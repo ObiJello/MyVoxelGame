@@ -6,9 +6,11 @@
 #include "../math/WorldMath.hpp"
 #include "../math/WorldCoordinates.hpp"
 #include "../block/Blocks.hpp"
+#include "../ticks/LevelChunkTicks.hpp"
 #include <glm/glm.hpp>
 #include <array>
 #include <memory>
+#include <shared_mutex>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -135,18 +137,34 @@ namespace Game {
         void SetBlock(int localX, int worldY, int localZ, BlockID blockId, BlockStateIndex stateIndex);
 
         // === SECTION MANAGEMENT ===
+        //
+        // Sections are ALWAYS PRESENT. The constructor allocates all 24, as MC
+        // ChunkAccess does via replaceMissingSections (ChunkAccess.java:104),
+        // so GetSection() is total for any in-range index and there is no
+        // "create on demand" step. Emptiness is asked of the CONTENTS
+        // (ChunkSection::IsAllAir, MC hasOnlyAir), never of the pointer.
+        //
+        // There used to be EnsureSection()/HasSection() here. Both are gone on
+        // purpose: "null means all air" was a second, silently divergent
+        // encoding of emptiness, and every consumer that tested the pointer
+        // rather than the contents was a bug waiting to be found.
 
-        // Get mutable section by index
+        // Get mutable section by index. Never null for 0 <= i < SECTION_COUNT.
         ChunkSection* GetSection(int sectionIndex);
 
-        // Get immutable section by index
+        // Get immutable section by index. Never null for 0 <= i < SECTION_COUNT.
         const ChunkSection* GetSection(int sectionIndex) const;
 
-        // Ensure section exists (create if needed)
-        void EnsureSection(int sectionIndex);
+        // MC ChunkAccess.NO_FILLED_SECTION (:61).
+        static constexpr int kNoFilledSection = -1;
 
-        // Check if section exists
-        bool HasSection(int sectionIndex) const;
+        // MC ChunkAccess.getHighestFilledSectionIndex (:127). Highest index
+        // whose section holds anything but air, or kNoFilledSection.
+        int HighestFilledSectionIndex() const;
+
+        // "This section holds something." The replacement for the old
+        // HasSection(), which asked about the pointer.
+        bool HasContentInSection(int sectionIndex) const;
 
         // === COORDINATE UTILITIES ===
 
@@ -197,6 +215,19 @@ namespace Game {
         std::unordered_map<glm::ivec3, std::unique_ptr<BlockEntity>, IVec3Hash>&
         MutableBlockEntities() { return m_blockEntities; }
 
+        // === SCHEDULED BLOCK TICKS ===
+        //
+        // MC LevelChunk.blockTicks. Pending appointments for blocks in THIS
+        // chunk — sand waiting to notice its support went, a repeater waiting
+        // to flip. Living on the chunk is what makes them unload with it and
+        // save with it; see LevelChunkTicks.hpp for why that matters.
+        //
+        // Always empty on the client, which has no authority to run block
+        // ticks. That mirrors vanilla's BlackholeTickAccess rather than costing
+        // a second chunk type to avoid two empty containers.
+        LevelChunkTicks&       BlockTicks()       { return m_blockTicks; }
+        const LevelChunkTicks& BlockTicks() const { return m_blockTicks; }
+
         // === STATISTICS ===
 
         // Get total possible blocks in chunk
@@ -208,11 +239,16 @@ namespace Game {
         // Check if chunk is completely empty (all air)
         bool IsEmpty() const;
 
-        // **NEW**: Get count of non-null sections
-        size_t GetSectionCount() const {
+        // How many sections hold anything. This used to count non-null
+        // pointers, which is now the constant 24 — and it was already wrong as
+        // a loop bound (a chunk whose only content sits at index 12 has count
+        // 1, so `for (i < GetSectionCount())` never reached it). Callers that
+        // want an index range want SECTIONS_PER_CHUNK; callers that want
+        // "is there anything here" want this or IsEmpty().
+        size_t FilledSectionCount() const {
             size_t count = 0;
             for (const auto& section : sections) {
-                if (section != nullptr) {
+                if (section && !section->IsAllAir()) {
                     count++;
                 }
             }
@@ -225,27 +261,45 @@ namespace Game {
 
         // Allow move construction and assignment. Same out-of-line constraint
         // as ~Chunk() — defaulted moves of the BE map would need BlockEntity
-        // complete here, but Chunk.cpp has the full include so they can be
-        // defaulted there.
+        // complete here, but Chunk.cpp has the full include. They are written
+        // out rather than defaulted because m_contentMutex is neither movable
+        // nor something a move should carry: the lock guards the OBJECT, and
+        // each Chunk keeps its own.
         Chunk(Chunk&&) noexcept;
         Chunk& operator=(Chunk&&) noexcept;
+
+        // ── Content lock ────────────────────────────────────────────────────
+        //
+        // ChunkProvider::SetBlock takes the chunk out of the cache under the
+        // cache's lock and then MUTATES it outside that lock, while a worker
+        // thread's eviction hands the same shared_ptr to the saver. That race
+        // predates the save work — Clone() hit it too — but it stops being
+        // survivable once the saver walks the paletted containers directly: a
+        // concurrent PalettedContainer::Grow reallocates the palette vector
+        // mid-read, which is a use-after-free rather than a torn value.
+        //
+        // Exclusive for writers (SetBlock, the block-entity mutators), shared
+        // for the serialiser. Uncontended in the common case: readers only
+        // collide with a write to the SAME chunk.
+        [[nodiscard]] std::shared_lock<std::shared_mutex> LockShared() const {
+            return std::shared_lock<std::shared_mutex>(m_contentMutex);
+        }
+        [[nodiscard]] std::unique_lock<std::shared_mutex> LockExclusive() const {
+            return std::unique_lock<std::shared_mutex>(m_contentMutex);
+        }
 
         // Create a deep copy of this chunk
         std::shared_ptr<Chunk> Clone() const {
             auto cloned = std::make_shared<Chunk>();
             cloned->pos = this->pos;
 
-            // Deep copy all sections
+            // Deep copy all sections. Unconditional now — both slots always
+            // exist, and an all-air source assigns a one-entry palette, which
+            // is cheaper than the branch that used to guard it.
             for (int i = 0; i < SECTION_COUNT; ++i) {
-                if (this->HasSection(i)) {
-                    cloned->EnsureSection(i);
-                    const ChunkSection* srcSection = this->GetSection(i);
-                    ChunkSection* dstSection = cloned->GetSection(i);
-
-                    // One assignment now: the paletted container carries the
-                    // blocks, their states and the censuses together.
-                    *dstSection = *srcSection;
-                }
+                // One assignment: the paletted container carries the blocks,
+                // their states and the censuses together.
+                *cloned->GetSection(i) = *this->GetSection(i);
             }
 
             // Heightmaps travel with the copy. Without this a cloned chunk
@@ -254,6 +308,11 @@ namespace Game {
             cloned->m_heightmaps = this->m_heightmaps;
             cloned->m_heightmapsPrimed = this->m_heightmapsPrimed;
 
+            // Block entities and scheduled ticks are deliberately NOT cloned.
+            // A clone is a snapshot of BLOCK CONTENT for the mesher; copying
+            // pending appointments would give two chunks that both believe they
+            // owe the world the same falling sand, and copying block entities
+            // would duplicate container contents.
             return cloned;
         }
 
@@ -262,6 +321,13 @@ namespace Game {
         static constexpr int SIZE_X = Math::CHUNK_SIZE_X;      // 16
         static constexpr int SIZE_Z = Math::CHUNK_SIZE_Z;      // 16
         static constexpr int SECTION_HEIGHT = Math::SECTION_HEIGHT; // 16
+        // Bumped on every SetBlock in this column. Parked entities (see
+        // PrimedTnt::Tick) record the sum of these over the columns their
+        // rest probe touches and revalidate only when it moves — a block
+        // written on the far side of the map must not wake a million settled
+        // TNT, which is exactly what a single global epoch did.
+        std::atomic<uint32_t> blockWriteCounter{0};
+
         static constexpr int SECTION_COUNT = Math::SECTIONS_PER_CHUNK; // 24
 
         // World Y coordinate constants
@@ -280,8 +346,15 @@ namespace Game {
         // Per-cell BlockEntity storage. Keyed by (localX, worldY, localZ).
         std::unordered_map<glm::ivec3, std::unique_ptr<BlockEntity>, IVec3Hash> m_blockEntities;
 
+        // Scheduled block ticks for this chunk — see BlockTicks() above.
+        LevelChunkTicks m_blockTicks;
+
         std::array<Heightmap, static_cast<size_t>(HeightmapType::Count)> m_heightmaps;
         bool m_heightmapsPrimed = false;
+
+        // See LockShared/LockExclusive above. Mutable so a const serialiser
+        // can take the shared side.
+        mutable std::shared_mutex m_contentMutex;
     };
 
 } // namespace Game

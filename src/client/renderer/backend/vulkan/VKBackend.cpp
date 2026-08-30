@@ -380,6 +380,10 @@ namespace Render {
         // gets a separate ring entirely.)
         m_frameUBOs[m_currentFrame].commonWriteSlot = 0;
         m_frameUBOs[m_currentFrame].bonesWriteSlot  = 0;
+        m_frameUBOs[m_currentFrame].haveCommonSlot  = false;
+        m_frameUBOs[m_currentFrame].haveBonesSlot   = false;
+        m_frameUBOs[m_currentFrame].exhaustWarned   = false;
+        m_frameUBOs[m_currentFrame].bonesWriteSlot  = 0;
 
         // Set dynamic viewport and scissor
         // Negative height flips Y to match OpenGL convention without affecting winding order
@@ -704,8 +708,14 @@ namespace Render {
         allocInfo.descriptorSetCount = 1;
         allocInfo.pSetLayouts = &m_textureDescriptorLayout;
 
-        VkDescriptorSet descriptorSet;
-        vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet);
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
+            // Pool exhausted: the texture still exists; draws that bind it
+            // bail on the null set instead of silently reusing a stale one.
+            Log::Error("VKBackend: descriptor pool exhausted — texture created "
+                       "without a descriptor set");
+            descriptorSet = VK_NULL_HANDLE;
+        }
 
         VkDescriptorImageInfo imageInfo{};
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1258,7 +1268,9 @@ namespace Render {
 
     void VKBackend::SetUniformMat4(ShaderHandle handle, const std::string& name,
                                    const glm::mat4& value) {
-        if (name == "uMVP") {
+        if (name == "uMVP" || name == "uViewProj") {
+            // "uViewProj" is the instanced block shader's name for the same
+            // push-constant slot — its model matrix arrives per instance.
             const glm::mat4 vkMVP = kVkZCorrect * value;
             m_pushConstants.uMVP    = vkMVP;
             m_commonUBOData.uMVP    = vkMVP;
@@ -1302,6 +1314,13 @@ namespace Render {
             m_commonUBODirty = true;
         } else if (name == "uFogEnv") {
             m_commonUBOData.uFogEnv = value;
+            m_commonUBODirty = true;
+        } else if (name == "uOverlayColor") {
+            // MC's entity overlay — the primed-TNT white flash. Its own UBO
+            // field rather than an alias onto uTint, because the block shaders
+            // need uPortalClipPlane (which lives in the uColor/uTint slot) at
+            // the same time.
+            m_commonUBOData.uOverlayColor = value;
             m_commonUBODirty = true;
         }
     }
@@ -1396,6 +1415,86 @@ namespace Render {
     // ========================================================================
     // MESHES
     // ========================================================================
+
+    MeshHandle VKBackend::CreateInstancedMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
+                                              BufferHandle instanceBuffer,
+                                              const VertexLayout& vertexLayout,
+                                              const VertexLayout& instanceLayout) {
+        if (vertexBuffer == INVALID_BUFFER || instanceBuffer == INVALID_BUFFER) return INVALID_MESH;
+        uint32_t handle = AllocHandle();
+        VKMeshInfo info;
+        info.vertexBuffer   = vertexBuffer;
+        info.indexBuffer    = indexBuffer;
+        info.layout         = vertexLayout;
+        info.instanceBuffer = instanceBuffer;
+        info.instanceLayout = instanceLayout;
+        m_meshes[handle] = std::move(info);
+        m_memStats.meshCount++;
+        return handle;
+    }
+
+    void VKBackend::DrawIndexedInstanced(MeshHandle mesh, uint32_t indexCount,
+                                         uint32_t indexOffset, uint32_t instanceCount,
+                                         uint32_t instanceByteOffset) {
+        // DrawIndexed's body with two vertex bindings and an instance count.
+        // The mass-detonation path lives here: on Vulkan the per-entity
+        // fallback was tens of thousands of vkCmdDrawIndexed per frame, which
+        // is what froze the render thread while the server kept running.
+        if (mesh == INVALID_MESH || m_boundShader == INVALID_SHADER ||
+            indexCount == 0 || instanceCount == 0) return;
+
+        auto meshIt = m_meshes.find(mesh);
+        if (meshIt == m_meshes.end()) return;
+
+        auto vbIt   = m_buffers.find(meshIt->second.vertexBuffer);
+        auto ibIt   = m_buffers.find(meshIt->second.indexBuffer);
+        auto instIt = m_buffers.find(meshIt->second.instanceBuffer);
+        if (vbIt == m_buffers.end() || ibIt == m_buffers.end() ||
+            instIt == m_buffers.end()) return;
+
+        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
+        if (pipeline == VK_NULL_HANDLE) return;
+
+        VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
+
+        if (pipeline != m_currentPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            m_currentPipeline = pipeline;
+        }
+        ApplyDynamicStencilState(cmd);
+
+        VkPipelineLayout pl = m_pipelineLayout;
+        bool isPortalShader = false;
+        {
+            auto sit = m_shaders.find(m_boundShader);
+            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
+                m_portalPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_portalPipelineLayout;
+                isPortalShader = true;
+            }
+        }
+
+        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                          0, sizeof(PushConstantBlock), &m_pushConstants);
+
+        if (isPortalShader) {
+            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
+        } else {
+            auto texIt = m_textures.find(m_boundTexture);
+            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
+                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
+            } else {
+                return;
+            }
+        }
+
+        VkBuffer     vertexBuffers[2] = { vbIt->second.buffer, instIt->second.buffer };
+        VkDeviceSize offsets[2]       = { 0, instanceByteOffset };
+        vkCmdBindVertexBuffers(cmd, 0, 2, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, indexCount, instanceCount, indexOffset, 0, 0);
+    }
 
     MeshHandle VKBackend::CreateMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
                                     const VertexLayout& layout) {
@@ -1506,7 +1605,9 @@ namespace Render {
         if (isPortalShader) {
             // Portal-feature shader: bind UBO+texture descriptor set
             // (BindPortalDescriptorForDraw also uploads any dirty UBO data).
-            BindPortalDescriptorForDraw(cmd, m_boundTexture);
+            // A false return means no valid binding — recording the draw
+            // anyway would use the PREVIOUS draw's texture and offsets.
+            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
         } else {
             // Block-style shader: original texture-only descriptor path.
             auto texIt = m_textures.find(m_boundTexture);
@@ -1562,7 +1663,7 @@ namespace Render {
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
         if (isPortalShader) {
-            BindPortalDescriptorForDraw(cmd, m_boundTexture);
+            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
         } else {
             auto texIt = m_textures.find(m_boundTexture);
             if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
@@ -1628,7 +1729,7 @@ namespace Render {
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
         if (isPortalShader) {
-            BindPortalDescriptorForDraw(cmd, m_boundTexture);
+            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
         } else {
             auto texIt = m_textures.find(m_boundTexture);
             if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
@@ -1693,7 +1794,7 @@ namespace Render {
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
         if (isPortalShader) {
-            BindPortalDescriptorForDraw(cmd, m_boundTexture);
+            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
         } else {
             auto texIt = m_textures.find(m_boundTexture);
             if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
@@ -2316,7 +2417,7 @@ namespace Render {
         // for now). UBO descriptors: 2 per portal set (Common + Bones).
         VkDescriptorPoolSize poolSizes[2]{};
         poolSizes[0].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[0].descriptorCount = 1000;
+        poolSizes[0].descriptorCount = 4096;
         // CommonUBO + BonesUBO are dynamic — pool must size that type.
         poolSizes[1].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         poolSizes[1].descriptorCount = 16;   // 2 × MAX_FRAMES + headroom
@@ -2325,7 +2426,7 @@ namespace Render {
         poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = 2;
         poolInfo.pPoolSizes    = poolSizes;
-        poolInfo.maxSets       = 1000 + MAX_FRAMES_IN_FLIGHT;
+        poolInfo.maxSets       = 4096 + MAX_FRAMES_IN_FLIGHT;
         return vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) == VK_SUCCESS;
     }
 
@@ -2449,6 +2550,10 @@ namespace Render {
             FrameUBOs& fb = m_frameUBOs[i];
             fb.commonWriteSlot = 0;
             fb.bonesWriteSlot  = 0;
+            fb.haveCommonSlot  = false;
+            fb.haveBonesSlot   = false;
+            fb.exhaustWarned   = false;
+            fb.bonesWriteSlot  = 0;
             // CommonUBO ring buffer
             if (!CreateVkBuffer(commonRingSize, uboUsage, hostVisible,
                                 fb.commonBuffer, fb.commonMemory)) {
@@ -2519,6 +2624,10 @@ namespace Render {
             if (fb.bonesMapped)  { vkUnmapMemory(m_device, fb.bonesMemory);  fb.bonesMapped  = nullptr; }
             fb.commonWriteSlot = 0;
             fb.bonesWriteSlot  = 0;
+            fb.haveCommonSlot  = false;
+            fb.haveBonesSlot   = false;
+            fb.exhaustWarned   = false;
+            fb.bonesWriteSlot  = 0;
             if (fb.commonBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(m_device, fb.commonBuffer, nullptr); fb.commonBuffer = VK_NULL_HANDLE; }
             if (fb.commonMemory != VK_NULL_HANDLE) { vkFreeMemory(m_device,   fb.commonMemory, nullptr);  fb.commonMemory = VK_NULL_HANDLE; }
             if (fb.bonesBuffer  != VK_NULL_HANDLE) { vkDestroyBuffer(m_device, fb.bonesBuffer,  nullptr); fb.bonesBuffer  = VK_NULL_HANDLE; }
@@ -2527,65 +2636,49 @@ namespace Render {
         }
     }
 
-    void VKBackend::BindPortalDescriptorForDraw(VkCommandBuffer cmd, TextureHandle tex) {
+    bool VKBackend::BindPortalDescriptorForDraw(VkCommandBuffer cmd, TextureHandle tex) {
         FrameUBOs& fb = m_frameUBOs[m_currentFrame];
 
-        // Allocate this draw's slot in the ring buffer. Each draw gets
-        // its own offset so the GPU reads exactly the uniforms set
-        // between this draw and the previous one — vs. the broken
-        // single-buffer design where every recorded draw read the LAST
-        // value of every uniform at submit time.
-        //
-        // If we run out of slots, wrap and overwrite the oldest. The
-        // ring is sized (256/32 slots) to comfortably cover an entire
-        // frame's draws; wrapping only happens in pathological cases.
-        // Wrapping silently corrupts earlier draws' uniforms (same bug
-        // as the original single-buffer design), so log a warning if
-        // we hit it so we can bump the slot count.
-        if (fb.commonWriteSlot >= kCommonSlotCount) {
-            static bool warned = false;
-            if (!warned) {
-                Log::Warning("VKBackend: CommonUBO ring overflowed (>%u draws/frame) — "
-                             "earlier draws may render with wrong uniforms",
-                             kCommonSlotCount);
-                warned = true;
+        // A draw only needs a fresh slot for data that actually changed since
+        // the previous draw; otherwise it rebinds the previous slot. This is
+        // what keeps a mass detonation — thousands of per-entity draws that
+        // never touch bones and rarely change the common block — from
+        // exhausting the ring and silently mis-binding later draws (the held
+        // item, drawn last in the frame, was the one that vanished).
+        const bool needCommon = m_commonUBODirty || !fb.haveCommonSlot;
+        const bool needBones  = m_bonesUBODirty  || !fb.haveBonesSlot;
+
+        if ((needCommon && fb.commonWriteSlot >= kCommonSlotCount) ||
+            (needBones  && fb.bonesWriteSlot  >= kBonesSlotCount)) {
+            if (!fb.exhaustWarned) {
+                fb.exhaustWarned = true;
+                Log::Warning("VKBackend: UBO ring exhausted (%u common / %u bones "
+                             "slots) — dropping further draws this frame rather "
+                             "than corrupting earlier ones",
+                             kCommonSlotCount, kBonesSlotCount);
             }
+            // The caller must SKIP the draw: recording it anyway would run it
+            // with whatever texture and UBO offsets the previous draw bound.
+            return false;
         }
-        if (fb.bonesWriteSlot >= kBonesSlotCount) {
-            static bool warned = false;
-            if (!warned) {
-                Log::Warning("VKBackend: BonesUBO ring overflowed (>%u draws/frame)",
-                             kBonesSlotCount);
-                warned = true;
-            }
+
+        if (needCommon) {
+            const uint32_t slot = fb.commonWriteSlot++;
+            fb.lastCommonOffset = slot * m_commonSlotStride;
+            std::memcpy(fb.commonMapped + fb.lastCommonOffset, &m_commonUBOData, sizeof(CommonUBO));
+            fb.haveCommonSlot = true;
+            m_commonUBODirty  = false;
         }
-        const uint32_t commonSlot = fb.commonWriteSlot % kCommonSlotCount;
-        const uint32_t bonesSlot  = fb.bonesWriteSlot  % kBonesSlotCount;
-        fb.commonWriteSlot++;
-        fb.bonesWriteSlot++;
+        if (needBones) {
+            const uint32_t slot = fb.bonesWriteSlot++;
+            fb.lastBonesOffset = slot * m_bonesSlotStride;
+            std::memcpy(fb.bonesMapped + fb.lastBonesOffset, &m_bonesUBOData, sizeof(BonesUBO));
+            fb.haveBonesSlot = true;
+            m_bonesUBODirty  = false;
+        }
 
-        const uint32_t commonOffset = commonSlot * m_commonSlotStride;
-        const uint32_t bonesOffset  = bonesSlot  * m_bonesSlotStride;
-
-        // Always memcpy current working state into this draw's slot.
-        // (Even when not "dirty" — the dirty flag was only valid for the
-        // single-buffer design. With per-draw slots, each slot starts
-        // uninitialised, so we must always write.)
-        std::memcpy(fb.commonMapped + commonOffset, &m_commonUBOData, sizeof(CommonUBO));
-        std::memcpy(fb.bonesMapped  + bonesOffset,  &m_bonesUBOData,  sizeof(BonesUBO));
-        m_commonUBODirty = false;
-        m_bonesUBODirty  = false;
-
-        // Three sets to bind:
-        //   set=0 → primary texture (slot 0)
-        //   set=1 → per-frame UBO descriptor (dynamic offset = this draw's slot)
-        //   set=2 → secondary texture (slot 1) — for portal renderer's
-        //           noise + colour-ramp pair. Falls back to the primary
-        //           texture when nothing else is bound at slot 1 (any valid
-        //           descriptor satisfies the layout; the shader simply
-        //           doesn't read it).
         auto tex0It = m_textures.find(tex);
-        if (tex0It == m_textures.end() || tex0It->second.descriptorSet == VK_NULL_HANDLE) return;
+        if (tex0It == m_textures.end() || tex0It->second.descriptorSet == VK_NULL_HANDLE) return false;
         TextureHandle tex1Handle = m_boundTextures[1] != INVALID_TEXTURE
                                  ? m_boundTextures[1] : tex;
         auto tex1It = m_textures.find(tex1Handle);
@@ -2597,14 +2690,23 @@ namespace Render {
             fb.descriptorSet,
             tex1Set,
         };
-        const uint32_t dynOffsets[2] = { commonOffset, bonesOffset };
+        const uint32_t dynOffsets[2] = { fb.lastCommonOffset, fb.lastBonesOffset };
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 m_portalPipelineLayout, 0, 3, sets, 2, dynOffsets);
+        return true;
     }
 
     void VKBackend::RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout) {
         auto it = m_shaders.find(shader);
         if (it != m_shaders.end()) it->second.vertexLayout = layout;
+    }
+
+    void VKBackend::RegisterShaderInstanceLayout(ShaderHandle shader, const VertexLayout& layout) {
+        // Per-INSTANCE attributes (binding 1, VK_VERTEX_INPUT_RATE_INSTANCE);
+        // see CreateGraphicsPipeline. The instanced block shader registers its
+        // mat4-as-four-vec4 columns here.
+        auto it = m_shaders.find(shader);
+        if (it != m_shaders.end()) it->second.instanceLayout = layout;
     }
 
     ShaderHandle VKBackend::CreateShaderFromFilesPortal(const std::string& vertexPath,
@@ -3135,10 +3237,39 @@ namespace Render {
             }
         }
 
+        // Second binding for per-instance attributes when the shader
+        // registered an instance layout (RegisterShaderInstanceLayout).
+        VkVertexInputBindingDescription bindings[2] = { bindingDesc, {} };
+        uint32_t bindingCount = 1;
+        {
+            const VertexLayout& inst = shaderIt->second.instanceLayout;
+            if (!inst.attributes.empty()) {
+                bindings[1].binding   = 1;
+                bindings[1].stride    = inst.stride;
+                bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+                bindingCount = 2;
+                for (const auto& a : inst.attributes) {
+                    VkFormat fmt = VK_FORMAT_UNDEFINED;
+                    if (a.type == AttribType::Float) {
+                        switch (a.componentCount) {
+                            case 1: fmt = VK_FORMAT_R32_SFLOAT;          break;
+                            case 2: fmt = VK_FORMAT_R32G32_SFLOAT;       break;
+                            case 3: fmt = VK_FORMAT_R32G32B32_SFLOAT;    break;
+                            case 4: fmt = VK_FORMAT_R32G32B32A32_SFLOAT; break;
+                        }
+                    } else if (a.componentCount == 4) {
+                        fmt = a.normalized ? VK_FORMAT_R8G8B8A8_UNORM
+                                           : VK_FORMAT_R8G8B8A8_UINT;
+                    }
+                    attrDescs.push_back({a.location, 1, fmt, a.offset});
+                }
+            }
+        }
+
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 1;
-        vertexInputInfo.pVertexBindingDescriptions    = &bindingDesc;
+        vertexInputInfo.vertexBindingDescriptionCount = bindingCount;
+        vertexInputInfo.pVertexBindingDescriptions    = bindings;
         vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrDescs.size());
         vertexInputInfo.pVertexAttributeDescriptions    = attrDescs.data();
 

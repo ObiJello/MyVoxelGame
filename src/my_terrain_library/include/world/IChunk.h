@@ -7,6 +7,7 @@
 #include "levelgen/structure/StructureStartData.h"
 #include <map>
 #include <set>
+#include <tuple>
 #include <string>
 
 // Forward declare to avoid circular dependencies
@@ -119,6 +120,24 @@ public:
      */
     virtual void markPosForPostprocessing(const BlockPos& pos) = 0;
 
+    // =========================================================================
+    // Block-entity NBT store (B8). Reference: ChunkAccess.setBlockEntityNbt /
+    // removeBlockEntity / getBlockEntityNbtForSaving. Worldgen stores pending
+    // tags only ({x,y,z,id:"DUMMY"} from WorldGenRegion.setBlock, or the full
+    // save-format tag written by structure/feature producers). Keyed (y,z,x)
+    // ascending = the canonical E-line emission order. Defaults are no-ops so
+    // non-generating chunk types ignore them.
+    // =========================================================================
+    virtual void setBlockEntityNbt(const BlockPos& pos, std::string canonicalNbt) {
+        (void)pos;
+        (void)canonicalNbt;
+    }
+    virtual void removeBlockEntity(const BlockPos& pos) { (void)pos; }
+    virtual const std::map<std::tuple<int, int, int>, std::string>*
+    getBlockEntityNbts() const {
+        return nullptr;
+    }
+
     /**
      * Check if this chunk is being upgraded from an older format
      * Reference: ChunkAccess.java isUpgrading()
@@ -219,6 +238,17 @@ public:
     }
 
     /**
+     * Mutable start lookup for placement (Java StructureStart is a mutable
+     * shared object; placeInChunk/postProcess mutate piece bounding boxes).
+     */
+    virtual levelgen::structure::StructureStartData* getMutableStartForStructure(
+        const std::string& structureName
+    ) {
+        (void)structureName;
+        return nullptr;
+    }
+
+    /**
      * Structure reference storage
      * Reference: ChunkAccess.java getAllReferences()/getReferencesForStructure()/addReferenceForStructure()
      */
@@ -227,15 +257,15 @@ public:
         return kEmptyReferences;
     }
 
-    virtual const std::set<int64_t>& getReferencesForStructure(const std::string& structureName) const {
+    virtual const std::vector<int64_t>& getReferencesForStructure(const std::string& structureName) const {
         const auto& references = getAllStructureReferences();
         auto it = references.find(structureName);
         if (it != references.end()) {
             return it->second;
         }
 
-        static const std::set<int64_t> kEmptyReferenceSet;
-        return kEmptyReferenceSet;
+        static const std::vector<int64_t> kEmptyReferenceList;
+        return kEmptyReferenceList;
     }
 
     virtual void addReferenceForStructure(const std::string& structureName, int64_t reference) {

@@ -1,4 +1,5 @@
 #include "world/biome/MultiNoiseBiomeSource.h"
+#include "levelgen/WorldGenTweaks.h"
 #include "world/biome/OverworldBiomeBuilder.h"
 #include "world/biome/Biomes.h"
 #include "world/biome/Biome.h"
@@ -31,6 +32,24 @@ MultiNoiseBiomeSource::MultiNoiseBiomeSource(Preset preset)
         case Preset::NETHER:
             params = buildNetherParameters();
             break;
+    }
+
+    // World Properties: disabled-biome checklist (non-vanilla). Removing an
+    // entry hands its climate space to the nearest remaining biome, exactly
+    // like a datapack that drops parameter points. Ignored if it would
+    // remove every entry.
+    if (preset == Preset::OVERWORLD) {
+        const auto& disabled = levelgen::WorldGenTweaks::get().disabledBiomes;
+        if (!disabled.empty()) {
+            std::vector<std::pair<Climate::ParameterPoint, BiomeKey>> kept;
+            kept.reserve(params.size());
+            for (const auto& entry : params) {
+                if (disabled.find(entry.second) == disabled.end()) {
+                    kept.push_back(entry);
+                }
+            }
+            if (!kept.empty()) params = std::move(kept);
+        }
     }
 
     m_parameters = std::make_unique<Climate::ParameterList<BiomeKey>>(params);
@@ -120,72 +139,25 @@ MultiNoiseBiomeSource::buildOverworldParameters() {
 // Build nether parameters
 std::vector<std::pair<Climate::ParameterPoint, BiomeKey>>
 MultiNoiseBiomeSource::buildNetherParameters() {
-    // Reference: MultiNoiseBiomeSource.Preset.NETHER and NetherBiomeBuilder
-    // The nether uses a simpler 2D climate system (temperature and humidity only)
-
+    // Reference: MultiNoiseBiomeSourceParameterList.Preset.NETHER (26.1) -
+    // EXACT vanilla point parameters (temperature, humidity, cont, erosion,
+    // depth, weirdness, offset), verified against the decompiled source:
+    //   (0,    0,   0,0,0,0, 0)     -> nether_wastes
+    //   (0,   -0.5, 0,0,0,0, 0)     -> soul_sand_valley
+    //   (0.4,  0,   0,0,0,0, 0)     -> crimson_forest
+    //   (0,    0.5, 0,0,0,0, 0.375) -> warped_forest
+    //   (-0.5, 0,   0,0,0,0, 0.175) -> basalt_deltas
     std::vector<std::pair<Climate::ParameterPoint, BiomeKey>> result;
-
-    // Nether biome parameters - Reference: NetherBiomeBuilder
-    // The nether ignores most climate parameters and just uses temperature/humidity
-
-    Climate::Parameter fullRange = Climate::Parameter::span(-1.0f, 1.0f);
-    Climate::Parameter zeroPoint = Climate::Parameter::point(0.0f);
-
-    // Nether Wastes - default biome
-    result.push_back({
-        Climate::parameters(
-            Climate::Parameter::span(0.0f, 1.0f),       // temperature (warm)
-            Climate::Parameter::span(-1.0f, 1.0f),      // humidity (any)
-            fullRange, fullRange, fullRange, fullRange,
-            0.0f
-        ),
-        BiomeKeys::NETHER_WASTES
-    });
-
-    // Soul Sand Valley
-    result.push_back({
-        Climate::parameters(
-            Climate::Parameter::span(-0.5f, 0.0f),      // temperature (cold)
-            Climate::Parameter::span(-1.0f, -0.5f),     // humidity (dry)
-            fullRange, fullRange, fullRange, fullRange,
-            0.0f
-        ),
-        BiomeKeys::SOUL_SAND_VALLEY
-    });
-
-    // Crimson Forest
-    result.push_back({
-        Climate::parameters(
-            Climate::Parameter::span(-0.15f, 0.5f),     // temperature
-            Climate::Parameter::span(0.0f, 1.0f),       // humidity (humid)
-            fullRange, fullRange, fullRange, fullRange,
-            0.375f
-        ),
-        BiomeKeys::CRIMSON_FOREST
-    });
-
-    // Warped Forest
-    result.push_back({
-        Climate::parameters(
-            Climate::Parameter::span(-1.0f, 0.0f),      // temperature (cold)
-            Climate::Parameter::span(0.0f, 1.0f),       // humidity (humid)
-            fullRange, fullRange, fullRange, fullRange,
-            0.375f
-        ),
-        BiomeKeys::WARPED_FOREST
-    });
-
-    // Basalt Deltas
-    result.push_back({
-        Climate::parameters(
-            Climate::Parameter::span(-0.5f, 0.5f),      // temperature
-            Climate::Parameter::span(-1.0f, -0.35f),    // humidity (dry)
-            fullRange, fullRange, fullRange, fullRange,
-            0.175f
-        ),
-        BiomeKeys::BASALT_DELTAS
-    });
-
+    result.push_back({Climate::parameters(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f),
+                      BiomeKeys::NETHER_WASTES});
+    result.push_back({Climate::parameters(0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f),
+                      BiomeKeys::SOUL_SAND_VALLEY});
+    result.push_back({Climate::parameters(0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f),
+                      BiomeKeys::CRIMSON_FOREST});
+    result.push_back({Climate::parameters(0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.375f),
+                      BiomeKeys::WARPED_FOREST});
+    result.push_back({Climate::parameters(-0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.175f),
+                      BiomeKeys::BASALT_DELTAS});
     return result;
 }
 

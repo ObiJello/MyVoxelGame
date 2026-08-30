@@ -75,10 +75,9 @@ namespace Game {
     } // namespace
 
     bool IsStairs(BlockID id) {
-        const std::string& n = BlockRegistry::Get(id).modelName;
-        static constexpr std::string_view kSuffix = "_stairs";
-        return n.size() >= kSuffix.size() &&
-               n.compare(n.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+        // Precomputed at the end of BlockRegistry::Init — this used to be a
+        // std::string suffix compare on a per-voxel query path.
+        return (BlockRegistry::FamilyBits(id) & BlockRegistry::FamilyStairs) != 0;
     }
 
     // MC's HORIZONTAL_FACING value order is north, south, west, east — NOT

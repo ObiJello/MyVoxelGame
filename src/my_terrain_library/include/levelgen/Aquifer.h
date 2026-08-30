@@ -5,6 +5,7 @@
 #include "levelgen/DensityFunction.h"
 #include "levelgen/NoiseRouter.h"
 #include "random/XoroshiroRandomSource.h"
+#include "random/AnyPositionalRandomFactory.h"
 #include "world/ChunkPos.h"
 #include "world/level/block/state/BlockState.h"
 #include <vector>
@@ -70,7 +71,7 @@ public:
         NoiseChunk* noiseChunk,
         const ChunkPos& pos,
         const NoiseRouter& router,
-        XoroshiroPositionalRandomFactory* positionalRandomFactory,
+        ::minecraft::random::AnyPositionalRandomFactory* positionalRandomFactory,
         int32_t minBlockY,
         int32_t yBlockSize,
         FluidPicker* globalFluidPicker
@@ -133,7 +134,7 @@ private:
     density::DensityFunction* m_depth;
 
     // Positional random factory for generating aquifer locations (Java line 66)
-    XoroshiroPositionalRandomFactory* m_positionalRandomFactory;
+    ::minecraft::random::AnyPositionalRandomFactory* m_positionalRandomFactory;
 
     FluidPicker* m_globalFluidPicker;
     NoiseChunk* m_noiseChunk;  // For preliminarySurfaceLevel
@@ -159,7 +160,7 @@ public:
         NoiseChunk* noiseChunk,
         const ChunkPos& pos,
         const NoiseRouter& router,
-        XoroshiroPositionalRandomFactory* positionalRandomFactory,
+        ::minecraft::random::AnyPositionalRandomFactory* positionalRandomFactory,
         int32_t minBlockY,
         int32_t yBlockSize,
         FluidPicker* globalFluidPicker

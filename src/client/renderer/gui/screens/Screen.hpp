@@ -57,6 +57,21 @@ namespace Render {
         virtual bool CharTyped(unsigned int codepoint);
 
         virtual bool ShouldCloseOnEsc() const { return true; }
+
+        // MC Screen.isPauseScreen (Screen.java:502) — does having this screen
+        // up stop the world?
+        //
+        // The default is TRUE and vanilla overrides it to false in exactly the
+        // places where stopping the world would be wrong: the title and
+        // loading screens (there is no world yet), the death screen (the
+        // respawn countdown has to run), chat, and every container screen —
+        // MC's AbstractContainerScreen returns false so a furnace keeps
+        // smelting while you look at it.
+        //
+        // Chat and the container screens are separate systems in this engine
+        // and never enter the ScreenManager, so only the first group needs an
+        // override here.
+        virtual bool IsPauseScreen() const { return true; }
         // ESC / Done. Default pops this screen off the stack.
         virtual void OnClose();
 
@@ -103,6 +118,17 @@ namespace Render {
         void Clear();
 
         Screen* Current() { return m_stack.empty() ? nullptr : m_stack.back().get(); }
+        const Screen* Current() const {
+            return m_stack.empty() ? nullptr : m_stack.back().get();
+        }
+
+        // The client half of MC's `Minecraft.pause` (Minecraft.java:1284):
+        // is a screen up, and is it one that stops the world? Reported to the
+        // server via PlayerPauseC2SPacket.
+        bool IsPauseScreenOpen() const {
+            const Screen* top = Current();
+            return top != nullptr && top->IsPauseScreen();
+        }
         bool Empty() const { return m_stack.empty() && m_pending.empty(); }
 
         // Apply pending stack ops + propagate resize. Call once per frame

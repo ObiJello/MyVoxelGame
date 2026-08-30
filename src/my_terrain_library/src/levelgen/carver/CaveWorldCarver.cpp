@@ -258,6 +258,13 @@ bool CaveWorldCarver::carve(
     // Triple nested random for variance
     int32_t caveCount = random.nextInt(random.nextInt(random.nextInt(getCaveBound()) + 1) + 1);
 
+    static const bool s_carverDebug = getenv("CARVER_DEBUG") != nullptr;
+    const bool dbg = s_carverDebug && chunk->getPos().x() == 0 && chunk->getPos().z() == 0;
+    if (dbg) {
+        fprintf(stderr, "[cd] src=%d,%d caveCount=%d\n",
+                sourceChunkPos.x(), sourceChunkPos.z(), caveCount);
+    }
+
     for (int32_t cave = 0; cave < caveCount; ++cave) {
         // Random starting position - Reference: lines 30-32
         double x = static_cast<double>(sourceChunkPos.getBlockX(random.nextInt(16)));
@@ -277,12 +284,17 @@ bool CaveWorldCarver::carve(
         int32_t tunnels = 1;
 
         // 25% chance to create a room first - Reference: lines 38-43
-        if (random.nextInt(4) == 0) {
+        bool room = random.nextInt(4) == 0;
+        if (room) {
             double yScale = static_cast<double>(configuration.yScale->sample(random));
             float thickness = 1.0f + random.nextFloat() * 6.0f;
             createRoom(context, configuration, chunk, biomeGetter, aquifer, x, y, z,
                        thickness, yScale, mask, skipChecker);
             tunnels += random.nextInt(4);
+        }
+        if (dbg) {
+            fprintf(stderr, "[cd]  cave=%d pos=%.1f,%.1f,%.1f room=%d tunnels=%d\n",
+                    cave, x, y, z, (int)room, tunnels);
         }
 
         // Create tunnels - Reference: lines 45-52
@@ -291,8 +303,14 @@ bool CaveWorldCarver::carve(
             float verticalRotation = (random.nextFloat() - 0.5f) / 4.0f;
             float thickness = getThickness(random);
             int32_t distance = maxDistance - random.nextInt(maxDistance / 4);
+            int64_t tunnelSeed = random.nextLong();
+            if (dbg) {
+                fprintf(stderr, "[cd]   tun=%d hRot=%.6f vRot=%.6f thick=%.6f dist=%d seed=%lld\n",
+                        i, horizontalRotation, verticalRotation, thickness, distance,
+                        (long long)tunnelSeed);
+            }
 
-            createTunnelLegacy(context, configuration, chunk, biomeGetter, random.nextLong(), aquifer,
+            createTunnelLegacy(context, configuration, chunk, biomeGetter, tunnelSeed, aquifer,
                          x, y, z, horizontalRadiusMultiplier, verticalRadiusMultiplier,
                          thickness, horizontalRotation, verticalRotation,
                          0, distance, getYScale(), mask, skipChecker);

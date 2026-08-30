@@ -68,6 +68,22 @@ namespace Network {
         }
     }
 
+    // Transport question ONLY: "did this socket come from this machine".
+    //
+    // MUST NOT be used as MC's isSingleplayerOwner. A friend joining through
+    // the relay makes the host dial OUT to the friends service and hands that
+    // socket to NetworkServer::AdoptConnection, and CLAUDE.md documents the
+    // hosting machine as pointing friends_service at 127.0.0.1 for NAT
+    // hairpin — so a remote WAN player genuinely presents a loopback remote
+    // endpoint. Exempting on this basis would hand a remote player the host's
+    // keep-alive and read-timeout exemption.
+    //
+    // The owner test is a NAME match against the singleplayer profile, exactly
+    // as in MC (IntegratedServer.java:269). See
+    // IntegratedServer::OnPlayerJoined and ServerConnection::IsSingleplayerOwner.
+    //
+    // Legitimate use, and the reason it exists: skipping compression for a
+    // same-machine connection, MC's isMemoryConnection (LoginPacketListener).
     bool NetworkConnection::IsLoopback() const {
         try {
             const auto endpoint = m_socket.remote_endpoint();
@@ -189,136 +205,140 @@ namespace Network {
         if (m_state != ConnectionState::CONNECTED) {
             return;
         }
-        
-        // Log::Debug("[%s] Starting async read chain", m_name.c_str());
-        
-        // Reset read state for new packet
-        m_readingHeader = true;
-        m_readPos = 0;
-        m_currentPacket = RawPacket();
-        
-        // Start async read for VarInt length (1-5 bytes)
-        net::async_read(m_socket,
-            net::buffer(m_readBuffer.data(), 1),
+
+        // Bulk reads: pull whatever the socket has into the buffer and parse
+        // every complete frame out of it. This replaced a chain that issued
+        // two async_reads PER PACKET (one byte for the length VarInt, then the
+        // payload), each a syscall and a strand hop. With a hundred thousand
+        // tracked entities the stream is hundreds of thousands of 20-byte
+        // frames a second, and the per-frame syscall pair — not the CPU on
+        // either side — was what left the client twenty seconds behind the
+        // server. Netty reads into a ByteBuf and lets the frame decoder split
+        // it; this is the same shape.
+        if (m_readBuffer.size() < kReadChunk) m_readBuffer.resize(kReadChunk);
+        if (m_readFill == m_readBuffer.size()) {
+            // A frame larger than the whole buffer is still arriving; grow.
+            m_readBuffer.resize(m_readBuffer.size() * 2);
+        }
+
+        m_socket.async_read_some(
+            net::buffer(m_readBuffer.data() + m_readFill, m_readBuffer.size() - m_readFill),
             net::bind_executor(m_strand,
                 [self = shared_from_this()](const error_code& ec, size_t bytes) {
-                    self->HandleReadHeader(ec, bytes);
+                    self->HandleReadSome(ec, bytes);
                 }));
     }
 
-    void NetworkConnection::HandleReadHeader(const error_code& error, size_t bytesTransferred) {
+    void NetworkConnection::HandleReadSome(const error_code& error, size_t bytesTransferred) {
         if (error) {
             HandleError(error);
             return;
         }
-        
+
         m_stats.bytesReceived.fetch_add(bytesTransferred);
-        
-        // Decode VarInt length
-        size_t varIntBytes = 0;
-        uint32_t packetLength = 0;
-        
-        // Check if we need more bytes for VarInt
-        if ((m_readBuffer[m_readPos] & 0x80) != 0) {
-            // Need more bytes, continue reading
-            m_readPos++;
-            if (m_readPos >= 5) {
-                Log::Error("[%s] VarInt too long", m_name.c_str());
+        m_readFill += bytesTransferred;
+
+        size_t pos = 0;
+        while (pos < m_readFill) {
+            // Length VarInt, decoded against what has actually arrived — a
+            // partial VarInt at the end of the buffer must wait for more
+            // bytes, not read past the fill mark into stale data.
+            uint32_t frameLength = 0;
+            size_t   lenBytes    = 0;
+            bool     complete    = false;
+            for (size_t i = pos; i < m_readFill && i < pos + 5; ++i) {
+                const uint8_t b = m_readBuffer[i];
+                frameLength |= static_cast<uint32_t>(b & 0x7F) << (7 * (i - pos));
+                ++lenBytes;
+                if ((b & 0x80) == 0) { complete = true; break; }
+            }
+            if (!complete) {
+                if (lenBytes >= 5) {
+                    Log::Error("[%s] VarInt too long", m_name.c_str());
+                    Disconnect();
+                    return;
+                }
+                break;   // need more bytes for the length itself
+            }
+            if (frameLength == 0 || frameLength > MAX_PACKET_SIZE) {
+                Log::Error("[%s] Invalid packet length: %u", m_name.c_str(), frameLength);
                 Disconnect();
                 return;
             }
-            
-            net::async_read(m_socket,
-                net::buffer(m_readBuffer.data() + m_readPos, 1),
-                net::bind_executor(m_strand,
-                    [self = shared_from_this()](const error_code& ec, size_t bytes) {
-                        self->HandleReadHeader(ec, bytes);
-                    }));
-            return;
+            const size_t frameEnd = pos + lenBytes + frameLength;
+            if (frameEnd > m_readFill) {
+                // Incomplete frame. Make sure the buffer can hold all of it
+                // once the unconsumed prefix is compacted to the front.
+                const size_t needed = lenBytes + frameLength;
+                if (m_readBuffer.size() - pos < needed) {
+                    // Compact first so the resize below is sized from zero.
+                    std::memmove(m_readBuffer.data(), m_readBuffer.data() + pos, m_readFill - pos);
+                    m_readFill -= pos;
+                    pos = 0;
+                    if (m_readBuffer.size() < needed) m_readBuffer.resize(needed);
+                }
+                break;
+            }
+
+            if (!ProcessFrame(m_readBuffer.data() + pos + lenBytes, frameLength)) {
+                return;   // disconnected inside the frame
+            }
+            pos = frameEnd;
+
+            // A frame handled inline may have closed the connection (a kick
+            // during login); stop parsing rather than feeding a dead peer.
+            if (m_state != ConnectionState::CONNECTED) return;
         }
-        
-        // Complete VarInt received, decode it
-        packetLength = DecodeVarInt(m_readBuffer.data(), varIntBytes);
-        
-        if (packetLength == 0 || packetLength > MAX_PACKET_SIZE) {
-            Log::Error("[%s] Invalid packet length: %u", m_name.c_str(), packetLength);
-            Disconnect();
-            return;
+
+        if (pos > 0) {
+            std::memmove(m_readBuffer.data(), m_readBuffer.data() + pos, m_readFill - pos);
+            m_readFill -= pos;
         }
-        
-        // Resize buffer if needed
-        if (m_readBuffer.size() < packetLength) {
-            m_readBuffer.resize(packetLength);
-        }
-        
-        // Read packet ID and payload
-        m_currentPacket.header.length = packetLength;
-        m_readingHeader = false;
-        
-        net::async_read(m_socket,
-            net::buffer(m_readBuffer.data(), packetLength),
-            net::bind_executor(m_strand,
-                [self = shared_from_this()](const error_code& ec, size_t bytes) {
-                    self->HandleReadPayload(ec, bytes);
-                }));
+
+        StartRead();
     }
 
-    void NetworkConnection::HandleReadPayload(const error_code& error, size_t bytesTransferred) {
-        if (error) {
-            HandleError(error);
-            return;
-        }
-        
-        m_stats.bytesReceived.fetch_add(bytesTransferred);
-        
-        // Log raw bytes for debugging
-        std::string hexDump;
-        for (size_t i = 0; i < std::min(size_t(10), bytesTransferred); i++) {
-            char buf[4];
-            snprintf(buf, sizeof(buf), "%02X ", m_readBuffer[i]);
-            hexDump += buf;
-        }
-        
+    bool NetworkConnection::ProcessFrame(const uint8_t* frame, size_t frameSize) {
         // Undo the compression stage first, so everything below sees the same
         // "VarInt id + payload" body it always did.
         //
         // MC CompressionDecoder: a leading VarInt of 0 means the rest is raw;
         // otherwise it is the uncompressed length to inflate to.
         std::vector<uint8_t> inflated;
-        const uint8_t* body = m_readBuffer.data();
-        size_t bodySize = bytesTransferred;
+        const uint8_t* body = frame;
+        size_t bodySize = frameSize;
 
         if (m_compressionThreshold >= 0) {
             size_t lenBytes = 0;
             uint32_t uncompressedLength = 0;
             try {
-                uncompressedLength = DecodeVarInt(m_readBuffer.data(), lenBytes);
+                uncompressedLength = DecodeVarInt(frame, lenBytes);
             } catch (const std::exception& e) {
                 Log::Error("[%s] Bad compressed frame header: %s", m_name.c_str(), e.what());
                 Disconnect();
-                return;
+                return false;
             }
             if (uncompressedLength == 0) {
-                body     = m_readBuffer.data() + lenBytes;
-                bodySize = bytesTransferred - lenBytes;
+                body     = frame + lenBytes;
+                bodySize = frameSize - lenBytes;
             } else {
                 if (uncompressedLength > MAX_PACKET_SIZE) {
                     Log::Error("[%s] Compressed frame claims %u bytes", m_name.c_str(),
                                uncompressedLength);
                     Disconnect();
-                    return;
+                    return false;
                 }
                 inflated.resize(uncompressedLength);
                 uLongf out = uncompressedLength;
                 const int rc = uncompress(inflated.data(), &out,
-                                          m_readBuffer.data() + lenBytes,
-                                          static_cast<uLong>(bytesTransferred - lenBytes));
+                                          frame + lenBytes,
+                                          static_cast<uLong>(frameSize - lenBytes));
                 if (rc != Z_OK || out != uncompressedLength) {
                     Log::Error("[%s] Inflate failed (rc=%d, got %lu of %u)",
                                m_name.c_str(), rc, static_cast<unsigned long>(out),
                                uncompressedLength);
                     Disconnect();
-                    return;
+                    return false;
                 }
                 body     = inflated.data();
                 bodySize = uncompressedLength;
@@ -331,59 +351,36 @@ namespace Network {
         try {
             packetId = DecodeVarInt(body, packetIdBytes);
         } catch (const std::exception& e) {
-            Log::Error("[%s] Failed to decode packet ID: %s, raw bytes: %s", 
-                      m_name.c_str(), e.what(), hexDump.c_str());
+            Log::Error("[%s] Failed to decode packet ID: %s", m_name.c_str(), e.what());
             Disconnect();
-            return;
+            return false;
         }
-        
-        if (packetId > 255) {
-            Log::Error("[%s] Invalid packet ID: 0x%X, raw bytes: %s", 
-                      m_name.c_str(), packetId, hexDump.c_str());
+
+        if (packetId > 255 || packetIdBytes > bodySize) {
+            Log::Error("[%s] Invalid packet ID: 0x%X", m_name.c_str(), packetId);
             Disconnect();
-            return;
+            return false;
         }
-        
+
+        m_currentPacket.header.length   = static_cast<uint32_t>(frameSize);
         m_currentPacket.header.packetId = static_cast<uint8_t>(packetId);
-        
+
         // Extract payload (remaining bytes after VarInt packet ID)
         m_currentPacket.payload.assign(body + packetIdBytes, body + bodySize);
-        
-        // Debug log for received packets - only log in base class if not a known packet type
-        // Client and Server connections will log their own specific packets  
-        if (m_currentPacket.header.packetId != 0x81 && 
-            m_currentPacket.header.packetId != static_cast<uint8_t>(PacketId::PlayerMoveC2S) &&
-            m_currentPacket.header.packetId != static_cast<uint8_t>(PacketId::KeepAliveS2C)) {
-            Log::Debug("[%s] Received packet ID 0x%02X, size: %zu bytes", 
-                      m_name.c_str(), m_currentPacket.header.packetId, 
-                      m_currentPacket.payload.size());
-        }
-        
+
         m_stats.packetsReceived.fetch_add(1);
-        
+
         // Decode packet on I/O thread (creates typed packet)
         try {
             PacketPtr packet = DecodePacket(m_currentPacket.header.packetId, m_currentPacket.payload);
             if (packet) {
-                // Debug logging for critical packets on Windows debugging
-                if (m_currentPacket.header.packetId == static_cast<uint8_t>(Network::PacketId::LoginStart) ||
-                    m_currentPacket.header.packetId == static_cast<uint8_t>(Network::PacketId::KeepAliveC2S)) {
-                    Log::Debug("[%s] I/O thread queueing packet ID 0x%02X for main thread", 
-                              m_name.c_str(), m_currentPacket.header.packetId);
-                }
-                
                 // Queue for main thread processing
                 IncomingPacket incoming(std::move(packet));
-                if (!m_incomingPackets.try_push(std::move(incoming))) {
-                    Log::Warning("[%s] Incoming packet queue full, dropping packet ID 0x%02X", 
-                                m_name.c_str(), m_currentPacket.header.packetId);
-                } else {
-                    // Log successful queueing for debugging
-                    if (m_currentPacket.header.packetId == static_cast<uint8_t>(Network::PacketId::LoginStart)) {
-                        Log::Debug("[%s] LoginStart packet successfully queued (queue size: %zu)", 
-                                  m_name.c_str(), m_incomingPackets.Size());
-                    }
-                }
+                // try_push cannot fail — the queue is unbounded, exactly as
+                // MC's PacketProcessor.packetsToBeHandled is. This used to
+                // drop on a full 2048-slot queue, which is silent corruption
+                // of a reliable stream. See MessageQueue.hpp.
+                m_incomingPackets.try_push(std::move(incoming));
             } else if (ShouldDeferPacket(m_currentPacket.header.packetId)) {
                 // Not decoded into a typed packet, but it still must not run
                 // here — this is the network I/O thread. Queue it so the legacy
@@ -392,10 +389,7 @@ namespace Network {
                 // PacketProcessor.scheduleIfPossible path.
                 IncomingPacket incoming(std::make_unique<RawPayloadPacket>(
                     m_currentPacket.header.packetId, m_currentPacket.payload));
-                if (!m_incomingPackets.try_push(std::move(incoming))) {
-                    Log::Warning("[%s] Incoming packet queue full, dropping packet ID 0x%02X",
-                                m_name.c_str(), m_currentPacket.header.packetId);
-                }
+                m_incomingPackets.try_push(std::move(incoming));
             } else {
                 // Handled inline, on purpose. MC's login/handshake listeners
                 // carry no ensureRunningOnSameThread call and run on the Netty
@@ -412,24 +406,41 @@ namespace Network {
             // file descriptors / heap exhaust and the process crashes.
             Log::Error("[%s] Exception decoding packet: %s — disconnecting", m_name.c_str(), e.what());
             Disconnect();
-            return;
+            return false;
         }
-
-        // Start reading next packet
-        StartRead();
+        return true;
     }
 
     void NetworkConnection::ProcessSendQueue() {
-        // Use shared_ptr to keep data alive during async operation
-        auto entry = std::make_shared<PendingSend>();
+        // Coalesce: everything queued goes out in ONE write, up to
+        // kMaxWriteBytes. This replaced one async_write per packet — a
+        // make_shared, a strand hop and a syscall each — which with a hundred
+        // thousand tracked entities was the sender's ceiling, not the wire.
+        //
+        // A packet with a post-write hook ends its batch: the hook may reframe
+        // the stream (compression), and "everything after this packet is
+        // framed under the new rules" only holds if nothing after it was
+        // framed before the hook ran.
+        struct SendBatch {
+            std::vector<uint8_t> bytes;
+            std::function<void()> onSent;   // at most one, for the LAST frame
+        };
+        auto batch = std::make_shared<SendBatch>();
+
+        std::vector<PendingSend> taken;
         {
             std::lock_guard<std::mutex> lock(m_sendMutex);
             if (m_sendQueue.empty()) {
                 m_sending = false;
                 return;
             }
-            *entry = std::move(m_sendQueue.front());
-            m_sendQueue.pop_front();
+            size_t total = 0;
+            while (!m_sendQueue.empty() && total < kMaxWriteBytes) {
+                total += m_sendQueue.front().data.size();
+                taken.push_back(std::move(m_sendQueue.front()));
+                m_sendQueue.pop_front();
+                if (taken.back().onSent) break;
+            }
         }
 
         // FRAME HERE, on the strand, immediately before the write — not when
@@ -442,21 +453,23 @@ namespace Network {
         // race between the caller and this strand — enable compression in a
         // send-completion hook and the very next packet may already have been
         // framed under the old rules, which the peer would then mis-parse.
-        entry->data = FrameForWire(entry->data);
+        for (PendingSend& e : taken) {
+            const std::vector<uint8_t> framed = FrameForWire(e.data);
+            batch->bytes.insert(batch->bytes.end(), framed.begin(), framed.end());
+            if (e.onSent) batch->onSent = std::move(e.onSent);
+        }
 
         // Async write - data is kept alive by the shared_ptr captured in lambda
         net::async_write(m_socket,
-            net::buffer(entry->data),
+            net::buffer(batch->bytes),
             net::bind_executor(m_strand,
-                [self = shared_from_this(), entry](const error_code& ec, size_t bytes) {
-                    // entry shared_ptr keeps the buffer alive until this handler completes.
-                    //
-                    // The hook runs BEFORE HandleWrite queues the next frame,
+                [self = shared_from_this(), batch](const error_code& ec, size_t bytes) {
+                    // The hook runs BEFORE HandleWrite queues the next batch,
                     // and before the error path, so a hook that reframes the
                     // stream (compression) takes effect for everything after
                     // this packet and nothing before it. Unconditional, as in
                     // PacketSendListener.thenRun.
-                    if (entry->onSent) entry->onSent();
+                    if (batch->onSent) batch->onSent();
                     self->HandleWrite(ec, bytes);
                 }));
     }

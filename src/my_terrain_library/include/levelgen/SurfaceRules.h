@@ -404,6 +404,13 @@ private:
 
 public:
     NotCondition(Condition* target) : m_target(target) {}
+    // Owns its target: NotConditionSource::apply hands over a fresh
+    // condition (release()) for every chunk. Without this the whole
+    // per-chunk rule tree leaked — measured 2026-08-29: ~5M rule/condition
+    // nodes alive after 12k chunks. (Java: the tree is garbage-collected.)
+    ~NotCondition() override { delete m_target; }
+    NotCondition(const NotCondition&) = delete;
+    NotCondition& operator=(const NotCondition&) = delete;
 
     bool test() override {
         return !m_target->test();
@@ -496,6 +503,10 @@ private:
 public:
     TestRule(Condition* condition, SurfaceRule* followup)
         : m_condition(condition), m_followup(followup) {}
+    // Owns both (see NotCondition).
+    ~TestRule() override { delete m_condition; delete m_followup; }
+    TestRule(const TestRule&) = delete;
+    TestRule& operator=(const TestRule&) = delete;
 
     BlockState* tryApply(int32_t blockX, int32_t blockY, int32_t blockZ) override {
         if (!m_condition->test()) {
@@ -515,6 +526,10 @@ private:
 
 public:
     SequenceRule(const std::vector<SurfaceRule*>& rules) : m_rules(rules) {}
+    // Owns every rule (see NotCondition).
+    ~SequenceRule() override { for (SurfaceRule* r : m_rules) delete r; }
+    SequenceRule(const SequenceRule&) = delete;
+    SequenceRule& operator=(const SequenceRule&) = delete;
 
     BlockState* tryApply(int32_t blockX, int32_t blockY, int32_t blockZ) override {
         for (SurfaceRule* rule : m_rules) {

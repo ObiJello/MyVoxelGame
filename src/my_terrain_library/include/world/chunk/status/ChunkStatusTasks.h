@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdio>
+#include <cstdlib>
 
 #include "world/chunk/status/ChunkStep.h"
 #include "world/chunk/status/ChunkStatus.h"
@@ -21,6 +23,7 @@
 #include "util/StaticCache2D.h"
 #include "levelgen/WorldGenRegionLevel.h"
 #include "levelgen/Heightmap.h"
+#include "levelgen/structure/StructureGeneration.h"
 #include "util/TerrainProfiling.h"
 #include <vector>
 #include <set>
@@ -61,6 +64,36 @@ public:
         return completed(chunk);
     }
 
+private:
+    /**
+     * Build the per-chunk structure Beardifier once, before the memoized
+     * NoiseChunk can be created (first at BIOMES). Java equivalent:
+     * createNoiseChunk(...) calls Beardifier.forStructuresInChunk(
+     * structureManager, chunk.getPos()) - the structureManager reads the
+     * chunk's reference map plus the referenced chunks' starts, which here
+     * live in the dependency grid (STRUCTURE_STARTS at radius 8, matching
+     * vanilla's requirement on BIOMES/NOISE/SURFACE/CARVERS/FEATURES).
+     * Must run synchronously in the task: async continuations outlive the
+     * grid vector.
+     */
+    static void ensureStructureBeardifier(
+        WorldGenContext& context,
+        const std::vector<std::vector<::world::IChunk*>>& chunks,
+        ::world::IChunk* chunk
+    ) {
+        if (context.structureState == nullptr) {
+            return;  // structures off: ProtoChunk keeps nullptr -> EMPTY
+        }
+        auto* proto = dynamic_cast<::world::ProtoChunk*>(chunk);
+        if (proto == nullptr || proto->structureBeardifierBuilt()) {
+            return;
+        }
+        proto->setStructureBeardifier(
+            minecraft::levelgen::structure::StructureGeneration::createBeardifier(chunks, chunk));
+    }
+
+public:
+
     /**
      * Generate structure starts
      * Reference: ChunkStatusTasks.java lines 40-48
@@ -74,9 +107,14 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
-        // Structure generation would go here
-        // Reference: context.generator().createStructures(...)
-        // For terrain-only generation, this is a no-op
+        TERRAIN_ZONE_N("Gen.StructureStarts");
+        // Reference: ChunkStatusTasks.java generateStructureStarts ->
+        // generator.createStructures(...) when worldGenOptions().generateStructures().
+        // structureState == nullptr means structures disabled (historical no-op).
+        if (context.structureState != nullptr && context.generator != nullptr) {
+            minecraft::levelgen::structure::StructureGeneration::createStructures(
+                *context.structureState, context.generator, context.randomState, chunk);
+        }
         return completed(chunk);
     }
 
@@ -90,6 +128,7 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
+        TERRAIN_ZONE_N("Gen.LoadStructureStarts");
         return completed(chunk);
     }
 
@@ -106,8 +145,13 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
-        // Reference: context.generator().createReferences(region, ...)
-        // For terrain-only generation, this is a no-op
+        TERRAIN_ZONE_N("Gen.StructureRefs");
+        // Reference: ChunkStatusTasks.java generateStructureReferences ->
+        // generator.createReferences(region, ...). Reads the +-8 STRUCTURE_STARTS
+        // neighborhood from the dependency grid; no RNG.
+        if (context.structureState != nullptr) {
+            minecraft::levelgen::structure::StructureGeneration::createReferences(chunks, chunk);
+        }
         return completed(chunk);
     }
 
@@ -137,6 +181,10 @@ public:
             return completed(chunk);
         }
 
+        // The memoized NoiseChunk is first created here (doCreateBiomes), so
+        // the structure Beardifier must exist before this task's generator call.
+        ensureStructureBeardifier(context, chunks, chunk);
+
         // If no background executor, run synchronously (fallback)
         if (!context.backgroundExecutor) {
             TERRAIN_ZONE_N("Gen.Biomes");
@@ -151,9 +199,9 @@ public:
         //     return protoChunk;
         // }, Util.backgroundExecutor().forName("init_biomes"));
         //
-        // Use supplyAsync pattern to run biome generation on thread pool
-        // Zone goes INSIDE the lambda: supplyAsync only enqueues here, so a zone
-        // around this call would time the dispatch, not the generation.
+        // Use supplyAsync pattern to run biome generation on thread pool.
+        // Zone goes INSIDE the lambda: supplyAsync only enqueues here, so a
+        // zone around this call would time the dispatch, not the generation.
         return util::CompletableFuture<::world::IChunk*>::supplyAsync(
             [generator = context.generator, randomState = context.randomState, chunk]() {
                 TERRAIN_ZONE_N("Gen.Biomes");
@@ -190,6 +238,9 @@ public:
             return completed(chunk);
         }
 
+        // Safety net if the chunk skipped BIOMES (e.g. sync harness paths).
+        ensureStructureBeardifier(context, chunks, chunk);
+
         // If no background executor, run synchronously (like old behavior)
         if (!context.backgroundExecutor) {
             TERRAIN_ZONE_N("Gen.Noise");
@@ -223,18 +274,19 @@ public:
      * Applies surface rules to convert stone to grass/dirt/sand/etc.
      * based on biome and noise.
      */
-    static ChunkFuture generateSurface(
-        WorldGenContext& context,
-        const ChunkStep& step,
+    // The body of generateSurface, factored out so it can run either inline (no
+    // background executor) or on the worldgen pool. `chunks` is the neighbour
+    // grid ChunkMap::applyStep builds on ITS stack — the async path copies it.
+    static void buildSurfaceStep(
+        levelgen::ChunkGenerator* generator,
+        levelgen::RandomState* randomState,
+        int64_t seed,
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
-        TERRAIN_ZONE_N("Gen.Surface");
-
-        // Reference: ChunkStatusTasks.java line 89
-        // context.generator().buildSurface(region, structureManager, randomState, chunk)
-        if (context.generator && context.randomState) {
-            auto* noiseGenerator = dynamic_cast<levelgen::NoiseBasedChunkGenerator*>(context.generator);
+        (void)seed;
+        if (generator && randomState) {
+            auto* noiseGenerator = dynamic_cast<levelgen::NoiseBasedChunkGenerator*>(generator);
             if (noiseGenerator) {
                 // FIX: Match Java's WorldGenRegion behavior - read biomes from stored chunk data
                 // instead of recomputing through BiomeSource::getNoiseBiome() (which uses the RTree).
@@ -277,38 +329,65 @@ public:
                 };
 
                 ChunkGridBiomeSource gridBiomeSource(chunks, centerPos.x(), centerPos.z(), inputRadius);
-                long obfuscatedSeed = world::biome::BiomeManager::obfuscateSeed(context.seed);
+                long obfuscatedSeed = world::biome::BiomeManager::obfuscateSeed(seed);
                 world::biome::BiomeManager biomeManager(&gridBiomeSource, obfuscatedSeed);
 
                 auto biomeGetter = [&biomeManager](const core::BlockPos& pos) -> world::biome::BiomeHolder {
                     return biomeManager.getBiome(pos);
                 };
-                noiseGenerator->buildSurface(context.randomState, biomeGetter, chunk);
+                noiseGenerator->buildSurface(randomState, biomeGetter, chunk);
             }
         }
-        return completed(chunk);
     }
 
-    /**
-     * Generate carvers (caves and canyons)
-     * Reference: ChunkStatusTasks.java lines 93-102
-     *
-     * Carves caves and canyons into the terrain using world carvers.
-     */
-    static ChunkFuture generateCarvers(
+    static ChunkFuture generateSurface(
         WorldGenContext& context,
         const ChunkStep& step,
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
-        TERRAIN_ZONE_N("Gen.Carvers");
+        ensureStructureBeardifier(context, chunks, chunk);
 
-        // Reference: ChunkStatusTasks.java lines 96-98, 100
-        // Blender.addAroundOldChunksCarvingMaskFilter(region, protoChunk) - for upgrades
-        // context.generator().applyCarvers(region, seed, randomState, biomeManager, structureManager, chunk)
+        // DIVERGENCE FROM VANILLA (deliberate, measured 2026-08-29): MC runs
+        // this step inline on the single-lane "worldgen" ConsecutiveExecutor,
+        // where it is serialised with every other chunk's surface, carvers,
+        // features and full steps. Measured on a 9-thread pool that lane was the
+        // hard cap on generation (~9.6 ms serialised per chunk = ~100 chunks/s
+        // with the pool 37% busy). This step only WRITES the centre chunk and
+        // only READS neighbours' biome data, which is complete and immutable
+        // once they passed BIOMES — so it is safe to run alongside other
+        // chunks' steps, and it produces bit-identical output. Same pattern as
+        // generateBiomes / generateNoise above (which vanilla itself runs
+        // async).
+        if (!context.backgroundExecutor) {
+            TERRAIN_ZONE_N("Gen.Surface");
+            buildSurfaceStep(context.generator, context.randomState, context.seed, chunks, chunk);
+            return completed(chunk);
+        }
+        return util::CompletableFuture<::world::IChunk*>::supplyAsync(
+            [generator = context.generator, randomState = context.randomState,
+             seed = context.seed, chunksCopy = chunks, chunk]() {
+                TERRAIN_ZONE_N("Gen.Surface");
+                buildSurfaceStep(generator, randomState, seed, chunksCopy, chunk);
+                return chunk;
+            },
+            context.backgroundExecutor
+        );
+    }
 
-        if (context.generator && context.randomState) {
-            auto* noiseGenerator = dynamic_cast<levelgen::NoiseBasedChunkGenerator*>(context.generator);
+    // The body of generateCarvers, factored out so it can run either inline (no
+    // background executor) or on the worldgen pool. `chunks` is the neighbour
+    // grid ChunkMap::applyStep builds on ITS stack — the async path copies it.
+    static void applyCarversStep(
+        levelgen::ChunkGenerator* generator,
+        levelgen::RandomState* randomState,
+        int64_t seed,
+        const std::vector<std::vector<::world::IChunk*>>& chunks,
+        ::world::IChunk* chunk
+    ) {
+        (void)seed;
+        if (generator && randomState) {
+            auto* noiseGenerator = dynamic_cast<levelgen::NoiseBasedChunkGenerator*>(generator);
             if (noiseGenerator) {
                 // FIX: Match Java's WorldGenRegion behavior - read biomes from stored chunk data
                 // (Same fix as in generateSurface - see comment there for details)
@@ -344,22 +423,58 @@ public:
                 };
 
                 ChunkGridBiomeSource gridBiomeSource(chunks, centerPos.x(), centerPos.z(), inputRadius);
-                long obfuscatedSeed = world::biome::BiomeManager::obfuscateSeed(context.seed);
+                long obfuscatedSeed = world::biome::BiomeManager::obfuscateSeed(seed);
                 world::biome::BiomeManager biomeManager(&gridBiomeSource, obfuscatedSeed);
 
                 auto biomeGetter = [&biomeManager](const core::BlockPos& pos) -> world::biome::BiomeHolder {
                     return biomeManager.getBiome(pos);
                 };
                 noiseGenerator->applyCarvers(
-                    context.seed,
-                    context.randomState,
+                    seed,
+                    randomState,
                     biomeGetter,
                     chunk,
                     levelgen::GenerationStep::Decoration::RAW_GENERATION  // Air carving step
                 );
             }
         }
-        return completed(chunk);
+    }
+
+    static ChunkFuture generateCarvers(
+        WorldGenContext& context,
+        const ChunkStep& step,
+        const std::vector<std::vector<::world::IChunk*>>& chunks,
+        ::world::IChunk* chunk
+    ) {
+        ensureStructureBeardifier(context, chunks, chunk);
+
+        // DIVERGENCE FROM VANILLA (deliberate, measured 2026-08-29): MC runs
+        // this step inline on the single-lane "worldgen" ConsecutiveExecutor,
+        // where it is serialised with every other chunk's surface, carvers,
+        // features and full steps. Measured on a 9-thread pool that lane was the
+        // hard cap on generation (~9.6 ms serialised per chunk = ~100 chunks/s
+        // with the pool 37% busy). This step only WRITES the centre chunk and
+        // only READS neighbours' biome data, which is complete and immutable
+        // once they passed BIOMES — so it is safe to run alongside other
+        // chunks' steps, and it produces bit-identical output. Same pattern as
+        // generateBiomes / generateNoise above (which vanilla itself runs
+        // async).
+        if (!context.backgroundExecutor) {
+            TERRAIN_ZONE_N("Gen.Carvers");
+            applyCarversStep(context.generator, context.randomState, context.seed, chunks, chunk);
+            debugGenHash(chunk);
+            return completed(chunk);
+        }
+        return util::CompletableFuture<::world::IChunk*>::supplyAsync(
+            [generator = context.generator, randomState = context.randomState,
+             seed = context.seed, chunksCopy = chunks, chunk]() {
+                TERRAIN_ZONE_N("Gen.Carvers");
+                applyCarversStep(generator, randomState, seed, chunksCopy, chunk);
+                debugGenHash(chunk);   // end of carvers: the last step that writes only the centre chunk
+                return chunk;
+            },
+            context.backgroundExecutor
+        );
     }
 
     /**
@@ -369,19 +484,13 @@ public:
      * Places decorations: trees, flowers, ores, etc.
      * Uses the decoration seeding for deterministic placement.
      */
-    static ChunkFuture generateFeatures(
+    // Body of generateFeatures (see below for why it is a separate function).
+    static void decorateStep(
         WorldGenContext& context,
         const ChunkStep& step,
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
-        TERRAIN_ZONE_N("Gen.Features");
-
-        // Reference: ChunkStatusTasks.java lines 106-107
-        // Heightmap.primeHeightmaps(chunk, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES, OCEAN_FLOOR, WORLD_SURFACE)
-        // Reference: ChunkStatusTasks.java lines 108-110
-        // context.generator().applyBiomeDecoration(region, chunk, structureManager)
-
         if (context.generator && context.randomState) {
             // Ensure feature registries are bootstrapped before any worker
             // reads the shared feature ordering cache.
@@ -402,31 +511,62 @@ public:
             // for feature RNG parity - the global index used for seeding depends on
             // the order features are first seen across ALL biomes, not just chunk biomes.
             // =========================================================================
+            // CRITICAL: Java builds featuresPerStep PER GENERATOR from that
+            // generator's biomeSource.possibleBiomes(). The nether sorter must
+            // see ONLY the 5 nether biomes or feature indices (setFeatureSeed)
+            // diverge. Dimension detected via the generator's default block.
+            bool isNetherDim = false;
+            bool isEndDim = false;
+            {
+                auto* noiseGen = dynamic_cast<levelgen::NoiseBasedChunkGenerator*>(context.generator);
+                if (noiseGen && noiseGen->getSettings() && noiseGen->getSettings()->defaultBlock()) {
+                    const std::string& defaultBlockId =
+                        noiseGen->getSettings()->defaultBlock()->getIdentifier();
+                    isNetherDim = defaultBlockId == "minecraft:netherrack";
+                    isEndDim = defaultBlockId == "minecraft:end_stone";
+                }
+            }
+            auto buildForKeys = [](const std::vector<std::string>& biomeKeys) {
+                return levelgen::FeatureSorter::buildFeaturesPerStep<std::string>(
+                    biomeKeys,
+                    [](const std::string& biomeKey) -> std::vector<std::vector<levelgen::placement::PlacedFeature*>> {
+                        const auto& features = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
+                        std::vector<std::vector<levelgen::placement::PlacedFeature*>> result;
+                        result.reserve(features.size());
+                        for (const auto& stepFeatures : features) {
+                            std::vector<levelgen::placement::PlacedFeature*> step;
+                            step.reserve(stepFeatures.size());
+                            for (const auto* f : stepFeatures) {
+                                step.push_back(const_cast<levelgen::placement::PlacedFeature*>(f));
+                            }
+                            result.push_back(std::move(step));
+                        }
+                        return result;
+                    },
+                    true
+                );
+            };
             const std::vector<levelgen::StepFeatureData>& featuresPerStep =
-                []() -> const std::vector<levelgen::StepFeatureData>& {
-                    static const std::vector<levelgen::StepFeatureData> s_cachedFeaturesPerStep =
-                        []() -> std::vector<levelgen::StepFeatureData> {
-                            const auto& allBiomeKeys = data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys();
-                            return levelgen::FeatureSorter::buildFeaturesPerStep<std::string>(
-                                allBiomeKeys,
-                                [](const std::string& biomeKey) -> std::vector<std::vector<levelgen::placement::PlacedFeature*>> {
-                                    const auto& features = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
-                                    std::vector<std::vector<levelgen::placement::PlacedFeature*>> result;
-                                    result.reserve(features.size());
-                                    for (const auto& stepFeatures : features) {
-                                        std::vector<levelgen::placement::PlacedFeature*> step;
-                                        step.reserve(stepFeatures.size());
-                                        for (const auto* f : stepFeatures) {
-                                            step.push_back(const_cast<levelgen::placement::PlacedFeature*>(f));
-                                        }
-                                        result.push_back(std::move(step));
-                                    }
-                                    return result;
-                                },
-                                true
-                            );
-                        }();
-                    return s_cachedFeaturesPerStep;
+                [&]() -> const std::vector<levelgen::StepFeatureData>& {
+                    // Per-generator override (single-biome and flat worlds):
+                    // Java builds featuresPerStep from the generator's own
+                    // possibleBiomes(), not the whole dimension.
+                    if (const auto* custom = context.generator->customFeaturesPerStep()) {
+                        return *custom;
+                    }
+                    if (isNetherDim) {
+                        static const std::vector<levelgen::StepFeatureData> s_netherFeaturesPerStep =
+                            buildForKeys(data::worldgen::BiomeFeatureRegistry::getNetherBiomeKeys());
+                        return s_netherFeaturesPerStep;
+                    }
+                    if (isEndDim) {
+                        static const std::vector<levelgen::StepFeatureData> s_endFeaturesPerStep =
+                            buildForKeys(data::worldgen::BiomeFeatureRegistry::getEndBiomeKeys());
+                        return s_endFeaturesPerStep;
+                    }
+                    static const std::vector<levelgen::StepFeatureData> s_overworldFeaturesPerStep =
+                        buildForKeys(data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys());
+                    return s_overworldFeaturesPerStep;
                 }();
 
             // Build multi-chunk WorldGenRegion from neighbor chunk grid
@@ -504,7 +644,89 @@ public:
 
         }
 
-        return completed(chunk);
+    }
+
+    // OBEY_GEN_HASH=1: log a hash of every block state in the chunk at the end
+    // of the carvers step — the exact output of biomes + noise + surface +
+    // carvers, and the last point before neighbours' decoration writes in. Decoration is order-dependent
+    // between neighbouring chunks (as in vanilla), so the saved region files
+    // cannot serve as a determinism oracle for density-function changes;
+    // this can. Compare `[GenHash]` lines between two runs.
+    static void debugGenHash(::world::IChunk* chunk) {
+        static const bool enabled = std::getenv("OBEY_GEN_HASH") != nullptr;
+        if (!enabled || !chunk) return;
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&h](const std::string& sv) {
+            for (unsigned char c : sv) { h ^= c; h *= 1099511628211ull; }
+        };
+        const int n = chunk->getSectionsCount();
+        for (int si = 0; si < n; ++si) {
+            auto& sec = chunk->getSection(si);
+            if (sec.hasOnlyAir()) { mix("air"); continue; }
+            const BlockState* last = nullptr; std::string lastStr;
+            for (int y = 0; y < 16; ++y) for (int z = 0; z < 16; ++z) for (int x = 0; x < 16; ++x) {
+                const BlockState* st = sec.getBlockState(x, y, z);
+                if (st != last) { last = st; lastStr = st ? st->toStateString() : std::string("null"); }
+                mix(lastStr);
+            }
+        }
+        std::fprintf(stderr, "[GenHash] %d %d %016llx\n", chunk->getPos().x(), chunk->getPos().z(),
+                     static_cast<unsigned long long>(h));
+    }
+
+    static ChunkFuture generateFeatures(
+        WorldGenContext& context,
+        const ChunkStep& step,
+        const std::vector<std::vector<::world::IChunk*>>& chunks,
+        ::world::IChunk* chunk
+    ) {
+
+        // Reference: ChunkStatusTasks.java lines 106-107
+        // Heightmap.primeHeightmaps(chunk, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES, OCEAN_FLOOR, WORLD_SURFACE)
+        // Reference: ChunkStatusTasks.java lines 108-110
+        // context.generator().applyBiomeDecoration(region, chunk, structureManager)
+
+        // DIVERGENCE FROM VANILLA (deliberate, measured 2026-08-30): vanilla
+        // decorates on the single worldgen lane; here that lane measured 59%
+        // busy with decoration as ~70% of it, and it is what capped fresh
+        // generation at ~100-125 chunks/s with the pool half idle. The step
+        // writes only its 3x3 neighbourhood (write radius 1), so steps whose
+        // centres are >= 3 chunks apart are independent; FeatureClaims makes
+        // any two closer than that take turns. Which of two neighbouring
+        // chunks decorates first is already scheduling-dependent in vanilla
+        // (the lane's own order is not fixed), so this changes the ORDER
+        // vanilla could have produced, not the kind of result.
+        if (!context.backgroundExecutor || !context.featureClaims) {
+            TERRAIN_ZONE_N("Gen.Features");
+            decorateStep(context, step, chunks, chunk);
+            return completed(chunk);
+        }
+        const ::world::ChunkPos pos = chunk->getPos();
+        WorldGenContext* ctx = &context;
+        const ChunkStep* stepp = &step;
+        auto future = std::make_shared<util::CompletableFuture<::world::IChunk*>>();
+        auto chunksCopy = std::make_shared<const std::vector<std::vector<::world::IChunk*>>>(chunks);
+        // Self-rescheduling attempt: if a neighbour is decorating, go to the
+        // back of the pool's queue and try again after the work ahead of us.
+        auto attempt = std::make_shared<std::function<void()>>();
+        *attempt = [ctx, stepp, chunksCopy, chunk, pos, future, attempt]() {
+            if (!ctx->featureClaims->acquireOrWait(pos.x(), pos.z(), *attempt)) {
+                return;   // parked; a release will re-submit us
+            }
+            auto submit = [ctx](std::function<void()> fn) { ctx->backgroundExecutor(std::move(fn)); };
+            try {
+                TERRAIN_ZONE_N("Gen.Features");
+                decorateStep(*ctx, *stepp, *chunksCopy, chunk);
+            } catch (...) {
+                ctx->featureClaims->release(pos.x(), pos.z(), submit);
+                future->completeExceptionally(std::current_exception());
+                return;
+            }
+            ctx->featureClaims->release(pos.x(), pos.z(), submit);
+            future->complete(chunk);
+        };
+        context.backgroundExecutor(*attempt);
+        return future;
     }
 
     /**

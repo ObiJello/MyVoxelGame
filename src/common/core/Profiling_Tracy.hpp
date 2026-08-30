@@ -25,6 +25,22 @@
     // Numeric time-series plot (name must be a string literal). Shows up in
     // Tracy's Plots pane — use for per-frame counts (visible sections, uploads).
     #define PROFILE_PLOT(name, value)       TracyPlot(name, value)
+
+    // A zone on a call site hot enough that the instrumentation itself
+    // distorts the measurement. Each ZoneScopedN pair is a TracyQueuePrepare +
+    // a timer read + a TracyQueueCommit, ~30-50 ns; on a function called ten
+    // million times in a capture that is hundreds of ms attributed to the
+    // thing being measured.
+    //
+    // OFF by default even in a Tracy build. Turn it on with
+    // -DEXPLOSION_DETAIL_ZONES=ON when you specifically want the per-call
+    // breakdown, and NEVER compare a capture taken with it against one taken
+    // without — the same trap as sampled-vs-unsampled captures.
+    #ifdef EXPLOSION_DETAIL_ZONES
+        #define PROFILE_ZONE_DETAIL(name)   ZoneScopedN(name)
+    #else
+        #define PROFILE_ZONE_DETAIL(name)   (void)0
+    #endif
 #else
     #define PROFILE_ZONE            (void)0
     #define PROFILE_ZONE_N(name)    (void)0
@@ -32,4 +48,5 @@
     #define PROFILE_FRAME_MARK_NAMED(name)  (void)0
     #define PROFILE_THREAD(name)    (void)0
     #define PROFILE_PLOT(name, value)       (void)0
+    #define PROFILE_ZONE_DETAIL(name)       (void)0
 #endif

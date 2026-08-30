@@ -14,6 +14,20 @@ uniform float uSkyBrightness;       // Day/night terrain dim (0.2667..1, MC SKY_
 uniform vec4 uFogColor;             // Time-of-day fog color
 uniform vec4 uFogEnv;               // (envStart, envEnd, rdStart, rdEnd); 1e9 = fog off
 
+// MC's entity OVERLAY (OverlayTexture) — the white flash on primed TNT and the
+// red flash on a hurt mob. rgb is the overlay colour; a is its STRENGTH.
+//
+// ALPHA IS INVERTED relative to vanilla, deliberately. MC samples a 16x16
+// overlay texture and does `mix(overlay.rgb, color.rgb, overlay.a)`, where a=1
+// means "no overlay" — its NO_OVERLAY texel is opaque white. An unset GL
+// uniform is all zeroes, so keeping that convention would make every block in
+// the world render BLACK the moment this uniform existed. Strength-from-zero is
+// the same maths read the other way round:
+//     mix(overlay, color, a)  ==  mix(color, overlay, 1 - a)
+// so a caller converts with `strength = 1 - overlayTexel.a` and the default
+// vec4(0) is a clean passthrough.
+uniform vec4 uOverlayColor;
+
 // Output
 out vec4 FragColor;
 
@@ -35,6 +49,12 @@ void main() {
     // Vertex color already contains: biome tint * AO * directional face shade
     // This matches Minecraft's approach — all lighting is baked per-vertex
     vec3 finalColor = textureColor.rgb * fragColor.rgb;
+
+    // MC entity.fsh applies the overlay HERE — after the vertex-colour
+    // multiply and BEFORE the lightmap. The position matters: an overlaid
+    // block still dims at night and still fogs with distance, so a flashing
+    // TNT in a dark cave is not a floating white square.
+    finalColor = mix(finalColor, uOverlayColor.rgb, uOverlayColor.a);
 
     // Day/night sky-light dim (approximation of MC's lightmap night curve)
     finalColor *= uSkyBrightness;

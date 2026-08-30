@@ -53,6 +53,7 @@ namespace Client {
         void onAddEntityS2C(const Network::AddEntityS2CPacket& packet) override { handleAddEntity(packet); }
         void onMoveEntityS2C(const Network::MoveEntityS2CPacket& packet) override { handleMoveEntity(packet); }
         void onEntityPositionSyncS2C(const Network::EntityPositionSyncS2CPacket& packet) override { handleEntityPositionSync(packet); }
+        void onEntityPositionSyncBatchS2C(const Network::EntityPositionSyncBatchS2CPacket& packet) override { handleEntityPositionSyncBatch(packet); }
         void onSetEntityMotionS2C(const Network::SetEntityMotionS2CPacket& packet) override { handleSetEntityMotion(packet); }
         void onSetEntityDataS2C(const Network::SetEntityDataS2CPacket& packet) override { handleSetEntityData(packet); }
         void onEntityEventS2C(const Network::EntityEventS2CPacket& packet) override { handleEntityEvent(packet); }
@@ -70,8 +71,19 @@ namespace Client {
             g_clientTickRate.SetFrozenTicksToRun(packet.tickSteps);
         }
 
+        void onChangeDimensionS2C(const Network::ChangeDimensionS2CPacket& packet) override {
+            handleChangeDimension(packet);
+        }
+
+        void onExplodeS2C(const Network::ExplodeS2CPacket& packet) override {
+            handleExplode(packet);
+        }
+
         void onItemEntityMoveS2C(const Network::ItemEntityMoveS2CPacket& packet) override { handleItemEntityMove(packet); }
         void onTakeItemEntityS2C(const Network::TakeItemEntityS2CPacket& packet) override { handleTakeItemEntity(packet); }
+        void onXpOrbSpawnS2C(const Network::XpOrbSpawnS2CPacket& packet) override { handleXpOrbSpawn(packet); }
+        void onXpOrbMoveS2C(const Network::XpOrbMoveS2CPacket& packet) override { handleXpOrbMove(packet); }
+        void onSetExperienceS2C(const Network::SetExperienceS2CPacket& packet) override { handleSetExperience(packet); }
         void onDisconnect(const std::string& reason) override { handleDisconnect(reason); }
         void onKeepAlive(uint64_t id) override { handleKeepAlive(id); }
         void onChunkBatchStart() override { handleChunkBatchStart(); }
@@ -134,12 +146,15 @@ namespace Client {
         void handleAddEntity(const Network::AddEntityS2CPacket& packet);
         void handleMoveEntity(const Network::MoveEntityS2CPacket& packet);
         void handleEntityPositionSync(const Network::EntityPositionSyncS2CPacket& packet);
+        void handleEntityPositionSyncBatch(const Network::EntityPositionSyncBatchS2CPacket& packet);
         void handleSetEntityMotion(const Network::SetEntityMotionS2CPacket& packet);
         void handleSetEntityData(const Network::SetEntityDataS2CPacket& packet);
         void handleEntityEvent(const Network::EntityEventS2CPacket& packet);
         void handleHurtAnimation(const Network::HurtAnimationS2CPacket& packet);
         void handleItemEntityMove(const Network::ItemEntityMoveS2CPacket& packet);
         void handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet);
+        void handleXpOrbSpawn(const Network::XpOrbSpawnS2CPacket& packet);
+        void handleXpOrbMove(const Network::XpOrbMoveS2CPacket& packet);
 
         // World state
         void handleTimeUpdate(uint64_t worldAge, uint64_t timeOfDay);
@@ -169,7 +184,15 @@ namespace Client {
         void handleOpenScreen(const Network::OpenScreenS2CPacket& packet);
         void handleContainerSetData(const Network::ContainerSetDataS2CPacket& packet);
         void handleSetHealth(const Network::SetHealthS2CPacket& packet);
+        void handleSetExperience(const Network::SetExperienceS2CPacket& packet);
         void handleBlockChangedAck(const Network::BlockChangedAckS2CPacket& packet);
+
+        // The server moved us to another dimension. Everything cached about
+        // the world we were in has to go before the first chunk of the new one
+        // lands, or a Nether chunk merges into an Overworld one at the same
+        // x/z and an Overworld mob turns up standing in lava.
+        void handleChangeDimension(const Network::ChangeDimensionS2CPacket& packet);
+        void handleExplode(const Network::ExplodeS2CPacket& packet);
 
 #if ENABLE_PORTAL_GUN
         // Portal gun (server-broadcast pair state). Forwards into
@@ -219,7 +242,13 @@ namespace Client {
 
         // Chunk batch rate calculator (Minecraft's ChunkBatchSizeCalculator)
         struct ChunkBatchSizeCalculator {
-            double aggregatedNanosPerChunk = 2000000.0; // 2ms initial estimate
+            // Vanilla starts at 2 ms/chunk with a 49-sample history weight and
+            // a 3x outlier clamp: with ~0.08 ms real apply cost that ramp took
+            // ~5 s to reach full rate on a 3,725-chunk saved area (measured
+            // 2026-08-30: 134/384/565/728/957 chunks per second). Same
+            // estimator, tuned to our cost: 0.25 ms start, 9-sample weight,
+            // 5x clamp. The 7 ms/tick budget is unchanged.
+            double aggregatedNanosPerChunk = 250000.0; // 0.25ms initial estimate
             int oldSamplesWeight = 1;
             std::chrono::steady_clock::time_point batchStartTime;
 
@@ -234,14 +263,14 @@ namespace Client {
                 double nanosPerChunk = batchNanos / batchSize;
 
                 // Clamp to 3x range of current average (reject outliers)
-                double lo = aggregatedNanosPerChunk / 3.0;
-                double hi = aggregatedNanosPerChunk * 3.0;
+                double lo = aggregatedNanosPerChunk / 5.0;
+                double hi = aggregatedNanosPerChunk * 5.0;
                 double clamped = std::clamp(nanosPerChunk, lo, hi);
 
                 // Weighted moving average (up to 49 old samples)
                 aggregatedNanosPerChunk =
                     (aggregatedNanosPerChunk * oldSamplesWeight + clamped) / (oldSamplesWeight + 1);
-                oldSamplesWeight = std::min(49, oldSamplesWeight + 1);
+                oldSamplesWeight = std::min(9, oldSamplesWeight + 1);
             }
 
             float getDesiredChunksPerTick() const {

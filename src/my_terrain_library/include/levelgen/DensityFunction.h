@@ -1,4 +1,6 @@
 #pragma once
+#include <string>
+#include <cstdint>
 
 #include <cstdint>
 #include <memory>
@@ -136,6 +138,20 @@ public:
 
         virtual DensityFunction* apply(DensityFunction* input) = 0;
 
+        // Memo hooks used by DensityFunction::mapAll (see its comment).
+        // Default: no memoisation, i.e. the old per-visit behaviour.
+        virtual DensityFunction* lookupMapped(const DensityFunction* original) {
+            (void)original;
+            return nullptr;
+        }
+        virtual void rememberMapped(const DensityFunction* original, DensityFunction* mapped) {
+            (void)original;
+            (void)mapped;
+        }
+        virtual bool memoises() const { return false; }
+        virtual DensityFunction* lookupPreMapped(const std::string& key) { (void)key; return nullptr; }
+        virtual void rememberPreMapped(const std::string& key, DensityFunction* mapped) { (void)key; (void)mapped; }
+
         // NoiseHolder visiting - subclasses can override to transform noise
         virtual NoiseHolder* visitNoise(NoiseHolder* noise) { return noise; }
 
@@ -174,8 +190,87 @@ public:
     // __restrict tells compiler that output doesn't alias other pointers
     virtual void fillArray(double* __restrict output, int32_t count, ContextProvider& contextProvider) const = 0;
 
-    // Apply a visitor transformation to this function and its children
-    virtual DensityFunction* mapAll(Visitor& visitor) = 0;
+    // Apply a visitor transformation to this function and its children.
+    //
+    // NOT virtual on purpose. Java's NoiseChunk keeps `wrapped`, a HashMap
+    // keyed by the density-function RECORDS, so structurally identical
+    // subtrees (the router references continents/erosion/ridges/offset/
+    // factor/depth from many places) map to ONE wrapper per chunk. The port's
+    // wrap map was keyed by pointer and mapAll creates fresh nodes, so it
+    // never hit: every NoiseChunk expanded the shared DAG into a ~7,000-node
+    // tree (measured 2026-08-29: 11 ms of the 15 ms biome step). The visitor
+    // may memoise original node -> mapped node; the router is one shared DAG,
+    // so memoising on the original identity reproduces Java's sharing.
+    DensityFunction* mapAll(Visitor& visitor) {
+        if (DensityFunction* memo = visitor.lookupMapped(this)) return memo;
+        // Only for memoising visitors (NoiseChunk's WrapVisitor): the key pass
+        // maps the children and mapAllImpl maps them again, which is a memo
+        // hit there and an EXPONENTIAL re-walk for a visitor without one
+        // (RandomState's noise wiring hung world load, 2026-08-29).
+        if (!visitor.memoises()) return mapAllImpl(visitor);
+        // Key of the node this WOULD map to (children mapped, memoised). An
+        // equal node already mapped for this visitor is returned as-is —
+        // no construction, no allocation: Java's record dedupe, one level up.
+        std::string key;
+        keyImpl(key, &visitor);
+        if (DensityFunction* existing = visitor.lookupPreMapped(key)) {
+            visitor.rememberMapped(this, existing);
+            return existing;
+        }
+        DensityFunction* mapped = mapAllImpl(visitor);
+        visitor.rememberMapped(this, mapped);
+        visitor.rememberPreMapped(key, mapped);
+        return mapped;
+    }
+    virtual DensityFunction* mapAllImpl(Visitor& visitor) = 0;
+
+    // ── Structural identity (Java record semantics) ─────────────────────────
+    // Java's density functions are records, so NoiseChunk's `wrapped` HashMap
+    // treats two structurally identical subtrees as the SAME key and hands
+    // back one wrapper. Ours are plain classes; keyImpl appends a byte string
+    // that plays the role of record equals/hashCode: a type tag, the value
+    // fields, and the CHILD POINTERS. With `v == nullptr` the children are
+    // this node's own (key of an already-mapped node, used by
+    // NoiseChunk::wrap); with a visitor the children are MAPPED first
+    // (memoised), which is the key the mapped node WOULD have — so mapAll can
+    // find an existing equal node and skip constructing a duplicate at all.
+    //
+    // Default: identity. Right for anything stateful or unique (NoiseChunk's
+    // own cache wrappers, the Beardifier, BlendAlpha/Offset singletons).
+    virtual void keyImpl(std::string& out, Visitor* v) const {
+        (void)v;
+        keyTag(out, 0);
+        keyPtr(out, this);
+    }
+    void structuralKey(std::string& out) const { keyImpl(out, nullptr); }
+    void mappedKey(std::string& out, Visitor& v) const { keyImpl(out, &v); }
+
+    static void keyTag(std::string& out, uint16_t tag) {
+        out.append(reinterpret_cast<const char*>(&tag), sizeof tag);
+    }
+    static void keyPtr(std::string& out, const void* p) {
+        const uintptr_t val = reinterpret_cast<uintptr_t>(p);
+        out.append(reinterpret_cast<const char*>(&val), sizeof val);
+    }
+    static void keyDouble(std::string& out, double d) {
+        out.append(reinterpret_cast<const char*>(&d), sizeof d);   // bit pattern
+    }
+    static void keyFloat(std::string& out, float f) {
+        out.append(reinterpret_cast<const char*>(&f), sizeof f);
+    }
+    static void keyInt(std::string& out, int64_t i) {
+        out.append(reinterpret_cast<const char*>(&i), sizeof i);
+    }
+    // A child: its mapped identity under `v`, or itself when keying a node
+    // that is already mapped.
+    static DensityFunction* keyChild(Visitor* v, DensityFunction* child) {
+        return (v && child) ? child->mapAll(*v) : child;
+    }
+    static void keyNoise(std::string& out, Visitor* v, NoiseHolder* n) {
+        NoiseHolder* h = (v && n) ? v->visitNoise(n) : n;
+        keyPtr(out, h ? static_cast<const void*>(h->noise()) : nullptr);
+        if (h && !h->noise() && h->noiseName()) out.append(h->noiseName());
+    }
 
     // Theoretical minimum value this function can produce
     virtual double minValue() const = 0;
@@ -199,7 +294,7 @@ public:
     }
 
     // Default implementation: just apply visitor to self
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 };

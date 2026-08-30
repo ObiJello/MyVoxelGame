@@ -82,7 +82,11 @@ namespace Threading {
 
         // Submit mesh building job using snapshot (THREAD-SAFE)
         // Returns true if job was successfully queued, false if queue is full
-        bool SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot);
+        // `evicted` (optional) receives a queued job that was displaced to make
+        // room because it was farther from the camera than this one; the
+        // caller must mark that section dirty again (it is no longer queued).
+        bool SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot,
+                                       std::shared_ptr<Client::Render::MeshJobData>* evicted = nullptr);
 
         // Compile a section on the CALLING thread and push the result straight
         // to the render thread's upload queue, skipping the compile queue and
@@ -250,7 +254,9 @@ namespace Threading {
         Network::MeshBuildResult BuildSectionMesh(const MeshJob& job);
 
         // Job queue management
-        bool EnqueueJob(MeshJob&& job);
+        // Admission bound for the job queue (see EnqueueJob).
+        static constexpr size_t kMaxQueuedJobs = 2048;
+        bool EnqueueJob(MeshJob&& job, std::shared_ptr<Client::Render::MeshJobData>* evicted = nullptr);
 
         // Port of MC's CompileTaskDynamicQueue.poll(Vec3): drop cancelled
         // entries, then take the nearest job to `cameraPos`, subject to the

@@ -32,7 +32,6 @@ namespace Game {
 
     ClientPlayerController::ClientPlayerController()
         : player(nullptr)
-        , world(nullptr)
         , networkClient(nullptr)
         , lastMoveSend(std::chrono::steady_clock::now())
     {
@@ -76,11 +75,6 @@ namespace Game {
         Log::Debug("ClientPlayerController player reference set");
     }
 
-    void ClientPlayerController::SetWorld(World* worldPtr) {
-        world = worldPtr;
-        Log::Debug("ClientPlayerController world reference set");
-    }
-
     void ClientPlayerController::SetBlockAccess(const IBlockAccess* access) {
         blockAccess = access;
         Log::Debug("ClientPlayerController block access set");
@@ -101,7 +95,6 @@ namespace Game {
     BlockID ClientPlayerController::ReadBlock(const glm::ivec3& pos) const {
         try {
             if (blockAccess) return blockAccess->GetBlock(pos.x, pos.y, pos.z);
-            if (world)       return world->GetBlock(pos.x, pos.y, pos.z);
         } catch (...) {}
         return BlockID::Air;
     }
@@ -109,7 +102,6 @@ namespace Game {
     BlockState ClientPlayerController::ReadBlockState(const glm::ivec3& pos) const {
         try {
             if (blockAccess) return blockAccess->GetBlockState(pos.x, pos.y, pos.z);
-            if (world)       return world->GetBlockState(pos.x, pos.y, pos.z);
         } catch (...) {}
         return BlockState{};
     }
@@ -168,11 +160,25 @@ namespace Game {
         // dirty check: whenever the local fly flag changes (double-tap
         // toggle, landing auto-cancel, server revoke), ship the new state
         // via PlayerAbilitiesC2S (MC ServerboundPlayerAbilitiesPacket).
-        if (player->physics.isFlying != lastSentFlying) {
+        // Adopt a server-dictated state as the new baseline instead of
+        // reporting it back. See ClientPlayer::abilitiesSyncedFromServer for
+        // the join-time race this closes.
+        if (player->abilitiesSyncedFromServer) {
+            player->abilitiesSyncedFromServer = false;
             lastSentFlying = player->physics.isFlying;
+            lastSentNoclip = player->physics.noclip;
+        }
+
+        if (player->physics.isFlying != lastSentFlying ||
+            player->physics.noclip    != lastSentNoclip) {
+            lastSentFlying = player->physics.isFlying;
+            lastSentNoclip = player->physics.noclip;
             if (networkClient && networkClient->IsConnected()) {
                 Network::PlayerAbilitiesC2SPacket packet;
                 if (lastSentFlying) packet.flags |= Network::PlayerAbilitiesC2SPacket::FLAG_FLYING;
+                // Noclip rides the same dirty check so the server can save it;
+                // it grants nothing, the client already owns the behaviour.
+                if (lastSentNoclip) packet.flags |= Network::PlayerAbilitiesC2SPacket::FLAG_NOCLIP;
                 auto data = Network::Serialization::Serialize(packet);
                 if (auto connection = networkClient->GetConnection()) {
                     connection->SendPacket(
@@ -410,6 +416,13 @@ namespace Game {
         // BlockID never changes, so `resolved` stays put and the new state is
         // carried to outState below.
         BlockID resolved = toPlace;
+        // Skull items are MC StandingAndWallBlockItems: a click on a
+        // horizontal face resolves to the WALL variant. Same rule, same
+        // stage as the server (PlayerSession::HandleUseItemOn), so the
+        // prediction never flips block when the authoritative update lands.
+        if (!replaceClicked) {
+            resolved = Game::SkullPlacementBlock(resolved, click.clickedFace);
+        }
         bool grewInPlace = false;
         BlockState grownState;
         if (Game::IsSegmentedBlock(targetId) && targetId == toPlace) {
@@ -514,6 +527,11 @@ namespace Game {
         // predicts with the exact connections the server is about to send.
         if (!grewInPlace && blockAccess) {
             outState = Game::ComputeWorldPlacementState(*blockAccess, target, outState);
+            // The block can change here, not just its state — concrete powder
+            // placed into water comes back as CONCRETE. Mirrors the server
+            // (PlayerSession::HandleUseItemOn); predicting the powder would
+            // flash the wrong block for a tick.
+            outBlock = outState.Block();
             // State-aware survival, mirroring the server's second gate: a
             // button's support depends on the face it ends up attached to, so
             // this can only be asked once the state is known. Predicting a
@@ -1073,9 +1091,21 @@ namespace Game {
             }
         }
 
-        for (const auto& [id, entry] : Client::g_clientMobManager->All()) {
-            const Game::Mob& mob = *entry.mob;
+        // The manager's per-tick candidate list, not the full mob map: with a
+        // hundred thousand primed TNT in the level, walking every mob per
+        // frame was half the main thread. The list holds the non-TNT mobs
+        // within 48 blocks of the player, rebuilt each client tick; ids
+        // rather than pointers because a removal packet can land mid-frame.
+        for (const int32_t id : Client::g_clientMobManager->PickCandidates()) {
+            const Client::ClientMob* centry = Client::g_clientMobManager->GetMob(id);
+            if (!centry || !centry->mob) continue;
+            const Game::Mob& mob = *centry->mob;
             if (!mob.IsAlive()) continue;
+            // MC Entity.isPickable — the gate MC's GameRenderer.pick applies
+            // through its ProjectileUtil.getEntityHitResult predicate. Without
+            // it every entity steals the crosshair, including the ones you
+            // obviously want to build through.
+            if (!mob.IsPickable()) continue;
 
             Game::AABB box = mob.GetAABB();
             box.min -= glm::vec3(kPickInflate);
@@ -1450,70 +1480,6 @@ namespace Game {
         }
     }
 
-    void ClientPlayerController::TryPlaceBlock() {
-        if (!world || !player) {
-            Log::Warning("Cannot place block - missing references");
-            return;
-        }
-
-        const auto& currentHit = player->lastBlockHit;
-        if (!currentHit.has_value()) {
-            return;
-        }
-
-        BlockID selectedBlock = player->GetSelectedBlock();
-        if (selectedBlock == BlockID::Air) {
-            return;
-        }
-
-        const glm::ivec3& placePos = currentHit->adjacentPos;
-        if (!CanPlaceBlockAt(placePos)) {
-            return;
-        }
-
-        // Check if placing block would intersect with player
-        AABB blockAABB(
-            glm::vec3(placePos) + glm::vec3(0.5f),
-            glm::vec3(1.0f)
-        );
-
-        if (player->physics.GetAABB().Intersects(blockAABB)) {
-            Log::Debug("Cannot place block - would intersect with player");
-            return;
-        }
-
-        // Creative keeps infinite stacks — only survival consumes.
-        if (!player->IsCreative() && !player->inventory.ConsumeSelectedBlock()) {
-            Log::Debug("Cannot place block - none left in inventory");
-            return;
-        }
-
-        bool placementSuccessful = false;
-        try {
-            placementSuccessful = world->SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock);
-        } catch (const std::exception& e) {
-            Log::Error("Exception during block placement: %s", e.what());
-            placementSuccessful = false;
-        }
-
-        if (placementSuccessful) {
-            player->stats.blocksPlaced++;
-            player->stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
-            rightClickDelay = PLACE_REFIRE_TICKS;
-
-            // Remeshing triggered by server's BlockChangeS2C → ProcessBlockChange
-            // (handles neighbor boundaries correctly, avoids race conditions).
-
-            const Block& block = BlockRegistry::Get(selectedBlock);
-            Log::Info("Placed %s at (%d, %d, %d)",
-                     block.name.c_str(), placePos.x, placePos.y, placePos.z);
-        } else {
-            player->inventory.AddBlocks(selectedBlock, 1);
-            Log::Warning("Failed to place block at (%d, %d, %d)",
-                        placePos.x, placePos.y, placePos.z);
-        }
-    }
-
     void ClientPlayerController::FinishBreaking(uint32_t sequence) {
         if (!player) {
             Log::Warning("Cannot break block - missing references");
@@ -1550,85 +1516,38 @@ namespace Game {
         // host it lands a tick earlier than the echo would.
         PredictBlock(pos, replacement, sequence);
 
-        // Integrated host only: also clear the shared server World so the
-        // host's raycast/physics (which read the server World, not the client
-        // cache) agree with what was just predicted visually. A remote client
-        // has no World — its ClientBlockAccess reads the same chunk cache the
-        // prediction just wrote, so it's already consistent.
-        bool breakingSuccessful = true;
-        if (world) {
-            try {
-                breakingSuccessful = world->SetBlock(pos.x, pos.y, pos.z, replacement);
-            } catch (const std::exception& e) {
-                Log::Error("Exception during block breaking: %s", e.what());
-                breakingSuccessful = false;
-            }
-        }
+        // The host used to ALSO write the break straight into the server's
+        // Game::World from here, on the grounds that its raycast and physics
+        // read that World rather than the client cache. Both halves of that
+        // are gone: the host reads ClientBlockAccess now (so the prediction
+        // above is all it needs), and the write itself was a client-thread
+        // mutation of a world owned by the server tick — a data race that
+        // also, once there were three Worlds, always hit the overworld's.
+        // The authoritative clear happens in PlayerSession::HandleBlockAction
+        // on the server thread, in the right dimension, and comes back as
+        // BlockChangeS2C.
 
-        if (breakingSuccessful) {
-            // NO predicted pickup. Drops come from the block's loot table, which
-            // is random — uniform counts, random_chance, table_bonus — so the
-            // client cannot guess the outcome without sharing the server's RNG
-            // stream, and a wrong guess would flash the wrong item in the HUD
-            // until the next sync corrected it. MC's client doesn't predict
-            // drops either: the server spawns them and tells the client.
-            //
-            // The authoritative roll lives in PlayerSession::HandleBlockAction,
-            // and its inventory delta arrives via BroadcastContainerChanges in
-            // the same server tick (sub-frame on the integrated server).
-            player->stats.blocksBroken++;
-            player->stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
+        // NO predicted pickup. Drops come from the block's loot table, which
+        // is random — uniform counts, random_chance, table_bonus — so the
+        // client cannot guess the outcome without sharing the server's RNG
+        // stream, and a wrong guess would flash the wrong item in the HUD
+        // until the next sync corrected it. MC's client doesn't predict
+        // drops either: the server spawns them and tells the client.
+        //
+        // The authoritative roll lives in PlayerSession::HandleBlockAction,
+        // and its inventory delta arrives via BroadcastContainerChanges in
+        // the same server tick (sub-frame on the integrated server).
+        player->stats.blocksBroken++;
+        player->stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
 
-            // Remeshing is triggered by the server's BlockChangeS2C via
-            // ProcessBlockChange (which handles neighbor boundaries correctly).
-            // Don't mark here — avoids race where neighbors remesh before
-            // the client chunk cache is updated.
+        // Remeshing is triggered by the server's BlockChangeS2C via
+        // ProcessBlockChange (which handles neighbor boundaries correctly).
+        // Don't mark here — avoids race where neighbors remesh before
+        // the client chunk cache is updated.
 
-            const Block& block = BlockRegistry::Get(brokenBlock);
-            Log::Info("Broke %s at (%d, %d, %d)",
-                     block.name.c_str(), pos.x, pos.y, pos.z);
-        } else {
-            Log::Warning("Failed to break block at (%d, %d, %d)",
-                        pos.x, pos.y, pos.z);
-        }
-    }
-
-    bool ClientPlayerController::CanPlaceBlockAt(const glm::ivec3& pos) {
-        if (!world) {
-            return false;
-        }
-
-        if (!world->IsValidPosition(pos.x, pos.y, pos.z)) {
-            return false;
-        }
-
-        BlockID existing = BlockID::Air;
-        try {
-            existing = world->GetBlock(pos.x, pos.y, pos.z);
-        } catch (const std::exception& e) {
-            Log::Error("Exception checking block at placement position: %s", e.what());
-            return false;
-        }
-
-        if (existing != BlockID::Air) {
-            return false;
-        }
-
-        return true;
-    }
-
-
-    BlockID ClientPlayerController::GetBreakingBlockType(const glm::ivec3& pos) {
-        if (!world) {
-            return BlockID::Air;
-        }
-
-        try {
-            return world->GetBlock(pos.x, pos.y, pos.z);
-        } catch (const std::exception& e) {
-            Log::Error("Exception getting breaking block type: %s", e.what());
-            return BlockID::Air;
-        }
+        const Block& block = BlockRegistry::Get(brokenBlock);
+        Log::Info("Broke %s at (%d, %d, %d)",
+                 block.name.c_str(), pos.x, pos.y, pos.z);
     }
 
 #if ENABLE_PORTAL_GUN

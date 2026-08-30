@@ -1,13 +1,16 @@
 // File: src/common/entity/ai/goals/BasicGoals.cpp
 #include "common/entity/ai/goals/BasicGoals.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/mobs/Animals.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/RandomPos.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/block/BlockRegistry.hpp"
 
 #include <cmath>
+#include <vector>
 
 namespace Game {
 
@@ -50,6 +53,11 @@ namespace Game {
     }
 
     bool RandomStrollGoal::CanUse() {
+        // MC RandomStrollGoal.canUse: a ridden-and-steered mob never wanders
+        // off on its own. GetControllingPassenger is null for every mob today,
+        // but the gate belongs here for when saddles arrive.
+        if (m_mob->GetControllingPassenger() != nullptr) return false;
+
         if (!m_forceTrigger) {
             // A mob nobody has been near for 5 seconds stops wandering. This is
             // what keeps distant, unobserved mobs cheap — and it pairs with the
@@ -72,7 +80,9 @@ namespace Game {
     }
 
     bool RandomStrollGoal::CanContinueToUse() {
-        return !m_mob->GetNavigation().IsDone();
+        // MC: the stroll also ABORTS the moment someone takes the reins.
+        return !m_mob->GetNavigation().IsDone() &&
+               m_mob->GetControllingPassenger() == nullptr;
     }
 
     void RandomStrollGoal::Start() {
@@ -105,6 +115,36 @@ namespace Game {
             return false;
         }
         return RandomStrollGoal::GetPosition(out);
+    }
+
+    // ── RandomSwimmingGoal ─────────────────────────────────────────────────
+
+    bool RandomSwimmingGoal::GetPosition(glm::dvec3& out) {
+        if (auto pos = RandomPos::GetSwimmablePos(*m_mob, 10, 7)) {
+            out = *pos;
+            return true;
+        }
+        return false;
+    }
+
+    // ── WaterAvoidingRandomFlyingGoal ──────────────────────────────────────
+
+    bool WaterAvoidingRandomFlyingGoal::GetPosition(glm::dvec3& out) {
+        // MC: try a perch 1..3 blocks above solid ground within a quarter-turn
+        // of the current heading; fall back to any clear air, biased 2 down.
+        const glm::vec3 view = Mth::ViewVector(m_mob->xRot, m_mob->yRot);
+        constexpr double kHalfPi = 3.14159265358979323846 / 2.0;
+        if (auto perch = RandomPos::GetHoverPos(*m_mob, 8, 7, view.x, view.z,
+                                                kHalfPi, 3, 1)) {
+            out = *perch;
+            return true;
+        }
+        if (auto air = RandomPos::GetAirAndWaterPos(*m_mob, 8, 4, -2,
+                                                    view.x, view.z, kHalfPi)) {
+            out = *air;
+            return true;
+        }
+        return false;
     }
 
     // ── LookAtPlayerGoal ───────────────────────────────────────────────────
@@ -145,9 +185,27 @@ namespace Game {
         // range — preserved here rather than "fixed".
         if (m_mob->GetTarget()) m_lookAt = m_mob->GetTarget();
 
-        LivingEntity* nearest = m_mob->Level()->GetNearestPlayer(
-            m_mob->position.x, m_mob->GetEyeY(), m_mob->position.z, m_lookDistance);
-        if (nearest && m_conditions.Test(m_mob, *nearest)) m_lookAt = nearest;
+        // MC bakes EntitySelector.notRiding(mob) into the Player-class
+        // conditions: a player riding THIS mob (anywhere in the ride chain) is
+        // never a look target — a pig does not crane at its own rider.
+        const auto notRidingThis = [&](const LivingEntity& player) {
+            for (const Entity* v = player.GetVehicle(); v; v = v->GetVehicle()) {
+                if (v == m_mob) return false;
+            }
+            return true;
+        };
+
+        LivingEntity* nearest = nullptr;
+        double nearestDistSq = 0.0;
+        std::vector<LivingEntity*> players;
+        m_mob->Level()->GetPlayers(players);
+        for (LivingEntity* p : players) {
+            if (!notRidingThis(*p)) continue;
+            if (!m_conditions.Test(m_mob, *p)) continue;
+            const double d = m_mob->DistanceToSqr(*p);
+            if (!nearest || d < nearestDistSq) { nearest = p; nearestDistSq = d; }
+        }
+        if (nearest) m_lookAt = nearest;
 
         return m_lookAt != nullptr;
     }
@@ -298,11 +356,14 @@ namespace Game {
     }
 
     bool PanicGoal::ShouldPanic() const {
-        // MC filters on the DamageTypeTags.PANIC_CAUSES tag. Every damage type
-        // this engine produces is in that tag except starvation and drowning,
-        // neither of which mobs can suffer here — so "was hurt recently" is the
-        // same predicate.
-        return m_mob->HasLastDamageSource() && m_mob->GetLastHurtByMob() != nullptr;
+        // MC PanicGoal.shouldPanic: getLastDamageSource() != null and in the
+        // DamageTypeTags.PANIC_CAUSES tag — the ATTACKER is irrelevant, which
+        // is exactly what lets a mob that walked into fire (no attacker at
+        // all) panic and run for water. Every damage type this engine
+        // produces is in that tag except starvation and drowning, neither of
+        // which mobs can suffer here — so "was hurt recently" is the same
+        // predicate.
+        return m_mob->HasLastDamageSource();
     }
 
     bool PanicGoal::LookForWater() {
@@ -310,21 +371,45 @@ namespace Game {
         const IBlockAccess* blocks = level ? level->Blocks() : nullptr;
         if (!blocks) return false;
 
-        // MC searches a 5-wide, 1-tall box for water. A burning mob that finds
-        // some runs for it instead of running at random.
         const glm::ivec3 origin = m_mob->BlockPosition();
+
+        // MC PanicGoal.lookForWater's guard: standing INSIDE a collidable
+        // block (a mob half-buried by a piston, say) makes the search
+        // pointless — the path out is not a water path.
+        if (BlockRegistry::HasCollision(blocks->GetBlock(origin.x, origin.y, origin.z))) {
+            return false;
+        }
+
+        // MC BlockPos.findClosestMatch(pos, 5, 1, water): the CLOSEST water
+        // block wins, not the first in raster order — a burning mob runs to
+        // the puddle beside it, not the lake corner the loop happened to
+        // visit first. findClosestMatch walks shells of increasing Manhattan
+        // distance; minimising Manhattan distance over the box reproduces its
+        // choice (ties broken by raster order, which is as arbitrary as MC's
+        // in-shell order).
+        bool found = false;
+        int bestManhattan = 0;
+        glm::ivec3 best(0);
         for (int dx = -5; dx <= 5; ++dx) {
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dz = -5; dz <= 5; ++dz) {
                     const int x = origin.x + dx, y = origin.y + dy, z = origin.z + dz;
-                    if (blocks->IsBlockFluid(x, y, z)) {
-                        m_posX = x + 0.5; m_posY = y; m_posZ = z + 0.5;
-                        return true;
+                    if (!blocks->ContainsWater(x, y, z)) continue;
+                    const int manhattan = std::abs(dx) + std::abs(dy) + std::abs(dz);
+                    if (!found || manhattan < bestManhattan) {
+                        found = true;
+                        bestManhattan = manhattan;
+                        best = glm::ivec3(x, y, z);
                     }
                 }
             }
         }
-        return false;
+        if (!found) return false;
+
+        // MC targets the RAW block coordinates (posX = blockPos.getX()), not
+        // the block centre.
+        m_posX = best.x; m_posY = best.y; m_posZ = best.z;
+        return true;
     }
 
     bool PanicGoal::FindRandomPosition() {
@@ -353,6 +438,21 @@ namespace Game {
 
     void PanicGoal::Stop() {
         m_isRunning = false;
+    }
+
+    // ── RabbitPanicGoal ────────────────────────────────────────────────────
+
+    RabbitPanicGoal::RabbitPanicGoal(Rabbit* rabbit, double speedModifier)
+        : PanicGoal(rabbit, speedModifier), m_rabbit(rabbit) {}
+
+    void RabbitPanicGoal::Tick() {
+        // MC Rabbit.RabbitPanicGoal.tick: super (a no-op in the base goal),
+        // then re-assert the panic speed — the rabbit's move control parks
+        // the speed at 0 on every landing, so without this a panicking
+        // rabbit would take exactly one fast hop. RequiresUpdateEveryTick is
+        // true so the re-assert wins the same-tick race with the control.
+        PanicGoal::Tick();
+        m_rabbit->SetSpeedModifier(m_speedModifier);
     }
 
 

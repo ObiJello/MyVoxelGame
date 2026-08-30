@@ -14,6 +14,7 @@
 #include "common/entity/Inventory.hpp"
 #include "common/inventory/InventoryMenu.hpp"
 #include "common/entity/IUsePlayer.hpp"
+#include "common/world/portal/PortalState.hpp"
 #include "FoodData.hpp"
 #include "PlayerExperience.hpp"
 
@@ -22,6 +23,16 @@ namespace Game {
 }
 
 namespace Server {
+
+    // The name an offline player gets when the launcher supplied none.
+    //
+    // It is not cosmetic: playerdata/<uuid>.dat is named by the type-3 UUID of
+    // "OfflinePlayer:" + this string, so changing it orphans every existing
+    // player file (the old one stays on disk, unread). It is also the name a
+    // world carries into real Minecraft — "Notch" resolves to a real offline
+    // profile there, so a world saved here loads with the same player.
+    inline constexpr const char* kDefaultPlayerName = "Notch";
+
 
     // Game modes matching Minecraft
     enum class GameMode {
@@ -41,7 +52,14 @@ namespace Server {
         VOID_DAMAGE,
         EXPLOSION,
         ENTITY_ATTACK,
-        MAGIC
+        MAGIC,
+        // MC DamageTypes.FALLING_BLOCK / FALLING_ANVIL / FALLING_STALACTITE /
+        // STALAGMITE — a block landed on you, or you landed on one. Distinct
+        // from FALL, which is you hitting the ground.
+        FALLING_BLOCK,
+        FALLING_ANVIL,
+        FALLING_STALACTITE,
+        STALAGMITE,
     };
 
     // MC CombatTracker.getDeathMessage + DamageSource.getLocalizedDeathMessage,
@@ -68,6 +86,11 @@ namespace Server {
             case DS::VOID_DAMAGE:  return victim + " fell out of the world";
             case DS::EXPLOSION:    return victim + " blew up";
             case DS::MAGIC:        return victim + " was killed by magic";
+            // MC death.attack.fallingBlock / fallingStalactite / stalagmite.
+            case DS::FALLING_BLOCK:      return victim + " was squashed by a falling block";
+            case DS::FALLING_ANVIL:      return victim + " was squashed by a falling anvil";
+            case DS::FALLING_STALACTITE: return victim + " was skewered by a falling stalactite";
+            case DS::STALAGMITE:         return victim + " was impaled on a stalagmite";
             case DS::ENTITY_ATTACK:
                 if (!attackerName.empty()) {
                     return victim + " was slain by " + attackerName;
@@ -294,6 +317,11 @@ namespace Server {
         // Game::IUsePlayer — lets item behaviours ask about creative without
         // common code depending on Server::GameMode.
         bool isCreative() const override { return m_gameMode == GameMode::CREATIVE; }
+
+        // MC Player.displayClientMessage — routed through the session manager
+        // rather than held as a connection pointer, because a ServerPlayer
+        // outlives its connection across a reconnect.
+        void DisplayClientMessage(const std::string& text, bool actionBar) override;
         
         // Set flying state
         void setFlying(bool flying);
@@ -317,10 +345,36 @@ namespace Server {
         float getPitch() const override { return m_rotation.y; }
         const glm::vec2& getRotation() const { return m_rotation; }
         
-        int getDimensionId() const { return m_dimensionId; }
+        int getDimensionId() const override { return m_dimensionId; }
         void setDimensionId(int id) { m_dimensionId = id; }
-        
+
+        // MC Entity.restoreFrom (Entity.java:3008-3009): the entity rebuilt in
+        // the destination level inherits `portalCooldown` and `portalProcess`
+        // from the one that left. Our "entity" for a player is a
+        // PlayerEntityView owned by ServerLevelBridge, and there is one PER
+        // LEVEL — crossing a portal destroys the source level's view and
+        // SyncPlayerViews builds a fresh one in the destination. ServerPlayer
+        // is the object that actually survives the crossing, so it is where
+        // the state is parked: PortalTravel writes it just before the
+        // dimension flips and PlayerEntityView's constructor reads it back.
+        //
+        // Dropping it is not cosmetic. The arriving player is standing INSIDE
+        // the destination portal by construction, and the cooldown is the only
+        // thing stopping that portal from firing again — PortalState::
+        // SetAsInsidePortal re-arms it every tick you remain in the block. A
+        // fresh view arrives with cooldown 0, so the exit portal fires on the
+        // next tick and sends the player straight back.
+        Game::PortalState&       portalState()       { return m_portalState; }
+        const Game::PortalState& portalState() const { return m_portalState; }
+
+
         float getHealth() const { return m_health; }
+
+        // Restore health from a save, bypassing damage()/heal() and every
+        // side effect they carry (hurt animation, death handling, the
+        // attacker bookkeeping). Loading a player is not an event in the
+        // world, so nothing downstream should observe it as one.
+        void setHealthDirect(float health) { m_health = health; }
         int getFood() const { return m_foodData.getFoodLevel(); }
         // Dead until PERFORM_RESPAWN — set when damage() drops health to 0.
         // While dead the session ignores move packets (the body is frozen)
@@ -343,6 +397,14 @@ namespace Server {
         
         GameMode getGameMode() const { return m_gameMode; }
         bool isFlying() const { return m_flying; }
+
+        // Debug noclip. There is no vanilla equivalent — the flag exists so
+        // the state survives a save and a rejoin, which is the only reason
+        // the server knows about it at all. Collision is resolved entirely on
+        // the client (PlayerPhysics::noclip), so this is a mirror, not an
+        // authority, and gating it would buy nothing.
+        bool isNoclip() const { return m_noclip; }
+        void setNoclip(bool v) { m_noclip = v; }
         bool canFly() const { return m_canFly; }
 
         // Fall-distance tracking (driven from PlayerSession::HandlePlayerMove
@@ -424,6 +486,9 @@ namespace Server {
         bool m_sneaking = false;
         // TODO: AABB m_boundingBox;
         int m_dimensionId = 0;
+        // Survives the dimension change the PlayerEntityView does not — see
+        // portalState() above.
+        Game::PortalState m_portalState;
         // TODO: glm::vec3 m_respawnPoint;
         
         // === ATTRIBUTES & STATUS ===
@@ -454,6 +519,7 @@ namespace Server {
         GameMode m_gameMode = GameMode::SURVIVAL;
         bool m_canFly = false;
         bool m_flying = false;
+        bool m_noclip = false;
         bool m_instabuild = false; // creative instant break
         float m_reachDistance = 5.0f;
         

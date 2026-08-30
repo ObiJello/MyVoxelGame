@@ -188,6 +188,9 @@ namespace Game {
         BlockState GetBlockState(int x, int y, int z) const;
         bool IsBlockSolid(int x, int y, int z) const;
         bool IsChunkLoaded(int chunkX, int chunkZ) const;
+        // MC `getFluidState(pos).is(FluidTags.WATER)` — true for water AND for
+        // waterlogged blocks. Delegates to IBlockAccess::ContainsWater.
+        bool ContainsWater(int x, int y, int z) const;
     };
 
     // Function to check if a block is solid for collision
@@ -231,6 +234,46 @@ namespace Game {
     // its say. Anything that needs to collide a box against the world should
     // call THIS rather than reimplementing the walk.
     bool CollidesAt(const AABB& box, const PhysicsContext& context);
+
+    // The cheap mover behind Entity::MoveApproximate, over plain values so the
+    // compact falling-block representation can run exactly the same step:
+    // apply `delta`, and if the box then overlaps anything undo Y first
+    // (landing), then the whole move (a wall). Feet-anchored box of the given
+    // half extents. Returns true when a vertical hit was resolved — the
+    // caller's cue to reset its fall distance. `onGround` is both read (was
+    // it resting last step) and written.
+    bool MoveApproximate(glm::dvec3& pos, glm::dvec3& velocity, const glm::vec3& halfExtents,
+                         const glm::dvec3& delta, bool& onGround,
+                         bool& horizontalCollision, bool& verticalCollision,
+                         const PhysicsContext& context);
+
+    // MC BlockState.isCollisionShapeFullBlock — does the block at this cell
+    // present a full 1×1×1 collision cube? Entity.moveTowardsClosestSpace uses
+    // this to decide which neighbouring cells count as escape routes for an
+    // entity stuck inside a block; a slab or stair neighbour is "open".
+    bool IsCollisionShapeFullBlock(const PhysicsContext& context, int x, int y, int z);
+
+    // How high fluid stands above `box.min.y` (the entity's feet), scanning
+    // every cell the box overlaps — MC Entity.getFluidHeight(FluidTags.WATER /
+    // LAVA), reduced to this engine's source-only fluids. A fluid cell's
+    // surface sits at 8/9 of the cell (FlowingFluid.getOwnHeight for a source)
+    // unless the cell above also holds the same fluid, in which case the column
+    // is continuous and the surface extends past the cell top. Returns 0 when
+    // the box touches no fluid of the requested kind.
+    //
+    // `lava` selects lava (plain Lava blocks) instead of water (water blocks
+    // plus everything waterlogged).
+    double FluidHeightAbove(const AABB& box, bool lava, const PhysicsContext& context);
+
+    // MC Entity.moveTowardsClosestSpace, verbatim: an entity stuck inside a
+    // full collision block gets its velocity pointed at the nearest open
+    // neighbour (N/S/W/E/UP — never down) of the cell containing
+    // `stuckPoint`, at `escapeSpeed` blocks/tick, while the other two axes
+    // keep 0.75 of their old velocity. `escapeSpeed` is MC's
+    // `random.nextFloat() * 0.2 + 0.1`; the caller rolls it so this stays
+    // RNG-free (the server rolls per entity, the client never runs this).
+    void EscapeTowardsClosestSpace(const glm::dvec3& stuckPoint, float escapeSpeed,
+                                   glm::dvec3& velocity, const PhysicsContext& context);
 
     // What MoveAABB ran into. `onGround` is true when the entity is resting on
     // something after the move, whether it landed this step or was already

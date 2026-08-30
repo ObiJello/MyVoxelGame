@@ -24,6 +24,7 @@
 #pragma once
 
 #include "common/entity/LivingEntity.hpp"
+#include "common/entity/SpawnReason.hpp"
 
 #include <algorithm>
 #include "common/entity/AnimationState.hpp"
@@ -40,10 +41,52 @@ namespace Game {
     class PathNavigation;
     class Sensing;
 
+    // MC SpawnGroupData — the token finalizeSpawn threads through a pack so
+    // its members agree on shared rolls (a sheep herd's wool colour, a zombie
+    // pack's baby odds). An empty base; each mob that needs one derives its
+    // own, exactly as in MC.
+    struct SpawnGroupData {
+        virtual ~SpawnGroupData() = default;
+    };
+
     class Mob : public LivingEntity {
     public:
         Mob(EntityTypeId type, EntityLevel* level);
         ~Mob() override;
+
+    protected:
+        // ── The no-AI constructor ──────────────────────────────────────────
+        //
+        // PrimedTnt.hpp and FallingBlockEntity.hpp both open by explaining that
+        // MC models these as plain Entities and this engine derives Mob only
+        // because the tracking / wire / NBT / client-factory pipelines are
+        // Mob-shaped. This is the constructor that stops them PAYING for the
+        // part they do not use.
+        //
+        // Skipped: MoveControl, LookControl, JumpControl, BodyRotationControl,
+        // Sensing and GroundPathNavigation — six heap allocations per entity —
+        // plus the attribute registration (LivingEntity::NoAttributesTag).
+        //
+        // Safe because neither type can reach the code that reads them. Both
+        // override Tick() and NEITHER chains to Mob::Tick or LivingEntity::Tick
+        // (each carries a comment saying so, and the omission is vanilla's), so
+        // ServerAiStep — the only reader of the sensing, navigation and the
+        // three controls — is unreachable, as is LivingEntity::Tick's
+        // TickHeadTurn, the only reader of the body rotation control. Neither
+        // registers a goal, so the selectors stay empty either way.
+        //
+        // The three places that touch a navigator from OUTSIDE that chain
+        // (Mob::StopInPlace, Mob::TickHeadTurn and /tp's stop-on-teleport) test
+        // HasAiControls first. Anything else added later must too — hence the
+        // accessor rather than a bare null check.
+        struct NoAiTag {};
+        Mob(EntityTypeId type, EntityLevel* level, NoAiTag);
+
+    public:
+        // False for an entity built through NoAiTag: it has no navigator, no
+        // sensing and none of the three controls, and calling their accessors
+        // would dereference null.
+        bool HasAiControls() const { return m_navigation != nullptr; }
 
         // ── AI plumbing ────────────────────────────────────────────────────
         GoalSelector& Goals()   { return m_goalSelector; }
@@ -61,9 +104,74 @@ namespace Game {
         const PathNavigation& GetNavigation() const;
         Sensing&              GetSensing();
 
+        // MC mobs assign `this.navigation` / `this.moveControl` freely in
+        // their constructors (every flyer and swimmer does); these are the
+        // port's equivalent. Defined out of line for the same incomplete-type
+        // reason as the getters.
+        void SetNavigation(std::unique_ptr<PathNavigation> navigation);
+        void SetMoveControl(std::unique_ptr<MoveControl> control) {
+            m_moveControl = std::move(control);
+        }
+        void SetLookControl(std::unique_ptr<LookControl> control) {
+            m_lookControl = std::move(control);
+        }
+        // MC Mob.createBodyControl — overridden by exactly one mob (the
+        // phantom); a setter mirrors the move/look control pattern above
+        // rather than adding a virtual for a single user.
+        void SetBodyRotationControl(std::unique_ptr<BodyRotationControl> control) {
+            m_bodyRotationControl = std::move(control);
+        }
+
+        // ── Home / restriction (MC Mob.homePosition + homeRadius) ──────────
+        //
+        // MC's setHomeTo/isWithinHome family (the older mappings call it
+        // restrictTo/getRestrictCenter). radius -1 means "no home", and every
+        // query is written against that sentinel exactly as MC's are — a mob
+        // without a home is within it everywhere, so MoveTowardsRestrictionGoal
+        // stays dormant until something calls SetHomeTo (the elder guardian's
+        // aura tick is the one caller today).
+        void SetHomeTo(const glm::ivec3& center, int radius) {
+            m_homePosition = center;
+            m_homeRadius = radius;
+        }
+        void ClearHome() { m_homeRadius = -1; }
+        bool HasHome() const { return m_homeRadius != -1; }
+        const glm::ivec3& GetHomePosition() const { return m_homePosition; }
+        int GetHomeRadius() const { return m_homeRadius; }
+        // Must be settable BEFORE the home position on load: MC only reads
+        // home_pos when home_radius >= 0 (Mob.java:420-423), so restoring them
+        // in the other order silently discards the position.
+        void SetHomeRadius(int radius) { m_homeRadius = radius; }
+
+        // MC Mob.isWithinHome() / isWithinHome(BlockPos) / isWithinHome(Vec3):
+        // STRICT distance-squared against radius squared. The no-arg form
+        // measures BLOCK-to-block (blockPosition), the Vec3 form measures from
+        // the home block's centre — MC keeps both metrics and so does this.
+        bool IsWithinHome() const { return IsWithinHome(BlockPosition()); }
+        bool IsWithinHome(const glm::ivec3& pos) const {
+            if (m_homeRadius == -1) return true;
+            const glm::ivec3 d = pos - m_homePosition;
+            const double distSq = static_cast<double>(d.x) * d.x +
+                                  static_cast<double>(d.y) * d.y +
+                                  static_cast<double>(d.z) * d.z;
+            return distSq <
+                   static_cast<double>(m_homeRadius) * static_cast<double>(m_homeRadius);
+        }
+        bool IsWithinHome(const glm::dvec3& pos) const {
+            if (m_homeRadius == -1) return true;
+            const glm::dvec3 centre(m_homePosition.x + 0.5, m_homePosition.y + 0.5,
+                                    m_homePosition.z + 0.5);
+            const glm::dvec3 d = pos - centre;
+            return glm::dot(d, d) <
+                   static_cast<double>(m_homeRadius) * static_cast<double>(m_homeRadius);
+        }
+
         // ── Target ─────────────────────────────────────────────────────────
         LivingEntity* GetTarget() const { return m_target; }
-        virtual void  SetTarget(LivingEntity* target) { m_target = target; }
+        virtual void  SetTarget(LivingEntity* target) {
+            if (target) MarkHoldsEntityRefs();   // see Entity::HoldsEntityRefs
+            m_target = target;
+        }
 
         // MC Mob.canAttack — overridden by Creeper (ignores goats) and by the
         // player adapter (never attackable in creative/spectator).
@@ -78,6 +186,17 @@ namespace Game {
         // ── Persistence / despawn ──────────────────────────────────────────
         bool IsPersistenceRequired() const { return m_persistenceRequired; }
         void SetPersistenceRequired(bool v) { m_persistenceRequired = v; }
+
+        // MC Mob.requiresCustomPersistence — despawn immunity the mob earns by
+        // STATE rather than by flag: MC's base returns isPassenger(); raiders
+        // in a raid, endermen holding a block, fish from a bucket override it.
+        // Checked by CheckDespawn AND skipped by the spawn census, exactly
+        // like the persistence flag — so a mounted rider (jockey) never
+        // distance-despawns and never counts against the mob cap, while its
+        // VEHICLE still can (MC keeps a jockey chicken despawnable via
+        // Chicken.removeWhenFarAway -> isChickenJockey, an override that lands
+        // with the jockey wave).
+        virtual bool RequiresCustomPersistence() const { return IsPassenger(); }
 
         // MC Mob.removeWhenFarAway — true means "eligible for despawn". The
         // base says yes; Animal overrides to no, which is why cows you walked
@@ -96,8 +215,47 @@ namespace Game {
         // agree instead of each inventing their own answer.
         //
         // Called AFTER the position is set — a subclass may read the biome it
-        // landed in.
-        virtual void FinalizeSpawn() {}
+        // landed in — and AFTER the spawner's validity tests, matching MC's
+        // order in spawnCategoryForPosition (snapTo -> isValidPositionForMob
+        // -> finalizeSpawn). `groupData` is threaded through a whole pack;
+        // the first member creates it, the rest read it.
+        //
+        // The base rolls MC Mob.finalizeSpawn's two universal draws: the
+        // triangle(0, 0.11485) FOLLOW_RANGE bonus and the 5% left-handed flag.
+        virtual std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData);
+
+        // MC Mob.isLeftHanded — rolled at spawn, read by the renderer.
+        bool IsLeftHanded() const { return m_leftHanded; }
+        void SetLeftHanded(bool v) { m_leftHanded = v; }
+
+        // MC Mob.canPickUpLoot — rolled at spawn for zombies/skeletons. No
+        // item-pickup system consumes it yet; the flag keeps the spawn rolls
+        // and the eventual behaviour in one place.
+        bool CanPickUpLoot() const { return m_canPickUpLoot; }
+        void SetCanPickUpLoot(bool v) { m_canPickUpLoot = v; }
+
+        // MC Mob.checkMobSpawnRules (static): spawner-driven spawns skip it;
+        // otherwise the block below must be a valid spawn surface.
+        static bool CheckMobSpawnRules(EntityLevel& level, SpawnReason reason,
+                                       const glm::ivec3& pos);
+
+        // MC Mob.checkSpawnRules (instance) — the mob's OWN veto after it has
+        // been constructed and positioned. Base is true; PathfinderMob gates
+        // on the walk-target value.
+        virtual bool CheckSpawnRules(EntityLevel& level, SpawnReason reason) {
+            (void)level; (void)reason;
+            return true;
+        }
+
+        // MC Mob.checkSpawnObstruction: no liquid anywhere in the bounding box
+        // and no other entity already occupying it.
+        virtual bool CheckSpawnObstruction(EntityLevel& level) const;
+
+        // MC Mob.dropCustomDeathLoot — the non-table drops (an enderman's
+        // carried block, equipment when that exists). Called by the server's
+        // loot pass alongside the generated table.
+        virtual void DropCustomDeathLoot(EntityLevel& level) { (void)level; }
 
         // MC Mob.mobInteract — the ENTITY's own answer to a right-click,
         // e.g. shears on a sheep or a saddle on a pig.
@@ -111,13 +269,30 @@ namespace Game {
             return UseResult::Pass;
         }
 
+        // The chunk-column bucket Server::MobManager last filed this mob under.
+        // Written by the manager only, read back when the mob is removed so the
+        // bucket it is actually IN is patched — recomputing the key from the
+        // current position is wrong after the mob has ticked (a TNT crossing a
+        // chunk edge between the rebuild and the sweep left a freed pointer in
+        // its old bucket, which the natural spawner then dereferenced).
+        uint64_t spatialIndexKey = 0;
+
         int  GetNoActionTime() const { return m_noActionTime; }
         void SetNoActionTime(int t) { m_noActionTime = t; }
+        // MC LivingEntity.hurtServer zeroes noActionTime on every accepted
+        // hit; LivingEntity::Hurt calls this hook.
+        void ResetNoActionTime() override { m_noActionTime = 0; }
 
         // MC Mob.getMaxSpawnClusterSize — how many of this type one spawn
         // attempt may place.
         virtual int GetMaxSpawnClusterSize() const { return 4; }
         virtual bool IsMaxGroupSizeReached(int groupSize) const { return false; }
+
+        // MC Mob.getMaxFallDistance — with a target the mob trades health for
+        // the drop: everything above a third of max health, minus a
+        // (3 - difficultyId) * 4 allowance. This is what the pathfinder's
+        // ledge check reads.
+        int GetMaxFallDistance() const override;
 
         // ── Pathfinding maluses (MC Mob.setPathfindingMalus) ──────────────
         float GetPathfindingMalus(PathType type) const;
@@ -126,6 +301,29 @@ namespace Game {
         // ── Combat ─────────────────────────────────────────────────────────
         // MC Mob.doHurtTarget. Returns whether the hit landed.
         virtual bool DoHurtTarget(Entity& target);
+
+        // MC LivingEntity.hurtServer → resolvePlayerResponsibleForDamage
+        // (LivingEntity.java:1332): an accepted hit from a player opens a
+        // 100-tick kill-credit window. LivingEntity::Hurt is shared with the
+        // player view, so the capture lives in Mob's override — its only
+        // consumers (killed_by_player loot pools, the XP drop) are mob-side.
+        bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
+
+        // Whether the player kill-credit window (MC's
+        // lastHurtByPlayerMemoryTime > 0) is still open. MC reads it in
+        // dropAllDeathLoot / dropExperience (LivingEntity.java:1479,1493).
+        bool HasPlayerKillCredit() const { return m_lastHurtByPlayerTime > 0; }
+        // Entity id of the crediting player's view; -1 when none.
+        int32_t LastHurtByPlayerId() const { return m_lastHurtByPlayerId; }
+
+        // MC Mob.getBaseExperienceReward (Mob.java:327-343) — the ctor-seeded
+        // xpReward, baked per type into the entity table by
+        // tools/gen_entity_types.py. The equipment bonus (+1..3 per worn
+        // piece with a full drop chance, Mob.java:330-338) is skipped: no mob
+        // equipment system. Animal (1..3 random), Fish/Squid/Dolphin (same),
+        // Slime (its size), Zombie (baby x2.5), Hoglin (baby 3) and Chicken
+        // (jockey 10) override.
+        virtual int GetXpReward() const { return TypeInfo().xpReward; }
 
         // MC Mob.isWithinMeleeAttackRange — an AABB overlap test against the
         // attacker's box inflated by the reach, NOT a centre-to-centre
@@ -204,6 +402,20 @@ namespace Game {
         // ships whatever the server's copy reports and the client hands it back.
         virtual uint8_t GetAnimStateByte() const { return 0; }
         virtual void    SetAnimStateByte(uint8_t v) { (void)v; }
+        // True when the client advances this byte itself from the value it
+        // was given at spawn, so the tracker must NOT treat every tick's
+        // change as dirty data. Primed TNT's fuse is the case: MC's client
+        // counts it down locally and the server never resends it. Without
+        // this the tracker shipped a SetEntityData packet per TNT per tick,
+        // which at 100k TNT is two million packets a second.
+        virtual bool AnimStateTicksOnClient() const { return false; }
+
+        // The wire's per-mob VARIANT byte (AddEntityS2C / SetEntityData).
+        // Same contract as the anim byte: the meaning is private to the type —
+        // a sheep's wool data, a slime's size. The tracker ships the server's
+        // value; the client hands it back here.
+        virtual uint8_t GetVariantByte() const { return 0; }
+        virtual void    SetVariantByte(uint8_t v) { (void)v; }
 
         void SetZza(float v) { zza = v; }
         void SetXxa(float v) { xxa = v; }
@@ -211,6 +423,35 @@ namespace Game {
 
         // MC Mob.stopInPlace — cancel navigation and all steering at once.
         void StopInPlace();
+
+        // ── Conversion (MC Mob.convertTo + ConversionType.SINGLE) ──────────
+        //
+        // One mob becoming another in place: copy the shared state onto the
+        // replacement, add it to the level, discard this. The caller
+        // constructs the concrete replacement (MC's EntityType.create half)
+        // and does its own per-family copies between CopyConversionState and
+        // FinishConversion — see Zombie::ConvertToZombieType, the shape MC's
+        // afterConversion callback takes.
+        //
+        // Returns the replacement, now owned by the level (null if this mob
+        // is already removed). NOTE MC does NOT copy health: a fresh convert
+        // stands at full health, and so does ours.
+        Mob* ConvertTo(std::unique_ptr<Mob> replacement);
+
+    protected:
+        // The ConversionType.SINGLE + convertCommon copy, reduced to what
+        // this port tracks. Copied: position/rotations/velocity/fallDistance/
+        // hurtTime/onGround, passengers and vehicle, active effects, left
+        // hand, NoAi, persistence, canPickUpLoot (MC preserveCanPickUpLoot —
+        // true for every conversion this port runs), fire ticks. Not tracked
+        // by this port, so not copied (each a system, not an oversight):
+        // equipment + drop chances, absorption, sleeping pos, leashes, teams,
+        // custom name, invulnerable/silent/noGravity flags, entity tags,
+        // portal cooldown, the brain's ANGRY_AT memory.
+        void CopyConversionState(Mob& to);
+        Mob* FinishConversion(std::unique_ptr<Mob> replacement);
+
+    public:
 
         void Tick() override;
 
@@ -263,6 +504,10 @@ namespace Game {
         // machinery than the two `return true`s it replaces.
         virtual bool BurnsInDaylight() const { return false; }
 
+        // MC Entity.isSensitiveToWater — blaze and snow golem. Consulted by
+        // AiStep's per-tick wet damage.
+        virtual bool IsSensitiveToWater() const { return false; }
+
         // MC Mob.isSunBurnTick / burnUndead. NOT const: the brightness roll
         // consumes the level's random exactly once per tick per burning mob,
         // and that draw is part of the shared spawn/AI RNG stream.
@@ -296,8 +541,23 @@ namespace Game {
         bool m_noAi = false;
         bool m_persistenceRequired = false;
 
+        // MC LivingEntity.lastHurtByPlayer / lastHurtByPlayerMemoryTime
+        // (LivingEntity.java:215-216) — the player kill-credit window, set to
+        // 100 by Hurt and counted down in BaseTick (LivingEntity.java:437-440).
+        // Stored as an entity id, not a pointer: the crediting player may
+        // disconnect before the mob dies.
+        int32_t m_lastHurtByPlayerId   = -1;
+        int     m_lastHurtByPlayerTime = 0;
+        bool m_leftHanded = false;
+        bool m_canPickUpLoot = false;
+
         int  m_noActionTime = 0;
         int  m_ambientSoundTime = 0;
+
+        // MC Mob.homePosition / homeRadius (-1 = no home). See the accessor
+        // block above.
+        glm::ivec3 m_homePosition{0};
+        int        m_homeRadius = -1;
 
         // Sparse: only the types a mob actually overrides. Everything else
         // falls through to PathType's default malus.
@@ -313,6 +573,14 @@ namespace Game {
         PathfinderMob(EntityTypeId type, EntityLevel* level) : Mob(type, level) {}
 
         virtual float GetWalkTargetValue(const glm::ivec3& pos) const { return 0.0f; }
+
+        // MC PathfinderMob.checkSpawnRules — the walk-target value at the
+        // spawn position must not be negative. For a Monster that means
+        // brightness <= 12; for an Animal, grass or brightness >= 12.
+        bool CheckSpawnRules(EntityLevel& level, SpawnReason reason) override {
+            (void)level; (void)reason;
+            return GetWalkTargetValue(BlockPosition()) >= 0.0f;
+        }
 
         bool IsPathFinding() const;
         bool IsPanicking() const { return m_goalSelector.IsRunning("PanicGoal"); }

@@ -218,6 +218,9 @@ endif()
 # ────────────────────────────────────────────────────────────────────────────
 
 # 3b) Tracy profiler (client library only — viewer is a separate download)
+option(EXPLOSION_DETAIL_ZONES
+       "Emit a Tracy zone per exposure raycast (very high overhead)" OFF)
+
 option(ENABLE_TRACY "Enable Tracy profiler integration" OFF)
 
 # Tracy 0.14's Apple system tracing. OFF by default, and deliberately so —
@@ -328,12 +331,6 @@ add_library(imgui
         src/server/world/cache/ChunkCache.hpp
         src/common/world/gen/ProceduralChunkGenerator.cpp
         src/common/world/gen/ProceduralChunkGenerator.hpp
-        src/server/world/storage/AsyncChunkSaver.cpp
-        src/server/world/storage/AsyncChunkSaver.hpp
-        src/server/world/storage/AnvilRegionWriter.cpp
-        src/server/world/storage/AnvilRegionWriter.hpp
-        src/server/world/storage/AnvilChunkSaver.cpp
-        src/server/world/storage/AnvilChunkSaver.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui
@@ -372,7 +369,7 @@ endif()
 
 # 5a) Terrain library - static library from your custom terrain generation system
 # For MD5 hashing: Use CommonCrypto on macOS (built-in, universal), OpenSSL elsewhere
-file(GLOB_RECURSE TERRAIN_LIBRARY_SOURCES
+file(GLOB_RECURSE TERRAIN_LIBRARY_SOURCES CONFIGURE_DEPENDS
         "src/my_terrain_library/src/*.cpp"
 )
 
@@ -506,6 +503,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/portal_vk.frag
             ${VK_SHADER_DIR}/portal_particle_vk.vert
             ${VK_SHADER_DIR}/portal_particle_vk.frag
+            ${VK_SHADER_DIR}/mob_particle_vk.vert
+            ${VK_SHADER_DIR}/mob_particle_vk.frag
             ${VK_SHADER_DIR}/viewmodel_skinned_vk.vert
             ${VK_SHADER_DIR}/viewmodel_skinned_vk.frag
             ${VK_SHADER_DIR}/panorama_vk.vert
@@ -516,6 +515,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/clouds_vk.frag
             ${VK_SHADER_DIR}/entity_vk.vert
             ${VK_SHADER_DIR}/entity_vk.frag
+            ${VK_SHADER_DIR}/end_portal_vk.vert
+            ${VK_SHADER_DIR}/end_portal_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})
@@ -564,11 +565,23 @@ set(GAME_SOURCES
             src/platform/CrashHandler.hpp
 
             # Core systems
+            src/common/core/SaveVersion.hpp
+            src/common/core/EntityRef.cpp
+            src/common/core/EntityRef.hpp
+            src/common/core/Uuid.cpp
+            src/common/core/Uuid.hpp
+            src/common/nbt/ModifiedUtf8.hpp
+            src/common/nbt/NbtWrite.cpp
+            src/common/nbt/NbtWrite.hpp
             src/common/core/Log.cpp
+            src/common/core/SoundEvents.cpp
+            src/common/core/SoundEvents.hpp
             src/common/core/Log.hpp
             src/common/core/Mth.hpp
             src/common/core/JobSystem.cpp
             src/common/core/JobSystem.hpp
+            src/common/core/TickParallel.cpp
+            src/common/core/TickParallel.hpp
             src/common/core/ThreadAllocator.cpp
             src/common/core/ThreadAllocator.hpp
             src/common/core/ThreadPriority.cpp
@@ -589,14 +602,26 @@ set(GAME_SOURCES
             src/client/entity/RemotePlayerManager.hpp
             src/client/entity/ItemEntityManager.cpp
             src/client/entity/ItemEntityManager.hpp
+            src/client/entity/XpOrbManager.cpp
+            src/client/entity/XpOrbManager.hpp
             src/client/entity/ClientMobManager.cpp
             src/client/entity/ClientMobManager.hpp
+            src/client/entity/ClientFallingBlocks.cpp
+            src/client/entity/ClientFallingBlocks.hpp
+
+            # Client rendering - Particles
+            src/client/renderer/particle/MobParticleSystem.cpp
+            src/client/renderer/particle/MobParticleSystem.hpp
 
             # Client rendering - Entity
             src/client/renderer/entity/PlayerRenderer.cpp
             src/client/renderer/entity/PlayerRenderer.hpp
             src/client/renderer/entity/ItemEntityRenderer.cpp
+            src/client/renderer/entity/BlockCubeEntityRenderer.cpp
+            src/client/renderer/entity/BlockCubeEntityRenderer.hpp
             src/client/renderer/entity/ItemEntityRenderer.hpp
+            src/client/renderer/entity/XpOrbRenderer.cpp
+            src/client/renderer/entity/XpOrbRenderer.hpp
             src/client/renderer/entity/StickFigureGeometry.cpp
             src/client/renderer/entity/StickFigureGeometry.hpp
             src/client/renderer/entity/MobRenderer.cpp
@@ -662,6 +687,10 @@ set(GAME_SOURCES
             src/client/renderer/blockentity/CampfireRenderer.cpp
             src/client/renderer/blockentity/ShulkerBoxRenderer.cpp
             src/client/renderer/blockentity/ShulkerBoxRenderer.hpp
+            src/client/renderer/blockentity/SkullBlockRenderer.cpp
+            src/client/renderer/blockentity/SkullBlockRenderer.hpp
+            src/client/renderer/blockentity/EndPortalRenderer.cpp
+            src/client/renderer/blockentity/EndPortalRenderer.hpp
 
             # Client rendering - Culling
             src/client/renderer/culling/VisibilitySet.hpp
@@ -770,6 +799,8 @@ set(GAME_SOURCES
             src/client/world/ClientWorkerPool.cpp
             src/client/world/ClientWorkerPool.hpp
             src/client/world/PendingDiffsManager.cpp
+            src/client/world/ClientAnimateTick.cpp
+            src/client/world/ClientAnimateTick.hpp
             src/client/world/PendingDiffsManager.hpp
 
             # Client networking
@@ -820,6 +851,27 @@ set(GAME_SOURCES
             src/common/world/block/Blocks.hpp
             src/common/world/block/MiningSpeed.cpp
             src/common/world/block/MiningSpeed.hpp
+            src/common/world/block/GeneratedBlockHardness.cpp
+            src/common/world/block/GeneratedBlockHardness.hpp
+            src/common/world/block/FallingBlock.cpp
+            src/common/world/block/FallingBlock.hpp
+            src/common/world/block/TntBlock.cpp
+            src/common/world/block/TntBlock.hpp
+            src/common/world/block/RedstoneSignal.cpp
+            src/common/world/block/RedstoneSignal.hpp
+
+            # Common world - Portals (nether + end)
+            src/common/world/portal/PortalShape.cpp
+            src/common/world/portal/PortalShape.hpp
+            src/common/world/portal/BlockUtil.cpp
+            src/common/world/portal/BlockUtil.hpp
+            src/common/world/portal/BlockPattern.cpp
+            src/common/world/portal/BlockPattern.hpp
+            src/common/world/portal/EndPortalFrame.cpp
+            src/common/world/portal/EndPortalFrame.hpp
+            src/common/world/portal/PortalState.cpp
+            src/common/world/portal/PortalState.hpp
+            src/common/world/level/DimensionId.hpp
 
             # Common world - Block entities
             src/common/world/block/entity/BlockEntity.hpp
@@ -831,12 +883,36 @@ set(GAME_SOURCES
             src/common/world/block/entity/FurnaceBlockEntity.cpp
             src/common/world/block/entity/CampfireBlockEntity.cpp
             src/common/world/level/WorldDrops.cpp
+            src/common/world/level/WorldFallingBlock.cpp
+            src/common/world/level/WorldFallingBlock.hpp
+            src/common/world/level/WorldPrimedTnt.cpp
+            src/common/world/level/WorldPrimedTnt.hpp
+            src/common/world/block/ExplosionTrigger.cpp
+            src/common/world/block/ExplosionTrigger.hpp
+            src/common/world/level/BlockClip.cpp
+            src/common/world/level/BlockClip.hpp
+            src/common/world/level/Explosion.cpp
+            src/common/world/level/Explosion.hpp
+            src/common/entity/FallingBlockEntity.cpp
+            src/common/entity/FallingBlockLanding.cpp
+            src/common/entity/FallingBlockLanding.hpp
+            src/common/entity/FallingBlockEntity.hpp
+            src/common/entity/PrimedTnt.cpp
+            src/common/entity/PrimedTnt.hpp
             src/common/world/level/WorldMobSpawn.cpp
             src/common/world/block/GeneratedBlockShapes.cpp
             src/common/world/block/GeneratedWaterlogged.cpp
             src/common/world/block/entity/FurnaceBlockEntity.hpp
             src/common/world/block/entity/DoubleChest.cpp
             src/common/world/block/entity/DoubleChest.hpp
+
+            # Common world - Scheduled block ticks
+            src/common/world/ticks/ScheduledTick.hpp
+            src/common/world/ticks/ScheduledTickAccess.hpp
+            src/common/world/ticks/LevelChunkTicks.cpp
+            src/common/world/ticks/LevelChunkTicks.hpp
+            src/common/world/ticks/LevelTicks.cpp
+            src/common/world/ticks/LevelTicks.hpp
 
             # Common world - Chunk
             src/common/world/chunk/Chunk.cpp
@@ -875,6 +951,8 @@ set(GAME_SOURCES
             src/common/entity/Inventory.hpp
             src/common/entity/ItemEntity.cpp
             src/common/entity/ItemEntity.hpp
+            src/common/entity/ExperienceOrb.cpp
+            src/common/entity/ExperienceOrb.hpp
             src/common/entity/GeneratedItemList.cpp
             src/common/entity/GeneratedItemList.hpp
             src/common/entity/PlayerColors.cpp
@@ -890,8 +968,14 @@ set(GAME_SOURCES
             src/common/entity/Entity.hpp
             src/common/entity/LivingEntity.cpp
             src/common/entity/LivingEntity.hpp
+            src/common/entity/effect/MobEffects.cpp
+            src/common/entity/effect/MobEffects.hpp
             src/common/entity/Mob.cpp
             src/common/entity/Mob.hpp
+            src/common/entity/NeutralMob.cpp
+            src/common/entity/NeutralMob.hpp
+            src/common/entity/TamableAnimal.cpp
+            src/common/entity/TamableAnimal.hpp
             src/common/entity/Monster.cpp
             src/common/entity/Monster.hpp
             src/common/entity/Animal.cpp
@@ -907,9 +991,23 @@ set(GAME_SOURCES
     src/common/entity/ai/navigation/AmphibiousPathNavigation.cpp
     src/common/entity/ai/brain/FrogAi.cpp
     src/common/entity/ai/brain/CamelAi.cpp
+    src/common/entity/ai/brain/CopperGolemAi.cpp
     src/common/entity/ai/brain/TadpoleAi.cpp
     src/common/entity/ai/brain/HoglinAi.cpp
     src/common/entity/ai/brain/GoatAi.cpp
+    src/common/entity/ai/brain/BreezeAi.cpp
+    src/common/entity/ai/brain/WardenAi.cpp
+    src/common/entity/ai/brain/SnifferAi.cpp
+    src/common/entity/ai/brain/CreakingAi.cpp
+    src/common/entity/ai/brain/ZoglinAi.cpp
+    src/common/entity/ai/brain/AxolotlAi.cpp
+    src/common/entity/ai/brain/PiglinAi.cpp
+    src/common/entity/ai/brain/PiglinBruteAi.cpp
+    src/common/entity/ai/brain/NautilusAi.cpp
+    src/common/entity/ai/brain/ZombieNautilusAi.cpp
+    src/common/entity/ai/brain/AllayAi.cpp
+    src/common/entity/ai/brain/HappyGhastAi.cpp
+    src/common/entity/ai/brain/ArmadilloAi.cpp
     src/common/entity/ai/brain/GeneratedMemoryModules.cpp
             src/common/entity/Animal.hpp
             src/common/entity/mobs/Monsters.cpp
@@ -930,14 +1028,87 @@ set(GAME_SOURCES
             src/common/entity/ai/RandomPos.hpp
             src/common/entity/ai/navigation/PathNavigation.cpp
             src/common/entity/ai/navigation/PathNavigation.hpp
+            src/common/entity/ai/navigation/FlyingPathNavigation.cpp
+            src/common/entity/ai/navigation/FlyingPathNavigation.hpp
+            src/common/entity/ai/navigation/WaterBoundPathNavigation.cpp
+            src/common/entity/ai/navigation/WaterBoundPathNavigation.hpp
             src/common/entity/ai/goals/BasicGoals.cpp
             src/common/entity/ai/goals/BasicGoals.hpp
             src/common/entity/ai/goals/AttackGoals.cpp
             src/common/entity/ai/goals/AttackGoals.hpp
+            src/common/entity/ai/goals/RangedGoals.cpp
+            src/common/entity/ai/goals/RangedGoals.hpp
             src/common/entity/ai/goals/TargetGoals.cpp
             src/common/entity/ai/goals/TargetGoals.hpp
+            src/common/entity/ai/goals/BeeGoals.cpp
+            src/common/entity/ai/goals/BeeGoals.hpp
             src/common/entity/ai/goals/AnimalGoals.cpp
             src/common/entity/ai/goals/AnimalGoals.hpp
+            src/common/entity/ai/goals/MoveToBlockGoal.cpp
+            src/common/entity/ai/goals/MoveToBlockGoal.hpp
+            src/common/entity/ai/goals/EndermanGoals.cpp
+            src/common/entity/ai/goals/EndermanGoals.hpp
+            src/common/entity/ai/goals/SlimeGoals.cpp
+            src/common/entity/ai/goals/SlimeGoals.hpp
+            src/common/entity/ai/goals/FishGoals.cpp
+            src/common/entity/ai/goals/FishGoals.hpp
+            src/common/entity/ai/goals/FoxGoals.cpp
+            src/common/entity/ai/goals/FoxGoals.hpp
+            src/common/entity/ai/goals/TurtleGoals.cpp
+            src/common/entity/ai/goals/TurtleGoals.hpp
+            src/common/entity/ai/goals/PandaGoals.cpp
+            src/common/entity/ai/goals/PandaGoals.hpp
+            src/common/entity/ai/goals/CatGoals.cpp
+            src/common/entity/ai/goals/CatGoals.hpp
+            src/common/entity/ai/goals/TamableGoals.cpp
+            src/common/entity/ai/goals/TamableGoals.hpp
+            src/common/entity/ai/goals/DolphinGoals.cpp
+            src/common/entity/ai/goals/DolphinGoals.hpp
+            src/common/entity/ai/goals/HorseGoals.cpp
+            src/common/entity/ai/goals/HorseGoals.hpp
+            src/common/entity/ai/goals/HappyGhastGoals.cpp
+            src/common/entity/ai/goals/HappyGhastGoals.hpp
+            src/common/entity/RangedAttackMob.hpp
+            src/common/entity/mobs/Slime.cpp
+            src/common/entity/mobs/Slime.hpp
+            src/common/entity/mobs/Fish.cpp
+            src/common/entity/mobs/Fish.hpp
+            src/common/entity/projectile/Arrow.cpp
+            src/common/entity/projectile/Arrow.hpp
+            src/common/entity/projectile/EyeOfEnder.cpp
+            src/common/entity/projectile/EyeOfEnder.hpp
+            src/common/entity/projectile/Projectile.cpp
+            src/common/entity/projectile/Projectile.hpp
+            src/common/entity/projectile/ThrowableProjectile.cpp
+            src/common/entity/projectile/ThrowableProjectile.hpp
+            src/common/entity/projectile/HurtingProjectile.cpp
+            src/common/entity/projectile/HurtingProjectile.hpp
+            src/common/entity/projectile/ShulkerBullet.cpp
+            src/common/entity/projectile/ShulkerBullet.hpp
+            src/common/entity/projectile/LlamaSpit.cpp
+            src/common/entity/projectile/LlamaSpit.hpp
+            src/common/entity/projectile/ThrownTrident.cpp
+            src/common/entity/projectile/ThrownTrident.hpp
+            src/common/entity/projectile/EvokerFangs.cpp
+            src/common/entity/projectile/EvokerFangs.hpp
+            src/common/entity/projectile/AreaEffectCloud.cpp
+            src/common/entity/projectile/AreaEffectCloud.hpp
+            src/common/entity/ai/goals/RestrictionGoals.cpp
+            src/common/entity/ai/goals/RestrictionGoals.hpp
+            src/common/entity/ai/goals/GuardianGoals.cpp
+            src/common/entity/ai/goals/GuardianGoals.hpp
+            src/common/entity/ai/goals/PhantomGoals.cpp
+            src/common/entity/ai/goals/PhantomGoals.hpp
+            src/common/entity/ai/goals/EvokerGoals.cpp
+            src/common/entity/ai/goals/EvokerGoals.hpp
+            src/common/entity/ai/goals/IllusionerGoals.cpp
+            src/common/entity/ai/goals/IllusionerGoals.hpp
+            src/common/entity/ai/goals/DoorGoals.cpp
+            src/common/entity/ai/goals/DoorGoals.hpp
+            src/common/entity/ai/goals/WitherGoals.cpp
+            src/common/entity/ai/goals/WitherGoals.hpp
+            src/common/entity/ai/goals/StriderGoals.cpp
+            src/common/entity/ai/goals/StriderGoals.hpp
 
             # Common world - pathfinder (MC world.level.pathfinder port)
             src/common/world/pathfinder/PathType.hpp
@@ -961,6 +1132,11 @@ set(GAME_SOURCES
             src/common/world/spawn/NaturalSpawner.hpp
             src/common/world/spawn/GeneratedMobSpawns.cpp
             src/common/world/spawn/GeneratedMobSpawns.hpp
+            src/common/world/spawn/GeneratedSpawnTags.cpp
+            src/common/world/spawn/GeneratedSpawnTags.hpp
+            src/common/world/spawn/SpawnPlacements.cpp
+            src/common/world/spawn/SpawnPlacements.hpp
+            src/common/world/spawn/PotentialCalculator.hpp
 
             # Common network
             src/common/network/MessageQueue.hpp
@@ -980,6 +1156,8 @@ set(GAME_SOURCES
             src/server/commands/CommandDispatcher.cpp
             src/server/commands/TeleportCommand.hpp
             src/server/commands/EntitySelector.cpp
+            src/server/commands/CommandCoords.cpp
+            src/server/commands/CommandCoords.hpp
             src/server/commands/SheepEatCommand.cpp
             src/server/commands/TeleportCommand.cpp
             src/server/commands/KickCommand.hpp
@@ -988,6 +1166,10 @@ set(GAME_SOURCES
             src/server/commands/GameModeCommand.cpp
             src/server/commands/KillCommand.hpp
             src/server/commands/KillCommand.cpp
+            src/server/commands/EntityStatsCommand.cpp
+            src/server/commands/EntityStatsCommand.hpp
+            src/server/commands/ShapeCommand.cpp
+            src/server/commands/ShapeCommand.hpp
             src/server/commands/TimeCommand.hpp
             src/server/commands/TimeCommand.cpp
             src/server/commands/GameRuleCommand.hpp
@@ -1014,14 +1196,34 @@ set(GAME_SOURCES
             src/server/commands/SummonCommand.hpp
             src/server/entity/MobManager.cpp
             src/server/entity/MobManager.hpp
+            src/server/entity/FallingBlockStore.cpp
+            src/server/entity/FallingBlockStore.hpp
+            src/server/entity/LocalMobCapCalculator.hpp
             src/server/entity/ServerLevelBridge.cpp
             src/server/entity/ServerLevelBridge.hpp
             src/server/entity/ServerEntityTracker.cpp
             src/server/entity/ServerEntityTracker.hpp
             src/server/entity/ItemEntityManager.cpp
             src/server/entity/ItemEntityManager.hpp
+            src/server/entity/ExperienceOrbManager.cpp
+            src/server/entity/ExperienceOrbManager.hpp
             src/server/level/PlayerSpawnFinder.cpp
             src/server/level/PlayerSpawnFinder.hpp
+
+            # Dimensions + nether/end portal travel
+            src/server/level/LevelEntityStore.cpp
+            src/server/level/LevelEntityStore.hpp
+            src/server/level/ServerLevel.cpp
+            src/server/level/ServerLevel.hpp
+            src/server/level/NetherPortalIndex.cpp
+            src/server/level/NetherPortalIndex.hpp
+            src/server/level/PortalForcer.cpp
+            src/server/level/PortalForcer.hpp
+            src/server/level/PortalTravel.cpp
+            src/server/level/PortalTravel.hpp
+            src/server/level/StrongholdLocate.cpp
+            src/server/level/StrongholdLocate.hpp
+            src/server/level/EnderEyeThrow.cpp
 
             # Container menus (shared by client prediction and server authority)
             src/common/inventory/Container.hpp
@@ -1070,13 +1272,41 @@ set(GAME_SOURCES
             src/server/world/interfaces/INeighborProvider.hpp
             src/server/world/interfaces/INeighborProvider.cpp
 
+            # Server world - Storage (Anvil: vanilla-format save/load)
+            src/server/world/storage/anvil/AnvilChunkStorage.cpp
+            src/server/world/storage/anvil/AnvilChunkStorage.hpp
+            src/server/world/storage/anvil/AnvilRegion.cpp
+            src/server/world/storage/anvil/AnvilRegion.hpp
+            src/server/world/storage/anvil/BlockEntityNbt.cpp
+            src/server/world/storage/anvil/BlockEntityNbt.hpp
+            src/server/world/storage/anvil/ChunkSerializer.cpp
+            src/server/world/storage/anvil/ChunkSerializer.hpp
+            src/server/world/storage/anvil/EntityChunkNbt.cpp
+            src/server/world/storage/anvil/EntityChunkNbt.hpp
+            src/server/world/storage/anvil/EntityNbt.cpp
+            src/server/world/storage/anvil/EntityNbt.hpp
+            src/server/world/storage/anvil/LevelDat.cpp
+            src/server/world/storage/anvil/LevelDat.hpp
+            src/server/world/storage/anvil/ItemStackNbt.cpp
+            src/server/world/storage/anvil/ItemStackNbt.hpp
+            src/server/world/storage/anvil/PaletteCodec.cpp
+            src/server/world/storage/anvil/PaletteCodec.hpp
+            src/server/world/storage/anvil/PlayerDataStore.cpp
+            src/server/world/storage/anvil/PlayerDataStore.hpp
+            src/server/world/storage/anvil/PlayerUuid.cpp
+            src/server/world/storage/anvil/PlayerUuid.hpp
+            src/server/world/storage/anvil/RegionStore.cpp
+            src/server/world/storage/anvil/RegionStore.hpp
+            src/server/world/storage/anvil/SaveRoot.cpp
+            src/server/world/storage/anvil/SaveRoot.hpp
+            src/server/world/storage/anvil/SessionLock.cpp
+            src/server/world/storage/anvil/SessionLock.hpp
+            src/server/world/storage/anvil/WorldFolder.cpp
+            src/server/world/storage/anvil/WorldFolder.hpp
+            src/server/world/storage/anvil/WorldSidecar.cpp
+            src/server/world/storage/anvil/WorldSidecar.hpp
+
             # Server world - Storage
-            src/server/world/storage/AnvilChunkSaver.cpp
-            src/server/world/storage/AnvilChunkSaver.hpp
-            src/server/world/storage/AnvilRegionWriter.cpp
-            src/server/world/storage/AnvilRegionWriter.hpp
-            src/server/world/storage/AsyncChunkSaver.cpp
-            src/server/world/storage/AsyncChunkSaver.hpp
             src/server/world/storage/MinecraftChunkLoader.cpp
             src/server/world/storage/MinecraftChunkLoader.hpp
             src/server/world/storage/MinecraftChunkLoaderImpl.cpp
@@ -1109,6 +1339,7 @@ set(GAME_SOURCES
             src/server/network/listeners/ServerPlayPacketListener.hpp
             
             # New session management system
+            src/server/world/ticketing/ChunkLevel.hpp
             src/server/world/ticketing/ChunkTicketManager.cpp
             src/server/world/ticketing/ChunkTicketManager.hpp
             src/server/world/watch/ChunkTrackingView.hpp
@@ -1240,6 +1471,15 @@ endif()
 # 8) Includes
 target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/src
+        # ext itself, so the vendored MD5 can be included as <md5/openssl/md5.h>.
+        #
+        # NOT ext/md5: that would make it <openssl/md5.h>, which Homebrew's real
+        # OpenSSL header at /opt/homebrew/include/openssl/md5.h shadows — and
+        # Boost puts /opt/homebrew/include EARLIER on the include line. The
+        # result compiled fine and failed at link with an undefined _MD5,
+        # because that header declares MD5 as an extern function in libcrypto,
+        # which this project does not link.
+        ${PROJECT_SOURCE_DIR}/ext
         ${PROJECT_SOURCE_DIR}/ext/glfw/include
         ${PROJECT_SOURCE_DIR}/ext/glad/include
         ${PROJECT_SOURCE_DIR}/ext/glm
@@ -1296,6 +1536,21 @@ endif()
 # Link Tracy profiler if enabled
 if(ENABLE_TRACY)
     target_link_libraries(MyVoxelGame PRIVATE TracyClient)
+
+    # Per-exposure-raycast zones. Off by default because the instrumentation
+    # dominates the thing it measures at ten million calls a capture; see
+    # PROFILE_ZONE_DETAIL in Profiling_Tracy.hpp.
+    #
+    # MUST live here and not in the ENABLE_TRACY option block far above: the
+    # MyVoxelGame target does not exist until add_executable, so naming it
+    # earlier makes `-DEXPLOSION_DETAIL_ZONES=ON` a hard configure failure
+    # ("Cannot specify compile definitions for target which is not built by
+    # this project") with no build tree generated at all.
+    if(EXPLOSION_DETAIL_ZONES)
+        target_compile_definitions(MyVoxelGame PRIVATE EXPLOSION_DETAIL_ZONES)
+        message(STATUS "Tracy: per-exposure zones ENABLED — do NOT compare "
+                       "these captures against ones taken without them")
+    endif()
     target_compile_definitions(MyVoxelGame PRIVATE TRACY_ENABLE)
 
 endif()

@@ -24,17 +24,51 @@ namespace Game {
         return stack.count < ItemRegistry::Get(stack.itemId).maxStackSize;
     }
 
-    void ItemEntity::TickMovement(const PhysicsContext& context) {
+    void ItemEntity::TickMovement(const PhysicsContext& context,
+                                  JavaRandom* serverRng) {
         ++tickCount;
 
         if (pickupDelay > 0) --pickupDelay;
 
-        // Gravity. MC skips this entirely while the entity is in a fluid deep
-        // enough to float in and applies buoyancy instead; this engine has no
-        // fluid-height query for entities, so items sink through water. That is
-        // a known simplification, not an oversight — the honest fix is a
-        // getFluidHeight equivalent, which does not exist yet.
-        vel.y -= kGravity;
+        // ── Buoyancy or gravity (ItemEntity.tick's fluid branch) ───────────
+        // MC: `isInWater() && getFluidHeight(WATER) > FLOAT_HEIGHT` floats,
+        // lava likewise, otherwise applyGravity. setFluidMovement drags the
+        // horizontal axes and feeds a small upward acceleration capped at
+        // 0.06/tick — no gravity while floating, which is the whole trick.
+        const AABB box = GetAABB();
+        const double waterHeight = FluidHeightAbove(box, /*lava=*/false, context);
+        if (waterHeight > kFloatHeight) {
+            vel.x *= kWaterDrag;
+            if (vel.y < kFluidMaxRise) vel.y += kFluidBuoyancy;
+            vel.z *= kWaterDrag;
+        } else if (FluidHeightAbove(box, /*lava=*/true, context) > kFloatHeight) {
+            vel.x *= kLavaDrag;
+            if (vel.y < kFluidMaxRise) vel.y += kFluidBuoyancy;
+            vel.z *= kLavaDrag;
+        } else {
+            vel.y -= kGravity;
+        }
+
+        // ── Stuck-in-block escape (server side of ItemEntity.tick) ─────────
+        // `noPhysics = !level.noCollision(this, box.deflate(1.0E-7))`, and a
+        // stuck entity gets its velocity pointed at the nearest open
+        // neighbour. The client forces noPhysics false instead — its copy
+        // keeps colliding and follows the server's corrections out.
+        if (serverRng) {
+            AABB deflated = box;
+            deflated.min += glm::vec3(1.0e-7f);
+            deflated.max -= glm::vec3(1.0e-7f);
+            noPhysics = CollidesAt(deflated, context);
+            if (noPhysics) {
+                // MC aims at the box's vertical CENTRE, not the feet — the
+                // cell containing the feet can be the block below.
+                const glm::dvec3 center(pos.x, pos.y + kHeight * 0.5, pos.z);
+                const float speed = serverRng->NextFloat() * 0.2f + 0.1f;
+                EscapeTowardsClosestSpace(center, speed, vel, context);
+            }
+        } else {
+            noPhysics = false;
+        }
 
         // Sleep optimisation (ItemEntity.tick): an item resting still only
         // integrates on one tick in four. Skipping the move for settled items
@@ -46,8 +80,17 @@ namespace Game {
                            || ((tickCount + id) % 4) == 0;
 
         if (mustMove) {
-            const MoveResult move = MoveAABB(pos, vel, HalfExtents(), context);
-            onGround = move.onGround;
+            if (noPhysics) {
+                // MC Entity.move with noPhysics set: position integrates
+                // directly, no collision resolution at all. Anything else
+                // would cancel the escape velocity against the very block the
+                // entity is escaping from.
+                pos += vel;
+                onGround = false;
+            } else {
+                const MoveResult move = MoveAABB(pos, vel, HalfExtents(), context);
+                onGround = move.onGround;
+            }
 
             // Drag AFTER the move — see the header note. Horizontal drag picks
             // up the ground multiplier once we're resting on something.
@@ -66,14 +109,14 @@ namespace Game {
         }
     }
 
-    bool ItemEntity::Tick(const PhysicsContext& context) {
+    bool ItemEntity::Tick(const PhysicsContext& context, JavaRandom& rng) {
         // An emptied stack (fully picked up, fully merged away) is a dead
         // entity — MC discards before doing any other work.
         if (stack.IsEmpty()) return false;
 
         const glm::dvec3 oldVel = vel;
 
-        TickMovement(context);
+        TickMovement(context, &rng);
 
         if (age < kLifetimeTicks) ++age;
 

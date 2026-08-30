@@ -8,18 +8,65 @@
 
 namespace Game {
 
+    // MC ChunkAccess's constructor, whose last act is replaceMissingSections
+    // (ChunkAccess.java:101-111):
+    //
+    //     for (int i = 0; i < sections.length; ++i)
+    //         if (sections[i] == null) sections[i] = new LevelChunkSection(f);
+    //
+    // Every slot is filled, so getSection() is TOTAL and there is no lazy
+    // creation anywhere in MC — LevelChunk.setBlockState:248 is just
+    // `getSection(getSectionIndex(y))` with no null handling.
+    //
+    // This engine used to leave the array null and allocate on first write.
+    // "Null means all air" is a second encoding of emptiness alongside
+    // ChunkSection::IsAllAir, and every place that tested the pointer instead
+    // of the contents was a latent bug: the client's render-side mirror went
+    // stale so blocks built into a previously-air section were never meshed,
+    // and a lazily created section came up with kFallbackBiomeId because the
+    // real biomes had never been sent. Both are the same mistake.
+    //
+    // Measured cost: 296 bytes per ChunkSection, 304 including its two
+    // one-entry palette allocations, so 7,296 bytes and 72 allocations per
+    // chunk. Against ~24 KB of packed block words for a chunk with terrain in
+    // it — and against the ~66 ms it takes to generate one — this is noise.
+    // Note also that on the SERVER most of it was already being paid:
+    // MyTerrainGenerator fills biomes for all 96 quart layers, and
+    // SetBiomeQuart used to call EnsureSection, so a generated chunk already
+    // carried 24 sections.
     Chunk::Chunk() {
-        // Initialize all sections as null (they'll be created on demand)
         for (auto& section : sections) {
-            section = nullptr;
+            section = std::make_unique<ChunkSection>();
         }
     }
 
     // Out-of-line so unique_ptr<BlockEntity> destructor sees the complete
     // BlockEntity type (Chunk.hpp only forward-declares it).
     Chunk::~Chunk()                                = default;
-    Chunk::Chunk(Chunk&&) noexcept                 = default;
-    Chunk& Chunk::operator=(Chunk&&) noexcept      = default;
+    // Written out rather than defaulted: m_contentMutex is not movable, and a
+    // move should not carry it anyway — the lock guards the object, and the
+    // destination keeps its own. Moving a chunk another thread is holding
+    // would be a bug regardless of what happens to the mutex.
+    Chunk::Chunk(Chunk&& other) noexcept
+        : pos(other.pos)
+        , sections(std::move(other.sections))
+        , onSectionDirty(std::move(other.onSectionDirty))
+        , m_blockEntities(std::move(other.m_blockEntities))
+        , m_blockTicks(std::move(other.m_blockTicks))
+        , m_heightmaps(other.m_heightmaps)
+        , m_heightmapsPrimed(other.m_heightmapsPrimed) {}
+
+    Chunk& Chunk::operator=(Chunk&& other) noexcept {
+        if (this == &other) return *this;
+        pos                = other.pos;
+        sections           = std::move(other.sections);
+        onSectionDirty     = std::move(other.onSectionDirty);
+        m_blockEntities    = std::move(other.m_blockEntities);
+        m_blockTicks       = std::move(other.m_blockTicks);
+        m_heightmaps       = other.m_heightmaps;
+        m_heightmapsPrimed = other.m_heightmapsPrimed;
+        return *this;
+    }
 
     // Block access (local X/Z coordinates, world Y coordinate)
     BlockID Chunk::GetBlock(int localX, int worldY, int localZ) const {
@@ -35,12 +82,7 @@ namespace Game {
             return BlockID::Air;
         }
 
-        const ChunkSection* section = GetSection(sectionIndex);
-        if (!section) {
-            return BlockID::Air; // Section doesn't exist = all air
-        }
-
-        return section->GetBlockID(localX, sectionY, localZ);
+        return GetSection(sectionIndex)->GetBlockID(localX, sectionY, localZ);
     }
 
     // MC ChunkAccess.getNoiseBiome — the caller's block coordinates are shifted
@@ -71,10 +113,7 @@ namespace Game {
         }
         const int sectionIndex = qy / ChunkSection::BIOME_AXIS;
         if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) return;
-        EnsureSection(sectionIndex);
-        if (ChunkSection* section = GetSection(sectionIndex)) {
-            section->SetBiome(qx, qy % ChunkSection::BIOME_AXIS, qz, biomeId);
-        }
+        GetSection(sectionIndex)->SetBiome(qx, qy % ChunkSection::BIOME_AXIS, qz, biomeId);
     }
 
     BlockStateIndex Chunk::GetBlockState(int localX, int worldY, int localZ) const {
@@ -89,12 +128,7 @@ namespace Game {
             return 0;
         }
 
-        const ChunkSection* section = GetSection(sectionIndex);
-        if (!section) {
-            return 0; // Section doesn't exist = all air = default state
-        }
-
-        return section->GetState(localX, sectionY, localZ);
+        return GetSection(sectionIndex)->GetState(localX, sectionY, localZ);
     }
 
     BlockState Chunk::StateAt(int localX, int worldY, int localZ) const {
@@ -104,12 +138,17 @@ namespace Game {
         Math::WorldCoordinates::WorldYToSectionCoords(worldY, sectionIndex, sectionY);
         if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) return BlockState{};
 
-        const ChunkSection* section = GetSection(sectionIndex);
-        if (!section) return BlockState{};        // no section = all air
-        return section->StateAt(localX, sectionY, localZ);
+        return GetSection(sectionIndex)->StateAt(localX, sectionY, localZ);
     }
 
     void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId, BlockStateIndex stateIndex) {
+        blockWriteCounter.fetch_add(1, std::memory_order_release);
+        // Exclusive against the serialiser (see Chunk::LockShared). Cheap: this
+        // is the player-edit / block-update path, not terrain generation —
+        // generation fills sections in bulk through AdoptStates and never
+        // comes through here.
+        const auto guard = LockExclusive();
+
         if (!ValidateCoordinates(localX, worldY, localZ, "SetBlock")) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d) in chunk (%d, %d)",
                         localX, worldY, localZ, pos.x, pos.z);
@@ -134,28 +173,39 @@ namespace Game {
             return;
         }
 
-        if (blockId == BlockID::Air && stateIndex == 0 && !HasSection(sectionIndex)) {
+        ChunkSection* section = GetSection(sectionIndex);
+
+        // MC LevelChunk.setBlockState:249-251 —
+        //     boolean wasEmpty = section.hasOnlyAir();
+        //     if (wasEmpty && state.isAir()) return null;
+        // Air into an already-empty section is not a change worth writing or
+        // dirtying. This replaces the old `!HasSection(sectionIndex)` form,
+        // which asked about the POINTER; sections are always allocated now, so
+        // the question has to be asked of the CONTENTS. It also fixes a case
+        // the old guard got wrong: it required stateIndex == 0, so writing air
+        // with a non-zero state index into a missing section was silently
+        // dropped instead of clearing the cell.
+        if (section->IsAllAir() && blockId == BlockID::Air) {
             return;
         }
 
-        if (blockId != BlockID::Air) {
-            EnsureSection(sectionIndex);
-        }
+        section->Set(localX, sectionY, localZ, blockId);
+        section->SetState(localX, sectionY, localZ, stateIndex);
 
-        ChunkSection* section = GetSection(sectionIndex);
-        if (section) {
-            section->Set(localX, sectionY, localZ, blockId);
-            section->SetState(localX, sectionY, localZ, stateIndex);
+        UpdateHeightmaps(localX, worldY, localZ, blockId);
 
-            UpdateHeightmaps(localX, worldY, localZ, blockId);
-
-            if (onSectionDirty) {
-                onSectionDirty(sectionIndex);
-            }
+        if (onSectionDirty) {
+            onSectionDirty(sectionIndex);
         }
     }
 
     void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId) {
+        // Exclusive against the serialiser (see Chunk::LockShared). Cheap: this
+        // is the player-edit / block-update path, not terrain generation —
+        // generation fills sections in bulk through AdoptStates and never
+        // comes through here.
+        const auto guard = LockExclusive();
+
         if (!ValidateCoordinates(localX, worldY, localZ, "SetBlock")) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d) in chunk (%d, %d)",
                         localX, worldY, localZ, pos.x, pos.z);
@@ -178,34 +228,28 @@ namespace Game {
             return; // No change needed — leaves any existing state untouched
         }
 
-        // If setting air and section doesn't exist, no need to create it
-        if (blockId == BlockID::Air && !HasSection(sectionIndex)) {
+        ChunkSection* section = GetSection(sectionIndex);
+
+        // MC LevelChunk.setBlockState:249-251, same rule as the overload above.
+        if (section->IsAllAir() && blockId == BlockID::Air) {
             return;
         }
 
-        // Ensure section exists for non-air blocks
-        if (blockId != BlockID::Air) {
-            EnsureSection(sectionIndex);
-        }
+        section->Set(localX, sectionY, localZ, blockId);
 
-        ChunkSection* section = GetSection(sectionIndex);
-        if (section) {
-            section->Set(localX, sectionY, localZ, blockId);
+        // The block genuinely changed, so any state left over from the
+        // previous occupant is meaningless — state indices are relative to
+        // the owning block's own state list. Reset to the new block's
+        // default (MC defaultBlockState()). Without this, mining a
+        // west-facing furnace and placing stone would leave stone carrying
+        // state index 3.
+        section->SetState(localX, sectionY, localZ, 0);
 
-            // The block genuinely changed, so any state left over from the
-            // previous occupant is meaningless — state indices are relative to
-            // the owning block's own state list. Reset to the new block's
-            // default (MC defaultBlockState()). Without this, mining a
-            // west-facing furnace and placing stone would leave stone carrying
-            // state index 3.
-            section->SetState(localX, sectionY, localZ, 0);
+        UpdateHeightmaps(localX, worldY, localZ, blockId);
 
-            UpdateHeightmaps(localX, worldY, localZ, blockId);
-
-            // Mark section as dirty for mesh rebuilding
-            if (onSectionDirty) {
-                onSectionDirty(sectionIndex);
-            }
+        // Mark section as dirty for mesh rebuilding
+        if (onSectionDirty) {
+            onSectionDirty(sectionIndex);
         }
     }
 
@@ -238,12 +282,16 @@ namespace Game {
         // Start from the top of the highest non-empty section rather than the
         // build limit: most chunks are empty above y=128 and scanning that is
         // pure waste.
+        // MC ChunkAccess.getHighestFilledSectionIndex (:127-135) asks
+        // hasOnlyAir(), not "does the section exist" — which is the only form
+        // that works now that every section exists. Testing the pointer here
+        // would pin scanTop to y=319 for every chunk and quietly turn this into
+        // a full-height scan, i.e. exactly the waste the comment above
+        // describes.
         int scanTop = MIN_WORLD_Y;
-        for (int i = SECTION_COUNT - 1; i >= 0; --i) {
-            if (HasSection(i)) {
-                scanTop = Math::WorldCoordinates::SectionCoordsToWorldY(i, SECTION_HEIGHT - 1);
-                break;
-            }
+        const int highest = HighestFilledSectionIndex();
+        if (highest != kNoFilledSection) {
+            scanTop = Math::WorldCoordinates::SectionCoordsToWorldY(highest, SECTION_HEIGHT - 1);
         }
 
         for (size_t i = 0; i < kTypeCount; ++i) m_heightmaps[i].Reset(MIN_WORLD_Y);
@@ -286,22 +334,26 @@ namespace Game {
         return sections[sectionIndex].get();
     }
 
-    void Chunk::EnsureSection(int sectionIndex) {
-        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) {
-            Log::Warning("Invalid section index %d in chunk (%d, %d)", sectionIndex, pos.x, pos.z);
-            return;
+    // MC ChunkAccess.getHighestFilledSectionIndex (:127-135), sentinel and all:
+    //
+    //     for (int i = sections.length - 1; i >= 0; --i)
+    //         if (!sections[i].hasOnlyAir()) return i;
+    //     return NO_FILLED_SECTION;   // -1
+    //
+    // This is the idiom that REPLACES null-checking. Anything that used to ask
+    // "which sections exist" is really asking "which sections have anything in
+    // them", and that question has always been IsAllAir's.
+    int Chunk::HighestFilledSectionIndex() const {
+        for (int i = SECTION_COUNT - 1; i >= 0; --i) {
+            const ChunkSection* section = sections[i].get();
+            if (section && !section->IsAllAir()) return i;
         }
-
-        if (!sections[sectionIndex]) {
-            sections[sectionIndex] = std::make_unique<ChunkSection>();
-        }
+        return kNoFilledSection;
     }
 
-    bool Chunk::HasSection(int sectionIndex) const {
-        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) {
-            return false;
-        }
-        return sections[sectionIndex] != nullptr;
+    bool Chunk::HasContentInSection(int sectionIndex) const {
+        const ChunkSection* section = GetSection(sectionIndex);
+        return section != nullptr && !section->IsAllAir();
     }
 
     // ========================================================================
@@ -320,6 +372,7 @@ namespace Game {
 
     void Chunk::SetBlockEntity(int localX, int worldY, int localZ,
                                 std::unique_ptr<BlockEntity> entity) {
+        const auto guard = LockExclusive();
         if (!entity) {
             m_blockEntities.erase(glm::ivec3(localX, worldY, localZ));
             return;
@@ -329,6 +382,7 @@ namespace Game {
 
     std::unique_ptr<BlockEntity>
     Chunk::RemoveBlockEntity(int localX, int worldY, int localZ) {
+        const auto guard = LockExclusive();
         auto it = m_blockEntities.find(glm::ivec3(localX, worldY, localZ));
         if (it == m_blockEntities.end()) return nullptr;
         std::unique_ptr<BlockEntity> out = std::move(it->second);
@@ -346,33 +400,39 @@ namespace Game {
 
         for (int sectionIndex = 0; sectionIndex < SECTION_COUNT; ++sectionIndex) {
             const ChunkSection* section = GetSection(sectionIndex);
-            if (!section) {
-                continue; // Null section = all air = 0 non-air blocks
+            // Emptiness is a CONTENT question. The null test this replaces was
+            // free only while sky sections were absent; with every section
+            // allocated it never fires, and the triple loop below would run
+            // 98,304 times per call over mostly air.
+            if (!section || section->IsAllAir()) {
+                continue;
             }
 
-            // Count non-air blocks in this section
-            for (int x = 0; x < ChunkSection::SIZE; ++x) {
-                for (int y = 0; y < ChunkSection::SIZE; ++y) {
-                    for (int z = 0; z < ChunkSection::SIZE; ++z) {
-                        if (section->GetBlockID(x, y, z) != BlockID::Air) {
-                            count++;
-                        }
-                    }
+            // Off the palette, MC LevelChunkSection.recalcBlockCounts style:
+            // the container already knows how many of each distinct state it
+            // holds, so there is no reason to visit 4096 voxels.
+            section->States().ForEachValue([&](uint32_t stateId, int n) {
+                if (BlockState::FromRawId(stateId).Block() != BlockID::Air) {
+                    count += static_cast<size_t>(n);
                 }
-            }
+            });
         }
 
         return count;
     }
 
+    // MC has no direct equivalent — the closest is
+    // getHighestFilledSectionIndex() == NO_FILLED_SECTION — but the meaning is
+    // the same: is there anything in this column at all.
+    //
+    // This USED to be `every section pointer is null`, which is permanently
+    // false now that the constructor fills them. That mattered: eight guards
+    // read it, including three that decide whether a chunk is worth saving and
+    // two that decide whether a loaded chunk is valid enough to enter the
+    // cache. Left pointer-based, a chunk that failed to generate would have
+    // validated as good and been persisted.
     bool Chunk::IsEmpty() const {
-        // Check if all sections are null (which means all air)
-        for (const auto& section : sections) {
-            if (section != nullptr) {
-                return false;
-            }
-        }
-        return true;
+        return HighestFilledSectionIndex() == kNoFilledSection;
     }
 
     // **NEW**: Helper method for coordinate validation with detailed logging

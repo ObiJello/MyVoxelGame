@@ -50,6 +50,10 @@ namespace Game {
 
         void Trigger() { m_forceTrigger = true; }
 
+        // MC RandomStrollGoal.setInterval — the elder guardian slows its
+        // wander to every 400 ticks after construction.
+        void SetInterval(int interval) { m_interval = interval; }
+
     protected:
         // Overridden by WaterAvoidingRandomStrollGoal.
         virtual bool GetPosition(glm::dvec3& out);
@@ -79,6 +83,34 @@ namespace Game {
 
     private:
         float m_probability;
+    };
+
+    // MC RandomSwimmingGoal — the wander for a water-bound mob: same cadence,
+    // but the target comes from getRandomSwimmablePos so it lands in open
+    // water rather than on a shore the fish cannot reach.
+    class RandomSwimmingGoal : public RandomStrollGoal {
+    public:
+        RandomSwimmingGoal(PathfinderMob* mob, double speedModifier, int interval)
+            : RandomStrollGoal(mob, speedModifier, interval) {}
+
+        const char* Name() const override { return "RandomSwimmingGoal"; }
+
+    protected:
+        bool GetPosition(glm::dvec3& out) override;
+    };
+
+    // MC WaterAvoidingRandomFlyingGoal — the flyer's wander: prefer a perch a
+    // few blocks above solid ground ahead of the current view direction, fall
+    // back to any clear air.
+    class WaterAvoidingRandomFlyingGoal : public WaterAvoidingRandomStrollGoal {
+    public:
+        WaterAvoidingRandomFlyingGoal(PathfinderMob* mob, double speedModifier)
+            : WaterAvoidingRandomStrollGoal(mob, speedModifier) {}
+
+        const char* Name() const override { return "WaterAvoidingRandomFlyingGoal"; }
+
+    protected:
+        bool GetPosition(glm::dvec3& out) override;
     };
 
     // MC LookAtPlayerGoal. Claims LOOK only, so a mob can walk and watch you
@@ -214,6 +246,25 @@ namespace Game {
         double m_speedModifier;
         double m_posX = 0.0, m_posY = 0.0, m_posZ = 0.0;
         bool   m_isRunning = false;
+    };
+
+    // MC Rabbit.RabbitPanicGoal — PanicGoal whose tick keeps re-asserting the
+    // panic speed through Rabbit::SetSpeedModifier, because the rabbit's own
+    // move control parks the speed at 0 on every landing. MC nests it in
+    // Rabbit.java; it lives here because every goal class in this port does.
+    class RabbitPanicGoal : public PanicGoal {
+    public:
+        RabbitPanicGoal(class Rabbit* rabbit, double speedModifier);
+
+        void Tick() override;
+        bool RequiresUpdateEveryTick() const override { return true; }
+        // Keeps the base name so PathfinderMob::IsPanicking (which matches on
+        // "PanicGoal", as MC matches on the class) still sees a fleeing
+        // rabbit — MC RabbitPanicGoal IS a PanicGoal for that check.
+        const char* Name() const override { return "PanicGoal"; }
+
+    private:
+        Rabbit* m_rabbit;
     };
 
 } // namespace Game

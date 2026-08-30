@@ -61,6 +61,47 @@ namespace Render {
             if (n == "MainArm")      return s.mainArm;
             if (n == "RightArmPose") return static_cast<float>(s.rightArmPose);
             if (n == "LeftArmPose")  return static_cast<float>(s.leftArmPose);
+            if (n == "Squish")               return s.squish;
+            if (n == "FlapTime")             return s.flapTime;
+            if (n == "TentacleAngle")        return s.tentacleAngle;
+            if (n == "EatAnim")              return s.eatAnimation;
+            if (n == "StandAnim")            return s.standAnimation;
+            if (n == "FeedingAnim")          return s.feedingAnimation;
+            if (n == "PlayingDead")          return s.playingDeadFactor;
+            if (n == "InWaterFactor")        return s.inWaterFactor;
+            if (n == "OnGroundFactor")       return s.onGroundFactor;
+            if (n == "MovingFactor")         return s.movingFactor;
+            if (n == "StandScale")           return s.standScale;
+            if (n == "RammingXHeadRot")      return s.rammingXHeadRot;
+            if (n == "AttackTicksRemaining") return s.attackTicksRemaining;
+            if (n == "AttackAnimRemaining")  return s.attackAnimationRemainingTicks;
+            if (n == "StunnedTicks")         return s.stunnedTicksRemaining;
+            if (n == "JumpCompletion")       return s.jumpCompletion;
+            if (n == "HoldingProgress")      return s.holdingAnimationProgress;
+            if (n == "TendrilAnim")          return s.tendrilAnimation;
+            if (n == "SpikesAnim")           return s.spikesAnimation;
+            if (n == "TailAnim")             return s.tailAnimation;
+            if (n == "EntityId")             return s.entityId;
+            if (n == "JumpCooldown")         return s.jumpCooldown;
+            if (n == "HeadRollAngle")        return s.headRollAngle;
+            if (n == "TailAngle")            return s.tailAngle;
+            if (n == "LieDown")              return s.lieDownAmount;
+            if (n == "LieDownTail")          return s.lieDownAmountTail;
+            if (n == "RelaxOne")             return s.relaxStateOneAmount;
+            if (n == "SitAmount")            return s.sitAmount;
+            if (n == "LieOnBack")            return s.lieOnBackAmount;
+            if (n == "RollAmount")           return s.rollAmount;
+            if (n == "SneezeTime")           return s.sneezeTime;
+            if (n == "CrouchAmount")         return s.crouchAmount;
+            if (n == "PeekAmount")           return s.peekAmount;
+            if (n == "SpinningProgress")     return s.spinningProgress;
+            if (n == "OfferFlowerTick")      return s.offerFlowerTick;
+            if (n == "RoarAnim")             return s.roarAnimation;
+            if (n == "YHeadRotAbs")          return s.yHeadRotAbs;
+            if (n == "YBodyRotAbs")          return s.yBodyRotAbs;
+            if (n == "MobArmPose")           return s.mobArmPose;
+            if (n == "MobPose")              return s.mobPose;
+            if (n == "SwingAnimType")        return s.swingAnimType;
             return 0.0f;
         }
 
@@ -77,6 +118,34 @@ namespace Render {
             if (n == "IsSitting")     return s.isSitting     ? 1.0f : 0.0f;
             if (n == "IsHoldingBow")  return s.isHoldingBow  ? 1.0f : 0.0f;
             if (n == "IsHidingInShell") return s.isHidingInShell ? 1.0f : 0.0f;
+            if (n == "IsResting")     return s.isResting     ? 1.0f : 0.0f;
+            if (n == "CanMove")       return s.canMove       ? 1.0f : 0.0f;
+            if (n == "IsSearching")   return s.isSearching   ? 1.0f : 0.0f;
+            if (n == "IsHoldingItem") return s.isHoldingItem ? 1.0f : 0.0f;
+            if (n == "IsMoving")      return s.isMoving      ? 1.0f : 0.0f;
+            if (n == "AnimateTail")   return s.animateTail   ? 1.0f : 0.0f;
+            if (n == "HasChest")      return s.hasChest      ? 1.0f : 0.0f;
+            if (n == "HasLeftHorn")   return s.hasLeftHorn   ? 1.0f : 0.0f;
+            if (n == "HasRightHorn")  return s.hasRightHorn  ? 1.0f : 0.0f;
+            if (n == "HasEgg")        return s.hasEgg        ? 1.0f : 0.0f;
+            if (n == "IsOnLand")      return s.isOnLand      ? 1.0f : 0.0f;
+            if (n == "IsLayingEgg")   return s.isLayingEgg   ? 1.0f : 0.0f;
+            if (n == "IsAngry")       return s.isAngry       ? 1.0f : 0.0f;
+            if (n == "HasStinger")    return s.hasStinger    ? 1.0f : 0.0f;
+            if (n == "IsSheared")     return s.isSheared     ? 1.0f : 0.0f;
+            if (n == "IsUnhappy")     return s.isUnhappy     ? 1.0f : 0.0f;
+            if (n == "IsCharging")    return s.isCharging    ? 1.0f : 0.0f;
+            if (n == "IsRidden")      return s.isRidden      ? 1.0f : 0.0f;
+            if (n == "IsCreepy")      return s.isCreepy      ? 1.0f : 0.0f;
+            if (n == "IsDancing")     return s.isDancing     ? 1.0f : 0.0f;
+            if (n == "IsFaceplanted") return s.isFaceplanted ? 1.0f : 0.0f;
+            if (n == "IsSwimming")    return s.isSwimming    ? 1.0f : 0.0f;
+            if (n == "IsSleeping")    return s.isSleeping    ? 1.0f : 0.0f;
+            if (n == "IsSpinning")    return s.isSpinning    ? 1.0f : 0.0f;
+            if (n == "IsSneezing")    return s.isSneezing    ? 1.0f : 0.0f;
+            if (n == "IsEating")      return s.isEating      ? 1.0f : 0.0f;
+            if (n == "IsScared")      return s.isScared      ? 1.0f : 0.0f;
+            if (n == "HasMainHandItem") return s.hasMainHandItem ? 1.0f : 0.0f;
             return 0.0f;
         }
 
@@ -209,6 +278,7 @@ namespace Render {
                     case AnimOp::Signum: { float v = pop();
                                            push(v > 0.0f ? 1.0f : (v < 0.0f ? -1.0f : 0.0f)); break; }
                     case AnimOp::Square: { float v = pop(); push(v * v); break; }
+                    case AnimOp::Cube:   { float v = pop(); push(v * v * v); break; }
                     case AnimOp::Min: { float b = pop(), a = pop(); push(std::min(a, b)); break; }
                     case AnimOp::Max: { float b = pop(), a = pop(); push(std::max(a, b)); break; }
                     case AnimOp::Clamp: { float hi = pop(), lo = pop(), v = pop();

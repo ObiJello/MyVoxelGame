@@ -23,13 +23,15 @@ namespace Game {
     }
 
     float Path::GetDistToTarget() const {
+        // MC Path computes this in its constructor as the end node's MANHATTAN
+        // distance to the target (Node.distanceManhattan) — Euclidean here
+        // skewed PathFinder's partial-path tiebreak toward diagonal endings.
         const Node* end = GetEndNode();
         if (!end) return 3.4028235e38f;
 
-        const float dx = static_cast<float>(m_target.x - end->x);
-        const float dy = static_cast<float>(m_target.y - end->y);
-        const float dz = static_cast<float>(m_target.z - end->z);
-        return std::sqrt(dx * dx + dy * dy + dz * dz);
+        return static_cast<float>(std::abs(m_target.x - end->x) +
+                                  std::abs(m_target.y - end->y) +
+                                  std::abs(m_target.z - end->z));
     }
 
     bool Path::SameAs(const Path& other) const {

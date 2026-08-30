@@ -95,13 +95,53 @@ namespace Render {
                         // and only its visibility bits are carried forward. The
                         // worker never sees a pointer.
                         cell.hasGeometry = true;
-                        cell.visBits = gpu->visibilitySet.raw();
-                    } else if (si.isAllAir) {
+                        // A STALE mask describes geometry that no longer
+                        // exists. Treat the section as fully see-through until
+                        // the new mesh lands: worst case is brief over-draw
+                        // behind a still-solid wall, where the stale mask's
+                        // worst case is terrain missing behind a freshly
+                        // blasted-open one — for seconds, because a cascade
+                        // queues thousands of remeshes.
+                        //
+                        // Staleness is a VERSION comparison, deliberately NOT
+                        // the dirty flag alone: dirty is cleared when the mesh
+                        // JOB is scheduled, long before its result uploads, so
+                        // keying off dirty made consecutive rebuilds flap
+                        // between see-through and stale-solid while remeshes
+                        // were in flight — whole regions flashing in and out
+                        // during a TNT cascade. uploadedVersion only advances
+                        // when the matching mesh+mask actually reach the GPU
+                        // (FinalizeSectionUpload), so this answer is monotonic
+                        // per section: open until proven, then correct.
+                        const bool staleMask = si.dirty || si.version != si.uploadedVersion;
+                        cell.visBits = staleMask ? VisibilitySet::kAllVisibleBits
+                                                 : gpu->visibilitySet.raw();
+                    } else if (si.isAllAir ||
+                               (si.builtOnce &&
+                                (si.dirty || si.version != si.uploadedVersion))) {
+                        // All-air: traversable by definition. The second arm
+                        // is the OPENED LID: a section whose last build
+                        // resolved to an EMPTY mesh — buried solid, every face
+                        // culled against neighbouring solid blocks, so no GPU
+                        // entry exists at all — that has since CHANGED. Its
+                        // implied answer, opaque, described the pre-blast
+                        // blocks; apply the same stale-is-see-through rule as
+                        // the has-geometry branch above until the remesh
+                        // lands. Without this, every blasted-open buried
+                        // section stayed a BFS lid hiding everything behind
+                        // and below it — "looking down at the crater culls the
+                        // sections under the rim until the camera goes below
+                        // it".
                         cell.visBits = VisibilitySet::kAllVisibleBits;
                     }
-                    // else: non-air but unmeshed — visBits 0 blocks BFS, exactly
-                    // like MC's CompiledSectionMesh.UNCOMPILED, whose
-                    // facesCanSeeEachother() returns false.
+                    // else: non-air and never built — visBits 0 blocks BFS,
+                    // exactly like MC's CompiledSectionMesh.UNCOMPILED, whose
+                    // facesCanSeeEachother() returns false. builtOnce gates
+                    // the stale test above precisely so streaming keeps this
+                    // behaviour: freshly loaded sections are all version 1 /
+                    // uploadedVersion 0 and must still block until compiled,
+                    // or the BFS floods to the horizon through unmeshed
+                    // terrain.
                 }
             }
         }
@@ -300,6 +340,11 @@ namespace Render {
                 PROFILE_PLOT("Occlusion/SourcesDropped",
                              static_cast<int64_t>(m_propagateFrom.size()));
                 m_propagateFrom.clear();
+                // The comment above promises "ask for one and start clean" —
+                // this is the ask. Without it a mass detonation's backlog was
+                // silently discarded and nothing ever recovered the lost
+                // propagation, so sections stayed culled until a camera move.
+                m_fullRebuildRequested = true;
             } else {
                 PROFILE_PLOT("Occlusion/SourcesDropped", static_cast<int64_t>(0));
             }
@@ -334,8 +379,14 @@ namespace Render {
                                                       /*includeNeighbors=*/false);
             GPUSectionData* gpu = si.gpuData.load(std::memory_order_acquire);
             if (gpu && gpu->HasGeometry()) {
-                c.visBits = gpu->visibilitySet.raw();
-            } else if (si.isAllAir) {
+                // Stale mask = see-through, version-keyed as in BuildInput.
+                const bool staleMask = si.dirty || si.version != si.uploadedVersion;
+                c.visBits = staleMask ? VisibilitySet::kAllVisibleBits
+                                      : gpu->visibilitySet.raw();
+            } else if (si.isAllAir ||
+                       (si.builtOnce &&
+                        (si.dirty || si.version != si.uploadedVersion))) {
+                // Opened-lid rule, as in BuildInput above.
                 c.visBits = VisibilitySet::kAllVisibleBits;
             }
             return c;
@@ -404,6 +455,7 @@ namespace Render {
             // Without this, a streamed-in section could never enter the graph
             // except via a full rebuild, which is exactly the coupling we are
             // trying to remove.
+            bool attached = false;
             for (int d = 0; d < 6; ++d) {
                 const int nrx = rx + SEED_DX[d];
                 const int nrz = rz + SEED_DZ[d];
@@ -415,6 +467,26 @@ namespace Render {
                 scratch.curQueue.push_back({static_cast<int16_t>(nrx), static_cast<int16_t>(nrz),
                                             static_cast<int8_t>(nsy),
                                             m_graph.nodes[nIdx].sourceDirections});
+                attached = true;
+            }
+            if (!attached) {
+                // Neither this section nor any neighbour is a node: the region
+                // it sits in was unreachable when the live graph was built, so
+                // propagation cannot legally reach it — but this source exists
+                // because the section CHANGED or finished meshing, so the
+                // graph's answer for it is stale by definition. Ask for a full
+                // rebuild instead of dropping the event on the floor.
+                //
+                // Dropping it was the post-cascade "nothing renders from this
+                // camera section" bug: a slot whose full rebuild happened to
+                // land at a mid-cascade instant (masks mostly opaque) kept its
+                // near-empty reachable set FOREVER while the camera stayed in
+                // that section — every later mesh upload's propagation source
+                // fell in unreachable space, got discarded here, and nothing
+                // else ever invalidated the slot. The request coalesces into
+                // one worldVersion bump, and the rebuild is async, so a burst
+                // of these costs one extra BFS, not a stall.
+                m_fullRebuildRequested = true;
             }
         }
         m_propagateFrom.clear();

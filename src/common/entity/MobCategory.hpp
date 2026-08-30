@@ -18,6 +18,7 @@
 //                         noDespawnDistance it is never removed.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace Game {

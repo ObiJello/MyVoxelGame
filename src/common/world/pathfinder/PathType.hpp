@@ -15,6 +15,7 @@
 // sets WATER to 0 (it floats), an Animal sets DAMAGE_FIRE to -1 (never).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace Game {

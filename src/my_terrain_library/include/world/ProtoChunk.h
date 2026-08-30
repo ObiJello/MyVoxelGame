@@ -55,6 +55,8 @@ private:
 
     // Post-processing positions (packed as shorts)
     std::vector<std::set<int16_t>> m_postProcessing;
+    // (y,z,x) -> canonical E-line payload; ascending = emission order.
+    std::map<std::tuple<int, int, int>, std::string> m_blockEntityNbts;
 
     // Carving mask for cave carving
     std::unique_ptr<levelgen::carver::CarvingMask> m_carvingMask;
@@ -76,6 +78,14 @@ private:
     // Reference: ChunkAccess.java startsForStructure / referencesForStructure storage
     levelgen::structure::StructureStartMap m_structureStarts;
     levelgen::structure::StructureReferenceMap m_structureReferences;
+
+    // Per-chunk structure Beardifier (Java builds it inside createNoiseChunk via
+    // Beardifier.forStructuresInChunk; we build it in the chunk-status task where
+    // the dependency grid is available, before the memoized NoiseChunk is created
+    // at BIOMES). nullptr = Beardifier.EMPTY; m_structureBeardifierBuilt keeps
+    // the empty result memoized too.
+    levelgen::Beardifier* m_structureBeardifier = nullptr;
+    bool m_structureBeardifierBuilt = false;
 
 public:
     // Convert Y to section index
@@ -192,6 +202,24 @@ public:
             delete m_noiseChunk;
             m_noiseChunk = nullptr;
         }
+        if (m_structureBeardifier != nullptr) {
+            delete m_structureBeardifier;
+            m_structureBeardifier = nullptr;
+        }
+    }
+
+    /**
+     * Per-chunk structure Beardifier (see member comment). The returned
+     * pointer may be nullptr even after building (= Beardifier.EMPTY).
+     */
+    levelgen::Beardifier* structureBeardifier() const { return m_structureBeardifier; }
+    bool structureBeardifierBuilt() const { return m_structureBeardifierBuilt; }
+    void setStructureBeardifier(levelgen::Beardifier* beardifier) {
+        if (m_structureBeardifier != nullptr && m_structureBeardifier != beardifier) {
+            delete m_structureBeardifier;
+        }
+        m_structureBeardifier = beardifier;
+        m_structureBeardifierBuilt = true;
     }
 
     // IChunk interface implementation
@@ -328,6 +356,23 @@ public:
         }
 
         return oldState;
+    }
+
+    // Reference: ChunkAccess.setBlockEntityNbt (pending tags during
+    // generation). The payload is the CANONICAL serialized E-line string
+    // (FORMAT.md); a new write at the same position replaces the old tag.
+    void setBlockEntityNbt(const core::BlockPos& pos, std::string canonicalNbt) override {
+        m_blockEntityNbts[std::make_tuple(pos.getY(), pos.getZ(), pos.getX())] =
+            std::move(canonicalNbt);
+    }
+
+    void removeBlockEntity(const core::BlockPos& pos) override {
+        m_blockEntityNbts.erase(std::make_tuple(pos.getY(), pos.getZ(), pos.getX()));
+    }
+
+    const std::map<std::tuple<int, int, int>, std::string>*
+    getBlockEntityNbts() const override {
+        return &m_blockEntityNbts;
     }
 
     /**
@@ -509,12 +554,24 @@ public:
         m_structureStarts[structureName] = start;
     }
 
+    levelgen::structure::StructureStartData* getMutableStartForStructure(
+        const std::string& structureName
+    ) override {
+        auto it = m_structureStarts.find(structureName);
+        return it != m_structureStarts.end() ? &it->second : nullptr;
+    }
+
     const levelgen::structure::StructureReferenceMap& getAllStructureReferences() const override {
         return m_structureReferences;
     }
 
     void addReferenceForStructure(const std::string& structureName, int64_t reference) override {
-        m_structureReferences[structureName].insert(reference);
+        // Insertion order preserved (feeds fastutilLongSetOrder); Java's
+        // LongOpenHashSet.add is a no-op for duplicates.
+        auto& references = m_structureReferences[structureName];
+        if (std::find(references.begin(), references.end(), reference) == references.end()) {
+            references.push_back(reference);
+        }
     }
 
     //=========================================================================

@@ -1,0 +1,236 @@
+{
+  "chunks_compared": 25,
+  "total_mismatches": 142019,
+  "by_class": {
+    "wrong-block": 142019
+  },
+  "by_type": [
+    {
+      "class": "wrong-block",
+      "type": "minecraft:cave_air",
+      "count": 98852
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:netherrack",
+      "count": 29880
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:lava",
+      "count": 13263
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:crimson_nylium",
+      "count": 24
+    }
+  ],
+  "samples": {
+    "wrong-block|minecraft:netherrack": [
+      "chunk(-2, -2) local(10,40,5) world(-22,40,-27) java=minecraft:netherrack cpp=minecraft:cave_air",
+      "chunk(-2, -2) local(13,39,6) world(-19,39,-26) java=minecraft:netherrack cpp=minecraft:cave_air",
+      "chunk(-2, -2) local(10,35,11) world(-22,35,-21) java=minecraft:netherrack cpp=minecraft:cave_air",
+      "chunk(-2, -2) local(14,44,1) world(-18,44,-31) java=minecraft:netherrack cpp=minecraft:cave_air",
+      "chunk(-2, -2) local(13,91,7) world(-19,91,-25) java=minecraft:netherrack cpp=minecraft:cave_air"
+    ],
+    "wrong-block|minecraft:cave_air": [
+      "chunk(-2, -2) local(3,112,8) world(-29,112,-24) java=minecraft:cave_air cpp=minecraft:netherrack",
+      "chunk(-2, -2) local(15,111,3) world(-17,111,-29) java=minecraft:cave_air cpp=minecraft:netherrack",
+      "chunk(-2, -2) local(6,112,9) world(-26,112,-23) java=minecraft:cave_air cpp=minecraft:netherrack",
+      "chunk(-2, -2) local(0,118,13) world(-32,118,-19) java=minecraft:cave_air cpp=minecraft:netherrack",
+      "chunk(-2, -2) local(1,111,4) world(-31,111,-28) java=minecraft:cave_air cpp=minecraft:netherrack"
+    ],
+    "wrong-block|minecraft:lava": [
+      "chunk(-2, -1) local(15,27,9) world(-17,27,-7) java=minecraft:lava[level=0] cpp=minecraft:netherrack",
+      "chunk(-2, -1) local(15,27,11) world(-17,27,-5) java=minecraft:lava[level=0] cpp=minecraft:netherrack",
+      "chunk(-2, -1) local(15,26,3) world(-17,26,-13) java=minecraft:lava[level=0] cpp=minecraft:netherrack",
+      "chunk(-2, -1) local(15,21,9) world(-17,21,-7) java=minecraft:lava[level=0] cpp=minecraft:netherrack",
+      "chunk(-2, -1) local(15,29,4) world(-17,29,-12) java=minecraft:lava[level=0] cpp=minecraft:netherrack"
+    ],
+    "wrong-block|minecraft:crimson_nylium": [
+      "chunk(-2, 2) local(5,82,13) world(-27,82,45) java=minecraft:crimson_nylium cpp=minecraft:cave_air",
+      "chunk(-2, 2) local(5,82,15) world(-27,82,47) java=minecraft:crimson_nylium cpp=minecraft:cave_air",
+      "chunk(-2, 2) local(7,82,13) world(-25,82,45) java=minecraft:crimson_nylium cpp=minecraft:cave_air",
+      "chunk(-2, 2) local(3,82,10) world(-29,82,42) java=minecraft:crimson_nylium cpp=minecraft:cave_air",
+      "chunk(-2, 2) local(3,82,12) world(-29,82,44) java=minecraft:crimson_nylium cpp=minecraft:cave_air"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        1,
+        0
+      ],
+      "count": 13950
+    },
+    {
+      "chunk": [
+        0,
+        0
+      ],
+      "count": 13179
+    },
+    {
+      "chunk": [
+        2,
+        -2
+      ],
+      "count": 12504
+    },
+    {
+      "chunk": [
+        2,
+        -1
+      ],
+      "count": 10228
+    },
+    {
+      "chunk": [
+        2,
+        0
+      ],
+      "count": 8843
+    },
+    {
+      "chunk": [
+        -1,
+        -1
+      ],
+      "count": 8718
+    },
+    {
+      "chunk": [
+        0,
+        -1
+      ],
+      "count": 7466
+    },
+    {
+      "chunk": [
+        0,
+        -2
+      ],
+      "count": 6439
+    },
+    {
+      "chunk": [
+        -1,
+        0
+      ],
+      "count": 6309
+    },
+    {
+      "chunk": [
+        1,
+        -2
+      ],
+      "count": 5296
+    },
+    {
+      "chunk": [
+        0,
+        1
+      ],
+      "count": 5229
+    },
+    {
+      "chunk": [
+        -1,
+        1
+      ],
+      "count": 4991
+    },
+    {
+      "chunk": [
+        1,
+        -1
+      ],
+      "count": 4908
+    },
+    {
+      "chunk": [
+        1,
+        1
+      ],
+      "count": 4842
+    },
+    {
+      "chunk": [
+        -1,
+        -2
+      ],
+      "count": 4022
+    },
+    {
+      "chunk": [
+        0,
+        2
+      ],
+      "count": 3687
+    },
+    {
+      "chunk": [
+        -1,
+        2
+      ],
+      "count": 3467
+    },
+    {
+      "chunk": [
+        -2,
+        1
+      ],
+      "count": 3439
+    },
+    {
+      "chunk": [
+        -2,
+        2
+      ],
+      "count": 3247
+    },
+    {
+      "chunk": [
+        2,
+        2
+      ],
+      "count": 3039
+    },
+    {
+      "chunk": [
+        -2,
+        0
+      ],
+      "count": 2463
+    },
+    {
+      "chunk": [
+        -2,
+        -2
+      ],
+      "count": 2215
+    },
+    {
+      "chunk": [
+        -2,
+        -1
+      ],
+      "count": 1877
+    },
+    {
+      "chunk": [
+        2,
+        1
+      ],
+      "count": 1039
+    },
+    {
+      "chunk": [
+        1,
+        2
+      ],
+      "count": 622
+    }
+  ]
+}

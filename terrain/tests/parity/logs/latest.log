@@ -1,0 +1,78 @@
+[19:47:56] [main/WARN]: Failed retrieving info for group processor
+java.lang.NoSuchMethodError: 'oshi.hardware.CentralProcessor oshi.hardware.HardwareAbstractionLayer.getProcessor()'
+	at net.minecraft.SystemReport.lambda$putHardware$0(SystemReport.java:87)
+	at net.minecraft.SystemReport.ignoreErrors(SystemReport.java:95)
+	at net.minecraft.SystemReport.putHardware(SystemReport.java:87)
+	at net.minecraft.SystemReport.lambda$new$2(SystemReport.java:59)
+	at net.minecraft.SystemReport.ignoreErrors(SystemReport.java:95)
+	at net.minecraft.SystemReport.<init>(SystemReport.java:59)
+	at net.minecraft.CrashReport.<init>(CrashReport.java:35)
+	at net.minecraft.CrashReport.preload(CrashReport.java:233)
+	at MinecraftAsyncChunkTest.runFullPipelineTest(MinecraftAsyncChunkTest.java:455)
+	at MinecraftAsyncChunkTest.main(MinecraftAsyncChunkTest.java:433)
+[19:47:56] [main/WARN]: Failed retrieving info for group graphics
+java.lang.NoSuchMethodError: 'java.util.List oshi.hardware.HardwareAbstractionLayer.getGraphicsCards()'
+	at net.minecraft.SystemReport.lambda$putHardware$1(SystemReport.java:88)
+	at net.minecraft.SystemReport.ignoreErrors(SystemReport.java:95)
+	at net.minecraft.SystemReport.putHardware(SystemReport.java:88)
+	at net.minecraft.SystemReport.lambda$new$2(SystemReport.java:59)
+	at net.minecraft.SystemReport.ignoreErrors(SystemReport.java:95)
+	at net.minecraft.SystemReport.<init>(SystemReport.java:59)
+	at net.minecraft.CrashReport.<init>(CrashReport.java:35)
+	at net.minecraft.CrashReport.preload(CrashReport.java:233)
+	at MinecraftAsyncChunkTest.runFullPipelineTest(MinecraftAsyncChunkTest.java:455)
+	at MinecraftAsyncChunkTest.main(MinecraftAsyncChunkTest.java:433)
+[19:47:56] [main/WARN]: Failed retrieving info for group memory
+java.lang.NoSuchMethodError: 'oshi.hardware.GlobalMemory oshi.hardware.HardwareAbstractionLayer.getMemory()'
+	at net.minecraft.SystemReport.lambda$putHardware$2(SystemReport.java:89)
+	at net.minecraft.SystemReport.ignoreErrors(SystemReport.java:95)
+	at net.minecraft.SystemReport.putHardware(SystemReport.java:89)
+	at net.minecraft.SystemReport.lambda$new$2(SystemReport.java:59)
+	at net.minecraft.SystemReport.ignoreErrors(SystemReport.java:95)
+	at net.minecraft.SystemReport.<init>(SystemReport.java:59)
+	at net.minecraft.CrashReport.<init>(CrashReport.java:35)
+	at net.minecraft.CrashReport.preload(CrashReport.java:233)
+	at MinecraftAsyncChunkTest.runFullPipelineTest(MinecraftAsyncChunkTest.java:455)
+	at MinecraftAsyncChunkTest.main(MinecraftAsyncChunkTest.java:433)
+[19:47:58] [main/INFO]: [STDOUT]:   Bootstrap complete.
+[19:47:58] [main/INFO]: [STDOUT]:   Phase config: 0-7 (EMPTY->FEATURES, with structures)
+[19:47:58] [main/INFO]: [STDOUT]:   Target status: minecraft:features
+[19:47:58] [main/INFO]: [STDOUT]:   Generate structures: true
+[19:47:58] [main/INFO]: [STDOUT]: Step 2: Creating temporary world storage...
+[19:47:58] [main/INFO]: [STDOUT]:   Temp path: /var/folders/xk/wgb7hy451d94jc5x2fy114_00000gn/T/mc_async_test_6699704705284892292
+[19:47:58] [main/INFO]: [STDOUT]:   Storage created.
+[19:47:58] [main/INFO]: [STDOUT]: Step 3: Creating pack repository...
+[19:47:58] [main/INFO]: [STDOUT]:   Packs loaded: [minecart_improvements, redstone_experiments, trade_rebalance, vanilla]
+[19:47:58] [main/INFO]: [STDOUT]: Step 4: Loading world data via WorldLoader...
+[19:47:58] [main/INFO]: Loaded 1470 recipes
+[19:47:58] [main/INFO]: Loaded 1584 advancements
+[19:47:58] [main/INFO]: [STDOUT]:   WorldStem created successfully.
+[19:47:58] [main/INFO]: [STDOUT]: Step 6: Creating HeadlessParityServer (GameTestServer pattern, no network bind)...
+[19:47:58] [main/INFO]: [STDOUT]:   Launching server via MinecraftServer.spin()...
+[19:47:58] [main/INFO]: [STDOUT]:   Waiting for server to initialize...
+[19:47:59] [main/INFO]: [STDOUT]:   Server is ready!
+[19:47:59] [main/INFO]: [STDOUT]: Step 7: Getting ServerLevel and ServerChunkCache...
+[19:47:59] [main/INFO]: [STDOUT]:   Dimension: overworld (y -64..320)
+[19:47:59] [main/INFO]: [STDOUT]:   Got ServerChunkCache: net.minecraft.server.level.ServerChunkCache
+[19:47:59] [main/INFO]: [STDOUT]:   Spawn suggestion: BlockPos{x=103, y=0, z=-28}
+[19:47:59] [main/INFO]: [STDOUT]:   Shared spawn: BlockPos{x=0, y=0, z=0}
+[19:47:59] [main/INFO]: [STDOUT]: Step 8: Requesting 25 chunks through ServerChunkCache.getChunk()...
+[19:47:59] [main/INFO]: [STDOUT]:   This goes through: DistanceManager -> ChunkMap -> ChunkTaskDispatcher -> etc.
+[19:48:01] [main/INFO]: [STDOUT]: All chunks generated!
+[19:48:01] [Server thread/WARN]: Can't keep up! Is the server overloaded? Running 2740ms or 54 ticks behind
+[19:48:01] [main/INFO]: [STDOUT]: Step 9: Writing output...
+[19:48:02] [main/INFO]: [STDOUT]: === Java Minecraft FULL PIPELINE Test Complete ===
+[19:48:02] [main/INFO]: [STDOUT]: Chunks generated: 25
+[19:48:02] [main/INFO]: [STDOUT]: Output: /Users/obey/Desktop/MyVoxelGame/terrain/tests/parity/results/java_s12345_r2_c-11_40_p0-7_be.txt
+[19:48:02] [main/INFO]: [STDOUT]: Step 11: Shutting down server...
+[19:48:02] [Server thread/INFO]: Stopping server
+[19:48:02] [Server thread/INFO]: Saving players
+[19:48:02] [Server thread/INFO]: Saving worlds
+[19:48:02] [Server thread/INFO]: Saving chunks for level 'ServerLevel[test_world]'/minecraft:overworld
+[19:48:02] [Server thread/INFO]: Saving chunks for level 'ServerLevel[test_world]'/minecraft:the_nether
+[19:48:02] [Server thread/INFO]: Saving chunks for level 'ServerLevel[test_world]'/minecraft:the_end
+[19:48:02] [Server thread/INFO]: ThreadedAnvilChunkStorage (test_world): All chunks are saved
+[19:48:02] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[19:48:02] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[19:48:02] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[19:48:02] [main/INFO]: [STDOUT]: Cleaning up temp directory...

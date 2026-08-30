@@ -6,6 +6,7 @@
 #include "common/core/Assert.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/network/packets/S2CPackets.hpp"  // Ensure packet implementations are available
+#include "common/network/packets/HandshakeC2S.hpp"  // Network::kProtocolVersion
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/RemotePlayerManager.hpp"
 #include "platform/GameDirectory.hpp"
@@ -67,6 +68,14 @@ namespace Client {
         // it carries the extra length VarInt. The packet itself arrived
         // uncompressed, because the server enables its encoder only after
         // writing it.
+        // Echo the challenge straight back, on the I/O thread. Nothing else:
+        // no game state, no stats, no ping display — see SendKeepAliveResponse.
+        m_packetRegistry.RegisterHandler(PacketId::KeepAliveS2C,
+            [this](const std::vector<uint8_t>& p) {
+                Network::PacketReader reader(p);
+                SendKeepAliveResponse(reader.ReadLong());
+            });
+
         m_packetRegistry.RegisterHandler(PacketId::SetCompression,
             [this](const std::vector<uint8_t>& p) {
                 Network::PacketReader reader(p);
@@ -136,7 +145,17 @@ namespace Client {
         if (m_phase != ConnectionPhase::PLAY) {
             return false;
         }
-        return packetId != static_cast<uint8_t>(Network::PacketId::Disconnect);
+        // KeepAliveS2C answers inline on the I/O thread, mirroring MC's
+        // ClientCommonPacketListenerImpl.handleKeepAlive:145, which carries no
+        // ensureRunningOnSameThread and replies straight off the Netty thread.
+        //
+        // This is the client half of what makes a 15 s server-side timeout
+        // safe: if the reply had to wait for the once-per-frame main-thread
+        // drain, a client whose frames are seconds long — precisely what
+        // happens when the shared integrated-server process is stalled — could
+        // not answer in time and would be kicked from its own world.
+        return packetId != static_cast<uint8_t>(Network::PacketId::Disconnect)
+            && packetId != static_cast<uint8_t>(Network::PacketId::KeepAliveS2C);
     }
 
     void ClientConnection::OnConnected() {
@@ -190,7 +209,7 @@ namespace Client {
 
         // Send handshake packet
         Network::PacketBuffer buffer;
-        buffer.WriteVarInt(754); // Protocol version (1.16.5)
+        buffer.WriteVarInt(Network::kProtocolVersion);
         buffer.WriteString(serverHost); // Server address
         buffer.WriteShort(serverPort); // Server port
         buffer.WriteVarInt(2); // Next state: LOGIN
@@ -259,10 +278,12 @@ namespace Client {
         SendPacket(static_cast<uint8_t>(Network::PacketId::ClientConfigC2S), buffer.GetData());
     }
 
+    // MAY RUN ON THE NETWORK I/O THREAD (see ShouldDeferPacket). Safe as
+    // written because SendPacket is mutex-guarded and posts to the strand —
+    // but do NOT add anything here that reads game state, updates a ping
+    // display, or writes stats. Keep it to echoing the id back, which is all
+    // MC's handleKeepAlive does.
     void ClientConnection::SendKeepAliveResponse(uint64_t id) {
-        Log::Debug("[Client] SENDING KeepAliveC2S (ID: 0x%02X) - ID: %llu",
-                   static_cast<uint8_t>(Network::PacketId::KeepAliveC2S), id);
-        
         Network::PacketBuffer buffer;
         buffer.WriteLong(id);
         SendPacket(static_cast<uint8_t>(Network::PacketId::KeepAliveC2S), buffer.GetData());
@@ -552,6 +573,21 @@ namespace Client {
                 return std::make_unique<TakeItemEntityS2CPacketImpl>(std::move(data));
             }
 
+            case PacketId::XpOrbSpawnS2C: {
+                auto data = Serialization::DeserializeXpOrbSpawnS2C(payload);
+                return std::make_unique<XpOrbSpawnS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::XpOrbMoveS2C: {
+                auto data = Serialization::DeserializeXpOrbMoveS2C(payload);
+                return std::make_unique<XpOrbMoveS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::SetExperienceS2C: {
+                auto data = Serialization::DeserializeSetExperienceS2C(payload);
+                return std::make_unique<SetExperienceS2CPacketImpl>(std::move(data));
+            }
+
             case PacketId::AddEntityS2C: {
                 auto data = Serialization::DeserializeAddEntityS2C(payload);
                 return std::make_unique<AddEntityS2CPacketImpl>(std::move(data));
@@ -565,6 +601,11 @@ namespace Client {
             case PacketId::EntityPositionSyncS2C: {
                 auto data = Serialization::DeserializeEntityPositionSyncS2C(payload);
                 return std::make_unique<EntityPositionSyncS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::EntityPositionSyncBatchS2C: {
+                auto data = Serialization::DeserializeEntityPositionSyncBatchS2C(payload);
+                return std::make_unique<EntityPositionSyncBatchS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::SetEntityMotionS2C: {
@@ -594,6 +635,15 @@ namespace Client {
             case PacketId::TickingStepS2C: {
                 auto data = Serialization::DeserializeTickingStepS2C(payload);
                 return std::make_unique<TickingStepS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::ChangeDimensionS2C: {
+                auto data = Serialization::DeserializeChangeDimensionS2C(payload);
+                return std::make_unique<ChangeDimensionS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::ExplodeS2C: {
+                auto data = Serialization::DeserializeExplodeS2C(payload);
+                return std::make_unique<ExplodeS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::Disconnect: {
@@ -648,11 +698,14 @@ namespace Client {
                 return std::make_unique<Network::Packets::BlockEntityActionS2CPacketImpl>(data);
             }
             
-            case PacketId::KeepAliveS2C: {
-                PacketReader reader(payload);
-                uint64_t id = reader.ReadLong();
-                return std::make_unique<KeepAliveS2CPacketImpl>(id);
-            }
+            // KeepAliveS2C deliberately absent. DecodePacket returning a typed
+            // packet ALWAYS queues it for the main thread — ShouldDeferPacket
+            // is only consulted when decode returns null — so leaving a case
+            // here would keep the reply behind the once-per-frame drain no
+            // matter what ShouldDeferPacket says. The raw registry handler
+            // installed in the constructor answers it on the I/O thread
+            // instead, which is what MC does
+            // (ClientCommonPacketListenerImpl.handleKeepAlive:145).
 
             case PacketId::ChunkBatchStartS2C: {
                 return std::make_unique<ChunkBatchStartS2CPacketImpl>();

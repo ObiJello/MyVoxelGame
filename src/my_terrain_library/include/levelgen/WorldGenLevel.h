@@ -117,6 +117,13 @@ public:
     virtual int getMaxY() const = 0;
 
     /**
+     * Whether the dimension has skylight (overworld true; nether/end false).
+     * Worldgen brightness checks (e.g. MushroomBlock.canSurvive light<13)
+     * resolve to 15 with skylight and 0 without during generation.
+     */
+    virtual bool hasSkyLight() const { return true; }
+
+    /**
      * Check if position is outside build height
      * Reference: LevelHeightAccessor.isOutsideBuildHeight(BlockPos)
      */

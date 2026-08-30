@@ -1,10 +1,21 @@
 // File: src/server/IntegratedServer.cpp
 #include "IntegratedServer.hpp"
+#include "server/entity/FallingBlockStore.hpp"
+#include <cctype>
+#include "common/entity/FallingBlockEntity.hpp"
+#include "common/entity/PrimedTnt.hpp"
+#include "common/core/SaveVersion.hpp"
+#include "server/world/storage/anvil/WorldFolder.hpp"
+#include "server/world/storage/anvil/PlayerDataStore.hpp"
 #include "common/entity/GeneratedItemAttributes.hpp"
 #include "commands/TeleportCommand.hpp"
 #include "commands/KickCommand.hpp"
 #include "commands/GameModeCommand.hpp"
 #include "commands/KillCommand.hpp"
+#include "commands/EntityStatsCommand.hpp"
+#include "commands/ShapeCommand.hpp"
+
+#include <deque>
 #include "commands/SummonCommand.hpp"
 #include "commands/SheepEatCommand.hpp"
 #include "commands/TimeCommand.hpp"
@@ -19,18 +30,40 @@
 #include "player/ServerPlayer.hpp"
 #include "level/PlayerSpawnFinder.hpp"
 #include "world/ticketing/ChunkTicketManager.hpp"
+#include "common/core/Assert.hpp"   // ASSERT_SERVER_THREAD in GetOrCreateLevel
+#include "level/ServerLevel.hpp"
+#include "level/PortalTravel.hpp"
 #include "world/status/ChunkStatusManager.hpp"
 #include "world/tracking/SectionChangeAccumulator.hpp"
 #include "world/tracking/ChunkDeltaBroadcaster.hpp"
 #include "entity/ItemEntityManager.hpp"
+#include "entity/ExperienceOrbManager.hpp"
 #include "entity/MobManager.hpp"
+#include "entity/LocalMobCapCalculator.hpp"
 #include "entity/ServerLevelBridge.hpp"
 #include "entity/ServerEntityTracker.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
+#include "common/entity/projectile/Arrow.hpp"
+#include "common/entity/projectile/ThrowableProjectile.hpp"
+#include "common/entity/projectile/HurtingProjectile.hpp"
+#include "common/entity/projectile/ShulkerBullet.hpp"
+#include "common/entity/projectile/LlamaSpit.hpp"
+#include "common/entity/projectile/ThrownTrident.hpp"
+#include "common/entity/projectile/EvokerFangs.hpp"
+#include "common/entity/projectile/AreaEffectCloud.hpp"
+#include "common/entity/projectile/EyeOfEnder.hpp"
+#include "common/entity/mobs/Slime.hpp"
+#include "common/entity/mobs/Fish.hpp"
+#include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/world/spawn/NaturalSpawner.hpp"
+#include "common/world/spawn/GeneratedMobSpawns.hpp"
+#include "common/world/spawn/SpawnPlacements.hpp"
+#include "common/world/spawn/PotentialCalculator.hpp"
 #include "common/physics/Physics.hpp"
+#include "common/physics/RayCast.hpp"
+#include <limits>
 #include "common/core/Mth.hpp"
 #include "common/world/pathfinder/PathTypeTable.hpp"
 #include "common/world/chunk/Heightmap.hpp"
@@ -42,6 +75,7 @@
 #include "common/core/Log.hpp"
 #include "common/core/ThreadPriority.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "common/core/TickParallel.hpp"
 #include <future>
 #include "common/world/level/World.hpp"
 #include "client/entity/Player.hpp"
@@ -58,6 +92,20 @@
 #include <thread>
 
 namespace Server {
+
+    namespace {
+        // MC uses String.equalsIgnoreCase for the singleplayer-owner test.
+        // ASCII-only on purpose: pass unsigned char to tolower — a negative
+        // signed char is undefined there.
+        bool EqualsIgnoreCaseAscii(const std::string& a, const std::string& b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                    std::tolower(static_cast<unsigned char>(b[i]))) return false;
+            }
+            return true;
+        }
+    } // namespace
 
     // Global instance
     std::unique_ptr<IntegratedServer> g_integratedServer = nullptr;
@@ -78,6 +126,129 @@ namespace Server {
         Log::Info("IntegratedServer destroyed");
     }
 
+    // ========================================================================
+    // DIMENSIONS
+    // ========================================================================
+
+    ServerLevel* IntegratedServer::GetLevel(Game::DimensionId dimension) const {
+        return m_levels[static_cast<size_t>(Game::DimensionSlot(dimension))].get();
+    }
+
+    ServerLevel& IntegratedServer::Overworld() const {
+        // Not a null check: the overworld is built in Initialize and every
+        // caller runs after it. A crash here means Initialize failed and the
+        // server should never have started, which Start() already refuses.
+        return *m_levels[static_cast<size_t>(
+            Game::DimensionSlot(Game::DimensionId::Overworld))];
+    }
+
+    ServerLevel* IntegratedServer::GetOrCreateLevel(Game::DimensionId dimension) {
+        const size_t slot = static_cast<size_t>(Game::DimensionSlot(dimension));
+        if (m_levels[slot]) return m_levels[slot].get();
+
+        ASSERT_SERVER_THREAD();
+
+        ServerLevelConfig cfg;
+        cfg.dimension          = dimension;
+        cfg.readOnly           = m_config.readOnlyWorld;
+        cfg.seed               = Overworld().World()->GetGenerationSeed();
+        cfg.generateStructures = true;
+
+        // MC's save layout: the overworld at the world root, the others in a
+        // sub-folder beside it. An empty root means this world has no Anvil
+        // storage at all, in which case the sub-folder would be meaningless —
+        // keep it empty so the level is generate-only rather than writing to a
+        // stray relative path.
+        const auto withSubdir = [dimension](std::string base) {
+            const std::string_view subdir = Game::DimensionSaveSubdir(dimension);
+            if (base.empty() || subdir.empty()) return base;
+            if (base.back() != '/' && base.back() != '\\') base += '/';
+            base += subdir;
+            return base;
+        };
+
+        cfg.worldPath = withSubdir(m_config.minecraftWorldPath);   // imported, read-only
+        cfg.savePath  = withSubdir(m_config.savePath);             // ours, writable
+
+        // A dimension nobody is standing in still holds a resident chunk cache.
+        // Sizing the Nether and the End like the Overworld would triple the
+        // engine's chunk memory for two worlds a session may visit for a
+        // minute; 1024 chunks is comfortably more than a portal's surroundings.
+        cfg.maxLoadedChunks = (dimension == Game::DimensionId::Overworld) ? 5120 : 2048;
+
+        auto level = std::make_unique<ServerLevel>(cfg, m_sessionManager.get(), this);
+        if (!level->InitializeChunkProvider()) {
+            Log::Error("[IntegratedServer] Could not build a chunk provider for '%s' — "
+                       "that dimension is unreachable this session",
+                       std::string(Game::DimensionName(dimension)).c_str());
+            return nullptr;
+        }
+
+        Log::Info("[IntegratedServer] Dimension '%s' is now live",
+                  std::string(Game::DimensionName(dimension)).c_str());
+        m_levels[slot] = std::move(level);
+        return m_levels[slot].get();
+    }
+
+    ServerLevel& IntegratedServer::LevelOf(const PlayerSession& session) {
+        ServerLevel* level = GetLevel(Game::DimensionFromRaw(session.GetDimensionId()));
+        // A session whose dimension has been torn down (or was never built)
+        // falls back to the overworld rather than dereferencing null. That is
+        // a bug upstream, but stranding the player in a world that exists
+        // beats crashing the server thread.
+        return level ? *level : Overworld();
+    }
+
+    Game::World* IntegratedServer::GetWorld() const {
+        ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
+        return level ? level->World() : nullptr;
+    }
+
+    SectionChangeAccumulator* IntegratedServer::GetChangeAccumulator() const {
+        ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
+        return level ? level->Changes() : nullptr;
+    }
+
+    SectionChangeAccumulator* IntegratedServer::GetChangeAccumulatorFor(
+            const Game::World& world) const {
+        // Resolved from the World's own dimension rather than by pointer
+        // identity so a caller holding a reference (World::SetBlock) needs no
+        // back-pointer. The identity check afterwards is what keeps the
+        // CLIENT's predicted world — which is also a Game::World, and also
+        // claims a dimension — from accumulating into the server's set.
+        ServerLevel* level = GetLevel(world.GetDimension());
+        if (!level || level->World() != &world) return nullptr;
+        return level->Changes();
+    }
+
+    ItemEntityManager* IntegratedServer::GetItemEntities() const {
+        ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
+        return level ? level->Items() : nullptr;
+    }
+
+    ExperienceOrbManager* IntegratedServer::GetXpOrbs() const {
+        ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
+        return level ? level->Orbs() : nullptr;
+    }
+
+    ChunkStatusManager* IntegratedServer::GetStatusManager() const {
+        ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
+        return level ? level->Status() : nullptr;
+    }
+
+    MobManager* IntegratedServer::GetMobs() const {
+        ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
+        return level ? level->Mobs() : nullptr;
+    }
+
+    size_t IntegratedServer::GetPendingChunkLoadCount() const {
+        size_t total = 0;
+        for (const auto& level : m_levels) {
+            if (level) total += level->pendingChunkLoads.size();
+        }
+        return total;
+    }
+
     bool IntegratedServer::Initialize() {
         Log::Info("IntegratedServer::Initialize - Creating world on server thread");
 
@@ -85,34 +256,115 @@ namespace Server {
         // A dedicated server would set this from its config file.
         Log::Info("Server view distance cap: %d chunks", m_config.serverViewDistance);
 
-        // Create the world instance owned by the server
-        m_world = std::make_unique<Game::World>();
-        
-        // Set Minecraft world path if provided in config.
-        // Read-only MUST be set before World::Initialize() — that is where the
-        // chunk provider (and its saver, or lack of one) gets built.
-        m_world->SetReadOnly(m_config.readOnlyWorld);
+        // The session system comes FIRST now, because a ServerLevel needs the
+        // PlayerSessionManager to build its ServerLevelBridge. Nothing in
+        // InitializeSessionSystem touches a level any more — the pieces that
+        // did (ticket manager, accumulator, mob system) moved into
+        // ServerLevel, which is exactly why the order could be flipped.
+        InitializeSessionSystem();
+
+        // The overworld. The Nether and the End are built on first visit; see
+        // GetOrCreateLevel.
+
+        // Lay down the world folder before any level exists, so the very first
+        // chunk save has somewhere to go and Minecraft can list the world even
+        // if the session ends before a single chunk is written. Idempotent for
+        // an existing world apart from rewriting level.dat, which is what
+        // vanilla does on every autosave anyway.
+        if (!m_config.savePath.empty() && !m_config.readOnlyWorld) {
+            std::string reason;
+            if (auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason)) {
+                // Take session.lock BEFORE writing anything. Two processes
+                // interleaving sector allocations in one region file corrupt
+                // it in a way nothing downstream can recover from, so a world
+                // already open elsewhere is refused rather than shared.
+                // The folder is normally created by the Create World screen,
+                // but a worlds.json-only entry (pre-folder worlds, dev
+                // harness) reaches here with nothing on disk — and the lock
+                // below cannot be created inside a folder that does not exist,
+                // which silently turned saving off for the whole session.
+                {
+                    std::string dirError;
+                    if (!Game::Anvil::EnsureDirectories(*root, dirError)) {
+                        Log::Error("Could not create the world folder: %s", dirError.c_str());
+                    }
+                }
+                std::string lockError;
+                m_sessionLock = Game::Anvil::SessionLock::Acquire(*root, lockError);
+                if (!m_sessionLock) {
+                    // Continue WITHOUT saving rather than refusing to start.
+                    // Failing startup here would drop the player back out with
+                    // no explanation; this way they get a playable session and
+                    // the world another process owns is left untouched.
+                    Log::Error("Cannot save this world: %s", lockError.c_str());
+                    Log::Error("Playing without saving — close the other window and rejoin to keep changes.");
+                    m_config.savePath.clear();
+                } else {
+                    Game::Anvil::LevelDatData meta;
+                    meta.levelName       = m_config.worldDisplayName;
+                    meta.gameType        = m_config.defaultGameMode;
+                    meta.dayTime         = m_config.initialDayTime;
+                    meta.doDaylightCycle = m_config.doDaylightCycle;
+                    // The SEED matters more than anything else here:
+                    // Minecraft generates the chunks beyond ours with it, so a
+                    // wrong seed means terrain that does not line up at the
+                    // border of what we saved. Rewritten on autosave and
+                    // shutdown once spawn and time are settled too.
+                    meta.seed            = m_config.worldSeed;
+                    std::string error;
+                    if (!Game::Anvil::CreateWorldFolder(*root, meta, Game::Save::DataVersion(), error)) {
+                        Log::Error("Could not prepare the world folder: %s", error.c_str());
+                    }
+                }
+            } else {
+                Log::Error("Refusing to use save path '%s': %s",
+                           m_config.savePath.c_str(), reason.c_str());
+                m_config.savePath.clear();
+            }
+        }
+
+        {
+            ServerLevelConfig cfg;
+            cfg.dimension          = Game::DimensionId::Overworld;
+            cfg.readOnly           = m_config.readOnlyWorld;
+            cfg.worldPath          = m_config.minecraftWorldPath;
+            cfg.savePath           = m_config.savePath;   // overworld sits at the world root
+            cfg.generateStructures = true;
+            cfg.maxLoadedChunks    = 5120;
+            // Seed and world-type customization are pushed in by PlatformMain
+            // AFTER construction via the World accessors, as they always were;
+            // ServerLevelConfig carries them only for the dimensions this
+            // class creates on its own.
+            m_levels[static_cast<size_t>(
+                Game::DimensionSlot(Game::DimensionId::Overworld))] =
+                std::make_unique<ServerLevel>(cfg, m_sessionManager.get(), this);
+        }
+
         if (!m_config.minecraftWorldPath.empty()) {
-            m_world->SetMinecraftWorldPath(m_config.minecraftWorldPath);
             Log::Info("Server world configured with Minecraft world: %s%s",
                       m_config.minecraftWorldPath.c_str(),
                       m_config.readOnlyWorld ? " (read-only)" : "");
         }
-        
-        // Restore world time + gamerule from world metadata (worlds.json)
-        m_world->SetDayTime(m_config.initialDayTime);
-        m_world->SetDoDaylightCycle(m_config.doDaylightCycle);
+        if (!m_config.savePath.empty()) {
+            Log::Info("World persists to: %s", m_config.savePath.c_str());
+        }
 
-        // Initialize the world
-        m_world->Initialize();
+        // Restore world time + gamerule from world metadata (worlds.json).
+        // Overworld only: MC's day/night cycle is a property of the overworld
+        // and the other two dimensions have no sky.
+        Overworld().World()->SetDayTime(m_config.initialDayTime);
+        Overworld().World()->SetDoDaylightCycle(m_config.doDaylightCycle);
         Log::Info("Server world initialized successfully");
 
-        // Initialize the new session management system
-        InitializeSessionSystem();
+        // The ticket manager belongs to a level now, so the spawn tickets that
+        // used to be added inside InitializeSessionSystem are added here,
+        // where the overworld exists.
+        Overworld().Tickets()->AddSpawnTickets(Game::Math::ChunkPos(0, 0), 2);
+        m_sessionManager->SetLevelServices(Overworld().Tickets(), Overworld().Status());
 
         // Create ServerPlayer instance (PlayerSession will be created when player joins)
         glm::vec3 spawnPos(0.0f, 67.0f, 0.0f);
-        m_serverPlayer = std::make_unique<ServerPlayer>(1, "Player");
+        m_serverPlayer = std::make_unique<ServerPlayer>(1, Server::kDefaultPlayerName);
         m_serverPlayer->setPosition(glm::dvec3(spawnPos));
 
         // NOTE: PlayerSession is now created by PlayerSessionManager when player joins
@@ -131,7 +383,11 @@ namespace Server {
             return false;
         }
 
-        if (!m_world) {
+        // The overworld is the one level Initialize builds eagerly; if it is
+        // missing, Initialize did not run (or failed) and there is nothing to
+        // tick. The other two are built on first visit and their absence here
+        // is normal.
+        if (!GetLevel(Game::DimensionId::Overworld)) {
             Log::Error("Cannot start IntegratedServer without world");
             return false;
         }
@@ -155,6 +411,8 @@ namespace Server {
         KickCommand::Register(m_commandDispatcher);
         GameModeCommand::Register(m_commandDispatcher);
         KillCommand::Register(m_commandDispatcher);
+        EntityStatsCommand::Register(m_commandDispatcher);
+        ShapeCommand::Register(m_commandDispatcher);
         SummonCommand::Register(m_commandDispatcher);
         SheepEatCommand::Register(m_commandDispatcher);
         TimeCommand::Register(m_commandDispatcher);
@@ -205,10 +463,12 @@ namespace Server {
         // Signal the server thread to stop
         m_shouldStop.store(true);
 
-        // Tell the world to abort any long-running chunk loading loops
-        if (m_world) {
-            m_world->RequestStop();
-        }
+        // Tell EVERY world to abort any long-running chunk loading loops. A
+        // worker parked in the Nether's blocking getChunk is just as capable
+        // of holding up the join below as one parked in the Overworld's.
+        ForEachLevel([](ServerLevel& level) {
+            if (level.World()) level.World()->RequestStop();
+        });
 
         // IMPORTANT: Wait for server thread to finish BEFORE destroying resources.
         // World::RequestStop() signals the terrain library's abort flag, so blocking
@@ -259,6 +519,93 @@ namespace Server {
         Log::Info("IntegratedServer stopped");
     }
 
+    void IntegratedServer::AutoSave() {
+        ASSERT_SERVER_THREAD();
+        if (m_config.savePath.empty() || m_config.readOnlyWorld) return;
+
+        const auto started = std::chrono::steady_clock::now();
+
+        // Queue every dirty chunk in every dimension. Non-blocking: the
+        // storage thread drains it while the game keeps ticking, and the
+        // per-chunk cooldown inside AnvilChunkStorage caps how often any one
+        // chunk can be rewritten.
+        ForEachLevel([](ServerLevel& level) {
+            if (level.World()) level.World()->SaveAllChunks();
+            // Entities are NOT dirty-tracked: a mob walking changes a chunk's
+            // entity list without touching a block, so every occupied chunk is
+            // reconsidered. O(entities), not O(loaded chunks).
+            if (level.Entities()) level.Entities()->SaveAllLoaded();
+        });
+
+        SaveAllPlayers();
+        WriteLevelDat();
+
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        Log::Info("[Anvil] autosave queued in %lld ms", static_cast<long long>(ms));
+    }
+
+    void IntegratedServer::SavePlayerData(const ServerPlayer& player) {
+        if (m_config.savePath.empty() || m_config.readOnlyWorld) return;
+        std::string reason;
+        auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason);
+        if (!root) return;
+
+        std::string error;
+        if (!Game::Anvil::WritePlayerData(*root, player, Game::Save::DataVersion(), error)) {
+            Log::Error("Could not save player '%s': %s", player.getName().c_str(), error.c_str());
+        }
+    }
+
+    bool IntegratedServer::LoadPlayerData(ServerPlayer& player) {
+        if (m_config.savePath.empty()) return false;
+        std::string reason;
+        auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason);
+        if (!root) return false;
+
+        std::string error;
+        if (!Game::Anvil::ReadPlayerData(*root, player, error)) {
+            // A real read failure, not a first join. Say so rather than
+            // silently handing the player a fresh inventory.
+            if (!error.empty()) {
+                Log::Error("Could not load player '%s': %s", player.getName().c_str(), error.c_str());
+            }
+            return false;
+        }
+        return true;
+    }
+
+    void IntegratedServer::SaveAllPlayers() {
+        if (!m_sessionManager) return;
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            if (session && session->GetPlayer()) SavePlayerData(*session->GetPlayer());
+        }
+    }
+
+    void IntegratedServer::WriteLevelDat() {
+        if (m_config.savePath.empty() || m_config.readOnlyWorld) return;
+        if (!m_levels[0] || !m_levels[0]->World()) return;
+
+        std::string reason;
+        auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason);
+        if (!root) return;
+
+        Game::Anvil::LevelDatData meta;
+        meta.levelName       = m_config.worldDisplayName;
+        meta.gameType        = m_config.defaultGameMode;
+        meta.seed            = m_levels[0]->World()->GetGenerationSeed();
+        meta.dayTime         = m_levels[0]->World()->GetDayTime();
+        meta.doDaylightCycle = m_config.doDaylightCycle;
+        meta.spawnX          = static_cast<int>(std::floor(m_worldSpawn.x));
+        meta.spawnY          = static_cast<int>(std::floor(m_worldSpawn.y));
+        meta.spawnZ          = static_cast<int>(std::floor(m_worldSpawn.z));
+
+        std::string error;
+        if (!Game::Anvil::WriteLevelDat(*root, meta, Game::Save::DataVersion(), error)) {
+            Log::Error("Could not write level.dat: %s", error.c_str());
+        }
+    }
+
     void IntegratedServer::Shutdown() {
         Stop();
         
@@ -273,18 +620,37 @@ namespace Server {
         }
         
         // Clear state
-        m_pendingChunkLoads.clear();
+        ForEachLevel([](ServerLevel& level) { level.pendingChunkLoads.clear(); });
 
         // Note: CleanupSessionSystem() already called in Stop() before io_context destruction
 
-        // Shutdown and release the world
-        if (m_world) {
-            Log::Info("Shutting down server-owned world...");
-            m_world->SaveAllChunks();
-            m_world->Shutdown();
-            m_world.reset();
+        // Save every dimension, then destroy the levels.
+        //
+        // Only the SAVE is done here: ~ServerLevel already stops and shuts down
+        // its world (and tears the rest of the bundle down in reverse
+        // construction order), so calling Shutdown here as well would double it.
+        ForEachLevel([](ServerLevel& level) {
+            if (!level.World()) return;
+            Log::Info("Saving server-owned world '%s'...",
+                      std::string(Game::DimensionName(level.Dimension())).c_str());
+            level.World()->SaveAllChunks();
+            if (level.Entities()) level.Entities()->SaveAllLoaded();
+        });
+        // Rewrite level.dat now that the values it describes are settled. At
+        // Initialize the seed had not been pushed in yet and the world spawn
+        // had not been searched for, so the file written then carries
+        // placeholders. Vanilla rewrites it on every autosave and on shutdown
+        // for the same reason.
+        WriteLevelDat();
+
+        // Release the session lock LAST, once everything is durable — while it
+        // is held, no other process can be writing this world.
+        m_sessionLock.reset();
+
+        for (auto& level : m_levels) {
+            level.reset();
         }
-        
+
         Log::Info("IntegratedServer shutdown complete");
     }
 
@@ -358,11 +724,30 @@ namespace Server {
         Log::Info("IntegratedServer main loop started (Target: %d TPS, ThreadId: %zu)",
                   m_config.tickRate, std::hash<std::thread::id>{}(g_serverThreadId));
 
-        // Initialize chunk provider on server thread so ServerChunkCache
-        // captures the correct main thread ID (matching Minecraft's architecture
-        // where the server thread owns all chunk data structures)
-        if (m_world) {
-            m_world->InitializeChunkProvider();
+        // Initialize the OVERWORLD's chunk provider on the server thread so
+        // ServerChunkCache captures the correct main thread ID (matching
+        // Minecraft's architecture where the server thread owns all chunk data
+        // structures). The Nether and the End do the same inside
+        // GetOrCreateLevel, which is likewise server-thread-only.
+        ServerLevel* overworld = GetLevel(Game::DimensionId::Overworld);
+        if (overworld && overworld->InitializeChunkProvider()) {
+            // World::Initialize no longer does this — with three Worlds the
+            // last one constructed would win, so a Nether built later would
+            // silently become what every raycast reads.
+            //
+            // The server no longer claims it AT ALL. Every caller of
+            // Raycast::CastRay is client code (block targeting, the
+            // third-person camera pull-in) and the client owns the pointer;
+            // nothing under src/server raycasts.
+            //
+            // This used to set it to the overworld "because PlatformMain
+            // overwrites it moments later" — which was a RACE, not a
+            // sequence. PlatformMain assigns on the main thread while this
+            // runs on the server thread, so whichever lost the race decided
+            // what the crosshair pointed at, and when this one won, targeting
+            // was pinned to the overworld forever: in the Nether the crosshair
+            // hit overworld geometry (or nothing at all once those chunks
+            // unloaded) and no block could be placed.
         }
 
         // ── World spawn selection (MC MinecraftServer.setInitialSpawn) ─────
@@ -372,8 +757,13 @@ namespace Server {
         // reads theirs from level.dat, which we don't parse yet). Runs before
         // any client can join, so every player — host and remote — spawns
         // (and is teleported on join) to this position.
-        if (m_config.minecraftWorldPath.empty() && m_world && m_world->GetChunkProvider()) {
-            if (auto* generator = m_world->GetChunkProvider()->GetGenerator()) {
+        //
+        // OVERWORLD ONLY, as in MC: setInitialSpawn is a property of the
+        // overworld, and the other two dimensions place arrivals from a portal
+        // exit or the End platform instead.
+        Game::World* spawnWorld = overworld ? overworld->World() : nullptr;
+        if (m_config.minecraftWorldPath.empty() && spawnWorld && spawnWorld->GetChunkProvider()) {
+            if (auto* generator = spawnWorld->GetChunkProvider()->GetGenerator()) {
                 const glm::ivec3 spawnBlock = generator->FindSpawnPosition();
                 m_worldSpawn = glm::vec3(static_cast<float>(spawnBlock.x) + 0.5f,
                                          static_cast<float>(spawnBlock.y),
@@ -390,7 +780,7 @@ namespace Server {
                 // as we probe it — ChunkProvider::GetChunk generates on demand
                 // and blocks, which is this engine's equivalent of the
                 // SPAWN_SEARCH ticket MC takes per candidate.
-                auto* provider = m_world->GetChunkProvider();
+                auto* provider = spawnWorld->GetChunkProvider();
                 const int spawnChunkX = static_cast<int>(std::floor(spawnBlock.x / 16.0f));
                 const int spawnChunkZ = static_cast<int>(std::floor(spawnBlock.z / 16.0f));
                 int xOff = 0, zOff = 0, dx = 0, dz = -1;
@@ -399,7 +789,7 @@ namespace Server {
                     if (xOff >= -5 && xOff <= 5 && zOff >= -5 && zOff <= 5) {
                         const Game::Math::ChunkPos probe(spawnChunkX + xOff, spawnChunkZ + zOff);
                         if (provider->GetChunk(probe)) {
-                            if (auto found = PlayerSpawnFinder::GetSpawnPosInChunk(*m_world, probe)) {
+                            if (auto found = PlayerSpawnFinder::GetSpawnPosInChunk(*spawnWorld, probe)) {
                                 m_worldSpawn = glm::vec3(static_cast<float>(found->x) + 0.5f,
                                                          static_cast<float>(found->y),
                                                          static_cast<float>(found->z) + 0.5f);
@@ -421,13 +811,17 @@ namespace Server {
                     // Nothing standable in 121 chunks (all ocean, say). Push the
                     // estimate out of any geometry rather than spawning inside it
                     // — MC's fixupSpawnHeight is the same last resort.
-                    m_worldSpawn = PlayerSpawnFinder::FixupSpawnHeight(*m_world, spawnBlock);
+                    m_worldSpawn = PlayerSpawnFinder::FixupSpawnHeight(*spawnWorld, spawnBlock);
                     Log::Warning("[IntegratedServer] No standable spawn within 5 chunks — "
                                  "height-corrected estimate to (%.1f, %.1f, %.1f)",
                                  m_worldSpawn.x, m_worldSpawn.y, m_worldSpawn.z);
                 }
                 Log::Info("[IntegratedServer] World spawn set to (%.1f, %.1f, %.1f)",
                           m_worldSpawn.x, m_worldSpawn.y, m_worldSpawn.z);
+                // The level carries its own copy; keep the two from drifting.
+                // Portal exits read the destination LEVEL's spawn, not this
+                // class's, so a stale one there would strand an arrival.
+                overworld->worldSpawn = m_worldSpawn;
                 // The host ServerPlayer was constructed at the legacy spawn
                 // before the world could tell us better; move it now.
                 if (m_serverPlayer) {
@@ -536,18 +930,39 @@ namespace Server {
             // polling interval instead would both burn wakeups on an empty
             // queue and add up to that interval of latency to every chunk
             // handed back — the very latency this pump exists to remove.
+            //
+            // The park can only listen to ONE generator's queue, and there is
+            // one queue PER DIMENSION (MyTerrainGenerator keeps its main-thread
+            // executor to itself). So with a second level live, work landing on
+            // the other queue cannot wake us — we would sleep out the whole
+            // window while a ServerWorker sat blocked in that dimension's
+            // getChunk. Cap the park in that case and come back round to pump
+            // the others; a 2 ms revisit is far cheaper than a wedged worker.
+            static constexpr auto MULTI_LEVEL_PARK_CAP = 2ms;
             const auto pumpUntil = nextTickTime - SPIN_CUSHION;
             while (!m_shouldStop.load() && clock::now() < pumpUntil) {
                 PumpChunkPipeline(pumpUntil);
 
-                // PumpChunkPipeline only returns before the deadline when the
-                // pipeline is idle, so there is genuinely nothing to do until
-                // something lands on the queue.
+                // PumpChunkPipeline only returns before the deadline when EVERY
+                // generator is idle, so there is genuinely nothing to do until
+                // something lands on one of the queues.
                 if (clock::now() < pumpUntil) {
-                    if (auto* gen = GetTerrainGenerator()) {
-                        gen->WaitForPipelineWork(pumpUntil);
-                    } else {
+                    Game::MyTerrainGenerator* parkOn = nullptr;
+                    int liveGenerators = 0;
+                    ForEachLevel([&](ServerLevel& level) {
+                        if (auto* gen = level.TerrainGenerator()) {
+                            ++liveGenerators;
+                            if (!parkOn) parkOn = gen;
+                        }
+                    });
+
+                    if (!parkOn) {
                         std::this_thread::sleep_until(pumpUntil);
+                    } else if (liveGenerators == 1) {
+                        parkOn->WaitForPipelineWork(pumpUntil);
+                    } else {
+                        parkOn->WaitForPipelineWork(std::min<clock::time_point>(
+                            pumpUntil, clock::now() + MULTI_LEVEL_PARK_CAP));
                     }
                 }
             }
@@ -558,7 +973,13 @@ namespace Server {
             }
             
             auto tickStart = clock::now();
-            
+
+            // MC MinecraftServer.haveTime() is `getNanos() < nextTickTimeNanos`
+            // — an ABSOLUTE deadline, so a tick that has already overrun does
+            // zero optional work rather than a fixed extra slice of it. Publish
+            // it for the phases inside the tick that can bound themselves.
+            m_tickDeadline = tickStart + tickBudget;
+
             try {
                 ServerTick();
             }
@@ -648,10 +1069,13 @@ namespace Server {
             // Tick all player sessions (updates watch sets)
             m_sessionManager->Tick(serverTick);
 
-            // Process expired tickets
-            if (m_ticketManager) {
-                m_ticketManager->ProcessExpiredTickets(serverTick);
-            }
+            // Process expired tickets, per dimension. Tickets are per level
+            // because they pin chunks, and a chunk only exists inside one
+            // world.
+            ForEachLevel([&](ServerLevel& level) {
+                if (!level.HasWork(*m_sessionManager)) return;
+                if (level.Tickets()) level.Tickets()->ProcessExpiredTickets(serverTick);
+            });
 
             // Process send queues
             if (m_sendScheduler) {
@@ -659,11 +1083,62 @@ namespace Server {
             }
         }
 
+        // === 2b. PAUSE STATE ===
+        //
+        // MC IntegratedServer.tickServer:102-110, with the multiplayer rule
+        // this engine can actually answer (see IntegratedServer::IsPaused).
+        //
+        // Computed HERE, after the packet drain and the session tick, so an
+        // unpause that arrived this tick takes effect on this tick rather than
+        // leaving the world frozen for one more.
+        {
+            const bool wasPaused = m_paused.load(std::memory_order_relaxed);
+
+            bool paused = true;   // no players == paused, exactly as MC does
+            if (m_sessionManager) {
+                for (const auto& session : m_sessionManager->GetAllSessions()) {
+                    if (!session) continue;
+                    if (!session->IsPaused()) { paused = false; break; }
+                }
+            }
+
+            if (paused != wasPaused) {
+                m_paused.store(paused, std::memory_order_relaxed);
+
+                if (paused) {
+                    // MC saves on the way IN, not out: "Saving and pausing
+                    // game..." at IntegratedServer.java:107. Pausing is when
+                    // the player walked away from the keyboard, which is
+                    // exactly when an unexpected power cut costs the most.
+                    Log::Info("Saving and pausing game...");
+                    SaveAllPlayers();
+                    ForEachLevel([](ServerLevel& level) {
+                        if (level.World()) level.World()->SaveAllChunks();
+                        if (level.Entities()) level.Entities()->SaveAllLoaded();
+                    });
+                    WriteLevelDat();
+                } else {
+                    // MC forceTimeSynchronization() on resume (:117). The
+                    // clients kept counting their own day-time while the server
+                    // did not, so without this everyone is ahead by however long
+                    // the pause lasted.
+                    Log::Info("Resuming game");
+                    ForceTimeSync();
+                }
+            }
+        }
+
         // === 3. FLUSH ACCUMULATED BLOCK CHANGES ===
         // This MUST happen AFTER session tick (so watch sets are updated)
-        // All block changes from this tick are broadcast to watchers now
-        if (m_deltaBroadcaster) {
-            m_deltaBroadcaster->flush();
+        // All block changes from this tick are broadcast to watchers now.
+        // One accumulator + broadcaster per level: a SectionPos carries no
+        // dimension, so a shared pair would send a Nether edit to whoever is
+        // standing on the Overworld chunk with the same x/z.
+        if (m_sessionManager) {
+            ForEachLevel([&](ServerLevel& level) {
+                if (!level.HasWork(*m_sessionManager)) return;
+                if (level.Deltas()) level.Deltas()->flush();
+            });
         }
 
         // === 3b. ACK CLIENT BLOCK PREDICTIONS ===
@@ -691,12 +1166,19 @@ namespace Server {
         // are placed (early-outs in PortalRegistry::Tick).
         // Frozen along with the rest of the simulation — teleporting through a
         // portal is a world event, not a networking one.
-        if (m_tickRateManager.runsNormally()) {
+        if (SimulationRuns()) {
             Game::Portal::ServerRegistry().Tick(this);
         }
 #endif
 
         // === 2. SESSION-DRIVEN CHUNK LOADING (Minecraft-style) ===
+        //
+        // View distance FIRST: it decides the size of the tracking view the
+        // scan below diffs against, and a settings packet that arrives after
+        // the join (the render-distance slider, or one that lost the race with
+        // session setup) has no other way in — nothing resends it.
+        ApplyPendingClientViewDistances();
+
         // Process watch set changes: request loading for new chunks entering view
         ProcessWatchSetChanges();
 
@@ -712,52 +1194,108 @@ namespace Server {
         // `/tick unfreeze`). That is exactly the split vanilla makes, and
         // freezing the whole tick instead would lock the player out of the
         // server they just froze.
-        if (m_world && m_tickRateManager.runsNormally()) {
-            // Hand the world this tick's simulation set before it runs. MC does
-            // the equivalent inside ServerChunkCache.tickChunks, which walks
-            // ChunkMap's block-ticking chunks; World deliberately can't reach
-            // for the ticket manager itself, so the server pushes it in.
-            //
-            // Recomputed every tick because players move. It is a walk of the
-            // ticket manager's level cache, which is already maintained for
-            // other reasons — not a fresh distance computation per chunk.
-            if (m_ticketManager) {
-                m_world->SetBlockTickingChunks(m_ticketManager->GetBlockTickingChunks());
-            }
-            m_world->WorldLoop(deltaTime);
+        if (m_sessionManager && SimulationRuns()) {
+            // Once per dimension, but only for the dimensions that have work.
+            // HasWork is false for a Nether nobody is standing in, which is
+            // what keeps an unvisited dimension off the tick budget entirely
+            // rather than costing a full simulation pass forever.
+            ForEachLevel([&](ServerLevel& level) {
+                if (!level.HasWork(*m_sessionManager)) return;
+                Game::World* world = level.World();
+                if (!world) return;
 
-            // Dropped items. Inside the runsNormally() gate on purpose: `/tick
-            // freeze` should stop items mid-air and stop their despawn clock,
-            // exactly like every other piece of world simulation.
-            if (m_itemEntities) {
-                PROFILE_ZONE_N("ItemEntityTick");
-                std::vector<int32_t> removed;
-                std::vector<ItemPickupEvent> pickups;
-                m_itemEntities->Tick(m_world.get(), m_sessionManager.get(),
-                                     removed, pickups);
-                // Pickups first: the take packet is what retires a collected
-                // entity client-side, and it has to arrive while the client
-                // still has the entity to animate.
-                if (!pickups.empty()) {
-                    BroadcastItemEntityPickups(pickups);
+                // Hand the world this tick's simulation set before it runs. MC
+                // does the equivalent inside ServerChunkCache.tickChunks, which
+                // walks ChunkMap's block-ticking chunks; World deliberately
+                // can't reach for the ticket manager itself, so the server
+                // pushes it in.
+                //
+                // Recomputed every tick because players move. It is a walk of
+                // the ticket manager's level cache, which is already maintained
+                // for other reasons — not a fresh distance computation per
+                // chunk.
+                if (level.Tickets()) {
+                    world->SetBlockTickingChunks(level.Tickets()->GetBlockTickingChunks());
                 }
-                if (!removed.empty()) {
-                    BroadcastItemEntityRemovals(removed);
-                }
-                BroadcastItemEntityUpdates(serverTick);
-            }
+                world->WorldLoop(deltaTime);
 
-            // Mobs. Same gate as items — `/tick freeze` must stop AI, physics
-            // and the despawn clock together, or an unfrozen mob walks through
-            // a frozen world.
-            TickMobs(serverTick);
+                // Dropped items. Inside the runsNormally() gate on purpose:
+                // `/tick freeze` should stop items mid-air and stop their
+                // despawn clock, exactly like every other piece of world
+                // simulation.
+                if (level.Items()) {
+                    PROFILE_ZONE_N("ItemEntityTick");
+                    std::vector<int32_t> removed;
+                    std::vector<ItemPickupEvent> pickups;
+                    level.Items()->Tick(world, m_sessionManager.get(), removed, pickups);
+                    // Pickups first: the take packet is what retires a
+                    // collected entity client-side, and it has to arrive while
+                    // the client still has the entity to animate.
+                    if (!pickups.empty()) {
+                        BroadcastItemEntityPickups(pickups);
+                    }
+                    if (!removed.empty()) {
+                        BroadcastItemEntityRemovals(level.Dimension(), removed);
+                    }
+                    BroadcastItemEntityUpdates(level, serverTick);
+                }
+
+                // Experience orbs. Same gate and the same
+                // pickups-before-removals ordering as items, for the same
+                // reasons.
+                if (level.Orbs()) {
+                    PROFILE_ZONE_N("XpOrbTick");
+                    std::vector<int32_t> removed;
+                    std::vector<XpOrbPickupEvent> pickups;
+                    level.Orbs()->Tick(world, m_sessionManager.get(), removed, pickups);
+                    if (!pickups.empty()) {
+                        BroadcastXpOrbPickups(pickups);
+                    }
+                    if (!removed.empty()) {
+                        BroadcastItemEntityRemovals(level.Dimension(), removed);
+                    }
+                    BroadcastXpOrbUpdates(level, serverTick);
+                }
+
+                // Mobs. Same gate as items — `/tick freeze` must stop AI,
+                // physics and the despawn clock together, or an unfrozen mob
+                // walks through a frozen world.
+                // Streamed /shape build, overworld only, ahead of the mobs
+                // so a freshly placed TNT block can be lit the same tick.
+                if (&level == &Overworld()) TickShapeJob();
+
+                TickMobs(level, serverTick);
+
+                // Portals. After TickMobs on purpose: that is where the player
+                // views are synced from their ServerPlayers and where mobs
+                // move, so the contact test runs against this tick's positions
+                // rather than last tick's.
+                TickPortals(level);
+            });
         }
 
         // === 4. SEND CHUNKS per player (Minecraft's PlayerChunkSender pattern) ===
         if (m_sessionManager) {
             auto sessions = m_sessionManager->GetAllSessions();
             for (auto& session : sessions) {
-                session->SendNextChunks(m_world.get());
+                // The world the player is actually standing in — sending them
+                // the overworld's copy of a chunk they are watching in the
+                // Nether is the whole failure mode this refactor exists for.
+                ServerLevel& L = LevelOf(*session);
+                std::vector<Game::Math::ChunkPos> notResident;
+                session->SendNextChunks(L.World(), &notResident);
+                for (const auto& pos : notResident) {
+                    // Same split as ProcessWatchSetChanges' onEnter: a chunk
+                    // that came back into the cache meanwhile only needs to be
+                    // queued again (RequestChunkLoad's already-loaded branch
+                    // deliberately does not queue it).
+                    if (L.World() && L.World()->IsChunkLoaded(pos.x, pos.z)) {
+                        if (L.Entities()) L.Entities()->RequestLoad(pos);
+                        session->MarkChunkPendingToSend(pos);
+                    } else {
+                        RequestChunkLoad(L.Dimension(), pos, 0);
+                    }
+                }
             }
         }
 
@@ -774,6 +1312,51 @@ namespace Server {
         // === 6. PERIODIC CLEANUP: unload chunks with no watchers ===
         if (serverTick % 60 == 0) { // Every ~3 seconds at 20 TPS
             UnloadUnwatchedChunks();
+        }
+
+        // Terrain library memory: release idle per-chunk generation caches
+        // (MyTerrainGenerator::ReleaseIdleNoiseChunks explains). Every 5 s;
+        // the sweep is a walk over the holder map, ~13k entries.
+        {
+            PROFILE_ZONE_N("ReleaseIdleNoiseChunks");
+            // Budget: a slice of what is left of this tick (the generator
+            // also applies a small floor), so the sweep never becomes the
+            // tick's biggest cost again.
+            const auto budget = std::min(m_tickDeadline - std::chrono::milliseconds(2),
+                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(2));
+            size_t released = 0;
+            ForEachLevel([&](ServerLevel& level) {
+                if (auto* gen = level.TerrainGenerator()) released += gen->ReleaseIdleNoiseChunks(budget);
+            });
+            m_stats.noiseChunksReleased += released;
+        }
+        // Library holder unloading (MyTerrainGenerator::TickLibrary) is
+        // implemented but DISABLED (kLibraryUnloadEnabled): with it on, a
+        // return to a previously visited area intermittently leaves a few
+        // hundred chunks whose generation task never runs (holder shows
+        // `task scheduled=none`, refcounts in the hundreds). Root cause not
+        // yet isolated — see project memory 2026-08-30. Memory is bounded by
+        // ReleaseIdleNoiseChunks instead; holders themselves stay resident.
+        static constexpr bool kLibraryUnloadEnabled = false;
+        if (kLibraryUnloadEnabled && serverTick % 20 == 0) {
+            PROFILE_ZONE_N("Lib.Tick");
+            const auto budget = std::min(m_tickDeadline - std::chrono::milliseconds(2),
+                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(3));
+            size_t unloaded = 0;
+            ForEachLevel([&](ServerLevel& level) {
+                if (auto* gen = level.TerrainGenerator()) unloaded += gen->TickLibrary(budget);
+            });
+            m_stats.libraryHoldersUnloaded += unloaded;
+        }
+
+        // === 7. AUTOSAVE (MC MinecraftServer.AUTOSAVE_INTERVAL = 6000) ===
+        //
+        // Five minutes, matching vanilla. Two things depend on it: a crash
+        // costs at most five minutes of play rather than the whole session,
+        // and shutdown only has recent changes left to flush instead of every
+        // chunk generated since launch.
+        if (serverTick > 0 && serverTick % 6000 == 0) {
+            AutoSave();
         }
 
         // Increment tick counter
@@ -805,19 +1388,47 @@ namespace Server {
         // Keeping empty for compatibility during transition
     }
 
-    void IntegratedServer::RequestChunkLoad(Game::Math::ChunkPos chunkPos, int priority) {
+    void IntegratedServer::RequestChunkLoad(Game::DimensionId dimension,
+                                            Game::Math::ChunkPos chunkPos, int priority) {
+        // GetLevel, NOT GetOrCreateLevel: every caller has already resolved the
+        // level it is asking about (a session's, or one it is iterating), and
+        // building a whole dimension — terrain generator included — as a side
+        // effect of a streaming request is not something a hot path should be
+        // able to do by accident.
+        ServerLevel* level = GetLevel(dimension);
+        if (!level) return;
+
+        Game::World* world = level->World();
+
         // Already loaded — SendNextChunks() will pick it up
-        if (m_world && m_world->IsChunkLoaded(chunkPos.x, chunkPos.z)) {
+        if (world && world->IsChunkLoaded(chunkPos.x, chunkPos.z)) {
+            // ...but its ENTITIES still have to be claimed. RequestLoad is
+            // otherwise only reached from ProcessAsyncChunkResults, and a
+            // chunk that entered the cache by any other route (the spawn
+            // search, a neighbour fetch, a portal scan, a block update) never
+            // produces a result — so it never got an entity-store entry, and
+            // LevelEntityStore::SaveChunk then refuses to write it because it
+            // "was not loaded". Items dropped in such a chunk were silently
+            // never saved, which is exactly what happens to the chunk the
+            // player is standing in at world load.
+            //
+            // Idempotent: RequestLoad returns immediately unless the state is
+            // Absent, so this costs one map lookup per already-resident chunk.
+            if (level->Entities()) level->Entities()->RequestLoad(chunkPos);
             return;
         }
 
         // Already in flight — a result is coming, and it will push the chunk to
         // every tracking player. Submitting again would generate it twice.
-        if (m_pendingChunkLoads.count(chunkPos) != 0) {
+        //
+        // The set is PER LEVEL: Overworld (0,0) and Nether (0,0) are the same
+        // ChunkPos, so one shared set would make the second request look like a
+        // duplicate of the first and that chunk would silently never load.
+        if (level->pendingChunkLoads.count(chunkPos) != 0) {
             return;
         }
 
-        // m_pendingChunkLoads is the "already in flight, don't submit again"
+        // pendingChunkLoads is the "already in flight, don't submit again"
         // guard, and the ONLY thing that clears an entry is a result arriving in
         // ProcessAsyncChunkResults. So a chunk may be marked pending only once a
         // job that is guaranteed to produce a result actually exists —
@@ -827,23 +1438,30 @@ namespace Server {
         // chunks streaming normally once you walk into positions that weren't
         // poisoned.)
         if (m_config.enableAsyncChunkLoading) {
-            if (!Threading::SubmitServerChunkLoading(chunkPos, priority)) {
+            if (!Threading::SubmitServerChunkLoading(dimension, chunkPos, priority)) {
                 // Only reachable when the pool is shutting down — the queue has
                 // no capacity limit. Leaving the chunk unmarked is correct:
                 // there is no result coming, and nothing is left to retry into.
                 return;
             }
-            m_pendingChunkLoads.insert(chunkPos);
-            Log::Debug("Requested async chunk loading for (%d, %d)", chunkPos.x, chunkPos.z);
+            level->pendingChunkLoads.insert(chunkPos);
+            Log::Debug("Requested async chunk loading for %s (%d, %d)",
+                       std::string(Game::DimensionName(dimension)).c_str(),
+                       chunkPos.x, chunkPos.z);
         } else {
             // Sync path: the chunk is in the cache by the time this returns, so
             // push it to its watchers right here — ProcessAsyncChunkResults
             // early-outs entirely when async loading is off, so nothing else
-            // ever would.
-            if (m_world && m_world->GetChunk(chunkPos.x, chunkPos.z) && m_sessionManager) {
-                m_sessionManager->ForEachSessionWatching(
-                    chunkPos,
-                    [&](PlayerSession& session) { session.MarkChunkPendingToSend(chunkPos); });
+            // ever would. That applies to the chunk's ENTITIES too: the async
+            // result path is where RequestLoad normally happens, so without
+            // this line sync mode never reads entities/*.mca at all.
+            if (world && world->GetChunk(chunkPos.x, chunkPos.z)) {
+                if (level->Entities()) level->Entities()->RequestLoad(chunkPos);
+                if (m_sessionManager) {
+                    m_sessionManager->ForEachSessionWatching(
+                        dimension, chunkPos,
+                        [&](PlayerSession& session) { session.MarkChunkPendingToSend(chunkPos); });
+                }
             }
         }
     }
@@ -852,10 +1470,10 @@ namespace Server {
     // ITEM ENTITY BROADCAST
     // ========================================================================
 
-    void IntegratedServer::BroadcastItemEntitySpawn(int32_t id) {
-        if (!m_itemEntities || !m_sessionManager) return;
+    void IntegratedServer::BroadcastItemEntitySpawn(ServerLevel& level, int32_t id) {
+        if (!level.Items() || !m_sessionManager) return;
 
-        const auto& all = m_itemEntities->All();
+        const auto& all = level.Items()->All();
         auto it = all.find(id);
         if (it == all.end()) return;
         const Game::ItemEntity& e = it->second;
@@ -868,25 +1486,172 @@ namespace Server {
         packet.stack    = e.stack;
 
         const auto data = Network::Serialization::Serialize(packet);
-        SendToChunkWatchers(e.pos, Network::PacketId::ItemEntitySpawnS2C, data);
+        SendToChunkWatchers(level.Dimension(), e.pos,
+                            Network::PacketId::ItemEntitySpawnS2C, data);
     }
 
     // ========================================================================
     // MOB ENTITIES
     // ========================================================================
 
-    namespace {
-        // Factory shared by the spawner and the debug spawn command.
-        std::unique_ptr<Game::Mob> MakeMob(Game::EntityTypeId type, Game::EntityLevel* level) {
+    // Factory shared by the natural spawner, /summon, and the entity LOADER.
+    //
+    // Deliberately not in an anonymous namespace any more: LevelEntityStore
+    // needs it to rebuild a saved mob, and a second copy of this switch would
+    // silently stop matching the first the next time a mob is added.
+    std::unique_ptr<Game::Mob> MakeMobForLoad(Game::EntityTypeId type, Game::EntityLevel* level) {
             switch (type) {
                 case Game::EntityTypeId::Zombie:   return std::make_unique<Game::Zombie>(level);
                 case Game::EntityTypeId::Skeleton: return std::make_unique<Game::Skeleton>(level);
                 case Game::EntityTypeId::Creeper:  return std::make_unique<Game::Creeper>(level);
                 case Game::EntityTypeId::Spider:   return std::make_unique<Game::Spider>(level);
+                case Game::EntityTypeId::CaveSpider:
+                    return std::make_unique<Game::CaveSpider>(level);
+                case Game::EntityTypeId::Stray:
+                    return std::make_unique<Game::Stray>(level);
+                case Game::EntityTypeId::WitherSkeleton:
+                    return std::make_unique<Game::WitherSkeleton>(level);
+                case Game::EntityTypeId::Bogged:
+                    return std::make_unique<Game::Bogged>(level);
                 case Game::EntityTypeId::Cow:      return std::make_unique<Game::Cow>(level);
                 case Game::EntityTypeId::Pig:      return std::make_unique<Game::Pig>(level);
                 case Game::EntityTypeId::Sheep:    return std::make_unique<Game::Sheep>(level);
                 case Game::EntityTypeId::Chicken:  return std::make_unique<Game::Chicken>(level);
+                case Game::EntityTypeId::Arrow:    return std::make_unique<Game::Arrow>(level);
+                case Game::EntityTypeId::Enderman: return std::make_unique<Game::Enderman>(level);
+                case Game::EntityTypeId::Husk:     return std::make_unique<Game::Husk>(level);
+                case Game::EntityTypeId::Drowned:  return std::make_unique<Game::Drowned>(level);
+                case Game::EntityTypeId::ZombieVillager:
+                    return std::make_unique<Game::ZombieVillager>(level);
+                case Game::EntityTypeId::ZombifiedPiglin:
+                    return std::make_unique<Game::ZombifiedPiglin>(level);
+                case Game::EntityTypeId::Slime:
+                    return Game::Slime::Make(level);
+                case Game::EntityTypeId::MagmaCube:
+                    return std::make_unique<Game::MagmaCube>(level);
+                case Game::EntityTypeId::Cod:
+                case Game::EntityTypeId::Salmon:
+                    return std::make_unique<Game::SchoolingFish>(type, level);
+                // TropicalFish carries MC's 10%-loner spawn roll on top of
+                // the schooling base (TropicalFish.java:97,207); the CLIENT
+                // mirror stays a plain SchoolingFish — the roll is
+                // server-spawn-only state.
+                case Game::EntityTypeId::TropicalFish:
+                    return std::make_unique<Game::TropicalFish>(level);
+                case Game::EntityTypeId::Pufferfish:
+                    return std::make_unique<Game::Pufferfish>(level);
+                case Game::EntityTypeId::Squid:
+                case Game::EntityTypeId::GlowSquid:
+                    return std::make_unique<Game::Squid>(type, level);
+                case Game::EntityTypeId::Guardian:
+                    return std::make_unique<Game::Guardian>(level);
+                case Game::EntityTypeId::ElderGuardian:
+                    return std::make_unique<Game::ElderGuardian>(level);
+                case Game::EntityTypeId::Parrot:
+                    return std::make_unique<Game::Parrot>(level);
+                case Game::EntityTypeId::IronGolem:
+                    return std::make_unique<Game::IronGolem>(level);
+                case Game::EntityTypeId::Ravager:
+                    return std::make_unique<Game::Ravager>(level);
+                case Game::EntityTypeId::Rabbit:
+                    return std::make_unique<Game::Rabbit>(level);
+                case Game::EntityTypeId::PolarBear:
+                    return std::make_unique<Game::PolarBear>(level);
+                case Game::EntityTypeId::Fox:
+                    return std::make_unique<Game::Fox>(level);
+                case Game::EntityTypeId::Turtle:
+                    return std::make_unique<Game::Turtle>(level);
+                case Game::EntityTypeId::Panda:
+                    return std::make_unique<Game::Panda>(level);
+                case Game::EntityTypeId::Cat:
+                    return std::make_unique<Game::Cat>(level);
+                case Game::EntityTypeId::Ocelot:
+                    return std::make_unique<Game::Ocelot>(level);
+                case Game::EntityTypeId::Dolphin:
+                    return std::make_unique<Game::Dolphin>(level);
+                case Game::EntityTypeId::HappyGhast:
+                    return std::make_unique<Game::HappyGhast>(level);
+                case Game::EntityTypeId::Horse:
+                    return std::make_unique<Game::Horse>(level);
+                case Game::EntityTypeId::Donkey:
+                    return std::make_unique<Game::Donkey>(level);
+                case Game::EntityTypeId::Mule:
+                    return std::make_unique<Game::Mule>(level);
+                case Game::EntityTypeId::SkeletonHorse:
+                    return std::make_unique<Game::SkeletonHorse>(level);
+                case Game::EntityTypeId::ZombieHorse:
+                    return std::make_unique<Game::ZombieHorse>(level);
+                case Game::EntityTypeId::Blaze:
+                    return std::make_unique<Game::Blaze>(level);
+                case Game::EntityTypeId::Ghast:
+                    return std::make_unique<Game::Ghast>(level);
+                case Game::EntityTypeId::Phantom:
+                    return std::make_unique<Game::Phantom>(level);
+                case Game::EntityTypeId::Vex:
+                    return std::make_unique<Game::Vex>(level);
+                case Game::EntityTypeId::Evoker:
+                    return std::make_unique<Game::Evoker>(level);
+                case Game::EntityTypeId::Illusioner:
+                    return std::make_unique<Game::Illusioner>(level);
+                case Game::EntityTypeId::Vindicator:
+                    return std::make_unique<Game::Vindicator>(level);
+                case Game::EntityTypeId::Wither:
+                    return std::make_unique<Game::Wither>(level);
+                case Game::EntityTypeId::EnderDragon:
+                    return std::make_unique<Game::EnderDragon>(level);
+                case Game::EntityTypeId::Strider:
+                    return std::make_unique<Game::Strider>(level);
+                case Game::EntityTypeId::SnowGolem:
+                    return std::make_unique<Game::SnowGolem>(level);
+                case Game::EntityTypeId::Witch:
+                    return std::make_unique<Game::Witch>(level);
+                case Game::EntityTypeId::Shulker:
+                    return std::make_unique<Game::Shulker>(level);
+                case Game::EntityTypeId::Llama:
+                    return std::make_unique<Game::Llama>(level);
+                case Game::EntityTypeId::TraderLlama:
+                    return std::make_unique<Game::TraderLlama>(level);
+                // ── Projectiles (Arrow precedent: Misc, mob machinery inert) ─
+                case Game::EntityTypeId::Snowball:
+                    return std::make_unique<Game::Snowball>(level);
+                case Game::EntityTypeId::Egg:
+                    return std::make_unique<Game::ThrownEgg>(level);
+                case Game::EntityTypeId::SplashPotion:
+                    return std::make_unique<Game::ThrownSplashPotion>(level);
+                case Game::EntityTypeId::SmallFireball:
+                    return std::make_unique<Game::SmallFireball>(level);
+                case Game::EntityTypeId::Fireball:
+                    return std::make_unique<Game::LargeFireball>(level);
+                case Game::EntityTypeId::DragonFireball:
+                    return std::make_unique<Game::DragonFireball>(level);
+                case Game::EntityTypeId::AreaEffectCloud:
+                    return std::make_unique<Game::AreaEffectCloud>(level);
+                case Game::EntityTypeId::WitherSkull:
+                    return std::make_unique<Game::WitherSkull>(level);
+                case Game::EntityTypeId::EvokerFangs:
+                    return std::make_unique<Game::EvokerFangs>(level);
+                case Game::EntityTypeId::ShulkerBullet:
+                    return std::make_unique<Game::ShulkerBullet>(level);
+                case Game::EntityTypeId::LlamaSpit:
+                    return std::make_unique<Game::LlamaSpit>(level);
+                case Game::EntityTypeId::Trident:
+                    return std::make_unique<Game::ThrownTrident>(level);
+                case Game::EntityTypeId::WindCharge:
+                    return std::make_unique<Game::WindCharge>(level);
+                case Game::EntityTypeId::BreezeWindCharge:
+                    return std::make_unique<Game::BreezeWindCharge>(level);
+                // Without this case a saved eye of ender reloads as a generic
+                // mob: the type id round-trips, so nothing looks wrong, but
+                // the concrete class is gone and its NBT applies to nothing.
+                case Game::EntityTypeId::EyeOfEnder:
+                    return std::make_unique<Game::EyeOfEnder>(level);
+                // ── Block-shaped entities — MUST mirror the client factory ──
+                // Neither is a Mob in MC; both ride this pipeline for the same
+                // reason the projectiles do (see FallingBlockEntity.hpp).
+                case Game::EntityTypeId::FallingBlock:
+                    return std::make_unique<Game::FallingBlockEntity>(level);
+                case Game::EntityTypeId::Tnt:
+                    return std::make_unique<Game::PrimedTnt>(level);
                 default: break;
             }
             // Everything else is built from its generated def. Promoting one to
@@ -894,52 +1659,79 @@ namespace Server {
             // generic path stops being used for it.
             return Game::MakeGenericMob(type, level);
         }
-    }
+    
 
-    void IntegratedServer::TickMobs(int64_t serverTick) {
-        if (!m_mobs || !m_mobLevel || !m_mobTracker || !m_sessionManager) return;
+    void IntegratedServer::TickMobs(ServerLevel& level, int64_t serverTick) {
+        MobManager*          mobs     = level.Mobs();
+        ServerLevelBridge*   mobLevel = level.MobLevel();
+        ServerEntityTracker* tracker  = level.MobTracker();
+        if (!mobs || !mobLevel || !tracker || !m_sessionManager) return;
 
         PROFILE_ZONE_N("MobSystemTick");
+
+        // 0. MC DistanceManager.runAllUpdates — solve chunk levels ONCE, here,
+        //    so every per-entity gate below is a lock-free hash lookup instead
+        //    of a mutex acquisition plus a possible solve on the read path.
+        if (level.Tickets()) level.Tickets()->RunAllUpdates();
+
+        //    Reset this tick's detonation budget. See
+        //    EntityLevel::TryBeginExplosion for why this exists and what it
+        //    deliberately diverges from.
+        mobLevel->BeginExplosionBudget();
 
         // 1. Refresh the player views FIRST. Everything downstream — targeting,
         //    despawn distance, the tracker's watch sets — reads them, and a
         //    stale view is a dangling ServerPlayer pointer.
-        m_mobLevel->SyncPlayerViews();
+        mobLevel->SyncPlayerViews();
 
         // 2. Tick, scoped to the block-ticking chunk set (mobs outside it are
         //    still despawn-checked; see MobManager::Tick).
         std::vector<int32_t> removed;
 
-        // The ticket manager hands out a vector of ChunkPos; MobManager wants a
-        // set it can probe per mob, so pack to the same 64-bit key its index
-        // uses. Built once per tick rather than per mob.
-        std::unordered_set<uint64_t> tickingChunks;
-        if (m_ticketManager) {
-            const auto chunkList = m_ticketManager->GetBlockTickingChunks();
-            tickingChunks.reserve(chunkList.size());
-            for (const auto& pos : chunkList) {
-                tickingChunks.insert((static_cast<uint64_t>(static_cast<uint32_t>(pos.x)) << 32) |
-                                      static_cast<uint32_t>(pos.z));
-            }
-        }
-        m_mobs->Tick(tickingChunks, removed);
+        // No set is built. MobManager reads entity-ticking range live from each
+        // mob's own chunk, exactly as MC's ServerLevel.tick does — see the note
+        // on MobManager::Tick.
+        mobs->Tick(level.Tickets(), removed);
+        // The compact falling blocks, right after the mobs (where the Mob-
+        // shaped falling batch runs too) and before the spawner.
+        if (level.FallingBlocks()) level.FallingBlocks()->Tick(level.Tickets());
 
         // 3. Spawn. After ticking so this tick's despawns have already freed
         //    room under the caps.
-        RunNaturalSpawner(serverTick);
+        RunNaturalSpawner(level, serverTick);
 
         // 4. Emit. The tracker owns who-knows-what, so removals go through it
         //    rather than being broadcast blindly.
         std::vector<EntityPacketOut> outgoing;
-        for (int32_t id : removed) m_mobTracker->RemoveEntity(id, outgoing);
+        // Entity events BEFORE removals: an event raised in the same tick as
+        // the discard (creeper explosion, projectile impact burst) must be
+        // emitted while the entity is still tracked here and still exists on
+        // the client — RemoveEntity erases the watcher set, and the client
+        // ignores events for ids it no longer knows.
+        tracker->FlushEntityEvents(*mobLevel, outgoing);
+        tracker->RemoveEntities(removed, outgoing);
 
-        std::vector<std::pair<uint32_t, glm::dvec3>> players;
+        // Only the players standing in THIS level. A player in the Overworld
+        // must not appear in the Nether tracker's distance tests, or the Nether
+        // would spawn-and-track its mobs for someone who will never see them.
+        std::vector<ServerEntityTracker::TrackedPlayer> players;
         for (const auto& session : m_sessionManager->GetAllSessions()) {
             if (!session || !session->GetPlayer()) continue;
-            players.emplace_back(session->GetConnectionId(), session->GetPlayer()->getPosition());
+            if (Game::DimensionFromRaw(session->GetDimensionId()) != level.Dimension()) continue;
+
+            ServerEntityTracker::TrackedPlayer tp;
+            tp.connectionId = session->GetConnectionId();
+            tp.position     = session->GetPlayer()->getPosition();
+            // MC ChunkMap.getPlayerViewDistance — clamps the tracking range.
+            tp.viewDistance = session->GetViewDistance();
+            // MC ChunkMap.isChunkTracked — entity updates never precede the
+            // chunk they stand in.
+            tp.sentChunks   = &session->GetSentChunks();
+            players.push_back(tp);
         }
 
-        m_mobTracker->Tick(*m_mobs, *m_mobLevel, players, outgoing);
+        tracker->Tick(*mobs, *mobLevel, players, level.Tickets(), outgoing);
+        if (level.FallingBlocks()) level.FallingBlocks()->Track(players, level.Tickets(), outgoing);
 
         // 5. Send. One lookup per recipient rather than per packet — a busy
         //    tick emits hundreds of packets across a handful of connections.
@@ -953,7 +1745,7 @@ namespace Server {
         // 6. Knockback the mob system applied to players. The player is
         //    client-authoritative for movement, so a push has to be SENT as a
         //    velocity packet or the next move packet simply overwrites it.
-        for (Server::PlayerEntityView* view : m_mobLevel->PlayerViews()) {
+        for (Server::PlayerEntityView* view : mobLevel->PlayerViews()) {
             glm::dvec3 push;
             if (!view->ConsumePendingKnockback(push)) continue;
 
@@ -970,47 +1762,226 @@ namespace Server {
         }
     }
 
-    void IntegratedServer::RunNaturalSpawner(int64_t serverTick) {
-        if (!m_mobs || !m_mobLevel || !m_world || !m_ticketManager) return;
+    void IntegratedServer::TickPortals(ServerLevel& level) {
+        Game::World*       world    = level.World();
+        ServerLevelBridge* mobLevel = level.MobLevel();
+        if (!world || !mobLevel) return;
+
+        PROFILE_ZONE_N("PortalTick");
+
+        // MC Entity.canUsePortal is asked twice per tick for a reason: once by
+        // entityInside to decide whether to START accumulating, and once by
+        // handlePortal to decide whether the accumulated time may FIRE. An
+        // entity that dies mid-crossing must not arrive.
+        auto tickOne = [this, world, &level](Game::Entity& entity) {
+            // Contact first — this is what re-arms `insidePortalThisTick` for
+            // any portal cell the entity currently overlaps. Skipping it is
+            // indistinguishable from stepping out of the portal, and the
+            // 4-ticks-per-tick decay would eat the progress.
+            //
+            // Against THIS level's blocks: the entity is standing in this
+            // world, and the same coordinates in another one hold something
+            // else entirely.
+            entity.CheckInsideBlocks(*world);
+
+            if (!entity.portal.IsInPortal() && !entity.portal.IsOnCooldown()) {
+                return;   // nothing to advance; the overwhelmingly common case
+            }
+
+            const Game::BlockID active = entity.portal.CurrentPortal();
+            const int transitionTime = Game::Portals::GetTransitionTime(
+                active, entity.IsPlayer(),
+                entity.IsCreative() || entity.IsSpectator());
+
+            const auto trigger = entity.portal.HandleTick(
+                transitionTime, entity.CanUsePortal(false),
+                entity.GetDimensionChangingDelay());
+            if (!trigger) return;
+
+            HandlePortalTraversal(level, entity, trigger->portal, trigger->entryPos);
+        };
+
+        // Players first, so a player and a mob crossing on the same tick
+        // resolve in a deterministic order.
+        for (Server::PlayerEntityView* view : mobLevel->PlayerViews()) {
+            if (view) tickOne(*view);
+        }
+        if (MobManager* mobs = level.Mobs()) {
+            // ENTITY-TICKING GATE. MC reaches checkInsideBlocks through
+            // Entity.baseTick, which only runs for entities in
+            // `entityTickList` — i.e. entity-ticking chunks
+            // (ServerLevel.java:371, :1810). This loop used to call
+            // CheckInsideBlocks on EVERY mob in the level before any early-out,
+            // which is both a divergence and a per-entity block scan: measured
+            // at 5.08 ms/tick with a 114 ms peak on a 100,000-entity world.
+            //
+            // Lock-free, same as MobManager's gate: RunAllUpdates() ran at the
+            // top of TickMobSystems.
+            //
+            // TWO PASSES. Everything a mob's turn does before it can write
+            // anything — the parked and stagger skips, the ticking gate, and
+            // CheckInsideBlocks' own all-air early-out over the swept region —
+            // is read-only, so it runs across the pool and leaves one byte
+            // per mob: does this one need its full turn? The serial pass then
+            // visits only those. With a hundred thousand airborne entities
+            // the serial walk alone was 5 ms a tick, nearly all of it cache
+            // misses to conclude "air".
+            const ChunkTicketManager* tickets = level.Tickets();
+            const auto& list = mobs->List();
+            const size_t n = list.size();
+            // The server thread's own buffer, bound to a reference the lambda
+            // captures: a bare thread_local inside the lambda would resolve to
+            // each WORKER's (empty) instance and write off the end of it.
+            thread_local std::vector<uint8_t> t_needsTurnStorage;
+            std::vector<uint8_t>& needsTurn = t_needsTurnStorage;
+            needsTurn.resize(n);
+            const auto prefilter = [&](size_t i) {
+                const Game::Mob* mob = list[i];
+                needsTurn[i] = 0;
+                if (!mob) return;
+                const bool inPortalOrCooling =
+                    mob->portal.IsInPortal() || mob->portal.IsOnCooldown();
+                // Parked FIRST, before the ticking-gate hash: a parked mob
+                // (see PrimedTnt::Tick) has not moved and its columns have
+                // not been written since it parked — the swept inside-block
+                // scan cannot find anything it did not find when it parked.
+                // A portal lit under it writes blocks, unparks it, and the
+                // scan runs again. At a million parked TNT the ordering of
+                // these two tests is tens of milliseconds a tick.
+                if (mob->physicsParked && !inPortalOrCooling) return;
+                // Moving TNT and falling blocks scan for portals on every
+                // fourth tick only (staggered by id): entering a portal
+                // registers up to 150 ms late, and a cascade with hundreds of
+                // thousands of airborne TNT — or a collapsing sand pyramid
+                // with as many falling blocks — stops paying a full swept
+                // block scan per entity per tick for a structure the bench
+                // world does not even contain.
+                if ((mob->GetType() == Game::EntityTypeId::Tnt ||
+                     mob->GetType() == Game::EntityTypeId::FallingBlock) &&
+                    !inPortalOrCooling &&
+                    ((static_cast<uint32_t>(mob->tickCount) +
+                      static_cast<uint32_t>(mob->GetId())) & 3u) != 0u) {
+                    return;
+                }
+                if (tickets) {
+                    const Game::Math::ChunkPos mobChunk(
+                        static_cast<int>(std::floor(mob->position.x)) >> 4,
+                        static_cast<int>(std::floor(mob->position.z)) >> 4);
+                    if (!tickets->IsEntityTickingAfterUpdates(mobChunk)) return;
+                }
+                // Mid-crossing or cooling down: the state machine has to
+                // advance whatever the blocks say.
+                if (inPortalOrCooling) { needsTurn[i] = 1; return; }
+                // Otherwise the turn is CheckInsideBlocks alone, and its first
+                // act is this same all-air test — answered here, read-only.
+                glm::ivec3 lo, hi;
+                mob->SweptInsideRegion(lo, hi);
+                needsTurn[i] = world->IsRegionAllAir(lo, hi) ? 0 : 1;
+            };
+            if (n >= 2048 && Core::ParallelWidth() > 1) {
+                Core::ParallelFor(n, 512, prefilter);
+            } else {
+                for (size_t i = 0; i < n; ++i) prefilter(i);
+            }
+            for (size_t i = 0; i < n; ++i) {
+                if (needsTurn[i]) tickOne(*list[i]);
+            }
+        }
+    }
+
+    void IntegratedServer::HandlePortalTraversal(ServerLevel& from, Game::Entity& entity,
+                                                 Game::BlockID portal,
+                                                 const glm::ivec3& entryPos) {
+        // The whole destination half lives in PortalTravel because it is the
+        // only code that legitimately reads TWO levels at once, and keeping it
+        // in one file is what makes "which world am I looking at" answerable.
+        //
+        // The cooldown is already armed by the time we get here
+        // (PortalState::HandleTick does it before returning the trigger), so a
+        // failed resolution costs one attempt rather than one per tick.
+        PortalTravel::Traverse(*this, from, entity, portal, entryPos);
+    }
+
+    void IntegratedServer::RunNaturalSpawner(ServerLevel& level, int64_t serverTick) {
+        PROFILE_ZONE_N("NaturalSpawner");
+        MobManager*        mobs     = level.Mobs();
+        ServerLevelBridge* mobLevel = level.MobLevel();
+        Game::World*       world    = level.World();
+        if (!mobs || !mobLevel || !world || !level.Tickets()) return;
 
         // MC ServerLevel.tickChunk gates the spawner on doMobSpawning. Only the
         // spawner — despawning and AI keep running, so the world drains rather
         // than freezing when it is turned off.
-        if (!m_world->GetDoMobSpawning()) return;
-
-        // Loaded ones only. GetBlockTickingChunks reports every chunk inside
-        // simulation distance, loaded or not, and the spawner probes biome and
-        // surface height inside each — reads that answer nothing useful for a
-        // chunk with no data, and used to drag a blocking generate along with
-        // them. MC's spawnable set is its loaded, ticking holders, so this is
-        // also the more faithful count for the mob-cap maths below.
-        auto tickingChunks = m_ticketManager->GetBlockTickingChunks();
-        tickingChunks.erase(
-            std::remove_if(tickingChunks.begin(), tickingChunks.end(),
-                           [this](const Game::Math::ChunkPos& cp) {
-                               return !m_world->IsChunkLoaded(cp.x, cp.z);
-                           }),
-            tickingChunks.end());
-        if (tickingChunks.empty()) return;
-
-        Game::SpawnContext ctx;
-        ctx.level = m_mobLevel.get();
-        ctx.spawnableChunkCount = static_cast<int>(tickingChunks.size());
-        m_mobs->SetSpawnableChunkCount(ctx.spawnableChunkCount);
-
-        int categoryCounts[8] = {};
-        for (int i = 0; i < 8; ++i) categoryCounts[i] = m_mobs->CountForCategory(i);
-        ctx.categoryCounts = categoryCounts;
+        if (!world->GetDoMobSpawning()) return;
 
         std::vector<glm::dvec3> playerPositions;
-        for (Server::PlayerEntityView* view : m_mobLevel->PlayerViews()) {
+        for (Server::PlayerEntityView* view : mobLevel->PlayerViews()) {
             if (view->IsSpectator()) continue;
             playerPositions.push_back(view->position);
         }
         if (playerPositions.empty()) return;   // nobody to spawn for
+
+        // ── Spawnable chunk accounting (MC DistanceManager + ChunkMap) ─────
+        //
+        // MC's naturalSpawnChunkCounter is a radius-8 player tracker:
+        // spawnableChunkCount is the size of the UNION of 17x17 chunk squares
+        // around every player — REGARDLESS of ticking or loaded state. That is
+        // the denominator's whole meaning: one player far from another always
+        // contributes 289, so the global cap scales with players, not with how
+        // many chunks happen to be resident.
+        const auto chunkKey = [](int cx, int cz) {
+            return (static_cast<uint64_t>(static_cast<uint32_t>(cx)) << 32) |
+                    static_cast<uint32_t>(cz);
+        };
+        std::unordered_set<uint64_t> spawnSquares;
+        for (const glm::dvec3& p : playerPositions) {
+            const int pcx = static_cast<int>(std::floor(p.x)) >> 4;
+            const int pcz = static_cast<int>(std::floor(p.z)) >> 4;
+            for (int dx = -Game::kSpawnDistanceChunk; dx <= Game::kSpawnDistanceChunk; ++dx) {
+                for (int dz = -Game::kSpawnDistanceChunk; dz <= Game::kSpawnDistanceChunk; ++dz) {
+                    spawnSquares.insert(chunkKey(pcx + dx, pcz + dz));
+                }
+            }
+        }
+
+        Game::SpawnContext ctx;
+        ctx.level = mobLevel;
+        ctx.spawnableChunkCount = static_cast<int>(spawnSquares.size());
+        mobs->SetSpawnableChunkCount(ctx.spawnableChunkCount);
         ctx.playerPositions = &playerPositions;
 
-        Game::World* world = m_world.get();
+        // The chunks that actually RECEIVE spawn attempts are narrower — MC
+        // ChunkMap.collectSpawningChunks: in a spawn square, holding a ticking
+        // (here: block-ticking AND loaded) chunk, and with the chunk CENTER
+        // within 128 blocks of a non-spectator player, XZ only.
+        auto tickingChunks = level.Tickets()->GetBlockTickingChunks();
+        tickingChunks.erase(
+            std::remove_if(tickingChunks.begin(), tickingChunks.end(),
+                           [world](const Game::Math::ChunkPos& cp) {
+                               return !world->IsChunkLoaded(cp.x, cp.z);
+                           }),
+            tickingChunks.end());
+
+        const auto playerCloseToChunk = [&playerPositions](int cx, int cz) {
+            const double centerX = cx * 16.0 + 8.0;
+            const double centerZ = cz * 16.0 + 8.0;
+            for (const glm::dvec3& p : playerPositions) {
+                const double dx = p.x - centerX;
+                const double dz = p.z - centerZ;
+                if (dx * dx + dz * dz < 128.0 * 128.0) return true;   // 16384 = 128²
+            }
+            return false;
+        };
+
+        std::vector<Game::Math::ChunkPos> chunks;
+        chunks.reserve(tickingChunks.size());
+        for (const auto& cp : tickingChunks) {
+            if (spawnSquares.count(chunkKey(cp.x, cp.z)) &&
+                playerCloseToChunk(cp.x, cp.z)) {
+                chunks.push_back(cp);
+            }
+        }
+
         ctx.biomeAt = [world](int x, int y, int z) -> std::string_view {
             // BiomeInfo::name is the bare vanilla slug ("plains"), which is
             // exactly the key GeneratedMobSpawns is built on — so no
@@ -1018,14 +1989,48 @@ namespace Server {
             return Game::BiomeRegistry::Get(world->GetBiome(x, y, z)).name;
         };
 
-        // MC Level.noCollision(type.getSpawnAABB(...)).
+        // ── Census (MC NaturalSpawner.createState) ─────────────────────────
+        //
+        // Rebuilt from scratch every spawn tick over every live mob. Mobs that
+        // cannot despawn — persistence flag or state-based immunity — do NOT
+        // count toward any cap, which is why name-tagged mobs in vanilla never
+        // choke a farm. MISC never counts either.
+        Server::LocalMobCapCalculator localCap(&playerPositions);
+        Game::PotentialCalculator spawnPotential;
+        int categoryCounts[8] = {};
+        for (const auto& [id, mob] : mobs->All()) {
+            if (mob->IsRemoved()) continue;
+            if (mob->IsPersistenceRequired() || mob->RequiresCustomPersistence()) continue;
+            const Game::MobCategory category = mob->TypeInfo().category;
+            if (category == Game::MobCategory::Misc) continue;
+
+            const glm::ivec3 bp = mob->BlockPosition();
+            const auto* biomeList = Game::FindBiomeSpawnList(ctx.biomeAt(bp.x, bp.y, bp.z));
+            if (const auto* cost = Game::FindMobSpawnCost(biomeList, mob->GetType())) {
+                spawnPotential.AddCharge(bp, cost->charge);
+            }
+            localCap.AddMob(bp.x >> 4, bp.z >> 4, category);
+            ++categoryCounts[static_cast<size_t>(category)];
+        }
+        ctx.categoryCounts = categoryCounts;
+        ctx.spawnPotential = &spawnPotential;
+        ctx.canSpawnLocal = [&localCap](Game::MobCategory category, int cx, int cz) {
+            return localCap.CanSpawn(category, cx, cz);
+        };
+        ctx.afterSpawn = [&localCap](Game::MobCategory category, const glm::ivec3& pos) {
+            localCap.AddMob(pos.x >> 4, pos.z >> 4, category);
+        };
+
+        // MC Level.noCollision(type.getSpawnAABB(...)) — spawn dimensions are
+        // SCALED for slime/magma cube, which spawn at up to size 4.
         ctx.spawnBoxFree = [world](Game::EntityTypeId type,
                                    double x, double y, double z) -> bool {
             const Game::EntityTypeInfo& info = Game::GetEntityTypeInfo(type);
-            const float half = info.width * 0.5f;
+            const float scale = Game::GetSpawnDimensionsScale(type);
+            const float half = info.width * scale * 0.5f;
             Game::AABB box;
             box.min = glm::vec3(x - half, y, z - half);
-            box.max = glm::vec3(x + half, y + info.height, z + half);
+            box.max = glm::vec3(x + half, y + info.height * scale, z + half);
 
             Game::PhysicsContext phys;
             phys.blockAccess = world;
@@ -1042,87 +2047,253 @@ namespace Server {
             return tickingSet.find(Game::Math::ChunkPos{ cx, cz }) != tickingSet.end();
         };
 
-        // MC isRightDistanceToPlayerAndSpawnPoint's respawn-point half.
+        // MC isRightDistanceToPlayerAndSpawnPoint's respawn-point half — the
+        // LEVEL's shared spawn, not any particular player's bed.
         if (m_sessionManager) {
-            const glm::vec3 spawn = m_sessionManager->GetPlayerSpawn(0);
-            ctx.worldSpawn = glm::dvec3(spawn);
+            ctx.worldSpawn = glm::dvec3(m_sessionManager->GetWorldSpawn());
             ctx.hasWorldSpawn = true;
         }
 
-        // MC LocalMobCapCalculator. A chunk may spawn a category only if SOME
-        // player within spawn range of it is below maxInstancesPerChunk for
-        // that category — counted per player, over the mobs near that player.
-        // Without it a single crowded area starves spawning everywhere else,
-        // because only the global cap would apply.
-        MobManager* mobs = m_mobs.get();
-        ctx.canSpawnLocal = [mobs, &playerPositions](Game::MobCategory category,
-                                                     int chunkX, int chunkZ) -> bool {
-            if (!mobs) return true;
-
-            const int maxPerChunk = Game::GetMobCategoryInfo(category).maxInstancesPerChunk;
-            const double chunkCenterX = chunkX * 16.0 + 8.0;
-            const double chunkCenterZ = chunkZ * 16.0 + 8.0;
-
-            // MC's "close for spawning" radius is the 8-chunk spawn distance.
-            constexpr double kSpawnRangeSq =
-                (Game::kSpawnDistanceChunk * 16.0) * (Game::kSpawnDistanceChunk * 16.0);
-
-            for (const glm::dvec3& p : playerPositions) {
-                const double dx = p.x - chunkCenterX;
-                const double dz = p.z - chunkCenterZ;
-                if (dx * dx + dz * dz > kSpawnRangeSq) continue;
-
-                int nearCount = 0;
-                for (const auto& [id, mob] : mobs->All()) {
-                    if (mob->TypeInfo().category != category) continue;
-                    const double mx = mob->position.x - p.x;
-                    const double mz = mob->position.z - p.z;
-                    if (mx * mx + mz * mz <= kSpawnRangeSq) ++nearCount;
-                }
-                if (nearCount < maxPerChunk) return true;
-            }
-
-            // Either no player is in range, or every one of them is already at
-            // the cap. MC's canSpawn returns false in both cases.
-            return false;
+        Game::EntityLevel* entityLevel = mobLevel;
+        ctx.createMob = [entityLevel](Game::EntityTypeId type) {
+            return MakeMobForLoad(type, entityLevel);
+        };
+        ctx.addFreshEntity = [mobs](std::unique_ptr<Game::Mob> mob) {
+            mobs->Add(std::move(mob));
         };
 
-        Game::EntityLevel* level = m_mobLevel.get();
-        ctx.createMob = [level](Game::EntityTypeId type) { return MakeMob(type, level); };
+        ctx.minY = Game::Math::WorldCoordinates::MIN_WORLD_Y;
+        // MC ServerLevel.getSeaLevel, which comes from the DIMENSION's noise
+        // settings — 63 / 32 / 0. It splits the spawner's water and underground
+        // categories, so the Nether's 32 is what stops the whole lava sea
+        // reading as "above sea level".
+        ctx.seaLevel = level.SeaLevel();
+        ctx.worldSeed = world->GetGenerationSeed();
+        ctx.surfaceHeight = [world](int x, int z) -> int {
+            auto chunk = world->GetLoadedChunk(x >> 4, z >> 4);
+            if (!chunk) return std::numeric_limits<int>::min();  // fail-closed: bat rule rejects
+            if (!chunk->AreHeightmapsPrimed()) chunk->PrimeHeightmaps();
+            return chunk->GetSurfaceHeight(x & 15, z & 15,
+                                           Game::HeightmapType::WorldSurface);
+        };
+
+        // ── The per-tick category filter (MC getFilteredSpawningCategories) ─
+        //
+        // spawnFriendlies is hardcoded true in MC's tickChunks; spawnEnemies is
+        // the peaceful gate; the persistent categories (CREATURE) only pass
+        // every 400 ticks.
+        const bool spawnEnemies =
+            mobLevel->GetDifficulty() != Game::Difficulty::Peaceful;
+        const bool spawnPersistent =
+            (serverTick % Game::kCreatureSpawnInterval) == 0;
+        const std::vector<Game::MobCategory> categories =
+            Game::GetFilteredSpawningCategories(ctx, /*spawnFriendlies=*/true,
+                                                spawnEnemies, spawnPersistent);
+        if (categories.empty() || chunks.empty()) return;
 
         // MC shuffles the spawnable chunk list and walks it. Walking it in a
         // fixed order would bias spawning toward whichever chunks happen to
         // hash first, which shows up as mobs clustering on one side of a player.
-        std::vector<Game::Math::ChunkPos> chunks(tickingChunks.begin(), tickingChunks.end());
-        Game::JavaRandom& rng = m_mobLevel->Random();
+        Game::JavaRandom& rng = mobLevel->Random();
         for (size_t i = chunks.size(); i > 1; --i) {
             std::swap(chunks[i - 1], chunks[rng.NextInt(static_cast<int>(i))]);
         }
 
-        std::vector<std::unique_ptr<Game::Mob>> spawned;
         for (const auto& pos : chunks) {
             // MC hands spawnForChunk the resolved LevelChunk. We filtered the
             // list to loaded chunks above, so this is a cache hit.
-            auto chunk = m_world->GetLoadedChunk(pos.x, pos.z);
+            auto chunk = world->GetLoadedChunk(pos.x, pos.z);
             if (!chunk) continue;
             // MC's heightmaps are always live; ours can be unprimed on a chunk
             // that skipped both the generator copy and the NBT restore, and
             // getRandomPosWithin would then sample against MIN_Y.
             if (!chunk->AreHeightmapsPrimed()) chunk->PrimeHeightmaps();
-            Game::SpawnForChunk(ctx, *chunk, pos.x, pos.z, serverTick, rng, spawned);
+            Game::SpawnForChunk(ctx, *chunk, pos.x, pos.z, categories, rng);
         }
-
-        for (auto& mob : spawned) m_mobs->Add(std::move(mob));
     }
 
-    int IntegratedServer::SummonMobs(Game::EntityTypeId type, const glm::dvec3& pos, int count) {
-        if (!m_mobs || !m_mobLevel) return 0;
+
+    // ── /shape build job ────────────────────────────────────────────────────
+    //
+    // One job at a time, streamed at a fixed cell budget per tick so a
+    // hundred-cubed cube (a million writes) lands over a handful of ticks
+    // instead of one multi-second stall. State is file-local: there is one
+    // integrated server, and a fresh Initialize resets it via the ctor path.
+    namespace {
+        struct ShapeJobState {
+            ShapeJobRequest job{};
+            bool     active = false;
+            int64_t  cursor = 0;      // linear index over the bounding box
+            int64_t  placed = 0;
+            glm::ivec3 lo{0}, size{0};
+            // Builds submitted while one is streaming wait their turn — a
+            // burst of /shape commands in one chat line should all land.
+            std::deque<ShapeJobRequest> queue;
+        };
+        ShapeJobState s_shape;
+
+        // Start streaming `job` (assumes no job is active).
+        void BeginShapeJob(const ShapeJobRequest& job) {
+            s_shape.job    = job;
+            s_shape.cursor = 0;
+            s_shape.placed = 0;
+            glm::ivec3 sz;
+            switch (job.form) {
+                case ShapeForm::Box:      sz = glm::ivec3(job.a, job.b, job.c); break;
+                case ShapeForm::Wall:
+                    sz = job.facing.x != 0 ? glm::ivec3(1, job.b, job.a)
+                                           : glm::ivec3(job.a, job.b, 1);
+                    break;
+                case ShapeForm::Sphere:   sz = glm::ivec3(2 * job.a + 1); break;
+                case ShapeForm::Dome:     sz = glm::ivec3(2 * job.a + 1, job.a + 1, 2 * job.a + 1); break;
+                case ShapeForm::Cylinder: sz = glm::ivec3(2 * job.a + 1, job.b, 2 * job.a + 1); break;
+                case ShapeForm::Pyramid:  sz = glm::ivec3(job.a, job.a / 2 + 1, job.a); break;
+            }
+            s_shape.size = sz;
+            s_shape.lo   = glm::ivec3(job.base.x - sz.x / 2, job.base.y, job.base.z - sz.z / 2);
+            s_shape.active = true;
+        }
+
+        // Is this bounding-box cell part of the requested form?
+        bool ShapeContains(const ShapeJobRequest& j, const glm::ivec3& sz,
+                           int x, int y, int z) {
+            // x/z relative to the box, y from the bottom.
+            const int cx = sz.x / 2, cz = sz.z / 2;
+            switch (j.form) {
+                case ShapeForm::Box: {
+                    if (j.frame) {
+                        int edges = 0;
+                        if (x == 0 || x == sz.x - 1) ++edges;
+                        if (y == 0 || y == sz.y - 1) ++edges;
+                        if (z == 0 || z == sz.z - 1) ++edges;
+                        return edges >= 2;
+                    }
+                    if (j.hollow) {
+                        return x == 0 || x == sz.x - 1 || y == 0 || y == sz.y - 1 ||
+                               z == 0 || z == sz.z - 1;
+                    }
+                    return true;
+                }
+                case ShapeForm::Wall: {
+                    if (j.frame || j.hollow) {
+                        return x == 0 || x == sz.x - 1 || y == 0 || y == sz.y - 1;
+                    }
+                    return true;
+                }
+                case ShapeForm::Sphere:
+                case ShapeForm::Dome: {
+                    const double r  = j.a + 0.5;
+                    const double dx = x - cx, dz = z - cz;
+                    const double dy = y - (j.form == ShapeForm::Dome ? 0 : j.a);
+                    const double d  = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (j.form == ShapeForm::Dome && y < 0) return false;
+                    if (d > r) return false;
+                    if (j.hollow || j.frame) return d > r - 1.25;
+                    return true;
+                }
+                case ShapeForm::Cylinder: {
+                    const double r  = j.a + 0.5;
+                    const double dx = x - cx, dz = z - cz;
+                    const double d  = std::sqrt(dx * dx + dz * dz);
+                    if (d > r) return false;
+                    // hollow: an open tube — walls only, no caps, so you can
+                    // stand inside it (or fill it with primed TNT).
+                    if (j.hollow || j.frame) return d > r - 1.25;
+                    return true;
+                }
+                case ShapeForm::Pyramid: {
+                    // Stepped: each level shrinks by one block a side.
+                    const int half = j.a / 2 - y;
+                    if (half < 0) return false;
+                    const int ax = std::abs(x - cx), az = std::abs(z - cz);
+                    if (ax > half || az > half) return false;
+                    if (j.hollow || j.frame) {
+                        return ax == half || az == half || y == 0;
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+    } // namespace
+
+    bool IntegratedServer::SubmitShapeJob(const ShapeJobRequest& job) {
+        if (s_shape.active) {
+            // Queue rather than refuse — several /shape commands issued in a
+            // burst (or one chat line) all land, in order.
+            if (s_shape.queue.size() >= 8) return false;
+            s_shape.queue.push_back(job);
+            return true;
+        }
+        BeginShapeJob(job);
+        return true;
+    }
+
+    void IntegratedServer::TickShapeJob() {
+        if (!s_shape.active) return;
+        Game::World* world = Overworld().World();
+        if (!world) { s_shape.active = false; return; }
+
+        const ShapeJobRequest& j = s_shape.job;
+        const glm::ivec3 sz = s_shape.size;
+        const int64_t total = int64_t(sz.x) * sz.y * sz.z;
+
+        // Budgets: cells examined bounds the membership math, writes bound
+        // the real work. Roughly one to two milliseconds a tick either way.
+        constexpr int64_t kCellsPerTick  = 600000;
+        constexpr int64_t kWritesPerTick = 120000;
+
+        int64_t cells = 0, writes = 0;
+        while (s_shape.cursor < total && cells < kCellsPerTick && writes < kWritesPerTick) {
+            const int64_t idx = s_shape.cursor++;
+            ++cells;
+            // y-major: the shape rises out of the ground tick by tick.
+            const int y = static_cast<int>(idx / (int64_t(sz.x) * sz.z));
+            const int rem = static_cast<int>(idx % (int64_t(sz.x) * sz.z));
+            const int z = rem / sz.x;
+            const int x = rem % sz.x;
+
+            if (j.checker && (((x + y + z) & 1) != 0)) continue;
+            if (j.spaced > 1 && (x % j.spaced || y % j.spaced || z % j.spaced)) continue;
+            if (!ShapeContains(j, sz, x, y, z)) continue;
+
+            if (world->SetBlock(s_shape.lo.x + x, s_shape.lo.y + y, s_shape.lo.z + z,
+                                j.block, Game::World::UpdateFlags::All)) {
+                ++writes;
+                ++s_shape.placed;
+            }
+        }
+
+        if (s_shape.cursor >= total) {
+            s_shape.active = false;
+            Log::Info("[Shape] done: %lld blocks placed",
+                      static_cast<long long>(s_shape.placed));
+            BroadcastSystemMessage("[Shape] done: " +
+                std::to_string(s_shape.placed) + " blocks placed", 0xFFFFFFFF);
+            if (!s_shape.queue.empty()) {
+                const ShapeJobRequest next = s_shape.queue.front();
+                s_shape.queue.pop_front();
+                BeginShapeJob(next);
+            }
+        }
+    }
+
+    int IntegratedServer::SummonMobs(Game::EntityTypeId type, const glm::dvec3& pos,
+                                     int count, const SummonOptions& options) {
+        // OVERWORLD. /summon reaches here from CommandDispatcher with a
+        // position and nothing else — no session, no dimension — so there is
+        // genuinely no player in scope to resolve a level from. Summoning into
+        // the Nether needs the command to carry its sender's dimension first.
+        ServerLevel&       level    = Overworld();
+        MobManager*        mobs     = level.Mobs();
+        ServerLevelBridge* mobLevel = level.MobLevel();
+        if (!mobs || !mobLevel) return 0;
 
         int spawned = 0;
-        Game::JavaRandom& rng = m_mobLevel->Random();
+        Game::JavaRandom& rng = mobLevel->Random();
 
         for (int i = 0; i < count; ++i) {
-            std::unique_ptr<Game::Mob> mob = MakeMob(type, m_mobLevel.get());
+            std::unique_ptr<Game::Mob> mob = MakeMobForLoad(type, mobLevel);
             if (!mob) break;
 
             mob->position = pos;
@@ -1137,15 +2308,46 @@ namespace Server {
             mob->yHeadRot = mob->yRot;
             mob->yBodyRot = mob->yRot;
 
+            // The two block-shaped entities need their own construction, not
+            // just a position: a PrimedTnt summoned without it has no spawn hop
+            // (so a stack of them sits in one column instead of scattering),
+            // and a FallingBlockEntity needs the cell it is falling FROM for
+            // the renderer's model-randomisation seed.
+            //
+            // MC does this through the summon's NBT; there is no NBT argument
+            // here, so both take their vanilla defaults — a full 80-tick fuse,
+            // and sand.
+            if (auto* tnt = dynamic_cast<Game::PrimedTnt*>(mob.get())) {
+                tnt->InitPrimed(mob->position, nullptr);
+                // InitPrimed stamps the default 80-tick fuse, so any override
+                // has to come after it. The step is what turns a stack of TNT
+                // from one big blast into a sequence.
+                if (options.tntFuse >= 0 || options.tntFuseStep != 0) {
+                    const int base = options.tntFuse >= 0
+                        ? options.tntFuse : Game::PrimedTnt::kDefaultFuse;
+                    // Clamped at 1: a fuse of 0 or less detonates on the very
+                    // first tick, before the client has even been told the
+                    // entity exists, so the blast would have no visible source.
+                    tnt->SetFuse(std::max(1, base + i * options.tntFuseStep));
+                }
+            } else if (auto* falling =
+                           dynamic_cast<Game::FallingBlockEntity*>(mob.get())) {
+                const glm::dvec3 at = mob->position;
+                falling->InitFall(glm::ivec3(static_cast<int>(std::floor(at.x)),
+                                             static_cast<int>(std::floor(at.y)),
+                                             static_cast<int>(std::floor(at.z))),
+                                  falling->CarriedState());
+            }
+
             // MC SummonCommand calls finalizeSpawn whenever the summon carries
             // no NBT overriding it — which is every summon this engine has.
-            mob->FinalizeSpawn();
+            mob->FinalizeSpawn(Game::SpawnReason::Command, nullptr);
 
             // Summoned mobs never despawn — MC does the same for /summon, and
             // it is what makes the command usable for testing at all.
             mob->SetPersistenceRequired(true);
 
-            if (m_mobs->Add(std::move(mob)) != 0) ++spawned;
+            if (mobs->Add(std::move(mob)) != 0) ++spawned;
         }
         return spawned;
     }
@@ -1153,16 +2355,25 @@ namespace Server {
     bool IntegratedServer::SpawnMobFromItemUse(Game::EntityTypeId type,
                                                const glm::ivec3& spawnPos,
                                                bool tryMoveDown, bool movedUp) {
-        if (!m_mobs || !m_mobLevel || !m_world) return false;
+        // OVERWORLD. The caller chain — ItemBehaviors -> Game::SpawnMobFromItem
+        // -> here — lives in `common` and carries neither a player nor a
+        // dimension; giving it one means changing an interface `common` owns.
+        // Until then a spawn egg used in the Nether creates its mob in the
+        // Overworld's manager.
+        ServerLevel&       level    = Overworld();
+        MobManager*        mobs     = level.Mobs();
+        ServerLevelBridge* mobLevel = level.MobLevel();
+        Game::World*       world    = level.World();
+        if (!mobs || !mobLevel || !world) return false;
 
         // MC SpawnEggItem.spawnMob's own gate, before anything is created.
         const Game::EntityTypeInfo& info = Game::GetEntityTypeInfo(type);
         if (info.notInPeaceful &&
-            m_mobLevel->GetDifficulty() == Game::Difficulty::Peaceful) {
+            mobLevel->GetDifficulty() == Game::Difficulty::Peaceful) {
             return false;
         }
 
-        std::unique_ptr<Game::Mob> mob = MakeMob(type, m_mobLevel.get());
+        std::unique_ptr<Game::Mob> mob = MakeMobForLoad(type, mobLevel);
         if (!mob) return false;
 
         // ── MC EntityType.create ────────────────────────────────────────────
@@ -1184,7 +2395,7 @@ namespace Server {
             region.max = glm::vec3(spawnPos.x + 1, spawnPos.y + 1, spawnPos.z + 1);
 
             Game::PhysicsContext phys;
-            phys.blockAccess = m_world.get();
+            phys.blockAccess = world;
             std::vector<Game::AABBd> colliders;
             Game::CollectBlockColliders(Game::ToAABBd(region), phys, colliders);
 
@@ -1194,7 +2405,7 @@ namespace Server {
         }
 
         mob->position = glm::dvec3(spawnPos.x + 0.5, spawnPos.y + yOffset, spawnPos.z + 0.5);
-        mob->yRot = Game::Mth::WrapDegrees(m_mobLevel->Random().NextFloat() * 360.0f);
+        mob->yRot = Game::Mth::WrapDegrees(mobLevel->Random().NextFloat() * 360.0f);
         mob->xRot = 0.0f;
         mob->yHeadRot = mob->yRot;
         mob->yBodyRot = mob->yRot;
@@ -1202,18 +2413,232 @@ namespace Server {
         // MC EntityType.create runs finalizeSpawn for SPAWN_ITEM_USE too, which
         // is why a vanilla spawn egg can produce a grey, brown or (rarely) pink
         // sheep rather than always a white one.
-        mob->FinalizeSpawn();
+        mob->FinalizeSpawn(Game::SpawnReason::SpawnItemUse, nullptr);
 
         // MC does NOT mark egg-spawned mobs persistent — they despawn like any
         // natural spawn. /summon is the one that pins them (see SummonMobs).
-        return m_mobs->Add(std::move(mob)) != 0;
+        return mobs->Add(std::move(mob)) != 0;
+    }
+
+    // ── Wither summoning ritual ─────────────────────────────────────────────
+    //
+    // Port of MC WitherSkullBlock.checkSpawn plus the slice of
+    // BlockPattern/BlockPatternBuilder it depends on. The full pattern is one
+    // 3-wide 3-tall aisle,
+    //
+    //     "^^^"      ^ = wither skeleton skull block, floor OR wall variant,
+    //     "###"          any rotation/facing (BlockStatePredicate.forBlock
+    //     "~#~"          matches the BLOCK, ignoring properties)
+    //                # = BlockTags.WITHER_SUMMON_BASE_BLOCKS = soul sand
+    //                    or soul soil
+    //                ~ = blockState.isAir() — MUST be air, not "anything"
+    //
+    // and BlockPattern.find tries it with every (forwards, up ⊥ forwards)
+    // direction pair at every position of a 3³ probe cube — which is why in
+    // vanilla the T can face any of the four ways AND be built lying flat, and
+    // why any of the three skulls can be the one placed last. All of that
+    // falls out of porting find() literally instead of scanning two axes.
+    namespace {
+        // The six Direction unit vectors, MC ordinal order (D U N S W E).
+        constexpr glm::ivec3 kDirSteps[6] = {
+            {0,-1,0}, {0,1,0}, {0,0,-1}, {0,0,1}, {-1,0,0}, {1,0,0},
+        };
+
+        glm::ivec3 IntCross(const glm::ivec3& a, const glm::ivec3& b) {
+            return { a.y * b.z - a.z * b.y,
+                     a.z * b.x - a.x * b.z,
+                     a.x * b.y - a.y * b.x };
+        }
+
+        // MC BlockPattern.translateAndRotate: right/down/forwards pattern
+        // coordinates → world offset from the front-top-left corner.
+        glm::ivec3 PatternCell(const glm::ivec3& frontTopLeft,
+                               const glm::ivec3& forwards, const glm::ivec3& up,
+                               int right, int down, int fwd) {
+            const glm::ivec3 rightVec = IntCross(forwards, up);
+            return frontTopLeft + up * (-down) + rightVec * right + forwards * fwd;
+        }
+
+        bool IsWitherSkullBlock(Game::BlockID id) {
+            return id == Game::BlockID::WitherSkeletonSkull ||
+                   id == Game::BlockID::WitherSkeletonWallSkull;
+        }
+        // BlockTags.WITHER_SUMMON_BASE_BLOCKS (data tag): soul_sand, soul_soil.
+        bool IsWitherSummonBase(Game::BlockID id) {
+            return id == Game::BlockID::SoulSand || id == Game::BlockID::SoulSoil;
+        }
+
+        // pattern[y][x] for the single aisle above. 0 = '^', 1 = '#', 2 = '~'.
+        constexpr int kWitherPattern[3][3] = {
+            { 0, 0, 0 },
+            { 1, 1, 1 },
+            { 2, 1, 2 },
+        };
+
+        bool WitherCellMatches(Game::World& world, const glm::ivec3& cell, int predicate) {
+            const Game::BlockID id = world.GetBlock(cell.x, cell.y, cell.z);
+            switch (predicate) {
+                case 0:  return IsWitherSkullBlock(id);
+                case 1:  return IsWitherSummonBase(id);
+                default: return id == Game::BlockID::Air;   // MC state.isAir()
+            }
+        }
+
+        bool WitherPatternMatches(Game::World& world, const glm::ivec3& frontTopLeft,
+                                  const glm::ivec3& forwards, const glm::ivec3& up) {
+            for (int x = 0; x < 3; ++x) {
+                for (int y = 0; y < 3; ++y) {
+                    const glm::ivec3 cell = PatternCell(frontTopLeft, forwards, up, x, y, 0);
+                    if (!WitherCellMatches(world, cell, kWitherPattern[y][x])) return false;
+                }
+            }
+            return true;
+        }
+    } // namespace
+
+    void IntegratedServer::CheckWitherSpawn(const glm::ivec3& pos) {
+        // OVERWORLD. PlayerSession calls this with a block position only, and
+        // its whole block-interaction path still reads GetWorld() (the
+        // overworld) too — so pinning here keeps the ritual consistent with the
+        // world the placement itself went into. Building the T in the Nether
+        // needs that path to carry the session's dimension first.
+        ServerLevel&       level    = Overworld();
+        MobManager*        mobs     = level.Mobs();
+        ServerLevelBridge* mobLevel = level.MobLevel();
+        Game::World*       world    = level.World();
+        if (!mobs || !mobLevel || !world) {
+            Log::Warning("[WitherRitual] skull placed at (%d,%d,%d) but the "
+                         "server has no mobs/level/world — no check ran",
+                         pos.x, pos.y, pos.z);
+            return;
+        }
+
+        // MC checkSpawn's gates: server side (this whole class is), the placed
+        // block IS a wither skull (the caller guarantees it), the position is
+        // in the world, and not peaceful.
+        if (pos.y < Game::World::MIN_Y) return;
+        if (mobLevel->GetDifficulty() == Game::Difficulty::Peaceful) {
+            Log::Debug("[WitherRitual] skull placed but difficulty is Peaceful");
+            return;
+        }
+        Log::Debug("[WitherRitual] checking pattern around (%d,%d,%d)",
+                   pos.x, pos.y, pos.z);
+
+        // MC BlockPattern.find: probe every frontTopLeft in the 3³ cube at
+        // `pos` against every valid (forwards, up) pair.
+        glm::ivec3 frontTopLeft{}, forwards{}, up{};
+        bool found = false;
+        for (int dx = 0; dx < 3 && !found; ++dx)
+        for (int dy = 0; dy < 3 && !found; ++dy)
+        for (int dz = 0; dz < 3 && !found; ++dz) {
+            const glm::ivec3 origin = pos + glm::ivec3(dx, dy, dz);
+            for (int f = 0; f < 6 && !found; ++f) {
+                for (int u = 0; u < 6; ++u) {
+                    const glm::ivec3 fv = kDirSteps[f];
+                    const glm::ivec3 uv = kDirSteps[u];
+                    if (uv == fv || uv == -fv) continue;   // up must be ⊥ forwards
+                    if (WitherPatternMatches(*world, origin, fv, uv)) {
+                        frontTopLeft = origin; forwards = fv; up = uv;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            // Diagnostic dump (Debug — skulls get placed as decoration): the
+            // vertical slice through the placed skull on both horizontal
+            // axes. The most common legitimate miss is MC's own pit rule —
+            // the '~' cells flanking the BASE soul sand must be AIR
+            // (WitherSkullBlock.java:90, state.isAir()), so a T flush with
+            // the ground, or with grass plants beside the base, refuses in
+            // vanilla too.
+            for (int dy = 0; dy >= -2; --dy) {
+                std::string rowX, rowZ;
+                for (int d = -2; d <= 2; ++d) {
+                    rowX += std::to_string(static_cast<int>(
+                                world->GetBlock(pos.x + d, pos.y + dy, pos.z))) + " ";
+                    rowZ += std::to_string(static_cast<int>(
+                                world->GetBlock(pos.x, pos.y + dy, pos.z + d))) + " ";
+                }
+                Log::Debug("[WitherRitual] y%+d  x-slice: %s | z-slice: %s",
+                           dy, rowX.c_str(), rowZ.c_str());
+            }
+            return;
+        }
+        Log::Info("[WitherRitual] pattern matched — summoning the wither");
+
+        std::unique_ptr<Game::Mob> wither = MakeMobForLoad(Game::EntityTypeId::Wither, mobLevel);
+        if (!wither) return;
+
+        // CarvedPumpkinBlock.clearPatternBlocks: every pattern cell — the two
+        // air corners included — becomes air with MC flag 2 (send to clients,
+        // NO neighbour updates yet; those come after the boss exists, below).
+        // MC also fires levelEvent 2001 per cell (break particles + sound);
+        // this engine has no level-event channel yet, so that part is skipped.
+        constexpr uint32_t kClearFlags = Game::World::UpdateFlags::UpdateShapes |
+                                         Game::World::UpdateFlags::RecomputeLight |
+                                         Game::World::UpdateFlags::UpdateHeightmap |
+                                         Game::World::UpdateFlags::MarkDirty;
+        for (int x = 0; x < 3; ++x) {
+            for (int y = 0; y < 3; ++y) {
+                const glm::ivec3 cell = PatternCell(frontTopLeft, forwards, up, x, y, 0);
+                world->SetBlock(cell.x, cell.y, cell.z, Game::BlockID::Air, kClearFlags);
+            }
+        }
+
+        // MC: spawn at getBlock(1, 2, 0) — the centre of the pattern's bottom
+        // row (the soul-sand column base) — with the wither snapped to
+        // (+0.5, +0.55, +0.5) and yawed along the pattern plane:
+        //   forwards axis == X ? 0° : 90°, body rotation matching.
+        const glm::ivec3 spawnCell = PatternCell(frontTopLeft, forwards, up, 1, 2, 0);
+        const float yaw = (forwards.x != 0) ? 0.0f : 90.0f;
+        wither->position = glm::dvec3(spawnCell.x + 0.5, spawnCell.y + 0.55,
+                                      spawnCell.z + 0.5);
+        wither->yRot = wither->yBodyRot = wither->yHeadRot = yaw;
+        wither->xRot = 0.0f;
+
+        // MC calls wither.makeInvulnerable() explicitly. Our
+        // Wither::FinalizeSpawn already applies MakeInvulnerable for every
+        // non-Load reason (it was written as the ritual stand-in), so calling
+        // it here again would double-apply — FinalizeSpawn alone is the whole
+        // charge-up.
+        wither->FinalizeSpawn(Game::SpawnReason::Triggered, nullptr);
+
+        // MC: CriteriaTriggers.SUMMONED_ENTITY for every player within 50
+        // blocks — no advancement system here, skipped. (Vanilla's piglin
+        // anger applies to golem construction, not this ritual.)
+
+        Log::Info("[Server] Wither summoned at (%d,%d,%d)",
+                  spawnCell.x, spawnCell.y, spawnCell.z);
+        mobs->Add(std::move(wither));
+
+        // CarvedPumpkinBlock.updatePatternBlocks: NOW run the deferred
+        // neighbour updates for every cleared cell.
+        for (int x = 0; x < 3; ++x) {
+            for (int y = 0; y < 3; ++y) {
+                const glm::ivec3 cell = PatternCell(frontTopLeft, forwards, up, x, y, 0);
+                world->NotifyNeighborBlocks(cell.x, cell.y, cell.z);
+            }
+        }
     }
 
     void IntegratedServer::HandleInteract(uint32_t connectionId, int32_t entityId,
                                           bool attack, bool sprinting) {
-        if (!m_mobs || !m_mobLevel) return;
+        if (!m_sessionManager) return;
 
-        Server::PlayerEntityView* attacker = m_mobLevel->GetPlayerView(connectionId);
+        // Everything below — the attacker's view, the target's id, the mob
+        // manager it is looked up in — belongs to the level the ATTACKER is
+        // standing in. Entity ids are allocated per level, so resolving the
+        // wrong one would hit a same-numbered mob in another world.
+        auto session = m_sessionManager->GetSessionByConnection(connectionId);
+        if (!session) return;
+        ServerLevel&       level    = LevelOf(*session);
+        MobManager*        mobs     = level.Mobs();
+        ServerLevelBridge* mobLevel = level.MobLevel();
+        if (!mobs || !mobLevel) return;
+
+        Server::PlayerEntityView* attacker = mobLevel->GetPlayerView(connectionId);
         if (!attacker || attacker->IsSpectator()) return;
 
         // The id space already separates the two (see Game::kMobEntityIdBase):
@@ -1223,13 +2648,13 @@ namespace Server {
         Game::LivingEntity* target = nullptr;
         Game::Mob*          mobTarget = nullptr;
         if (Game::IsMobEntityId(entityId)) {
-            mobTarget = m_mobs->Find(entityId);
+            mobTarget = mobs->Find(entityId);
             target = mobTarget;
         } else if (entityId >= 0 && entityId < Game::kItemEntityIdBase) {
             // A player. Never yourself: MC's pick never returns the attacker,
             // but a hand-made packet could.
             if (static_cast<uint32_t>(entityId) == connectionId) return;
-            target = m_mobLevel->GetPlayerView(static_cast<uint32_t>(entityId));
+            target = mobLevel->GetPlayerView(static_cast<uint32_t>(entityId));
         }
         if (!target || !target->IsAlive()) return;
 
@@ -1304,9 +2729,7 @@ namespace Server {
                 // The stack may have shrunk and the mob's synched data changed.
                 // The tracker picks the mob up on its own; the inventory has to
                 // be pushed.
-                auto session = m_sessionManager
-                    ? m_sessionManager->GetSession(connectionId) : nullptr;
-                if (session) session->SendInventoryFull();
+                session->SendInventoryFull();
             }
             return;
         }
@@ -1350,7 +2773,9 @@ namespace Server {
         // fallDistance > 0 && !onGround is why a crit is a hit taken on the way
         // DOWN — the accumulator only grows while descending (see
         // PlayerSession::UpdateMovementStats). isMobilityRestricted and
-        // isPassenger have no analogue here: no status effects, no vehicles.
+        // isPassenger have no analogue here: BLINDNESS (the one effect the
+        // mobility test reads) is outside the ported effect set — nothing in
+        // the mob system applies it — and no vehicles exist.
         const bool crit = fullStrength
                        && player->getFallDistance() > 0.0f
                        && !player->isOnGround()
@@ -1387,7 +2812,7 @@ namespace Server {
                 target->Knockback(0.5, std::sin(yaw), -std::cos(yaw));
             }
             if (sweep) DoSweepAttack(*attacker, *target, strengthScale);
-            BroadcastAttackEffects(*target, crit);
+            BroadcastAttackEffects(level.Dimension(), *target, crit);
 
             // MC Player.attack's last line: 0.1 exhaustion per landed hit.
             // causeFoodExhaustion no-ops for an invulnerable player, which is
@@ -1401,9 +2826,14 @@ namespace Server {
     }
 
     bool IntegratedServer::IsOnClimbable(const ServerPlayer& player) const {
-        if (!m_world) return false;
+        // The blocks under this player's feet are the ones in the world they
+        // are standing in — read from the player's own dimension rather than
+        // the overworld, or a ladder in the Nether would never register.
+        ServerLevel* level = GetLevel(Game::DimensionFromRaw(player.getDimensionId()));
+        Game::World* world = level ? level->World() : nullptr;
+        if (!world) return false;
         const glm::dvec3 pos = player.getPosition();
-        const Game::BlockID block = m_world->GetBlock(
+        const Game::BlockID block = world->GetBlock(
             static_cast<int>(std::floor(pos.x)),
             static_cast<int>(std::floor(pos.y)),
             static_cast<int>(std::floor(pos.z)));
@@ -1428,7 +2858,13 @@ namespace Server {
     void IntegratedServer::DoSweepAttack(Server::PlayerEntityView& attacker,
                                          Game::LivingEntity& target,
                                          float strengthScale) {
-        if (!m_mobLevel) return;
+        // The sweep asks "what else is standing next to what I hit", which is
+        // a query against the attacker's own level's entity set.
+        ServerPlayer* player = attacker.GetPlayer();
+        if (!player) return;
+        ServerLevel* level = GetLevel(Game::DimensionFromRaw(player->getDimensionId()));
+        ServerLevelBridge* mobLevel = level ? level->MobLevel() : nullptr;
+        if (!mobLevel) return;
 
         // MC Player.doSweepAttack: everything living inside the TARGET's box
         // inflated by (1.0, 0.25, 1.0), except the attacker and the target
@@ -1443,7 +2879,7 @@ namespace Server {
         box.max += glm::vec3(1.0f, 0.25f, 1.0f);
 
         std::vector<Game::Entity*> nearby;
-        m_mobLevel->GetEntitiesInBox(box, &attacker, nearby);
+        mobLevel->GetEntitiesInBox(box, &attacker, nearby);
 
         const float yaw = attacker.yRot * Game::Mth::kDegToRad;
         const float sweepDamage = 1.0f * strengthScale;
@@ -1462,10 +2898,35 @@ namespace Server {
     }
 
     Server::PlayerEntityView* IntegratedServer::GetPlayerEntityView(uint32_t connectionId) {
-        return m_mobLevel ? m_mobLevel->GetPlayerView(connectionId) : nullptr;
+        // Each level's bridge keeps its own view objects, so a player in the
+        // Nether has their live view in the Nether's bridge — asking the
+        // overworld's would hand back a stale mirror (or nothing).
+        //
+        // The dimension is read off the ServerPlayer and NOT via a session
+        // lookup, which would deadlock: PlayerSessionManager::
+        // BroadcastPlayerPositions calls this from inside its own
+        // (non-recursive) m_sessionMutex, so asking that manager for a session
+        // here would block the server thread on a lock it already holds.
+        //
+        // Connection ids and player ids are the same number (OnPlayerJoined
+        // uses the connection id as the player id), and both containers below
+        // are only ever written on the server thread.
+        const ServerPlayer* player = nullptr;
+        if (connectionId == 1 && m_serverPlayer) {
+            player = m_serverPlayer.get();
+        } else {
+            auto it = m_remotePlayers.find(connectionId);
+            if (it != m_remotePlayers.end()) player = it->second.get();
+        }
+        if (!player) return nullptr;
+
+        ServerLevel* level = GetLevel(Game::DimensionFromRaw(player->getDimensionId()));
+        ServerLevelBridge* mobLevel = level ? level->MobLevel() : nullptr;
+        return mobLevel ? mobLevel->GetPlayerView(connectionId) : nullptr;
     }
 
-    void IntegratedServer::BroadcastAttackEffects(const Game::LivingEntity& target,
+    void IntegratedServer::BroadcastAttackEffects(Game::DimensionId dimension,
+                                                  const Game::LivingEntity& target,
                                                   bool crit) {
         if (!m_networkServer) return;
 
@@ -1484,25 +2945,25 @@ namespace Server {
             static_cast<int32_t>(std::floor(target.position.x / 16.0)),
             static_cast<int32_t>(std::floor(target.position.z / 16.0))
         };
-        SendToChunkWatchersAt(cp, Network::PacketId::EntityEventS2C, data);
+        SendToChunkWatchersAt(dimension, cp, Network::PacketId::EntityEventS2C, data);
     }
 
-    void IntegratedServer::BroadcastItemEntityUpdates(int64_t serverTick) {
-        if (!m_itemEntities || !m_sessionManager) return;
+    void IntegratedServer::BroadcastItemEntityUpdates(ServerLevel& level, int64_t serverTick) {
+        if (!level.Items() || !m_sessionManager) return;
 
         std::vector<int32_t> fullRefresh;
         std::vector<int32_t> moveOnly;
-        m_itemEntities->CollectSyncSets(serverTick, fullRefresh, moveOnly);
+        level.Items()->CollectSyncSets(serverTick, fullRefresh, moveOnly);
 
         for (int32_t id : fullRefresh) {
-            BroadcastItemEntitySpawn(id);
+            BroadcastItemEntitySpawn(level, id);
         }
 
         if (moveOnly.empty()) return;
 
         // Compact updates are bucketed by chunk so each client gets ONE packet
         // covering everything it can see, rather than one per entity.
-        const auto& all = m_itemEntities->All();
+        const auto& all = level.Items()->All();
         std::unordered_map<Game::Math::ChunkPos, Network::ItemEntityMoveS2CPacket,
                            Game::Math::ChunkPosHash> byChunk;
 
@@ -1526,7 +2987,8 @@ namespace Server {
 
         for (const auto& [chunk, packet] : byChunk) {
             const auto data = Network::Serialization::Serialize(packet);
-            SendToChunkWatchersAt(chunk, Network::PacketId::ItemEntityMoveS2C, data);
+            SendToChunkWatchersAt(level.Dimension(), chunk,
+                                  Network::PacketId::ItemEntityMoveS2C, data);
         }
     }
 
@@ -1548,33 +3010,137 @@ namespace Server {
         }
     }
 
-    void IntegratedServer::BroadcastItemEntityRemovals(const std::vector<int32_t>& ids) {
-        if (ids.empty() || !m_networkServer) return;
+    void IntegratedServer::BroadcastItemEntityRemovals(Game::DimensionId dimension,
+                                                       const std::vector<int32_t>& ids) {
+        if (ids.empty() || !m_sessionManager) return;
 
-        // Unscoped on purpose — see the header note. A client that never knew
-        // the entity just doesn't find the id in its map.
+        // Scoped to the dimension, where it used to be a flat broadcast.
+        //
+        // The old comment was right for one world — "a client that never knew
+        // the entity just doesn't find the id in its map" — and became wrong
+        // the moment there were three. Item, orb and mob ids are allocated per
+        // LEVEL from the same per-type base, so a Nether item and an Overworld
+        // item genuinely share an id, and an unscoped removal would retire the
+        // wrong one on the wrong client.
+        //
+        // Still unscoped WITHIN the dimension: tracking who was told about
+        // which item costs more than it saves, and a client in this dimension
+        // that never saw the id simply ignores it — which is what the original
+        // note was actually about.
         Network::RemoveEntitiesS2CPacket packet(ids);
         const auto data = Network::Serialization::Serialize(packet);
-        m_networkServer->BroadcastPacket(
-            static_cast<uint8_t>(Network::PacketId::EntityDestroy), data);
+
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            if (!session || !session->GetConnection()) continue;
+            if (Game::DimensionFromRaw(session->GetDimensionId()) != dimension) continue;
+            session->GetConnection()->SendPacket(
+                static_cast<uint8_t>(Network::PacketId::EntityDestroy), data);
+        }
     }
 
-    void IntegratedServer::SendToChunkWatchers(const glm::dvec3& pos,
+    // ========================================================================
+    // EXPERIENCE ORB BROADCAST
+    // ========================================================================
+
+    void IntegratedServer::BroadcastXpOrbSpawn(ServerLevel& level, int32_t id) {
+        if (!level.Orbs() || !m_sessionManager) return;
+
+        const auto& all = level.Orbs()->All();
+        auto it = all.find(id);
+        if (it == all.end()) return;
+        const Game::ExperienceOrb& orb = it->second;
+
+        Network::XpOrbSpawnS2CPacket packet;
+        packet.entityId = orb.id;
+        packet.position = orb.pos;
+        packet.velocity = glm::vec3(orb.vel);
+        packet.value    = orb.value;
+
+        const auto data = Network::Serialization::Serialize(packet);
+        SendToChunkWatchers(level.Dimension(), orb.pos,
+                            Network::PacketId::XpOrbSpawnS2C, data);
+    }
+
+    void IntegratedServer::BroadcastXpOrbUpdates(ServerLevel& level, int64_t serverTick) {
+        if (!level.Orbs() || !m_sessionManager) return;
+
+        std::vector<int32_t> fullRefresh;
+        std::vector<int32_t> moveOnly;
+        level.Orbs()->CollectSyncSets(serverTick, fullRefresh, moveOnly);
+
+        for (int32_t id : fullRefresh) {
+            BroadcastXpOrbSpawn(level, id);
+        }
+
+        if (moveOnly.empty()) return;
+
+        // Bucketed by chunk like the item moves — one packet per chunk per
+        // client instead of one per orb.
+        const auto& all = level.Orbs()->All();
+        std::unordered_map<Game::Math::ChunkPos, Network::XpOrbMoveS2CPacket,
+                           Game::Math::ChunkPosHash> byChunk;
+
+        for (int32_t id : moveOnly) {
+            auto it = all.find(id);
+            if (it == all.end()) continue;
+            const Game::ExperienceOrb& orb = it->second;
+
+            Network::XpOrbMoveS2CPacket::Entry entry;
+            entry.entityId = orb.id;
+            entry.position = orb.pos;
+            entry.velocity = glm::vec3(orb.vel);
+
+            const Game::Math::ChunkPos cp{
+                static_cast<int32_t>(std::floor(orb.pos.x / 16.0)),
+                static_cast<int32_t>(std::floor(orb.pos.z / 16.0))
+            };
+            byChunk[cp].entries.push_back(entry);
+        }
+
+        for (const auto& [chunk, packet] : byChunk) {
+            const auto data = Network::Serialization::Serialize(packet);
+            SendToChunkWatchersAt(level.Dimension(), chunk,
+                                  Network::PacketId::XpOrbMoveS2C, data);
+        }
+    }
+
+    void IntegratedServer::BroadcastXpOrbPickups(
+            const std::vector<XpOrbPickupEvent>& pickups) {
+        if (pickups.empty() || !m_networkServer) return;
+
+        // MC broadcasts ClientboundTakeItemEntityPacket for orbs too; the
+        // client routes on the id range. Unscoped, like the item pickups.
+        for (const auto& p : pickups) {
+            Network::TakeItemEntityS2CPacket packet;
+            packet.itemEntityId = p.orbId;
+            packet.playerId     = p.playerId;
+            packet.amount       = 1;
+
+            const auto data = Network::Serialization::Serialize(packet);
+            m_networkServer->BroadcastPacket(
+                static_cast<uint8_t>(Network::PacketId::TakeItemEntityS2C), data);
+        }
+    }
+
+    void IntegratedServer::SendToChunkWatchers(Game::DimensionId dimension,
+                                              const glm::dvec3& pos,
                                               Network::PacketId packetId,
                                               const std::vector<uint8_t>& data) {
         const Game::Math::ChunkPos cp{
             static_cast<int32_t>(std::floor(pos.x / 16.0)),
             static_cast<int32_t>(std::floor(pos.z / 16.0))
         };
-        SendToChunkWatchersAt(cp, packetId, data);
+        SendToChunkWatchersAt(dimension, cp, packetId, data);
     }
 
-    void IntegratedServer::SendToChunkWatchersAt(Game::Math::ChunkPos chunk,
+    void IntegratedServer::SendToChunkWatchersAt(Game::DimensionId dimension,
+                                                Game::Math::ChunkPos chunk,
                                                 Network::PacketId packetId,
                                                 const std::vector<uint8_t>& data) {
         if (!m_sessionManager) return;
 
-        m_sessionManager->ForEachSessionWatching(chunk, [&](PlayerSession& session) {
+        m_sessionManager->ForEachSessionWatching(dimension, chunk,
+                                                 [&](PlayerSession& session) {
             if (auto* conn = session.GetConnection()) {
                 conn->SendPacket(static_cast<uint8_t>(packetId), data);
             }
@@ -1590,45 +3156,111 @@ namespace Server {
 
         auto& resultQueue = Threading::ServerWorkerPool::GetChunkGenResultQueue();
 
-        // Process ALL completed results this tick (no time budget — let the send rate be the throttle)
+        // Bounded by the tick's own deadline, MC-style. This used to drain the
+        // WHOLE queue every tick with the comment "let the send rate be the
+        // throttle" — but the per-result work is not just a send: it scans the
+        // chunk for portals and reads its entity file off disk. On a
+        // freshly-generated world, where hundreds of results land in one burst,
+        // that produced a single 2,475 ms tick, which was the largest spike in
+        // the whole capture.
+        //
+        // MC bounds the equivalent work with haveTime() — an absolute deadline
+        // at the start of the next tick (MinecraftServer.java:868), so a tick
+        // already over budget does none of it. Nothing is lost: unprocessed
+        // results stay queued and are picked up next tick.
+        //
+        // FLOOR, then deadline. The deadline alone was not safe: during mass
+        // world generation the tick is routinely already over budget by the
+        // time this runs, which would drop delivery to ONE chunk per tick and
+        // turn a 1,057-chunk world load into a ~53-second wait. The floor
+        // guarantees forward progress at ~160 chunks/second regardless, and the
+        // deadline still stops a burst from producing the 2,475 ms tick this
+        // bound exists to prevent.
+        //
+        // 8 x ~2.3 ms measured per result = ~18 ms worst case for the floor.
+        constexpr int kMinResultsPerTick = 8;
         int resultsProcessed = 0;
+        const bool haveDeadline = m_tickDeadline.time_since_epoch().count() != 0;
 
         Network::ChunkGenResult result;
         while (resultQueue.try_pop(result)) {
+            // The queue is shared by every dimension, so the result's own
+            // stamp is the only thing that says which level it belongs to.
+            // A level torn down while its job was in flight leaves nothing to
+            // file the result against — drop it rather than defaulting to the
+            // overworld, which would push a Nether chunk to overworld players.
+            ServerLevel* level = GetLevel(result.dimension);
+            if (!level) {
+                Log::Debug("Discarding chunk result for '%s' (%d, %d): that level is gone",
+                           std::string(Game::DimensionName(result.dimension)).c_str(),
+                           result.position.x, result.position.z);
+                continue;
+            }
 
             if (result.success && result.chunk) {
                 // Chunk is already in ChunkProvider cache (worker called GetChunk -> CompleteChunkLoad)
                 // Update status tracking
-                if (m_statusManager) {
-                    m_statusManager->MarkChunkReady(result.position);
+                {
+                    PROFILE_ZONE_N("ChunkResult.MarkReady");
+                    if (level->Status()) {
+                        level->Status()->MarkChunkReady(result.position);
+                    }
+                }
+
+                // Record any nether portals this chunk holds. This is the only
+                // moment they can be found cheaply: the scan rejects almost
+                // every section on a palette-membership test, it runs once per
+                // chunk per session, and after this the chunk may unload and
+                // never be walked again.
+                //
+                // It is also what makes the RETURN trip work. A portal you
+                // built is remembered even after its chunk unloads behind you,
+                // so coming back links to it instead of building a second one
+                // a few blocks away — see NetherPortalIndex.hpp.
+                {
+                    PROFILE_ZONE_N("ChunkResult.PortalScan");
+                    level->Portals().NoteChunkLoaded(result.position, *result.chunk);
+                }
+
+                // The chunk's entities come back with it. Before the chunk is
+                // queued to the client, so a cow and the ground it stands on
+                // arrive within a frame of each other.
+                {
+                    PROFILE_ZONE_N("ChunkResult.EntityLoad");
+                    if (level->Entities()) level->Entities()->RequestLoad(result.position);
                 }
 
                 // MC ChunkMap.onChunkReadyToSend: the chunk PUSHES itself to
                 // every player already tracking it. Nobody polls for it, and no
                 // session keeps a "waiting for this chunk" list — the tracking
                 // view is the only membership test.
-                if (m_sessionManager) {
-                    m_sessionManager->ForEachSessionWatching(
-                        result.position,
-                        [&](PlayerSession& session) {
-                            session.MarkChunkPendingToSend(result.position);
-                        });
+                {
+                    PROFILE_ZONE_N("ChunkResult.MarkPending");
+                    if (m_sessionManager) {
+                        m_sessionManager->ForEachSessionWatching(
+                            result.dimension, result.position,
+                            [&](PlayerSession& session) {
+                                session.MarkChunkPendingToSend(result.position);
+                            });
+                    }
                 }
 
                 Log::Debug("Async chunk ready (%d, %d)",
                          result.position.x, result.position.z);
             } else {
                 // Mark as failed so it can be retried
-                if (m_statusManager) {
-                    m_statusManager->SetChunkStatus(result.position, Server::ChunkStatus::EMPTY);
+                if (level->Status()) {
+                    level->Status()->SetChunkStatus(result.position, Server::ChunkStatus::EMPTY);
                 }
-                // Erasing from m_pendingChunkLoads below is the whole retry
+                // Erasing from pendingChunkLoads below is the whole retry
                 // mechanism: the chunk is still inside somebody's tracking view,
                 // so RetryFailedChunkLoads re-requests it on a later tick.
                 if (m_sessionManager) {
                     m_sessionManager->ForEachSessionWatching(
-                        result.position,
-                        [&](PlayerSession&) { m_failedChunkLoads.insert(result.position); });
+                        result.dimension, result.position,
+                        [&](PlayerSession&) {
+                            level->failedChunkLoads.insert(result.position);
+                        });
                 }
                 Log::Warning("Async chunk load failed for (%d, %d): %s",
                            result.position.x, result.position.z,
@@ -1636,8 +3268,16 @@ namespace Server {
             }
 
             // Remove from pending list
-            m_pendingChunkLoads.erase(result.position);
+            level->pendingChunkLoads.erase(result.position);
             resultsProcessed++;
+
+            // MC haveTime(): stop once this tick's deadline has passed and let
+            // the rest wait — but only after the floor above has been met, so a
+            // tick that is already late still delivers chunks.
+            if (resultsProcessed >= kMinResultsPerTick && haveDeadline &&
+                std::chrono::steady_clock::now() >= m_tickDeadline) {
+                break;
+            }
         }
 
         if (resultsProcessed > 0) {
@@ -1646,18 +3286,113 @@ namespace Server {
     }
 
 
+    // The OVERWORLD's, specifically — see the header. PumpChunkPipeline
+    // deliberately does not use this: it has to reach all three.
     Game::MyTerrainGenerator* IntegratedServer::GetTerrainGenerator() const {
-        if (!m_world) return nullptr;
-        auto* chunkProvider = m_world->GetChunkProvider();
-        if (!chunkProvider) return nullptr;
-        return dynamic_cast<Game::MyTerrainGenerator*>(chunkProvider->GetGenerator());
+        ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
+        return level ? level->TerrainGenerator() : nullptr;
+    }
+
+    void IntegratedServer::ServiceGenerationQueues(ServerLevel& level, Game::MyTerrainGenerator& gen) {
+        PROFILE_ZONE_N("ServiceGenerationQueues");
+        const Game::DimensionId dimension = level.Dimension();
+
+        // Requests are held here and handed to the library a bounded number
+        // at a time, nearest to the player first. Measured 2026-08-30: giving
+        // the library all ~3,700 chunks of a view at once was SLOWER than the
+        // old 12-blocking-workers design (2,785 vs 3,144 chunks in 30 s) —
+        // the port's dispatcher advances one task hop at a time on a serial
+        // lane, so thousands of half-started pyramids just dilute it, while a
+        // couple of dozen nearest pyramids share a compact frontier. The view
+        // ticket still gives the library its level gradient for the ring.
+        static const size_t kMaxInFlight = [] {   // OBEY_INFLIGHT env overrides for tuning runs
+            const char* e = std::getenv("OBEY_INFLIGHT"); return e ? (size_t)std::atoi(e) : (size_t)24; }();
+        {
+            std::vector<Game::Math::ChunkPos> fresh;
+            gen.TakeRequests(fresh);
+            level.generationBacklog.insert(level.generationBacklog.end(), fresh.begin(), fresh.end());
+        }
+        if (!level.generationBacklog.empty() && level.generationInFlight < kMaxInFlight) {
+            Game::Math::ChunkPos anchor{0, 0};
+            if (auto session = GetPlayerSession()) anchor = session->GetAnchorChunk();
+            // Drop entries nobody wants any more, then take the nearest.
+            auto& bl = level.generationBacklog;
+            bl.erase(std::remove_if(bl.begin(), bl.end(), [&](const Game::Math::ChunkPos& p) {
+                return level.pendingChunkLoads.count(p) == 0; }), bl.end());
+            const size_t want = std::min(bl.size(), kMaxInFlight - level.generationInFlight);
+            std::partial_sort(bl.begin(), bl.begin() + want, bl.end(),
+                [&](const Game::Math::ChunkPos& a, const Game::Math::ChunkPos& b) {
+                    const long da = (long)(a.x - anchor.x) * (a.x - anchor.x) + (long)(a.z - anchor.z) * (a.z - anchor.z);
+                    const long db = (long)(b.x - anchor.x) * (b.x - anchor.x) + (long)(b.z - anchor.z) * (b.z - anchor.z);
+                    return da < db;
+                });
+            for (size_t i = 0; i < want; ++i) {
+                const auto pos = bl[i];
+                if (gen.RequestChunkGeneration(pos)) {
+                    ++level.generationInFlight;
+                } else {
+                    level.pendingChunkLoads.erase(pos);
+                    level.failedChunkLoads.insert(pos);
+                }
+            }
+            bl.erase(bl.begin(), bl.begin() + want);
+        }
+
+        std::vector<Game::MyTerrainGenerator::Completion> done;
+        gen.TakeCompletions(done);
+        if (done.empty()) return;
+        level.generationInFlight = done.size() > level.generationInFlight ? 0 : level.generationInFlight - done.size();
+        Game::World* world = level.World();
+        Game::ChunkProvider* provider = world ? world->GetChunkProvider() : nullptr;
+        Threading::ServerWorkerPool* pool = Threading::g_serverWorkerPool.get();
+        for (const auto& c : done) {
+            if (level.pendingChunkLoads.count(c.position) == 0) {   // nobody wants it any more
+                gen.UnpinConversion(c.position);
+                continue;
+            }
+            if (!c.chunk || !provider || !pool) {
+                gen.UnpinConversion(c.position);
+                if (pool) pool->SendChunkGenResult(dimension, c.position, nullptr, false, "generation failed");
+                continue;
+            }
+            // Conversion (~0.5 ms) on a worker. The pin taken at request time
+            // keeps processUnloads off this holder until the job unpins.
+            Game::MyTerrainGenerator* genp = &gen;
+            const Game::Math::ChunkPos pos = c.position;
+            minecraft::world::IChunk* lib = c.chunk;
+            pool->SubmitWorldIOJob([genp, provider, pool, dimension, pos, lib]() {
+                std::shared_ptr<Game::Chunk> chunk = genp->ConvertCompletedChunk(lib, pos);
+                if (chunk) chunk = provider->StoreChunkInCache(chunk);
+                genp->UnpinConversion(pos);
+                pool->SendChunkGenResult(dimension, pos, chunk, chunk != nullptr,
+                                         chunk ? "" : "conversion failed");
+            }, /*priority=*/1);
+        }
     }
 
     void IntegratedServer::PumpChunkPipeline(std::chrono::steady_clock::time_point deadline) {
-        auto* generator = GetTerrainGenerator();
-        if (!generator) return;
+        // Gathered once: the round-robin below revisits the same generators
+        // until they are all idle, and TerrainGenerator() costs a dynamic_cast
+        // per call.
+        Game::MyTerrainGenerator* generators[Game::kDimensionCount] = {};
+        ServerLevel*              levels[Game::kDimensionCount] = {};
+        size_t count = 0;
+        ForEachLevel([&](ServerLevel& level) {
+            if (auto* gen = level.TerrainGenerator()) { levels[count] = &level; generators[count++] = gen; }
+        });
+        if (count == 0) return;
 
         PROFILE_ZONE_N("PumpChunkPipeline");
+
+        // ── Ticket-driven generation (MC ChunkMap model) ──────────────────
+        // Workers hand chunks that are not on disk to the generator's request
+        // queue; here — the library's main thread — each becomes a ticket +
+        // future. Completions (any thread) land in the generator's sink and
+        // are converted to game chunks on a worker, then flow through the
+        // ordinary ChunkGenResult queue. Nothing ever blocks on the library.
+        for (size_t i = 0; i < count; ++i) {
+            ServiceGenerationQueues(*levels[i], *generators[i]);
+        }
 
         // MC BlockableEventLoop.managedBlock(() -> !haveTime()):
         //
@@ -1670,17 +3405,35 @@ namespace Server {
         // deadline is the only thing standing between "pump the pipeline" and
         // "stop ticking the server for five seconds".
         //
-        // Breaking out early when PumpOneTask() returns false is MC's
-        // waitForTasks(): there is nothing left to do, so give the time back to
-        // the caller rather than spinning on an idle pipeline.
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (!generator->PumpOneTask()) break;
+        // ROUND-ROBIN over every live dimension, not just one. Each generator
+        // owns its own main-thread queue, and ServerWorkerPool::
+        // ProcessChunkLoading calls the BLOCKING ChunkProvider::GetChunk, which
+        // parks the worker until the server thread pumps THAT dimension's
+        // queue. Pumping only one generator therefore does not merely delay a
+        // chunk — it wedges however many workers are parked on the others, and
+        // a wedged pool stops loading chunks for every dimension including the
+        // one being pumped.
+        //
+        // `idle` counts CONSECUTIVE generators that had nothing to do, so the
+        // loop exits only once a full round produced no work — MC's
+        // waitForTasks(), generalised to N queues. Any generator doing work
+        // resets it, which is what keeps a busy overworld from being abandoned
+        // because the End had nothing queued.
+        size_t idle = 0;
+        size_t next = 0;
+        while (idle < count && std::chrono::steady_clock::now() < deadline) {
+            if (generators[next]->PumpOneTask()) {
+                idle = 0;
+            } else {
+                ++idle;
+            }
+            next = (next + 1) % count;
         }
     }
 
     void IntegratedServer::ProcessWatchSetChanges() {
         PROFILE_ZONE;
-        if (!m_sessionManager || !m_world) return;
+        if (!m_sessionManager) return;
 
         // Pump the terrain generator's async pipeline (like Minecraft's
         // runDistanceManagerUpdates). Kept here as well as in the loop's idle
@@ -1696,13 +3449,16 @@ namespace Server {
                           std::chrono::nanoseconds(m_tickRateManager.nanosecondsPerTick()));
 
         // Re-request anything whose load came back failed. Normally a no-op.
-        if (!m_failedChunkLoads.empty()) {
-            auto failed = std::move(m_failedChunkLoads);
-            m_failedChunkLoads.clear();
+        // Per level, because the failure and the retry both have to name the
+        // dimension the chunk was wanted in.
+        ForEachLevel([this](ServerLevel& level) {
+            if (level.failedChunkLoads.empty()) return;
+            auto failed = std::move(level.failedChunkLoads);
+            level.failedChunkLoads.clear();
             for (const auto& pos : failed) {
-                RequestChunkLoad(pos, 0);
+                RequestChunkLoad(level.Dimension(), pos, 0);
             }
-        }
+        });
 
         // Refresh the positions the worker pool prioritises against. MC
         // re-evaluates its queue level per poll for the same reason: a request
@@ -1732,19 +3488,81 @@ namespace Server {
         for (const auto& session : sessions) {
             if (!session) continue;
 
+            // The level this player is standing in. Everything below is asked
+            // of it and only it — "is this chunk loaded" has a different
+            // answer in every world.
+            ServerLevel& L = LevelOf(*session);
+            Game::World* world = L.World();
+            if (!world) continue;
+
+            // Library-side view tickets (MC player tickets) are OFF: see
+            // MyTerrainGenerator::RequestChunkGeneration. Kept behind a flag for
+            // when library unloading is re-enabled (they are what expires the
+            // area behind the player).
+            static constexpr bool kLibraryViewTickets = false;
+            if (kLibraryViewTickets) {
+                ForEachLevel([&](ServerLevel& other) {
+                    auto* gen = other.TerrainGenerator();
+                    if (!gen) return;
+                    if (&other == &L) gen->SetViewTicket(session->GetPlayerId(), session->GetAnchorChunk(),
+                                                         std::min(session->GetViewDistance() + 1, 33));
+                    else              gen->ClearViewTicket(session->GetPlayerId());
+                });
+            }
+
             session->UpdateChunkTracking(
                 [&](Game::Math::ChunkPos pos) {
                     // MC markChunkPendingToSend: getChunkToSend() returns null
                     // for a chunk that is not loaded, and the call quietly does
                     // nothing. Ours asks the world the same question.
-                    if (m_world->IsChunkLoaded(pos.x, pos.z)) {
+                    if (world->IsChunkLoaded(pos.x, pos.z)) {
+                        // Claim its entities. This branch NEVER goes through
+                        // RequestChunkLoad, so it was the one route by which a
+                        // chunk could become visible to a player without its
+                        // entities/*.mca entry ever being read — and it is the
+                        // route the SPAWN chunks take, the player's own chunk
+                        // among them, because those are already resident by the
+                        // time the session starts tracking them.
+                        //
+                        // Symptom it caused: everything you dropped at your feet
+                        // was still on disk and simply never came back, while
+                        // mob drops one chunk over reloaded fine.
+                        if (L.Entities()) L.Entities()->RequestLoad(pos);
                         session->MarkChunkPendingToSend(pos);
                     } else {
-                        RequestChunkLoad(pos, 0);
+                        RequestChunkLoad(L.Dimension(), pos, 0);
                     }
                 },
                 [&](Game::Math::ChunkPos pos) {
                     session->DropChunk(pos);
+
+                    // A load still in flight for a chunk nobody watches any
+                    // more is pure waste — and after a far teleport that is
+                    // most of the queue: measured 2026-08-29, ~1,500 chunks of
+                    // the OLD area kept generating for 30 s after the player
+                    // left (6 workers x 65 ms each), landing in the cache only
+                    // to be unloaded 3 s later ("Unloaded 280 unwatched
+                    // chunks" every sweep, 250 ms server stalls each). MC has
+                    // no equivalent because its tickets ARE the request: drop
+                    // the ticket and the chunk holder's future is cancelled.
+                    //
+                    // The session's own view is not updated until after this
+                    // callback, so it still reports the chunk as watched —
+                    // only OTHER sessions count.
+                    auto pending = L.pendingChunkLoads.find(pos);
+                    if (pending != L.pendingChunkLoads.end()) {
+                        bool watchedByOther = false;
+                        m_sessionManager->ForEachSessionWatching(
+                            L.Dimension(), pos, [&](PlayerSession& other) {
+                                if (&other != session.get()) watchedByOther = true;
+                            });
+                        if (!watchedByOther) {
+                            L.pendingChunkLoads.erase(pending);
+                            if (Threading::g_serverWorkerPool) {
+                                Threading::g_serverWorkerPool->CancelChunkJobs(L.Dimension(), pos);
+                            }
+                        }
+                    }
                 });
         }
     }
@@ -1760,64 +3578,115 @@ namespace Server {
 
     void IntegratedServer::UnloadUnwatchedChunks() {
         PROFILE_ZONE;
-        if (!m_world || !m_sessionManager) return;
+        if (!m_sessionManager) return;
 
-        auto* chunkProvider = m_world->GetChunkProvider();
-        if (!chunkProvider) return;
-
-        // Iterate only actually loaded chunks instead of scanning a huge grid
-        auto loadedPositions = chunkProvider->GetLoadedChunkPositions();
-
-        // "Watched" is now asked of the tracking views directly — the same
-        // question the reverse index used to answer, minus the index.
+        // Snapshot once and reuse across levels — the walk below is per level
+        // but the player list is not.
         const auto sessions = m_sessionManager->GetAllSessions();
-        auto anyoneTracking = [&sessions](Game::Math::ChunkPos pos) {
-            for (const auto& session : sessions) {
-                if (session && session->GetTrackingView().Contains(pos)) return true;
-            }
-            return false;
-        };
 
         size_t unloaded = 0;
-        std::vector<int32_t> removedItems;
-        for (const auto& pos : loadedPositions) {
-            if (!anyoneTracking(pos)) {
-                if (chunkProvider->UnloadChunk(pos)) {
-                    unloaded++;
-                    // Dropped items go with their chunk. Item entities are
-                    // memory-only by design (no entity storage in the save
-                    // format), and leaving them behind would have them ticking
-                    // against blocks that no longer exist — they'd fall forever
-                    // through a world with no floor.
-                    if (m_itemEntities) {
-                        m_itemEntities->RemoveInChunk(pos, removedItems);
-                    }
-                    // Mobs go the same way, and for the same reason: there is
-                    // no entity persistence layer, so a mob left in an unloaded
-                    // chunk would tick against blocks that no longer exist.
-                    if (m_mobs) {
-                        std::vector<int32_t> removedMobs;
-                        m_mobs->RemoveInChunk(pos, removedMobs);
-                        if (!removedMobs.empty() && m_mobTracker && m_sessionManager) {
-                            std::vector<EntityPacketOut> outgoing;
-                            for (int32_t id : removedMobs) {
-                                m_mobTracker->RemoveEntity(id, outgoing);
-                            }
-                            for (const auto& packet : outgoing) {
-                                auto session = m_sessionManager->GetSession(packet.connectionId);
-                                if (!session || !session->GetConnection()) continue;
-                                session->GetConnection()->SendPacket(
-                                    static_cast<uint8_t>(packet.packetId), packet.payload);
-                            }
+
+        // Every level, including the ones with no players: an abandoned Nether
+        // is precisely the one whose chunks most need dropping.
+        ForEachLevel([&](ServerLevel& level) {
+            Game::World* world = level.World();
+            if (!world) return;
+
+            // Per level, not shared across the sweep: these ids go only to this
+            // dimension's players, and item/orb ids are allocated per level from
+            // the same base — so merging two levels' removals would retire an
+            // Overworld item on the strength of a Nether one vanishing.
+            std::vector<int32_t> removedItems;
+
+            auto* chunkProvider = world->GetChunkProvider();
+            if (!chunkProvider) return;
+
+            // Iterate only actually loaded chunks instead of scanning a huge grid
+            auto loadedPositions = chunkProvider->GetLoadedChunkPositions();
+
+            // "Watched" is now asked of the tracking views directly — the same
+            // question the reverse index used to answer, minus the index.
+            const Game::DimensionId dimension = level.Dimension();
+            auto anyoneTracking = [&sessions, dimension](Game::Math::ChunkPos pos) {
+                for (const auto& session : sessions) {
+                    if (!session) continue;
+                    // The dimension test is load-bearing: a tracking view is a
+                    // set of ChunkPos with no world attached, so without it a
+                    // player standing in the Nether pins the Overworld chunks
+                    // at the same x/z — forever, since nobody is ever going to
+                    // stop tracking them.
+                    if (Game::DimensionFromRaw(session->GetDimensionId()) != dimension) continue;
+                    if (session->GetTrackingView().Contains(pos)) return true;
+                }
+                return false;
+            };
+
+            // Mobs are removed for ALL unloaded chunks in one batched call
+            // after the loop — see MobManager::RemoveInChunks.
+            std::vector<Game::Math::ChunkPos> unloadedForMobs;
+            for (const auto& pos : loadedPositions) {
+                if (anyoneTracking(pos)) continue;
+                {
+                    PROFILE_ZONE_N("Unload.CacheRemove");
+                    if (!chunkProvider->UnloadChunk(pos)) continue;
+                }
+
+                // Entities BEFORE the three RemoveInChunk calls below: every
+                // one of them destroys the objects and hands back only ints,
+                // so anything not captured here is gone.
+                if (level.Entities()) {
+                    PROFILE_ZONE_N("Unload.EntitySave");
+                    level.Entities()->SaveAndForget(pos);
+                }
+
+                unloaded++;
+                // Dropped items go with their chunk. They have just been
+                // written to entities/*.mca by SaveAndForget above, so this is
+                // an unload rather than a loss; leaving them resident would
+                // have them ticking against blocks that no longer exist
+                // through a world with no floor.
+                if (level.Items()) {
+                    level.Items()->RemoveInChunk(pos, removedItems);
+                }
+                if (level.Orbs()) {
+                    // Same removal broadcast — the client dispatches
+                    // RemoveEntities by id range.
+                    level.Orbs()->RemoveInChunk(pos, removedItems);
+                }
+                unloadedForMobs.push_back(pos);
+            }
+
+            // Mobs go the same way, and for the same reason: there is no
+            // entity persistence layer, so a mob left in an unloaded chunk
+            // would tick against blocks that no longer exist. One batched
+            // call: the per-chunk form was O(chunks x mobs).
+            if (!unloadedForMobs.empty()) {
+                PROFILE_ZONE_N("Unload.Mobs");
+                std::vector<EntityPacketOut> outgoing;
+                if (level.Mobs()) {
+                    std::vector<int32_t> removedMobs;
+                    level.Mobs()->RemoveInChunks(unloadedForMobs, removedMobs);
+                    if (!removedMobs.empty() && level.MobTracker()) {
+                        for (int32_t id : removedMobs) {
+                            level.MobTracker()->RemoveEntity(id, outgoing);
                         }
                     }
                 }
+                if (level.FallingBlocks()) {
+                    level.FallingBlocks()->RemoveInChunks(unloadedForMobs, outgoing);
+                }
+                for (const auto& packet : outgoing) {
+                    auto session = m_sessionManager->GetSession(packet.connectionId);
+                    if (!session || !session->GetConnection()) continue;
+                    session->GetConnection()->SendPacket(
+                        static_cast<uint8_t>(packet.packetId), packet.payload);
+                }
             }
-        }
 
-        if (!removedItems.empty()) {
-            BroadcastItemEntityRemovals(removedItems);
-        }
+            if (!removedItems.empty()) {
+                BroadcastItemEntityRemovals(level.Dimension(), removedItems);
+            }
+        });
 
         if (unloaded > 0) {
             Log::Info("Unloaded %zu unwatched chunks", unloaded);
@@ -1878,12 +3747,17 @@ namespace Server {
     }
 
     void IntegratedServer::ApplyBlockChange(int worldX, int worldY, int worldZ, Game::BlockID blockId) {
-        if (!m_world) {
+        // OVERWORLD. This is the legacy BlockActionC2S path, reached only from
+        // ProcessBlockAction — a packet with no connection id on it, so there
+        // is no player and no dimension to resolve from. (The live block path
+        // is PlayerSession::HandleBlockAction, which does have a session.)
+        Game::World* world = Overworld().World();
+        if (!world) {
             return;
         }
-        
+
         // Apply change to world
-        bool success = m_world->SetBlock(worldX, worldY, worldZ, blockId);
+        bool success = world->SetBlock(worldX, worldY, worldZ, blockId);
         if (success) {
             // Send block change to client
             Network::BlockChangeS2CPacket packet;
@@ -1994,10 +3868,21 @@ namespace Server {
             return false;
         };
 
-        // Default name = "PlayerN" using connection id (matches MC's offline-mode pattern).
-        // The default is always unique because connection ids are monotonically increasing
-        // and never reused by an existing session.
-        std::string defaultName = "Player" + std::to_string(playerId);
+        // Default name = kDefaultPlayerName ("Notch"), and only numbered if
+        // that is actually taken by someone else currently online.
+        //
+        // It used to be "Player" + connectionId, which is unique but not
+        // STABLE: every rejoin within a session produced Player1, Player2,
+        // Player3... That is visible to the player, and it is now load-bearing
+        // — playerdata/<uuid>.dat derives its UUID from
+        // "OfflinePlayer:" + name, so a name that changes each join means a
+        // fresh, empty player file each join and an inventory that never comes
+        // back. Uniqueness among concurrent players still holds; it just is
+        // not bought with a number that changes every time.
+        std::string defaultName = Server::kDefaultPlayerName;
+        for (int suffix = 2; isNameTaken(defaultName) && suffix < 1000; ++suffix) {
+            defaultName = std::string(Server::kDefaultPlayerName) + std::to_string(suffix);
+        }
 
         // Resolution rules (per user spec):
         //   - Empty requested name → use default
@@ -2015,13 +3900,44 @@ namespace Server {
         // Update connection so chat (<name> message) and disconnect logs use the resolved name
         connection->SetPlayerName(playerName);
 
+        // MC IntegratedServer.java:269-270 — a case-insensitive NAME compare
+        // against the host's profile decides isSingleplayerOwner, and the owner
+        // is exempt from keep-alive and the read timeout entirely.
+        //
+        // Compare the RESOLVED name, never the requested one: the collision
+        // policy just above already renamed any impostor, which is our
+        // equivalent of MC's name_taken rejection.
+        //
+        // NOT keyed on IsLoopback(), and that is deliberate — a friend joining
+        // through the relay hands the host a socket dialled to the friends
+        // service, which CLAUDE.md documents as 127.0.0.1 on the hosting
+        // machine, so a remote WAN player really can present a loopback
+        // endpoint. See the note on NetworkConnection::IsLoopback.
+        //
+        // The compare_exchange makes it first-claimant-wins, so even a spoofed
+        // --name can only ever cost the exemption for one connection.
+        const std::string ownerName = m_config.singleplayerProfileName.empty()
+                                          ? defaultName
+                                          : m_config.singleplayerProfileName;
+        if (m_config.hasSingleplayerOwner &&
+            EqualsIgnoreCaseAscii(playerName, ownerName)) {
+            uint32_t expected = 0;
+            if (m_singleplayerOwnerConnId.compare_exchange_strong(
+                    expected, connection->GetConnectionId())) {
+                connection->SetSingleplayerOwner(true);
+                Log::Info("[IntegratedServer] Connection %u is the singleplayer owner ('%s') — "
+                          "exempt from keep-alive and read timeout (MC IntegratedServer.java:269)",
+                          connection->GetConnectionId(), playerName.c_str());
+            }
+        }
+
         // Determine which ServerPlayer to use:
         // - Connection 1 (host): use existing m_serverPlayer
         // - Other connections: create a new ServerPlayer
         ServerPlayer* playerPtr = nullptr;
         if (playerId == 1 && m_serverPlayer) {
             playerPtr = m_serverPlayer.get();
-            // Host's m_serverPlayer was constructed with the placeholder "Player" before we
+            // Host's m_serverPlayer was constructed with kDefaultPlayerName before we
             // knew the resolved name. Sync it now so /tp <name> and the PlayerInfo broadcast
             // both see the same name as chat does.
             playerPtr->setName(playerName);
@@ -2033,6 +3949,13 @@ namespace Server {
             Log::Info("[IntegratedServer] Created ServerPlayer for remote player '%s' (ID: %u)",
                       playerName.c_str(), playerId);
         }
+        // Restore this player from disk, if they have been here before.
+        //
+        // Must happen AFTER the name is resolved: the file is named by a UUID
+        // derived from the name, so loading earlier would look for the wrong
+        // file. A first-time player simply has none, which is not an error.
+        const bool restoredFromDisk = LoadPlayerData(*playerPtr);
+
         // Capture the colour the client sent at LoginStart onto the ServerPlayer so
         // both the new-player broadcast (below) and any future PlayerInfo refreshes
         // pull from one canonical source.
@@ -2061,19 +3984,14 @@ namespace Server {
             session->AttachPlayer(playerPtr);
             session->SetConnection(connection.get());
 
-            // Apply client settings that arrived before this session existed.
-            // Without this the session keeps its starting view distance of 2 and
-            // the player gets a small square of chunks that only expands when
-            // they cross a chunk boundary (which recomputes the watch set for
-            // unrelated reasons). See OnClientSettingsReceived.
-            const uint32_t connId = connection->GetConnectionId();
-            auto pendingVd = m_pendingClientViewDistance.find(connId);
-            if (pendingVd != m_pendingClientViewDistance.end()) {
-                Log::Info("[IntegratedServer] Applying deferred client view distance %d for connection %u",
-                          pendingVd->second, connId);
-                ApplyClientViewDistance(*session, connId, pendingVd->second);
-                m_pendingClientViewDistance.erase(pendingVd);
-            }
+            // Apply the client settings that arrived while this session was
+            // being built — by now it is Initialize()d, so the value sticks.
+            // Doing it here rather than waiting for the tick means the FIRST
+            // batch of chunks already goes out at the right radius. The tick
+            // repeats the call as a safety net for a stash that landed after
+            // this point. See OnClientSettingsReceived.
+            ApplyPendingClientViewDistances();
+
             Log::Info("[IntegratedServer] Player '%s' (ID: %u) session created and wired to connection %u",
                       playerName.c_str(), playerId, connection->GetConnectionId());
 
@@ -2098,7 +4016,13 @@ namespace Server {
             // (SendPlayerAbilitiesForJoin) already carried this same mode, so
             // this is a reconfirmation against the live ServerPlayer rather
             // than a correction — the client is never told "survival" first.
-            playerPtr->setGameMode(static_cast<GameMode>(m_config.defaultGameMode));
+            // FIRST JOIN ONLY. A returning player's mode came from their save
+            // in LoadPlayerData, and setGameMode also clears m_flying — so
+            // running it unconditionally is what used to land every returning
+            // creative flier back in survival, falling.
+            if (!restoredFromDisk) {
+                playerPtr->setGameMode(static_cast<GameMode>(m_config.defaultGameMode));
+            }
             connection->SendPlayerAbilities(*playerPtr);
 
             // Send full 46-slot inventory snapshot. Replaces the old HotbarSyncS2C path —
@@ -2129,7 +4053,12 @@ namespace Server {
             // connection.teleport(...) on login.
             {
                 const glm::dvec3 pos = playerPtr->getPosition();
-                connection->Teleport(pos.x, pos.y, pos.z, 0.0f, 0.0f);
+                // The player's OWN rotation, not (0,0). ReadPlayerData
+                // restores it onto the ServerPlayer and this teleport is what
+                // the client actually obeys, so hardcoding zero here threw the
+                // saved look direction away on every single join.
+                connection->Teleport(pos.x, pos.y, pos.z,
+                                     playerPtr->getYaw(), playerPtr->getPitch());
                 Log::Info("[IntegratedServer] Teleported '%s' to spawn (%.1f, %.1f, %.1f)",
                           playerName.c_str(), pos.x, pos.y, pos.z);
             }
@@ -2170,8 +4099,31 @@ namespace Server {
 
     void IntegratedServer::OnPlayerDisconnected(std::shared_ptr<ServerConnection> connection) {
         uint32_t connectionId = connection->GetConnectionId();
+        // Free the singleplayer-owner slot if this was the holder, so a
+        // reconnecting host can claim it again.
+        {
+            uint32_t owner = connectionId;
+            m_singleplayerOwnerConnId.compare_exchange_strong(owner, 0u);
+        }
         uint32_t playerId = connection->GetPlayerId();
         std::string playerName = connection->GetPlayerName();
+
+        // Save on the way out. This is where MC does it too (PlayerList.remove
+        // -> playerIo.save), and it is the only place that works: by the time
+        // IntegratedServer::Shutdown runs, Stop() has already torn down the
+        // session manager and with it every ServerPlayer, inventory included.
+        // Same lookup the rest of this class uses: connection id 1 is the
+        // host's ServerPlayer, everyone else lives in m_remotePlayers.
+        {
+            const ServerPlayer* leaving = nullptr;
+            if (connectionId == 1 && m_serverPlayer) {
+                leaving = m_serverPlayer.get();
+            } else {
+                auto it = m_remotePlayers.find(connectionId);
+                if (it != m_remotePlayers.end()) leaving = it->second.get();
+            }
+            if (leaving) SavePlayerData(*leaving);
+        }
 
         Log::Info("[IntegratedServer] Player '%s' (ID: %u, conn: %u) disconnected",
                   playerName.c_str(), playerId, connectionId);
@@ -2197,12 +4149,20 @@ namespace Server {
 
         // Drop any client settings still waiting on a session that will now
         // never exist — a reused connection id must not inherit them.
-        m_pendingClientViewDistance.erase(connectionId);
+        {
+            std::lock_guard<std::mutex> lock(m_pendingViewDistanceMutex);
+            m_pendingClientViewDistance.erase(connectionId);
+        }
 
-        // Forget everything this player was tracking. Connection ids ARE
-        // reused, so a leftover watch set would make the next player to take
-        // this id silently never receive spawn packets for those mobs.
-        if (m_mobTracker) m_mobTracker->RemovePlayer(connectionId);
+        // Forget everything this player was tracking, in EVERY level. Connection
+        // ids ARE reused, so a leftover watch set would make the next player to
+        // take this id silently never receive spawn packets for those mobs —
+        // and a player who used a portal is tracked in both worlds, so clearing
+        // only the one they happened to be standing in would leave the other.
+        ForEachLevel([connectionId](ServerLevel& level) {
+            if (level.MobTracker()) level.MobTracker()->RemovePlayer(connectionId);
+            if (level.FallingBlocks()) level.FallingBlocks()->RemovePlayer(connectionId);
+        });
 
         // 1. Broadcast RemoveEntities to all remaining clients
         if (m_networkServer && playerId != 0) {
@@ -2235,18 +4195,37 @@ namespace Server {
             Log::Info("[IntegratedServer] Broadcast PlayerInfo REMOVE for player %u", playerId);
         }
 
-        // 2. Clean up remote ServerPlayer
-        m_remotePlayers.erase(playerId);
-
-        // 3. Unregister from SendScheduler
+        // 2. Unregister from SendScheduler
         if (m_sendScheduler) {
             m_sendScheduler->UnregisterConnection(connectionId);
         }
 
-        // 4. Clean up session (watch index, chunk state, etc.)
+        // 3. Clean up session (watch index, chunk state, etc.)
         if (m_sessionManager) {
             m_sessionManager->OnPlayerLeave(playerId, "Disconnected");
         }
+
+        // 4. Retire this player's PlayerEntityView in every level, BEFORE the
+        //    ServerPlayer it points at is freed.
+        //
+        // This ordering is load-bearing and it used to be wrong: the erase
+        // below ran FIRST, so for the rest of the teardown every level still
+        // held a PlayerEntityView whose ServerPlayer* was dangling, and the
+        // session still handed that same pointer out of GetPlayer(). One more
+        // server tick in that window and a mob's TemptGoal called
+        // ServerLevelBridge::GetHeldItemId on freed memory — a hard SIGSEGV on
+        // "Save and Quit", with a stack of
+        // MobManager::Tick -> Mob::ServerAiStep -> TemptGoal::CanUse.
+        //
+        // SyncPlayerViews is what drops a view, and it does the necessary
+        // ClearReferenceTo sweep over every mob first. It only drops views
+        // whose session is gone, which is why step 3 has to precede it.
+        ForEachLevel([](ServerLevel& level) {
+            if (ServerLevelBridge* bridge = level.MobLevel()) bridge->SyncPlayerViews();
+        });
+
+        // 5. NOW the ServerPlayer can go. Nothing points at it any more.
+        m_remotePlayers.erase(playerId);
     }
 
     // ========================================================================
@@ -2257,33 +4236,71 @@ namespace Server {
         // Note the ordering: a missing session manager must still stash, not
         // return. Bailing out before the stash would lose the settings exactly
         // when they are most likely to arrive early — during startup.
-        auto session = m_sessionManager
-            ? m_sessionManager->GetSessionByConnection(connectionId)
-            : nullptr;
-        if (!session) {
-            // The client sends ClientConfigC2S once, straight after LoginSuccess,
-            // and it can beat OnPlayerJoined to the server. Dropping it here used
-            // to be permanent: nothing resends it, so the session stayed at its
-            // starting view distance of 2 (PlayerSessionManager: "Initialize at
-            // minimum view distance, like Minecraft's ServerPlayer default") and
-            // the player got a tiny square of chunks that never grew.
-            //
-            // It only appeared to fix itself on movement because crossing a
-            // chunk boundary moves the tracking view's centre, which makes
-            // UpdateChunkTracking re-diff with whatever view distance had been
-            // applied by then — hence "nothing loads, then the whole render
-            // distance arrives at once".
-            //
-            // Stash it instead; OnPlayerJoined applies it as soon as the session
-            // exists.
-            Log::Info("[IntegratedServer] Client settings for connection %u arrived before its "
-                      "session — deferring view distance %d to join",
-                      connectionId, requestedViewDistance);
+        // Runs on the NETWORK I/O thread. It only stashes; the server thread
+        // applies (ApplyPendingClientViewDistances). See the header for why
+        // both halves of that matter.
+        //
+        // The bug this replaces is worth spelling out, because "the session
+        // does not exist yet" was only half of it. A session EXISTS from
+        // PlayerSessionManager::CreateSession, several statements before
+        // OnPlayerJoin gets round to Initialize() — and Initialize assigns both
+        // distances from its Config. So the usual sequence was:
+        //
+        //   Created session for player 1
+        //   Player 1 requested view distance 16, effective: 16
+        //   Player 1 view distance changed to 8      <- clamped by the DEFAULT
+        //                                              m_simulationDistance
+        //   Sent SetChunkCacheRadius(16)             <- client believes 16
+        //   Initialized session for player 1         <- resets it to 2
+        //   UpdateChunkTracking: ... viewDist=2
+        //
+        // Applied, acknowledged to the client, then silently overwritten. The
+        // client rendered out to 16 and the server never sent more than the 25
+        // chunks a view distance of 2 covers.
+        {
+            std::lock_guard<std::mutex> lock(m_pendingViewDistanceMutex);
             m_pendingClientViewDistance[connectionId] = requestedViewDistance;
-            return;
+        }
+        Log::Info("[IntegratedServer] Client settings for connection %u: view distance %d "
+                  "queued for the server thread", connectionId, requestedViewDistance);
+    }
+
+    void IntegratedServer::ApplyPendingClientViewDistances() {
+        if (!m_sessionManager) return;
+
+        // Swap the map out rather than holding the lock across the session
+        // lookups below — those take PlayerSessionManager's own mutex, and
+        // nesting two locks in one order here and the other order anywhere
+        // else is how this deadlocks later.
+        std::unordered_map<uint32_t, int> pending;
+        {
+            std::lock_guard<std::mutex> lock(m_pendingViewDistanceMutex);
+            if (m_pendingClientViewDistance.empty()) return;
+            pending.swap(m_pendingClientViewDistance);
         }
 
-        ApplyClientViewDistance(*session, connectionId, requestedViewDistance);
+        std::unordered_map<uint32_t, int> stillWaiting;
+        for (const auto& [connectionId, requested] : pending) {
+            auto session = m_sessionManager->GetSessionByConnection(connectionId);
+            // Not ready is not a failure: the join is mid-flight and the next
+            // tick will find it. Only a DISCONNECT drops the entry, which
+            // OnPlayerDisconnected does explicitly.
+            if (!session || !session->IsInitialized()) {
+                stillWaiting[connectionId] = requested;
+                continue;
+            }
+            ApplyClientViewDistance(*session, connectionId, requested);
+        }
+
+        if (!stillWaiting.empty()) {
+            std::lock_guard<std::mutex> lock(m_pendingViewDistanceMutex);
+            // Merge, don't assign: a newer value may have arrived from the I/O
+            // thread while this ran, and it must win over the one we are
+            // putting back.
+            for (const auto& [connectionId, requested] : stillWaiting) {
+                m_pendingClientViewDistance.emplace(connectionId, requested);
+            }
+        }
     }
 
     void IntegratedServer::ApplyClientViewDistance(PlayerSession& session,
@@ -2403,9 +4420,12 @@ namespace Server {
     void IntegratedServer::LogServerState() const {
         auto session = GetPlayerSession();
         size_t sentChunks = session ? session->GetSentChunkCount() : 0;
+        // PendingLoads is the sum across every dimension — one number, because
+        // the streaming health this line reports is a property of the pool, not
+        // of any one world.
         Log::Info("Server State: TPS=%.1f, TickTime=%.2fms, LoadedChunks=%zu, PendingLoads=%zu",
                  m_stats.averageTPS.load(), m_stats.averageTickTime.load(),
-                 sentChunks, m_pendingChunkLoads.size());
+                 sentChunks, GetPendingChunkLoadCount());
     }
 
     // ========================================================================
@@ -2458,22 +4478,14 @@ namespace Server {
 
     void IntegratedServer::InitializeSessionSystem() {
         Log::Info("Initializing session management system...");
-        
-        // Create core components
-        m_ticketManager = std::make_unique<ChunkTicketManager>();
-        m_statusManager = std::make_unique<ChunkStatusManager>();
+
+        // Only the genuinely GLOBAL pieces are built here. The ticket and
+        // status managers, the change accumulator and broadcaster, the item,
+        // XP and mob systems all belong to a ServerLevel now — and this runs
+        // BEFORE any level exists, because a level needs the session manager to
+        // construct its mob bridge.
         m_sendScheduler = std::make_unique<SendScheduler>();
         m_sessionManager = std::make_unique<PlayerSessionManager>();
-        m_itemEntities = std::make_unique<ItemEntityManager>();
-
-        // Mobs. The bridge is constructed first because the manager holds a
-        // pointer to it, and the bridge needs the manager back for entity
-        // queries — hence the explicit SetMobManager rather than a constructor
-        // argument.
-        m_mobLevel = std::make_unique<ServerLevelBridge>(m_world.get(), m_sessionManager.get());
-        m_mobs = std::make_unique<MobManager>(m_mobLevel.get());
-        m_mobLevel->SetMobManager(m_mobs.get());
-        m_mobTracker = std::make_unique<ServerEntityTracker>();
 
         // The pathfinder's block classification is derived from the block
         // registry, so it has to be (re)built after BlockRegistry::Init and
@@ -2503,75 +4515,60 @@ namespace Server {
         sessionConfig.maxChunksPerPlayerPerTick = m_config.maxChunksPerTick;
         sessionConfig.kickOnTimeout = false;  // Integrated server: never kick local player
 
+        // Nulls for the ticket and status managers: they belong to the
+        // overworld, which does not exist yet. Initialize() hands them over via
+        // SetLevelServices — together with the spawn tickets that depend on
+        // them — the moment the overworld is built.
         m_sessionManager->Initialize(
             sessionConfig,
-            m_ticketManager.get(),
-            m_statusManager.get(),
+            nullptr,
+            nullptr,
             m_sendScheduler.get()
         );
-        
-        // Add spawn chunk tickets
-        Game::Math::ChunkPos spawnChunk(0, 0);
-        m_ticketManager->AddSpawnTickets(spawnChunk, 2);
-        
-        // Initialize block change accumulation and broadcasting
-        m_changeAccumulator = std::make_unique<SectionChangeAccumulator>();
-        m_deltaBroadcaster = std::make_unique<ChunkDeltaBroadcaster>(
-            this,
-            m_changeAccumulator.get(),
-            m_sessionManager.get()
-        );
-        
+
         Log::Info("Session management system initialized successfully");
     }
 
     void IntegratedServer::CleanupSessionSystem() {
         Log::Info("Cleaning up session management system...");
-        
-        // Clean up broadcaster and accumulator first
-        if (m_deltaBroadcaster) {
-            m_deltaBroadcaster.reset();
-        }
-        
-        if (m_changeAccumulator) {
-            m_changeAccumulator.reset();
-        }
-        
+
+        // Only the global pieces. Everything that moved into ServerLevel is
+        // torn down by ~ServerLevel, in reverse construction order, when
+        // Shutdown() resets the array — which happens AFTER this, so a session
+        // being cleaned up here can still reach its level.
         if (m_sessionManager) {
             m_sessionManager->Shutdown();
             m_sessionManager.reset();
         }
-        
+
         if (m_sendScheduler) {
             m_sendScheduler->Shutdown();
             m_sendScheduler.reset();
         }
-        
-        if (m_statusManager) {
-            m_statusManager->Clear();
-            m_statusManager.reset();
-        }
-        
-        if (m_ticketManager) {
-            m_ticketManager->Clear();
-            m_ticketManager.reset();
-        }
-        
+
         Log::Info("Session management system cleaned up");
     }
-    
-    void IntegratedServer::SendBlockChangeS2CPacket(const Network::BlockChangeS2CPacket& packet) {
+
+    void IntegratedServer::SendBlockChangeS2CPacket(Game::DimensionId dimension,
+                                                    const Network::BlockChangeS2CPacket& packet) {
         // Check both that NetworkServer exists and we're not shutting down
         if (m_networkServer && !m_shouldStop.load()) {
             auto data = Network::Serialization::Serialize(packet);
-            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);
-            
+            // Scoped to the watchers of this chunk IN this dimension, not
+            // broadcast: the packet carries only x/y/z, so every client that
+            // received it would apply the edit to its own world at those
+            // coordinates — a Nether edit repainting the Overworld.
+            SendToChunkWatchersAt(dimension,
+                                  Game::Math::ChunkPos{packet.worldX >> 4, packet.worldZ >> 4},
+                                  Network::PacketId::BlockChangeS2C, data);
+
             Log::Debug("[IntegratedServer] Sent block change at (%d, %d, %d) to block %d",
                       packet.worldX, packet.worldY, packet.worldZ, static_cast<int>(packet.newBlockId));
         }
     }
-    
-    void IntegratedServer::SendSectionBlocksUpdateS2CPacket(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
+
+    void IntegratedServer::SendSectionBlocksUpdateS2CPacket(Game::DimensionId dimension,
+                                                            const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
         // Check both that NetworkServer exists and we're not shutting down
         if (m_networkServer && !m_shouldStop.load()) {
             // TODO: Serialize the packet properly when serialization is implemented
@@ -2608,8 +4605,12 @@ namespace Server {
                 data.push_back(val & 0x7F);
             }
             
-            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ClientboundSectionBlocksUpdate), data);
-            
+            // Watcher-scoped for the same reason as the single-block path
+            // above: the record stream is section-local coordinates, which
+            // every client would happily apply to whichever world it is in.
+            SendToChunkWatchersAt(dimension, packet.chunkPos,
+                                  Network::PacketId::ClientboundSectionBlocksUpdate, data);
+
             Log::Debug("[IntegratedServer] Sent section block updates for chunk (%d, %d) section %d with %zu changes",
                       packet.chunkPos.x, packet.chunkPos.z, packet.sectionY, packet.packedRecords.size());
         }

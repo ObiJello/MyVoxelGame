@@ -17,7 +17,7 @@ namespace Render {
         Neg, Add, Sub, Mul, Div, Select,
         Cos, Sin, Abs, Sqrt, Floor, Signum, Min, Max,
         Clamp, Lerp, RotLerpRad, RotLerp, WrapDegrees, TriangleWave,
-        Square, DegDiffAbs, Mod,
+        Square, Cube, DegDiffAbs, Mod,
         Gt, Lt, Ge, Le, Eq, Ne, And, Or, Not,
     };
 
@@ -51,7 +51,7 @@ namespace Render {
         bool writesHead;
     };
 
-    inline constexpr int kAnimProgramCount = 70;
+    inline constexpr int kAnimProgramCount = 79;
     extern const AnimProgram   kAnimPrograms[kAnimProgramCount];
     extern const AnimStatement kAnimStatements[];
     extern const AnimNode      kAnimNodes[];

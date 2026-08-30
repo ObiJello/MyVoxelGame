@@ -12,10 +12,11 @@ using namespace levelgen::structure::templatesystem;
 
 // Static members
 OreFeature OreFeatures::s_oreFeature;
+ScatteredOreFeature OreFeatures::s_scatteredOreFeature;
 std::shared_ptr<TagMatchTest> OreFeatures::s_stoneOreReplaceables;
 std::shared_ptr<TagMatchTest> OreFeatures::s_deepslateOreReplaceables;
 std::shared_ptr<TagMatchTest> OreFeatures::s_naturalStone;
-std::shared_ptr<TagMatchTest> OreFeatures::s_netherrack;
+std::shared_ptr<RuleTest> OreFeatures::s_netherrack;
 std::shared_ptr<TagMatchTest> OreFeatures::s_netherOreReplaceables;
 bool OreFeatures::s_initialized = false;
 
@@ -44,6 +45,14 @@ ConfiguredFeature* OreFeatures::ORE_DIORITE = nullptr;
 ConfiguredFeature* OreFeatures::ORE_ANDESITE = nullptr;
 ConfiguredFeature* OreFeatures::ORE_TUFF = nullptr;
 ConfiguredFeature* OreFeatures::ORE_CLAY = nullptr;
+ConfiguredFeature* OreFeatures::ORE_MAGMA = nullptr;
+ConfiguredFeature* OreFeatures::ORE_SOUL_SAND = nullptr;
+ConfiguredFeature* OreFeatures::ORE_NETHER_GOLD = nullptr;
+ConfiguredFeature* OreFeatures::ORE_QUARTZ = nullptr;
+ConfiguredFeature* OreFeatures::ORE_GRAVEL_NETHER = nullptr;
+ConfiguredFeature* OreFeatures::ORE_BLACKSTONE = nullptr;
+ConfiguredFeature* OreFeatures::ORE_ANCIENT_DEBRIS_LARGE = nullptr;
+ConfiguredFeature* OreFeatures::ORE_ANCIENT_DEBRIS_SMALL = nullptr;
 
 // Storage for ConfiguredFeatureImpl instances
 static std::vector<std::unique_ptr<ConfiguredFeature>> s_configuredFeatures;
@@ -81,7 +90,8 @@ void OreFeatures::bootstrap() {
     s_stoneOreReplaceables = std::make_shared<TagMatchTest>("minecraft:stone_ore_replaceables");
     s_deepslateOreReplaceables = std::make_shared<TagMatchTest>("minecraft:deepslate_ore_replaceables");
     s_naturalStone = std::make_shared<TagMatchTest>("minecraft:base_stone_overworld");
-    s_netherrack = std::make_shared<TagMatchTest>("minecraft:netherrack");
+    // Java: new BlockMatchTest(Blocks.NETHERRACK) - a block match, not a tag
+    s_netherrack = std::make_shared<BlockMatchTest>("minecraft:netherrack");
     s_netherOreReplaceables = std::make_shared<TagMatchTest>("minecraft:base_stone_nether");
 
     // Helper to create and store a configured feature
@@ -254,6 +264,36 @@ void OreFeatures::bootstrap() {
         block("minecraft:clay"),
         33, 0.0f
     ));
+
+    // Nether ores - Reference: OreFeatures.java lines 61-66
+    ORE_MAGMA = createFeature(createSingleOreConfig(
+        s_netherrack, block("minecraft:magma_block"), 33, 0.0f));
+    ORE_SOUL_SAND = createFeature(createSingleOreConfig(
+        s_netherrack, block("minecraft:soul_sand"), 12, 0.0f));
+    ORE_NETHER_GOLD = createFeature(createSingleOreConfig(
+        s_netherrack, block("minecraft:nether_gold_ore"), 10, 0.0f));
+    ORE_QUARTZ = createFeature(createSingleOreConfig(
+        s_netherrack, block("minecraft:nether_quartz_ore"), 14, 0.0f));
+    ORE_GRAVEL_NETHER = createFeature(createSingleOreConfig(
+        s_netherrack, block("minecraft:gravel"), 33, 0.0f));
+    ORE_BLACKSTONE = createFeature(createSingleOreConfig(
+        s_netherrack, block("minecraft:blackstone"), 33, 0.0f));
+
+    // Ancient debris - SCATTERED_ORE feature, discard-on-air 1.0
+    // Reference: OreFeatures.java lines 88-89
+    auto createScattered = [](const OreConfiguration& config) -> ConfiguredFeature* {
+        auto feature = std::make_unique<ConfiguredFeatureImpl<OreConfiguration, ScatteredOreFeature>>(
+            &s_scatteredOreFeature,
+            config
+        );
+        ConfiguredFeature* ptr = feature.get();
+        s_configuredFeatures.push_back(std::move(feature));
+        return ptr;
+    };
+    ORE_ANCIENT_DEBRIS_LARGE = createScattered(createSingleOreConfig(
+        s_netherOreReplaceables, block("minecraft:ancient_debris"), 3, 1.0f));
+    ORE_ANCIENT_DEBRIS_SMALL = createScattered(createSingleOreConfig(
+        s_netherOreReplaceables, block("minecraft:ancient_debris"), 2, 1.0f));
 
     s_initialized = true;
 }

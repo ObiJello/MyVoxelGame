@@ -1,5 +1,7 @@
 #pragma once
 
+#include "levelgen/WorldGenTweaks.h"
+
 #include "levelgen/placement/PlacementModifier.h"
 #include "levelgen/placement/PlacementContext.h"
 #include "levelgen/placement/PlacedFeature.h"
@@ -346,7 +348,14 @@ protected:
         WorldgenRandom& random,
         const core::BlockPos& origin
     ) override {
-        return random.nextFloat() < 1.0f / static_cast<float>(m_chance);
+        // World Properties density knob scales the pass probability
+        // (non-vanilla; 1.0 = exact old comparison, one draw either way).
+        float densityMult = WorldGenTweaks::currentStepMultiplier();
+        if (densityMult == 1.0f) {
+            return random.nextFloat() < 1.0f / static_cast<float>(m_chance);
+        }
+        return random.nextFloat() <
+               std::min(1.0f, densityMult / static_cast<float>(m_chance));
     }
 
 private:
@@ -1003,7 +1012,9 @@ public:
      * Reference: CountOnEveryLayerPlacement.java lines 27-29
      */
     static CountOnEveryLayerPlacement of(int32_t count) {
-        static std::vector<carver::ConstantInt> constants;
+        // deque: references stay valid across push_back (vector realloc
+        // would dangle every previously returned m_count pointer).
+        static std::deque<carver::ConstantInt> constants;
         constants.push_back(carver::ConstantInt(count));
         return CountOnEveryLayerPlacement(&constants.back());
     }
@@ -1041,9 +1052,10 @@ public:
 
         do {
             foundAny = false;
-            int32_t count = m_count->sample(random);
 
-            for (int32_t i = 0; i < count; ++i) {
+            // Java: `for (i = 0; i < this.count.sample(random); ++i)` - the
+            // provider is RE-SAMPLED in the loop condition every iteration.
+            for (int32_t i = 0; i < m_count->sample(random); ++i) {
                 int32_t x = random.nextInt(16) + origin.getX();
                 int32_t z = random.nextInt(16) + origin.getZ();
                 int32_t startY = context.getHeight(Heightmap::Types::MOTION_BLOCKING, x, z);

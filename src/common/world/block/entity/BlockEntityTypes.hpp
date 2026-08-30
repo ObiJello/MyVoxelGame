@@ -40,10 +40,16 @@ namespace Game {
         constexpr uint16_t CRAFTER       = 14;
         constexpr uint16_t CAMPFIRE      = 15;
         constexpr uint16_t SOUL_CAMPFIRE = 16;
-        // ... 17..29 reserved for the remaining MC BE types (Sign, Banner, Bed,
+        // Skulls / mob heads. One BE type across every skull kind and both the
+        // floor and wall placements, exactly as MC registers
+        // BlockEntityType.SKULL against all 14 blocks. The BE exists so the
+        // SkullBlockRenderer has something to render — the skull BLOCK model is
+        // empty in vanilla, all visuals are the block-entity renderer's.
+        constexpr uint16_t SKULL         = 17;
+        // ... 18..29 reserved for the remaining MC BE types (Sign, Banner, Bed,
         // Bell, Conduit, EndPortal, EndGateway, EnchantingTable, Lectern,
         // MobSpawner, TrialSpawner, Vault, StructureBlock, TestInstanceBlock,
-        // Piston, BrushableBlock, DecoratedPot, Skull,
+        // Piston, BrushableBlock, DecoratedPot,
         // CopperGolemStatue, Shelf, HangingSign). Added in later stages.
         constexpr uint16_t MAX_ID        = 64;
     }

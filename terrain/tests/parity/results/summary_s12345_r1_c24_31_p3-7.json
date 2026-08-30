@@ -1,0 +1,329 @@
+{
+  "chunks_compared": 9,
+  "total_mismatches": 1416,
+  "by_class": {
+    "missing": 698,
+    "extra": 537,
+    "wrong-block": 148,
+    "wrong-properties": 33
+  },
+  "by_type": [
+    {
+      "class": "extra",
+      "type": "minecraft:spruce_leaves",
+      "count": 410
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:spruce_leaves",
+      "count": 398
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:spruce_log",
+      "count": 241
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:podzol",
+      "count": 98
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:spruce_log",
+      "count": 48
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:mossy_cobblestone",
+      "count": 36
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:spruce_leaves",
+      "count": 33
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:fern",
+      "count": 29
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:fern",
+      "count": 25
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:mossy_cobblestone",
+      "count": 19
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:short_grass",
+      "count": 14
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:mossy_cobblestone",
+      "count": 14
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:spruce_leaves",
+      "count": 8
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:short_grass",
+      "count": 8
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:red_mushroom",
+      "count": 7
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:grass_block",
+      "count": 5
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:dirt",
+      "count": 3
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:spruce_log",
+      "count": 3
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:fern",
+      "count": 3
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:brown_mushroom",
+      "count": 3
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:brown_mushroom",
+      "count": 3
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:large_fern",
+      "count": 3
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:short_grass",
+      "count": 2
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:red_mushroom",
+      "count": 1
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:podzol",
+      "count": 1
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:large_fern",
+      "count": 1
+    }
+  ],
+  "samples": {
+    "missing|minecraft:spruce_leaves": [
+      "chunk(24, 31) local(12,79,11) world(396,79,507) java=minecraft:spruce_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(10,81,10) world(394,81,506) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(10,81,12) world(394,81,508) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(9,80,10) world(393,80,506) java=minecraft:spruce_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(9,80,12) world(393,80,508) java=minecraft:spruce_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "extra|minecraft:spruce_leaves": [
+      "chunk(24, 31) local(4,79,15) world(388,79,511) cpp=minecraft:spruce_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(4,76,14) world(388,76,510) cpp=minecraft:spruce_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(11,83,14) world(395,83,510) cpp=minecraft:spruce_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(5,75,13) world(389,75,509) cpp=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(13,85,11) world(397,85,507) cpp=minecraft:spruce_leaves[distance=1,persistent=false,waterlogged=false]"
+    ],
+    "extra|minecraft:spruce_log": [
+      "chunk(24, 31) local(4,73,15) world(388,73,511) cpp=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(13,79,11) world(397,79,507) cpp=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(4,74,15) world(388,74,511) cpp=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(4,75,15) world(388,75,511) cpp=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(13,76,11) world(397,76,507) cpp=minecraft:spruce_log[axis=y]"
+    ],
+    "wrong-block|minecraft:dirt": [
+      "chunk(24, 31) local(11,74,11) world(395,74,507) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(7,74,8) world(407,74,504) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(15,72,3) world(415,72,499) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]"
+    ],
+    "extra|minecraft:short_grass": [
+      "chunk(24, 31) local(15,75,11) world(399,75,507) cpp=minecraft:short_grass",
+      "chunk(24, 31) local(15,75,10) world(399,75,506) cpp=minecraft:short_grass",
+      "chunk(25, 31) local(7,75,9) world(407,75,505) cpp=minecraft:short_grass",
+      "chunk(25, 31) local(5,76,13) world(405,76,509) cpp=minecraft:short_grass",
+      "chunk(25, 31) local(9,77,15) world(409,77,511) cpp=minecraft:short_grass"
+    ],
+    "extra|minecraft:fern": [
+      "chunk(24, 31) local(9,74,8) world(393,74,504) cpp=minecraft:fern",
+      "chunk(24, 31) local(13,74,7) world(397,74,503) cpp=minecraft:fern",
+      "chunk(24, 31) local(12,75,15) world(396,75,511) cpp=minecraft:fern",
+      "chunk(24, 31) local(13,75,9) world(397,75,505) cpp=minecraft:fern",
+      "chunk(24, 31) local(15,74,7) world(399,74,503) cpp=minecraft:fern"
+    ],
+    "wrong-block|minecraft:spruce_log": [
+      "chunk(24, 31) local(5,73,12) world(389,73,508) java=minecraft:spruce_log[axis=y] cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(13,77,10) world(413,77,506) java=minecraft:spruce_log[axis=y] cpp=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(25, 31) local(13,79,10) world(413,79,506) java=minecraft:spruce_log[axis=y] cpp=minecraft:spruce_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:mossy_cobblestone": [
+      "chunk(24, 31) local(5,73,14) world(389,73,510) java=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(9,76,11) world(409,76,507) java=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(8,76,11) world(408,76,507) java=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(9,77,11) world(409,77,507) java=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(10,76,12) world(410,76,508) java=minecraft:mossy_cobblestone"
+    ],
+    "wrong-block|minecraft:spruce_leaves": [
+      "chunk(24, 31) local(13,80,11) world(397,80,507) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(13,81,11) world(397,81,507) java=minecraft:spruce_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:spruce_log[axis=y]",
+      "chunk(25, 31) local(6,78,10) world(406,78,506) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(5,76,9) world(405,76,505) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(12,76,3) world(412,76,499) java=minecraft:spruce_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:spruce_log[axis=y]"
+    ],
+    "missing|minecraft:spruce_log": [
+      "chunk(24, 31) local(11,80,11) world(395,80,507) java=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(11,81,11) world(395,81,507) java=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(11,75,11) world(395,75,507) java=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(11,76,11) world(395,76,507) java=minecraft:spruce_log[axis=y]",
+      "chunk(24, 31) local(11,77,11) world(395,77,507) java=minecraft:spruce_log[axis=y]"
+    ],
+    "wrong-block|minecraft:grass_block": [
+      "chunk(24, 31) local(13,74,11) world(397,74,507) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt",
+      "chunk(25, 31) local(12,72,3) world(412,72,499) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt",
+      "chunk(25, 31) local(4,73,5) world(404,73,501) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt",
+      "chunk(25, 32) local(10,77,5) world(410,77,517) java=minecraft:grass_block[snowy=false] cpp=minecraft:podzol[snowy=false]",
+      "chunk(25, 32) local(15,77,3) world(415,77,515) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt"
+    ],
+    "wrong-properties|minecraft:spruce_leaves": [
+      "chunk(24, 31) local(11,82,11) world(395,82,507) java=minecraft:spruce_leaves[distance=1,persistent=false,waterlogged=false] cpp=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(12,82,11) world(396,82,507) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:spruce_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(11,83,11) world(395,83,507) java=minecraft:spruce_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(11,82,10) world(395,82,506) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:spruce_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(24, 31) local(11,82,12) world(395,82,508) java=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:spruce_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:fern": [
+      "chunk(24, 31) local(10,74,9) world(394,74,505) java=minecraft:fern",
+      "chunk(24, 31) local(12,75,11) world(396,75,507) java=minecraft:fern",
+      "chunk(24, 31) local(9,74,13) world(393,74,509) java=minecraft:fern",
+      "chunk(24, 31) local(5,73,15) world(389,73,511) java=minecraft:fern",
+      "chunk(24, 31) local(14,75,9) world(398,75,505) java=minecraft:fern"
+    ],
+    "missing|minecraft:short_grass": [
+      "chunk(24, 31) local(5,73,11) world(389,73,507) java=minecraft:short_grass",
+      "chunk(25, 31) local(13,73,0) world(413,73,496) java=minecraft:short_grass",
+      "chunk(25, 32) local(14,78,1) world(414,78,513) java=minecraft:short_grass",
+      "chunk(25, 32) local(9,78,4) world(409,78,516) java=minecraft:short_grass",
+      "chunk(25, 32) local(13,78,3) world(413,78,515) java=minecraft:short_grass"
+    ],
+    "wrong-block|minecraft:fern": [
+      "chunk(24, 31) local(6,73,13) world(390,73,509) java=minecraft:fern cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(12,77,14) world(412,77,510) java=minecraft:fern cpp=minecraft:spruce_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(25, 32) local(11,78,3) world(411,78,515) java=minecraft:fern cpp=minecraft:spruce_leaves[distance=2,persistent=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:mossy_cobblestone": [
+      "chunk(24, 31) local(6,73,15) world(390,73,511) java=minecraft:mossy_cobblestone cpp=minecraft:fern",
+      "chunk(24, 32) local(13,74,11) world(397,74,523) java=minecraft:mossy_cobblestone cpp=minecraft:grass_block[snowy=false]",
+      "chunk(24, 32) local(13,74,10) world(397,74,522) java=minecraft:mossy_cobblestone cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(7,76,13) world(407,76,509) java=minecraft:mossy_cobblestone cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(9,76,13) world(409,76,509) java=minecraft:mossy_cobblestone cpp=minecraft:grass_block[snowy=false]"
+    ],
+    "extra|minecraft:mossy_cobblestone": [
+      "chunk(24, 32) local(11,74,11) world(395,74,523) cpp=minecraft:mossy_cobblestone",
+      "chunk(24, 32) local(9,74,10) world(393,74,522) cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(5,78,10) world(405,78,506) cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(4,77,10) world(404,77,506) cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(5,76,11) world(405,76,507) cpp=minecraft:mossy_cobblestone"
+    ],
+    "wrong-block|minecraft:podzol": [
+      "chunk(25, 31) local(13,75,12) world(413,75,508) java=minecraft:podzol[snowy=false] cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(14,75,13) world(414,75,509) java=minecraft:podzol[snowy=false] cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(12,76,14) world(412,76,510) java=minecraft:podzol[snowy=false] cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(11,74,9) world(411,74,505) java=minecraft:podzol[snowy=false] cpp=minecraft:grass_block[snowy=false]",
+      "chunk(25, 31) local(11,73,5) world(411,73,501) java=minecraft:podzol[snowy=false] cpp=minecraft:grass_block[snowy=false]"
+    ],
+    "wrong-block|minecraft:red_mushroom": [
+      "chunk(25, 31) local(12,76,12) world(412,76,508) java=minecraft:red_mushroom cpp=minecraft:spruce_log[axis=y]"
+    ],
+    "wrong-block|minecraft:brown_mushroom": [
+      "chunk(25, 31) local(13,77,14) world(413,77,510) java=minecraft:brown_mushroom cpp=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(25, 32) local(6,77,3) world(406,77,515) java=minecraft:brown_mushroom cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 32) local(10,78,3) world(410,78,515) java=minecraft:brown_mushroom cpp=minecraft:spruce_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:red_mushroom": [
+      "chunk(25, 31) local(13,76,12) world(413,76,508) java=minecraft:red_mushroom",
+      "chunk(25, 31) local(13,76,13) world(413,76,509) java=minecraft:red_mushroom",
+      "chunk(25, 31) local(14,76,12) world(414,76,508) java=minecraft:red_mushroom",
+      "chunk(25, 31) local(10,77,14) world(410,77,510) java=minecraft:red_mushroom",
+      "chunk(25, 31) local(12,76,11) world(412,76,507) java=minecraft:red_mushroom"
+    ],
+    "missing|minecraft:brown_mushroom": [
+      "chunk(25, 31) local(11,76,12) world(411,76,508) java=minecraft:brown_mushroom",
+      "chunk(25, 31) local(11,76,13) world(411,76,509) java=minecraft:brown_mushroom",
+      "chunk(25, 32) local(4,77,2) world(404,77,514) java=minecraft:brown_mushroom"
+    ],
+    "wrong-block|minecraft:large_fern": [
+      "chunk(25, 31) local(4,76,8) world(404,76,504) java=minecraft:large_fern[half=upper] cpp=minecraft:mossy_cobblestone",
+      "chunk(25, 31) local(1,74,7) world(401,74,503) java=minecraft:large_fern[half=lower] cpp=minecraft:fern",
+      "chunk(25, 31) local(4,75,8) world(404,75,504) java=minecraft:large_fern[half=lower] cpp=minecraft:fern"
+    ],
+    "wrong-block|minecraft:short_grass": [
+      "chunk(25, 31) local(5,77,15) world(405,77,511) java=minecraft:short_grass cpp=minecraft:fern",
+      "chunk(25, 32) local(10,77,1) world(410,77,513) java=minecraft:short_grass cpp=minecraft:fern"
+    ],
+    "missing|minecraft:podzol": [
+      "chunk(25, 31) local(14,74,9) world(414,74,505) java=minecraft:podzol[snowy=false]"
+    ],
+    "missing|minecraft:large_fern": [
+      "chunk(25, 31) local(1,75,7) world(401,75,503) java=minecraft:large_fern[half=upper]"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        25,
+        31
+      ],
+      "count": 741
+    },
+    {
+      "chunk": [
+        25,
+        32
+      ],
+      "count": 443
+    },
+    {
+      "chunk": [
+        24,
+        31
+      ],
+      "count": 193
+    },
+    {
+      "chunk": [
+        24,
+        32
+      ],
+      "count": 39
+    }
+  ]
+}

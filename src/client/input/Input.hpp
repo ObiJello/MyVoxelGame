@@ -33,6 +33,7 @@ namespace Input {
         Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6, Alpha7, Alpha8, Alpha9,
         F3,
         F5,  // cycle camera perspective (MC default)
+        F8,  // culling diagnostics: dump view-ray section states to the log
         F11,
         Tilde,
     };

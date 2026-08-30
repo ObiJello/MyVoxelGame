@@ -91,6 +91,18 @@ namespace Render {
             m_skyboxMode = mode;
         }
 
+        // MC DimensionSpecialEffects constantAmbientLight (Nether) /
+        // forceBrightLightmap (End): neither dimension has a day/night cycle,
+        // so the terrain must not dim, the stars must not come out and there
+        // is no sunrise glow. Without this a Nether portal — and the whole
+        // Nether with it — visibly darkens at midnight for no reason the
+        // player can see, because the server keeps ticking overworld time and
+        // the sky brightness rides it.
+        //
+        // Deliberately separate from the skybox override: a player who picks a
+        // static skybox in the OVERWORLD should still get night.
+        void SetConstantAmbientLight(bool on) { m_constantAmbientLight = on; }
+
     private:
         EnvironmentState() = default;
         void ApplyPendingSync();
@@ -109,6 +121,7 @@ namespace Render {
 
         // Skybox fog override (main thread only).
         bool m_skyboxActive = false;
+        bool m_constantAmbientLight = false;
         glm::vec3 m_skyboxFogBase{0.5f};
         int m_skyboxMode = 2;
 

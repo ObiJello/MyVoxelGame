@@ -97,6 +97,13 @@ namespace Render {
 
         // Drawing
         void DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) override;
+        MeshHandle CreateInstancedMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
+                                       BufferHandle instanceBuffer,
+                                       const VertexLayout& vertexLayout,
+                                       const VertexLayout& instanceLayout) override;
+        void DrawIndexedInstanced(MeshHandle mesh, uint32_t indexCount,
+                                  uint32_t indexOffset, uint32_t instanceCount,
+                                  uint32_t instanceByteOffset = 0) override;
         void DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) override;
         void UnbindMesh() override;
 
@@ -164,6 +171,12 @@ namespace Render {
             GLuint vao = 0;
             BufferHandle vertexBuffer = INVALID_BUFFER;
             BufferHandle indexBuffer = INVALID_BUFFER;
+            // Instanced meshes: the per-instance buffer and its layout, kept
+            // so DrawIndexedInstanced can re-point the instance attributes at
+            // a byte offset (GL 4.1 has no base-instance draw).
+            BufferHandle instanceBuffer = INVALID_BUFFER;
+            VertexLayout instanceLayout;
+            uint32_t     lastInstanceOffset = 0;
         };
         std::unordered_map<uint32_t, GLMeshInfo> m_meshes;
 

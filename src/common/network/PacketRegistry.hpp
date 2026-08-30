@@ -89,9 +89,34 @@
             EntityEventS2C         = 0x3C, // MC ClientboundEntityEventPacket
             HurtAnimationS2C       = 0x40, // MC ClientboundHurtAnimationPacket
 
+            // ── Experience orbs ────────────────────────────────────────────
+            // Pickup reuses TakeItemEntityS2C and removal reuses EntityDestroy
+            // (dispatched by id range, Game::kXpOrbEntityIdBase) — only spawn
+            // and move need their own ids.
+            XpOrbSpawnS2C          = 0x41, // MC ClientboundAddExperienceOrbPacket (+ velocity for the client sim)
+            XpOrbMoveS2C           = 0x42, // Batched compact orb position/velocity refresh
+            SetExperienceS2C       = 0x43, // XP bar triple — mirrors MC ClientboundSetExperiencePacket
+
             // ── Tick rate / freeze (MC's two ticking packets) ──────────────
             TickingStateS2C        = 0x3D, // MC ClientboundTickingStatePacket
             TickingStepS2C         = 0x3F, // MC ClientboundTickingStepPacket
+
+            // ── Dimensions ─────────────────────────────────────────────────
+            // The only packet nether/end portals add. See
+            // ChangeDimensionS2CPacket.hpp for why one is enough.
+            //
+            // 0x44 and not 0x2C-0x2F: that block belongs to the PORTAL GUN
+            // (a separate Valve-Portal feature behind ENABLE_PORTAL_GUN), and
+            // reusing it would create a live id collision the moment that flag
+            // is turned on.
+            ChangeDimensionS2C     = 0x44, // rough analogue of MC ClientboundRespawnPacket
+
+            // MC ClientboundExplodePacket. Replaces the two stand-in
+            // entity-event bytes (kEntityEventExplosion*) documented in
+            // EntityLevel.hpp, which could carry neither the exact centre, nor
+            // the real destroyed-block count, nor the local player's knockback.
+            ExplodeS2C             = 0x45, // MC ClientboundExplodePacket
+            EntityPositionSyncBatchS2C = 0x46, // many EntityPositionSyncS2C in one (falling-block store)
 #if ENABLE_PORTAL_GUN
             PortalSetS2C            = 0x2C, // Portal placed / moved (per-gun, per-color)
             PortalRemoveS2C         = 0x2D, // Portal pair cleared
@@ -126,6 +151,7 @@
             PlayerAbilitiesC2S  = 0x94,  // Client fly-state toggle (mirrors MC ServerboundPlayerAbilitiesPacket)
             InteractC2S         = 0x95,  // Attack or interact with an entity (mirrors MC ServerboundInteractPacket)
             PlayerLoadedC2S     = 0x96,  // "my level is ready" (mirrors MC ServerboundPlayerLoadedPacket) — no payload
+            PlayerPauseC2S      = 0x97,  // Pause screen opened/closed — the server freezes the world only when EVERY player is paused
         };
 
         // Convert PacketId to string for logging
@@ -150,8 +176,12 @@
                 case PacketId::ItemEntitySpawnS2C: return "ItemEntitySpawnS2C";
                 case PacketId::ItemEntityMoveS2C: return "ItemEntityMoveS2C";
                 case PacketId::TakeItemEntityS2C: return "TakeItemEntityS2C";
+                case PacketId::XpOrbSpawnS2C: return "XpOrbSpawnS2C";
+                case PacketId::XpOrbMoveS2C: return "XpOrbMoveS2C";
+                case PacketId::SetExperienceS2C: return "SetExperienceS2C";
                 case PacketId::AddEntityS2C: return "AddEntityS2C";
                 case PacketId::EntityPositionSyncS2C: return "EntityPositionSyncS2C";
+                case PacketId::EntityPositionSyncBatchS2C: return "EntityPositionSyncBatchS2C";
                 case PacketId::MoveEntityS2C: return "MoveEntityS2C";
                 case PacketId::SetEntityMotionS2C: return "SetEntityMotionS2C";
                 case PacketId::SetEntityDataS2C: return "SetEntityDataS2C";
@@ -159,6 +189,7 @@
                 case PacketId::HurtAnimationS2C: return "HurtAnimationS2C";
                 case PacketId::TickingStateS2C: return "TickingStateS2C";
                 case PacketId::TickingStepS2C: return "TickingStepS2C";
+                case PacketId::ChangeDimensionS2C: return "ChangeDimensionS2C";
                 case PacketId::EntityDestroy: return "EntityDestroy";
                 case PacketId::ChatMessageS2C: return "ChatMessageS2C";
                 case PacketId::TimeUpdate: return "TimeUpdate";
@@ -214,6 +245,7 @@
                 case PacketId::InventoryClickC2S: return "InventoryClickC2S";
                 case PacketId::InventoryCloseC2S: return "InventoryCloseC2S";
                 case PacketId::PlayerAbilitiesC2S: return "PlayerAbilitiesC2S";
+                case PacketId::PlayerPauseC2S: return "PlayerPauseC2S";
                 case PacketId::InteractC2S: return "InteractC2S";
                 case PacketId::PlayerLoadedC2S: return "PlayerLoadedC2S";
 

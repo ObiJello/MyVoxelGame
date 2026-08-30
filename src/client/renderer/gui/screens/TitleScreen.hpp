@@ -44,6 +44,12 @@ namespace Render {
         std::string worldName;
         int64_t     seed     = 0;
         int         gameMode = 1;   // 0 = Survival, 1 = Creative
+        bool        generateStructures = true;  // world-creation toggle (WorldEntry::generateStructures)
+        int         worldType = 0;              // 0 Default, 1 Superflat, 2 Large Biomes, 3 AMPLIFIED, 4 Single Biome
+        std::string flatPreset;                 // superflat preset name ("" = MC default flat)
+        std::string flatLayers;                 // superflat custom "<layers>;<biome>" ("" = preset's own)
+        std::string singleBiome = "minecraft:plains";  // single-biome world's biome id
+        std::string worldgenTweaks;             // World Properties JSON ("" = vanilla)
         long long   dayTime  = 6000;          // world time restored from worlds.json (6000 = noon)
         bool        doDaylightCycle = false;  // gamerule restored from worlds.json
         std::string skybox = "vanilla";       // per-world sky (see WorldEntry::skybox)
@@ -63,6 +69,10 @@ namespace Render {
         // fadeIn: play the 2-second widget fade (used on boot, like MC's
         // post-loading fade).
         explicit TitleScreen(bool fadeIn = true);
+
+        // MC TitleScreen.isPauseScreen() == false. Academic here (there is no
+        // world behind it), kept because the vanilla override exists.
+        bool IsPauseScreen() const override { return false; }
 
         void Init() override;
         void Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;

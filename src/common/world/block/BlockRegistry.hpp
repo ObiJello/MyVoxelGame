@@ -36,6 +36,9 @@ namespace Game {
     class ILevelWrite;
     class IUsePlayer;
     class JavaRandom;
+    class Entity;
+    struct ScheduledTickAccess;
+    struct EntityLevel;
 
     // Render layer classification — determines which rendering pass a block uses
     enum class RenderLayer : uint8_t {
@@ -113,10 +116,81 @@ namespace Game {
     // their fruit is picked.
     // outBlock/outState collapsed into one BlockState: the block IS part of
     // the state, so "become air" is just returning air's state.
+    //
+    // `ticks` is MC's ScheduledTickAccess, the same extra parameter vanilla's
+    // updateShape carries and for the same reason: a shape update is allowed to
+    // book delayed work but not to write blocks, and handing it a writable
+    // level would let it recurse into setBlock in the middle of the neighbour
+    // walk. It is NULL on the client (block ticks are server authority), so
+    // implementations must check before using it.
     using BlockNeighborChangedFn = bool (*)(const IBlockAccess& level, const glm::ivec3& pos,
                                             BlockState state,
                                             Direction toNeighbour, BlockID neighbourId,
-                                            BlockState& outState);
+                                            BlockState& outState,
+                                            ScheduledTickAccess* ticks);
+
+    // A SCHEDULED tick has come due for this block. Port of MC's
+    // `BlockBehaviour.tick(state, serverLevel, pos, random)` — the delayed
+    // appointment booked through ScheduledTickAccess, NOT the random tick.
+    //
+    // The two are easy to confuse and behave nothing alike: `randomTick` fires
+    // on positions sampled at random and is a probability per section per tick,
+    // while this fires exactly once at exactly the tick it was booked for. Sand
+    // falls because of this one; wheat grows because of the other.
+    //
+    // Signature deliberately matches BlockRandomTickFn so the two can share
+    // helpers. Reach the scheduler again (to reschedule) through `level.Ticks()`.
+    //
+    // Server-only in practice: World is the only ILevelWrite that drains a tick
+    // queue, so the client never calls this even for a block that defines it.
+    using BlockTickFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                 BlockState state, JavaRandom& random);
+
+    // MC BlockBehaviour.animateTick — the CLIENT-SIDE ambient animation tick.
+    //
+    // A third kind of tick, and it is not a server concept at all: the client
+    // samples ~1300 random positions around the camera every tick and runs this
+    // on whatever it lands on. That is where every ambient block particle in
+    // Minecraft comes from — torch flames, portal shimmer, lava pops, campfire
+    // smoke, and the dust that trickles from unsupported sand.
+    //
+    // Takes EntityLevel rather than ILevelWrite because the only thing it can
+    // usefully do is spawn particles, and the particle sink lives there. It is
+    // never called server-side.
+    using BlockAnimateTickFn = void (*)(EntityLevel& level, const glm::ivec3& pos,
+                                        BlockState state, JavaRandom& random);
+
+    // This block was just written into the world. Port of MC's
+    // `BlockBehaviour.onPlace(state, level, pos, oldState, movedByPiston)`,
+    // called from `Level.setBlock` after the chunk write and BEFORE neighbour
+    // notification.
+    //
+    // Distinct from `useOn`: onPlace fires however the block got there —
+    // player placement, a structure, fire spreading, another block's
+    // behaviour. That generality is the point for the nether portal, whose
+    // vanilla ignition lives in `BaseFireBlock.onPlace` precisely so that any
+    // fire appearing in a frame lights it, not just flint and steel.
+    //
+    // MC only calls it when the BLOCK changed (`!oldState.is(state.getBlock())`
+    // guards every implementation); the engine applies that filter for you, so
+    // a state-only edit never reaches here.
+    //
+    // A callback may write to the world — including overwriting itself, which
+    // is exactly what the fire→portal path does. World's existing recursion
+    // budget bounds the resulting cascade.
+    using BlockOnPlaceFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                    BlockState newState, BlockState oldState);
+
+    // An entity's bounding box overlaps this block's cell. Port of MC's
+    // `BlockBehaviour.entityInside(state, level, pos, entity, effectApplier,
+    // isPrecise)`, driven per tick rather than per movement step.
+    //
+    // MC's two extra parameters are dropped: `InsideBlockEffectApplier` is a
+    // deferral queue for effects that must not fire mid-movement (fire damage,
+    // freezing) and nothing modelled here needs it, and `isPrecise` only
+    // distinguishes a swept test from a sampled one. Portals ignore both.
+    using BlockEntityInsideFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                         BlockState state, Entity& entity);
 
     struct Block {
         std::string name;
@@ -158,16 +232,48 @@ namespace Game {
         BlockIsValidBonemealTargetFn isValidBonemealTarget = nullptr;
         BlockPerformBonemealFn       performBonemeal       = nullptr;
         BlockNeighborChangedFn       neighborChanged       = nullptr;
+        BlockTickFn                  tick                  = nullptr;
+        BlockAnimateTickFn           animateTick           = nullptr;
+
+        // Lifecycle / contact callbacks. See the typedefs above.
+        BlockOnPlaceFn               onPlace               = nullptr;
+        BlockEntityInsideFn          entityInside          = nullptr;
 
         // ── Mining data (MC parity) ────────────────────────────────────────
         // destroyTime: MC's `strength(destroyTime, ...)` first arg from
         // Blocks.java. Units are MC seconds at the player's base mining speed
         // (×30 ticks for the correct tool). -1 = unbreakable (bedrock).
         // 0 = instant break (grass plant, flower, leaves).
+        // destroyTime, explosionResistance, requiresCorrectTool, preferredTool,
+        // minTier, mapColor and ignitedByLava are all filled from the
+        // transcribed Blocks.java table (GeneratedBlockHardness.hpp) during
+        // BlockRegistry::Init. The initialisers here are only what an
+        // unregistered slot keeps.
         float       destroyTime         = 1.0f;
         bool        requiresCorrectTool = false;
         ToolType    preferredTool       = ToolType::None;
         MiningTier  minTier             = MiningTier::Wood;
+
+        // MC's `strength(destroyTime, explosionResistance)` SECOND argument —
+        // how much of an explosion's ray power this block soaks
+        // (ServerExplosion: `remainingPower -= (resistance + 0.3) * 0.3`).
+        //
+        // NOT the same axis as destroyTime, even though `strength(a)` sets both
+        // to `a` for most of the registry. Obsidian is 50 to mine and 1200 to
+        // blow up; stone is 1.5 and 6.0. Defaulting to 0 rather than 1 matches
+        // MC's own field initialiser — a block with no `strength` call really
+        // is free to destroy.
+        float       explosionResistance  = 0.0f;
+
+        // MC MapColor as 0xRRGGBB. Carried for one consumer: the falling-dust
+        // particle, whose colour is `state.getMapColor(...).col` for every
+        // falling block except sand, red sand and gravel (which hardcode a
+        // ColorRGBA in their ColoredFallingBlock constructor).
+        uint32_t    mapColor             = 0;
+
+        // MC Properties.ignitedByLava(). The data half of fire spread, which
+        // does not exist yet — see the seam in FireBlock.
+        bool        ignitedByLava        = false;
 
         // MC's BlockBehaviour.Properties.noCollision(): when false, the block
         // is non-colliding (the player walks straight through it). Mirrors
@@ -313,6 +419,23 @@ namespace Game {
         // that asks "what does this block look like" use GetBlockShapeSet.
         static BlockShapeSet GetBlockCollisionShapeSet(BlockState state);
 
+        // Non-null when this state's COLLISION shape is a SINGLE box — which is
+        // almost every block in a world (stone, dirt, ore, planks…). Returns a
+        // reference INTO the shape cache, so the caller copies nothing.
+        //
+        // GetBlockCollisionShapeSet returns a BlockShapeSet BY VALUE: six
+        // BlockShapes plus a count, ~148 bytes, constructed and copied for every
+        // candidate cell of every collision sweep. A `sample` profile put it at
+        // 30.4% of the server thread and 17.2% of the client's once a hundred
+        // thousand primed TNT were sweeping. The set cannot simply be returned
+        // by reference — the single-box case is built on the stack, and the
+        // comment on GetBlockShapeSet explains why memoising THAT is a trap —
+        // so the fix is to let the common case skip the set entirely.
+        //
+        // The family tests below are byte tests against the precomputed table
+        // (0.57 ns), not the string compares they replaced.
+        static const BlockShape* GetSingleCollisionBox(BlockState state);
+
         // Shape for a specific block STATE. Rotation lives in the model, so a
         // block whose blockstate maps facing to a y-rotated model has a
         // DIFFERENT shape per state — a leaf litter clump occupies a different
@@ -324,6 +447,23 @@ namespace Game {
         // Querying the state-0 overload for a rotated block gives the shape of
         // the block as authored (north-facing), which is why the outline and
         // the raycast used to sit in the wrong corner.
+        // Fill all three shape caches for every (BlockID, stateIndex) once, on
+        // one thread, at a known-good point.
+        //
+        // MUST be called AFTER BlockStateModels::Load. Load() begins with
+        // Clear(), so prewarming in the gap between LoadModels and Load makes
+        // ModelNameFor return empty for every state, falls back to the default
+        // full cube, and permanently caches a solid 1x1x1 as the collision
+        // shape of every door, trapdoor, bell, chain and scaffolding state —
+        // a live gameplay bug (solid closed doors) that also blocks explosion
+        // rays vanilla lets through.
+        //
+        // Two things this buys: worker threads never race to populate a slot
+        // during play, and the caches are constructed at a point where the
+        // state table is known complete rather than on whichever thread asks
+        // first.
+        static void PrewarmShapeCaches();
+
         static const BlockShape& GetBlockShape(BlockState state);
 
         // World-aware shape. Identical to GetBlockShape except for blocks whose
@@ -461,6 +601,31 @@ namespace Game {
         // Declares the `waterlogged` property, i.e. MC's class chain reaches
         // SimpleWaterloggedBlock. 386 blocks: stairs, slabs, fences, walls,
         // trapdoors, signs, leaves, ladders, chests, candles, rails, coral…
+        // ── Shape families, precomputed ────────────────────────────────────
+        //
+        // IsStairs / IsFenceBlock / IsPaneBlock / IsWallBlock / IsFenceGateBlock
+        // were each a std::string suffix compare reaching into a 233 KB table of
+        // 208-byte Block structs. GetBlockCollisionShapeSet runs up to five of
+        // them and HasMultiBoxShape repeats every one — measured 8.78 ns of
+        // string work per voxel query, against 0.57 ns for a byte test.
+        //
+        // The table is filled at the END of Init, after the last
+        // RegisterModelBlock: Init assigns whole Block structs and then
+        // OVERRIDES modelName for Water and Lava, so "definitions are populated"
+        // is not the invariant that matters.
+        enum FamilyBit : uint8_t {
+            FamilyStairs    = 1u << 0,
+            FamilyFence     = 1u << 1,
+            FamilyPane      = 1u << 2,
+            FamilyWall      = 1u << 3,
+            FamilyFenceGate = 1u << 4,
+        };
+        static uint8_t FamilyBits(BlockID id) {
+            const size_t i = static_cast<size_t>(id);
+            return i < Size ? s_familyBits[i] : 0;
+        }
+        static void InitFamilies();
+
         static bool IsWaterloggable(BlockID id);
 
         // No property, `getFluidState` returns WATER unconditionally: kelp,
@@ -472,6 +637,17 @@ namespace Game {
         // a waterloggable block whose flag is set. This is THE question the
         // mesher, the entity fluid test and the bucket all ask.
         static bool ContainsWater(BlockState state);
+
+        // MC `BlockState.getFluidState().is(Fluids.WATER)` — the SOURCE fluid
+        // specifically, not the `#water` fluid TAG that ContainsWater answers.
+        // The two differ for FLOWING water, and MC leans on the difference:
+        //   * FallingBlockEntity re-logs a landed block only on `is(Fluids.
+        //     WATER)`, so a slab landing in a waterfall does NOT come back
+        //     waterlogged — ContainsWater would say it does;
+        //   * ClipContext.Fluid.SOURCE_ONLY clips against source cells only.
+        // A waterlogged block's getFluidState returns WATER.getSource(false),
+        // so it counts here exactly as it does in ContainsWater.
+        static bool IsWaterSource(BlockState state);
 
         // `state.setValue(WATERLOGGED, on)` — every other property untouched.
         // Returns `stateIndex` unchanged for a block with no such property.
@@ -486,6 +662,7 @@ namespace Game {
 
         // Backing storage for all blocks
         static std::array<Block, Size> blockDefinitions;
+        static std::array<uint8_t, Size> s_familyBits;
 
     private:
         BlockRegistry() = delete;

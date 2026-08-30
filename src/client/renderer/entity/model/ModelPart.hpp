@@ -52,6 +52,10 @@ namespace Render {
     struct PartPose {
         float x = 0.0f, y = 0.0f, z = 0.0f;             // pixels
         float xRot = 0.0f, yRot = 0.0f, zRot = 0.0f;    // radians
+        // MC PartPose xScale/yScale/zScale — MeshTransformer.scaling puts the
+        // LayerDefinitions mesh scale here (on the root part), and loadPose
+        // restores it, so ResetPose must copy it into the animation state.
+        float xScale = 1.0f, yScale = 1.0f, zScale = 1.0f;
 
         static PartPose Offset(float x, float y, float z) { return { x, y, z, 0, 0, 0 }; }
         static PartPose OffsetAndRotation(float x, float y, float z,
@@ -73,7 +77,10 @@ namespace Render {
         float originX, originY, originZ;    // pixels, MC model space
         float sizeX, sizeY, sizeZ;          // pixels
         float texOffsX, texOffsY;           // texture pixels
-        float grow = 0.0f;
+        // MC CubeDeformation is per axis. Uniform everywhere except the
+        // equine baby legs, which stretch Y alone (AbstractEquineModel
+        // .createFullScaleBabyMesh's g.extend(0, 5.5, 0)).
+        float growX = 0.0f, growY = 0.0f, growZ = 0.0f;
         bool  mirror = false;               // MC CubeListBuilder.mirror()
     };
 

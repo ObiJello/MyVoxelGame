@@ -1,0 +1,13 @@
+[16:29:50] [main/INFO]: [STDOUT]: Bootstrap complete.
+[16:29:50] [main/INFO]: [STDOUT]: Setting up registries...
+[16:29:51] [main/INFO]: [STDOUT]: RandomState created for seed: 12345
+[16:29:51] [main/INFO]: [STDOUT]: Created biome registry with 65 biomes
+[16:29:51] [main/INFO]: [STDOUT]: ProtoChunk created at [0, 0]
+[16:29:51] [main/INFO]: [STDOUT]: NoiseChunk created and set
+[16:29:51] [main/INFO]: [STDOUT]: Running fillFromNoise (NOISE PHASE ONLY)...
+[16:29:51] [main/INFO]: [STDOUT]: Noise phase complete!
+[16:29:51] [main/INFO]: [STDOUT]: Writing output to: java_phase_noise_output.txt
+[16:29:51] [main/INFO]: [STDOUT]: Total blocks: 98304
+[16:29:51] [main/INFO]: [STDOUT]: Air blocks: 65890
+[16:29:51] [main/INFO]: [STDOUT]: Non-air blocks: 32414
+[16:29:51] [main/INFO]: [STDOUT]: Done!

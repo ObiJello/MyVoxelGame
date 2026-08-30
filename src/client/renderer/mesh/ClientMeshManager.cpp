@@ -2,6 +2,7 @@
 #include "ClientMeshManager.hpp"
 #include "ChunkRenderer.hpp"
 #include "MeshUploadPermits.hpp"
+#include <cstring>
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -344,11 +345,17 @@ namespace Render {
             case Client::MeshApplyAction::Upload: {
                 if (!result.success) {
                     m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
+                    // A failed LATEST job would otherwise leave the section
+                    // stuck "in flight" forever — see NoteMeshBuildFailed.
+                    m_chunkManager->NoteMeshBuildFailed(result.chunkPos, result.sectionY,
+                                                        result.generation);
                     return;
                 }
 
                 if (!ValidateMeshBuildResult(result)) {
                     m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
+                    m_chunkManager->NoteMeshBuildFailed(result.chunkPos, result.sectionY,
+                                                        result.generation);
                     return;
                 }
 
@@ -365,7 +372,8 @@ namespace Render {
                 }
 
                 { PROFILE_ZONE_N("FinalizeUpload");
-                m_chunkManager->FinalizeSectionUpload(result.chunkPos, result.sectionY, result.neighborMask);
+                m_chunkManager->FinalizeSectionUpload(result.chunkPos, result.sectionY,
+                                                      result.neighborMask, result.generation);
                 }
 
                 m_stats.meshBuildsCompleted.fetch_add(1, std::memory_order_relaxed);
@@ -706,9 +714,12 @@ namespace Render {
 
         // Remove existing mega-buffer regions for this section (re-upload)
         MegaBufferSectionKey megaKey{chunkPos, sectionY};
-        m_opaqueMegaBuffer.RemoveSection(megaKey);
-        m_cutoutMegaBuffer.RemoveSection(megaKey);
-        m_translucentMegaBuffer.RemoveSection(megaKey);
+        {
+            PROFILE_ZONE_N("Upl.RemoveOld");
+            m_opaqueMegaBuffer.RemoveSection(megaKey);
+            m_cutoutMegaBuffer.RemoveSection(megaKey);
+            m_translucentMegaBuffer.RemoveSection(megaKey);
+        }
 
         // Reset counts and cached draw commands before re-upload
         gpuData.opaqueIndexCount = 0;
@@ -753,6 +764,7 @@ namespace Render {
             }
         }
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
+            PROFILE_ZONE_N("Upl.Translucent");
             m_translucentMegaBuffer.UploadSection(megaKey,
                 meshData.translucentVertices.data(),
                 meshData.translucentVertexCount,
@@ -773,60 +785,26 @@ namespace Render {
             // 4k..4k+3, which is what GenerateQuad and FluidMeshBuilder emit.
             // Positions are the first three floats of each vertex.
             {
-                const float* v = meshData.translucentVertices.data();
-                // 24-byte vertex (vec3 pos + vec2 uv + packed RGBA8) = 6 floats.
+                // Sorted on the worker (ClientWorkerPool::ConvertSectionMeshToResult);
+                // keep the centroids for later re-sorts and record the view.
                 static_assert(sizeof(Render::Vertex) == 24,
                               "translucent centroid extraction assumes the 24-byte vertex");
-                constexpr size_t floatsPerVertex = sizeof(Render::Vertex) / sizeof(float);
-                const size_t quads = meshData.translucentVertexCount / 4;
-                gpuData.translucentCentroids.clear();
-                gpuData.translucentCentroids.reserve(quads);
-                for (size_t q = 0; q < quads; ++q) {
-                    const float* p0 = v + (q * 4 + 0) * floatsPerVertex;
-                    const float* p2 = v + (q * 4 + 2) * floatsPerVertex;
-                    gpuData.translucentCentroids.emplace_back(
-                        (p0[0] + p2[0]) * 0.5f,
-                        (p0[1] + p2[1]) * 0.5f,
-                        (p0[2] + p2[2]) * 0.5f);
+                const size_t quads = meshData.translucentCentroids.size() / 3;
+                gpuData.translucentCentroids.resize(quads);
+                if (quads > 0) {
+                    std::memcpy(gpuData.translucentCentroids.data(),
+                                meshData.translucentCentroids.data(),
+                                quads * sizeof(glm::vec3));
                 }
-                // Sort NOW, not on some later frame. MC sorts at compile time
-                // (SectionCompiler → MeshData.sortQuads with the camera
-                // position), so a section is never drawn in raw mesher order.
-                // Ours used to defer to the per-frame re-sort, which is
-                // throttled to the nearby sections plus a slice of the rest —
-                // a newly streamed distant chunk could wait many frames, and
-                // since the translucent pass writes depth, unsorted quads
-                // occlude each other instead of blending.
-                //
-                // This is load-bearing for the scheduler in ChunkRenderer:
-                // that sweep only ever walks VISIBLE sections, so a section
-                // that is off-screen (or behind the occlusion BFS) is never
-                // swept at all. Sorting at upload time is what guarantees it
-                // still has a valid order the frame it first comes into view.
-                //
-                // An empty result means the quad count overflowed the 16-bit
-                // index space; UpdateSectionIndices then rejects the size
-                // mismatch and the mesher order stands. Leaving the point of
-                // view invalid in either case just asks the sweep to try again.
-                const glm::vec3 cameraPos = GetPlayerPosition();
                 gpuData.translucencyPov = TranslucentSort::PointOfView{};
-                TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
-                                                    m_resortIndexScratch, m_resortOrderScratch,
-                                            m_resortKeyScratch);
-                if (!m_resortIndexScratch.empty()
-                    && m_translucentMegaBuffer.UpdateSectionIndices(
-                           megaKey, m_resortIndexScratch.data(), m_resortIndexScratch.size())) {
-                    const glm::ivec3 origin(
-                        chunkPos.x * 16,
-                        Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0),
-                        chunkPos.z * 16);
-                    gpuData.translucencyPov =
-                        TranslucentSort::MakePointOfView(cameraPos, origin);
+                if (meshData.translucentPovValid) {
+                    gpuData.translucencyPov.x = meshData.translucentPovX;
+                    gpuData.translucencyPov.y = meshData.translucentPovY;
+                    gpuData.translucencyPov.z = meshData.translucentPovZ;
+                    gpuData.translucencyPov.valid = true;
                 }
             }
         }
-
-        // Update metadata
         gpuData.lastUploadFrame = 0; // TODO: Add frame counter
         gpuData.needsUpload = false;
 

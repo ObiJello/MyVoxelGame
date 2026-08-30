@@ -577,6 +577,28 @@ namespace Game {
         return result;
     }
 
+    // The creative void. MC CreativeModeInventoryScreen:195-196 (the "X"
+    // slot) and :254-257 (a click on the item list while carrying) both call
+    // setCarried directly — the stack ceases to exist, it is NOT dropped.
+    //
+    // This is a separate action from THROW on purpose. THROW is the drop path
+    // and spawns an ItemEntity; routing a delete through it put the item on
+    // the floor, which in creative is both wrong and self-defeating (the thing
+    // you were trying to get rid of lands at your feet and is picked back up).
+    ContainerClickResult AbstractContainerMenu::HandleCreativeDeleteCarried(uint8_t button) {
+        ContainerClickResult result;
+        if (m_carried.IsEmpty()) return result;
+
+        if (button == 0) {
+            m_carried.Clear();                 // whole cursor
+        } else {
+            m_carried.count -= 1;              // MC's carried.shrink(1)
+            if (m_carried.count <= 0) m_carried.Clear();
+        }
+        result.carriedChanged = true;
+        return result;
+    }
+
     // Pick-block (P key), routed through the server so the authoritative
     // inventory reflects it. Mirrors ServerboundSetCreativeModeSlotPacket.
     ContainerClickResult AbstractContainerMenu::HandleCreativeFillSlot(int slotIndex,
@@ -648,6 +670,8 @@ namespace Game {
                 case Network::ContainerInput::PICKUP_ALL:  result = HandlePickupAll (slot); break;
                 case Network::ContainerInput::CREATIVE_DESTROY_ALL:
                     result = HandleCreativeDestroyAll(); break;
+                case Network::ContainerInput::CREATIVE_DELETE_CARRIED:
+                    result = HandleCreativeDeleteCarried(click.button); break;
                 case Network::ContainerInput::CREATIVE_FILL_SLOT:
                     result = HandleCreativeFillSlot(slot, creativeSource); break;
                 default:

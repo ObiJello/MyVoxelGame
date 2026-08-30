@@ -1,0 +1,108 @@
+{
+ "tier": "0",
+ "determinism": true,
+ "combos": [
+  {
+   "tag": "s0_single_-5_-8_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s0_single_8_10_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_-100_-92_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_-103_-91_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_-107_-103_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_-255_-249_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_-260_-263_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_24_31_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_31_30_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_31_38_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_34_37_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_35_38_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_59990_-59999_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_59990_-60006_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_5_-6_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_60007_-60002_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_6_-2_p3-7",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_8_-1_p3-6",
+   "rc": 0,
+   "seconds": 0
+  },
+  {
+   "tag": "s12345_single_8_-1_p3-7",
+   "rc": 0,
+   "seconds": 1
+  },
+  {
+   "tag": "s12345_single_9_-3_p3-7",
+   "rc": 0,
+   "seconds": 0
+  }
+ ],
+ "pass": 20,
+ "fail": 0
+}

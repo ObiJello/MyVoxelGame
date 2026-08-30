@@ -458,6 +458,11 @@ namespace Platform {
             bool        hardcore = false;
             bool        allowCommands = false;
             std::string versionName;  // Data.Version.Name, e.g. "1.21.6"
+            int64_t     seed = 0;     // Data.WorldGenSettings.seed
+            int         difficulty = 2;
+            int64_t     dayTime = 6000;
+            bool        generateStructures = true;
+            bool        doDaylightCycle = false;
         };
 
         // The vanilla launcher's saves folder for this platform. Does not check
@@ -469,6 +474,11 @@ namespace Platform {
         // Returns empty when Minecraft isn't installed — that is the normal
         // case for most players and is not an error.
         static std::vector<MinecraftWorldInfo> ListMinecraftWorlds();
+
+        // The same, for ObeyCraft's OWN saves folder. A world folder is
+        // self-describing: what is on disk is what the list shows, so a world
+        // copied in by hand appears and a deleted folder disappears.
+        std::vector<MinecraftWorldInfo> ListObeyCraftWorlds() const;
 
     private:
         std::string m_gameDirectory;

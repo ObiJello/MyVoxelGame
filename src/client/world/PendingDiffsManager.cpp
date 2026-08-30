@@ -34,8 +34,13 @@ namespace Client {
         // Check per-chunk limit
         if (chunkDiffs.GetTotalDiffCount() >= MAX_DIFFS_PER_CHUNK) {
             m_stats.droppedDiffs++;
-            Log::Warning("[PendingDiffs] Dropping block change for chunk (%d,%d) - per-chunk limit reached",
-                        chunkPos.x, chunkPos.z);
+            // Rate-limited: during a cascade this fired once per dropped
+            // BLOCK, and each Log::Warning is a global mutex + flush — the
+            // warning spam was itself a frame stall.
+            if ((m_stats.droppedDiffs & 1023) == 1) {
+                Log::Warning("[PendingDiffs] Dropping block changes (chunk (%d,%d), %zu dropped so far) - per-chunk limit",
+                            chunkPos.x, chunkPos.z, m_stats.droppedDiffs);
+            }
             return;
         }
         
@@ -90,8 +95,10 @@ namespace Client {
             // Check per-chunk limit
             if (chunkDiffs.GetTotalDiffCount() >= MAX_DIFFS_PER_CHUNK) {
                 m_stats.droppedDiffs++;
-                Log::Warning("[PendingDiffs] Dropping remaining changes for chunk (%d,%d) - limit reached",
-                            packet.chunkPos.x, packet.chunkPos.z);
+                if ((m_stats.droppedDiffs & 1023) == 1) {
+                    Log::Warning("[PendingDiffs] Dropping remaining changes (chunk (%d,%d), %zu dropped so far) - limit",
+                                packet.chunkPos.x, packet.chunkPos.z, m_stats.droppedDiffs);
+                }
                 break;
             }
             

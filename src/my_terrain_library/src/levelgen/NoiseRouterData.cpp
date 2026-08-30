@@ -864,9 +864,26 @@ NoiseRouter* NoiseRouterData::noNewCaves(DensityFunction* slide) {
     DensityFunction* zeroFunc = zero();
     DensityFunction* fullNoise = postProcess(slide);
 
+    // Reference: shiftX/shiftZ from SHIFT_X/SHIFT_Z (offset noise), then
+    // temperature/vegetation = shiftedNoise2d(shiftX, shiftZ, 0.25, noise).
+    // The RandomState visitor swaps the noise holders for the legacy nether
+    // biome noises (createLegacyNetherBiome) when legacy_random_source=true.
+    DensityFunction::NoiseHolder* offsetNoiseHolder =
+        DensityFunctionRegistry::createNoiseHolder("offset", 0);
+    DensityFunction* shiftX = flatCache(cache2d(shiftA(offsetNoiseHolder)));
+    DensityFunction* shiftZ = flatCache(cache2d(shiftB(offsetNoiseHolder)));
+    DensityFunction::NoiseHolder* temperatureNoiseHolder =
+        DensityFunctionRegistry::createNoiseHolder("temperature", 0);
+    DensityFunction* temperature =
+        shiftedNoise2d(shiftX, shiftZ, 0.25, temperatureNoiseHolder);
+    DensityFunction::NoiseHolder* vegetationNoiseHolder =
+        DensityFunctionRegistry::createNoiseHolder("vegetation", 0);
+    DensityFunction* vegetation =
+        shiftedNoise2d(shiftX, shiftZ, 0.25, vegetationNoiseHolder);
+
     return new NoiseRouter(
         zeroFunc, zeroFunc, zeroFunc, zeroFunc,  // barrier, fluidFlood, fluidSpread, lava
-        zeroFunc, zeroFunc,                       // temperature, vegetation
+        temperature, vegetation,
         zeroFunc, zeroFunc, zeroFunc, zeroFunc,  // continents, erosion, depth, ridges
         zeroFunc, fullNoise,                      // prelimSurface, finalDensity
         zeroFunc, zeroFunc, zeroFunc             // veinToggle, veinRidged, veinGap

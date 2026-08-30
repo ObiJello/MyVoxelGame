@@ -104,9 +104,13 @@ namespace Game {
 
         bool HasRequiredMemories(const LivingEntity& body) const;
 
-    private:
+        // MC Behavior.timedOut — protected because subclasses read it in stop()
+        // to distinguish "ran to completion" from "was interrupted". The
+        // sniffer's whole dig cycle branches on exactly that (a dig cut short
+        // by panic resets; one that timed out pays the 9600-tick cooldown).
         bool TimedOut(int64_t timestamp) const { return timestamp > m_endTimestamp; }
 
+    private:
         std::vector<MemoryCondition> m_entryCondition;
         BehaviorStatus m_status = BehaviorStatus::Stopped;
         int64_t m_endTimestamp = 0;

@@ -951,6 +951,7 @@ namespace Render {
         m_scissorStack.push_back(m_currentScissor);
         m_currentScissor = rect;
         m_scissorActive = true;
+        if (m_renderState) m_renderState->SetActiveScissor(true, m_currentScissor);
     }
 
     void GuiGraphics::DisableScissor() {
@@ -961,6 +962,7 @@ namespace Render {
         } else {
             m_scissorActive = false;
         }
+        if (m_renderState) m_renderState->SetActiveScissor(m_scissorActive, m_currentScissor);
     }
 
     // --- Transform stack ---

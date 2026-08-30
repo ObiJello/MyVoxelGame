@@ -10,6 +10,7 @@
 // "simplify" them into a modulo or a division by RAND_MAX.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
 namespace Game {
@@ -20,6 +21,8 @@ namespace Game {
 
         void SetSeed(int64_t seed) {
             m_seed = (static_cast<uint64_t>(seed) ^ kMultiplier) & kMask48;
+            // java.util.Random.setSeed also clears the cached spare gaussian.
+            m_haveNextGaussian = false;
         }
 
         // java.util.Random.next(bits): 48-bit LCG step, top bits returned.
@@ -61,12 +64,45 @@ namespace Game {
 
         bool NextBool() { return Next(1) != 0; }
 
+        // MC RandomSource.triangle(mode, deviation) — the sum of two uniform
+        // draws gives a triangular distribution centred on `mode`. Draw order
+        // (two NextDoubles) is part of the stream, so this is a method rather
+        // than an ad-hoc expression at call sites.
+        double Triangle(double mode, double deviation) {
+            return mode + deviation * (NextDouble() - NextDouble());
+        }
+
+        // java.util.Random.nextGaussian — Marsaglia polar method with the
+        // cached-spare optimisation, exactly Java's (MC's LegacyRandomSource
+        // delegates to the same MarsagliaPolarGaussian). The draw ORDER (two
+        // NextDoubles per rejection round, spare consumed first) is part of
+        // the stream, so this must stay byte-for-byte Java's algorithm.
+        double NextGaussian() {
+            if (m_haveNextGaussian) {
+                m_haveNextGaussian = false;
+                return m_nextGaussian;
+            }
+            double v1, v2, s;
+            do {
+                v1 = 2.0 * NextDouble() - 1.0;
+                v2 = 2.0 * NextDouble() - 1.0;
+                s = v1 * v1 + v2 * v2;
+            } while (s >= 1.0 || s == 0.0);
+            const double multiplier = std::sqrt(-2.0 * std::log(s) / s);
+            m_nextGaussian = v2 * multiplier;
+            m_haveNextGaussian = true;
+            return v1 * multiplier;
+        }
+
     private:
         static constexpr uint64_t kMultiplier = 0x5DEECE66DULL;
         static constexpr uint64_t kAddend = 0xBULL;
         static constexpr uint64_t kMask48 = (1ULL << 48) - 1;
 
         uint64_t m_seed = 0;
+        // nextGaussian's cached spare (java.util.Random.haveNextNextGaussian).
+        double m_nextGaussian = 0.0;
+        bool   m_haveNextGaussian = false;
     };
 
 } // namespace Game

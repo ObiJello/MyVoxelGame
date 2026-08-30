@@ -3,6 +3,7 @@
 #include "world/biome/Climate.h"
 #include "levelgen/NoiseRouter.h"
 #include "random/PositionalRandomFactory.h"
+#include "random/AnyPositionalRandomFactory.h"
 #include "synth/NormalNoise.h"
 #include <unordered_map>
 #include <string>
@@ -37,7 +38,7 @@ namespace levelgen {
 class RandomState {
 private:
     // Reference: RandomState.java line 18
-    minecraft::random::PositionalRandomFactory* m_random;
+    minecraft::random::AnyPositionalRandomFactory* m_random;
 
     // Reference: RandomState.java line 20
     NoiseRouter* m_router;
@@ -49,10 +50,10 @@ private:
     SurfaceSystem* m_surfaceSystem;
 
     // Reference: RandomState.java line 23
-    XoroshiroPositionalRandomFactory* m_aquiferRandom;
+    minecraft::random::AnyPositionalRandomFactory* m_aquiferRandom;
 
     // Reference: RandomState.java line 24
-    XoroshiroPositionalRandomFactory* m_oreRandom;
+    minecraft::random::AnyPositionalRandomFactory* m_oreRandom;
 
     // Reference: RandomState.java line 25
     // Map of noise name -> NormalNoise instance
@@ -61,7 +62,7 @@ private:
 
     // Reference: RandomState.java line 26
     // Map of identifier -> PositionalRandomFactory
-    std::unordered_map<std::string, random::PositionalRandomFactory*> m_positionalRandoms;
+    std::unordered_map<std::string, random::AnyPositionalRandomFactory*> m_positionalRandoms;
     mutable std::mutex m_positionalRandomsMutex;
 
 public:
@@ -92,15 +93,15 @@ public:
      * Get or create a positional random factory by identifier
      * Reference: RandomState.java lines 126-128
      */
-    minecraft::random::PositionalRandomFactory* getOrCreateRandomFactory(const std::string& identifier);
+    minecraft::random::AnyPositionalRandomFactory* getOrCreateRandomFactory(const std::string& identifier);
 
     // Accessors (Reference: RandomState.java lines 130-148)
     NoiseRouter* router() const { return m_router; }
     minecraft::world::biome::Climate::Sampler* sampler() const { return m_sampler; }
     SurfaceSystem* surfaceSystem() const { return m_surfaceSystem; }
-    XoroshiroPositionalRandomFactory* aquiferRandom() const { return m_aquiferRandom; }
-    XoroshiroPositionalRandomFactory* oreRandom() const { return m_oreRandom; }
-    minecraft::random::PositionalRandomFactory* random() const { return m_random; }
+    minecraft::random::AnyPositionalRandomFactory* aquiferRandom() const { return m_aquiferRandom; }
+    minecraft::random::AnyPositionalRandomFactory* oreRandom() const { return m_oreRandom; }
+    minecraft::random::AnyPositionalRandomFactory* random() const { return m_random; }
 
 };
 

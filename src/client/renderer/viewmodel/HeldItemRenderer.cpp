@@ -233,9 +233,13 @@ namespace Render {
         // Scratch GPU buffers reused for the block cube path. Allocated
         // once (24 verts capacity is fixed) and re-uploaded each frame
         // a block item is rendered.
-        BufferHandle s_cubeVB    = INVALID_BUFFER;
-        BufferHandle s_cubeIB    = INVALID_BUFFER;
-        MeshHandle   s_cubeMesh  = INVALID_MESH;
+        // PER HAND: both hands can hold block items in one frame, and the
+        // backends map-and-copy UpdateBuffer at record time — a shared
+        // buffer meant the offhand overwrote the mainhand's geometry before
+        // the GPU read it (visible on Vulkan, masked by orphaning on GL).
+        BufferHandle s_cubeVB[2]   = { INVALID_BUFFER, INVALID_BUFFER };
+        BufferHandle s_cubeIB[2]   = { INVALID_BUFFER, INVALID_BUFFER };
+        MeshHandle   s_cubeMesh[2] = { INVALID_MESH,   INVALID_MESH };
     } // namespace
 
     // ──────────────────────────────────────────────────────────────
@@ -275,14 +279,16 @@ namespace Render {
             1, 1, TextureFormat::RGBA8, white);
 
         // Pre-allocate the block-cube scratch buffers.
-        s_cubeVB = g_renderBackend->CreateBuffer(
-            BufferUsage::Vertex, kItemCubeMaxVerts * sizeof(ItemCubeVert),
-            nullptr, BufferAccess::Streaming);
-        s_cubeIB = g_renderBackend->CreateBuffer(
-            BufferUsage::Index,  kItemCubeMaxIdx  * sizeof(uint32_t),
-            nullptr, BufferAccess::Streaming);
-        s_cubeMesh = g_renderBackend->CreateMesh(
-            s_cubeVB, s_cubeIB, GetBlockVertexLayout());
+        for (int h = 0; h < 2; ++h) {
+            s_cubeVB[h] = g_renderBackend->CreateBuffer(
+                BufferUsage::Vertex, kItemCubeMaxVerts * sizeof(ItemCubeVert),
+                nullptr, BufferAccess::Streaming);
+            s_cubeIB[h] = g_renderBackend->CreateBuffer(
+                BufferUsage::Index,  kItemCubeMaxIdx  * sizeof(uint32_t),
+                nullptr, BufferAccess::Streaming);
+            s_cubeMesh[h] = g_renderBackend->CreateMesh(
+                s_cubeVB[h], s_cubeIB[h], GetBlockVertexLayout());
+        }
 
         m_initialized = true;
         Log::Info("[HeldItemRenderer] initialized");
@@ -292,9 +298,11 @@ namespace Render {
     void HeldItemRenderer::Shutdown() {
         if (!g_renderBackend) return;
         HeldItemSpriteMesh::ClearCache();
-        if (s_cubeMesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(s_cubeMesh); s_cubeMesh = INVALID_MESH; }
-        if (s_cubeVB   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(s_cubeVB); s_cubeVB = INVALID_BUFFER; }
-        if (s_cubeIB   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(s_cubeIB); s_cubeIB = INVALID_BUFFER; }
+        for (int h = 0; h < 2; ++h) {
+            if (s_cubeMesh[h] != INVALID_MESH)  { g_renderBackend->DestroyMesh(s_cubeMesh[h]); s_cubeMesh[h] = INVALID_MESH; }
+            if (s_cubeVB[h]   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(s_cubeVB[h]); s_cubeVB[h] = INVALID_BUFFER; }
+            if (s_cubeIB[h]   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(s_cubeIB[h]); s_cubeIB[h] = INVALID_BUFFER; }
+        }
         if (m_dummyTexture != INVALID_TEXTURE) {
             g_renderBackend->DestroyTexture(m_dummyTexture);
             m_dummyTexture = INVALID_TEXTURE;
@@ -577,11 +585,11 @@ namespace Render {
             if (!BuildBlockModelMesh(item.blockId, item.blockModelOverride, verts, idx)) {
                 BuildBlockCubeMesh(item.blockId, verts, idx);
             }
-            g_renderBackend->UpdateBuffer(s_cubeVB, 0,
+            g_renderBackend->UpdateBuffer(s_cubeVB[hand], 0,
                 verts.size() * sizeof(ItemCubeVert), verts.data());
-            g_renderBackend->UpdateBuffer(s_cubeIB, 0,
+            g_renderBackend->UpdateBuffer(s_cubeIB[hand], 0,
                 idx.size() * sizeof(uint32_t), idx.data());
-            mesh        = s_cubeMesh;
+            mesh        = s_cubeMesh[hand];
             indexCount  = (uint32_t)idx.size();
             xf          = kBlockXf;
             // Block path uses the atlas (matches how chunks render).

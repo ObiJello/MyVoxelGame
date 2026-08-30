@@ -341,4 +341,4 @@ These still exist if you ever need manual control:
 - **Build numbers**: `tools/game_build_number`, `tools/launcher_build_number`
 - **Auto-release scripts**: `tools/bump_version.sh`, `tools/auto_release.sh`, `tools/update_plist_version.sh`
 - **Launcher app icon**: `assets/launcher/logo.png` (converted to `AppIcon.icns` via `iconutil`)
-- **DMG builder**: `tools/create_dmg.sh`
+- **DMG builder**: `tools/create_dmg.sh`                                                                                                             

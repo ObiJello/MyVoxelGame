@@ -62,11 +62,21 @@ public:
                  double yFactor,
                  double smearScaleMultiplier);
 
+    /** Legacy variant (legacy_random_source=true settings - nether/end):
+     *  identical layout, octaves initialized from a LegacyRandomSource. */
+    BlendedNoise(LegacyRandomSource& random,
+                 double xzScale,
+                 double yScale,
+                 double xzFactor,
+                 double yFactor,
+                 double smearScaleMultiplier);
+
     /**
      * Copy constructor - creates new BlendedNoise with same parameters but new random.
      * Reference: BlendedNoise.java lines 54-56
      */
     BlendedNoise withNewRandom(XoroshiroRandomSource& terrainRandom) const;
+    BlendedNoise withNewRandom(LegacyRandomSource& terrainRandom) const;
 
     /**
      * Compute noise value at given context.
@@ -94,7 +104,13 @@ public:
     /**
      * Map all visitor implementation (required by DensityFunction base class)
      */
-    DensityFunction* mapAll(Visitor& visitor) override;
+    void keyImpl(std::string& out, Visitor* v) const override {
+        (void)v;
+        keyTag(out, 18); keyPtr(out, m_minLimitNoise); keyPtr(out, m_maxLimitNoise); keyPtr(out, m_mainNoise);
+        keyDouble(out, m_xzScale); keyDouble(out, m_yScale); keyDouble(out, m_xzFactor); keyDouble(out, m_yFactor);
+        keyDouble(out, m_smearScaleMultiplier);
+    }
+    DensityFunction* mapAllImpl(Visitor& visitor) override;
 
     // Accessors for testing
     double xzScale() const { return m_xzScale; }

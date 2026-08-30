@@ -88,8 +88,20 @@ def main():
                     int(entry.get("maxCount", 1)),
                 ))
 
-        if entries:
-            biomes.append((slug, entries))
+        # MC MobSpawnSettings.mobSpawnCosts — the PotentialCalculator budget
+        # (soul sand valley and friends). Kept even when every weighted entry
+        # was dropped, so the costs arrive the day the mob does.
+        costs = []
+        for mob_key, cost in sorted(data.get("spawn_costs", {}).items()):
+            mob = mob_key.removeprefix("minecraft:")
+            if mob not in KNOWN_MOBS:
+                skipped.add(mob)
+                continue
+            costs.append((KNOWN_MOBS[mob],
+                          float(cost["energy_budget"]), float(cost["charge"])))
+
+        if entries or costs:
+            biomes.append((slug, entries, costs))
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -120,10 +132,20 @@ namespace Game {
         int          maxCount;
     };
 
+    // MC MobSpawnSettings.MobSpawnCost — the PotentialCalculator budget for a
+    // charged type in this biome (soul sand valley skeletons, etc.).
+    struct MobSpawnCost {
+        EntityTypeId type;
+        double       energyBudget;
+        double       charge;
+    };
+
     struct BiomeSpawnList {
         std::string_view     biome;
         const MobSpawnEntry* entries;
         int                  count;
+        const MobSpawnCost*  costs;      // null when the biome has none
+        int                  costCount;
     };
 
     // Sorted by biome slug so lookup can binary-search.
@@ -132,6 +154,9 @@ namespace Game {
 
     // Null when the biome has no spawns for any implemented mob.
     const BiomeSpawnList* FindBiomeSpawnList(std::string_view biomeSlug);
+
+    // Null when the biome assigns this type no spawn cost.
+    const MobSpawnCost* FindMobSpawnCost(const BiomeSpawnList* list, EntityTypeId type);
 
 } // namespace Game
 """)
@@ -146,18 +171,28 @@ namespace Game {
 namespace Game {
 
 """)
-        for slug, entries in biomes:
+        for slug, entries, costs in biomes:
             ident = slug.replace("-", "_")
-            f.write(f"    static const MobSpawnEntry k_{ident}[] = {{\n")
-            for cat, mob, weight, mn, mx in entries:
-                f.write(f"        {{ MobCategory::{cat}, EntityTypeId::{mob}, "
-                        f"{weight}, {mn}, {mx} }},\n")
-            f.write("    };\n\n")
+            if entries:
+                f.write(f"    static const MobSpawnEntry k_{ident}[] = {{\n")
+                for cat, mob, weight, mn, mx in entries:
+                    f.write(f"        {{ MobCategory::{cat}, EntityTypeId::{mob}, "
+                            f"{weight}, {mn}, {mx} }},\n")
+                f.write("    };\n")
+            if costs:
+                f.write(f"    static const MobSpawnCost k_{ident}_costs[] = {{\n")
+                for mob, budget, charge in costs:
+                    f.write(f"        {{ EntityTypeId::{mob}, {budget}, {charge} }},\n")
+                f.write("    };\n")
+            f.write("\n")
 
         f.write("    const BiomeSpawnList kBiomeSpawnLists[] = {\n")
-        for slug, entries in biomes:
+        for slug, entries, costs in biomes:
             ident = slug.replace("-", "_")
-            f.write(f'        {{ "{slug}", k_{ident}, {len(entries)} }},\n')
+            entries_ref = f"k_{ident}" if entries else "nullptr"
+            costs_ref = f"k_{ident}_costs" if costs else "nullptr"
+            f.write(f'        {{ "{slug}", {entries_ref}, {len(entries)}, '
+                    f"{costs_ref}, {len(costs)} }},\n")
         f.write("    };\n\n")
         f.write(f"    const int kBiomeSpawnListCount = {len(biomes)};\n\n")
 
@@ -170,10 +205,18 @@ namespace Game {
         return it;
     }
 
+    const MobSpawnCost* FindMobSpawnCost(const BiomeSpawnList* list, EntityTypeId type) {
+        if (!list || !list->costs) return nullptr;
+        for (int i = 0; i < list->costCount; ++i) {
+            if (list->costs[i].type == type) return &list->costs[i];
+        }
+        return nullptr;
+    }
+
 } // namespace Game
 """)
 
-    total = sum(len(e) for _, e in biomes)
+    total = sum(len(e) for _, e, _ in biomes)
     print(f"Wrote {len(biomes)} biomes, {total} spawn entries")
     if skipped:
         print(f"Skipped {len(skipped)} unimplemented mob types: "

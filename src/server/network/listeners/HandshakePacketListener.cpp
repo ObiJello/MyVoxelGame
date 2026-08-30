@@ -14,11 +14,19 @@ namespace Server {
                   packet.protocolVersion, packet.serverAddress.c_str(), packet.serverPort, 
                   static_cast<int>(packet.nextState));
         
-        // Validate protocol version (754 = Minecraft 1.16.5)
-        const int SUPPORTED_PROTOCOL = 754;
-        if (packet.protocolVersion != SUPPORTED_PROTOCOL) {
-            Log::Warning("[HandshakePacketListener] Unsupported protocol version: %d", packet.protocolVersion);
-            // For now, allow any version for testing
+        // Refuse a mismatched peer outright. This used to log a warning and
+        // fall through, which was harmless only while the two ends could not
+        // meaningfully disagree. They can now: the chunk stream is positional,
+        // so a version skew does not fail to parse, it parses into the wrong
+        // sections. See Network::kProtocolVersion.
+        if (packet.protocolVersion != Network::kProtocolVersion) {
+            Log::Warning("[HandshakePacketListener] Rejecting protocol version %d (need %d)",
+                         packet.protocolVersion, Network::kProtocolVersion);
+            m_connection.SendDisconnect(
+                packet.protocolVersion < Network::kProtocolVersion
+                    ? "Your game is out of date — update it to join this server."
+                    : "This server is out of date — it cannot accept your client version.");
+            return;
         }
         
         // Switch to the requested state

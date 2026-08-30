@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 
 /**
  * WorldGenRegionLevel - Adapter that wraps WorldGenRegion as WorldGenLevel
@@ -129,55 +130,49 @@ public:
         return m_region->getMinY() + m_region->getHeight();
     }
 
+    bool hasSkyLight() const override {
+        return m_region->hasSkyLight();
+    }
+
     //=========================================================================
     // Biome Access
     //=========================================================================
 
+    // One biome source + manager per region, not per call: the old body built
+    // both objects (and a try frame) on every getBiome, i.e. for each of the
+    // 8 zoom samples' worth of calls from BiomeFilter — measured 2026-08-30
+    // as 14% of the whole features step.
+    class RegionBiomeSource : public world::biome::BiomeManager::NoiseBiomeSource {
+    public:
+        explicit RegionBiomeSource(const server::level::WorldGenRegion* region) : m_region(region) {}
+        world::biome::BiomeHolder getNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ) const override {
+            int32_t blockX = core::QuartPos::toBlock(quartX);
+            int32_t blockY = core::QuartPos::toBlock(quartY);
+            int32_t blockZ = core::QuartPos::toBlock(quartZ);
+            ::world::IChunk* chunk = const_cast<server::level::WorldGenRegion*>(m_region)->getChunk(
+                blockX >> 4, blockZ >> 4, world::chunk::status::ChunkStatus::BIOMES, false);
+            if (chunk) {
+                return chunk->getBiome(core::BlockPos(blockX, blockY, blockZ));
+            }
+            return world::biome::Biomes::get(world::biome::BiomeKeys::PLAINS);
+        }
+    private:
+        const server::level::WorldGenRegion* m_region;
+    };
+    mutable std::unique_ptr<RegionBiomeSource> m_biomeSource;
+    mutable std::unique_ptr<world::biome::BiomeManager> m_biomeManager;
+
     const world::biome::Biome* getBiome(const core::BlockPos& pos) const override {
         try {
-            class RegionBiomeSource : public world::biome::BiomeManager::NoiseBiomeSource {
-            public:
-                explicit RegionBiomeSource(const server::level::WorldGenRegion* region)
-                    : m_region(region) {}
-
-                world::biome::BiomeHolder getNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ) const override {
-                    int32_t blockX = core::QuartPos::toBlock(quartX);
-                    int32_t blockY = core::QuartPos::toBlock(quartY);
-                    int32_t blockZ = core::QuartPos::toBlock(quartZ);
-                    int chunkX = blockX >> 4;
-                    int chunkZ = blockZ >> 4;
-
-                    ::world::IChunk* chunk = const_cast<server::level::WorldGenRegion*>(m_region)->getChunk(
-                        chunkX,
-                        chunkZ,
-                        world::chunk::status::ChunkStatus::BIOMES,
-                        false
-                    );
-                    if (chunk) {
-                        return chunk->getBiome(core::BlockPos(blockX, blockY, blockZ));
-                    }
-
-                    return world::biome::Biomes::get(world::biome::BiomeKeys::PLAINS);
-                }
-
-            private:
-                const server::level::WorldGenRegion* m_region;
-            };
-
-            RegionBiomeSource biomeSource(m_region);
-            world::biome::BiomeManager biomeManager(
-                &biomeSource,
-                world::biome::BiomeManager::obfuscateSeed(m_region->getSeed())
-            );
-            return biomeManager.getBiome(pos);
+            if (!m_biomeManager) {
+                m_biomeSource = std::make_unique<RegionBiomeSource>(m_region);
+                m_biomeManager = std::make_unique<world::biome::BiomeManager>(
+                    m_biomeSource.get(), world::biome::BiomeManager::obfuscateSeed(m_region->getSeed()));
+            }
+            return m_biomeManager->getBiome(pos);
         } catch (...) {}
         return nullptr;
     }
-
-    //=========================================================================
-    // World Properties
-    //=========================================================================
-
     int64_t getSeed() const override {
         return m_region->getSeed();
     }

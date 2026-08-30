@@ -43,6 +43,25 @@ namespace Game {
         return BlockRegistry::ContainsWater(GetBlockState(worldX, worldY, worldZ));
     }
 
+    void IBlockAccess::FillCollisionMask(const glm::ivec3& origin, const glm::ivec3& size,
+                                         int shiftZ, int shiftY, uint64_t* out) const {
+        for (int dy = 0; dy < size.y; ++dy) {
+            for (int dz = 0; dz < size.z; ++dz) {
+                const size_t row = (static_cast<size_t>(dy) << shiftY) |
+                                   (static_cast<size_t>(dz) << shiftZ);
+                for (int dx = 0; dx < size.x; ++dx) {
+                    const BlockState st = GetBlockState(origin.x + dx,
+                                                        origin.y + dy,
+                                                        origin.z + dz);
+                    if (BlockRegistry::HasCollision(st.Block())) {
+                        const size_t i = row | static_cast<size_t>(dx);
+                        out[i >> 6] |= (1ull << (i & 63));
+                    }
+                }
+            }
+        }
+    }
+
     int IBlockAccess::GetRawBrightness(int worldX, int worldY, int worldZ) const {
         // Anything above the build limit is sky by definition.
         for (int y = worldY + 1; y <= kMaxBuildY; ++y) {

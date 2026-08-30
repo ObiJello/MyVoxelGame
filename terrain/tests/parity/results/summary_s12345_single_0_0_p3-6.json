@@ -1,0 +1,56 @@
+{
+  "chunks_compared": 1,
+  "total_mismatches": 21081,
+  "by_class": {
+    "wrong-properties": 21081
+  },
+  "by_type": [
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:deepslate",
+      "count": 14941
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:water",
+      "count": 6101
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:lava",
+      "count": 39
+    }
+  ],
+  "samples": {
+    "wrong-properties|minecraft:deepslate": [
+      "chunk(0, 0) local(10,-36,10) world(10,-36,10) java=minecraft:deepslate[axis=y] cpp=minecraft:deepslate",
+      "chunk(0, 0) local(1,-12,0) world(1,-12,0) java=minecraft:deepslate[axis=y] cpp=minecraft:deepslate",
+      "chunk(0, 0) local(2,-31,11) world(2,-31,11) java=minecraft:deepslate[axis=y] cpp=minecraft:deepslate",
+      "chunk(0, 0) local(5,-26,6) world(5,-26,6) java=minecraft:deepslate[axis=y] cpp=minecraft:deepslate",
+      "chunk(0, 0) local(10,-44,11) world(10,-44,11) java=minecraft:deepslate[axis=y] cpp=minecraft:deepslate"
+    ],
+    "wrong-properties|minecraft:water": [
+      "chunk(0, 0) local(14,14,1) world(14,14,1) java=minecraft:water[level=0] cpp=minecraft:water",
+      "chunk(0, 0) local(5,58,0) world(5,58,0) java=minecraft:water[level=0] cpp=minecraft:water",
+      "chunk(0, 0) local(2,4,5) world(2,4,5) java=minecraft:water[level=0] cpp=minecraft:water",
+      "chunk(0, 0) local(5,9,0) world(5,9,0) java=minecraft:water[level=0] cpp=minecraft:water",
+      "chunk(0, 0) local(5,62,11) world(5,62,11) java=minecraft:water[level=0] cpp=minecraft:water"
+    ],
+    "wrong-properties|minecraft:lava": [
+      "chunk(0, 0) local(4,-55,13) world(4,-55,13) java=minecraft:lava[level=0] cpp=minecraft:lava",
+      "chunk(0, 0) local(4,-55,15) world(4,-55,15) java=minecraft:lava[level=0] cpp=minecraft:lava",
+      "chunk(0, 0) local(3,-55,15) world(3,-55,15) java=minecraft:lava[level=0] cpp=minecraft:lava",
+      "chunk(0, 0) local(2,-55,9) world(2,-55,9) java=minecraft:lava[level=0] cpp=minecraft:lava",
+      "chunk(0, 0) local(2,-55,11) world(2,-55,11) java=minecraft:lava[level=0] cpp=minecraft:lava"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        0,
+        0
+      ],
+      "count": 21081
+    }
+  ]
+}

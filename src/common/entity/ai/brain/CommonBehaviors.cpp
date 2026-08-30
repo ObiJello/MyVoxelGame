@@ -105,17 +105,28 @@ namespace Game {
 
     // ── RandomStroll ───────────────────────────────────────────────────────
 
-    RandomStroll::RandomStroll(float speedModifier, Kind kind, bool mayStrollFromWater)
+    RandomStroll::RandomStroll(float speedModifier, Kind kind, bool mayStrollFromWater,
+                               int maxHorizontalDistance, int maxVerticalDistance)
         : Behavior({ MemoryCondition{ MemoryModule::WalkTarget, MemoryStatus::ValueAbsent } },
                    1),
           m_speedModifier(speedModifier), m_kind(kind),
-          m_mayStrollFromWater(mayStrollFromWater) {}
+          m_mayStrollFromWater(mayStrollFromWater),
+          m_maxHorizontalDistance(maxHorizontalDistance),
+          m_maxVerticalDistance(maxVerticalDistance) {}
 
     BehaviorPtr RandomStroll::Stroll(float speedModifier, bool mayStrollFromWater) {
         return std::make_unique<RandomStroll>(speedModifier, Kind::Land, mayStrollFromWater);
     }
+    BehaviorPtr RandomStroll::Stroll(float speedModifier, int maxHorizontalDistance,
+                                     int maxVerticalDistance) {
+        return std::make_unique<RandomStroll>(speedModifier, Kind::Land, true,
+                                              maxHorizontalDistance, maxVerticalDistance);
+    }
     BehaviorPtr RandomStroll::Swim(float speedModifier) {
         return std::make_unique<RandomStroll>(speedModifier, Kind::Swim, true);
+    }
+    BehaviorPtr RandomStroll::Fly(float speedModifier) {
+        return std::make_unique<RandomStroll>(speedModifier, Kind::Fly, true);
     }
 
     bool RandomStroll::CheckExtraStartConditions(EntityLevel&, LivingEntity& body) {
@@ -128,10 +139,28 @@ namespace Game {
         if (m_kind == Kind::Swim && !mob->IsInWater()) return false;
         if (m_kind == Kind::Land && !m_mayStrollFromWater && mob->IsInWater()) return false;
 
+        // MC fly(): AirAndWaterRandomPos ahead of the view vector, the
+        // allay's exact wander shape.
+        if (m_kind == Kind::Fly) {
+            const glm::vec3 view = Mth::ViewVector(0.0f, mob->yRot);
+            const auto flyPos = RandomPos::GetAirAndWaterPos(
+                *mob, m_maxHorizontalDistance, m_maxVerticalDistance, -2,
+                view.x, view.z, 3.14159265358979 / 2.0);
+            if (!flyPos) return true;
+            brain->SetMemory(MemoryModule::WalkTarget,
+                             WalkTarget(PositionTracker::OfBlock(glm::ivec3(
+                                            static_cast<int>(std::floor(flyPos->x)),
+                                            static_cast<int>(std::floor(flyPos->y)),
+                                            static_cast<int>(std::floor(flyPos->z)))),
+                                        m_speedModifier, 0));
+            return true;
+        }
+
         // MC's swim variant walks a tier list of distances looking for a
         // swimmable position; without fluid-aware random positions this port
         // uses the same land search, which finds a reachable spot either way.
-        const auto pos = RandomPos::GetLandPos(*mob, 10, 7);
+        const auto pos = RandomPos::GetLandPos(*mob, m_maxHorizontalDistance,
+                                               m_maxVerticalDistance);
         if (!pos) return true;   // MC's setOrErase with an empty optional
 
         brain->SetMemory(MemoryModule::WalkTarget,
@@ -152,13 +181,23 @@ namespace Game {
                    1),
           m_speedModifier(speedModifier), m_closeEnoughDistance(closeEnoughDistance) {}
 
+    SetWalkTargetFromLookTarget::SetWalkTargetFromLookTarget(Pred canSet, SpeedFn speed,
+                                                             int closeEnoughDistance)
+        : Behavior({ MemoryCondition{ MemoryModule::WalkTarget, MemoryStatus::ValueAbsent },
+                     MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::ValuePresent } },
+                   1),
+          m_speedModifier(1.0f), m_closeEnoughDistance(closeEnoughDistance),
+          m_canSet(std::move(canSet)), m_speedFn(std::move(speed)) {}
+
     bool SetWalkTargetFromLookTarget::CheckExtraStartConditions(EntityLevel&, LivingEntity& body) {
         Brain* brain = body.GetBrain();
         if (!brain) return false;
+        if (m_canSet && !m_canSet(body)) return false;
         const PositionTracker* look = brain->GetPositionTracker(MemoryModule::LookTarget);
         if (!look) return false;
+        const float speed = m_speedFn ? m_speedFn(body) : m_speedModifier;
         brain->SetMemory(MemoryModule::WalkTarget,
-                         WalkTarget(*look, m_speedModifier, m_closeEnoughDistance));
+                         WalkTarget(*look, speed, m_closeEnoughDistance));
         return true;
     }
 
@@ -272,6 +311,11 @@ namespace Game {
                      MemoryCondition{ MemoryModule::IsPanicking, MemoryStatus::ValueAbsent } }),
           m_speedModifier(speedModifier), m_closeEnoughDistance(closeEnoughDistance) {}
 
+    FollowTemptation::FollowTemptation(SpeedFn speed, double closeEnoughDistance)
+        : FollowTemptation(1.0f, closeEnoughDistance) {
+        m_speedFn = std::move(speed);
+    }
+
     bool FollowTemptation::CanStillUse(EntityLevel&, LivingEntity& body, int64_t) {
         const Brain* brain = body.GetBrain();
         if (!brain) return false;
@@ -299,9 +343,10 @@ namespace Game {
             // a tempted animal cluster at your feet rather than shove past you.
             brain->EraseMemory(MemoryModule::WalkTarget);
         } else {
+            const float speed = m_speedFn ? m_speedFn(body) : m_speedModifier;
             brain->SetMemory(MemoryModule::WalkTarget,
                              WalkTarget(PositionTracker::OfEntity(player, false),
-                                        m_speedModifier, 2));
+                                        speed, 2));
         }
     }
 
@@ -461,6 +506,66 @@ namespace Game {
         return true;
     }
 
+    // ── TryFindWater ───────────────────────────────────────────────────────
+
+    TryFindWater::TryFindWater(int range, float speedModifier)
+        : Behavior({ MemoryCondition{ MemoryModule::AttackTarget, MemoryStatus::ValueAbsent },
+                     MemoryCondition{ MemoryModule::WalkTarget, MemoryStatus::ValueAbsent },
+                     MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::Registered } },
+                   1),
+          m_range(range), m_speedModifier(speedModifier) {}
+
+    bool TryFindWater::CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) {
+        Brain* brain = body.GetBrain();
+        const IBlockAccess* blocks = level.Blocks();
+        if (!brain || !blocks) return false;
+
+        const glm::ivec3 origin = body.BlockPosition();
+        // MC: already standing in water — nothing to find.
+        if (blocks->ContainsWater(origin.x, origin.y, origin.z)) return false;
+
+        const int64_t now = level.GetGameTime();
+        if (now < m_nextOkStartTime) {
+            m_nextOkStartTime = now + 20 + 2;
+            return true;
+        }
+
+        // MC scans the Manhattan ball for water: FIRST water with air above
+        // wins outright; failing that, the first water at least 1.5 blocks
+        // from the mob's centre.
+        std::optional<glm::ivec3> best;
+        std::optional<glm::ivec3> alternate;
+        for (int dx = -m_range; dx <= m_range && !best; ++dx) {
+            for (int dy = -m_range; dy <= m_range && !best; ++dy) {
+                for (int dz = -m_range; dz <= m_range; ++dz) {
+                    if (std::abs(dx) + std::abs(dy) + std::abs(dz) > m_range) continue;
+                    if (dx == 0 && dz == 0) continue;
+                    const glm::ivec3 p = origin + glm::ivec3(dx, dy, dz);
+                    if (!blocks->ContainsWater(p.x, p.y, p.z)) continue;
+                    if (!blocks->IsBlockSolid(p.x, p.y + 1, p.z)
+                        && !blocks->ContainsWater(p.x, p.y + 1, p.z)) {
+                        best = p;
+                        break;
+                    }
+                    if (!alternate) {
+                        const glm::dvec3 centre(p.x + 0.5, p.y + 0.5, p.z + 0.5);
+                        const glm::dvec3 d = centre - body.position;
+                        if (glm::dot(d, d) >= 1.5 * 1.5) alternate = p;
+                    }
+                }
+            }
+        }
+        if (!best) best = alternate;
+        if (best) {
+            brain->SetMemory(MemoryModule::LookTarget, PositionTracker::OfBlock(*best));
+            brain->SetMemory(MemoryModule::WalkTarget,
+                             WalkTarget(PositionTracker::OfBlock(*best),
+                                        m_speedModifier, 0));
+        }
+        m_nextOkStartTime = now + 40;
+        return true;
+    }
+
     // ── Swim / DoNothing / RandomLookAround ────────────────────────────────
 
     bool Swim::CheckExtraStartConditions(EntityLevel&, LivingEntity& body) {
@@ -534,9 +639,11 @@ namespace Game {
 
         // MC requires the target to be in the VISIBLE set, not merely named by
         // ATTACK_TARGET — a mob does not swing at something behind a wall.
+        // Visibility is now query-time (MC contains applies lineOfSightTest),
+        // so membership alone is not enough.
         const NearestVisibleLivingEntities* visible =
             brain->GetVisibleEntities(MemoryModule::NearestVisibleLivingEntities);
-        if (!visible || !visible->Contains(target)) return false;
+        if (!visible || !visible->Contains(target) || !visible->IsVisible(target)) return false;
 
         brain->SetMemory(MemoryModule::LookTarget,
                          PositionTracker::OfEntity(target, true));
@@ -557,6 +664,11 @@ namespace Game {
                    1),
           m_speedModifier(speedModifier) {}
 
+    SetWalkTargetFromAttackTarget::SetWalkTargetFromAttackTarget(SpeedFn speed)
+        : SetWalkTargetFromAttackTarget(1.0f) {
+        m_speedFn = std::move(speed);
+    }
+
     bool SetWalkTargetFromAttackTarget::CheckExtraStartConditions(EntityLevel&,
                                                                   LivingEntity& body) {
         auto* mob = dynamic_cast<Mob*>(&body);
@@ -567,16 +679,19 @@ namespace Game {
 
         const NearestVisibleLivingEntities* visible =
             brain->GetVisibleEntities(MemoryModule::NearestVisibleLivingEntities);
-        if (visible && visible->Contains(target) && mob->IsWithinMeleeAttackRange(*target)) {
+        // MC contains applies the query-time visibility predicate too.
+        if (visible && visible->Contains(target) && visible->IsVisible(target) &&
+            mob->IsWithinMeleeAttackRange(*target)) {
             // Already in reach — stop walking so the mob stands and swings
             // instead of shoving its target around.
             brain->EraseMemory(MemoryModule::WalkTarget);
         } else {
+            const float speed = m_speedFn ? m_speedFn(body) : m_speedModifier;
             brain->SetMemory(MemoryModule::LookTarget,
                              PositionTracker::OfEntity(target, true));
             brain->SetMemory(MemoryModule::WalkTarget,
                              WalkTarget(PositionTracker::OfEntity(target, false),
-                                        m_speedModifier, 0));
+                                        speed, 0));
         }
         return true;
     }
@@ -638,11 +753,26 @@ namespace Game {
                    1),
           m_min(followRangeMin), m_max(followRangeMax), m_speedModifier(speedModifier) {}
 
+    BabyFollowAdult::BabyFollowAdult(int followRangeMin, int followRangeMax, SpeedFn speed)
+        : BabyFollowAdult(followRangeMin, followRangeMax, 1.0f) {
+        m_speedFn = std::move(speed);
+    }
+
+    BabyFollowAdult::BabyFollowAdult(int followRangeMin, int followRangeMax, SpeedFn speed,
+                                     MemoryModule followMemory, bool targetEye)
+        : Behavior({ MemoryCondition{ followMemory, MemoryStatus::ValuePresent },
+                     MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::Registered },
+                     MemoryCondition{ MemoryModule::WalkTarget, MemoryStatus::ValueAbsent } },
+                   1),
+          m_min(followRangeMin), m_max(followRangeMax), m_speedModifier(1.0f),
+          m_speedFn(std::move(speed)), m_followMemory(followMemory),
+          m_targetEye(targetEye) {}
+
     bool BabyFollowAdult::CheckExtraStartConditions(EntityLevel&, LivingEntity& body) {
         if (!body.IsBaby()) return false;
         Brain* brain = body.GetBrain();
         if (!brain) return false;
-        Entity* adult = brain->GetEntity(MemoryModule::NearestVisibleAdult);
+        Entity* adult = brain->GetEntity(m_followMemory);
         if (!adult) return false;
 
         // Inside the min: already close enough, stop. Beyond the max + 1: too
@@ -653,10 +783,11 @@ namespace Game {
         const double minD = static_cast<double>(m_min);
         if (d2 >= maxD * maxD || d2 < minD * minD) return false;
 
+        const float speed = m_speedFn ? m_speedFn(body) : m_speedModifier;
         brain->SetMemory(MemoryModule::LookTarget, PositionTracker::OfEntity(adult, true));
         brain->SetMemory(MemoryModule::WalkTarget,
-                         WalkTarget(PositionTracker::OfEntity(adult, false),
-                                    m_speedModifier, m_min - 1));
+                         WalkTarget(PositionTracker::OfEntity(adult, m_targetEye),
+                                    speed, m_min - 1));
         return true;
     }
 
@@ -671,6 +802,14 @@ namespace Game {
           m_avoid(avoidMemory), m_speedModifier(speedModifier),
           m_desiredDistance(desiredDistance), m_interruptCurrentWalk(interruptCurrentWalk) {}
 
+    BehaviorPtr SetWalkTargetAwayFrom::Pos(MemoryModule avoidMemory, float speedModifier,
+                                           int desiredDistance, bool interruptCurrentWalk) {
+        auto b = std::make_unique<SetWalkTargetAwayFrom>(
+            avoidMemory, speedModifier, desiredDistance, interruptCurrentWalk);
+        b->m_isPosMemory = true;
+        return b;
+    }
+
     bool SetWalkTargetAwayFrom::CheckExtraStartConditions(EntityLevel&, LivingEntity& body) {
         auto* mob = dynamic_cast<PathfinderMob*>(&body);
         Brain* brain = body.GetBrain();
@@ -679,10 +818,20 @@ namespace Game {
         const WalkTarget* current = brain->GetWalkTarget(MemoryModule::WalkTarget);
         if (current && !m_interruptCurrentWalk) return false;
 
-        Entity* avoid = brain->GetEntity(m_avoid);
-        if (!avoid) return false;
-        const glm::dvec3 avoidPos = avoid->position;
-        if (body.DistanceToSqr(*avoid)
+        // MC's entity and pos variants differ only in where the avoided
+        // position comes from.
+        glm::dvec3 avoidPos;
+        if (m_isPosMemory) {
+            const std::optional<glm::ivec3> pos = brain->GetBlockPos(m_avoid);
+            if (!pos) return false;
+            avoidPos = glm::dvec3(pos->x + 0.5, pos->y + 0.5, pos->z + 0.5);
+        } else {
+            Entity* avoid = brain->GetEntity(m_avoid);
+            if (!avoid) return false;
+            avoidPos = avoid->position;
+        }
+        const glm::dvec3 delta = avoidPos - body.position;
+        if (glm::dot(delta, delta)
             >= static_cast<double>(m_desiredDistance) * m_desiredDistance) {
             return false;
         }
@@ -705,6 +854,58 @@ namespace Game {
                                             m_speedModifier, 0));
                 break;
             }
+        }
+        return true;
+    }
+
+    // ── InteractWith ───────────────────────────────────────────────────────
+
+    InteractWith::InteractWith(EntityTypeId type, int interactionRange,
+                               float speedModifier, int stopDistance)
+        : Behavior({ MemoryCondition{ MemoryModule::InteractionTarget,
+                                      MemoryStatus::Registered },
+                     MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::Registered },
+                     MemoryCondition{ MemoryModule::WalkTarget, MemoryStatus::ValueAbsent },
+                     MemoryCondition{ MemoryModule::NearestVisibleLivingEntities,
+                                      MemoryStatus::ValuePresent } },
+                   1),
+          m_type(type), m_rangeSqr(interactionRange * interactionRange),
+          m_speedModifier(speedModifier), m_stopDistance(stopDistance) {}
+
+    bool InteractWith::CheckExtraStartConditions(EntityLevel&, LivingEntity& body) {
+        Brain* brain = body.GetBrain();
+        if (!brain) return false;
+        const NearestVisibleLivingEntities* visible =
+            brain->GetVisibleEntities(MemoryModule::NearestVisibleLivingEntities);
+        if (!visible) return false;
+        LivingEntity* target = visible->FindClosest([&](LivingEntity* e) {
+            return e->GetType() == m_type
+                && body.DistanceToSqr(*e) <= static_cast<double>(m_rangeSqr);
+        });
+        if (!target) return false;
+        brain->SetMemory(MemoryModule::InteractionTarget, static_cast<Entity*>(target));
+        brain->SetMemory(MemoryModule::LookTarget,
+                         PositionTracker::OfEntity(target, true));
+        brain->SetMemory(MemoryModule::WalkTarget,
+                         WalkTarget(PositionTracker::OfEntity(target, false),
+                                    m_speedModifier, m_stopDistance));
+        return true;
+    }
+
+    // ── StopBeingAngryIfTargetDead ─────────────────────────────────────────
+
+    StopBeingAngryIfTargetDead::StopBeingAngryIfTargetDead()
+        : Behavior({ MemoryCondition{ MemoryModule::AngryAt,
+                                      MemoryStatus::ValuePresent } },
+                   1) {}
+
+    bool StopBeingAngryIfTargetDead::CheckExtraStartConditions(EntityLevel&,
+                                                               LivingEntity& body) {
+        Brain* brain = body.GetBrain();
+        if (!brain) return false;
+        auto* target = dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt));
+        if (target && target->IsDeadOrDying()) {
+            brain->EraseMemory(MemoryModule::AngryAt);
         }
         return true;
     }
@@ -772,14 +973,82 @@ namespace Game {
     void HurtBySensor::DoTick(EntityLevel&, LivingEntity& body) {
         Brain* brain = body.GetBrain();
         if (!brain) return;
-        if (body.HasLastDamageSource() && body.hurtTime > 0) {
+        // MC HurtBySensor.doTick, scan rate 1: the memory mirrors
+        // getLastDamageSource() — SET (no TTL) while the source is live (MC's
+        // 40-tick lastDamageStamp window, which HasLastDamageSource models),
+        // ERASED the tick it lapses. No hurtTime gate: hurtTime is the 10-tick
+        // red flash, and gating on it made the memory die 30 ticks early.
+        if (body.HasLastDamageSource()) {
             // MC stores the DamageSource; this port does not model one, so the
             // memory is a Unit and the attacker rides in HURT_BY_ENTITY.
-            brain->SetMemoryWithExpiry(MemoryModule::HurtBy, std::monostate{}, 100);
+            brain->SetMemory(MemoryModule::HurtBy, std::monostate{});
+            // MC takes damageSource.getEntity(); the port's damage source does
+            // not carry its attacker, so GetLastHurtByMob (stamped by the same
+            // hit) is the closest record.
             if (Entity* by = body.GetLastHurtByMob()) {
-                brain->SetMemoryWithExpiry(MemoryModule::HurtByEntity, by, 100);
+                if (dynamic_cast<LivingEntity*>(by) != nullptr) {
+                    brain->SetMemory(MemoryModule::HurtByEntity, by);
+                }
+            }
+        } else {
+            // MC erases only HURT_BY here — HURT_BY_ENTITY lives on until the
+            // attacker dies (below) or the entity-memory TTL machinery ends it.
+            brain->EraseMemory(MemoryModule::HurtBy);
+        }
+
+        // MC: a dead (or level-changed) attacker is forgotten immediately.
+        if (Entity* attacker = brain->GetEntity(MemoryModule::HurtByEntity)) {
+            if (!attacker->IsAlive()) {
+                brain->EraseMemory(MemoryModule::HurtByEntity);
             }
         }
+    }
+
+    void PlayerSensor::DoTick(EntityLevel& level, LivingEntity& body) {
+        Brain* brain = body.GetBrain();
+        if (!brain) return;
+
+        // MC filters level.players() to within FOLLOW_RANGE, sorted nearest
+        // first. Spectators are excluded from the raw list too.
+        const double range = body.GetAttributeValue(Attribute::FollowRange);
+        std::vector<LivingEntity*> all;
+        level.GetPlayers(all);
+
+        std::vector<Entity*> players;
+        for (LivingEntity* p : all) {
+            if (p->IsSpectator()) continue;
+            if (body.DistanceToSqr(*p) > range * range) continue;
+            players.push_back(p);
+        }
+        std::sort(players.begin(), players.end(), [&](Entity* a, Entity* b) {
+            return body.DistanceToSqr(*a) < body.DistanceToSqr(*b);
+        });
+        brain->SetMemory(MemoryModule::NearestPlayers, players);
+
+        // The visible subset (MC isEntityTargetable → line of sight), then the
+        // attackable subset (MC isEntityAttackable → additionally not
+        // creative). Both keep the distance order.
+        auto* mob = dynamic_cast<Mob*>(&body);
+        std::vector<Entity*> attackable;
+        Entity* nearestVisible = nullptr;
+        for (Entity* e : players) {
+            auto* p = static_cast<LivingEntity*>(e);
+            if (mob && !mob->GetSensing().HasLineOfSight(*p)) continue;
+            if (!nearestVisible) nearestVisible = p;
+            if (p->IsCreative()) continue;
+            attackable.push_back(p);
+        }
+        if (nearestVisible) {
+            brain->SetMemory(MemoryModule::NearestVisiblePlayer, nearestVisible);
+        } else {
+            brain->EraseMemory(MemoryModule::NearestVisiblePlayer);
+        }
+        if (!attackable.empty()) {
+            brain->SetMemory(MemoryModule::NearestVisibleAttackablePlayer, attackable.front());
+        } else {
+            brain->EraseMemory(MemoryModule::NearestVisibleAttackablePlayer);
+        }
+        brain->SetMemory(MemoryModule::NearestVisibleAttackablePlayers, std::move(attackable));
     }
 
     void TemptingSensor::DoTick(EntityLevel& level, LivingEntity& body) {

@@ -13,6 +13,7 @@
 #include "DoubleBlockHalf.h"
 #include "BedPart.h"
 #include "ChestType.h"
+#include "StructureExtraEnums.h"
 #include "DoorHingeSide.h"
 #include "RedstoneSide.h"
 #include "RailShape.h"
@@ -95,6 +96,7 @@ public:
     static IntegerProperty* AGE_1;
     static IntegerProperty* AGE_2;
     static IntegerProperty* AGE_3;
+    static IntegerProperty* DRIED_GHAST_HYDRATION;  // "hydration" 0-3
     static IntegerProperty* AGE_4;
     static IntegerProperty* AGE_5;
     static IntegerProperty* AGE_7;
@@ -129,6 +131,9 @@ public:
     static EnumProperty<DoubleBlockHalf>* DOUBLE_BLOCK_HALF;
     static EnumProperty<BedPart>* BED_PART;
     static EnumProperty<ChestType>* CHEST_TYPE;
+    static EnumProperty<NoteBlockInstrument>* NOTEBLOCK_INSTRUMENT;
+    static EnumProperty<TrialSpawnerState>* TRIAL_SPAWNER_STATE;
+    static EnumProperty<VaultState>* VAULT_STATE;
     static EnumProperty<DoorHingeSide>* DOOR_HINGE;
     static EnumProperty<PistonType>* PISTON_TYPE;
     static EnumProperty<ComparatorMode>* MODE_COMPARATOR;

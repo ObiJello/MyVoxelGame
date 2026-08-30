@@ -16,9 +16,16 @@ namespace Client {
     class PendingDiffsManager {
     public:
         // Configuration constants
-        static constexpr size_t MAX_DIFFS_PER_CHUNK = 256;        // Max diffs per chunk
-        static constexpr size_t MAX_CHUNKS_WITH_DIFFS = 64;       // Max chunks that can have pending diffs
-        static constexpr size_t MAX_TOTAL_DIFFS = 4096;           // Global diff limit
+        // Sized for mass detonations: one blast breaks ~1,500 blocks and a
+        // /shape can rewrite a whole column (16x384x16 is ~98k cells), and
+        // every one of those can race ahead of its chunk's first send. The
+        // worst case is bounded by memory (~150 B/diff -> ~40 MB at the
+        // global cap) and short-lived: diffs drain the moment the chunk
+        // lands. The old 256/chunk cap silently dropped real changes during
+        // TNT cascades, which is a permanent client-side hole in the world.
+        static constexpr size_t MAX_DIFFS_PER_CHUNK = 100000;     // > a full chunk column
+        static constexpr size_t MAX_CHUNKS_WITH_DIFFS = 512;      // Max chunks that can have pending diffs
+        static constexpr size_t MAX_TOTAL_DIFFS = 262144;         // Global diff limit
         
         // Block position within world (not chunk-relative)
         struct BlockPos {

@@ -623,6 +623,69 @@ namespace Platform {
         if (auto version = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("Version"))) {
             info.versionName = version->GetValue<std::string>("Name", "");
         }
+
+        info.difficulty = data->GetValue<int8_t>("Difficulty", 2);
+        info.dayTime    = data->GetValue<int64_t>("DayTime", 6000);
+
+        // The SEED. For our own worlds this is what regenerates matching
+        // terrain beyond what has been saved, so it has to survive a round
+        // trip through level.dat rather than living only in worlds.json.
+        if (auto gen = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("WorldGenSettings"))) {
+            info.seed = gen->GetValue<int64_t>("seed", 0);
+            info.generateStructures = gen->GetValue<int8_t>("generate_features", 1) != 0;
+        }
+
+        if (auto rules = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("game_rules"))) {
+            // Every gamerule is stored as a string, whatever its type.
+            info.doDaylightCycle = rules->GetValue<std::string>("doDaylightCycle", "false") == "true";
+        }
+    }
+
+    // Shared by both world lists: one folder -> one summary. `dir` must
+    // contain a level.dat.
+    static bool SummariseWorld(const std::filesystem::path& worldPath,
+                               GameDirectory::MinecraftWorldInfo& info) {
+        std::error_code ec;
+        const std::filesystem::path levelDat = worldPath / "level.dat";
+        if (!std::filesystem::exists(levelDat, ec)) return false;
+
+        info.folderName = worldPath.filename().string();
+        info.path       = worldPath.string();
+        info.levelName  = info.folderName;   // overwritten if level.dat has one
+
+        const auto t = std::filesystem::last_write_time(levelDat, ec);
+        if (!ec) {
+            info.lastPlayed = static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    t.time_since_epoch()).count());
+        }
+        ReadLevelDat(levelDat, info);
+        return true;
+    }
+
+    std::vector<GameDirectory::MinecraftWorldInfo> GameDirectory::ListObeyCraftWorlds() const {
+        // The same shape as ListMinecraftWorlds, pointed at OUR saves folder.
+        //
+        // This is what makes a world folder self-describing: drop one into
+        // obeycraft/saves and it appears, delete it and it is gone. worlds.json
+        // no longer decides what exists.
+        std::vector<MinecraftWorldInfo> out;
+
+        std::error_code ec;
+        if (!std::filesystem::is_directory(m_savesDirectory, ec)) return out;
+
+        for (const auto& dir : std::filesystem::directory_iterator(m_savesDirectory, ec)) {
+            if (ec) break;
+            if (!dir.is_directory(ec)) continue;
+            MinecraftWorldInfo info;
+            if (SummariseWorld(dir.path(), info)) out.push_back(std::move(info));
+        }
+
+        std::sort(out.begin(), out.end(),
+                  [](const MinecraftWorldInfo& a, const MinecraftWorldInfo& b) {
+                      return a.lastPlayed > b.lastPlayed;
+                  });
+        return out;
     }
 
     std::vector<GameDirectory::MinecraftWorldInfo> GameDirectory::ListMinecraftWorlds() {

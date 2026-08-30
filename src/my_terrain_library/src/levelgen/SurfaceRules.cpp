@@ -527,20 +527,20 @@ std::unique_ptr<Condition> VerticalGradientConditionSource::apply(Context& conte
     const int32_t trueAtAndBelow = m_trueAtAndBelow.resolveY(genContext);
     const int32_t falseAtAndAbove = m_falseAtAndAbove.resolveY(genContext);
 
-    // Get positional random factory
-    random::PositionalRandomFactory* randomFactory =
+    // Get positional random factory (Any-typed: legacy for nether/end).
+    ::minecraft::random::AnyPositionalRandomFactory* randomFactory =
         context.getRandomState()->getOrCreateRandomFactory(m_randomName);
 
     class VerticalGradientCondition : public LazyYCondition {
     private:
         int32_t m_trueAtAndBelow;
         int32_t m_falseAtAndAbove;
-        random::PositionalRandomFactory* m_randomFactory;
+        ::minecraft::random::AnyPositionalRandomFactory* m_randomFactory;
 
     public:
         VerticalGradientCondition(Context& ctx, int32_t trueAtAndBelow,
                                    int32_t falseAtAndAbove,
-                                   random::PositionalRandomFactory* randomFactory)
+                                   ::minecraft::random::AnyPositionalRandomFactory* randomFactory)
             : LazyYCondition(ctx)
             , m_trueAtAndBelow(trueAtAndBelow)
             , m_falseAtAndAbove(falseAtAndAbove)
@@ -564,7 +564,7 @@ std::unique_ptr<Condition> VerticalGradientConditionSource::apply(Context& conte
                     1.0, 0.0
                 );
 
-                XoroshiroRandomSource random = m_randomFactory->at(
+                ::minecraft::random::AnyRandomSource random = m_randomFactory->at(
                     m_context.getBlockX(), blockY, m_context.getBlockZ()
                 );
 

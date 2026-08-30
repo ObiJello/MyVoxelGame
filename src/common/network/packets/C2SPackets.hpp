@@ -113,6 +113,26 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    class PlayerPauseC2SPacketImpl : public IC2SPacket {
+    private:
+        PlayerPauseC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit PlayerPauseC2SPacketImpl(PlayerPauseC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onPlayerPauseC2S(m_data);
+        }
+
+        const PlayerPauseC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::PlayerPauseC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class PlayerAbilitiesC2SPacketImpl : public IC2SPacket {
     private:
         PlayerAbilitiesC2SPacket m_data;

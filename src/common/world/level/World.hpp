@@ -9,10 +9,13 @@
 #include "../math/WorldMath.hpp"
 #include "server/world/tracking/DirtyTracker.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "../ticks/LevelTicks.hpp"
+#include "common/entity/EntityLevel.hpp"   // Game::Difficulty
 #include <memory>
 #include <atomic>
 #include <cstdint>
 #include <vector>
+#include <unordered_set>
 #include <glm/glm.hpp>
 
 namespace Game {
@@ -63,6 +66,23 @@ namespace Game {
         // IBlockAccess implementation
         BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
         BlockState GetBlockState(int worldX, int worldY, int worldZ) const override;
+
+        // Section-aware collision-mask fill. See IBlockAccess for the contract.
+        void FillCollisionMask(const glm::ivec3& origin, const glm::ivec3& size,
+                               int shiftZ, int shiftY, uint64_t* out) const override;
+        bool IsRegionAllAir(const glm::ivec3& min, const glm::ivec3& max,
+                            bool absentIsAir = false) const override;
+        void GetBlockStatesInBox(const glm::ivec3& min, const glm::ivec3& max,
+                                 BlockState* out) const override;
+        uint64_t RegionWriteStamp(const glm::ivec3& min, const glm::ivec3& max) const override;
+
+        // Monotonic counter bumped by every accepted block write. A cached view
+        // of the block field (see CollisionGrid) stamps this at build and
+        // re-checks it before use, so a write that lands mid-read demotes the
+        // reader to the uncached path instead of silently answering stale.
+        uint64_t BlockWriteEpoch() const {
+            return m_blockWriteEpoch.load(std::memory_order_acquire);
+        }
         uint16_t GetBiome(int worldX, int worldY, int worldZ) const override;
         bool IsChunkLoaded(int chunkX, int chunkZ) const override;
         bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override;
@@ -89,6 +109,18 @@ namespace Game {
         // The server's world is the authority — MC ServerLevel.isClientSide.
         bool IsClientSide() const override { return false; }
 
+        // Which dimension this world IS. MUST be set before Initialize() —
+        // that is where the chunk provider is built, and the provider hands
+        // the dimension to the terrain generator, which uses it to pick the
+        // noise router, biome source and surface rules.
+        //
+        // It is also what the portal rules read (`ILevelWrite::GetDimension`)
+        // and what scopes the block-entity broadcasts to the right watchers,
+        // so a world left at the default would light nether portals in the End
+        // and send Nether block entities to Overworld players.
+        void SetDimension(DimensionId dimension) { m_dimension = dimension; }
+        DimensionId GetDimension() const override { return m_dimension; }
+
         // MC BlockBehaviour.canSurvive for the block currently at this cell.
         // True for anything with no support rule, so callers can ask blindly.
         bool CanBlockSurviveAt(int worldX, int worldY, int worldZ) const;
@@ -111,6 +143,12 @@ namespace Game {
 
         // Minecraft world support
         void SetMinecraftWorldPath(const std::string& worldPath);
+
+        // This dimension's folder inside an ObeyCraft save. Non-empty means the
+        // world persists. Distinct from the Minecraft world path above, which
+        // is somebody else's save and is never written.
+        void SetSavePath(const std::string& savePath) { m_savePath = savePath; }
+        const std::string& GetSavePath() const { return m_savePath; }
         const std::string& GetMinecraftWorldPath() const;
         bool HasMinecraftWorld() const;
 
@@ -142,6 +180,17 @@ namespace Game {
         // World generation control
         void SetGenerationSeed(int64_t seed);
         int64_t GetGenerationSeed() const;
+        // World-creation "Generate Structures" toggle; set alongside the seed
+        // (after it — see ChunkProvider::SetGenerateStructures), before
+        // generation starts.
+        void SetGenerateStructures(bool enabled);
+        // World type + superflat/single-biome customization (same timing).
+        void SetWorldGenOptions(const std::string& worldType,
+                                const std::string& flatPreset,
+                                const std::string& flatLayers,
+                                const std::string& singleBiome);
+        // World Properties sandbox tweaks JSON ("" = vanilla; same timing).
+        void SetWorldGenTweaks(const std::string& tweaksJson);
 
         // Direct access to chunk provider for advanced use cases
         ChunkProvider* GetChunkProvider() const { return m_chunkProvider.get(); }
@@ -206,6 +255,41 @@ namespace Game {
         bool GetDoMobSpawning() const { return m_doMobSpawning; }
         void SetDoMobSpawning(bool enabled) { m_doMobSpawning = enabled; }
 
+        // MC LevelData.getDifficulty. Was hardcoded to Normal at
+        // EntityLevel::GetDifficulty, which meant Peaceful was unreachable and
+        // MC's difficulty scaling on damage could not be reproduced at all.
+        Difficulty GetDifficulty() const { return m_difficulty; }
+        void SetDifficulty(Difficulty d) { m_difficulty = d; }
+
+        // ── Explosion gamerules (MC GameRules.java) ─────────────────────────
+        //
+        // MC gamerule `tnt_explodes`. Turns every TNT prime and detonation
+        // into a no-op — the block still breaks and drops, it just never lights.
+        bool GetTntExplodes() const { return m_tntExplodes; }
+        void SetTntExplodes(bool enabled) { m_tntExplodes = enabled; }
+
+        // MC gamerule `entity_drops`. Gates drops that come from an ENTITY
+        // rather than a block break — including a falling block that could not
+        // land and pops as an item.
+        bool GetDoEntityDrops() const { return m_doEntityDrops; }
+        void SetDoEntityDrops(bool enabled) { m_doEntityDrops = enabled; }
+
+        // The three drop-decay rules pick DESTROY vs DESTROY_WITH_DECAY, which
+        // is what decides whether a blasted block's loot survives at 1/radius.
+        //
+        // NOTE THE TNT DEFAULT IS FALSE. That is vanilla and it surprises
+        // people: TNT drops EVERYTHING it breaks, while creeper and generic
+        // block explosions decay. Someone will eventually "fix" this to true;
+        // it is not a bug.
+        bool GetTntExplosionDropDecay() const { return m_tntExplosionDropDecay; }
+        void SetTntExplosionDropDecay(bool v) { m_tntExplosionDropDecay = v; }
+
+        bool GetBlockExplosionDropDecay() const { return m_blockExplosionDropDecay; }
+        void SetBlockExplosionDropDecay(bool v) { m_blockExplosionDropDecay = v; }
+
+        bool GetMobExplosionDropDecay() const { return m_mobExplosionDropDecay; }
+        void SetMobExplosionDropDecay(bool v) { m_mobExplosionDropDecay = v; }
+
         // ========================================================================
         // RANDOM TICKING (MC ServerLevel.tickChunk)
         // ========================================================================
@@ -228,6 +312,18 @@ namespace Game {
         // sessions (see the WorldLoop comment).
         void SetBlockTickingChunks(std::vector<Math::ChunkPos> chunks) {
             m_blockTickingChunks = std::move(chunks);
+            // The random-tick walk iterates the vector; the scheduled-tick
+            // drain needs to ASK "is this one chunk simulating?" per active
+            // container, so it gets a set. Rebuilt here rather than lazily
+            // because the vector is replaced wholesale every tick and a stale
+            // set would silently freeze or resurrect block ticks.
+            m_blockTickingKeys.clear();
+            m_blockTickingKeys.reserve(m_blockTickingChunks.size());
+            for (const Math::ChunkPos& cp : m_blockTickingChunks) {
+                m_blockTickingKeys.insert(
+                    (static_cast<uint64_t>(static_cast<uint32_t>(cp.x)) << 32) |
+                     static_cast<uint64_t>(static_cast<uint32_t>(cp.z)));
+            }
         }
 
         // MC Level.getBlockRandomPos — a dedicated LCG, NOT the world RNG.
@@ -242,14 +338,40 @@ namespace Game {
         // future weather system has one obvious place to plug in.
         bool IsRainingAt(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const { return false; }
 
+        // ========================================================================
+        // SCHEDULED BLOCK TICKS (MC ServerLevel.blockTicks)
+        // ========================================================================
+        //
+        // The delayed-tick system behind falling blocks, and eventually behind
+        // fluids and redstone. Distinct from random ticking: a random tick is a
+        // probability, a scheduled tick is an appointment.
+        //
+        // The queues live on the chunks (Chunk::BlockTicks); this is the index
+        // that merges them. Wired up in Initialize(), because the resolver has
+        // to reach the chunk provider.
+        ScheduledTickAccess* Ticks() override { return &m_blockTicks; }
+        LevelTicks&          BlockTicks()     { return m_blockTicks; }
+
+        // MC ServerLevel's per-tick cap on scheduled ticks (65536). Far above
+        // anything a real world produces; it exists so a runaway feedback loop
+        // degrades into lag instead of hanging the tick thread.
+        static constexpr int kMaxBlockTicksPerTick = 65536;
+
+        // MC Level.updateNeighborsAt. Public because the wither ritual mirrors
+        // CarvedPumpkinBlock.updatePatternBlocks: the pattern cells are
+        // cleared WITHOUT neighbour updates (MC flag 2), the boss is spawned,
+        // and only then does each cleared cell notify its neighbours.
+        void NotifyNeighborBlocks(int worldX, int worldY, int worldZ);
+
     private:
         std::unique_ptr<ChunkProvider> m_chunkProvider;
         std::string m_minecraftWorldPath;
         bool        m_readOnly = false;   // see SetReadOnly
+        DimensionId m_dimension = DimensionId::Overworld;
+        std::string m_savePath;   // see SetSavePath
 
         // Helper functions
         void OnBlockChanged(int worldX, int worldY, int worldZ);
-        void NotifyNeighborBlocks(int worldX, int worldY, int worldZ);
         Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) const;
         void MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ);
 
@@ -268,6 +390,20 @@ namespace Game {
         // Vanilla defaults, unlike doDaylightCycle above.
         bool m_doMobSpawning = true;
         bool m_doMobGriefing = true;
+        // MC's default for a fresh world.
+        Difficulty m_difficulty = Difficulty::Normal;
+        // Explosion rules — see the accessors above. Every default is MC's,
+        // including tntExplosionDropDecay being the odd one out at false.
+        bool m_tntExplodes             = true;
+        bool m_doEntityDrops           = true;
+        bool m_tntExplosionDropDecay   = false;
+        bool m_blockExplosionDropDecay = true;
+        // See BlockWriteEpoch(). Atomic because SetBlock is documented as
+        // callable from the server thread OR a worker; two racing plain
+        // increments could advance the counter by one instead of two and let a
+        // two-writes-stale snapshot compare equal to the current value.
+        std::atomic<uint64_t> m_blockWriteEpoch{1};
+        bool m_mobExplosionDropDecay   = true;
 
         // ── Random ticking ──────────────────────────────────────────────────
         int m_randomTickSpeed = kDefaultRandomTickSpeed;
@@ -276,12 +412,18 @@ namespace Game {
         // moves in, rather than a set World queries, so the tick loop is a
         // straight walk with no hashing.
         std::vector<Math::ChunkPos> m_blockTickingChunks;
+        // Lookup form of the above — see SetBlockTickingChunks.
+        std::unordered_set<uint64_t> m_blockTickingKeys;
 
         // MC Level.randValue — the state of getBlockRandomPos's own LCG. It is
         // deliberately NOT the world RNG and deliberately not seeded: vanilla
         // leaves it at 0 and lets it walk, and the sequence is what spreads
         // sampled positions evenly through a section.
         int32_t m_randValue = 0;
+
+        // ── Scheduled ticks ─────────────────────────────────────────────────
+        // See Ticks() above. Resolver + tick-check are installed in Initialize.
+        LevelTicks m_blockTicks;
 
         // Reused across every dispatch so a random tick allocates nothing. The
         // seed is irrelevant to correctness — MC passes the level's shared

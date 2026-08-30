@@ -60,6 +60,37 @@ namespace Network {
         // covers every such enum this port has, and the meaning is per-type —
         // the client dispatches on the entity class, exactly as MC does.
         uint8_t    animState = 0;
+        // The entity id of the vehicle this entity RIDES, or -1 for none —
+        // the equivalent of MC's ClientboundSetPassengersPacket, inverted:
+        // MC sends [vehicle -> passenger list] as its own packet; this port
+        // sends [passenger -> vehicle] appended here (and to SetEntityData
+        // for runtime mount/dismount), because the relation is one field per
+        // passenger and both packets already exist. Same information, same
+        // moments (tracking start / mount / dismount). APPENDED FIELD —
+        // deserializers treat its absence as -1, so old streams still decode.
+        int32_t    vehicleId = -1;
+
+        // MC ClientboundAddEntityPacket's `data` int, which vanilla gives a
+        // different meaning per entity type. Two entities use it here, and both
+        // carry a block:
+        //
+        //   falling_block — the carried blockstate's flat global id
+        //                   (MC FallingBlockEntity.getAddEntityPacket).
+        //   tnt           — the same, though vanilla syncs the TNT's block
+        //                   state as entity data instead. Folded in here for
+        //                   both because NEITHER state ever changes after
+        //                   spawn, so a per-tick SetEntityData field would be
+        //                   pure waste.
+        //
+        // The TNT's FUSE rides `animState` above rather than a field of its
+        // own: it fits a byte, the client counts down locally exactly as MC's
+        // client does, and `animState` is already documented as meaning
+        // whatever the entity class says it means.
+        //
+        // APPENDED FIELD, after vehicleId — absence decodes as 0 (air's default
+        // state), which is the right answer for every entity that carries no
+        // block. Same compatibility rule vehicleId's own note describes.
+        uint32_t   blockStateRaw = 0;
     };
 
     // MC ClientboundMoveEntityPacket.Pos / .Rot / .PosRot, merged into one
@@ -88,6 +119,24 @@ namespace Network {
         bool       onGround = false;
     };
 
+    // Many EntityPositionSync in one packet, for the compact falling-block
+    // store: a block falling at terminal velocity moves ~40 blocks between
+    // two update-interval sends, past the 8-block reach of a MoveEntity
+    // delta, so EVERY falling block took the full-precision sync path — one
+    // packet each, 68k a tick at 1.37M, which the client then dispatched one
+    // at a time. Same payload per entry as EntityPositionSyncS2CPacket minus
+    // the rotations a block does not have; the mob tracker keeps sending the
+    // single form.
+    struct EntityPositionSyncBatchS2CPacket {
+        struct Entry {
+            int32_t    entityId = 0;
+            glm::dvec3 position{0.0};
+            glm::vec3  velocity{0.0f};
+            bool       onGround = false;
+        };
+        std::vector<Entry> entries;
+    };
+
     // MC ClientboundSetEntityMotionPacket.
     struct SetEntityMotionS2CPacket {
         int32_t   entityId = 0;
@@ -108,6 +157,7 @@ namespace Network {
         uint8_t swell = 0;          // creeper fuse progress, 0..30
         uint8_t pose = 0;           // Game::Pose ordinal — see AddEntity
         uint8_t animState = 0;      // per-type animation state — see AddEntity
+        int32_t vehicleId = -1;     // id ridden, -1 none — see AddEntity's note
     };
 
     // MC ClientboundEntityEventPacket. One byte: 3 death, 60 poof, 10 eat,
@@ -164,6 +214,10 @@ namespace Network {
             b.WriteByte(p.variantData);
             b.WriteByte(p.pose);
             b.WriteByte(p.animState);
+            // Appended (riding). WriteInt not VarInt: -1 is the common value
+            // and zig-zag would buy nothing for a full-range id.
+            b.WriteInt(static_cast<uint32_t>(p.vehicleId));
+            b.WriteInt(p.blockStateRaw);
             return b.GetData();
         }
 
@@ -186,6 +240,13 @@ namespace Network {
             p.variantData = r.ReadByte();
             p.pose       = r.ReadByte();
             p.animState  = r.ReadByte();
+            // Appended field: an older peer's stream simply ends here, and the
+            // struct default (-1, not riding) is the right answer for it.
+            if (r.Remaining() >= 4) p.vehicleId = static_cast<int32_t>(r.ReadInt());
+            // Two consecutive Remaining() guards decode correctly both ways: an
+            // old server's stream simply ends here, and an old client leaves
+            // the extra four bytes unread.
+            if (r.Remaining() >= 4) p.blockStateRaw = r.ReadInt();
             return p;
         }
 
@@ -274,6 +335,44 @@ namespace Network {
             return p;
         }
 
+        // ── EntityPositionSyncBatch ───────────────────────────────────────
+        inline std::vector<uint8_t> Serialize(const EntityPositionSyncBatchS2CPacket& p) {
+            Network::PacketBuffer b;
+            b.WriteVarInt(static_cast<uint32_t>(p.entries.size()));
+            for (const auto& e : p.entries) {
+                b.WriteVarInt(static_cast<uint32_t>(e.entityId));
+                b.WriteDouble(e.position.x);
+                b.WriteDouble(e.position.y);
+                b.WriteDouble(e.position.z);
+                b.WriteFloat(e.velocity.x);
+                b.WriteFloat(e.velocity.y);
+                b.WriteFloat(e.velocity.z);
+                b.WriteByte(e.onGround ? 1 : 0);
+            }
+            return b.GetData();
+        }
+
+        inline EntityPositionSyncBatchS2CPacket
+        DeserializeEntityPositionSyncBatchS2C(const std::vector<uint8_t>& data) {
+            Network::PacketReader r(data);
+            EntityPositionSyncBatchS2CPacket p;
+            const uint32_t n = r.ReadVarInt();
+            p.entries.reserve(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                EntityPositionSyncBatchS2CPacket::Entry e;
+                e.entityId   = static_cast<int32_t>(r.ReadVarInt());
+                e.position.x = r.ReadDouble();
+                e.position.y = r.ReadDouble();
+                e.position.z = r.ReadDouble();
+                e.velocity.x = r.ReadFloat();
+                e.velocity.y = r.ReadFloat();
+                e.velocity.z = r.ReadFloat();
+                e.onGround   = r.ReadByte() != 0;
+                p.entries.push_back(e);
+            }
+            return p;
+        }
+
         // ── SetEntityMotion ────────────────────────────────────────────────
         inline std::vector<uint8_t> Serialize(const SetEntityMotionS2CPacket& p) {
             Network::PacketBuffer b;
@@ -308,6 +407,8 @@ namespace Network {
             b.WriteByte(p.swell);
             b.WriteByte(p.pose);
             b.WriteByte(p.animState);
+            // Appended (riding) — see AddEntity's serializer.
+            b.WriteInt(static_cast<uint32_t>(p.vehicleId));
             return b.GetData();
         }
 
@@ -325,6 +426,8 @@ namespace Network {
             p.swell       = r.ReadByte();
             p.pose        = r.ReadByte();
             p.animState   = r.ReadByte();
+            // Appended field — absent on old streams, default -1 (not riding).
+            if (r.Remaining() >= 4) p.vehicleId = static_cast<int32_t>(r.ReadInt());
             return p;
         }
 

@@ -25,6 +25,10 @@ namespace Render {
         void Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;
         void RenderBackground(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;
         bool ShouldCloseOnEsc() const override { return false; }
+        // MC DeathScreen.isPauseScreen() == false. The respawn button arms on
+        // a 20-tick countdown driven by the server, so freezing the world here
+        // would leave you unable to respawn.
+        bool IsPauseScreen() const override { return false; }
 
     private:
         void SetButtonsActive(bool active);

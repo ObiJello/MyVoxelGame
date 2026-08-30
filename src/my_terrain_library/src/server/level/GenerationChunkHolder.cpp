@@ -88,8 +88,12 @@ GenerationChunkHolder::FutureType GenerationChunkHolder::applyStep(
         // Reference: In Java, objects are reference types so this isn't an issue
         const world::chunk::status::ChunkStatus* targetStatus = &step.targetStatus();
         auto resultFuture = std::make_shared<util::CompletableFuture<ChunkResultType>>();
-        chunkFuture->thenAccept([this, targetStatus, resultFuture](ChunkAccess* chunk) {
-            if (chunk != nullptr) {
+        // whenComplete, not thenAccept: a step that throws inside its async
+        // body used to leave this result future pending forever, and every
+        // task waiting on it (and every holder those tasks pin) hung with it.
+        chunkFuture->whenComplete([this, targetStatus, resultFuture](ChunkAccess* chunk,
+                                                                     std::exception_ptr ex) {
+            if (chunk != nullptr && !ex) {
                 completeFuture(*targetStatus, chunk);
                 resultFuture->complete(ChunkResult<ChunkAccess*>::of(chunk));
             } else {
@@ -101,6 +105,35 @@ GenerationChunkHolder::FutureType GenerationChunkHolder::applyStep(
     } else {
         return getOrCreateFuture(step.targetStatus());
     }
+}
+
+std::pair<int64_t, int> GenerationChunkHolder::debugWaitingOn() const {
+    std::shared_ptr<ChunkGenerationTask> task;
+    { std::lock_guard<std::mutex> lock(m_taskMutex); task = m_task; }
+    return task ? task->waitingOn() : std::make_pair(int64_t(0), -1);
+}
+
+int GenerationChunkHolder::debugTaskRuns() const {
+    std::shared_ptr<ChunkGenerationTask> task;
+    { std::lock_guard<std::mutex> lock(m_taskMutex); task = m_task; }
+    return task ? task->runs() : -1;
+}
+
+std::string GenerationChunkHolder::debugState() const {
+    std::string out = "level=" + std::to_string(getTicketLevel());
+    const auto* latest = getLatestStatus();
+    out += " latest=" + (latest ? latest->getName() : std::string("none"));
+    out += " refs=" + std::to_string(generationRefCount());
+    std::shared_ptr<ChunkGenerationTask> task;
+    { std::lock_guard<std::mutex> lock(m_taskMutex); task = m_task; }
+    out += task ? " task=" + task->debugString() : std::string(" task=none");
+    {
+        std::lock_guard<std::mutex> lock(m_futuresMutex);
+        for (int i = 0; i < STATUS_COUNT; ++i) {
+            if (m_futures[i] && !m_futures[i]->isDone()) out += " pend[" + std::to_string(i) + "]";
+        }
+    }
+    return out;
 }
 
 void GenerationChunkHolder::updateHighestAllowedStatus(ChunkMap& scheduler) {
@@ -134,6 +167,7 @@ void GenerationChunkHolder::replaceProtoChunk(ChunkAccess* imposterChunk) {
         ChunkResult<ChunkAccess*>::of(imposterChunk)
     );
 
+    m_emptyChunk.store(imposterChunk, std::memory_order_release);
     std::lock_guard<std::mutex> lock(m_futuresMutex);
     for (int i = 0; i < STATUS_COUNT - 1; ++i) {
         FutureType future = m_futures[i];
@@ -247,6 +281,9 @@ void GenerationChunkHolder::completeFuture(
     // Reference: GenerationChunkHolder.java lines 177-199
     ChunkResultType result = ChunkResult<ChunkAccess*>::of(chunk);
     int index = status.getIndex();
+    if (&status == &world::chunk::status::ChunkStatus::EMPTY) {
+        m_emptyChunk.store(chunk, std::memory_order_release);
+    }
 
     std::lock_guard<std::mutex> lock(m_futuresMutex);
 
@@ -418,20 +455,17 @@ GenerationChunkHolder::ChunkAccess* GenerationChunkHolder::getLatestChunk() cons
 }
 
 const world::chunk::status::ChunkStatus* GenerationChunkHolder::getPersistedStatus() const {
-    // Reference: GenerationChunkHolder.java lines 280-284
-    std::lock_guard<std::mutex> lock(m_futuresMutex);
-    FutureType future = m_futures[world::chunk::status::ChunkStatus::EMPTY.getIndex()];
-
-    if (future == nullptr) {
-        return nullptr;
-    }
-
-    ChunkResultType result = future->getNow(NOT_DONE_YET);
-    ChunkAccess* chunkAccess = result->orElse(nullptr);
+    // Reference: GenerationChunkHolder.java getPersistedStatus() — reads the
+    // EMPTY chunk without locking (see m_emptyChunk).
+    ChunkAccess* chunkAccess = m_emptyChunk.load(std::memory_order_acquire);
     if (chunkAccess == nullptr) {
-        return nullptr;
+        std::lock_guard<std::mutex> lock(m_futuresMutex);
+        FutureType future = m_futures[world::chunk::status::ChunkStatus::EMPTY.getIndex()];
+        if (future == nullptr) return nullptr;
+        ChunkResultType result = future->getNow(NOT_DONE_YET);
+        chunkAccess = result->orElse(nullptr);
+        if (chunkAccess == nullptr) return nullptr;
     }
-
     return chunkAccess->getPersistedStatus();
 }
 

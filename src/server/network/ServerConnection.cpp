@@ -35,9 +35,11 @@ namespace Server {
         SetName("Server#" + std::to_string(m_connectionId));
         
         m_lastActivity = std::chrono::steady_clock::now();
-        m_lastKeepAliveSent = m_lastActivity;
-        m_lastKeepAliveReceived = m_lastActivity;
-        m_lastPacketReceived = m_lastActivity;
+        // MC's constructor seeds keepAliveTime so the FIRST challenge goes out
+        // one full interval after the listener exists, not immediately.
+        const int64_t nowMs = NowMs();
+        m_keepAliveTime.store(nowMs, std::memory_order_relaxed);
+        m_lastPacketReceivedMs.store(nowMs, std::memory_order_relaxed);
         
         // Start with handshake listener
         setProtocolState(Network::ProtocolState::HANDSHAKING);
@@ -65,6 +67,12 @@ namespace Server {
         // does). Once in PLAY, DecodePacket claims it and this never fires.
         m_packetRegistry.RegisterHandler(PacketId::ClientConfigC2S,
                                          [this](const std::vector<uint8_t>& p) { HandleClientSettings(p); });
+
+        // Answered on the I/O thread, never deferred — see ShouldDeferPacket
+        // and HandleKeepAliveResponse. This is what keeps the keep-alive
+        // answerable while the tick thread is stalled.
+        m_packetRegistry.RegisterHandler(PacketId::KeepAliveC2S,
+                                         [this](const std::vector<uint8_t>& p) { HandleKeepAliveResponse(p); });
     }
 
     ServerConnection::~ServerConnection() {
@@ -116,30 +124,11 @@ namespace Server {
         // the teleport gate lives on the connection.
         ++m_tickCount;
 
-        // Drain incoming packets queue and apply to listener
+        // Drain the WHOLE incoming queue, as MC does. No per-tick packet cap
+        // and no time budget — see the note further down where the budget used
+        // to be. Peek-then-pop is kept: it is what makes the drain lossless.
         int packetsProcessed = 0;
-        const int MAX_PACKETS_PER_TICK = 1000;  // Safety limit
-        
-        // State-aware budgeting (Minecraft-style)
-        float budgetMs;
-        switch (m_phase) {
-            case ConnectionPhase::HANDSHAKING:
-            case ConnectionPhase::LOGIN:
-            case ConnectionPhase::STATUS:
-                budgetMs = 5.0f;  // Generous 5ms for connection setup
-                break;
-            case ConnectionPhase::PLAY:
-                budgetMs = 1.0f;  // 1ms for normal play (increased from 0.5ms for older systems)
-                break;
-            default:
-                budgetMs = 1.0f;
-                break;
-        }
-        
-        auto startTime = std::chrono::steady_clock::now();
-        
-        // Peek-then-pop pattern (Minecraft-style: never lose packets)
-        while (packetsProcessed < MAX_PACKETS_PER_TICK) {
+        for (;;) {
             // Free any listener displaced during the PREVIOUS iteration. Safe
             // here and nowhere earlier: the handler that triggered the switch
             // has returned by now, so nothing is still executing inside it.
@@ -150,30 +139,22 @@ namespace Server {
                 break;
             }
             
-            // Check time budget (but always process at least 1 packet to prevent starvation)
-            if (packetsProcessed > 0) {  // Already processed at least one
-                auto currentTime = std::chrono::steady_clock::now();
-                float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
-                
-                // Peek at the next packet to check if it's critical
-                bool isCritical = false;
-                PeekIncoming([&isCritical](const Network::IncomingPacket& pkt) {
-                    if (pkt.packet) {
-                        auto packetId = pkt.packet->getId();
-                        isCritical = (packetId == Network::PacketId::KeepAliveC2S ||
-                                     packetId == Network::PacketId::Disconnect ||
-                                     packetId == Network::PacketId::Handshake ||
-                                     packetId == Network::PacketId::LoginStart);
-                    }
-                });
-                
-                // Stop if over budget and not a critical packet
-                if (elapsedMs >= budgetMs && !isCritical) {
-                    Log::Debug("[ServerConnection %u] Time budget of %.1fms exceeded after %.2fms, leaving %zu packets for next tick", 
-                              GetConnectionId(), budgetMs, elapsedMs, GetIncomingQueueSize());
-                    break;
-                }
-            }
+            // NO TIME BUDGET. MC drains the whole queue every tick —
+            // BlockableEventLoop.runAllTasks() is literally
+            // "while (this.pollTask()) {}" (util/thread/BlockableEventLoop
+            // .java:109-113) — and the budget that used to sit here was our own
+            // invention. It was also actively harmful: the criticality test
+            // only PEEKED AT THE HEAD of the queue, so a KeepAliveC2S sitting
+            // behind non-critical packets never got its exemption, and with
+            // multi-second ticks only a handful of 1 ms drains fitted inside
+            // the timeout window. That is what disconnected a player from their
+            // own singleplayer world.
+            //
+            // The trade, stated honestly: the tick after a stall now handles
+            // the whole accumulated backlog at once and will show up as one
+            // long tick rather than a slow bleed. That is MC's behaviour, and
+            // the queue is unbounded and lossless either way, so the budget was
+            // only ever deferring the same work forever.
             
             // NOW we're committed to processing this packet, so pop it
             Network::IncomingPacket packet;
@@ -253,28 +234,52 @@ namespace Server {
                       GetConnectionId(), packetsProcessed, GetIncomingQueueSize());
         }
         
-        // Send periodic keep-alives during PLAY phase
-        if (m_phase == ConnectionPhase::PLAY) {
-            auto now = std::chrono::steady_clock::now();
-            
-            if (!m_awaitingKeepAlive) {
-                // Send new keep-alive if interval has passed since last keep-alive sent
-                if (now - m_lastKeepAliveSent >= KEEP_ALIVE_INTERVAL) {
-                    // Generate a new keep-alive ID
-                    m_lastKeepAliveId = ++m_keepAliveSequence;
-                    SendKeepAlive(m_lastKeepAliveId);
-                    m_awaitingKeepAlive = true;
-                    Log::Info("[ServerConnection %u] Sent keep-alive with ID %llu",
-                              GetConnectionId(), m_lastKeepAliveId);
-                }
-            } else {
-                // Check for timeout on pending keep-alive
-                if (now - m_lastKeepAliveSent >= CONNECTION_TIMEOUT) {
-                    Log::Warning("[ServerConnection %u] Keep-alive timeout - no response to ID %llu", 
-                                GetConnectionId(), m_lastKeepAliveId);
+        // A bad keep-alive seen on the I/O thread asks for the kick here, on
+        // the tick thread, because the teardown touches server state.
+        if (m_pendingTimeoutDisconnect.exchange(false, std::memory_order_relaxed)) {
+            Log::Warning("[ServerConnection %u] Unsolicited or mismatched keep-alive - disconnecting",
+                         GetConnectionId());
+            SendDisconnect("Timed out");
+            return;
+        }
+
+        // MC ServerCommonPacketListenerImpl.keepConnectionAlive:117-132,
+        // transliterated:
+        //
+        //   if (!isSingleplayerOwner() && now - keepAliveTime >= 15000) {
+        //       if (keepAlivePending) disconnect(TIMEOUT);
+        //       else { keepAlivePending = true; keepAliveTime = now;
+        //              keepAliveChallenge = now; send(KeepAlive(challenge)); } }
+        //
+        // Two things this buys that the old two-timer version did not:
+        //
+        // 1. The singleplayer owner is exempt OUTRIGHT. That is why vanilla
+        //    never times the host out however long a tick runs, and it is the
+        //    direct fix for a host being kicked out of their own world after
+        //    summoning a million entities.
+        // 2. ONE timer drives both halves, so a stalled tick thread freezes the
+        //    send and the timeout together. The old code armed the deadline on
+        //    a real-time clock and then could not answer it, because only the
+        //    tick thread ever looked at the reply.
+        if (m_phase == ConnectionPhase::PLAY && !IsSingleplayerOwner()) {
+            const int64_t now = NowMs();
+            if (now - m_keepAliveTime.load(std::memory_order_relaxed) >= KEEP_ALIVE_INTERVAL_MS) {
+                if (m_keepAlivePending.load(std::memory_order_relaxed)) {
+                    Log::Warning("[ServerConnection %u] Keep-alive timeout - no response to challenge %llu",
+                                 GetConnectionId(),
+                                 (unsigned long long)m_keepAliveChallenge.load(std::memory_order_relaxed));
                     SendDisconnect("Timed out");
-                    return;
+                    return;   // the session is torn down underneath us
                 }
+                // MC uses the send timestamp ITSELF as the challenge id.
+                m_keepAliveTime.store(now, std::memory_order_relaxed);
+                m_keepAliveChallenge.store(static_cast<uint64_t>(now), std::memory_order_relaxed);
+                m_keepAlivePending.store(true, std::memory_order_relaxed);
+                Network::PacketBuffer buf;
+                buf.WriteLong(static_cast<uint64_t>(now));
+                SendPacket(static_cast<uint8_t>(Network::PacketId::KeepAliveS2C), buf.GetData());
+                Log::Debug("[ServerConnection %u] Sent keep-alive challenge %lld",
+                           GetConnectionId(), (long long)now);
             }
         }
         
@@ -376,12 +381,21 @@ namespace Server {
         // Disconnect is terminal — MC's handleDisconnect carries no
         // ensureRunningOnSameThread call and tears the connection down from the
         // Netty thread. Deferring it would keep reading from a dead peer.
-        return packetId != static_cast<uint8_t>(Network::PacketId::Disconnect);
+        //
+        // KeepAliveC2S joins it for the same reason: handleKeepAlive is the
+        // other method in ServerCommonPacketListenerImpl with NO
+        // ensureRunningOnSameThread call, so MC answers it inline on the Netty
+        // thread. Deferring it to the tick is what let an 11.7 s tick eat the
+        // response and time the player out of their own singleplayer world.
+        return packetId != static_cast<uint8_t>(Network::PacketId::Disconnect)
+            && packetId != static_cast<uint8_t>(Network::PacketId::KeepAliveC2S);
     }
 
     void ServerConnection::OnPacketReceived(uint8_t packetId, const std::vector<uint8_t>& payload) {
         UpdateActivity();
-        m_lastPacketReceived = std::chrono::steady_clock::now();
+        // Every inbound FRAME refreshes the read timeout, which is what makes
+        // it netty's ReadTimeoutHandler rather than a keep-alive echo watcher.
+        m_lastPacketReceivedMs.store(NowMs(), std::memory_order_relaxed);
         
         // Forward to server for statistics
         if (m_server) {
@@ -415,22 +429,23 @@ namespace Server {
         SendPacket(static_cast<uint8_t>(Network::PacketId::ChatMessageS2C), data);
     }
 
-    void ServerConnection::SendKeepAlive(uint64_t id) {
-        Network::PacketBuffer buffer;
-        buffer.WriteLong(id);
-        SendPacket(static_cast<uint8_t>(Network::PacketId::KeepAliveS2C), buffer.GetData());
-        
-        m_lastKeepAliveId = id;
-        m_lastKeepAliveSent = std::chrono::steady_clock::now();
-    }
 
     void ServerConnection::SendDisconnect(const std::string& reason) {
         Network::PacketBuffer buffer;
         buffer.WriteString(reason);
         SendPacket(static_cast<uint8_t>(Network::PacketId::Disconnect), buffer.GetData());
-        
-        // Give time for packet to send, then disconnect
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // No sleep. This used to block the CALLING thread for 100 ms hoping the
+        // packet had drained — which meant the server tick thread stalled for a
+        // tenth of a second on every kick, and the wait was a guess either way.
+        // SendPacket posts to the connection's strand, so ordering is already
+        // guaranteed: the Disconnect frame is queued ahead of the teardown and
+        // goes out first.
+        //
+        // TODO (parity gap, out of scope here): MC additionally latches the
+        // connection read-only at this point so in-flight inbound packets are
+        // dropped rather than handled after the disconnect decision
+        // (PacketListener.shouldHandleMessage, PacketListener.java:29-30).
         Disconnect();
     }
 
@@ -463,8 +478,10 @@ namespace Server {
         // login-time packet and the post-join packet from disagreeing about
         // what "creative" means.
         Network::PlayerAbilitiesS2CPacket BuildAbilitiesPacket(GameMode mode,
-                                                               bool flying, bool canFly) {
+                                                               bool flying, bool canFly,
+                                                               bool noclip = false) {
             Network::PlayerAbilitiesS2CPacket packet;
+            if (noclip) packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_NOCLIP;
             if (mode == GameMode::CREATIVE || mode == GameMode::SPECTATOR) {
                 packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INVULNERABLE;
             }
@@ -480,7 +497,8 @@ namespace Server {
 
     void ServerConnection::SendPlayerAbilities(const ServerPlayer& player) {
         auto data = Network::Serialization::Serialize(
-            BuildAbilitiesPacket(player.getGameMode(), player.isFlying(), player.canFly()));
+            BuildAbilitiesPacket(player.getGameMode(), player.isFlying(), player.canFly(),
+                                 player.isNoclip()));
         SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
     }
 
@@ -651,23 +669,31 @@ namespace Server {
         }
     }
 
+    // MC ServerCommonPacketListenerImpl.handleKeepAlive:82-91.
+    //
+    // RUNS ON THE NETWORK I/O THREAD. It must touch nothing but its own
+    // atomics — no PlayerSession, no world, no logging that reads game state.
+    // MC has exactly the same constraint for exactly the same reason: this is
+    // one of the two handlers in that class with no ensureRunningOnSameThread.
     void ServerConnection::HandleKeepAliveResponse(const std::vector<uint8_t>& payload) {
         Network::PacketReader reader(payload);
-        uint64_t id = reader.ReadLong();
-        
-        if (id == m_lastKeepAliveId && m_awaitingKeepAlive) {
-            m_awaitingKeepAlive = false;
-            m_lastKeepAliveReceived = std::chrono::steady_clock::now();
-            m_lastPacketReceived = m_lastKeepAliveReceived; // Reset the 15s timer
-            
-            // Calculate RTT if needed
-            auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
-                m_lastKeepAliveReceived - m_lastKeepAliveSent).count();
-            Log::Info("[Server#%u] RECEIVED KeepAliveC2S (ID: 0x%02X) - ID: %llu, RTT: %ldms",
-                      GetConnectionId(), static_cast<uint8_t>(Network::PacketId::KeepAliveC2S), id, rtt);
+        const uint64_t id = reader.ReadLong();
+
+        if (m_keepAlivePending.load(std::memory_order_relaxed) &&
+            id == m_keepAliveChallenge.load(std::memory_order_relaxed)) {
+            // MC: latency = (latency * 3 + time) / 4
+            const int32_t time =
+                static_cast<int32_t>(NowMs() - m_keepAliveTime.load(std::memory_order_relaxed));
+            m_latencyMs.store((m_latencyMs.load(std::memory_order_relaxed) * 3 + time) / 4,
+                              std::memory_order_relaxed);
+            m_keepAlivePending.store(false, std::memory_order_relaxed);
         } else {
-            Log::Warning("[ServerConnection %u] Unexpected keep-alive response (ID: %llu, expected: %llu)", 
-                        GetConnectionId(), id, m_lastKeepAliveId);
+            // MC disconnects on an unsolicited or wrong-id echo — unless this
+            // is the singleplayer owner, who is outside the whole mechanism.
+            // The teardown itself is deferred to the tick thread.
+            if (!IsSingleplayerOwner()) {
+                m_pendingTimeoutDisconnect.store(true, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -843,16 +869,25 @@ namespace Server {
         return true;
     }
 
+    // MC's analogue is netty's ReadTimeoutHandler (ServerConnectionListener
+    // .java:67) — a watchdog on inbound BYTES, not on any particular packet.
+    // m_lastPacketReceivedMs is therefore stamped by every inbound frame (see
+    // OnPacketReceived), which is what makes a 30 s window safe; the old 60 s
+    // was generous only because almost nothing refreshed it during PLAY.
+    //
+    // Owner-exempt for the same reason as the keep-alive: MC's integrated
+    // server host is outside these timers, and the local client of a stalled
+    // integrated server is exactly the peer that cannot answer in time.
     bool ServerConnection::IsTimedOut() const {
-        auto now = std::chrono::steady_clock::now();
-        
+        if (IsSingleplayerOwner()) return false;
+
+        const int64_t silentMs = NowMs() - m_lastPacketReceivedMs.load(std::memory_order_relaxed);
         if (m_phase == ConnectionPhase::LOGIN) {
-            return (now - m_lastPacketReceived) > LOGIN_TIMEOUT;
-        } else if (m_phase == ConnectionPhase::PLAY) {
-            // During play, timeout based on last packet received (any packet counts)
-            return (now - m_lastPacketReceived) > (CONNECTION_TIMEOUT * 2);  // Be generous, 60s
+            return silentMs > LOGIN_TIMEOUT_MS;
         }
-        
+        if (m_phase == ConnectionPhase::PLAY) {
+            return silentMs > READ_TIMEOUT_MS;
+        }
         return false;
     }
     
@@ -893,11 +928,11 @@ namespace Server {
                 }
                 break;
                 
-            case PacketId::KeepAliveC2S:
-                if (m_phase == ConnectionPhase::PLAY) {
-                    return std::make_unique<KeepAliveC2SPacket>(reader);
-                }
-                break;
+            // KeepAliveC2S deliberately absent: it is answered inline on the
+            // I/O thread by the registry handler below (MC's handleKeepAlive
+            // carries no ensureRunningOnSameThread), so it must NOT become a
+            // typed packet queued for the tick thread.
+
             
             case PacketId::UseItemOnC2S:
                 if (m_phase == ConnectionPhase::PLAY) {
@@ -938,6 +973,13 @@ namespace Server {
                 if (m_phase == ConnectionPhase::PLAY) {
                     auto data = Network::Serialization::DeserializePlayerAbilitiesC2S(payload);
                     return std::make_unique<Network::Packets::PlayerAbilitiesC2SPacketImpl>(data);
+                }
+                break;
+
+            case PacketId::PlayerPauseC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializePlayerPauseC2S(payload);
+                    return std::make_unique<Network::Packets::PlayerPauseC2SPacketImpl>(data);
                 }
                 break;
 

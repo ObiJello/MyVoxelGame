@@ -27,6 +27,29 @@
 //
 // The 1.501 (not 1.5) is deliberate in MC: the extra thousandth lifts the model
 // clear of the ground plane so a mob standing on a block does not z-fight it.
+//
+// ── Known visual deviations (deliberate, not oversights) ──────────────────
+//
+// * BLOB SHADOWS (MC EntityRenderDispatcher.renderBlockShadow) are not
+//   rendered. MC projects a soft dark quad onto the top faces of the blocks
+//   under the entity, per renderer shadowRadius (0.5 humanoid default,
+//   slime size*0.25, ghast 1.5, ...), alpha fading with height. That needs
+//   per-block ground shape queries from the render loop; skipped rather
+//   than faked with a single floating quad.
+//
+// * WORLD LIGHTING: mobs render FULLBRIGHT. The entity shader has no light
+//   input, and the client's entity-side block access reports a constant
+//   brightness of 15 (ClientLevelBridge — real light data lives in the
+//   chunk-mesh pipeline, not in IBlockAccess). Wiring a per-mob brightness
+//   would need light-engine plumbing, so it is documented instead of
+//   half-done. Note MC itself draws the magma cube, blaze and wither
+//   fullbright (their getBlockLightLevel overrides return 15), so those
+//   three are exact today.
+//
+// * The warden's TENDRIL emissive layer is skipped: its alpha is
+//   tendrilAnimation, which MC drives from vibration game events this port
+//   does not run — the alpha is permanently 0, so MC would draw nothing
+//   either. The other four warden emissive layers are rendered.
 #pragma once
 
 #include "client/renderer/backend/RenderTypes.hpp"
@@ -70,9 +93,10 @@ namespace Render {
         //
         // The sqrt front-loads it: the body is most of the way over within the
         // first few ticks and eases into flat, rather than rotating linearly.
-        // getFlipDegrees() is 90 for everything this port renders (MC overrides
-        // it only for spiders, which flip 180). Public because the player
-        // renderer topples its stick figures with the same curve.
+        // getFlipDegrees() defaults to 90; MC overrides it to 180 for spiders,
+        // silverfish and endermites, and the caller passes that. Public
+        // because the player renderer topples its stick figures with the same
+        // curve.
         static float DeathFlipDegrees(int deathTime, float partialTick,
                                       float flipDegrees = 90.0f) {
             if (deathTime <= 0) return 0.0f;
@@ -89,6 +113,18 @@ namespace Render {
             TextureHandle texture = INVALID_TEXTURE;
             // Sheep carry a second, dyed layer over the base body.
             std::unique_ptr<EntityModel> overlayModel;
+            // MC AgeableMobRenderer's babyModel — the separate baby MESH
+            // (big head, half body), not a shrunken adult. Built on the
+            // first baby seen; null means MC has no baby mesh for this mob
+            // and the uniform-shrink fallback applies.
+            std::unique_ptr<EntityModel> babyModel;
+            std::unique_ptr<EntityModel> babyOverlayModel;
+            bool babyTried = false;
+            // MC PufferfishRenderer's three puff stages — `model` is the
+            // small (deflated) mesh; these are PUFFERFISH_MEDIUM/BIG,
+            // swapped in per frame by the synced puff state.
+            std::unique_ptr<EntityModel> pufferMid;
+            std::unique_ptr<EntityModel> pufferBig;
         };
 
         ModelEntry* GetModelFor(Game::EntityTypeId type);
@@ -98,13 +134,22 @@ namespace Render {
         // camera-relative world space. Shared by the body and by anything
         // parented to it (the bow in a skeleton's hand), so the two can never
         // be composed from different matrices.
+        // `scale` is MC LivingEntityRenderState.scale — the SCALE attribute,
+        // NOT the baby shrink: MC babies render through a separate baby mesh
+        // and this stays 1.0 for them. It carries kBabyScale only for the
+        // fallback baby whose mesh could not be built.
         // `deathFlipDeg` is MC LivingEntityRenderer.setupRotations' death roll,
         // already in degrees (see DeathFlipDegrees) — 0 for a living entity.
+        // `swimPitchDeg`/`swimPivotY` are DrownedRenderer.setupRotations' swim
+        // tilt — a pitch about the mid-box pivot, applied after the death
+        // flip, 0 for everything that is not a swimming drowned.
         static glm::mat4 EntityMatrix(const glm::dvec3& renderPos,
                                       const glm::vec3& cameraPos,
-                                      float bodyRot, float ageScale,
+                                      float bodyRot, float scale,
                                       float deathFlipDeg = 0.0f,
-                                      const glm::vec3& modelScale = glm::vec3(1.0f));
+                                      const glm::vec3& modelScale = glm::vec3(1.0f),
+                                      float swimPitchDeg = 0.0f,
+                                      float swimPivotY = 0.0f);
 
         // Build one mob's posed geometry into `verts`/`idx`, already in world
         // space. Returns the matrix it used.
@@ -113,14 +158,31 @@ namespace Render {
                             const glm::vec3& cameraPos,
                             std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx);
 
-        // Decode + extrude assets/textures/item/bow.png once, into MC item
-        // model space. Returns false if the sprite is missing, in which case
-        // the skeleton simply renders empty-handed rather than not at all.
-        bool EnsureBowGeometry();
+        // One item model's display.thirdperson_righthand block — translation
+        // in sixteenths of a block, rotation in degrees, uniform scale —
+        // exactly as the item JSONs carry them.
+        struct DisplaySpec {
+            glm::vec3 translation;
+            glm::vec3 rotationDeg;
+            float     scale;
+        };
 
-        // Append the bow, posed in the model's right hand.
-        void AppendHeldBow(const EntityModel& model, const glm::mat4& entityMatrix,
-                           std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx);
+        // MC ItemInHandLayer for an arbitrary flat item sprite: hand matrix
+        // from the model, the layer's fixed grip, then the item's display
+        // transform. Returns the sprite's texture (INVALID if unavailable).
+        TextureHandle AppendHeldSprite(const EntityModel& model,
+                                       const glm::mat4& entityMatrix,
+                                       const std::string& itemName,
+                                       const DisplaySpec& spec,
+                                       std::vector<ModelVertex>& verts,
+                                       std::vector<uint32_t>& idx);
+
+        // The drowned's trident: MC renders the trident MODEL in hand (the
+        // trident_in_hand.json display block), not a sprite.
+        TextureHandle AppendHeldTrident(const EntityModel& model,
+                                        const glm::mat4& entityMatrix,
+                                        std::vector<ModelVertex>& verts,
+                                        std::vector<uint32_t>& idx);
 
         ShaderHandle m_shader = INVALID_SHADER;
         BufferHandle m_vertexBuffer = INVALID_BUFFER;
@@ -135,13 +197,31 @@ namespace Render {
         std::unordered_map<uint16_t, ModelEntry> m_models;
         std::unordered_map<std::string, TextureHandle> m_textureCache;
 
-        // The skeleton's bow, extruded once and kept in ITEM MODEL space so
-        // each skeleton only pays a matrix multiply per vertex.
         enum class AssetState : uint8_t { Unloaded, Ready, Failed };
-        AssetState m_bowState = AssetState::Unloaded;
-        std::vector<ModelVertex> m_bowVerts;
-        std::vector<uint32_t>    m_bowIndices;
-        TextureHandle            m_bowTexture = INVALID_TEXTURE;
+        // A TridentModel instance reused for every in-hand trident (the
+        // geometry under its "orient" wrapper is the raw vertical trident).
+        std::unique_ptr<EntityModel> m_heldTridentModel;
+
+        // MC ThrownItemRenderer — snowball, egg, splash potion and the
+        // fireballs render as a camera-facing extruded item sprite at MC's
+        // GROUND display scale (0.5). One cached mesh per item sprite.
+        struct SpriteEntry {
+            AssetState state = AssetState::Unloaded;
+            std::vector<ModelVertex> verts;
+            std::vector<uint32_t>    indices;
+            TextureHandle            texture = INVALID_TEXTURE;
+        };
+        std::unordered_map<std::string, SpriteEntry> m_spriteEntries;
+
+        SpriteEntry* EnsureSpriteGeometry(const std::string& itemName);
+        // Appends the billboarded sprite; returns the texture to batch with,
+        // or INVALID_TEXTURE when nothing was appended.
+        TextureHandle AppendSpriteProjectile(const std::string& itemName,
+                                             const glm::dvec3& renderPos,
+                                             float halfHeight,
+                                             const glm::vec3& cameraPos,
+                                             std::vector<ModelVertex>& verts,
+                                             std::vector<uint32_t>& idx);
 
         // Reused across frames so the per-frame rebuild does not allocate.
         std::vector<ModelVertex> m_verts;

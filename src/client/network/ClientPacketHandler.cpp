@@ -1,9 +1,11 @@
 // File: src/client/network/ClientPacketHandler.cpp
+#include "client/entity/ClientFallingBlocks.hpp"
 #include "ClientPacketHandler.hpp"
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/Player.hpp"
 #include "../entity/RemotePlayerManager.hpp"
 #include "../entity/ItemEntityManager.hpp"
+#include "../entity/XpOrbManager.hpp"
 #include "../entity/ClientMobManager.hpp"
 #include "common/entity/ItemEntity.hpp"   // Game::IsItemEntityId
 #include "common/entity/Entity.hpp"       // Game::IsMobEntityId
@@ -12,6 +14,8 @@
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
 #include "../renderer/gui/ChatScreen.hpp"   // SetServerCommandNames
+#include "../world/LevelLoadTracker.hpp"    // dimension change re-enters the load wait
+#include "../renderer/environment/SkyRenderer.hpp"  // per-dimension sky
 #include <cmath>
 #if ENABLE_PORTAL_GUN
 #include "../portal/ClientPortalManager.hpp"
@@ -69,8 +73,8 @@ namespace Client {
         m_stats.chunksReceived++;
         m_stats.packetsProcessed++;
         
-        Log::Debug("[ClientPacketHandler] Received chunk (%d, %d) with bitmask 0x%X",
-                  packet.chunkX, packet.chunkZ, packet.primaryBitmask);
+        Log::Debug("[ClientPacketHandler] Received chunk (%d, %d) with %zu sections",
+                  packet.chunkX, packet.chunkZ, packet.sections.size());
     }
 
     void ClientPacketHandler::handleChunkUnload(const Network::UnloadChunkS2CPacket& packet) {
@@ -207,8 +211,14 @@ namespace Client {
         // ids. Routing every id at the player map, as this used to, would make
         // a despawning item silently evict a player.
         for (int32_t entityId : packet.entityIds) {
-            if (Game::IsMobEntityId(entityId)) {
-                if (g_clientMobManager) g_clientMobManager->Remove(entityId);
+            if (Game::IsXpOrbEntityId(entityId)) {
+                if (g_xpOrbManager) g_xpOrbManager->Remove(entityId);
+            } else if (Game::IsMobEntityId(entityId)) {
+                if (g_clientFallingBlocks && g_clientFallingBlocks->Owns(entityId)) {
+                    g_clientFallingBlocks->Remove(entityId);
+                } else if (g_clientMobManager) {
+                    g_clientMobManager->Remove(entityId);
+                }
             } else if (Game::IsItemEntityId(entityId)) {
                 if (g_itemEntityManager) g_itemEntityManager->Remove(entityId);
             } else if (g_remotePlayerManager) {
@@ -233,10 +243,18 @@ namespace Client {
     }
 
     void ClientPacketHandler::handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet) {
-        // MC also plays SoundEvents.ITEM_PICKUP here. This engine has no sound
-        // system yet (Game::PlaySound is a logging stub), so the animation goes
-        // out silent — that is the one piece of MC's pickup feedback missing.
-        if (g_itemEntityManager) {
+        // MC also plays SoundEvents.ITEM_PICKUP / EXPERIENCE_ORB_PICKUP here.
+        // This engine has no sound system yet (Game::PlaySound is a logging
+        // stub), so the animation goes out silent — that is the one piece of
+        // MC's pickup feedback missing.
+        //
+        // The packet serves BOTH entity kinds (MC's does too); the id range
+        // says which manager owns it.
+        if (Game::IsXpOrbEntityId(packet.itemEntityId)) {
+            if (g_xpOrbManager) {
+                g_xpOrbManager->TakeOrb(packet.itemEntityId, packet.playerId);
+            }
+        } else if (g_itemEntityManager) {
             g_itemEntityManager->TakeItem(packet.itemEntityId, packet.playerId,
                                           packet.amount);
         }
@@ -253,10 +271,40 @@ namespace Client {
     }
 
     // ========================================================================
+    // EXPERIENCE ORBS
+    // ========================================================================
+
+    void ClientPacketHandler::handleXpOrbSpawn(const Network::XpOrbSpawnS2CPacket& packet) {
+        if (g_xpOrbManager) {
+            g_xpOrbManager->Spawn(packet.entityId, packet.position,
+                                  packet.velocity, packet.value);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleXpOrbMove(const Network::XpOrbMoveS2CPacket& packet) {
+        if (g_xpOrbManager) {
+            for (const auto& e : packet.entries) {
+                g_xpOrbManager->Move(e.entityId, e.position, e.velocity);
+            }
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    // ========================================================================
     // MOB ENTITIES
     // ========================================================================
 
     void ClientPacketHandler::handleAddEntity(const Network::AddEntityS2CPacket& packet) {
+        // Every falling block goes to the compact store — see
+        // ClientFallingBlocks for why the client needs no Mob for them.
+        if (packet.entityType == static_cast<uint16_t>(Game::EntityTypeId::FallingBlock) &&
+            g_clientFallingBlocks) {
+            g_clientFallingBlocks->Spawn(packet.entityId, packet.position, packet.velocity,
+                                         packet.blockStateRaw);
+            m_stats.packetsProcessed++;
+            return;
+        }
         if (g_clientMobManager) {
             g_clientMobManager->Spawn(packet.entityId, packet.entityType, packet.position,
                                       packet.velocity,
@@ -264,7 +312,8 @@ namespace Client {
                                       Game::Mth::UnpackDegrees(packet.xRot),
                                       Game::Mth::UnpackDegrees(packet.yHeadRot),
                                       packet.health, packet.flags, packet.variantData,
-                                      packet.pose, packet.animState);
+                                      packet.pose, packet.animState,
+                                      packet.blockStateRaw);
         }
         m_stats.packetsProcessed++;
     }
@@ -280,6 +329,11 @@ namespace Client {
                     Network::DecodeEntityPos(e.dy),
                     Network::DecodeEntityPos(e.dz));
 
+                if (g_clientFallingBlocks && g_clientFallingBlocks->Owns(e.entityId)) {
+                    g_clientFallingBlocks->MoveDelta(e.entityId, (e.mask & 0x01) != 0, delta,
+                                                     e.onGround);
+                    continue;
+                }
                 g_clientMobManager->MoveDelta(
                     e.entityId, (e.mask & 0x01) != 0, delta, (e.mask & 0x02) != 0,
                     Game::Mth::UnpackDegrees(e.yRot),
@@ -293,7 +347,10 @@ namespace Client {
 
     void ClientPacketHandler::handleEntityPositionSync(
             const Network::EntityPositionSyncS2CPacket& packet) {
-        if (g_clientMobManager) {
+        if (g_clientFallingBlocks && g_clientFallingBlocks->Owns(packet.entityId)) {
+            g_clientFallingBlocks->Teleport(packet.entityId, packet.position, packet.velocity,
+                                            packet.onGround);
+        } else if (g_clientMobManager) {
             g_clientMobManager->Teleport(packet.entityId, packet.position, packet.velocity,
                                          Game::Mth::UnpackDegrees(packet.yRot),
                                          Game::Mth::UnpackDegrees(packet.xRot),
@@ -303,9 +360,24 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::handleEntityPositionSyncBatch(
+            const Network::EntityPositionSyncBatchS2CPacket& packet) {
+        for (const auto& e : packet.entries) {
+            if (g_clientFallingBlocks && g_clientFallingBlocks->Owns(e.entityId)) {
+                g_clientFallingBlocks->Teleport(e.entityId, e.position, e.velocity, e.onGround);
+            } else if (g_clientMobManager) {
+                g_clientMobManager->Teleport(e.entityId, e.position, e.velocity,
+                                             0.0f, 0.0f, 0.0f, e.onGround);
+            }
+        }
+        m_stats.packetsProcessed++;
+    }
+
     void ClientPacketHandler::handleSetEntityMotion(
             const Network::SetEntityMotionS2CPacket& packet) {
-        if (g_clientMobManager) {
+        if (g_clientFallingBlocks && g_clientFallingBlocks->Owns(packet.entityId)) {
+            g_clientFallingBlocks->SetMotion(packet.entityId, packet.velocity);
+        } else if (g_clientMobManager) {
             g_clientMobManager->SetMotion(packet.entityId, packet.velocity);
         }
         m_stats.packetsProcessed++;
@@ -381,24 +453,18 @@ namespace Client {
 #endif
     }
 
+    // UNREACHABLE as of the I/O-thread keep-alive rework. ClientConnection no
+    // longer decodes KeepAliveS2C into a typed packet; it answers on the I/O
+    // thread from a raw registry handler, matching MC's
+    // ClientCommonPacketListenerImpl.handleKeepAlive:145. Kept as a loud
+    // tripwire rather than deleted: if someone re-adds the decode case, the
+    // reply would go out twice and the second one would be an unsolicited echo,
+    // which the server now treats as a disconnect.
     void ClientPacketHandler::handleKeepAlive(uint64_t id) {
-        Log::Debug("[ClientPacketHandler] Received keep-alive with ID: %llu", id);
-        
-        // Send keep-alive response immediately using global NetworkClient
-        if (!g_networkClient) {
-            Log::Warning("[ClientPacketHandler] g_networkClient is null, cannot send keep-alive response");
-        } else if (!g_networkClient->IsConnected()) {
-            Log::Warning("[ClientPacketHandler] Client not connected, cannot send keep-alive response");
-        } else {
-            auto connection = g_networkClient->GetConnection();
-            if (!connection) {
-                Log::Warning("[ClientPacketHandler] Connection is null, cannot send keep-alive response");
-            } else {
-                Log::Debug("[ClientPacketHandler] Sending keep-alive response with ID: %llu", id);
-                connection->SendKeepAliveResponse(id);
-                Log::Info("[ClientPacketHandler] Successfully sent keep-alive response with ID: %llu", id);
-            }
-        }
+        Log::Warning("[ClientPacketHandler] handleKeepAlive reached on the main thread "
+                     "(id %llu) — KeepAliveS2C should be answered on the I/O thread. "
+                     "Did a typed decode case come back?",
+                     static_cast<unsigned long long>(id));
         m_stats.packetsProcessed++;
     }
 
@@ -420,12 +486,35 @@ namespace Client {
         m_player->flyingSpeed  = packet.flyingSpeed;
         m_player->physics.mayFly = packet.mayFly();
 
-        // Flight permission revoked (creative → survival): force-land.
-        // While permitted, the local double-tap toggle stays authoritative
-        // for responsiveness (MC's client also owns abilities.flying).
-        if (!packet.mayFly()) {
+        // MC ClientPacketListener.handlePlayerAbilities:1884 assigns
+        // `abilities.flying = packet.isFlying()` unconditionally, and this used
+        // to skip it so the local double-tap toggle would not fight a stale
+        // server value. That divergence is what made flight not survive a
+        // rejoin: the server restores the saved flag from playerdata, sends it
+        // in the join abilities packet, and the client threw it away — so you
+        // came back falling.
+        //
+        // Applying it is safe because the server only sends this packet at
+        // join, on a game-mode change, and as the corrective reply to a client
+        // claiming flight it may not have. None of those race the toggle.
+        if (packet.mayFly()) {
+            m_player->physics.isFlying = packet.flying();
+        } else {
+            // Flight permission revoked (creative → survival): force-land.
             m_player->physics.isFlying = false;
         }
+
+        // Non-vanilla: noclip is a debug state the client owns outright, so the
+        // only thing the server can do with it is hand back what was saved.
+        // Guarded on a real change because SetNoclip logs and zeroes velocity,
+        // and this packet also arrives on every game-mode change.
+        if (m_player->physics.noclip != packet.noclip()) {
+            m_player->SetNoclip(packet.noclip());
+        }
+
+        // Everything above came FROM the server, so the controller's dirty
+        // check must not treat it as a local toggle and send it back.
+        m_player->abilitiesSyncedFromServer = true;
 
         Log::Info("[ClientPacketHandler] Abilities: gameMode=%u mayFly=%d instabuild=%d invulnerable=%d",
                   packet.gameMode, packet.mayFly() ? 1 : 0,
@@ -449,6 +538,86 @@ namespace Client {
     }
 
     // ========================================================================
+    // DIMENSION CHANGE
+    // ========================================================================
+
+    // Rough analogue of MC ClientPacketListener.handleRespawn, which is what
+    // vanilla runs on a dimension change: everything about the level is
+    // discarded and rebuilt from the packets that follow.
+    void ClientPacketHandler::handleExplode(const Network::ExplodeS2CPacket& packet) {
+        // MC ClientPacketListener.handleExplosion: sound, centre particle,
+        // debris, then the local player's push.
+        // Distance-gated BEFORE the debris loop: SpawnExplosionVisualEffects
+        // runs up to 512 RNG + block-lookup iterations per blast, and the
+        // particle system then culls everything beyond 32 blocks anyway
+        // (MobParticleSystem::kParticleCutoffSq). A mass detonation is
+        // thousands of these packets a tick; paying the loop for blasts whose
+        // particles are discarded on arrival was the client's dominant
+        // cascade cost. Same 32-block radius as the cull, so nothing that
+        // would have been drawn is skipped.
+        constexpr double kVisualCutoffSq = 32.0 * 32.0;
+        const glm::dvec3 toBlast = m_player
+            ? packet.center - glm::dvec3(m_player->physics.position) : glm::dvec3(0.0);
+        const bool nearEnough = !m_player || glm::dot(toBlast, toBlast) <= kVisualCutoffSq;
+        if (Client::g_clientMobManager && nearEnough) {
+            SpawnExplosionVisualEffects(Client::g_clientMobManager->Level(),
+                                        packet.center.x, packet.center.y, packet.center.z,
+                                        packet.radius, packet.small, packet.blockCount);
+        }
+
+        // UNIT CONVERSION, and it is easy to miss: the server computes
+        // knockback in MC's blocks-per-TICK, while PlayerPhysics is
+        // blocks-per-SECOND (see the note at the top of ItemEntity.hpp about
+        // the two conventions). Applying the raw value would be a twentieth of
+        // the intended shove.
+        if (m_player && glm::length(packet.playerKnockback) > 1.0e-6f) {
+            constexpr float kTicksPerSecond = 20.0f;
+            m_player->physics.velocity += packet.playerKnockback * kTicksPerSecond;
+        }
+    }
+
+    void ClientPacketHandler::handleChangeDimension(
+            const Network::ChangeDimensionS2CPacket& packet) {
+        Log::Info("[ClientPacketHandler] Changing dimension to %d (skyLight=%d, ceiling=%d)",
+                  static_cast<int>(packet.dimensionId),
+                  packet.HasSkyLight() ? 1 : 0, packet.HasCeiling() ? 1 : 0);
+
+        // ORDER MATTERS. Chunks first: their sections own GPU buffers, and the
+        // renderers below hold raw pointers into them.
+        //
+        // ClearAllChunks also drops every outstanding block prediction, which
+        // this path needs for its own reason: a prediction is keyed by
+        // position with no dimension, so a late ack would otherwise roll back
+        // into a block in the wrong world.
+        if (Client::g_clientChunkManager) {
+            Client::g_clientChunkManager->ClearAllChunks();
+        }
+
+        // Every entity id is re-issued by the destination dimension's own
+        // managers, which start their counters at the same per-type bases —
+        // so a surviving entity would collide with a new one and the client
+        // would render a Nether zombie wearing an Overworld cow's position.
+        if (Client::g_remotePlayerManager) Client::g_remotePlayerManager->Clear();
+        if (Client::g_itemEntityManager)   Client::g_itemEntityManager->Clear();
+        if (Client::g_xpOrbManager)        Client::g_xpOrbManager->Clear();
+        if (Client::g_clientMobManager)    Client::g_clientMobManager->Clear();
+        if (Client::g_clientFallingBlocks) Client::g_clientFallingBlocks->Clear();
+
+        // The sky is a property of the dimension, not of the player's
+        // settings — the End its starfield, the Nether no sky at all. Applied
+        // before the first chunk arrives so the horizon is never briefly the
+        // wrong world's.
+        ::Render::g_skyRenderer.SetDimension(packet.dimensionId);
+
+        // Go back to waiting for a level. Without this the loading screen has
+        // already been dismissed for the old dimension and the player spends
+        // the arrival standing in an empty void watching chunks pop in.
+        Client::g_levelLoadTracker.StartClientLoad();
+
+        m_stats.packetsProcessed++;
+    }
+
+    // ========================================================================
     // CHUNK BATCH (Adaptive Rate Control)
     // ========================================================================
 
@@ -460,7 +629,7 @@ namespace Client {
     void ClientPacketHandler::handleChunkBatchFinished(int batchSize) {
         m_batchCalculator.onBatchFinished(batchSize);
         float desiredRate = m_batchCalculator.getDesiredChunksPerTick();
-        desiredRate = std::clamp(desiredRate, 0.01f, 64.0f);
+        desiredRate = std::clamp(desiredRate, 0.01f, 256.0f);   // vanilla clamps at 64; our apply is ~10x cheaper than Java's, the 7 ms budget stays the governor
 
         // Send ack back to server
         if (g_networkClient && g_networkClient->IsConnected()) {
@@ -591,6 +760,16 @@ namespace Client {
         } else {
             ::Render::DismissDeathScreen();
         }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleSetExperience(const Network::SetExperienceS2CPacket& packet) {
+        // Mirrors ClientPacketListener.handleSetExperience — the authoritative
+        // XP pair onto the local player; the HUD reads it each frame beside
+        // health and food.
+        if (!m_player) return;
+        m_player->xpProgress = packet.progress;
+        m_player->xpLevel    = static_cast<int>(packet.level);
         m_stats.packetsProcessed++;
     }
 

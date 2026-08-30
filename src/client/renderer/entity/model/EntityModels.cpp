@@ -5,6 +5,8 @@
 #include "common/core/Log.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <initializer_list>
 #include <string>
 
 #include <cmath>
@@ -18,12 +20,40 @@ namespace Render {
         // MC's limb-swing frequency. Appears in every setupAnim below.
         constexpr float kSwingFreq = 0.6662f;
 
-        // Shorthand for one cube on a part.
+        // Shorthand for one cube on a part. The hand-written meshes only ever
+        // use MC's uniform CubeDeformation, so one grow fills all three axes.
         void AddBox(ModelPart* part, float texX, float texY,
                     float ox, float oy, float oz, float sx, float sy, float sz,
                     float grow = 0.0f, bool mirror = false) {
             part->cubes.push_back(CubeDefinition{ ox, oy, oz, sx, sy, sz,
-                                                  texX, texY, grow, mirror });
+                                                  texX, texY,
+                                                  grow, grow, grow, mirror });
+        }
+
+        // MC client/model/BabyModelTransform.apply: each ROOT child's rest
+        // pose is translated, then scaled — and PartPose.scaled multiplies
+        // the offsets AND the pose scale (PartPose.java:30-32), which is how
+        // the shrink composes down through LocalMatrix exactly like MC's
+        // baked baby mesh. Parts below the root keep their own poses.
+        void ApplyBabyTransform(ModelPart& root, bool scaleHead,
+                                float babyYHeadOffset, float babyZHeadOffset,
+                                float babyHeadScale, float babyBodyScale,
+                                float bodyYOffset,
+                                std::initializer_list<std::string_view> headParts) {
+            const float headScale = scaleHead ? 1.5f / babyHeadScale : 1.0f;
+            const float bodyScale = 1.0f / babyBodyScale;
+            for (auto& child : root.children) {
+                const bool isHead =
+                    std::find(headParts.begin(), headParts.end(),
+                              std::string_view(child->name)) != headParts.end();
+                const float s = isHead ? headScale : bodyScale;
+                PartPose& p = child->pose;
+                p.y += isHead ? babyYHeadOffset : bodyYOffset;
+                p.z += isHead ? babyZHeadOffset : 0.0f;
+                p.x *= s; p.y *= s; p.z *= s;
+                p.xScale *= s; p.yScale *= s; p.zScale *= s;
+            }
+            root.ResetPose();
         }
 
         // MC AnimationUtils.bobModelPart — the idle sway on raised zombie and
@@ -81,6 +111,14 @@ namespace Render {
         }
 
         m_root.ResetPose();
+    }
+
+    bool HumanoidModel::BecomeBaby() {
+        // HumanoidModel.BABY_TRANSFORMER (HumanoidModel.java:27). The hat is
+        // a child of the head in MC too (createMesh:67), so the transform
+        // never touches it — only root children move.
+        ApplyBabyTransform(m_root, true, 16.0f, 0.0f, 2.0f, 2.0f, 24.0f, {"head"});
+        return true;
     }
 
     void HumanoidModel::SetupAnim(const EntityRenderState& state) {
@@ -345,6 +383,14 @@ namespace Render {
         m_root.ResetPose();
     }
 
+    bool CowModel::BecomeBaby() {
+        // CowModel.BABY_TRANSFORMER (CowModel.java:16) — the 4-arg
+        // BabyModelTransform ctor, so head/body scales default to 2 and the
+        // body drop to 24 (BabyModelTransform.java:16-18).
+        ApplyBabyTransform(m_root, false, 8.0f, 6.0f, 2.0f, 2.0f, 24.0f, {"head"});
+        return true;
+    }
+
     // ── PigModel ───────────────────────────────────────────────────────────
 
     PigModel::PigModel() {
@@ -361,6 +407,12 @@ namespace Render {
         AddBox(m_head, 16, 16, -2.0f, 0.0f, -9.0f, 4.0f, 3.0f, 1.0f);      // snout
 
         m_root.ResetPose();
+    }
+
+    bool PigModel::BecomeBaby() {
+        // PigModel.BABY_TRANSFORMER (PigModel.java:17).
+        ApplyBabyTransform(m_root, false, 4.0f, 4.0f, 2.0f, 2.0f, 24.0f, {"head"});
+        return true;
     }
 
     // ── SheepModel ─────────────────────────────────────────────────────────
@@ -402,6 +454,14 @@ namespace Render {
         }
 
         m_root.ResetPose();
+    }
+
+    bool SheepModel::BecomeBaby() {
+        // SheepModel.BABY_TRANSFORMER (SheepModel.java:17). MC applies the
+        // same transform to the wool layer (LayerDefinitions'
+        // SHEEP_BABY_WOOL), so this serves the fur instance unchanged.
+        ApplyBabyTransform(m_root, false, 8.0f, 4.0f, 2.0f, 2.0f, 24.0f, {"head"});
+        return true;
     }
 
     void SheepModel::SetupAnim(const EntityRenderState& state) {
@@ -553,6 +613,15 @@ namespace Render {
         m_root.ResetPose();
     }
 
+    bool ChickenModel::BecomeBaby() {
+        // ChickenModel.BABY_TRANSFORMER (ChickenModel.java:19). Its headParts
+        // set also names beak/red_thing, but MC nests both under the head
+        // (createBodyLayer:44-45) and the transform walks root children only,
+        // so those two entries are no-ops there and here alike.
+        ApplyBabyTransform(m_root, false, 5.0f, 2.0f, 2.0f, 1.99f, 24.0f, {"head"});
+        return true;
+    }
+
     void ChickenModel::SetupAnim(const EntityRenderState& state) {
         m_root.ResetPose();
 
@@ -574,7 +643,8 @@ namespace Render {
 
     // ── GeneratedModel ─────────────────────────────────────────────────────
 
-    GeneratedModel::GeneratedModel(std::string_view slug) {
+    GeneratedModel::GeneratedModel(std::string_view slug,
+                                   std::string_view animSlugOverride) {
         const GenModel* gm = FindGenModel(slug);
         if (!gm) {
             Log::Warning("[GeneratedModel] no mesh for '%s'", std::string(slug).c_str());
@@ -593,9 +663,14 @@ namespace Render {
                 ? built[static_cast<size_t>(gp.parent)] : &m_root;
             if (!parent) parent = &m_root;
 
-            ModelPart* p = parent->AddChild(
-                std::string(gp.name),
-                PartPose::OffsetAndRotation(gp.x, gp.y, gp.z, gp.xRot, gp.yRot, gp.zRot));
+            PartPose pose =
+                PartPose::OffsetAndRotation(gp.x, gp.y, gp.z, gp.xRot, gp.yRot, gp.zRot);
+            // The LayerDefinitions mesh scale rides the root part's pose,
+            // exactly as MC's MeshTransformer.scaling leaves it.
+            pose.xScale = gp.xScale;
+            pose.yScale = gp.yScale;
+            pose.zScale = gp.zScale;
+            ModelPart* p = parent->AddChild(std::string(gp.name), pose);
             // MC's setupAnim hides some parts in the default state — see
             // HIDDEN_PARTS in the generator. Nothing here ever shows them
             // again, because the state that would (rolled up, carrying a
@@ -605,9 +680,23 @@ namespace Render {
                 const GenCube& gc = kGenCubes[gp.firstCube + c];
                 p->cubes.push_back(CubeDefinition{
                     gc.ox, gc.oy, gc.oz, gc.sx, gc.sy, gc.sz,
-                    gc.tu, gc.tv, gc.grow, gc.mirror });
+                    gc.tu, gc.tv, gc.growX, gc.growY, gc.growZ, gc.mirror });
             }
             built[static_cast<size_t>(i)] = p;
+        }
+
+        // A baby mesh is animated by the ADULT's compiled program — MC's
+        // AgeableMobRenderer swaps meshes, never setupAnim, and the
+        // BabyModelTransform keeps every part name. The generated row already
+        // carries the adult's clips; only the program lookup needs the base
+        // slug.
+        std::string_view animSlug = animSlugOverride.empty() ? slug
+                                                             : animSlugOverride;
+        constexpr std::string_view kBabySuffix = "_baby";
+        if (animSlugOverride.empty() &&
+            animSlug.size() > kBabySuffix.size() &&
+            animSlug.substr(animSlug.size() - kBabySuffix.size()) == kBabySuffix) {
+            animSlug.remove_suffix(kBabySuffix.size());
         }
 
         // MC's setupAnim turns a head only in SOME models, and the part is
@@ -625,7 +714,7 @@ namespace Render {
 
         // MC's own setupAnim. Covers the head turn (with MC's clamps), the limb
         // swing, and everything else the model writes by hand.
-        if (const AnimProgram* prog = FindAnimProgram(slug)) {
+        if (const AnimProgram* prog = FindAnimProgram(animSlug)) {
             m_setup = SetupAnimProgram::Bake(m_root, *prog);
             // Only drop the plain head turn when the program actually poses the
             // head. A program that compiled some statements but not the head
@@ -651,6 +740,32 @@ namespace Render {
             const GenClipVisibility& gv = kGenClipVis[gm->firstVis + i];
             if (ModelPart* p = m_root.Find(std::string(gv.part))) {
                 m_visRules.push_back(VisRule{ p, gv.animSlot });
+            }
+        }
+
+        // Root-to-"right_arm" chain for RightHandMatrix — resolved once so a
+        // held item is a couple of matrix multiplies per frame. The DFS is
+        // depth-first exactly like ModelPart::Find, so both agree on WHICH
+        // right_arm when a mesh nests one (none do today).
+        {
+            std::vector<const ModelPart*> chain;
+            const std::function<bool(const ModelPart&)> dfs =
+                [&](const ModelPart& part) -> bool {
+                    chain.push_back(&part);
+                    if (part.name == "right_arm") return true;
+                    for (const auto& child : part.children) {
+                        if (dfs(*child)) return true;
+                    }
+                    chain.pop_back();
+                    return false;
+                };
+            if (dfs(m_root)) m_rightArmChain = std::move(chain);
+
+            // MC SkeletonModel.translateToHand shoves the right arm one pixel
+            // outward; every other armed model uses the plain chain.
+            if (slug == "stray" || slug == "bogged" || slug == "parched"
+                || slug == "wither_skeleton") {
+                m_handOffset = glm::vec3(1.0f, 0.0f, 0.0f);
             }
         }
 
@@ -704,6 +819,21 @@ namespace Render {
         }
     } // namespace
 
+    bool GeneratedModel::RightHandMatrix(glm::mat4& out) const {
+        if (m_rightArmChain.empty()) return false;
+        // MC ArmedModel.translateToHand: root.translateAndRotate, then every
+        // part down to the arm. The shove (skeleton family's ±1 pixel) is
+        // folded into the ARM's own matrix, exactly like the hand-written
+        // SkeletonModel::RightHandMatrix.
+        out = glm::mat4(1.0f);
+        for (size_t i = 0; i < m_rightArmChain.size(); ++i) {
+            const bool last = (i + 1 == m_rightArmChain.size());
+            out *= m_rightArmChain[i]->LocalMatrix(last ? m_handOffset
+                                                        : glm::vec3(0.0f));
+        }
+        return true;
+    }
+
     void GeneratedModel::SetupAnim(const EntityRenderState& state) {
         m_root.ResetPose();
 
@@ -750,6 +880,463 @@ namespace Render {
         for (const Animated& a : m_animated) {
             a.part->xRot += std::cos(state.walkAnimationPos * kSwingFreq + a.phase) *
                             a.amplitude * state.walkAnimationSpeed;
+        }
+    }
+
+    // ── PufferfishModel (mid/big puff stages) ──────────────────────────────
+
+    PufferfishModel::PufferfishModel(std::string_view slug)
+        // Pass the SMALL puffer's program as animSlug: it targets
+        // right_fin/left_fin, which these meshes do not have, so it binds to
+        // nothing — but a VALID program suppresses the generic limb-swing
+        // fallback, which would otherwise wag every "*_fin" part on the walk
+        // clock (MC's mid/big fins flap on ageInTicks, not on distance).
+        : GeneratedModel(slug, "pufferfish") {
+        m_leftBlueFin = m_root.Find("left_blue_fin");
+        m_rightBlueFin = m_root.Find("right_blue_fin");
+    }
+
+    void PufferfishModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        // MC PufferfishMidModel.setupAnim / PufferfishBigModel.setupAnim —
+        // identical two statements in both classes.
+        if (m_rightBlueFin) {
+            m_rightBlueFin->zRot =
+                -0.2f + 0.4f * std::sin(state.ageInTicks * 0.2f);
+        }
+        if (m_leftBlueFin) {
+            m_leftBlueFin->zRot =
+                0.2f - 0.4f * std::sin(state.ageInTicks * 0.2f);
+        }
+    }
+
+    // ── ArrowModel ─────────────────────────────────────────────────────────
+
+    ArrowModel::ArrowModel() {
+        m_texWidth = 32.0f;
+        m_texHeight = 32.0f;
+
+        // MC arrow units are 0.05625 blocks; the model pipeline is 1/16
+        // blocks per pixel, so one arrow unit is 0.9 model pixels.
+        constexpr float u = 0.9f;
+
+        // Two nested parts because ModelPart's rotation order is Z-Y-X with X
+        // innermost: the pitch (X rotation, set per frame) must wrap the fixed
+        // 90-degree yaw that turns the +X shaft into the renderer's -Z
+        // "forward", or it would roll the shaft instead of tilting it.
+        m_pivot = m_root.AddChild("pivot", PartPose::Offset(0.0f, 22.0f, 0.0f));
+        ModelPart* yaw = m_pivot->AddChild("yaw",
+            PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f,
+                                        0.0f, kPi * 0.5f, 0.0f));
+
+        // Each flat plane needs a flipped twin: a zero-thickness box maps only
+        // one face onto the artwork, and the twin (rotated a half-turn) shows
+        // the same texels from the other side.
+        const auto flatPair = [&](const char* name, float rotAxisX,
+                                  float texX, float texY,
+                                  float ox, float oy, float oz,
+                                  float sx, float sy, float sz) {
+            ModelPart* front = yaw->AddChild(name, PartPose::Zero());
+            AddBox(front, texX, texY, ox, oy, oz, sx, sy, sz);
+            ModelPart* back = yaw->AddChild(std::string(name) + "_back",
+                PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f,
+                                            rotAxisX ? kPi : 0.0f, 0.0f,
+                                            rotAxisX ? 0.0f : kPi));
+            AddBox(back, texX, texY, ox, oy, oz, sx, sy, sz);
+        };
+
+        // Horizontal shaft plane: 16x5 units in XZ. texOffs (-4.5, 5) lands
+        // the box's TOP face on the shaft strip at (0,5)-(16,10).
+        flatPair("shaft_h", 1.0f, -4.5f, 5.0f,
+                 -7.0f * u, 0.0f, -2.5f * u, 16.0f * u, 0.0f, 5.0f * u);
+
+        // Vertical shaft plane: 16x5 units in XY. texOffs (0,5) lands the
+        // NORTH face on the same strip.
+        flatPair("shaft_v", 0.0f, 0.0f, 5.0f,
+                 -7.0f * u, -2.5f * u, 0.0f, 16.0f * u, 5.0f * u, 0.0f);
+
+        // Tail cross (the fletching): a 5x5-unit YZ plane at the tail. A
+        // zero-WIDTH box's east/west faces are the D x H side pair; texOffs
+        // (0, -4.5) puts the west face on the 5x5 fletching art at (0,0).
+        flatPair("back", 0.0f, 0.0f, -4.5f,
+                 -7.0f * u, -2.5f * u, -2.5f * u, 0.0f, 5.0f * u, 5.0f * u);
+
+        m_root.ResetPose();
+    }
+
+    void ArrowModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        // The arrow's xRot is atan2(vy, horizontal) — positive climbing.
+        // Model pitch is positive nose-down, hence the sign flip.
+        m_pivot->zRot = 0.0f;
+        m_pivot->xRot = -state.xRot * kDegToRad;
+    }
+
+    // ── EvokerFangsModel ───────────────────────────────────────────────────
+
+    EvokerFangsModel::EvokerFangsModel() {
+        m_texWidth = 64.0f;
+        m_texHeight = 32.0f;
+
+        m_base = m_root.AddChild("base", PartPose::Offset(-5.0f, 24.0f, -5.0f));
+        AddBox(m_base, 0, 0, 0.0f, 0.0f, 0.0f, 10.0f, 12.0f, 10.0f);
+
+        // Both jaws share one 4x14x8 plate; the lower one is yawed a half
+        // turn so the two blades face each other.
+        m_upperJaw = m_base->AddChild("upper_jaw",
+            PartPose::OffsetAndRotation(6.5f, 0.0f, 1.0f, 0.0f, 0.0f, 2.042035f));
+        AddBox(m_upperJaw, 40, 0, 0.0f, 0.0f, 0.0f, 4.0f, 14.0f, 8.0f);
+        m_lowerJaw = m_base->AddChild("lower_jaw",
+            PartPose::OffsetAndRotation(3.5f, 0.0f, 9.0f, 0.0f, kPi, 4.2411504f));
+        AddBox(m_lowerJaw, 40, 0, 0.0f, 0.0f, 0.0f, 4.0f, 14.0f, 8.0f);
+    }
+
+    void EvokerFangsModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        const float biteProgress = state.biteProgress;
+        float biteAmount = std::min(biteProgress * 2.0f, 1.0f);
+        biteAmount = 1.0f - biteAmount * biteAmount * biteAmount;
+        m_upperJaw->zRot = kPi - biteAmount * 0.35f * kPi;
+        m_lowerJaw->zRot = kPi + biteAmount * 0.35f * kPi;
+        m_base->y -= (biteProgress + std::sin(biteProgress * 2.7f)) * 7.2f;
+
+        float preScale = 1.0f;
+        if (biteProgress > 0.9f) {
+            preScale *= (1.0f - biteProgress) / 0.1f;
+        }
+        m_root.y = 24.0f - 20.0f * preScale;
+        m_root.xScale = preScale;
+        m_root.yScale = preScale;
+        m_root.zScale = preScale;
+    }
+
+    // ── TridentModel ───────────────────────────────────────────────────────
+
+    TridentModel::TridentModel() {
+        m_texWidth = 32.0f;
+        m_texHeight = 32.0f;
+
+        // Same nesting as ArrowModel: the pivot carries the per-frame pitch,
+        // the yaw child turns +X into the renderer's forward, and the orient
+        // child rolls the vertical trident (spikes at -Y) point-first onto
+        // +X. The trident geometry spans y -4..27, so the parts sit at -11.5
+        // to centre it on the pivot; the pivot itself sits at the entity's
+        // half-height (0.5 blocks tall -> centre 4 px above ground = y 20).
+        m_pivot = m_root.AddChild("pivot", PartPose::Offset(0.0f, 20.0f, 0.0f));
+        ModelPart* yaw = m_pivot->AddChild("yaw",
+            PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f,
+                                        0.0f, kPi * 0.5f, 0.0f));
+        ModelPart* orient = yaw->AddChild("orient",
+            PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f,
+                                        0.0f, 0.0f, kPi * 0.5f));
+        ModelPart* pole = orient->AddChild("pole",
+                                           PartPose::Offset(0.0f, -11.5f, 0.0f));
+
+        // MC TridentModel.createLayer, box for box.
+        AddBox(pole, 0.0f, 6.0f, -0.5f, 2.0f, -0.5f, 1.0f, 25.0f, 1.0f);
+        AddBox(pole, 4.0f, 0.0f, -1.5f, 0.0f, -0.5f, 3.0f, 2.0f, 1.0f);
+        AddBox(pole, 4.0f, 3.0f, -2.5f, -3.0f, -0.5f, 1.0f, 4.0f, 1.0f);
+        AddBox(pole, 0.0f, 0.0f, -0.5f, -4.0f, -0.5f, 1.0f, 4.0f, 1.0f);
+        AddBox(pole, 4.0f, 3.0f, 1.5f, -3.0f, -0.5f, 1.0f, 4.0f, 1.0f,
+               0.0f, /*mirror=*/true);
+
+        m_root.ResetPose();
+    }
+
+    void TridentModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        m_pivot->xRot = -state.xRot * kDegToRad;
+    }
+
+    // ── WitherSkullModel ───────────────────────────────────────────────────
+
+    WitherSkullModel::WitherSkullModel() {
+        m_texWidth = 64.0f;
+        m_texHeight = 64.0f;
+
+        // The 0.3125-block skull's centre sits 2.5 px above ground; the box
+        // spans y -8..0, so the part sits 4 px lower still.
+        m_head = m_root.AddChild("head", PartPose::Offset(0.0f, 25.5f, 0.0f));
+        AddBox(m_head, 0.0f, 35.0f, -4.0f, -8.0f, -4.0f, 8.0f, 8.0f, 8.0f);
+        m_root.ResetPose();
+    }
+
+    void WitherSkullModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        // The renderer's body yaw already turns the skull; only the pitch is
+        // the model's (MC SkullModel.setupAnim xRot).
+        m_head->xRot = -state.xRot * kDegToRad;
+    }
+
+    // ── ShulkerBulletModel ─────────────────────────────────────────────────
+
+    ShulkerBulletModel::ShulkerBulletModel() {
+        m_texWidth = 64.0f;
+        m_texHeight = 32.0f;
+
+        m_main = m_root.AddChild("main", PartPose::Offset(0.0f, 21.5f, 0.0f));
+        AddBox(m_main,  0.0f,  0.0f, -4.0f, -4.0f, -1.0f, 8.0f, 8.0f, 2.0f);
+        AddBox(m_main,  0.0f, 10.0f, -1.0f, -4.0f, -4.0f, 2.0f, 8.0f, 8.0f);
+        AddBox(m_main, 20.0f,  0.0f, -4.0f, -1.0f, -4.0f, 8.0f, 2.0f, 8.0f);
+        m_root.ResetPose();
+    }
+
+    void ShulkerBulletModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        // MC ShulkerBulletRenderer's tumble: yaw sin(t*0.1)*180, pitch
+        // cos(t*0.1)*180, roll sin(t*0.15)*360, at a net 0.75 scale
+        // (scale(-0.5,-0.5,0.5) * 1.5 — the flip is the renderer's usual -1).
+        const float t = state.ageInTicks;
+        m_main->yRot = std::sin(t * 0.1f) * kPi;
+        m_main->xRot = std::cos(t * 0.1f) * kPi;
+        m_main->zRot = std::sin(t * 0.15f) * 2.0f * kPi;
+        m_main->xScale = m_main->yScale = m_main->zScale = 0.75f;
+    }
+
+    // ── LlamaSpitModel ─────────────────────────────────────────────────────
+
+    LlamaSpitModel::LlamaSpitModel() {
+        m_texWidth = 64.0f;
+        m_texHeight = 32.0f;
+
+        // The seven 2x2x2 cubes centre on (1, 1, 1); the inner offset recentres
+        // them on the pivot at the 0.25-block entity's half height (y 22).
+        m_pivot = m_root.AddChild("pivot", PartPose::Offset(0.0f, 22.0f, 0.0f));
+        ModelPart* main = m_pivot->AddChild("main",
+                                            PartPose::Offset(-1.0f, -1.0f, -1.0f));
+        AddBox(main, 0.0f, 0.0f, -4.0f,  0.0f,  0.0f, 2.0f, 2.0f, 2.0f);
+        AddBox(main, 0.0f, 0.0f,  0.0f, -4.0f,  0.0f, 2.0f, 2.0f, 2.0f);
+        AddBox(main, 0.0f, 0.0f,  0.0f,  0.0f, -4.0f, 2.0f, 2.0f, 2.0f);
+        AddBox(main, 0.0f, 0.0f,  0.0f,  0.0f,  0.0f, 2.0f, 2.0f, 2.0f);
+        AddBox(main, 0.0f, 0.0f,  2.0f,  0.0f,  0.0f, 2.0f, 2.0f, 2.0f);
+        AddBox(main, 0.0f, 0.0f,  0.0f,  2.0f,  0.0f, 2.0f, 2.0f, 2.0f);
+        AddBox(main, 0.0f, 0.0f,  0.0f,  0.0f,  2.0f, 2.0f, 2.0f, 2.0f);
+        m_root.ResetPose();
+    }
+
+    void LlamaSpitModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        m_pivot->xRot = -state.xRot * kDegToRad;
+    }
+
+    // ── WindChargeModel ────────────────────────────────────────────────────
+
+    WindChargeModel::WindChargeModel() {
+        m_texWidth = 64.0f;
+        m_texHeight = 32.0f;
+
+        ModelPart* bone = m_root.AddChild("bone",
+                                          PartPose::Offset(0.0f, 21.5f, 0.0f));
+        m_wind = bone->AddChild("wind",
+            PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f, 0.0f, -0.7854f, 0.0f));
+        AddBox(m_wind, 15.0f, 20.0f, -4.0f, -1.0f, -4.0f, 8.0f, 2.0f, 8.0f);
+        AddBox(m_wind,  0.0f,  9.0f, -3.0f, -2.0f, -3.0f, 6.0f, 4.0f, 6.0f);
+        m_windCharge = bone->AddChild("wind_charge", PartPose::Zero());
+        AddBox(m_windCharge, 0.0f, 0.0f, -2.0f, -2.0f, -2.0f, 4.0f, 4.0f, 4.0f);
+        m_root.ResetPose();
+    }
+
+    void WindChargeModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        // MC WindChargeModel.setupAnim — the core and the shroud counter-spin
+        // at 16 degrees per tick. The assignments REPLACE the rest yaw, as
+        // MC's do.
+        m_windCharge->yRot = -state.ageInTicks * 16.0f * kDegToRad;
+        m_wind->yRot = state.ageInTicks * 16.0f * kDegToRad;
+    }
+
+    // ── DragonModel ────────────────────────────────────────────────────────
+
+    DragonModel::DragonModel() : GeneratedModel("ender_dragon") {
+        m_head = m_root.Find("head");
+        m_jaw  = m_head ? m_head->Find("jaw") : nullptr;
+        m_body = m_root.Find("body");
+        for (int i = 0; i < 5; ++i) {
+            m_neck[i] = m_root.Find("neck" + std::to_string(i));
+        }
+        for (int i = 0; i < 12; ++i) {
+            m_tail[i] = m_root.Find("tail" + std::to_string(i));
+        }
+        if (m_body) {
+            m_leftWing     = m_body->Find("left_wing");
+            m_leftWingTip  = m_leftWing ? m_leftWing->Find("left_wing_tip") : nullptr;
+            m_rightWing    = m_body->Find("right_wing");
+            m_rightWingTip = m_rightWing ? m_rightWing->Find("right_wing_tip") : nullptr;
+
+            const char* legs[12] = {
+                "left_front_leg", "left_front_leg_tip", "left_front_foot",
+                "left_hind_leg",  "left_hind_leg_tip",  "left_hind_foot",
+                "right_front_leg", "right_front_leg_tip", "right_front_foot",
+                "right_hind_leg",  "right_hind_leg_tip",  "right_hind_foot",
+            };
+            for (int i = 0; i < 12; ++i) m_leg[i] = m_body->Find(legs[i]);
+        }
+    }
+
+    void DragonModel::PoseLimbs(float bounce, ModelPart* frontLeg, ModelPart* frontTip,
+                                ModelPart* frontFoot, ModelPart* rearLeg,
+                                ModelPart* rearTip, ModelPart* rearFoot) {
+        if (rearLeg)   rearLeg->xRot   = 1.0f + bounce * 0.1f;
+        if (rearTip)   rearTip->xRot   = 0.5f + bounce * 0.1f;
+        if (rearFoot)  rearFoot->xRot  = 0.75f + bounce * 0.1f;
+        if (frontLeg)  frontLeg->xRot  = 1.3f + bounce * 0.1f;
+        if (frontTip)  frontTip->xRot  = -0.5f - bounce * 0.1f;
+        if (frontFoot) frontFoot->xRot = 0.75f + bounce * 0.1f;
+    }
+
+    namespace {
+        // MC Mth.wrapDegrees, local so the dragon math below reads like the
+        // Java (Game::Mth is not included here).
+        float DragonWrapDegrees(float deg) {
+            float r = std::fmod(deg, 360.0f);
+            if (r >= 180.0f) r -= 360.0f;
+            if (r < -180.0f) r += 360.0f;
+            return r;
+        }
+
+        // MC EnderDragonRenderState.getHeadPartYOffset.
+        float DragonHeadPartYOffset(const EntityRenderState& state, int part,
+                                    double bodyY, double partY) {
+            double result;
+            if (state.dragonIsLandingOrTakingOff) {
+                result = static_cast<double>(part) /
+                         std::max(state.dragonDistanceToEgg / 4.0, 1.0);
+            } else if (state.dragonIsSitting) {
+                result = static_cast<double>(part);
+            } else if (part == 6) {
+                result = 0.0;
+            } else {
+                result = partY - bodyY;
+            }
+            return static_cast<float>(result);
+        }
+    } // namespace
+
+    void DragonModel::SetupAnim(const EntityRenderState& state) {
+        // Deliberately NOT GeneratedModel::SetupAnim — the compiled program
+        // holds only the fragments that survived the compiler, and half a
+        // dragon pose is worse than this whole one.
+        m_root.ResetPose();
+        if (!m_head || !m_body || !m_neck[0] || !m_tail[0]) return;
+
+        // MC EnderDragonModel.setupAnim: state.flapTime * 2π. Without dragon
+        // history (a state built for no real dragon) the hover clock — MC's
+        // sitting rate of 0.1/tick — stands in.
+        const bool live = state.hasDragonHistory;
+        const float flapTime =
+            (live ? state.dragonFlapTime : state.ageInTicks * 0.1f) * 2.0f * kPi;
+
+        if (m_jaw) m_jaw->xRot = (std::sin(flapTime) + 1.0f) * 0.2f;
+
+        float bounce = std::sin(flapTime - 1.0f) + 1.0f;
+        bounce = (bounce * bounce + bounce * 2.0f) * 0.05f;
+
+        // The root shift is the reason an unposed dragon sat three blocks off
+        // its hitbox: MC recentres the whole model every frame.
+        m_root.y = (bounce - 2.0f) * 16.0f;
+        m_root.z = -48.0f;
+        m_root.xRot = bounce * 2.0f * kDegToRad;
+
+        // The history reads. The fallback is a constant history — every yaw
+        // and height delta zero — which is MC's own pose for a hover.
+        const auto sampleY = [&](int d) { return live ? state.dragonY[d] : 0.0; };
+        const auto sampleYRot = [&](int d) {
+            return live ? state.dragonYRot[d] : 0.0f;
+        };
+
+        // ── Neck chain (MC setupAnim's first loop) ─────────────────────────
+        const double startY = sampleY(6);
+        const float  startYRot = sampleYRot(6);
+        const float rot2 = DragonWrapDegrees(sampleYRot(5) - sampleYRot(10));
+        const float rot = DragonWrapDegrees(sampleYRot(5) + rot2 / 2.0f);
+
+        float xx = m_neck[0]->x;
+        float yy = m_neck[0]->y;
+        float zz = m_neck[0]->z;
+        for (int i = 0; i < 5; ++i) {
+            ModelPart* neck = m_neck[i];
+            if (!neck) continue;
+            const double pointY = sampleY(5 - i);
+            const float  pointYRot = sampleYRot(5 - i);
+            const float neckXRot =
+                std::cos(static_cast<float>(i) * 0.45f + flapTime) * 0.15f;
+            neck->yRot = DragonWrapDegrees(pointYRot - startYRot) * kDegToRad * 1.5f;
+            neck->xRot = neckXRot +
+                         DragonHeadPartYOffset(state, i, startY, pointY) *
+                             kDegToRad * 1.5f * 5.0f;
+            neck->zRot = -DragonWrapDegrees(pointYRot - rot) * kDegToRad * 1.5f;
+            neck->x = xx;
+            neck->y = yy;
+            neck->z = zz;
+            xx -= std::sin(neck->yRot) * std::cos(neck->xRot) * 10.0f;
+            yy += std::sin(neck->xRot) * 10.0f;
+            zz -= std::cos(neck->yRot) * std::cos(neck->xRot) * 10.0f;
+        }
+
+        // ── Head (MC: historical sample 0) ─────────────────────────────────
+        m_head->x = xx;
+        m_head->y = yy;
+        m_head->z = zz;
+        const double currentY = sampleY(0);
+        const float  currentYRot = sampleYRot(0);
+        m_head->yRot = DragonWrapDegrees(currentYRot - startYRot) * kDegToRad;
+        m_head->xRot =
+            DragonWrapDegrees(
+                DragonHeadPartYOffset(state, 6, startY, currentY)) *
+            kDegToRad * 1.5f * 5.0f;
+        m_head->zRot = -DragonWrapDegrees(currentYRot - rot) * kDegToRad;
+
+        // ── Body bank ──────────────────────────────────────────────────────
+        m_body->zRot = -rot2 * 1.5f * kDegToRad;
+
+        // ── Wings (exact MC waveform) ──────────────────────────────────────
+        if (m_leftWing) {
+            m_leftWing->xRot = 0.125f - std::cos(flapTime) * 0.2f;
+            m_leftWing->yRot = -0.25f;
+            m_leftWing->zRot = -(std::sin(flapTime) + 0.125f) * 0.8f;
+        }
+        if (m_leftWingTip) {
+            m_leftWingTip->zRot = (std::sin(flapTime + 2.0f) + 0.5f) * 0.75f;
+        }
+        if (m_rightWing && m_leftWing) {
+            m_rightWing->xRot = m_leftWing->xRot;
+            m_rightWing->yRot = -m_leftWing->yRot;
+            m_rightWing->zRot = -m_leftWing->zRot;
+        }
+        if (m_rightWingTip && m_leftWingTip) {
+            m_rightWingTip->zRot = -m_leftWingTip->zRot;
+        }
+
+        PoseLimbs(bounce, m_leg[0], m_leg[1], m_leg[2], m_leg[3], m_leg[4], m_leg[5]);
+        PoseLimbs(bounce, m_leg[6], m_leg[7], m_leg[8], m_leg[9], m_leg[10], m_leg[11]);
+
+        // ── Tail chain (MC setupAnim's second loop, samples 12..23 against
+        //    the sample-11 anchor) ───────────────────────────────────────────
+        const double tailStartY = sampleY(11);
+        const float  tailStartYRot = sampleYRot(11);
+        float tailXRot = 0.0f;
+        yy = m_tail[0]->y;
+        zz = m_tail[0]->z;
+        xx = m_tail[0]->x;
+        for (int i = 0; i < 12; ++i) {
+            ModelPart* tail = m_tail[i];
+            if (!tail) continue;
+            const double pointY = sampleY(12 + i);
+            const float  pointYRot = sampleYRot(12 + i);
+            tailXRot += std::sin(static_cast<float>(i) * 0.45f + flapTime) * 0.05f;
+            tail->yRot =
+                (DragonWrapDegrees(pointYRot - tailStartYRot) * 1.5f + 180.0f) *
+                kDegToRad;
+            tail->xRot = tailXRot + static_cast<float>(pointY - tailStartY) *
+                                        kDegToRad * 1.5f * 5.0f;
+            tail->zRot =
+                DragonWrapDegrees(pointYRot - rot) * kDegToRad * 1.5f;
+            tail->x = xx;
+            tail->y = yy;
+            tail->z = zz;
+            yy += std::sin(tail->xRot) * 10.0f;
+            zz -= std::cos(tail->yRot) * std::cos(tail->xRot) * 10.0f;
+            xx -= std::sin(tail->yRot) * std::cos(tail->xRot) * 10.0f;
         }
     }
 

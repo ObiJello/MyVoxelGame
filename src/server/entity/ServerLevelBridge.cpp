@@ -1,20 +1,35 @@
 // File: src/server/entity/ServerLevelBridge.cpp
 #include "server/entity/ServerLevelBridge.hpp"
+#include "common/entity/PrimedTnt.hpp"
+#include "server/entity/ExperienceOrbManager.hpp"
 #include "server/entity/MobManager.hpp"
+#include "server/IntegratedServer.hpp"
+#include "server/world/storage/anvil/PlayerUuid.hpp"
+#include "server/level/ServerLevel.hpp"
 #include "server/player/ServerPlayer.hpp"
 #include "server/session/PlayerSessionManager.hpp"
 #include "server/session/PlayerSession.hpp"
 #include "server/network/ServerConnection.hpp"
 #include "common/network/packets/game/MobEntityPackets.hpp"
 #include "common/core/Mth.hpp"
+#include "common/world/level/Explosion.hpp"
+#include "common/core/TickParallel.hpp"
+#include "common/core/Profiling_Tracy.hpp"
+#include "server/entity/ItemEntityManager.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldDrops.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/entity/BaseContainerBlockEntity.hpp"
+#include "common/world/chunk/Chunk.hpp"
+#include "common/world/math/WorldCoordinates.hpp"
 #include "common/entity/Mob.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <chrono>
 
 namespace Server {
 
@@ -29,6 +44,15 @@ namespace Server {
         // worse — it would show up in spawn caps and the debug counts.
         SetId(entityId);
         SyncFromPlayer();
+
+        // MC Entity.restoreFrom(:3008-3009) — the dimension change's other
+        // half. See ServerPlayer::portalState(): a view is per LEVEL, so this
+        // constructor IS the "entity recreated in the destination", and the
+        // portal cooldown it inherits is the only thing keeping the portal it
+        // just arrived inside from firing straight back.
+        if (m_player) {
+            portal.CopyFrom(m_player->portalState());
+        }
     }
 
     bool PlayerEntityView::IsCreative() const {
@@ -37,6 +61,10 @@ namespace Server {
 
     bool PlayerEntityView::IsSpectator() const {
         return m_player && m_player->getGameMode() == GameMode::SPECTATOR;
+    }
+
+    bool PlayerEntityView::IsAbilityFlying() const {
+        return m_player && m_player->isFlying();
     }
 
     void PlayerEntityView::SyncFromPlayer() {
@@ -64,6 +92,13 @@ namespace Server {
 
     void PlayerEntityView::TickCombatState() {
         TickCombatTimers();
+
+        // MC ticks a player's effects from LivingEntity.baseTick like any
+        // other entity; the view is never BaseTick'ed (the client owns player
+        // movement), so this is where a player's poison damages, regeneration
+        // heals and mining fatigue counts down. Runs AFTER SyncFromPlayer so
+        // the health the ticks read is this tick's truth.
+        TickEffects();
 
         // MC LivingEntity.tickDeath — the corpse's topple clock, counted here
         // for the same reason the hurt timers are: nothing else ticks a view.
@@ -124,8 +159,90 @@ namespace Server {
                 upper = false;
             }
         }
-        m_player->damage(amount, DamageSource::ENTITY_ATTACK, attackerName);
+        // Map the mob-system source onto ServerPlayer's own enum so the death
+        // message tells the truth — a player killed by poison ticks reads
+        // "was killed by magic", not "was slain by".
+        DamageSource playerSource = DamageSource::ENTITY_ATTACK;
+        switch (source) {
+            case Game::MobDamageSource::Magic:
+            case Game::MobDamageSource::Wither:
+                playerSource = DamageSource::MAGIC;
+                break;
+            case Game::MobDamageSource::Fire:
+                playerSource = DamageSource::FIRE;
+                break;
+            // Explosion used to fall through to ENTITY_ATTACK, which made
+            // DamageSource::EXPLOSION unreachable and reported every creeper
+            // kill as "was slain by Creeper" instead of "blew up".
+            case Game::MobDamageSource::Explosion:
+                playerSource = DamageSource::EXPLOSION;
+                break;
+            case Game::MobDamageSource::Fall:
+                playerSource = DamageSource::FALL;
+                break;
+            case Game::MobDamageSource::Drown:
+                playerSource = DamageSource::DROWNING;
+                break;
+            case Game::MobDamageSource::Void:
+                playerSource = DamageSource::VOID_DAMAGE;
+                break;
+            case Game::MobDamageSource::FallingBlock:
+                playerSource = DamageSource::FALLING_BLOCK;
+                break;
+            case Game::MobDamageSource::FallingAnvil:
+                playerSource = DamageSource::FALLING_ANVIL;
+                break;
+            case Game::MobDamageSource::FallingStalactite:
+                playerSource = DamageSource::FALLING_STALACTITE;
+                break;
+            case Game::MobDamageSource::Stalagmite:
+                playerSource = DamageSource::STALAGMITE;
+                break;
+            default:
+                break;
+        }
+        // MC Player.hurtServer's difficulty pass, applied to sources whose
+        // damage type is `"scaling": "always"` — of which EXPLOSION is one.
+        //
+        //     PEACEFUL -> 0, and the hit is DROPPED (MC: `damage == 0 ? false`)
+        //     EASY     -> min(dmg/2 + 1, dmg)
+        //     NORMAL   -> unchanged
+        //     HARD     -> dmg * 3/2
+        //
+        // This is what makes full cover on Peaceful cost nothing. MC's
+        // explosion formula has a flat `+1` floor that lands on every entity in
+        // range regardless of exposure, so without this pass hiding behind
+        // obsidian still took half a heart.
+        if (Game::DamageSourceScalesWithDifficulty(source)) {
+            switch (GetDifficultyOfLevel()) {
+                case Game::Difficulty::Peaceful: amount = 0.0f; break;
+                case Game::Difficulty::Easy:
+                    amount = std::min(amount / 2.0f + 1.0f, amount);
+                    break;
+                case Game::Difficulty::Hard:     amount = amount * 3.0f / 2.0f; break;
+                case Game::Difficulty::Normal:   break;
+            }
+            if (amount == 0.0f) return;   // MC returns false without hurting
+        }
+
+        m_player->damage(amount, playerSource, attackerName);
         m_health = m_player->getHealth();
+    }
+
+    void PlayerEntityView::Heal(float amount) {
+        if (!m_player || m_player->isDead()) return;
+        m_player->heal(amount);
+        m_health = m_player->getHealth();
+    }
+
+    void PlayerEntityView::CauseFoodExhaustion(float amount) {
+        // MC Player.causeFoodExhaustion — HUNGER's per-tick drain.
+        if (m_player) m_player->getFoodData().addExhaustion(amount);
+    }
+
+    void PlayerEntityView::EatFood(int nutrition, float saturationModifier) {
+        // MC FoodData.eat — SATURATION's instant top-up.
+        if (m_player) m_player->getFoodData().eat(nutrition, saturationModifier);
     }
 
     bool PlayerEntityView::Hurt(Game::MobDamageSource source, float amount,
@@ -163,20 +280,254 @@ namespace Server {
         if (bridge) bridge->SendHurtAnimation(GetId(), hurtDir);
     }
 
+    Game::Difficulty PlayerEntityView::GetDifficultyOfLevel() const {
+        // The view's own Level() is the ServerLevelBridge, which knows the
+        // world's difficulty. Null only during teardown.
+        return m_level ? m_level->GetDifficulty() : Game::Difficulty::Normal;
+    }
+
     bool PlayerEntityView::ConsumePendingKnockback(glm::dvec3& out) {
         if (!m_hasPendingKnockback) return false;
         out = m_pendingKnockback;
         m_hasPendingKnockback = false;
         m_pendingKnockback = glm::dvec3(0.0);
+        // Reset the view's velocity too. AddDeltaMovement reports the
+        // ACCUMULATED velocity as the pending push (which is right — several
+        // things can shove you in one tick and the client should get the sum),
+        // but nothing else ever clears it: the player is client-authoritative
+        // for movement, so this view's velocity is never integrated or damped
+        // the way a mob's is. Without this reset every push a player has ever
+        // received stays in the total, and the next one sends the running sum.
+        velocity = glm::dvec3(0.0);
         return true;
     }
 
     // ── ServerLevelBridge ──────────────────────────────────────────────────
 
+    ServerLevelBridge::~ServerLevelBridge() = default;
+
     ServerLevelBridge::ServerLevelBridge(Game::World* world, PlayerSessionManager* sessions)
         : m_world(world), m_sessions(sessions) {}
 
     const Game::IBlockAccess* ServerLevelBridge::Blocks() const { return m_world; }
+
+    uint64_t ServerLevelBridge::BlockWriteEpoch() const {
+        return m_world ? m_world->BlockWriteEpoch() : 0;
+    }
+
+    namespace {
+        // How much of a 50 ms tick may go to detonations. The rest of the tick
+        // still has to run — entities, chunks, packets — and a blast is not
+        // interruptible once started, so the real worst case is this budget
+        // plus one blast. At the measured ~1,295 us per blast that is roughly
+        // 19 detonations a tick, ~380 a second.
+        constexpr auto kExplosionBudget = std::chrono::microseconds(25000);
+    // Ceiling for the tick-proportional budget (see BeginExplosionBudget).
+    constexpr auto kExplosionBudgetMax = std::chrono::microseconds(500000);
+    }
+
+    void ServerLevelBridge::BeginExplosionBudget() {
+        const auto now = std::chrono::steady_clock::now();
+        // How long the REST of the last tick took (everything but the
+        // resolve). When a mass detonation already has the tick at 100 ms of
+        // entity physics, capping blasts at 25 ms means four times as many
+        // ticks — and four times the physics — to get through the pile. Let
+        // the blasts have as long as the rest of the tick did, within
+        // [kExplosionBudget, kExplosionBudgetMax]; on a healthy server the
+        // rest of the tick is a few ms and the floor is what applies.
+        int64_t budgetNs = std::chrono::duration_cast<std::chrono::nanoseconds>(kExplosionBudget).count();
+        if (m_explosionBudgetStart.time_since_epoch().count() != 0) {
+            const int64_t tickNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       now - m_explosionBudgetStart).count();
+            const int64_t otherNs = tickNs - m_lastResolveTotalNs;
+            const int64_t maxNs = std::chrono::duration_cast<std::chrono::nanoseconds>(kExplosionBudgetMax).count();
+            budgetNs = std::clamp<int64_t>(otherNs, budgetNs, maxNs);
+        }
+        m_explosionBudgetStart = now;
+        m_explosionsThisTick.store(0, std::memory_order_relaxed);
+
+        // ── From an elapsed-time gate to a measured count ───────────────────
+        //
+        // The old gate asked "has 25 ms passed since the tick began?" at the
+        // moment a fuse ran out. That worked when the blast ran INLINE right
+        // there. It cannot work now: the cost is paid later, in
+        // ResolveQueuedExplosions, so at gate time the elapsed clock knows
+        // nothing about what has been admitted.
+        //
+        // So the gate is a COUNT, derived from what the last resolve actually
+        // cost per blast. Same contract as before — about 25 ms of tick spent
+        // detonating — but measured rather than sampled, and it re-tunes itself
+        // as blasts get cheaper or dearer (a crater in open air and one eating
+        // into stone differ by several times).
+        if (m_lastBlastCostNs > 0) {
+            // The batched apply has a per-TICK cost that does not scale with
+            // the blast count — one victim gather over the pile, one binning
+            // pass — measured separately as m_lastResolveFixedNs. Dividing the
+            // whole resolve by the count charged that overhead to every blast
+            // and admitted a tenth of what the budget could actually afford.
+            // Budget the marginal cost against what is left after the fixed
+            // part; if the fixed part alone eats the budget, still admit a
+            // useful batch, since the overhead is paid per tick regardless.
+            const int64_t marginalBudget = std::max<int64_t>(
+                budgetNs - m_lastResolveFixedNs, budgetNs / 4);
+            const int64_t allowed = marginalBudget / m_lastBlastCostNs;
+            // Floor of 1 for the same reason the old gate always let the first
+            // blast through: a single detonation dearer than the whole budget
+            // must still happen, or the cascade livelocks with fuses pinned at
+            // zero. Ceiling because the pending vectors are sized by this.
+            m_blastsAllowedThisTick =
+                static_cast<int>(std::clamp<int64_t>(allowed, 1, 8192));
+        } else {
+            // First blasts of a cascade, before any resolve has been
+            // measured: admit a real batch rather than one. A single blast
+            // against a fully stacked pile takes the one-blast path, and it
+            // is the batch path that carries the million-victim machinery.
+            m_blastsAllowedThisTick = 64;
+        }
+    }
+
+    bool ServerLevelBridge::TryBeginExplosion() {
+        // Atomic: primed TNT calls this from the parallel tick batch. The
+        // first claim of the tick is always granted — a single detonation
+        // dearer than the whole budget must still happen, or the cascade
+        // livelocks with fuses pinned at zero.
+        const int n = m_explosionsThisTick.fetch_add(1, std::memory_order_relaxed);
+        return n == 0 || n < m_blastsAllowedThisTick;
+    }
+
+    void ServerLevelBridge::QueueExplosion(const Game::ExplosionParams& p) {
+        // Locked because primed TNT now ticks across the worker pool (see
+        // MobManager::Tick's parallel batch), and this push is the ONE piece of
+        // shared mutable state a TNT's tick reaches. Contended a few thousand
+        // times a tick against work measured in tens of milliseconds.
+        std::lock_guard<std::mutex> lock(m_pendingExplosionsMutex);
+        m_pendingExplosions.push_back(p);
+    }
+
+    void ServerLevelBridge::ResolveQueuedExplosions() {
+        if (m_pendingExplosions.empty()) { m_lastResolveTotalNs = 0; return; }
+        PROFILE_ZONE_N("ResolveExplosions");
+
+        const auto started = std::chrono::steady_clock::now();
+
+        // Thread scheduling decided the push order; entity id decides the APPLY
+        // order. Without this the sequence of Hurts, knockbacks and block
+        // writes would vary run to run for identical input — the blasts would
+        // still all happen, but the world would not be reproducible from a
+        // seed, and a bug found once could not be re-run.
+        std::sort(m_pendingExplosions.begin(), m_pendingExplosions.end(),
+                  [](const Game::ExplosionParams& a, const Game::ExplosionParams& b) {
+                      return (a.source ? a.source->GetId() : 0) <
+                             (b.source ? b.source->GetId() : 0);
+                  });
+
+        const size_t count = m_pendingExplosions.size();
+
+        // ── Phase A: draw the jitter, serially, on this thread ──────────────
+        //
+        // The per-ray power jitter is the only shared mutable state the crater
+        // scan would touch, and JavaRandom is not thread-safe. Drawing it here,
+        // in queue order and at a fixed count per blast, is what lets the scans
+        // run anywhere.
+        //
+        // It does move the whole batch's jitter ahead of the whole batch's drop
+        // rolls, which shifts the RNG stream against a serial detonation — see
+        // the note on Game::ExplosionScanCrater. Deterministic, replayable, and
+        // observable only as different crater raggedness and drop luck.
+        {
+            PROFILE_ZONE_N("ResolveExplosions.Jitter");
+            m_explosionJitter.resize(count * Game::kExplosionRayCount);
+            for (size_t i = 0; i < count * Game::kExplosionRayCount; ++i) {
+                m_explosionJitter[i] = m_random.NextFloat();
+            }
+        }
+
+        // ── Phase B: the crater scans, off the tick thread ──────────────────
+        //
+        // Pure reads of the block field: nothing here writes a block, spawns an
+        // entity or touches the RNG. Phase C is the first thing in a blast that
+        // mutates anything, and it has not run yet — so the field every scan
+        // sees is this tick's, identical for all of them.
+        //
+        // THAT IS A DIVERGENCE and it is deliberate: run serially, blast 2
+        // would march through blast 1's fresh crater and reach further. Batched,
+        // they do not compound within a tick. With tens of blasts a tick in one
+        // pile the difference is a marginally smaller crater per tick, made up
+        // for by the ticks that follow.
+        m_explosionCraters.resize(count);
+        const auto scanStart = std::chrono::steady_clock::now();
+        {
+            PROFILE_ZONE_N("ResolveExplosions.Scan");
+            // Below this the fork/join costs more than the scans save — the
+            // same reasoning as Explosion.cpp's exposure threshold, scaled to a
+            // ~245 us unit of work rather than a ~1.3 us one.
+            constexpr size_t kParallelThreshold = 4;
+            if (count >= kParallelThreshold && Core::ParallelWidth() > 1) {
+                Core::ParallelFor(count, 1, [&](size_t i) {
+                    m_explosionCraters[i] = Game::ExplosionScanCrater(
+                        *this, m_pendingExplosions[i],
+                        m_explosionJitter.data() + i * Game::kExplosionRayCount);
+                });
+            } else {
+                for (size_t i = 0; i < count; ++i) {
+                    m_explosionCraters[i] = Game::ExplosionScanCrater(
+                        *this, m_pendingExplosions[i],
+                        m_explosionJitter.data() + i * Game::kExplosionRayCount);
+                }
+            }
+        }
+
+        const int64_t scanNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - scanStart).count();
+
+        // ── Phase C: apply, serially, in queue order ────────────────────────
+        //
+        // Every mutation a blast makes happens here and in exactly the order it
+        // did before: each Hurt, each AddDeltaMovement, each SetBlock, each
+        // drop roll and each RNG draw they reach. Only the pure half moved.
+        //
+        // Iterated by index rather than by iterator: an apply can prime a TNT
+        // block into a fresh PrimedTnt, which is deferred to DrainSpawned and
+        // cannot queue into this vector — but a range-for would still be a
+        // silent trap for the day something does.
+        {
+            PROFILE_ZONE_N("ResolveExplosions.Apply");
+            if (count >= 2) {
+                m_explosionFixedNs = Game::ExplodeApplyBatch(*this, m_pendingExplosions,
+                                                             m_explosionCraters,
+                                                             &m_explosionBlastNs);
+            } else {
+                Game::ExplodeApply(*this, m_pendingExplosions[0], m_explosionCraters[0]);
+            }
+        }
+
+        // What the next tick's gate is sized from. Measured over the WHOLE
+        // resolve, so the jitter draws and the join overhead are charged to the
+        // blasts that caused them rather than being invisible.
+        const auto elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - started).count();
+        // Fixed part: what the batch spent before any blast-proportional work
+        // (the gather and binning), reported by the apply; zero on the
+        // single-blast path.
+        m_lastResolveTotalNs = elapsedNs;
+        // Marginal cost measured DIRECTLY: the crater scans plus the
+        // block/fire/broadcast tail are the only parts that scale with the
+        // blast count. Everything else — the victim gather, the tables, the
+        // knockback passes — scales with the pile, repeats per tick whatever
+        // is admitted, and lives in the fixed part. A 10 us floor keeps a
+        // batch of trivial air blasts from opening the gate to the cap.
+        const int64_t marginalNs = m_explosionBlastNs > 0 || scanNs > 0
+            ? (m_explosionBlastNs + scanNs) : (elapsedNs - m_explosionFixedNs);
+        m_lastResolveFixedNs = std::min<int64_t>(elapsedNs,
+            std::max<int64_t>(0, elapsedNs - marginalNs));
+        m_lastBlastCostNs = std::max<int64_t>(10000,
+            marginalNs / static_cast<int64_t>(count));
+        m_explosionFixedNs = 0;
+        m_explosionBlastNs = 0;
+
+        m_pendingExplosions.clear();
+        m_explosionCraters.clear();
+    }
 
     int64_t ServerLevelBridge::GetGameTime() const {
         return m_world ? m_world->GetGameTime() : 0;
@@ -200,6 +551,13 @@ namespace Server {
         // that is called by every monster's walk-target scoring (ten rolls per
         // wander) and by every spawn attempt.
         return m_world->CanSeeSky(x, y, z);
+    }
+
+    float ServerLevelBridge::GetBiomeTemperature(int x, int y, int z) const {
+        // MC Biome.getBaseTemperature. Same lookup the natural spawner's
+        // biomeAt lambda makes — World::GetBiome hands back the registry id.
+        if (!m_world) return 0.8f;
+        return Game::BiomeRegistry::Get(m_world->GetBiome(x, y, z)).temperature;
     }
 
     int ServerLevelBridge::GetSkyBrightness(int x, int y, int z) const {
@@ -269,12 +627,27 @@ namespace Server {
 
     void ServerLevelBridge::GetEntitiesInBox(const Game::AABB& box, const Game::Entity* except,
                                              std::vector<Game::Entity*>& out) const {
-        if (m_mobs) m_mobs->CollectInBox(box, except, out);
+        if (m_mobs) m_mobs->CollectInBoxParallel(box, except, out);
 
         // Player views participate in entity queries — BreedGoal does not care,
         // but HurtByTargetGoal's alert scan and the creeper explosion both do.
         for (PlayerEntityView* view : m_playerViewList) {
             if (view == except) continue;
+            // MC EntityGetter.java:29 — the two-arg getEntities is
+            //     getEntities(except, bb, EntitySelector.NO_SPECTATORS)
+            // and EntitySelector.java:26 is `!entity.isSpectator()`. A
+            // spectator is excluded from the LIST, not merely from damage.
+            //
+            // Without this a spectator watching a TNT chain entered
+            // LivingEntity::Hurt once per blast: i-frames armed, hurtTime set,
+            // last-attacker clobbered, and a red flash plus camera tilt from
+            // every explosion. Health survived only because ServerPlayer's
+            // damage bails on gamemode, which is not the same thing.
+            //
+            // NOT a replacement for the separate creative-flying gate in the
+            // explosion knockback path — that is MC's hitPlayers rule
+            // (ServerExplosion.java:198) and still applies.
+            if (view->IsSpectator()) continue;
             if (!view->GetAABB().Intersects(box)) continue;
             out.push_back(view);
         }
@@ -301,6 +674,60 @@ namespace Server {
     void ServerLevelBridge::GetPlayers(std::vector<Game::LivingEntity*>& out) const {
         for (PlayerEntityView* view : m_playerViewList) out.push_back(view);
     }
+    Game::Entity* ServerLevelBridge::ResolveEntity(const Game::Uuid& uuid) const {
+        if (Game::UuidIsNil(uuid)) return nullptr;
+
+        // This level first — the common case, and it is a hash lookup.
+        if (m_mobs) {
+            if (Game::Mob* mob = m_mobs->FindByUuid(uuid)) return mob;
+        }
+
+        // Then every sibling dimension. A saved reference can cross a portal,
+        // and vanilla resolves the same way rather than treating a reference
+        // as level-local.
+        if (g_integratedServer) {
+            Game::Entity* found = nullptr;
+            g_integratedServer->ForEachLevel([&](ServerLevel& level) {
+                if (found) return;
+                if (MobManager* mobs = level.Mobs()) {
+                    if (Game::Mob* mob = mobs->FindByUuid(uuid)) found = mob;
+                }
+            });
+            if (found) return found;
+        }
+        return nullptr;
+    }
+
+    Game::LivingEntity* ServerLevelBridge::ResolvePlayer(const Game::Uuid& uuid) const {
+        if (Game::UuidIsNil(uuid)) return nullptr;
+
+        // Players are keyed by the OFFLINE uuid derived from their name, the
+        // same derivation playerdata/<uuid>.dat uses — so a pet saved with its
+        // owner's uuid finds that owner again on any later session.
+        //
+        // Every level's views are searched, not just this one: an owner may be
+        // standing in another dimension.
+        if (!g_integratedServer) return nullptr;
+
+        Game::LivingEntity* found = nullptr;
+        g_integratedServer->ForEachLevel([&](ServerLevel& level) {
+            if (found) return;
+            ServerLevelBridge* bridge = level.MobLevel();
+            if (!bridge) return;
+            std::vector<Game::LivingEntity*> players;
+            bridge->GetPlayers(players);
+            for (Game::LivingEntity* p : players) {
+                auto* view = dynamic_cast<PlayerEntityView*>(p);
+                if (!view || !view->GetPlayer()) continue;
+                if (Game::Anvil::OfflinePlayerUuid(view->GetPlayer()->getName()) == uuid) {
+                    found = p;
+                    return;
+                }
+            }
+        });
+        return found;
+    }
+
 
     uint32_t ServerLevelBridge::GetHeldItemId(const Game::LivingEntity& player) const {
         const auto* view = dynamic_cast<const PlayerEntityView*>(&player);
@@ -328,6 +755,219 @@ namespace Server {
             Network::Serialization::Serialize(p));
     }
 
+    Game::ILevelWrite* ServerLevelBridge::MutableBlocks() {
+        return m_world;
+    }
+
+    void ServerLevelBridge::OnTntExploded(const glm::ivec3& pos, Game::Entity* igniter) {
+        // MC TntBlock.wasExploded: a TNT block caught in a blast re-primes with
+        // a SHORT random fuse — nextInt(80/4) + 80/8, i.e. 10..29 ticks. The
+        // stagger is the whole reason a 3x3x3 of TNT ripples outward instead of
+        // detonating as one instant sphere.
+        if (!m_world || !m_world->GetTntExplodes()) return;
+
+        auto tnt = std::make_unique<Game::PrimedTnt>(this);
+        tnt->InitPrimed(glm::dvec3(static_cast<double>(pos.x) + 0.5,
+                                   static_cast<double>(pos.y),
+                                   static_cast<double>(pos.z) + 0.5),
+                        igniter);
+        const int base = Game::PrimedTnt::kDefaultFuse;
+        tnt->SetFuse(Random().NextInt(base / 4) + base / 8);
+        AddFreshEntity(std::move(tnt));
+    }
+
+    void ServerLevelBridge::ApplyExplosionsToLooseEntities(
+            const Game::ExplosionParams* const* params, size_t count,
+            const Game::CollisionGrid* occlusion) {
+        auto* server = Server::g_integratedServer.get();
+        if (!server || count == 0) return;
+
+        // Bounds of the whole batch, for the cheap reject; then each loose
+        // entity that survives it is tested against each blast in order —
+        // the same per-blast work as ApplyExplosionToLooseEntities, walked
+        // once per batch instead of once per blast.
+        glm::dvec3 lo(std::numeric_limits<double>::infinity());
+        glm::dvec3 hi(-std::numeric_limits<double>::infinity());
+        for (size_t i = 0; i < count; ++i) {
+            const double reach = static_cast<double>(params[i]->radius) * 2.0;
+            lo = glm::min(lo, params[i]->center - glm::dvec3(reach));
+            hi = glm::max(hi, params[i]->center + glm::dvec3(reach));
+        }
+        const auto outOfReachAll = [&](const glm::dvec3& p) {
+            return p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y ||
+                   p.z < lo.z || p.z > hi.z;
+        };
+        const auto outOfReachOf = [](const Game::ExplosionParams& b, const glm::dvec3& p) {
+            const double reach = static_cast<double>(b.radius) * 2.0;
+            return p.x < b.center.x - reach || p.x > b.center.x + reach ||
+                   p.y < b.center.y - reach || p.y > b.center.y + reach ||
+                   p.z < b.center.z - reach || p.z > b.center.z + reach;
+        };
+
+        if (auto* items = server->GetItemEntities()) {
+            for (auto& [id, item] : items->AllMutable()) {
+                if (item.stack.IsEmpty()) continue;
+                if (outOfReachAll(item.pos)) continue;
+                const double kW = Game::ItemEntity::kWidth;
+                const double kH = Game::ItemEntity::kHeight;
+                for (size_t i = 0; i < count; ++i) {
+                    const Game::ExplosionParams& b = *params[i];
+                    if (outOfReachOf(b, item.pos)) continue;
+                    Game::AABBd box;
+                    box.min = item.pos - glm::dvec3(kW * 0.5, 0.0, kW * 0.5);
+                    box.max = box.min + glm::dvec3(kW, kH, kW);
+                    const Game::ExplosionImpact impact =
+                        Game::ComputeExplosionImpact(*this, b, item.pos, box, occlusion);
+                    if (!impact.inRange) continue;
+                    item.vel += impact.knockback;
+                    item.needsSync = true;
+                    if (impact.damage > 0.0f) {
+                        item.health -= static_cast<int>(impact.damage);
+                        if (item.health <= 0) { item.stack.Clear(); break; }
+                    }
+                }
+            }
+        }
+
+        if (auto* orbs = server->GetXpOrbs()) {
+            for (auto& [id, orb] : orbs->AllMutable()) {
+                if (outOfReachAll(orb.pos)) continue;
+                for (size_t i = 0; i < count; ++i) {
+                    const Game::ExplosionParams& b = *params[i];
+                    if (outOfReachOf(b, orb.pos)) continue;
+                    Game::AABBd box;
+                    box.min = orb.pos - glm::dvec3(0.25, 0.0, 0.25);
+                    box.max = box.min + glm::dvec3(0.5, 0.5, 0.5);
+                    const Game::ExplosionImpact impact =
+                        Game::ComputeExplosionImpact(*this, b, orb.pos, box, occlusion);
+                    if (impact.inRange) orb.vel += impact.knockback;
+                }
+            }
+        }
+    }
+
+    void ServerLevelBridge::ApplyExplosionToLooseEntities(
+            const Game::ExplosionParams& params,
+            const Game::CollisionGrid* occlusion) {
+        auto* server = Server::g_integratedServer.get();
+        if (!server) return;
+
+        // Cheap bounds reject, hoisted out of both loops below.
+        //
+        // Neither manager has a spatial index — both store a flat
+        // unordered_map — so this pass is O(all loose entities) per blast no
+        // matter what. What it must NOT be is O(all loose entities) x
+        // sqrt + AABB construction + ComputeExplosionImpact call, which is what
+        // it was: a world already full of dropped items (which is exactly what
+        // a world you have blown up a lot looks like) paid that for every
+        // single blast, and a TNT chain is hundreds of blasts.
+        //
+        // Three comparisons per axis reject everything outside the blast's
+        // reach before any of that runs. The real fix is an index on the item
+        // manager; this makes the constant small enough that it stops
+        // mattering first.
+        const double reach = static_cast<double>(params.radius) * 2.0;
+        const glm::dvec3 lo = params.center - glm::dvec3(reach);
+        const glm::dvec3 hi = params.center + glm::dvec3(reach);
+        const auto outOfReach = [&](const glm::dvec3& p) {
+            return p.x < lo.x || p.x > hi.x ||
+                   p.y < lo.y || p.y > hi.y ||
+                   p.z < lo.z || p.z > hi.z;
+        };
+
+        // Dropped items: MC ItemEntity.hurtServer subtracts the damage from a
+        // health of 5 and discards at zero, so anything close to a TNT is gone.
+        // Clearing the stack is this manager's own "destroyed" signal — its
+        // tick sweeps empty entities and broadcasts the removal (see step 4 of
+        // ItemEntityManager::Tick), so the client is told without a second
+        // removal path.
+        if (auto* items = server->GetItemEntities()) {
+            for (auto& [id, item] : items->AllMutable()) {
+                if (item.stack.IsEmpty()) continue;
+                if (outOfReach(item.pos)) continue;
+
+                // Built in DOUBLE, like MC's AABB. The float form narrowed
+                // item.pos, shifting the exposure sample origins away from
+                // vanilla by more the further from the origin you play.
+                const double kW = Game::ItemEntity::kWidth;
+                const double kH = Game::ItemEntity::kHeight;
+                Game::AABBd box;
+                box.min = item.pos - glm::dvec3(kW * 0.5, 0.0, kW * 0.5);
+                box.max = box.min + glm::dvec3(kW, kH, kW);
+
+                const Game::ExplosionImpact impact =
+                    Game::ComputeExplosionImpact(*this, params, item.pos, box, occlusion);
+                if (!impact.inRange) continue;
+
+                item.vel += impact.knockback;
+                item.needsSync = true;
+
+                if (impact.damage > 0.0f) {
+                    item.health -= static_cast<int>(impact.damage);
+                    if (item.health <= 0) item.stack.Clear();
+                }
+            }
+        }
+
+        // XP orbs: MC ExperienceOrb has no explosion damage (its hurtServer
+        // ignores everything but the void), only the push.
+        if (auto* orbs = server->GetXpOrbs()) {
+            for (auto& [id, orb] : orbs->AllMutable()) {
+                if (outOfReach(orb.pos)) continue;
+
+                // Double, as above and as MC.
+                Game::AABBd box;
+                box.min = orb.pos - glm::dvec3(0.25, 0.0, 0.25);
+                box.max = box.min + glm::dvec3(0.5, 0.5, 0.5);
+
+                const Game::ExplosionImpact impact =
+                    Game::ComputeExplosionImpact(*this, params, orb.pos, box, occlusion);
+                if (impact.inRange) orb.vel += impact.knockback;
+            }
+        }
+    }
+
+    void ServerLevelBridge::BroadcastExplosion(const glm::dvec3& center, float radius,
+                                               int blockCount, bool small) {
+        if (!m_sessions) return;
+
+        // MC sends to every player within 64 blocks (distanceToSqr < 4096).
+        // Beyond that the particles would be outside the render distance
+        // anyway, and a big TNT chain would otherwise packet-storm the server.
+        constexpr double kSendRangeSq = 4096.0;
+
+        Network::ExplodeS2CPacket packet;
+        packet.center     = center;
+        packet.radius     = radius;
+        packet.blockCount = blockCount;
+        packet.small      = small;
+
+        for (PlayerEntityView* view : m_playerViewList) {
+            if (!view) continue;
+            if (view->DistanceToSqr(center.x, center.y, center.z) >= kSendRangeSq) continue;
+
+            auto session = m_sessions->GetSessionByConnection(
+                static_cast<uint32_t>(view->GetId()));
+            if (!session) continue;
+            auto* connection = session->GetConnection();
+            if (!connection) continue;
+
+            // The player's push travels IN THIS PACKET rather than as a
+            // velocity write. Player movement is client-authoritative here, so
+            // a server-side velocity on the view would be overwritten by the
+            // player's very next move packet — the client has to apply it.
+            // PlayerEntityView::AddDeltaMovement parked it during the blast's
+            // entity sweep; this drains it.
+            glm::dvec3 knockback(0.0);
+            view->ConsumePendingKnockback(knockback);
+            packet.playerKnockback = glm::vec3(knockback);
+
+            connection->SendPacket(
+                static_cast<uint8_t>(Network::PacketId::ExplodeS2C),
+                Network::Serialization::Serialize(packet));
+        }
+    }
+
     void ServerLevelBridge::DestroyBlock(const glm::ivec3& pos, bool dropResources) {
         if (!m_world) return;
         // MC Level.destroyBlock(pos, dropBlock). The sheep passes false, so
@@ -348,8 +988,82 @@ namespace Server {
         m_world->SetBlock(pos.x, pos.y, pos.z, block, Game::World::UpdateFlags::All);
     }
 
+    void ServerLevelBridge::SetBlockState(const glm::ivec3& pos,
+                                          Game::BlockState state) {
+        if (!m_world) return;
+        // MC flag 2 (update clients, no neighbour shape updates) — the flag
+        // the rabbit's carrot-age write and the bee's crop-growth write carry
+        // in vanilla, and the same combination BlockGrowth's random ticks use.
+        m_world->SetBlock(pos.x, pos.y, pos.z, state,
+                          Game::World::UpdateFlags::MarkDirty);
+    }
+
+    int ServerLevelBridge::GetMinY() const {
+        // MC Level.getMinY() = dimensionType().minY().
+        return m_world ? Game::DimensionMinY(m_world->GetDimension()) : -64;
+    }
+
+    int ServerLevelBridge::GetMaxY() const {
+        // MC Level.getMaxY() = getMinY() + getHeight() - 1, and getHeight() is
+        // the dimension's logical height: nether 128, end 256, overworld 384.
+        if (!m_world) return 319;
+        const Game::DimensionId d = m_world->GetDimension();
+        return Game::DimensionMinY(d) + Game::DimensionLogicalHeight(d) - 1;
+    }
+
     bool ServerLevelBridge::MobGriefing() const {
         return m_world ? m_world->GetDoMobGriefing() : true;
+    }
+
+    Game::Difficulty ServerLevelBridge::GetDifficulty() const {
+        return m_world ? m_world->GetDifficulty() : Game::Difficulty::Normal;
+    }
+
+    // Each forwards to the world's rule, falling back to MC's default when
+    // there is no world — which only happens during teardown.
+    bool ServerLevelBridge::TntExplodes() const {
+        return m_world ? m_world->GetTntExplodes() : true;
+    }
+    bool ServerLevelBridge::DoEntityDrops() const {
+        return m_world ? m_world->GetDoEntityDrops() : true;
+    }
+    bool ServerLevelBridge::TntExplosionDropDecay() const {
+        return m_world ? m_world->GetTntExplosionDropDecay() : false;
+    }
+    bool ServerLevelBridge::BlockExplosionDropDecay() const {
+        return m_world ? m_world->GetBlockExplosionDropDecay() : true;
+    }
+    bool ServerLevelBridge::MobExplosionDropDecay() const {
+        return m_world ? m_world->GetMobExplosionDropDecay() : true;
+    }
+
+    Game::BaseContainerBlockEntity*
+    ServerLevelBridge::GetContainerBlockEntity(const glm::ivec3& pos) const {
+        if (!m_world) return nullptr;
+        const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+        auto chunk = m_world->GetChunk(cp.x, cp.z);
+        if (!chunk) return nullptr;
+        return dynamic_cast<Game::BaseContainerBlockEntity*>(
+            chunk->GetBlockEntity(pos.x - cp.x * 16, pos.y, pos.z - cp.z * 16));
+    }
+
+    void ServerLevelBridge::GetContainerBlockEntities(
+        const glm::ivec3& center, int chunkRange,
+        std::vector<Game::BaseContainerBlockEntity*>& out) const {
+        if (!m_world) return;
+        const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(center.x, center.z);
+        for (int cz = cp.z - chunkRange; cz <= cp.z + chunkRange; ++cz) {
+            for (int cx = cp.x - chunkRange; cx <= cp.x + chunkRange; ++cx) {
+                auto chunk = m_world->GetChunk(cx, cz);
+                if (!chunk) continue;   // MC getChunkNow: unloaded = skipped
+                for (const auto& [local, be] : chunk->GetAllBlockEntities()) {
+                    if (auto* container =
+                            dynamic_cast<Game::BaseContainerBlockEntity*>(be.get())) {
+                        out.push_back(container);
+                    }
+                }
+            }
+        }
     }
 
     void ServerLevelBridge::SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) {
@@ -363,6 +1077,21 @@ namespace Server {
                                   static_cast<int>(std::floor(pos.y)),
                                   static_cast<int>(std::floor(pos.z)));
         Game::DropItemStackNear(blockPos, Game::ItemStack(itemId, count));
+    }
+
+    void ServerLevelBridge::AwardExperience(const glm::dvec3& pos, int amount,
+                                            int32_t /*creditPlayerEntityId*/) {
+        if (amount <= 0) return;
+
+        // MC ExperienceOrb.award: real orb entities at the award point, split
+        // into MC's denominations, that fly to whichever player comes within
+        // 8 blocks. The kill credit no longer matters here — it gated whether
+        // XP drops at all (the callers check that), not who may collect it.
+        auto* server = Server::g_integratedServer.get();
+        if (!server) return;
+        if (auto* orbs = server->GetXpOrbs()) {
+            orbs->Award(pos, amount);
+        }
     }
 
     void ServerLevelBridge::AddFreshEntity(std::unique_ptr<Game::Entity> entity) {
@@ -385,6 +1114,20 @@ namespace Server {
             if (!session) continue;
             ServerPlayer* player = session->GetPlayer();
             if (!player) continue;
+
+            // Only players standing in THIS bridge's dimension.
+            //
+            // Without the filter every level holds a view of every player, and
+            // two things break at once: a Nether mob can target, path toward
+            // and attack an Overworld player standing at the same x/z, and the
+            // per-level portal tick runs each player against all three worlds
+            // — so an Overworld player standing anywhere would be pulled
+            // through a Nether portal that happens to occupy the same
+            // coordinates.
+            if (!m_world ||
+                Game::DimensionFromRaw(session->GetDimensionId()) != m_world->GetDimension()) {
+                continue;
+            }
 
             const uint32_t id = session->GetConnectionId();
             live.push_back(id);

@@ -1,5 +1,6 @@
 // File: src/common/world/block/BlockPlacement.cpp
 #include "BlockPlacement.hpp"
+#include "FallingBlock.hpp"
 #include <algorithm>
 #include "BlockRegistry.hpp"
 #include "RedstoneWire.hpp"
@@ -12,6 +13,8 @@
 #include "../../core/Log.hpp"
 
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -281,6 +284,20 @@ namespace Game {
             }
         }
 
+        // ── Pointed dripstone ─────────────────────────────────────────────
+        // MC PointedDripstoneBlock.getStateForPlacement's `defaultTipDirection
+        // = getNearestLookingVerticalDirection().getOpposite()` — look DOWN at
+        // a floor and you get a stalagmite (tip UP). Only the DEFAULT is
+        // recorded here; whether that orientation actually has support, and
+        // the THICKNESS it takes in the column, both need the world and are
+        // resolved in ComputeWorldPlacementState. Same hint pattern as the
+        // multiface/vine pair below.
+        if (id == BlockID::PointedDripstone) {
+            const Direction tip =
+                Opposite(context.getNearestLookingVerticalDirection());
+            return def.IndexOfSingle("tip_direction", NameOf(tip));
+        }
+
         // ── Multiface (glow lichen, sculk vein, resin clump) ──────────────
         // Same shape of rule as the vine below, different class: six faces
         // instead of five, and every one it wears must hold.
@@ -309,6 +326,34 @@ namespace Game {
         // and the reason both functions exist.
         if (IsStairs(id)) {
             return StairsPlacementState(id, look, clicked, context.getCursorPos().y).Index();
+        }
+
+        // ── Skulls / mob heads ────────────────────────────────────────────
+        // Floor skulls — MC SkullBlock.getStateForPlacement:
+        //   setValue(ROTATION, RotationSegment.convertToSegment(context.getRotation()))
+        // where convertToSegment is SegmentedAnglePrecision(4).fromDegrees:
+        //   normalize(Math.round(yaw * 16 / 360)) — Java Math.round(float) is
+        // floor(x + 0.5), reproduced literally so the 16 segment boundaries
+        // land where vanilla puts them. The result is that a placed skull
+        // looks back at whoever placed it, in 22.5° steps.
+        {
+            BlockID unusedWall;
+            if (SkullWallVariantOf(id, unusedWall)) {
+                const int segment =
+                    static_cast<int>(std::floor(context.playerYaw * (16.0f / 360.0f) + 0.5f)) & 15;
+                return def.IndexOfSingle("rotation", std::to_string(segment));
+            }
+        }
+        // Wall skulls — MC WallSkullBlock.getStateForPlacement walks
+        // getNearestLookingDirections() and takes the first horizontal whose
+        // support block holds. Reduced to the clicked face (the same
+        // approximation the ladder documents above): FACING = the face
+        // clicked, which points the skull out of the wall it hangs on.
+        if (IsWallSkullBlock(id)) {
+            if (IsHorizontal(clicked)) {
+                return def.IndexOfSingle("facing", NameOf(clicked));
+            }
+            return kDefault;
         }
 
         switch (rule) {
@@ -359,6 +404,51 @@ namespace Game {
 
     BlockState ComputePlacementState(BlockID id, const UseOnContext& context) {
         return BlockStates::FromIndex(id, ComputePlacementIndex(id, context));
+    }
+
+    // ── Skulls / mob heads: floor vs wall block choice ──────────────────────
+
+    bool SkullWallVariantOf(BlockID id, BlockID& outWall) {
+        switch (id) {
+            case BlockID::SkeletonSkull:       outWall = BlockID::SkeletonWallSkull;       return true;
+            case BlockID::WitherSkeletonSkull: outWall = BlockID::WitherSkeletonWallSkull; return true;
+            case BlockID::ZombieHead:          outWall = BlockID::ZombieWallHead;          return true;
+            case BlockID::CreeperHead:         outWall = BlockID::CreeperWallHead;         return true;
+            case BlockID::PlayerHead:          outWall = BlockID::PlayerWallHead;          return true;
+            case BlockID::PiglinHead:          outWall = BlockID::PiglinWallHead;          return true;
+            case BlockID::DragonHead:          outWall = BlockID::DragonWallHead;          return true;
+            default:                           return false;
+        }
+    }
+
+    bool IsWallSkullBlock(BlockID id) {
+        switch (id) {
+            case BlockID::SkeletonWallSkull:
+            case BlockID::WitherSkeletonWallSkull:
+            case BlockID::ZombieWallHead:
+            case BlockID::CreeperWallHead:
+            case BlockID::PlayerWallHead:
+            case BlockID::PiglinWallHead:
+            case BlockID::DragonWallHead:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    BlockID SkullPlacementBlock(BlockID held, Direction clickedFace) {
+        // MC StandingAndWallBlockItem.getPlacementState (skull items are one,
+        // attached DOWN): it walks context.getNearestLookingDirections() and
+        // takes the standing block for DOWN and the wall block for the first
+        // horizontal that holds. Clicking the side of a block puts that face
+        // first in the ordering, so the observable rule collapses to: a click
+        // on a horizontal face hangs the wall variant, a click on a top or
+        // bottom face stands the floor variant.
+        BlockID wall;
+        if (IsHorizontal(clickedFace) && SkullWallVariantOf(held, wall)) {
+            return wall;
+        }
+        return held;
     }
 
     namespace {
@@ -469,6 +559,27 @@ namespace Game {
         // segment count is a state now, so all four counts are one BlockID.
         if (IsSegmentedBlock(existingId) && existingId == held) {
             return !secondaryUse && SegmentAmountOf(existing) < 4;
+        }
+
+        // MC SnowLayerBlock.canBeReplaced:
+        //
+        //   int layers = state.getValue(LAYERS);
+        //   if (itemInHand.is(this.asItem()) && layers < 8) { … }
+        //   else return layers == 1;
+        //
+        // Snow is the one `.replaceable()` block whose answer depends on its
+        // STATE. Only a single layer is replaceable by something else; a
+        // 2-to-8-layer pile is not, and a falling block landing on one must
+        // pop as an item rather than overwrite it. The blanket replaceable
+        // flag said yes at every depth, which quietly deleted snow piles.
+        if (existingId == BlockID::Snow) {
+            const int layers = std::atoi(
+                std::string(existing.GetValueByName("layers")).c_str());
+            if (held == existingId && layers < 8) {
+                if (!click.replacingClickedOnBlock) return true;
+                return click.clickedFace == Direction::Up;
+            }
+            return layers == 1;
         }
 
         // MC BlockBehaviour.canBeReplaced:
@@ -628,14 +739,17 @@ namespace Game {
 
     } // namespace
 
-    bool IsFaceSturdyAt(const IBlockAccess& level, const glm::ivec3& p, Direction face) {
-        const BlockID id = level.GetBlock(p.x, p.y, p.z);
+    bool IsStateFaceSturdy(BlockState state, Direction face) {
+        const BlockID id = state.Block();
         if (id == BlockID::Air) return false;
         if (!BlockRegistry::HasCollision(id)) return false;
-        const auto set =
-            BlockRegistry::GetBlockShapeSet(level.GetBlockState(p.x, p.y, p.z));
+        const auto set = BlockRegistry::GetBlockShapeSet(state);
         for (const auto& s : set) if (IsBoxFaceSturdy(s, face)) return true;
         return false;
+    }
+
+    bool IsFaceSturdyAt(const IBlockAccess& level, const glm::ivec3& p, Direction face) {
+        return IsStateFaceSturdy(level.GetBlockState(p.x, p.y, p.z), face);
     }
 
     namespace {
@@ -680,6 +794,15 @@ namespace Game {
         }
         if (IsVineBlock(id)) return VineCanSurvive(level, pos, state);
         if (IsMultifaceBlock(id)) return MultifaceCanSurvive(level, pos, state);
+        // MC ScaffoldingBlock.canSurvive / PointedDripstoneBlock.canSurvive.
+        // Both are STATE-shaped rules that the generic "solid below" heuristic
+        // cannot express: scaffolding is held by a horizontal distance walk,
+        // and a dripstone is held from BEHIND its tip, which for a stalactite
+        // means from above.
+        if (id == BlockID::Scaffolding) return ScaffoldingCanSurvive(level, pos);
+        if (id == BlockID::PointedDripstone) {
+            return PointedDripstoneCanSurvive(level, pos, state);
+        }
         return CanSurviveAt(level, pos, id);
     }
 
@@ -745,6 +868,34 @@ namespace Game {
 
             fallback = multiface ? MultifacePlacementState(level, pos, base, hint)
                                  : VinePlacementState(level, pos, base, hint);
+        }
+
+        // MC ConcretePowderBlock / ScaffoldingBlock / PointedDripstoneBlock
+        // getStateForPlacement. All three need the neighbours and none of them
+        // needs anything from the click beyond what `fallback` already carries,
+        // so they belong on this side of the placement pair.
+        //
+        // Concrete powder is the odd one: it can return a state of a DIFFERENT
+        // BLOCK (the concrete), so callers must take the block from the
+        // returned state rather than from the item they were holding.
+        if (IsConcretePowder(id)) {
+            fallback = ConcretePowderPlacementState(level, pos, fallback);
+        }
+        if (id == BlockID::Scaffolding) {
+            fallback = ScaffoldingPlacementState(level, pos, fallback);
+        }
+        if (id == BlockID::PointedDripstone) {
+            // TIP_DIRECTION is the one part of this that DOES come from the
+            // click, so ComputePlacementState leaves it as a hint in
+            // `fallback` (the multiface/vine pattern above) and it is read
+            // back out here. `secondaryUse` (sneaking) is not plumbed through
+            // ComputeWorldPlacementState, so opposing tips always merge —
+            // which is the non-sneaking default.
+            const bool defaultTipDown =
+                fallback.GetValueByName("tip_direction") == "down";
+            fallback = PointedDripstonePlacementState(level, pos, fallback,
+                                                      defaultTipDown,
+                                                      /*secondaryUse=*/false);
         }
 
         // MC FenceGateBlock.getStateForPlacement's IN_WALL clause. FACING has

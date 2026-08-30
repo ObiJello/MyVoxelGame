@@ -74,39 +74,52 @@ ChunkPipeline ChunkPipeline::createDefault() {
     pipeline.addStep(std::move(structureRefsStep));
 
     // BIOMES - index 3
-    // Reference: ChunkPyramid.java
+    // Reference: ChunkPyramid.java - addRequirement(STRUCTURE_STARTS, 8):
+    // the memoized NoiseChunk (with the structure Beardifier) is first
+    // created at this step, and the Beardifier reads starts up to 8 away.
     ChunkStep biomesStep = ChunkStepBuilder(ChunkStatus::BIOMES, pipeline.getStep(2))
+        .addRequirement(ChunkStatus::STRUCTURE_STARTS, ChunkStatus::MAX_STRUCTURE_DISTANCE)
         .setTask(ChunkStatusTasks::generateBiomes)
         .build();
     pipeline.addStep(std::move(biomesStep));
 
     // NOISE - index 4
-    // Reference: ChunkPyramid.java - blockStateWriteRadius(0)
+    // Reference: ChunkPyramid.java - addRequirement(STRUCTURE_STARTS, 8),
+    // addRequirement(BIOMES, 1), blockStateWriteRadius(0)
     ChunkStep noiseStep = ChunkStepBuilder(ChunkStatus::NOISE, pipeline.getStep(3))
+        .addRequirement(ChunkStatus::STRUCTURE_STARTS, ChunkStatus::MAX_STRUCTURE_DISTANCE)
+        .addRequirement(ChunkStatus::BIOMES, 1)
         .setBlockStateWriteRadius(0)
         .setTask(ChunkStatusTasks::generateNoise)
         .build();
     pipeline.addStep(std::move(noiseStep));
 
     // SURFACE - index 5
-    // Reference: ChunkPyramid.java - blockStateWriteRadius(0)
+    // Reference: ChunkPyramid.java - addRequirement(STRUCTURE_STARTS, 8),
+    // addRequirement(BIOMES, 1), blockStateWriteRadius(0)
     ChunkStep surfaceStep = ChunkStepBuilder(ChunkStatus::SURFACE, pipeline.getStep(4))
+        .addRequirement(ChunkStatus::STRUCTURE_STARTS, ChunkStatus::MAX_STRUCTURE_DISTANCE)
+        .addRequirement(ChunkStatus::BIOMES, 1)
         .setBlockStateWriteRadius(0)
         .setTask(ChunkStatusTasks::generateSurface)
         .build();
     pipeline.addStep(std::move(surfaceStep));
 
     // CARVERS - index 6
-    // Reference: ChunkPyramid.java - blockStateWriteRadius(0)
+    // Reference: ChunkPyramid.java - addRequirement(STRUCTURE_STARTS, 8),
+    // blockStateWriteRadius(0)
     ChunkStep carversStep = ChunkStepBuilder(ChunkStatus::CARVERS, pipeline.getStep(5))
+        .addRequirement(ChunkStatus::STRUCTURE_STARTS, ChunkStatus::MAX_STRUCTURE_DISTANCE)
         .setBlockStateWriteRadius(0)
         .setTask(ChunkStatusTasks::generateCarvers)
         .build();
     pipeline.addStep(std::move(carversStep));
 
     // FEATURES - index 7
-    // Reference: ChunkPyramid.java - addRequirement(CARVERS, 1), blockStateWriteRadius(1)
+    // Reference: ChunkPyramid.java - addRequirement(STRUCTURE_STARTS, 8),
+    // addRequirement(CARVERS, 1), blockStateWriteRadius(1)
     ChunkStep featuresStep = ChunkStepBuilder(ChunkStatus::FEATURES, pipeline.getStep(6))
+        .addRequirement(ChunkStatus::STRUCTURE_STARTS, ChunkStatus::MAX_STRUCTURE_DISTANCE)
         .addRequirement(ChunkStatus::CARVERS, 1)
         .setBlockStateWriteRadius(1)
         .setTask(ChunkStatusTasks::generateFeatures)

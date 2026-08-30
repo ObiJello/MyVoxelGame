@@ -1,8 +1,12 @@
+#include <unordered_map>
+#include <cstdint>
 #include "levelgen/feature/TreeFeature.h"
 #include "levelgen/feature/rootplacers/RootPlacer.h"
 #include "world/level/block/blocks/BushBlock.h"
 #include "world/level/block/blocks/VineBlock.h"
 #include "world/level/block/blocks/MossyCarpetBlock.h"
+#include "levelgen/structure/TemplateEngine.h"
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
@@ -16,6 +20,24 @@
 namespace minecraft {
 namespace levelgen {
 namespace feature {
+
+namespace {
+// Java: `instanceof` is a class-pointer compare; dynamic_cast measured 10% of
+// tree placement (2026-08-30). Class membership of a Block never changes, so
+// it is resolved once per Block per thread.
+enum : uint8_t { kIsMossyCarpet = 1, kIsVine = 2, kIsBush = 4 };
+uint8_t blockClassFlags(world::level::block::Block* block) {
+    thread_local std::unordered_map<world::level::block::Block*, uint8_t> memo;
+    auto it = memo.find(block);
+    if (it != memo.end()) return it->second;
+    uint8_t f = 0;
+    if (dynamic_cast<world::level::block::MossyCarpetBlock*>(block)) f |= kIsMossyCarpet;
+    if (dynamic_cast<world::level::block::VineBlock*>(block)) f |= kIsVine;
+    if (dynamic_cast<world::level::block::BushBlock*>(block)) f |= kIsBush;
+    memo.emplace(block, f);
+    return f;
+}
+} // namespace
 
 namespace {
 
@@ -177,11 +199,41 @@ void updateLeaves(
     // flowers) reacts to DOWN with a canSurvive check.
     auto shapeUpdateAt = [&](const core::BlockPos& pos, core::Direction direction) {
         BlockState* state = level.getBlockState(pos);
+        // Structure-placed families (never natural): the tree sweep in Java
+        // runs their BlockState.updateShape virtuals - e.g., a mansion garden
+        // wall under a grown canopy turns its connections TALL. Route through
+        // the template engine's gate-verified dispatch. Excludes the natural
+        // moss carpets (handled by the MossyCarpetBlock branch below).
+        if (state && !state->isAir()) {
+            const std::string& sid = state->getIdentifier();
+            auto ends = [&](const char* suffix) {
+                size_t n = std::strlen(suffix);
+                return sid.size() > n && sid.compare(sid.size() - n, n, suffix) == 0;
+            };
+            bool structureFamily = ends("_wall") || ends("_fence") || ends("_pane")
+                || ends("_stairs") || ends("_door") || ends("_trapdoor")
+                || ends("_bed") || ends("_wall_sign")
+                || (ends("_carpet") && sid != "minecraft:moss_carpet"
+                    && sid != "minecraft:pale_moss_carpet")
+                || sid == "minecraft:iron_bars" || sid == "minecraft:torch"
+                || sid == "minecraft:redstone_torch" || sid == "minecraft:wall_torch"
+                || sid == "minecraft:ladder" || sid == "minecraft:rail";
+            if (structureFamily) {
+                core::BlockPos neighborPos2 = pos.relative(direction, 1);
+                BlockState* updated = structure::TemplateEngine::updateShapeForBlock(
+                    state, &level, pos, direction, neighborPos2,
+                    level.getBlockState(neighborPos2));
+                if (updated != state) {
+                    level.setBlock(pos, updated, 2);
+                }
+                return;
+            }
+        }
         if (!isDoublePlant(state)) {
             // MossyCarpetBlock.updateShape recalculates wall sides from the
             // (possibly changed) neighbours.
             if (state && !state->isAir()) {
-                if (auto* carpet = dynamic_cast<world::level::block::MossyCarpetBlock*>(state->getBlock())) {
+                if (auto* carpet = (blockClassFlags(state->getBlock()) & kIsMossyCarpet) ? static_cast<world::level::block::MossyCarpetBlock*>(state->getBlock()) : nullptr) {
                     // MossyCarpetBlock.updateShape: !canSurvive -> air, then
                     // side recalc, then !hasFaces -> air.
                     if (!carpet->canSurvive(state, level, pos)) {
@@ -204,7 +256,7 @@ void updateLeaves(
             // when none remain (removes vines orphaned by leaf replacement).
             // DOWN neighbour updates are delegated to super (no-op) in Java.
             if (state && !state->isAir() && direction != core::Direction::DOWN) {
-                if (auto* vine = dynamic_cast<world::level::block::VineBlock*>(state->getBlock())) {
+                if (auto* vine = (blockClassFlags(state->getBlock()) & kIsVine) ? static_cast<world::level::block::VineBlock*>(state->getBlock()) : nullptr) {
                     BlockState* updated = vine->getUpdatedStateForShapeUpdate(state, level, pos);
                     if (!updated) {
                         updated = static_cast<BlockState*>(world::level::block::Blocks::AIR->defaultBlockState());
@@ -225,8 +277,8 @@ void updateLeaves(
             // a log must orphan the propagule).
             if (state && !state->isAir()) {
                 bool isVegetation =
-                    dynamic_cast<world::level::block::BushBlock*>(state->getBlock()) != nullptr ||
-                    state->getBlockName() == "minecraft:mangrove_propagule";
+                    (blockClassFlags(state->getBlock()) & kIsBush) != 0 ||
+                    state->getBlock() == world::level::block::Blocks::MANGROVE_PROPAGULE;
                 if (isVegetation && !state->getBlock()->canSurvive(state, level, pos)) {
                     level.setBlock(pos,
                         static_cast<BlockState*>(world::level::block::Blocks::AIR->defaultBlockState()),
@@ -250,12 +302,27 @@ void updateLeaves(
                     static_cast<BlockState*>(world::level::block::Blocks::AIR->defaultBlockState()),
                     2);
             }
-        } else if (lower && direction == core::Direction::DOWN) {
-            // VegetationBlock.canSurvive for the lower half: dirt-tag or farmland.
-            BlockState* below = level.getBlockState(pos.below());
-            bool survives = below && !below->isAir() &&
-                (::minecraft::levelgen::blockpredicates::matchesBlockTagName(below, "minecraft:dirt") ||
-                 below->getIdentifier() == "minecraft:farmland");
+        } else {
+            // Reference: DoublePlantBlock.updateShape falls through to
+            // VegetationBlock.updateShape, which re-checks canSurvive on ANY
+            // neighbour-face direction in 26.1 (a village oak's trunk face
+            // update must kill tall_grass left on a street's dirt_path).
+            bool survives;
+            if (lower) {
+                // VegetationBlock.canSurvive: dirt-tag or farmland below.
+                BlockState* below = level.getBlockState(pos.below());
+                survives = below && !below->isAir() &&
+                    (::minecraft::levelgen::blockpredicates::matchesBlockTagName(below, "minecraft:dirt") ||
+                     below->getIdentifier() == "minecraft:farmland");
+            } else {
+                // Upper half survives on its own lower half.
+                BlockState* below = level.getBlockState(pos.below());
+                survives = below && !below->isAir() &&
+                    below->getIdentifier() == state->getIdentifier() &&
+                    below->hasProperty(BlockStateProperties::DOUBLE_BLOCK_HALF) &&
+                    below->getValue(*BlockStateProperties::DOUBLE_BLOCK_HALF).getValue()
+                        == DoubleBlockHalf::LOWER;
+            }
             if (!survives) {
                 level.setBlock(pos,
                     static_cast<BlockState*>(world::level::block::Blocks::AIR->defaultBlockState()),

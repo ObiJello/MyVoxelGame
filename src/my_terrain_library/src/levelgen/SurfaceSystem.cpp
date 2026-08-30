@@ -27,7 +27,7 @@ using Blocks = minecraft::world::level::block::Blocks;
 
 // Reference: SurfaceSystem.java lines 295-307
 void SurfaceSystem::makeBands(
-    XoroshiroRandomSource& random,
+    ::minecraft::random::AnyRandomSource& random,
     std::vector<BlockState*>& clayBands,
     int32_t baseWidth,
     BlockState* state
@@ -48,7 +48,7 @@ void SurfaceSystem::makeBands(
 }
 
 // Reference: SurfaceSystem.java lines 262-293
-std::vector<BlockState*> SurfaceSystem::generateBands(XoroshiroRandomSource& random) {
+std::vector<BlockState*> SurfaceSystem::generateBands(::minecraft::random::AnyRandomSource& random) {
     // Line 263: BlockState[] clayBands = new BlockState[192];
     std::vector<BlockState*> clayBands(192, minecraft::world::level::block::Blocks::TERRACOTTA->defaultBlockState());
 
@@ -95,7 +95,7 @@ SurfaceSystem::SurfaceSystem(
     RandomState* randomState,
     BlockState* defaultBlock,
     int32_t seaLevel,
-    random::PositionalRandomFactory* noiseRandom
+    ::minecraft::random::AnyPositionalRandomFactory* noiseRandom
 )
     : m_defaultBlock(defaultBlock)
     , m_seaLevel(seaLevel)
@@ -115,7 +115,7 @@ SurfaceSystem::SurfaceSystem(
 
     // Reference: SurfaceSystem.java line 56
     // Generate clay bands using positional random
-    XoroshiroRandomSource clayBandRandomValue = m_noiseRandom->fromHashOf("minecraft:clay_bands");
+    ::minecraft::random::AnyRandomSource clayBandRandomValue = m_noiseRandom->fromHashOf("minecraft:clay_bands");
     m_clayBands = generateBands(clayBandRandomValue);
 
     // Reference: SurfaceSystem.java lines 57-64
@@ -144,7 +144,7 @@ int32_t SurfaceSystem::getSurfaceDepth(int32_t blockX, int32_t blockZ) const {
     );
 
     // return (int)(noiseValue * 2.75 + 3.0 + this.noiseRandom.at(blockX, 0, blockZ).nextDouble() * 0.25);
-    XoroshiroRandomSource posRandom = m_noiseRandom->at(blockX, 0, blockZ);
+    ::minecraft::random::AnyRandomSource posRandom = m_noiseRandom->at(blockX, 0, blockZ);
     return static_cast<int32_t>(noiseValue * 2.75 + 3.0 + posRandom.nextDouble() * 0.25);
 }
 
@@ -473,7 +473,7 @@ void SurfaceSystem::frozenOceanExtension(
     double extensionTop = top;
 
     // Reference: lines 243-246
-    XoroshiroRandomSource random = m_noiseRandom->at(blockX, 0, blockZ);
+    ::minecraft::random::AnyRandomSource random = m_noiseRandom->at(blockX, 0, blockZ);
     int32_t maxSnowDepth = 2 + random.nextInt(4);
     int32_t minSnowHeight = m_seaLevel + 18 + random.nextInt(10);
     int32_t snowDepth = 0;

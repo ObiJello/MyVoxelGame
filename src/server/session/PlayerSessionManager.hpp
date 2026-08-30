@@ -2,6 +2,7 @@
 #pragma once
 
 #include "PlayerSession.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include <unordered_map>
 #include <memory>
@@ -120,14 +121,17 @@ namespace Server {
 
         // === WORLD UPDATES ===
 
-        // Notify all watching players of a block change
+        // Notify all watching players of a block change.
+        // `dimension` scopes the broadcast — see ForEachSessionWatching.
         void BroadcastBlockChange(
+            Game::DimensionId dimension,
             int worldX, int worldY, int worldZ,
             Game::BlockID newBlock
         );
-        
+
         // Notify all watching players of section changes
         void BroadcastSectionChanges(
+            Game::DimensionId dimension,
             Game::Math::ChunkPos chunk,
             int section,
             const std::vector<Network::MultiBlockChangeS2CPacket::BlockChange>& changes
@@ -203,11 +207,36 @@ namespace Server {
         using LeaveCallback = std::function<void(uint32_t playerId, const std::string& reason)>;
         void SetLeaveCallback(LeaveCallback callback);
 
+        // Hand over the OVERWORLD's ticket and status managers, and add the
+        // spawn tickets that depend on them.
+        //
+        // Separate from Initialize because those two managers belong to a
+        // ServerLevel now, and a ServerLevel needs this manager to build its
+        // mob bridge — so the manager has to exist first and be completed
+        // afterwards. Per-dimension resolution goes through
+        // TicketsForDimension instead.
+        void SetLevelServices(ChunkTicketManager* tickets, ChunkStatusManager* status);
+
     private:
+        // The ticket manager for one dimension, falling back to the
+        // overworld's when that dimension has never been visited.
+        //
+        // Tickets are what keep chunks loaded, and they are per level: a
+        // player in the Nether adding tickets to the Overworld's manager pins
+        // Overworld chunks they cannot see while leaving the Nether chunks
+        // under their feet unloaded.
+        //
+        // Takes the raw dimension id rather than a player id ON PURPOSE — a
+        // player-id form would have to look the session up, and two of the
+        // three callers already hold m_sessionMutex, which is not recursive.
+        ChunkTicketManager* TicketsForDimension(int rawDimensionId) const;
+
         // Configuration
         Config m_config;
-        
-        // Dependencies
+
+        // Dependencies. These two are the OVERWORLD's — see
+        // TicketsForDimension for the per-dimension path, and SetLevelServices
+        // for why they arrive after Initialize.
         ChunkTicketManager* m_ticketManager = nullptr;
         ChunkStatusManager* m_statusManager = nullptr;
         SendScheduler* m_sendScheduler = nullptr;
@@ -237,29 +266,42 @@ namespace Server {
         
         // === INTERNAL METHODS ===
         
-        // Update tickets for a player's simulation distance
-        void UpdatePlayerTickets(
-            uint32_t playerId,
-            Game::Math::ChunkPos oldAnchor,
-            Game::Math::ChunkPos newAnchor,
-            int simulationDistance
-        );
+        // Update tickets for a player's simulation distance.
+        //
+        // `rawDimensionId` is the player's CURRENT dimension, passed in rather
+        // than looked up: the lookup would need m_sessionMutex, and this runs
+        // from ProcessSessionTick which already holds a session alive by
+        // shared_ptr — see TicketsForDimension.
+        void UpdatePlayerTickets(uint32_t playerId,
+                                 int rawDimensionId,
+                                 Game::Math::ChunkPos chunk,
+                                 int simulationDistance);
         
     public:
-        // Run `fn` for every session whose tracking view contains `chunk`.
+        // Run `fn` for every session IN `dimension` whose tracking view
+        // contains `chunk`.
         //
         // This is the ONLY answer to "who is watching this chunk" — MC
         // ChunkMap.onChunkReadyToSend does the same walk over its player list
         // rather than maintaining a reverse index. `fn` runs OUTSIDE the
         // session lock (the matches are snapshotted first), so a callback is
         // free to call back into this manager.
-        void ForEachSessionWatching(Game::Math::ChunkPos chunk,
+        //
+        // The dimension is NOT optional and must never be defaulted: a
+        // tracking view is a set of ChunkPos and a ChunkPos carries no world,
+        // so a player standing at Nether (10, 10) "contains" the Overworld
+        // chunk (10, 10) just as well. Every packet routed through here — the
+        // chunk sends, the block deltas, the item and orb updates — carries no
+        // dimension either, so an unscoped walk applies one world's edit to the
+        // other's identically-numbered chunk.
+        void ForEachSessionWatching(Game::DimensionId dimension, Game::Math::ChunkPos chunk,
                                     const std::function<void(PlayerSession&)>& fn) const;
 
         // Ids of the players watching a chunk. Prefer ForEachSessionWatching
         // where the sessions themselves are wanted — this exists for callers
         // that only need the ids.
-        std::vector<uint32_t> GetChunkWatchers(Game::Math::ChunkPos chunk) const;
+        std::vector<uint32_t> GetChunkWatchers(Game::DimensionId dimension,
+                                               Game::Math::ChunkPos chunk) const;
 
     private:
 

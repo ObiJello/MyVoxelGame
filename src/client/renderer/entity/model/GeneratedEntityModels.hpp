@@ -17,7 +17,9 @@ namespace Render {
         float ox, oy, oz;      // origin, pixels
         float sx, sy, sz;      // size, pixels
         float tu, tv;          // texOffs
-        float grow;            // CubeDeformation
+        // CubeDeformation, per axis — uniform everywhere except the equine
+        // baby legs (AbstractEquineModel's g.extend(0, 5.5, 0)).
+        float growX, growY, growZ;
         bool  mirror;
     };
 
@@ -26,6 +28,10 @@ namespace Render {
         int   parent;          // index into the model's part span, -1 = root
         float x, y, z;         // PartPose offset, pixels
         float xRot, yRot, zRot;
+        // PartPose scale — MC MeshTransformer.scaling lands here (on the
+        // root), never in the cube geometry: UV layout derives from the
+        // unscaled cube size, exactly as in MC.
+        float xScale, yScale, zScale;
         int   firstCube, cubeCount;
         bool  visible;         // false = MC hides it in the default state
     };
@@ -77,7 +83,7 @@ namespace Render {
         int   firstVis,  visCount;
     };
 
-    inline constexpr int kGenModelCount = 81;
+    inline constexpr int kGenModelCount = 120;
     extern const GenModel kGenModels[kGenModelCount];
     extern const GenPart  kGenParts[];
     extern const GenCube  kGenCubes[];
@@ -85,7 +91,7 @@ namespace Render {
     extern const GenClipVisibility kGenClipVis[];
 
     // Mesh for a mob slug, or nullptr when it has a hand-written model class
-    // (or none at all). Linear over ~81 entries, called once per type.
+    // (or none at all). Linear over ~120 entries, called once per type.
     const GenModel* FindGenModel(std::string_view slug);
 
 } // namespace Render

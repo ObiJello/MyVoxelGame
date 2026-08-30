@@ -41,7 +41,12 @@ namespace Game {
         static constexpr float kStuckThresholdDistanceFactor = 0.25f;
 
         // ── Path creation ──────────────────────────────────────────────────
-        std::optional<Path> CreatePath(const glm::ivec3& target, int reachRange);
+        // Virtual because MC's createPath(BlockPos, int) is: ground navigation
+        // projects a mid-air or buried target onto a pathable surface first,
+        // and the wall climber stashes the ultimate ask so its Tick can steer
+        // straight at it when no path exists. All the other overloads funnel
+        // through this one, exactly as MC's do.
+        virtual std::optional<Path> CreatePath(const glm::ivec3& target, int reachRange);
         // MC's three-argument overload. `maxVisitedNodesMultiplier` scales the
         // node budget for ONE search without changing the navigation's own —
         // LongJumpToRandomPos passes 8, because it is asking "could I simply
@@ -54,7 +59,9 @@ namespace Game {
 
         // ── Path following ─────────────────────────────────────────────────
         bool MoveTo(double x, double y, double z, double speedModifier);
-        bool MoveTo(const Entity& target, double speedModifier);
+        // Virtual for WallClimberNavigation, which falls back to steering
+        // STRAIGHT at an unreachable target so the climb can begin.
+        virtual bool MoveTo(const Entity& target, double speedModifier);
         bool MoveTo(std::optional<Path> path, double speedModifier);
 
         void Stop();
@@ -69,13 +76,36 @@ namespace Game {
         void SetCanFloat(bool v);
         bool CanFloat() const;
 
+        // MC GroundPathNavigation.setCanOpenDoors — mirrored here like
+        // canFloat (see SetCanFloat's lazy-evaluator note). Zombies with the
+        // break-doors roll and vindicators are the setters.
+        void SetCanOpenDoors(bool v);
+        bool CanOpenDoors() const;
+
+        // MC PathNavigation.setRequiredPathLength — a floor under the max path
+        // length so a mob can path beyond its FOLLOW_RANGE (the copper golem
+        // asks for 48 to cover its 32-block chest search; GetMaxPathLength
+        // already takes the max). MC's updatePathfinderMaxVisitedNodes half is
+        // skipped: the port sizes the node budget from the base follow range
+        // once, at the lazy pathfinder creation.
+        void SetRequiredPathLength(float length) { m_requiredPathLength = length; }
+
         // NOTE: there is deliberately no public GetNodeEvaluator(). The
         // evaluator does not exist until the first CreatePath, so any caller
         // reaching for it during mob construction gets a null dereference —
         // which is exactly the crash FloatGoal caused. Anything that needs an
         // evaluator flag should mirror it on the navigation, as canFloat does.
 
-        void Tick();
+        // Virtual for FlyingPathNavigation, whose waypoint-advance rule
+        // differs (block equality in three axes rather than the ground test).
+        virtual void Tick();
+
+        // MC PathNavigation.isStableDestination — PUBLIC because
+        // GoalUtils.isNotStable (RandomPos) asks the mob's own navigation:
+        // solid-below for a walker, any-non-air-below for an amphibian, any
+        // non-solid cell for a swimmer. Routing wander targets through this is
+        // what lets fish pick open water and fliers pick perches.
+        virtual bool IsStableDestination(const glm::ivec3& pos) const;
 
         // MC PathNavigation.recomputePath — rate-limited to once per 20 ticks,
         // deferring the request when called sooner. Without the limit a mob
@@ -112,18 +142,29 @@ namespace Game {
         void FollowThePath();
         void DoStuckDetection(const glm::dvec3& mobPos);
         bool ShouldTargetNextNodeInDirection(const glm::dvec3& mobPos) const;
+        // MC PathNavigation.canMoveDirectly returns false; ONLY the flying,
+        // water-bound and amphibious navigations override it. Ground mobs
+        // never shortcut a waypoint — their sweep test knows nothing about
+        // step height or fall damage.
         virtual bool CanMoveDirectly(const glm::dvec3& from, const glm::dvec3& to) const { return false; }
 
-        // MC isStableDestination — may the path END here. Ground navigation
-        // wants solid footing; amphibious navigation accepts anything that is
-        // not air below.
-        virtual bool IsStableDestination(const glm::ivec3& pos) const;
+        // MC PathNavigation.timeoutPath / resetStuckTimeout. The reset clears
+        // isStuck too — a fresh path (or an abandoned one) starts innocent, or
+        // a mob once wedged reports IsStuck forever.
+        void TimeoutPath();
+        void ResetStuckTimeout();
 
         Mob*         m_mob;
         EntityLevel* m_level;
 
         std::unique_ptr<PathFinder> m_pathFinder;
         std::optional<Path>         m_path;
+
+        // MC PathNavigation.targetPos/reachRange — what the last successful
+        // CreatePath was ASKED for, so RecomputePath re-issues the same
+        // request instead of re-deriving it from the path.
+        std::optional<glm::ivec3>   m_targetPos;
+        int                         m_reachRange = 0;
 
         double m_speedModifier = 0.0;
         int    m_tick = 0;
@@ -138,6 +179,7 @@ namespace Game {
         // Mirrored here rather than living only on the node evaluator, which
         // does not exist until the first path is requested. See SetCanFloat.
         bool   m_canFloat = false;
+        bool   m_canOpenDoors = false;
         int64_t m_timeLastRecompute = 0;
 
         float m_maxDistanceToWaypoint = 0.5f;
@@ -149,19 +191,58 @@ namespace Game {
     public:
         GroundPathNavigation(Mob* mob, EntityLevel* level);
 
+        // The override hides the base's other CreatePath overloads without this.
+        using PathNavigation::CreatePath;
+
+        // MC GroundPathNavigation.createPath(BlockPos, int) — null when the
+        // target's chunk is not loaded, and (unless the below-surface toggle
+        // is set) the target is first projected onto a pathable surface.
+        std::optional<Path> CreatePath(const glm::ivec3& target, int reachRange) override;
+
         void SetAvoidSun(bool v) { m_avoidSun = v; }
+        // MC GroundPathNavigation.setCanPathToTargetsBelowSurface — flipped by
+        // the copper golem's transport behaviour so a chest sunk into the
+        // floor stays a legal target.
+        void SetCanPathToTargetsBelowSurface(bool v) { m_canPathToTargetsBelowSurface = v; }
 
     protected:
         std::unique_ptr<PathFinder> CreatePathFinder(int maxVisitedNodes) override;
         bool CanUpdatePath() const override;
         glm::dvec3 GetTempMobPos() const override;
         void TrimPath() override;
-        bool CanMoveDirectly(const glm::dvec3& from, const glm::dvec3& to) const override;
 
     private:
         int GetSurfaceY() const;
+        // MC GroundPathNavigation.findSurfacePosition — walk a mid-air target
+        // down to the ground (or up out of a cave ceiling / solid column).
+        glm::ivec3 FindSurfacePosition(const glm::ivec3& target) const;
 
         bool m_avoidSun = false;
+        bool m_canPathToTargetsBelowSurface = false;
+    };
+
+    // MC WallClimberNavigation — the spider's. A ground navigation that
+    // remembers the position it was ULTIMATELY asked for: when the A* cannot
+    // produce a path (the target is up a wall), it steers straight at the
+    // remembered position instead, and the spider's climb-on-collision does
+    // the rest.
+    class WallClimberNavigation : public GroundPathNavigation {
+    public:
+        WallClimberNavigation(Mob* mob, EntityLevel* level)
+            : GroundPathNavigation(mob, level) {}
+
+        using GroundPathNavigation::CreatePath;
+
+        // MC WallClimberNavigation.createPath — EVERY path request stashes the
+        // ultimate ask, even one that succeeds, so once the path runs out the
+        // spider keeps steering at the remembered position until it is within
+        // its own body width of the column.
+        std::optional<Path> CreatePath(const glm::ivec3& target, int reachRange) override;
+        bool MoveTo(const Entity& target, double speedModifier) override;
+        void Tick() override;
+
+    private:
+        std::optional<glm::ivec3> m_pathToPosition;
     };
 
 } // namespace Game

@@ -16,6 +16,9 @@ namespace Game {
 
     enum class MobBase : uint8_t { Mob, PathfinderMob, Monster, Animal };
 
+    // MC createNavigation — which search space this mob paths through.
+    enum class MobNav : uint8_t { Ground, Flying, Water, Amphibious, WallClimber };
+
     struct MobAttrOverride {
         Attribute attribute;
         double    value;
@@ -71,6 +74,26 @@ namespace Game {
         // MC RestrictSunGoal + FleeSunGoal. AbstractSkeleton only — a zombie
         // caught in daylight just burns, a skeleton runs for shade.
         bool   seeksShade;
+
+        // ── Locomotion (MC createNavigation + control constructors) ────────
+        MobNav nav;
+        // FlyingMoveControl(maxTurn, hoversInPlace); flyCtrl gates it.
+        bool flyCtrl;  int flyMaxTurn;  bool flyHover;
+        // SmoothSwimmingMoveControl(maxTurnX, maxTurnY, inWater, outsideWater,
+        // applyGravity); swimCtrl gates it.
+        bool swimCtrl; int swimMaxTurnX, swimMaxTurnY;
+        float swimInWater, swimOutsideWater; bool swimGravity;
+        // SmoothSwimmingLookControl's maxYRotFromCenter; 0 = default control.
+        int  swimLookMaxYRot;
+        // MC's FlyingAnimal marker — vertical air friction matches horizontal.
+        bool flyingAnimal;
+        // RandomSwimmingGoal(speed, interval) / WaterAvoidingRandomFlyingGoal
+        // (speed); 0 speed = the mob's registerGoals has none.
+        double swimStrollSpeed; int swimStrollInterval;
+        double flyStrollSpeed;
+        // MC AbstractFish's nested FishMoveControl (lerped speed + a direct
+        // vertical nudge) — distinct from SmoothSwimmingMoveControl.
+        bool fishCtrl;
     };
 
     inline constexpr int kMobDefCount = 81;

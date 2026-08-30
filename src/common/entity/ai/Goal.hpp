@@ -134,6 +134,12 @@ namespace Game {
     public:
         void AddGoal(int priority, std::unique_ptr<Goal> goal);
 
+        // MC GoalSelector.removeGoal — stop it if running, then drop it.
+        // What Cat.reassessTameGoals / Ocelot.reassessTrustingGoals use to
+        // swap the wild avoid-players goal in and out on tame/trust changes.
+        // Identified by pointer; a pointer not in the list is a no-op.
+        void RemoveGoal(const Goal* goal);
+
         // MC GoalSelector.tick — cleanup pass, then start pass, then tick all
         // running goals.
         void Tick();

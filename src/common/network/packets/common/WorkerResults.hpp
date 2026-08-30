@@ -13,6 +13,7 @@
 
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/chunk/Chunk.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include "client/renderer/culling/VisibilitySet.hpp"
 
 #include <memory>
@@ -26,14 +27,26 @@ namespace Network {
     // Chunk generation results (Server worker → Server thread).
     struct ChunkGenResult {
         Game::Math::ChunkPos position;
+
+        // Which dimension `position` belongs to. A ChunkPos does not carry
+        // one, so without this the server thread cannot tell Nether (0,0) from
+        // Overworld (0,0) — it would clear the wrong level's pending entry,
+        // mark the wrong status manager ready, and push the chunk to players
+        // standing in the other world.
+        //
+        // Defaulted so a result built by anything that predates dimensions
+        // still lands in the overworld, which is where it used to go.
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
+
         std::shared_ptr<Game::Chunk> chunk;
         bool success = false;
         std::chrono::steady_clock::time_point completeTime;
         std::string errorMessage;
 
         ChunkGenResult() = default;
-        ChunkGenResult(Game::Math::ChunkPos pos, std::shared_ptr<Game::Chunk> chunkPtr, bool succeeded)
-            : position(pos), chunk(std::move(chunkPtr)), success(succeeded)
+        ChunkGenResult(Game::Math::ChunkPos pos, std::shared_ptr<Game::Chunk> chunkPtr, bool succeeded,
+                       Game::DimensionId dim = Game::DimensionId::Overworld)
+            : position(pos), dimension(dim), chunk(std::move(chunkPtr)), success(succeeded)
             , completeTime(std::chrono::steady_clock::now()) {}
     };
 
@@ -57,7 +70,15 @@ namespace Network {
 
             // Translucent geometry (blended blocks like glass, water, ice)
             std::vector<float>    translucentVertices;
-            std::vector<uint16_t> translucentIndices;
+            std::vector<uint16_t> translucentIndices;   // already sorted back-to-front (see below)
+
+            // Translucent quads are sorted on the worker with the camera at
+            // build time (MC RebuildTask). Centroids (xyz per quad) let the
+            // render thread re-sort later without touching vertex data, and
+            // the point of view records which sort the indices hold.
+            std::vector<float>    translucentCentroids;
+            int8_t translucentPovX = 0, translucentPovY = 0, translucentPovZ = 0;
+            bool   translucentPovValid = false;
 
             // Layer counts for validation
             size_t opaqueVertexCount      = 0;

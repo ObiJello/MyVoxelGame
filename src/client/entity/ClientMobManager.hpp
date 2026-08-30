@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <mutex>
 #include <vector>
 
 namespace Game { struct IBlockAccess; }
@@ -69,11 +70,80 @@ namespace Client {
         void GetPlayers(std::vector<Game::LivingEntity*>&) const override {}
         void BroadcastEntityEvent(const Game::Entity&, uint8_t) override {}
 
+        // ── Particles (MC ClientLevel.addParticle) ─────────────────────────
+        //
+        // One queued spawn request. The client mobs emit these during their
+        // 20 Hz tick (AiStep client branches) and from HandleEntityEvent;
+        // Render::MobParticleSystem drains the queue every frame and owns
+        // the per-type particle physics. Single-threaded by design: the mob
+        // tick, the event handling and the particle Update all run on the
+        // main thread (same loop PlatformMain drives), so the queue needs no
+        // lock — do NOT push into it from another thread.
+        struct QueuedParticle {
+            Game::ParticleKind kind;
+            double x, y, z;
+            double vx, vy, vz;
+            // ENTITY_EFFECT tint (MC ColorParticleOption); 1,1,1,1 for
+            // everything spawned through the colourless overload.
+            float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
+        };
+
+        // ── The queue cap ──────────────────────────────────────────────
+        //
+        // MobParticleSystem::kMaxParticles is 16384 and it REJECTS anything
+        // past it, so a spawn queued beyond that is built, copied and thrown
+        // away. That was not a theoretical waste: primed TNT spawns one smoke
+        // particle per entity per tick (PrimedTnt::Tick), so a hundred thousand
+        // of them queued ~96,000 QueuedParticles — about 6.5 MB of push_back,
+        // insert and clear — every tick, of which ~80,000 could never be
+        // accepted.
+        //
+        // Refusing at the source is what the engine already does one step
+        // later, just without paying for it first. Which spawns survive is
+        // arbitrary either way — MC's ParticleEngine drops at its own cap with
+        // no fairness rule either.
+        //
+        // Not MobParticleSystem::kMaxParticles by name: this header is on the
+        // entity side and must not pull in the renderer. Keep the two in sync.
+        static constexpr size_t kMaxQueuedParticles = 16384;
+
+        // Mutex-guarded: primed TNT ticks across the worker pool now (see
+        // ClientMobManager::Tick) and its smoke plume lands here. The size
+        // probe stays outside the lock — a stale read only mis-judges the
+        // cap by a few entries, and the recheck inside is exact.
+        void AddParticle(Game::ParticleKind kind, double x, double y, double z,
+                         double vx, double vy, double vz) override {
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            std::lock_guard<std::mutex> lock(m_particleMutex);
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            m_particleQueue.push_back({kind, x, y, z, vx, vy, vz,
+                                       1.0f, 1.0f, 1.0f, 1.0f});
+        }
+        void AddColorParticle(Game::ParticleKind kind, double x, double y, double z,
+                              double vx, double vy, double vz,
+                              float r, float g, float b, float a) override {
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            std::lock_guard<std::mutex> lock(m_particleMutex);
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            m_particleQueue.push_back({kind, x, y, z, vx, vy, vz, r, g, b, a});
+        }
+
+        // Move the queued spawns into `out` (appending) and clear the queue.
+        void DrainParticles(std::vector<QueuedParticle>& out) {
+            out.insert(out.end(), m_particleQueue.begin(), m_particleQueue.end());
+            m_particleQueue.clear();
+        }
+
+        size_t QueuedParticleCount() const { return m_particleQueue.size(); }
+
     private:
         const Game::IBlockAccess* m_blocks = nullptr;
         int64_t m_dayTime = 0;
         int64_t m_gameTime = 0;
         Game::JavaRandom m_random{0};
+        std::vector<QueuedParticle> m_particleQueue;
+        // Guards the queue: primed TNT ticks in parallel and enqueues here.
+        std::mutex m_particleMutex;
     };
 
     // One mirrored mob, plus the interpolation state layered on top.
@@ -100,6 +170,54 @@ namespace Client {
 
         // Creeper fuse, mirrored so the render can lerp it.
         uint8_t swell = 0, oldSwell = 0;
+
+        // MC LivingEntity's swimAmount — the client-side 0..1 ramp behind the
+        // drowned's whole-body swim tilt (DrownedRenderer.setupRotations).
+        // ±0.09 per tick, clamped (LivingEntity.baseTick:3305-3310). Lives on
+        // the client mirror because the shared LivingEntity does not carry
+        // it; only the drowned ticks it (see Tick).
+        float swimAmount = 0.0f, swimAmountO = 0.0f;
+
+        // The riding link the server last announced (AddEntityS2C /
+        // SetEntityDataS2C vehicleId; -1 = none). Kept as an ID and re-resolved
+        // against m_mobs at the top of every Tick rather than applied eagerly,
+        // because the packets for a jockey pair can arrive in either order —
+        // the rider's link may name a vehicle whose AddEntity is still one
+        // packet behind. Resolution is idempotent and self-healing.
+        int32_t wantedVehicleId = -1;
+
+        // Slot in ClientMobManager::m_mobList (dense pointer list the tick
+        // iterates instead of the node map); maintained by Spawn/Remove.
+        size_t listIndex = 0;
+        // Slot in m_modelMobList, or SIZE_MAX for the block-shaped entities
+        // (TNT, falling block) that are not in it. See ModelMobList().
+        size_t modelListIndex = static_cast<size_t>(-1);
+        // This entry's own entity id, so list-driven passes need no map key.
+        int32_t selfId = 0;
+    };
+
+    // What BlockCubeEntityRenderer needs to draw one entity, written by the
+    // client tick into a dense array that mirrors m_mobList slot for slot.
+    //
+    // The renderer used to walk the entity objects themselves every frame —
+    // an entry node, then the Mob behind it, then its state — which at 176k
+    // falling blocks was ~165 ns of cache misses per entity per frame even
+    // across the worker pool (3.2 ms a frame). The tick already touches every
+    // entity, so it leaves this 64-byte summary behind and the renderer reads
+    // memory sequentially instead. Positions stay double so the sub-tick
+    // interpolation is exactly what the entity path computed.
+    //
+    // `drawable` is false for every entity that is not a primed TNT or a
+    // falling block; those slots exist only so the indices line up.
+    struct BlockEntityProxy {
+        glm::dvec3 prevPos{0.0};
+        glm::dvec3 pos{0.0};
+        glm::vec3  half{0.0f};
+        uint32_t   stateRaw = 0;
+        int32_t    fuse = 0;
+        uint8_t    type = 0;
+        uint8_t    onGround = 0;
+        uint8_t    drawable = 0;
     };
 
     class ClientMobManager {
@@ -117,10 +235,13 @@ namespace Client {
         }
 
         // Packet entry points.
+        // `blockStateRaw` is AddEntityS2C's per-type data int: the block a
+        // falling block or a primed TNT carries. Zero for everything else, and
+        // zero is air's default state, so a type that ignores it is unaffected.
         void Spawn(int32_t id, uint16_t type, const glm::dvec3& pos, const glm::vec3& vel,
                    float yRot, float xRot, float yHeadRot,
                    float health, uint8_t flags, uint8_t variantData,
-                   uint8_t pose, uint8_t animState);
+                   uint8_t pose, uint8_t animState, uint32_t blockStateRaw = 0);
         void MoveDelta(int32_t id, bool hasPos, const glm::dvec3& delta,
                        bool hasRot, float yRot, float xRot, float yHeadRot, bool onGround);
         void Teleport(int32_t id, const glm::dvec3& pos, const glm::vec3& vel,
@@ -130,6 +251,11 @@ namespace Client {
                      uint8_t hurtTime, uint8_t deathTime, uint8_t swellDir, uint8_t swell,
                      uint8_t pose, uint8_t animState);
         void HandleEvent(int32_t id, uint8_t event);
+        // The riding link for one mob (vehicleId -1 = dismount). Fed by the
+        // appended field on AddEntityS2C / SetEntityDataS2C via
+        // Client::ApplyMobVehicleLink (defined in the .cpp — see the seam note
+        // in S2CPackets.hpp).
+        void SetVehicle(int32_t passengerId, int32_t vehicleId);
         void Remove(int32_t id);
         void Clear();
 
@@ -139,6 +265,33 @@ namespace Client {
         const std::unordered_map<int32_t, ClientMob>& All() const { return m_mobs; }
         size_t Count() const { return m_mobs.size(); }
 
+        // See the pick-candidate note in Tick(): set before each Tick, read
+        // by ClientPlayerController::PickEntity every frame.
+        void SetPickOrigin(const glm::dvec3& origin) { m_pickOrigin = origin; }
+        const std::vector<int32_t>& PickCandidates() const { return m_pickCandidates; }
+        // Dense entry list for render-side walks (never mutate through it).
+        const std::vector<ClientMob*>& MobList() const { return m_mobList; }
+        // The subset MobRenderer draws — everything that is NOT a primed TNT
+        // or a falling block. Those two are BlockCubeEntityRenderer's, and at
+        // a hundred thousand of them the model renderer spent 1.8 ms a frame
+        // walking the full list to skip them (a cache miss per entry).
+        const std::vector<ClientMob*>& ModelMobList() const { return m_modelMobList; }
+        // Slot-for-slot mirror of MobList() — see BlockEntityProxy. Refreshed
+        // by Tick; kept in step by Spawn/Remove between ticks, so a block that
+        // starts falling draws on the very frame its entity arrives.
+        const std::vector<BlockEntityProxy>& BlockProxies() const { return m_blockProxies; }
+        const ClientMob* GetMob(int32_t id) const {
+            const auto it = m_mobs.find(id);
+            return it == m_mobs.end() ? nullptr : &it->second;
+        }
+
+        // Particle spawns the client mobs queued this tick — see
+        // ClientLevelBridge. Render::MobParticleSystem drains this each
+        // frame (main thread only).
+        void DrainParticles(std::vector<ClientLevelBridge::QueuedParticle>& out) {
+            m_level.DrainParticles(out);
+        }
+
         // The last decoded position for an id, kept so MoveEntity deltas can be
         // accumulated against the same base the server encoded against. MC
         // keeps this in the entity's VecDeltaCodec; here it is explicit because
@@ -146,12 +299,50 @@ namespace Client {
         // which has drifted since the last packet.
         bool GetCodecBase(int32_t id, glm::dvec3& out) const;
 
+        // The EntityLevel the client's mobs and particles run against. Exposed
+        // so the ExplodeS2C handler can spawn a blast's particles: the blast
+        // has no entity to hang them off, because the TNT that produced it was
+        // discarded server-side a tick before the packet went out.
+        Game::EntityLevel& Level() { return m_level; }
+
     private:
         ClientMob* Find(int32_t id);
+
+        // Mirror of MobManager::TickPassengerChain — after a vehicle's client
+        // tick, its riders get their interpolation (ROTATION only — position
+        // is vehicle-derived) and RideTick, recursively.
+        void TickPassengerChain(Game::Entity& vehicle);
 
         ClientLevelBridge m_level;
         std::unordered_map<int32_t, ClientMob> m_mobs;
         std::unordered_map<int32_t, glm::dvec3> m_codecBase;
+        // Deferred TNT ticks for the parallel batch; persistent for capacity.
+        std::vector<Game::Mob*> m_tntTickBatch;
+        // Dense entry list, maintained incrementally — a million-node map
+        // walk per tick was most of the client tick by itself.
+        std::vector<ClientMob*> m_mobList;
+        std::vector<ClientMob*> m_modelMobList;
+        std::vector<BlockEntityProxy> m_blockProxies;
+        std::vector<ClientMob*> m_serialScratch;
+
+        static void FillProxy(BlockEntityProxy& proxy, const ClientMob& entry);
+        // Swap-pop slot `idx` of m_mobList AND m_blockProxies together.
+        void ListSwapPop(size_t idx);
+
+        // m_modelMobList maintenance, mirrored wherever m_mobList's is.
+        void ModelListAdd(ClientMob& entry);
+        void ModelListRemove(ClientMob& entry);
+        // Non-TNT mobs near the pick origin, rebuilt each tick (ids, not
+        // pointers: a removal packet between ticks frees the mob).
+        std::vector<int32_t> m_pickCandidates;
+        glm::dvec3 m_pickOrigin{0.0};
+
+        // Ids observed removed during a tick, drained by that tick's sweep.
+        // A member, not a local, for two reasons: TickPassengerChain writes to
+        // it as well, and the buffer is reused so a detonation does not
+        // allocate one per tick. Ids may repeat and may name an already-erased
+        // mob — Tick's sweep re-checks both.
+        std::vector<int32_t> m_removedThisTick;
     };
 
     extern std::unique_ptr<ClientMobManager> g_clientMobManager;

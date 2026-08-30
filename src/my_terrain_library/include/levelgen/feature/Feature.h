@@ -773,6 +773,8 @@ protected:
         // Reference: OreFeature.java line 95
         // try (BulkSectionAccess sectionGetter = new BulkSectionAccess(level))
         ::minecraft::world::level::chunk::BulkSectionAccess sections(worldGenLevel);
+        const int32_t oreMinY = worldGenLevel->getMinY();
+        const int32_t oreMaxY = worldGenLevel->getMaxY();
 
         // Create block getter function matching Java's sectionGetter::getBlockState
         // Reference: OreFeature.java line 132
@@ -861,7 +863,7 @@ protected:
 
                         // Check if outside build height
                         // Reference: OreFeature.java line 117
-                        if (worldGenLevel->isOutsideBuildHeight(core::BlockPos(x, y, z))) continue;
+                        if (y < oreMinY || y >= oreMaxY) continue;   // isOutsideBuildHeight, hoisted
 
                         // Check if already tested
                         // Reference: OreFeature.java lines 118-120
@@ -927,9 +929,11 @@ protected:
         return placed > 0;
     }
 
+public:
     /**
      * Check if ore can be placed at position
      * Reference: OreFeature.java canPlaceOre() lines 154-162
+     * (public: ScatteredOreFeature calls it too, like Java's package-private static)
      *
      * Takes a block getter function to allow cross-chunk access via BulkSectionAccess.
      * This matches Java's signature: canPlaceOre(BlockState, Function<BlockPos, BlockState>, ...)
@@ -2231,52 +2235,49 @@ public:
         WorldgenRandom& random = context.random();
 
         // Reference: GlowstoneFeature.java lines 21-22
-        BlockState* originBlock = level->getBlockState(origin);
-        if (originBlock) {
-            BlockState* originState = static_cast<BlockState*>(originBlock);
-            if (!originState->isAir()) {
-                return false;
-            }
-        } else {
+        BlockState* originState = level->getBlockState(origin);
+        if (!originState || !originState->isAir()) {
             return false;
         }
 
         // Reference: GlowstoneFeature.java lines 24-27
-        BlockState* aboveBlock = level->getBlockState(origin.above());
-        if (!aboveBlock) return false;
-        BlockState* aboveState = static_cast<BlockState*>(aboveBlock);
+        BlockState* aboveState = level->getBlockState(origin.above());
+        if (!aboveState) return false;
         if (aboveState->getIdentifier() != "minecraft:netherrack" &&
             aboveState->getIdentifier() != "minecraft:basalt" &&
             aboveState->getIdentifier() != "minecraft:blackstone") {
             return false;
         }
 
-        // Place initial glowstone
-        // level->setBlockState(origin, "minecraft:glowstone")
+        static BlockState* const s_glowstone =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:glowstone");
+        level->setBlock(origin, s_glowstone, 2);
 
         // Reference: GlowstoneFeature.java lines 30-49
         for (int i = 0; i < 1500; ++i) {
-            int dx = random.nextInt(8) - random.nextInt(8);
+            // CRITICAL: Java evaluates the offset args left-to-right; each
+            // nextInt must be hoisted (C++ subtraction operands are unsequenced).
+            int x1 = random.nextInt(8);
+            int x2 = random.nextInt(8);
             int dy = -random.nextInt(12);
-            int dz = random.nextInt(8) - random.nextInt(8);
-            core::BlockPos placePos = origin.offset(dx, dy, dz);
+            int z1 = random.nextInt(8);
+            int z2 = random.nextInt(8);
+            core::BlockPos placePos = origin.offset(x1 - x2, dy, z1 - z2);
 
-            BlockState* block = level->getBlockState(placePos);
-            if (!block) continue;
-            BlockState* blockState = static_cast<BlockState*>(block);
-
-            if (blockState->isAir()) {
+            BlockState* blockState = level->getBlockState(placePos);
+            if (blockState && blockState->isAir()) {
                 int neighbours = 0;
 
-                // Check all 6 directions
-                for (const auto& [dirX, dirY, dirZ] : DIRECTION_OFFSETS) {
-                    core::BlockPos neighborPos = placePos.offset(dirX, dirY, dirZ);
-                    BlockState* neighborBlock = level->getBlockState(neighborPos);
-                    if (neighborBlock) {
-                        BlockState* neighborState = static_cast<BlockState*>(neighborBlock);
-                        if (neighborState->getIdentifier() == "minecraft:glowstone") {
-                            ++neighbours;
-                        }
+                // Direction.values() order [DOWN, UP, N, S, W, E]
+                static constexpr int32_t DIRS[6][3] = {
+                    {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0}
+                };
+                for (const auto& d : DIRS) {
+                    core::BlockPos neighborPos = placePos.offset(d[0], d[1], d[2]);
+                    BlockState* neighborState = level->getBlockState(neighborPos);
+                    if (neighborState &&
+                        neighborState->getIdentifier() == "minecraft:glowstone") {
+                        ++neighbours;
                     }
 
                     if (neighbours > 1) {
@@ -2285,8 +2286,7 @@ public:
                 }
 
                 if (neighbours == 1) {
-                    // Place glowstone
-                    // level->setBlockState(placePos, "minecraft:glowstone")
+                    level->setBlock(placePos, s_glowstone, 2);
                 }
             }
         }
@@ -2744,6 +2744,41 @@ public:
  * HugeFungusConfiguration - Configuration for huge fungus (nether mushrooms)
  * Reference: HugeFungusConfiguration.java
  */
+/**
+ * Place a weeping vines column walking DOWN from placePos.
+ * Reference: WeepingVinesFeature.placeWeepingVinesColumn() - the terminal
+ * block is WEEPING_VINES[age=nextInt(min..max)] (one draw), body blocks are
+ * WEEPING_VINES_PLANT; non-empty positions place nothing (no draw) but the
+ * walk continues downward. Shared by WeepingVinesFeature and HugeFungusFeature.
+ */
+inline void placeWeepingVinesColumn(
+    WorldGenLevel* level, WorldgenRandom& random,
+    core::BlockPos::MutableBlockPos& placePos,
+    int totalHeight, int minAge, int maxAge
+) {
+    static minecraft::world::level::block::Block* const s_weepingVines =
+        minecraft::world::level::block::Blocks::getBlock("minecraft:weeping_vines");
+    static BlockState* const s_weepingVinesPlant =
+        minecraft::world::level::block::Blocks::getDefaultState("minecraft:weeping_vines_plant");
+
+    for (int height = 0; height <= totalHeight; ++height) {
+        BlockState* here = level->getBlockState(placePos);
+        if (here && here->isAir()) {
+            BlockState* below = level->getBlockState(placePos.below());
+            bool belowEmpty = below && below->isAir();
+            if (height == totalHeight || !belowEmpty) {
+                int age = minAge + random.nextInt(maxAge - minAge + 1);
+                BlockState* head = s_weepingVines->defaultBlockState()->setValue(
+                    *BlockStateProperties::AGE_25, age);
+                level->setBlock(placePos, head, 2);
+                break;
+            }
+            level->setBlock(placePos, s_weepingVinesPlant, 2);
+        }
+        placePos.set(placePos.getX(), placePos.getY() - 1, placePos.getZ());
+    }
+}
+
 class HugeFungusConfiguration : public FeatureConfiguration {
 public:
     BlockState* validBaseState;
@@ -2788,27 +2823,34 @@ public:
         WorldgenRandom& random = context.random();
         const HugeFungusConfiguration& config = context.config();
 
-        // Check base block
-        BlockState* belowBlock = level->getBlockState(origin.below());
-        if (!belowBlock) return false;
-        BlockState* belowState = static_cast<BlockState*>(belowBlock);
-        if (belowState->getIdentifier() != config.validBaseState->getIdentifier()) {
+        // Check base block - Reference: lines 29-37 (block-level match)
+        BlockState* belowState = level->getBlockState(origin.below());
+        if (!belowState ||
+            belowState->getBlock() != config.validBaseState->getBlock()) {
             return false;
         }
 
-        // Reference: HugeFungusFeature.java lines 39-43
+        // Reference: Mth.nextInt(random, 4, 13) = 4 + nextInt(10)
         int totalHeight = 4 + random.nextInt(10);
         if (random.nextInt(12) == 0) {
             totalHeight *= 2;
         }
 
-        // Reference: HugeFungusFeature.java line 51
+        // Height guard - Reference: lines 44-49 (generator getGenDepth = 128 nether)
+        if (!config.planted && context.chunkGenerator() != nullptr) {
+            int maxHeight = context.chunkGenerator()->getGenDepth();
+            if (origin.getY() + totalHeight + 1 >= maxHeight) {
+                return false;
+            }
+        }
+
+        // Reference: line 51
         bool isHuge = !config.planted && random.nextFloat() < HUGE_PROBABILITY;
 
-        // Clear origin
-        // level->setBlockState(origin, air)
+        // Reference: line 52 - clear origin (flags 260; dump-equivalent)
+        level->setBlock(origin,
+            minecraft::world::level::block::Blocks::AIR->defaultBlockState(), 2);
 
-        // Place stem and hat
         placeStem(level, random, config, origin, totalHeight, isHuge);
         placeHat(level, random, config, origin, totalHeight, isHuge);
 
@@ -2817,8 +2859,27 @@ public:
 
 private:
     /**
+     * isReplaceable - Reference: HugeFungusFeature.java lines 60-66
+     */
+    static bool isReplaceable(
+        WorldGenLevel* level,
+        const core::BlockPos& pos,
+        const HugeFungusConfiguration& config,
+        bool checkNonReplaceablePlants
+    ) {
+        BlockState* state = level->getBlockState(pos);
+        if (state && state->canBeReplaced()) {
+            return true;
+        }
+        if (checkNonReplaceablePlants && config.replaceableBlocks) {
+            return config.replaceableBlocks->test(*level, pos);
+        }
+        return false;
+    }
+
+    /**
      * Place stem
-     * Reference: HugeFungusFeature.java placeStem() lines 67-96
+     * Reference: HugeFungusFeature.java placeStem() lines 69-99
      */
     void placeStem(
         WorldGenLevel* level,
@@ -2837,13 +2898,15 @@ private:
 
                 for (int dy = 0; dy < totalHeight; ++dy) {
                     blockPos.setWithOffset(surfaceOrigin, dx, dy, dz);
-
-                    if (cornerOfHugeStem) {
-                        if (random.nextFloat() < 0.1f) {
-                            // Place stem
+                    if (isReplaceable(level, blockPos, config, true)) {
+                        // config.planted is always false in worldgen
+                        if (cornerOfHugeStem) {
+                            if (random.nextFloat() < 0.1f) {
+                                level->setBlock(blockPos, config.stemState, 3);
+                            }
+                        } else {
+                            level->setBlock(blockPos, config.stemState, 3);
                         }
-                    } else {
-                        // Place stem
                     }
                 }
             }
@@ -2886,16 +2949,21 @@ private:
 
                     blockPos.setWithOffset(surfaceOrigin, dx, dy, dz);
 
-                    if (isHatBottom) {
-                        if (!inside) {
-                            // Place hat drop block
+                    // CRITICAL: Java gates ALL branches (and their RNG draws)
+                    // on isReplaceable(..., false).
+                    if (isReplaceable(level, blockPos, config, false)) {
+                        // config.planted always false in worldgen
+                        if (isHatBottom) {
+                            if (!inside) {
+                                placeHatDropBlock(level, random, blockPos, config.hatState, placeVines);
+                            }
+                        } else if (inside) {
+                            placeHatBlock(level, random, config, blockPos, 0.1f, 0.2f, placeVines ? 0.1f : 0.0f);
+                        } else if (corner) {
+                            placeHatBlock(level, random, config, blockPos, 0.01f, 0.7f, placeVines ? 0.083f : 0.0f);
+                        } else {
+                            placeHatBlock(level, random, config, blockPos, 5.0e-4f, 0.98f, placeVines ? 0.07f : 0.0f);
                         }
-                    } else if (inside) {
-                        placeHatBlock(level, random, config, blockPos, 0.1f, 0.2f, placeVines ? 0.1f : 0.0f);
-                    } else if (corner) {
-                        placeHatBlock(level, random, config, blockPos, 0.01f, 0.7f, placeVines ? 0.083f : 0.0f);
-                    } else {
-                        placeHatBlock(level, random, config, blockPos, 5.0e-4f, 0.98f, placeVines ? 0.07f : 0.0f);
                     }
                 }
             }
@@ -2905,6 +2973,7 @@ private:
     /**
      * Place hat block with probabilities
      * Reference: HugeFungusFeature.java placeHatBlock() lines 146-155
+     * Draw order: decor roll; else hat roll; vines roll ONLY if hat placed.
      */
     void placeHatBlock(
         WorldGenLevel* level,
@@ -2916,12 +2985,57 @@ private:
         float vinesProbability
     ) {
         if (random.nextFloat() < decorBlockProbability) {
-            // Place decor state
+            level->setBlock(blockPos, config.decorState, 3);
         } else if (random.nextFloat() < hatBlockProbability) {
-            // Place hat state
+            level->setBlock(blockPos, config.hatState, 3);
             if (random.nextFloat() < vinesProbability) {
-                // Try place weeping vines
+                tryPlaceWeepingVines(blockPos, level, random);
             }
+        }
+    }
+
+    /**
+     * Place hat drop block
+     * Reference: HugeFungusFeature.java placeHatDropBlock() lines 157-166
+     */
+    void placeHatDropBlock(
+        WorldGenLevel* level,
+        WorldgenRandom& random,
+        const core::BlockPos::MutableBlockPos& blockPos,
+        BlockState* hatState,
+        bool placeVines
+    ) {
+        BlockState* below = level->getBlockState(blockPos.below());
+        if (below && below->getBlock() == hatState->getBlock()) {
+            level->setBlock(blockPos, hatState, 3);
+        } else if (static_cast<double>(random.nextFloat()) < 0.15) {
+            level->setBlock(blockPos, hatState, 3);
+            // nextInt(11) drawn only when placeVines (Java short-circuit)
+            if (placeVines && random.nextInt(11) == 0) {
+                tryPlaceWeepingVines(blockPos, level, random);
+            }
+        }
+    }
+
+    /**
+     * Try to place weeping vines under a hat block
+     * Reference: HugeFungusFeature.java tryPlaceWeepingVines() lines 168-179
+     */
+    static void tryPlaceWeepingVines(
+        const core::BlockPos& hatBlockPos,
+        WorldGenLevel* level,
+        WorldgenRandom& random
+    ) {
+        core::BlockPos::MutableBlockPos placePos(
+            hatBlockPos.getX(), hatBlockPos.getY() - 1, hatBlockPos.getZ());
+        BlockState* here = level->getBlockState(placePos);
+        if (here && here->isAir()) {
+            // Mth.nextInt(random, 1, 5) = 1 + nextInt(5)
+            int goalVineHeight = 1 + random.nextInt(5);
+            if (random.nextInt(7) == 0) {
+                goalVineHeight *= 2;
+            }
+            placeWeepingVinesColumn(level, random, placePos, goalVineHeight, 23, 25);
         }
     }
 };
@@ -2932,13 +3046,26 @@ private:
 //=============================================================================
 
 /**
- * EndSpikeConfiguration - Configuration for end spike (obsidian pillars)
- * Reference: SpikeConfiguration.java
+ * EndSpike - One obsidian pillar descriptor
+ * Reference: SpikeFeature.EndSpike
+ */
+struct EndSpike {
+    int centerX;
+    int centerZ;
+    int radius;
+    int height;
+    bool guarded;
+};
+
+/**
+ * EndSpikeConfiguration - Configuration for end spikes
+ * Reference: SpikeConfiguration.java - vanilla end_spike uses
+ * (false, ImmutableList.of(), null): empty spike list -> computed per level.
  */
 class EndSpikeConfiguration : public FeatureConfiguration {
 public:
     bool crystalInvulnerable;
-    std::vector<core::BlockPos> spikes;  // Simplified - would be SpikeFeature.EndSpike
+    std::vector<EndSpike> spikes;
 
     EndSpikeConfiguration(
         bool crystalInvulnerable = false
@@ -2949,17 +3076,150 @@ public:
 
 /**
  * EndSpikeFeature - Generates obsidian pillars in the End
- * Reference: EndSpikeFeature.java (simplified)
+ * Reference: SpikeFeature.java
  */
 class EndSpikeFeature : public Feature<EndSpikeConfiguration> {
 public:
+    static constexpr int NUMBER_OF_SPIKES = 10;
+    static constexpr int SPIKE_DISTANCE = 42;
+
+    /**
+     * Compute the 10 spikes for a level seed.
+     * Reference: SpikeFeature.getSpikesForLevel + SpikeCacheLoader.load:
+     * key = LegacyRandomSource(seed).nextLong() & 65535; sizes =
+     * Util.toShuffledList([0..9], LegacyRandomSource(key)) (reverse
+     * Fisher-Yates); spike i at (floor(42*cos(2*(-PI + PI/10 * i))),
+     * floor(42*sin(...))), radius 2 + size/3, height 76 + size*3,
+     * guarded when size is 1 or 2.
+     */
+    static const std::vector<EndSpike>& getSpikesForLevel(WorldGenLevel* level) {
+        static std::mutex s_mutex;
+        static std::map<int64_t, std::vector<EndSpike>> s_cache;
+        std::lock_guard<std::mutex> lock(s_mutex);
+        int64_t seed = level->getSeed();
+        auto it = s_cache.find(seed);
+        if (it != s_cache.end()) {
+            return it->second;
+        }
+
+        LegacyRandomSource seedRandom(seed);
+        int64_t key = seedRandom.nextLong() & 65535LL;
+
+        std::vector<int> sizes;
+        for (int i = 0; i < NUMBER_OF_SPIKES; ++i) sizes.push_back(i);
+        LegacyRandomSource shuffleRandom(key);
+        // Util.shuffle - reverse Fisher-Yates
+        for (int i = static_cast<int>(sizes.size()); i > 1; --i) {
+            int j = shuffleRandom.nextInt(i);
+            std::swap(sizes[i - 1], sizes[j]);
+        }
+
+        std::vector<EndSpike> spikes;
+        for (int i = 0; i < NUMBER_OF_SPIKES; ++i) {
+            int x = static_cast<int>(std::floor(42.0 * std::cos(2.0 * (-M_PI + (M_PI / 10.0) * static_cast<double>(i)))));
+            int z = static_cast<int>(std::floor(42.0 * std::sin(2.0 * (-M_PI + (M_PI / 10.0) * static_cast<double>(i)))));
+            int size = sizes[i];
+            int radius = 2 + size / 3;
+            int height = 76 + size * 3;
+            bool guarded = size == 1 || size == 2;
+            spikes.push_back(EndSpike{x, z, radius, height, guarded});
+        }
+
+        auto res = s_cache.emplace(seed, std::move(spikes));
+        return res.first->second;
+    }
+
+    // Reference: SpikeFeature.place() lines 47-64
     bool place(FeaturePlaceContext<EndSpikeConfiguration>& context) override {
-        // End spike placement is complex and involves:
-        // - Placing obsidian pillar
-        // - Placing end crystal entity
-        // - Optional iron bars cage
-        // Simplified implementation for now
+        const EndSpikeConfiguration& config = context.config();
+        WorldGenLevel* level = context.level();
+        WorldgenRandom& random = context.random();
+        const core::BlockPos& origin = context.origin();
+
+        const std::vector<EndSpike>* spikes = &config.spikes;
+        if (spikes->empty()) {
+            spikes = &getSpikesForLevel(level);
+        }
+
+        for (const EndSpike& spike : *spikes) {
+            // isCenterWithinChunk: same chunk as origin
+            if ((origin.getX() >> 4) == (spike.centerX >> 4) &&
+                (origin.getZ() >> 4) == (spike.centerZ >> 4)) {
+                placeSpike(level, random, spike);
+            }
+        }
+
         return true;
+    }
+
+private:
+    // Reference: SpikeFeature.placeSpike() lines 66-113
+    void placeSpike(WorldGenLevel* level, WorldgenRandom& random, const EndSpike& spike) {
+        static BlockState* const s_obsidian =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:obsidian");
+        static BlockState* const s_bedrock =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:bedrock");
+        BlockState* const s_air =
+            minecraft::world::level::block::Blocks::AIR->defaultBlockState();
+
+        int radius = spike.radius;
+
+        // betweenClosed((cx-r, minY, cz-r), (cx+r, height+10, cz+r)):
+        // x varies fastest, then y, then z (each pos written once).
+        for (int z = spike.centerZ - radius; z <= spike.centerZ + radius; ++z) {
+            for (int y = level->getMinY(); y <= spike.height + 10; ++y) {
+                for (int x = spike.centerX - radius; x <= spike.centerX + radius; ++x) {
+                    core::BlockPos pos(x, y, z);
+                    // distToLowCornerSqr(cx, pos.y, cz) - horizontal distance sq
+                    double dx = static_cast<double>(spike.centerX - x);
+                    double dz = static_cast<double>(spike.centerZ - z);
+                    double distSq = dx * dx + dz * dz;
+                    if (distSq <= static_cast<double>(radius * radius + 1) && y < spike.height) {
+                        level->setBlock(pos, s_obsidian, 3);
+                    } else if (y > 65) {
+                        level->setBlock(pos, s_air, 3);
+                    }
+                }
+            }
+        }
+
+        if (spike.guarded) {
+            // Iron bars cage - Reference: lines 80-100
+            static minecraft::world::level::block::Block* const s_ironBars =
+                minecraft::world::level::block::Blocks::getBlock("minecraft:iron_bars");
+            core::BlockPos::MutableBlockPos pos;
+            for (int dx = -2; dx <= 2; ++dx) {
+                for (int dz = -2; dz <= 2; ++dz) {
+                    for (int dy = 0; dy <= 3; ++dy) {
+                        bool isXSide = std::abs(dx) == 2;
+                        bool isZSide = std::abs(dz) == 2;
+                        bool top = dy == 3;
+                        if (isXSide || isZSide || top) {
+                            bool xEdge = dx == -2 || dx == 2 || top;
+                            bool zEdge = dz == -2 || dz == 2 || top;
+                            BlockState* state = s_ironBars->defaultBlockState();
+                            state = state->setValue(*minecraft::world::level::block::FenceBlock::NORTH, xEdge && dz != -2);
+                            state = state->setValue(*minecraft::world::level::block::FenceBlock::SOUTH, xEdge && dz != 2);
+                            state = state->setValue(*minecraft::world::level::block::FenceBlock::WEST, zEdge && dx != -2);
+                            state = state->setValue(*minecraft::world::level::block::FenceBlock::EAST, zEdge && dx != 2);
+                            pos.set(spike.centerX + dx, spike.height + dy, spike.centerZ + dz);
+                            level->setBlock(pos, state, 3);
+                        }
+                    }
+                }
+            }
+        }
+
+        // End crystal entity (out of scope) - but its worldgen side effects are
+        // blocks: one nextFloat draw (crystal yRot), bedrock below the crystal,
+        // fire at the crystal position (default state - bedrock below is
+        // sturdy, so FireBlock.getState returns the base state).
+        random.nextFloat();
+        core::BlockPos crystalPos(spike.centerX, spike.height + 1, spike.centerZ);
+        level->setBlock(crystalPos.below(), s_bedrock, 3);
+        static minecraft::world::level::block::Block* const s_fire =
+            minecraft::world::level::block::Blocks::getBlock("minecraft:fire");
+        level->setBlock(crystalPos, s_fire->defaultBlockState(), 3);
     }
 };
 
@@ -3061,24 +3321,126 @@ public:
         WorldgenRandom& random = context.random();
 
         // Reference: ChorusPlantFeature.java lines 17-24
-        // Check if origin is air and below is end stone
-        BlockState* originBlock = level->getBlockState(origin);
-        if (!originBlock) return false;
-        BlockState* originState = static_cast<BlockState*>(originBlock);
-        if (!originState->isAir()) {
+        BlockState* originState = level->getBlockState(origin);
+        if (!originState || !originState->isAir()) {
+            return false;
+        }
+        BlockState* belowState = level->getBlockState(origin.below());
+        if (!belowState || belowState->getIdentifier() != "minecraft:end_stone") {
             return false;
         }
 
-        BlockState* belowBlock = level->getBlockState(origin.below());
-        if (!belowBlock) return false;
-        BlockState* belowState = static_cast<BlockState*>(belowBlock);
-        if (belowState->getIdentifier() != "minecraft:end_stone") {
-            return false;
-        }
-
-        // Would call ChorusFlowerBlock.generatePlant() here
-        // Simplified - just return true for now
+        // ChorusFlowerBlock.generatePlant(level, origin, random, 8)
+        level->setBlock(origin, chorusPlantWithConnections(level, origin), 2);
+        growTreeRecursive(level, origin, random, origin, 8, 0);
         return true;
+    }
+
+private:
+    static bool isEmpty(WorldGenLevel* level, const core::BlockPos& pos) {
+        BlockState* state = level->getBlockState(pos);
+        return state && state->isAir();
+    }
+
+    static bool isChorusOrFlower(BlockState* state) {
+        return state && (state->getIdentifier() == "minecraft:chorus_plant" ||
+                         state->getIdentifier() == "minecraft:chorus_flower");
+    }
+
+    /**
+     * ChorusPlantBlock.getStateWithConnections: 6 bools; DOWN also connects
+     * to end_stone.
+     */
+    static BlockState* chorusPlantWithConnections(WorldGenLevel* level, const core::BlockPos& pos) {
+        static minecraft::world::level::block::Block* const s_chorusPlant =
+            minecraft::world::level::block::Blocks::getBlock("minecraft:chorus_plant");
+        BlockState* down = level->getBlockState(pos.below());
+        BlockState* up = level->getBlockState(pos.above());
+        BlockState* north = level->getBlockState(pos.offset(0, 0, -1));
+        BlockState* east = level->getBlockState(pos.offset(1, 0, 0));
+        BlockState* south = level->getBlockState(pos.offset(0, 0, 1));
+        BlockState* west = level->getBlockState(pos.offset(-1, 0, 0));
+        BlockState* state = s_chorusPlant->defaultBlockState();
+        state = state->setValue(*BlockStateProperties::DOWN,
+            isChorusOrFlower(down) || (down && down->getIdentifier() == "minecraft:end_stone"));
+        state = state->setValue(*BlockStateProperties::UP, isChorusOrFlower(up));
+        state = state->setValue(*BlockStateProperties::NORTH, isChorusOrFlower(north));
+        state = state->setValue(*BlockStateProperties::EAST, isChorusOrFlower(east));
+        state = state->setValue(*BlockStateProperties::SOUTH, isChorusOrFlower(south));
+        state = state->setValue(*BlockStateProperties::WEST, isChorusOrFlower(west));
+        return state;
+    }
+
+    /**
+     * ChorusFlowerBlock.allNeighborsEmpty: Plane.HORIZONTAL [N, E, S, W],
+     * skipping `ignore` (-1 = none).
+     */
+    static bool allNeighborsEmpty(WorldGenLevel* level, const core::BlockPos& pos, int ignoreDir) {
+        static constexpr int32_t HORIZ[4][2] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};  // N,E,S,W
+        for (int d = 0; d < 4; ++d) {
+            if (d == ignoreDir) continue;
+            if (!isEmpty(level, pos.offset(HORIZ[d][0], 0, HORIZ[d][1]))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Reference: ChorusFlowerBlock.growTreeRecursive() lines 187-227
+     */
+    static void growTreeRecursive(WorldGenLevel* level, const core::BlockPos& current,
+                                  WorldgenRandom& random, const core::BlockPos& startPos,
+                                  int maxHorizontalSpread, int depth) {
+        static constexpr int32_t HORIZ[4][2] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};  // N,E,S,W
+        static minecraft::world::level::block::Block* const s_chorusFlower =
+            minecraft::world::level::block::Blocks::getBlock("minecraft:chorus_flower");
+
+        int height = random.nextInt(4) + 1;
+        if (depth == 0) {
+            ++height;
+        }
+
+        for (int i = 0; i < height; ++i) {
+            core::BlockPos target = current.above(i + 1);
+            if (!allNeighborsEmpty(level, target, -1)) {
+                return;
+            }
+            level->setBlock(target, chorusPlantWithConnections(level, target), 2);
+            level->setBlock(target.below(), chorusPlantWithConnections(level, target.below()), 2);
+        }
+
+        bool placedStem = false;
+        if (depth < 4) {
+            int stems = random.nextInt(4);
+            if (depth == 0) {
+                ++stems;
+            }
+
+            for (int i = 0; i < stems; ++i) {
+                // Plane.HORIZONTAL.getRandomDirection = faces[nextInt(4)]
+                int dir = random.nextInt(4);
+                // opposite indices in [N,E,S,W]: N<->S (0,2), E<->W (1,3)
+                int oppositeDir = (dir + 2) % 4;
+                core::BlockPos target = current.above(height).offset(HORIZ[dir][0], 0, HORIZ[dir][1]);
+                if (std::abs(target.getX() - startPos.getX()) < maxHorizontalSpread &&
+                    std::abs(target.getZ() - startPos.getZ()) < maxHorizontalSpread &&
+                    isEmpty(level, target) && isEmpty(level, target.below()) &&
+                    allNeighborsEmpty(level, target, oppositeDir)) {
+                    placedStem = true;
+                    level->setBlock(target, chorusPlantWithConnections(level, target), 2);
+                    core::BlockPos back = target.offset(-HORIZ[dir][0], 0, -HORIZ[dir][1]);
+                    level->setBlock(back, chorusPlantWithConnections(level, back), 2);
+                    growTreeRecursive(level, target, random, startPos, maxHorizontalSpread, depth + 1);
+                }
+            }
+        }
+
+        if (!placedStem) {
+            BlockState* flower = s_chorusFlower->defaultBlockState()->setValue(
+                *BlockStateProperties::AGE_5, 5);
+            level->setBlock(current.above(height), flower, 2);
+        }
     }
 };
 
@@ -3130,7 +3492,9 @@ public:
         }
 
         int y = origin.getY();
-        if (y < level->getMinY() + 1 || y + 1 > level->getMaxY()) {
+        // Java: y >= minY+1 && y+1 <= getMaxY() (Java getMaxY is INCLUSIVE;
+        // C++ WorldGenLevel::getMaxY is exclusive, hence >=).
+        if (y < level->getMinY() + 1 || y + 1 >= level->getMaxY()) {
             return false;
         }
 
@@ -3138,19 +3502,27 @@ public:
         int spreadSq = config.spreadWidth * config.spreadWidth;
 
         for (int i = 0; i < spreadSq; ++i) {
-            int dx = random.nextInt(config.spreadWidth) - random.nextInt(config.spreadWidth);
-            int dy = random.nextInt(config.spreadHeight) - random.nextInt(config.spreadHeight);
-            int dz = random.nextInt(config.spreadWidth) - random.nextInt(config.spreadWidth);
-            core::BlockPos finalPos = origin.offset(dx, dy, dz);
+            // CRITICAL: hoist draws in Java's left-to-right arg order.
+            int x1 = random.nextInt(config.spreadWidth);
+            int x2 = random.nextInt(config.spreadWidth);
+            int y1 = random.nextInt(config.spreadHeight);
+            int y2 = random.nextInt(config.spreadHeight);
+            int z1 = random.nextInt(config.spreadWidth);
+            int z2 = random.nextInt(config.spreadWidth);
+            core::BlockPos finalPos = origin.offset(x1 - x2, y1 - y2, z1 - z2);
 
-            if (config.stateProvider) {
-                BlockState* targetBlock = level->getBlockState(finalPos);
-                if (targetBlock) {
-                    BlockState* targetState = static_cast<BlockState*>(targetBlock);
-                    if (targetState->isAir() && finalPos.getY() > level->getMinY()) {
-                        ++placed;
-                    }
-                }
+            // CRITICAL: Java calls stateProvider.getState EVERY iteration
+            // (weighted providers DRAW here), before the empty check.
+            BlockState* state = config.stateProvider
+                ? config.stateProvider->getState(random, finalPos)
+                : nullptr;
+
+            BlockState* targetState = level->getBlockState(finalPos);
+            if (state && targetState && targetState->isAir() &&
+                finalPos.getY() > level->getMinY() &&
+                state->canSurvive(*level, finalPos)) {
+                level->setBlock(finalPos, state, 2);
+                ++placed;
             }
         }
 
@@ -3282,6 +3654,7 @@ public:
  */
 class BasaltColumnsFeature : public Feature<ColumnFeatureConfiguration> {
 public:
+    // Reference: BasaltColumnsFeature.java place() lines 27-52
     bool place(FeaturePlaceContext<ColumnFeatureConfiguration>& context) override {
         const core::BlockPos& origin = context.origin();
         WorldGenLevel* level = context.level();
@@ -3290,24 +3663,130 @@ public:
         ChunkGenerator* generator = context.chunkGenerator();
 
         int lavaSeaLevel = generator ? generator->getSeaLevel() : 32;
-        int columnHeight = config.height ? config.height->sample(random) : 5;
+        if (!canPlaceAt(level, lavaSeaLevel, origin)) {
+            return false;
+        }
+
+        int columnHeight = config.height->sample(random);
         bool generateClustered = random.nextFloat() < 0.9f;
         int reach = std::min(columnHeight, generateClustered ? 5 : 8);
         int count = generateClustered ? 50 : 15;
 
         bool placed = false;
+        // BlockPos.randomBetweenClosed: per position draws nextInt(width),
+        // nextInt(height), nextInt(depth) in x,y,z order; y span is 1 so
+        // nextInt(1) STILL DRAWS.
         for (int i = 0; i < count; ++i) {
-            int dx = random.nextInt(reach * 2 + 1) - reach;
-            int dz = random.nextInt(reach * 2 + 1) - reach;
-            core::BlockPos pos = origin.offset(dx, 0, dz);
+            int x = origin.getX() - reach + random.nextInt(reach * 2 + 1);
+            int y = origin.getY() + random.nextInt(1);
+            int z = origin.getZ() - reach + random.nextInt(reach * 2 + 1);
+            core::BlockPos pos(x, y, z);
 
-            int blocksToPlaceY = columnHeight - std::abs(dx) - std::abs(dz);
+            int blocksToPlaceY = columnHeight - pos.distManhattan(origin);
             if (blocksToPlaceY >= 0) {
-                placed = true;
+                // config.reach().sample drawn per qualifying position
+                bool one = placeColumn(level, lavaSeaLevel, pos, blocksToPlaceY,
+                                       config.reach->sample(random));
+                placed = placed || one;
             }
         }
 
         return placed;
+    }
+
+private:
+    static bool isCannotPlaceOn(BlockState* state) {
+        if (!state) return false;
+        const std::string& id = state->getIdentifier();
+        return id == "minecraft:lava" || id == "minecraft:bedrock" ||
+               id == "minecraft:magma_block" || id == "minecraft:soul_sand" ||
+               id == "minecraft:nether_bricks" || id == "minecraft:nether_brick_fence" ||
+               id == "minecraft:nether_brick_stairs" || id == "minecraft:nether_wart" ||
+               id == "minecraft:chest" || id == "minecraft:spawner";
+    }
+
+    static bool isAirOrLavaOcean(WorldGenLevel* level, int lavaSeaLevel, const core::BlockPos& pos) {
+        BlockState* state = level->getBlockState(pos);
+        if (!state) return false;
+        if (state->isAir()) return true;
+        return state->getBlockName() == "minecraft:lava" && pos.getY() <= lavaSeaLevel;
+    }
+
+    static bool canPlaceAt(WorldGenLevel* level, int lavaSeaLevel, const core::BlockPos& pos) {
+        if (!isAirOrLavaOcean(level, lavaSeaLevel, pos)) {
+            return false;
+        }
+        BlockState* below = level->getBlockState(pos.below());
+        return below && !below->isAir() && !isCannotPlaceOn(below);
+    }
+
+    // Reference: findSurface() - walk DOWN up to `limit` steps
+    static bool findSurface(WorldGenLevel* level, int lavaSeaLevel,
+                            core::BlockPos::MutableBlockPos& cursor, int limit) {
+        while (cursor.getY() > level->getMinY() + 1 && limit > 0) {
+            --limit;
+            if (canPlaceAt(level, lavaSeaLevel, cursor)) {
+                return true;
+            }
+            cursor.set(cursor.getX(), cursor.getY() - 1, cursor.getZ());
+        }
+        return false;
+    }
+
+    // Reference: findAir() - walk UP up to `limit` steps
+    // (Java getMaxY is INCLUSIVE: cursor.y <= maxY <=> cursor.y < cpp getMaxY)
+    static bool findAir(WorldGenLevel* level,
+                        core::BlockPos::MutableBlockPos& cursor, int limit) {
+        while (cursor.getY() < level->getMaxY() && limit > 0) {
+            --limit;
+            BlockState* state = level->getBlockState(cursor);
+            if (isCannotPlaceOn(state)) {
+                return false;
+            }
+            if (state && state->isAir()) {
+                return true;
+            }
+            cursor.set(cursor.getX(), cursor.getY() + 1, cursor.getZ());
+        }
+        return false;
+    }
+
+    // Reference: placeColumn() lines 55-81
+    bool placeColumn(WorldGenLevel* level, int lavaSeaLevel,
+                     const core::BlockPos& columnOrigin, int columnHeight, int reach) {
+        static BlockState* const s_basalt =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:basalt");
+        bool placedAny = false;
+
+        // BlockPos.betweenClosed: x varies FASTEST, then y (single), then z.
+        for (int z = columnOrigin.getZ() - reach; z <= columnOrigin.getZ() + reach; ++z) {
+            for (int x = columnOrigin.getX() - reach; x <= columnOrigin.getX() + reach; ++x) {
+                core::BlockPos pos(x, columnOrigin.getY(), z);
+                int stepLimit = pos.distManhattan(columnOrigin);
+                core::BlockPos::MutableBlockPos cursor(x, columnOrigin.getY(), z);
+                bool found = isAirOrLavaOcean(level, lavaSeaLevel, pos)
+                    ? findSurface(level, lavaSeaLevel, cursor, stepLimit)
+                    : findAir(level, cursor, stepLimit);
+                if (found) {
+                    int blocksY = columnHeight - stepLimit / 2;
+                    for (; blocksY >= 0; --blocksY) {
+                        if (isAirOrLavaOcean(level, lavaSeaLevel, cursor)) {
+                            level->setBlock(cursor, s_basalt, 2);
+                            cursor.set(cursor.getX(), cursor.getY() + 1, cursor.getZ());
+                            placedAny = true;
+                        } else {
+                            BlockState* state = level->getBlockState(cursor);
+                            if (!state || state->getBlockName() != "minecraft:basalt") {
+                                break;
+                            }
+                            cursor.set(cursor.getX(), cursor.getY() + 1, cursor.getZ());
+                        }
+                    }
+                }
+            }
+        }
+
+        return placedAny;
     }
 };
 
@@ -3355,18 +3834,78 @@ public:
         int radiusX = config.size ? config.size->sample(random) : 3;
         int radiusZ = config.size ? config.size->sample(random) : 3;
         int radiusLimit = std::max(radiusX, radiusZ);
+        bool hasRim = spawnRim && rimX != 0 && rimZ != 0;
 
         bool anyPlaced = false;
 
-        for (int dx = -radiusX; dx <= radiusX; ++dx) {
-            for (int dz = -radiusZ; dz <= radiusZ; ++dz) {
-                if (std::abs(dx) + std::abs(dz) <= radiusLimit) {
-                    anyPlaced = true;
+        // BlockPos.withinManhattan(origin, radiusX, 0, radiusZ): depth ring
+        // order, x ascending, z emitted +z then mirrored -z. The write ORDER
+        // is load-bearing (later contents writes can overwrite earlier rims).
+        // Java breaks the whole loop when distManhattan > radiusLimit.
+        int maxDepth = radiusX + radiusZ;
+        bool stop = false;
+        for (int depth = 0; depth <= maxDepth && !stop; ++depth) {
+            int maxX = std::min(radiusX, depth);
+            for (int x = -maxX; x <= maxX && !stop; ++x) {
+                int z = depth - std::abs(x);
+                if (z > radiusZ) continue;
+                int emitCount = (z != 0) ? 2 : 1;
+                for (int m = 0; m < emitCount && !stop; ++m) {
+                    int zz = (m == 0) ? z : -z;
+                    core::BlockPos pos(origin.getX() + x, origin.getY(), origin.getZ() + zz);
+                    if (pos.distManhattan(origin) > radiusLimit) {
+                        stop = true;
+                        break;
+                    }
+                    if (isClear(level, pos, config)) {
+                        if (hasRim) {
+                            anyPlaced = true;
+                            level->setBlock(pos, config.rim, 3);
+                        }
+                        core::BlockPos posOffset = pos.offset(rimX, 0, rimZ);
+                        if (isClear(level, posOffset, config)) {
+                            anyPlaced = true;
+                            level->setBlock(posOffset, config.contents, 3);
+                        }
+                    }
                 }
             }
         }
 
         return anyPlaced;
+    }
+
+private:
+    // Reference: DeltaFeature.isClear() lines 60-76
+    static bool isClear(WorldGenLevel* level, const core::BlockPos& pos,
+                        const DeltaFeatureConfiguration& config) {
+        BlockState* state = level->getBlockState(pos);
+        if (!state) return false;
+        if (state->getBlock() == config.contents->getBlock()) {
+            return false;
+        }
+        const std::string& id = state->getIdentifier();
+        if (id == "minecraft:bedrock" || id == "minecraft:nether_bricks" ||
+            id == "minecraft:nether_brick_fence" || id == "minecraft:nether_brick_stairs" ||
+            id == "minecraft:nether_wart" || id == "minecraft:chest" ||
+            id == "minecraft:spawner") {
+            return false;
+        }
+        // Direction.values() [DOWN, UP, N, S, W, E]: every neighbor must be
+        // non-air EXCEPT up, which must be air.
+        static constexpr int32_t DIRS[6][3] = {
+            {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0}
+        };
+        for (int d = 0; d < 6; ++d) {
+            BlockState* neighbor = level->getBlockState(
+                pos.offset(DIRS[d][0], DIRS[d][1], DIRS[d][2]));
+            bool isAir = neighbor && neighbor->isAir();
+            bool isUp = (d == 1);
+            if ((isAir && !isUp) || (!isAir && isUp)) {
+                return false;
+            }
+        }
+        return true;
     }
 };
 
@@ -4182,7 +4721,9 @@ public:
                 for (int z = minR; z <= maxR; ++z) {
                     float distSq = static_cast<float>(x * x + z * z);
                     if (distSq <= (size + 1.0f) * (size + 1.0f)) {
-                        // Would set END_STONE block at origin.offset(x, y, z)
+                        static BlockState* const s_endStone =
+                            minecraft::world::level::block::Blocks::getDefaultState("minecraft:end_stone");
+                        level->setBlock(origin.offset(x, y, z), s_endStone, 3);
                     }
                 }
             }
@@ -4236,16 +4777,23 @@ public:
                     bool sameZ = z == 0;
                     bool isEnd = std::abs(y) == 2;
 
+                    static BlockState* const s_endGateway =
+                        minecraft::world::level::block::Blocks::getDefaultState("minecraft:end_gateway");
+                    static BlockState* const s_bedrock =
+                        minecraft::world::level::block::Blocks::getDefaultState("minecraft:bedrock");
+                    BlockState* const s_air =
+                        minecraft::world::level::block::Blocks::AIR->defaultBlockState();
                     if (sameX && sameY && sameZ) {
-                        // Place END_GATEWAY at center
+                        level->setBlock(pos, s_endGateway, 3);
+                        // Block entity exit position: FULL-status concern, dump-invisible here
                     } else if (sameY) {
-                        // Place AIR
+                        level->setBlock(pos, s_air, 3);
                     } else if (isEnd && sameX && sameZ) {
-                        // Place BEDROCK at top/bottom center
+                        level->setBlock(pos, s_bedrock, 3);
                     } else if ((sameX || sameZ) && !isEnd) {
-                        // Place BEDROCK on sides
+                        level->setBlock(pos, s_bedrock, 3);
                     } else {
-                        // Place AIR
+                        level->setBlock(pos, s_air, 3);
                     }
                 }
             }
@@ -4344,9 +4892,16 @@ public:
             for (int dx = -2; dx <= 2; ++dx) {
                 for (int dy = -1; dy < 3; ++dy) {
                     pos.set(origin.getX() + dx, origin.getY() + dy, origin.getZ() + dz);
-                    // dy == -1: place OBSIDIAN
-                    // dy >= 0: place AIR
-                    // TODO: Actually place blocks using level->setBlock()
+                    static BlockState* const s_obsidian =
+                        minecraft::world::level::block::Blocks::getDefaultState("minecraft:obsidian");
+                    BlockState* target = (dy == -1)
+                        ? s_obsidian
+                        : minecraft::world::level::block::Blocks::AIR->defaultBlockState();
+                    BlockState* current = level->getBlockState(pos);
+                    // Java: only setBlock when the current block differs
+                    if (!current || current->getBlock() != target->getBlock()) {
+                        level->setBlock(pos, target, 3);
+                    }
                 }
             }
         }
@@ -5597,11 +6152,47 @@ public:
                 if (random.nextInt(5) == 0) {
                     vineHeight = 1;
                 }
-                // Would place vine column here
+                placeTwistingVinesColumn(level, random, placePos, vineHeight, 17, 25);
             }
         }
 
         return true;
+    }
+
+    /**
+     * Place a twisting vines column walking UP from placePos.
+     * Reference: TwistingVinesFeature.placeWeepingVinesColumn() - height starts
+     * at 1; terminal block is TWISTING_VINES[age=nextInt(min..max)] when at
+     * total height or the block ABOVE is non-empty; body blocks are
+     * TWISTING_VINES_PLANT; non-empty positions place nothing (no draw) but
+     * the walk continues upward.
+     */
+    static void placeTwistingVinesColumn(
+        WorldGenLevel* level, WorldgenRandom& random,
+        core::BlockPos::MutableBlockPos& placePos,
+        int totalHeight, int minAge, int maxAge
+    ) {
+        static minecraft::world::level::block::Block* const s_twistingVines =
+            minecraft::world::level::block::Blocks::getBlock("minecraft:twisting_vines");
+        static BlockState* const s_twistingVinesPlant =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:twisting_vines_plant");
+
+        for (int height = 1; height <= totalHeight; ++height) {
+            BlockState* here = level->getBlockState(placePos);
+            if (here && here->isAir()) {
+                BlockState* above = level->getBlockState(placePos.above());
+                bool aboveEmpty = above && above->isAir();
+                if (height == totalHeight || !aboveEmpty) {
+                    int age = minAge + random.nextInt(maxAge - minAge + 1);
+                    BlockState* head = s_twistingVines->defaultBlockState()->setValue(
+                        *BlockStateProperties::AGE_25, age);
+                    level->setBlock(placePos, head, 2);
+                    break;
+                }
+                level->setBlock(placePos, s_twistingVinesPlant, 2);
+            }
+            placePos.set(placePos.getX(), placePos.getY() + 1, placePos.getZ());
+        }
     }
 
 private:
@@ -5668,47 +6259,75 @@ public:
 
 private:
     void placeRoofNetherWart(WorldGenLevel* level, WorldgenRandom& random, const core::BlockPos& origin) {
-        // Would place nether wart blocks
-        core::BlockPos::MutableBlockPos placePos(origin.getX(), origin.getY(), origin.getZ());
-        core::BlockPos::MutableBlockPos neighbourPos(origin.getX(), origin.getY(), origin.getZ());
+        static BlockState* const s_wartBlock =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:nether_wart_block");
+        level->setBlock(origin, s_wartBlock, 2);
+        core::BlockPos::MutableBlockPos placePos;
+        core::BlockPos::MutableBlockPos neighbourPos;
 
         for (int i = 0; i < 200; ++i) {
-            int ox = random.nextInt(6) - random.nextInt(6);
-            int oy = random.nextInt(2) - random.nextInt(5);
-            int oz = random.nextInt(6) - random.nextInt(6);
-            placePos.set(origin.getX() + ox, origin.getY() + oy, origin.getZ() + oz);
+            // CRITICAL: hoist draws; Java evaluates args left-to-right.
+            int x1 = random.nextInt(6);
+            int x2 = random.nextInt(6);
+            int y1 = random.nextInt(2);
+            int y2 = random.nextInt(5);
+            int z1 = random.nextInt(6);
+            int z2 = random.nextInt(6);
+            placePos.set(origin.getX() + (x1 - x2), origin.getY() + (y1 - y2), origin.getZ() + (z1 - z2));
 
             BlockState* block = level->getBlockState(placePos);
-            if (block && static_cast<BlockState*>(block)->isAir()) {
-                // Would check neighbours and place nether wart block
+            if (block && block->isAir()) {
+                int neighbours = 0;
+                // Direction.values() order [DOWN, UP, N, S, W, E]
+                static constexpr int32_t DIRS[6][3] = {
+                    {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0}
+                };
+                for (const auto& d : DIRS) {
+                    neighbourPos.set(placePos.getX() + d[0], placePos.getY() + d[1], placePos.getZ() + d[2]);
+                    BlockState* neighbour = level->getBlockState(neighbourPos);
+                    if (neighbour &&
+                        (neighbour->getIdentifier() == "minecraft:netherrack" ||
+                         neighbour->getIdentifier() == "minecraft:nether_wart_block")) {
+                        ++neighbours;
+                    }
+                    if (neighbours > 1) {
+                        break;
+                    }
+                }
+                if (neighbours == 1) {
+                    level->setBlock(placePos, s_wartBlock, 2);
+                }
             }
         }
     }
 
     void placeRoofWeepingVines(WorldGenLevel* level, WorldgenRandom& random, const core::BlockPos& origin) {
-        core::BlockPos::MutableBlockPos placePos(origin.getX(), origin.getY(), origin.getZ());
+        core::BlockPos::MutableBlockPos placePos;
 
         for (int i = 0; i < 100; ++i) {
-            int ox = random.nextInt(8) - random.nextInt(8);
-            int oy = random.nextInt(2) - random.nextInt(7);
-            int oz = random.nextInt(8) - random.nextInt(8);
-            placePos.set(origin.getX() + ox, origin.getY() + oy, origin.getZ() + oz);
+            int x1 = random.nextInt(8);
+            int x2 = random.nextInt(8);
+            int y1 = random.nextInt(2);
+            int y2 = random.nextInt(7);
+            int z1 = random.nextInt(8);
+            int z2 = random.nextInt(8);
+            placePos.set(origin.getX() + (x1 - x2), origin.getY() + (y1 - y2), origin.getZ() + (z1 - z2));
 
             BlockState* block = level->getBlockState(placePos);
-            if (block && static_cast<BlockState*>(block)->isAir()) {
-                BlockState* aboveBlock = level->getBlockState(placePos.above());
-                if (aboveBlock) {
-                    BlockState* aboveState = static_cast<BlockState*>(aboveBlock);
-                    if (aboveState->getIdentifier() == "minecraft:netherrack" || aboveState->getIdentifier() == "minecraft:nether_wart_block") {
-                        int vineHeight = random.nextIntBetweenInclusive(1, 8);
-                        if (random.nextInt(6) == 0) {
-                            vineHeight *= 2;
-                        }
-                        if (random.nextInt(5) == 0) {
-                            vineHeight = 1;
-                        }
-                        // Would place weeping vines column
+            if (block && block->isAir()) {
+                BlockState* aboveState = level->getBlockState(placePos.above());
+                if (aboveState &&
+                    (aboveState->getIdentifier() == "minecraft:netherrack" ||
+                     aboveState->getIdentifier() == "minecraft:nether_wart_block")) {
+                    // Mth.nextInt(random, 1, 8) = 1 + nextInt(8)
+                    int vineHeight = 1 + random.nextInt(8);
+                    if (random.nextInt(6) == 0) {
+                        vineHeight *= 2;
                     }
+                    if (random.nextInt(5) == 0) {
+                        vineHeight = 1;
+                    }
+                    placeWeepingVinesColumn(level, random, placePos, vineHeight, 17, 25);
                 }
             }
         }
@@ -5750,16 +6369,21 @@ public:
         int xr = 2 + random.nextInt(2);
         int zr = 2 + random.nextInt(2);
 
-        for (int x = -xr; x <= xr; ++x) {
+        // Reference: BlockPos.betweenClosed(origin.offset(-xr, 0, -zr),
+        // origin.offset(xr, 1, zr)) - x varies FASTEST, then y, then z.
+        for (int z = -zr; z <= zr; ++z) {
             for (int y = 0; y <= 1; ++y) {
-                for (int z = -zr; z <= zr; ++z) {
+                for (int x = -xr; x <= xr; ++x) {
                     core::BlockPos blockPos = origin.offset(x, y, z);
-                    int xd = x;
-                    int zd = z;
-                    float distCheck = static_cast<float>(xd * xd + zd * zd);
-
-                    if (distCheck <= random.nextFloat() * 10.0f - random.nextFloat() * 6.0f ||
-                        random.nextFloat() < 0.031f) {
+                    float distCheck = static_cast<float>(x * x + z * z);
+                    // Both nextFloats of the first test draw before comparing
+                    // (sequenced explicitly - C++ operand order of '-' is
+                    // unspecified); the 0.031 draw is skipped when it passes.
+                    float first = random.nextFloat() * 10.0f;
+                    float second = random.nextFloat() * 6.0f;
+                    if (distCheck <= first - second) {
+                        tryPlaceBlock(level, blockPos, random, config);
+                    } else if (random.nextFloat() < 0.031f) {
                         tryPlaceBlock(level, blockPos, random, config);
                     }
                 }
@@ -5772,24 +6396,23 @@ public:
 private:
     bool mayPlaceOn(WorldGenLevel* level, const core::BlockPos& pos, WorldgenRandom& random) {
         core::BlockPos below = pos.below();
-        BlockState* belowBlock = level->getBlockState(below);
-        if (!belowBlock) {
+        BlockState* belowState = level->getBlockState(below);
+        if (!belowState) {
             return false;
         }
-        BlockState* belowState = static_cast<BlockState*>(belowBlock);
         if (belowState->getIdentifier() == "minecraft:dirt_path") {
             return random.nextBoolean();
         }
-        // Would check if face is sturdy
-        return !belowState->isAir();
+        return belowState->isFaceSturdy(*level, below, core::Direction::UP);
     }
 
     void tryPlaceBlock(WorldGenLevel* level, const core::BlockPos& pos,
                        WorldgenRandom& random, const BlockPileConfiguration& config) {
         BlockState* block = level->getBlockState(pos);
-        if (block && static_cast<BlockState*>(block)->isAir() &&
-            mayPlaceOn(level, pos, random)) {
-            // Would set block using config.stateProvider
+        if (block && block->isAir() && mayPlaceOn(level, pos, random)) {
+            // Reference: flags 260 (UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE) -
+            // dump-equivalent to 2.
+            level->setBlock(pos, config.stateProvider->getState(random, pos), 260);
         }
     }
 };
@@ -6132,6 +6755,8 @@ public:
                 return true;
             }
 
+            level->setBlock(pos, basaltState(), 2);
+
             // Place hangoffs - Reference: lines 36-39
             tmpPos.set(pos.getX(), pos.getY(), pos.getZ() - 1);
             placeNorthHangoff = placeNorthHangoff && placeHangOff(level, random, tmpPos);
@@ -6180,7 +6805,7 @@ public:
                     tmpPos.set(basePos.getX(), basePos.getY() - 1, basePos.getZ());
                     BlockState* finalBelow = level->getBlockState(tmpPos);
                     if (finalBelow && !static_cast<BlockState*>(finalBelow)->isAir()) {
-                        // Would set BASALT at basePos
+                        level->setBlock(basePos, basaltState(), 2);
                     }
                 }
             }
@@ -6190,17 +6815,23 @@ public:
     }
 
 private:
+    static BlockState* basaltState() {
+        static BlockState* const s_basalt =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:basalt");
+        return s_basalt;
+    }
+
     // Reference: BasaltPillarFeature.java placeBaseHangOff() lines 79-83
     void placeBaseHangOff(WorldGenLevel* level, WorldgenRandom& random, const core::BlockPos& pos) {
         if (random.nextBoolean()) {
-            // Would set BASALT at pos
+            level->setBlock(pos, basaltState(), 2);
         }
     }
 
     // Reference: BasaltPillarFeature.java placeHangOff() lines 86-92
     bool placeHangOff(WorldGenLevel* level, WorldgenRandom& random, const core::BlockPos& pos) {
         if (random.nextInt(10) != 0) {
-            // Would set BASALT at pos
+            level->setBlock(pos, basaltState(), 2);
             return true;
         }
         return false;
@@ -6301,8 +6932,8 @@ public:
                 pos.set(x, y, z);
 
                 BlockState* block = level->getBlockState(pos);
-                if (block && static_cast<BlockState*>(block)->isAir()) {
-                    // Would set block using config.state
+                if (block && block->isAir()) {
+                    level->setBlock(pos, config.state, 2);
                 }
             }
         }
@@ -6343,7 +6974,8 @@ public:
         WorldgenRandom& random = context.random();
         const ReplaceSphereConfiguration& config = context.config();
 
-        int clampedY = std::max(level->getMinY() + 1, std::min(origin.getY(), level->getMaxY()));
+        // Java clamp(minY+1, getMaxY()) - Java getMaxY is INCLUSIVE (cpp -1)
+        int clampedY = std::max(level->getMinY() + 1, std::min(origin.getY(), level->getMaxY() - 1));
         core::BlockPos::MutableBlockPos cursor(origin.getX(), clampedY, origin.getZ());
 
         // Find target block - Reference: lines 50-60
@@ -6370,7 +7002,7 @@ public:
                     core::BlockPos pos = centerPos.offset(dx, dy, dz);
                     BlockState* block = level->getBlockState(pos);
                     if (block && static_cast<BlockState*>(block)->getIdentifier() == config.targetState->getIdentifier()) {
-                        // Would set replaceState
+                        level->setBlock(pos, config.replaceState, 3);
                         replacedAny = true;
                     }
                 }
@@ -6624,27 +7256,28 @@ private:
     static constexpr int MAX_DIST_FROM_ORIGIN = 7;
 
 public:
-    // Reference: ScatteredOreFeature.java place() lines 18-39
+    // Reference: ScatteredOreFeature.java place() lines 18-40
     bool place(FeaturePlaceContext<OreConfiguration>& context) override {
-        ::world::IChunk* level = context.getChunkForOrigin();
-        const core::BlockPos& origin = context.origin();
+        WorldGenLevel* level = context.level();
         WorldgenRandom& random = context.random();
         const OreConfiguration& config = context.config();
+        const core::BlockPos& origin = context.origin();
 
         int numberOfTries = random.nextInt(config.size + 1);
-        core::BlockPos::MutableBlockPos targetPos(origin.getX(), origin.getY(), origin.getZ());
+        core::BlockPos::MutableBlockPos targetPos;
+
+        auto blockGetter = [level](const core::BlockPos& pos) -> BlockState* {
+            return level->getBlockState(pos);
+        };
 
         for (int i = 0; i < numberOfTries; ++i) {
             offsetTargetPos(targetPos, random, origin, std::min(i, MAX_DIST_FROM_ORIGIN));
-
-            BlockState* block = level->getBlockState(targetPos);
-            if (!block) continue;
-
-            BlockState* blockState = static_cast<BlockState*>(block);
+            BlockState* blockState = level->getBlockState(targetPos);
 
             for (const auto& targetState : config.targetStates) {
-                if (targetState.target && targetState.target->test(blockState, random)) {
-                    // Would set targetState.state at targetPos
+                if (OreFeature::canPlaceOre(blockState, blockGetter, random, config,
+                                            targetState, targetPos)) {
+                    level->setBlock(targetPos, targetState.state, 2);
                     break;
                 }
             }
@@ -6654,7 +7287,7 @@ public:
     }
 
 private:
-    // Reference: ScatteredOreFeature.java offsetTargetPos() lines 42-46
+    // Reference: ScatteredOreFeature.java offsetTargetPos() lines 42-47
     void offsetTargetPos(core::BlockPos::MutableBlockPos& targetPos, WorldgenRandom& random,
                          const core::BlockPos& origin, int maxDistFromOrigin) {
         int xd = getRandomPlacementInOneAxisRelativeToOrigin(random, maxDistFromOrigin);
@@ -6665,7 +7298,11 @@ private:
 
     // Reference: ScatteredOreFeature.java getRandomPlacementInOneAxisRelativeToOrigin() lines 49-51
     int getRandomPlacementInOneAxisRelativeToOrigin(WorldgenRandom& random, int maxDistance) {
-        return static_cast<int>(std::round((random.nextFloat() - random.nextFloat()) * static_cast<float>(maxDistance)));
+        // CRITICAL: evaluate the two nextFloat draws in order (C++ is unsequenced),
+        // and Java Math.round(float) == floor(x + 0.5f), NOT llround (negative halves).
+        float r1 = random.nextFloat();
+        float r2 = random.nextFloat();
+        return static_cast<int>(std::floor((r1 - r2) * static_cast<float>(maxDistance) + 0.5f));
     }
 };
 
@@ -7514,8 +8151,16 @@ public:
                         }
                         this->safeSetBlock(level, chestPos, chestState, replaceableTag);
                         // RandomizableContainer.setBlockEntityLootTable draws the
-                        // loot-table seed from the worldgen random.
-                        random.nextLong();
+                        // loot-table seed from the worldgen random; the saved BE
+                        // is {LootTable, LootTableSeed, components, id} (B8).
+                        int64_t lootSeed = random.nextLong();
+                        if (auto* chunk = level->getChunk(chestPos.getX() >> 4,
+                                                          chestPos.getZ() >> 4)) {
+                            chunk->setBlockEntityNbt(chestPos,
+                                "{LootTable:\"minecraft:chests/simple_dungeon\","
+                                "LootTableSeed:" + std::to_string(lootSeed)
+                                + "l,components:{},id:\"minecraft:chest\"}");
+                        }
                         break;  // Success, move to next iteration
                     }
                 }
@@ -7536,7 +8181,19 @@ public:
             BlockState* placedState = level->getBlockState(origin);
             if (placedState &&
                 placedState->getIdentifier() == "minecraft:spawner") {
-                random.nextInt(4);
+                int mobIndex = random.nextInt(4);
+                // B8: SpawnerBlockEntity.setEntityId -> the saved BE carries
+                // the vanilla BaseSpawner defaults + the chosen entity.
+                if (auto* chunk = level->getChunk(origin.getX() >> 4,
+                                                  origin.getZ() >> 4)) {
+                    chunk->setBlockEntityNbt(origin,
+                        std::string("{Delay:20s,MaxNearbyEntities:6s,"
+                        "MaxSpawnDelay:800s,MinSpawnDelay:200s,"
+                        "RequiredPlayerRange:16s,SpawnCount:4s,"
+                        "SpawnData:{entity:{id:\"") + MOBS[mobIndex]
+                        + "\"}},SpawnPotentials:[],SpawnRange:4s,"
+                        "components:{},id:\"minecraft:mob_spawner\"}");
+                }
             }
         }
 

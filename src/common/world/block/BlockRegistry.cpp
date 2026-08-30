@@ -1,5 +1,6 @@
 // File: src/common/world/block/BlockRegistry.cpp
 #include "BlockRegistry.hpp"
+#include "GeneratedBlockHardness.hpp"
 #include "entity/DoubleChest.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/chunk/ChunkSection.hpp"   // g_blockRandomlyTicks
@@ -45,292 +46,56 @@ namespace Game {
         std::array<BlockRegistry::BlockShape, BlockRegistry::Size> s_mcShape{};
         std::array<bool, BlockRegistry::Size>                      s_hasMcShape{};
 
-        // ── Name-pattern classifier (MC parity heuristics) ─────────────────
-        // Runs after every block is registered. Walks the registry, looks at
-        // each block's model name + display name, and assigns destroyTime /
-        // preferredTool / requiresCorrectTool / minTier based on MC's
-        // Blocks.java categories. Specific overrides (obsidian, bedrock,
-        // diamond_ore, etc.) follow in ApplyExplicitHardnessOverrides.
-        struct MiningTraits {
-            float      destroyTime;
-            ToolType   preferredTool;
-            bool       requiresCorrectTool;
-            MiningTier minTier;
-        };
-
-        bool nameContains(std::string_view name, std::string_view needle) {
-            return name.find(needle) != std::string_view::npos;
-        }
-
-        MiningTraits ClassifyByName(const std::string& modelName) {
-            const std::string& n = modelName;
-
-            // Blocks.java:1509-1510 — both are .instabreak(). Exact names, for
-            // the same reason as the no-collision table: fire_coral_block and
-            // campfire are ordinary blocks that must keep their hardness.
-            if (n == "fire" || n == "soul_fire") {
-                return {0.0f, ToolType::None, false, MiningTier::Wood};
-            }
-
-            // Nether wart is `.noCollision().randomTicks()` with no strength()
-            // at all (Blocks.java:1683), so it takes Properties' 0.0 default.
-            // Exact name, NOT a substring: "nether_wart" is a prefix of
-            // nether_wart_block, which is a 1.0-strength hoe block.
-            if (n == "nether_wart") {
-                return {0.0f, ToolType::None, false, MiningTier::Wood};
-            }
-
-            // Instant-break: flowers, grasses, saplings, mushrooms, torches,
-            // fire, signs, redstone wire/torch, sugar cane, kelp, seagrass,
-            // hanging vines, leaf litter, wildflowers, pink petals, lilypad,
-            // dead bush, fern, vine, scaffolding (0.0 destroyTime in MC).
-            static constexpr std::string_view kInstantSubstr[] = {
-                "_sapling", "_flower", "tulip", "allium", "azure_bluet",
-                "oxeye_daisy", "cornflower", "lily_of_the_valley", "dandelion",
-                "poppy", "wither_rose", "torchflower", "open_eyeblossom",
-                "closed_eyeblossom", "pitcher_plant",
-                "short_grass", "tall_grass", "fern", "large_fern",
-                "dead_bush", "vine", "weeping_vines", "twisting_vines",
-                "kelp", "seagrass", "sugar_cane", "lily_pad",
-                "torch", "_carpet", "moss_carpet",
-                "redstone_wire", "redstone_torch", "tripwire",
-                "leaf_litter", "wildflowers", "pink_petals",
-                "warped_roots", "crimson_roots", "warped_fungus", "crimson_fungus",
-                "hanging_roots", "small_dripleaf", "spore_blossom",
-                "glow_lichen", "sculk_vein", "bush", "firefly_bush",
-                "azalea", "flowering_azalea", "_button",
-                // Crops — all `.instabreak()` in Blocks.java (:1520, :1739,
-                // :1740, :1963, :1960, :1961). "melon_stem"/"pumpkin_stem"
-                // deliberately carry no leading underscore so they also match
-                // attached_melon_stem / attached_pumpkin_stem, which are
-                // instabreak too (:1661-1662). A bare "_stem" would wrongly
-                // catch warped_stem / crimson_stem, which are 2.0 logs.
-                "wheat", "carrots", "potatoes", "beetroots",
-                "melon_stem", "pumpkin_stem", "pitcher_crop",
-            };
-            for (auto sv : kInstantSubstr) if (nameContains(n, sv)) {
-                return {0.0f, ToolType::None, false, MiningTier::Wood};
-            }
-
-            // Leaves: 0.2, prefers shears, but hoe also speeds them up.
-            if (nameContains(n, "_leaves")) {
-                return {0.2f, ToolType::Shears, false, MiningTier::Wood};
-            }
-
-            // Wool / cloth: shears preferred, 0.8.
-            if (nameContains(n, "_wool") || n == "white_wool" || nameContains(n, "cobweb")) {
-                if (nameContains(n, "cobweb")) {
-                    return {4.0f, ToolType::Sword, true, MiningTier::Wood};
+        // ── Mining + blast data (MC Blocks.java, via a generator) ──────────
+        //
+        // These four columns used to be inferred from a block's MODEL NAME by
+        // a ~200-line substring classifier ("anything containing 'stone' is
+        // 1.5") plus forty hand-written overrides. That was right often enough
+        // to look correct and wrong often enough to matter, and it had no
+        // answer at all for explosion resistance — which is the number an
+        // explosion's ray march actually spends.
+        //
+        // They now come from tools/gen_block_hardness.py, which transcribes
+        // Blocks.java's Properties builder chains (resolving `strength`,
+        // `instabreak`, `ofFullCopy`/`ofLegacyCopy` inheritance and the local
+        // Properties factories) and reads the tool/tier columns out of
+        // data/minecraft/tags/block/. See GeneratedBlockHardness.hpp.
+        void ApplyGeneratedHardness(std::array<Block, BlockRegistry::Size>& defs) {
+            size_t matched = 0;
+            size_t unmatched = 0;
+            for (Block& b : defs) {
+                if (b.registrySlug.empty()) continue;
+                const GeneratedBlockHardnessRow* row = FindBlockHardness(b.registrySlug);
+                if (!row) {
+                    // A block this engine carries that vanilla does not, or a
+                    // promoted state variant sharing a base block's slug. Its
+                    // struct defaults stand.
+                    ++unmatched;
+                    continue;
                 }
-                return {0.8f, ToolType::Shears, false, MiningTier::Wood};
+                b.destroyTime          = row->destroyTime;
+                b.explosionResistance  = row->explosionResistance;
+                b.requiresCorrectTool  = row->requiresCorrectTool;
+                b.preferredTool        = row->preferredTool;
+                b.minTier              = row->minTier;
+                b.mapColor             = row->mapColor;
+                b.ignitedByLava        = row->ignitedByLava;
+                ++matched;
             }
 
-            // Sand / gravel / clay / dirt / podzol / mycelium / coarse_dirt /
-            // mud / soul_sand / soul_soil / snow_block / snow: shovel, 0.5-0.6.
-            static constexpr std::string_view kShovelSubstr[] = {
-                "sand", "gravel", "_dirt", "dirt_path", "podzol", "mycelium",
-                "mud", "soul_sand", "soul_soil", "coarse_dirt", "rooted_dirt",
-                "snow_block", "snow", "clay",
-            };
-            for (auto sv : kShovelSubstr) if (nameContains(n, sv)) {
-                float t = nameContains(n, "_block") ? 0.2f : 0.6f;
-                if (n == "dirt" || nameContains(n, "_dirt") || n == "podzol" ||
-                    n == "mycelium" || n == "coarse_dirt" || n == "rooted_dirt") t = 0.5f;
-                if (n == "clay") t = 0.6f;
-                if (n == "mud") t = 0.5f;
-                if (nameContains(n, "soul_")) t = 0.5f;
-                if (n == "snow") t = 0.1f;
-                return {t, ToolType::Shovel, false, MiningTier::Wood};
-            }
+            // Air has no BlockDefs.inc row and therefore no slug, so the walk
+            // above cannot reach it. MC registers it `.replaceable()
+            // .noCollision().air()` with both strengths left at the default 0.
+            Block& air = defs[static_cast<size_t>(BlockID::Air)];
+            air.destroyTime         = 0.0f;
+            air.explosionResistance = 0.0f;
+            air.requiresCorrectTool = false;
 
-            // Grass block / dirt-like surface blocks
-            if (n == "grass_block" || n == "grass_block_snow") {
-                return {0.6f, ToolType::Shovel, false, MiningTier::Wood};
-            }
-
-            // Wood: logs, planks, fences, doors, slabs, stairs, signs.
-            static constexpr std::string_view kWoodSubstr[] = {
-                "_log", "_wood", "_planks", "_fence", "_door", "_trapdoor",
-                "_slab", "_stairs", "_sign", "_shelf", "stripped_",
-                "bookshelf", "crafting_table", "chest", "barrel", "loom",
-                "smoker", "_pressure_plate", "ladder",
-            };
-            for (auto sv : kWoodSubstr) if (nameContains(n, sv)) {
-                // Slabs/stairs of stone-like still need pickaxe — handled below
-                // by the stone-substr check that runs first when matched.
-                ToolType tool = ToolType::Axe;
-                float t = 2.0f;
-                if (nameContains(n, "_pressure_plate")) t = 0.5f;
-                if (nameContains(n, "_door") || nameContains(n, "_trapdoor")) t = 3.0f;
-                if (nameContains(n, "ladder")) { tool = ToolType::Axe; t = 0.4f; }
-                if (nameContains(n, "bookshelf")) t = 1.5f;
-                if (nameContains(n, "chest")) t = 2.5f;
-                return {t, tool, false, MiningTier::Wood};
-            }
-
-            // Ores — gated by tier (covered explicitly below for the iconic
-            // ones, but provide a default for any remaining `_ore`).
-            if (nameContains(n, "_ore")) {
-                MiningTier tier = MiningTier::Wood;
-                if (nameContains(n, "iron_") || nameContains(n, "lapis_") ||
-                    nameContains(n, "copper_")) tier = MiningTier::Stone;
-                if (nameContains(n, "gold_") || nameContains(n, "redstone_") ||
-                    nameContains(n, "diamond_") || nameContains(n, "emerald_")) {
-                    tier = (nameContains(n, "diamond_") || nameContains(n, "emerald_") ||
-                            nameContains(n, "gold_") || nameContains(n, "redstone_"))
-                            ? MiningTier::Iron : MiningTier::Stone;
-                }
-                if (nameContains(n, "ancient_debris")) tier = MiningTier::Diamond;
-                float t = 3.0f;
-                if (nameContains(n, "deepslate_")) t = 4.5f;
-                if (nameContains(n, "nether_quartz") || nameContains(n, "nether_gold")) t = 3.0f;
-                return {t, ToolType::Pickaxe, true, tier};
-            }
-
-            // Stone family (stone/cobblestone/andesite/granite/diorite/basalt/
-            // deepslate/bricks/etc.) — pickaxe required.
-            static constexpr std::string_view kStoneSubstr[] = {
-                "stone", "cobblestone", "andesite", "granite", "diorite",
-                "basalt", "blackstone", "deepslate", "tuff", "calcite",
-                "dripstone", "_bricks", "brick", "prismarine", "purpur",
-                "end_stone", "netherrack", "magma_block", "obsidian",
-                "anvil", "iron_block", "gold_block", "diamond_block",
-                "emerald_block", "redstone_block", "lapis_block",
-                "iron_bars", "iron_door", "iron_trapdoor",
-                "smooth_", "polished_", "chiseled_", "cracked_", "mossy_",
-                "_wall", "concrete", "terracotta", "glazed_terracotta",
-                "quartz", "amethyst_block", "amethyst_cluster",
-                "ice", "packed_ice", "blue_ice", "frosted_ice",
-                "copper_block", "cut_copper", "weathered_copper",
-                "raw_copper_block", "raw_iron_block", "raw_gold_block",
-                "netherite_block", "honey_block", "honeycomb_block",
-                "slime_block", "moss_block", "shroomlight",
-                "mud_bricks", "packed_mud", "respawn_anchor",
-            };
-            bool isStone = false;
-            for (auto sv : kStoneSubstr) if (nameContains(n, sv)) { isStone = true; break; }
-            if (isStone) {
-                float t = 1.5f;
-                MiningTier tier = MiningTier::Wood;
-                bool req = true;
-                ToolType tool = ToolType::Pickaxe;
-
-                if (nameContains(n, "cobblestone")) t = 2.0f;
-                if (nameContains(n, "_bricks") || nameContains(n, "_brick")) t = 2.0f;
-                if (nameContains(n, "deepslate")) t = 3.0f;
-                if (nameContains(n, "blackstone")) t = 1.5f;
-                if (nameContains(n, "basalt")) t = 1.25f;
-                if (nameContains(n, "netherrack")) { t = 0.4f; req = false; }
-                if (nameContains(n, "magma_block")) t = 0.5f;
-                if (nameContains(n, "ice")) { t = 0.5f; req = false; tool = ToolType::Pickaxe; }
-                if (nameContains(n, "packed_ice") || nameContains(n, "blue_ice")) t = 0.5f;
-
-                // Metal blocks
-                if (n == "iron_block") { t = 5.0f; tier = MiningTier::Stone; }
-                if (n == "gold_block") { t = 3.0f; tier = MiningTier::Iron; }
-                if (n == "diamond_block" || n == "emerald_block") { t = 5.0f; tier = MiningTier::Iron; }
-                if (n == "netherite_block") { t = 50.0f; tier = MiningTier::Diamond; }
-                if (n == "raw_iron_block") { t = 5.0f; tier = MiningTier::Stone; }
-                if (n == "raw_gold_block") { t = 5.0f; tier = MiningTier::Iron; }
-                if (n == "raw_copper_block" || nameContains(n, "copper_block") ||
-                    nameContains(n, "cut_copper")) { t = 3.0f; tier = MiningTier::Stone; }
-                if (n == "redstone_block" || n == "lapis_block") { t = 3.0f; tier = MiningTier::Stone; }
-                if (n == "amethyst_block" || n == "amethyst_cluster") { t = 1.5f; tier = MiningTier::Wood; }
-
-                if (n == "obsidian" || nameContains(n, "crying_obsidian")) {
-                    t = 50.0f; tier = MiningTier::Diamond;
-                }
-                if (n == "respawn_anchor") { t = 50.0f; tier = MiningTier::Diamond; }
-                if (n == "ancient_debris") { t = 30.0f; tier = MiningTier::Diamond; }
-
-                // Honey/slime/moss/shroomlight — not stone, no tool needed.
-                if (n == "honey_block" || n == "slime_block" ||
-                    n == "moss_block" || n == "shroomlight" ||
-                    n == "honeycomb_block") { return {0.5f, ToolType::None, false, MiningTier::Wood}; }
-
-                // Terracotta / concrete / glazed
-                if (nameContains(n, "concrete_powder")) {
-                    return {0.5f, ToolType::Shovel, false, MiningTier::Wood};
-                }
-                if (nameContains(n, "concrete")) { t = 1.8f; tier = MiningTier::Wood; }
-                if (nameContains(n, "terracotta")) { t = 1.25f; tier = MiningTier::Wood; }
-                if (nameContains(n, "glazed_terracotta")) t = 1.4f;
-
-                // Quartz family is breakable by any pickaxe
-                if (nameContains(n, "quartz")) { t = 0.8f; tier = MiningTier::Wood; }
-
-                // Walls / stairs / slabs of stone family — inherit tier from base
-                return {t, tool, req, tier};
-            }
-
-            // Glass: 0.3, no tool, doesn't require a tool to break.
-            if (nameContains(n, "glass") || nameContains(n, "_pane")) {
-                return {0.3f, ToolType::None, false, MiningTier::Wood};
-            }
-
-            // Default: 1.0s, no special tool, no requirement.
-            return {1.0f, ToolType::None, false, MiningTier::Wood};
-        }
-
-        void ApplyExplicitHardnessOverrides(std::array<Block, BlockRegistry::Size>& defs) {
-            auto setHardness = [&](BlockID id, float dt, ToolType tool, bool req,
-                                   MiningTier tier) {
-                size_t idx = static_cast<size_t>(id);
-                if (idx >= defs.size()) return;
-                defs[idx].destroyTime = dt;
-                defs[idx].preferredTool = tool;
-                defs[idx].requiresCorrectTool = req;
-                defs[idx].minTier = tier;
-            };
-            // The iconic / sanity-check set — values from MC Blocks.java.
-            setHardness(BlockID::Air,          0.0f, ToolType::None,  false, MiningTier::Wood);
-            setHardness(BlockID::Bedrock,     -1.0f, ToolType::None,  false, MiningTier::Wood);
-            setHardness(BlockID::Stone,        1.5f, ToolType::Pickaxe, true,  MiningTier::Wood);
-            setHardness(BlockID::Cobblestone,  2.0f, ToolType::Pickaxe, true,  MiningTier::Wood);
-            setHardness(BlockID::Dirt,         0.5f, ToolType::Shovel,  false, MiningTier::Wood);
-            setHardness(BlockID::Grass,        0.6f, ToolType::Shovel,  false, MiningTier::Wood);
-            setHardness(BlockID::Sand,         0.5f, ToolType::Shovel,  false, MiningTier::Wood);
-            setHardness(BlockID::Gravel,       0.6f, ToolType::Shovel,  false, MiningTier::Wood);
-            setHardness(BlockID::Obsidian,    50.0f, ToolType::Pickaxe, true,  MiningTier::Diamond);
-            setHardness(BlockID::CryingObsidian, 50.0f, ToolType::Pickaxe, true, MiningTier::Diamond);
-            setHardness(BlockID::IronOre,      3.0f, ToolType::Pickaxe, true,  MiningTier::Stone);
-            setHardness(BlockID::CoalOre,      3.0f, ToolType::Pickaxe, true,  MiningTier::Wood);
-            setHardness(BlockID::CopperOre,    3.0f, ToolType::Pickaxe, true,  MiningTier::Stone);
-            setHardness(BlockID::GoldOre,      3.0f, ToolType::Pickaxe, true,  MiningTier::Iron);
-            setHardness(BlockID::DiamondOre,   3.0f, ToolType::Pickaxe, true,  MiningTier::Iron);
-            setHardness(BlockID::EmeraldOre,   3.0f, ToolType::Pickaxe, true,  MiningTier::Iron);
-            setHardness(BlockID::RedstoneOre,  3.0f, ToolType::Pickaxe, true,  MiningTier::Iron);
-            setHardness(BlockID::LapisOre,     3.0f, ToolType::Pickaxe, true,  MiningTier::Stone);
-            setHardness(BlockID::NetherQuartzOre, 3.0f, ToolType::Pickaxe, true, MiningTier::Wood);
-            setHardness(BlockID::NetherGoldOre,   3.0f, ToolType::Pickaxe, true, MiningTier::Wood);
-            setHardness(BlockID::AncientDebris,  30.0f, ToolType::Pickaxe, true, MiningTier::Diamond);
-            setHardness(BlockID::Netherrack,   0.4f, ToolType::Pickaxe, true,  MiningTier::Wood);
-            setHardness(BlockID::Glowstone,    0.3f, ToolType::None,    false, MiningTier::Wood);
-            setHardness(BlockID::Sandstone,    0.8f, ToolType::Pickaxe, true,  MiningTier::Wood);
-            setHardness(BlockID::Glass,        0.3f, ToolType::None,    false, MiningTier::Wood);
-            setHardness(BlockID::IronBlock,    5.0f, ToolType::Pickaxe, true,  MiningTier::Stone);
-            setHardness(BlockID::GoldBlock,    3.0f, ToolType::Pickaxe, true,  MiningTier::Iron);
-            setHardness(BlockID::DiamondBlock, 5.0f, ToolType::Pickaxe, true,  MiningTier::Iron);
-            setHardness(BlockID::EmeraldBlock, 5.0f, ToolType::Pickaxe, true,  MiningTier::Iron);
-            setHardness(BlockID::NetheriteBlock, 50.0f, ToolType::Pickaxe, true, MiningTier::Diamond);
-            setHardness(BlockID::Water,       -1.0f, ToolType::None,    false, MiningTier::Wood);
-            setHardness(BlockID::Lava,        -1.0f, ToolType::None,    false, MiningTier::Wood);
-
-            // ── Farming blocks the name classifier can't reach ──────────────
-            // Farmland matches no shovel substring ("farmland" contains none
-            // of sand/gravel/_dirt/…), so it fell through to the 1.0 default.
-            // Blocks.java:1521 — .strength(0.6F), and it is in #mineable/shovel.
-            setHardness(BlockID::Farmland,     0.6f, ToolType::Shovel,  false, MiningTier::Wood);
-            // Blocks.java:1592 — .strength(0.4F), no preferred tool.
-            setHardness(BlockID::Cactus,       0.4f, ToolType::None,    false, MiningTier::Wood);
-            // Blocks.java:1695 — .strength(0.2F, 3.0F), #mineable/axe.
-            setHardness(BlockID::Cocoa,        0.2f, ToolType::Axe,     false, MiningTier::Wood);
-            // Blocks.java:2089-2090 — both chain .instabreak() and THEN
-            // .strength(1.0F); the later call wins, so neither is instant.
-            // Both are #mineable/axe (and a sword one-shots bamboo, which the
-            // engine has no rule for yet).
-            setHardness(BlockID::Bamboo,        1.0f, ToolType::Axe,    false, MiningTier::Wood);
-            setHardness(BlockID::BambooSapling, 1.0f, ToolType::Axe,    false, MiningTier::Wood);
+            // This count is the regression detector for an MC version bump: if
+            // a Blocks.java refactor breaks the generator's parse, `unmatched`
+            // jumps and every affected block silently reverts to 0 hardness.
+            Log::Info("[BlockRegistry] hardness table: %zu matched, %zu unmatched",
+                      matched, unmatched);
         }
 
 
@@ -583,7 +348,7 @@ namespace Game {
         // ── Mining data: classify every registered block by name, then
         //    apply explicit overrides for the iconic / sanity-check ones.
         //    Mirrors MC Blocks.java per-block strength() / requires-tool
-        //    declarations. See ClassifyByName / ApplyExplicitHardnessOverrides
+        //    declarations. See ApplyGeneratedHardness
         //    above for the rules.
         //
         // ── Collision: blocks declared with `.noCollision()` in MC's
@@ -747,6 +512,17 @@ namespace Game {
             // The bare "rail" — the "_rail" substring above catches the
             // powered/detector/activator variants but not this one.
             if (n == "rail") return true;
+            // Both portal blocks are .noCollision() (Blocks.java:1608, :1690)
+            // — walking INTO one is how you use it, so a collision box would
+            // make the portal a wall you bounce off.
+            //
+            // Exact matches, not substrings: "end_portal" as a substring also
+            // catches end_portal_frame, which is a solid block you stand on
+            // and which the pattern matcher needs you to be able to walk
+            // around.
+            if (n == "nether_portal" || n == "end_portal" || n == "end_gateway") {
+                return true;
+            }
             for (auto sv : kNoCollisionSubstr) {
                 if (n.find(sv) != std::string::npos) return true;
             }
@@ -756,11 +532,11 @@ namespace Game {
             Block& b = blockDefinitions[i];
             if (b.modelName.empty() && b.name.empty()) continue; // unregistered slot
             const std::string& name = !b.modelName.empty() ? b.modelName : b.name;
-            const MiningTraits t = ClassifyByName(name);
-            b.destroyTime         = t.destroyTime;
-            b.preferredTool       = t.preferredTool;
-            b.requiresCorrectTool = t.requiresCorrectTool;
-            b.minTier             = t.minTier;
+            // destroyTime / preferredTool / requiresCorrectTool / minTier are
+            // NO LONGER derived from the name — ApplyGeneratedHardness below
+            // takes them from the transcribed Blocks.java table. Collision and
+            // support are still name-driven; those have no Blocks.java column
+            // this engine can read (they come out of VoxelShapes).
             b.hasCollision        = !noCollisionFor(name);
             b.needsSupportBelow   = needsSupportBelowFor(name);
             // Slug, not model name — see kReplaceableSlugs. Safe here because
@@ -782,7 +558,24 @@ namespace Game {
             blockDefinitions[static_cast<size_t>(id)].hasCollision = false;
         }
 
-        ApplyExplicitHardnessOverrides(blockDefinitions);
+        // Air is REPLACEABLE. Blocks.java registers it as
+        // `.replaceable().noCollision()`, and the substring table above cannot
+        // reach it for the same reason the collision flag above cannot: Air has
+        // no BlockDefs.inc row, so it has no registrySlug to match on.
+        //
+        // Nothing noticed until portals: every other consumer of the flag
+        // (BlockPlacement) tests `existingId == BlockID::Air` first and returns
+        // true before the flag is read. `PortalForcer::CanPortalReplaceBlock`
+        // is the first caller to ask the flag directly, and with air answering
+        // "not replaceable" it rejected EVERY empty cell — so the search for a
+        // spot to put an exit portal could never succeed, and every nether
+        // portal fell through to the last-resort branch that carves a platform
+        // at y=70 regardless of what is already there.
+        blockDefinitions[static_cast<size_t>(BlockID::Air)].replaceable = true;
+
+        // Must run after the registry-slug pass above — the table is keyed on
+        // the slug, and an empty slug matches nothing.
+        ApplyGeneratedHardness(blockDefinitions);
 
         // Right-click behaviour (crafting table's menu, container menus, …).
         // Must come after the registry-slug pass above: it looks blocks up by
@@ -816,6 +609,10 @@ namespace Game {
 
         Log::Info("Block Registry initialization complete - %zu blocks registered",
                  static_cast<size_t>(BlockID::Count));
+
+        // AFTER the last RegisterModelBlock and after the Water/Lava modelName
+        // overrides — see the note on FamilyBits.
+        InitFamilies();
 
         // BlockEntityTypes registers per-BlockID factories; must run AFTER
         // block ids are stable. Safe to call multiple times (idempotent).
@@ -1040,6 +837,49 @@ namespace Game {
     // See tools/gen_block_states.py. The data is checked against vanilla by
     // tools/verify_block_states.py and the runtime tables by
     // tools/blockstate_parity.
+
+    std::array<uint8_t, BlockRegistry::Size> BlockRegistry::s_familyBits{};
+
+    void BlockRegistry::InitFamilies() {
+        // The string logic that used to live in five separate predicates, run
+        // ONCE here. Keeping it in one place is the point: the suffix rules are
+        // subtle (a "_fence_gate" is not a "_fence"; "_wall_torch" is not a
+        // "_wall") and having five copies invited them to drift.
+        const auto endsWith = [](const std::string& n, std::string_view suffix) {
+            return n.size() >= suffix.size() &&
+                   n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+
+        size_t counted = 0;
+        for (size_t i = 0; i < Size; ++i) {
+            const std::string& n = blockDefinitions[i].modelName;
+            uint8_t bits = 0;
+
+            if (endsWith(n, "_stairs")) bits |= FamilyStairs;
+
+            // Longer suffix first — "_fence" would otherwise swallow
+            // "_fence_gate", which is a different class with different
+            // properties.
+            if (endsWith(n, "_fence_gate")) {
+                bits |= FamilyFenceGate;
+            } else if (endsWith(n, "_fence")) {
+                bits |= FamilyFence;
+            }
+
+            if (n == "iron_bars" || endsWith(n, "_pane")) bits |= FamilyPane;
+
+            // Ends-with, not contains: "_wall_sign", "_wall_torch",
+            // "_wall_banner" and the coral wall fans carry "_wall_" in the
+            // MIDDLE and are not walls.
+            if (endsWith(n, "_wall")) bits |= FamilyWall;
+
+            s_familyBits[i] = bits;
+            if (bits) ++counted;
+        }
+        Log::Info("Shape families - %zu of %zu blocks in a multi-box family",
+                  counted, Size);
+    }
+
     void BlockRegistry::InitBlockStates() {
         BlockStates::Init();
 
@@ -1131,6 +971,24 @@ namespace Game {
     bool BlockRegistry::ContainsWater(BlockState state) {
         const BlockID id = state.Block();
         if (id == BlockID::Water) return true;
+        const size_t i = static_cast<size_t>(id);
+        if (i >= Size) return false;
+        const WaterlogInfo& w = s_waterlog[i];
+        if (w.alwaysWater) return true;
+        if (!w.waterloggable) return false;
+        // Booleans list [true, false], so index 0 is true.
+        return state.GetIndex(PropertyId::WATERLOGGED) == 0;
+    }
+
+    bool BlockRegistry::IsWaterSource(BlockState state) {
+        const BlockID id = state.Block();
+        if (id == BlockID::Water) {
+            // MC WaterFluid.Flowing vs WaterFluid.Source: `level` 0 is the
+            // source, 1..15 are the flowing falloff. LiquidBlock stores the
+            // MC-inverted "falling/level" in one property here, and index 0 is
+            // value "0", so a source is index 0.
+            return state.GetIndex(PropertyId::LEVEL) == 0;
+        }
         const size_t i = static_cast<size_t>(id);
         if (i >= Size) return false;
         const WaterlogInfo& w = s_waterlog[i];
@@ -1243,6 +1101,19 @@ namespace Game {
         };
 
         StateShapeSetCache& StateShapeSets() {
+            static StateShapeSetCache c;
+            return c;
+        }
+
+        // The COLLISION variant, keyed identically. The outline path has been
+        // memoised since it was written, with a comment saying those box sets
+        // come from string-keyed property reads and are "far too much work for
+        // a per-voxel query" — and the collision variant IS that query: it is
+        // what the explosion exposure raycast and the entity collision sweep
+        // call. It had no cache at all, so a blast next to a fence line rebuilt
+        // five boxes from property reads on every ray that touched it, with no
+        // bound on how bad it could get.
+        StateShapeSetCache& StateCollisionShapeSets() {
             static StateShapeSetCache c;
             return c;
         }
@@ -1637,15 +1508,88 @@ namespace Game {
         return set;
     }
 
+    void BlockRegistry::PrewarmShapeCaches() {
+        // Touch every state through all three entry points, then force-fill any
+        // slot the touch left cold.
+        //
+        // The force-fill is not belt-and-braces, it is required. GetBlockShape
+        // has one exit that returns WITHOUT storing: the `model.elements.empty()`
+        // branch, which hands back a full cube for the block-entity-rendered
+        // blocks whose model JSON carries only a particle texture (the shulker
+        // boxes, barrier, moving_piston, copper_chest and friends — see
+        // BlockModel.cpp, which deliberately does NOT let a parentless,
+        // element-less model inherit the default stone cube). Those slots would
+        // stay uncomputed for the life of the process, so every ray-cell test
+        // that touched one re-ran the whole cold path — two std::string::find
+        // calls and an unordered_map<std::string,...> lookup — and did so on
+        // every worker thread at once, which is exactly what this prewarm
+        // exists to prevent.
+        //
+        // Value-preserving: BlockShape{} is the same 0..1 cube that branch
+        // returns. Safe to write here because prewarm is single-threaded and
+        // runs after BlockStateModels::Load, so the models are final.
+        StateShapeCache& sc = StateShapes();
+        size_t forced = 0;
+        for (size_t idx = 0; idx < Size; ++idx) {
+            const BlockID id = static_cast<BlockID>(idx);
+            const uint32_t count = StateIds().countAt(idx);
+            for (uint32_t si = 0; si < count; ++si) {
+                const BlockState st = BlockStates::FromIndex(id, static_cast<BlockStateIndex>(si));
+                (void)GetBlockShape(st);
+                (void)GetBlockShapeSet(st);
+                (void)GetBlockCollisionShapeSet(st);
+
+                const uint32_t slot = StateIds().baseAt(idx) + si;
+                if (!sc.computed[slot].load(std::memory_order_acquire)) {
+                    sc.shapes[slot] = BlockShape{};
+                    sc.computed[slot].store(true, std::memory_order_release);
+                    ++forced;
+                }
+            }
+        }
+        if (forced > 0) {
+            Log::Info("[BlockRegistry] prewarmed shape caches (%zu element-less states "
+                      "filled with the full cube)", forced);
+        }
+    }
+
+    const BlockRegistry::BlockShape* BlockRegistry::GetSingleCollisionBox(BlockState state) {
+        const BlockID id = state.Block();
+        const size_t idx = static_cast<size_t>(id);
+        if (idx >= Size) return nullptr;
+        // The three families whose COLLISION shape differs from their outline
+        // (see GetBlockCollisionShapeSet), plus anything multi-box, need the set.
+        if (IsCrossCollisionBlock(id) || IsWallBlock(id) || IsFenceGateBlock(id)) {
+            return nullptr;
+        }
+        if (HasMultiBoxShape(id)) return nullptr;
+        // GetBlockShape returns a reference into the cache — nothing is copied.
+        return &GetBlockShape(state);
+    }
+
     BlockRegistry::BlockShapeSet BlockRegistry::GetBlockCollisionShapeSet(BlockState state) {
         const BlockID id = state.Block();
+        const size_t idx = static_cast<size_t>(id);
         // Three families separate the two: fences and walls are taller to walk
         // into than to look at, and an open gate has no collision shape at all.
         // Everything else inherits BlockBehaviour.getCollisionShape's default
         // of "the outline shape".
-        if (static_cast<size_t>(id) < Size &&
+        if (idx < Size &&
             (IsCrossCollisionBlock(id) || IsWallBlock(id) || IsFenceGateBlock(id))) {
-            return MultiBoxShape(state, /*collision=*/true);
+            // Memoised exactly like the outline variant above, and keyed the
+            // same way, so the two caches agree on what a state index means.
+            BlockStateIndex stateIndex = state.Index();
+            if (stateIndex >= StateIds().countAt(idx)) stateIndex = 0;
+            const uint32_t slot = StateIds().baseAt(idx) + stateIndex;
+
+            StateShapeSetCache& cache = StateCollisionShapeSets();
+            if (cache.computed[slot].load(std::memory_order_acquire)) {
+                return cache.sets[slot];
+            }
+            BlockShapeSet set = MultiBoxShape(state, /*collision=*/true);
+            cache.sets[slot] = set;
+            cache.computed[slot].store(true, std::memory_order_release);
+            return set;
         }
         return GetBlockShapeSet(state);
     }
@@ -1675,6 +1619,27 @@ namespace Game {
         const uint32_t slot = StateIds().baseAt(idx) + stateIndex;
         BlockShape* const shapes = cache.shapes.data();
         std::atomic<bool>* const computed = cache.computed.get();
+
+        // Memo check, BEFORE the fast paths below and not after them.
+        //
+        // It used to sit past all six, which meant a warm call still executed
+        // whichever fast path matched and STORED its result — so reading a
+        // slab's shape was a WRITE to shared non-atomic memory on every call,
+        // from every thread. That is a data race the mesher's worker threads
+        // hit today (they each run the full state sweep), and it is a hard
+        // blocker for computing exposure on more than one thread: the stores
+        // would be write-write UB and would ping-pong the cache line.
+        //
+        // Safe to hoist because each fast path is a pure function of
+        // (id, stateIndex) once BlockStates::Init() has run, so the memoised
+        // value always equals the one the fast path would recompute. The
+        // comment below about self-healing described the old unconditional
+        // store; PrewarmShapeCaches now fills every slot at a known-good point
+        // after the models load, which is what actually guarantees a slab is
+        // never cached as a full cube.
+        if (computed[slot].load(std::memory_order_acquire)) {
+            return shapes[slot];
+        }
 
         // Fast-path: a slab ALWAYS resolves from its `type` state, regardless of
         // whether the JSON model has loaded yet. Without this the mesher's
@@ -1738,8 +1703,55 @@ namespace Game {
             return shapes[slot];
         }
 
-        if (computed[slot].load(std::memory_order_acquire)) {
-            return shapes[slot];
+        // Skulls/heads — BE-rendered like the chest, so the model JSON is
+        // empty and the shape must be stated here. MC SkullBlock:
+        // Block.column(8, 0, 8) → (4,0,4)-(12,8,12), except the piglin's
+        // wider column(10, 0, 8) → (3,0,3)-(13,8,13); WallSkullBlock hangs a
+        // 8×8×8 box on the wall behind, keyed on FACING (the direction the
+        // face looks, opposite the supporting wall).
+        switch (id) {
+            case BlockID::SkeletonSkull:
+            case BlockID::WitherSkeletonSkull:
+            case BlockID::ZombieHead:
+            case BlockID::CreeperHead:
+            case BlockID::PlayerHead:
+            case BlockID::DragonHead: {
+                static const BlockShape kFloorSkull =
+                    BlockShape{ glm::vec3(4.0f / 16.0f, 0.0f, 4.0f / 16.0f),
+                                glm::vec3(12.0f / 16.0f, 8.0f / 16.0f, 12.0f / 16.0f) };
+                shapes[slot] = kFloorSkull;
+                computed[slot].store(true, std::memory_order_release);
+                return shapes[slot];
+            }
+            case BlockID::PiglinHead: {
+                static const BlockShape kPiglinFloor =
+                    BlockShape{ glm::vec3(3.0f / 16.0f, 0.0f, 3.0f / 16.0f),
+                                glm::vec3(13.0f / 16.0f, 8.0f / 16.0f, 13.0f / 16.0f) };
+                shapes[slot] = kPiglinFloor;
+                computed[slot].store(true, std::memory_order_release);
+                return shapes[slot];
+            }
+            case BlockID::SkeletonWallSkull:
+            case BlockID::WitherSkeletonWallSkull:
+            case BlockID::ZombieWallHead:
+            case BlockID::CreeperWallHead:
+            case BlockID::PlayerWallHead:
+            case BlockID::PiglinWallHead:
+            case BlockID::DragonWallHead: {
+                // MC WallSkullBlock.SHAPES per FACING: north (4,4,8)-(12,12,16),
+                // south (4,4,0)-(12,12,8), east (0,4,4)-(8,12,12),
+                // west (8,4,4)-(16,12,12).
+                const std::string_view facing = state.GetValueByName("facing");
+                glm::vec3 mn(4.0f, 4.0f, 8.0f), mx(12.0f, 12.0f, 16.0f); // north
+                if (facing == "south")     { mn = {4.0f, 4.0f, 0.0f};  mx = {12.0f, 12.0f, 8.0f}; }
+                else if (facing == "east") { mn = {0.0f, 4.0f, 4.0f};  mx = {8.0f, 12.0f, 12.0f}; }
+                else if (facing == "west") { mn = {8.0f, 4.0f, 4.0f};  mx = {16.0f, 12.0f, 12.0f}; }
+                shapes[slot] = BlockShape{ mn / 16.0f, mx / 16.0f };
+                computed[slot].store(true, std::memory_order_release);
+                return shapes[slot];
+            }
+            default:
+                break;
         }
 
         // ── Stairs ──────────────────────────────────────────────────────────

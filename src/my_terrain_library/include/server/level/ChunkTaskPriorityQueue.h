@@ -1,6 +1,7 @@
 #pragma once
 
 #include "server/level/ChunkLevel.h"
+#include <cstdio>
 #include "world/ChunkPos.h"
 #include <vector>
 #include <unordered_map>
@@ -135,7 +136,16 @@ public:
      * Reference: ChunkTaskPriorityQueue.java lines 40-43
      * OPTIMIZATION: Only locks the specific priority level
      */
+    static int clampLevel(int level) {
+        const int count = getPriorityLevelCount();
+        if (level < 0 || level >= count) {
+            std::fprintf(stderr, "[ChunkTaskPriorityQueue] level %d out of range [0,%d)\n", level, count);
+            return level < 0 ? 0 : count - 1;
+        }
+        return level;
+    }
     void submit(std::function<void()> task, int64_t chunkPos, int level) {
+        level = clampLevel(level);
         {
             std::lock_guard<std::mutex> lock(m_priorityMutexes[level]);
             m_queuesPerPriority[level].getOrCreate(chunkPos).push_back(std::move(task));
@@ -171,48 +181,45 @@ public:
      * @return TasksForChunk or nullopt if no work
      */
     std::optional<TasksForChunk> pop() {
-        // Fast path: check if there's work without locking
         if (!hasWork()) {
             return std::nullopt;
         }
-
-        int index = m_topPriorityQueueIndex.load(std::memory_order_acquire);
-        int priorityLevelCount = getPriorityLevelCount();
-
-        // Try each priority level starting from current top
+        // Scan from 0, not from the cached top index. The cache is only a
+        // hint; a task sitting at a level below a stale top would never be
+        // popped again (46 empty-checks per pop is nothing next to a task).
+        const int cachedTop = m_topPriorityQueueIndex.load(std::memory_order_acquire);
+        int index = 0;
+        const int priorityLevelCount = getPriorityLevelCount();
         while (index < priorityLevelCount) {
             std::lock_guard<std::mutex> lock(m_priorityMutexes[index]);
             auto& queue = m_queuesPerPriority[index];
-
             if (!queue.empty()) {
                 auto first = queue.removeFirst();
                 if (!first.has_value()) {
                     ++index;
                     continue;
                 }
-
-                // Update top priority if this queue is now empty
+                if (index < cachedTop) {
+                    m_strandedPops.fetch_add(1, std::memory_order_relaxed);
+                    m_topPriorityQueueIndex.store(index, std::memory_order_release);
+                }
                 if (queue.empty()) {
                     updateTopPriorityQueueIndexFrom(index);
                 }
-
                 return TasksForChunk(first->first, std::move(first->second));
             }
-
             ++index;
         }
-
-        // No work found, update top index
         m_topPriorityQueueIndex.store(priorityLevelCount, std::memory_order_release);
         return std::nullopt;
     }
 
-    /**
-     * Check if there is work to do
-     * Reference: ChunkTaskPriorityQueue.java lines 81-83
-     */
+    size_t strandedPops() const { return m_strandedPops.load(); }
+
     bool hasWork() const {
-        return m_topPriorityQueueIndex.load(std::memory_order_acquire) < getPriorityLevelCount();
+        if (m_topPriorityQueueIndex.load(std::memory_order_acquire) < getPriorityLevelCount()) return true;
+        for (const auto& q : m_queuesPerPriority) if (!q.empty()) return true;
+        return false;
     }
 
     /**
@@ -227,6 +234,7 @@ public:
 
 protected:
     void resortChunkTasksInternal(int oldPriority, int64_t pos, int newPriority) {
+        newPriority = clampLevel(newPriority);
         int priorityLevelCount = getPriorityLevelCount();
 
         if (oldPriority < priorityLevelCount) {
@@ -284,6 +292,7 @@ protected:
 private:
     std::string m_name;
     std::atomic<int> m_topPriorityQueueIndex;
+    std::atomic<size_t> m_strandedPops{0};   // diagnostics
     std::vector<OrderedChunkTaskMap> m_queuesPerPriority;
     std::vector<std::mutex> m_priorityMutexes;  // Per-priority mutexes for submit/pop
     std::mutex m_globalMutex;  // For operations that touch multiple priorities

@@ -24,6 +24,9 @@ namespace Network {
         static constexpr uint8_t FLAG_FLYING       = 0x02;
         static constexpr uint8_t FLAG_MAY_FLY      = 0x04;
         static constexpr uint8_t FLAG_INSTABUILD   = 0x08;
+        // Non-vanilla, see the C2S packet: the saved debug-noclip state coming
+        // back on join. A vanilla client would ignore the bit.
+        static constexpr uint8_t FLAG_NOCLIP       = 0x10;
 
         uint8_t flags        = 0;
         float   flyingSpeed  = 0.05f;   // MC Abilities.flyingSpeed default
@@ -34,6 +37,7 @@ namespace Network {
         bool flying()       const { return (flags & FLAG_FLYING) != 0; }
         bool mayFly()       const { return (flags & FLAG_MAY_FLY) != 0; }
         bool instabuild()   const { return (flags & FLAG_INSTABUILD) != 0; }
+        bool noclip()       const { return (flags & FLAG_NOCLIP) != 0; }
     };
 
     namespace Serialization {

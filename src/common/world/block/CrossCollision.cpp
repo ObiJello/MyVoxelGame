@@ -124,11 +124,10 @@ namespace Game {
     }
 
     bool IsFenceBlock(BlockID id) {
-        const std::string& n = BlockRegistry::Get(id).modelName;
-        // "_fence" would also swallow "_fence_gate", which is a different class
-        // with a different property set — check the longer suffix first.
-        if (EndsWith(n, "_fence_gate")) return false;
-        return EndsWith(n, "_fence");
+        // Precomputed at the end of BlockRegistry::Init. The "_fence_gate"
+        // exclusion still applies — it is applied once, when the table is
+        // built, rather than per query.
+        return (BlockRegistry::FamilyBits(id) & BlockRegistry::FamilyFence) != 0;
     }
 
     bool IsWoodenFence(BlockID id) {
@@ -138,8 +137,7 @@ namespace Game {
     }
 
     bool IsPaneBlock(BlockID id) {
-        const std::string& n = BlockRegistry::Get(id).modelName;
-        return n == "iron_bars" || EndsWith(n, "_pane");
+        return (BlockRegistry::FamilyBits(id) & BlockRegistry::FamilyPane) != 0;
     }
 
     bool CrossSideOf(BlockState state, Direction dir) {

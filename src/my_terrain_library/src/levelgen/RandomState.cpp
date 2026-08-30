@@ -1,3 +1,5 @@
+#include <string>
+#include <cstdlib>
 #include "levelgen/RandomState.h"
 #include "levelgen/NoiseRouter.h"
 #include "levelgen/NoiseGeneratorSettings.h"
@@ -37,23 +39,31 @@ RandomState::RandomState(NoiseGeneratorSettings* settings, int64_t seed)
     // For overworld: getRandomSource() returns XOROSHIRO, so we use XoroshiroRandomSource
     bool useLegacyInit = (settings->getRandomSource() == RandomAlgorithm::LEGACY);
 
-    XoroshiroRandomSource mainRandom(seed);
-
-    // Reference: RandomState.java line 37
-    // this.random = settings.getRandomSource().newInstance(seed).forkPositional();
-    m_random = new XoroshiroPositionalRandomFactory(mainRandom.forkPositional());
-
-    // Reference: RandomState.java line 39
-    // this.aquiferRandom = this.random.fromHashOf(Identifier.withDefaultNamespace("aquifer")).forkPositional();
-    // CRITICAL: Java uses Identifier.withDefaultNamespace("aquifer").toString() = "minecraft:aquifer"
-    XoroshiroRandomSource aquiferRandomSource = m_random->fromHashOf("minecraft:aquifer");
-    m_aquiferRandom = new XoroshiroPositionalRandomFactory(aquiferRandomSource.forkPositional());
-
-    // Reference: RandomState.java line 40
-    // this.oreRandom = this.random.fromHashOf(Identifier.withDefaultNamespace("ore")).forkPositional();
-    // CRITICAL: Java uses Identifier.withDefaultNamespace("ore").toString() = "minecraft:ore"
-    XoroshiroRandomSource oreRandomSource = m_random->fromHashOf("minecraft:ore");
-    m_oreRandom = new XoroshiroPositionalRandomFactory(oreRandomSource.forkPositional());
+    // Reference: RandomState.java lines 37-40:
+    //   this.random = settings.getRandomSource().newInstance(seed).forkPositional();
+    //   this.aquiferRandom = this.random.fromHashOf("minecraft:aquifer").forkPositional();
+    //   this.oreRandom = this.random.fromHashOf("minecraft:ore").forkPositional();
+    // legacy_random_source=true (nether/end) uses LegacyRandomSource end to
+    // end; the overworld keeps the exact Xoroshiro objects as before.
+    if (useLegacyInit) {
+        LegacyRandomSource mainRandom(seed);
+        m_random = new random::AnyPositionalRandomFactory(mainRandom.forkPositional());
+        LegacyRandomSource aquiferSource = m_random->legacy().fromHashOf("minecraft:aquifer");
+        m_aquiferRandom = new random::AnyPositionalRandomFactory(aquiferSource.forkPositional());
+        LegacyRandomSource oreSource = m_random->legacy().fromHashOf("minecraft:ore");
+        m_oreRandom = new random::AnyPositionalRandomFactory(oreSource.forkPositional());
+    } else {
+        XoroshiroRandomSource mainRandom(seed);
+        m_random = new random::AnyPositionalRandomFactory(mainRandom.forkPositional());
+        XoroshiroRandomSource aquiferRandomSource =
+            m_random->xoroshiro().fromHashOf("minecraft:aquifer");
+        m_aquiferRandom = new random::AnyPositionalRandomFactory(
+            aquiferRandomSource.forkPositional());
+        XoroshiroRandomSource oreRandomSource =
+            m_random->xoroshiro().fromHashOf("minecraft:ore");
+        m_oreRandom = new random::AnyPositionalRandomFactory(
+            oreRandomSource.forkPositional());
+    }
 
     // Reference: RandomState.java line 41
     // this.noiseIntances = new ConcurrentHashMap();
@@ -79,6 +89,38 @@ RandomState::RandomState(NoiseGeneratorSettings* settings, int64_t seed)
             , m_useLegacyInit(useLegacyInit)
             , m_seed(seed) {}
 
+        // Java's router is a DAG: registry Holders make every reference to
+        // continents/erosion/ridges/offset/... the same object. The port's
+        // NoiseRouterData expands each reference into its own copy, so this
+        // wiring pass — the one that builds the router every NoiseChunk maps
+        // from — memoises like NoiseChunk's WrapVisitor (DensityFunction::
+        // mapAll's pre-key), producing the shared DAG once. Measured
+        // 2026-08-30: NoiseChunks walked ~7,000 original nodes per chunk to
+        // find their ~93 distinct ones. OBEY_NO_STRUCT_DEDUPE=1 turns it off
+        // together with the NoiseChunk dedupe (A/B against the gen hash).
+        bool memoises() const override {
+            static const bool noDedupe = std::getenv("OBEY_NO_STRUCT_DEDUPE") != nullptr;
+            return !noDedupe;
+        }
+        density::DensityFunction* lookupMapped(const density::DensityFunction* original) override {
+            auto it = m_memo.find(original);
+            return it == m_memo.end() ? nullptr : it->second;
+        }
+        void rememberMapped(const density::DensityFunction* original,
+                            density::DensityFunction* mapped) override {
+            m_memo.emplace(original, mapped);
+            m_memo.emplace(mapped, mapped);
+        }
+        density::DensityFunction* lookupPreMapped(const std::string& key) override {
+            auto it = m_preMap.find(key);
+            return it == m_preMap.end() ? nullptr : it->second;
+        }
+        void rememberPreMapped(const std::string& key, density::DensityFunction* mapped) override {
+            m_preMap.emplace(key, mapped);
+        }
+        std::unordered_map<const density::DensityFunction*, density::DensityFunction*> m_memo;
+        std::unordered_map<std::string, density::DensityFunction*> m_preMap;
+
         density::DensityFunction* apply(density::DensityFunction* input) override {
             auto it = m_wrapped.find(input);
             if (it != m_wrapped.end()) {
@@ -100,6 +142,38 @@ RandomState::RandomState(NoiseGeneratorSettings* settings, int64_t seed)
                 return noiseHolder;
             }
 
+            // Reference: RandomState.java NoiseWiringHelper.visitNoise legacy
+            // special cases (legacy_random_source=true, nether/end):
+            // TEMPERATURE/VEGETATION use createLegacyNetherBiome with
+            // LegacyRandomSource(seed+0/+1) and params(-7, 1.0, [1.0]);
+            // SHIFT (minecraft:offset) becomes a ZERO noise
+            // (params(0, 0.0, [])) from random.fromHashOf(offset).
+            if (m_useLegacyInit) {
+                std::string name(noiseName);
+                if (name == "minecraft:temperature" || name == "temperature") {
+                    LegacyRandomSource legacyRandom(m_seed + 0);
+                    NormalNoise* noise = new NormalNoise(NormalNoise::createLegacyNetherBiome(
+                        legacyRandom,
+                        NormalNoise::NoiseParameters(-7, 1.0, std::vector<double>{1.0})));
+                    return new density::DensityFunction::NoiseHolder(noise);
+                }
+                if (name == "minecraft:vegetation" || name == "vegetation") {
+                    LegacyRandomSource legacyRandom(m_seed + 1);
+                    NormalNoise* noise = new NormalNoise(NormalNoise::createLegacyNetherBiome(
+                        legacyRandom,
+                        NormalNoise::NoiseParameters(-7, 1.0, std::vector<double>{1.0})));
+                    return new density::DensityFunction::NoiseHolder(noise);
+                }
+                if (name == "minecraft:offset" || name == "offset") {
+                    LegacyRandomSource offsetRandom =
+                        m_state->random()->legacy().fromHashOf("minecraft:offset");
+                    NormalNoise* noise = new NormalNoise(NormalNoise::create(
+                        offsetRandom,
+                        NormalNoise::NoiseParameters(0, 0.0, std::vector<double>{})));
+                    return new density::DensityFunction::NoiseHolder(noise);
+                }
+            }
+
             NormalNoise* noise = m_state->getOrCreateNoise(noiseName);
             return new density::DensityFunction::NoiseHolder(noise);
         }
@@ -111,10 +185,15 @@ RandomState::RandomState(NoiseGeneratorSettings* settings, int64_t seed)
             }
 
             if (auto* noise = dynamic_cast<::minecraft::BlendedNoise*>(function)) {
-                if (!m_useLegacyInit) {
-                    XoroshiroRandomSource terrainRandom = m_state->random()->fromHashOf("minecraft:terrain");
+                // Reference: NoiseWiringHelper.wrapNew - legacy uses
+                // LegacyRandomSource(seed + 0); otherwise fromHashOf(terrain).
+                if (m_useLegacyInit) {
+                    LegacyRandomSource terrainRandom(m_seed + 0);
                     return new ::minecraft::BlendedNoise(noise->withNewRandom(terrainRandom));
                 }
+                XoroshiroRandomSource terrainRandom =
+                    m_state->random()->xoroshiro().fromHashOf("minecraft:terrain");
+                return new ::minecraft::BlendedNoise(noise->withNewRandom(terrainRandom));
             } else if (dynamic_cast<density::EndIslandDensityFunction*>(function)) {
                 return new density::EndIslandDensityFunction(m_seed);
             }
@@ -278,11 +357,17 @@ NormalNoise* RandomState::getOrCreateNoise(const std::string& noiseName) {
     // Create random source for this noise
     // Reference: Noises.java line 78
     // NormalNoise.create(context.fromHashOf(((ResourceKey)holder.unwrapKey().orElseThrow()).identifier()), holder.value())
-    // Java uses full ResourceKey identifier like "minecraft:temperature"
-    XoroshiroRandomSource noiseRandomSource = m_random->fromHashOf(fullIdentifier);
-
-    // Instantiate the noise
-    NormalNoise* noise = new NormalNoise(NormalNoise::create(noiseRandomSource, params.firstOctave, params.amplitudes));
+    // Java uses full ResourceKey identifier like "minecraft:temperature".
+    // Legacy settings route through LegacyRandomSource (its NormalNoise
+    // overload uses the legacy octave initialization).
+    NormalNoise* noise;
+    if (m_random->isLegacy()) {
+        LegacyRandomSource noiseRandomSource = m_random->legacy().fromHashOf(fullIdentifier);
+        noise = new NormalNoise(NormalNoise::create(noiseRandomSource, params.firstOctave, params.amplitudes));
+    } else {
+        XoroshiroRandomSource noiseRandomSource = m_random->xoroshiro().fromHashOf(fullIdentifier);
+        noise = new NormalNoise(NormalNoise::create(noiseRandomSource, params.firstOctave, params.amplitudes));
+    }
 
     // Store in map
     m_noiseInstances[noiseName] = noise;
@@ -291,7 +376,7 @@ NormalNoise* RandomState::getOrCreateNoise(const std::string& noiseName) {
 }
 
 // Reference: RandomState.java lines 126-128
-random::PositionalRandomFactory* RandomState::getOrCreateRandomFactory(const std::string& identifier) {
+random::AnyPositionalRandomFactory* RandomState::getOrCreateRandomFactory(const std::string& identifier) {
     // Java uses ConcurrentHashMap.computeIfAbsent here as well.
     std::lock_guard<std::mutex> lock(m_positionalRandomsMutex);
 
@@ -306,8 +391,14 @@ random::PositionalRandomFactory* RandomState::getOrCreateRandomFactory(const std
     if (fullIdentifier.rfind("minecraft:", 0) != 0) {
         fullIdentifier = "minecraft:" + fullIdentifier;
     }
-    XoroshiroRandomSource identRandomSource = m_random->fromHashOf(fullIdentifier);
-    random::PositionalRandomFactory* factory = new random::PositionalRandomFactory(identRandomSource.forkPositional());
+    random::AnyPositionalRandomFactory* factory;
+    if (m_random->isLegacy()) {
+        LegacyRandomSource identRandomSource = m_random->legacy().fromHashOf(fullIdentifier);
+        factory = new random::AnyPositionalRandomFactory(identRandomSource.forkPositional());
+    } else {
+        XoroshiroRandomSource identRandomSource = m_random->xoroshiro().fromHashOf(fullIdentifier);
+        factory = new random::AnyPositionalRandomFactory(identRandomSource.forkPositional());
+    }
 
     // Store in map
     m_positionalRandoms[identifier] = factory;

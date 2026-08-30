@@ -74,9 +74,18 @@ namespace Render {
         bool  isAggressive = false;
         bool  isBaby = false;
 
-        // MC LivingEntityRenderState.ageScale — the baby shrink, read by
-        // setupAttackAnimation when it slides the arms around the body.
+        // MC LivingEntityRenderState.ageScale (LivingEntity.getAgeScale) —
+        // 0.5 for a baby. Read by setupAttackAnimation when it slides the
+        // arms around the body and by the sheep's graze drop; it does NOT
+        // shrink the model — MC babies are drawn through a separate baby
+        // mesh, not a uniform scale.
         float ageScale = 1.0f;
+
+        // MC LivingEntityRenderState.scale — the SCALE attribute, and the
+        // ONLY uniform factor LivingEntityRenderer.submit applies (always
+        // 1.0 in this port). MobRenderer drops it to kBabyScale solely as
+        // the fallback for a baby whose mesh could not be built.
+        float scale = 1.0f;
 
         // MC LivingEntityRenderer.setupRotations' death topple, in degrees.
         // Zero while alive; see MobRenderer::DeathFlipDegrees for the curve.
@@ -115,6 +124,14 @@ namespace Render {
         float swimAmount = 0.0f;
         float mainArm    = 1.0f;   // HumanoidArm ordinal: LEFT 0, RIGHT 1
 
+        // MC DrownedRenderer.setupRotations' swim tilt — a whole-body pitch
+        // applied in the pose stack (after the death flip, before the Y
+        // flip), rotating about a pivot swimPivotY blocks up from the feet
+        // (state.boundingBoxHeight / 2). Carried on the render state so the
+        // outer-layer overlay tilts with the body from the same numbers.
+        float swimPitchDeg = 0.0f;
+        float swimPivotY = 0.0f;
+
         bool isCrouching  = false;
         bool isSprinting  = false;
         bool isInWater    = false;
@@ -123,6 +140,89 @@ namespace Render {
         bool isPassenger  = false;
         bool isUsingItem  = false;
         bool isSitting    = false;
+
+        // ── Per-mob render-state inputs for the compiled programs ──────────
+        //
+        // Each mirrors one field of an MC RenderState subclass. The defaults
+        // are the value MC's own extractRenderState produces for a mob whose
+        // behaviour this port does not run yet (a horse that never rears has
+        // standAnimation 0, a bee that has not stung keeps its stinger) — so
+        // an unpopulated field is still the vanilla answer, not a stand-in.
+        // MobRenderer fills the ones the game genuinely tracks.
+        float squish = 0.0f;             // slime family squash spring
+        float flapTime = 0.0f;           // phantom wing clock
+        float tentacleAngle = 0.0f;      // squid
+        float eatAnimation = 0.0f;       // equines
+        float standAnimation = 0.0f;
+        float feedingAnimation = 0.0f;
+        float playingDeadFactor = 0.0f;  // axolotl
+        float inWaterFactor = 0.0f;
+        float onGroundFactor = 1.0f;
+        float movingFactor = 0.0f;
+        float standScale = 0.0f;         // polar bear rear-up
+        float rammingXHeadRot = 0.0f;    // goat
+        float attackTicksRemaining = 0.0f;         // iron golem, ravager
+        float attackAnimationRemainingTicks = 0.0f;// hoglin/zoglin headbutt
+        float stunnedTicksRemaining = 0.0f;        // ravager
+        float jumpCompletion = 0.0f;     // rabbit
+        float holdingAnimationProgress = 0.0f;     // allay
+        float tendrilAnimation = 0.0f;   // warden
+        float spikesAnimation = 0.0f;    // guardian
+        float tailAnimation = 0.0f;      // guardian swim tail
+        float entityId = 0.0f;           // witch nose wiggle seed
+        float jumpCooldown = 0.0f;       // camel
+        float headRollAngle = 0.0f;      // wolf
+        float tailAngle = 0.0f;          // wolf
+        float lieDownAmount = 0.0f;      // cat/ocelot
+        float lieDownAmountTail = 0.0f;
+        float relaxStateOneAmount = 0.0f;
+        float sitAmount = 0.0f;          // panda
+        float lieOnBackAmount = 0.0f;
+        float rollAmount = 0.0f;         // panda roll / bee hover roll
+        float sneezeTime = 0.0f;         // panda
+        float crouchAmount = 0.0f;       // fox pounce crouch
+        float peekAmount = 0.0f;         // shulker
+        float spinningProgress = 0.0f;   // allay
+        float offerFlowerTick = 0.0f;    // iron golem
+        float roarAnimation = 0.0f;      // ravager
+        float yHeadRotAbs = 0.0f;        // shulker: ABSOLUTE head yaw
+        float yBodyRotAbs = 0.0f;        // shulker: ABSOLUTE body yaw
+        float biteProgress = 0.0f;       // evoker fangs 0..1 lifetime
+        // Enum ordinals, in MC declaration order. mobArmPose is
+        // IllagerArmPose or PiglinArmPose depending on the mob; mobPose is
+        // ParrotModel.Pose. swingAnimType is SwingAnimationType — WHACK (1)
+        // is ArmedEntityRenderState's default, the empty-hand swing.
+        float mobArmPose = 0.0f;
+        float mobPose = 0.0f;
+        float swingAnimType = 1.0f;
+
+        bool isMoving = false;           // dolphin tail gate
+        bool animateTail = false;        // equines
+        bool hasChest = false;           // donkey/mule/llama
+        bool hasLeftHorn = true;         // goat spawns with both horns
+        bool hasRightHorn = true;
+        bool hasEgg = false;             // turtle
+        bool isOnLand = false;
+        bool isLayingEgg = false;
+        bool isAngry = false;            // bee/wolf
+        bool hasStinger = true;          // bee keeps it until it stings
+        bool isSheared = false;          // bogged
+        bool isUnhappy = false;          // villager head shake
+        bool isCharging = false;         // vex
+        bool isRidden = false;           // strider
+        bool isCreepy = false;           // enderman
+        bool isDancing = false;          // allay/piglin
+        bool isFaceplanted = false;      // fox
+        bool isSwimming = false;         // drowned
+        bool isSleeping = false;         // fox/cat
+        bool isSpinning = false;         // allay
+        bool isSneezing = false;         // panda
+        bool isEating = false;
+        bool isScared = false;
+        // Whether the mob's MAIN hand holds an item — IllagerModel's
+        // ATTACKING branch picks swingWeaponDown (armed) vs animateZombieArms
+        // (empty) on it. Only the vindicator carries a weapon here.
+        bool hasMainHandItem = false;
 
         // ── Clip guards (GenClip::guard) ───────────────────────────────────
         //
@@ -143,6 +243,26 @@ namespace Render {
         bool canMove        = true;
         bool isResting      = false;
         bool isHoldingItem  = false;
+
+        // ── Ender dragon flight inputs (MC EnderDragonRenderState) ─────────
+        //
+        // The model's neck/tail kinematics read the flight history at fixed
+        // delays 0..23 (necks 0..6, body 5/7/10, tails 11..23); MobRenderer
+        // pre-lerps each sample by the partial tick (MC getHistoricalPos), so
+        // the model just indexes. hasDragonHistory false keeps the old
+        // constant-history hover pose — the fallback for a state built
+        // without a dragon behind it.
+        static constexpr int kDragonHistorySamples = 24;
+        bool   hasDragonHistory = false;
+        double dragonY[kDragonHistorySamples] = {};
+        float  dragonYRot[kDragonHistorySamples] = {};
+        // MC EnderDragonRenderState.flapTime — lerp(partialTick, oFlapTime,
+        // flapTime), in MC's revolutions (the model multiplies by 2π).
+        float  dragonFlapTime = 0.0f;
+        // MC getHeadPartYOffset's three inputs.
+        bool   dragonIsSitting = false;
+        bool   dragonIsLandingOrTakingOff = false;
+        double dragonDistanceToEgg = 0.0;   // SQUARED, as MC stores it
 
         // ── Animation state timers (Game::AnimationState) ──────────────────
         //
@@ -178,10 +298,14 @@ namespace Render {
         float TexWidth()  const { return m_texWidth; }
         float TexHeight() const { return m_texHeight; }
 
-        // MC's baby transform: head at 1/(headScale) and the body at half size,
-        // offset down. Applied by the renderer, not baked in, because the same
-        // model instance serves adults and babies.
-        virtual bool HasBabyTransform() const { return false; }
+        // MC BabyModelTransform.apply, run over THIS instance's rest poses:
+        // rewrites each root child (head parts translated up and enlarged,
+        // everything else offset down and halved) so the instance becomes the
+        // class's baby mesh — the renderer builds a second instance per type
+        // and calls this once, mirroring AgeableMobRenderer's babyModel.
+        // False for models MC never draws as a baby; generated mobs use the
+        // '<slug>_baby' mesh instead of this.
+        virtual bool BecomeBaby() { return false; }
 
         // MC ArmedModel.translateToHand — the transform of the MAIN (right)
         // hand, in this model's own pixel space, valid only after SetupAnim.
@@ -201,7 +325,7 @@ namespace Render {
         // `slim` gives the skeleton's 2-pixel-wide limbs instead of 4.
         explicit HumanoidModel(bool slim);
         void SetupAnim(const EntityRenderState& state) override;
-        bool HasBabyTransform() const override { return true; }
+        bool BecomeBaby() override;
 
     protected:
         // MC HumanoidModel.poseRightArm / poseLeftArm / setupAttackAnimation.
@@ -244,7 +368,6 @@ namespace Render {
     class QuadrupedModel : public EntityModel {
     public:
         void SetupAnim(const EntityRenderState& state) override;
-        bool HasBabyTransform() const override { return true; }
 
     protected:
         // MC QuadrupedModel.createBodyMesh(legSize, mirrorLeft, mirrorRight, g).
@@ -261,11 +384,13 @@ namespace Render {
     class CowModel : public QuadrupedModel {
     public:
         CowModel();
+        bool BecomeBaby() override;
     };
 
     class PigModel : public QuadrupedModel {
     public:
         PigModel();
+        bool BecomeBaby() override;
     };
 
     class SheepModel : public QuadrupedModel {
@@ -273,6 +398,9 @@ namespace Render {
         // `fur` builds the woolly overlay layer instead of the body.
         explicit SheepModel(bool fur);
         void SetupAnim(const EntityRenderState& state) override;
+        // One transform serves both layers — MC's SHEEP_BABY_WOOL is the wool
+        // layer run through the same SheepModel.BABY_TRANSFORMER.
+        bool BecomeBaby() override;
 
     private:
         bool m_fur;
@@ -314,10 +442,28 @@ namespace Render {
     //     no walk clip. It is what QuadrupedModel does anyway.
     class GeneratedModel : public EntityModel {
     public:
-        // `slug` must name a row in kGenModels; use FindGenModel to check first.
-        explicit GeneratedModel(std::string_view slug);
+        // `slug` must name a row in kGenModels; use FindGenModel to check
+        // first. A "<slug>_baby" row (the generator's BabyModelTransform
+        // output) runs the ADULT slug's setupAnim program — MC's
+        // AgeableMobRenderer swaps meshes, never animation, and the baby
+        // mesh keeps every part name.
+        //
+        // `animSlug` names the compiled setupAnim program to run when it is
+        // not simply `slug` — the clothing/decor LAYER meshes (drowned_outer,
+        // stray_clothes, ...) keep the body's part names and MC animates them
+        // with the body's model class, so they take the base mob's program.
+        // Empty = derive from `slug` (stripping a "_baby" suffix).
+        explicit GeneratedModel(std::string_view slug,
+                                std::string_view animSlug = {});
         void SetupAnim(const EntityRenderState& state) override;
-        bool HasBabyTransform() const override { return true; }
+
+        // MC ArmedModel.translateToHand generalized: composes the transform
+        // chain from the root to the mesh's "right_arm" part, resolved at
+        // construction. The skeleton-family models (SkeletonModel in MC —
+        // stray, bogged, parched, wither skeleton) shove the arm one pixel
+        // outward first, exactly like the hand-written SkeletonModel does;
+        // IllagerModel and the zombie family use the plain chain.
+        bool RightHandMatrix(glm::mat4& out) const override;
 
     private:
         // Resolved once at construction so SetupAnim is a walk over pointers
@@ -355,13 +501,35 @@ namespace Render {
         // A model with a walk clip writes no limb rotations of its own, so the
         // heuristic swing must not fill in for it.
         bool m_hasWalkClip = false;
+
+        // Root-to-right_arm part chain (empty when the mesh has no right_arm)
+        // plus the per-model translateToHand arm shove — see RightHandMatrix.
+        std::vector<const ModelPart*> m_rightArmChain;
+        glm::vec3 m_handOffset{0.0f};
+    };
+
+    // MC PufferfishMidModel / PufferfishBigModel over the generated
+    // "pufferfish_mid" / "pufferfish_big" meshes (LayerDefinitions
+    // PUFFERFISH_MEDIUM / PUFFERFISH_BIG). The compiled setupAnim table only
+    // carries the SMALL puffer's program (slug "pufferfish", parts
+    // right_fin/left_fin); the mid/big classes write the same flap onto
+    // right_blue_fin/left_blue_fin, so it is hand-posed here — the two
+    // statements of PufferfishMidModel.setupAnim, verbatim.
+    class PufferfishModel : public GeneratedModel {
+    public:
+        explicit PufferfishModel(std::string_view slug);
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_leftBlueFin = nullptr;
+        ModelPart* m_rightBlueFin = nullptr;
     };
 
     class ChickenModel : public EntityModel {
     public:
         ChickenModel();
         void SetupAnim(const EntityRenderState& state) override;
-        bool HasBabyTransform() const override { return true; }
+        bool BecomeBaby() override;
 
     private:
         ModelPart* m_head = nullptr;
@@ -369,6 +537,145 @@ namespace Render {
         ModelPart* m_leftLeg = nullptr;
         ModelPart* m_rightWing = nullptr;
         ModelPart* m_leftWing = nullptr;
+    };
+
+    // MC ArrowRenderer's quad geometry, rebuilt through the cube pipeline:
+    // two crossed 16x5-unit shaft planes plus the 5x5 tail cross, at MC's
+    // 0.05625 world scale (0.9 model pixels per arrow unit). Each plane is a
+    // zero-thickness box paired with a flipped twin so both sides draw — the
+    // cube UV layout maps only one face of a flat box onto the artwork.
+    //
+    // SetupAnim pitches the whole assembly by the entity xRot: an arrow's
+    // orientation IS its rotation pair, there is nothing else to animate.
+    class ArrowModel : public EntityModel {
+    public:
+        ArrowModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_pivot = nullptr;
+    };
+
+    // ── Projectile models ──────────────────────────────────────────────────
+    //
+    // Hand-written rather than generated: each needs a real setupAnim (the
+    // pitch-to-flight-direction pose the arrow already has, the wind charge's
+    // counter-spin, the shulker bullet's tumble), which the compiled pipeline
+    // does not express for non-mob entities. Meshes are MC's model classes
+    // (client/model/object/projectile/*) transcribed number for number.
+
+    // MC TridentModel (ThrownTridentRenderer rotates it point-first along the
+    // flight path; here the arrow's pivot/yaw scheme plus a fixed roll does
+    // the same mapping). Texture entity/trident.png, 32x32.
+    class TridentModel : public EntityModel {
+    public:
+        TridentModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_pivot = nullptr;
+    };
+
+    // MC WitherSkullRenderer.createSkullLayer — the 8x8x8 SkullModel head cube
+    // at texOffs(0, 35) on the wither sheet (64x64). The dangerous (blue)
+    // variant swaps the texture in MobRenderer.
+    class WitherSkullModel : public EntityModel {
+    public:
+        WitherSkullModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_head = nullptr;
+    };
+
+    // MC ShulkerBulletModel — three crossed slabs, tumbling exactly as
+    // ShulkerBulletRenderer spins them (sin/cos of the age) at its net 0.75
+    // scale. Texture entity/shulker/spark.png, 64x32.
+    class ShulkerBulletModel : public EntityModel {
+    public:
+        ShulkerBulletModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_main = nullptr;
+    };
+
+    // MC LlamaSpitModel — the seven-cube 3D plus. Texture
+    // entity/llama/spit.png, 64x32.
+    class LlamaSpitModel : public EntityModel {
+    public:
+        LlamaSpitModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_pivot = nullptr;
+    };
+
+    // MC WindChargeModel — the core cube and the wind shroud counter-rotating
+    // at 16 deg/tick. (MC draws the shroud translucent; the entity pipeline
+    // here is cutout-only, so it reads solid.) Texture
+    // entity/projectiles/wind_charge.png, 64x32.
+    class WindChargeModel : public EntityModel {
+    public:
+        WindChargeModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_wind = nullptr;
+        ModelPart* m_windCharge = nullptr;
+    };
+
+    // MC EvokerFangsModel — the fang trap the evoker's attack spell raises.
+    // Two mirrored jaw plates on a base cube; biteProgress (the entity's
+    // lifetime fraction) drives the snap: jaws swing 0.35π shut through an
+    // eased 1-(2t)³ curve, the base surges up 7.2·(t+sin(2.7t)), and past
+    // t=0.9 the whole model scales away to nothing.
+    class EvokerFangsModel : public EntityModel {
+    public:
+        EvokerFangsModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_base = nullptr;
+        ModelPart* m_upperJaw = nullptr;
+        ModelPart* m_lowerJaw = nullptr;
+    };
+
+    // MC EnderDragonModel's setupAnim over the GENERATED dragon mesh. The
+    // mesh (37 parts: head+jaw, 5 neck and 12 tail spine segments, body,
+    // two-bone wings, three-bone legs) is exact from the tables; what the
+    // compiled pipeline cannot express is the POSING — the neck and tail are
+    // kinematic chains laid out segment by segment in for-loops, positions
+    // accumulated through each segment's own rotations, and the whole root
+    // shifts (-2 blocks up-bounce, -3 blocks forward) every frame.
+    //
+    // The flight-history terms (yaw/height deltas across the dragon's last
+    // second of movement) come from EntityRenderState's dragon inputs —
+    // MobRenderer pre-lerps the EnderDragon's real DragonFlightHistory into
+    // them, so the neck cranes into turns and the tail trails the flight
+    // path exactly as MC's does. When hasDragonHistory is false (a state
+    // built without a dragon behind it) the old constant-history hover pose
+    // stands in, which is MC's own pose for a hovering dragon.
+    class DragonModel : public GeneratedModel {
+    public:
+        DragonModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        void PoseLimbs(float bounce, ModelPart* frontLeg, ModelPart* frontTip,
+                       ModelPart* frontFoot, ModelPart* rearLeg, ModelPart* rearTip,
+                       ModelPart* rearFoot);
+
+        ModelPart* m_head = nullptr;
+        ModelPart* m_jaw = nullptr;
+        ModelPart* m_body = nullptr;
+        ModelPart* m_neck[5] = {};
+        ModelPart* m_tail[12] = {};
+        ModelPart* m_leftWing = nullptr;
+        ModelPart* m_leftWingTip = nullptr;
+        ModelPart* m_rightWing = nullptr;
+        ModelPart* m_rightWingTip = nullptr;
+        ModelPart* m_leg[12] = {};   // L/R x front/rear x leg/tip/foot
     };
 
 } // namespace Render

@@ -752,6 +752,12 @@ namespace Game {
         { MobCategory::Monster, EntityTypeId::Enderman, 1, 4, 4 },
         { MobCategory::Creature, EntityTypeId::Strider, 60, 1, 2 },
     };
+    static const MobSpawnCost k_soul_sand_valley_costs[] = {
+        { EntityTypeId::Enderman, 0.15, 0.7 },
+        { EntityTypeId::Ghast, 0.15, 0.7 },
+        { EntityTypeId::Skeleton, 0.15, 0.7 },
+        { EntityTypeId::Strider, 0.15, 0.7 },
+    };
 
     static const MobSpawnEntry k_sparse_jungle[] = {
         { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
@@ -885,6 +891,9 @@ namespace Game {
         { MobCategory::Monster, EntityTypeId::Enderman, 1, 4, 4 },
         { MobCategory::Creature, EntityTypeId::Strider, 60, 1, 2 },
     };
+    static const MobSpawnCost k_warped_forest_costs[] = {
+        { EntityTypeId::Enderman, 0.12, 1.0 },
+    };
 
     static const MobSpawnEntry k_windswept_forest[] = {
         { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
@@ -981,69 +990,69 @@ namespace Game {
     };
 
     const BiomeSpawnList kBiomeSpawnLists[] = {
-        { "badlands", k_badlands, 15 },
-        { "bamboo_jungle", k_bamboo_jungle, 18 },
-        { "basalt_deltas", k_basalt_deltas, 3 },
-        { "beach", k_beach, 11 },
-        { "birch_forest", k_birch_forest, 14 },
-        { "cherry_grove", k_cherry_grove, 13 },
-        { "cold_ocean", k_cold_ocean, 15 },
-        { "crimson_forest", k_crimson_forest, 4 },
-        { "dark_forest", k_dark_forest, 14 },
-        { "deep_cold_ocean", k_deep_cold_ocean, 15 },
-        { "deep_frozen_ocean", k_deep_frozen_ocean, 15 },
-        { "deep_lukewarm_ocean", k_deep_lukewarm_ocean, 17 },
-        { "deep_ocean", k_deep_ocean, 15 },
-        { "desert", k_desert, 14 },
-        { "dripstone_caves", k_dripstone_caves, 11 },
-        { "end_barrens", k_end_barrens, 1 },
-        { "end_highlands", k_end_highlands, 1 },
-        { "end_midlands", k_end_midlands, 1 },
-        { "eroded_badlands", k_eroded_badlands, 15 },
-        { "flower_forest", k_flower_forest, 15 },
-        { "forest", k_forest, 15 },
-        { "frozen_ocean", k_frozen_ocean, 15 },
-        { "frozen_peaks", k_frozen_peaks, 11 },
-        { "frozen_river", k_frozen_river, 13 },
-        { "grove", k_grove, 13 },
-        { "ice_spikes", k_ice_spikes, 13 },
-        { "jagged_peaks", k_jagged_peaks, 11 },
-        { "jungle", k_jungle, 18 },
-        { "lukewarm_ocean", k_lukewarm_ocean, 17 },
-        { "lush_caves", k_lush_caves, 12 },
-        { "mangrove_swamp", k_mangrove_swamp, 14 },
-        { "meadow", k_meadow, 13 },
-        { "mushroom_fields", k_mushroom_fields, 3 },
-        { "nether_wastes", k_nether_wastes, 6 },
-        { "ocean", k_ocean, 15 },
-        { "old_growth_birch_forest", k_old_growth_birch_forest, 14 },
-        { "old_growth_pine_taiga", k_old_growth_pine_taiga, 17 },
-        { "old_growth_spruce_taiga", k_old_growth_spruce_taiga, 17 },
-        { "pale_garden", k_pale_garden, 10 },
-        { "plains", k_plains, 17 },
-        { "river", k_river, 13 },
-        { "savanna", k_savanna, 18 },
-        { "savanna_plateau", k_savanna_plateau, 20 },
-        { "small_end_islands", k_small_end_islands, 1 },
-        { "snowy_beach", k_snowy_beach, 10 },
-        { "snowy_plains", k_snowy_plains, 14 },
-        { "snowy_slopes", k_snowy_slopes, 12 },
-        { "snowy_taiga", k_snowy_taiga, 17 },
-        { "soul_sand_valley", k_soul_sand_valley, 4 },
-        { "sparse_jungle", k_sparse_jungle, 16 },
-        { "stony_peaks", k_stony_peaks, 10 },
-        { "stony_shore", k_stony_shore, 10 },
-        { "sunflower_plains", k_sunflower_plains, 17 },
-        { "swamp", k_swamp, 17 },
-        { "taiga", k_taiga, 17 },
-        { "the_end", k_the_end, 1 },
-        { "warm_ocean", k_warm_ocean, 16 },
-        { "warped_forest", k_warped_forest, 2 },
-        { "windswept_forest", k_windswept_forest, 15 },
-        { "windswept_gravelly_hills", k_windswept_gravelly_hills, 15 },
-        { "windswept_hills", k_windswept_hills, 15 },
-        { "windswept_savanna", k_windswept_savanna, 18 },
-        { "wooded_badlands", k_wooded_badlands, 16 },
+        { "badlands", k_badlands, 15, nullptr, 0 },
+        { "bamboo_jungle", k_bamboo_jungle, 18, nullptr, 0 },
+        { "basalt_deltas", k_basalt_deltas, 3, nullptr, 0 },
+        { "beach", k_beach, 11, nullptr, 0 },
+        { "birch_forest", k_birch_forest, 14, nullptr, 0 },
+        { "cherry_grove", k_cherry_grove, 13, nullptr, 0 },
+        { "cold_ocean", k_cold_ocean, 15, nullptr, 0 },
+        { "crimson_forest", k_crimson_forest, 4, nullptr, 0 },
+        { "dark_forest", k_dark_forest, 14, nullptr, 0 },
+        { "deep_cold_ocean", k_deep_cold_ocean, 15, nullptr, 0 },
+        { "deep_frozen_ocean", k_deep_frozen_ocean, 15, nullptr, 0 },
+        { "deep_lukewarm_ocean", k_deep_lukewarm_ocean, 17, nullptr, 0 },
+        { "deep_ocean", k_deep_ocean, 15, nullptr, 0 },
+        { "desert", k_desert, 14, nullptr, 0 },
+        { "dripstone_caves", k_dripstone_caves, 11, nullptr, 0 },
+        { "end_barrens", k_end_barrens, 1, nullptr, 0 },
+        { "end_highlands", k_end_highlands, 1, nullptr, 0 },
+        { "end_midlands", k_end_midlands, 1, nullptr, 0 },
+        { "eroded_badlands", k_eroded_badlands, 15, nullptr, 0 },
+        { "flower_forest", k_flower_forest, 15, nullptr, 0 },
+        { "forest", k_forest, 15, nullptr, 0 },
+        { "frozen_ocean", k_frozen_ocean, 15, nullptr, 0 },
+        { "frozen_peaks", k_frozen_peaks, 11, nullptr, 0 },
+        { "frozen_river", k_frozen_river, 13, nullptr, 0 },
+        { "grove", k_grove, 13, nullptr, 0 },
+        { "ice_spikes", k_ice_spikes, 13, nullptr, 0 },
+        { "jagged_peaks", k_jagged_peaks, 11, nullptr, 0 },
+        { "jungle", k_jungle, 18, nullptr, 0 },
+        { "lukewarm_ocean", k_lukewarm_ocean, 17, nullptr, 0 },
+        { "lush_caves", k_lush_caves, 12, nullptr, 0 },
+        { "mangrove_swamp", k_mangrove_swamp, 14, nullptr, 0 },
+        { "meadow", k_meadow, 13, nullptr, 0 },
+        { "mushroom_fields", k_mushroom_fields, 3, nullptr, 0 },
+        { "nether_wastes", k_nether_wastes, 6, nullptr, 0 },
+        { "ocean", k_ocean, 15, nullptr, 0 },
+        { "old_growth_birch_forest", k_old_growth_birch_forest, 14, nullptr, 0 },
+        { "old_growth_pine_taiga", k_old_growth_pine_taiga, 17, nullptr, 0 },
+        { "old_growth_spruce_taiga", k_old_growth_spruce_taiga, 17, nullptr, 0 },
+        { "pale_garden", k_pale_garden, 10, nullptr, 0 },
+        { "plains", k_plains, 17, nullptr, 0 },
+        { "river", k_river, 13, nullptr, 0 },
+        { "savanna", k_savanna, 18, nullptr, 0 },
+        { "savanna_plateau", k_savanna_plateau, 20, nullptr, 0 },
+        { "small_end_islands", k_small_end_islands, 1, nullptr, 0 },
+        { "snowy_beach", k_snowy_beach, 10, nullptr, 0 },
+        { "snowy_plains", k_snowy_plains, 14, nullptr, 0 },
+        { "snowy_slopes", k_snowy_slopes, 12, nullptr, 0 },
+        { "snowy_taiga", k_snowy_taiga, 17, nullptr, 0 },
+        { "soul_sand_valley", k_soul_sand_valley, 4, k_soul_sand_valley_costs, 4 },
+        { "sparse_jungle", k_sparse_jungle, 16, nullptr, 0 },
+        { "stony_peaks", k_stony_peaks, 10, nullptr, 0 },
+        { "stony_shore", k_stony_shore, 10, nullptr, 0 },
+        { "sunflower_plains", k_sunflower_plains, 17, nullptr, 0 },
+        { "swamp", k_swamp, 17, nullptr, 0 },
+        { "taiga", k_taiga, 17, nullptr, 0 },
+        { "the_end", k_the_end, 1, nullptr, 0 },
+        { "warm_ocean", k_warm_ocean, 16, nullptr, 0 },
+        { "warped_forest", k_warped_forest, 2, k_warped_forest_costs, 1 },
+        { "windswept_forest", k_windswept_forest, 15, nullptr, 0 },
+        { "windswept_gravelly_hills", k_windswept_gravelly_hills, 15, nullptr, 0 },
+        { "windswept_hills", k_windswept_hills, 15, nullptr, 0 },
+        { "windswept_savanna", k_windswept_savanna, 18, nullptr, 0 },
+        { "wooded_badlands", k_wooded_badlands, 16, nullptr, 0 },
     };
 
     const int kBiomeSpawnListCount = 63;
@@ -1055,6 +1064,14 @@ namespace Game {
             [](const BiomeSpawnList& row, std::string_view key) { return row.biome < key; });
         if (it == end || it->biome != biomeSlug) return nullptr;
         return it;
+    }
+
+    const MobSpawnCost* FindMobSpawnCost(const BiomeSpawnList* list, EntityTypeId type) {
+        if (!list || !list->costs) return nullptr;
+        for (int i = 0; i < list->costCount; ++i) {
+            if (list->costs[i].type == type) return &list->costs[i];
+        }
+        return nullptr;
     }
 
 } // namespace Game

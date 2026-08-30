@@ -24,6 +24,9 @@ namespace World {
 
 namespace Game {
 
+    namespace Anvil { class AnvilChunkIo; }
+
+
     // Forward declarations
     class Chunk;
     class IChunkGenerator;
@@ -206,6 +209,17 @@ namespace Game {
         ChunkLoadResult LoadChunkInternal(Math::ChunkPos position, LoadPriority priority);
 
         // Load from Minecraft region files
+        // 1.18+ chunks go through the shared Anvil reader; older layouts fall
+        // back to LoadFromRegionFile below.
+        ChunkLoadResult LoadModernChunk(Math::ChunkPos position);
+
+        // Read-only Anvil access to the imported world. Read-only by
+        // construction: AnvilChunkIo's writable form takes a SaveRoot, and a
+        // folder outside obeycraft/saves cannot produce one.
+        std::shared_ptr<Anvil::AnvilChunkIo> m_anvilIo;
+        bool m_layoutKnown    = false;
+        bool m_isModernLayout = false;
+
         ChunkLoadResult LoadFromRegionFile(Math::ChunkPos position);
 
         // Load using fallback generator

@@ -5,6 +5,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/Mob.hpp"
 #include "common/entity/ai/Sensing.hpp"
+#include "common/entity/ai/TargetingConditions.hpp"
 #include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 
@@ -169,17 +170,42 @@ namespace Game {
 
     // ── NearestLivingEntitySensor ──────────────────────────────────────────
 
+    // MC NearestVisibleLivingEntities' lineOfSightTest, evaluated LAZILY at
+    // query time (memoized per snapshot) — NOT at the sensor's 20-tick
+    // cadence. The predicate is MC Sensor.isEntityTargetable: non-combat
+    // TargetingConditions at FOLLOW_RANGE, swapping to the ignore-invisibility
+    // variant when the candidate IS the current ATTACK_TARGET (an already-
+    // engaged target does not vanish by drinking invisibility).
+    bool NearestVisibleLivingEntities::IsVisible(LivingEntity* e) const {
+        if (!owner || !e) return false;
+        for (const auto& cached : visibilityCache) {
+            if (cached.first == e) return cached.second;
+        }
+
+        TargetingConditions conditions = TargetingConditions::ForNonCombat()
+            .Range(owner->GetAttributeValue(Attribute::FollowRange));
+        if (const Brain* brain = owner->GetBrain()) {
+            if (brain->GetEntity(MemoryModule::AttackTarget) == e) {
+                conditions.IgnoreInvisibility();
+            }
+        }
+        const bool result = conditions.Test(owner, *e);
+        visibilityCache.emplace_back(e, result);
+        return result;
+    }
+
     void NearestLivingEntitySensor::DoTick(EntityLevel& level, LivingEntity& body) {
         Brain* brain = body.GetBrain();
         if (!brain) return;
 
-        // MC scans a box of the mob's FOLLOW_RANGE horizontally and half that
-        // vertically, then sorts by distance — the sort is what makes every
-        // "nearest X" query a scan-until-first-match.
+        // MC scans a box of the mob's FOLLOW_RANGE on ALL axes (NearestLiving-
+        // EntitySensor.doTick inflates uniformly), then sorts by distance —
+        // the sort is what makes every "nearest X" query a scan-until-first-
+        // match.
         const double range = body.GetAttributeValue(Attribute::FollowRange);
         AABB box = body.GetAABB();
-        box.min -= glm::vec3(range, range * 0.5, range);
-        box.max += glm::vec3(range, range * 0.5, range);
+        box.min -= glm::vec3(range, range, range);
+        box.max += glm::vec3(range, range, range);
 
         std::vector<Entity*> found;
         level.GetEntitiesInBox(box, &body, found);
@@ -197,13 +223,14 @@ namespace Game {
 
         brain->SetMemory(MemoryModule::NearestLivingEntities, living);
 
-        // The visible subset. MC applies the mob's own line-of-sight test, so a
-        // mob does not react to something through a wall.
+        // The "visible" snapshot holds the WHOLE sorted list plus the lazy
+        // visibility predicate above — MC builds the snapshot from the same
+        // list and defers every line-of-sight test to the queries.
         NearestVisibleLivingEntities visible;
-        auto* mob = dynamic_cast<Mob*>(&body);
+        visible.owner = &body;
+        visible.entities.reserve(living.size());
         for (Entity* e : living) {
-            auto* l = static_cast<LivingEntity*>(e);
-            if (!mob || mob->GetSensing().HasLineOfSight(*l)) visible.entities.push_back(l);
+            visible.entities.push_back(static_cast<LivingEntity*>(e));
         }
         brain->SetMemory(MemoryModule::NearestVisibleLivingEntities, std::move(visible));
     }

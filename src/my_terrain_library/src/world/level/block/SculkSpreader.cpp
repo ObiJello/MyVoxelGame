@@ -195,7 +195,7 @@ static bool stateCanBeReplaced(
 
     BlockState* againstState = level->getBlockState(placementPos.relative(placementDirection));
     if (againstState) {
-        const std::string againstId = againstState->getIdentifier();
+        const std::string& againstId = againstState->getIdentifier();
         if (againstId == "minecraft:sculk" || againstId == "minecraft:sculk_catalyst" || againstId == "minecraft:moving_piston") {
             return false;
         }

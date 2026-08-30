@@ -55,7 +55,7 @@ OreVeinifier::OreVeinifier(
     density::DensityFunction* veinToggle,
     density::DensityFunction* veinRidged,
     density::DensityFunction* veinGap,
-    random::PositionalRandomFactory* oreVeinsPositionalRandomFactory
+    ::minecraft::random::AnyPositionalRandomFactory* oreVeinsPositionalRandomFactory
 )
     : m_veinToggle(veinToggle)
     , m_veinRidged(veinRidged)
@@ -105,7 +105,7 @@ BlockState* OreVeinifier::calculate(
     }
 
     // Line 38: Get positional random
-    XoroshiroRandomSource positionalRandom = m_positionalRandomFactory->at(
+    ::minecraft::random::AnyRandomSource positionalRandom = m_positionalRandomFactory->at(
         context.blockX(), posY, context.blockZ()
     );
 

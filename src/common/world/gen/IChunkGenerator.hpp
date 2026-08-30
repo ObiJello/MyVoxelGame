@@ -21,7 +21,32 @@ namespace Game {
         // truncating it silently generates a different world from the one
         // that seed produces in vanilla.
         int64_t seed = 12345;
-        std::string worldType = "default";  // e.g., "default", "superflat", "amplified"
+        // Which DIMENSION this generator produces: "overworld", "nether" or
+        // "end" (MC LevelStem ids, minus the namespace). Orthogonal to
+        // worldType below — that is a WorldPreset and, like in vanilla,
+        // applies to the overworld only. Anything unrecognised falls back to
+        // "overworld" with a warning.
+        std::string dimension = "overworld";
+        // Dimension folder of the world save (region/ lives under it). When
+        // set, the terrain library loads already-saved chunks from disk to
+        // satisfy generation dependencies instead of regenerating them (MC
+        // ChunkMap.scheduleChunkLoad). Empty = generate everything.
+        std::string storagePath;
+        // MC world preset: "default", "flat", "large_biomes", "amplified",
+        // "single_biome_surface" (WorldPresets ids, minus the namespace).
+        std::string worldType = "default";
+        // flat only: vanilla preset short name (FlatLevelGeneratorPresets) —
+        // empty means MC's default flat settings (strongholds+villages,
+        // bedrock/2*dirt/grass, plains).
+        std::string flatPreset;
+        // flat only: custom "<layers>;<biome>" preset string overriding the
+        // preset's layers/biome (PresetFlatWorldScreen format). Empty = none.
+        std::string flatLayers;
+        // single_biome_surface only: biome id (default plains, like vanilla).
+        std::string singleBiome = "minecraft:plains";
+        // "World Properties" sandbox tweaks (JSON; empty = pure vanilla).
+        // See minecraft::levelgen::WorldGenTweaks.
+        std::string worldgenTweaks;
 
         // Terrain settings
         int seaLevel = 64;
@@ -176,6 +201,13 @@ namespace Game {
 
         // Signal abort to break blocking generation loops (for clean shutdown)
         virtual void RequestAbort() {};
+
+        // True once RequestAbort has been called. Exists so the load path can
+        // tell a REAL generation failure from a deliberate cancellation: on
+        // shutdown every in-flight chunk fails at once, and logging those as
+        // errors buried the log in ~1,000 ERROR lines that read exactly like a
+        // broken world. Never cleared — abort is terminal for the generator.
+        virtual bool IsAbortRequested() const { return false; }
 
         // Check if ready to generate
         virtual bool IsReady() const = 0;

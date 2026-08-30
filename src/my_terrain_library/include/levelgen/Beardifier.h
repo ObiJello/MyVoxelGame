@@ -163,7 +163,7 @@ public:
      */
     void fillArray(double* __restrict output, int32_t count, ContextProvider& contextProvider) const override;
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 

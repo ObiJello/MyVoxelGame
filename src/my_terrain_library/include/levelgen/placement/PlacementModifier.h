@@ -1,5 +1,8 @@
 #pragma once
 
+#include "levelgen/WorldGenTweaks.h"
+#include <cmath>
+
 #include "core/BlockPos.h"
 #include "levelgen/placement/PlacementContext.h"
 #include "levelgen/WorldgenRandom.h"
@@ -144,6 +147,13 @@ public:
         std::vector<core::BlockPos>& out
     ) override {
         int32_t n = count(random, origin);
+        // World Properties density knob (non-vanilla; 1.0 = exact old path).
+        {
+            float densityMult = WorldGenTweaks::currentStepMultiplier();
+            if (densityMult != 1.0f) {
+                n = static_cast<int32_t>(std::lround(n * densityMult));
+            }
+        }
         // Java's IntStream.range(0, n) returns empty stream for n <= 0
         for (int32_t i = 0; i < n; ++i) {
             out.push_back(origin);

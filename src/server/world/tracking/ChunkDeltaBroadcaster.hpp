@@ -3,6 +3,7 @@
 
 #include "SectionChangeAccumulator.hpp"
 #include "../../session/PlayerSessionManager.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/network/PacketTypes.hpp"
 #include <glm/glm.hpp>
@@ -23,9 +24,14 @@ public:
     static constexpr size_t MULTI_THRESHOLD = 64;  // Use section update for > 64 changes
     static constexpr size_t CHUNK_RESEND_THRESHOLD = 256;  // Consider full chunk resend above this
     
+    // `dimension` is the level this broadcaster belongs to. It is what scopes
+    // every watcher lookup below: the accumulator is keyed by SectionPos and a
+    // SectionPos carries no world, so without it a Nether edit would be sent
+    // to whoever is standing on the Overworld chunk with the same x/z.
     ChunkDeltaBroadcaster(IntegratedServer* server,
                          SectionChangeAccumulator* accumulator,
-                         PlayerSessionManager* sessionManager);
+                         PlayerSessionManager* sessionManager,
+                         Game::DimensionId dimension);
     ~ChunkDeltaBroadcaster();
     
     // === MAIN FLUSH ===
@@ -90,7 +96,8 @@ private:
     IntegratedServer* m_server;
     SectionChangeAccumulator* m_accumulator;
     PlayerSessionManager* m_sessionManager;
-    
+    Game::DimensionId m_dimension;
+
     // Statistics
     Stats m_stats;
     

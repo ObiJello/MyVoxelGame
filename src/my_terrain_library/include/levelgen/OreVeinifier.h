@@ -3,6 +3,7 @@
 #include "levelgen/DensityFunction.h"
 #include "levelgen/BlockStateFiller.h"
 #include "random/PositionalRandomFactory.h"
+#include "random/AnyPositionalRandomFactory.h"
 #include "world/level/block/state/BlockState.h"
 
 namespace minecraft {
@@ -51,7 +52,7 @@ public:
         density::DensityFunction* veinToggle,
         density::DensityFunction* veinRidged,
         density::DensityFunction* veinGap,
-        random::PositionalRandomFactory* oreVeinsPositionalRandomFactory
+        ::minecraft::random::AnyPositionalRandomFactory* oreVeinsPositionalRandomFactory
     );
 
     virtual ~OreVeinifier() = default;
@@ -78,7 +79,7 @@ private:
     density::DensityFunction* m_veinToggle;
     density::DensityFunction* m_veinRidged;
     density::DensityFunction* m_veinGap;
-    random::PositionalRandomFactory* m_positionalRandomFactory;
+    ::minecraft::random::AnyPositionalRandomFactory* m_positionalRandomFactory;
 };
 
 } // namespace levelgen

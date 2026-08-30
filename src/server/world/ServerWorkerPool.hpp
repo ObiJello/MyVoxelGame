@@ -4,7 +4,9 @@
 #include "common/core/JobSystem.hpp"
 #include "common/network/MessageQueue.hpp"
 #include "common/network/PacketTypes.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include "common/world/math/WorldMath.hpp"
+#include <array>
 #include <functional>
 #include <memory>
 #include <atomic>
@@ -35,13 +37,21 @@ namespace Threading {
     struct ServerJob {
         ServerJobType type;
         Game::Math::ChunkPos chunkPos;
+
+        // Which world `chunkPos` is in. The pool is process-wide and serves
+        // every dimension, so the job — not the pool — is what names the
+        // level; see ServerWorkerPool::ProcessChunkLoading.
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
+
         std::function<void()> task;
         int priority = 0; // Higher = more important
         uint64_t generationId{0}; // Generation ID for cancellation tracking
         std::chrono::steady_clock::time_point submitTime;
 
-        ServerJob(ServerJobType jobType, Game::Math::ChunkPos pos)
-            : type(jobType), chunkPos(pos), submitTime(std::chrono::steady_clock::now()) {}
+        ServerJob(ServerJobType jobType, Game::Math::ChunkPos pos,
+                  Game::DimensionId dim = Game::DimensionId::Overworld)
+            : type(jobType), chunkPos(pos), dimension(dim)
+            , submitTime(std::chrono::steady_clock::now()) {}
     };
 
     // Server worker pool dedicated to chunk I/O and generation
@@ -68,15 +78,18 @@ namespace Threading {
         // ========================================================================
 
         // Submit chunk generation job
-        void SubmitChunkGeneration(Game::Math::ChunkPos chunkPos, int priority = 0);
+        void SubmitChunkGeneration(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                   int priority = 0);
 
         // Submit chunk loading job (from disk). Always accepted — the queue has
         // no capacity limit, matching MC's ChunkTaskDispatcher. Returns false
         // only when the pool is not running.
-        bool SubmitChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
+        bool SubmitChunkLoading(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                int priority = 0);
 
         // Submit chunk saving job
-        void SubmitChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority = 0);
+        void SubmitChunkSaving(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                               std::shared_ptr<Game::Chunk> chunk, int priority = 0);
 
         // Submit generic world I/O job
         void SubmitWorldIOJob(std::function<void()> task, int priority = 0);
@@ -86,7 +99,7 @@ namespace Threading {
         // ========================================================================
 
         // Cancel all jobs for a specific chunk
-        void CancelChunkJobs(Game::Math::ChunkPos chunkPos);
+        void CancelChunkJobs(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos);
 
         // Cancel all pending jobs
         void CancelAllJobs();
@@ -111,6 +124,12 @@ namespace Threading {
         
         // Get the chunk generation result queue (used by server thread to consume results)
         static Network::ResultQueue<Network::ChunkGenResult>& GetChunkGenResultQueue();
+        // Post a load/generation result (any thread). Public since the
+        // ticket-driven generation path (IntegratedServer) produces results
+        // from conversion jobs rather than from ProcessChunkLoading.
+        void SendChunkGenResult(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                std::shared_ptr<Game::Chunk> chunk, bool success,
+                                const std::string& error = "");
 
         // ========================================================================
         // STATISTICS
@@ -157,12 +176,21 @@ namespace Threading {
         std::vector<ServerJob> m_jobQueue;
         std::condition_variable m_jobCondition;
 
-        // Job cancellation via generation IDs
+        // Job cancellation via generation IDs, ONE MAP PER DIMENSION (indexed
+        // by Game::DimensionSlot). A single ChunkPos-keyed map would make
+        // Nether (0,0) and Overworld (0,0) share a counter: submitting one
+        // would bump the other's generation, the in-flight job would see
+        // itself as stale, and a stale job returns WITHOUT sending a result —
+        // so the requester's pending entry would never clear and that chunk
+        // would never load again for the rest of the session.
         mutable std::mutex m_cancelMutex;
-        std::unordered_map<Game::Math::ChunkPos, uint64_t, Game::Math::ChunkPosHash> m_chunkGenerations;
+        std::array<std::unordered_map<Game::Math::ChunkPos, uint64_t, Game::Math::ChunkPosHash>,
+                   Game::kDimensionCount> m_chunkGenerations;
 
-        // World reference
-        Game::World* m_world = nullptr;
+        // NO cached world pointer. One pool serves every dimension, so the
+        // world is resolved from the job's DimensionId at execution time; a
+        // cached one would pin every worker to whichever level happened to
+        // exist when Initialize ran.
 
         // Statistics
         ServerWorkerStats m_stats;
@@ -182,9 +210,12 @@ namespace Threading {
         bool ShouldCancelJob(const ServerJob& job) const;
 
         // Specific job handlers
-        void ProcessChunkGeneration(Game::Math::ChunkPos chunkPos, uint64_t generation);
-        void ProcessChunkLoading(Game::Math::ChunkPos chunkPos, uint64_t generation);
-        void ProcessChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk);
+        void ProcessChunkGeneration(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                    uint64_t generation);
+        void ProcessChunkLoading(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                 uint64_t generation);
+        void ProcessChunkSaving(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                std::shared_ptr<Game::Chunk> chunk);
 
         // Job queue management. EnqueueJob returns false when the queue is at
         // capacity and the job was dropped.
@@ -192,10 +223,11 @@ namespace Threading {
         bool DequeueJob(ServerJob& job);
 
         // Result handling
-        void SendChunkGenResult(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, bool success, const std::string& error = "");
+
 
         // Check if a job's generation is stale
-        bool IsGenerationStale(Game::Math::ChunkPos chunkPos, uint64_t generation) const;
+        bool IsGenerationStale(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                               uint64_t generation) const;
     };
 
     // ========================================================================
@@ -210,11 +242,18 @@ namespace Threading {
     void ShutdownServerWorkerPool();
     
     // Direct job submission
-    void SubmitServerChunkGeneration(Game::Math::ChunkPos chunkPos, int priority = 0);
-    bool SubmitServerChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
+    void SubmitServerChunkGeneration(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                     int priority = 0);
+    bool SubmitServerChunkLoading(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                  int priority = 0);
 
     // Player chunk positions the pool orders queued chunk work against.
+    //
+    // Deliberately NOT per-dimension: the anchors only order the queue, and a
+    // chunk in another dimension at the same x/z is exactly as urgent as this
+    // one — both are somewhere a player is standing.
     void SetServerChunkLoadAnchors(std::vector<Game::Math::ChunkPos> anchors);
-    void SubmitServerChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority = 0);
+    void SubmitServerChunkSaving(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                 std::shared_ptr<Game::Chunk> chunk, int priority = 0);
 
 } // namespace Threading

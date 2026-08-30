@@ -18,7 +18,8 @@
 //     zombies in clusters rather than being uniformly sprinkled.
 //
 // The per-biome weights come from GeneratedMobSpawns, baked from the vanilla
-// biome JSON by tools/gen_mob_spawns.py.
+// biome JSON by tools/gen_mob_spawns.py; the per-type placement rules live in
+// SpawnPlacements.
 #pragma once
 
 #include "common/entity/EntityType.hpp"
@@ -39,6 +40,7 @@ namespace Game {
     class Mob;
     struct EntityLevel;
     class JavaRandom;
+    class PotentialCalculator;
 
     // MC NaturalSpawner constants.
     inline constexpr int kMinSpawnDistance    = 24;    // blocks from any player
@@ -46,15 +48,13 @@ namespace Game {
     inline constexpr int kMagicNumber         = 17 * 17;  // 289
     inline constexpr int kPackAttemptsPerChunk = 3;
     inline constexpr int kPackSpread           = 6;
-    // MC Mob.getMaxSpawnClusterSize. Counted across all three attempts, not
-    // per attempt — see the comment at the loop.
-    inline constexpr int kMaxSpawnClusterSize  = 4;
-    // MC Level.getMinY for the overworld. The spawner samples Y from here to
-    // the WORLD_SURFACE height, inclusive at both ends.
+    // MC Level.getMinY for the overworld — the DEFAULT for
+    // SpawnContext::minY; the server passes the world's real value.
     inline constexpr int kMinBuildHeight       = -64;
-    // CREATURE (passive) only gets a spawn pass every 400 ticks; everything
-    // else is eligible every tick. This is why animals are placed mostly at
-    // worldgen and top up slowly, while monsters refill continuously.
+    // The isPersistent() categories (CREATURE, MISC) only get a spawn pass
+    // every 400 ticks; everything else is eligible every tick. This is why
+    // animals are placed mostly at worldgen and top up slowly, while monsters
+    // refill continuously.
     inline constexpr int kCreatureSpawnInterval = 400;
 
     // Everything the spawner needs from its caller, so it stays free of any
@@ -65,10 +65,11 @@ namespace Game {
         // Number of chunks currently eligible for spawning, for the cap.
         int spawnableChunkCount = 0;
 
-        // Live count per MobCategory, indexed by the enum.
+        // Live count per MobCategory, indexed by the enum. MC's census skips
+        // persistent mobs and MISC — the caller's counts must too.
         const int* categoryCounts = nullptr;
 
-        // Positions of every player, for the distance rules.
+        // Positions of every non-spectator player, for the distance rules.
         const std::vector<glm::dvec3>* playerPositions = nullptr;
 
         // Biome slug at a world position — the key into GeneratedMobSpawns.
@@ -76,11 +77,12 @@ namespace Game {
 
         // MC Level.noCollision(type.getSpawnAABB(...)) — does the mob's own box
         // fit here? Without this mobs spawn embedded in walls and immediately
-        // suffocate or get pushed out.
+        // suffocate or get pushed out. The callee must apply
+        // GetSpawnDimensionsScale (slime/magma cube spawn at 4x size).
         std::function<bool(EntityTypeId, double, double, double)> spawnBoxFree;
 
         // MC isRightDistanceToPlayerAndSpawnPoint's second half: nothing spawns
-        // within 24 blocks of the world respawn point.
+        // within 24 blocks of the level's respawn point.
         glm::dvec3 worldSpawn{0.0};
         bool       hasWorldSpawn = false;
 
@@ -99,22 +101,54 @@ namespace Game {
         // Construct a mob of the given type. Supplied by the caller so this
         // header does not have to know every concrete class.
         std::function<std::unique_ptr<Mob>(EntityTypeId)> createMob;
+
+        // Hand a validated, finalized mob to the level. MC adds each pack
+        // member to the level IMMEDIATELY (addFreshEntityWithPassengers), so a
+        // later member's CheckSpawnObstruction can collide with an earlier one
+        // — deferring the adds to the end of the chunk loop breaks that.
+        std::function<void(std::unique_ptr<Mob>)> addFreshEntity;
+
+        // MC SpawnState.afterSpawn: registers the new mob with the per-player
+        // local cap so the cap tightens WITHIN the tick. (The spawn-cost
+        // charge is added by the spawner itself via spawnPotential.)
+        std::function<void(MobCategory, const glm::ivec3&)> afterSpawn;
+
+        // MC SpawnState.spawnPotential — the spawn-cost budget, seeded by the
+        // census with every charged mob already alive. Null disables the gate
+        // (no charged biome nearby is the common case).
+        PotentialCalculator* spawnPotential = nullptr;
+
+        // MC Level.getMinY — the bottom of the world, for getRandomPosWithin.
+        int minY = kMinBuildHeight;
+
+        // Plumbed through to SpawnPlacements' per-type rules.
+        int      seaLevel  = 63;
+        int64_t  worldSeed = 0;
+        std::function<int(int, int)> surfaceHeight;   // WORLD_SURFACE at (x,z)
     };
 
-    // Run one chunk's worth of spawn attempts. Appends anything created to
-    // `out`; the caller owns registering them with its entity manager.
+    // MC NaturalSpawner.getFilteredSpawningCategories: which categories get a
+    // pass THIS tick — the friendly/enemy gamerule gates, the 400-tick
+    // persistent-category gate, and the global cap, evaluated once per tick
+    // (the global cap does NOT tighten within a tick; only the local cap does).
+    // Order is MC's enum order, which matters for RNG parity.
+    std::vector<MobCategory> GetFilteredSpawningCategories(const SpawnContext& ctx,
+                                                           bool spawnFriendlies,
+                                                           bool spawnEnemies,
+                                                           bool spawnPersistent);
+
+    // Run one chunk's worth of spawn attempts for the already-filtered
+    // category list — MC NaturalSpawner.spawnForChunk(ServerLevel, LevelChunk,
+    // SpawnState, List<MobCategory>).
     //
-    // `chunk` is the RESOLVED chunk being spawned in, matching MC
-    // NaturalSpawner.spawnForChunk(ServerLevel, LevelChunk, ...). The caller
-    // has it already, and handing it over means the starting position's
-    // heightmap read is a direct `chunk.getHeight(...)` — MC getRandomPosWithin
-    // — instead of a lookup back through the level for a chunk we are holding.
-    //
-    // `gameTime` gates the CREATURE pass.
+    // `chunk` is the RESOLVED chunk being spawned in. The caller has it
+    // already, and handing it over means the starting position's heightmap
+    // read is a direct `chunk.getHeight(...)` — MC getRandomPosWithin —
+    // instead of a lookup back through the level for a chunk we are holding.
     void SpawnForChunk(const SpawnContext& ctx, const Chunk& chunk,
                        int chunkX, int chunkZ,
-                       int64_t gameTime, JavaRandom& rng,
-                       std::vector<std::unique_ptr<Mob>>& out);
+                       const std::vector<MobCategory>& categories,
+                       JavaRandom& rng);
 
     // MC SpawnState.canSpawnForCategoryGlobal.
     bool CanSpawnForCategory(const SpawnContext& ctx, MobCategory category);

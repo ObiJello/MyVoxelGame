@@ -68,7 +68,10 @@ namespace Game {
         MemoryKind::Vec3,              // SPEAR_CHARGE_POSITION
         MemoryKind::Int,               // SPEAR_ENGAGE_TIME
         MemoryKind::Int,               // SPEAR_STATUS
-        MemoryKind::Unit,              // ANGRY_AT
+        // MC stores a UUID here; this port keeps entity references instead of
+        // UUIDs everywhere (see HURT_BY_ENTITY), so the piglin anger target is
+        // the entity itself. Hand-adjusted from the generator's Unit fallback.
+        MemoryKind::Entity,            // ANGRY_AT
         MemoryKind::Bool,              // UNIVERSAL_ANGER
         MemoryKind::Bool,              // ADMIRING_ITEM
         MemoryKind::Int,               // TIME_TRYING_TO_REACH_ADMIRE_ITEM

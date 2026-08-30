@@ -10,6 +10,7 @@
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include "../renderer/mesh/MeshUploadPermits.hpp"
 #include "../renderer/mesh/MeshJobData.hpp"
+#include "../renderer/mesh/TranslucentSort.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -83,7 +84,8 @@ namespace Threading {
     }
 
 
-    bool ClientWorkerPool::SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot) {
+    bool ClientWorkerPool::SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot,
+                                                     std::shared_ptr<Client::Render::MeshJobData>* evicted) {
         if (!m_running.load()) {
             Log::Warning("Cannot submit mesh job - ClientWorkerPool not running");
             return false;
@@ -96,7 +98,7 @@ namespace Threading {
 
         // Create job with snapshot
         MeshJob job(snapshot);
-        if (EnqueueJob(std::move(job))) {
+        if (EnqueueJob(std::move(job), evicted)) {
             m_stats.meshJobsSubmitted.fetch_add(1, std::memory_order_relaxed);
             // Log::Debug("Submitted snapshot mesh job for chunk (%d, %d) section %d, priority=%.1f, highPri=%s",
             //           snapshot->chunkPos.x, snapshot->chunkPos.z, snapshot->sectionY, 
@@ -418,7 +420,7 @@ namespace Threading {
         return result;
     }
 
-    bool ClientWorkerPool::EnqueueJob(MeshJob&& job) {
+    bool ClientWorkerPool::EnqueueJob(MeshJob&& job, std::shared_ptr<Client::Render::MeshJobData>* evicted) {
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
 
         // No capacity limit. MC's compile queue (CompileTaskDynamicQueue) has
@@ -431,6 +433,37 @@ namespace Threading {
         // where throughput is supposed to be limited. A cap here limited
         // ADMISSION instead, which is the mistake this file's scheduler comment
         // warns about at length.
+        //
+        // ...except that "dirty visible sections" is 25,000+ after a far
+        // teleport at render distance 32, and every queued job carries a
+        // RegionSnapshot. Measured 2026-08-29: 23k queued snapshots held
+        // ~1.4 GB, and PollNearestLocked scans the whole queue per pop.
+        // Throughput is unaffected by a cap — the workers were 87% idle on
+        // permits — so admission is bounded here and the scheduler simply
+        // revisits the (still dirty) rest next frame, nearest first.
+        if (m_jobQueue.size() >= kMaxQueuedJobs) {
+            // Full: the queue must still behave like MC's CompileTaskDynamicQueue
+            // for the sections that matter — the ones nearest the camera. A
+            // hard wall here meant that after a load the queue sat full of far
+            // sections ahead of the player and turning around left the newly
+            // visible sections behind waiting for that whole queue to drain.
+            // Displace the farthest queued job if this one is nearer; the
+            // caller re-dirties the displaced section so it comes back later.
+            size_t worst = m_jobQueue.size();
+            float worstDist = job.priority;
+            for (size_t i = 0; i < m_jobQueue.size(); ++i) {
+                if (m_jobQueue[i].priority > worstDist) { worstDist = m_jobQueue[i].priority; worst = i; }
+            }
+            if (worst == m_jobQueue.size()) {
+                return false;   // nothing queued is farther than this one
+            }
+            if (evicted) *evicted = m_jobQueue[worst].snapshot;
+            if (m_jobQueue[worst].snapshot) m_jobQueue[worst].snapshot->Cancel();
+            m_jobQueue[worst] = std::move(job);
+            lock.unlock();
+            m_jobCondition.notify_one();
+            return true;
+        }
         m_jobQueue.push_back(std::move(job));
         lock.unlock();
         m_jobCondition.notify_one();
@@ -620,6 +653,48 @@ namespace Threading {
             result.meshData.translucentIndices = sectionMesh.translucentIdxs;
             result.meshData.translucentVertexCount = sectionMesh.translucentVerts.size();
             result.meshData.translucentIndexCount = sectionMesh.translucentIdxs.size();
+
+            // Initial back-to-front sort HERE, on the worker, like MC's
+            // RebuildTask (MeshData.sortQuads with the camera at build time).
+            // The render thread used to compute centroids, sort and upload a
+            // second index buffer per translucent section — measured
+            // 2026-08-29 at 0.26 ms each, a third of all upload time during a
+            // world load. Now it uploads the sorted indices once and only
+            // re-sorts when the point of view changes.
+            const glm::vec3 cameraPos = GetPlayerPosition();
+            const float* v = result.meshData.translucentVertices.data();
+            constexpr size_t floatsPerVertex = sizeof(Render::Vertex) / sizeof(float);
+            const size_t quads = result.meshData.translucentVertexCount / 4;
+            auto& centroids = result.meshData.translucentCentroids;
+            centroids.clear();
+            centroids.reserve(quads * 3);
+            std::vector<glm::vec3> centroidVec;
+            centroidVec.reserve(quads);
+            for (size_t q = 0; q < quads; ++q) {
+                const float* p0 = v + (q * 4 + 0) * floatsPerVertex;
+                const float* p2 = v + (q * 4 + 2) * floatsPerVertex;
+                const glm::vec3 c((p0[0] + p2[0]) * 0.5f, (p0[1] + p2[1]) * 0.5f, (p0[2] + p2[2]) * 0.5f);
+                centroidVec.push_back(c);
+                centroids.push_back(c.x); centroids.push_back(c.y); centroids.push_back(c.z);
+            }
+            std::vector<uint16_t> sorted;
+            std::vector<uint32_t> scratchOrder;
+            std::vector<float>    scratchKeys;
+            ::Render::TranslucentSort::BuildSortedIndices(centroidVec, cameraPos, sorted,
+                                                          scratchOrder, scratchKeys);
+            if (!sorted.empty()) {
+                result.meshData.translucentIndices = std::move(sorted);
+                result.meshData.translucentIndexCount = result.meshData.translucentIndices.size();
+                const glm::ivec3 origin(
+                    chunkPos.x * 16,
+                    Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0),
+                    chunkPos.z * 16);
+                const auto pov = ::Render::TranslucentSort::MakePointOfView(cameraPos, origin);
+                result.meshData.translucentPovX = pov.x;
+                result.meshData.translucentPovY = pov.y;
+                result.meshData.translucentPovZ = pov.z;
+                result.meshData.translucentPovValid = pov.valid;
+            }
         }
 
         // Occlusion culling data

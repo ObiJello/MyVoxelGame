@@ -33,6 +33,19 @@ namespace Render {
         void Render(const glm::mat4& projection, const glm::mat4& view,
                     const glm::vec3& cameraPos, float partialTick);
 
+        // Items draw out to a QUARTER of the render distance, in chunks:
+        //   8 chunks  -> 2 chunks -> 32 blocks
+        //   16 chunks -> 4 chunks -> 64 blocks
+        //   32 chunks -> 8 chunks -> 128 blocks
+        // i.e. simply `chunks * 4` blocks, since a quarter of a chunk-count
+        // times 16 blocks per chunk is the same thing.
+        //
+        // Call it once per frame with the EFFECTIVE render distance (the
+        // client setting already clamped by the server's view distance) —
+        // items the server never sent cannot be drawn at any range, so scaling
+        // off the raw client setting would promise more than the wire gives.
+        void SetRenderDistanceChunks(int chunks);
+
     private:
         // Draw one item at a world position with MC's bob + spin + ground
         // transform. Shared by the entities lying in the world and by the
@@ -60,20 +73,34 @@ namespace Render {
         BufferHandle m_cubeIB   = INVALID_BUFFER;
         MeshHandle   m_cubeMesh = INVALID_MESH;
 
-        // MC Entity.shouldRenderAtSqrDistance: an entity renders while
-        // `distance² < (boundingBox.getSize() * 64 * viewScale)²`, where
-        // getSize() is the mean of the box's three extents. A 0.25³ item gives
-        // 0.25 * 64 = 16 blocks — small entities cull aggressively in vanilla,
-        // and dropped items really do wink out at around that range.
+        // The cull radius in BLOCKS, driven by SetRenderDistanceChunks.
         //
-        // viewScale is MC's "Entity Distance" video option, 1.0 at the default
-        // 100%. Raise this multiplier if items should stay visible further out;
-        // it is the one knob here that is a deliberate look choice.
-        static constexpr float kViewScale = 1.0f;
+        // DELIBERATE DIVERGENCE FROM VANILLA, recorded because the old value
+        // was a faithful port and someone will otherwise "fix" this back.
+        // MC Entity.shouldRenderAtSqrDistance (Entity.java:1996) derives the
+        // cutoff from the HITBOX:
+        //
+        //     size = boundingBox.getSize()            // mean of the 3 extents
+        //     size *= 64.0 * viewScale
+        //     return distanceSq < size * size
+        //
+        // A 0.25³ item gives 0.25 * 64 = 16 blocks * viewScale, and viewScale
+        // is `clamp(renderDistance / 8, 1.0, 2.5) * entityDistanceScaling`
+        // (LevelRenderer.java:754) — so vanilla shows items at 16 blocks on an
+        // 8-chunk view and 40 at 20+, before the Entity Distance slider.
+        //
+        // This engine scales off the view distance directly instead: items are
+        // visible to a quarter of it. Still more generous than vanilla at every
+        // setting (32 blocks where vanilla gives 16 at 8 chunks) and it is a
+        // look choice, not an oversight.
+        //
+        // Floored at one chunk so a very small view distance cannot cull items
+        // out of arm's reach.
+        static constexpr float kMinRenderDistance = 16.0f;
 
-        static constexpr float kMaxRenderDistance =
-            ((Game::ItemEntity::kWidth + Game::ItemEntity::kHeight
-              + Game::ItemEntity::kWidth) / 3.0f) * 64.0f * kViewScale;
+        // Default corresponds to an 8-chunk view, so the first frame before
+        // SetRenderDistanceChunks lands is already sensible.
+        float m_maxRenderDistance = 8.0f * 4.0f;
     };
 
 } // namespace Render

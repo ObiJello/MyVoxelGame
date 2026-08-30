@@ -1,11 +1,13 @@
 // File: src/server/world/ServerWorkerPool.cpp
 #include "ServerWorkerPool.hpp"
+#include "MyTerrainGenerator.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/ThreadPriority.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/chunk/Chunk.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/level/ServerLevel.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
 #include <future>
@@ -15,9 +17,28 @@ namespace Threading {
 
     // Global instance
     std::unique_ptr<ServerWorkerPool> g_serverWorkerPool = nullptr;
-    
+
     // Static result queue for chunk generation results
     static Network::ResultQueue<Network::ChunkGenResult> s_chunkGenResultQueue;
+
+    namespace {
+        // The World a job's dimension belongs to, or null if that level does
+        // not exist (the server is shutting down, or the dimension's generator
+        // never started).
+        //
+        // Resolved per job rather than cached because one pool serves three
+        // levels. Reading m_levels from a worker is safe for the SAME reason
+        // the old cached pointer was: a job for dimension D is only ever
+        // enqueued after IntegratedServer has finished building D's level, and
+        // the enqueue and the dequeue both pass through m_jobQueueMutex — so
+        // the slot's write happens-before this read, and the slot is never
+        // rewritten afterwards.
+        Game::World* WorldForJob(Game::DimensionId dimension) {
+            if (!Server::g_integratedServer) return nullptr;
+            Server::ServerLevel* level = Server::g_integratedServer->GetLevel(dimension);
+            return level ? level->World() : nullptr;
+        }
+    } // namespace
 
     ServerWorkerPool::ServerWorkerPool(size_t workerCount)
         : m_workerCount(workerCount) {
@@ -37,18 +58,20 @@ namespace Threading {
             return;
         }
 
-        // Get world from IntegratedServer
+        // No world is captured here any more — a job names its dimension and
+        // the level is resolved when it runs (see WorldForJob). The overworld
+        // is still required to exist, because a pool started before the server
+        // has a world would only ever be handed jobs it cannot serve.
         if (!Server::g_integratedServer) {
             Log::Error("Cannot initialize ServerWorkerPool: IntegratedServer not initialized");
             return;
         }
 
-        m_world = Server::g_integratedServer->GetWorld();
-        if (!m_world) {
+        if (!Server::g_integratedServer->GetWorld()) {
             Log::Error("Cannot initialize ServerWorkerPool: IntegratedServer has no world");
             return;
         }
-        
+
         // No queue capacity to configure: the queue is unbounded, like MC's
         // ChunkTaskDispatcher, and self-limiting because a chunk can only be
         // in flight once. See EnqueueJob.
@@ -96,7 +119,8 @@ namespace Threading {
         Log::Info("ServerWorkerPool shutdown complete");
     }
 
-    void ServerWorkerPool::SubmitChunkGeneration(Game::Math::ChunkPos chunkPos, int priority) {
+    void ServerWorkerPool::SubmitChunkGeneration(Game::DimensionId dimension,
+                                                 Game::Math::ChunkPos chunkPos, int priority) {
         if (!m_running.load()) {
             Log::Warning("Cannot submit chunk generation job - ServerWorkerPool not running");
             return;
@@ -105,34 +129,41 @@ namespace Threading {
         uint64_t generation;
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            generation = ++m_chunkGenerations[chunkPos];
+            generation = ++m_chunkGenerations[Game::DimensionSlot(dimension)][chunkPos];
         }
 
-        ServerJob job(ServerJobType::CHUNK_GENERATION, chunkPos);
+        ServerJob job(ServerJobType::CHUNK_GENERATION, chunkPos, dimension);
         job.priority = priority;
         job.generationId = generation;
-        job.task = [this, chunkPos, generation]() { ProcessChunkGeneration(chunkPos, generation); };
+        job.task = [this, dimension, chunkPos, generation]() {
+            ProcessChunkGeneration(dimension, chunkPos, generation);
+        };
 
         EnqueueJob(std::move(job));
         m_stats.jobsSubmitted.fetch_add(1, std::memory_order_relaxed);
     }
 
-    bool ServerWorkerPool::SubmitChunkLoading(Game::Math::ChunkPos chunkPos, int priority) {
+    bool ServerWorkerPool::SubmitChunkLoading(Game::DimensionId dimension,
+                                              Game::Math::ChunkPos chunkPos, int priority) {
         if (!m_running.load()) {
             Log::Warning("Cannot submit chunk loading job - ServerWorkerPool not running");
             return false;
         }
 
+        const int slot = Game::DimensionSlot(dimension);
+
         uint64_t generation;
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            generation = ++m_chunkGenerations[chunkPos];
+            generation = ++m_chunkGenerations[slot][chunkPos];
         }
 
-        ServerJob job(ServerJobType::CHUNK_LOADING, chunkPos);
+        ServerJob job(ServerJobType::CHUNK_LOADING, chunkPos, dimension);
         job.priority = priority;
         job.generationId = generation;
-        job.task = [this, chunkPos, generation]() { ProcessChunkLoading(chunkPos, generation); };
+        job.task = [this, dimension, chunkPos, generation]() {
+            ProcessChunkLoading(dimension, chunkPos, generation);
+        };
 
         if (!EnqueueJob(std::move(job))) {
             // Roll the generation back. The bump above marks every older job
@@ -142,8 +173,9 @@ namespace Threading {
             // the requester waiting on a result that can never arrive. Only
             // undo it if nobody else bumped in the meantime.
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            auto it = m_chunkGenerations.find(chunkPos);
-            if (it != m_chunkGenerations.end() && it->second == generation) {
+            auto& generations = m_chunkGenerations[slot];
+            auto it = generations.find(chunkPos);
+            if (it != generations.end() && it->second == generation) {
                 --it->second;
             }
             return false;
@@ -153,7 +185,9 @@ namespace Threading {
         return true;
     }
 
-    void ServerWorkerPool::SubmitChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority) {
+    void ServerWorkerPool::SubmitChunkSaving(Game::DimensionId dimension,
+                                             Game::Math::ChunkPos chunkPos,
+                                             std::shared_ptr<Game::Chunk> chunk, int priority) {
         if (!m_running.load()) {
             Log::Warning("Cannot submit chunk saving job - ServerWorkerPool not running");
             return;
@@ -164,9 +198,11 @@ namespace Threading {
             return;
         }
 
-        ServerJob job(ServerJobType::CHUNK_SAVING, chunkPos);
+        ServerJob job(ServerJobType::CHUNK_SAVING, chunkPos, dimension);
         job.priority = priority;
-        job.task = [this, chunkPos, chunk]() { ProcessChunkSaving(chunkPos, chunk); };
+        job.task = [this, dimension, chunkPos, chunk]() {
+            ProcessChunkSaving(dimension, chunkPos, chunk);
+        };
 
         EnqueueJob(std::move(job));
         m_stats.jobsSubmitted.fetch_add(1, std::memory_order_relaxed);
@@ -191,11 +227,15 @@ namespace Threading {
         m_stats.jobsSubmitted.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void ServerWorkerPool::CancelChunkJobs(Game::Math::ChunkPos chunkPos) {
+    void ServerWorkerPool::CancelChunkJobs(Game::DimensionId dimension,
+                                           Game::Math::ChunkPos chunkPos) {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
-        ++m_chunkGenerations[chunkPos];
-        Log::Debug("Cancelled jobs for chunk (%d, %d) (gen %llu)", chunkPos.x, chunkPos.z,
-                   static_cast<unsigned long long>(m_chunkGenerations[chunkPos]));
+        auto& generations = m_chunkGenerations[Game::DimensionSlot(dimension)];
+        ++generations[chunkPos];
+        Log::Debug("Cancelled jobs for %s chunk (%d, %d) (gen %llu)",
+                   std::string(Game::DimensionName(dimension)).c_str(),
+                   chunkPos.x, chunkPos.z,
+                   static_cast<unsigned long long>(generations[chunkPos]));
     }
 
     void ServerWorkerPool::CancelAllJobs() {
@@ -206,7 +246,9 @@ namespace Threading {
 
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            m_chunkGenerations.clear();
+            for (auto& generations : m_chunkGenerations) {
+                generations.clear();
+            }
         }
 
         Log::Info("Cancelled all pending server worker jobs");
@@ -297,22 +339,27 @@ namespace Threading {
             return false;
         }
 
-        return IsGenerationStale(job.chunkPos, job.generationId);
+        return IsGenerationStale(job.dimension, job.chunkPos, job.generationId);
     }
 
-    void ServerWorkerPool::ProcessChunkGeneration(Game::Math::ChunkPos chunkPos, uint64_t generation) {
+    void ServerWorkerPool::ProcessChunkGeneration(Game::DimensionId dimension,
+                                                  Game::Math::ChunkPos chunkPos,
+                                                  uint64_t generation) {
         PROFILE_ZONE;
-        if (!m_world) {
-            Log::Error("Cannot generate chunk - no world reference");
+        Game::World* world = WorldForJob(dimension);
+        if (!world) {
+            Log::Error("Cannot generate chunk - dimension '%s' has no world",
+                       std::string(Game::DimensionName(dimension)).c_str());
             return;
         }
 
         Log::Debug("Generating chunk (%d, %d)", chunkPos.x, chunkPos.z);
 
         try {
-            auto* chunkProvider = m_world->GetChunkProvider();
+            auto* chunkProvider = world->GetChunkProvider();
             if (!chunkProvider) {
-                SendChunkGenResult(chunkPos, nullptr, false, "No chunk provider available");
+                SendChunkGenResult(dimension, chunkPos, nullptr, false,
+                                   "No chunk provider available");
                 return;
             }
 
@@ -320,65 +367,97 @@ namespace Threading {
             auto chunk = chunkProvider->GetChunk(chunkPos);
 
             // Check if this job's generation is still current before sending result
-            if (IsGenerationStale(chunkPos, generation)) {
+            if (IsGenerationStale(dimension, chunkPos, generation)) {
                 m_stats.jobsCancelled.fetch_add(1, std::memory_order_relaxed);
                 Log::Debug("Chunk (%d, %d) generation stale, discarding result", chunkPos.x, chunkPos.z);
                 return;
             }
 
             if (chunk) {
-                SendChunkGenResult(chunkPos, chunk, true);
+                SendChunkGenResult(dimension, chunkPos, chunk, true);
                 m_stats.chunksGenerated.fetch_add(1, std::memory_order_relaxed);
                 Log::Debug("Successfully generated chunk (%d, %d)", chunkPos.x, chunkPos.z);
             } else {
-                SendChunkGenResult(chunkPos, nullptr, false, "Chunk generation failed");
+                SendChunkGenResult(dimension, chunkPos, nullptr, false, "Chunk generation failed");
             }
         }
         catch (const std::exception& e) {
-            SendChunkGenResult(chunkPos, nullptr, false, std::string("Exception: ") + e.what());
+            SendChunkGenResult(dimension, chunkPos, nullptr, false,
+                               std::string("Exception: ") + e.what());
         }
     }
 
-    void ServerWorkerPool::ProcessChunkLoading(Game::Math::ChunkPos chunkPos, uint64_t generation) {
-        if (!m_world) {
-            Log::Error("Cannot load chunk - no world reference");
+    void ServerWorkerPool::ProcessChunkLoading(Game::DimensionId dimension,
+                                               Game::Math::ChunkPos chunkPos,
+                                               uint64_t generation) {
+        // Resolved here, not cached: this is the one call that BLOCKS inside
+        // ChunkProvider::GetChunk until the server thread pumps THIS
+        // dimension's generator, so pointing it at the wrong level would park
+        // the worker on a pipeline nobody is feeding.
+        Game::World* world = WorldForJob(dimension);
+        if (!world) {
+            Log::Error("Cannot load chunk - dimension '%s' has no world",
+                       std::string(Game::DimensionName(dimension)).c_str());
             return;
         }
 
         Log::Debug("Loading chunk (%d, %d)", chunkPos.x, chunkPos.z);
 
         try {
-            auto* chunkProvider = m_world->GetChunkProvider();
+            auto* chunkProvider = world->GetChunkProvider();
             if (!chunkProvider) {
-                SendChunkGenResult(chunkPos, nullptr, false, "No chunk provider available");
+                SendChunkGenResult(dimension, chunkPos, nullptr, false,
+                                   "No chunk provider available");
                 return;
             }
 
-            // GetChunk routes through cache -> disk -> MyTerrainGenerator (all thread-safe)
-            auto chunk = chunkProvider->GetChunk(chunkPos);
+            // Cache -> disk only. A chunk that is not on disk is handed to
+            // the terrain library as a ticketed generation request (MC's
+            // ChunkMap model) and its result arrives through
+            // IntegratedServer::PumpChunkPipeline — this worker does NOT park
+            // inside the library waiting for it. Measured 2026-08-29: twelve
+            // workers spent 97-99% of their time in that wait.
+            auto chunk = chunkProvider->LoadWithoutGenerating(chunkPos);
+            if (!chunk) {
+                if (auto* gen = dynamic_cast<Game::MyTerrainGenerator*>(chunkProvider->GetGenerator())) {
+                    if (IsGenerationStale(dimension, chunkPos, generation)) {
+                        m_stats.jobsCancelled.fetch_add(1, std::memory_order_relaxed);
+                        return;
+                    }
+                    gen->EnqueueGenerationRequest(chunkPos);
+                    return;   // result comes from the generation path
+                }
+                // No library generator: fall back to the blocking path.
+                chunk = chunkProvider->GetChunk(chunkPos);
+            }
 
             // Check if this job's generation is still current before sending result
-            if (IsGenerationStale(chunkPos, generation)) {
+            if (IsGenerationStale(dimension, chunkPos, generation)) {
                 m_stats.jobsCancelled.fetch_add(1, std::memory_order_relaxed);
                 Log::Debug("Chunk (%d, %d) generation stale, discarding result", chunkPos.x, chunkPos.z);
                 return;
             }
 
             if (chunk) {
-                SendChunkGenResult(chunkPos, chunk, true);
+                SendChunkGenResult(dimension, chunkPos, chunk, true);
                 m_stats.chunksLoaded.fetch_add(1, std::memory_order_relaxed);
                 Log::Debug("Successfully loaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
             } else {
-                SendChunkGenResult(chunkPos, nullptr, false, "Failed to load/generate chunk");
+                SendChunkGenResult(dimension, chunkPos, nullptr, false,
+                                   "Failed to load/generate chunk");
             }
         }
         catch (const std::exception& e) {
-            SendChunkGenResult(chunkPos, nullptr, false, std::string("Exception: ") + e.what());
+            SendChunkGenResult(dimension, chunkPos, nullptr, false,
+                               std::string("Exception: ") + e.what());
         }
     }
 
-    void ServerWorkerPool::ProcessChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk) {
-        if (!m_world || !chunk) {
+    void ServerWorkerPool::ProcessChunkSaving(Game::DimensionId dimension,
+                                              Game::Math::ChunkPos chunkPos,
+                                              std::shared_ptr<Game::Chunk> chunk) {
+        Game::World* world = WorldForJob(dimension);
+        if (!world || !chunk) {
             Log::Error("Cannot save chunk - missing world or chunk");
             return;
         }
@@ -387,7 +466,7 @@ namespace Threading {
 
         try {
             // Get chunk provider from world
-            auto* chunkProvider = m_world->GetChunkProvider();
+            auto* chunkProvider = world->GetChunkProvider();
             if (!chunkProvider) {
                 Log::Error("Cannot save chunk - no chunk provider available");
                 return;
@@ -411,8 +490,8 @@ namespace Threading {
         // No capacity limit, matching MC: ChunkTaskDispatcher holds one task per
         // scheduled chunk and never refuses one. The bound here is the same one
         // MC has — a chunk can only be requested once while in flight
-        // (IntegratedServer::m_pendingChunkLoads), so depth is bounded by the
-        // players' tracking views, ~1k per player.
+        // (ServerLevel::pendingChunkLoads, one set per dimension), so depth is
+        // bounded by the players' tracking views, ~1k per player.
         //
         // Dropping was worse than it looked: a dropped job produces no result,
         // and the requester treats "requested, no result yet" as permanently in
@@ -490,8 +569,13 @@ namespace Threading {
         m_anchors = std::move(anchors);
     }
 
-    void ServerWorkerPool::SendChunkGenResult(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, bool success, const std::string& error) {
-        Network::ChunkGenResult result(chunkPos, chunk, success);
+    void ServerWorkerPool::SendChunkGenResult(Game::DimensionId dimension,
+                                              Game::Math::ChunkPos chunkPos,
+                                              std::shared_ptr<Game::Chunk> chunk, bool success,
+                                              const std::string& error) {
+        // Stamping the dimension here is what lets the server thread file the
+        // result against the right level — the queue is shared by all three.
+        Network::ChunkGenResult result(chunkPos, chunk, success, dimension);
         if (!error.empty()) {
             result.errorMessage = error;
         }
@@ -504,10 +588,13 @@ namespace Threading {
         return s_chunkGenResultQueue;
     }
 
-    bool ServerWorkerPool::IsGenerationStale(Game::Math::ChunkPos chunkPos, uint64_t generation) const {
+    bool ServerWorkerPool::IsGenerationStale(Game::DimensionId dimension,
+                                             Game::Math::ChunkPos chunkPos,
+                                             uint64_t generation) const {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
-        auto it = m_chunkGenerations.find(chunkPos);
-        if (it == m_chunkGenerations.end()) return false;
+        const auto& generations = m_chunkGenerations[Game::DimensionSlot(dimension)];
+        auto it = generations.find(chunkPos);
+        if (it == generations.end()) return false;
         return generation != it->second;
     }
 
@@ -532,9 +619,10 @@ namespace Threading {
         }
     }
 
-    void SubmitServerChunkGeneration(Game::Math::ChunkPos chunkPos, int priority) {
+    void SubmitServerChunkGeneration(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                     int priority) {
         if (g_serverWorkerPool) {
-            g_serverWorkerPool->SubmitChunkGeneration(chunkPos, priority);
+            g_serverWorkerPool->SubmitChunkGeneration(dimension, chunkPos, priority);
         }
     }
 
@@ -544,16 +632,18 @@ namespace Threading {
         }
     }
 
-    bool SubmitServerChunkLoading(Game::Math::ChunkPos chunkPos, int priority) {
+    bool SubmitServerChunkLoading(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                  int priority) {
         if (!g_serverWorkerPool) {
             return false;
         }
-        return g_serverWorkerPool->SubmitChunkLoading(chunkPos, priority);
+        return g_serverWorkerPool->SubmitChunkLoading(dimension, chunkPos, priority);
     }
 
-    void SubmitServerChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority) {
+    void SubmitServerChunkSaving(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                                 std::shared_ptr<Game::Chunk> chunk, int priority) {
         if (g_serverWorkerPool) {
-            g_serverWorkerPool->SubmitChunkSaving(chunkPos, chunk, priority);
+            g_serverWorkerPool->SubmitChunkSaving(dimension, chunkPos, chunk, priority);
         }
     }
 

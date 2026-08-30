@@ -74,6 +74,31 @@ BlendedNoise BlendedNoise::withNewRandom(XoroshiroRandomSource& terrainRandom) c
     return BlendedNoise(terrainRandom, m_xzScale, m_yScale, m_xzFactor, m_yFactor, m_smearScaleMultiplier);
 }
 
+// Legacy variant (legacy_random_source settings): identical structure, octave
+// init resolves to the LegacyRandomSource overloads of PerlinNoise.
+BlendedNoise::BlendedNoise(LegacyRandomSource& random,
+                           double xzScale,
+                           double yScale,
+                           double xzFactor,
+                           double yFactor,
+                           double smearScaleMultiplier)
+{
+    m_minLimitNoise = new PerlinNoise(PerlinNoise::createLegacyForBlendedNoise(random, -15, 0));
+    m_maxLimitNoise = new PerlinNoise(PerlinNoise::createLegacyForBlendedNoise(random, -15, 0));
+    m_mainNoise = new PerlinNoise(PerlinNoise::createLegacyForBlendedNoise(random, -7, 0));
+    m_xzScale = xzScale;
+    m_yScale = yScale;
+    m_xzFactor = xzFactor;
+    m_yFactor = yFactor;
+    m_smearScaleMultiplier = smearScaleMultiplier;
+    m_xzMultiplier = 684.412 * m_xzScale;
+    m_yMultiplier = 684.412 * m_yScale;
+}
+
+BlendedNoise BlendedNoise::withNewRandom(LegacyRandomSource& terrainRandom) const {
+    return BlendedNoise(terrainRandom, m_xzScale, m_yScale, m_xzFactor, m_yFactor, m_smearScaleMultiplier);
+}
+
 double BlendedNoise::compute(const FunctionContext& context) const {
     // Reference: BlendedNoise.java lines 58-110
 
@@ -176,7 +201,7 @@ void BlendedNoise::fillArray(double* __restrict output, int32_t count, ContextPr
     contextProvider.fillAllDirectly(output, count, const_cast<BlendedNoise*>(this));
 }
 
-DensityFunction* BlendedNoise::mapAll(Visitor& visitor) {
+DensityFunction* BlendedNoise::mapAllImpl(Visitor& visitor) {
     // BlendedNoise doesn't transform its internal structure
     return visitor.apply(this);
 }

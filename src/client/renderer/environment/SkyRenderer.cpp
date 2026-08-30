@@ -449,6 +449,41 @@ void main() {
     }
 
     void SkyRenderer::SetSkybox(const std::string& id, int mode) {
+        // The PLAYER's choice. It is remembered separately from the active sky
+        // so that being in the End (which forces its own) neither reports nor
+        // overwrites it, and so returning to the overworld restores it.
+        m_userSkyboxId = id.empty() ? "vanilla" : id;
+        m_userSkyboxMode = std::clamp(mode, 0, 2);
+        ApplyDimensionSky();
+    }
+
+    void SkyRenderer::SetDimension(int rawDimensionId) {
+        if (m_dimension == rawDimensionId) return;
+        m_dimension = rawDimensionId;
+        ApplyDimensionSky();
+    }
+
+    void SkyRenderer::ApplyDimensionSky() {
+        // MC DimensionSpecialEffects: NETHER is SkyType.NONE (no sky drawn at
+        // all, the world is just fog), END is SkyType.END (the static starfield
+        // cube), OVERWORLD is NORMAL.
+        m_noSky = (m_dimension == -1);
+        // Neither the Nether nor the End has a day/night cycle.
+        EnvironmentState::Get().SetConstantAmbientLight(m_dimension != 0);
+        if (m_noSky) {
+            DestroySkyboxTextures();
+            EnvironmentState::Get().SetSkyboxOverride(
+                true, glm::vec3(kNetherFog[0], kNetherFog[1], kNetherFog[2]),
+                /*mode 0 = constant, no night curve*/ 0);
+            return;
+        }
+        // The End forces its own sky; everywhere else honours the player.
+        const bool inEnd = (m_dimension == 1);
+        ApplySkybox(inEnd ? std::string("end") : m_userSkyboxId,
+                    inEnd ? 0 : m_userSkyboxMode);
+    }
+
+    void SkyRenderer::ApplySkybox(const std::string& id, int mode) {
         m_skyboxMode = std::clamp(mode, 0, 2);
         m_skyboxId = id.empty() ? "vanilla" : id;
 
@@ -523,6 +558,10 @@ void main() {
 
     void SkyRenderer::Render(const glm::mat4& proj, const glm::mat4& viewRotation) {
         if (!m_initialized || !g_renderBackend) return;
+        // MC SkyType.NONE — the Nether has no sky, no sun, no moon and no
+        // stars. The frame is already cleared to the fog colour, which is
+        // exactly what vanilla shows there.
+        if (m_noSky) return;
 
         const EnvironmentState& envState = EnvironmentState::Get();
         const EnvironmentFrame& env = envState.Frame();

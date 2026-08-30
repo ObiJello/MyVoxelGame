@@ -12,6 +12,7 @@
 #include <climits>
 #include <cstdint>
 #include <vector>
+#include <chrono>
 #include <array>
 #include <memory>
 
@@ -289,9 +290,30 @@ namespace Render {
         // MarkSectionDataErased). BFS stats are copied out of completed jobs.
         bool m_sectionDataErased = false;
         uint64_t m_worldVersion = 1;
+        // Last effective render distance PrepareVisibleSections ran with —
+        // a change invalidates every reachable-slot (see the worldVersion
+        // bump where this is compared).
+        int m_lastRenderDistanceChunks = -1;
         uint64_t m_eraseToken = 1;
         int m_bfsVisitedCount = 0;
         int m_bfsOccludedCount = 0;
+
+        // ── Culling diagnostics ────────────────────────────────────────
+        // Per-second [CullDiag] log line: min/max visible-section count
+        // within the second (a large swing IS the "flashing" symptom, made
+        // measurable), full-rebuild and partial-add rates, source backlog.
+        // F8 → DumpViewRay: walks the camera ray and logs every section it
+        // passes through with its complete culling state, so "look at the
+        // hole and press F8" pins which stage dropped it.
+        size_t m_diagVisMin = static_cast<size_t>(-1);
+        size_t m_diagVisMax = 0;
+        int m_diagRebuilds = 0;
+        int m_diagPartialAdds = 0;
+        std::chrono::steady_clock::time_point m_diagLastLog{};
+        // Steady-camera full-rebuild rate limit (see PrepareVisibleSections).
+        std::chrono::steady_clock::time_point m_lastRebuildSubmit{};
+        void DumpViewRay(const Camera& camera, const Frustum& frustum,
+                         const ReachableCacheSlot& slot, int renderDistanceChunks);
 
         // Per-frame draw list: the active slot's sections filtered through the
         // current frustum. Rebuilt every frame (cheap — a few thousand AABB

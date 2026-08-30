@@ -17,6 +17,7 @@ needs more gets a hand-written model class, as the original eight already have.
     python3 tools/gen_entity_models.py
 """
 
+import math
 import os
 import re
 import sys
@@ -66,18 +67,11 @@ MODEL_ALIAS = {
     "zombie_nautilus": "NautilusModel",
 }
 
-# MC MeshTransformer.scaling(f), baked in rather than carried as a per-part
-# scale. LayerDefinitions maps these mobs to `createBodyLayer().apply(SCALE)`,
-# where scaling(f) is
-#     pose -> pose.scaled(f).translated(0, 24.016 * (1 - f), 0)
-# A uniform scale of a rigid hierarchy is the same whether it is applied at the
-# pose or multiplied into the geometry — no part carries its own scale, and the
-# rotations are untouched — so multiplying every offset, origin and size by f
-# and shifting the root by yOffset reproduces it exactly, with no scale field
-# on GenPart.
-MESH_SCALE = {
-    "elder_guardian": 2.35,   # GuardianModel.ELDER_GUARDIAN_SCALE
-}
+# MC MeshTransformer.scaling(f) is picked up automatically from
+# LayerDefinitions.java (`createBodyLayer().apply(SCALE)`) by eval_transformer
+# and carried as PartPose scale on the root — see apply_mesh_scale for why it
+# must NOT be multiplied into the geometry (UV layout derives from the
+# unscaled cube size).
 
 # Parts MC's setupAnim hides in the DEFAULT state, keyed by slug.
 #
@@ -120,6 +114,45 @@ HIDDEN_PARTS = {
 HAND_WRITTEN = {"zombie", "skeleton", "creeper", "spider",
                 "cow", "pig", "sheep", "chicken"}
 
+# Generated-model mobs that get a `<slug>_baby` mesh — MC AgeableMobRenderer's
+# babyModel, built from LayerDefinitions' `<LAYER>_BABY` rows. Only mobs that
+# can actually BE babies in this port are here, cross-checked against
+# src/common/entity/mobs/{Animals,AnimatedMobs,Monsters,Fish}.hpp: Animal's
+# age < 0, the zombie family's m_baby, and piglin/zoglin. Deliberately absent:
+#   frog / parrot / zombie_nautilus  IsBaby() is hardcoded false in the port
+#                                    (and in MC);
+#   piglin_brute / giant / villager  no baby form in the port (brute has none
+#                                    in MC either; villager is a plain
+#                                    GenericPathfinderMob here);
+#   dolphin / squid / glow_squid     never age in the port (Mob-based);
+#   nautilus                         MC's baby is a separate 64x64 mesh on
+#                                    nautilus_baby.png, and that sheet is not
+#                                    in assets/ — a baby mesh sampling the
+#                                    128x128 adult sheet would be garbage, so
+#                                    the uniform-shrink fallback stands until
+#                                    the texture lands.
+# The hand-written five (zombie, cow, pig, sheep, chicken) build their babies
+# in EntityModels.cpp via EntityModel::BecomeBaby instead.
+BABY_MESH_SLUGS = {
+    "armadillo", "axolotl", "bee", "camel", "camel_husk", "cat", "donkey",
+    "drowned", "fox", "goat", "happy_ghast", "hoglin", "horse", "husk",
+    "llama", "mooshroom", "mule", "ocelot", "panda", "piglin", "polar_bear",
+    "rabbit", "skeleton_horse", "sniffer", "strider", "trader_llama",
+    "turtle", "wolf", "zoglin", "zombie_horse", "zombie_villager",
+    "zombified_piglin",
+}
+
+# Projectiles: the sprite-rendered ones (snowball, egg, potion, fireballs)
+# have no MC model class at all, and the modelled ones (trident, wind charge,
+# shulker bullet, llama spit, wither skull) have hand-written classes in
+# EntityModels.cpp because each needs a real setupAnim (spin / pitch-to-flight).
+PROJECTILES = {
+    "arrow", "snowball", "egg", "splash_potion",
+    "small_fireball", "fireball", "dragon_fireball", "wither_skull",
+    "shulker_bullet", "llama_spit", "trident",
+    "wind_charge", "breeze_wind_charge",
+}
+
 NUM = r"[-+]?[0-9]*\.?[0-9]+"
 
 
@@ -138,6 +171,11 @@ def evalnum(expr, env):
     e = e.replace("F", "").replace("f", "").replace("D", "")
     e = e.replace("(Math.PI", "(3.141592653589793")
     e = e.replace("Math.PI", "3.141592653589793")
+    # Mth.cos/sin (and the Math spellings) appear in loop-local position maths —
+    # the squid's tentacle ring, the blaze's rod circles. Without them the whole
+    # expression failed to eval and took the 0.0 fallback, which stacked all
+    # eight squid tentacles at the origin.
+    e = re.sub(r"\b(?:Mth|Math)\s*\.\s*(cos|sin)\b", r"\1", e)
     # `.mirror(true)` and `.mirror(mirrorLeftLeg)` both come through here, and
     # a bare `true` is not a Python expression — it evaluated to the 0.0
     # fallback, i.e. NOT mirrored, silently flipping those cubes' UVs.
@@ -146,7 +184,8 @@ def evalnum(expr, env):
     for k, v in env.items():
         e = re.sub(r"\b" + re.escape(k) + r"\b", repr(v), e)
     try:
-        return float(eval(e, {"__builtins__": {}}, {}))
+        return float(eval(e, {"__builtins__": {}},
+                          {"cos": math.cos, "sin": math.sin}))
     except Exception:
         return 0.0
 
@@ -191,6 +230,7 @@ class Part:
         self.name = name
         self.parent = parent          # Part or None
         self.pose = [0.0] * 6         # x y z xRot yRot zRot
+        self.scale = [1.0] * 3        # PartPose xScale yScale zScale
         self.cubes = []               # dicts
 
 
@@ -205,43 +245,50 @@ def is_deform(expr, denv):
 
 
 def evaldeform(expr, env, denv):
-    """A CubeDeformation expression -> its uniform grow, in pixels.
+    """A CubeDeformation expression -> its per-axis grow (gx, gy, gz), pixels.
 
-    MC inflates a cube by this on every axis (ModelPart.Cube's constructor).
+    MC inflates a cube by this per axis (ModelPart.Cube's constructor).
     Two coincident boxes with DIFFERENT deformations are how MC layers a shell
     over a body — armadillo, wolf, sheep, every 'outer layer'. Dropping the
     value collapses them onto each other and they z-fight, which is exactly
     what this used to do: `evalnum("new CubeDeformation(0.3F)")` cannot be
     eval'd as Python, so it returned the 0.0 fallback for all 138 of them.
 
-    Only the uniform (single-argument) constructor appears in MC's model
-    sources — the growX/growY/growZ form lives inside CubeDeformation itself —
-    so one float is enough and GenCube keeps a single `grow`.
+    Per-axis matters in exactly one place in MC's model sources:
+    AbstractEquineModel.createFullScaleBabyMesh stretches the baby legs with
+    `g.extend(0, 5.5, 0)` — collapsed to one float, baby equine legs come out
+    5.5px short of the ground.
     """
     e = expr.strip()
     if e in denv:
         return denv[e]
     if e.endswith("NONE") and "CubeDeformation" in e:
-        return 0.0
+        return (0.0, 0.0, 0.0)
 
-    # `<base>.extend(f)` -> base + f, recursively.
+    # `<base>.extend(f)` / `.extend(x, y, z)` -> base + factor, recursively.
     m = re.search(r"\.extend\s*\(", e)
     if m:
         inner, end = balanced(e, m.end() - 1)
         if end >= len(e.rstrip()):
             args = split_args(inner)
             base = evaldeform(e[:m.start()], env, denv)
-            return base + evalnum(args[0], env)
+            if len(args) >= 3:
+                return tuple(b + evalnum(a, env)
+                             for b, a in zip(base, args[:3]))
+            f = evalnum(args[0], env)
+            return (base[0] + f, base[1] + f, base[2] + f)
 
     m = re.match(r"new\s+CubeDeformation\s*\(", e)
     if m:
         inner, _ = balanced(e, m.end() - 1)
         args = split_args(inner)
-        # The 3-arg form is per-axis; MC's models never use it, but if a
-        # snapshot introduces one, taking X keeps the common case right.
-        return evalnum(args[0], env) if args else 0.0
+        if len(args) >= 3:
+            return tuple(evalnum(a, env) for a in args[:3])
+        v = evalnum(args[0], env) if args else 0.0
+        return (v, v, v)
 
-    return evalnum(e, env)
+    v = evalnum(e, env)
+    return (v, v, v)
 
 
 def parse_cubes(expr, env, denv=None):
@@ -276,7 +323,7 @@ def parse_cubes(expr, env, denv=None):
             if len(a) >= 6:
                 vals = [evalnum(x, env) for x in a[:6]]
                 extra = a[6:]
-                grow, cube_tex = 0.0, tex
+                grow, cube_tex = (0.0, 0.0, 0.0), tex
 
                 if len(extra) == 1:
                     # CubeDeformation | boolean mirror | Set<Direction>.
@@ -307,57 +354,342 @@ def parse_cubes(expr, env, denv=None):
 NAME_FN = re.compile(r'\b(\w+)\s*\([^)]*\)\s*\{\s*return\s+"([a-z_0-9]*)"\s*\+')
 
 
-def unroll_loops(body, src, env):
-    """Expand literal-bounded for loops, resolving `"prefix" + i` part names."""
-    name_fns = {m.group(1): m.group(2) for m in NAME_FN.finditer(src)}
+class JavaRandom:
+    """java.util.Random's 48-bit LCG. `RandomSource.create(seed)` is
+    LegacyRandomSource, which is exactly this generator (cross-checked against
+    src/my_terrain_library/include/random/LegacyRandomSource.h). GhastModel
+    seeds one with 1660L and draws every tentacle's length from it, so the mesh
+    is only right if this reproduces the sequence bit for bit."""
+    MASK = (1 << 48) - 1
+    MULT = 0x5DEECE66D        # 25214903917
+    INC = 0xB
 
-    out, i = "", 0
-    while True:
-        m = re.compile(r"\bfor\s*\(").search(body, i)
-        if not m:
-            out += body[i:]
-            break
-        out += body[i:m.start()]
-        head, end = balanced(body, m.end() - 1)
-        rest = body[end:].lstrip()
-        if not rest.startswith("{"):
-            out += body[m.start():end]
-            i = end
+    def __init__(self, seed):
+        self.seed = (seed ^ self.MULT) & self.MASK
+
+    def next(self, bits):
+        self.seed = (self.seed * self.MULT + self.INC) & self.MASK
+        return self.seed >> (48 - bits)
+
+    def next_int(self, bound):
+        if bound & (bound - 1) == 0:              # power-of-two shortcut
+            return (bound * self.next(31)) >> 31
+        while True:
+            bits = self.next(31)
+            val = bits % bound
+            # Retry while `bits - val + (bound-1)` overflows a signed int32 —
+            # Java writes this as `< 0` after the wrap.
+            if bits - val + (bound - 1) < (1 << 31):
+                return val
+
+
+def parse_static_tables(src):
+    """Class-level `static final int[][] / int[] / float[]` data tables.
+
+    SilverfishModel and EndermiteModel keep every segment's box size and
+    texOffs in `BODY_SIZES` / `BODY_TEXS`, GuardianModel keeps its spike ring
+    in six float[]s. Values from an int table stay Python ints so that Java's
+    integer `/` and `%` still fold correctly after substitution."""
+    tables = {}
+    for m in re.finditer(r"static\s+final\s+(int|float)\s*\[\]\s*\[\]\s+(\w+)"
+                         r"\s*=\s*new\s+(?:int|float)\s*\[\]\s*\[\]\s*\{", src):
+        outer, _ = balanced(src, m.end() - 1, "{", "}")
+        rows, i = [], 0
+        while True:
+            j = outer.find("{", i)
+            if j < 0:
+                break
+            inner, i = balanced(outer, j, "{", "}")
+            rows.append([_table_num(x, m.group(1)) for x in inner.split(",") if x.strip()])
+        tables[m.group(2)] = rows
+    for m in re.finditer(r"static\s+final\s+(int|float)\s*\[\]\s+(\w+)"
+                         r"\s*=\s*new\s+(?:int|float)\s*\[\]\s*\{", src):
+        inner, _ = balanced(src, m.end() - 1, "{", "}")
+        tables[m.group(2)] = [_table_num(x, m.group(1)) for x in inner.split(",") if x.strip()]
+    return tables
+
+
+def _table_num(text, jtype):
+    v = float(text.strip().rstrip("FfDdLl"))
+    return int(v) if jtype == "int" else v
+
+
+def numeric_return_fns(src):
+    """Static numeric helpers whose whole body is `return <expr>;`.
+
+    GuardianModel's getSpikeX/Y/Z/getSpikeOffset are the reason: the spike
+    positions are computed through them, and leaving the calls unresolved made
+    every spike evaluate to the origin. They are inlined (with parameters
+    bound) during simulation so evalnum sees plain arithmetic."""
+    out = {}
+    for m in re.finditer(r"static\s+(?:int|long|float|double)\s+(\w+)\s*\(", src):
+        got = method_signature(src, m.group(1))
+        if not got:
             continue
-        inner, e2 = balanced(rest, 0, "{", "}")
-        consumed = end + (len(body[end:]) - len(rest)) + e2
-
-        parts = head.split(";")
-        mi = re.fullmatch(r"\s*(?:int\s+)?(\w+)\s*=\s*(-?\d+)\s*", parts[0]) if len(parts) == 3 else None
-        mc = re.fullmatch(r"\s*(\w+)\s*<\s*(-?\d+)\s*", parts[1]) if mi else None
-        if not mi or not mc or mi.group(1) != mc.group(1) or int(mc.group(2)) - int(mi.group(2)) > 64:
-            out += body[m.start():consumed]
-            i = consumed
-            continue
-
-        var, lo, hi = mi.group(1), int(mi.group(2)), int(mc.group(2))
-        # Loop-carried accumulators (`++angle`) are evaluated per iteration and
-        # folded into the emitted text, since the unrolled copies are otherwise
-        # independent and would all read the initial value.
-        carried = {}
-        for cm in re.finditer(r"(?:\+\+\s*(\w+)|(\w+)\s*\+\+)\s*;", inner):
-            nm = cm.group(1) or cm.group(2)
-            carried[nm] = 1.0
-        for k in range(lo, hi):
-            it = inner
-            # `getPartName(i)` -> the literal name it would return.
-            for fn, prefix in name_fns.items():
-                it = re.sub(r"\b" + re.escape(fn) + r"\s*\(\s*" + re.escape(var)
-                            + r"\s*\)", '"%s%d"' % (prefix, k), it)
-            it = re.sub(r"\b" + re.escape(var) + r"\b", str(k), it)
-            for nm, step in carried.items():
-                # Replace reads of the accumulator with `nm + <n steps>`.
-                bump = (k - lo) * step
-                it = re.sub(r"\b" + re.escape(nm) + r"\b(?!\s*(?:\+\+|=))",
-                            "(%s + %g)" % (nm, bump), it)
-            out += it + "\n"
-        i = consumed
+        params, mbody = got
+        r = re.fullmatch(r"\s*return\s+(.+?);\s*", mbody, re.S)
+        if r:
+            out[m.group(1)] = ([p[1] for p in params], r.group(1).strip())
     return out
+
+
+def fold_int_ops(text):
+    """Fold `intLiteral / intLiteral` and `%` with JAVA int semantics.
+
+    After the loop variable is substituted, GhastModel's `(float)(i / 3 % 2)`
+    reads e.g. `4 / 3 % 2` — Java int division gives 1, Python float division
+    1.333, and the difference moves tentacles between rows. Only folds when
+    BOTH operands are bare int literals (so `2.0F / 8.0F` is untouched) and the
+    preceding token is not `*`/`/`/`%` (same precedence, would bind first)."""
+    pat = re.compile(r"(?<![\w.])(\d+)\s*([/%])\s*(\d+)(?![\w.])")
+    while True:
+        for m in pat.finditer(text):
+            if text[:m.start()].rstrip().endswith(("*", "/", "%")):
+                continue
+            a, b = int(m.group(1)), int(m.group(3))
+            if b == 0:
+                continue
+            v = a // b if m.group(2) == "/" else a % b
+            text = text[:m.start()] + str(v) + text[m.end():]
+            break
+        else:
+            return text
+
+
+def eval_cond(cond):
+    """A fully-literal Java condition -> True/False, or None when it still
+    references anything symbolic (in which case the caller keeps the source
+    text and both branches are scanned, as before)."""
+    e = re.sub(r"\btrue\b", "1", cond)
+    e = re.sub(r"\bfalse\b", "0", e)
+    e = re.sub(r"\(\s*(?:float|double|int|long)\s*\)", "", e)
+    e = e.replace("F", "").replace("f", "").replace("D", "")
+    e = e.replace("&&", " and ").replace("||", " or ")
+    e = re.sub(r"!(?!=)", " not ", e)
+    if re.search(r"[A-Za-z_]", re.sub(r"\b(?:and|or|not)\b", "", e)):
+        return None
+    try:
+        return bool(eval(e, {"__builtins__": {}}, {}))
+    except Exception:
+        return None
+
+
+def unroll_loops(body, src, env, sources=None):
+    """Symbolically execute a mesh-builder body into straight-line text.
+
+    The scans that follow (addOrReplaceChild, PartPose, cubes) read literals,
+    so everything Java computes along the way has to be computed HERE and
+    substituted into the text:
+
+      - literal-bounded `for` loops are unrolled (blaze rods, squid tentacles,
+        wither heads, the dragon's neck — left folded, a whole loop collapses
+        into one part);
+      - part-name helpers (`getPartName(i)` -> "part3") are resolved for BOTH
+        loop-variable and literal arguments, including the cross-class
+        `PartNames.tentacle(i)` — the qualifier is consumed too, or the
+        substitution left broken `PartNames."tentacle0"` text behind;
+      - numeric locals are simulated statement by statement, so loop-carried
+        accumulators (silverfish's `placement += ...`, blaze's `++angle`) and
+        per-iteration locals (ghast's `int len = random.nextInt(7) + 8`) read
+        their value AT that point in the execution, not their initial value;
+      - `float[]` locals filled inside the loop (silverfish's zPlacement) are
+        recorded and their reads after the loop substituted;
+      - static int[][] / float[] data tables (BODY_SIZES) are folded in;
+      - `RandomSource.create(seed)` draws are replayed with the real Java LCG,
+        in execution order;
+      - `if` conditions that reduce to literals are decided (drops the
+        HappyGhast baby-only inner_body and PlayerModel's slim-arm branch);
+        anything symbolic keeps its source text, which is the old behaviour.
+    """
+    sources = sources or {}
+    name_fns = {m.group(1): m.group(2)
+                for m in NAME_FN.finditer(sources.get("PartNames", ""))}
+    name_fns.update({m.group(1): m.group(2) for m in NAME_FN.finditer(src)})
+    tables = parse_static_tables(src)
+    numfns = numeric_return_fns(src)
+    rngs = {}                 # java var -> JavaRandom
+    farrays = {}              # java float[] local -> {index: value}
+    sim = dict(env)           # numeric locals, simulated in statement order
+
+    def jnum(v):
+        if isinstance(v, int):
+            return str(v)
+        r = repr(round(float(v), 6))
+        # Parenthesise negatives so `-x` cannot turn into `--3.5`.
+        return "(" + r + ")" if r.startswith("-") else r
+
+    def subst_arrays(text):
+        pos = 0
+        while True:
+            m = re.compile(r"\b(\w+)\s*\[").search(text, pos)
+            if not m:
+                return text
+            data = tables.get(m.group(1), farrays.get(m.group(1)))
+            if data is None:
+                pos = m.end()
+                continue
+            idx_txt, end = balanced(text, text.index("[", m.end() - 1), "[", "]")
+            if not re.fullmatch(r"[\d\s()+\-*/%.]+", idx_txt):
+                pos = m.end()
+                continue
+            i1 = int(evalnum(fold_int_ops(idx_txt), {}))
+            val = None
+            if isinstance(data, dict):                       # simulated float[]
+                val = data.get(i1)
+            elif 0 <= i1 < len(data):
+                row = data[i1]
+                if isinstance(row, list):                    # int[][] — need [j]
+                    m2 = re.match(r"\s*\[", text[end:])
+                    if m2:
+                        idx2, e2 = balanced(text, end + m2.end() - 1, "[", "]")
+                        if re.fullmatch(r"[\d\s()+\-*/%.]+", idx2):
+                            j = int(evalnum(fold_int_ops(idx2), {}))
+                            if 0 <= j < len(row):
+                                val = row[j]
+                                end = e2
+                else:
+                    val = row
+            if val is None:
+                pos = m.end()
+                continue
+            lit = jnum(val)
+            text = text[:m.start()] + lit + text[end:]
+            pos = m.start() + len(lit)
+
+    def subst(text):
+        # Numeric locals -> their current value. NOT when the name is a member
+        # access or a call: VillagerModel declares a (dead) local `float offset
+        # = 0.5F`, and an unguarded substitution rewrote every
+        # `PartPose.offset(...)` into `PartPose.0.5(...)`, zeroing the poses.
+        for k, v in sim.items():
+            text = re.sub(r"(?<![.\w])" + re.escape(k) + r"\b(?!\s*\()",
+                          jnum(v), text)
+        # Single-return static numeric helpers -> their expression, parameters
+        # bound. Repeated for nested helpers (getSpikeX -> getSpikeOffset).
+        for _ in range(4):
+            hit = False
+            for fn, (params, expr) in numfns.items():
+                m = re.search(r"\b" + re.escape(fn) + r"\s*\(", text)
+                while m:
+                    args, aend = balanced(text, m.end() - 1)
+                    e = expr
+                    for p, a in zip(params, split_args(args)):
+                        e = re.sub(r"\b" + re.escape(p) + r"\b",
+                                   "(" + a.strip() + ")", e)
+                    text = text[:m.start()] + "(" + e + ")" + text[aend:]
+                    hit = True
+                    m = re.search(r"\b" + re.escape(fn) + r"\s*\(", text)
+            if not hit:
+                break
+        text = subst_arrays(text)
+        # Part-name helpers with (now-)literal arguments; the optional
+        # `PartNames.` / class qualifier is consumed with the call.
+        for fn, prefix in name_fns.items():
+            text = re.sub(r"(?:\b\w+\s*\.\s*)?\b" + re.escape(fn)
+                          + r"\s*\(\s*(-?\d+)\s*\)",
+                          lambda mm: '"%s%s"' % (prefix, mm.group(1)), text)
+        # Seeded random draws — each textual occurrence is one draw, and text
+        # order IS execution order once the loops are unrolled.
+        def draw(mm):
+            r = rngs.get(mm.group(1))
+            return mm.group(0) if r is None else str(r.next_int(int(mm.group(2))))
+        text = re.sub(r"\b(\w+)\s*\.\s*nextInt\s*\(\s*(\d+)\s*\)", draw, text)
+        return fold_int_ops(text)
+
+    def process_stmt(s):
+        s = s.strip()
+        if not s:
+            return ""
+
+        if re.match(r"for\s*\(", s):
+            head, hend = balanced(s, s.index("("))
+            rest = s[hend:].lstrip()
+            if rest.startswith("{"):
+                inner, _ = balanced(rest, 0, "{", "}")
+                p = head.split(";")
+                mi = re.fullmatch(r"\s*(?:int\s+)?(\w+)\s*=\s*(-?\d+)\s*",
+                                  p[0]) if len(p) == 3 else None
+                mc = re.fullmatch(r"\s*(\w+)\s*<\s*(-?\d+)\s*", p[1]) if mi else None
+                if mi and mc and mi.group(1) == mc.group(1) \
+                        and int(mc.group(2)) - int(mi.group(2)) <= 64:
+                    var = mi.group(1)
+                    saved = sim.pop(var, None)
+                    out = []
+                    for k in range(int(mi.group(2)), int(mc.group(2))):
+                        sim[var] = k
+                        out.append(process_block(inner))
+                    if saved is None:
+                        sim.pop(var, None)
+                    else:
+                        sim[var] = saved
+                    return "\n".join(out)
+            return subst(s)
+
+        if re.match(r"if\s*\(", s):
+            cond, cend = balanced(s, s.index("("))
+            rest = s[cend:].lstrip()
+            if rest.startswith("{"):
+                then_body, tend = balanced(rest, 0, "{", "}")
+                tail = rest[tend:].lstrip()
+                verdict = eval_cond(subst(cond))
+                if verdict is True:
+                    return process_block(then_body)
+                if verdict is False:
+                    if tail.startswith("else"):
+                        t2 = tail[4:].lstrip()
+                        if t2.startswith("{"):
+                            return process_block(balanced(t2, 0, "{", "}")[0])
+                        if t2.startswith("if"):
+                            return process_stmt(t2)
+                    return ""
+            return subst(s)
+
+        m = re.fullmatch(r"RandomSource\s+(\w+)\s*=\s*RandomSource\s*\.\s*create"
+                         r"\(\s*(-?\d+)L?\s*\)", s)
+        if m:
+            rngs[m.group(1)] = JavaRandom(int(m.group(2)))
+            return ""
+        m = re.fullmatch(r"float\s*\[\]\s*(\w+)\s*=\s*new\s+float\s*\[\s*\d+\s*\]", s)
+        if m:
+            farrays[m.group(1)] = {}
+            return ""
+        m = re.fullmatch(r"(?:final\s+)?(int|long|float|double)\s+(\w+)\s*=\s*(.+)",
+                         s, re.S)
+        if m:
+            v = evalnum(subst(m.group(3)), {})
+            sim[m.group(2)] = int(v) if m.group(1) in ("int", "long") else v
+            return ""
+        m = re.fullmatch(r"(\w+)\s*\[([^\]]+)\]\s*=\s*(.+)", s, re.S)
+        if m and m.group(1) in farrays:
+            idx = int(evalnum(subst(m.group(2)), {}))
+            farrays[m.group(1)][idx] = evalnum(subst(m.group(3)), {})
+            return ""
+        m = re.fullmatch(r"(\w+)\s*([+\-*/])?=\s*([^=].*)", s, re.S)
+        if m and m.group(1) in sim:
+            v = evalnum(subst(m.group(3)), {})
+            old = sim[m.group(1)]
+            op = m.group(2)
+            nv = v if not op else {"+": old + v, "-": old - v, "*": old * v,
+                                   "/": old / v if v else 0.0}[op]
+            if isinstance(old, int) and float(nv).is_integer():
+                nv = int(nv)
+            sim[m.group(1)] = nv
+            return ""
+        m = re.fullmatch(r"(?:\+\+\s*(\w+)|(\w+)\s*\+\+)", s)
+        if m:
+            nm = m.group(1) or m.group(2)
+            if nm in sim:
+                sim[nm] = sim[nm] + 1
+            return ""
+
+        out = subst(s)
+        return out if out.endswith("}") else out + ";"
+
+    def process_block(text):
+        return "\n".join(filter(None, (process_stmt(x)
+                                       for x in split_statements(text))))
+
+    return process_block(body)
 
 
 def parse_pose(expr, env):
@@ -416,7 +748,15 @@ def base_mesh(call, env, denv, sources, chain):
     if not m:
         return None
     owner, meth = m.group(1), m.group(2)
-    search = [owner] if owner else list(chain)
+    # An owner-qualified call resolves along the OWNER's superclass chain —
+    # Java static-method inheritance. `PiglinModel.createMesh(...)` (the
+    # LayerDefinitions row for all three piglins) is defined on
+    # AbstractPiglinModel; searching the named class alone found nothing and
+    # the whole layer evaluation failed over to the wrong fallback mesh.
+    if owner:
+        search = class_chain(owner, sources) or [owner]
+    else:
+        search = list(chain)
     for cls in search:
         src = sources.get(cls)
         if not src:
@@ -435,7 +775,34 @@ def base_mesh(call, env, denv, sources, chain):
                 cdenv[pname] = evaldeform(arg, env, denv)
             else:
                 cenv[pname] = evalnum(arg, env)
-        return run_mesh(body, src, sources, chain, cenv, cdenv)
+
+        # `return BABY_TRANSFORMER.apply(createFullScaleBabyMesh(g));` —
+        # AbstractEquineModel.createBabyMesh. The body builds nothing itself,
+        # so run_mesh would come back empty; evaluate the inner call and run
+        # the class's transformer constant over it instead.
+        cchain = class_chain(cls, sources) or list(chain)
+        rm = re.fullmatch(r"\s*return\s+([A-Z][A-Z0-9_]*)\s*\.\s*apply\s*\("
+                          r"\s*((?:\w+\s*\.\s*)?\w+\s*\(.*\))\s*\)\s*;\s*",
+                          body, re.S)
+        if rm:
+            decl = None
+            for c2 in cchain:
+                decl = re.search(r"MeshTransformer\s+" + rm.group(1)
+                                 + r"\s*=\s*([^;]+);", sources.get(c2, ""))
+                if decl:
+                    break
+            if decl:
+                got = base_mesh(rm.group(2), cenv, cdenv, sources, cchain)
+                if got:
+                    model = dict(root=got[0], parts=got[1])
+                    ctx = {"sources": sources, "lvars": {}, "home": cls}
+                    apply_transformer(model,
+                                      eval_transformer_in(decl.group(1), cls, ctx),
+                                      ctx)
+                    return model["root"], model["parts"]
+
+        # The callee's body runs in the scope of the class that DEFINES it.
+        return run_mesh(body, src, sources, cchain, cenv, cdenv)
     return None
 
 
@@ -484,10 +851,14 @@ def run_mesh(body, src, sources, chain=(), env=None, denv=None, into=None):
     # `PartDefinition x = mesh.getRoot();` and `... = root.getChild("body");`
     for m in re.finditer(r"PartDefinition\s+(\w+)\s*=\s*\w+\.getRoot\(\)", body):
         vars_[m.group(1)] = root
+    # `.getRoot()` is allowed inside the chain: HoglinModel.createBabyLayer
+    # writes `PartDefinition body = mesh.getRoot().getChild("body")`, and
+    # without it the mane replacement landed under the ROOT as a duplicate.
     for m in re.finditer(
-            r"PartDefinition\s+(\w+)\s*=\s*(\w+)((?:\.getChild\(\s*\"[a-z_0-9]+\"\s*\))+)", body):
+            r"PartDefinition\s+(\w+)\s*=\s*(\w+)"
+            r"((?:\s*\.\s*get(?:Root\s*\(\s*\)|Child\s*\(\s*\"[a-z_0-9]+\"\s*\)))+)", body):
         cur = vars_.get(m.group(2), root)
-        for name in re.findall(r'getChild\(\s*"([a-z_0-9]+)"', m.group(3)):
+        for name in re.findall(r'getChild\s*\(\s*"([a-z_0-9]+)"', m.group(3)):
             cur = next((p for p in parts if p.parent is cur and p.name == name), cur)
         vars_[m.group(1)] = cur
 
@@ -516,7 +887,82 @@ def run_mesh(body, src, sources, chain=(), env=None, denv=None, into=None):
     # (`getPartName(i)` -> `"part" + i`). Left folded, the whole loop collapses
     # to a single child called `part` — a blaze rendered with one rod instead of
     # twelve, and a squid with no tentacles at all.
-    body = unroll_loops(body, src, env)
+    body = unroll_loops(body, src, env, sources)
+
+    # `PartDefinition head = addHead(g, mesh);` — a static helper that builds
+    # parts INTO the mesh and returns one of them. AbstractPiglinModel.addHead
+    # is the only occurrence in MC's model sources: it replaces the humanoid
+    # head with the piglin head (snout, both ears as children) — skipping it
+    # left every piglin ear-less with a plain player head. The assigned
+    # variable is bound to the part the helper's `return` names, so a later
+    # `head.clearChild(...)` resolves.
+    for m in re.finditer(r"PartDefinition\s+(\w+)\s*=\s*(?:(\w+)\s*\.\s*)?(\w+)\s*\(", body):
+        hvar, howner, hmeth = m.group(1), m.group(2), m.group(3)
+        if hmeth in ("getRoot", "getChild", "addOrReplaceChild"):
+            continue
+        if howner:
+            search = class_chain(howner, sources) or [howner]
+        else:
+            search = list(chain)
+        for cls in search:
+            csrc = sources.get(cls)
+            if not csrc:
+                continue
+            got = method_signature(csrc, hmeth)
+            if got is None:
+                continue
+            hparams, hbody = got
+            hargs = split_args(balanced(body, m.end() - 1)[0])
+            henv, hdenv = {}, {}
+            for (ptype, pname), arg in zip(hparams, hargs):
+                if ptype == "CubeDeformation" or is_deform(arg, denv):
+                    hdenv[pname] = evaldeform(arg, env, denv)
+                else:
+                    henv[pname] = evalnum(arg, env)
+            run_mesh(hbody, csrc, sources, class_chain(cls, sources) or chain,
+                     henv, hdenv, into=(root, parts))
+            ret = re.search(r"return\s+(\w+)\s*;", hbody)
+            if ret:
+                rd = re.search(r"PartDefinition\s+" + re.escape(ret.group(1))
+                               + r"\s*=\s*\w+\.addOrReplaceChild\(\s*\"([a-z_0-9]+)\"",
+                               hbody)
+                if rd:
+                    part = next((p for p in parts if p.name == rd.group(1)), None)
+                    if part is not None:
+                        vars_[hvar] = part
+            break
+
+    # `createDefaultSkeletonMesh(root);` — a bare VOID helper that builds
+    # parts into the mesh. SkeletonModel (and through it stray, bogged,
+    # wither skeleton) REPLACES the humanoid's fat limbs with the slim 2px
+    # bones this way; skipping it shipped fat-armed skeletons. Only helpers
+    # whose body actually adds parts are inlined, and the PartDefinition
+    # argument falls back to the mesh root inside run_mesh — the only shape
+    # MC's model sources use for this. Inlined here, after the assigned-
+    # helper pass and before the main scan; MC always places these calls
+    # after the base mesh is built, so replace-order is preserved.
+    for m in re.finditer(r"(?:^|;)\s*(?:(\w+)\s*\.\s*)?(\w+)\s*\(\s*(\w+)\s*\)\s*;",
+                         body):
+        howner, hmeth = m.group(1), m.group(2)
+        if hmeth in ("getRoot", "getChild", "addOrReplaceChild", "clearChild"):
+            continue
+        if howner:
+            search = class_chain(howner, sources) or [howner]
+        else:
+            search = list(chain)
+        for cls in search:
+            csrc = sources.get(cls)
+            if not csrc:
+                continue
+            got = method_signature(csrc, hmeth)
+            if got is None:
+                continue
+            hparams, hbody = got
+            if "addOrReplaceChild" not in hbody:
+                break
+            run_mesh(hbody, csrc, sources, class_chain(cls, sources) or chain,
+                     dict(env), dict(denv), into=(root, parts))
+            break
 
     # Every addOrReplaceChild, in source order.
     for m in re.finditer(r"(\w+)((?:\.addOrReplaceChild\s*\()+)", body):
@@ -558,6 +1004,18 @@ def run_mesh(body, src, sources, chain=(), env=None, denv=None, into=None):
                 body = body[:end] + body[end:].replace(".addOrReplaceChild",
                                                        "__chain__.addOrReplaceChild", 1)
         pos = end
+
+    # `head.clearChild("hat")` — MC empties the child's CUBES but keeps the
+    # part, its pose and its children (PartDefinition.clearChild re-adds the
+    # name with CubeListBuilder.create()). AbstractPiglinModel uses it to
+    # delete the humanoid hat overlay from the piglin head; HumanoidModel's
+    # constructor still getChild()s "hat", so the part must survive, empty.
+    for m in re.finditer(r'(\w+)\s*\.\s*clearChild\(\s*"([a-z_0-9]+)"\s*\)', body):
+        parent = vars_.get(m.group(1), root)
+        part = next((p for p in parts
+                     if p.parent is parent and p.name == m.group(2)), None)
+        if part is not None:
+            part.cubes = []
 
     return root, parts
 
@@ -618,34 +1076,84 @@ def resolve_forward(body, src, sources, chain):
 
 
 def apply_mesh_scale(model, f):
-    """Bake MC MeshTransformer.scaling(f) into the parsed mesh. See MESH_SCALE."""
+    """MC MeshTransformer.scaling(f), carried on the ROOT PartPose.
+
+    scaling(f) is `pose -> pose.scaled(f).translated(0, 24.016*(1-f), 0)`,
+    and MeshDefinition.transformed rewrites only the root's own pose —
+    PartPose.scaled multiplies the offsets AND the pose scale, translated
+    then adds the re-anchor. The scale must stay ON THE POSE rather than be
+    multiplied into the geometry: MC computes every cube's UV layout from
+    the UNSCALED pixel size (a Cube never carries scale), so baking f into
+    the sizes remaps every face's texels by f — the smeared wither-skeleton
+    / cave-spider / villager-family textures. GenPart carries the three
+    PartPose scale fields for exactly this."""
     y_offset = 24.016 * (1.0 - f)
     root = model["root"]
+    for i in range(3):
+        root.pose[i] *= f
+        root.scale[i] *= f
+    root.pose[1] += y_offset
+    if root not in model["parts"]:
+        # Never happens on the eval_layer path (run_mesh seeds parts with the
+        # root), but a scaled mesh whose root got dropped would silently lose
+        # the transform — make that loud instead.
+        raise RuntimeError("apply_mesh_scale: root not in parts")
+
+
+def parse_baby_transform(expr):
+    """`new BabyModelTransform(...)` -> the record's seven fields.
+
+    Resolves the two convenience constructors (BabyModelTransform.java:12-18)
+    to the canonical (scaleHead, babyYHeadOffset, babyZHeadOffset,
+    babyHeadScale, babyBodyScale, bodyYOffset, headParts) form. The trailing
+    argument is always the Set.of(...) of head part names.
+    """
+    inner, _ = balanced(expr, expr.index("("))
+    args = split_args(inner)
+    head_parts = frozenset(re.findall(r'"([a-z_0-9]+)"', args[-1]))
+    nums = [evalnum(a, {}) for a in args[:-1]]
+    if not nums:                       # (headParts)
+        nums = [0.0, 5.0, 2.0]
+    if len(nums) == 3:                 # (scaleHead, yHead, zHead, headParts)
+        nums += [2.0, 2.0, 24.0]
+    return (nums[0] != 0.0, nums[1], nums[2], nums[3], nums[4], nums[5],
+            head_parts)
+
+
+# LlamaModel.transformToBaby (LlamaModel.java:55-79) — the one baby transform
+# that is a hand-rolled loop instead of a BabyModelTransform record, so its
+# literal per-part rules are transcribed. Rows are (part names or None for
+# the default arm of the switch, translate xyz, scale xyz), applied in order,
+# first match wins — exactly the Java switch.
+LLAMA_BABY_POSES = (
+    (frozenset(("head",)), (0.0, 21.0, 3.52),
+     (0.71428573, 0.64935064, 0.7936508)),
+    (frozenset(("body",)), (0.0, 33.0, 0.0),
+     (0.625, 0.45454544, 0.45454544)),
+    (None, (0.0, 33.0, 0.0),
+     (0.45454544, 0.41322312, 0.45454544)),
+)
+
+
+def apply_baby_poses(model, rules):
+    """BabyModelTransform.apply / LlamaModel.transformToBaby: rewrite each
+    ROOT CHILD's PartPose as translated(t) then scaled(s) — PartPose.scaled
+    multiplies the offsets AND the pose scale (PartPose.java:30-32), and
+    parts below the root keep their own poses. MC rebuilds the mesh under a
+    fresh ZERO root, so anything the old root's pose carried is dropped.
+    """
+    root = model["root"]
+    root.pose = [0.0] * 6
+    root.scale = [1.0] * 3
     for p in model["parts"]:
-        for i in range(3):
-            p.pose[i] *= f
-        for c in p.cubes:
-            c["o"] = [v * f for v in c["o"]]
-            c["s"] = [v * f for v in c["s"]]
-            c["grow"] *= f
-    # PartDefinition.transformed rewrites only ITS OWN pose (children are copied
-    # verbatim), so the translate lands on the root alone. The root itself is
-    # dropped from the emitted table when it has no cubes, so carry the shift to
-    # its direct children — one level down is the same transform, two would move
-    # every grandchild twice.
-    #
-    # It is added AFTER the scaling because MC's ModelPart translates before it
-    # scales: the root's offset is in unscaled units and only the subtree below
-    # it is multiplied.
-    if root in model["parts"]:
-        root.pose[1] += y_offset
-    else:
-        # The root is dropped from the emitted table when it carries no cubes;
-        # carry the shift to its direct children instead. Doing BOTH moves every
-        # child twice.
-        for p in model["parts"]:
-            if p.parent is None or p.parent is root:
-                p.pose[1] += y_offset
+        if p.parent is not root:
+            continue
+        for names, t, s in rules:
+            if names is None or p.name in names:
+                for i in range(3):
+                    p.pose[i] = (p.pose[i] + t[i]) * s[i]
+                    p.scale[i] *= s[i]
+                break
 
 
 def parse_model(cls, sources, entry_pin=None):
@@ -1115,13 +1623,45 @@ def split_applies(expr):
         expr = expr[:cut]
 
 
+def top_level_ternary(expr):
+    """`cond ? a : b` split at depth 0, or None. No MC transformer expression
+    nests ternaries, so the first '?' and its ':' are the split points."""
+    depth, qpos = 0, None
+    for i, ch in enumerate(expr):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "?" and depth == 0:
+            qpos = i
+        elif ch == ":" and depth == 0 and qpos is not None:
+            return expr[:qpos], expr[qpos + 1:i], expr[i + 1:]
+    return None
+
+
 def eval_transformer(expr, ctx):
-    """A MeshTransformer expression -> ("scale", f) | ("meshfn", cls, meth) | None."""
+    """A MeshTransformer expression -> ("scale", f) | ("meshfn", cls, meth)
+    | ("baby", params) | ("posemap", rules) | None."""
     e = expr.strip()
     sources, lvars = ctx["sources"], ctx["lvars"]
 
     if e in lvars:
         return eval_transformer(lvars[e], ctx)
+
+    # `baby ? BABY_TRANSFORMER : MeshTransformer.IDENTITY` — RabbitModel and
+    # PolarBearModel thread a boolean through createBodyLayer. Folded BEFORE
+    # the IDENTITY early-out below, which would otherwise swallow the whole
+    # ternary on its trailing token.
+    q = top_level_ternary(e)
+    if q:
+        cond, then_e, else_e = q
+        for k, v in ctx.get("env", {}).items():
+            cond = re.sub(r"\b" + re.escape(k) + r"\b", repr(v), cond)
+        verdict = eval_cond(cond)
+        if verdict is None:
+            return None
+        return eval_transformer(then_e if verdict else else_e, ctx)
+
     if e.endswith("IDENTITY"):
         return None
 
@@ -1140,12 +1680,16 @@ def eval_transformer(expr, ctx):
 
     # A bare constant, written inside the class whose layer method we are in —
     # DonkeyModel's `.apply(DONKEY_TRANSFORMER)`. Resolving it needs that class,
-    # so `home` must survive the call.
+    # so `home` must survive the call. The search walks the superclass chain:
+    # DonkeyModel.createBabyLayer applies BABY_TRANSFORMER, which lives on
+    # AbstractEquineModel.
     home = ctx.get("home")
-    if re.fullmatch(r"[A-Z][A-Z0-9_]*", e) and home in sources:
-        d = re.search(r"MeshTransformer\s+" + e + r"\s*=\s*([^;]+);", sources[home])
-        if d:
-            return eval_transformer_in(d.group(1), home, ctx)
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", e):
+        for cls in class_chain(home, ctx["sources"]) or ():
+            d = re.search(r"MeshTransformer\s+" + e + r"\s*=\s*([^;]+);",
+                          sources[cls])
+            if d:
+                return eval_transformer_in(d.group(1), cls, ctx)
     return eval_transformer_in(e, home, ctx)
 
 
@@ -1156,6 +1700,13 @@ def eval_transformer_in(expr, cls, ctx):
     if m:
         inner, _ = balanced(e, m.end() - 1)
         return ("scale", evalnum(inner, ctx.get("env", {})))
+    # The baby-mesh record — see BabyModelTransform.java and apply_baby_poses.
+    if re.match(r"new\s+BabyModelTransform\s*\(", e):
+        return ("baby", parse_baby_transform(e))
+    # LlamaModel::transformToBaby — the method reference behind
+    # LlamaModel.BABY_TRANSFORMER; its rules are the transcribed table.
+    if e.endswith("::transformToBaby"):
+        return ("posemap", LLAMA_BABY_POSES)
     # `(mesh) -> { modifyMesh(mesh.getRoot()); return mesh; }` — a lambda that
     # bolts extra parts on. DonkeyModel's is the only one reachable from a mob
     # layer, and it is what adds the chest packs and the long ears.
@@ -1170,6 +1721,17 @@ def apply_transformer(model, tf, ctx):
         return
     if tf[0] == "scale":
         apply_mesh_scale(model, tf[1])
+    elif tf[0] == "baby":
+        scale_head, y_head, z_head, head_scale, body_scale, body_y, heads = tf[1]
+        # BabyModelTransform.apply:21-24.
+        hs = (1.5 / head_scale) if scale_head else 1.0
+        bs = 1.0 / body_scale
+        apply_baby_poses(model, (
+            (heads, (0.0, y_head, z_head), (hs, hs, hs)),
+            (None, (0.0, body_y, 0.0), (bs, bs, bs)),
+        ))
+    elif tf[0] == "posemap":
+        apply_baby_poses(model, tf[1])
     elif tf[0] == "meshfn":
         _, cls, meth = tf
         sources = ctx["sources"]
@@ -1233,7 +1795,12 @@ def eval_create(args, ctx, depth):
 def eval_method_layer(owner, meth, args, ctx, depth):
     """`Cls.createXxxLayer(args)` -> the layer it returns."""
     sources = ctx["sources"]
-    search = [owner] if owner in sources else list(ctx.get("chain", ())) or list(sources)
+    if owner in sources:
+        # Walk the owner's superclass chain too — Java static-method
+        # inheritance, same rule as base_mesh.
+        search = class_chain(owner, sources) or [owner]
+    else:
+        search = list(ctx.get("chain", ())) or list(sources)
     for cls in search:
         got = method_signature(sources.get(cls, ""), meth)
         if not got:
@@ -1291,7 +1858,7 @@ def main():
 
     models, missing = {}, []
     for slug in slugs:
-        if slug in HAND_WRITTEN or slug == "arrow":
+        if slug in HAND_WRITTEN or slug in PROJECTILES:
             continue
         # MC's own build description, transformers and all. Falling back to the
         # model class is only for the handful with no ModelLayers row.
@@ -1310,6 +1877,59 @@ def main():
         cls_for_anim = MODEL_ALIAS.get(slug, camel(slug) + "Model").split("#")[0]
         (got["head"], got["headguard"],
          got["clips"], got["vis"]) = setup_anim_info(cls_for_anim, sources)
+        models[slug] = got
+
+    # ── Baby meshes ────────────────────────────────────────────────────────
+    #
+    # MC renders a baby through a SEPARATE mesh, not a uniform shrink:
+    # AgeableMobRenderer swaps to babyModel, whose LayerDefinitions row is
+    # (usually) the adult layer run through the class's BABY_TRANSFORMER —
+    # BabyModelTransform rewrites each root child's PartPose (big head, half
+    # body). Part names survive, so a baby runs the SAME setupAnim program and
+    # clips as its adult; only the mesh row differs.
+    baby_skipped = []
+    for slug in sorted(BABY_MESH_SLUGS):
+        if slug not in models:
+            baby_skipped.append((slug, "no adult mesh"))
+            continue
+        layer = SLUG_LAYER.get(slug, slug.upper()) + "_BABY"
+        got = eval_layer(layers[layer], dict(ctx0)) if layer in layers else None
+        if not got or not any(p.cubes for p in got["parts"]):
+            baby_skipped.append((slug, "could not evaluate ModelLayers." + layer))
+            continue
+        cls_for_anim = MODEL_ALIAS.get(slug, camel(slug) + "Model").split("#")[0]
+        (got["head"], got["headguard"],
+         got["clips"], got["vis"]) = setup_anim_info(cls_for_anim, sources)
+        models[slug + "_baby"] = got
+
+    # ── Extra layer meshes ─────────────────────────────────────────────────
+    #
+    # MC's clothing/decor RenderLayers draw a SECOND model over (or instead
+    # of) the mob's body mesh: DrownedOuterLayer, SkeletonClothingLayer
+    # (stray/bogged), and the pufferfish's mid/big puff stages
+    # (PufferfishRenderer swaps the whole model by puff state). Each has its
+    # own LayerDefinitions row, evaluated here exactly like a body layer.
+    # The layer meshes keep the body's part names, so MobRenderer can run the
+    # base mob's compiled setupAnim program over them (GeneratedModel's
+    # animSlug); the setup_anim_info class below only supplies the head/clip
+    # metadata for the row.
+    EXTRA_LAYER_MESHES = (
+        # (slug,                ModelLayers row,            setupAnim class)
+        ("drowned_outer",       "DROWNED_OUTER_LAYER",      "DrownedModel"),
+        ("drowned_outer_baby",  "DROWNED_BABY_OUTER_LAYER", "DrownedModel"),
+        ("stray_clothes",       "STRAY_OUTER_LAYER",        "SkeletonModel"),
+        ("bogged_clothes",      "BOGGED_OUTER_LAYER",       "SkeletonModel"),
+        ("pufferfish_mid",      "PUFFERFISH_MEDIUM",        "PufferfishMidModel"),
+        ("pufferfish_big",      "PUFFERFISH_BIG",           "PufferfishBigModel"),
+    )
+    for slug, layer, cls in EXTRA_LAYER_MESHES:
+        got = eval_layer(layers[layer], dict(ctx0)) if layer in layers else None
+        if not got or not any(p.cubes for p in got["parts"]):
+            print(f"  WARNING: no mesh for extra layer {slug} "
+                  f"(ModelLayers.{layer})")
+            continue
+        (got["head"], got["headguard"],
+         got["clips"], got["vis"]) = setup_anim_info(cls, sources)
         models[slug] = got
 
     # ── Emit ───────────────────────────────────────────────────────────────
@@ -1333,7 +1953,9 @@ namespace Render {{
         float ox, oy, oz;      // origin, pixels
         float sx, sy, sz;      // size, pixels
         float tu, tv;          // texOffs
-        float grow;            // CubeDeformation
+        // CubeDeformation, per axis — uniform everywhere except the equine
+        // baby legs (AbstractEquineModel's g.extend(0, 5.5, 0)).
+        float growX, growY, growZ;
         bool  mirror;
     }};
 
@@ -1342,6 +1964,10 @@ namespace Render {{
         int   parent;          // index into the model's part span, -1 = root
         float x, y, z;         // PartPose offset, pixels
         float xRot, yRot, zRot;
+        // PartPose scale — MC MeshTransformer.scaling lands here (on the
+        // root), never in the cube geometry: UV layout derives from the
+        // unscaled cube size, exactly as in MC.
+        float xScale, yScale, zScale;
         int   firstCube, cubeCount;
         bool  visible;         // false = MC hides it in the default state
     }};
@@ -1412,6 +2038,10 @@ namespace Render {{
     slot_index = read_mob_anim_slots()
     for slug in sorted(models):
         md = models[slug]
+        # A baby mesh hides the same default-state parts as its adult — the
+        # llama's chest packs and the turtle's egg belly exist in the baby
+        # rows too.
+        base_slug = slug[:-5] if slug.endswith("_baby") else slug
         ordered = [p for p in md["parts"]]
         index = {id(p): i for i, p in enumerate(ordered)}
         first_part = len(parts_rows)
@@ -1419,17 +2049,20 @@ namespace Render {{
             fc = len(cubes_rows)
             for c in p.cubes:
                 cubes_rows.append(
-                    "    {{ {}, {}, {}, {}, {}, {}, {}, {}, {}, {} }},".format(
+                    "    {{ {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} }},".format(
                         cf(c["o"][0]), cf(c["o"][1]), cf(c["o"][2]),
                         cf(c["s"][0]), cf(c["s"][1]), cf(c["s"][2]),
-                        cf(c["tu"]), cf(c["tv"]), cf(c["grow"]),
+                        cf(c["tu"]), cf(c["tv"]),
+                        cf(c["grow"][0]), cf(c["grow"][1]), cf(c["grow"][2]),
                         "true" if c["mirror"] else "false"))
             parent = -1 if p.parent is None else index.get(id(p.parent), -1)
-            visible = p.name not in HIDDEN_PARTS.get(slug, ())
+            visible = p.name not in HIDDEN_PARTS.get(base_slug, ())
             parts_rows.append(
-                '    {{ "{}", {}, {}, {}, {}, {}, {}, {}, {}, {}, {} }},'.format(
+                '    {{ "{}", {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} }},'.format(
                     p.name, parent, cf(p.pose[0]), cf(p.pose[1]), cf(p.pose[2]),
-                    cf(p.pose[3]), cf(p.pose[4]), cf(p.pose[5]), fc, len(p.cubes),
+                    cf(p.pose[3]), cf(p.pose[4]), cf(p.pose[5]),
+                    cf(p.scale[0]), cf(p.scale[1]), cf(p.scale[2]),
+                    fc, len(p.cubes),
                     "true" if visible else "false"))
         first_clip = len(clip_rows)
         for kind, anim, slot, sf, sc, guard, age, bias in md["clips"]:
@@ -1489,12 +2122,15 @@ namespace Render {{
 
     open(OUT_HPP, "w", encoding="utf-8").write(hpp)
     open(OUT_CPP, "w", encoding="utf-8").write(cpp)
-    print(f"{OUT_HPP}: {len(models)} meshes, "
+    baby_count = sum(1 for s in models if s.endswith("_baby"))
+    print(f"{OUT_HPP}: {len(models)} meshes ({baby_count} baby), "
           f"{len(parts_rows)} parts, {len(cubes_rows)} cubes")
     if missing:
         print(f"  no mesh for {len(missing)}:")
         for slug, cls in missing:
             print(f"    {slug:24s} (looked for {cls})")
+    for slug, why in baby_skipped:
+        print(f"  WARNING: no baby mesh for {slug}: {why}")
 
 
 if __name__ == "__main__":

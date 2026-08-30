@@ -64,15 +64,17 @@ namespace Game {
 
         // Set references (must be called after creation)
         void SetPlayer(ClientPlayer* player);
-        void SetWorld(World* world);
         void SetNetworkClient(Client::NetworkClient* networkClient);
 
-        // Block reader for interaction logic. REQUIRED in both modes — the
-        // integrated host passes the server World, a remote client passes
-        // ClientBlockAccess (the client chunk cache). Before this existed the
-        // controller read blocks through `world`, which is null on a remote
-        // client: every lookup returned Air, so mining read Air's destroyTime
-        // of 0 and finished in one tick no matter what the block actually was.
+        // Block reader for interaction logic. REQUIRED, and in both modes it
+        // is ClientBlockAccess — the client chunk cache. The controller
+        // deliberately has no handle on the server's `Game::World`: that
+        // pointer is one dimension's, it is owned by the server thread, and
+        // the client cache is both dimension-correct and what the renderer
+        // meshes from. (Before this existed the controller read blocks through
+        // a `world` member, which was null on a remote client: every lookup
+        // returned Air, so mining read Air's destroyTime of 0 and finished in
+        // one tick no matter what the block actually was.)
         void SetBlockAccess(const IBlockAccess* access);
 
         // Main update tick (call once per frame)
@@ -163,8 +165,7 @@ namespace Game {
     private:
         // References
         ClientPlayer* player;
-        World* world;
-        const IBlockAccess* blockAccess = nullptr;  // Block reads (host: World, remote: client chunk cache)
+        const IBlockAccess* blockAccess = nullptr;  // Block reads — the client chunk cache, both modes
         Client::NetworkClient* networkClient;  // Network client for sending packets
 
         // Mining state — mirrors MultiPlayerGameMode's fields exactly.
@@ -204,6 +205,7 @@ namespace Game {
         int interactSeq = 0;     // Interaction sequence number
         bool sentPlayerLoaded = false;  // Track if we've sent initial spawn
         bool lastSentFlying = false;    // Fly state last shipped via PlayerAbilitiesC2S
+        bool lastSentNoclip = false;    // Same, for the debug noclip flag
 
         // Internal methods
         // Read a block from whichever source this session has (see
@@ -309,14 +311,11 @@ namespace Game {
         // Helper methods (existing functionality)
         void UpdateBreakingTick();          // run once per 1/20s tick
         void UpdatePlacingTick();           // continuous-RMB placement
-        void TryPlaceBlock();
         // Local (predicted) block breaking. `sequence` is the interaction id
         // the STOP_DESTROY packet was sent with, used to reconcile against the
         // server's BlockChangedAckS2C.
         void FinishBreaking(uint32_t sequence);
-        bool CanPlaceBlockAt(const glm::ivec3& pos);
         void MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos);
-        BlockID GetBreakingBlockType(const glm::ivec3& pos);
         // Send a START/STOP/ABORT_DESTROY packet to the server. Returns the
         // interaction sequence it was stamped with, which is what a matching
         // block prediction must be registered under (0 if nothing was sent).

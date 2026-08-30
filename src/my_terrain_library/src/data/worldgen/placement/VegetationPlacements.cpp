@@ -760,7 +760,10 @@ void VegetationPlacements::bootstrap() {
     // FULL_RANGE = HeightRangePlacement.uniform(VerticalAnchor.bottom(), VerticalAnchor.top())
     // =========================================================================
     {
-        s_heightRangePlacements.push_back(HeightRangePlacement::uniform(-64, 320));  // FULL_RANGE
+        // FULL_RANGE = uniform(bottom(), top()) - anchors resolve per dimension
+        // (nether genDepth 128 -> 0..126; hardcoded absolutes would be wrong).
+        s_heightRangePlacements.push_back(HeightRangePlacement::uniform(
+            levelgen::VerticalAnchor::bottom(), levelgen::VerticalAnchor::top()));
         BROWN_MUSHROOM_NETHER = createPlaced(
             VegetationFeatures::PATCH_BROWN_MUSHROOM,
             { rarityOf(2), &InSquarePlacement::spread(), &s_heightRangePlacements.back(), &BiomeFilter::biome() },
@@ -773,7 +776,8 @@ void VegetationPlacements::bootstrap() {
     // RarityFilter.onAverageOnceEvery(2), InSquarePlacement.spread(), PlacementUtils.FULL_RANGE, BiomeFilter.biome()
     // =========================================================================
     {
-        s_heightRangePlacements.push_back(HeightRangePlacement::uniform(-64, 320));  // FULL_RANGE
+        s_heightRangePlacements.push_back(HeightRangePlacement::uniform(
+            levelgen::VerticalAnchor::bottom(), levelgen::VerticalAnchor::top()));  // FULL_RANGE
         RED_MUSHROOM_NETHER = createPlaced(
             VegetationFeatures::PATCH_RED_MUSHROOM,
             { rarityOf(2), &InSquarePlacement::spread(), &s_heightRangePlacements.back(), &BiomeFilter::biome() },

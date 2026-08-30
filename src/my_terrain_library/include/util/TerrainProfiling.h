@@ -22,8 +22,10 @@
     #define TERRAIN_ZONE_N(name)        ZoneScopedN(name)
     #define TERRAIN_THREAD(name)        tracy::SetThreadName(name)
     #define TERRAIN_PLOT(name, value)   TracyPlot(name, value)
+    #define TERRAIN_ZONE_TEXT(str, len)  ZoneName(str, len)
 #else
     #define TERRAIN_ZONE_N(name)        (void)0
     #define TERRAIN_THREAD(name)        (void)0
     #define TERRAIN_PLOT(name, value)   (void)0
+    #define TERRAIN_ZONE_TEXT(str, len)  (void)0
 #endif

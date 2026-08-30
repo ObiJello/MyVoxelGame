@@ -1,0 +1,33 @@
+[19:56:11] [main/INFO]: [STDOUT]: Sea level: 63
+[19:56:11] [main/INFO]: [STDOUT]: Creating NoiseChunk...
+[19:56:11] [main/INFO]: [STDOUT]: skipSamplingAboveY = 70
+[19:56:11] [main/INFO]: [STDOUT]: === Testing computeSubstance at problem positions ===
+[19:56:11] [main/INFO]: [STDOUT]: Position (47, 5, 110):
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.fluidLevel=63
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(5)=Block{minecraft:water}[level=0]
+[19:56:11] [main/INFO]: [STDOUT]:   y > skipSamplingAboveY? 5 > 70 = false
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(y).is(LAVA)? false
+[19:56:11] [main/INFO]: [STDOUT]:   Using test density = -5.0E-4
+[19:56:11] [main/INFO]: [STDOUT]:   -> computeSubstance returned: null (STONE)
+[19:56:11] [main/INFO]: [STDOUT]: Position (45, 6, 109):
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.fluidLevel=63
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(6)=Block{minecraft:water}[level=0]
+[19:56:11] [main/INFO]: [STDOUT]:   y > skipSamplingAboveY? 6 > 70 = false
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(y).is(LAVA)? false
+[19:56:11] [main/INFO]: [STDOUT]:   Using test density = -5.0E-4
+[19:56:11] [main/INFO]: [STDOUT]:   -> computeSubstance returned: null (STONE)
+[19:56:11] [main/INFO]: [STDOUT]: Position (47, 6, 109):
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.fluidLevel=63
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(6)=Block{minecraft:water}[level=0]
+[19:56:11] [main/INFO]: [STDOUT]:   y > skipSamplingAboveY? 6 > 70 = false
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(y).is(LAVA)? false
+[19:56:11] [main/INFO]: [STDOUT]:   Using test density = -5.0E-4
+[19:56:11] [main/INFO]: [STDOUT]:   -> computeSubstance returned: null (STONE)
+[19:56:11] [main/INFO]: [STDOUT]: Position (40, 7, 109):
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.fluidLevel=63
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(7)=Block{minecraft:water}[level=0]
+[19:56:11] [main/INFO]: [STDOUT]:   y > skipSamplingAboveY? 7 > 70 = false
+[19:56:11] [main/INFO]: [STDOUT]:   globalFluid.at(y).is(LAVA)? false
+[19:56:11] [main/INFO]: [STDOUT]:   Using test density = -5.0E-4
+[19:56:11] [main/INFO]: [STDOUT]:   -> computeSubstance returned: null (STONE)
+[19:56:11] [main/INFO]: [STDOUT]: Done.

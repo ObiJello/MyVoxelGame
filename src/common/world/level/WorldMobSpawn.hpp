@@ -29,4 +29,21 @@ namespace Game {
     bool SpawnMobFromItem(EntityTypeId type, const glm::ivec3& spawnPos,
                           bool tryMoveDown, bool movedUp);
 
+    struct ItemStack;
+
+    // MC EnderEyeItem.use's tail (EnderEyeItem.java:85-101): locate the
+    // nearest stronghold, spawn an EyeOfEnder at `from`, and point it there.
+    //
+    // Its own bridge rather than a call to SpawnMobFromItem because it needs
+    // two things only the server can do — the stronghold lookup and
+    // `EyeOfEnder::SignalTo` on the spawned entity — and doing them from the
+    // item behaviour would mean common reaching into server twice.
+    //
+    // Returns false when there is no server, or when this world generates no
+    // strongholds. MC's own `nearestMapFeature == null` branch returns CONSUME
+    // WITHOUT taking the item, which is what stops an eye being wasted in a
+    // world that has nowhere to send it — so the caller must not shrink the
+    // stack when this answers false.
+    bool ThrowEnderEye(int dimensionId, const glm::dvec3& from, const ItemStack& stack);
+
 } // namespace Game

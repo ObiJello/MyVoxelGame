@@ -8,7 +8,10 @@ namespace Render {
     void ModelPart::ResetPose() {
         x = pose.x; y = pose.y; z = pose.z;
         xRot = pose.xRot; yRot = pose.yRot; zRot = pose.zRot;
-        xScale = yScale = zScale = 1.0f;
+        // MC ModelPart.loadPose copies the pose scale too — this is where a
+        // LayerDefinitions mesh scale (wither skeleton 1.2, elder guardian
+        // 2.35, ...) survives every per-frame reset.
+        xScale = pose.xScale; yScale = pose.yScale; zScale = pose.zScale;
         for (auto& child : children) child->ResetPose();
     }
 
@@ -72,14 +75,12 @@ namespace Render {
 
     void BuildCube(const CubeDefinition& cube, const glm::mat4& transform,
                    std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx) {
-        const float g = cube.grow;
-
-        const float minX = cube.originX - g;
-        const float minY = cube.originY - g;
-        const float minZ = cube.originZ - g;
-        const float maxX = cube.originX + cube.sizeX + g;
-        const float maxY = cube.originY + cube.sizeY + g;
-        const float maxZ = cube.originZ + cube.sizeZ + g;
+        const float minX = cube.originX - cube.growX;
+        const float minY = cube.originY - cube.growY;
+        const float minZ = cube.originZ - cube.growZ;
+        const float maxX = cube.originX + cube.sizeX + cube.growX;
+        const float maxY = cube.originY + cube.sizeY + cube.growY;
+        const float maxZ = cube.originZ + cube.sizeZ + cube.growZ;
 
         // Vertex names mirror ModelPart.Cube.
         const glm::vec3 t0(minX, minY, minZ), t1(maxX, minY, minZ);

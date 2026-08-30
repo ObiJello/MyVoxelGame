@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util/thread/StrictQueue.h"
+#include <cstdio>
 #include "util/thread/TaskScheduler.h"
 #include <atomic>
 #include <memory>
@@ -161,10 +162,11 @@ protected:
 
         try {
             runnable();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[%s] task threw: %s\n", m_name.c_str(), e.what());
         } catch (...) {
-            // Log error - Util.runNamed equivalent
+            std::fprintf(stderr, "[%s] task threw (unknown)\n", m_name.c_str());
         }
-
         return true;
     }
 

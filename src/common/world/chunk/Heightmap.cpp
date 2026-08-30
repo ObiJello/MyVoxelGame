@@ -24,6 +24,8 @@ namespace Game {
 
         constexpr uint8_t kBitMotionBlockingNoLeaves = 1 << 0;
         constexpr uint8_t kBitWorldSurface           = 1 << 1;
+        constexpr uint8_t kBitOceanFloor             = 1 << 2;
+        constexpr uint8_t kBitMotionBlocking         = 1 << 3;
 
         bool EndsWith(std::string_view s, std::string_view suffix) {
             return s.size() >= suffix.size() &&
@@ -61,9 +63,18 @@ namespace Game {
                                  BlockRegistry::IsAlwaysWaterlogged(id);
             const bool isLeaves = EndsWith(slug, "_leaves");
 
-            if ((BlockRegistry::HasCollision(id) || isFluid) && !isLeaves) {
+            const bool blocksMotion = BlockRegistry::HasCollision(id);
+
+            if ((blocksMotion || isFluid) && !isLeaves) {
                 bits |= kBitMotionBlockingNoLeaves;
             }
+
+            // MC MOTION_BLOCKING: the same predicate WITHOUT the leaves
+            // exclusion. MC OCEAN_FLOOR: blocksMotion() alone, so it ignores
+            // fluids and lands on the seabed. Both terms are already computed
+            // above, so these two maps cost nothing but a bit each.
+            if (blocksMotion || isFluid) bits |= kBitMotionBlocking;
+            if (blocksMotion)            bits |= kBitOceanFloor;
 
             return bits;
         }
@@ -95,6 +106,10 @@ namespace Game {
                 return (bits & kBitMotionBlockingNoLeaves) != 0;
             case HeightmapType::WorldSurface:
                 return (bits & kBitWorldSurface) != 0;
+            case HeightmapType::OceanFloor:
+                return (bits & kBitOceanFloor) != 0;
+            case HeightmapType::MotionBlocking:
+                return (bits & kBitMotionBlocking) != 0;
             default:
                 return false;
         }

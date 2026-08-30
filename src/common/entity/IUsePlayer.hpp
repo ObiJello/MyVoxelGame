@@ -14,6 +14,8 @@
 // this interface.
 #pragma once
 
+#include <string>
+
 #include "../inventory/MenuType.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -39,7 +41,28 @@ namespace Game {
         // depend on the server's player header.)
         virtual bool isCreative() const = 0;
 
+        // Which dimension this player is standing in — Game::DimensionId's raw
+        // value. Defaulted rather than pure so the client's own adapter needs
+        // no change; the server's ServerPlayer overrides it.
+        //
+        // Item behaviours need it because a few of them reach back into the
+        // server to spawn something, and "spawn it in the player's world"
+        // cannot be answered from a position alone: Overworld (0, 70, 0) and
+        // Nether (0, 70, 0) are the same three numbers.
+        virtual int getDimensionId() const { return 0; }
+
         virtual bool IsSneaking() const = 0;
+
+        // MC Player.displayClientMessage(component, actionBar). Only the
+        // server can actually send one; the client's adapter is a no-op so
+        // prediction stays silent instead of double-printing.
+        //
+        // The one caller today is TntBlock.useItemOn's tnt_explodes branch,
+        // where MC tells the player "TNT is disabled" rather than eating the
+        // click in silence.
+        virtual void DisplayClientMessage(const std::string& text, bool actionBar) {
+            (void)text; (void)actionBar;
+        }
 
         // hand: 0 = main, 1 = off.
         virtual ItemStack& getItemInHand(uint32_t hand) = 0;

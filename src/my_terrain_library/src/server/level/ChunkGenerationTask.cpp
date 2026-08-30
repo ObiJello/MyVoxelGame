@@ -1,5 +1,7 @@
 #include "server/level/ChunkGenerationTask.h"
+#include "util/TerrainProfiling.h"
 #include "server/level/GeneratingChunkMap.h"
+#include "server/level/ChunkMap.h"
 #include "world/chunk/status/ChunkPyramid.h"
 #include "world/chunk/status/ChunkDependencies.h"
 
@@ -49,6 +51,12 @@ std::shared_ptr<ChunkGenerationTask> ChunkGenerationTask::create(
 }
 
 ChunkGenerationTask::FutureType ChunkGenerationTask::runUntilWait() {
+    if (!m_started.exchange(true, std::memory_order_acq_rel) &&
+        m_markedForCancellation.load(std::memory_order_acquire)) {
+        releaseClaim();
+        return nullptr;
+    }
+    if (m_claimReleased.load(std::memory_order_acquire)) return nullptr;   // cancelled before it started
     // Reference: ChunkGenerationTask.java lines 40-54
     while (true) {
         auto waitingFor = waitForScheduledLayer();
@@ -95,10 +103,20 @@ void ChunkGenerationTask::scheduleNextLayer() {
 void ChunkGenerationTask::markForCancellation() {
     // Reference: ChunkGenerationTask.java lines 71-73
     m_markedForCancellation.store(true, std::memory_order_release);
+    // A task that never started (still queued, lowest priority after its
+    // area was left) would only drop its generation refs when the dispatcher
+    // finally ran it — after every nearer task. Meanwhile ~290 holders per
+    // task stayed pinned and the old area could not unload (measured
+    // 2026-08-30: 15k holders after a teleport). Release now if no run has
+    // claimed the task; a running task keeps ownership and releases itself.
+    // Early release for never-started tasks was tried here (2026-08-30) and
+    // is off: it only matters when holder unloading is on, and that path is
+    // disabled until its stuck-task race is understood.
 }
 
 void ChunkGenerationTask::releaseClaim() {
     // Reference: ChunkGenerationTask.java lines 75-82
+    if (m_claimReleased.exchange(true, std::memory_order_acq_rel)) return;   // idempotent
     GenerationChunkHolder* chunkHolder = m_cache.get(m_pos.x(), m_pos.z());
     chunkHolder->removeTask(this);
 
@@ -111,6 +129,9 @@ bool ChunkGenerationTask::canLoadWithoutGeneration() {
     // Reference: ChunkGenerationTask.java lines 84-109
     if (&m_targetStatus == &ChunkStatus::EMPTY) {
         return true;
+    }
+    if (m_cache.get(m_pos.x(), m_pos.z())->forceGeneration()) {
+        return false;   // a previous attempt found the loading shortcut inconsistent
     }
 
     const ChunkStatus* highestGeneratedStatus = m_cache.get(m_pos.x(), m_pos.z())->getPersistedStatus();
@@ -149,6 +170,7 @@ void ChunkGenerationTask::scheduleLayer(
     const ChunkStatus& status,
     bool needsGeneration
 ) {
+    TERRAIN_ZONE_N("Lane.ScheduleLayer");
     // Reference: ChunkGenerationTask.java lines 115-131
     int radius = getRadiusForLayer(status, needsGeneration);
 
@@ -190,7 +212,32 @@ bool ChunkGenerationTask::scheduleChunkInLayer(
         : ChunkPyramid::getLoadingPyramid();
 
     if (generate && !needsGeneration) {
-        throw std::logic_error("Can't load chunk, but didn't expect to need to generate");
+        // Java throws IllegalStateException here: its saved statuses and its
+        // pyramid can never disagree. Ours can — the game saves FULL chunks
+        // to the region files the library loads from, while the library's
+        // own ring chunks stay unsaved — so a task that chose the loading
+        // pyramid can meet a neighbour that still needs generating. Recover:
+        // flag the centre so the NEXT task takes the generation pyramid from
+        // the start, and reschedule it now (rescheduleChunkTask cancels this
+        // task; runUntilWait then releases its claims). Restarting in place
+        // was tried and skipped statuses on already-bumped holders.
+        GenerationChunkHolder* center = getCenter();
+        center->setForceGeneration();
+        if (auto* map = dynamic_cast<ChunkMap*>(m_chunkMap)) {
+            center->rescheduleChunkTask(*map, &m_targetStatus);
+        } else {
+            markForCancellation();
+        }
+        return false;
+    }
+
+    // Already at or past this layer's status: the step's future is done and
+    // successful (the status is written by the step's thenApply just before
+    // the holder completes it), so applyStep would only take the holder's
+    // mutex to discover that. Skipping it is what makes the two 529-holder
+    // layers of a FULL pyramid cheap; Java's volatile reads make it free.
+    if (persistedStatus != nullptr && !status.isAfter(*persistedStatus)) {
+        return true;
     }
 
     FutureType future = chunkHolder->applyStep(
@@ -203,6 +250,7 @@ bool ChunkGenerationTask::scheduleChunkInLayer(
 
     if (now == nullptr) {
         m_scheduledLayer.push_back(future);
+        m_scheduledLayerInfo.emplace_back(chunkHolder->getPos().toLong(), status.getIndex());
         return true;
     } else if (now->isSuccess()) {
         return true;
@@ -223,6 +271,7 @@ ChunkGenerationTask::FutureType ChunkGenerationTask::waitForScheduledLayer() {
         }
 
         m_scheduledLayer.pop_back();
+        m_scheduledLayerInfo.pop_back();
         if (!resultNow->isSuccess()) {
             markForCancellation();
         }

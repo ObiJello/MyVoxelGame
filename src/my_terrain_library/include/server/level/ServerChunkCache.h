@@ -10,10 +10,10 @@
 #include "world/chunk/status/ChunkStatus.h"
 #include "world/ChunkPos.h"
 #include "util/CompletableFuture.h"
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
-#include <atomic>
 #include <array>
 
 // Reference: net/minecraft/server/level/ServerChunkCache.java
@@ -67,11 +67,13 @@ public:
         int64_t seed,
         Executor backgroundExecutor,
         Executor mainThreadExecutor,
+        Executor laneExecutor,   // see ChunkMap; pass nullptr to share backgroundExecutor
         world::BlockRegistry* blockRegistry,
         BlockState* airBlock,
         BlockState* defaultBlock,
         int32_t minY = -64,
-        int32_t worldHeight = 384
+        int32_t worldHeight = 384,
+        const std::string& storagePath = ""   // dimension folder; "" = no disk loading
     );
 
     ~ServerChunkCache();
@@ -180,8 +182,6 @@ public:
         m_taskPoller = std::move(poller);
     }
 
-    // Game patch (docs/terrain-library-patches.md, Patch 1): abort flag so
-    // blocking getChunk paths can exit during shutdown instead of hanging.
     void requestAbort() { m_abort.store(true, std::memory_order_release); }
     bool isAbortRequested() const { return m_abort.load(std::memory_order_acquire); }
 
@@ -235,7 +235,7 @@ private:
     // Task poller for managedBlock (polls main thread tasks while waiting)
     std::function<void()> m_taskPoller;
 
-    // Game patch (Patch 1): shutdown abort flag
+    // Game-local patch: shutdown abort flag (docs/terrain-library-patches.md)
     std::atomic<bool> m_abort{false};
 };
 

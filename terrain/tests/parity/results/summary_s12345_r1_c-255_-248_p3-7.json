@@ -1,0 +1,66 @@
+{
+  "chunks_compared": 9,
+  "total_mismatches": 14,
+  "by_class": {
+    "wrong-block": 14
+  },
+  "by_type": [
+    {
+      "class": "wrong-block",
+      "type": "minecraft:water",
+      "count": 8
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:tall_seagrass",
+      "count": 4
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:seagrass",
+      "count": 2
+    }
+  ],
+  "samples": {
+    "wrong-block|minecraft:water": [
+      "chunk(-255, -249) local(0,58,3) world(-4080,58,-3981) java=minecraft:water[level=0] cpp=minecraft:seagrass",
+      "chunk(-255, -249) local(0,54,13) world(-4080,54,-3971) java=minecraft:water[level=0] cpp=minecraft:seagrass",
+      "chunk(-255, -248) local(8,56,3) world(-4072,56,-3965) java=minecraft:water[level=0] cpp=minecraft:seagrass",
+      "chunk(-255, -248) local(4,50,10) world(-4076,50,-3958) java=minecraft:water[level=0] cpp=minecraft:tall_seagrass[half=lower]",
+      "chunk(-255, -248) local(4,51,10) world(-4076,51,-3958) java=minecraft:water[level=0] cpp=minecraft:tall_seagrass[half=upper]"
+    ],
+    "wrong-block|minecraft:tall_seagrass": [
+      "chunk(-255, -249) local(2,50,13) world(-4078,50,-3971) java=minecraft:tall_seagrass[half=lower] cpp=minecraft:water[level=0]",
+      "chunk(-255, -249) local(2,51,13) world(-4078,51,-3971) java=minecraft:tall_seagrass[half=upper] cpp=minecraft:water[level=0]",
+      "chunk(-255, -247) local(6,53,0) world(-4074,53,-3952) java=minecraft:tall_seagrass[half=lower] cpp=minecraft:seagrass",
+      "chunk(-255, -247) local(6,54,0) world(-4074,54,-3952) java=minecraft:tall_seagrass[half=upper] cpp=minecraft:water[level=0]"
+    ],
+    "wrong-block|minecraft:seagrass": [
+      "chunk(-255, -249) local(3,50,7) world(-4077,50,-3977) java=minecraft:seagrass cpp=minecraft:water[level=0]",
+      "chunk(-255, -247) local(2,51,2) world(-4078,51,-3950) java=minecraft:seagrass cpp=minecraft:water[level=0]"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        -255,
+        -249
+      ],
+      "count": 5
+    },
+    {
+      "chunk": [
+        -255,
+        -248
+      ],
+      "count": 5
+    },
+    {
+      "chunk": [
+        -255,
+        -247
+      ],
+      "count": 4
+    }
+  ]
+}

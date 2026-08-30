@@ -61,6 +61,16 @@ namespace Network {
         // authoritative inventory, so subsequent placements / clicks against
         // the slot all fail silently.
         CREATIVE_FILL_SLOT   = 8,
+        // MC creative-only: DELETE the cursor outright, with no item entity.
+        // Two vanilla sites do this, and both used to be routed through THROW
+        // here, which is the DROP path and spawned the stack on the floor:
+        //   * the destroy_item ("X") slot, plain click —
+        //     CreativeModeInventoryScreen:195-196 `menu.setCarried(EMPTY)`;
+        //   * a click on the creative item list carrying a stack —
+        //     :254-257, where button 0 clears the cursor and button 1 shrinks
+        //     it by one.
+        // button: 0 = clear the whole cursor, 1 = remove a single item.
+        CREATIVE_DELETE_CARRIED = 9,
     };
 
     // Sentinel slot indices for InventoryClickC2SPacket.

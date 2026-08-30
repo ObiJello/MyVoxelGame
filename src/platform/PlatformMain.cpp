@@ -36,6 +36,7 @@
 #include "client/renderer/mesh/BlockBreakOverlay.hpp"
 #include "client/renderer/blockentity/BlockEntityRenderDispatcher.hpp"
 #include "client/renderer/blockentity/BlockEntityRenderers.hpp"
+#include "client/renderer/blockentity/EndPortalRenderer.hpp"
 #include "client/renderer/debug/Crosshair.hpp"
 #if ENABLE_PORTAL_GUN
 #include "client/renderer/portal/PortalRenderer.hpp"
@@ -48,6 +49,7 @@
 #include "common/world/loot/LootTables.hpp"
 #include "client/portal/ClientPortalManager.hpp"
 #endif
+#include "client/renderer/particle/MobParticleSystem.hpp"
 #include "client/renderer/gui/GuiAtlas.hpp"
 #include "client/renderer/gui/GuiRenderState.hpp"
 #include "client/renderer/gui/GuiRenderer.hpp"
@@ -95,6 +97,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldGlobals.hpp"
 #include "server/world/ChunkProvider.hpp"
+#include "server/world/MyTerrainGenerator.hpp"
 
 // Include mesh system headers
 #include "client/renderer/mesh/ChunkRenderer.hpp"
@@ -107,8 +110,12 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "client/network/ClientConnection.hpp"
 #include "client/network/NetworkIOService.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/world/storage/anvil/WorldFolder.hpp"
 #include "server/network/NetworkServer.hpp"
 #include "client/world/ClientChunkManager.hpp"
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 #include "client/world/LevelLoadTracker.hpp"
 #include "client/world/ClientBlockAccess.hpp"
 #include "server/world/ServerWorkerPool.hpp"
@@ -118,10 +125,18 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "client/entity/RemotePlayerManager.hpp"
 #include "client/renderer/entity/PlayerRenderer.hpp"
 #include "client/entity/ItemEntityManager.hpp"
+#include "client/entity/XpOrbManager.hpp"
 #include "client/renderer/entity/ItemEntityRenderer.hpp"
+#include "client/renderer/entity/XpOrbRenderer.hpp"
 #include "client/entity/ClientMobManager.hpp"
+#include "client/entity/ClientFallingBlocks.hpp"
 #include "client/ClientTickRateManager.hpp"
+#include "client/world/ClientAnimateTick.hpp"
+#include "client/renderer/entity/BlockCubeEntityRenderer.hpp"
 #include "server/entity/MobManager.hpp"
+#include "server/entity/ItemEntityManager.hpp"
+#include "server/entity/FallingBlockStore.hpp"
+#include "server/level/ServerLevel.hpp"
 #include "common/world/spawn/NaturalSpawner.hpp"   // kMagicNumber
 #include "client/renderer/entity/MobRenderer.hpp"
 
@@ -152,6 +167,7 @@ static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
 #include "platform/GameDirectory.hpp"
 #include "platform/CrashHandler.hpp"
 #include "common/core/JobSystem.hpp"
+#include "common/core/TickParallel.hpp"
 #include "client/renderer/backend/RenderBackend.hpp"
 
 #ifdef __APPLE__
@@ -763,6 +779,37 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     // player's choice; Run() then continues into the normal boot path
     // (integrated server for Singleplayer, remote connect for Multiplayer)
     // or shuts down for Quit.
+    // --world <name>: build the Singleplayer TitleAction SelectWorldScreen's
+    // LaunchWorld would for the worlds.json entry of that name. False when no
+    // entry matches, so the caller can fall back to the title screen.
+    static bool DevHarnessWorldAction(const std::string& name, Render::TitleAction& out) {
+        for (const Render::WorldEntry& e : Render::WorldList::Load()) {
+            if (e.name != name) continue;
+            Render::TitleAction a;
+            a.kind = Render::TitleAction::Kind::Singleplayer;
+            a.useMinecraftSave = e.isMinecraftSave;
+            a.worldPath        = e.savePath;
+            a.readOnlyWorld    = e.readOnly;
+            a.worldName        = e.name;
+            a.seed             = e.seed;
+            a.gameMode         = e.gameMode;
+            a.generateStructures = e.generateStructures;
+            a.worldType   = e.worldType;
+            a.flatPreset  = e.flatPreset;
+            a.flatLayers  = e.flatLayers;
+            a.singleBiome = e.singleBiome;
+            a.worldgenTweaks  = e.worldgenTweaks;
+            a.dayTime         = e.dayTime;
+            a.doDaylightCycle = e.doDaylightCycle;
+            a.skybox          = e.skybox;
+            a.skyboxMode      = e.skyboxMode;
+            out = std::move(a);
+            return true;
+        }
+        Log::Warning("[Harness] --world: no worlds.json entry named \"%s\"; showing title", name.c_str());
+        return false;
+    }
+
     Render::TitleAction RunTitleScreenPhase(GLFWwindow* window) {
         using Render::TitleAction;
 
@@ -1022,6 +1069,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // just keeps its default model.
         Game::BlockStateModels::Load(GetAssetPath("assets/blockstates"));
 
+        // Fill the shape caches now, on this thread, while nothing else is
+        // running. AFTER Load, never between it and LoadModels — see the note
+        // on the declaration. This removes every lazy population from the hot
+        // paths, which is what lets multiple threads query shapes at once.
+        Game::BlockRegistry::PrewarmShapeCaches();
+
         // Initialize texture systems
         if (!InitializeTextureSystem()) {
             Log::Error("Failed to initialize texture systems");
@@ -1058,11 +1111,25 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // simply not drawn in-world.
         Render::RegisterAllBlockEntityRenderers();
 
+        // End portal. Not part of the dispatcher above: it draws off a
+        // per-chunk position index instead of block entities, because
+        // world-generated portals never get one (see EndPortalRenderer.hpp).
+        // Non-fatal — a failure leaves the portal invisible, as it is today.
+        if (!Render::g_endPortalRenderer.Initialize()) {
+            Log::Warning("End portal renderer init failed — end portals will not render");
+        }
+
         // Vanilla first-person held-item renderer. Always enabled —
         // independent of the portal feature flag. Non-fatal failure:
         // if shaders don't load, nothing renders in the hand slot.
         if (!Render::g_heldItemRenderer.Initialize()) {
             Log::Warning("Held item renderer init failed — hotbar items will not appear in hand");
+        }
+
+        // Mob/world particle system (hearts, smoke, explosions, spell
+        // swirls). Non-fatal failure: mobs just emit nothing.
+        if (!Render::g_mobParticleSystem.Initialize()) {
+            Log::Warning("Mob particle system init failed — mob particles will not draw");
         }
 
 #if ENABLE_PORTAL_GUN
@@ -1251,8 +1318,54 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         int64_t friendsAccountId = 0;
         std::string friendsServiceHost = Friends::kDefaultServiceHost;
         uint16_t friendsServicePort = Friends::kDefaultServicePort;
+        // ── Dev harness (scripted runs for profiling) ─────────────────────
+        //   --world <name>        skip the title screen, load this worlds.json
+        //                         entry as singleplayer (first session only)
+        //   --exec "<cmd>"        send this chat line/command once the session
+        //                         is up (repeatable, sent in order)
+        //   --exec-delay <sec>    seconds after session start before --exec
+        //                         lines are sent (default 8)
+        //   --quit-after <sec>    close the game this many seconds after
+        //                         session start (0 = never)
+        // While active, a "[Harness]" line is logged every second with the
+        // client and server entity counts, so time-to-done can be read from
+        // the log without a profiler attached.
+        std::string devWorldName;
+        std::vector<std::string> devExecCommands;
+        // --exec-late "<cmd>": sent 5 s before --quit-after fires.
+        std::vector<std::string> devExecLateCommands;
+        // --exec-at <sec> "<cmd>": sent once, this many seconds after session
+        // start (repeatable; for timed sequences like "tp far, then tp back").
+        std::vector<std::pair<double, std::string>> devExecAtCommands;
+        double devExecDelaySec  = 8.0;
+        double devQuitAfterSec  = 0.0;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
+            if (arg == "--world" && i + 1 < argc) {
+                devWorldName = argv[++i];
+                continue;
+            }
+            if (arg == "--exec" && i + 1 < argc) {
+                devExecCommands.emplace_back(argv[++i]);
+                continue;
+            }
+            if (arg == "--exec-late" && i + 1 < argc) {
+                devExecLateCommands.emplace_back(argv[++i]);
+                continue;
+            }
+            if (arg == "--exec-at" && i + 2 < argc) {
+                const double at = std::atof(argv[++i]);
+                devExecAtCommands.emplace_back(at, argv[++i]);
+                continue;
+            }
+            if (arg == "--exec-delay" && i + 1 < argc) {
+                devExecDelaySec = std::atof(argv[++i]);
+                continue;
+            }
+            if (arg == "--quit-after" && i + 1 < argc) {
+                devQuitAfterSec = std::atof(argv[++i]);
+                continue;
+            }
             if (arg == "--vulkan") {
                 useVulkan = true;
                 Log::Info("Vulkan backend requested via --vulkan flag");
@@ -1571,6 +1684,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // CLI --server bypasses the title screen for the FIRST session only;
         // after a quit-to-title the menu shows normally.
         isRemoteClient = cliRemoteClient && firstSession;
+        const bool devAutoWorld = !devWorldName.empty() && firstSession && !isRemoteClient;
         firstSession = false;
 
         // No world session yet — the options menu's World Settings entry
@@ -1592,6 +1706,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                           static_cast<unsigned>(remoteServerPort));
             }
             SetCursorCaptured(window, true);
+        } else if (devAutoWorld && DevHarnessWorldAction(devWorldName, titleAction)) {
+            // --world: the matching worlds.json entry, launched exactly as
+            // SelectWorldScreen would, without the title screen. An unknown
+            // name logs and falls through to the normal title screen.
+            Log::Info("[Harness] --world: loading \"%s\" without the title screen",
+                      devWorldName.c_str());
+            SetCursorCaptured(window, true);
         } else if (!isRemoteClient) {
             titleAction = RunTitleScreenPhase(window);
             if (titleAction.kind == Render::TitleAction::Kind::Quit) {
@@ -1607,6 +1728,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::g_crosshair.Shutdown();
                 Render::g_blockHighlight.Shutdown();
                 Render::g_blockBreakOverlay.Shutdown();
+                Render::g_endPortalRenderer.Shutdown();
                 Render::g_skyRenderer.Shutdown();
                 Render::g_cloudRenderer.Shutdown();
                 if (Render::g_atlasBuilder)    Render::g_atlasBuilder.reset();
@@ -1671,7 +1793,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Dropped items in the world. Created BEFORE the connection opens so a
         // spawn packet arriving on the very first tick has somewhere to land.
         Client::g_itemEntityManager = std::make_unique<Client::ItemEntityManager>();
+        Client::g_xpOrbManager = std::make_unique<Client::XpOrbManager>();
         Client::g_clientMobManager = std::make_unique<Client::ClientMobManager>();
+        Client::g_clientFallingBlocks = std::make_unique<Client::ClientFallingBlocks>();
         Render::MobRenderer mobRenderer;
         if (!mobRenderer.Initialize()) {
             Log::Warning("[PlatformMain] mob renderer failed to initialize — mobs will be invisible");
@@ -1679,6 +1803,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Render::ItemEntityRenderer itemEntityRenderer;
         if (!itemEntityRenderer.Initialize()) {
             Log::Warning("Failed to initialize item entity renderer, dropped items won't be visible");
+        }
+        // Falling blocks and primed TNT. A separate renderer from MobRenderer
+        // because those two ARE blocks, and MobRenderer is built around
+        // ModelPart skeletons; this one reuses the item renderer's block-model
+        // path so a falling cobblestone and a dropped one are one mesh builder.
+        if (!Render::g_blockCubeEntityRenderer.Initialize()) {
+            Log::Warning("Failed to initialize block-entity renderer, "
+                         "falling blocks and TNT won't be visible");
+        }
+        Render::XpOrbRenderer xpOrbRenderer;
+        if (!xpOrbRenderer.Initialize()) {
+            Log::Warning("Failed to initialize XP orb renderer, experience orbs won't be visible");
         }
 
         // === MINECRAFT-STYLE ARCHITECTURE INITIALIZATION ===
@@ -1743,6 +1879,34 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Log::Info("No local Minecraft save found, will use procedural generation");
             }
 
+            // Where an ObeyCraft world persists. Only for worlds that are OURS:
+            // an imported Minecraft save is loaded read-only and never gets a
+            // save path, which is the difference between the two fields.
+            //
+            // The folder is created by IntegratedServer::Initialize, so a world
+            // made before this existed picks one up the first time it is opened
+            // — same seed, same terrain, and from then on it saves.
+            if (!titleAction.useMinecraftSave && !titleAction.worldName.empty()) {
+                std::string reason;
+                const std::string folder =
+                    Game::Anvil::SanitiseFolderName(titleAction.worldName);
+                serverConfig.savePath =
+                    Platform::g_gameDirectory.GetSavesDirectory() + "/" + folder;
+                serverConfig.worldDisplayName = titleAction.worldName;
+                serverConfig.worldSeed        = titleAction.seed;
+                Log::Info("✓ World saves to: %s", serverConfig.savePath.c_str());
+            }
+
+            // MC IntegratedServer.java:69 — the player who launched this
+            // process is the singleplayer owner, and is exempt from keep-alive
+            // and the read timeout. Passed raw: an empty --name means "use the
+            // server's own default", which the server resolves at login where
+            // kDefaultPlayerName and the collision policy both live. Only the
+            // isRemoteClient path leaves this unset, and that path has no
+            // integrated server at all.
+            serverConfig.singleplayerProfileName = playerName;
+            serverConfig.hasSingleplayerOwner    = true;
+
             Server::InitializeIntegratedServer(serverConfig);
             Log::Info("✓ IntegratedServer initialized (20 TPS, world created on server)");
 
@@ -1754,9 +1918,22 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // generation kicks off (server thread starts further down).
             if (!titleAction.useMinecraftSave) {
                 world->SetGenerationSeed(titleAction.seed);
-                Log::Info("World '%s': procedural generation from seed %d (%s)",
+                // After the seed (these push the whole generation config to
+                // the generator).
+                static const char* kWorldTypeIds[] = {
+                    "default", "flat", "large_biomes", "amplified", "single_biome_surface"};
+                const char* worldTypeId =
+                    (titleAction.worldType >= 0 && titleAction.worldType <= 4)
+                        ? kWorldTypeIds[titleAction.worldType] : "default";
+                world->SetWorldGenOptions(worldTypeId, titleAction.flatPreset,
+                                          titleAction.flatLayers, titleAction.singleBiome);
+                world->SetWorldGenTweaks(titleAction.worldgenTweaks);
+                world->SetGenerateStructures(titleAction.generateStructures);
+                Log::Info("World '%s': procedural generation from seed %d (%s, type %s, structures %s)",
                           titleAction.worldName.c_str(), titleAction.seed,
-                          titleAction.gameMode == 0 ? "Survival" : "Creative");
+                          titleAction.gameMode == 0 ? "Survival" : "Creative",
+                          worldTypeId,
+                          titleAction.generateStructures ? "on" : "off");
             }
 
             // 3. Initialize worker pools with dynamic thread allocation
@@ -1802,7 +1979,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // to spare; this is the knob that trades frame smoothness for fill speed.
         {
             const unsigned hw = std::thread::hardware_concurrency();
-            const size_t permitCount = std::max<size_t>(16, hw > 0 ? hw : 4);
+            // 2026-08-29: doubled. Mesh throughput was pinned at permits x fps
+            // (~900 sections/s at 57 fps) while the mesh workers idled 87%,
+            // so a 25k-section backlog after a far teleport took 30 s to
+            // drain. The per-section upload also got cheaper (translucent
+            // sort moved to the worker), which is what pays for the extra
+            // per-frame upload work.
+            // 2026-08-30: MC has no upload permit at all — uploadAllPendingUploads
+            // drains everything each frame and the only back-pressure is its
+            // SectionBufferBuilderPool, sized from memory (maxMemory*0.3 /
+            // pack size = hundreds of packs). 128 in flight here (~10 MB of
+            // finished meshes) approximates that; the drain is already
+            // "upload all pending".
+            const size_t permitCount = std::max<size_t>(128, hw > 0 ? hw * 8 : 32);
             Render::GetMeshUploadPermits().Initialize(permitCount);
             Log::Info("✓ Mesh upload permits: %zu", permitCount);
         }
@@ -1833,19 +2022,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Game::ClientPlayerController playerController;
         playerController.SetPlayer(&player);
         Render::SetInventoryScreenPlayer(&player);
-        if (!isRemoteClient) {
-            playerController.SetWorld(world);
-            playerController.SetBlockAccess(world);
-        } else {
-            // Remote client: no World for block placement (server handles it).
-            // Block READS still have to work though — the controller needs
-            // hardness/target lookups for the mining state machine, and it
-            // gets them from the client chunk cache. Leaving this null was why
-            // mining on a remote server ignored hardness entirely: every
-            // lookup returned Air, whose destroyTime of 0 means "instant".
-            playerController.SetWorld(nullptr);
-            playerController.SetBlockAccess(clientBlockAccess.get());
-        }
+        // Interaction block reads come from the CLIENT chunk cache in both
+        // modes, for the same reason physics and raycasting do (see the note
+        // above `blockAccessForPhysics`). The host used to read the server's
+        // `Game::World*` here, which is the OVERWORLD's and never follows the
+        // player: in the Nether or the End every mining lookup resolved
+        // against overworld chunks at the same coordinates, so the crosshair
+        // block read back as Air and the dig was dropped on the floor
+        // (`CreativeDestroy` bails on air; survival cached an air hardness).
+        // Placement was unaffected because it goes through SendUseItemOn and
+        // predicts into the client cache — hence "can place but not break".
+        playerController.SetBlockAccess(clientBlockAccess.get());
 
         // 6. Configure IntegratedServer with player (host only)
         if (!isRemoteClient && Server::g_integratedServer) {
@@ -1893,15 +2080,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Log::Info("✓ IntegratedServer thread started (20 TPS)");
         }
 
-        // Set up global block access for raycast system
-        Game::IBlockAccess* blockAccessForPhysics = nullptr;
-        if (!isRemoteClient) {
-            blockAccessForPhysics = world;
-            // Note: World::Initialize already calls SetGlobalBlockAccess(this)
-        } else {
-            blockAccessForPhysics = clientBlockAccess.get();
-            Game::SetGlobalBlockAccess(clientBlockAccess.get());
-        }
+        // Physics and raycasting read the CLIENT's chunk cache, in both modes.
+        //
+        // A host used to read the server's Game::World directly, which was
+        // fine while there was exactly one of them and is a bug now that there
+        // are three: that pointer is the OVERWORLD's and never follows the
+        // player, so walking into the Nether or the End left the host
+        // colliding with, and mining, overworld blocks at the same
+        // coordinates. In the End — where the overworld is solid stone at the
+        // arrival height — that presents as the player having no physics at
+        // all.
+        //
+        // The client cache is dimension-correct by construction (the dimension
+        // change wipes it and the destination refills it), it is already what
+        // a remote client uses, it is what the renderer meshes from, and it is
+        // what MC does: the client always reads its own ClientLevel and never
+        // the server's. The one property it gives up is that the host no
+        // longer sees chunks the server has but has not sent yet — which is
+        // exactly the constraint every other client already lives under.
+        Game::IBlockAccess* blockAccessForPhysics = clientBlockAccess.get();
+        Game::SetGlobalBlockAccess(clientBlockAccess.get());
         
         // 10. Initialize Network I/O Service (dedicated I/O thread like Minecraft's Netty)
         Client::InitializeNetworkIOService();
@@ -2130,6 +2328,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         // Network tracking
         uint32_t playerMoveSequence = 0;
+        // Is a world-stopping screen up right now? Read by the client tick
+        // below as MC reads `Minecraft.pause` (Minecraft.java:1741,1757,1809).
+        bool localPaused = false;
+        // Last pause state reported to the server (PlayerPauseC2SPacket).
+        // Session-scoped rather than static: a new session starts with the
+        // server assuming "not paused", so the cache has to start there too or
+        // the first pause after a rejoin would be swallowed as "no change".
+        bool sentPaused = false;
 
         // Performance tracking
         Debug::PerformanceMetrics metrics;
@@ -2152,8 +2358,204 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // returns to the title screen.
         bool returnToTitle = false;
 
+        // Dev harness state (see the --exec / --quit-after flags in Run()).
+        const auto harnessStart      = std::chrono::steady_clock::now();
+        const bool harnessActive     = !devExecCommands.empty() || devQuitAfterSec > 0.0 ||
+                                       !devExecAtCommands.empty();
+        std::vector<bool> harnessAtSent(devExecAtCommands.size(), false);
+        bool       harnessExecSent   = false;
+        bool       harnessLateSent   = false;
+        int        harnessLastLogSec = -1;
+        int        harnessFrames     = 0;
+        double     harnessWorstFrame = 0.0;
+        auto       harnessPrevFrame  = std::chrono::steady_clock::now();
+
         while (!glfwWindowShouldClose(window) && !returnToTitle) {
             frameStartTime = std::chrono::high_resolution_clock::now();
+
+            if (harnessActive) {
+                const auto harnessNow = std::chrono::steady_clock::now();
+                const double elapsed =
+                    std::chrono::duration<double>(harnessNow - harnessStart).count();
+                // Frame pacing, as the player experiences it — the zone stats
+                // average away exactly the multi-second stalls that matter.
+                ++harnessFrames;
+                harnessWorstFrame = std::max(harnessWorstFrame,
+                    std::chrono::duration<double, std::milli>(harnessNow - harnessPrevFrame).count());
+                harnessPrevFrame = harnessNow;
+                if (!harnessExecSent && elapsed >= devExecDelaySec &&
+                    networkClient && networkClient->IsConnected()) {
+                    if (auto conn = networkClient->GetConnection()) {
+                        // Hover a few blocks up, flying: a creative flyer is
+                        // excluded from explosion knockback (see
+                        // Explosion.cpp HurtEntities), so the player stays put
+                        // and keeps the pile's chunk loaded instead of being
+                        // launched out of tracking range. The controller's
+                        // dirty check ships the flag to the server.
+                        if (player.physics.mayFly && !player.physics.isFlying) {
+                            player.physics.isFlying = true;
+                            player.physics.position.y += 4.0;
+                            player.physics.velocity = glm::dvec3(0.0);
+                            Log::Info("[Harness] flight enabled, hovering at y=%.1f",
+                                      player.physics.position.y);
+                        }
+                        for (const std::string& cmd : devExecCommands) {
+                            Log::Info("[Harness] t=%.2fs exec: %s", elapsed, cmd.c_str());
+                            conn->SendChatMessage(cmd);
+                        }
+                        harnessExecSent = true;
+                    }
+                }
+                if (networkClient && networkClient->IsConnected()) {
+                    if (auto conn = networkClient->GetConnection()) {
+                        for (size_t k = 0; k < devExecAtCommands.size(); ++k) {
+                            if (harnessAtSent[k] || elapsed < devExecAtCommands[k].first) continue;
+                            Log::Info("[Harness] t=%.2fs exec-at: %s", elapsed,
+                                      devExecAtCommands[k].second.c_str());
+                            conn->SendChatMessage(devExecAtCommands[k].second);
+                            harnessAtSent[k] = true;
+                        }
+                    }
+                }
+                const int sec = static_cast<int>(elapsed);
+                if (sec != harnessLastLogSec) {
+                    harnessLastLogSec = sec;
+                    const size_t clientMobs =
+                        (Client::g_clientMobManager ? Client::g_clientMobManager->Count() : 0) +
+                        (Client::g_clientFallingBlocks ? Client::g_clientFallingBlocks->Count() : 0);
+                    int serverTnt = -1, serverFalling = -1;
+                    long serverItems = -1;
+                    if (!isRemoteClient && Server::g_integratedServer) {
+                        if (auto* mobs = Server::g_integratedServer->Overworld().Mobs()) {
+                            serverTnt = mobs->CountForType(
+                                static_cast<uint16_t>(Game::EntityTypeId::Tnt));
+                            serverFalling = mobs->CountForType(
+                                static_cast<uint16_t>(Game::EntityTypeId::FallingBlock));
+                        }
+                        if (auto* store = Server::g_integratedServer->Overworld().FallingBlocks()) {
+                            serverFalling += static_cast<int>(store->Count());
+                        }
+                        if (auto* items = Server::g_integratedServer->Overworld().Items()) {
+                            serverItems = static_cast<long>(items->Count());
+                        }
+                    }
+                    Log::Info("[Harness] t=%ds clientMobs=%zu serverTnt=%d serverFalling=%d "
+                              "serverItems=%ld fps=%d worstFrameMs=%.0f",
+                              sec, clientMobs, serverTnt, serverFalling, serverItems,
+                              harnessFrames, harnessWorstFrame);
+                    // Chunk streaming health: where chunks are in the pipeline
+                    // (server cache → sent to client → client cache → meshed).
+                    {
+                        size_t srvChunks = 0, srvPending = 0, sent = 0, genJobs = 0, libChunks = 0;
+                        if (!isRemoteClient && Server::g_integratedServer) {
+                            if (auto* w = Server::g_integratedServer->Overworld().World())
+                                if (auto* cp = w->GetChunkProvider()) srvChunks = cp->GetLoadedChunkCount();
+                            srvPending = Server::g_integratedServer->GetPendingChunkLoadCount();
+                            if (auto* gen = Server::g_integratedServer->Overworld().TerrainGenerator()) {
+                                libChunks = gen->LibraryChunkCount();
+                                if (sec % 5 == 0) {
+                                    auto d = gen->GetUnloadDiag();
+                                    Log::Info("[HarnessLib] t=%ds holders=%zu aboveMax=%zu pendingUnload=%zu refHeld=%zu pinned=%zu",
+                                              sec, libChunks, d.aboveMax, d.pendingUnload, d.refHeld, d.pinned);
+                                }
+                            }
+                            if (auto sess = Server::g_integratedServer->GetPlayerSession())
+                                sent = sess->GetSentChunkCount();
+                            if (Threading::g_serverWorkerPool)
+                                genJobs = Threading::g_serverWorkerPool->GetPendingJobCount();
+                        }
+                        const size_t cliChunks = Client::g_clientChunkManager
+                            ? Client::g_clientChunkManager->GetLoadedChunkCount() : 0;
+                        const size_t meshPending = Threading::g_clientWorkerPool
+                            ? Threading::g_clientWorkerPool->GetPendingJobCount() : 0;
+                        const size_t gpuSections = Render::g_clientMeshManager
+                            ? Render::g_clientMeshManager->GetGPUDataCount() : 0;
+                        size_t rssMb = 0;
+#ifdef __APPLE__
+                        {
+                            mach_task_basic_info info{};
+                            mach_msg_type_number_t n = MACH_TASK_BASIC_INFO_COUNT;
+                            if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                                          reinterpret_cast<task_info_t>(&info), &n) == KERN_SUCCESS) {
+                                rssMb = static_cast<size_t>(info.resident_size >> 20);
+                            }
+                        }
+#endif
+                        Log::Info("[HarnessChunks] t=%ds srvChunks=%zu srvPending=%zu genJobs=%zu sent=%zu "
+                                  "cliChunks=%zu meshPending=%zu gpuSections=%zu rssMB=%zu libChunks=%zu",
+                                  sec, srvChunks, srvPending, genJobs, sent,
+                                  cliChunks, meshPending, gpuSections, rssMb, libChunks);
+                    }
+                    harnessFrames = 0;
+                    harnessWorstFrame = 0.0;
+
+                    // Culling audit (harness runs only): hunt for sections
+                    // whose occlusion answer is provably wrong or stuck.
+                    //   MIRROR  — isAllAir mirror disagrees with the blocks
+                    //             (would render an opaque invisible section).
+                    //   stale   — GPU mesh/mask behind the content version
+                    //             (normal DURING a cascade; must drain to ~0
+                    //             once it settles).
+                    //   STUCK   — stale but with no remesh possible: not
+                    //             dirty and meshingVersion == version, so the
+                    //             scheduler will never touch it again.
+                    if (sec > 0 && sec % 15 == 0 && Client::g_clientChunkManager) {
+                        static std::vector<std::pair<Game::Math::ChunkPos, Client::ClientChunk*>> auditChunks;
+                        Client::g_clientChunkManager->SnapshotLoadedChunks(auditChunks);
+                        int mirrorBad = 0, staleCount = 0, stuckNoJob = 0, printed = 0;
+                        for (auto& [cpos, achunk] : auditChunks) {
+                            if (!achunk->chunkData) continue;
+                            for (int sy = 0; sy < 24; ++sy) {
+                                const auto& si = achunk->sectionInfos[sy];
+                                if (!si.hasCpuData) continue;
+                                const auto* csec = achunk->chunkData->GetSection(sy);
+                                const bool nowAir = (csec == nullptr) || csec->IsAllAir();
+                                if (nowAir != si.isAllAir) {
+                                    ++mirrorBad;
+                                    if (printed < 8) { ++printed;
+                                        Log::Info("[CullAudit] MIRROR chunk(%d,%d) sy=%d mirror=%d actual=%d dirty=%d ver=%u up=%u mesh=%u",
+                                                  cpos.x, cpos.z, sy, (int)si.isAllAir, (int)nowAir,
+                                                  (int)si.dirty, si.version, si.uploadedVersion, si.meshingVersion);
+                                    }
+                                }
+                                // Air sections are never compiled, so their
+                                // uploadedVersion stays 0 forever — count only
+                                // sections a mesh is actually expected for, or
+                                // the real signal drowns (measured: 24443
+                                // air-section "stales" on bench-flat, constant
+                                // from t=15 to t=90).
+                                if (!si.isAllAir && si.version != si.uploadedVersion) {
+                                    ++staleCount;
+                                    if (!si.dirty && si.meshingVersion == si.version) {
+                                        ++stuckNoJob;
+                                        if (printed < 8) { ++printed;
+                                            Log::Info("[CullAudit] STUCK chunk(%d,%d) sy=%d ver=%u up=%u mesh=%u air=%d built=%d",
+                                                      cpos.x, cpos.z, sy, si.version, si.uploadedVersion,
+                                                      si.meshingVersion, (int)si.isAllAir, (int)si.builtOnce);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Log::Info("[CullAudit] t=%ds mirrorBad=%d stale=%d stuckNoJob=%d chunks=%zu",
+                                  sec, mirrorBad, staleCount, stuckNoJob, auditChunks.size());
+                    }
+                }
+                if (!harnessLateSent && !devExecLateCommands.empty() && devQuitAfterSec > 0.0 &&
+                    elapsed >= devQuitAfterSec - 5.0 && networkClient && networkClient->IsConnected()) {
+                    if (auto conn = networkClient->GetConnection()) {
+                        for (const std::string& cmd : devExecLateCommands) {
+                            Log::Info("[Harness] t=%.2fs exec-late: %s", elapsed, cmd.c_str());
+                            conn->SendChatMessage(cmd);
+                        }
+                        harnessLateSent = true;
+                    }
+                }
+                if (devQuitAfterSec > 0.0 && elapsed >= devQuitAfterSec) {
+                    Log::Info("[Harness] --quit-after reached; closing");
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                }
+            }
 
             // Server dropped us (kick, host quit, connection lost). Same exit
             // as "Save and Quit to Title": the teardown below runs and the
@@ -2470,7 +2872,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // E to open the inventory in the game branch doesn't immediately retrigger
                 // OnKeyDown(E) here on the next frame (which would close it).
                 extern bool s_eKeyHeld;
-                static bool escHeld=false, qHeld=false;
+                static bool qHeld=false;
                 static bool num1=false, num2=false, num3=false, num4=false,
                             num5=false, num6=false, num7=false, num8=false, num9=false;
                 static bool ileftH=false, irightH=false, ihomeH=false, iendH=false,
@@ -2486,7 +2888,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     held = down;
                 };
                 edge(s_eKeyHeld, GLFW_KEY_E,    GLFW_KEY_E);
-                edge(escHeld,  GLFW_KEY_ESCAPE, GLFW_KEY_ESCAPE);
+                // ESC uses the SHARED edge (s_escKeyHeld, sampled once per
+                // frame above) for exactly the reason the note about `eHeld`
+                // gives for E — it just never got the same treatment.
+                //
+                // With a private `escHeld` here, this branch and the
+                // screen-manager branch each kept their own idea of whether ESC
+                // was down. They are mutually exclusive, so the branch that did
+                // not run held a stale `false`, and the next press it DID see
+                // edged a second time. That is the "one press closes the pause
+                // menu straight back up" report, and it showed up on the first
+                // press because that is when the two flags are furthest apart.
+                if (escPressedThisFrame) inv.OnKeyDown(GLFW_KEY_ESCAPE, mods);
                 edge(qHeld,    GLFW_KEY_Q,      GLFW_KEY_Q);
                 edge(num1, GLFW_KEY_1, GLFW_KEY_1);
                 edge(num2, GLFW_KEY_2, GLFW_KEY_2);
@@ -2655,6 +3068,49 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // HandlePlayerInput below (which zeroes movement and drains
             // attack/use), so bindings keep working the whole time.
             Input::SetUiActive(screenOpen);
+
+            // MC Minecraft.java:1284 — the pause flag. Vanilla reads it
+            // straight off the embedded client and refuses to pause at all
+            // once the world is published; we report it instead, so the server
+            // can freeze the world only when EVERY player is paused.
+            //
+            // ScreenManager only, deliberately: chat and the container screens
+            // are separate systems here and MC's isPauseScreen() is false for
+            // both of them anyway — a furnace keeps smelting while you watch.
+            //
+            // Sent on CHANGE only. The server treats a client that never sends
+            // it as playing, so a dropped packet can never freeze the world for
+            // somebody else; the next transition re-syncs it.
+            {
+                const bool nowPaused = Render::GetScreenManager().IsPauseScreenOpen();
+                localPaused = nowPaused;
+                if (nowPaused != sentPaused) {
+                    // `sentPaused` advances ONLY when the packet actually went
+                    // out. It used to advance unconditionally, which made it a
+                    // record of intent rather than of what the server was told:
+                    // a transition that happened while disconnected (or before
+                    // the connection existed) was marked as sent and, because
+                    // this reports on CHANGE only, never sent again.
+                    //
+                    // The dangerous direction is a lost UN-pause. Every entity
+                    // tick on the server sits behind SimulationRuns(), which is
+                    // `runsNormally() && !m_paused` — so a server left believing
+                    // a player is paused stops simulating entirely while still
+                    // streaming chunks and answering commands. `/tick unfreeze`
+                    // cannot clear it, because that only touches the other half
+                    // of the condition.
+                    if (networkClient && networkClient->IsConnected()) {
+                        if (auto conn = networkClient->GetConnection()) {
+                            Network::PlayerPauseC2SPacket pausePacket{};
+                            pausePacket.paused = nowPaused;
+                            auto data = Network::Serialization::Serialize(pausePacket);
+                            conn->SendPacket(
+                                static_cast<uint8_t>(Network::PacketId::PlayerPauseC2S), data);
+                            sentPaused = nowPaused;
+                        }
+                    }
+                }
+            }
             {
                 static bool s_prevUiActive = false;
                 if (screenOpen && !s_prevUiActive) {
@@ -2706,22 +3162,37 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             {
             auto now = std::chrono::steady_clock::now();
             int ticksThisFrame = 0;
+
+            // Drain ALL queued packets ONCE PER FRAME, before the tick loop —
+            // MC Minecraft.runTick:1223-1230, where processQueuedPackets() sits
+            // inside `if (advanceGameTime)` and ahead of the
+            // `for (i < min(10, ticksToDo)) tick()` loop.
+            //
+            // This used to live INSIDE the catch-up loop below, which coupled
+            // drain cadence to tick debt and produced exactly the wrong
+            // behaviour under load: during any single long frame the queue was
+            // not drained at all, and then a frame that owed several ticks
+            // drained several times in a row. Bursty arrival against a bursty
+            // drain is what let the incoming queue pile up during world load,
+            // back when piling up meant dropped packets. Draining per frame
+            // decouples the two — a slow frame still drains once, and a fast
+            // frame drains more often than the tick rate rather than less.
+            { PROFILE_ZONE_N("Network");
+            PROFILE_TIMER_START(network);
+            if (networkClient) {
+                networkClient->DrainIncomingPackets();
+            }
+            PROFILE_TIMER_END(network, metrics.networkProcessingTime);
+            }
+
             while (now >= nextClientTick && ticksThisFrame < MAX_TICKS_PER_FRAME) {
                 PROFILE_ZONE_N("ClientTick");
 
-                // 1. Drain ALL queued packets (Minecraft: packetProcessor.processQueuedPackets())
-                { PROFILE_ZONE_N("Network");
-                PROFILE_TIMER_START(network);
-                if (networkClient) {
-                    networkClient->DrainIncomingPackets();
-                }
-                PROFILE_TIMER_END(network, metrics.networkProcessingTime);
-                }
-
                 // MC ClientPacketListener.tick: levelLoadTracker.tickClientLoad()
-                // then notifyPlayerLoaded() once the level is ready. Runs right
-                // after the packet drain, as it does there — the chunk that
-                // makes us ready may have arrived in the drain above.
+                // then notifyPlayerLoaded() once the level is ready. Still per
+                // TICK (MC drives it from the packet listener's tick, not from
+                // runTick), and still after the drain — which now happened just
+                // above, for the whole frame.
                 Client::g_levelLoadTracker.Tick(player.physics.position);
 
                 // (Mesh scheduling used to live here, in the 20 Hz tick. It is a
@@ -2758,11 +3229,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // Remote PLAYERS above are deliberately outside the gate:
                 // TickRateManager.isEntityFrozen exempts Player, which is why
                 // you can still walk around a frozen world in vanilla.
-                const bool entitiesFrozen = Client::g_clientTickRate.IsEntityFrozen();
+                // A pause screen freezes them for the same reason a /tick freeze
+                // does — the server has stopped simulating, so an animating mob
+                // is showing motion that is not happening.
+                const bool entitiesFrozen =
+                    Client::g_clientTickRate.IsEntityFrozen() || localPaused;
 
                 if (Client::g_itemEntityManager && !entitiesFrozen) {
                     // Feet position, for pickup animations to fly toward.
                     Client::g_itemEntityManager->Tick(player.predictedPos);
+                }
+                if (Client::g_xpOrbManager && !entitiesFrozen) {
+                    // Feet position again — the orbs' player pull and their
+                    // pickup flights both aim at the local player.
+                    Client::g_xpOrbManager->Tick(player.predictedPos);
                 }
 
                 // Mobs run the same physics classes the server does, so
@@ -2775,7 +3255,36 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Client::g_clientMobManager->SetTime(
                         Render::EnvironmentState::Get().GameTime(),
                         Render::EnvironmentState::Get().DayTime());
-                    if (!entitiesFrozen) Client::g_clientMobManager->Tick();
+                    if (!entitiesFrozen) {
+                        Client::g_clientMobManager->SetPickOrigin(
+                            glm::dvec3(player.physics.position));
+                        Client::g_clientMobManager->Tick();
+                        if (Client::g_clientFallingBlocks) {
+                            Client::g_clientFallingBlocks->SetBlockAccess(Client::g_clientBlockAccess);
+                            Client::g_clientFallingBlocks->Tick();
+                        }
+                    }
+
+                    // MC ClientLevel.animateTick — the ambient-particle sweep
+                    // (Minecraft.java:1854 calls it once per client tick with
+                    // the player's block position). This is the ONLY producer
+                    // of block particles: without it the dust under
+                    // unsupported sand never appears, and neither will torch
+                    // flames or lava pops when those land.
+                    //
+                    // Gated on entitiesFrozen for the same reason the mob tick
+                    // is: a frozen world should look frozen.
+                    if (!entitiesFrozen && Client::g_clientBlockAccess) {
+                        static Game::JavaRandom s_animateRandom{0};
+                        const glm::dvec3& camPos = player.visualPos;
+                        Client::AnimateTick(
+                            glm::ivec3(static_cast<int>(std::floor(camPos.x)),
+                                       static_cast<int>(std::floor(camPos.y)),
+                                       static_cast<int>(std::floor(camPos.z))),
+                            *Client::g_clientBlockAccess,
+                            Client::g_clientMobManager->Level(),
+                            s_animateRandom);
+                    }
                 }
 
                 // 3b. Advance local world time (ClientLevel.tickTime mirror —
@@ -2786,7 +3295,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 //     without this the sky would keep sliding toward a sunset
                 //     the world never reaches, then snap back on the next
                 //     TimeUpdate.
-                if (Client::g_clientTickRate.RunsNormally()) {
+                // `!localPaused` is MC's own `if (this.level != null &&
+                // !this.pause)` (Minecraft.java:1741) on top of the /tick
+                // freeze gate. Without it the sky keeps sliding while the
+                // server is paused and then snaps back on the next TimeUpdate.
+                if (Client::g_clientTickRate.RunsNormally() && !localPaused) {
                     Render::EnvironmentState::Get().TickClient();
                 }
 
@@ -2796,7 +3309,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::GetScreenManager().Tick();
 
                 // 4. Send player position to server (one packet per tick = 20 Hz)
-                if (networkClient->IsConnected()) {
+                //
+                // Same gate as the physics above, and for the same reason MC
+                // puts sendPosition() inside its hasClientLoaded() guard
+                // (LocalPlayer.tick:228): a position produced before the world
+                // exists is not a position worth telling the server about.
+                if (networkClient->IsConnected() && Client::g_levelLoadTracker.IsLoaded()) {
                     glm::vec3 playerPos = player.physics.position;
                     Network::PlayerMoveC2SPacket movePacket;
                     movePacket.position = playerPos;
@@ -2894,6 +3412,30 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 nextClientTick += CLIENT_TICK_INTERVAL;
                 ticksThisFrame++;
             }
+
+            // Drop the excess instead of carrying it — MC DeltaTracker.Timer
+            // .advanceGameTime:38-45 keeps only a SUB-TICK residual:
+            //
+            //     deltaTicks = (currentMs - lastMs) / msPerTick;
+            //     lastMs = currentMs;                 // <- reset every frame
+            //     deltaTickResidual += deltaTicks;
+            //     int ticks = (int)deltaTickResidual;
+            //     deltaTickResidual -= ticks;         // <- keeps only 0..1
+            //
+            // and Minecraft.runTick:1239 then runs `min(10, ticksToDo)`. A
+            // frame that owed twenty ticks runs ten and the other ten are GONE;
+            // the next frame measures from now, not from the old deadline.
+            //
+            // We accumulated an absolute deadline instead, and it was only ever
+            // advanced one interval per tick actually executed. So a single
+            // frame long enough to owe more than MAX_TICKS_PER_FRAME left
+            // permanent debt: nextClientTick could never catch up, and the loop
+            // ran its full cap of ten ticks EVERY frame for the rest of the
+            // session. One hitch during world load and the client stayed in
+            // catch-up forever, doing 10x the tick work per frame.
+            if (ticksThisFrame >= MAX_TICKS_PER_FRAME && now > nextClientTick) {
+                nextClientTick = now + CLIENT_TICK_INTERVAL;
+            }
             }
 
             // === PER-FRAME: Game logic (variable dt for smooth rendering) ===
@@ -2939,7 +3481,24 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // where it died until PERFORM_RESPAWN teleports it. (health is
             // the server-synced value; respawn restores it to 20 and physics
             // resumes.)
-            if (player.health <= 0) {
+            //
+            // MC LocalPlayer.tick:212 wraps the ENTIRE player tick — physics
+            // and the position send both — in
+            // `if (this.connection.hasClientLoaded())`. Until the client's own
+            // section has been compiled there is nothing to stand on: the
+            // block view answers "air" for every chunk that has not arrived
+            // yet, so the player free-falls through the world for as long as
+            // the terrain takes to stream in.
+            //
+            // That is not cosmetic, because the falling position is then SENT
+            // and the server adopts it. Every rejoin saved a Y a few blocks
+            // below the last one and the error compounded — measured at 3.9
+            // and 4.7 blocks per session with x/z identical.
+            //
+            // g_levelLoadTracker is this engine's port of the same
+            // LevelLoadTracker MC drives hasClientLoaded() from, and it has a
+            // 30-second escape hatch, so this cannot strand the player.
+            if (player.health <= 0 || !Client::g_levelLoadTracker.IsLoaded()) {
                 player.physics.velocity = glm::vec3(0.0f);
             } else {
                 player.UpdatePhysics(dt, blockAccessForPhysics);
@@ -3144,6 +3703,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
                 effectiveRenderDist = std::min(effectiveRenderDist, Client::g_networkClient->GetServerViewDistance());
             }
+            // Dropped items cull at half the view distance (see
+            // ItemEntityRenderer::SetRenderDistanceChunks). Fed the EFFECTIVE
+            // distance, not the raw client setting: the server clamps what it
+            // sends, and an item that never arrived cannot be drawn however
+            // far the renderer is willing to look.
+            itemEntityRenderer.SetRenderDistanceChunks(effectiveRenderDist);
+            Render::g_blockCubeEntityRenderer.SetRenderDistanceChunks(effectiveRenderDist);
             {
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
@@ -3307,18 +3873,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         }
                     }
                 }
+                { PROFILE_ZONE_N("Render.RemotePlayers");
                 playerRenderer.Render(proj, view, camera.position,
                                       *Client::g_remotePlayerManager,
-                                      partialTick, &straddlingIds);
+                                      partialTick, &straddlingIds); }
 #else
+                { PROFILE_ZONE_N("Render.RemotePlayers");
                 playerRenderer.Render(proj, view, camera.position,
-                                      *Client::g_remotePlayerManager, partialTick);
+                                      *Client::g_remotePlayerManager, partialTick); }
 #endif
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
 
                 // Dropped items, drawn with the same partialTick the remote
                 // players use so everything in the world moves on one clock.
-                itemEntityRenderer.Render(proj, view, camera.position, partialTick);
+                { PROFILE_ZONE_N("Render.ItemEntities");
+                itemEntityRenderer.Render(proj, view, camera.position, partialTick); }
+                { PROFILE_ZONE_N("Render.BlockCubeEntities");
+                Render::g_blockCubeEntityRenderer.Render(proj, view, camera.position,
+                                                         partialTick); }
+                { PROFILE_ZONE_N("Render.XpOrbs");
+                xpOrbRenderer.Render(proj, view, camera.position, partialTick); }
                 if (Client::g_clientMobManager) {
                     mobRenderer.Render(proj, view, camera.position,
                                        *Client::g_clientMobManager, partialTick);
@@ -3466,6 +4040,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Client::g_clientChunkManager.get(),
                     proj, view, camera.position, /*partialTick=*/0.0f);
             }
+
+            // End portals — same slot in the frame as the block entities
+            // above (opaque world geometry, before the portal pass), but off
+            // a per-chunk position index rather than the BE map.
+            Render::g_endPortalRenderer.Render(
+                Client::g_clientChunkManager.get(),
+                proj, view, camera.position, /*partialTick=*/0.0f);
 #if ENABLE_PORTAL_GUN
             // Phase 7 portal pass: recursive see-through rendering. The
             // lambda is invoked once per recursion level by the portal
@@ -3510,6 +4091,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         // and remote players are ever tracked that way.
                         itemEntityRenderer.Render(obliqueProj, virtView,
                                                   virtCam.position, partialTickPortal);
+                        Render::g_blockCubeEntityRenderer.Render(
+                            obliqueProj, virtView, virtCam.position, partialTickPortal);
+                        xpOrbRenderer.Render(obliqueProj, virtView,
+                                             virtCam.position, partialTickPortal);
                         if (Client::g_clientMobManager) {
                             mobRenderer.Render(obliqueProj, virtView, virtCam.position,
                                                *Client::g_clientMobManager,
@@ -3662,9 +4247,24 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
 #endif
 
+            // Mob/world particles — drain the spawns the client mobs queued
+            // this tick (ClientLevelBridge), step the 20 Hz simulation, and
+            // draw. After the world pass (depth-tested, no depth write),
+            // before the clouds — MC's particle pass sits the same way.
+            Render::g_mobParticleSystem.Update(
+                dt, Client::g_clientMobManager.get(),
+                Client::g_clientBlockAccess, camera.position);
+            Render::g_mobParticleSystem.Render(proj, view, camera.position);
+
             // Clouds — MC's cloud pass runs after terrain and particles
             // (translucent, depth-tested against the world, no depth write).
-            {
+            //
+            // Overworld only. MC gives the Nether and the End a cloud level of
+            // Float.NaN (DimensionSpecialEffects.NetherEffects / EndEffects),
+            // which is its way of saying "no cloud layer" — a band of white
+            // clouds across the Nether's ceiling would be very obviously wrong.
+            if (!Render::g_skyRenderer.SkyHidden()
+                && Render::g_skyRenderer.CurrentSkyboxIsEnd() == false) {
                 PROFILE_ZONE_N("CloudPass");
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
@@ -3782,6 +4382,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             g_hudRenderer.SetHealth(player.health);
             g_hudRenderer.SetFood(player.food);
             g_hudRenderer.SetSaturation(player.saturation);
+            g_hudRenderer.SetExperience(player.xpProgress, player.xpLevel);
             // MC Gui gates the survival stat block on gameMode.canHurtPlayer()
             // (Gui.java:524). The extra !gameModeKnown term covers a window MC
             // doesn't have: our render loop spins from the moment the socket
@@ -4401,9 +5002,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         playerRenderer.Shutdown();
         Client::g_remotePlayerManager.reset();
         itemEntityRenderer.Shutdown();
+        Render::g_blockCubeEntityRenderer.Shutdown();
+        xpOrbRenderer.Shutdown();
         mobRenderer.Shutdown();
         Client::g_clientMobManager.reset();
+        Client::g_clientFallingBlocks.reset();
         Client::g_itemEntityManager.reset();
+        Client::g_xpOrbManager.reset();
         // The inventory screens are singletons but their menu is bound to this
         // session's ClientPlayer, which is about to go out of scope.
         Render::SetInventoryScreenPlayer(nullptr);
@@ -4442,6 +5047,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Render::g_crosshair.Shutdown();
         Render::g_blockHighlight.Shutdown();
         Render::g_blockBreakOverlay.Shutdown();
+        Render::g_endPortalRenderer.Shutdown();
         Render::g_skyRenderer.Shutdown();
         Render::g_cloudRenderer.Shutdown();
         if (Render::g_atlasBuilder) {
@@ -4465,6 +5071,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Log::Info("Stopping legacy job system...");
         try {
             JobSystem::g_ThreadPool.Stop();
+            Core::ShutdownTickParallel();
             Log::Info("✓ Legacy job system stopped");
         } catch (const std::exception& e) {
             Log::Error("Exception stopping job system: %s", e.what());

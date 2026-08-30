@@ -19,6 +19,7 @@
 // whether to stop the dispatch chain or fall through.
 
 #include "Item.hpp"
+#include "common/core/SoundEvents.hpp"
 #include "GeneratedItemList.hpp"
 #include "SpawnEggs.hpp"
 #include "../world/level/WorldMobSpawn.hpp"
@@ -28,6 +29,8 @@
 #include "../world/block/BlockPlacement.hpp"
 #include "../world/level/World.hpp"
 #include "../world/level/WorldDrops.hpp"
+#include "../world/portal/PortalShape.hpp"
+#include "../world/portal/EndPortalFrame.hpp"
 #include "../core/JavaRandom.hpp"
 #include "../core/Mth.hpp"
 #include "../core/Log.hpp"
@@ -57,17 +60,11 @@ namespace Game {
 
         // ── Common helpers ──────────────────────────────────────────────────
 
-        // Mirrors MC `Level.playSound(player, pos, soundEvent, source, volume,
-        // pitch)` (Level.java:1013). We have no sound system yet — log instead
-        // so the trigger sites are visible during testing. Replace with the
-        // real `SoundEventS2CPacket` call when sounds land.
-        void PlaySound(const char* eventName, const glm::ivec3& pos) {
-            (void)pos;
-            // TODO(sounds): broadcast a SoundEventS2CPacket(eventName, pos, vol, pitch)
-            //               from `m_serverWorldInstance` to all players in range.
-            Log::Debug("[Sound] %s at (%d,%d,%d) — TODO: wire sound system",
-                       eventName, pos.x, pos.y, pos.z);
-        }
+        // PlaySound moved to common/core/SoundEvents.hpp — it lived here, in an
+        // anonymous namespace, which meant only item behaviours could reach it
+        // and every block and entity that should have been making a noise
+        // silently was not. The unqualified calls below now resolve to
+        // Game::PlaySound through the enclosing namespace.
 
         // Mirrors MC `Level.gameEvent(GameEvent, BlockPos, Context)`
         // (Level.java:1129). Sculk sensors / wardens listen on these. We don't
@@ -118,7 +115,55 @@ namespace Game {
         // upward face OR there's a flammable neighbour (`isValidFireLocation`).
         // We approximate the sturdy-face check via "block below is opaque",
         // which covers every vanilla solid block.
-        bool CanFireBePlacedAt(ILevelWrite* world, const glm::ivec3& pos) {
+
+        // ── BaseFireBlock.isPortal (BaseFireBlock.java:181) ─────────────────
+        // The second half of canBePlacedAt: fire may also go somewhere it
+        // could never survive on its own, as long as that somewhere is the
+        // inside of an empty obsidian portal frame. This is what lets you
+        // light a portal by clicking the obsidian at head height, three blocks
+        // off the ground — the classic way everyone actually does it.
+        //
+        // `forwardDirection` is the face of the block that was clicked. MC
+        // derives the preferred portal axis from it (the axis perpendicular to
+        // the clicked face, in the horizontal plane) and falls back to a
+        // random horizontal axis for a vertical face. The random pick costs
+        // nothing here — findEmptyPortalShape tries the other axis anyway when
+        // the first one fails — so a fixed X keeps the behaviour deterministic
+        // between the client's prediction and the server's authority, which
+        // matters more.
+        bool IsInEmptyPortalFrame(ILevelWrite* world, const glm::ivec3& pos,
+                                  int clickedFace) {
+            if (!world) return false;
+            if (!DimensionAllowsNetherPortal(world->GetDimension())) return false;
+
+            // MC scans all six neighbours for obsidian first — a cheap reject
+            // that keeps the frame walk off every fire placement in the world.
+            static constexpr Direction kFaces[6] = {
+                Direction::Down, Direction::Up, Direction::North,
+                Direction::South, Direction::West, Direction::East,
+            };
+            bool hasObsidian = false;
+            for (Direction d : kFaces) {
+                const glm::ivec3 n{ pos.x + StepX(d), pos.y + StepY(d), pos.z + StepZ(d) };
+                if (world->GetBlock(n.x, n.y, n.z) == BlockID::Obsidian) {
+                    hasObsidian = true;
+                    break;
+                }
+            }
+            if (!hasObsidian) return false;
+
+            const Direction face = static_cast<Direction>(
+                clickedFace >= 0 && clickedFace <= 5 ? clickedFace
+                                                     : static_cast<int>(Direction::North));
+            const Axis preferredAxis = IsHorizontal(face)
+                ? AxisOf(ClockWise(face))    // MC getCounterClockWise().getAxis();
+                                             // either turn gives the same AXIS
+                : Axis::X;
+            return PortalShape::FindEmptyPortalShape(*world, pos, preferredAxis).has_value();
+        }
+
+        bool CanFireBePlacedAt(ILevelWrite* world, const glm::ivec3& pos,
+                               int clickedFace) {
             if (!world) return false;
             if (!world->IsValidPosition(pos.x, pos.y, pos.z)) return false;
             if (world->GetBlock(pos.x, pos.y, pos.z) != BlockID::Air) return false;
@@ -127,10 +172,13 @@ namespace Game {
             // neighbour check — both produce the same Boolean for solid floors,
             // which is the overwhelming common case. Refine when we add fire
             // spread behaviour and SoulFire.)
-            if (pos.y <= 0) return false;
-            const BlockID below = world->GetBlock(pos.x, pos.y - 1, pos.z);
-            const Block& belowDef = BlockRegistry::Get(below);
-            return belowDef.opaque;
+            if (pos.y > 0) {
+                const BlockID below = world->GetBlock(pos.x, pos.y - 1, pos.z);
+                const Block& belowDef = BlockRegistry::Get(below);
+                if (belowDef.opaque) return true;
+            }
+            // MC: `getState(level, pos).canSurvive(level, pos) || isPortal(...)`
+            return IsInEmptyPortalFrame(world, pos, clickedFace);
         }
 
         // ── FlintAndSteel — mirrors FlintAndSteelItem.java:26-58 ────────────
@@ -174,7 +222,11 @@ namespace Game {
             // Not a relightable block — fall into the place-fire path:
 
             const glm::ivec3 firePos = ctx.getPlacementPos();
-            if (!CanFireBePlacedAt(ctx.world, firePos)) {
+            // MC passes the clicked FACE here (FlintAndSteelItem.java:41 →
+            // canBePlacedAt(level, relativePos, context.getClickedFace())); it
+            // is what picks the preferred portal axis when the target is the
+            // inside of an obsidian frame.
+            if (!CanFireBePlacedAt(ctx.world, firePos, ctx.hitResult.face)) {
                 return UseResult::Fail;  // matches MC: explicit FAIL when the surface won't hold fire
             }
 
@@ -199,6 +251,72 @@ namespace Game {
             // MC: `if (player instanceof ServerPlayer) itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot());`
             HurtAndBreak(stack, 1, ctx.hand);
 
+            return UseResult::Success;
+        }
+
+        // ── EnderEye.useOn — mirrors EnderEyeItem.java:36-70 ────────────────
+        //
+        // Puts an eye into an empty end_portal_frame and, if that completed
+        // the ring, fills the 3x3 interior with end_portal blocks.
+        UseResult UseOn_EnderEye(const UseOnContext& ctx, ItemStack& stack) {
+            if (!ctx.world) return UseResult::Pass;
+            const glm::ivec3 pos = ctx.hitResult.blockPos;
+            const BlockState target = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+
+            // MC returns PASS, not FAIL, for anything else — and it matters:
+            // FAIL stops the dispatch, which would break the throw-the-eye
+            // path whenever the player happened to be aiming at a block.
+            if (!target.Is(BlockID::EndPortalFrame)) return UseResult::Pass;
+            if (EndPortalFrame::HasEye(target))       return UseResult::Pass;
+
+            // MC: `if (level.isClientSide()) return SUCCESS;`. The client
+            // predicts the arm swing and nothing else — filling nine cells
+            // with end_portal on a prediction that the server then rejects
+            // would leave a portal the server does not have.
+            if (ctx.world->IsClientSide()) return UseResult::Success;
+
+            const BlockState withEye = EndPortalFrame::WithEye(target, true);
+            // MC uses flag 2 (clients only, no neighbour updates). Nothing
+            // reacts to a frame block's shape, so the engine's MarkDirty —
+            // which also reaches the change accumulator — is the same thing.
+            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, withEye,
+                                     World::UpdateFlags::MarkDirty)) {
+                return UseResult::Fail;
+            }
+
+            // MC: level.levelEvent(1503, pos, 0) — the eye-seated sound.
+            PlaySound("block.end_portal_frame.fill", pos);
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
+
+            // MC skips Block.pushEntitiesUp (the eye grows the block's
+            // collision shape by 3 pixels, so anything standing on the frame
+            // is nudged clear) and updateNeighbourForOutputSignal (comparators
+            // read HAS_EYE). Neither system exists here.
+
+            const auto match = EndPortalFrame::PortalShapePattern().Find(*ctx.world, pos);
+            if (!match) return UseResult::Success;
+
+            // EnderEyeItem.java:52 — the interior's minimum corner, in RAW
+            // world offsets. That works because the pattern search is
+            // deterministic: the only orientation an inward-facing ring can
+            // match is forwards=DOWN, up=SOUTH, which puts frontTopLeft at the
+            // ring's maximum X and Z. See BlockPattern.hpp.
+            const glm::ivec3 base = match->frontTopLeft + glm::ivec3(-3, 0, -3);
+            for (int x = 0; x < 3; ++x) {
+                for (int z = 0; z < 3; ++z) {
+                    const glm::ivec3 cell{ base.x + x, base.y, base.z + z };
+                    // MC destroyBlock(pos, true) first: the pattern's interior
+                    // predicate is ANY, so there can be something in the way,
+                    // and vanilla drops it rather than deleting it.
+                    ctx.world->SetBlock(cell.x, cell.y, cell.z, BlockID::EndPortal,
+                                        World::UpdateFlags::All);
+                }
+            }
+
+            // MC: globalLevelEvent(1038, blockPos.offset(1, 0, 1), 0) — the
+            // portal-spawn fanfare, heard world-wide.
+            PlaySound("block.end_portal.spawn", base + glm::ivec3(1, 0, 1));
             return UseResult::Success;
         }
 
@@ -832,6 +950,42 @@ namespace Game {
         }
 
         // Empty bucket — BucketItem.java:43-74 (fill path).
+        // ── EnderEye.use — mirrors EnderEyeItem.java:76-108 ─────────────────
+        //
+        // Throws the eye toward the nearest stronghold. Aiming at an
+        // end_portal_frame instead PASSES, so that the useOn path (seating an
+        // eye) wins whenever the player is looking at a frame — without that
+        // branch, filling a portal would throw the eye away instead.
+        UseResult Use_EnderEye(ILevelWrite* world, IUsePlayer* player,
+                               uint32_t /*hand*/, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+
+            // MC getPlayerPOVHitResult(level, player, ClipContext.Fluid.NONE)
+            // — the same POV clip the bucket uses, minus the fluid stop.
+            if (auto hit = BucketClip(world, *player, /*stopOnFluid=*/false)) {
+                if (hit->block == BlockID::EndPortalFrame) return UseResult::Pass;
+            }
+
+            // MC guards the whole tail with `if (level instanceof ServerLevel)`
+            // and still returns SUCCESS_SERVER — the client swings its arm and
+            // waits for the entity to arrive on the wire. There is nothing to
+            // predict: an entity the client invented would be a duplicate.
+            if (world->IsClientSide()) return UseResult::Success;
+
+            const glm::dvec3 from = player->getPosition() + glm::dvec3(0.0, 0.5, 0.0);
+            if (!ThrowEnderEye(player->getDimensionId(), from, stack)) {
+                // MC returns CONSUME with the stack UNTOUCHED when there is no
+                // structure to point at — the eye is not spent on a world that
+                // has nowhere to send it.
+                return UseResult::Consume;
+            }
+
+            PlaySound("entity.ender_eye.launch", glm::ivec3(from));
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
+            return UseResult::Success;
+        }
+
         UseResult Use_EmptyBucket(ILevelWrite* world, IUsePlayer* player,
                                   uint32_t hand, ItemStack& stack) {
             if (!world || !player) return UseResult::Pass;
@@ -1015,6 +1169,13 @@ namespace Game {
         // FlintAndSteel — single variant.
         wireUseOn(Items::FlintAndSteel, &UseOn_FlintAndSteel);
 
+        // EnderEye — seats an eye in an end_portal_frame and opens the portal
+        // once the ring is complete. Wiring a useOn also takes the eye out of
+        // the client's block-placement prediction (PlayerController refuses to
+        // predict placement for any item that has one), which is what stops it
+        // predicting a block that is not a block item at all.
+        wireUseOn(Items::EnderEye, &UseOn_EnderEye);
+
         // Every hoe tier shares the till behaviour. Tool material (mining
         // speed, durability, attack damage) is a per-item property MC reads
         // from the Item.Properties.hoe(material, …) builder; we don't model
@@ -1084,6 +1245,7 @@ namespace Game {
             auto it = pureItems.find(id);
             if (it != pureItems.end()) it->second.use = fn;
         };
+        wireUse(Items::EnderEye,    &Use_EnderEye);
         wireUse(Items::Bucket,      &Use_EmptyBucket);
         wireUse(Items::WaterBucket, &Use_FilledBucket);
         wireUse(Items::LavaBucket,  &Use_FilledBucket);

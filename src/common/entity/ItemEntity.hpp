@@ -15,8 +15,11 @@
 // interpolates between server snapshots exactly the way remote players do).
 #pragma once
 
+#include "common/core/Uuid.hpp"
+
 #include "common/entity/Item.hpp"
 #include "common/physics/Physics.hpp"
+#include "common/core/JavaRandom.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
 
@@ -37,7 +40,11 @@ namespace Game {
     // need it: the server allocates from it, the client dispatches on it.
     constexpr int32_t kItemEntityIdBase = 0x0100'0000;
 
-    inline bool IsItemEntityId(int32_t id) { return id >= kItemEntityIdBase; }
+    // Upper bound is Game::kMobEntityIdBase (Entity.hpp) — spelled as a
+    // literal because this header deliberately doesn't pull Entity.hpp in.
+    inline bool IsItemEntityId(int32_t id) {
+        return id >= kItemEntityIdBase && id < 0x0200'0000;
+    }
 
     struct ItemEntity {
         // ── MC constants (ItemEntity.java / EntityType.ITEM) ───────────────
@@ -65,6 +72,20 @@ namespace Game {
         // producing a small settle rather than a dead stop.
         static constexpr double kBounceDamping  = -0.5;
 
+        // ── Fluids (ItemEntity.FLOAT_HEIGHT / setFluidMovement) ────────────
+        // An item floats once the fluid stands more than this far above its
+        // feet; below that it's just brushing the surface and gravity rules.
+        static constexpr double kFloatHeight    = 0.1;
+        // Horizontal drag while floating: water keeps 0.99 of the motion per
+        // tick, lava only 0.95 (setUnderwaterMovement / setUnderLavaMovement).
+        static constexpr double kWaterDrag      = 0.99;
+        static constexpr double kLavaDrag       = 0.95;
+        // Buoyancy: +5.0E-4 per tick until vertical speed reaches 0.06 —
+        // an item released at depth accelerates gently toward the surface and
+        // then bobs there as the float check flickers at the waterline.
+        static constexpr double kFluidBuoyancy  = 5.0e-4;
+        static constexpr double kFluidMaxRise   = 0.06;
+
         // ItemEntity.LIFETIME — 6000 ticks = 5 minutes at 20 TPS.
         static constexpr int kLifetimeTicks         = 6000;
         // setDefaultPickUpDelay() — what a block drop gets.
@@ -90,6 +111,9 @@ namespace Game {
 
         // ── State ──────────────────────────────────────────────────────────
         int32_t    id    = 0;
+        // Persistent identity, minted by the manager that assigns `id`.
+        // `id` itself is a per-session handle and cannot name this across a save.
+        Uuid uuid{};
         ItemStack  stack{};
 
         // `pos` is the entity's FEET, matching MC and MoveAABB's convention.
@@ -100,6 +124,27 @@ namespace Game {
         int   age         = 0;
         int   pickupDelay = 0;
         bool  onGround    = false;
+
+        // MC ItemEntity.health — 5, reduced by damage (fire, lava, a blast)
+        // and the item is destroyed at zero. Only the explosion path writes it
+        // today; fire and lava damage to dropped items is not modelled, and
+        // neither is ItemStack.canBeHurtBy (netherite's damage_resistant), so
+        // every stack is equally destructible.
+        int   health      = 5;
+
+        // MC Entity.noPhysics, driven per-tick by ItemEntity.tick: true while
+        // the entity's (slightly deflated) box overlaps a collision shape —
+        // i.e. it is STUCK inside a block, usually because something was
+        // placed or fell on top of it. A noPhysics move integrates position
+        // directly with no collision at all, which is what lets the escape
+        // velocity from EscapeTowardsClosestSpace actually carry the item out
+        // instead of being cancelled against the very block it is stuck in.
+        //
+        // SERVER-ONLY state: MC forces this false on the client
+        // (ItemEntity.tick's isClientSide branch) and so do we — the client's
+        // simulation keeps colliding normally and the server's motion sync
+        // (the escape velocity trips the 0.01 threshold) carries it along.
+        bool  noPhysics   = false;
 
         // Random phase for the render bob/spin, so a pile of items doesn't
         // pulse in unison. Rolled once at spawn and sent on the wire — MC
@@ -152,14 +197,22 @@ namespace Game {
         // happen BEFORE drag, because MoveAABB zeroes the velocity of any axis
         // that hit something and applying drag first would scale a value that
         // is about to be discarded.
-        void TickMovement(const PhysicsContext& context);
+        //
+        // `serverRng` selects which side's variant runs. Non-null (the server
+        // manager passes its own RNG) enables the two pieces MC guards behind
+        // `!isClientSide`: the stuck-in-block check and the escape impulse,
+        // whose speed is a random roll. Null (the client) forces noPhysics
+        // false and collides normally, exactly as MC's client does — the
+        // escape reaches it as an ordinary motion correction.
+        void TickMovement(const PhysicsContext& context,
+                          JavaRandom* serverRng = nullptr);
 
         // Full server-side tick: TickMovement plus the pieces MC runs only on
         // the server — ageing, despawn, and resend bookkeeping.
         //
         // Returns false when the entity should be removed (it despawned or its
         // stack emptied); the manager is responsible for actually erasing it.
-        bool Tick(const PhysicsContext& context);
+        bool Tick(const PhysicsContext& context, JavaRandom& rng);
 
         // True when this entity is eligible to merge with a neighbour: alive,
         // not already at a full stack, and not past its lifetime.

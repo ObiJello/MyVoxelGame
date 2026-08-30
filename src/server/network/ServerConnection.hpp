@@ -42,6 +42,19 @@ namespace Server {
         // Get/set player name
         void SetPlayerName(const std::string& name) { m_playerName = name; }
         const std::string& GetPlayerName() const { return m_playerName; }
+
+        // MC isSingleplayerOwner (ServerCommonPacketListenerImpl.java:189).
+        // The host of an integrated server is exempt from keep-alive entirely,
+        // which is why vanilla never times the host out however long a tick
+        // runs. Set once at login from a NAME match; never from the transport.
+        void SetSingleplayerOwner(bool v) {
+            m_isSingleplayerOwner.store(v, std::memory_order_relaxed);
+        }
+        bool IsSingleplayerOwner() const {
+            return m_isSingleplayerOwner.load(std::memory_order_relaxed);
+        }
+        // MC ServerCommonPacketListenerImpl.java:200 latency().
+        int32_t GetLatencyMs() const { return m_latencyMs.load(std::memory_order_relaxed); }
         uint8_t GetPlayerColor() const { return m_playerColor; }
         void    SetPlayerColor(uint8_t id) { m_playerColor = id; }
         
@@ -92,7 +105,6 @@ namespace Server {
         void SendChatMessage(const Network::ChatMessageS2CPacket& packet);
         
         // Send keep-alive
-        void SendKeepAlive(uint64_t id);
         
         // Handle keep-alive response (public for listener)
         void HandleKeepAliveResponse(const std::vector<uint8_t>& payload);
@@ -276,13 +288,43 @@ namespace Server {
         // previous handler has returned.
         std::vector<std::unique_ptr<Network::IPacketListener>> m_retiredListeners;
         
-        // Keep-alive tracking
-        uint64_t m_lastKeepAliveId = 0;
-        uint64_t m_keepAliveSequence = 0;
-        bool m_awaitingKeepAlive = false;
-        std::chrono::steady_clock::time_point m_lastKeepAliveSent;
-        std::chrono::steady_clock::time_point m_lastKeepAliveReceived;
-        std::chrono::steady_clock::time_point m_lastPacketReceived;
+        // ── Keep-alive, MC ServerCommonPacketListenerImpl.java:45-50 ───────
+        //
+        // Field names deliberately match MC's. Atomic because — unlike the old
+        // design — the RESPONSE is handled on the network I/O thread while the
+        // challenge is sent from the tick thread, exactly as MC does it
+        // (handleKeepAlive is one of the only two methods in that class with no
+        // ensureRunningOnSameThread call, so it runs inline on the Netty
+        // thread). MC's plain fields are a benign data race under the JMM; in
+        // C++ a torn read is genuinely undefined, so these are atomics.
+        // Relaxed throughout: nothing is published through them, only the flag
+        // itself matters.
+
+        // MC keepAliveTime — ONE timestamp serving as both "last challenge
+        // sent" and "interval start", which is what makes a stalled tick
+        // thread freeze the send and the timeout together instead of letting
+        // the deadline run out underneath a frozen server.
+        std::atomic<int64_t>  m_keepAliveTime{0};
+        std::atomic<bool>     m_keepAlivePending{false};
+        std::atomic<uint64_t> m_keepAliveChallenge{0};
+        // MC latency — EMA of the round trip in ms, (latency * 3 + time) / 4.
+        std::atomic<int32_t>  m_latencyMs{0};
+        // Last inbound FRAME of any kind. MC's analogue is netty's
+        // ReadTimeoutHandler, which counts bytes off the socket rather than
+        // watching for one particular packet.
+        std::atomic<int64_t>  m_lastPacketReceivedMs{0};
+
+        // MC's isSingleplayerOwner, cached per connection. Deliberately NOT a
+        // transport property — see the note on NetworkConnection::IsLoopback.
+        std::atomic<bool>     m_isSingleplayerOwner{false};
+        // Set from the I/O thread when a bad keep-alive arrives; the tick
+        // thread performs the teardown. See HandleKeepAliveResponse.
+        std::atomic<bool>     m_pendingTimeoutDisconnect{false};
+
+        static int64_t NowMs() {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
         
         // Activity tracking
         std::chrono::steady_clock::time_point m_lastActivity;
@@ -297,10 +339,15 @@ namespace Server {
         // Packet registry for this connection
         Network::PacketRegistry m_packetRegistry;
         
-        // Timeout settings
-        static constexpr auto KEEP_ALIVE_INTERVAL = std::chrono::seconds(15);
-        static constexpr auto CONNECTION_TIMEOUT = std::chrono::seconds(30);
-        static constexpr auto LOGIN_TIMEOUT = std::chrono::seconds(10);
+        // MC ServerCommonPacketListenerImpl.java:38 LATENCY_CHECK_INTERVAL.
+        // ONE interval: a challenge goes out every 15 s, and if one is still
+        // outstanding when the next 15 s elapses the connection is dropped.
+        // There is no second, longer keep-alive window in MC.
+        static constexpr int64_t KEEP_ALIVE_INTERVAL_MS = 15000;
+        // Netty's ReadTimeoutHandler (MC ServerConnectionListener.java:67) —
+        // a byte-level watchdog on inbound frames, NOT a keep-alive timer.
+        static constexpr int64_t READ_TIMEOUT_MS = 30000;
+        static constexpr int64_t LOGIN_TIMEOUT_MS = 30000;
     };
     
     using ServerConnectionPtr = std::shared_ptr<ServerConnection>;

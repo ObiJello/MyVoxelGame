@@ -1,0 +1,36 @@
+{
+  "chunks_compared": 9,
+  "total_mismatches": 2,
+  "by_class": {
+    "wrong-block": 2
+  },
+  "by_type": [
+    {
+      "class": "wrong-block",
+      "type": "minecraft:water",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:dripstone_block",
+      "count": 1
+    }
+  ],
+  "samples": {
+    "wrong-block|minecraft:water": [
+      "chunk(34, 37) local(7,39,5) world(551,39,597) java=minecraft:water[level=0] cpp=minecraft:dripstone_block"
+    ],
+    "wrong-block|minecraft:dripstone_block": [
+      "chunk(34, 37) local(7,36,5) world(551,36,597) java=minecraft:dripstone_block cpp=minecraft:stone"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        34,
+        37
+      ],
+      "count": 2
+    }
+  ]
+}

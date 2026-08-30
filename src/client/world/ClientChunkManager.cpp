@@ -1,4 +1,5 @@
 // File: src/client/world/ClientChunkManager.cpp
+#include <cstdint>
 #include "ClientChunkManager.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/core/Log.hpp"
@@ -81,85 +82,6 @@ namespace Client {
     // ========================================================================
 
     
-    void ClientChunkManager::LoadChunk(Game::Math::ChunkPos chunkPos, const Network::SerializedChunkData& serializedData) {
-        PROFILE_ZONE;
-        ASSERT_MAIN_THREAD();
-        Log::Debug("PIPELINE: LoadChunk START for chunk (%d, %d) with %zu bytes", 
-                  chunkPos.x, chunkPos.z, serializedData.GetTotalSize());
-        
-        // Get or create client chunk
-        auto it = m_chunks.find(chunkPos);
-        if (it == m_chunks.end()) {
-            // Create new client chunk
-            Log::Debug("PIPELINE: Creating new ClientChunk for (%d, %d)", chunkPos.x, chunkPos.z);
-            auto clientChunk = std::make_unique<ClientChunk>(chunkPos);
-            it = m_chunks.emplace(chunkPos, std::move(clientChunk)).first;
-        } else {
-            Log::Debug("PIPELINE: Using existing ClientChunk for (%d, %d)", chunkPos.x, chunkPos.z);
-        }
-        
-        ClientChunk* chunk = it->second.get();
-        
-        // Deserialize chunk data
-        Log::Debug("PIPELINE: Deserializing chunk data for (%d, %d)", chunkPos.x, chunkPos.z);
-        chunk->chunkData = DeserializeChunkData(serializedData);
-        if (!chunk->chunkData) {
-            Log::Error("PIPELINE: Failed to deserialize chunk data for (%d, %d)", chunkPos.x, chunkPos.z);
-            return;
-        }
-        
-        Log::Debug("PIPELINE: Chunk data deserialized successfully for (%d, %d), %zu sections created",
-                  chunkPos.x, chunkPos.z, chunk->chunkData->GetSectionCount());
-
-        // Initialize ALL 24 sections for proper neighbor culling (Minecraft-style)
-        for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-            auto& sectionInfo = chunk->sectionInfos[sectionY];
-            sectionInfo.lastMeshJob.reset(); // Clear any old task reference
-
-            if (chunk->chunkData->HasSection(sectionY)) {
-                // Section has data — reset all state for fresh meshing
-                sectionInfo.hasCpuData = true;
-                sectionInfo.isAllAir = false;
-                sectionInfo.state = SectionState::LOADED;
-                sectionInfo.version++;
-                sectionInfo.meshingVersion = 0;
-                sectionInfo.builtOnce = false;
-                sectionInfo.dirty = true;
-                
-                // Also update legacy dirty set for compatibility
-                chunk->dirtySections.insert(sectionY);
-                m_chunksWithDirtySections.insert(chunkPos);
-            } else {
-                // Section is empty (all air) — reset state
-                sectionInfo.hasCpuData = true;
-                sectionInfo.isAllAir = true;
-                sectionInfo.state = SectionState::LOADED;
-                sectionInfo.version++;
-                sectionInfo.meshingVersion = 0;
-                sectionInfo.builtOnce = false;
-                sectionInfo.dirty = false;
-            }
-        }
-        
-        // Transition to LOADED state
-        TransitionChunkState(chunk, ChunkState::LOADED);
-        
-        // Mark neighbor chunks' sections as dirty for proper face culling
-        MarkNeighborSectionsDirty(chunkPos);
-        
-        // Count how many sections have data vs are empty
-        int nonEmptyCount = 0;
-        for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
-            if (!chunk->sectionInfos[sy].isAllAir) {
-                nonEmptyCount++;
-            }
-        }
-        
-        Log::Debug("PIPELINE: LoadChunk COMPLETE for chunk (%d, %d) - %d non-empty sections, %zu dirty sections", 
-                  chunkPos.x, chunkPos.z, nonEmptyCount, chunk->dirtySections.size());
-    }
-
-
     void ClientChunkManager::UnloadChunk(Game::Math::ChunkPos chunkPos) {
         PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
@@ -167,10 +89,14 @@ namespace Client {
 
         // Mark neighbor chunks' sections as dirty BEFORE unloading
         // This ensures they rebuild their meshes to show previously culled faces
-        MarkNeighborSectionsDirty(chunkPos);
+        {
+            PROFILE_ZONE_N("Unload.NeighborsDirty");
+            MarkNeighborSectionsDirty(chunkPos);
+        }
         
         // Cancel in-flight mesh tasks per-section (Minecraft-style per-task cancellation)
         {
+            PROFILE_ZONE_N("Unload.CancelJobs");
             auto chunkIt = m_chunks.find(chunkPos);
             if (chunkIt != m_chunks.end()) {
                 for (int sy = 0; sy < 24; ++sy) {
@@ -185,16 +111,19 @@ namespace Client {
         
         // Drop any pending diffs for this chunk
         if (m_pendingDiffs) {
+            PROFILE_ZONE_N("Unload.Diffs");
             m_pendingDiffs->DropChunkDiffs(chunkPos);
         }
 
         // Clean up GPU resources (vertex/index buffers) before erasing chunk data
         if (::Render::g_clientMeshManager) {
+            PROFILE_ZONE_N("Unload.GPUData");
             ::Render::g_clientMeshManager->RemoveChunkGPUData(chunkPos);
         }
 
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end()) {
+            PROFILE_ZONE_N("Unload.Erase");
             m_chunks.erase(it);
             Log::Debug("Unloaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
         }
@@ -220,8 +149,66 @@ namespace Client {
             if (fromPlayer) sectionInfo.dirtyFromPlayer = true;
             it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
             m_chunksWithDirtySections.insert(chunkPos);
+            m_schedulerSkip = 0;
+            // Mass destruction: after enough section changes, force one
+            // authoritative full BFS rebuild. The incremental path only ADDS
+            // reachable sections; a blast that re-shapes the neighbourhood
+            // needs the conservative pre-blast answer thrown away too, and
+            // without this that only happened when the camera moved.
+            // The section just became see-through to the BFS (dirty = open,
+            // see SectionOcclusionGraph::BuildInput) — seed a propagation so
+            // the partial update walks through it THIS frame instead of
+            // waiting for a full rebuild.
+            if (::Render::g_chunkRenderer) {
+                ::Render::g_chunkRenderer->SchedulePropagationFrom(chunkPos, sectionY);
+            }
+            if (++m_dirtyMarksSinceRebuild >= 256) {
+                m_dirtyMarksSinceRebuild = 0;
+                if (::Render::g_chunkRenderer) {
+                    ::Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+                }
+            }
             Log::Debug("Marked chunk (%d, %d) section %d as dirty (version now %u)",
                       chunkPos.x, chunkPos.z, sectionY, sectionInfo.version);
+        }
+    }
+
+    void ClientChunkManager::RefreshSectionEmptiness(ClientChunk& chunk, int sectionY) {
+        ASSERT_MAIN_THREAD();
+        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) return;
+        if (!chunk.chunkData) return;
+
+        auto& sectionInfo = chunk.sectionInfos[sectionY];
+
+        // Re-derive rather than assign `false` on a non-air write: this has to
+        // handle the reverse too. Mining the last block out of a section makes
+        // it all-air again, and a section left wrongly marked NON-air is
+        // rendered as an opaque BFS blocker (visBits 0 while unmeshed), which
+        // hides everything behind it. ChunkSection::IsAllAir is O(1) — a
+        // single-value palette test — so this is cheap enough for every write,
+        // which is the only discipline that keeps the mirror honest.
+        const Game::ChunkSection* section = chunk.chunkData->GetSection(sectionY);
+        const bool nowAllAir = (section == nullptr) || section->IsAllAir();
+        if (nowAllAir == sectionInfo.isAllAir) return;
+
+        sectionInfo.isAllAir = nowAllAir;
+        // Same promotion as on load. Never cleared when a section stops being
+        // air: MC's state machine only moves UNCOMPILED -> EMPTY -> compiled,
+        // and a section that gains blocks is marked dirty below and will build.
+        if (nowAllAir) sectionInfo.meshResolvedEmpty = true;
+
+        // The cell's BFS inputs just changed — `renderable` flips, and so does
+        // whether it counts as fully see-through. Seed a propagation so the
+        // graph picks it up this frame instead of waiting for the next full
+        // rebuild (which only happens on an 8-block camera move).
+        //
+        // This matters more than it looks: with the default chunk-builder mode
+        // the visible list is the ONLY mesh-candidate source
+        // (`needDirtyWalk` is false), so a section that is not in the list is
+        // never even handed to the mesher. Until the graph learns the section
+        // is renderable, marking it dirty accomplishes nothing.
+        if (::Render::g_chunkRenderer) {
+            ::Render::g_chunkRenderer->SchedulePropagationFrom(chunk.position, sectionY);
         }
     }
 
@@ -237,6 +224,7 @@ namespace Client {
                 it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
             }
             m_chunksWithDirtySections.insert(chunkPos);
+            m_schedulerSkip = 0;
             Log::Debug("Marked all sections in chunk (%d, %d) as dirty", chunkPos.x, chunkPos.z);
         }
     }
@@ -322,7 +310,16 @@ namespace Client {
         ASSERT_MAIN_THREAD();
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end()) {
-            it->second->UpdateAccessTime();
+            // No access stamp. `lastAccessTime` was written here and read
+            // NOWHERE in the tree — a dead field whose only effect was a
+            // steady_clock::now() on the hottest call in the client.
+            //
+            // GetChunk backs every block query the client makes, so at a
+            // hundred thousand primed TNT each doing collision reads it landed
+            // at 851 of 6,090 samples on the main thread: 14% of the client,
+            // and 57% of MoveApproximate, spent in mach_continuous_time.
+            // A `sample` profile found it; no zone would have, because it sat
+            // inside an accessor nobody would think to instrument.
             return it->second.get();
         }
         return nullptr;
@@ -419,92 +416,6 @@ namespace Client {
     // ========================================================================
     // INTERNAL METHODS
     // ========================================================================
-
-    std::shared_ptr<Game::Chunk> ClientChunkManager::DeserializeChunkData(const Network::SerializedChunkData& serializedData) {
-        auto chunk = std::make_shared<Game::Chunk>();
-        
-        // Deserialize chunk data from the packet
-        if (serializedData.blockData.empty()) {
-            Log::Debug("Empty block data in serialized chunk, creating empty chunk");
-            return chunk;
-        }
-        
-        Log::Debug("Deserializing chunk data: {} bytes, compression type: {}",
-                  serializedData.blockData.size(), serializedData.compressionType);
-        
-        // Handle different compression types
-        const std::vector<uint8_t>* blockData = &serializedData.blockData;
-        std::vector<uint8_t> decompressedData;
-        
-        if (serializedData.compressionType != 0) {
-            // TODO: Implement decompression for other compression types
-            Log::Warning("Compression type {} not implemented, treating as uncompressed",
-                       serializedData.compressionType);
-        }
-        
-        // Deserialize sections from block data
-        const uint8_t* dataPtr = blockData->data();
-        size_t dataOffset = 0;
-        size_t totalDataSize = blockData->size();
-        
-        Log::Debug("Starting deserialization: {} total bytes", totalDataSize);
-        
-        // Process each section
-        for (int sectionIndex = 0; sectionIndex < Game::Math::SECTIONS_PER_CHUNK; ++sectionIndex) {
-            // Check if we have enough data for a full section
-            size_t sectionSize = 16 * 16 * 16 * sizeof(uint16_t); // 8192 bytes per section
-            
-            if (dataOffset + sectionSize > totalDataSize) {
-                // Not enough data for this section, it's likely empty
-                Log::Debug("Section {} has no data (offset {} + {} > {})",
-                         sectionIndex, dataOffset, sectionSize, totalDataSize);
-                break;
-            }
-            
-            // Check if this section contains any non-air blocks
-            const uint16_t* sectionBlocks = reinterpret_cast<const uint16_t*>(dataPtr + dataOffset);
-            bool hasBlocks = false;
-            
-            // Quick scan to see if section has any blocks
-            for (size_t i = 0; i < 16 * 16 * 16; ++i) {
-                if (sectionBlocks[i] != static_cast<uint16_t>(Game::BlockID::Air)) {
-                    hasBlocks = true;
-                    break;
-                }
-            }
-            
-            if (hasBlocks) {
-                // Create and populate the section
-                chunk->EnsureSection(sectionIndex);
-                auto* section = chunk->GetSection(sectionIndex);
-                
-                if (section) {
-                    // Per voxel: the section's storage is a paletted container
-                    // now, so there is no flat array to memcpy into.
-                    const uint16_t* src = reinterpret_cast<const uint16_t*>(sectionBlocks);
-                    for (int y = 0; y < Game::ChunkSection::SIZE; ++y) {
-                        for (int z = 0; z < Game::ChunkSection::SIZE; ++z) {
-                            for (int x = 0; x < Game::ChunkSection::SIZE; ++x) {
-                                section->Set(x, y, z, src[y * 256 + z * 16 + x]);
-                            }
-                        }
-                    }
-                    (void)sectionSize;
-
-                    Log::Debug("Deserialized section {} with block data", sectionIndex);
-                } else {
-                    Log::Debug("Failed to create section {} during deserialization", sectionIndex);
-                }
-            }
-            
-            dataOffset += sectionSize;
-        }
-        
-        Log::Debug("Chunk deserialization completed: {} sections processed, {} bytes consumed",
-                  Game::Math::SECTIONS_PER_CHUNK, dataOffset);
-        
-        return chunk;
-    }
 
     void ClientChunkManager::TransitionChunkState(ClientChunk* chunk, ChunkState newState) {
         if (!chunk) {
@@ -615,8 +526,29 @@ namespace Client {
         int localZ = pos.z & 0xF;
         int sectionY = (pos.y + 64) >> 4;  // Convert to section index
 
+        // Read the outgoing block BEFORE the write — the end-portal index has
+        // to know whether a portal is being removed, and there is no other
+        // record of what used to be here.
+        const Game::BlockID prevBlockId =
+            chunk->chunkData->GetBlock(localX, pos.y, localZ);
+
         // Set the block in the chunk
         chunk->chunkData->SetBlock(localX, pos.y, localZ, blockId, stateIndex);
+
+        // Keep the render-side emptiness mirror true. This is the whole reason
+        // a block placed into a section that was air at chunk-load time used to
+        // be solid and invisible — see RefreshSectionEmptiness.
+        RefreshSectionEmptiness(*chunk, sectionY);
+
+        // Patch ClientChunk::endPortals in place rather than rescanning. Every
+        // ordinary edit costs the two comparisons below and nothing else; only
+        // an edit that actually involves a portal touches the vector.
+        if (prevBlockId == Game::BlockID::EndPortal && blockId != Game::BlockID::EndPortal) {
+            auto& list = chunk->endPortals;
+            list.erase(std::remove(list.begin(), list.end(), pos), list.end());
+        } else if (prevBlockId != Game::BlockID::EndPortal && blockId == Game::BlockID::EndPortal) {
+            chunk->endPortals.push_back(pos);
+        }
 
         // Mark section as dirty for remeshing
         MarkSectionDirty(chunkPos, sectionY, fromPlayer);
@@ -707,6 +639,10 @@ namespace Client {
                 // Reset to default state for ground-up load
                 sectionInfo.hasCpuData = true;  // We'll know the state after parsing
                 sectionInfo.isAllAir = true;    // Assume air until proven otherwise
+                // Not resolved yet either — "assume air" is a placeholder, and
+                // promoting on it would let the load tracker call a section
+                // ready before its blocks have been parsed.
+                sectionInfo.meshResolvedEmpty = false;
                 sectionInfo.state = SectionState::LOADED;
                 sectionInfo.version = 0;
                 sectionInfo.dirty = false;
@@ -714,62 +650,84 @@ namespace Client {
             }
         }
         
-        // Apply section data
-        int sectionIndex = 0;
-        for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK; ++y) {
-            if (packet.primaryBitmask & (1 << y)) {
-                if (sectionIndex < packet.sections.size()) {
-                    const auto& sectionData = packet.sections[sectionIndex];
-                    
-                    // Ensure section exists
-                    chunk->chunkData->EnsureSection(y);
-                    auto* section = chunk->chunkData->GetSection(y);
-                    
-                    if (section && !sectionData.IsEmpty()) {
-                        // MC LevelChunkSection.read: hand the wire's bits,
-                        // palette and words straight to the container. No
-                        // per-voxel unpacking — the words ARE the storage.
-                        Game::PalettedContainer states(
-                            Game::PaletteStrategy::ForBlockStates(Game::kBlockStateBits),
-                            Game::BlockState{}.RawId());
-                        Game::PalettedContainer biomes = Game::ChunkSection::MakeBiomeContainer();
+        // Apply section data.
+        //
+        // Positional and total: `sections` is exactly SECTIONS_PER_CHUNK long
+        // (the deserializer resizes to it), section Y is the index, and there
+        // is no bitmask to consult — MC LevelChunk.replaceWithPacketData reads
+        // the sections back in the same fixed order they were written.
+        //
+        // Every section is DECODED, including all-air ones. The guard here
+        // used to be `if (section && !sectionData.IsEmpty())`, and IsEmpty was
+        // `blockCount == 0` — so an all-air section's decode was skipped
+        // wholesale, taking `AdoptBiomes` with it. That is precisely why the
+        // sky had no biomes: the block data being empty says nothing about
+        // whether the biome container is.
+        for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK &&
+                        y < static_cast<int>(packet.sections.size()); ++y) {
+            const auto& sectionData = packet.sections[y];
+            auto* section = chunk->chunkData->GetSection(y);
+            if (!section) continue;   // out-of-range only; unreachable here
 
-                        auto stateWords  = sectionData.states.words;
-                        auto statePal    = sectionData.states.palette;
-                        auto biomeWords  = sectionData.biomes.words;
-                        auto biomePal    = sectionData.biomes.palette;
+            // MC LevelChunkSection.read: hand the wire's bits, palette and
+            // words straight to the container. No per-voxel unpacking — the
+            // words ARE the storage.
+            Game::PalettedContainer states(
+                Game::PaletteStrategy::ForBlockStates(Game::kBlockStateBits),
+                Game::BlockState{}.RawId());
+            Game::PalettedContainer biomes = Game::ChunkSection::MakeBiomeContainer();
 
-                        const bool okStates = states.ReadFrom(
-                            sectionData.states.bits, std::move(statePal), std::move(stateWords));
-                        const bool okBiomes = biomes.ReadFrom(
-                            sectionData.biomes.bits, std::move(biomePal), std::move(biomeWords));
+            // MOVE the wire buffers into the containers. The packet is this
+            // handler's to consume (it is destroyed right after apply), and
+            // the copies were most of ApplyChunkData — which sets the client
+            // batch budget (7 ms / cost per chunk), i.e. the whole
+            // server->client chunk rate for saved areas.
+            auto& mutableSection = const_cast<Network::ChunkDataS2CPacket::SectionData&>(sectionData);
+            auto stateWords  = std::move(mutableSection.states.words);
+            auto statePal    = std::move(mutableSection.states.palette);
+            auto biomeWords  = std::move(mutableSection.biomes.words);
+            auto biomePal    = std::move(mutableSection.biomes.palette);
 
-                        if (okStates && okBiomes) {
-                            section->AdoptStates(std::move(states));
-                            section->AdoptBiomes(std::move(biomes));
+            const bool okStates = states.ReadFrom(
+                sectionData.states.bits, std::move(statePal), std::move(stateWords));
+            const bool okBiomes = biomes.ReadFrom(
+                sectionData.biomes.bits, std::move(biomePal), std::move(biomeWords));
 
-                            auto& sectionInfo = chunk->sectionInfos[y];
-                            sectionInfo.hasCpuData = true;
-                            sectionInfo.isAllAir = section->IsAllAir();
-                            sectionInfo.version++;        // 0->1 on first load, +1 on updates
-                            sectionInfo.state = SectionState::LOADED;
-                            sectionInfo.dirty = true;     // Needs meshing
+            if (!okStates || !okBiomes) {
+                Log::Warning("Failed to decode section %d for chunk (%d, %d)",
+                             y, chunkPos.x, chunkPos.z);
+                continue;
+            }
 
-                            chunk->dirtySections.insert(y);
-                            m_chunksWithDirtySections.insert(chunkPos);
-                        } else {
-                            Log::Warning("Failed to decode section %d for chunk (%d, %d)",
-                                       y, chunkPos.x, chunkPos.z);
-                        }
-                    }
-                    
-                    sectionIndex++;
-                }
-            } else if (packet.groundUpContinuous) {
-                // For ground-up loads, sections not in bitmask are empty
-                auto& sectionInfo = chunk->sectionInfos[y];
-                sectionInfo.version++;  // Still increment version for neighbor culling
-                // hasCpuData and isAllAir already set to true in initialization
+            section->AdoptStates(std::move(states));
+            section->AdoptBiomes(std::move(biomes));
+
+            auto& sectionInfo = chunk->sectionInfos[y];
+            sectionInfo.hasCpuData = true;
+            sectionInfo.isAllAir = section->IsAllAir();
+            sectionInfo.version++;        // 0->1 on first load, +1 on updates
+            sectionInfo.state = SectionState::LOADED;
+
+            // Only sections with something in them are worth compiling. This
+            // is the one place the emptiness of the BLOCK data still matters,
+            // and it is deliberately separate from the decode above: without
+            // the split, every chunk arrival would queue 24 mesh jobs instead
+            // of the ~8 that can produce geometry, and the extra 16 would be
+            // dropped one stage later for having nothing to draw.
+            if (!sectionInfo.isAllAir) {
+                sectionInfo.dirty = true;
+                chunk->dirtySections.insert(y);
+                m_chunksWithDirtySections.insert(chunkPos);
+                m_schedulerSkip = 0;
+            } else {
+                // MC SectionOcclusionGraph.java:259 —
+                //     sectionMesh.compareAndSet(UNCOMPILED, EMPTY)
+                // The section stays uncompiled and undrawn, but it is now
+                // RESOLVED rather than pending. Without this the section has no
+                // terminal state at all: not dirty, so never scheduled; never
+                // scheduled, so never builtOnce; and anything waiting on it
+                // waits forever. See SectionInfo::meshResolvedEmpty.
+                sectionInfo.meshResolvedEmpty = true;
             }
         }
         
@@ -809,7 +767,13 @@ namespace Client {
         
         // Apply any pending diffs for this chunk
         ApplyPendingDiffsForChunk(chunkPos, chunk);
-        
+
+        // End-portal index for EndPortalRenderer. Rebuilt AFTER the diffs,
+        // because those write straight into the chunk (they don't go through
+        // SetBlockLocal) and would otherwise not be reflected. A partial
+        // (non-groundUp) update rescans too: it can have replaced any section.
+        RebuildEndPortalIndex(*chunk);
+
         // Mark all dirty sections for meshing
         for (int section : chunk->dirtySections) {
             // TODO: Queue mesh rebuild for this section
@@ -818,6 +782,47 @@ namespace Client {
         }
     }
     
+    void ClientChunkManager::RebuildEndPortalIndex(ClientChunk& chunk) {
+        chunk.endPortals.clear();
+        if (!chunk.chunkData) return;
+
+        for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+            const Game::ChunkSection* section = chunk.chunkData->GetSection(sy);
+            if (!section) continue;
+
+            // Palette-membership pre-test. A section's palette is at most a
+            // few dozen state ids, so this rejects every ordinary section for
+            // the cost of a short linear scan instead of 4096 container reads
+            // — which is what makes rebuilding on every chunk arrival free.
+            // A section that has overflowed to the global palette has no
+            // palette to test, so it falls through to the full walk.
+            const Game::PalettedContainer& states = section->States();
+            if (!states.IsGlobalPalette()) {
+                bool present = false;
+                for (uint32_t rawState : states.Palette()) {
+                    if (Game::BlockState::FromRawId(rawState).Block() == Game::BlockID::EndPortal) {
+                        present = true;
+                        break;
+                    }
+                }
+                if (!present) continue;
+            }
+
+            const int baseY = Game::Math::WorldCoordinates::SectionCoordsToWorldY(sy, 0);
+            for (int y = 0; y < Game::Math::SECTION_HEIGHT; ++y) {
+                for (int z = 0; z < Game::Math::CHUNK_SIZE_Z; ++z) {
+                    for (int x = 0; x < Game::Math::CHUNK_SIZE_X; ++x) {
+                        if (section->GetBlockID(x, y, z) != Game::BlockID::EndPortal) continue;
+                        chunk.endPortals.push_back({
+                            chunk.position.x * Game::Math::CHUNK_SIZE_X + x,
+                            baseY + y,
+                            chunk.position.z * Game::Math::CHUNK_SIZE_Z + z});
+                    }
+                }
+            }
+        }
+    }
+
     void ClientChunkManager::ApplyPendingDiffsForChunk(Game::Math::ChunkPos chunkPos, ClientChunk* chunk) {
         if (!m_pendingDiffs || !chunk || !chunk->chunkData) {
             return;
@@ -841,8 +846,18 @@ namespace Client {
                 int sectionY = (blockPos.y + 64) >> 4;
                 
                 chunk->chunkData->SetBlock(localX, blockPos.y, localZ, change.blockId, change.blockState);
-                chunk->dirtySections.insert(sectionY);
-                m_chunksWithDirtySections.insert(chunkPos);
+
+                // This used to insert straight into `dirtySections` and stop
+                // there, which is not enough on either count. The scheduler
+                // skips a candidate whose `si.dirty` is false and whose
+                // `version` has not moved past `meshingVersion`, so a diff
+                // applied this way was written into the chunk and never
+                // compiled; and, like every other write path, it has to
+                // refresh the emptiness mirror or a diff that fills a
+                // previously-air section is invisible. MarkSectionDirty does
+                // both halves of the first, this does the second.
+                RefreshSectionEmptiness(*chunk, sectionY);
+                MarkSectionDirty(chunkPos, sectionY);
 
                 Log::Debug("Applied pending block change at (%d, %d, %d) to block %d",
                          blockPos.x, blockPos.y, blockPos.z, static_cast<int>(change.blockId));
@@ -856,6 +871,7 @@ namespace Client {
                 int sectionY = (update.pos.y + 64) >> 4;
                 chunk->dirtySections.insert(sectionY);
                 m_chunksWithDirtySections.insert(chunkPos);
+                m_schedulerSkip = 0;
             }
         }
         
@@ -942,6 +958,47 @@ namespace Client {
         // visibleSections walk MC does unconditionally every frame.
         auto workerPool = Threading::g_clientWorkerPool.get();
         if (!workerPool) return;
+        // Nothing dirty anywhere -> nothing to schedule. Every path that sets
+        // SectionInfo::dirty also inserts into m_chunksWithDirtySections, so
+        // this is exact, and it removes a per-frame walk of every visible
+        // section (8k+ hash lookups, 1.3-2.9 ms/frame: 11% of the GL main
+        // thread and 41% of the VK one in a fully loaded view, 2026-08-29).
+        if (m_chunksWithDirtySections.empty()) return;
+        // Idle backoff: a pass that found nothing to submit skips the next
+        // three frames (the visible walk costs ~1.5 ms in a loaded view and
+        // MC walks visibleSections every frame). Any dirty event resets it,
+        // so block edits and chunk loads are never delayed; only a camera
+        // turn onto already-dirty sections can wait up to 3 frames.
+        if (m_schedulerSkip > 0) { --m_schedulerSkip; return; }
+        // Eligibility pre-pass over the DIRTY set (small: hundreds), before
+        // the visible walk (large: every section in view). A loaded view keeps
+        // its outer ring dirty forever (no neighbours -> cannot mesh), so
+        // "dirty set empty" never happens; "no dirty section is eligible" is
+        // the steady state, and then the visible walk has nothing to find.
+        // Eligibility changes only through MarkSectionDirty / chunk loads
+        // (which re-dirty neighbours), so skipping is exact.
+        {
+            size_t eligible = 0;
+            Game::Math::ChunkPos nbPos{INT32_MIN, INT32_MIN}; bool nbAll = false;
+            for (const auto& chunkPos : m_chunksWithDirtySections) {
+                auto chunkIt = m_chunks.find(chunkPos);
+                if (chunkIt == m_chunks.end() || !chunkIt->second->chunkData) continue;
+                ClientChunk* chunk = chunkIt->second.get();
+                for (int sectionY : chunk->dirtySections) {
+                    if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
+                    const auto& si = chunk->sectionInfos[sectionY];
+                    if (!si.dirty || si.meshingVersion == si.version) continue;
+                    if (!si.builtOnce) {
+                        if (chunkPos != nbPos) { nbPos = chunkPos; nbAll = HasAllNeighborChunks(chunkPos); }
+                        if (!nbAll) continue;
+                    }
+                    ++eligible;
+                    break;
+                }
+                if (eligible) break;
+            }
+            if (eligible == 0) return;
+        }
 
         // Chunk-builder mode — MC's Options.prioritizeChunkUpdates, same three
         // values and the same default (NONE / fully threaded).
@@ -988,10 +1045,20 @@ namespace Client {
 
         if (kScheduleFromVisible && ::Render::g_chunkRenderer) {
             const auto& visible = ::Render::g_chunkRenderer->GetMainViewSections();
+            Game::Math::ChunkPos lastPos{INT32_MIN, INT32_MIN};
+            ClientChunk* lastChunk = nullptr;
             for (const auto& vs : visible) {
-                auto vIt = m_chunks.find(vs.chunkPos);
-                if (vIt == m_chunks.end()) continue;
-                ClientChunk* chunk = vIt->second.get();
+                // 24 sections share a chunk; a one-entry memo dodges most of
+                // the per-section hash lookups.
+                ClientChunk* chunk;
+                if (vs.chunkPos == lastPos) {
+                    chunk = lastChunk;
+                } else {
+                    auto vIt = m_chunks.find(vs.chunkPos);
+                    chunk = (vIt == m_chunks.end()) ? nullptr : vIt->second.get();
+                    lastPos = vs.chunkPos; lastChunk = chunk;
+                }
+                if (!chunk) continue;
                 if (!chunk || !chunk->chunkData) continue;
                 if (vs.sectionY < 0 || vs.sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
 
@@ -1026,7 +1093,14 @@ namespace Client {
         // of MC's rebuildSectionSync. Anything already collected above is
         // filtered out by the dirty/meshingVersion checks in the submit loop, so
         // the overlap costs nothing but a skipped iteration.
-        const bool needDirtyWalk = !usedVisibleList || chunkBuilderMode != 0;
+        // ALWAYS also walk the dirty set. The visible list alone is a
+        // deadlock for mass destruction: a section the BFS culled with its
+        // pre-explosion mask is not in the list, so it never re-meshes, so
+        // its mask never updates, so it stays culled — until a camera move
+        // forces a full rebuild, which is exactly the "have to look around
+        // for it to render" symptom. Dirty sections are bounded and drain as
+        // they build; the sort below still prioritises by distance.
+        const bool needDirtyWalk = true;
         for (auto dirtyIt = m_chunksWithDirtySections.begin();
              needDirtyWalk && dirtyIt != m_chunksWithDirtySections.end(); ) {
             const Game::Math::ChunkPos chunkPos = *dirtyIt;
@@ -1058,10 +1132,17 @@ namespace Client {
                 // When the visible list already supplied candidates, this pass
                 // exists only for the player's own edits — everything else is
                 // visibility-gated, MC-style.
-                if (usedVisibleList && !si.dirtyFromPlayer) continue;
 
                 // Same admission test as above (MC applies it in one loop).
                 if (!si.builtOnce && !HasAllNeighborChunks(chunkPos)) continue;
+                // MC compiles only visibleSections plus the player's own edits
+                // (LevelRenderer.compileSections). This walk used to admit EVERY
+                // dirty section — the whole loaded world meshed before it was
+                // looked at, and turning around no longer got priority. Keep
+                // the walk for what it was added for (a section culled with a
+                // stale pre-explosion mask), but only near the player, where
+                // that case actually happens: 3 chunks.
+                if (usedVisibleList && !si.dirtyFromPlayer && xzDistSq > 48.0f * 48.0f) continue;
 
                 const float dy = (-64.0f + sectionY * 16.0f + 8.0f) - playerPosition.y;
                 // Squared distance with Y attenuated (0.1 factor squared = 0.01)
@@ -1186,7 +1267,13 @@ namespace Client {
             // No permit taken here. The job goes onto the compile queue and a
             // worker claims a pipeline slot when it actually starts the work —
             // ClientWorkerPool::WorkerLoop, mirroring MC's runTask()/bufferPool.
-            if (workerPool->SubmitMeshJobWithSnapshot(snapshot)) {
+            std::shared_ptr<Render::MeshJobData> evictedJob;
+            if (workerPool->SubmitMeshJobWithSnapshot(snapshot, &evictedJob)) {
+                if (evictedJob) {
+                    // Displaced by a nearer section: back to dirty so it is
+                    // scheduled again once the queue has room.
+                    NoteMeshBuildFailed(evictedJob->chunkPos, evictedJob->sectionY, evictedJob->generation);
+                }
                 if (sectionInfo.lastMeshJob) {
                     sectionInfo.lastMeshJob->Cancel();
                 }
@@ -1208,6 +1295,7 @@ namespace Client {
             }
         }
 
+        m_schedulerSkip = m_meshCandidates.empty() ? 3u : 0u;
         if (sectionsSubmitted > 0) {
             // DistinctSections is the sharing ratio: with 27 sections per region
             // it should sit far below 27x the job count, and close to the job
@@ -1301,7 +1389,17 @@ namespace Client {
         }
         
         auto& sectionInfo = chunk->sectionInfos[result.sectionY];
-        
+
+        // OUT-OF-ORDER GUARD: two jobs for the same section can complete on
+        // different workers in either order. Uploading an older generation
+        // OVER a newer one would leave the GPU holding blocks that no longer
+        // exist while the version bookkeeping says it is current — and since
+        // nothing would ever reschedule it (not dirty, meshingVersion ==
+        // version), permanently.
+        if (result.generation < sectionInfo.uploadedVersion) {
+            return { MeshApplyAction::Drop_Replaced };
+        }
+
         // Accept any result for a loaded chunk — better to show something than nothing.
         // FinalizeSectionUpload will mark it dirty for re-mesh if the version changed.
         
@@ -1316,7 +1414,8 @@ namespace Client {
         return { MeshApplyAction::Upload };
     }
     
-    void ClientChunkManager::FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY, uint8_t neighborMask) {
+    void ClientChunkManager::FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY,
+                                                   uint8_t neighborMask, uint32_t builtVersion) {
         ASSERT_MAIN_THREAD();
         
         auto it = m_chunks.find(chunkPos);
@@ -1336,6 +1435,17 @@ namespace Client {
         // Mark section as ready
         sectionInfo.state = SectionState::READY;
         sectionInfo.builtOnce = true;
+        // The job only exists to be cancellable; once its result is applied it
+        // is dead. Holding it kept every built section's RegionSnapshot (its 27
+        // section copies) alive for the section's whole lifetime — measured
+        // 2026-08-29: gigabytes at render distance 32, and freeing them all at
+        // once on a far teleport was 174 ms of a 204 ms client stall.
+        sectionInfo.lastMeshJob.reset();
+        // The GPU now holds the mesh+mask for this content version. If the
+        // section changed again while this mesh was in flight, version has
+        // moved past builtVersion and the occlusion BFS keeps treating the
+        // mask as stale (see SectionInfo::uploadedVersion).
+        sectionInfo.uploadedVersion = builtVersion;
 
         // If version changed while meshing (neighbor loaded/unloaded), keep dirty for re-mesh
         // but still show this mesh result so the player sees something
@@ -1344,6 +1454,7 @@ namespace Client {
             sectionInfo.dirty = true;
             chunk->dirtySections.insert(sectionY);
             m_chunksWithDirtySections.insert(chunkPos);
+            m_schedulerSkip = 0;
         } else {
             sectionInfo.dirty = false;
             chunk->dirtySections.erase(sectionY);
@@ -1355,6 +1466,31 @@ namespace Client {
                   prevMask != neighborMask ? "YES" : "NO");
     }
     
+    void ClientChunkManager::NoteMeshBuildFailed(Game::Math::ChunkPos chunkPos, int sectionY,
+                                                 uint32_t builtVersion) {
+        ASSERT_MAIN_THREAD();
+        if (sectionY < 0 || sectionY >= 24) return;
+        auto it = m_chunks.find(chunkPos);
+        if (it == m_chunks.end() || !it->second) return;
+        auto& chunk = it->second;
+        auto& si = chunk->sectionInfos[sectionY];
+        si.lastMeshJob.reset();
+        // Only the LATEST job's failure needs recovery: a cancelled job always
+        // has a newer one behind it (cancellation happens at the moment the
+        // newer job is submitted), and that newer job carries the section
+        // forward. But when the failed result IS the latest — its generation
+        // matches what the scheduler recorded — nothing else will ever remesh
+        // this section: dirty is false and meshingVersion == version reads as
+        // "in flight" forever. Re-dirty it so the scheduler retries.
+        if (si.meshingVersion == builtVersion && !si.dirty) {
+            si.dirty = true;
+            si.meshingVersion = 0;
+            chunk->dirtySections.insert(sectionY);
+            m_chunksWithDirtySections.insert(chunkPos);
+            m_schedulerSkip = 0;
+        }
+    }
+
     void ClientChunkManager::ClearAllChunks() {
         ASSERT_MAIN_THREAD();
         m_chunks.clear();

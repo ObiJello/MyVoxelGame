@@ -323,8 +323,18 @@ namespace Render {
             m_frame.fogRdEnd = 1e9f;
         }
 
+        // Nether / End: no day-night cycle at all. Applied after the whole
+        // timeline composition rather than by branching around it, so the one
+        // place that decides "does time of day affect the look" is here.
+        if (m_constantAmbientLight) {
+            m_frame.skyBrightness  = 1.0f;
+            m_frame.starBrightness = 0.0f;
+            m_frame.sunriseColor   = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+        }
+
         // Dark disc below the horizon line (ClientLevel.getHorizonHeight = 63).
-        m_showDarkDisc = (cameraY - 63.0f) < 0.0f;
+        // Never in a dimension with no sky — there is no horizon to be below.
+        m_showDarkDisc = !m_constantAmbientLight && (cameraY - 63.0f) < 0.0f;
     }
 
 } // namespace Render

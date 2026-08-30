@@ -40,6 +40,12 @@ namespace Render {
     void GuiRenderState::SubmitQuad(const QuadCommand& cmd) {
         QuadCommand c = cmd;
         c.zOrder = m_currentZOrder;
+        // Inherit the active GUI scissor (see SetActiveScissor) unless the
+        // emitter stamped its own.
+        if (!c.hasScissor && m_scissorOn) {
+            c.scissor = m_activeScissor;
+            c.hasScissor = true;
+        }
         m_currentNode->quads.push_back(c);
     }
 

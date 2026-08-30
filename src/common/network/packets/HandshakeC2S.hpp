@@ -14,6 +14,23 @@ namespace Server {
 
 namespace Network {
 
+    // THE protocol version, for both ends. Bump it whenever the wire format
+    // changes in a way an older peer cannot read.
+    //
+    // 754 was MC 1.16.5's number, inherited when the handshake was written.
+    // 755 is the first version of OUR protocol that diverges from it: the
+    // chunk packet lost its section bitmask and became positional (every
+    // section, ascending Y, no mask — matching modern MC, which dropped the
+    // mask when it moved to 3D biomes). A 754 peer reading a 755 chunk stream
+    // consumes the first section's data as a VarInt bitmask and every section
+    // after it lands at the wrong Y.
+    //
+    // That failure is silent and looks like corrupt terrain, which is why the
+    // check on this is a DISCONNECT and not a warning. It used to log and
+    // carry on "for testing", which was survivable only while the two ends
+    // could not actually disagree about anything.
+    inline constexpr int32_t kProtocolVersion = 755;
+
     class HandshakeC2SPacket : public IC2SPacket {
     public:
         // Fields match Minecraft wire format exactly

@@ -1,5 +1,6 @@
 #include "world/biome/TheEndBiomeSource.h"
 #include "random/LegacyRandomSource.h"
+#include "levelgen/DensityFunction.h"
 #include <cmath>
 
 // Reference: net/minecraft/world/level/biome/TheEndBiomeSource.java
@@ -31,50 +32,35 @@ void TheEndBiomeSource::initBiomes() {
 
 BiomeKey TheEndBiomeSource::getNoiseBiome(
     int32_t quartX, int32_t quartY, int32_t quartZ,
-    const Climate::Sampler& /* sampler */
+    const Climate::Sampler& sampler
 ) {
-    // Reference: TheEndBiomeSource.java getNoiseBiome() lines 30-48
-
-    // Convert quart coordinates to block coordinates for distance check
-    int32_t blockX = quartX << 2;  // x * 4
-    int32_t blockZ = quartZ << 2;  // z * 4
-
-    // Check if we're in the main island area
-    // Reference: line 32-33
-    // if ((long)chunkX * (long)chunkX + (long)chunkZ * (long)chunkZ <= 4096L)
-    //     return THE_END
-
-    // Convert to chunk coordinates for distance check
-    int32_t chunkX = blockX >> 4;  // floor divide by 16
+    // Reference: TheEndBiomeSource.java getNoiseBiome() (MODERN 1.19+/26.1
+    // algorithm: EROSION density from the end router, NOT the legacy
+    // SimplexNoise height value).
+    int32_t blockX = quartX << 2;
+    int32_t blockY = quartY << 2;
+    int32_t blockZ = quartZ << 2;
+    int32_t chunkX = blockX >> 4;
     int32_t chunkZ = blockZ >> 4;
 
-    int64_t distSq = static_cast<int64_t>(chunkX) * static_cast<int64_t>(chunkX)
-                   + static_cast<int64_t>(chunkZ) * static_cast<int64_t>(chunkZ);
-
-    if (distSq <= 4096L) {
-        // We're in the main island
+    if (static_cast<int64_t>(chunkX) * static_cast<int64_t>(chunkX) +
+        static_cast<int64_t>(chunkZ) * static_cast<int64_t>(chunkZ) <= 4096LL) {
         return BiomeKeys::THE_END;
     }
 
-    // Get height value at this position
-    // Reference: line 36
-    // float heightValue = this.getHeightValue(islandNoise, chunkX * 2 + 1, chunkZ * 2 + 1);
-    float heightValue = getHeightValue(chunkX * 2 + 1, chunkZ * 2 + 1);
+    int32_t weirdBlockX = (chunkX * 2 + 1) * 8;
+    int32_t weirdBlockZ = (chunkZ * 2 + 1) * 8;
+    minecraft::density::DensityFunction::SinglePointContext context(
+        weirdBlockX, blockY, weirdBlockZ);
+    double heightValue = sampler.erosion()->compute(context);
 
-    // Select biome based on height value
-    // Reference: lines 37-47
-    if (heightValue > 40.0f) {
-        // High areas: END_HIGHLANDS
+    if (heightValue > 0.25) {
         return BiomeKeys::END_HIGHLANDS;
-    } else if (heightValue >= 0.0f) {
-        // Medium areas: END_MIDLANDS
+    } else if (heightValue >= -0.0625) {
         return BiomeKeys::END_MIDLANDS;
-    } else if (heightValue < -20.0f) {
-        // Small scattered islands
-        return BiomeKeys::SMALL_END_ISLANDS;
     } else {
-        // Low areas near islands: END_BARRENS
-        return BiomeKeys::END_BARRENS;
+        return heightValue < -0.21875 ? BiomeKeys::SMALL_END_ISLANDS
+                                      : BiomeKeys::END_BARRENS;
     }
 }
 

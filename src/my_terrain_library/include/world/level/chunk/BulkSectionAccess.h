@@ -38,6 +38,8 @@ class BulkSectionAccess {
 private:
     levelgen::WorldGenLevel* m_level;
     std::unordered_map<int64_t, LevelChunkSection*> m_acquiredSections;
+    int32_t m_minSectionY = 0;
+    int32_t m_maxSectionY = 0;
     LevelChunkSection* m_lastSection = nullptr;
     int64_t m_lastSectionKey = std::numeric_limits<int64_t>::min();
 
@@ -48,6 +50,8 @@ public:
      */
     explicit BulkSectionAccess(levelgen::WorldGenLevel* level)
         : m_level(level)
+        , m_minSectionY(core::SectionPos::blockToSectionCoord(level->getMinY()))
+        , m_maxSectionY(core::SectionPos::blockToSectionCoord(level->getMaxY()))
     {}
 
     /**
@@ -65,6 +69,8 @@ public:
     BulkSectionAccess(BulkSectionAccess&& other) noexcept
         : m_level(other.m_level)
         , m_acquiredSections(std::move(other.m_acquiredSections))
+        , m_minSectionY(other.m_minSectionY)
+        , m_maxSectionY(other.m_maxSectionY)
         , m_lastSection(other.m_lastSection)
         , m_lastSectionKey(other.m_lastSectionKey)
     {
@@ -83,8 +89,9 @@ public:
         // Calculate section index from Y coordinate
         // Reference: LevelHeightAccessor.java getSectionIndex()
         int32_t sectionY = core::SectionPos::blockToSectionCoord(pos.getY());
-        int32_t minSectionY = core::SectionPos::blockToSectionCoord(m_level->getMinY());
-        int32_t maxSectionY = core::SectionPos::blockToSectionCoord(m_level->getMaxY());
+        // Cached at construction: two virtual calls per candidate block before.
+        const int32_t minSectionY = m_minSectionY;
+        const int32_t maxSectionY = m_maxSectionY;
         int32_t sectionIndex = sectionY - minSectionY;
 
         // Bounds check - section index must be valid

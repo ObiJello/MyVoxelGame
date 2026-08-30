@@ -216,14 +216,15 @@ namespace Network {
         // ASYNC OPERATIONS (INTERNAL)
         // ========================================================================
 
-        // Start async read for packet header
+        // Start a bulk read into m_readBuffer (see StartRead).
         void StartRead();
-        
-        // Handle header read completion
-        void HandleReadHeader(const error_code& error, size_t bytesTransferred);
-        
-        // Handle payload read completion
-        void HandleReadPayload(const error_code& error, size_t bytesTransferred);
+
+        // Parse every complete frame out of the buffer, then read again.
+        void HandleReadSome(const error_code& error, size_t bytesTransferred);
+
+        // One wire frame (compression stage + id + payload). False when the
+        // frame disconnected the connection.
+        bool ProcessFrame(const uint8_t* frame, size_t frameSize);
         
         // Process send queue
         void ProcessSendQueue();
@@ -253,24 +254,33 @@ namespace Network {
         net::any_io_executor m_strand;
         
         // Incoming packet queue (thread-safe, written by I/O thread, read by main thread)
-        MessageQueue<IncomingPacket> m_incomingPackets{2048}; // Allow up to 2048 packets queued
+        // UNBOUNDED. The number is a high-water DIAGNOSTIC, not a cap —
+        // nothing is ever refused or dropped. MC's equivalent
+        // (PacketProcessor.packetsToBeHandled) is an unbounded
+        // ConcurrentLinkedQueue for the same reason: a decoded packet has
+        // already been consumed from the TCP stream, so discarding it is a
+        // silent, unrecoverable desync. See MessageQueue.hpp.
+        MessageQueue<IncomingPacket> m_incomingPackets{2048};
         
         // Connection state
         std::atomic<ConnectionState> m_state{ConnectionState::DISCONNECTED};
         
-        // Read buffer
+        // Read buffer: [0, m_readFill) holds bytes received and not yet
+        // consumed as whole frames. Strand-confined.
         std::vector<uint8_t> m_readBuffer;
-        size_t m_readPos = 0;
-        
-        // Current packet being read
+        size_t m_readFill = 0;
+        static constexpr size_t kReadChunk     = 256 * 1024;
+        // Upper bound on one coalesced write (see ProcessSendQueue).
+        static constexpr size_t kMaxWriteBytes = 256 * 1024;
+
+        // Scratch for the frame being decoded
         RawPacket m_currentPacket;
-        bool m_readingHeader = true;
 
         // < 0 means no compression stage in either direction.
         // -1 = compression off. STRAND-CONFINED: written by EnableCompression
         // (server: the SetCompression send-completion hook; client: the read
         // handler for that packet) and read by FrameForWire and
-        // HandleReadPayload — all on m_strand. That confinement is what makes
+        // ProcessFrame — all on m_strand. That confinement is what makes
         // the switch atomic with respect to the byte stream in both directions;
         // do not set it from a game thread.
         int  m_compressionThreshold = -1;

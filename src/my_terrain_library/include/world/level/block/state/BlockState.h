@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 
 #include "StateHolder.h"
 #include "StateDefinition.h"
@@ -48,6 +49,8 @@ private:
     bool m_isReplaceableByTrees;
     bool m_blocksMotionResult;  // cached blocksMotion() (identifier + solid flags are ctor-fixed)
     std::string m_identifier;  // Block name like "minecraft:stone"
+    mutable std::atomic<int8_t> m_hasBlockEntityCache{-1};   // -1 unknown, see hasBlockEntity
+    mutable std::atomic<uint16_t> m_faceSturdyCache{0};      // bits 8+d = known, bit d = sturdy
 
 public:
     /**
@@ -161,6 +164,14 @@ public:
     int getLightEmission() const;
 
     bool canBeReplaced() const { return m_isReplaceable; }
+
+    /**
+     * Whether this block carries a block entity (Java EntityBlock).
+     * Reference: BlockStateBase.hasBlockEntity(); drives the worldgen
+     * pending-BE tag ({id:"DUMMY"}) in WorldGenRegion.setBlock.
+     */
+    bool hasBlockEntity() const;
+    bool computeHasBlockEntity() const;
     bool hasWaterFluid() const;
     bool hasSourceWaterFluid() const;
     bool hasAnyFluid() const;
@@ -170,6 +181,11 @@ public:
     bool isCollisionShapeFullBlock(const minecraft::levelgen::WorldGenLevel& level, const core::BlockPos& pos) const;
 
     bool isFaceSturdy(
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos,
+        core::Direction direction
+    ) const;
+    bool computeIsFaceSturdy(
         const minecraft::levelgen::WorldGenLevel& level,
         const core::BlockPos& pos,
         core::Direction direction

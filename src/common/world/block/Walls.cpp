@@ -197,10 +197,9 @@ namespace Game {
     } // namespace
 
     bool IsWallBlock(BlockID id) {
-        // Ends-with, not contains: "_wall_sign", "_wall_torch", "_wall_banner"
-        // and the coral wall fans all carry "_wall_" in the middle and are not
-        // walls at all.
-        return EndsWith(BlockRegistry::Get(id).modelName, "_wall");
+        // Precomputed. The ends-with rule (so "_wall_torch" and the coral wall
+        // fans are excluded) is applied once, at table build.
+        return (BlockRegistry::FamilyBits(id) & BlockRegistry::FamilyWall) != 0;
     }
 
     WallSide WallSideOf(BlockState state, Direction dir) {

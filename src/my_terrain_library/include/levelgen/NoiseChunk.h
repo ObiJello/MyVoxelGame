@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdlib>
+#include <string>
 
 #include "levelgen/DensityFunction.h"
 #include "levelgen/NoiseRouter.h"
@@ -353,6 +355,40 @@ private:
 
     // Wrapped density functions (Java line 35 - Map<DensityFunction, DensityFunction>)
     std::unordered_map<density::DensityFunction*, density::DensityFunction*> m_wrapped;
+    // Java's `wrapped` sharing, see DensityFunction::mapAll: original router
+    // node -> its mapped node for THIS chunk. Shared across every WrapVisitor
+    // the chunk creates (constructor, fullNoiseValue, cachedClimateSampler),
+    // exactly as Java's single per-NoiseChunk map is.
+    std::unordered_map<const density::DensityFunction*, density::DensityFunction*> m_mapMemo;
+    // Java's record-keyed `wrapped` map: structural key -> wrapper (see wrap()).
+    std::unordered_map<std::string, density::DensityFunction*> m_structural;
+    // mappedKey(original) -> mapped result: lets DensityFunction::mapAll skip
+    // constructing a node equal to one already mapped (see mapAll).
+    std::unordered_map<std::string, density::DensityFunction*> m_preMap;
+public:
+    density::DensityFunction* lookupPreMapped(const std::string& key) const {
+        if (s_noDedupe) return nullptr;
+        auto it = m_preMap.find(key);
+        return it == m_preMap.end() ? nullptr : it->second;
+    }
+    void rememberPreMapped(const std::string& key, density::DensityFunction* mapped) {
+        if (!s_noDedupe) m_preMap.emplace(key, mapped);
+    }
+    static inline const bool s_noDedupe = std::getenv("OBEY_NO_STRUCT_DEDUPE") != nullptr;   // A/B switch
+private:
+public:
+    density::DensityFunction* lookupMapped(const density::DensityFunction* original) const {
+        auto it = m_mapMemo.find(original);
+        return it == m_mapMemo.end() ? nullptr : it->second;
+    }
+    void rememberMapped(const density::DensityFunction* original, density::DensityFunction* mapped) {
+        m_mapMemo.emplace(original, mapped);
+        // Mapping an already-mapped node is the identity in Java (its record
+        // equals the map key that produced it), so fullNoiseValue's second
+        // mapAll over the wrapped router must not copy the tree again.
+        m_mapMemo.emplace(mapped, mapped);
+    }
+private:
 
     // Interior nodes heap-allocated during mapAll (new Clamp/Ap2/mapped
     // splines, ...). Registered via WrapVisitor's ownership sink; deleted in
@@ -479,31 +515,29 @@ private:
      * Java line 348-350 - inlined for performance
      */
     inline density::DensityFunction* wrap(density::DensityFunction* function) {
-        // Counts every node the mapAll walk visits, vs m_wrapped.size() which is
-        // the number of DISTINCT nodes. The ratio is the DAG re-traversal factor:
-        // mapAll recurses into a shared subtree once per reference, so a graph
-        // with heavy sharing is walked far more than its node count suggests.
-        //
-        // Which of the two numbers is large decides the fix for NC.WrapRouter
-        // (11.03 ms/chunk, 23.3 s/session):
-        //   visits ~= distinct  -> per-node cost dominates (every node does
-        //                          `new` + own() + hash), so arena-allocate.
-        //   visits >> distinct  -> the walk itself dominates, so the recursion
-        //                          needs memoising, not the allocator.
-        ++m_wrapVisits;
         // Use try_emplace for single lookup (like Java's computeIfAbsent)
         auto [it, inserted] = m_wrapped.try_emplace(function, nullptr);
         if (inserted) {
-            it->second = wrapNew(function);
+            // Java: wrapped.computeIfAbsent(function, this::wrapNew) with
+            // RECORD keys — a structurally identical node already wrapped
+            // for this chunk yields the same wrapper (one FlatCache /
+            // Cache2D / NoiseInterpolator per distinct subtree). See
+            // DensityFunction::structuralKey. Measured 2026-08-29 before
+            // this: 5,095 wrapper entries per chunk, every one a miss.
+            if (s_noDedupe) { it->second = wrapNew(function); return it->second; }
+            std::string key;
+            function->structuralKey(key);
+            auto [sit, sinserted] = m_structural.try_emplace(std::move(key), nullptr);
+            if (!sinserted) {
+                it->second = sit->second;
+            } else {
+                DensityFunction* wrapped = wrapNew(function);
+                sit->second = wrapped;
+                it->second = wrapped;
+            }
         }
         return it->second;
     }
-
-public:
-    size_t getWrapVisitCount() const { return m_wrapVisits; }
-    size_t getWrapDistinctCount() const { return m_wrapped.size(); }
-private:
-    size_t m_wrapVisits = 0;
 
     /**
      * Create a new wrapped density function

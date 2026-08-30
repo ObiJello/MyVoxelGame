@@ -1,0 +1,198 @@
+{
+  "chunks_compared": 1,
+  "total_mismatches": 2050,
+  "by_class": {
+    "wrong-block": 1635,
+    "wrong-properties": 2,
+    "missing": 1,
+    "heightmap": 412
+  },
+  "by_type": [
+    {
+      "class": "wrong-block",
+      "type": "minecraft:stone",
+      "count": 1185
+    },
+    {
+      "class": "heightmap",
+      "type": "WS",
+      "count": 208
+    },
+    {
+      "class": "heightmap",
+      "type": "OF",
+      "count": 204
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:coal_ore",
+      "count": 167
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:deepslate",
+      "count": 98
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:diorite",
+      "count": 48
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:granite",
+      "count": 47
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:andesite",
+      "count": 45
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:gravel",
+      "count": 18
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:dirt",
+      "count": 11
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:tuff",
+      "count": 11
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:copper_ore",
+      "count": 4
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:dark_oak_leaves",
+      "count": 1
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:leaf_litter",
+      "count": 1
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:leaf_litter",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:redstone_ore",
+      "count": 1
+    }
+  ],
+  "samples": {
+    "wrong-block|minecraft:stone": [
+      "chunk(59990, -60010) local(1,101,11) world(959841,101,-960149) java=minecraft:stone cpp=minecraft:coal_ore",
+      "chunk(59990, -60010) local(15,27,9) world(959855,27,-960151) java=minecraft:stone cpp=minecraft:coal_ore",
+      "chunk(59990, -60010) local(11,39,4) world(959851,39,-960156) java=minecraft:stone cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(2,100,10) world(959842,100,-960150) java=minecraft:stone cpp=minecraft:coal_ore",
+      "chunk(59990, -60010) local(4,24,11) world(959844,24,-960149) java=minecraft:stone cpp=minecraft:dripstone_block"
+    ],
+    "wrong-block|minecraft:coal_ore": [
+      "chunk(59990, -60010) local(13,91,7) world(959853,91,-960153) java=minecraft:coal_ore cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(6,93,9) world(959846,93,-960151) java=minecraft:coal_ore cpp=minecraft:stone",
+      "chunk(59990, -60010) local(15,26,1) world(959855,26,-960159) java=minecraft:coal_ore cpp=minecraft:andesite",
+      "chunk(59990, -60010) local(13,110,9) world(959853,110,-960151) java=minecraft:coal_ore cpp=minecraft:stone",
+      "chunk(59990, -60010) local(9,97,4) world(959849,97,-960156) java=minecraft:coal_ore cpp=minecraft:stone"
+    ],
+    "wrong-block|minecraft:deepslate": [
+      "chunk(59990, -60010) local(6,-6,3) world(959846,-6,-960157) java=minecraft:deepslate[axis=y] cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(6,-8,14) world(959846,-8,-960146) java=minecraft:deepslate[axis=y] cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(15,4,2) world(959855,4,-960158) java=minecraft:deepslate[axis=y] cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(1,-14,15) world(959841,-14,-960145) java=minecraft:deepslate[axis=y] cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(10,-4,14) world(959850,-4,-960146) java=minecraft:deepslate[axis=y] cpp=minecraft:dripstone_block"
+    ],
+    "wrong-block|minecraft:dirt": [
+      "chunk(59990, -60010) local(13,9,10) world(959853,9,-960150) java=minecraft:dirt cpp=minecraft:pointed_dripstone",
+      "chunk(59990, -60010) local(12,11,15) world(959852,11,-960145) java=minecraft:dirt cpp=minecraft:gold_ore",
+      "chunk(59990, -60010) local(13,12,15) world(959853,12,-960145) java=minecraft:dirt cpp=minecraft:gold_ore",
+      "chunk(59990, -60010) local(9,99,10) world(959849,99,-960150) java=minecraft:dirt cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(9,98,9) world(959849,98,-960151) java=minecraft:dirt cpp=minecraft:dripstone_block"
+    ],
+    "wrong-block|minecraft:tuff": [
+      "chunk(59990, -60010) local(0,-11,5) world(959840,-11,-960155) java=minecraft:tuff cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(0,-18,6) world(959840,-18,-960154) java=minecraft:tuff cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(0,-10,4) world(959840,-10,-960156) java=minecraft:tuff cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(7,-8,7) world(959847,-8,-960153) java=minecraft:tuff cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(1,-18,6) world(959841,-18,-960154) java=minecraft:tuff cpp=minecraft:dripstone_block"
+    ],
+    "wrong-block|minecraft:copper_ore": [
+      "chunk(59990, -60010) local(5,20,3) world(959845,20,-960157) java=minecraft:copper_ore cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(5,20,4) world(959845,20,-960156) java=minecraft:copper_ore cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(0,59,0) world(959840,59,-960160) java=minecraft:copper_ore cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(4,82,12) world(959844,82,-960148) java=minecraft:copper_ore cpp=minecraft:dripstone_block"
+    ],
+    "wrong-block|minecraft:andesite": [
+      "chunk(59990, -60010) local(11,14,4) world(959851,14,-960156) java=minecraft:andesite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(10,14,4) world(959850,14,-960156) java=minecraft:andesite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(13,18,3) world(959853,18,-960157) java=minecraft:andesite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(0,42,6) world(959840,42,-960154) java=minecraft:andesite cpp=minecraft:coal_ore",
+      "chunk(59990, -60010) local(2,40,8) world(959842,40,-960152) java=minecraft:andesite cpp=minecraft:coal_ore"
+    ],
+    "wrong-block|minecraft:granite": [
+      "chunk(59990, -60010) local(10,32,14) world(959850,32,-960146) java=minecraft:granite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(15,29,10) world(959855,29,-960150) java=minecraft:granite cpp=minecraft:coal_ore",
+      "chunk(59990, -60010) local(0,36,2) world(959840,36,-960158) java=minecraft:granite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(13,9,6) world(959853,9,-960154) java=minecraft:granite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(14,28,11) world(959854,28,-960149) java=minecraft:granite cpp=minecraft:coal_ore"
+    ],
+    "wrong-block|minecraft:diorite": [
+      "chunk(59990, -60010) local(8,35,8) world(959848,35,-960152) java=minecraft:diorite cpp=minecraft:pointed_dripstone",
+      "chunk(59990, -60010) local(9,34,7) world(959849,34,-960153) java=minecraft:diorite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(6,1,3) world(959846,1,-960157) java=minecraft:diorite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(11,0,9) world(959851,0,-960151) java=minecraft:diorite cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(6,-2,4) world(959846,-2,-960156) java=minecraft:diorite cpp=minecraft:pointed_dripstone"
+    ],
+    "wrong-block|minecraft:gravel": [
+      "chunk(59990, -60010) local(10,102,9) world(959850,102,-960151) java=minecraft:gravel cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(14,53,7) world(959854,53,-960153) java=minecraft:gravel cpp=minecraft:dirt",
+      "chunk(59990, -60010) local(10,102,10) world(959850,102,-960150) java=minecraft:gravel cpp=minecraft:dripstone_block",
+      "chunk(59990, -60010) local(15,92,9) world(959855,92,-960151) java=minecraft:gravel cpp=minecraft:pointed_dripstone",
+      "chunk(59990, -60010) local(10,102,11) world(959850,102,-960149) java=minecraft:gravel cpp=minecraft:dripstone_block"
+    ],
+    "wrong-properties|minecraft:dark_oak_leaves": [
+      "chunk(59990, -60010) local(15,131,4) world(959855,131,-960156) java=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:leaf_litter": [
+      "chunk(59990, -60010) local(15,125,15) world(959855,125,-960145) java=minecraft:leaf_litter[facing=west,segment_amount=3]"
+    ],
+    "wrong-properties|minecraft:leaf_litter": [
+      "chunk(59990, -60010) local(9,117,13) world(959849,117,-960147) java=minecraft:leaf_litter[facing=east,segment_amount=4] cpp=minecraft:leaf_litter[facing=south,segment_amount=4]"
+    ],
+    "wrong-block|minecraft:redstone_ore": [
+      "chunk(59990, -60010) local(13,12,6) world(959853,12,-960154) java=minecraft:redstone_ore[lit=false] cpp=minecraft:pointed_dripstone"
+    ],
+    "heightmap|OF": [
+      "chunk(59990, -60010) ('OF', 9, 6) java=129 cpp=119",
+      "chunk(59990, -60010) ('OF', 1, 2) java=119 cpp=110",
+      "chunk(59990, -60010) ('OF', 9, 15) java=127 cpp=117",
+      "chunk(59990, -60010) ('OF', 1, 11) java=119 cpp=107",
+      "chunk(59990, -60010) ('OF', 13, 3) java=132 cpp=123"
+    ],
+    "heightmap|WS": [
+      "chunk(59990, -60010) ('WS', 1, 2) java=119 cpp=110",
+      "chunk(59990, -60010) ('WS', 12, 2) java=131 cpp=122",
+      "chunk(59990, -60010) ('WS', 1, 11) java=119 cpp=107",
+      "chunk(59990, -60010) ('WS', 12, 11) java=127 cpp=119",
+      "chunk(59990, -60010) ('WS', 11, 15) java=126 cpp=119"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        59990,
+        -60010
+      ],
+      "count": 2050
+    }
+  ]
+}

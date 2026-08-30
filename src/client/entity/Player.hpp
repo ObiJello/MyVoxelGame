@@ -60,6 +60,10 @@ namespace Game {
         int   health     = 20;
         int   food       = 20;
         float saturation = 5.0f;
+        // XP — synced via SetExperienceS2C (handleSetExperience); the HUD's
+        // bar fill and level number read these each frame.
+        float xpProgress = 0.0f;
+        int   xpLevel    = 0;
         int   air = 300;           // TODO: Sync from server (ticks of air remaining)
         float stepHeight = 0.6f;   // How high the player can step up
 
@@ -217,6 +221,21 @@ namespace Game {
         // Noclip control
         void ToggleNoclip();
         void SetNoclip(bool enabled);
+
+        // Raised whenever a PlayerAbilitiesS2C wrote isFlying / noclip, and
+        // consumed by ClientPlayerController's dirty check.
+        //
+        // Without it the client ECHOES the server's own value straight back as
+        // if it were a local toggle, and on join that echo is stale. The join
+        // sequence sends two abilities packets — a speculative one at login
+        // (derived from the world's default game mode, so flying=false and
+        // noclip=false) and the real one from playerdata a moment later. The
+        // first flips the local flag off, the dirty check fires, and the client
+        // tells the server "noclip=false" — which the server applies to the
+        // ServerPlayer it had just restored to TRUE. If that C2S lands after
+        // the server sent the real state, the server keeps `false`, saves
+        // `false`, and the next rejoin drops the player out of the sky.
+        bool abilitiesSyncedFromServer = false;
         
         // Inventory management
         void SelectSlot(int slot);

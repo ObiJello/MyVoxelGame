@@ -29,7 +29,9 @@ namespace Game {
         AttackDamage,
         AttackKnockback,
         AttackSpeed,
+        ExplosionKnockbackResistance,
         FallDamageMultiplier,
+        FlyingSpeed,
         FollowRange,
         Gravity,
         JumpStrength,
@@ -60,7 +62,10 @@ namespace Game {
         /* AttackDamage         */ { "attack_damage",          2.0,  0.0,  2048.0 },
         /* AttackKnockback      */ { "attack_knockback",       0.0,  0.0,     5.0 },
         /* AttackSpeed          */ { "attack_speed",           4.0,  0.0,  1024.0 },
+        /* ExplosionKnockbackResistance */
+                                   { "explosion_knockback_resistance", 0.0, 0.0, 1.0 },
         /* FallDamageMultiplier */ { "fall_damage_multiplier", 1.0,  0.0,   100.0 },
+        /* FlyingSpeed          */ { "flying_speed",           0.4,  0.0,  1024.0 },
         /* FollowRange          */ { "follow_range",          32.0,  0.0,  2048.0 },
         /* Gravity              */ { "gravity",                0.08, -1.0,    1.0 },
         /* JumpStrength         */ { "jump_strength",          0.42, 0.0,    32.0 },
@@ -103,6 +108,23 @@ namespace Game {
         ZombieSpawnReinf    = 5,
         ZombieRandomKnockback = 6,
         SpiderSpeedEffect   = 7,
+        // Status-effect templates (MC MobEffects.java "effect.<name>" ids).
+        // One id per effect, every level — MC replaces rather than stacks.
+        EffectSpeed         = 8,
+        EffectSlowness      = 9,
+        EffectHaste         = 10,
+        EffectMiningFatigue = 11,
+        EffectStrength      = 12,
+        EffectWeakness      = 13,
+        EffectJumpBoost     = 14,
+        WitchDrinkingSlowdown = 15,  // Witch SPEED_MODIFIER_DRINKING (-0.25)
+        PiglinAttackingSpeed  = 16,  // ZombifiedPiglin SPEED_MODIFIER_ATTACKING (+0.05)
+        // Zombie "reinforcement_callee_charge" — DISTINCT from the caller's
+        // ZombieSpawnReinf id (MC Zombie.java:294,502): a callee later
+        // promoted to caller carries both, so one id must not clobber the
+        // other.
+        ZombieReinfCalleeCharge = 17,
+        EndermanAttackingSpeed  = 18,  // EnderMan SPEED_MODIFIER_ATTACKING (+0.15)
     };
 
     // One attribute on one entity: a base value plus its modifier stack.

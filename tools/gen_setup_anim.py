@@ -47,6 +47,9 @@ STATE_FLOAT = {
     "xRot": "XRot",
     "yRot": "YRot",
     "attackTime": "AttackTime",
+    # IllagerRenderState.attackAnim = entity.getAttackAnim(partialTicks) —
+    # the same 0..1 swing progress attackTime carries everywhere else.
+    "attackAnim": "AttackTime",
     "ageScale": "AgeScale",
     "flapAngle": "Flap",
     "flap": "Flap",
@@ -63,6 +66,68 @@ STATE_FLOAT = {
     # right-handed, which is what MC's default is too.
     "mainArm": "MainArm",
     "attackArm": "MainArm",
+
+    # ── Per-mob render-state floats (see EntityRenderState) ────────────────
+    #
+    # Each is populated by MobRenderer from real entity state where the game
+    # tracks it, and otherwise carries the truthful default for a mob whose
+    # behaviour this port does not run yet (a horse that never rears has
+    # standAnimation 0 — that is MC's value for it, not a stand-in).
+    "squish": "Squish",                            # slime family
+    "flapTime": "FlapTime",                        # phantom
+    "tentacleAngle": "TentacleAngle",              # squid
+    "eatAnimation": "EatAnim",                     # equines
+    "standAnimation": "StandAnim",
+    "feedingAnimation": "FeedingAnim",
+    "playingDeadFactor": "PlayingDead",            # axolotl
+    "inWaterFactor": "InWaterFactor",
+    "onGroundFactor": "OnGroundFactor",
+    "movingFactor": "MovingFactor",
+    "standScale": "StandScale",                    # polar bear
+    "rammingXHeadRot": "RammingXHeadRot",          # goat
+    "attackTicksRemaining": "AttackTicksRemaining",# iron golem, ravager
+    "attackAnimationRemainingTicks": "AttackAnimRemaining",  # hoglin
+    "stunnedTicksRemaining": "StunnedTicks",       # ravager
+    "jumpCompletion": "JumpCompletion",            # rabbit
+    "holdingAnimationProgress": "HoldingProgress", # allay
+    "tendrilAnimation": "TendrilAnim",             # warden
+    "spikesAnimation": "SpikesAnim",               # guardian
+    "tailAnimation": "TailAnim",                   # guardian
+    "entityId": "EntityId",                        # witch nose wiggle
+    "jumpCooldown": "JumpCooldown",                # camel
+    "headRollAngle": "HeadRollAngle",              # wolf
+    "tailAngle": "TailAngle",                      # wolf
+    "lieDownAmount": "LieDown",                    # cat/ocelot
+    "relaxStateOneAmount": "RelaxOne",
+    "sitAmount": "SitAmount",                      # panda
+    "lieOnBackAmount": "LieOnBack",
+    "rollAmount": "RollAmount",                    # panda roll / bee hover roll
+    "crouchAmount": "CrouchAmount",                # fox
+    "peekAmount": "PeekAmount",                    # shulker
+    "spinningProgress": "SpinningProgress",        # allay
+    "sneezeTime": "SneezeTime",                    # panda
+    "lieDownAmountTail": "LieDownTail",            # cat/ocelot
+    "offerFlowerTick": "OfferFlowerTick",          # iron golem
+    "roarAnimation": "RoarAnim",                   # ravager
+    # Shulker head math wants ABSOLUTE head/body yaw, unlike yRot which is
+    # already head-relative-to-body.
+    "yHeadRot": "YHeadRotAbs",
+    "yBodyRot": "YBodyRotAbs",
+    # Per-mob pose enums as ordinals (see ENUM_ORDINALS): armPose is the
+    # illager/piglin arm pose, pose is ParrotModel.Pose.
+    "armPose": "MobArmPose",
+    "pose": "MobPose",
+    # SwingAnimationType ordinal; runtime default WHACK (1) — the empty-hand
+    # swing, which is what every mob in this port attacks with.
+    "swingAnimationType": "SwingAnimType",
+}
+
+# `state.<method>(...)` calls whose value is a compile-time constant in this
+# port, each because the behaviour that would change it does not run yet:
+# getBodyRollAngle is the wolf's shake roll (never shakes -> 0), and bodyItem
+# is the happy ghast's harness slot (never equipped -> isEmpty() true).
+STATE_CONST_CALLS = {
+    "getBodyRollAngle": 0.0,
 }
 
 ARM_SIDE = {"LEFT": 0, "RIGHT": 1}
@@ -94,6 +159,35 @@ STATE_BOOL = {
     # 10x10x10 shell cube shown — hangs off this one boolean, so without it the
     # armadillo plays the roll-up animation and stays armadillo-shaped.
     "isHidingInShell": "IsHidingInShell",
+
+    # ── Per-mob render-state booleans ──────────────────────────────────────
+    "isResting": "IsResting",          # bat
+    "canMove": "CanMove",              # creaking
+    "isSearching": "IsSearching",      # sniffer
+    "isHoldingItem": "IsHoldingItem",  # witch / copper golem
+    "isMoving": "IsMoving",            # dolphin
+    "animateTail": "AnimateTail",      # equines
+    "hasChest": "HasChest",            # donkey/mule/llama
+    "hasLeftHorn": "HasLeftHorn",      # goat
+    "hasRightHorn": "HasRightHorn",
+    "hasEgg": "HasEgg",                # turtle
+    "isOnLand": "IsOnLand",
+    "isAngry": "IsAngry",              # bee/wolf
+    "hasStinger": "HasStinger",        # bee
+    "isSheared": "IsSheared",          # bogged
+    "isUnhappy": "IsUnhappy",          # villager
+    "isCharging": "IsCharging",        # vex
+    "isRidden": "IsRidden",            # strider
+    "isCreepy": "IsCreepy",            # enderman
+    "isDancing": "IsDancing",          # allay/piglin
+    "isFaceplanted": "IsFaceplanted",  # fox
+    "isSwimming": "IsSwimming",        # drowned
+    "isSleeping": "IsSleeping",        # fox/cat
+    "isSpinning": "IsSpinning",        # allay
+    "isLayingEgg": "IsLayingEgg",      # turtle
+    "isSneezing": "IsSneezing",        # panda
+    "isEating": "IsEating",            # panda
+    "isScared": "IsScared",            # panda
 }
 
 # MC HumanoidModel.ArmPose ordinals, mirrored by Render::ArmPose.
@@ -101,6 +195,27 @@ ARM_POSE = {n: i for i, n in enumerate([
     "EMPTY", "ITEM", "BLOCK", "BOW_AND_ARROW", "THROW_TRIDENT",
     "CROSSBOW_CHARGE", "CROSSBOW_HOLD", "SPYGLASS", "TOOT_HORN",
     "BRUSH", "SPEAR"])}
+
+# Enum constants that appear in setupAnim comparisons/switches, as ordinals.
+# Each list is read from its MC declaration order — the switch statements
+# compare against `.ordinal()`, so order is load-bearing. `mobArmPose` is the
+# per-mob ArmPose field (IllagerArmPose / PiglinArmPose — different enums, but
+# the same `state.armPose` field, populated per-mob by the renderer).
+ENUM_ORDINALS = {
+    # AbstractIllager.IllagerArmPose
+    "IllagerArmPose": ["CROSSED", "ATTACKING", "SPELLCASTING", "BOW_AND_ARROW",
+                       "CROSSBOW_HOLD", "CROSSBOW_CHARGE", "CELEBRATING",
+                       "NEUTRAL"],
+    # PiglinArmPose
+    "PiglinArmPose": ["ATTACKING_WITH_MELEE_WEAPON", "CROSSBOW_HOLD",
+                      "CROSSBOW_CHARGE", "ADMIRING_ITEM", "DANCING", "DEFAULT"],
+    # ParrotModel.Pose
+    "Pose": ["FLYING", "STANDING", "SITTING", "PARTY", "ON_SHOULDER"],
+    # world/item/SwingAnimationType — the melee swing flavour. The render
+    # state default (ArmedEntityRenderState) is WHACK, which is what an empty
+    # hand swings with, so that is the runtime default too.
+    "SwingAnimationType": ["NONE", "WHACK", "STAB"],
+}
 
 # Mth / Math calls we implement. argc is fixed per name.
 FUNCS = {
@@ -112,6 +227,7 @@ FUNCS = {
     "wrapDegrees": ("WrapDegrees", 1),
     "triangleWave": ("TriangleWave", 2),
     "square": ("Square", 1),
+    "cube": ("Cube", 1),
     "degreesDifferenceAbs": ("DegDiffAbs", 2),
 }
 
@@ -179,8 +295,13 @@ def value_signature(src, name):
 
 
 def method_signature(src, name):
-    """(params, body) for a void method — used to inline setupAnim's helpers."""
-    m = re.search(r"(?:public|private|protected)\s+(?:static\s+)?void\s+"
+    """(params, body) for a void method — used to inline setupAnim's helpers.
+
+    The optional `<T extends ...>` admits generic statics — AnimationUtils's
+    `static <T extends UndeadRenderState> void animateZombieArms`, which is
+    the whole zombie-family arm pose."""
+    m = re.search(r"(?:public|private|protected)\s+(?:static\s+)?"
+                  r"(?:<[^>]*>\s*)?void\s+"
                   + re.escape(name) + r"\s*\(([^)]*)\)\s*\{", src)
     if not m:
         return None
@@ -347,6 +468,29 @@ class Parser:
         if self.peek()[1] == "(":
             return self.call(path)
 
+        # Indexed reads: `SPIKE_X[spike]` (a static float table — constant
+        # once the index is), and `this.tailParts[0].x` (an indexed part).
+        if self.peek()[1] == "[":
+            self.eat("[")
+            idx = self.logical_or()
+            self.eat("]")
+            if idx[0] != "const":
+                raise Unsupported("index %s" % ".".join(path))
+            k = int(idx[1])
+            arrays = self.ctx.get("arrays") or {}
+            if len(path) <= 2 and path[-1] in arrays:
+                table = arrays[path[-1]]
+                if 0 <= k < len(table):
+                    return ("const", table[k])
+                raise Unsupported("index %s[%d]" % (path[-1], k))
+            if path[0] == "this" and len(path) == 2 and self.peek()[1] == ".":
+                self.eat(".")
+                field = self.eat()
+                if field in PART_FIELDS:
+                    return ("part", self.ctx["part_name"](path[1], k),
+                            PART_FIELDS[field])
+            raise Unsupported("index %s" % ".".join(path))
+
         return self.value(path)
 
     def call(self, path):
@@ -364,6 +508,31 @@ class Parser:
         name = path[-1]
         owner = path[-2] if len(path) > 1 else ""
 
+        # `state.<method>()` whose value is constant in this port — see
+        # STATE_CONST_CALLS. `state.bodyItem.isEmpty()` and friends: no mob
+        # here carries an item, so any state item-stack isEmpty() is true.
+        if path[0] == "state" and name in STATE_CONST_CALLS:
+            return ("const", STATE_CONST_CALLS[name])
+        if path[0] == "state" and name == "isEmpty" and len(path) == 3:
+            return ("const", 1.0)
+        # `state.getMainHandItemState().isEmpty()` — an item-state getter whose
+        # result is only ever tested for emptiness. The MAIN hand is a real
+        # render-state boolean now (vindicator's axe drives the swingWeaponDown
+        # branch of IllagerModel); the off hand stays constant-empty — nothing
+        # in this port dual-wields. Any other use is unsupported.
+        if path[0] == "state" and name in ("getMainHandItemState",
+                                           "getOffhandItemState",
+                                           "getOffHandItemState"):
+            if self.peek()[1] == "." and self.peek(1)[1] == "isEmpty":
+                self.eat(".")
+                self.eat()
+                self.eat("(")
+                self.eat(")")
+                if name == "getMainHandItemState":
+                    return ("not", ("bstate", "HasMainHandItem"))
+                return ("const", 1.0)
+            raise Unsupported("call state.%s" % name)
+
         # `<armPoseExpr>.isTwoHanded()` / `.affectsOffhandPose()`.
         table = {"isTwoHanded": ARM_POSE_TWO_HANDED,
                  "affectsOffhandPose": ARM_POSE_AFFECTS_OFFHAND}.get(name)
@@ -377,11 +546,16 @@ class Parser:
                 expr = ("logic", "||", expr, test)
             return expr
 
-        # A value-returning helper in the same class — MC's
-        # `this.quadraticArmUpdate(x)`. Inlined with its arguments substituted
-        # as SUBTREES, so operator precedence survives.
-        if len(path) == 2 and path[0] == "this" and self.ctx.get("fnbody"):
-            inline = self.ctx["fnbody"](name)
+        # A value-returning helper — same-class (`this.quadraticArmUpdate(x)`,
+        # bare static `getSpikeX(0, ...)`) or class-qualified
+        # (`Ease.outQuart(x)`). Inlined with its arguments substituted as
+        # SUBTREES, so operator precedence survives. Value helpers may call
+        # each other (guardian's getSpikeX -> getSpikeOffset); the depth guard
+        # in value_helper stops runaway recursion.
+        if self.ctx.get("fnbody") and len(path) <= 2 \
+                and owner not in ("Mth", "Math", "state"):
+            inline = self.ctx["fnbody"](
+                name, owner if owner not in ("this", "") else None)
             if inline:
                 return inline(args)
 
@@ -402,6 +576,11 @@ class Parser:
             return ("const", float(ARM_POSE[path[-1]]))
         if len(path) >= 2 and path[-2] == "HumanoidArm" and path[-1] in ARM_SIDE:
             return ("const", float(ARM_SIDE[path[-1]]))
+        # `AbstractIllager.IllagerArmPose.ATTACKING`, `PiglinArmPose.DANCING`,
+        # `ParrotModel.Pose.PARTY` -> their ordinal, in MC declaration order.
+        if len(path) >= 2 and path[-2] in ENUM_ORDINALS \
+                and path[-1] in ENUM_ORDINALS[path[-2]]:
+            return ("const", float(ENUM_ORDINALS[path[-2]].index(path[-1])))
         if len(path) == 2 and path[0] == "state":
             f = path[1]
             if f in STATE_FLOAT:
@@ -428,6 +607,19 @@ class Parser:
         # `this.<part>.<field>` read — a part's current value.
         if path[0] == "this" and len(path) == 3 and path[2] in PART_FIELDS:
             return ("part", self.ctx["part_name"](path[1]), PART_FIELDS[path[2]])
+        # `<alias>.<field>` read — a part reached through a local ModelPart
+        # variable (`arm.xRot`, `holdingArm.xRot`).
+        if len(path) == 2 and path[1] in PART_FIELDS:
+            try:
+                return ("part", self.ctx["part_name"](path[0]),
+                        PART_FIELDS[path[1]])
+            except Unsupported:
+                pass
+        # `this.<scalar>` read — a model field the bee stores state into
+        # (`this.rollAmount = state.rollAmount`), compiled as a local slot.
+        if path[0] == "this" and len(path) == 2 \
+                and ("this." + path[1]) in self.ctx["locals"]:
+            return ("local", self.ctx["locals"]["this." + path[1]])
         raise Unsupported("value %s" % ".".join(path))
 
 
@@ -442,6 +634,24 @@ BOOL_LOCAL_RE = re.compile(r"^(?:final\s+)?boolean\s+(\w+)\s*=\s*(.+)$", re.S)
 # Statements with no effect on the pose. resetPose is the runtime's job (it runs
 # before the program), and it appears in all 74 models.
 IGNORE_RE = re.compile(r"^(?:this\.)?(?:resetPose|loadPose)\s*\(")
+
+
+def split_args(text):
+    """Split a call's argument text on top-level commas."""
+    out, depth, cur = [], 0, ""
+    for c in text:
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        if c == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += c
+    if cur.strip():
+        out.append(cur.strip())
+    return out
 
 
 def split_statements(body):
@@ -483,22 +693,36 @@ def split_statements(body):
 
 
 class Compiler:
-    def __init__(self, fields, helpers=None, value_fns=None):
+    def __init__(self, fields, helpers=None, value_fns=None, arrays=None,
+                 parts=None, mpart_fns=None):
         self.helpers = helpers
         self.value_fns = value_fns
+        self.mpart_fns = mpart_fns  # ModelPart-returning helper -> body text
         self.fields = fields        # java field name -> mesh part name
+        self.arrays = arrays or {}  # static float table name -> [values]
+        self.parts = parts or set() # mesh part names, for getChild() chains
         self.locals = {}
         self.bools = {}
         self.aliases = {}
         self.nodes = []             # postfix expression nodes
         self.stmts = []             # (kind, ...)
         self.skipped = []
+        self._inline_depth = 0
+        # While inlining a helper's body, the class it was found in — so an
+        # unqualified call inside AnimationUtils.bobArms resolves to
+        # AnimationUtils.bobModelPart, not to a method of the model class.
+        self.helper_owners = []
+        # Locals bound from a LITERAL helper argument (`animateCrossbowHold(
+        # ..., true)`) — the one case where a ModelPart ternary
+        # (`holdingArm = holdingInRightArm ? rightArm : leftArm`) can be
+        # resolved statically. name -> float value.
+        self.const_locals = {}
 
-    def value_helper(self, name):
+    def value_helper(self, name, owner=None):
         """A `private float f(args) { return <expr>; }` helper, as an inliner."""
         if self.value_fns is None:
             return None
-        got = self.value_fns(name)
+        got = self.value_fns(name, owner)
         if not got:
             return None
         params, body = got
@@ -508,10 +732,18 @@ class Compiler:
         src = m.group(1)
 
         def inline(args, _params=params, _src=src):
-            ctx = {"locals": self.locals, "part_name": self.part_name,
-                   "bools": self.bools, "expand": self.expand_bool,
-                   "fnbody": None, "argtrees": dict(zip(_params, args))}
-            return Parser(tokenize(_src), ctx).parse()
+            if self._inline_depth > 6:
+                raise Unsupported("helper recursion")
+            self._inline_depth += 1
+            try:
+                ctx = {"locals": self.locals, "part_name": self.part_name,
+                       "bools": self.bools, "expand": self.expand_bool,
+                       "arrays": self.arrays,
+                       "fnbody": self.value_helper,
+                       "argtrees": dict(zip(_params, args))}
+                return Parser(tokenize(_src), ctx).parse()
+            finally:
+                self._inline_depth -= 1
 
         return inline
 
@@ -521,7 +753,8 @@ class Compiler:
         depth[0] += 1
         try:
             ctx = {"locals": self.locals, "part_name": self.part_name,
-                   "bools": self.bools, "expand": self.expand_bool}
+                   "bools": self.bools, "expand": self.expand_bool,
+                   "arrays": self.arrays, "fnbody": self.value_helper}
             return Parser(tokenize(text), ctx).parse()
         finally:
             depth[0] -= 1
@@ -540,6 +773,7 @@ class Compiler:
     def compile_expr(self, text):
         ctx = {"locals": self.locals, "part_name": self.part_name,
                "bools": self.bools, "expand": self.expand_bool,
+               "arrays": self.arrays,
                "fnbody": self.value_helper}
         tree = Parser(tokenize(text), ctx).parse()
         first = len(self.nodes)
@@ -604,7 +838,10 @@ class Compiler:
         if s.startswith("for"):
             self.for_statement(s, guard)
             return
-        if s.startswith("while") or s.startswith("switch"):
+        if s.startswith("switch"):
+            self.switch_statement(s, guard)
+            return
+        if s.startswith("while"):
             raise Unsupported("control flow")
 
         if s.startswith("if"):
@@ -624,6 +861,35 @@ class Compiler:
             self.aliases[m.group(1)] = m.group(2)
             return
 
+        # `ModelPart holdingArm = holdingInRightArm ? rightArm : leftArm` —
+        # a part ternary whose condition is a compile-time constant (a
+        # literal helper argument). AnimationUtils.animateCrossbowHold and
+        # friends select their arms this way.
+        m = re.fullmatch(r"(?:final\s+)?ModelPart\s+(\w+)\s*=\s*(\w+)\s*"
+                         r"\?\s*(\w+)\s*:\s*(\w+)", s)
+        if m and m.group(2) in self.const_locals:
+            pick = m.group(3) if self.const_locals[m.group(2)] != 0.0 \
+                              else m.group(4)
+            self.aliases[m.group(1)] = self.aliases.get(pick, pick)
+            return
+
+        # `ModelPart attackArm = this.getArm(state.attackArm)` — a part-
+        # returning helper whose body is `return <arm> == HumanoidArm.LEFT ?
+        # this.A : this.B`. Every mob in this port is right-handed (mainArm is
+        # the RIGHT constant — see STATE_FLOAT), so the RIGHT branch is the
+        # statically-resolved alias.
+        m = re.fullmatch(r"(?:final\s+)?ModelPart\s+(\w+)\s*=\s*"
+                         r"this\.(\w+)\(\s*state\.(?:attackArm|mainArm)\s*\)", s)
+        if m and self.mpart_fns is not None:
+            body = self.mpart_fns(m.group(2))
+            if body:
+                bm = re.search(r"return\s+\w+\s*==\s*HumanoidArm\.LEFT\s*\?"
+                               r"\s*this\.(\w+)\s*:\s*this\.(\w+)\s*;", body)
+                if bm:
+                    self.aliases[m.group(1)] = bm.group(2)
+                    return
+            raise Unsupported("call this.%s" % m.group(2))
+
         m = LOCAL_RE.match(s)
         if m:
             first, count = self.compile_expr(m.group(2))
@@ -632,19 +898,57 @@ class Compiler:
             self.stmts.append(("SetLocal", idx, "", "", first, count, guard))
             return
 
-        m = re.fullmatch(r"this\.(\w+)\s*\((.*)\)", s, re.S)
+        # Bare re-assignment of an existing local — the decompiler's
+        # `bounce = bounce * bounce ...`, salmon's `amplitudeMultiplier = 1.3F`,
+        # the camel's `yRot = Mth.clamp(yRot, -30, 30)`.
+        m = re.fullmatch(r"(\w+)\s*=\s*(.+)", s, re.S)
+        if m and m.group(1) in self.locals:
+            first, count = self.compile_expr(m.group(2))
+            self.stmts.append(("SetLocal", self.locals[m.group(1)], "", "",
+                               first, count, guard))
+            return
+
+        # A void helper call: `this.setupSpikes(...)`, a bare static
+        # `setupHeadRotation(state, this.rightHead, 0)`, or a cross-class
+        # `GhastModel.animateTentacles(state, this.tentacles)` /
+        # `AnimationUtils.bobModelPart(this.rightArm, ...)`. ModelPart and
+        # ModelPart[] arguments bind as part aliases so the inlined body's
+        # writes land on the real parts.
+        m = re.fullmatch(r"(?:(\w+)\.)?(\w+)\s*\((.*)\)", s, re.S)
         if m and self.helpers is not None:
-            name, argtext = m.group(1), m.group(2)
-            got = self.helpers(name)
+            qual, name, argtext = m.groups()
+            if qual == "this":
+                qual = None
+            owner = qual or (self.helper_owners[-1] if self.helper_owners else None)
+            got = self.helpers(name, owner)
             if got:
-                params, body = got
-                args = [a.strip() for a in argtext.split(",")] if argtext.strip() else []
+                params, body, owner_cls = got
+                args = split_args(argtext)
                 saved = dict(self.locals)
                 savedb = dict(self.bools)
-                # `state` is passed through by name, so bind the rest positionally.
+                saveda = dict(self.aliases)
+                savedf = dict(self.fields)
+                savedc = dict(self.const_locals)
+                # `state` is passed through by name; ModelPart (array) args
+                # bind as aliases; the rest positionally as locals.
                 for pname, arg in zip(params, args):
                     if pname == "state" or arg == "state":
                         continue
+                    # `this.rightArm`, or a bare name that is itself a bound
+                    # alias/param of the enclosing helper (bobArms passing its
+                    # own ModelPart params down to bobModelPart).
+                    pm = re.fullmatch(r"(?:this\.)?(\w+)", arg)
+                    if pm:
+                        fname = self.aliases.get(pm.group(1), pm.group(1))
+                        if fname in self.fields:
+                            self.aliases[pname] = fname
+                            continue
+                        arr = [k for k in self.fields
+                               if re.fullmatch(re.escape(fname) + r"\[\d+\]", k)]
+                        if arr:
+                            for k in arr:
+                                self.fields[pname + k[len(fname):]] = self.fields[k]
+                            continue
                     try:
                         first, count = self.compile_expr(arg)
                     except Unsupported:
@@ -652,10 +956,27 @@ class Compiler:
                     idx = len(self.locals)
                     self.locals[pname] = idx
                     self.stmts.append(("SetLocal", idx, "", "", first, count, guard))
-                self.run(body, guard)
-                self.locals, self.bools = saved, savedb
+                    # A literal argument is also a compile-time constant —
+                    # the ModelPart-ternary resolver keys off it.
+                    if arg in ("true", "false"):
+                        self.const_locals[pname] = 1.0 if arg == "true" else 0.0
+                    else:
+                        try:
+                            self.const_locals[pname] = float(arg.rstrip("FfDdLl"))
+                        except ValueError:
+                            pass
+                self.helper_owners.append(owner_cls)
+                try:
+                    self.run(body, guard)
+                finally:
+                    self.helper_owners.pop()
+                    self.locals, self.bools = saved, savedb
+                    self.aliases, self.fields = saveda, savedf
+                    self.const_locals = savedc
                 return
-            raise Unsupported("call this.%s" % name)
+            if qual is None:
+                raise Unsupported("call this.%s" % name)
+            raise Unsupported("call %s.%s" % (qual, name))
 
         # `++angle` / `angle++`. Loop-carried accumulators: the blaze's rod
         # angle advances once per iteration, so dropping the increment gave all
@@ -677,6 +998,68 @@ class Compiler:
             op = {"+=": "+", "-=": "-", "*=": "*"}[m.group(2)]
             first, count = self.compile_expr("%s %s (%s)" % (m.group(1), op, m.group(3)))
             self.stmts.append(("SetLocal", idx, "", "", first, count, guard))
+            return
+
+        # `this.nose.setPos(x, y, z)` — three axis writes in one call (witch
+        # nose, shulker lid, wither tail).
+        m = re.fullmatch(r"(?:this\.)?(\w+)\.setPos\s*\((.*)\)", s, re.S)
+        if m:
+            part = self.part_name(m.group(1))
+            axes = split_args(m.group(2))
+            if len(axes) != 3:
+                raise Unsupported("setPos argc %d" % len(axes))
+            for expr, field in zip(axes, ("X", "Y", "Z")):
+                first, count = self.compile_expr(expr)
+                self.stmts.append(("Set", 0, part, field, first, count, guard))
+            return
+
+        # `--this.root.y` / `this.root.y++` — the turtle's shell drop.
+        m = re.fullmatch(r"(--|\+\+)\s*this\.(\w+)\.(\w+)"
+                         r"|this\.(\w+)\.(\w+)\s*(--|\+\+)", s)
+        if m:
+            op = m.group(1) or m.group(6)
+            recv = m.group(2) or m.group(4)
+            field = m.group(3) or m.group(5)
+            if field not in PART_FIELDS:
+                raise Unsupported("field %s" % field)
+            part = self.part_name(recv)
+            first, count = self.compile_expr("1")
+            self.stmts.append(("AddTo" if op == "++" else "SubFrom",
+                               0, part, PART_FIELDS[field], first, count, guard))
+            return
+
+        # `this.head.getChild("left_horn").visible = ...` — the goat's horns.
+        # The child name is a mesh part name directly (they are unique), so it
+        # bypasses the java-field map.
+        m = re.fullmatch(r"this\.\w+((?:\.getChild\(\s*\"[a-z_0-9]+\"\s*\))+)"
+                         r"\.(\w+)\s*(=|\+=|-=|\*=)\s*(.+)", s, re.S)
+        if m:
+            chain, field, op, rhs = m.groups()
+            child = re.findall(r'getChild\(\s*"([a-z_0-9]+)"\s*\)', chain)[-1]
+            if field not in PART_FIELDS:
+                raise Unsupported("field %s" % field)
+            if child not in self.parts:
+                raise Unsupported("part %s" % child)
+            first, count = self.compile_expr(rhs)
+            self.stmts.append((
+                {"=": "Set", "+=": "AddTo", "-=": "SubFrom", "*=": "MulBy"}[op],
+                0, child, PART_FIELDS[field], first, count, guard))
+            return
+
+        # `this.rollAmount = state.rollAmount` — a scalar MODEL field the bee
+        # stores into and reads back. Compiled as a local slot keyed
+        # "this.<name>"; Parser.value resolves reads against the same key.
+        # Must run before ASSIGN_RE, whose backtracking would otherwise parse
+        # it as part "this" field "rollAmount".
+        m = re.fullmatch(r"this\.(\w+)\s*=\s*(.+)", s, re.S)
+        if m and m.group(1) not in self.fields \
+                and m.group(1) not in self.aliases:
+            first, count = self.compile_expr(m.group(2))
+            key = "this." + m.group(1)
+            if key not in self.locals:
+                self.locals[key] = len(self.locals)
+            self.stmts.append(("SetLocal", self.locals[key], "", "",
+                               first, count, guard))
             return
 
         m = ASSIGN_RE.match(s)
@@ -708,14 +1091,50 @@ class Compiler:
             raise Unsupported("control flow")
         body, _ = balanced(body_text, 0)
 
+        def array_len(arr):
+            return len([k for k in self.fields
+                        if re.fullmatch(re.escape(arr) + r"\[\d+\]", k)])
+
+        # Enhanced for over a part array — the squid's
+        # `for (ModelPart tentacle : this.tentacles)`. Each iteration binds
+        # the loop variable to that iteration's part.
+        me = re.fullmatch(r"\s*(?:final\s+)?ModelPart\s+(\w+)\s*:\s*"
+                          r"this\.(\w+)\s*", head)
+        if me:
+            var, arr = me.groups()
+            n = array_len(arr)
+            if n == 0:
+                raise Unsupported("part %s[]" % arr)
+            saved = dict(self.fields)
+            try:
+                for k in range(n):
+                    self.fields[var] = self.fields["%s[%d]" % (arr, k)]
+                    self.run(body, guard)
+            finally:
+                self.fields = saved
+            return
+
         parts = head.split(";")
         if len(parts) != 3:
             raise Unsupported("control flow")
         mi = re.fullmatch(r"\s*(?:int\s+)?(\w+)\s*=\s*(-?\d+)\s*", parts[0])
         mc_ = re.fullmatch(r"\s*(\w+)\s*<\s*(-?\d+)\s*", parts[1])
-        if not mi or not mc_ or mi.group(1) != mc_.group(1):
+        # `i < this.bodyCubes.length` — the bound is the number of indexed
+        # entries the field map has for that array (magma cube, endermite,
+        # and the ghast's inlined tentacle helper).
+        ml = re.fullmatch(r"\s*(\w+)\s*<\s*(?:this\.)?(\w+)\s*\.\s*length\s*",
+                          parts[1])
+        if not mi or (not mc_ and not ml):
             raise Unsupported("control flow")
-        var, lo, hi = mi.group(1), int(mi.group(2)), int(mc_.group(2))
+        if mc_ and mi.group(1) == mc_.group(1):
+            hi = int(mc_.group(2))
+        elif ml and mi.group(1) == ml.group(1):
+            hi = array_len(ml.group(2))
+            if hi == 0:
+                raise Unsupported("part %s[]" % ml.group(2))
+        else:
+            raise Unsupported("control flow")
+        var, lo = mi.group(1), int(mi.group(2))
         if hi - lo > 64:
             raise Unsupported("control flow")
 
@@ -723,6 +1142,112 @@ class Compiler:
             # Substitute the induction variable, including inside `parts[i]`.
             it = re.sub(r"\b" + re.escape(var) + r"\b", str(k), body)
             self.run(it, guard)
+
+    def switch_statement(self, s, guard):
+        """Compile `switch (<expr>.ordinal()) { case N: ... }` to guarded runs.
+
+        Java fall-through is preserved: a chunk with no top-level `break` lets
+        the previous chunk's entry labels reach the next one, which is exactly
+        how ParrotModel's STANDING case adds the leg swing and then falls into
+        the shared body bob. `default` compiles to "none of the explicit
+        labels". A `break` nested under an `if` would break the switch
+        conditionally — unsupported, none of the models do it.
+        """
+        m = re.match(r"switch\s*\(", s)
+        head, end = balanced(s, m.end() - 1, "(", ")")
+        rest = s[end:].lstrip()
+        if not rest.startswith("{"):
+            raise Unsupported("control flow")
+        body, _ = balanced(rest, 0)
+        sel = re.sub(r"\.ordinal\(\)\s*$", "", head.strip())
+
+        # Chunk the body at depth-0 `case N:` / `case NAME:` / `default:`
+        # labels. Named labels are resolved to ordinals afterwards.
+        chunks, cur_labels, cur_text = [], [], ""
+        i, depth = 0, 0
+        while i < len(body):
+            if depth == 0:
+                mlab = re.match(r"\s*(?:case\s+(\w+)|default)\s*:", body[i:])
+                if mlab:
+                    if cur_text.strip():
+                        chunks.append((cur_labels, cur_text))
+                        cur_labels, cur_text = [], ""
+                    cur_labels.append(mlab.group(1)
+                                      if mlab.group(1) is not None else "default")
+                    i += mlab.end()
+                    continue
+            c = body[i]
+            if c in "{(":
+                depth += 1
+            elif c in "})":
+                depth -= 1
+            cur_text += c
+            i += 1
+        if cur_text.strip() or cur_labels:
+            chunks.append((cur_labels, cur_text))
+
+        # Statements before the first label would run unguarded — malformed.
+        if chunks and chunks[0][0] == [] :
+            raise Unsupported("control flow")
+
+        # Resolve labels: digits are ordinals already; names resolve against
+        # the ONE enum in ENUM_ORDINALS containing every named label. A label
+        # that resolves nowhere rejects the whole switch — anything less would
+        # run its statements with the wrong guard.
+        named = {l for labs, _ in chunks for l in labs
+                 if l != "default" and not l.isdigit()}
+        enum = None
+        if named:
+            candidates = [vals for vals in ENUM_ORDINALS.values()
+                          if named <= set(vals)]
+            if len(candidates) != 1:
+                raise Unsupported("control flow")
+            enum = candidates[0]
+
+        def resolve(l):
+            if l == "default":
+                return l
+            return int(l) if l.isdigit() else enum.index(l)
+
+        chunks = [([resolve(l) for l in labs], text) for labs, text in chunks]
+        all_labels = sorted({l for labs, _ in chunks for l in labs
+                             if l != "default"})
+
+        def chunk_breaks(text):
+            # Top-level break only; a nested one is conditional control flow.
+            d = 0
+            for stmt in split_statements(text):
+                if stmt == "break":
+                    return True
+                d += stmt.count("{") - stmt.count("}")
+                if "break" in stmt and re.search(r"\bbreak\b", stmt):
+                    raise Unsupported("control flow")
+            return False
+
+        entry = set()
+        prev_falls = False
+        for labs, text in chunks:
+            entry = (entry if prev_falls else set()) | set(labs)
+            prev_falls = not chunk_breaks(text)
+            stripped = re.sub(r"\bbreak\s*;", "", text)
+            if not stripped.strip():
+                continue
+            conds = []
+            for l in sorted(entry, key=str):
+                if l == "default":
+                    if all_labels:
+                        conds.append("(" + " && ".join(
+                            "%s != %d" % (sel, x) for x in all_labels) + ")")
+                    else:
+                        conds = None
+                        break
+                else:
+                    conds.append("(%s == %d)" % (sel, l))
+            if conds is None or not conds:
+                cg = None
+            else:
+                cg = self.guard_expr(" || ".join(conds))
+            self.run(stripped, self.and_guard(guard, cg) if cg else guard)
 
     def if_statement(self, s, guard):
         m = re.match(r"if\s*\(", s)
@@ -813,6 +1338,12 @@ def main():
         for f in fs:
             if f.endswith(".java"):
                 sources.setdefault(f[:-5], strip_comments(open(os.path.join(r, f), encoding="utf-8").read()))
+    # Non-model classes setupAnim calls into: Ease (the WHACK swing curve).
+    for extra in (os.path.join(MC, "util/Ease.java"),):
+        if os.path.exists(extra):
+            name = os.path.basename(extra)[:-5]
+            sources.setdefault(name, strip_comments(
+                open(extra, encoding="utf-8").read()))
 
     # Which model class each generated mob uses, and the parts its mesh has.
     sys.path.insert(0, "tools")
@@ -858,31 +1389,52 @@ def main():
                 fields.setdefault(m.group(1), "root")
             # Arrays of parts, filled either by an indexed loop or by an
             # initialiser list. Blaze, wither and the dragon all do this.
+            # The charclass admits brackets so a chained receiver like
+            # `this.tailParts[0].getChild("tail1")` (guardian) still matches.
             for m in re.finditer(
-                    r'this\.(\w+)\[\s*(\d+)\s*\]\s*=\s*[\w.()"+ ]*?getChild\('
+                    r'this\.(\w+)\[\s*(\d+)\s*\]\s*=\s*[\w.\[\]()"+ ]*?getChild\('
                     r'\s*"([a-z_0-9]+)"\s*\)', sources[c]):
                 fields.setdefault("%s[%s]" % (m.group(1), m.group(2)), m.group(3))
+            # Name-helper resolution shared by the two indexed-fill forms
+            # below. The helper may be class-qualified — the ghast's
+            # `root.getChild(PartNames.tentacle(i))` lives in PartNames.java,
+            # not the model chain — so a qualifier routes the search there.
+            def helper_prefix(fn):
+                search_chain = G_CHAIN
+                if "." in fn:
+                    owner, fn = fn.rsplit(".", 1)
+                    search_chain = [owner] if owner in sources else []
+                for c2 in search_chain:
+                    fm = re.search(r'\b' + re.escape(fn) + r'\s*\([^)]*\)\s*\{'
+                                   r'\s*return\s+"([a-z_0-9]*)"', sources.get(c2, ""))
+                    if fm:
+                        return fm.group(1)
+                return None
+
+            def fill_indexed(arr, fn):
+                prefix = helper_prefix(fn)
+                if prefix is None:
+                    return
+                for k in range(64):
+                    name = "%s%d" % (prefix, k)
+                    if name in parts:
+                        fields.setdefault("%s[%d]" % (arr, k), name)
+
+            # `for (i...) this.spikeParts[i] = this.head.getChild(createSpikeName(i))`
+            # — an indexed fill through a name helper (guardian's spikes,
+            # ghast tentacles via PartNames).
+            for m in re.finditer(
+                    r'this\.(\w+)\[\s*\w+\s*\]\s*=\s*[\w.\[\]()" ]*?getChild\('
+                    r'\s*([\w.]+)\s*\(', sources[c]):
+                fill_indexed(m.group(1), m.group(2))
             # `Arrays.setAll(this.rods, (i) -> root.getChild(getPartName(i)))`
             # where the name helper is `return "prefix" + i;`. Blaze rods,
             # wither heads, squid tentacles and the dragon's neck all index
             # their parts this way, and every loop body writes through it.
             for m in re.finditer(
                     r'Arrays\.setAll\(\s*this\.(\w+)\s*,\s*\(\s*\w+\s*\)\s*->'
-                    r'\s*[\w.]*getChild\(\s*(\w+)\s*\(', sources[c]):
-                arr, fn = m.group(1), m.group(2)
-                prefix = None
-                for c2 in G_CHAIN:
-                    fm = re.search(r'\b' + re.escape(fn) + r'\s*\([^)]*\)\s*\{'
-                                   r'\s*return\s+"([a-z_0-9]*)"', sources.get(c2, ""))
-                    if fm:
-                        prefix = fm.group(1)
-                        break
-                if prefix is None:
-                    continue
-                for k in range(64):
-                    name = "%s%d" % (prefix, k)
-                    if name in parts:
-                        fields.setdefault("%s[%d]" % (arr, k), name)
+                    r'\s*[\w.]*getChild\(\s*([\w.]+)\s*\(', sources[c]):
+                fill_indexed(m.group(1), m.group(2))
 
             for m in re.finditer(
                     r'this\.(\w+)\s*=\s*new ModelPart\[\]\s*\{([^}]*)\}', sources[c]):
@@ -894,21 +1446,59 @@ def main():
 
         chain = class_chain(cls, sources)
 
-        def helpers(name, _chain=chain):
-            for c in _chain:
+        def helpers(name, owner=None, _chain=chain):
+            """Resolve a void helper. `owner` is an explicit qualifier
+            (`GhastModel.animateTentacles`, `AnimationUtils.bobModelPart`) or
+            the class an enclosing inlined body was found in — searched first
+            so nested unqualified calls resolve in their own class."""
+            search = []
+            if owner and owner in sources:
+                search.extend(class_chain(owner, sources))
+            search.extend(c for c in _chain if c not in search)
+            for c in search:
                 got = method_signature(sources[c], name)
                 if got:
-                    return got
+                    return got[0], got[1], c
             return None
 
-        def value_fns(name, _chain=chain):
-            for c in _chain:
+        def value_fns(name, owner=None, _chain=chain):
+            search = []
+            if owner and owner in sources:
+                search.extend(class_chain(owner, sources))
+            search.extend(c for c in _chain if c not in search)
+            for c in search:
                 got = value_signature(sources[c], name)
                 if got:
                     return got
             return None
 
-        comp = Compiler(fields, helpers, value_fns)
+        def mpart_fns(name, _chain=chain):
+            """Body text of a `ModelPart <name>(...)` helper — getArm."""
+            for c in _chain:
+                m2 = re.search(r"(?:public|private|protected)\s+(?:static\s+)?"
+                               r"ModelPart\s+" + re.escape(name)
+                               + r"\s*\([^)]*\)\s*\{", sources[c])
+                if m2:
+                    body2, _ = balanced(sources[c], m2.end() - 1)
+                    return body2
+            return None
+
+        # Static float tables — GuardianModel's SPIKE_X/Y/Z and friends.
+        # Indexed with a constant (the unrolled loop's induction value), they
+        # fold to constants.
+        arrays = {}
+        for c in chain:
+            for am in re.finditer(
+                    r'float\[\]\s+(\w+)\s*=\s*(?:new\s+float\[\]\s*)?\{([^}]*)\}',
+                    sources[c]):
+                try:
+                    arrays.setdefault(am.group(1), [
+                        float(v.strip().rstrip("FfDd"))
+                        for v in am.group(2).split(",") if v.strip()])
+                except ValueError:
+                    continue
+
+        comp = Compiler(fields, helpers, value_fns, arrays, parts, mpart_fns)
         for c in reversed(chain):          # base first, mirroring super.setupAnim
             b = method_body(sources[c], "setupAnim")
             if b:
@@ -969,7 +1559,7 @@ namespace Render {{
         Neg, Add, Sub, Mul, Div, Select,
         Cos, Sin, Abs, Sqrt, Floor, Signum, Min, Max,
         Clamp, Lerp, RotLerpRad, RotLerp, WrapDegrees, TriangleWave,
-        Square, DegDiffAbs, Mod,
+        Square, Cube, DegDiffAbs, Mod,
         Gt, Lt, Ge, Le, Eq, Ne, And, Or, Not,
     }};
 

@@ -2,11 +2,17 @@
 #include "common/entity/mobs/GenericMobs.hpp"
 
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/entity/mobs/Animals.hpp"
+#include "common/entity/mobs/Fish.hpp"
 
 #include "common/entity/ai/goals/AnimalGoals.hpp"
 #include "common/entity/ai/goals/AttackGoals.hpp"
 #include "common/entity/ai/goals/BasicGoals.hpp"
 #include "common/entity/ai/goals/TargetGoals.hpp"
+#include "common/entity/ai/Controls.hpp"
+#include "common/entity/ai/navigation/AmphibiousPathNavigation.hpp"
+#include "common/entity/ai/navigation/FlyingPathNavigation.hpp"
+#include "common/entity/ai/navigation/WaterBoundPathNavigation.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 
 #include <algorithm>
@@ -61,11 +67,26 @@ namespace Game {
             return d ? *d : kEmpty;
         }
 
-        // MC picks between the two stroll goals per mob — 8 of them use the
-        // plain RandomStrollGoal, which will walk into water. They are
-        // different goals, so the choice is carried in the def.
+        // MC picks the wander goal per LOCOMOTION: swimmers get
+        // RandomSwimmingGoal, fliers WaterAvoidingRandomFlyingGoal, and
+        // walkers one of the two stroll variants (8 mobs use the plain one,
+        // which will walk into water).
         void AddStroll(PathfinderMob& mob, GoalSelector& goals,
                        const MobDef& def, int priority) {
+            if (def.swimStrollSpeed > 0.0) {
+                goals.AddGoal(priority, std::make_unique<RandomSwimmingGoal>(
+                                            &mob, def.swimStrollSpeed,
+                                            def.swimStrollInterval));
+                return;
+            }
+            if (def.nav == MobNav::Flying) {
+                // flyStrollSpeed is 0 for mobs whose wander goal is a nested
+                // subclass in its own file (parrot, bee); MC passes 1.0 there.
+                const double speed = def.flyStrollSpeed > 0.0 ? def.flyStrollSpeed : 1.0;
+                goals.AddGoal(priority, std::make_unique<WaterAvoidingRandomFlyingGoal>(
+                                            &mob, speed));
+                return;
+            }
             if (def.strollSpeed <= 0.0) return;
             if (def.strollAvoidsWater) {
                 goals.AddGoal(priority, std::make_unique<WaterAvoidingRandomStrollGoal>(
@@ -73,6 +94,47 @@ namespace Game {
             } else {
                 goals.AddGoal(priority, std::make_unique<RandomStrollGoal>(
                                             &mob, def.strollSpeed));
+            }
+        }
+
+        // MC declares locomotion in createNavigation + the control
+        // constructors; the def carries both, and this applies them. Called
+        // after the base constructor built the ground defaults.
+        void ApplyLocomotion(Mob& mob, EntityLevel* level, const MobDef& def) {
+            switch (def.nav) {
+                case MobNav::Flying:
+                    mob.SetNavigation(std::make_unique<FlyingPathNavigation>(&mob, level));
+                    break;
+                case MobNav::Water:
+                    mob.SetNavigation(std::make_unique<WaterBoundPathNavigation>(&mob, level));
+                    break;
+                case MobNav::Amphibious:
+                    mob.SetNavigation(std::make_unique<AmphibiousPathNavigation>(&mob, level));
+                    break;
+                case MobNav::WallClimber:
+                    mob.SetNavigation(std::make_unique<WallClimberNavigation>(&mob, level));
+                    break;
+                case MobNav::Ground:
+                    break;
+            }
+            if (def.flyCtrl) {
+                mob.SetMoveControl(std::make_unique<FlyingMoveControl>(
+                    &mob, def.flyMaxTurn, def.flyHover));
+            }
+            if (def.swimCtrl) {
+                mob.SetMoveControl(std::make_unique<SmoothSwimmingMoveControl>(
+                    &mob, def.swimMaxTurnX, def.swimMaxTurnY, def.swimInWater,
+                    def.swimOutsideWater, def.swimGravity));
+                // The REAL control owns the outside-water modifier now; the
+                // SetSpeed-side stand-in must not apply it a second time.
+                mob.SetLandSpeedFactor(1.0f);
+            }
+            if (def.fishCtrl) {
+                mob.SetMoveControl(std::make_unique<FishMoveControl>(&mob));
+            }
+            if (def.swimLookMaxYRot > 0) {
+                mob.SetLookControl(std::make_unique<SmoothSwimmingLookControl>(
+                    &mob, def.swimLookMaxYRot));
             }
         }
 
@@ -131,6 +193,7 @@ namespace Game {
         SetLandSpeedFactor(DefFor(type).landSpeedFactor);
         SetWalkAnimParams(DefFor(type).walkAnimScale, DefFor(type).walkAnimCap,
                           DefFor(type).walkAnimFactor, DefFor(type).walkAnimBabyScale);
+        ApplyLocomotion(*this, level, DefFor(type));
         m_health = GetMaxHealth();
         RegisterGoals();
     }
@@ -154,6 +217,7 @@ namespace Game {
         SetLandSpeedFactor(DefFor(type).landSpeedFactor);
         SetWalkAnimParams(DefFor(type).walkAnimScale, DefFor(type).walkAnimCap,
                           DefFor(type).walkAnimFactor, DefFor(type).walkAnimBabyScale);
+        ApplyLocomotion(*this, level, DefFor(type));
         m_health = GetMaxHealth();
         RegisterGoals();
     }
@@ -177,6 +241,7 @@ namespace Game {
         SetLandSpeedFactor(DefFor(type).landSpeedFactor);
         SetWalkAnimParams(DefFor(type).walkAnimScale, DefFor(type).walkAnimCap,
                           DefFor(type).walkAnimFactor, DefFor(type).walkAnimBabyScale);
+        ApplyLocomotion(*this, level, DefFor(type));
         m_health = GetMaxHealth();
         RegisterGoals();
     }
@@ -205,6 +270,7 @@ namespace Game {
         SetLandSpeedFactor(DefFor(type).landSpeedFactor);
         SetWalkAnimParams(DefFor(type).walkAnimScale, DefFor(type).walkAnimCap,
                           DefFor(type).walkAnimFactor, DefFor(type).walkAnimBabyScale);
+        ApplyLocomotion(*this, level, DefFor(type));
         m_health = GetMaxHealth();
         RegisterGoals();
     }
@@ -241,10 +307,22 @@ namespace Game {
     }
 
     std::unique_ptr<Animal> GenericAnimal::CreateBaby() {
-        // Same type as the parent. AgeableMob's own breeding path sets the
-        // baby age, exactly as the hand-written Cow/Pig/Sheep do.
+        // Through the factory, so a PROMOTED type breeds a promoted baby — a
+        // camel foal or baby sniffer built as a plain GenericAnimal would have
+        // no brain and stand inert forever. AgeableMob's own breeding path
+        // sets the baby age, exactly as the hand-written Cow/Pig/Sheep do.
+        std::unique_ptr<Mob> baby = MakeGenericMob(GetType(), m_level);
+        if (dynamic_cast<Animal*>(baby.get())) {
+            return std::unique_ptr<Animal>(static_cast<Animal*>(baby.release()));
+        }
         return std::make_unique<GenericAnimal>(GetType(), m_level);
     }
+
+
+    bool GenericMob::IsFlyingAnimal() const { return DefFor(GetType()).flyingAnimal; }
+    bool GenericPathfinderMob::IsFlyingAnimal() const { return DefFor(GetType()).flyingAnimal; }
+    bool GenericMonster::IsFlyingAnimal() const { return DefFor(GetType()).flyingAnimal; }
+    bool GenericAnimal::IsFlyingAnimal() const { return DefFor(GetType()).flyingAnimal; }
 
     // ── Factory ────────────────────────────────────────────────────────────
 
@@ -262,6 +340,7 @@ namespace Game {
         // client does not is a mob that ticks and never draws.
         switch (type) {
             case EntityTypeId::Frog:      return std::make_unique<Frog>(level);
+            case EntityTypeId::Axolotl:   return std::make_unique<Axolotl>(level);
             case EntityTypeId::Camel:     return std::make_unique<Camel>(level);
             // MC's CamelHusk extends Camel — same brain, same pose machinery.
             case EntityTypeId::CamelHusk:
@@ -271,8 +350,38 @@ namespace Game {
             case EntityTypeId::Tadpole:   return std::make_unique<Tadpole>(level);
             case EntityTypeId::Goat:      return std::make_unique<Goat>(level);
             case EntityTypeId::Hoglin:    return std::make_unique<Hoglin>(level);
+            // Bee keeps the def's goal set (it extends the generic base) and
+            // adds MC's animation machinery — the hover-roll.
+            case EntityTypeId::Zoglin:    return std::make_unique<Zoglin>(level);
+            case EntityTypeId::Piglin:    return std::make_unique<Piglin>(level);
+            case EntityTypeId::PiglinBrute:
+                return std::make_unique<PiglinBrute>(level);
+            case EntityTypeId::Allay:     return std::make_unique<Allay>(level);
+            case EntityTypeId::Nautilus:  return std::make_unique<Nautilus>(level);
+            case EntityTypeId::ZombieNautilus:
+                return std::make_unique<ZombieNautilus>(level);
+            case EntityTypeId::Bee:       return std::make_unique<Bee>(level);
+            // Wolf keeps the def's goal set and adds the persistent-anger
+            // system (NeutralMob), the taming layer (TamableAnimal) and
+            // MC's leap + melee goals — see Animals.hpp.
+            case EntityTypeId::Wolf:      return std::make_unique<Wolf>(level);
+            // Mooshroom keeps the def's goal set and adds the shears →
+            // cow conversion (MushroomCow.mobInteract) — see Animals.hpp.
+            case EntityTypeId::Mooshroom: return std::make_unique<Mooshroom>(level);
             case EntityTypeId::Warden:    return std::make_unique<Warden>(level);
             case EntityTypeId::Creaking:  return std::make_unique<Creaking>(level);
+            case EntityTypeId::Breeze:    return std::make_unique<Breeze>(level);
+            case EntityTypeId::Sniffer:   return std::make_unique<Sniffer>(level);
+            case EntityTypeId::CopperGolem:
+                return std::make_unique<CopperGolem>(level);
+            // Silverfish stays generic: both of its bespoke goals need
+            // infested blocks, which this engine does not have —
+            // SilverfishWakeUpFriendsGoal bursts hidden silverfish OUT of
+            // infested stone around a hurt one, and SilverfishMergeWithStone
+            // burrows INTO a stone block, converting it. Without the block,
+            // each goal is a no-op shell; the generic monster set (melee,
+            // retaliate, wander) is the honest remainder. Its promotion goes
+            // HERE when infested blocks land.
             default: break;
         }
 

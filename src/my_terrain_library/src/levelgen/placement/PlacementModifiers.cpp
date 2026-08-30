@@ -1,4 +1,5 @@
 #include "levelgen/placement/PlacementModifiers.h"
+#include "levelgen/ChunkGenerator.h"
 #include "data/worldgen/BiomeFeatureRegistry.h"
 #include "levelgen/placement/PlacedFeature.h"
 #include "world/biome/Biome.h"
@@ -75,8 +76,11 @@ bool BiomeFilter::shouldPlace(
 
     // Reference: BiomeFilter.java line 23
     // return context.generator().getBiomeGenerationSettings(biome).hasFeature(feature);
-    // We use BiomeFeatureRegistry instead of BiomeGenerationSettings for feature lookup
-    bool result = data::worldgen::BiomeFeatureRegistry::hasFeature(biomeName, *topFeature);
+    // Routed through the generator so flat worlds' adjusted feature lists are
+    // consulted; the default implementation is the BiomeFeatureRegistry lookup.
+    bool result = context.generator()
+        ? context.generator()->hasFeatureInBiome(biomeName, *topFeature)
+        : data::worldgen::BiomeFeatureRegistry::hasFeature(biomeName, *topFeature);
 
     if (!result) {
         s_biomeFilterFiltered++;

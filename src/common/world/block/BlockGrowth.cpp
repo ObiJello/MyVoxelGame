@@ -454,7 +454,8 @@ namespace Game {
         bool AttachedStemNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                          BlockState state,
                                          Direction toNeighbour, BlockID neighbourId,
-                                         BlockState& outState) {
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             (void)level; (void)pos;
             const BlockID id = state.Block();
             const StemPair* pair = nullptr;

@@ -176,7 +176,21 @@ namespace Core {
         // 47.8 ms needs ~5.5 slots in flight. Six covers the peak at close to
         // minimum latency; more only adds queueing delay. Do not raise this to
         // chase throughput — measure the dependency graph instead.
-        allocation.serverWorldWorkers = std::max(allocation.serverWorldWorkers, size_t(6));
+        //
+        // UPDATE 2026-08-29: the "dependency graph" ceiling above was really
+        // the terrain library's single-lane worldgen executor, where surface,
+        // carvers, features and full ran serialised (~9.6 ms per chunk = ~100
+        // chunks/s no matter what). Surface and carvers now run on the pool
+        // (ChunkStatusTasks.h), which left the lane ~50% busy and the pool
+        // ~50% busy with 6 slots — i.e. the in-flight count became the
+        // limiter again. Twelve slots; re-measure before raising further.
+        //
+        // UPDATE 2026-08-30: workers no longer block inside the library at all
+        // — generation is ticket-driven (ServerWorkerPool::ProcessChunkLoading
+        // hands misses to MyTerrainGenerator and results come back through
+        // IntegratedServer::PumpChunkPipeline). The pool now only does disk
+        // loads, chunk conversions and saves, so it is a CPU budget again.
+        allocation.serverWorldWorkers = std::clamp(allocation.serverWorldWorkers, size_t(4), size_t(6));
     }
 
     void ThreadAllocator::ValidateAllocation(ThreadAllocation& allocation) {

@@ -41,8 +41,25 @@ namespace Game::Math {
 
     // Hash function for ChunkPos (for use with unordered containers)
     struct ChunkPosHash {
+        // The old form was `hash(x) ^ (hash(z) << 1)`, and libc++'s
+        // std::hash<int32_t> is the identity — so it reduced to `x ^ (z << 1)`.
+        // For any local region that collapses catastrophically: measured over a
+        // 65x65 chunk area, 4,225 chunks landed in 193 distinct buckets with a
+        // longest chain of 33. Every chunk-keyed lookup in the engine then
+        // walked that chain, and there are 39 of these maps — the chunk cache,
+        // the ticket manager's level map, sentChunks, and the CLIENT chunk map
+        // among them.
+        //
+        // A 64-bit finalizer over the packed pair instead: same area gives
+        // 3,078 buckets used and a longest chain of 6, and the ticket-manager
+        // gate measured 28.9 -> 11.3 ns per lookup.
         std::size_t operator()(const ChunkPos& pos) const {
-            return std::hash<int32_t>{}(pos.x) ^ (std::hash<int32_t>{}(pos.z) << 1);
+            uint64_t h = (static_cast<uint64_t>(static_cast<uint32_t>(pos.x)) << 32)
+                       |  static_cast<uint64_t>(static_cast<uint32_t>(pos.z));
+            h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+            h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+            h ^= h >> 33;
+            return static_cast<std::size_t>(h);
         }
     };
     

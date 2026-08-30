@@ -4,6 +4,7 @@
 #include "../../session/PlayerSession.hpp"
 #include "../../session/PlayerSessionManager.hpp"
 #include "../../network/NetworkServer.hpp"
+#include "../../network/ServerConnection.hpp"
 #include "common/core/Log.hpp"
 #include "common/network/PacketTypes.hpp"
 
@@ -11,10 +12,12 @@ namespace Server {
 
 ChunkDeltaBroadcaster::ChunkDeltaBroadcaster(IntegratedServer* server,
                                            SectionChangeAccumulator* accumulator,
-                                           PlayerSessionManager* sessionManager)
+                                           PlayerSessionManager* sessionManager,
+                                           Game::DimensionId dimension)
     : m_server(server)
     , m_accumulator(accumulator)
-    , m_sessionManager(sessionManager) {
+    , m_sessionManager(sessionManager)
+    , m_dimension(dimension) {
 }
 
 ChunkDeltaBroadcaster::~ChunkDeltaBroadcaster() = default;
@@ -39,17 +42,26 @@ void ChunkDeltaBroadcaster::flush() {
     for (const auto& [sectionPos, changes] : allChanges) {
         sectionsProcessed++;
         
-        Log::Info("[ChunkDeltaBroadcaster] Processing section (%d,%d,%d) with %zu changes",
-                  sectionPos.chunkX, sectionPos.sectionY, sectionPos.chunkZ, changes.size());
-        
+        // No per-section logging here. Every Log:: call is a 2 KB vsnprintf, the
+        // GLOBAL log mutex, an fprintf to stdout, a timestamp allocation, a
+        // ring push and an fprintf to the log file — none of it compiled out,
+        // since only Log::Debug is NDEBUG-guarded. On the SERVER TICK THREAD,
+        // once per changed section, while an explosion is feeding hundreds of
+        // sections into the accumulator. It also serialises the tick thread
+        // against the render and network threads on that one mutex.
+        // MC's ChunkHolder.broadcastChanges logs nothing.
+
         // Who is watching this section = who is tracking its chunk. Asked of
         // the sessions directly (MC ChunkMap.onChunkReadyToSend does the same
         // walk) rather than of a reverse index that has to be kept in sync.
         const Game::Math::ChunkPos chunkPos{sectionPos.chunkX, sectionPos.chunkZ};
-        std::vector<uint32_t> watchers = m_sessionManager->GetChunkWatchers(chunkPos);
+        std::vector<uint32_t> watchers =
+            m_sessionManager->GetChunkWatchers(m_dimension, chunkPos);
         if (watchers.empty()) {
-            Log::Warning("[ChunkDeltaBroadcaster] No watchers for section (%d,%d,%d), skipping broadcast",
-                        sectionPos.chunkX, sectionPos.sectionY, sectionPos.chunkZ);
+            // Routine, not a warning: a section changing with nobody in range
+            // is the normal case for anything away from a player.
+            Log::Debug("[ChunkDeltaBroadcaster] No watchers for section (%d,%d,%d), skipping",
+                       sectionPos.chunkX, sectionPos.sectionY, sectionPos.chunkZ);
             continue;  // No one watching, skip
         }
         
@@ -75,10 +87,13 @@ void ChunkDeltaBroadcaster::flush() {
             m_stats.multiBlockPackets++;
             totalPackets++;
         } else {
-            // Massive changes - might want to resend the whole chunk
-            // For now, still use section update (chunk resend would need more infrastructure)
-            Log::Warning("ChunkDeltaBroadcaster: %zu changes in section (%d,%d,%d), using section update",
-                        numChanges, sectionPos.chunkX, sectionPos.sectionY, sectionPos.chunkZ);
+            // Massive changes — a chunk resend would be better but needs more
+            // infrastructure, so still a section update.
+            //
+            // Deliberately NOT logged: MULTI_THRESHOLD is 64, so an explosion
+            // trips this for essentially every section it touches, and a
+            // Log::Warning additionally does a synchronous fflush on the tick
+            // thread.
             broadcastSectionUpdate(sectionPos, changes, watchers);
             m_stats.multiBlockPackets++;
             totalPackets++;
@@ -166,28 +181,33 @@ glm::ivec3 ChunkDeltaBroadcaster::sectionCellToWorld(const Game::Math::SectionPo
 
 void ChunkDeltaBroadcaster::sendToAllWatchers(const std::vector<uint32_t>& watchers,
                                              const Network::BlockChangeS2CPacket& packet) {
-    if (!m_server) return;
-    
-    // For integrated server, broadcast through the network server
-    auto* networkServer = m_server->GetNetworkServer();
-    if (networkServer) {
-        // Serialize packet once
-        auto data = Network::Serialization::Serialize(packet);
-        
-        // Broadcast to all connections (network server will filter by authentication)
-        networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);
-        
-        m_stats.totalBytesSent += data.size() * watchers.size();
+    if (!m_sessionManager || watchers.empty()) return;
+
+    // Sent to the watcher list this flush already computed, NOT broadcast.
+    // A BlockChangeS2C carries no dimension, so a broadcast delivers a Nether
+    // edit to a player in the Overworld, who applies it to their chunk at the
+    // same x/z. The list is already dimension-scoped by GetChunkWatchers.
+    const auto data = Network::Serialization::Serialize(packet);
+
+    for (uint32_t playerId : watchers) {
+        auto session = m_sessionManager->GetSession(playerId);
+        if (!session) continue;
+        auto* conn = session->GetConnection();
+        if (!conn) continue;
+        conn->SendPacket(static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);
+        m_stats.totalBytesSent += data.size();
     }
 }
 
 void ChunkDeltaBroadcaster::sendToAllWatchers(const std::vector<uint32_t>& watchers,
                                              const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
     if (!m_server) return;
-    
-    // For integrated server, use the server's send methods
-    m_server->SendSectionBlocksUpdateS2CPacket(packet);
-    
+
+    // The section packet's hand-rolled serialization lives on the server, so
+    // this still delegates — but the server scopes it to this dimension's
+    // watchers now, for the same reason as the single-block path above.
+    m_server->SendSectionBlocksUpdateS2CPacket(m_dimension, packet);
+
     // Estimate packet size for statistics
     size_t estimatedSize = 16 + packet.packedRecords.size() * 4;
     m_stats.totalBytesSent += estimatedSize * watchers.size();

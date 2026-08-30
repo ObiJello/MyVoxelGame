@@ -148,7 +148,15 @@ namespace Render {
 
         // Drop the graph (camera section changed, pointers erased, …). The next
         // full rebuild re-establishes it; partial updates no-op until then.
-        void InvalidateGraph();
+// Set when a source backlog had to be discarded; the renderer consumes
+        // it as a visible-sections-dirty so a full rebuild recovers the loss.
+        bool ConsumeFullRebuildRequest() {
+            const bool r = m_fullRebuildRequested;
+            m_fullRebuildRequested = false;
+            return r;
+        }
+
+                void InvalidateGraph();
 
         // MC runPartialUpdate. Propagates from every queued section into the
         // live graph and APPENDS newly-reachable sections to `outSections`.
@@ -165,6 +173,9 @@ namespace Render {
 
         bool HasGraphFor(int cameraChunkX, int cameraChunkZ, int cameraSectionY,
                          int renderDistance, uint64_t eraseToken) const;
+
+        // Diagnostics: queued-but-undrained propagation sources.
+        size_t PendingSourceCount() const { return m_propagateFrom.size(); }
 
     private:
         // Per-run scratch (visited grid + BFS queues). One instance for the
@@ -199,6 +210,7 @@ namespace Render {
         // uploads and PrepareVisibleSections both run there.
         struct PendingSource { Game::Math::ChunkPos chunkPos; int sectionY; };
         std::vector<PendingSource> m_propagateFrom;
+        bool m_fullRebuildRequested = false;
         Scratch m_partialScratch;
 
         // The BFS itself — pure function of (job input, scratch).

@@ -1,10 +1,6 @@
 #include "data/worldgen/placement/OrePlacements.h"
 #include "levelgen/carver/CarverConfiguration.h"
 
-// MSVC's STL does not include <deque> transitively (libc++ does) — see the
-// "MSVC compatibility fixes" list in CLAUDE.md.
-#include <deque>
-
 // Reference: net/minecraft/data/worldgen/placement/OrePlacements.java
 
 namespace minecraft {
@@ -50,6 +46,16 @@ PlacedFeature* OrePlacements::ORE_DIORITE_LOWER = nullptr;
 PlacedFeature* OrePlacements::ORE_ANDESITE_UPPER = nullptr;
 PlacedFeature* OrePlacements::ORE_ANDESITE_LOWER = nullptr;
 PlacedFeature* OrePlacements::ORE_TUFF = nullptr;
+PlacedFeature* OrePlacements::ORE_MAGMA = nullptr;
+PlacedFeature* OrePlacements::ORE_SOUL_SAND = nullptr;
+PlacedFeature* OrePlacements::ORE_GOLD_DELTAS = nullptr;
+PlacedFeature* OrePlacements::ORE_QUARTZ_DELTAS = nullptr;
+PlacedFeature* OrePlacements::ORE_GOLD_NETHER = nullptr;
+PlacedFeature* OrePlacements::ORE_QUARTZ_NETHER = nullptr;
+PlacedFeature* OrePlacements::ORE_GRAVEL_NETHER = nullptr;
+PlacedFeature* OrePlacements::ORE_BLACKSTONE = nullptr;
+PlacedFeature* OrePlacements::ORE_ANCIENT_DEBRIS_LARGE = nullptr;
+PlacedFeature* OrePlacements::ORE_ANCIENT_DEBRIS_SMALL = nullptr;
 
 // Storage for placement modifiers and features
 static std::vector<std::unique_ptr<PlacementModifier>> s_modifiers;
@@ -107,6 +113,14 @@ void OrePlacements::bootstrap() {
                 VerticalAnchor::absolute(max)
             )
         );
+        PlacementModifier* ptr = mod.get();
+        s_modifiers.push_back(std::move(mod));
+        return ptr;
+    };
+
+    auto anchorUniform = [](const VerticalAnchor& min, const VerticalAnchor& max) -> PlacementModifier* {
+        auto mod = std::make_unique<HeightRangePlacement>(
+            HeightRangePlacement::uniform(min, max));
         PlacementModifier* ptr = mod.get();
         s_modifiers.push_back(std::move(mod));
         return ptr;
@@ -183,7 +197,7 @@ void OrePlacements::bootstrap() {
     ORE_IRON_MIDDLE = createPlaced(OreFeatures::ORE_IRON,
         commonOrePlacement(10, triangleHeight(-24, 56)), "ORE_IRON_MIDDLE");
     ORE_IRON_SMALL = createPlaced(OreFeatures::ORE_IRON_SMALL,
-        commonOrePlacement(10, uniformHeight(-64, 72)), "ORE_IRON_SMALL");
+        commonOrePlacement(10, anchorUniform(VerticalAnchor::bottom(), VerticalAnchor::absolute(72))), "ORE_IRON_SMALL");
 
     // Gold - line 132-133
     ORE_GOLD = createPlaced(OreFeatures::ORE_GOLD_BURIED,
@@ -204,7 +218,7 @@ void OrePlacements::bootstrap() {
 
     // Redstone - line 134-135
     ORE_REDSTONE = createPlaced(OreFeatures::ORE_REDSTONE,
-        commonOrePlacement(4, uniformHeight(-64, 15)), "ORE_REDSTONE");
+        commonOrePlacement(4, anchorUniform(VerticalAnchor::bottom(), VerticalAnchor::absolute(15))), "ORE_REDSTONE");
     ORE_REDSTONE_LOWER = createPlaced(OreFeatures::ORE_REDSTONE,
         commonOrePlacement(8, aboveBottomTriangle(-32, 32)), "ORE_REDSTONE_LOWER");
 
@@ -222,7 +236,7 @@ void OrePlacements::bootstrap() {
     ORE_LAPIS = createPlaced(OreFeatures::ORE_LAPIS,
         commonOrePlacement(2, triangleHeight(-32, 32)), "ORE_LAPIS");
     ORE_LAPIS_BURIED = createPlaced(OreFeatures::ORE_LAPIS_BURIED,
-        commonOrePlacement(4, uniformHeight(-64, 64)), "ORE_LAPIS_BURIED");
+        commonOrePlacement(4, anchorUniform(VerticalAnchor::bottom(), VerticalAnchor::absolute(64))), "ORE_LAPIS_BURIED");
 
     // Copper - line 146
     ORE_COPPER = createPlaced(OreFeatures::ORE_COPPER_SMALL,
@@ -247,13 +261,13 @@ void OrePlacements::bootstrap() {
     // Infested stone - line 142
     // Reference: commonOrePlacement(14, HeightRangePlacement.uniform(aboveBottom(0), absolute(63)))
     ORE_INFESTED = createPlaced(OreFeatures::ORE_INFESTED,
-        commonOrePlacement(14, uniformHeight(-64, 63)), "ORE_INFESTED");
+        commonOrePlacement(14, anchorUniform(VerticalAnchor::bottom(), VerticalAnchor::absolute(63))), "ORE_INFESTED");
 
     // Clay - for lush caves
     // Reference: OrePlacements.java line 148 - uses RANGE_BOTTOM_TO_MAX_TERRAIN_HEIGHT
     // RANGE_BOTTOM_TO_MAX_TERRAIN_HEIGHT = uniform(bottom(), absolute(256))
     ORE_CLAY = createPlaced(OreFeatures::ORE_CLAY,
-        commonOrePlacement(46, uniformHeight(-64, 256)), "ORE_CLAY");
+        commonOrePlacement(46, anchorUniform(VerticalAnchor::bottom(), VerticalAnchor::absolute(256))), "ORE_CLAY");
 
     // Stone variants - line 117-125
     ORE_DIRT = createPlaced(OreFeatures::ORE_DIRT,
@@ -273,7 +287,43 @@ void OrePlacements::bootstrap() {
     ORE_ANDESITE_LOWER = createPlaced(OreFeatures::ORE_ANDESITE,
         commonOrePlacement(2, uniformHeight(0, 60)), "ORE_ANDESITE_LOWER");
     ORE_TUFF = createPlaced(OreFeatures::ORE_TUFF,
-        commonOrePlacement(2, uniformHeight(-64, 0)), "ORE_TUFF");
+        commonOrePlacement(2, anchorUniform(VerticalAnchor::bottom(), VerticalAnchor::absolute(0))), "ORE_TUFF");
+
+    // ============ Nether ore placements ============
+    // Reference: OrePlacements.java lines 109-116, 144-145
+    // RANGE_10_10 = uniform(aboveBottom(10), belowTop(10)); anchors resolve
+    // against the placement context (nether genDepth 128).
+
+    auto range1010 = [&]() -> PlacementModifier* {
+        return anchorUniform(VerticalAnchor::aboveBottom(10), VerticalAnchor::belowTop(10));
+    };
+
+    ORE_MAGMA = createPlaced(OreFeatures::ORE_MAGMA,
+        commonOrePlacement(4, uniformHeight(27, 36)), "ORE_MAGMA");
+    ORE_SOUL_SAND = createPlaced(OreFeatures::ORE_SOUL_SAND,
+        commonOrePlacement(12, anchorUniform(VerticalAnchor::bottom(), VerticalAnchor::absolute(31))),
+        "ORE_SOUL_SAND");
+    ORE_GOLD_DELTAS = createPlaced(OreFeatures::ORE_NETHER_GOLD,
+        commonOrePlacement(20, range1010()), "ORE_GOLD_DELTAS");
+    ORE_QUARTZ_DELTAS = createPlaced(OreFeatures::ORE_QUARTZ,
+        commonOrePlacement(32, range1010()), "ORE_QUARTZ_DELTAS");
+    ORE_GOLD_NETHER = createPlaced(OreFeatures::ORE_NETHER_GOLD,
+        commonOrePlacement(10, range1010()), "ORE_GOLD_NETHER");
+    ORE_QUARTZ_NETHER = createPlaced(OreFeatures::ORE_QUARTZ,
+        commonOrePlacement(16, range1010()), "ORE_QUARTZ_NETHER");
+    ORE_GRAVEL_NETHER = createPlaced(OreFeatures::ORE_GRAVEL_NETHER,
+        commonOrePlacement(2, uniformHeight(5, 41)), "ORE_GRAVEL_NETHER");
+    ORE_BLACKSTONE = createPlaced(OreFeatures::ORE_BLACKSTONE,
+        commonOrePlacement(2, uniformHeight(5, 31)), "ORE_BLACKSTONE");
+    // Debris: NO count modifier - in_square + height + biome only.
+    ORE_ANCIENT_DEBRIS_LARGE = createPlaced(OreFeatures::ORE_ANCIENT_DEBRIS_LARGE,
+        {&InSquarePlacement::spread(), triangleHeight(8, 24), &BiomeFilter::biome()},
+        "ORE_ANCIENT_DEBRIS_LARGE");
+    ORE_ANCIENT_DEBRIS_SMALL = createPlaced(OreFeatures::ORE_ANCIENT_DEBRIS_SMALL,
+        {&InSquarePlacement::spread(),
+         anchorUniform(VerticalAnchor::aboveBottom(8), VerticalAnchor::belowTop(8)),
+         &BiomeFilter::biome()},
+        "ORE_ANCIENT_DEBRIS_SMALL");
 
     s_initialized = true;
 }

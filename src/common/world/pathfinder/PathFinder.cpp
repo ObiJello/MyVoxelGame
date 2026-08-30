@@ -79,10 +79,13 @@ namespace Game {
             Node* current = m_openSet.Pop();
             current->closed = true;
 
+            // MC PathFinder.findPath only marks the target reached — the path
+            // is still reconstructed from the target's bestNode (the closest
+            // node by heuristic, maintained in GetBestH), NOT from the node
+            // that happened to enter reach range first.
             for (Target& t : targets) {
                 if (current->DistanceManhattan(t.node) <= static_cast<float>(reachRange)) {
                     t.SetReached();
-                    t.bestNode = current;
                     anyReached = true;
                 }
             }

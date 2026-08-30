@@ -123,7 +123,7 @@ protected:
      * Carve a single block
      * Reference: WorldCarver.java lines 110-144
      */
-    bool carveBlock(
+    virtual bool carveBlock(
         CarvingContext& context,
         const C& configuration,
         world::IChunk* chunk,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "random/PositionalRandomFactory.h"
+#include "random/AnyPositionalRandomFactory.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/IChunk.h"
 #include <cstdint>
@@ -44,7 +45,7 @@ private:
     int32_t m_seaLevel;
 
     // Reference: SurfaceSystem.java line 47
-    random::PositionalRandomFactory* m_noiseRandom;
+    ::minecraft::random::AnyPositionalRandomFactory* m_noiseRandom;
 
     // Clay bands for badlands biomes (Reference: line 39)
     std::vector<BlockState*> m_clayBands;
@@ -63,10 +64,10 @@ private:
 
     // Helper methods for clay band generation
     // Reference: SurfaceSystem.java lines 262-293
-    static std::vector<BlockState*> generateBands(XoroshiroRandomSource& random);
+    static std::vector<BlockState*> generateBands(::minecraft::random::AnyRandomSource& random);
 
     // Reference: SurfaceSystem.java lines 295-307
-    static void makeBands(XoroshiroRandomSource& random,
+    static void makeBands(::minecraft::random::AnyRandomSource& random,
                           std::vector<BlockState*>& clayBands,
                           int32_t baseWidth,
                           BlockState* state);
@@ -79,7 +80,7 @@ public:
     SurfaceSystem(RandomState* randomState,
                   BlockState* defaultBlock,
                   int32_t seaLevel,
-                  random::PositionalRandomFactory* noiseRandom);
+                  ::minecraft::random::AnyPositionalRandomFactory* noiseRandom);
 
     /**
      * Destructor - clean up allocated resources

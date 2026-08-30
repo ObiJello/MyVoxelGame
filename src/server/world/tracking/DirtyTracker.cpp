@@ -25,6 +25,16 @@ namespace Game {
             return;
         }
 
+        // See m_clearEpoch. The memo is per thread because SetBlock runs on
+        // the server thread and on workers alike.
+        struct LastMark { const DirtyTracker* owner; Math::ChunkPos pos; int section; uint64_t epoch; };
+        thread_local LastMark t_last{nullptr, Math::ChunkPos{0, 0}, -1, 0};
+        const uint64_t epoch = m_clearEpoch.load(std::memory_order_acquire);
+        if (t_last.owner == this && t_last.epoch == epoch && t_last.section == sectionIndex &&
+            t_last.pos.x == chunkPos.x && t_last.pos.z == chunkPos.z) {
+            return;
+        }
+
         DirtySection section(chunkPos, sectionIndex);
         MarkSectionDirtyInternal(section);
 
@@ -32,6 +42,10 @@ namespace Game {
         if (m_config.enableNeighborInvalidation) {
             MarkNeighborsDirty(chunkPos, sectionIndex);
         }
+        // Recorded AFTER the marks, against the epoch read BEFORE them: a
+        // clear that raced in between leaves the memo stale-by-epoch, so the
+        // next call marks again rather than skipping.
+        t_last = LastMark{this, chunkPos, sectionIndex, epoch};
     }
 
     void DirtyTracker::MarkChunkDirty(Math::ChunkPos chunkPos) {
@@ -94,6 +108,7 @@ namespace Game {
     // === RETRIEVAL ===
 
     std::vector<DirtySection> DirtyTracker::GetAndClearAllDirtySections() {
+        m_clearEpoch.fetch_add(1, std::memory_order_release);
         std::lock_guard<std::mutex> lock(m_dirtyMutex);
 
         std::vector<DirtySection> result;
@@ -134,6 +149,7 @@ namespace Game {
     }
 
     void DirtyTracker::ClearDirtySections(const std::vector<DirtySection>& sections) {
+        m_clearEpoch.fetch_add(1, std::memory_order_release);
         if (sections.empty()) {
             return;
         }
@@ -174,6 +190,7 @@ namespace Game {
     }
 
     void DirtyTracker::ClearAllDirtySections() {
+        m_clearEpoch.fetch_add(1, std::memory_order_release);
         std::lock_guard<std::mutex> lock(m_dirtyMutex);
 
         size_t clearedCount = m_dirtySections.size();

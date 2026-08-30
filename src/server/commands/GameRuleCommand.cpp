@@ -95,6 +95,47 @@ namespace Server {
                     [](Game::World& w) { return std::string(w.GetDoMobSpawning() ? "true" : "false"); },
                     [](Game::World& w, const std::string& v) { w.SetDoMobSpawning(v == "true"); },
                 },
+                Rule{
+                    // GameRules.java:229, category MISC, default true. Off
+                    // makes TNT inert: it still breaks and drops, it just
+                    // never lights.
+                    "tnt_explodes", "tntExplodes", RuleType::Bool,
+                    0, 0,
+                    [](Game::World& w) { return std::string(w.GetTntExplodes() ? "true" : "false"); },
+                    [](Game::World& w, const std::string& v) { w.SetTntExplodes(v == "true"); },
+                },
+                Rule{
+                    // GameRules.java:184, category DROPS, default true. Gates
+                    // drops that come from an ENTITY — including a falling
+                    // block that could not land.
+                    "entity_drops", "doEntityDrops", RuleType::Bool,
+                    0, 0,
+                    [](Game::World& w) { return std::string(w.GetDoEntityDrops() ? "true" : "false"); },
+                    [](Game::World& w, const std::string& v) { w.SetDoEntityDrops(v == "true"); },
+                },
+                Rule{
+                    // GameRules.java:230, category DROPS, default FALSE — the
+                    // odd one out, and why vanilla TNT drops 100% of what it
+                    // breaks while a creeper drops about a third.
+                    "tnt_explosion_drop_decay", "tntExplosionDropDecay", RuleType::Bool,
+                    0, 0,
+                    [](Game::World& w) { return std::string(w.GetTntExplosionDropDecay() ? "true" : "false"); },
+                    [](Game::World& w, const std::string& v) { w.SetTntExplosionDropDecay(v == "true"); },
+                },
+                Rule{
+                    // GameRules.java:178, category DROPS, default true.
+                    "block_explosion_drop_decay", "blockExplosionDropDecay", RuleType::Bool,
+                    0, 0,
+                    [](Game::World& w) { return std::string(w.GetBlockExplosionDropDecay() ? "true" : "false"); },
+                    [](Game::World& w, const std::string& v) { w.SetBlockExplosionDropDecay(v == "true"); },
+                },
+                Rule{
+                    // GameRules.java:204, category DROPS, default true.
+                    "mob_explosion_drop_decay", "mobExplosionDropDecay", RuleType::Bool,
+                    0, 0,
+                    [](Game::World& w) { return std::string(w.GetMobExplosionDropDecay() ? "true" : "false"); },
+                    [](Game::World& w, const std::string& v) { w.SetMobExplosionDropDecay(v == "true"); },
+                },
             };
             return kRules;
         }

@@ -5,278 +5,609 @@
 
 namespace Game {
 
+    // blaze
+    static const MobLootEntry k_blaze_p0[] = {
+        { Items::BlazeRod, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_blaze[] = {
+        { 1, 1, true, 1.0f, 0, 127, k_blaze_p0, 1 },
+    };
+
     // bogged
-    static const MobLootEntry k_bogged[] = {
-        { Items::Arrow, 0, 2, Items::Air },
-        { Items::Bone, 0, 2, Items::Air },
+    static const MobLootEntry k_bogged_p0[] = {
+        { Items::Arrow, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_bogged_p1[] = {
+        { Items::Bone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_bogged[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_bogged_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_bogged_p1, 1 },
+    };
+
+    // breeze
+    static const MobLootEntry k_breeze_p0[] = {
+        { Items::BreezeRod, 1, 1, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_breeze[] = {
+        { 1, 1, true, 1.0f, 0, 127, k_breeze_p0, 1 },
     };
 
     // camel_husk
-    static const MobLootEntry k_camel_husk[] = {
-        { Items::RottenFlesh, 2, 3, Items::Air },
+    static const MobLootEntry k_camel_husk_p0[] = {
+        { Items::RottenFlesh, 1, 2, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_camel_husk[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_camel_husk_p0, 1 },
     };
 
     // cat
-    static const MobLootEntry k_cat[] = {
-        { Items::String, 0, 2, Items::Air },
+    static const MobLootEntry k_cat_p0[] = {
+        { Items::String, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_cat[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_cat_p0, 1 },
     };
 
     // cave_spider
-    static const MobLootEntry k_cave_spider[] = {
-        { Items::String, 0, 2, Items::Air },
+    static const MobLootEntry k_cave_spider_p0[] = {
+        { Items::String, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_cave_spider_p1[] = {
+        { Items::SpiderEye, 1, -1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_cave_spider[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_cave_spider_p0, 1 },
+        { 1, 1, true, 1.0f, 0, 127, k_cave_spider_p1, 1 },
     };
 
     // chicken
-    static const MobLootEntry k_chicken[] = {
-        { Items::Feather, 0, 2, Items::Air },
-        { Items::Chicken, 1, 1, Items::CookedChicken },
+    static const MobLootEntry k_chicken_p0[] = {
+        { Items::Feather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_chicken_p1[] = {
+        { Items::Chicken, 1, 1, 1, Items::CookedChicken, 0, 127 },
+    };
+    static const MobLootPool k_chicken[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_chicken_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_chicken_p1, 1 },
     };
 
     // cod
-    static const MobLootEntry k_cod[] = {
-        { Items::Cod, 1, 1, Items::CookedCod },
+    static const MobLootEntry k_cod_p0[] = {
+        { Items::Cod, 1, 1, 1, Items::CookedCod, 0, 127 },
+    };
+    static const MobLootEntry k_cod_p1[] = {
+        { Items::BoneMeal, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_cod[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_cod_p0, 1 },
+        { 1, 1, false, 0.05f, 0, 127, k_cod_p1, 1 },
     };
 
     // copper_golem
-    static const MobLootEntry k_copper_golem[] = {
-        { Items::CopperIngot, 1, 3, Items::Air },
+    static const MobLootEntry k_copper_golem_p0[] = {
+        { Items::CopperIngot, 1, 1, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_copper_golem[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_copper_golem_p0, 1 },
     };
 
     // cow
-    static const MobLootEntry k_cow[] = {
-        { Items::Leather, 0, 2, Items::Air },
-        { Items::Beef, 1, 3, Items::CookedBeef },
+    static const MobLootEntry k_cow_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_cow_p1[] = {
+        { Items::Beef, 1, 1, 3, Items::CookedBeef, 0, 127 },
+    };
+    static const MobLootPool k_cow[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_cow_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_cow_p1, 1 },
     };
 
     // creeper
-    static const MobLootEntry k_creeper[] = {
-        { Items::Gunpowder, 0, 2, Items::Air },
+    static const MobLootEntry k_creeper_p0[] = {
+        { Items::Gunpowder, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_creeper[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_creeper_p0, 1 },
     };
 
     // dolphin
-    static const MobLootEntry k_dolphin[] = {
-        { Items::Cod, 0, 1, Items::CookedCod },
+    static const MobLootEntry k_dolphin_p0[] = {
+        { Items::Cod, 1, 0, 1, Items::CookedCod, 0, 127 },
+    };
+    static const MobLootPool k_dolphin[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_dolphin_p0, 1 },
     };
 
     // donkey
-    static const MobLootEntry k_donkey[] = {
-        { Items::Leather, 0, 2, Items::Air },
+    static const MobLootEntry k_donkey_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_donkey[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_donkey_p0, 1 },
     };
 
     // drowned
-    static const MobLootEntry k_drowned[] = {
-        { Items::RottenFlesh, 0, 2, Items::Air },
+    static const MobLootEntry k_drowned_p0[] = {
+        { Items::RottenFlesh, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_drowned_p1[] = {
+        { Items::CopperIngot, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_drowned[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_drowned_p0, 1 },
+        { 1, 1, true, 0.11f, 0, 127, k_drowned_p1, 1 },
     };
 
     // elder_guardian
-    static const MobLootEntry k_elder_guardian[] = {
-        { Items::PrismarineShard, 0, 2, Items::Air },
-        { Items::Cod, 1, 1, Items::CookedCod },
-        { Items::PrismarineCrystals, 1, 1, Items::Air },
-        { Items::TideArmorTrimSmithingTemplate, 1, 1, Items::Air },
+    static const MobLootEntry k_elder_guardian_p0[] = {
+        { Items::PrismarineShard, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_elder_guardian_p1[] = {
+        { Items::Cod, 3, 1, 1, Items::CookedCod, 0, 127 },
+        { Items::PrismarineCrystals, 2, 1, 1, Items::Air, 0, 127 },
+        { Items::Air, 1, 0, 0, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_elder_guardian_p2[] = {
+        { Items::Air, 4, 0, 0, Items::Air, 0, 127 },
+        { Items::TideArmorTrimSmithingTemplate, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_elder_guardian[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_elder_guardian_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_elder_guardian_p1, 3 },
+        { 1, 1, false, 1.0f, 0, 127, k_elder_guardian_p2, 2 },
     };
 
     // enderman
-    static const MobLootEntry k_enderman[] = {
-        { Items::EnderPearl, 0, 1, Items::Air },
+    static const MobLootEntry k_enderman_p0[] = {
+        { Items::EnderPearl, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_enderman[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_enderman_p0, 1 },
     };
 
     // evoker
-    static const MobLootEntry k_evoker[] = {
-        { Items::TotemOfUndying, 1, 1, Items::Air },
+    static const MobLootEntry k_evoker_p0[] = {
+        { Items::TotemOfUndying, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_evoker_p1[] = {
+        { Items::Emerald, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_evoker[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_evoker_p0, 1 },
+        { 1, 1, true, 1.0f, 0, 127, k_evoker_p1, 1 },
     };
 
     // ghast
-    static const MobLootEntry k_ghast[] = {
-        { Items::GhastTear, 0, 1, Items::Air },
-        { Items::Gunpowder, 0, 2, Items::Air },
+    static const MobLootEntry k_ghast_p0[] = {
+        { Items::GhastTear, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_ghast_p1[] = {
+        { Items::Gunpowder, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_ghast[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_ghast_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_ghast_p1, 1 },
     };
 
     // glow_squid
-    static const MobLootEntry k_glow_squid[] = {
-        { Items::GlowInkSac, 1, 3, Items::Air },
+    static const MobLootEntry k_glow_squid_p0[] = {
+        { Items::GlowInkSac, 1, 1, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_glow_squid[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_glow_squid_p0, 1 },
     };
 
     // guardian
-    static const MobLootEntry k_guardian[] = {
-        { Items::PrismarineShard, 0, 2, Items::Air },
-        { Items::Cod, 1, 1, Items::CookedCod },
-        { Items::PrismarineCrystals, 1, 1, Items::Air },
+    static const MobLootEntry k_guardian_p0[] = {
+        { Items::PrismarineShard, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_guardian_p1[] = {
+        { Items::Cod, 2, 1, 1, Items::CookedCod, 0, 127 },
+        { Items::PrismarineCrystals, 2, 1, 1, Items::Air, 0, 127 },
+        { Items::Air, 1, 0, 0, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_guardian[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_guardian_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_guardian_p1, 3 },
     };
 
     // hoglin
-    static const MobLootEntry k_hoglin[] = {
-        { Items::Porkchop, 2, 4, Items::CookedPorkchop },
-        { Items::Leather, 0, 1, Items::Air },
+    static const MobLootEntry k_hoglin_p0[] = {
+        { Items::Porkchop, 1, 2, 4, Items::CookedPorkchop, 0, 127 },
+    };
+    static const MobLootEntry k_hoglin_p1[] = {
+        { Items::Leather, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_hoglin[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_hoglin_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_hoglin_p1, 1 },
     };
 
     // horse
-    static const MobLootEntry k_horse[] = {
-        { Items::Leather, 0, 2, Items::Air },
+    static const MobLootEntry k_horse_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_horse[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_horse_p0, 1 },
     };
 
     // husk
-    static const MobLootEntry k_husk[] = {
-        { Items::RottenFlesh, 0, 2, Items::Air },
+    static const MobLootEntry k_husk_p0[] = {
+        { Items::RottenFlesh, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_husk_p1[] = {
+        { Items::IronIngot, 1, 1, 1, Items::Air, 0, 127 },
+        { Items::Carrot, 1, 1, 1, Items::Air, 0, 127 },
+        { Items::Potato, 1, 1, 1, Items::BakedPotato, 0, 127 },
+    };
+    static const MobLootPool k_husk[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_husk_p0, 1 },
+        { 1, 1, true, 0.025f, 0, 127, k_husk_p1, 3 },
     };
 
     // iron_golem
-    static const MobLootEntry k_iron_golem[] = {
-        { Items::IronIngot, 3, 5, Items::Air },
+    static const MobLootEntry k_iron_golem_p0[] = {
+        { Items::IronIngot, 1, 3, 5, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_iron_golem[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_iron_golem_p0, 1 },
     };
 
     // llama
-    static const MobLootEntry k_llama[] = {
-        { Items::Leather, 0, 2, Items::Air },
+    static const MobLootEntry k_llama_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_llama[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_llama_p0, 1 },
+    };
+
+    // magma_cube
+    static const MobLootEntry k_magma_cube_p0[] = {
+        { Items::MagmaCream, 1, -2, 1, Items::Air, 2, 127 },
+    };
+    static const MobLootPool k_magma_cube[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_magma_cube_p0, 1 },
     };
 
     // mooshroom
-    static const MobLootEntry k_mooshroom[] = {
-        { Items::Leather, 0, 2, Items::Air },
-        { Items::Beef, 1, 3, Items::CookedBeef },
+    static const MobLootEntry k_mooshroom_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_mooshroom_p1[] = {
+        { Items::Beef, 1, 1, 3, Items::CookedBeef, 0, 127 },
+    };
+    static const MobLootPool k_mooshroom[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_mooshroom_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_mooshroom_p1, 1 },
     };
 
     // mule
-    static const MobLootEntry k_mule[] = {
-        { Items::Leather, 0, 2, Items::Air },
+    static const MobLootEntry k_mule_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_mule[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_mule_p0, 1 },
+    };
+
+    // nautilus
+    static const MobLootEntry k_nautilus_p0[] = {
+        { Items::NautilusShell, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_nautilus[] = {
+        { 1, 1, true, 0.05f, 0, 127, k_nautilus_p0, 1 },
     };
 
     // parched
-    static const MobLootEntry k_parched[] = {
-        { Items::Arrow, 0, 2, Items::Air },
-        { Items::Bone, 0, 2, Items::Air },
+    static const MobLootEntry k_parched_p0[] = {
+        { Items::Arrow, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_parched_p1[] = {
+        { Items::Bone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_parched[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_parched_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_parched_p1, 1 },
     };
 
     // parrot
-    static const MobLootEntry k_parrot[] = {
-        { Items::Feather, 1, 2, Items::Air },
+    static const MobLootEntry k_parrot_p0[] = {
+        { Items::Feather, 1, 1, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_parrot[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_parrot_p0, 1 },
+    };
+
+    // phantom
+    static const MobLootEntry k_phantom_p0[] = {
+        { Items::PhantomMembrane, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_phantom[] = {
+        { 1, 1, true, 1.0f, 0, 127, k_phantom_p0, 1 },
     };
 
     // pig
-    static const MobLootEntry k_pig[] = {
-        { Items::Porkchop, 1, 3, Items::CookedPorkchop },
+    static const MobLootEntry k_pig_p0[] = {
+        { Items::Porkchop, 1, 1, 3, Items::CookedPorkchop, 0, 127 },
+    };
+    static const MobLootPool k_pig[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_pig_p0, 1 },
     };
 
     // polar_bear
-    static const MobLootEntry k_polar_bear[] = {
-        { Items::Cod, 0, 2, Items::CookedCod },
-        { Items::Salmon, 0, 2, Items::CookedSalmon },
+    static const MobLootEntry k_polar_bear_p0[] = {
+        { Items::Cod, 3, 0, 2, Items::CookedCod, 0, 127 },
+        { Items::Salmon, 1, 0, 2, Items::CookedSalmon, 0, 127 },
+    };
+    static const MobLootPool k_polar_bear[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_polar_bear_p0, 2 },
     };
 
     // pufferfish
-    static const MobLootEntry k_pufferfish[] = {
-        { Items::Pufferfish, 1, 1, Items::Air },
+    static const MobLootEntry k_pufferfish_p0[] = {
+        { Items::Pufferfish, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_pufferfish_p1[] = {
+        { Items::BoneMeal, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_pufferfish[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_pufferfish_p0, 1 },
+        { 1, 1, false, 0.05f, 0, 127, k_pufferfish_p1, 1 },
     };
 
     // rabbit
-    static const MobLootEntry k_rabbit[] = {
-        { Items::RabbitHide, 0, 1, Items::Air },
-        { Items::Rabbit, 1, 1, Items::CookedRabbit },
+    static const MobLootEntry k_rabbit_p0[] = {
+        { Items::RabbitHide, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_rabbit_p1[] = {
+        { Items::Rabbit, 1, 1, 1, Items::CookedRabbit, 0, 127 },
+    };
+    static const MobLootEntry k_rabbit_p2[] = {
+        { Items::RabbitFoot, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_rabbit[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_rabbit_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_rabbit_p1, 1 },
+        { 1, 1, true, 0.1f, 0, 127, k_rabbit_p2, 1 },
     };
 
     // ravager
-    static const MobLootEntry k_ravager[] = {
-        { Items::Saddle, 1, 1, Items::Air },
+    static const MobLootEntry k_ravager_p0[] = {
+        { Items::Saddle, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_ravager[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_ravager_p0, 1 },
     };
 
     // salmon
-    static const MobLootEntry k_salmon[] = {
-        { Items::Salmon, 1, 1, Items::CookedSalmon },
+    static const MobLootEntry k_salmon_p0[] = {
+        { Items::Salmon, 1, 1, 1, Items::CookedSalmon, 0, 127 },
+    };
+    static const MobLootEntry k_salmon_p1[] = {
+        { Items::BoneMeal, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_salmon[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_salmon_p0, 1 },
+        { 1, 1, false, 0.05f, 0, 127, k_salmon_p1, 1 },
     };
 
     // sheep
-    static const MobLootEntry k_sheep[] = {
-        { Items::Mutton, 1, 2, Items::CookedMutton },
+    static const MobLootEntry k_sheep_p0[] = {
+        { Items::Mutton, 1, 1, 2, Items::CookedMutton, 0, 127 },
+    };
+    static const MobLootPool k_sheep[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_sheep_p0, 1 },
+    };
+
+    // shulker
+    static const MobLootEntry k_shulker_p0[] = {
+        { Items::ShulkerShell, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_shulker[] = {
+        { 1, 1, false, 0.5f, 0, 127, k_shulker_p0, 1 },
     };
 
     // skeleton
-    static const MobLootEntry k_skeleton[] = {
-        { Items::Arrow, 0, 2, Items::Air },
-        { Items::Bone, 0, 2, Items::Air },
+    static const MobLootEntry k_skeleton_p0[] = {
+        { Items::Arrow, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_skeleton_p1[] = {
+        { Items::Bone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_skeleton[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_skeleton_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_skeleton_p1, 1 },
     };
 
     // skeleton_horse
-    static const MobLootEntry k_skeleton_horse[] = {
-        { Items::Bone, 0, 2, Items::Air },
+    static const MobLootEntry k_skeleton_horse_p0[] = {
+        { Items::Bone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_skeleton_horse[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_skeleton_horse_p0, 1 },
+    };
+
+    // slime
+    static const MobLootEntry k_slime_p0[] = {
+        { Items::SlimeBall, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_slime[] = {
+        { 1, 1, false, 1.0f, 1, 1, k_slime_p0, 1 },
     };
 
     // snow_golem
-    static const MobLootEntry k_snow_golem[] = {
-        { Items::Snowball, 0, 15, Items::Air },
+    static const MobLootEntry k_snow_golem_p0[] = {
+        { Items::Snowball, 1, 0, 15, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_snow_golem[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_snow_golem_p0, 1 },
     };
 
     // spider
-    static const MobLootEntry k_spider[] = {
-        { Items::String, 0, 2, Items::Air },
+    static const MobLootEntry k_spider_p0[] = {
+        { Items::String, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_spider_p1[] = {
+        { Items::SpiderEye, 1, -1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_spider[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_spider_p0, 1 },
+        { 1, 1, true, 1.0f, 0, 127, k_spider_p1, 1 },
     };
 
     // squid
-    static const MobLootEntry k_squid[] = {
-        { Items::InkSac, 1, 3, Items::Air },
+    static const MobLootEntry k_squid_p0[] = {
+        { Items::InkSac, 1, 1, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_squid[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_squid_p0, 1 },
     };
 
     // stray
-    static const MobLootEntry k_stray[] = {
-        { Items::Arrow, 0, 2, Items::Air },
-        { Items::Bone, 0, 2, Items::Air },
+    static const MobLootEntry k_stray_p0[] = {
+        { Items::Arrow, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_stray_p1[] = {
+        { Items::Bone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_stray[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_stray_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_stray_p1, 1 },
     };
 
     // strider
-    static const MobLootEntry k_strider[] = {
-        { Items::String, 2, 5, Items::Air },
+    static const MobLootEntry k_strider_p0[] = {
+        { Items::String, 1, 2, 5, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_strider[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_strider_p0, 1 },
     };
 
     // trader_llama
-    static const MobLootEntry k_trader_llama[] = {
-        { Items::Leather, 0, 2, Items::Air },
+    static const MobLootEntry k_trader_llama_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_trader_llama[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_trader_llama_p0, 1 },
     };
 
     // tropical_fish
-    static const MobLootEntry k_tropical_fish[] = {
-        { Items::TropicalFish, 1, 1, Items::Air },
+    static const MobLootEntry k_tropical_fish_p0[] = {
+        { Items::TropicalFish, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_tropical_fish_p1[] = {
+        { Items::BoneMeal, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_tropical_fish[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_tropical_fish_p0, 1 },
+        { 1, 1, false, 0.05f, 0, 127, k_tropical_fish_p1, 1 },
+    };
+
+    // vindicator
+    static const MobLootEntry k_vindicator_p0[] = {
+        { Items::Emerald, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_vindicator[] = {
+        { 1, 1, true, 1.0f, 0, 127, k_vindicator_p0, 1 },
     };
 
     // witch
-    static const MobLootEntry k_witch[] = {
-        { Items::GlowstoneDust, 0, 2, Items::Air },
-        { Items::Sugar, 0, 2, Items::Air },
-        { Items::SpiderEye, 0, 2, Items::Air },
-        { Items::GlassBottle, 0, 2, Items::Air },
-        { Items::Gunpowder, 0, 2, Items::Air },
-        { Items::Stick, 0, 2, Items::Air },
-        { Items::Redstone, 4, 8, Items::Air },
+    static const MobLootEntry k_witch_p0[] = {
+        { Items::GlowstoneDust, 1, 0, 2, Items::Air, 0, 127 },
+        { Items::Sugar, 1, 0, 2, Items::Air, 0, 127 },
+        { Items::SpiderEye, 1, 0, 2, Items::Air, 0, 127 },
+        { Items::GlassBottle, 1, 0, 2, Items::Air, 0, 127 },
+        { Items::Gunpowder, 1, 0, 2, Items::Air, 0, 127 },
+        { Items::Stick, 2, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_witch_p1[] = {
+        { Items::Redstone, 1, 4, 8, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_witch[] = {
+        { 1, 3, false, 1.0f, 0, 127, k_witch_p0, 6 },
+        { 1, 1, false, 1.0f, 0, 127, k_witch_p1, 1 },
     };
 
     // wither_skeleton
-    static const MobLootEntry k_wither_skeleton[] = {
-        { Items::Coal, 0, 1, Items::Air },
-        { Items::Bone, 0, 2, Items::Air },
+    static const MobLootEntry k_wither_skeleton_p0[] = {
+        { Items::Coal, 1, -1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_wither_skeleton_p1[] = {
+        { Items::Bone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_wither_skeleton[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_wither_skeleton_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_wither_skeleton_p1, 1 },
     };
 
     // zoglin
-    static const MobLootEntry k_zoglin[] = {
-        { Items::RottenFlesh, 1, 3, Items::Air },
+    static const MobLootEntry k_zoglin_p0[] = {
+        { Items::RottenFlesh, 1, 1, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_zoglin[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_zoglin_p0, 1 },
     };
 
     // zombie
-    static const MobLootEntry k_zombie[] = {
-        { Items::RottenFlesh, 0, 2, Items::Air },
+    static const MobLootEntry k_zombie_p0[] = {
+        { Items::RottenFlesh, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_zombie_p1[] = {
+        { Items::IronIngot, 1, 1, 1, Items::Air, 0, 127 },
+        { Items::Carrot, 1, 1, 1, Items::Air, 0, 127 },
+        { Items::Potato, 1, 1, 1, Items::BakedPotato, 0, 127 },
+    };
+    static const MobLootPool k_zombie[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_zombie_p0, 1 },
+        { 1, 1, true, 0.025f, 0, 127, k_zombie_p1, 3 },
     };
 
     // zombie_horse
-    static const MobLootEntry k_zombie_horse[] = {
-        { Items::RottenFlesh, 2, 3, Items::Air },
+    static const MobLootEntry k_zombie_horse_p0[] = {
+        { Items::RottenFlesh, 1, 2, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_zombie_horse[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_zombie_horse_p0, 1 },
+    };
+
+    // zombie_nautilus
+    static const MobLootEntry k_zombie_nautilus_p0[] = {
+        { Items::RottenFlesh, 1, 0, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_zombie_nautilus[] = {
+        { 1, 1, true, 1.0f, 0, 127, k_zombie_nautilus_p0, 1 },
     };
 
     // zombie_villager
-    static const MobLootEntry k_zombie_villager[] = {
-        { Items::RottenFlesh, 0, 2, Items::Air },
+    static const MobLootEntry k_zombie_villager_p0[] = {
+        { Items::RottenFlesh, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_zombie_villager_p1[] = {
+        { Items::IronIngot, 1, 1, 1, Items::Air, 0, 127 },
+        { Items::Carrot, 1, 1, 1, Items::Air, 0, 127 },
+        { Items::Potato, 1, 1, 1, Items::BakedPotato, 0, 127 },
+    };
+    static const MobLootPool k_zombie_villager[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_zombie_villager_p0, 1 },
+        { 1, 1, true, 0.025f, 0, 127, k_zombie_villager_p1, 3 },
     };
 
     // zombified_piglin
-    static const MobLootEntry k_zombified_piglin[] = {
-        { Items::RottenFlesh, 0, 1, Items::Air },
-        { Items::GoldNugget, 0, 1, Items::Air },
+    static const MobLootEntry k_zombified_piglin_p0[] = {
+        { Items::RottenFlesh, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_zombified_piglin_p1[] = {
+        { Items::GoldNugget, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_zombified_piglin_p2[] = {
+        { Items::GoldIngot, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_zombified_piglin[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_zombified_piglin_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_zombified_piglin_p1, 1 },
+        { 1, 1, true, 0.025f, 0, 127, k_zombified_piglin_p2, 1 },
     };
 
     const MobLootTable kMobLootTables[] = {
@@ -285,90 +616,90 @@ namespace Game {
         { EntityTypeId::Axolotl, nullptr, 0 },
         { EntityTypeId::Bat, nullptr, 0 },
         { EntityTypeId::Bee, nullptr, 0 },
-        { EntityTypeId::Blaze, nullptr, 0 },
+        { EntityTypeId::Blaze, k_blaze, 1 },
         { EntityTypeId::Bogged, k_bogged, 2 },
-        { EntityTypeId::Breeze, nullptr, 0 },
+        { EntityTypeId::Breeze, k_breeze, 1 },
         { EntityTypeId::Camel, nullptr, 0 },
         { EntityTypeId::CamelHusk, k_camel_husk, 1 },
         { EntityTypeId::Cat, k_cat, 1 },
-        { EntityTypeId::CaveSpider, k_cave_spider, 1 },
+        { EntityTypeId::CaveSpider, k_cave_spider, 2 },
         { EntityTypeId::Chicken, k_chicken, 2 },
-        { EntityTypeId::Cod, k_cod, 1 },
+        { EntityTypeId::Cod, k_cod, 2 },
         { EntityTypeId::CopperGolem, k_copper_golem, 1 },
         { EntityTypeId::Cow, k_cow, 2 },
         { EntityTypeId::Creaking, nullptr, 0 },
         { EntityTypeId::Creeper, k_creeper, 1 },
         { EntityTypeId::Dolphin, k_dolphin, 1 },
         { EntityTypeId::Donkey, k_donkey, 1 },
-        { EntityTypeId::Drowned, k_drowned, 1 },
-        { EntityTypeId::ElderGuardian, k_elder_guardian, 4 },
+        { EntityTypeId::Drowned, k_drowned, 2 },
+        { EntityTypeId::ElderGuardian, k_elder_guardian, 3 },
         { EntityTypeId::EnderDragon, nullptr, 0 },
         { EntityTypeId::Enderman, k_enderman, 1 },
         { EntityTypeId::Endermite, nullptr, 0 },
-        { EntityTypeId::Evoker, k_evoker, 1 },
+        { EntityTypeId::Evoker, k_evoker, 2 },
         { EntityTypeId::Fox, nullptr, 0 },
         { EntityTypeId::Frog, nullptr, 0 },
         { EntityTypeId::Ghast, k_ghast, 2 },
         { EntityTypeId::Giant, nullptr, 0 },
         { EntityTypeId::GlowSquid, k_glow_squid, 1 },
         { EntityTypeId::Goat, nullptr, 0 },
-        { EntityTypeId::Guardian, k_guardian, 3 },
+        { EntityTypeId::Guardian, k_guardian, 2 },
         { EntityTypeId::HappyGhast, nullptr, 0 },
         { EntityTypeId::Hoglin, k_hoglin, 2 },
         { EntityTypeId::Horse, k_horse, 1 },
-        { EntityTypeId::Husk, k_husk, 1 },
+        { EntityTypeId::Husk, k_husk, 2 },
         { EntityTypeId::Illusioner, nullptr, 0 },
         { EntityTypeId::IronGolem, k_iron_golem, 1 },
         { EntityTypeId::Llama, k_llama, 1 },
-        { EntityTypeId::MagmaCube, nullptr, 0 },
+        { EntityTypeId::MagmaCube, k_magma_cube, 1 },
         { EntityTypeId::Mooshroom, k_mooshroom, 2 },
         { EntityTypeId::Mule, k_mule, 1 },
-        { EntityTypeId::Nautilus, nullptr, 0 },
+        { EntityTypeId::Nautilus, k_nautilus, 1 },
         { EntityTypeId::Ocelot, nullptr, 0 },
         { EntityTypeId::Panda, nullptr, 0 },
         { EntityTypeId::Parched, k_parched, 2 },
         { EntityTypeId::Parrot, k_parrot, 1 },
-        { EntityTypeId::Phantom, nullptr, 0 },
+        { EntityTypeId::Phantom, k_phantom, 1 },
         { EntityTypeId::Pig, k_pig, 1 },
         { EntityTypeId::Piglin, nullptr, 0 },
         { EntityTypeId::PiglinBrute, nullptr, 0 },
         { EntityTypeId::Pillager, nullptr, 0 },
-        { EntityTypeId::PolarBear, k_polar_bear, 2 },
-        { EntityTypeId::Pufferfish, k_pufferfish, 1 },
-        { EntityTypeId::Rabbit, k_rabbit, 2 },
+        { EntityTypeId::PolarBear, k_polar_bear, 1 },
+        { EntityTypeId::Pufferfish, k_pufferfish, 2 },
+        { EntityTypeId::Rabbit, k_rabbit, 3 },
         { EntityTypeId::Ravager, k_ravager, 1 },
-        { EntityTypeId::Salmon, k_salmon, 1 },
+        { EntityTypeId::Salmon, k_salmon, 2 },
         { EntityTypeId::Sheep, k_sheep, 1 },
-        { EntityTypeId::Shulker, nullptr, 0 },
+        { EntityTypeId::Shulker, k_shulker, 1 },
         { EntityTypeId::Silverfish, nullptr, 0 },
         { EntityTypeId::Skeleton, k_skeleton, 2 },
         { EntityTypeId::SkeletonHorse, k_skeleton_horse, 1 },
-        { EntityTypeId::Slime, nullptr, 0 },
+        { EntityTypeId::Slime, k_slime, 1 },
         { EntityTypeId::Sniffer, nullptr, 0 },
         { EntityTypeId::SnowGolem, k_snow_golem, 1 },
-        { EntityTypeId::Spider, k_spider, 1 },
+        { EntityTypeId::Spider, k_spider, 2 },
         { EntityTypeId::Squid, k_squid, 1 },
         { EntityTypeId::Stray, k_stray, 2 },
         { EntityTypeId::Strider, k_strider, 1 },
         { EntityTypeId::Tadpole, nullptr, 0 },
         { EntityTypeId::TraderLlama, k_trader_llama, 1 },
-        { EntityTypeId::TropicalFish, k_tropical_fish, 1 },
+        { EntityTypeId::TropicalFish, k_tropical_fish, 2 },
         { EntityTypeId::Turtle, nullptr, 0 },
         { EntityTypeId::Vex, nullptr, 0 },
         { EntityTypeId::Villager, nullptr, 0 },
-        { EntityTypeId::Vindicator, nullptr, 0 },
+        { EntityTypeId::Vindicator, k_vindicator, 1 },
         { EntityTypeId::WanderingTrader, nullptr, 0 },
         { EntityTypeId::Warden, nullptr, 0 },
-        { EntityTypeId::Witch, k_witch, 7 },
+        { EntityTypeId::Witch, k_witch, 2 },
         { EntityTypeId::Wither, nullptr, 0 },
         { EntityTypeId::WitherSkeleton, k_wither_skeleton, 2 },
         { EntityTypeId::Wolf, nullptr, 0 },
         { EntityTypeId::Zoglin, k_zoglin, 1 },
-        { EntityTypeId::Zombie, k_zombie, 1 },
+        { EntityTypeId::Zombie, k_zombie, 2 },
         { EntityTypeId::ZombieHorse, k_zombie_horse, 1 },
-        { EntityTypeId::ZombieNautilus, nullptr, 0 },
-        { EntityTypeId::ZombieVillager, k_zombie_villager, 1 },
-        { EntityTypeId::ZombifiedPiglin, k_zombified_piglin, 2 },
+        { EntityTypeId::ZombieNautilus, k_zombie_nautilus, 1 },
+        { EntityTypeId::ZombieVillager, k_zombie_villager, 2 },
+        { EntityTypeId::ZombifiedPiglin, k_zombified_piglin, 3 },
     };
 
     const int kMobLootTableCount = 89;

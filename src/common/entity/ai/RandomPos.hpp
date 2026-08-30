@@ -40,6 +40,25 @@ namespace Game {
                                                 int verticalDist, const glm::dvec3& towardsPos,
                                                 double maxRadians);
 
+        // MC BehaviorUtils.getRandomSwimmablePos — a wander target for a
+        // swimmer: DefaultRandomPos re-rolled until the cell is water-pathable.
+        std::optional<glm::dvec3> GetSwimmablePos(PathfinderMob& mob, int horizontalDist,
+                                                  int verticalDist);
+
+        // MC HoverRandomPos.getPos — a flyer's perch-seeking wander target:
+        // ground-based, lifted hoverMin..hoverMax blocks above the surface.
+        std::optional<glm::dvec3> GetHoverPos(PathfinderMob& mob, int horizontalDist,
+                                              int verticalDist, double dirX, double dirZ,
+                                              double maxRadians, int hoverMaxHeight,
+                                              int hoverMinHeight);
+
+        // MC AirAndWaterRandomPos.getPos — the fallback flight target when no
+        // perch is found; `flyingHeight` biases the vertical roll.
+        std::optional<glm::dvec3> GetAirAndWaterPos(PathfinderMob& mob, int horizontalDist,
+                                                    int verticalDist, int flyingHeight,
+                                                    double dirX, double dirZ,
+                                                    double maxRadians);
+
         // MC LandRandomPos.getPos — like GetPos but the result is pulled up out
         // of any solid it landed inside, so a swimming mob aims at dry land.
         std::optional<glm::dvec3> GetLandPos(PathfinderMob& mob, int horizontalDist,

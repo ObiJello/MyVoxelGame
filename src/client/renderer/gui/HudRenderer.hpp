@@ -33,6 +33,10 @@ namespace Render {
         void SetFood(int food)             { m_food = food; }
         void SetSaturation(float sat)      { m_saturation = sat; }
         void SetArmor(int armorPoints)     { m_armor = armorPoints; }
+        void SetExperience(float progress, int level) {
+            m_experience      = progress;
+            m_experienceLevel = level;
+        }
         // Creative/spectator hide the survival stat block (hearts, food,
         // armor, air, XP) — MC Gui gates those on gameMode.canHurtPlayer().
         void SetStatsHidden(bool hidden)   { m_statsHidden = hidden; }

@@ -47,6 +47,11 @@ namespace Game {
         // menu's to keep, so they go into the world rather than being deleted.
         // Separate from droppedItem because a single close can strand several.
         std::vector<ItemStack> extraDrops;
+        // Banked smelting XP this click freed (FurnaceResultSlot::OnTake
+        // drains the furnace's float bank into here). The SESSION converts it
+        // to orbs at the player — the menu has no player position and the
+        // client applies clicks predictively, where this must award nothing.
+        float xpBanked = 0.0f;
     };
 
     class AbstractContainerMenu {
@@ -165,6 +170,7 @@ namespace Game {
         virtual ContainerClickResult HandleCreativePickup(const ItemStack& source, uint8_t button);
         virtual ContainerClickResult HandleCreativeQuickMove(const ItemStack& source);
         virtual ContainerClickResult HandleCreativeDestroyAll();
+        virtual ContainerClickResult HandleCreativeDeleteCarried(uint8_t button);
         virtual ContainerClickResult HandleCreativeFillSlot(int slotIndex, const ItemStack& source);
 
         static void MarkChanged(ContainerClickResult& r, int slot);

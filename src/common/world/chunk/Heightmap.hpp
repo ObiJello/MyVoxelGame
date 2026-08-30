@@ -36,9 +36,21 @@
 
 namespace Game {
 
-    // MC Heightmap.Types, reduced to the two this engine consumes. Kept as an
-    // enum rather than two separate members so the storage, the update loop and
-    // the NBT round-trip can all iterate.
+    // MC Heightmap.Types. Kept as an enum rather than separate members so the
+    // storage, the update loop and the NBT round-trip can all iterate.
+    //
+    // These four are exactly MC's FINAL_HEIGHTMAPS — the set
+    // ChunkStatus.heightmapsAfter() names for a chunk at status `full`, and
+    // therefore the set vanilla expects to find in a saved chunk. The two *_WG
+    // worldgen variants are not in that set and are never read at full status,
+    // so they are not carried.
+    //
+    // The engine only CONSUMES the first two. The other two exist because
+    // vanilla reads them: MC primes only the heightmaps that are ABSENT from
+    // the file (SerializableChunkData.read), so a key present but zero-filled
+    // is taken at face value — "every column is empty" — and that silently
+    // breaks mob spawning, snow and water placement, and structure siting.
+    // Writing them correctly is cheaper than the alternatives.
     //
     // The serialization keys are vanilla's, so worlds stay readable in MC.
     enum class HeightmapType : uint8_t {
@@ -47,6 +59,11 @@ namespace Game {
         MotionBlockingNoLeaves = 0,
         // MC WORLD_SURFACE: any non-air block. What the sky test reads.
         WorldSurface,
+        // MC OCEAN_FLOOR: blocksMotion() alone — no fluid clause, so this sits
+        // on the seabed rather than the water's surface.
+        OceanFloor,
+        // MC MOTION_BLOCKING: blocksMotion() || hasFluid(), leaves INCLUDED.
+        MotionBlocking,
         Count
     };
 
@@ -54,6 +71,8 @@ namespace Game {
         switch (type) {
             case HeightmapType::MotionBlockingNoLeaves: return "MOTION_BLOCKING_NO_LEAVES";
             case HeightmapType::WorldSurface:           return "WORLD_SURFACE";
+            case HeightmapType::OceanFloor:             return "OCEAN_FLOOR";
+            case HeightmapType::MotionBlocking:         return "MOTION_BLOCKING";
             default: return "";
         }
     }

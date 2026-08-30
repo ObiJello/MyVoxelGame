@@ -625,7 +625,10 @@ BLOCK_DEF(NetherBrickStairs, "nether_brick_stairs", "Nether Brick Stairs", Opaqu
 BLOCK_DEF(NetherBrickWall, "nether_brick_wall", "Nether Brick Wall", Opaque)
 BLOCK_DEF(NetherBricks, "nether_bricks", "Nether Bricks", Opaque)
 BLOCK_DEF(NetherGoldOre, "nether_gold_ore", "Nether Gold Ore", Opaque)
-BLOCK_DEF(NetherPortal, "nether_portal", "Nether Portal", Cutout)
+// Translucent, not Cutout: MC ItemBlockRenderTypes.java:313 maps
+// NETHER_PORTAL to the translucent pass. The swirl texture is a soft alpha
+// gradient, so an alpha TEST turns it into hard-edged purple confetti.
+BLOCK_DEF(NetherPortal, "nether_portal", "Nether Portal", Translucent)
 BLOCK_DEF(NetherQuartzOre, "nether_quartz_ore", "Nether Quartz Ore", Opaque)
 BLOCK_DEF(NetherSprouts, "nether_sprouts", "Nether Sprouts", Cutout)
 BLOCK_DEF(NetherWart, "nether_wart", "Nether Wart", Cutout)

@@ -90,9 +90,12 @@ namespace Game {
             switch (static_cast<LootCondType>(cond.type)) {
 
             case LootCondType::SurvivesExplosion:
-                // MC SurvivesExplosionCondition: true when there is no
-                // explosion radius parameter. Nothing produces explosions yet.
-                return true;
+                // MC ExplosionCondition: an ABSENT radius passes outright (the
+                // ordinary break case); a present one rolls 1/radius per item.
+                // Note `<=`, not `<` — MC's comparison, and at radius 1 it
+                // makes the condition always pass rather than almost always.
+                if (ctx.explosionRadius <= 0.0f) return true;
+                return ctx.rng->NextFloat() <= 1.0f / ctx.explosionRadius;
 
             case LootCondType::EntityProperties:
                 // Every use in the block tables is {entity:"this", predicate:{}}
@@ -166,10 +169,10 @@ namespace Game {
             case LootCondType::LocationCheck: {
                 // Only the "block at +offsetY is X" shape occurs (tall_grass
                 // and large_fern confirming their own upper half is present).
-                if (!ctx.world || cond.argCount == 0) return true;
+                if (!ctx.blocks || cond.argCount == 0) return true;
                 const BlockID want = s_argBlock[cond.argBegin];
                 if (want == BlockID::Air) return true;   // unresolvable — don't block the drop
-                const BlockID got = ctx.world->GetBlock(ctx.pos.x,
+                const BlockID got = ctx.blocks->GetBlock(ctx.pos.x,
                                                         ctx.pos.y + cond.i0,
                                                         ctx.pos.z);
                 if (got == want) return true;
@@ -250,8 +253,19 @@ namespace Game {
                 break;
 
             case LootFuncType::ExplosionDecay:
-                // MC ApplyExplosionDecay drops each item with probability
-                // 1/radius. No explosions exist, so nothing decays.
+                // MC ApplyExplosionDecay: each item in the stack survives
+                // INDEPENDENTLY at 1/radius — a per-item loop, not one roll for
+                // the whole stack. A stack that loses every item drops nothing,
+                // which is how a blasted ore vein yields a scatter rather than
+                // all-or-nothing.
+                if (ctx.explosionRadius > 0.0f) {
+                    const float p = 1.0f / ctx.explosionRadius;
+                    int kept = 0;
+                    for (int i = 0; i < stack.count; ++i) {
+                        if (ctx.rng->NextFloat() <= p) ++kept;
+                    }
+                    stack.count = kept;
+                }
                 break;
 
             case LootFuncType::CopyComponents:
@@ -442,6 +456,55 @@ namespace Game {
 
         SplitAndAppend(out, std::move(rolled));
         return out;
+    }
+
+    int LootTables::RollBlockBreakExperience(BlockID block, const ItemStack* tool,
+                                             JavaRandom& rng) {
+        // SpawnerBlock.spawnAfterBreak pays with no Silk Touch check and no
+        // xpRange — it's a flat 15 + nextInt(15) + nextInt(15) (SpawnerBlock
+        // .java:36-41), so it goes before the gate. Two separate NextInt
+        // calls, matching MC's two random draws.
+        if (block == BlockID::Spawner) {
+            return 15 + rng.NextInt(15) + rng.NextInt(15);
+        }
+
+        // Everything else routes through Block.tryDropExperience, where a
+        // Silk Touch tool zeroes the payout (EnchantmentHelper
+        // .processBlockExperience — the silk_touch enchantment's
+        // block_experience effect sets it to 0).
+        if (EnchantmentLevel(tool, LootEnchantment::SilkTouch) > 0) return 0;
+
+        // UniformInt.of(min, max).sample == min + nextInt(max - min + 1).
+        const auto uniform = [&rng](int min, int max) {
+            return min + rng.NextInt(max - min + 1);
+        };
+
+        switch (block) {
+            // Blocks.java DropExperienceBlock registrations.
+            case BlockID::CoalOre:
+            case BlockID::DeepslateCoalOre:      return uniform(0, 2);
+            case BlockID::NetherGoldOre:         return uniform(0, 1);
+            case BlockID::LapisOre:
+            case BlockID::DeepslateLapisOre:     return uniform(2, 5);
+            case BlockID::DiamondOre:
+            case BlockID::DeepslateDiamondOre:   return uniform(3, 7);
+            case BlockID::EmeraldOre:
+            case BlockID::DeepslateEmeraldOre:   return uniform(3, 7);
+            case BlockID::NetherQuartzOre:       return uniform(2, 5);
+            // RedStoneOreBlock.spawnAfterBreak (RedStoneOreBlock.java:82).
+            case BlockID::RedstoneOre:
+            case BlockID::DeepslateRedstoneOre:  return uniform(1, 5);
+            // SculkBlock's ctor passes ConstantInt.of(1); the sensor pair,
+            // shrieker and catalyst each pay ConstantInt.of(5) from their own
+            // spawnAfterBreak overrides. (Iron/gold/copper ores pay nothing
+            // raw — their XP comes from smelting.)
+            case BlockID::Sculk:                 return 1;
+            case BlockID::SculkSensor:
+            case BlockID::CalibratedSculkSensor:
+            case BlockID::SculkShrieker:
+            case BlockID::SculkCatalyst:         return 5;
+            default:                             return 0;
+        }
     }
 
 } // namespace Game

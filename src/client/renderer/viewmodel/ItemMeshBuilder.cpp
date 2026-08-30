@@ -299,6 +299,30 @@ namespace Render {
             uv[i].x = au0 + uvT[i].x * (au1 - au0);
             uv[i].y = av0 + uvT[i].y * (av1 - av0);
         }
+
+        // MC BlockElementFace's `rotation` — a pure permutation of which UV
+        // corner each vertex gets (Quadrant.rotateVertexIndex: (i + shift) % 4).
+        // No trig, no matrix.
+        //
+        // This was MISSING, and it only bites on a model that carries a
+        // rotation. Two sources do:
+        //
+        //   * a model whose JSON authors `"rotation"` on a face;
+        //   * ANY model that BlockStateModels pre-rotated for a blockstate
+        //     variant — RotateModel bakes a uvRotation correction into every
+        //     face it moves, because the mesher derives UVs from fixed
+        //     world-space axes rather than from the vertices.
+        //
+        // Dropping it left every face of a rotated model textured as if
+        // unrotated. On a falling anvil, whose top face is strongly
+        // directional and whose four elements each got it wrong differently,
+        // that reads as the texture being flipped — or as two models overlaid.
+        const int shift = ((face.uvRotation / 90) % 4 + 4) % 4;
+        if (shift != 0) {
+            const glm::vec2 src[4] = { uv[0], uv[1], uv[2], uv[3] };
+            for (int i = 0; i < 4; ++i) uv[i] = src[(i + shift) & 3];
+        }
+
         appendCubeFace(verts, idx, q, uv, r, g, b);
     }
 
@@ -308,10 +332,18 @@ namespace Render {
     bool BuildBlockModelMesh(Game::BlockID b, const std::string& modelOverride,
                              std::vector<ItemCubeVert>& verts,
                              std::vector<uint32_t>& idx) {
+        const Game::BlockModel* bm = pickItemModel(b, modelOverride);
+        if (!bm) { verts.clear(); idx.clear(); return false; }
+        return BuildBlockModelMeshFrom(*bm, verts, idx);
+    }
+
+    bool BuildBlockModelMeshFrom(const Game::BlockModel& model,
+                                 std::vector<ItemCubeVert>& verts,
+                                 std::vector<uint32_t>& idx) {
         verts.clear();
         idx.clear();
-        const Game::BlockModel* bm = pickItemModel(b, modelOverride);
-        if (!bm || bm->elements.empty()) return false;
+        const Game::BlockModel* bm = &model;
+        if (bm->elements.empty()) return false;
 
         for (const auto& el : bm->elements) {
             // Clamp rather than overrun the fixed streaming buffers. A

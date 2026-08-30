@@ -1,6 +1,8 @@
 // File: src/server/world/cache/ChunkCache.hpp
 #pragma once
 
+#include <atomic>
+
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/core/Log.hpp"
@@ -57,6 +59,23 @@ namespace Game {
 
         // Get chunk from cache (returns null if not cached)
         std::shared_ptr<Chunk> Get(Math::ChunkPos position);
+
+    // Bumped by every mutation that can change what Get() answers — Put,
+    // Remove, Clear and eviction. A caller memoizing Get()'s result validates
+    // against this instead of re-entering the cache, which is the whole point:
+    // Get takes a process-wide mutex, does two hash lookups, an LRU list
+    // erase+push_front (one free, one alloc) and returns a shared_ptr by value.
+    // See ChunkProvider::GetCachedChunk.
+    uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
+    // The same counter split by WHAT changed, for a memo that can afford to be
+    // smarter than "forget everything": a Put can only turn a "not resident"
+    // answer stale (a chunk appeared), a Remove/eviction/Clear can only turn a
+    // "resident" answer stale (a chunk vanished). While chunks stream in
+    // around a mass event, Put fires hundreds of times a second and the
+    // whole-memo reset it caused sent every worker back through the mutex —
+    // three quarters of the falling-block physics time was __psynch_mutexwait.
+    uint64_t PutGeneration() const    { return m_putGeneration.load(std::memory_order_acquire); }
+    uint64_t RemoveGeneration() const { return m_removeGeneration.load(std::memory_order_acquire); }
 
         // Put chunk in cache (may trigger eviction)
         void Put(Math::ChunkPos position, std::shared_ptr<Chunk> chunk);
@@ -139,6 +158,18 @@ namespace Game {
 
     private:
         // Cache storage
+        std::atomic<uint64_t> m_generation{0};
+        std::atomic<uint64_t> m_putGeneration{0};
+        std::atomic<uint64_t> m_removeGeneration{0};
+// The size at which Get resumes maintaining LRU order. Below it nothing
+        // can be evicted, so recency decides nothing and the splice is skipped.
+        // 1/8 of headroom so a burst of Puts cannot cross from "order does not
+        // matter" to "evicting" inside one tick without Get having kept order
+        // for a while first.
+        size_t EvictionWatermark() const {
+            return m_config.maxSize - m_config.maxSize / 8;
+        }
+
         mutable std::mutex m_cacheMutex;
         std::unordered_map<Math::ChunkPos, ChunkCacheEntry, Math::ChunkPosHash> m_cache;
 
@@ -158,8 +189,23 @@ namespace Game {
 
         // Internal helpers
         void UpdateAccess(Math::ChunkPos position);
-        void EvictLRU();
-        void EvictChunk(Math::ChunkPos position, ChunkCacheEntry& entry);
+        // One chunk on its way out, carried from under the cache lock to
+        // after it is released.
+        struct PendingEviction {
+            Math::ChunkPos         pos;
+            std::shared_ptr<Chunk> chunk;
+            bool                   wasDirty = false;
+        };
+
+        // Both run WITH m_cacheMutex held and do no I/O: they only move the
+        // entry out of the map and record what has to happen next.
+        void EvictLRU(std::vector<PendingEviction>& out);
+
+        // Runs with the lock RELEASED. Saving a chunk now means serialising
+        // and compressing it, and doing that while holding the lock every
+        // block read needs was the single worst contention point in the cache
+        // — with maxSize 5120 it evicted on essentially every Put.
+        void FlushEvictions(std::vector<PendingEviction>& pending);
 
         // Move implementation
         void MoveFrom(ChunkCache&& other) noexcept;

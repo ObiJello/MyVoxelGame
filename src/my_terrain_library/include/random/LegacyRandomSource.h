@@ -183,6 +183,18 @@ public:
         setSeed(result);
     }
 
+    /**
+     * Reference: WorldgenRandom.java setLargeFeatureWithSalt()
+     * Structure placement seeding. NOTE the caller-dependent argument roles:
+     * RandomSpread passes (seed, gridX, gridZ, salt); the DEFAULT frequency
+     * reducer passes (seed, salt, sourceX, sourceZ) into the SAME formula.
+     */
+    void setLargeFeatureWithSalt(int64_t worldSeed, int32_t regionX, int32_t regionZ, int32_t salt) {
+        setSeed(static_cast<int64_t>(regionX) * 341873128712LL
+              + static_cast<int64_t>(regionZ) * 132897987541LL
+              + worldSeed + static_cast<int64_t>(salt));
+    }
+
 private:
     int64_t m_seed;
     double m_nextNextGaussian = 0.0;

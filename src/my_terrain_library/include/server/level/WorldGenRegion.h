@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 
 #include "server/level/GenerationChunkHolder.h"
 #include "util/StaticCache2D.h"
@@ -156,6 +157,14 @@ public:
     minecraft::XoroshiroRandomSource& getRandom();
 
     /**
+     * Whether this region's dimension has skylight (overworld true;
+     * nether/end false). The legacy_random_source dims are exactly the
+     * skylight-less dims, so the flag is derived alongside m_randomValid.
+     * Affects worldgen getRawBrightness-dependent checks (mushroom survival).
+     */
+    bool hasSkyLight() const { return m_hasSkyLight; }
+
+    /**
      * Get the minimum Y level
      * Reference: WorldGenRegion.java lines 406-408
      */
@@ -214,9 +223,20 @@ private:
 
     // Region-local random source
     minecraft::XoroshiroRandomSource m_random;
+    bool m_randomValid = true;
+    bool m_hasSkyLight = true;
 
     // Currently generating feature (for crash reports)
     std::function<std::string()> m_currentlyGenerating;
+    // Resolved chunk pointers, one per position in the dependency square.
+    // getChunk used to take the holder's futures mutex and copy two
+    // shared_ptrs for EVERY block read/write during decoration (measured
+    // 2026-08-30: 60% of getHeight, most of getBiome). The chunk object a
+    // holder answers with for a status <= this step's dependency is fixed
+    // for the region's lifetime, so it is resolved once. Java reads a
+    // volatile array here with no lock at all.
+    int m_chunkCacheRadius = 0;
+    std::vector<ChunkAccess*> m_chunkCache;
 
     // Sub-tick counter for ordering
     std::atomic<int64_t> m_subTickCount{0};

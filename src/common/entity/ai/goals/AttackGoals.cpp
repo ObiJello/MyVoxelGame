@@ -1,11 +1,13 @@
 // File: src/common/entity/ai/goals/AttackGoals.cpp
 #include "common/entity/ai/goals/AttackGoals.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/RangedAttackMob.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/Sensing.hpp"
 #include "common/entity/ai/RandomPos.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/entity/mobs/Monsters.hpp"
+#include "common/entity/mobs/Animals.hpp"
 #include "common/core/JavaRandom.hpp"
 
 #include <algorithm>
@@ -50,6 +52,11 @@ namespace Game {
         if (!m_followingTargetEvenIfNotSeen) {
             return !m_mob->GetNavigation().IsDone();
         }
+
+        // MC MeleeAttackGoal.canContinueToUse: a persistent chaser still gives
+        // up the moment the target leaves the mob's home restriction — the
+        // leash that keeps a restricted guard from being kited off its post.
+        if (!m_mob->IsWithinHome(target->BlockPosition())) return false;
 
         if (target->IsCreative() || target->IsSpectator()) return false;
         return true;
@@ -130,6 +137,60 @@ namespace Game {
         m_ticksUntilNextAttack = std::max(m_ticksUntilNextAttack - 1, 0);
         CheckAndPerformAttack(*target);
     }
+
+    // ── PolarBearMeleeAttackGoal ───────────────────────────────────────────
+
+    PolarBearMeleeAttackGoal::PolarBearMeleeAttackGoal(PolarBear* bear)
+        : MeleeAttackGoal(bear, 1.25, true), m_bear(bear) {}
+
+    void PolarBearMeleeAttackGoal::CheckAndPerformAttack(LivingEntity& target) {
+        // MC PolarBear.PolarBearMeleeAttackGoal.checkAndPerformAttack,
+        // verbatim: swing when possible; otherwise, inside warning range
+        // (target width + 3 blocks), rear up for the LAST 10 ticks of each
+        // cooldown; and drop back down whenever the target is out of range.
+        // (MC's override deliberately omits the base's swing() call.)
+        if (CanPerformAttack(target)) {
+            ResetAttackCooldown();
+            m_mob->DoHurtTarget(target);
+            m_bear->SetStanding(false);
+        } else if (m_mob->DistanceToSqr(target) <
+                   static_cast<double>((target.GetBbWidth() + 3.0f) *
+                                       (target.GetBbWidth() + 3.0f))) {
+            if (IsTimeToAttack()) {
+                m_bear->SetStanding(false);
+                ResetAttackCooldown();
+            }
+
+            if (m_ticksUntilNextAttack <= 10) {
+                m_bear->SetStanding(true);
+                m_bear->PlayWarningSound();
+            }
+        } else {
+            ResetAttackCooldown();
+            m_bear->SetStanding(false);
+        }
+    }
+
+    void PolarBearMeleeAttackGoal::Stop() {
+        m_bear->SetStanding(false);
+        MeleeAttackGoal::Stop();
+    }
+
+    // ── RabbitAvoidEntityGoal ──────────────────────────────────────────────
+
+    RabbitAvoidEntityGoal::RabbitAvoidEntityGoal(Rabbit* rabbit, float maxDistance,
+                                                 double walkSpeedModifier,
+                                                 double sprintSpeedModifier)
+        : AvoidEntityGoal(rabbit, maxDistance, walkSpeedModifier,
+                          sprintSpeedModifier) {}
+
+    RabbitAvoidEntityGoal::RabbitAvoidEntityGoal(Rabbit* rabbit,
+                                                 const EntityTypeId* types,
+                                                 int typeCount, float maxDistance,
+                                                 double walkSpeedModifier,
+                                                 double sprintSpeedModifier)
+        : AvoidEntityGoal(rabbit, types, typeCount, maxDistance,
+                          walkSpeedModifier, sprintSpeedModifier) {}
 
     // ── ZombieAttackGoal ───────────────────────────────────────────────────
 
@@ -333,6 +394,115 @@ namespace Game {
 
     void AvoidEntityGoal::ClearReferenceTo(const Entity* entity) {
         if (m_toAvoid == entity) m_toAvoid = nullptr;
+    }
+
+    // ── RangedBowAttackGoal ────────────────────────────────────────────────
+
+    RangedBowAttackGoal::RangedBowAttackGoal(Mob* mob, RangedAttackMob* shooter,
+                                             double speedModifier, int attackIntervalMin,
+                                             float attackRadius)
+        : m_mob(mob), m_shooter(shooter), m_speedModifier(speedModifier),
+          m_attackIntervalMin(attackIntervalMin),
+          m_attackRadiusSqr(attackRadius * attackRadius) {
+        SetFlags(GoalFlag::Move | GoalFlag::Look);
+    }
+
+    bool RangedBowAttackGoal::CanUse() {
+        // MC also requires isHolding(BOW); this port's shooter always has one.
+        return m_mob->GetTarget() != nullptr;
+    }
+
+    bool RangedBowAttackGoal::CanContinueToUse() {
+        return CanUse() || !m_mob->GetNavigation().IsDone();
+    }
+
+    void RangedBowAttackGoal::Start() {
+        m_mob->SetAggressive(true);
+    }
+
+    void RangedBowAttackGoal::Stop() {
+        m_mob->SetAggressive(false);
+        m_seeTime = 0;
+        m_attackTime = -1;
+        m_useTicks = -1;   // stopUsingItem
+        m_mob->GetNavigation().Stop();
+        m_mob->SetZza(0.0f);
+        m_mob->SetXxa(0.0f);
+    }
+
+    void RangedBowAttackGoal::Tick() {
+        LivingEntity* target = m_mob->GetTarget();
+        if (!target) return;
+
+        const double targetDistSqr = m_mob->DistanceToSqr(*target);
+        const bool hasLineOfSight = m_mob->GetSensing().HasLineOfSight(*target);
+        const bool hadLineOfSight = m_seeTime > 0;
+        if (hasLineOfSight != hadLineOfSight) m_seeTime = 0;
+        if (hasLineOfSight) ++m_seeTime; else --m_seeTime;
+
+        // Inside the radius with 1s of continuous sight: stand and strafe.
+        if (targetDistSqr <= static_cast<double>(m_attackRadiusSqr) && m_seeTime >= 20) {
+            m_mob->GetNavigation().Stop();
+            ++m_strafingTime;
+        } else {
+            m_mob->GetNavigation().MoveTo(*target, m_speedModifier);
+            m_strafingTime = -1;
+        }
+
+        JavaRandom& rng = m_mob->Level()->Random();
+        if (m_strafingTime >= 20) {
+            if (rng.NextFloat() < 0.3f) m_strafingClockwise = !m_strafingClockwise;
+            if (rng.NextFloat() < 0.3f) m_strafingBackwards = !m_strafingBackwards;
+            m_strafingTime = 0;
+        }
+
+        if (m_strafingTime > -1) {
+            if (targetDistSqr > static_cast<double>(m_attackRadiusSqr) * 0.75) {
+                m_strafingBackwards = false;
+            } else if (targetDistSqr < static_cast<double>(m_attackRadiusSqr) * 0.25) {
+                m_strafingBackwards = true;
+            }
+            m_mob->GetMoveControl().Strafe(m_strafingBackwards ? -0.5f : 0.5f,
+                                           m_strafingClockwise ? 0.5f : -0.5f);
+            m_mob->GetLookControl().SetLookAt(target->position.x, target->GetEyeY(),
+                                              target->position.z, 30.0f, 30.0f);
+        } else {
+            m_mob->GetLookControl().SetLookAt(target->position.x, target->GetEyeY(),
+                                              target->position.z, 30.0f, 30.0f);
+        }
+
+        // The draw/release/cooldown state machine, timing-identical to MC's
+        // item-use path: 20 ticks of draw, then release at full power (a bow
+        // held 20 ticks is charge 1.0), then attackIntervalMin of cooldown
+        // before the next draw begins.
+        if (m_useTicks >= 0) {
+            ++m_useTicks;
+            if (!hasLineOfSight && m_seeTime < -60) {
+                m_useTicks = -1;   // stopUsingItem
+            } else if (hasLineOfSight && m_useTicks >= 20) {
+                m_useTicks = -1;
+                m_shooter->PerformRangedAttack(*target, 1.0f);
+                m_attackTime = m_attackIntervalMin;
+            }
+        } else if (--m_attackTime <= 0 && m_seeTime >= -60) {
+            m_useTicks = 0;   // startUsingItem
+        }
+    }
+
+    // ── SpiderAttackGoal ───────────────────────────────────────────────────
+
+    SpiderAttackGoal::SpiderAttackGoal(PathfinderMob* mob)
+        : MeleeAttackGoal(mob, 1.0, true) {}
+
+    bool SpiderAttackGoal::CanContinueToUse() {
+        // MC: in bright light (magic value >= 0.5) the spider has a 1-in-100
+        // per-tick chance of losing interest entirely.
+        if (!Spider::IsDarkEnoughToHunt(*m_mob) && m_mob->Level() &&
+            m_mob->Level()->Random().NextInt(100) == 0) {
+            m_mob->SetTarget(nullptr);
+            return false;
+        }
+        return MeleeAttackGoal::CanContinueToUse();
     }
 
 } // namespace Game

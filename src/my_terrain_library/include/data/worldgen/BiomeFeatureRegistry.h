@@ -70,6 +70,28 @@ public:
      */
     static const std::vector<std::string>& getAllBiomeKeys();
 
+    /**
+     * Whether a biome id is a real vanilla biome (overworld, nether, or end).
+     * Bootstraps the registry. NOTE: Biomes::has() is NOT a validity check -
+     * Biomes::get() auto-creates entries, so that registry only reflects what
+     * has been referenced so far.
+     */
+    static bool isKnownBiomeKey(const std::string& biomeKey);
+
+    /**
+     * Nether biome keys in Java's possibleBiomes() order (vanilla nether
+     * preset parameter list order). Java builds featuresPerStep PER GENERATOR
+     * from its biome source's possibleBiomes - the nether sorter must see
+     * ONLY these five biomes or feature indices (setFeatureSeed) diverge.
+     */
+    static const std::vector<std::string>& getNetherBiomeKeys();
+
+    /**
+     * End biome keys in Java's collectPossibleBiomes() order
+     * (TheEndBiomeSource: end, highlands, midlands, islands, barrens).
+     */
+    static const std::vector<std::string>& getEndBiomeKeys();
+
 private:
     // Ordered list of biome keys (order matters for FeatureSorter)
     static std::vector<std::string> s_biomeKeyOrder;
@@ -293,6 +315,21 @@ private:
     static void setupDripstoneCaves(const std::string& biomeKey);
     static void setupDeepDark(const std::string& biomeKey);
     static void setupMangroveSwamp(const std::string& biomeKey);
+
+    // Nether biomes - Reference: NetherBiomes.java
+    static void addNetherDefaultOres(const std::string& biomeKey);
+    static void addAncientDebris(const std::string& biomeKey);
+    static void setupNetherWastes(const std::string& biomeKey);
+    static void setupSoulSandValley(const std::string& biomeKey);
+    static void setupCrimsonForest(const std::string& biomeKey);
+    static void setupWarpedForest(const std::string& biomeKey);
+    static void setupBasaltDeltas(const std::string& biomeKey);
+
+    // End biomes - Reference: EndBiomes.java
+    static void setupTheEnd(const std::string& biomeKey);
+    static void setupEndHighlands(const std::string& biomeKey);
+    static void setupSmallEndIslands(const std::string& biomeKey);
+    static void setupEndBarrensOrMidlands(const std::string& biomeKey);
     static void registerForestFeatures(const std::string& biomeKey);
     static void registerPlainsFeatures(const std::string& biomeKey);
     static void registerSwampFeatures(const std::string& biomeKey);

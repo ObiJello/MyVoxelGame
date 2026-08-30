@@ -28,6 +28,7 @@
 #pragma once
 
 #include "common/network/packets/game/MobEntityPackets.hpp"
+#include "common/world/math/WorldMath.hpp"
 
 #include <cstdint>
 #include <unordered_map>
@@ -37,6 +38,8 @@
 namespace Game { class Mob; }
 
 namespace Server {
+
+    class ChunkTicketManager;
 
     class MobManager;
     class ServerLevelBridge;
@@ -65,9 +68,43 @@ namespace Server {
         static constexpr int32_t kMaxDelta = 32767;
 
         // Compute everything that should go out this tick.
+        // One recipient of entity updates, with everything MC's
+        // ChunkMap.TrackedEntity.updatePlayer reads about them.
+        struct TrackedPlayer {
+            uint32_t   connectionId = 0;
+            glm::dvec3 position{0.0};
+            // MC ChunkMap.getPlayerViewDistance — the tracking range is
+            // clamped to it, so a player on render distance 4 does not receive
+            // updates for entities 128 blocks away.
+            int        viewDistance = 8;
+            // MC ChunkMap.isChunkTracked: the chunk must be in the player's
+            // tracking view AND no longer pending in their chunk sender. Our
+            // PlayerSession::m_sentChunks is exactly that set — a chunk lands
+            // in it at the moment its ChunkDataS2C actually goes out.
+            //
+            // Null disables the gate (used by anything constructing a tracker
+            // without sessions).
+            const std::unordered_set<Game::Math::ChunkPos,
+                                     Game::Math::ChunkPosHash>* sentChunks = nullptr;
+        };
+
+        // `tickets` answers MC's DistanceManager.inEntityTickingRange, read
+        // LIVE per entity from its own chunk — not from a precomputed set. Null
+        // disables the gate (tests), which fails open rather than closed.
         void Tick(const MobManager& mobs, ServerLevelBridge& level,
-                  const std::vector<std::pair<uint32_t, glm::dvec3>>& players,
+                  const std::vector<TrackedPlayer>& players,
+                  const ChunkTicketManager* tickets,
                   std::vector<EntityPacketOut>& out);
+
+        // Drain the entity events the entity system raised and emit them to
+        // each event's watchers. Split out of Tick() so IntegratedServer can
+        // flush BEFORE this tick's removals go out: an event raised in the
+        // same tick its entity is discarded (creeper explosion, projectile
+        // impact) must be emitted while the entity is still tracked —
+        // RemoveEntity erases the watcher set this flush needs, and the
+        // client drops events for entities it has already removed.
+        void FlushEntityEvents(ServerLevelBridge& level,
+                               std::vector<EntityPacketOut>& out);
 
         // A player disconnected — forget everything they were tracking, so a
         // reconnecting id does not inherit a stale watch set.
@@ -75,6 +112,9 @@ namespace Server {
 
         // An entity is gone. Emits removals to everyone tracking it.
         void RemoveEntity(int32_t entityId, std::vector<EntityPacketOut>& out);
+        // Same, for a whole tick's removals: one packet per watcher.
+        void RemoveEntities(const std::vector<int32_t>& entityIds,
+                            std::vector<EntityPacketOut>& out);
 
         void Clear();
 
@@ -86,7 +126,20 @@ namespace Server {
             bool    wasOnGround = false;
 
             int  tickCount = 0;
+            // MC ChunkMap.tick's `sectionPosChanged` — an entity that crossed
+            // a chunk boundary gets one update even when it sits outside the
+            // entity-ticking range, so watchers see it arrive rather than
+            // teleport in later.
+            int  lastChunkX = INT32_MIN;
+            int  lastChunkZ = INT32_MIN;
             int  teleportDelay = 0;
+
+            // MC ServerEntity.wasRiding: while an entity is a passenger no
+            // position packets are sent (the client derives its position from
+            // the vehicle via PositionRider), but the delta base keeps
+            // advancing silently; the FIRST update after dismounting is forced
+            // to a full-precision EntityPositionSync so both sides re-agree.
+            bool wasRiding = false;
 
             // Last synced data payload, so SetEntityData only goes out on change.
             float   lastHealth = -1.0f;
@@ -97,6 +150,9 @@ namespace Server {
             uint8_t lastSwell = 0xFF;
             uint8_t lastPose = 0xFF;
             uint8_t lastAnimState = 0xFF;
+            // Sentinel distinct from every real value (-1 means "no vehicle"),
+            // so the first data send always carries the riding link.
+            int32_t lastVehicleId = INT32_MIN;
 
             std::unordered_set<uint32_t> watchers;
         };
@@ -111,6 +167,9 @@ namespace Server {
                     std::vector<EntityPacketOut>& out);
 
         std::unordered_map<int32_t, Tracked> m_tracked;
+        // Connection ids seen last tick, so the per-mob "drop watchers who
+        // left" walk runs only on the tick the player set actually changed.
+        std::vector<uint32_t> m_lastPlayerIds;
     };
 
 } // namespace Server

@@ -5,6 +5,19 @@
 #include "../PacketTypes.hpp"
 #include "../IPacketListener.hpp"
 
+namespace Client {
+    // Applies the appended riding field (AddEntityS2C / SetEntityDataS2C
+    // `vehicleId` — see MobEntityPackets.hpp) to the client mob mirror:
+    // ClientMobManager stores the wanted link and resolves it against its own
+    // entities. DEFINED in client/entity/ClientMobManager.cpp — a deliberate,
+    // narrow common→client seam: apply() only ever runs on the client main
+    // thread (ClientConnection::DrainIncomingPackets), but the LISTENER type
+    // it is handed (ClientPacketHandler) forwards fixed argument lists that
+    // predate riding, so the riding field is applied here beside the listener
+    // call instead of widening every handler signature.
+    void ApplyMobVehicleLink(int32_t passengerId, int32_t vehicleId);
+}
+
 namespace Network {
 namespace Packets {
 
@@ -298,6 +311,70 @@ namespace Packets {
     };
 
     // ========================================================================
+    // EXPERIENCE ORBS
+    // ========================================================================
+
+    class XpOrbSpawnS2CPacketImpl : public IS2CPacket {
+    private:
+        XpOrbSpawnS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit XpOrbSpawnS2CPacketImpl(XpOrbSpawnS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onXpOrbSpawnS2C(m_data);
+        }
+
+        const XpOrbSpawnS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::XpOrbSpawnS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class XpOrbMoveS2CPacketImpl : public IS2CPacket {
+    private:
+        XpOrbMoveS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit XpOrbMoveS2CPacketImpl(XpOrbMoveS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onXpOrbMoveS2C(m_data);
+        }
+
+        const XpOrbMoveS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::XpOrbMoveS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class SetExperienceS2CPacketImpl : public IS2CPacket {
+    private:
+        SetExperienceS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit SetExperienceS2CPacketImpl(SetExperienceS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onSetExperienceS2C(m_data);
+        }
+
+        const SetExperienceS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::SetExperienceS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // MOB ENTITIES (MC clientbound entity packet family)
     // ========================================================================
 
@@ -313,6 +390,8 @@ namespace Packets {
 
         void apply(IPacketListener& listener) override {
             listener.onAddEntityS2C(m_data);
+            // AFTER the listener: Spawn has created the mob this links.
+            Client::ApplyMobVehicleLink(m_data.entityId, m_data.vehicleId);
         }
 
         const AddEntityS2CPacket& getData() const { return m_data; }
@@ -361,6 +440,26 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    class EntityPositionSyncBatchS2CPacketImpl : public IS2CPacket {
+    private:
+        EntityPositionSyncBatchS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit EntityPositionSyncBatchS2CPacketImpl(EntityPositionSyncBatchS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onEntityPositionSyncBatchS2C(m_data);
+        }
+
+        const EntityPositionSyncBatchS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::EntityPositionSyncBatchS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class SetEntityMotionS2CPacketImpl : public IS2CPacket {
     private:
         SetEntityMotionS2CPacket m_data;
@@ -393,6 +492,8 @@ namespace Packets {
 
         void apply(IPacketListener& listener) override {
             listener.onSetEntityDataS2C(m_data);
+            // Mount/dismount at runtime — see the AddEntity impl.
+            Client::ApplyMobVehicleLink(m_data.entityId, m_data.vehicleId);
         }
 
         const SetEntityDataS2CPacket& getData() const { return m_data; }
@@ -483,6 +584,46 @@ namespace Packets {
         const TickingStepS2CPacket& getData() const { return m_data; }
 
         PacketId getId() const override { return PacketId::TickingStepS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class ChangeDimensionS2CPacketImpl : public IS2CPacket {
+    private:
+        ChangeDimensionS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit ChangeDimensionS2CPacketImpl(ChangeDimensionS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onChangeDimensionS2C(m_data);
+        }
+
+        const ChangeDimensionS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::ChangeDimensionS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class ExplodeS2CPacketImpl : public IS2CPacket {
+    private:
+        ExplodeS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit ExplodeS2CPacketImpl(ExplodeS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onExplodeS2C(m_data);
+        }
+
+        const ExplodeS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::ExplodeS2C; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 

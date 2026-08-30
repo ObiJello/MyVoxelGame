@@ -61,6 +61,7 @@ public:
         world::level::TicketStorage& ticketStorage,
         Executor backgroundExecutor,
         Executor mainThreadExecutor,
+        Executor laneExecutor,   // runs the dispatcher mailbox + worldgen lane; may equal backgroundExecutor
         const std::string& storagePath = "",
         const std::string& levelId = "world",
         const std::string& dimension = "overworld",
@@ -158,10 +159,52 @@ public:
      * Get the number of chunks
      */
     size_t size() const { return m_updatingChunkMap.size(); }
+    ChunkTaskDispatcher::Stats worldgenDispatcherStats() const { return m_worldgenTaskDispatcher->stats(); }
+    size_t pendingGenerationTaskCount() const { return m_pendingGenerationTasks.size(); }
+    std::string debugHotTasks(size_t n);   // diagnostics
+    size_t featureClaimRetries() const { return m_worldGenContext.featureClaims ? m_worldGenContext.featureClaims->retries.load() : 0; }
+    size_t featureClaimWaiters() const {
+        if (!m_worldGenContext.featureClaims) return 0;
+        std::lock_guard<std::mutex> lock(m_worldGenContext.featureClaims->mutex);
+        return m_worldGenContext.featureClaims->waiters.size();
+    }
+    size_t pendingUnloadCount() const { std::lock_guard<std::mutex> lock(m_mapMutex); return m_pendingUnloads.size(); }
+
+    // Reference: ChunkMap.java processUnloads (lines 442-460), minus the save:
+    // holders whose ticket level rose above the max are destroyed (the holder
+    // owns its chunk). `canUnload(key)` lets the embedder veto a holder it
+    // still references (a conversion in flight). Budgeted by `haveTime` with
+    // a small floor, like Java. Main thread. Returns holders destroyed.
+    size_t processUnloads(const std::function<bool()>& haveTime,
+                          const std::function<bool(int64_t)>& canUnload);
+
+    // Reference: ChunkMap.java onLevelChange — forwards a holder's new ticket
+    // level to both task dispatchers so queued work is re-sorted by it. This
+    // was a no-op in the port, which left every holder at queue level MAX+1:
+    // no priority at all, so a whole ticketed area generated layer-by-layer
+    // breadth-first and nothing reached FULL until almost everything had.
+    void onLevelChange(const world::ChunkPos& pos, std::function<int()> oldLevel,
+                       int newLevel, std::function<void(int)> setQueueLevel);
+
+    // Visit every holder (main thread). The callback must not add or remove
+    // holders.
+    template <typename F>
+    void forEachHolder(F&& f) {
+        std::lock_guard<std::mutex> lock(m_mapMutex);
+        for (auto& [key, holder] : m_updatingChunkMap) {
+            f(*holder);
+        }
+    }
 
     /**
      * Get the worldgen context
      */
+    // Mutable access for opt-in wiring (e.g. structure state injection by the
+    // embedder after construction; nullptr keeps structures disabled).
+    world::chunk::status::WorldGenContext& worldGenContextMutable() {
+        return m_worldGenContext;
+    }
+
     const world::chunk::status::WorldGenContext& getWorldGenContext() const {
         return m_worldGenContext;
     }
@@ -231,6 +274,12 @@ private:
     std::unordered_map<int64_t, std::unique_ptr<ChunkHolder>> m_updatingChunkMap;
     std::unordered_map<int64_t, ChunkHolder*> m_visibleChunkMap;
     std::unordered_set<int64_t> m_pendingUnloads;
+    // Holders created since the last promoteChunkMap. Java clones the whole
+    // updating map on every promotion; with holders never unloaded here
+    // that clone grew to 13k+ entries and ran once per chunk request. Only
+    // additions ever happen, so promotion just appends these.
+    std::vector<std::pair<int64_t, ChunkHolder*>> m_visibleAdds;
+    std::vector<int64_t> m_visibleRemoves;
 
     // Generation state
     std::vector<std::shared_ptr<ChunkGenerationTask>> m_pendingGenerationTasks;

@@ -3,6 +3,8 @@
 #include "GuiGraphics.hpp"
 #include "../../network/NetworkClient.hpp"
 #include "../../entity/RemotePlayerManager.hpp"
+#include "common/entity/GeneratedEntityTypes.hpp"
+#include "common/world/block/BlockRegistry.hpp"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cctype>
@@ -87,6 +89,133 @@ namespace {
         return out;
     }
 
+    std::string ToLowerCopy(std::string v) {
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return v;
+    }
+
+    // Every entity slug the shared registry knows — the same table /summon
+    // resolves against, so the popup can never drift from what works.
+    std::vector<std::string> CollectEntitySlugs() {
+        std::vector<std::string> out;
+        out.reserve(Game::kEntityTypeCount);
+        for (int i = 0; i < Game::kEntityTypeCount; ++i) {
+            const auto& info = Game::kEntityTypeTable[i];
+            if (!info.slug.empty()) out.emplace_back(info.slug);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    // Block names as /shape accepts them: lower-case, spaces as underscores
+    // ("Infested Stone" -> "infested_stone").
+    std::vector<std::string> CollectBlockNames() {
+        std::vector<std::string> out;
+        out.reserve(static_cast<size_t>(Game::BlockID::Count));
+        out.emplace_back("air");
+        for (size_t i = 1; i < static_cast<size_t>(Game::BlockID::Count); ++i) {
+            std::string n = Game::BlockRegistry::Get(static_cast<Game::BlockID>(i)).name;
+            if (n.empty()) continue;
+            for (char& c : n) {
+                c = (c == ' ') ? '_'
+                              : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            out.push_back(std::move(n));
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    }
+
+    // The gamerule table ChatScreen suggests — mirrors GameRuleCommand's
+    // snake_case ids (the camelCase aliases still parse but are not offered).
+    struct RuleSuggestion { const char* name; bool isBool; };
+    constexpr RuleSuggestion kRuleSuggestions[] = {
+        {"advance_time", true},   {"block_explosion_drop_decay", true},
+        {"do_mob_spawning", true}, {"entity_drops", true},
+        {"mob_explosion_drop_decay", true}, {"mob_griefing", true},
+        {"random_tick_speed", false}, {"tnt_explodes", true},
+        {"tnt_explosion_drop_decay", true},
+    };
+
+    // ── @selector completion ────────────────────────────────────────────
+    //
+    // `word` is the whole @-token (spaces never appear inside selector
+    // brackets in this engine's parser), `wordStart` its index in the input,
+    // `posInWord` the cursor relative to it. Inside brackets the completion
+    // slot is the run since the last '[', ',' or '=' — which is what lets
+    // "@e[type=zom<TAB>" complete just the value, and a further ",limit="
+    // start a fresh key.
+    std::vector<std::string> SelectorSuggestions(const std::string& word, int wordStart,
+                                                 int posInWord, int& anchorOut) {
+        const size_t br = word.find('[');
+        if (br == std::string::npos || posInWord <= static_cast<int>(br)) {
+            anchorOut = wordStart;
+            // "@e[" as its own entry so a second TAB dives straight into the
+            // bracket; the bare forms are what /kill @a wants.
+            return {"@a", "@e", "@e[", "@p", "@r", "@s"};
+        }
+        int sub = static_cast<int>(br) + 1;
+        for (int i = sub; i < posInWord && i < static_cast<int>(word.size()); ++i) {
+            const char c = word[i];
+            if (c == '[' || c == ',' || c == '=') sub = i + 1;
+        }
+        anchorOut = wordStart + sub;
+        const char prev = sub > 0 ? word[sub - 1] : '[';
+        if (prev == '=') {
+            // Value position: which key is this?
+            int ke = sub - 1, ks = ke;
+            while (ks > static_cast<int>(br) && word[ks - 1] != '[' && word[ks - 1] != ',') --ks;
+            std::string key = ToLowerCopy(word.substr(ks, ke - ks));
+            // A '!'-negated value keeps its '!' and completes the rest.
+            if (posInWord > sub && sub < static_cast<int>(word.size()) && word[sub] == '!') {
+                ++anchorOut;
+            }
+            if (key == "type")     return CollectEntitySlugs();
+            if (key == "sort")     return {"arbitrary", "furthest", "nearest", "random"};
+            if (key == "gamemode") return {"adventure", "creative", "spectator", "survival"};
+            if (key == "limit")    return {"1", "10", "100"};
+            if (key == "name")     return CollectPlayerNames();
+            return {};
+        }
+        // Key position. "]" closes the selector once at least one pair is in.
+        std::vector<std::string> keys = {
+            "distance=", "dx=", "dy=", "dz=", "gamemode=", "limit=", "name=",
+            "sort=", "type=", "x=", "x_rotation=", "y=", "y_rotation=", "z="};
+        if (sub > static_cast<int>(br) + 1) keys.insert(keys.begin(), "]");
+        return keys;
+    }
+
+    // One-line usage template per command, drawn greyed above the input as
+    // soon as the command name is recognisable.
+    std::string UsageHintFor(const std::string& text) {
+        if (text.size() < 2 || text[0] != '/') return {};
+        std::string cmd = text.substr(1, text.find(' ') == std::string::npos
+                                             ? std::string::npos : text.find(' ') - 1);
+        cmd = ToLowerCopy(cmd);
+        static const std::pair<const char*, const char*> kUsages[] = {
+            {"tp",          "/tp <target|x y z> [<dest>|<x y z>] [yaw pitch | facing x y z]"},
+            {"teleport",    "/teleport <target|x y z> [<dest>|<x y z>] [yaw pitch | facing x y z]"},
+            {"kick",        "/kick <player> [reason]"},
+            {"gamemode",    "/gamemode <survival|creative|adventure|spectator> [player]"},
+            {"kill",        "/kill [<player>|@e[type=...]|@a|@p|@r|@s]"},
+            {"summon",      "/summon <entity> [count] [<x> <y> <z>] [fuse=n] [delay=n]"},
+            {"sheepeat",    "/sheepeat [radius]"},
+            {"seed",        "/seed"},
+            {"time",        "/time <set|add|query> <value>"},
+            {"gamerule",    "/gamerule <rule> [value]"},
+            {"entitystats", "/entitystats [tnt|all]"},
+            {"tick",        "/tick <query|rate|freeze|unfreeze|step|sprint> [...]"},
+            {"clearchat",   "/clearchat"},
+            {"shape",       "/shape <block> <cube s|box sx sy sz|wall w [h]|sphere r|dome r|"
+                            "cylinder r [h]|pyramid base> [hollow|frame|checker|spaced=N] [at x y z]"},
+        };
+        for (const auto& [name, usage] : kUsages) {
+            if (cmd == name) return usage;
+        }
+        return {};
+    }
+
     // The full suggestion-provider entry point. Returns the candidate
     // list filtered by the partial word at the cursor, AND sets `anchor`
     // to the index of where to start the replacement.
@@ -95,39 +224,23 @@ namespace {
                                                    int& anchorOut) {
         anchorOut = FindWordStart(text, cursor);
 
-        // Not in command mode? No suggestions (MC's @-mention path isn't
-        // wired yet).
         if (text.empty() || text[0] != '/') return {};
 
-        // Tokenise up to the cursor to figure out which arg we're in.
         auto tokens = TokenizeBeforeCursor(text, cursor);
-        // tokens[0] still includes the leading '/' here.
 
-        // Are we completing the FIRST word (the command name)? That is,
-        // the cursor sits inside or right after the '/foo' token and
-        // there are no positional args yet.
-        //
-        // Cases:
-        //   text="/"     tokens=["/"]      cursor=1  → command name
-        //   text="/t"    tokens=["/t"]     cursor=2  → command name
-        //   text="/tp "  tokens=["/tp"]    cursor=4  → arg 1 (after space)
         const bool completingCommandName =
             (tokens.size() <= 1) && (cursor <= (int)(tokens.empty() ? 0 : tokens[0].size()));
 
-        std::string partial;
         int argIndex;
+        const int wordStart = anchorOut;
+        const std::string word = text.substr(wordStart, cursor - wordStart);
 
         if (completingCommandName) {
-            // MC's command popup: bare names WITHOUT the leading '/'.
-            // Anchor right after the slash so the apply replaces only
-            // the partial command and leaves the '/' in place.
             anchorOut = std::min(cursor, 1);
-            partial = text.substr(anchorOut, cursor - anchorOut);
             argIndex = 0;
         } else {
-            partial = text.substr(anchorOut, cursor - anchorOut);
             // argIndex: 0 = command name, 1+ = positional args after it.
-            if (!partial.empty() && !tokens.empty()) {
+            if (!word.empty() && !tokens.empty()) {
                 argIndex = static_cast<int>(tokens.size()) - 1;
             } else {
                 argIndex = static_cast<int>(tokens.size());
@@ -136,98 +249,124 @@ namespace {
 
         std::vector<std::string> candidates;
         if (argIndex == 0) {
-            // BARE command names (no '/'), MC-style. The '/' is already
-            // in the input field and stays put when applying.
-            //
-            // Sourced from the server's CommandsS2C rather than a literal
-            // list here: the literal drifted from IntegratedServer's
-            // registrations every time a command was added, which is how
-            // /tick shipped without ever appearing in the popup.
+            // BARE command names (no '/'), from the server's CommandsS2C so
+            // the popup can never drift from what is actually registered.
             candidates = Render::GetServerCommandNames();
-            // `clearchat` is handled entirely client-side (PlatformMain
-            // intercepts it before the line is sent), so the server does not
-            // know about it and it has to be added here.
             candidates.push_back("clearchat");
             std::sort(candidates.begin(), candidates.end());
             candidates.erase(std::unique(candidates.begin(), candidates.end()),
                              candidates.end());
         } else {
-            // Command name without the leading '/' for matching.
             std::string cmd = tokens.empty() ? "" : tokens[0];
             if (!cmd.empty() && cmd[0] == '/') cmd.erase(0, 1);
-            for (auto& c : cmd) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            cmd = ToLowerCopy(cmd);
 
-            if (cmd == "tp" || cmd == "teleport") {
-                // /tp <player>, /tp <player> <player>, /tp <x> <y> <z>
+            const bool takesSelectors =
+                cmd == "kill" || cmd == "tp" || cmd == "teleport";
+
+            // An @-token completes as a selector wherever selectors parse,
+            // whatever the argument position — this is the "@e[type=<TAB>"
+            // path, and it manages its own anchor inside the brackets.
+            if (takesSelectors && !word.empty() && word[0] == '@') {
+                candidates = SelectorSuggestions(word, wordStart, cursor - wordStart, anchorOut);
+            } else if (cmd == "tp" || cmd == "teleport") {
                 if (argIndex == 1 || argIndex == 2) {
                     candidates = CollectPlayerNames();
-                    // Also offer "~" for coordinates on arg 1..3 of /tp
-                    // (MC offers the relative-coord tilde here).
+                    candidates.push_back("@a"); candidates.push_back("@e");
+                    candidates.push_back("@p"); candidates.push_back("@r");
+                    candidates.push_back("@s");
                     candidates.push_back("~");
                 } else if (argIndex == 3) {
                     candidates = {"~"};
+                } else if (argIndex >= 4) {
+                    candidates = {"~", "facing"};
                 }
             } else if (cmd == "kick") {
-                if (argIndex == 1) {
-                    candidates = CollectPlayerNames();
-                }
+                if (argIndex == 1) candidates = CollectPlayerNames();
             } else if (cmd == "gamemode") {
-                // /gamemode <mode> [player]
                 if (argIndex == 1) {
-                    candidates = {"survival", "creative", "adventure", "spectator"};
+                    candidates = {"adventure", "creative", "spectator", "survival"};
                 } else if (argIndex == 2) {
                     candidates = CollectPlayerNames();
                 }
             } else if (cmd == "kill") {
                 if (argIndex == 1) {
                     candidates = CollectPlayerNames();
+                    candidates.push_back("@a"); candidates.push_back("@e");
+                    candidates.push_back("@p"); candidates.push_back("@r");
+                    candidates.push_back("@s");
                 }
-            } else if (cmd == "time") {
-                // /time <set|add|query> <value>
+            } else if (cmd == "summon") {
                 if (argIndex == 1) {
-                    candidates = {"set", "add", "query"};
+                    candidates = CollectEntitySlugs();
                 } else if (argIndex == 2) {
-                    const std::string sub = tokens.size() > 1 ? tokens[1] : "";
-                    if (sub == "query") {
-                        candidates = {"daytime", "gametime", "day"};
-                    } else if (sub == "set") {
-                        candidates = {"day", "noon", "night", "midnight"};
+                    candidates = {"1", "10", "100", "1000", "10000", "100000"};
+                } else {
+                    candidates = {"~", "fuse=80", "delay=1"};
+                }
+            } else if (cmd == "shape") {
+                // /shape <block> <form> <sizes...> [quirks] [at x y z]
+                if (argIndex == 1) {
+                    candidates = CollectBlockNames();
+                } else if (argIndex == 2) {
+                    candidates = {"box", "cube", "cylinder", "dome",
+                                  "pyramid", "sphere", "wall"};
+                } else {
+                    // Past the sizes: quirks, the `at` anchor, and `~` for its
+                    // coordinates. (Sizes themselves are numbers — nothing
+                    // useful to suggest.)
+                    const std::string prev1 = tokens.size() >= 2 ? tokens[tokens.size() - (word.empty() ? 1 : 2)] : "";
+                    bool afterAt = false;
+                    for (size_t t = 3; t < tokens.size(); ++t) {
+                        if (ToLowerCopy(tokens[t]) == "at") { afterAt = true; break; }
+                    }
+                    if (afterAt || ToLowerCopy(prev1) == "at") {
+                        candidates = {"~"};
+                    } else {
+                        candidates = {"at", "checker", "frame", "hollow", "spaced=2"};
                     }
                 }
-            } else if (cmd == "gamerule") {
-                // /gamerule <rule> [value]. Rule ids mirror GameRuleCommand's
-                // table (snake_case, per the vendored decompile); the legacy
-                // camelCase aliases still work but are not suggested.
+            } else if (cmd == "entitystats") {
+                if (argIndex == 1) candidates = {"all", "tnt"};
+            } else if (cmd == "sheepeat") {
+                if (argIndex == 1) candidates = {"8", "16"};
+            } else if (cmd == "time") {
                 if (argIndex == 1) {
-                    candidates = {"random_tick_speed", "advance_time"};
+                    candidates = {"add", "query", "set"};
                 } else if (argIndex == 2) {
-                    // Only boolean rules have a fixed value set — an int rule
-                    // takes a number, which there is nothing useful to suggest
-                    // for. Offering true/false for random_tick_speed would be
-                    // actively misleading.
-                    const std::string rule = tokens.size() > 1 ? tokens[1] : "";
-                    if (rule == "advance_time" || rule == "doDaylightCycle") {
-                        candidates = {"true", "false"};
+                    const std::string sub = tokens.size() > 1 ? ToLowerCopy(tokens[1]) : "";
+                    if (sub == "query")    candidates = {"day", "daytime", "gametime"};
+                    else if (sub == "set") candidates = {"day", "midnight", "night", "noon"};
+                }
+            } else if (cmd == "gamerule") {
+                if (argIndex == 1) {
+                    for (const auto& r : kRuleSuggestions) candidates.push_back(r.name);
+                } else if (argIndex == 2) {
+                    const std::string rule = tokens.size() > 1 ? ToLowerCopy(tokens[1]) : "";
+                    for (const auto& r : kRuleSuggestions) {
+                        if (rule == r.name) {
+                            candidates = r.isBool
+                                ? std::vector<std::string>{"false", "true"}
+                                : std::vector<std::string>{"0", "3", "300"};
+                            break;
+                        }
                     }
                 }
             } else if (cmd == "tick") {
-                // /tick <query|rate|freeze|unfreeze|step|sprint>
                 if (argIndex == 1) {
-                    candidates = {"query", "rate", "freeze", "unfreeze", "step", "sprint"};
+                    candidates = {"freeze", "query", "rate", "sprint", "step", "unfreeze"};
                 } else if (argIndex == 2) {
-                    const std::string sub = tokens.size() > 1 ? tokens[1] : "";
-                    if (sub == "rate") {
-                        candidates = {"20"};            // MC's DEFAULT_TICKRATE suggestion
-                    } else if (sub == "step") {
-                        candidates = {"stop", "1t", "1s"};   // MC's step suggestions
-                    } else if (sub == "sprint") {
-                        candidates = {"stop", "60s", "1d", "3d"};  // MC's sprint suggestions
-                    }
+                    const std::string sub = tokens.size() > 1 ? ToLowerCopy(tokens[1]) : "";
+                    if (sub == "rate")        candidates = {"20"};
+                    else if (sub == "step")   candidates = {"1s", "1t", "stop"};
+                    else if (sub == "sprint") candidates = {"1d", "3d", "60s", "stop"};
                 }
             }
         }
 
-        // Filter by partial prefix (case-insensitive).
+        // Filter by the partial at the FINAL anchor (a selector path may have
+        // moved it inside the token), case-insensitive.
+        const std::string partial = text.substr(anchorOut, cursor - anchorOut);
         std::vector<std::string> filtered;
         for (const auto& c : candidates) {
             if (partial.empty() || StartsWithIgnoreCase(c, partial)) {
@@ -247,7 +386,8 @@ namespace Render {
         // It is deliberately NOT kept up to date — the whole point of the
         // packet is that this list stops mattering.
         std::vector<std::string> s_serverCommandNames = {
-            "tp", "teleport", "kick", "gamemode", "kill", "time", "gamerule", "seed",
+            "entitystats", "gamemode", "gamerule", "kick", "kill", "seed",
+            "shape", "sheepeat", "summon", "teleport", "tick", "time", "tp",
         };
     } // namespace
 
@@ -492,6 +632,15 @@ namespace Render {
     void ChatScreen::Render(GuiGraphics& graphics) {
         if (!m_open) return;
 
+        // Own stratum, above the chat history. Within one stratum the GUI
+        // batcher orders all fills under all text (GuiRenderer::BuildBatches
+        // pushes fills first and the sort is stable), so the suggestion
+        // popup's background could never cover ChatComponent's lines — a
+        // broadcast rendered above the popup box but below its entries. MC
+        // solves this the same way: CommandSuggestions renders in a later
+        // stratum than the chat.
+        graphics.NextStratum();
+
         int guiWidth = graphics.GuiWidth();
         int guiHeight = graphics.GuiHeight();
 
@@ -527,6 +676,15 @@ namespace Render {
         }
 
         // Suggestion popup is drawn LAST so it sits on top of everything.
+        // Usage template for the command being typed — MC shows this as the
+        // grey inline hint; a line above the input is the closest fit here.
+        if (!m_suggestionsOpen) {
+            const std::string hint = UsageHintFor(m_inputText);
+            if (!hint.empty()) {
+                graphics.DrawString(hint, inputX, inputY - 11, 0xFFA0A0A0, true);
+            }
+        }
+
         RenderSuggestions(graphics, inputX, inputY);
     }
 
@@ -572,6 +730,13 @@ namespace Render {
         // Box background — MC uses 0xD0000000 (~82% black). Drawn under
         // every row at once.
         graphics.Fill(boxX0, boxY0, boxX1, boxY1, 0xD0000000);
+
+        {
+            const std::string hint = UsageHintFor(m_inputText);
+            if (!hint.empty()) {
+                graphics.DrawString(hint, inputX, boxY0 - 11, 0xFFA0A0A0, true);
+            }
+        }
 
         // Each visible row, top-down.
         for (int i = 0; i < visible; ++i) {

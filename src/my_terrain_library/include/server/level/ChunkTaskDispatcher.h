@@ -7,6 +7,7 @@
 #include "util/CompletableFuture.h"
 #include "world/ChunkPos.h"
 #include <memory>
+#include <cstdio>
 #include <functional>
 #include <atomic>
 
@@ -121,6 +122,7 @@ public:
             int ticketLevel = level();
             // Debug logging would go here
             m_queue.submit(task, pos, ticketLevel);
+            m_statSubmitted.fetch_add(1, std::memory_order_relaxed);
             if (m_sleeping.load(std::memory_order_acquire)) {
                 m_sleeping.store(false, std::memory_order_release);
                 pollTask();
@@ -165,9 +167,18 @@ protected:
      * This enables batching: many tasks can queue up before any are polled for execution,
      * allowing the ConsecutiveExecutor to batch work efficiently.
      */
+public:
+    struct Stats { size_t submitted, popped, executed, polls; bool hasWork, sleeping; size_t stranded; };
+    Stats stats() const {
+        return Stats{m_statSubmitted.load(), m_statPopped.load(), m_statExecuted.load(),
+                     m_statPolls.load(), m_queue.hasWork(), m_sleeping.load(), m_queue.strandedPops()};
+    }
+
+protected:
     virtual void pollTask() {
         // MUST schedule to dispatcher at priority 3 (lowest) - matches Java exactly!
         m_dispatcher->schedule(3, [this]() {
+            m_statPolls.fetch_add(1, std::memory_order_relaxed);
             auto tasksForChunk = popTasks();
             if (!tasksForChunk.has_value()) {
                 // Queue is empty - go to sleep
@@ -188,10 +199,21 @@ protected:
         std::vector<std::shared_ptr<util::CompletableFuture<void>>> futures;
         futures.reserve(tasksForChunk.tasks.size());
 
+        m_statPopped.fetch_add(tasksForChunk.tasks.size(), std::memory_order_relaxed);
         for (auto& task : tasksForChunk.tasks) {
             auto future = m_executor->template scheduleWithResult<void>(
-                [task = std::move(task)](std::shared_ptr<util::CompletableFuture<void>> f) {
-                    task();
+                [this, task = std::move(task)](std::shared_ptr<util::CompletableFuture<void>> f) {
+                    // The future MUST complete: pollTask is chained on it, and
+                    // a task that threw used to leave the whole dispatcher
+                    // asleep forever (no more generation for the session).
+                    try {
+                        task();
+                        m_statExecuted.fetch_add(1, std::memory_order_relaxed);
+                    } catch (const std::exception& e) {
+                        std::fprintf(stderr, "[ChunkTaskDispatcher] task threw: %s\n", e.what());
+                    } catch (...) {
+                        std::fprintf(stderr, "[ChunkTaskDispatcher] task threw (unknown)\n");
+                    }
                     f->complete();
                 }
             );
@@ -226,6 +248,7 @@ private:
     std::shared_ptr<util::thread::TaskScheduler<std::function<void()>>> m_executor;
     std::unique_ptr<util::thread::PriorityConsecutiveExecutor> m_dispatcher;
     std::atomic<bool> m_sleeping;
+    std::atomic<size_t> m_statSubmitted{0}, m_statPopped{0}, m_statExecuted{0}, m_statPolls{0};
 };
 
 } // namespace level

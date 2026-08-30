@@ -111,6 +111,20 @@ public:
      * Increase generation reference count
      * Reference: GenerationChunkHolder.java lines 241-247
      */
+    // Number of ChunkGenerationTasks currently holding this chunk in their
+    // dependency cache. Zero means no step can be running on or reading it.
+    // Set when a task that chose the loading pyramid met a neighbour that
+    // still needs generating; the next task for this chunk skips the
+    // loading shortcut (ChunkGenerationTask::canLoadWithoutGeneration).
+    void setForceGeneration() { m_forceGeneration.store(true, std::memory_order_release); }
+    bool forceGeneration() const { return m_forceGeneration.load(std::memory_order_acquire); }
+    std::atomic<bool> m_forceGeneration{false};
+
+    // Public for ChunkGenerationTask's loading-shortcut recovery.
+    void rescheduleChunkTask(ChunkMap& scheduler, const world::chunk::status::ChunkStatus* status);
+
+    int generationRefCount() const { return m_generationRefCount.load(std::memory_order_acquire); }
+
     void increaseGenerationRefCount();
 
     /**
@@ -178,6 +192,9 @@ public:
      * Reference: GenerationChunkHolder.java lines 310-318
      */
     const world::chunk::status::ChunkStatus* getLatestStatus() const;
+    std::string debugState() const;   // diagnostics
+    std::pair<int64_t, int> debugWaitingOn() const;
+    int debugTaskRuns() const;   // -1 = no task   // diagnostics: what the current task waits on
 
 protected:
     /**
@@ -193,7 +210,6 @@ private:
      * Reschedule chunk task
      * Reference: GenerationChunkHolder.java lines 119-132
      */
-    void rescheduleChunkTask(ChunkMap& scheduler, const world::chunk::status::ChunkStatus* status);
 
     /**
      * Get or create a future for a status
@@ -257,6 +273,11 @@ private:
     // Protected by m_futuresMutex since Apple's libc++ doesn't support std::atomic<shared_ptr>
     static constexpr int STATUS_COUNT = 12;  // Number of ChunkStatus values
     mutable std::mutex m_futuresMutex;
+    // The EMPTY future's chunk, mirrored lock-free: getPersistedStatus() is
+    // read once per holder per pyramid layer (~1,250 times per generated
+    // chunk) and took m_futuresMutex plus two shared_ptr copies each time —
+    // 21% of the worldgen lane (measured 2026-08-30). Java reads a volatile.
+    std::atomic<ChunkAccess*> m_emptyChunk{nullptr};
     std::array<FutureType, STATUS_COUNT> m_futures;
 
     // Current generation task (protected by m_taskMutex)

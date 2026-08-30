@@ -107,6 +107,23 @@ namespace Game {
         IronGolem = 87,  // "iron_golem"
         SnowGolem = 88,  // "snow_golem"
         Villager = 89,  // "villager"
+        BreezeWindCharge = 90,  // "breeze_wind_charge"
+        DragonFireball = 91,  // "dragon_fireball"
+        Egg = 92,  // "egg"
+        Fireball = 93,  // "fireball"
+        LlamaSpit = 94,  // "llama_spit"
+        ShulkerBullet = 95,  // "shulker_bullet"
+        SmallFireball = 96,  // "small_fireball"
+        Snowball = 97,  // "snowball"
+        SplashPotion = 98,  // "splash_potion"
+        Trident = 99,  // "trident"
+        WindCharge = 100,  // "wind_charge"
+        WitherSkull = 101,  // "wither_skull"
+        EvokerFangs = 102,  // "evoker_fangs"
+        AreaEffectCloud = 103,  // "area_effect_cloud"
+        EyeOfEnder = 104,  // "eye_of_ender"
+        FallingBlock = 105,  // "falling_block"
+        Tnt = 106,  // "tnt"
         Count
     };
 
@@ -126,8 +143,11 @@ namespace Game {
         // (eyeHeight * 0.5); MC hardcodes an override for the mobs whose baby
         // model has a proportionally larger head.
         float       babyEyeHeight;
-        // Monster's ctor sets 5; Animal returns 1 + rand(3) itself, so 0 here
-        // means 'ask the entity'.
+        // MC Mob.xpReward as seeded by the entity's constructor chain
+        // (Monster.java:34 base 5, per-mob ctor overrides — see the
+        // generator's XP_OVERRIDES). Mob::GetXpReward reads this; mobs whose
+        // reward is dynamic (animals 1..3, slime size, baby zombie x2.5)
+        // override GetXpReward in code instead.
         int         xpReward;
         bool        notInPeaceful;
     };
@@ -135,7 +155,7 @@ namespace Game {
     // LivingEntity.DEFAULT_BABY_SCALE — one value for every type.
     inline constexpr float kBabyScale = 0.5f;
 
-    inline constexpr int kEntityTypeCount = 90;
+    inline constexpr int kEntityTypeCount = 107;
     extern const EntityTypeInfo kEntityTypeTable[kEntityTypeCount];
 
     inline const EntityTypeInfo& GetEntityTypeInfo(EntityTypeId t) {

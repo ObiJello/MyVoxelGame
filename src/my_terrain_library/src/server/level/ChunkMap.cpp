@@ -1,4 +1,8 @@
 #include "server/level/ChunkMap.h"
+#include <cstdio>
+#include <cstdlib>
+#include <algorithm>
+#include "util/TerrainProfiling.h"
 #include "server/level/ServerLevel.h"
 #include "server/level/WorldGenRegion.h"
 #include "world/chunk/status/ChunkPyramid.h"
@@ -24,6 +28,7 @@ ChunkMap::ChunkMap(
     world::level::TicketStorage& ticketStorage,
     Executor backgroundExecutor,
     Executor mainThreadExecutor,
+    Executor laneExecutor,
     const std::string& storagePath,
     const std::string& levelId,
     const std::string& dimension,
@@ -54,6 +59,14 @@ ChunkMap::ChunkMap(
     // Wire background executor for async tasks (NOISE, BIOMES use supplyAsync)
     // Reference: NoiseBasedChunkGenerator.fillFromNoise() uses Util.backgroundExecutor()
     m_worldGenContext.backgroundExecutor = m_backgroundExecutor;
+    // Parallel decoration (ChunkStatusTasks::generateFeatures with
+    // FeatureClaims) stays DISABLED. Even with structure placement under one
+    // lock (ChunkGenerator::applyBiomeDecoration) it still crashed in
+    // WorldGenRegionLevel::getBlockState from JigsawPieceBehavior: structure
+    // pieces read blocks well outside the decorating chunk's 3x3, i.e. in
+    // chunks another decoration task may be writing. Vanilla's single
+    // worldgen lane is the invariant that makes those reads safe; keep it.
+    m_worldGenContext.featureClaims = nullptr;
     m_worldGenContext.unsavedListener = [this](int x, int z) {
         // Mark chunk as unsaved
         int64_t key = world::ChunkPos::asLong(x, z);
@@ -74,11 +87,18 @@ ChunkMap::ChunkMap(
     // CRITICAL: Must use ConsecutiveExecutor, not plain ExecutorTaskScheduler!
     // The ConsecutiveExecutor ensures tasks execute ONE AT A TIME, preventing
     // contention and ensuring proper ordering. This is how Java does it.
+    // Java runs the mailbox and the worldgen lane on Util.backgroundExecutor —
+    // a ForkJoinPool whose small tasks are picked up immediately. Our pool is
+    // a FIFO: every hop of the serial lane queued behind 10-30 ms noise and
+    // biome tasks, so the pipeline advanced at the pool's queue latency
+    // instead of the lane's speed. The embedder passes dedicated threads for
+    // these two serial executors.
+    Executor lane = laneExecutor ? laneExecutor : m_backgroundExecutor;
     m_worldgenConsecutiveExecutor = std::make_shared<util::thread::ConsecutiveExecutor>(
-        m_backgroundExecutor, "worldgen"
+        lane, "worldgen"
     );
     m_worldgenTaskDispatcher = std::make_unique<ChunkTaskDispatcher>(
-        m_worldgenConsecutiveExecutor, m_backgroundExecutor
+        m_worldgenConsecutiveExecutor, lane
     );
 
     m_lightConsecutiveExecutor = std::make_shared<util::thread::ConsecutiveExecutor>(
@@ -117,13 +137,16 @@ GenerationChunkHolder* ChunkMap::acquireGeneration(int64_t chunkPos) {
             ChunkLevel::getMaxLevel(),
             m_worldHeight,
             m_minY,
-            // onLevelChange - no-op for now
-            [](const world::ChunkPos&, std::function<int()>, int, std::function<void(int)>) {},
+            [this](const world::ChunkPos& p, std::function<int()> oldLevel, int newLevel,
+                   std::function<void(int)> setQueueLevel) {
+                onLevelChange(p, std::move(oldLevel), newLevel, std::move(setQueueLevel));
+            },
             // playerProvider - no-op
             [](const world::ChunkPos&, bool) { return std::vector<void*>{}; }
         );
         ChunkHolder* ptr = holder.get();
         m_updatingChunkMap[chunkPos] = std::move(holder);
+        m_visibleAdds.emplace_back(chunkPos, ptr);
         m_modified = true;
         ptr->increaseGenerationRefCount();
         return ptr;
@@ -244,7 +267,21 @@ void ChunkMap::runGenerationTask(std::shared_ptr<ChunkGenerationTask> task) {
 
     m_worldgenTaskDispatcher->submit(
         [this, task, pos]() {  // task captured by value (shared_ptr copy)
-            auto waitFuture = task->runUntilWait();
+            TERRAIN_ZONE_N("Lane.RunUntilWait");
+            task->noteRun();
+            ChunkGenerationTask::FutureType waitFuture;
+            try {
+                waitFuture = task->runUntilWait();
+            } catch (const std::exception& e) {
+                // Java would crash the server here. We cannot: release the
+                // task's claims so its holders can unload and other tasks
+                // waiting on them resume, and report loudly.
+                std::fprintf(stderr, "[ChunkMap] generation task for (%d,%d) threw: %s\n",
+                             pos.x(), pos.z(), e.what());
+                task->markForCancellation();
+                task->releaseClaim();
+                return;
+            }
             if (waitFuture != nullptr) {
                 // Need to wait - reschedule when done
                 // Lambda captures shared_ptr, keeping task alive
@@ -274,29 +311,29 @@ ChunkMap::scheduleChunkLoad(const world::ChunkPos& pos) {
             const std::optional<std::unique_ptr<nbt::CompoundTag>>& optionalTag) {
 
             if (optionalTag && *optionalTag) {
-                // Found chunk data on disk - parse it
-                const auto& tag = *optionalTag;
-
-                // Get chunk status from tag to determine what type of chunk to create
-                const ChunkStatus* status =
-                    world::level::chunk::storage::SerializableChunkData::getChunkStatusFromTag(tag.get());
-
-                if (status && status->isOrAfter(ChunkStatus::FULL)) {
-                    // Chunk is fully generated - would create LevelChunk
-                    // For now, create empty since we don't have full chunk implementation
-                    ChunkAccess* chunk = createEmptyChunk(pos);
-                    if (chunk) {
-                        chunk->setPersistedStatus(*status);
+                // Reference: ChunkMap.java scheduleChunkLoad -> ChunkSerializer.read.
+                // Build a real ProtoChunk from the saved data (blocks, biomes,
+                // heightmaps, status) so a neighbour that already exists on
+                // disk satisfies dependencies instead of being regenerated.
+                nbt::CompoundTag& tag = **optionalTag;
+                ChunkAccess* chunk = nullptr;
+                try {
+                    auto data = world::level::chunk::storage::SerializableChunkData::parse(
+                        m_minY, m_worldHeight, tag);
+                    if (data) {
+                        auto proto = data->readDirect(m_minY, m_worldHeight, m_airBlock,
+                                                      m_defaultBlock, m_blockRegistry);
+                        if (proto) chunk = proto.release();
                     }
-                    resultFuture->complete(chunk);
-                } else {
-                    // Chunk is partially generated - would create ProtoChunk
-                    ChunkAccess* chunk = createEmptyChunk(pos);
-                    if (chunk && status) {
-                        chunk->setPersistedStatus(*status);
-                    }
-                    resultFuture->complete(chunk);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "[ChunkMap] chunk (%d,%d) on disk could not be read: %s\n",
+                                 pos.x(), pos.z(), e.what());
+                    chunk = nullptr;
                 }
+                if (!chunk) {
+                    chunk = createEmptyChunk(pos);   // regenerate from scratch
+                }
+                resultFuture->complete(chunk);
             } else {
                 // No chunk data on disk - create new empty chunk
                 ChunkAccess* chunk = createEmptyChunk(pos);
@@ -337,6 +374,90 @@ ChunkMap::ChunkAccess* ChunkMap::createEmptyChunk(const world::ChunkPos& pos) {
 }
 
 // Reference: ChunkMap.java lines 240-262
+std::string ChunkMap::debugHotTasks(size_t n) {
+    std::vector<std::pair<int, std::string>> rows;
+    {
+        std::lock_guard<std::mutex> lock(m_mapMutex);
+        for (auto& [key, holder] : m_updatingChunkMap) {
+            std::string st = holder->debugState();
+            auto p = st.find("runs=");
+            if (p == std::string::npos) continue;
+            int runs = std::atoi(st.c_str() + p + 5);
+            if (runs > 20) rows.emplace_back(runs, world::ChunkPos(key).toString() + " " + st);
+        }
+    }
+    std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    std::string out;
+    for (size_t i = 0; i < rows.size() && i < n; ++i) out += "\n    " + rows[i].second;
+    return out + "\n    (" + std::to_string(rows.size()) + " tasks with >20 runs)";
+}
+
+size_t ChunkMap::processUnloads(const std::function<bool()>& haveTime,
+                                const std::function<bool(int64_t)>& canUnload) {
+    std::vector<int64_t> candidates;
+    {
+        std::lock_guard<std::mutex> lock(m_mapMutex);
+        candidates.assign(m_pendingUnloads.begin(), m_pendingUnloads.end());
+    }
+    if (candidates.empty()) return 0;
+
+    // Java: while ((floor > 0 || haveTime()) && poll()) — floor keeps a late
+    // tick draining a few, and forces progress on a large backlog.
+    size_t floor = candidates.size() > 2000 ? candidates.size() - 2000 : 0;
+    floor = std::max<size_t>(floor, 4);
+    size_t destroyed = 0;
+    const int maxLevel = ChunkLevel::getMaxLevel();
+    for (int64_t key : candidates) {
+        if (destroyed >= floor && !haveTime()) break;
+        std::unique_ptr<ChunkHolder> victim;
+        {
+            std::lock_guard<std::mutex> lock(m_mapMutex);
+            auto it = m_updatingChunkMap.find(key);
+            if (it == m_updatingChunkMap.end()) { m_pendingUnloads.erase(key); continue; }
+            ChunkHolder* holder = it->second.get();
+            if (holder->getTicketLevel() <= maxLevel) { m_pendingUnloads.erase(key); continue; }   // wanted again
+            if (holder->generationRefCount() != 0) continue;   // a task still holds it in its cache
+            if (!canUnload(key)) continue;                     // embedder still reads it
+            victim = std::move(it->second);
+            m_updatingChunkMap.erase(it);
+            m_pendingUnloads.erase(key);
+            m_visibleRemoves.push_back(key);
+            m_modified = true;
+        }
+        // Lifetime: ChunkHolder::updateFutures hands the dispatchers lambdas
+        // that capture the holder (`[this] { return getQueueLevel(); }`), and
+        // they run later on the dispatcher thread. Deleting the holder here
+        // was a use-after-free (SIGSEGV in that lambda, 2026-08-30). Java has
+        // a GC; we instead queue the delete BEHIND those callbacks on both
+        // dispatchers (release() with clearQueue=false only sequences — it
+        // does not drop queued tasks; and a holder with queued tasks never
+        // gets here because they hold generation refs).
+        {
+            ChunkHolder* raw = victim.release();
+            auto light = m_lightTaskDispatcher.get();
+            m_worldgenTaskDispatcher->release(key, [raw, light, key]() {
+                if (light) light->release(key, [raw]() { delete raw; }, false);
+                else       delete raw;
+            }, false);
+        }
+        ++destroyed;
+    }
+    return destroyed;
+}
+
+// Reference: ChunkMap.java lines 374-381
+void ChunkMap::onLevelChange(const world::ChunkPos& pos, std::function<int()> oldLevel,
+                             int newLevel, std::function<void(int)> setQueueLevel) {
+    static const bool kDisabled = std::getenv("OBEY_NO_LEVELCHANGE") != nullptr;   // A/B toggle
+    if (kDisabled) return;
+    if (m_worldgenTaskDispatcher) {
+        m_worldgenTaskDispatcher->onLevelChange(pos, oldLevel, newLevel, setQueueLevel);
+    }
+    if (m_lightTaskDispatcher) {
+        m_lightTaskDispatcher->onLevelChange(pos, oldLevel, newLevel, std::move(setQueueLevel));
+    }
+}
+
 bool ChunkMap::promoteChunkMap() {
     std::lock_guard<std::mutex> lock(m_mapMutex);
 
@@ -344,11 +465,18 @@ bool ChunkMap::promoteChunkMap() {
         return false;
     }
 
-    // Update visible map
-    m_visibleChunkMap.clear();
-    for (const auto& pair : m_updatingChunkMap) {
-        m_visibleChunkMap[pair.first] = pair.second.get();
+    // Incremental: holders are only ever ADDED to m_updatingChunkMap (nothing
+    // processes m_pendingUnloads), so the visible map is brought up to date by
+    // appending. If removal is ever implemented, this must also erase — or
+    // fall back to the full rebuild Java does (ChunkMap.java promoteChunkMap).
+    for (const auto& [key, holder] : m_visibleAdds) {
+        m_visibleChunkMap[key] = holder;
     }
+    m_visibleAdds.clear();
+    for (int64_t key : m_visibleRemoves) {
+        m_visibleChunkMap.erase(key);
+    }
+    m_visibleRemoves.clear();
 
     m_modified = false;
     return true;
@@ -398,13 +526,16 @@ ChunkHolder* ChunkMap::updateChunkScheduling(
             level,
             m_worldHeight,
             m_minY,
-            // onLevelChange - no-op
-            [](const world::ChunkPos&, std::function<int()>, int, std::function<void(int)>) {},
+            [this](const world::ChunkPos& p, std::function<int()> oldLevel, int newLevel,
+                   std::function<void(int)> setQueueLevel) {
+                onLevelChange(p, std::move(oldLevel), newLevel, std::move(setQueueLevel));
+            },
             // playerProvider - no-op
             [](const world::ChunkPos&, bool) { return std::vector<void*>{}; }
         );
         chunk = holder.get();
         m_updatingChunkMap[node] = std::move(holder);
+        m_visibleAdds.emplace_back(node, chunk);
     }
 
     m_pendingUnloads.erase(node);

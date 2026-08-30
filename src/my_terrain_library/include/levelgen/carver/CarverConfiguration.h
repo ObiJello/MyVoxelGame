@@ -289,6 +289,40 @@ public:
 };
 
 /**
+ * BiasedToBottomInt - Biased toward the minimum value
+ * Reference: BiasedToBottomInt.java
+ * sample = min + nextInt(nextInt(max - min + 1) + 1)
+ */
+class BiasedToBottomInt : public IntProvider {
+private:
+    int32_t m_minInclusive;
+    int32_t m_maxInclusive;
+
+public:
+    BiasedToBottomInt(int32_t minInclusive, int32_t maxInclusive)
+        : m_minInclusive(minInclusive), m_maxInclusive(maxInclusive) {}
+
+    static BiasedToBottomInt of(int32_t minInclusive, int32_t maxInclusive) {
+        return BiasedToBottomInt(minInclusive, maxInclusive);
+    }
+
+    int32_t sample(WorldgenRandom& random) const override {
+        return m_minInclusive + random.nextInt(random.nextInt(m_maxInclusive - m_minInclusive + 1) + 1);
+    }
+
+    int32_t sample(LegacyRandomSource& random) const override {
+        return m_minInclusive + random.nextInt(random.nextInt(m_maxInclusive - m_minInclusive + 1) + 1);
+    }
+
+    int32_t sample(XoroshiroRandomSource& random) const override {
+        return m_minInclusive + random.nextInt(random.nextInt(m_maxInclusive - m_minInclusive + 1) + 1);
+    }
+
+    int32_t getMinValue() const override { return m_minInclusive; }
+    int32_t getMaxValue() const override { return m_maxInclusive; }
+};
+
+/**
  * ClampedInt - Clamps another provider's output to a range
  * Reference: ClampedInt.java
  */

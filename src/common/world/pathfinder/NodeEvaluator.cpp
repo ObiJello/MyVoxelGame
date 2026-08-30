@@ -138,9 +138,12 @@ namespace Game {
             static_cast<double>(target.y) - m_mob->position.y + size.y / 2.0,
             static_cast<double>(target.z) - m_mob->position.z + size.z / 2.0);
 
-        const double maxSize = std::max({size.x, size.y, size.z});
+        // MC divides by AABB.getSize() — the AVERAGE of the three dimensions,
+        // not the largest. The larger divisor took fewer, coarser steps and
+        // could sweep a tall mob's box clean through a thin wall.
+        const double avgSize = (static_cast<double>(size.x) + size.y + size.z) / 3.0;
         const double len = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-        const int steps = std::max(1, static_cast<int>(std::ceil(len / std::max(1.0e-4, maxSize))));
+        const int steps = std::max(1, static_cast<int>(std::ceil(len / std::max(1.0e-4, avgSize))));
         delta /= static_cast<double>(steps);
 
         for (int i = 1; i <= steps; ++i) {
@@ -229,6 +232,16 @@ namespace Game {
                     }
                     if (t == PathType::DoorOpen && !CanPassDoors()) {
                         t = PathType::Blocked;
+                    }
+                    // MC getPathTypeWithinMobBB: a RAIL is only passable to a
+                    // mob ALREADY standing on (or in) one — mobs do not step
+                    // onto tracks, but one spawned there may leave.
+                    if (t == PathType::Rail && m_mob) {
+                        const glm::ivec3 mobBlock = m_mob->BlockPosition();
+                        if (GetPathType(ctx, mobBlock.x, mobBlock.y, mobBlock.z) != PathType::Rail &&
+                            GetPathType(ctx, mobBlock.x, mobBlock.y - 1, mobBlock.z) != PathType::Rail) {
+                            t = PathType::UnpassableRail;
+                        }
                     }
                     present[static_cast<size_t>(t)] = true;
                 }
@@ -514,9 +527,11 @@ namespace Game {
     }
 
     Node* WalkNodeEvaluator::TryFindFirstGroundNodeBelow(int x, int y, int z) {
-        // MC caps the drop at getMaxFallDistance (3 by default), which is what
-        // stops mobs from cheerfully pathing off cliffs.
-        const int maxFall = 3;
+        // MC caps the drop at getMaxFallDistance, which is what stops mobs
+        // from cheerfully pathing off cliffs — 3 with no target, but a mob
+        // CHASING something will path off a drop it can survive (and a
+        // creeper will drop to within one HP of death to reach you).
+        const int maxFall = m_mob ? m_mob->GetMaxFallDistance() : 3;
 
         for (int currentY = y - 1; currentY >= m_ctx.GetMinY(); --currentY) {
             if (y - currentY > maxFall) return GetBlockedNode(x, currentY, z);

@@ -523,9 +523,30 @@ void ChunkGenerationRunner::clearChunkCache() {
     // for feature RNG parity - the global index used for seeding depends on
     // the order features are first seen across ALL biomes, not just chunk biomes.
     // =========================================================================
-    if (!m_featuresPerStepBuilt) {
-        // Get ALL biome keys in bootstrap order (matches Java's biomeSource.possibleBiomes())
-        const auto& allBiomeKeys = data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys();
+    // Per-generator override (single-biome and flat worlds): Java builds
+    // featuresPerStep from the generator's own possibleBiomes().
+    const std::vector<StepFeatureData>* customPerStep =
+        m_generator ? m_generator->customFeaturesPerStep() : nullptr;
+
+    if (!customPerStep && !m_featuresPerStepBuilt) {
+        // Get the generator's biome keys in bootstrap order (matches Java's
+        // biomeSource.possibleBiomes() - dimension-specific: the nether sorter
+        // must see ONLY the 5 nether biomes or feature indices diverge).
+        bool isNetherDim = false;
+        bool isEndDim = false;
+        {
+            auto* noiseGen = dynamic_cast<NoiseBasedChunkGenerator*>(m_generator);
+            if (noiseGen && noiseGen->getSettings() && noiseGen->getSettings()->defaultBlock()) {
+                const std::string& defaultBlockId =
+                    noiseGen->getSettings()->defaultBlock()->getIdentifier();
+                isNetherDim = defaultBlockId == "minecraft:netherrack";
+                isEndDim = defaultBlockId == "minecraft:end_stone";
+            }
+        }
+        const auto& allBiomeKeys = isNetherDim
+            ? data::worldgen::BiomeFeatureRegistry::getNetherBiomeKeys()
+            : (isEndDim ? data::worldgen::BiomeFeatureRegistry::getEndBiomeKeys()
+                        : data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys());
 
         // Use FeatureSorter to build global feature order
         // Reference: FeatureSorter.buildFeaturesPerStep(List.copyOf(biomeSource.possibleBiomes()), ...)
@@ -553,7 +574,8 @@ void ChunkGenerationRunner::clearChunkCache() {
     }
 
     // Use the cached/memoized features for this chunk
-    const std::vector<StepFeatureData>& featuresPerStep = m_cachedFeaturesPerStep;
+    const std::vector<StepFeatureData>& featuresPerStep =
+        customPerStep ? *customPerStep : m_cachedFeaturesPerStep;
 
     ::world::ChunkPos centerPos = chunk->getPos();
 

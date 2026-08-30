@@ -39,6 +39,14 @@ layout (std140, set = 1, binding = 0) uniform Common {
     vec4  uFogColor_;      // rgb = fog color, a = fog strength
     vec4  uFogEnv_;        // (envStart, envEnd, rdStart, rdEnd)
     vec4  uCamPosBright_;  // xyz = camera pos, w = sky brightness
+    // MC's entity OVERLAY — the TNT white flash. rgb = overlay colour,
+    // a = STRENGTH. See the long note in shaders/block.frag for why the alpha
+    // is inverted relative to vanilla's OverlayTexture texel.
+    //
+    // APPENDED at offset 352, following the same rule uFogColor_ did: a shader
+    // may declare a SMALLER UBO block than the bound buffer, so the _vk shaders
+    // that still stop at 304 or 352 bytes stay valid.
+    vec4  uOverlayColor_;  // 352
 } U;
 
 // Output
@@ -60,6 +68,10 @@ void main() {
 
     // Vertex color contains: biome tint * AO * directional face shade (gamma space)
     vec3 finalColor = textureColor.rgb * fragColor.rgb;
+
+    // MC entity.fsh order: overlay AFTER the vertex-colour multiply and BEFORE
+    // the lightmap, so a flashing block still dims and fogs.
+    finalColor = mix(finalColor, U.uOverlayColor_.rgb, U.uOverlayColor_.a);
 
     // Day/night sky-light dim + MC-style distance fog
     finalColor *= U.uCamPosBright_.w;

@@ -1,0 +1,32 @@
+{
+  "chunks_compared": 1,
+  "total_mismatches": 256,
+  "by_class": {
+    "wrong-block": 256
+  },
+  "by_type": [
+    {
+      "class": "wrong-block",
+      "type": "minecraft:red_sand",
+      "count": 256
+    }
+  ],
+  "samples": {
+    "wrong-block|minecraft:red_sand": [
+      "chunk(-260, -263) local(3,69,14) world(-4157,69,-4194) java=minecraft:red_sand cpp=minecraft:orange_terracotta",
+      "chunk(-260, -263) local(2,70,10) world(-4158,70,-4198) java=minecraft:red_sand cpp=minecraft:orange_terracotta",
+      "chunk(-260, -263) local(4,70,6) world(-4156,70,-4202) java=minecraft:red_sand cpp=minecraft:orange_terracotta",
+      "chunk(-260, -263) local(6,70,2) world(-4154,70,-4206) java=minecraft:red_sand cpp=minecraft:orange_terracotta",
+      "chunk(-260, -263) local(1,68,14) world(-4159,68,-4194) java=minecraft:red_sand cpp=minecraft:orange_terracotta"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        -260,
+        -263
+      ],
+      "count": 256
+    }
+  ]
+}

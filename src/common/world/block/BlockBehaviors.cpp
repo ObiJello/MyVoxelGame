@@ -14,13 +14,17 @@
 #include "BlockInteraction.hpp"
 #include "BlockPlacement.hpp"
 #include "RedstoneWire.hpp"
+#include "FallingBlock.hpp"
+#include "TntBlock.hpp"
 #include "Stairs.hpp"
 #include "CrossCollision.hpp"
 #include "Walls.hpp"
 #include "Vine.hpp"
 #include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
+#include "common/world/portal/PortalShape.hpp"
 #include "common/world/level/World.hpp"
+#include "common/entity/Entity.hpp"
 #include "common/entity/IUsePlayer.hpp"
 #include "common/entity/Item.hpp"
 #include "common/inventory/MenuType.hpp"
@@ -85,7 +89,8 @@ namespace Game {
         bool FaceAttachedNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                          BlockState state,
                                          Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockState& outState) {
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             const BlockID id = state.Block();
             if (CanSurviveAt(level, pos, state)) return false;
             // Only the attachment side matters. CanSurviveAt already answered
@@ -116,7 +121,8 @@ namespace Game {
         bool RedstoneWireNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                          BlockState state,
                                          Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockState& outState) {
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             // DOWN is the support case: MC returns AIR when the block below can
             // no longer hold dust. The engine's support-collapse rule already
             // handles that (redstone has a modelled canSurvive), so leave it.
@@ -128,6 +134,83 @@ namespace Game {
             return true;
         }
 
+        // MC BaseFireBlock.onPlace (BaseFireBlock.java:140-155) — the real
+        // nether-portal ignition, and the reason the engine grew an onPlace
+        // hook at all.
+        //
+        // Putting it on FIRE rather than on flint & steel is not a stylistic
+        // choice: it is what makes every route to a fire block light a frame —
+        // a fire charge, lava spreading, fire jumping from a burning block, a
+        // ghast fireball. Vanilla players rely on all of them.
+        void FireOnPlace(ILevelWrite& level, const glm::ivec3& pos,
+                         BlockState /*newState*/, BlockState /*oldState*/) {
+            // MC inPortalDimension: overworld or nether only. An obsidian
+            // frame in the End just holds a fire.
+            if (!DimensionAllowsNetherPortal(level.GetDimension())) return;
+
+            // MC always probes X first and lets findPortalShape fall through
+            // to Z. The clicked face never reaches here — onPlace has no idea
+            // how the fire got placed — which is also why the axis preference
+            // in CanFireBePlacedAt is only about whether the fire is ALLOWED,
+            // not about which way the portal ends up facing.
+            auto shape = PortalShape::FindEmptyPortalShape(level, pos, Axis::X);
+            if (!shape) return;
+
+            shape->CreatePortalBlocks(level);
+        }
+
+        // MC NetherPortalBlock.entityInside (:92) and EndPortalBlock
+        // .entityInside (:56), which are the same two lines.
+        //
+        // Neither teleports. They only record "this entity is standing in this
+        // portal, this tick"; the timing lives in PortalState and the travel
+        // itself is resolved by the server, which is the only layer that can
+        // see another dimension.
+        //
+        // No client-side guard, matching MC: the client needs the same state
+        // to ramp its warp overlay. What the client does NOT have is a server
+        // to resolve the destination, so its processor simply accumulates and
+        // is thrown away.
+        void PortalEntityInside(ILevelWrite& /*level*/, const glm::ivec3& pos,
+                                BlockState state, Entity& entity) {
+            if (!entity.CanUsePortal(false)) return;
+            entity.portal.SetAsInsidePortal(state.Block(), pos,
+                                            entity.GetDimensionChangingDelay());
+        }
+
+        // MC NetherPortalBlock.updateShape (NetherPortalBlock.java:85) — the
+        // rule that makes a portal vanish when someone mines its frame.
+        //
+        // Two guards before the expensive part:
+        //   * a change along the horizontal axis PERPENDICULAR to the portal
+        //     plane is somebody walking past with a block, not a frame edit,
+        //     so it is ignored outright (MC's `wrongAxis`);
+        //   * a neighbouring portal block changing is the collapse already in
+        //     progress, and re-walking the shape for every one of up to 441
+        //     cells per cell would be quadratic.
+        // Only then does it re-walk the frame, and only a NON-complete shape
+        // deletes the block. World turns the AIR answer into a destroy, which
+        // notifies ITS neighbours — that cascade is what takes the whole
+        // portal down from one broken obsidian block, exactly as in vanilla.
+        bool NetherPortalNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                                         BlockState state,
+                                         Direction toNeighbour, BlockID neighbourId,
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
+            const Axis updateAxis = AxisOf(toNeighbour);
+            const Axis axis = (state.GetName(PropertyId::HORIZONTAL_AXIS) == "z")
+                                  ? Axis::Z : Axis::X;
+
+            const bool wrongAxis = (axis != updateAxis) && IsHorizontal(toNeighbour);
+            if (wrongAxis) return false;
+            if (neighbourId == BlockID::NetherPortal) return false;
+
+            if (PortalShape::FindAnyShape(level, pos, axis).IsComplete()) return false;
+
+            outState = BlockState{};   // air — World destroys with drops (there are none)
+            return true;
+        }
+
         // MC VineBlock.updateShape — re-derive which faces still have support.
         // A vine that loses its last face returns AIR, and World turns that into
         // a destroy-with-drops, which is how a vine curtain falls when the wall
@@ -135,7 +218,8 @@ namespace Game {
         bool VineNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                  BlockState state,
                                  Direction toNeighbour, BlockID /*neighbourId*/,
-                                 BlockState& outState) {
+                                 BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             const BlockState next = VineUpdateShape(level, pos, state, toNeighbour);
             if (next == state) return false;
             outState = next;
@@ -147,7 +231,8 @@ namespace Game {
         bool MultifaceNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                       BlockState state,
                                       Direction toNeighbour, BlockID /*neighbourId*/,
-                                      BlockState& outState) {
+                                      BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             const BlockState next = MultifaceUpdateShape(level, pos, state, toNeighbour);
             if (next == state) return false;
             outState = next;
@@ -162,7 +247,8 @@ namespace Game {
         bool StairNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                   BlockState state,
                                   Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockState& outState) {
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             const BlockState next = StairsUpdateShape(level, pos, state, toNeighbour);
             if (next == state) return false;
             outState = next;
@@ -175,7 +261,8 @@ namespace Game {
         bool CrossCollisionNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                            BlockState state,
                                            Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockState& outState) {
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             const BlockState next = CrossUpdateShape(level, pos, state, toNeighbour);
             if (next == state) return false;
             outState = next;
@@ -188,7 +275,8 @@ namespace Game {
         bool WallNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                  BlockState state,
                                  Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockState& outState) {
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             const BlockState next = WallUpdateShape(level, pos, state, toNeighbour);
             if (next == state) return false;
             outState = next;
@@ -200,7 +288,8 @@ namespace Game {
         bool FenceGateNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
                                       BlockState state,
                                       Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockState& outState) {
+                                         BlockState& outState,
+                                         ScheduledTickAccess* /*ticks*/) {
             const BlockState next = FenceGateUpdateShape(level, pos, state, toNeighbour);
             if (next == state) return false;
             outState = next;
@@ -344,6 +433,41 @@ namespace Game {
             wire->neighborChanged = &RedstoneWireNeighborChanged;
         }
 
+        // ── Nether portal ─────────────────────────────────────────────────
+        // The only behaviour the BLOCK itself owns. Lighting a portal lives in
+        // the flint-and-steel item behaviour (MC puts it in BaseFireBlock
+        // .onPlace, which this engine has no equivalent of), and walking
+        // through one is an entity-side check, not a block callback.
+        if (Block* portal = forSlug("nether_portal")) {
+            portal->neighborChanged = &NetherPortalNeighborChanged;
+            portal->entityInside    = &PortalEntityInside;
+        } else {
+            Log::Warning("[BlockBehaviors] no block with registrySlug "
+                         "'nether_portal' — portals will not close when their "
+                         "frame is broken");
+        }
+        // Lighting a portal. Soul fire deliberately does NOT get this — MC
+        // only overrides onPlace on BaseFireBlock, but SoulFireBlock can never
+        // sit inside an obsidian frame (it needs soul sand or soul soil under
+        // it), so vanilla's shared implementation is unreachable for it.
+        if (Block* fire = forSlug("fire")) {
+            fire->onPlace = &FireOnPlace;
+        } else {
+            Log::Warning("[BlockBehaviors] no block with registrySlug 'fire' — "
+                         "nether portals can never be lit");
+        }
+
+        // ── End portal ────────────────────────────────────────────────────
+        // Only the contact hook. The portal blocks themselves are placed by
+        // the Eye of Ender (ItemBehaviors) and are unbreakable, so there is
+        // nothing for onPlace or neighborChanged to do.
+        if (Block* endPortal = forSlug("end_portal")) {
+            endPortal->entityInside = &PortalEntityInside;
+        } else {
+            Log::Warning("[BlockBehaviors] no block with registrySlug "
+                         "'end_portal' — the End is unreachable");
+        }
+
         // ── Vines ─────────────────────────────────────────────────────────
         // Faces drop as their support goes, and the last one taking the vine
         // with it. Without this a vine hangs in mid-air forever once the wall
@@ -392,6 +516,94 @@ namespace Game {
                 blocks[i].useWithoutItem  = &FenceGateUse;
                 blocks[i].neighborChanged = &FenceGateNeighborChanged;
             }
+        }
+
+        // ── Falling blocks (MC FallingBlock family) ───────────────────────
+        //
+        // Three hooks per block and nothing per-frame: onPlace and
+        // neighborChanged book a scheduled tick, and the tick decides whether
+        // to fall. See FallingBlock.hpp for why that indirection is the whole
+        // mechanism rather than an optimisation.
+        //
+        // Wired by BlockID rather than by slug because IsFallingBlock already
+        // owns the membership question (and concrete powder's sixteen colours
+        // would otherwise be sixteen more string literals to keep in step).
+        {
+            size_t fallingWired = 0;
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                const BlockID id = static_cast<BlockID>(i);
+                if (!IsFallingBlock(id)) continue;
+
+                switch (id) {
+                    case BlockID::Scaffolding:
+                        // Its own rule: falls on the `distance` state machine,
+                        // not on whether the cell below is free.
+                        blocks[i].onPlace         = &ScaffoldingOnPlace;
+                        blocks[i].neighborChanged = &ScaffoldingNeighborChanged;
+                        blocks[i].tick            = &ScaffoldingTick;
+                        break;
+                    case BlockID::PointedDripstone:
+                        // Also its own rule: supported from BEHIND the tip, and
+                        // a stalactite collapses as a whole column.
+                        //
+                        // NO onPlace. PointedDripstoneBlock extends Block, not
+                        // FallingBlock, and overrides neither onPlace nor
+                        // getDelayAfterPlace — its only scheduling comes from
+                        // updateShape, and only when the support side actually
+                        // broke. Borrowing FallingBlockOnPlace here booked a
+                        // tick on EVERY placement (World::ProcessBlockUpdates
+                        // fires onPlace on any block-id change), and
+                        // PointedDripstoneTick then fell straight through to
+                        // the collapse path, so placed dripstone dropped on the
+                        // spot.
+                        blocks[i].neighborChanged = &PointedDripstoneNeighborChanged;
+                        blocks[i].tick            = &PointedDripstoneTick;
+                        break;
+                    default:
+                        blocks[i].onPlace = &FallingBlockOnPlace;
+                        // Concrete powder solidifies on water contact BEFORE it
+                        // would schedule a fall, so it gets the combined hook.
+                        blocks[i].neighborChanged = IsConcretePowder(id)
+                            ? &ConcretePowderNeighborChanged
+                            : &FallingBlockNeighborChanged;
+                        blocks[i].tick = &FallingBlockTick;
+                        break;
+                }
+                // Falling dust comes from FallingBlock.animateTick, so it
+                // belongs to the blocks that actually extend FallingBlock:
+                // sand, gravel, the suspicious pair (BrushableBlock copies it
+                // verbatim), concrete powder, the anvils and the dragon egg.
+                //
+                // Scaffolding and pointed dripstone are NOT FallingBlocks in
+                // MC — both extend Block directly and implement Fallable — so
+                // neither has any dust. Dripstone has an animateTick of its
+                // own, but it is the water/lava DRIP particle, which needs the
+                // getFluidAboveStalactite column walk and the cauldron rules;
+                // that is a separate mechanism from falling and is not wired
+                // yet. Giving them falling dust in the meantime was not a
+                // stand-in for it, just a wrong particle.
+                if (id != BlockID::Scaffolding && id != BlockID::PointedDripstone) {
+                    blocks[i].animateTick = &FallingBlockAnimateTick;
+                }
+                ++fallingWired;
+            }
+            // 3 sand/gravel + 2 suspicious + 16 concrete powder + 3 anvils +
+            // dragon egg + scaffolding + dripstone = 27. A different number
+            // means BlockDefs.inc lost a row or IsFallingBlock drifted.
+            Log::Info("[BlockBehaviors] falling blocks wired: %zu", fallingWired);
+        }
+
+        // ── TNT ───────────────────────────────────────────────────────────
+        //
+        // useItemOn beats the ITEM's own useOn, which is the whole reason
+        // flint & steel lights TNT instead of putting a fire block on top of
+        // it — see the contract note on BlockUseItemOnFn.
+        if (Block* tnt = forSlug("tnt")) {
+            tnt->useItemOn       = &TntUseItemOn;
+            tnt->onPlace         = &TntOnPlace;
+            tnt->neighborChanged = &TntNeighborChanged;
+        } else {
+            Log::Warning("[BlockBehaviors] no block 'tnt' — it can never be lit");
         }
 
         // ── Buttons and levers ────────────────────────────────────────────

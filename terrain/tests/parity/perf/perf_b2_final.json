@@ -1,0 +1,34 @@
+{
+ "seed": 12345,
+ "mode": "radius",
+ "radius": 10,
+ "center": [
+  0,
+  0
+ ],
+ "phases": "3-7",
+ "chunks": 441,
+ "generation_seconds": 9.6613,
+ "chunks_per_sec": 45.6462,
+ "ms_per_chunk": 21.9076,
+ "setup_seconds": 0.0311,
+ "dump_seconds": 2.645,
+ "max_rss_bytes": 1055129600,
+ "label": "b2-final",
+ "captured": "2026-08-07T16:31:59+00:00",
+ "reps": 3,
+ "all_generation_seconds": [
+  9.2793,
+  9.6613,
+  10.227
+ ],
+ "all_ms_per_chunk": [
+  21.0415,
+  21.9076,
+  23.1906
+ ],
+ "host": {
+  "cpu": "Apple M4",
+  "os": "Darwin 25.5.0"
+ }
+}

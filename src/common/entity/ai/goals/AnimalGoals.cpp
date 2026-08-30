@@ -14,11 +14,26 @@ namespace Game {
 
     // ── TemptGoal ──────────────────────────────────────────────────────────
 
-    TemptGoal::TemptGoal(PathfinderMob* mob, double speedModifier, bool canScare)
-        : m_mob(mob), m_speedModifier(speedModifier), m_canScare(canScare) {
+    TemptGoal::TemptGoal(PathfinderMob* mob, double speedModifier, bool canScare,
+                         uint32_t temptItem)
+        : m_mob(mob), m_speedModifier(speedModifier), m_canScare(canScare),
+          m_temptItem(temptItem) {
         SetFlags(GoalFlag::Move | GoalFlag::Look);
         // Non-combat: an animal does not need line of sight to notice food.
         m_conditions = TargetingConditions::ForNonCombat().IgnoreLineOfSight();
+    }
+
+    bool TemptGoal::ShouldFollow(const LivingEntity& player) const {
+        // MC TemptGoal.shouldFollow — the held-item test. The item layer lives
+        // outside the entity system, so the level bridge answers via the
+        // adapter's held item (MC also checks the offhand; this port has no
+        // offhand slot).
+        EntityLevel* level = m_mob->Level();
+        if (!level) return false;
+        const uint32_t held = level->GetHeldItemId(player);
+        if (m_temptItem != 0) return held == m_temptItem;
+        const Animal* animal = dynamic_cast<const Animal*>(m_mob);
+        return animal != nullptr && animal->IsFood(held);
     }
 
     bool TemptGoal::CanUse() {
@@ -29,26 +44,31 @@ namespace Game {
         EntityLevel* level = m_mob->Level();
         if (!level) return false;
 
-        const double range = m_mob->GetAttributeValue(Attribute::TemptRange);
-        LivingEntity* player = level->GetNearestPlayer(
-            m_mob->position.x, m_mob->position.y, m_mob->position.z, range);
-        if (!player) return false;
+        // MC bakes shouldFollow into the TargetingConditions SELECTOR, so the
+        // search finds the nearest player HOLDING the item — a closer player
+        // with empty hands must not mask the farmer behind them.
+        m_conditions.Range(m_mob->GetAttributeValue(Attribute::TemptRange));
 
-        // Whether the player is HOLDING food is checked by the caller-supplied
-        // food test on the animal — the item layer lives outside the entity
-        // system, so the level bridge answers this via the adapter's held item.
-        Animal* animal = dynamic_cast<Animal*>(m_mob);
-        if (!animal) return false;
-        if (!animal->IsFood(level->GetHeldItemId(*player))) return false;
+        LivingEntity* best = nullptr;
+        double bestDistSq = 0.0;
+        std::vector<LivingEntity*> players;
+        level->GetPlayers(players);
+        for (LivingEntity* p : players) {
+            if (!ShouldFollow(*p)) continue;
+            if (!m_conditions.Test(m_mob, *p)) continue;
+            const double d = m_mob->DistanceToSqr(*p);
+            if (!best || d < bestDistSq) { best = p; bestDistSq = d; }
+        }
+        if (!best) return false;
 
-        m_player = player;
+        m_player = best;
         return true;
     }
 
     bool TemptGoal::CanContinueToUse() {
         if (!m_player || !m_player->IsAlive()) return false;
 
-        if (m_canScare && m_mob->DistanceToSqr(*m_player) < 36.0) {
+        if (CanScare() && m_mob->DistanceToSqr(*m_player) < 36.0) {
             // Inside 6 blocks the player must hold still. The thresholds are
             // MC's: a hair of movement (0.01 blocks) or 5 degrees of turn is
             // enough to spook.
@@ -106,6 +126,11 @@ namespace Game {
     BreedGoal::BreedGoal(Animal* animal, double speedModifier)
         : m_animal(animal), m_speedModifier(speedModifier) {
         SetFlags(GoalFlag::Move | GoalFlag::Look);
+        // MC PARTNER_TARGETING: an 8-block SPHERE — the box below is only the
+        // coarse gather; range enforces the radius. ignoreLineOfSight is MC's
+        // (a cow behind a fence post still counts).
+        m_partnerConditions =
+            TargetingConditions::ForNonCombat().Range(8.0).IgnoreLineOfSight();
     }
 
     Animal* BreedGoal::GetFreePartner() {
@@ -125,6 +150,10 @@ namespace Game {
         for (Entity* e : nearby) {
             Animal* other = dynamic_cast<Animal*>(e);
             if (!other) continue;
+            // MC getNearbyEntities applies PARTNER_TARGETING: the box's
+            // corners reach ~11.3 blocks, but the spherical 8-block range
+            // test is what decides — a partner in the corner is out of reach.
+            if (!m_partnerConditions.Test(m_animal, *other)) continue;
             if (!m_animal->CanMate(*other)) continue;
             // A panicking animal will not stop to breed.
             if (other->IsPanicking()) continue;

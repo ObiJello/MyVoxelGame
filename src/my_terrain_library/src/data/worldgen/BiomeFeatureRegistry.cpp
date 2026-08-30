@@ -1,3 +1,4 @@
+#include <unordered_set>
 #include "data/worldgen/BiomeFeatureRegistry.h"
 #include "data/worldgen/features/OreFeatures.h"
 #include "data/worldgen/features/VegetationFeatures.h"
@@ -9,6 +10,10 @@
 #include "data/worldgen/placement/AquaticPlacements.h"
 #include "data/worldgen/placement/CavePlacements.h"
 #include "data/worldgen/placement/MiscOverworldPlacements.h"
+#include "data/worldgen/features/NetherFeatures.h"
+#include "data/worldgen/placement/NetherPlacements.h"
+#include "data/worldgen/features/EndFeatures.h"
+#include "data/worldgen/placement/EndPlacements.h"
 #include <set>
 #include <iostream>
 #include <mutex>
@@ -957,6 +962,160 @@ void BiomeFeatureRegistry::setupMangroveSwamp(const std::string& biomeKey) {
 // Bootstrap - sets up all biomes in the exact order Java processes them
 // =============================================================================
 
+// =============================================================================
+// Nether biomes - Reference: NetherBiomes.java (exact addFeature call order)
+// =============================================================================
+
+void BiomeFeatureRegistry::addNetherDefaultOres(const std::string& biomeKey) {
+    // Reference: BiomeDefaultFeatures.java lines 410-416
+    int step = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, step, placement::OrePlacements::ORE_GRAVEL_NETHER);
+    addFeature(biomeKey, step, placement::OrePlacements::ORE_BLACKSTONE);
+    addFeature(biomeKey, step, placement::OrePlacements::ORE_GOLD_NETHER);
+    addFeature(biomeKey, step, placement::OrePlacements::ORE_QUARTZ_NETHER);
+    addAncientDebris(biomeKey);
+}
+
+void BiomeFeatureRegistry::addAncientDebris(const std::string& biomeKey) {
+    // Reference: BiomeDefaultFeatures.java lines 418-421
+    int step = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, step, placement::OrePlacements::ORE_ANCIENT_DEBRIS_LARGE);
+    addFeature(biomeKey, step, placement::OrePlacements::ORE_ANCIENT_DEBRIS_SMALL);
+}
+
+void BiomeFeatureRegistry::setupNetherWastes(const std::string& biomeKey) {
+    // Reference: NetherBiomes.java netherWastes() lines 38-41
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    int underground = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, vegetal, MiscOverworldPlacements::SPRING_LAVA);
+    addDefaultMushrooms(biomeKey);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_OPEN);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_SOUL_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE_EXTRA);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE);
+    addFeature(biomeKey, underground, VegetationPlacements::BROWN_MUSHROOM_NETHER);
+    addFeature(biomeKey, underground, VegetationPlacements::RED_MUSHROOM_NETHER);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_MAGMA);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_CLOSED);
+    addNetherDefaultOres(biomeKey);
+}
+
+void BiomeFeatureRegistry::setupSoulSandValley(const std::string& biomeKey) {
+    // Reference: NetherBiomes.java soulSandValley() line 49
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    int localMods = static_cast<int>(GenerationStep::Decoration::LOCAL_MODIFICATIONS);
+    int underground = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, vegetal, MiscOverworldPlacements::SPRING_LAVA);
+    addFeature(biomeKey, localMods, NetherPlacements::BASALT_PILLAR);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_OPEN);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_SOUL_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE_EXTRA);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_CRIMSON_ROOTS);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_MAGMA);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_CLOSED);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_SOUL_SAND);
+    addNetherDefaultOres(biomeKey);
+}
+
+void BiomeFeatureRegistry::setupCrimsonForest(const std::string& biomeKey) {
+    // Reference: NetherBiomes.java crimsonForest() lines 63-66
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    int underground = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, vegetal, MiscOverworldPlacements::SPRING_LAVA);
+    addDefaultMushrooms(biomeKey);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_OPEN);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE_EXTRA);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_MAGMA);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_CLOSED);
+    addFeature(biomeKey, vegetal, NetherPlacements::WEEPING_VINES);
+    addFeature(biomeKey, vegetal, TreePlacements::CRIMSON_FUNGI);
+    addFeature(biomeKey, vegetal, NetherPlacements::CRIMSON_FOREST_VEGETATION);
+    addNetherDefaultOres(biomeKey);
+}
+
+void BiomeFeatureRegistry::setupWarpedForest(const std::string& biomeKey) {
+    // Reference: NetherBiomes.java warpedForest() lines 72-75
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    int underground = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, vegetal, MiscOverworldPlacements::SPRING_LAVA);
+    addDefaultMushrooms(biomeKey);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_OPEN);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_SOUL_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE_EXTRA);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_MAGMA);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_CLOSED);
+    addFeature(biomeKey, vegetal, TreePlacements::WARPED_FUNGI);
+    addFeature(biomeKey, vegetal, NetherPlacements::WARPED_FOREST_VEGETATION);
+    addFeature(biomeKey, vegetal, NetherPlacements::NETHER_SPROUTS);
+    addFeature(biomeKey, vegetal, NetherPlacements::TWISTING_VINES);
+    addNetherDefaultOres(biomeKey);
+}
+
+void BiomeFeatureRegistry::setupBasaltDeltas(const std::string& biomeKey) {
+    // Reference: NetherBiomes.java basaltDeltas() lines 56-57
+    int surfaceStructures = static_cast<int>(GenerationStep::Decoration::SURFACE_STRUCTURES);
+    int underground = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, surfaceStructures, NetherPlacements::DELTA);
+    addFeature(biomeKey, surfaceStructures, NetherPlacements::SMALL_BASALT_COLUMNS);
+    addFeature(biomeKey, surfaceStructures, NetherPlacements::LARGE_BASALT_COLUMNS);
+    addFeature(biomeKey, underground, NetherPlacements::BASALT_BLOBS);
+    addFeature(biomeKey, underground, NetherPlacements::BLACKSTONE_BLOBS);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_DELTA);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::PATCH_SOUL_FIRE);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE_EXTRA);
+    addFeature(biomeKey, underground, NetherPlacements::GLOWSTONE);
+    addFeature(biomeKey, underground, VegetationPlacements::BROWN_MUSHROOM_NETHER);
+    addFeature(biomeKey, underground, VegetationPlacements::RED_MUSHROOM_NETHER);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_MAGMA);
+    addFeature(biomeKey, underground, NetherPlacements::SPRING_CLOSED_DOUBLE);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_GOLD_DELTAS);
+    addFeature(biomeKey, underground, placement::OrePlacements::ORE_QUARTZ_DELTAS);
+    addAncientDebris(biomeKey);
+}
+
+// =============================================================================
+// End biomes - Reference: EndBiomes.java
+// =============================================================================
+
+void BiomeFeatureRegistry::setupTheEnd(const std::string& biomeKey) {
+    // Reference: EndBiomes.java endBiome() line 27
+    addFeature(biomeKey, static_cast<int>(GenerationStep::Decoration::SURFACE_STRUCTURES),
+               EndPlacements::END_SPIKE);
+    addFeature(biomeKey, static_cast<int>(GenerationStep::Decoration::TOP_LAYER_MODIFICATION),
+               EndPlacements::END_PLATFORM);
+}
+
+void BiomeFeatureRegistry::setupEndHighlands(const std::string& biomeKey) {
+    // Reference: EndBiomes.java line 37
+    addFeature(biomeKey, static_cast<int>(GenerationStep::Decoration::SURFACE_STRUCTURES),
+               EndPlacements::END_GATEWAY_RETURN);
+    addFeature(biomeKey, static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION),
+               EndPlacements::CHORUS_PLANT);
+}
+
+void BiomeFeatureRegistry::setupSmallEndIslands(const std::string& biomeKey) {
+    // Reference: EndBiomes.java line 42
+    addFeature(biomeKey, static_cast<int>(GenerationStep::Decoration::RAW_GENERATION),
+               EndPlacements::END_ISLAND_DECORATED);
+}
+
+void BiomeFeatureRegistry::setupEndBarrensOrMidlands(const std::string& biomeKey) {
+    // Reference: EndBiomes.java - no features; register the biome with empty
+    // step lists so lookups are well-defined.
+    auto& biome = s_biomeFeatures[biomeKey];
+    if (biome.empty()) {
+        biome.resize(GenerationStep::DECORATION_COUNT);
+    }
+}
+
 void BiomeFeatureRegistry::bootstrap() {
     std::call_once(s_bootstrapOnce, []() {
         // Initialize feature registries first
@@ -972,6 +1131,10 @@ void BiomeFeatureRegistry::bootstrap() {
         placement::AquaticPlacements::bootstrap();
         placement::CavePlacements::bootstrap();
         placement::MiscOverworldPlacements::bootstrap();
+        features::NetherFeatures::bootstrap();
+        placement::NetherPlacements::bootstrap();
+        features::EndFeatures::bootstrap();
+        placement::EndPlacements::bootstrap();
 
         // All overworld biomes in EXACT order from Java's biomeSource.possibleBiomes()
         // Reference: MultiNoiseBiomeSource.createFromPreset(OVERWORLD).possibleBiomes()
@@ -1191,8 +1354,56 @@ void BiomeFeatureRegistry::bootstrap() {
         // 53: deep_dark
         setupDeepDark("minecraft:deep_dark");
 
+        // Nether biomes - registered in the map but NOT in s_biomeKeyOrder
+        // (the overworld featuresPerStep must not see them; the nether
+        // generator builds its own from getNetherBiomeKeys()).
+        setupNetherWastes("minecraft:nether_wastes");
+        setupSoulSandValley("minecraft:soul_sand_valley");
+        setupCrimsonForest("minecraft:crimson_forest");
+        setupWarpedForest("minecraft:warped_forest");
+        setupBasaltDeltas("minecraft:basalt_deltas");
+
+        // End biomes (also NOT in s_biomeKeyOrder)
+        setupTheEnd("minecraft:the_end");
+        setupEndHighlands("minecraft:end_highlands");
+        setupEndBarrensOrMidlands("minecraft:end_midlands");
+        setupSmallEndIslands("minecraft:small_end_islands");
+        setupEndBarrensOrMidlands("minecraft:end_barrens");
+
         s_initialized.store(true, std::memory_order_release);
     });
+}
+
+const std::vector<std::string>& BiomeFeatureRegistry::getEndBiomeKeys() {
+    // Java TheEndBiomeSource.collectPossibleBiomes() order:
+    // end, highlands, midlands, islands, barrens.
+    static const std::vector<std::string> s_endBiomeKeys = {
+        "minecraft:the_end",
+        "minecraft:end_highlands",
+        "minecraft:end_midlands",
+        "minecraft:small_end_islands",
+        "minecraft:end_barrens"
+    };
+    if (!s_initialized.load(std::memory_order_acquire)) {
+        bootstrap();
+    }
+    return s_endBiomeKeys;
+}
+
+const std::vector<std::string>& BiomeFeatureRegistry::getNetherBiomeKeys() {
+    // Java: nether biome source possibleBiomes() - vanilla nether preset
+    // parameter list order (multi_noise_biome_source_parameter_list/nether.json).
+    static const std::vector<std::string> s_netherBiomeKeys = {
+        "minecraft:nether_wastes",
+        "minecraft:soul_sand_valley",
+        "minecraft:crimson_forest",
+        "minecraft:warped_forest",
+        "minecraft:basalt_deltas"
+    };
+    if (!s_initialized.load(std::memory_order_acquire)) {
+        bootstrap();
+    }
+    return s_netherBiomeKeys;
 }
 
 const std::vector<const PlacedFeature*>& BiomeFeatureRegistry::getFeaturesForStep(
@@ -1233,17 +1444,35 @@ bool BiomeFeatureRegistry::hasFeature(const std::string& biomeKey, const PlacedF
     if (!s_initialized.load(std::memory_order_acquire)) {
         bootstrap();
     }
-
-    auto it = s_biomeFeatures.find(biomeKey);
-    if (it == s_biomeFeatures.end()) {
-        return false;
-    }
-
-    for (const auto& stepFeatures : it->second) {
-        for (const auto* f : stepFeatures) {
-            if (f == feature) {
-                return true;
+    // Java: biome.getGenerationSettings().hasFeature(feature) is a HashSet
+    // lookup. This was a linear scan over every step's feature list, called
+    // once per BiomeFilter test.
+    static std::mutex s_setMutex;
+    static std::unordered_map<std::string, std::unordered_set<const PlacedFeature*>> s_sets;
+    std::lock_guard<std::mutex> lock(s_setMutex);
+    auto sit = s_sets.find(biomeKey);
+    if (sit == s_sets.end()) {
+        std::unordered_set<const PlacedFeature*> set;
+        auto it = s_biomeFeatures.find(biomeKey);
+        if (it != s_biomeFeatures.end()) {
+            for (const auto& stepFeatures : it->second) {
+                for (const auto* f : stepFeatures) set.insert(f);
             }
+        }
+        sit = s_sets.emplace(biomeKey, std::move(set)).first;
+    }
+    return sit->second.count(feature) != 0;
+}
+
+bool BiomeFeatureRegistry::isKnownBiomeKey(const std::string& biomeKey) {
+    bootstrap();
+    // the_void is a real vanilla biome (selectable for single-biome worlds)
+    // with no features in this port (vanilla gives it only
+    // void_start_platform); getFeaturesForBiome returns empty for it.
+    if (biomeKey == "minecraft:the_void") return true;
+    for (const auto& keys : {getAllBiomeKeys(), getNetherBiomeKeys(), getEndBiomeKeys()}) {
+        for (const auto& k : keys) {
+            if (k == biomeKey) return true;
         }
     }
     return false;

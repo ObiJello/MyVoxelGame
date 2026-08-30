@@ -62,18 +62,6 @@ bool DensityFunctionRegistry::has(const std::string& name) const {
 
 void DensityFunctionRegistry::clear() {
     for (auto& pair : m_functions) {
-        // PATCH (quit-to-title support): never delete zero(). It is
-        // Constant::ZERO(), a process-lifetime singleton whose static accessor
-        // caches the pointer in Constant::s_zero and hands the SAME object to
-        // every caller. Deleting it here leaves that cache dangling but
-        // non-null, so the next bootstrap() re-registers freed memory and the
-        // first NoiseRouterData::overworld() build segfaults — i.e. loading a
-        // second world in one process (quit to title → join another) crashes.
-        // Everything else in the registry is uniquely owned and safe to free.
-        //
-        // Re-apply this when re-syncing src/my_terrain_library from a newer
-        // snapshot; it is listed under "Terrain Library Patches" in CLAUDE.md.
-        if (pair.second == zero()) continue;
         delete pair.second;
     }
     m_functions.clear();
@@ -196,14 +184,24 @@ static void registerTerrainNoises(
 void DensityFunctionRegistry::bootstrap(int64_t worldSeed) {
     DensityFunctionRegistry& registry = instance();
 
-    // Store world seed for later use (e.g., NoiseRouterData::overworld())
+    // Store world seed for later use (e.g., NoiseRouterData::overworld()).
+    // NOTE: nothing actually consumes it - createNoiseHolder builds UNSEEDED
+    // holders by design (RandomState wires the per-world seeded noises), so
+    // the whole registry graph is seed-independent.
     registry.m_worldSeed = worldSeed;
 
-    // Clear any existing functions
-    registry.clear();
-
-    // Clear noise cache (matches Java's RandomState constructor creating new noiseIntances map)
-    g_noiseCache.clear();
+    // ONCE PER PROCESS, like every other registry. The old per-world rebuild
+    // (clear + re-register) deleted every registered function - including
+    // Constant::ZERO(), a process-lifetime SINGLETON shared by zero() - so
+    // the SECOND world loaded in one game session crashed inside
+    // DensityFunctions::add/mul's dynamic_cast<Constant*> on the freed
+    // singleton (world -> quit to title -> load world = SIGSEGV in
+    // NoiseRouterData::overworld). Nothing here is per-seed, so rebuilding
+    // was never needed; keeping the graph alive also keeps every long-lived
+    // structure that captured registry pointers valid.
+    if (!registry.m_functions.empty()) {
+        return;
+    }
 
     // Line 76: ZERO = DensityFunctions.zero()
     registry.registerFunction("zero", zero());

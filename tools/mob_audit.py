@@ -185,7 +185,8 @@ def load_port():
     # Hand-written mob classes: EntityTypeId::X -> a concrete C++ class.
     handwritten = set()
     for f in ("src/common/entity/mobs/Animals.hpp", "src/common/entity/mobs/Monsters.hpp",
-              "src/common/entity/mobs/AnimatedMobs.hpp"):
+              "src/common/entity/mobs/AnimatedMobs.hpp", "src/common/entity/mobs/Slime.hpp",
+              "src/common/entity/mobs/Fish.hpp"):
         for mm in re.finditer(r"class\s+(\w+)\s*:\s*public\s+\w+", read_text(f)):
             handwritten.add(mm.group(1))
     p["handwritten"] = handwritten

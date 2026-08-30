@@ -1,5 +1,6 @@
 // File: src/server/session/PlayerSession.cpp
 #include "PlayerSession.hpp"
+#include "common/world/block/TntBlock.hpp"
 #include "common/core/Mth.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../player/ServerPlayer.hpp"
@@ -8,10 +9,14 @@
 #include "../network/SendScheduler.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "../entity/ItemEntityManager.hpp"
+#include "../entity/ExperienceOrbManager.hpp"
 #include "PlayerSessionManager.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Assert.hpp"
 #include "common/network/PacketTypes.hpp"
+#include "common/world/level/DimensionId.hpp"   // ChangeDimension's packet fields
+#include "../level/ServerLevel.hpp"                 // SessionWorld
+#include "../level/ServerLevel.hpp"                 // SessionWorld
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockPlacement.hpp"
@@ -184,7 +189,14 @@ namespace Server {
         // The tracking view starts EMPTY; the server's first UpdateChunkTracking
         // diffs it against the real view, so the whole initial set arrives
         // through the ordinary enter path with no special-casing.
-        
+
+        // Last, and only on the way out: this is what tells
+        // IntegratedServer::OnClientSettingsReceived that applying a view
+        // distance to this session will STICK. Everything above resets the
+        // distances from `config`, so client settings applied before this
+        // point are silently discarded (see the comment there).
+        m_initialized = true;
+
         Log::Info("PlayerSession: Initialized session for player %u in dimension %d",
                  m_playerId, dimensionId);
     }
@@ -216,6 +228,18 @@ namespace Server {
             return;
         }
         
+        // Latency now comes from the connection's MC-style EMA, refreshed on
+        // the network I/O thread by ServerConnection::HandleKeepAliveResponse
+        // ((latency * 3 + time) / 4, MC ServerCommonPacketListenerImpl:85).
+        // PlayerSession::HandleKeepAlive no longer runs — the keep-alive is
+        // answered off the tick thread — and the value it used to compute was
+        // meaningless anyway, since m_lastKeepAliveTx was written once at
+        // session start and never again.
+        if (m_connection) {
+            std::lock_guard<std::mutex> lock(m_statsMutex);
+            m_stats.latency = static_cast<float>(m_connection->GetLatencyMs());
+        }
+
         // Reset per-tick budgets
         m_bytesOutThisTick = 0;
         m_chunksOutThisTick = 0;
@@ -242,11 +266,7 @@ namespace Server {
         // never advanced).
         if (m_player) {
             ASSERT_SERVER_THREAD();
-            Game::World* world = nullptr;
-            if (auto* server = Server::g_integratedServer.get()) {
-                world = server->GetWorld();
-            }
-            m_player->tick(world, static_cast<int>(serverTick));
+            m_player->tick(SessionWorld(), static_cast<int>(serverTick));
 
             // MC ServerPlayer.die (:932) ends with
             //     this.connection.markClientUnloadedAfterDeath();
@@ -297,6 +317,23 @@ namespace Server {
                     m_lastSentHealth     = health;
                     m_lastSentFood       = food;
                     m_lastSentSaturation = saturation;
+                }
+
+                // XP triple — MC ServerPlayer.tick's lastSentExp dirty-check
+                // (ClientboundSetExperiencePacket). Same shape as the health
+                // sync above: first PLAYING tick always sends because the
+                // cached values start impossible.
+                const auto& xp = m_player->getExperience();
+                if (xp.Level() != m_lastSentXpLevel
+                    || xp.Progress() != m_lastSentXpProgress) {
+                    Network::SetExperienceS2CPacket xpOut;
+                    xpOut.progress = xp.Progress();
+                    xpOut.level    = static_cast<uint32_t>(xp.Level());
+                    xpOut.total    = static_cast<uint32_t>(xp.Total());
+                    auto xpData = Network::Serialization::Serialize(xpOut);
+                    m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::SetExperienceS2C), xpData);
+                    m_lastSentXpLevel    = xp.Level();
+                    m_lastSentXpProgress = xp.Progress();
                 }
             }
 
@@ -385,24 +422,58 @@ namespace Server {
                  m_playerId, m_player->getDimensionId(), newDimensionId);
         
         m_isChangingDimension = true;
-        
-        // Send unload for all tracked chunks. Snapshot the view first —
-        // SendChunkUnload clears it, and ForEach reads it.
-        const ChunkTrackingView previousView = m_trackingView;
-        previousView.ForEach([this](Game::Math::ChunkPos chunk) { SendChunkUnload(chunk); });
-        
-        // Clear all watch sets
+
+        // ONE barrier packet, not one unload per tracked chunk.
+        //
+        // The old shape sent an UnloadChunk for every chunk in the tracking
+        // view. At view distance 32 that is over four thousand packets in a
+        // single tick, against an incoming queue that holds 2048 and DROPS the
+        // overflow — so the tail of the unloads, and then the head of the new
+        // dimension's chunk data, would simply vanish. ChangeDimensionS2C
+        // tells the client to throw the whole level away in one message, which
+        // is both cheaper and the only version that cannot half-apply.
+        if (m_connection) {
+            const Game::DimensionId dim = Game::DimensionFromRaw(newDimensionId);
+            Network::ChangeDimensionS2CPacket packet;
+            packet.dimensionId  = static_cast<int8_t>(Game::DimensionToRaw(dim));
+            packet.flags = static_cast<uint8_t>(
+                (Game::DimensionHasSkyLight(dim)
+                     ? Network::ChangeDimensionS2CPacket::kFlagHasSkyLight : 0) |
+                (Game::DimensionHasCeiling(dim)
+                     ? Network::ChangeDimensionS2CPacket::kFlagHasCeiling : 0));
+            // MC DimensionTypes.java: the Nether's ambient light is 0.1, and
+            // everywhere else it is 0.
+            packet.ambientLight = (dim == Game::DimensionId::Nether) ? 0.1f : 0.0f;
+            packet.minY   = Game::DimensionMinY(dim);
+            packet.height = Game::DimensionLogicalHeight(dim);
+
+            m_connection->SendPacket(
+                static_cast<uint8_t>(Network::PacketId::ChangeDimensionS2C),
+                Network::Serialization::Serialize(packet));
+        }
+
+        // Clear all watch sets. The tracking view must become genuinely EMPTY
+        // rather than merely stale: ProcessWatchSetChanges diffs the new view
+        // against this one, and a leftover view would make it believe the
+        // player already has chunks that were just thrown away.
         ClearWatchSets();
         ClearQueues();
         ClearDiffs();
-        
+        m_trackingView = ChunkTrackingView::Empty();
+        m_sentChunks.clear();
+
         // Update player dimension and position
         m_player->setDimensionId(newDimensionId);
         m_player->teleport(glm::dvec3(targetPos));
-        
+
         m_currentChunk = m_player->getChunkPosition();
         m_anchorChunk = m_currentChunk;
-        
+
+        // Back to waiting for a level, so the loading screen stays up until
+        // the destination's chunks are actually there. Mirrors the respawn
+        // path, which has exactly the same problem.
+        RestartClientLoadTimerAfterRespawn();
+
         // Recompute watch set for new dimension
         m_isChangingDimension = false;
     }
@@ -545,7 +616,8 @@ namespace Server {
         }
     }
 
-    void PlayerSession::SendNextChunks(Game::World* world) {
+    void PlayerSession::SendNextChunks(Game::World* world,
+                                       std::vector<Game::Math::ChunkPos>* outNotResident) {
         if (!world || !m_connection) return;
         if (m_pendingChunksToSend.empty()) return;
         PROFILE_ZONE_N("SendNextChunks");
@@ -585,7 +657,14 @@ namespace Server {
             // then regenerate it here, on the server thread, inside the send
             // loop. Skipping is what the "picked up later" below always meant.
             auto chunk = world->GetLoadedChunk(pos.x, pos.z);
-            if (!chunk) continue;  // Not resident right now — skip, retried later
+            if (!chunk) {
+                // Evicted between "ready" and "sent". Nothing reloads a chunk
+                // that is already in the tracking view, so hand it back to the
+                // caller to request again instead of waiting here forever.
+                staleChunks.push_back(pos);
+                if (outNotResident) outNotResident->push_back(pos);
+                continue;
+            }
 
             int dx = pos.x - m_anchorChunk.x;
             int dz = pos.z - m_anchorChunk.z;
@@ -627,7 +706,7 @@ namespace Server {
             packet.chunkX = cd.pos.x;
             packet.chunkZ = cd.pos.z;
             packet.groundUpContinuous = true;
-            packet.primaryBitmask = 0;
+            packet.sections.reserve(Game::Math::SECTIONS_PER_CHUNK);
 
             // MC ClientboundLevelChunkPacketData.extractChunkData:
             //
@@ -644,25 +723,50 @@ namespace Server {
                 dst.words   = src.RawWords();
             };
 
+            // EVERY section, in order, with no skipping — the wire is
+            // positional now and section Y is the index. This loop used to
+            // `continue` past all-air sections and record the survivors in a
+            // bitmask; the omission took their BIOMES with it, which is why
+            // anything placed high above terrain tinted with the fallback
+            // biome. MC has no such filter and no such mask.
+            //
+            // An all-air section costs about seven bytes: a two-byte count,
+            // then two single-value containers, each one `bits` byte plus a
+            // one-entry VarInt palette and no words at all.
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                 const auto* section = cd.chunk->GetSection(sectionY);
-                if (!section) continue;
-                // MC hasOnlyAir() — one comparison against the palette.
-                if (section->IsAllAir()) continue;
-
-                packet.primaryBitmask |= (1 << sectionY);
 
                 Network::ChunkDataS2CPacket::SectionData sectionData;
 
+                // Defensive, and load-bearing if it ever fires: a `continue`
+                // here would shift every later section down one slot on a
+                // positional wire. Emit a placeholder instead so the stream
+                // stays in phase. GetSection is total for an in-range index,
+                // so this is unreachable today.
+                if (!section) {
+                    Log::Warning("[PlayerSession] Chunk (%d, %d) section %d missing; "
+                                 "sending an empty placeholder to keep the stream aligned",
+                                 cd.pos.x, cd.pos.z, sectionY);
+                    sectionData.states.bits = 0;
+                    sectionData.states.palette = { Game::BlockState{}.RawId() };
+                    sectionData.biomes.bits = 0;
+                    sectionData.biomes.palette = { Game::kFallbackBiomeId };
+                    packet.sections.push_back(std::move(sectionData));
+                    continue;
+                }
+
                 // MC nonEmptyBlockCount. Counted off the palette rather than by
                 // walking voxels: the container already knows how many of each
-                // distinct state it holds.
+                // distinct state it holds. IsAllAir short-circuits the common
+                // sky case to zero without touching the palette at all.
                 uint32_t nonAir = 0;
-                section->States().ForEachValue([&](uint32_t stateId, int count) {
-                    if (Game::BlockState::FromRawId(stateId).Block() != Game::BlockID::Air) {
-                        nonAir += static_cast<uint32_t>(count);
-                    }
-                });
+                if (!section->IsAllAir()) {
+                    section->States().ForEachValue([&](uint32_t stateId, int count) {
+                        if (Game::BlockState::FromRawId(stateId).Block() != Game::BlockID::Air) {
+                            nonAir += static_cast<uint32_t>(count);
+                        }
+                    });
+                }
                 sectionData.blockCount = static_cast<uint16_t>(nonAir > 0xFFFFu ? 0xFFFFu : nonAir);
 
                 copyContainer(section->States(), sectionData.states);
@@ -671,7 +775,7 @@ namespace Server {
                 packet.sections.push_back(std::move(sectionData));
             }
 
-            // Biomes now ride inside each section's container above, where MC
+            // Biomes ride inside each section's container above, where MC
             // keeps them — not as a flat per-chunk array.
 
             auto data = Network::Serialization::Serialize(packet);
@@ -701,7 +805,7 @@ namespace Server {
 
     void PlayerSession::OnChunkBatchAck(float desiredRate) {
         m_unackedBatches--;
-        m_desiredChunksPerTick = std::isnan(desiredRate) ? 0.01f : std::clamp(desiredRate, 0.01f, 64.0f);
+        m_desiredChunksPerTick = std::isnan(desiredRate) ? 0.01f : std::clamp(desiredRate, 0.01f, 256.0f);   // matches the client clamp (was vanilla's 64)
         if (m_unackedBatches == 0) m_batchQuota = 1.0f;
         m_maxUnackedBatches = 10;
 
@@ -868,6 +972,15 @@ namespace Server {
         // which is why looking around still works in vanilla while a teleport
         // is pending. updateAwaitingTeleport also re-sends the teleport if it
         // has gone unacknowledged for 20 ticks, so this can never latch.
+        // MC handleMovePlayer:1027 puts its ENTIRE body — rotation included —
+        // behind hasClientLoaded(). A position produced before the client's
+        // world exists is a position produced against empty air, and adopting
+        // it is what let a rejoining player's saved Y sink a few blocks per
+        // session. The client is gated too (LocalPlayer.tick:212, ported in
+        // PlatformMain); this is the half that does not depend on the client
+        // being well-behaved.
+        if (!HasClientLoaded()) return;
+
         const bool awaitingTeleport =
             m_connection && m_connection->UpdateAwaitingTeleport();
 
@@ -914,8 +1027,8 @@ namespace Server {
 
         // Feet-in-water check (server-side; block at the foot position).
         bool inWater = false;
-        if (auto* server = g_integratedServer.get()) {
-            if (Game::World* world = server->GetWorld()) {
+        {
+            if (Game::World* world = SessionWorld()) {
                 const glm::ivec3 feet(static_cast<int>(std::floor(newPos.x)),
                                       static_cast<int>(std::floor(newPos.y)),
                                       static_cast<int>(std::floor(newPos.z)));
@@ -1050,9 +1163,8 @@ namespace Server {
                 }
 
                 // Get world and break the block (set to air)
-                IntegratedServer* server = g_integratedServer.get();
-                if (!server || !server->GetWorld()) return;
-                Game::World* world = server->GetWorld();
+                Game::World* world = SessionWorld();
+                if (!world) return;
 
                 // Trust the packet's blockId for inventory purposes. In integrated-server
                 // mode the client and server share one World, so by the time we get here
@@ -1107,6 +1219,18 @@ namespace Server {
                                 dynamic_cast<Game::BaseContainerBlockEntity*>(be)) {
                             spilled = container->TakeAllContents();
                         }
+                        // A furnace destroyed with banked smelting XP pays it
+                        // out at the block — MC AbstractFurnaceBlockEntity
+                        // .preRemoveSideEffects → getRecipesToAwardAndPop-
+                        // Experience(level, Vec3.atCenterOf(pos)). Like the
+                        // contents spill above, this runs regardless of game
+                        // mode and tool: the XP was already earned by the
+                        // smelts, it was never the block's loot.
+                        if (auto* furnace = dynamic_cast<Game::FurnaceBlockEntity*>(be)) {
+                            AwardBankedExperience(
+                                glm::dvec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5),
+                                furnace->TakeStoredExperience());
+                        }
                     }
                 }
                 // Bedrock is unbreakable in survival/adventure, but creative
@@ -1115,6 +1239,17 @@ namespace Server {
                 const bool creativeBreak =
                     (m_player->getGameMode() == Server::GameMode::CREATIVE);
                 if (oldBlock == Game::BlockID::Bedrock && !creativeBreak) return;
+
+                // MC TntBlock.playerWillDestroy — an UNSTABLE TNT primes
+                // instead of dropping when a survival player breaks it. Runs
+                // BEFORE the cell is cleared, because priming reads the state.
+                // Nothing sets `unstable` true yet (it needs a datapack or a
+                // /setblock), so this is inert but correct.
+                bool primedOnBreak = false;
+                if (oldBlock == Game::BlockID::Tnt) {
+                    primedOnBreak = Game::TntPlayerWillDestroy(
+                        *world, pos, oldBlockState, nullptr, creativeBreak);
+                }
 
                 // SetBlock may already be a no-op (the world is already Air in integrated
                 // mode), but call it anyway so dedicated multiplayer still clears the
@@ -1135,6 +1270,9 @@ namespace Server {
                         ? Game::BlockID::Water
                         : Game::BlockID::Air;
                 world->SetBlock(pos.x, pos.y, pos.z, replacement);
+                // A TNT that primed on break has become an entity; dropping the
+                // item as well would duplicate it.
+                if (primedOnBreak) return;
 #if ENABLE_PORTAL_GUN
                 // Remove any portal mounted on this block. Block-break
                 // bypasses IntegratedServer::ApplyBlockChange so the
@@ -1183,7 +1321,7 @@ namespace Server {
                         lootCtx.block          = oldBlock;
                         lootCtx.blockState     = oldBlockState.Index();
                         lootCtx.tool           = &heldStack;
-                        lootCtx.world          = world;
+                        lootCtx.blocks         = world;
                         lootCtx.pos            = pos;
                         lootCtx.brokenByEntity = true;   // a player did this
                         lootCtx.rng            = &m_lootRandom;
@@ -1198,6 +1336,19 @@ namespace Server {
                             for (const Game::ItemStack& drop : Game::LootTables::GetDrops(lootCtx)) {
                                 items->PopResource(pos, drop);
                             }
+                        }
+
+                        // MC Block.spawnAfterBreak's XP half — ores, sculk and
+                        // the spawner pay orbs at the block's centre
+                        // (Block.popExperience → ExperienceOrb.award at
+                        // Vec3.atCenterOf(pos)). Same gate as the loot: player
+                        // break, correct tool, not creative.
+                        const int blockXp = Game::LootTables::RollBlockBreakExperience(
+                            oldBlock, &heldStack, m_lootRandom);
+                        if (blockXp > 0) {
+                            AwardWorldExperience(
+                                glm::dvec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5),
+                                blockXp);
                         }
                     }
                 }
@@ -1266,12 +1417,12 @@ namespace Server {
         if (!m_player || !m_menuIsBlockBacked || !m_player->hasOpenContainerMenu()) {
             return false;
         }
-        IntegratedServer* server = g_integratedServer.get();
-        if (!server || !server->GetWorld()) return false;
+        Game::World* sessionWorld = SessionWorld();
+        if (!sessionWorld) return false;
 
         const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(
             m_openMenuPos.x, m_openMenuPos.z);
-        auto chunk = server->GetWorld()->GetChunk(cp.x, cp.z);
+        auto chunk = sessionWorld->GetChunk(cp.x, cp.z);
         Game::BlockEntity* be = chunk
             ? chunk->GetBlockEntity(m_openMenuPos.x - cp.x * 16, m_openMenuPos.y,
                                     m_openMenuPos.z - cp.z * 16)
@@ -1283,7 +1434,7 @@ namespace Server {
             if (!m_hasMenuPartner) return false;
             const auto pcp = Game::Math::WorldCoordinates::WorldToChunkPos(
                 m_openMenuPartnerPos.x, m_openMenuPartnerPos.z);
-            auto pchunk = server->GetWorld()->GetChunk(pcp.x, pcp.z);
+            auto pchunk = sessionWorld->GetChunk(pcp.x, pcp.z);
             Game::BlockEntity* pbe = pchunk
                 ? pchunk->GetBlockEntity(m_openMenuPartnerPos.x - pcp.x * 16,
                                          m_openMenuPartnerPos.y,
@@ -1467,6 +1618,34 @@ namespace Server {
         for (const auto& extra : result.extraDrops) {
             DropItemFromPlayer(extra);
         }
+
+        // Taking from a furnace's result slot freed its banked smelting XP
+        // (FurnaceResultSlot::OnTake). MC pays it as orbs at the player's own
+        // position (AbstractFurnaceBlockEntity.awardUsedRecipesAndPop-
+        // Experience → player.position()), where the pickup pull collects
+        // them immediately.
+        AwardBankedExperience(m_player->getPosition(), result.xpBanked);
+    }
+
+    void PlayerSession::AwardWorldExperience(const glm::dvec3& pos, int amount) {
+        if (amount <= 0) return;
+        auto* server = g_integratedServer.get();
+        if (!server) return;
+        if (auto* orbs = server->GetXpOrbs()) {
+            orbs->Award(pos, amount);
+        }
+    }
+
+    void PlayerSession::AwardBankedExperience(const glm::dvec3& pos, float banked) {
+        if (banked <= 0.0f) return;
+        // MC AbstractFurnaceBlockEntity.createExperience: floor the banked
+        // total, then a random chance at the fractional remainder. (MC rounds
+        // per recipe type; we bank one float total and round once — the
+        // expected value is identical, and the difference is at most one
+        // fractional roll per payout.)
+        const int amount = Server::PlayerExperience::RoundBankedExperience(
+            banked, m_lootRandom.NextFloat());
+        AwardWorldExperience(pos, amount);
     }
 
     void PlayerSession::DropItemFromPlayer(const Game::ItemStack& stack) {
@@ -1566,6 +1745,11 @@ namespace Server {
         // MC ServerGamePacketListenerImpl.handlePlayerAbilities: only the
         // FLYING bit is client-writable, and only while mayFly. A client
         // claiming flight without permission gets a corrective resend.
+        // Noclip is NOT gated on canFly: the client resolves it in its own
+        // physics either way, so refusing the bit would only stop the state
+        // being saved. Recorded first so it survives even the corrective path.
+        m_player->setNoclip(packet.noclip());
+
         if (m_player->canFly()) {
             m_player->setFlying(packet.flying());
         } else if (packet.flying()) {
@@ -1633,9 +1817,8 @@ namespace Server {
         auto pending = m_player->takePendingCampfireFood();
         if (!pending) return;
 
-        IntegratedServer* server = g_integratedServer.get();
-        if (!server || !server->GetWorld()) return;
-        Game::World* world = server->GetWorld();
+        Game::World* world = SessionWorld();
+        if (!world) return;
 
         const glm::ivec3& pos = pending->pos;
         const auto chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
@@ -1674,11 +1857,11 @@ namespace Server {
         // MC gets there via state.getMenuProvider(level, pos), which resolves
         // the block entity; ours is the same lookup the placement path uses.
         auto containerAt = [this](const glm::ivec3& pos) -> Game::BaseContainerBlockEntity* {
-            IntegratedServer* server = g_integratedServer.get();
-            if (!server || !server->GetWorld()) return nullptr;
+            Game::World* world = SessionWorld();
+            if (!world) return nullptr;
             const auto chunkPos =
                 Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
-            auto chunk = server->GetWorld()->GetChunk(chunkPos.x, chunkPos.z);
+            auto chunk = world->GetChunk(chunkPos.x, chunkPos.z);
             if (!chunk) return nullptr;
             const int lx = pos.x - chunkPos.x * 16;
             const int lz = pos.z - chunkPos.z * 16;
@@ -1699,7 +1882,7 @@ namespace Server {
             // a load would fill in.
             if (!be) {
                 const Game::BlockID blockId =
-                    server->GetWorld()->GetBlock(pos.x, pos.y, pos.z);
+                    world->GetBlock(pos.x, pos.y, pos.z);
                 if (const auto* type = Game::BlockEntityTypes::ForBlock(blockId)) {
                     auto created = type->Create(pos, blockId);
                     be = created.get();
@@ -1717,10 +1900,9 @@ namespace Server {
         // blocks out, at the table's level and one above, and a shelf only
         // counts when the cell BETWEEN it and the table is air. That air check
         // is the whole reason you can wall a table off from its shelves.
-        auto CountBookshelvesAround = [](const glm::ivec3& tablePos) -> int {
-            IntegratedServer* server = g_integratedServer.get();
-            if (!server || !server->GetWorld()) return 0;
-            Game::World* w = server->GetWorld();
+        auto CountBookshelvesAround = [this](const glm::ivec3& tablePos) -> int {
+            Game::World* w = SessionWorld();
+            if (!w) return 0;
             int power = 0;
             for (int dz = -1; dz <= 1; ++dz) {
                 for (int dx = -1; dx <= 1; ++dx) {
@@ -1748,11 +1930,11 @@ namespace Server {
         // Screen title = the block's display name, as vanilla does for every
         // container without a custom name (MC BaseContainerBlockEntity
         // .getDisplayName falls back to the block's description id).
-        auto blockNameAt = [](const glm::ivec3& pos) -> std::string {
-            IntegratedServer* server = g_integratedServer.get();
-            if (!server || !server->GetWorld()) return {};
+        auto blockNameAt = [this](const glm::ivec3& pos) -> std::string {
+            Game::World* world = SessionWorld();
+            if (!world) return {};
             return Game::BlockRegistry::Get(
-                server->GetWorld()->GetBlock(pos.x, pos.y, pos.z)).name;
+                world->GetBlock(pos.x, pos.y, pos.z)).name;
         };
 
         // Cleared BEFORE the switch: the double-chest branch sets it true, and
@@ -1794,8 +1976,7 @@ namespace Server {
                 // two 27-slot ones. The pair is resolved from the world every
                 // time it opens (DoubleChest.hpp), so breaking one half simply
                 // stops it pairing rather than leaving stale state behind.
-                IntegratedServer* srv = g_integratedServer.get();
-                Game::World* world = srv ? srv->GetWorld() : nullptr;
+                Game::World* world = SessionWorld();
                 auto pair = world ? Game::FindChestPartner(*world, pending->pos)
                                   : std::nullopt;
                 if (pair) {
@@ -1985,7 +2166,7 @@ namespace Server {
             return;
         }
         
-        Game::World* world = server->GetWorld();
+        Game::World* world = SessionWorld();
         if (!world) {
             Log::Warning("HandleUseItemOn: No world available");
             return;
@@ -2320,6 +2501,18 @@ namespace Server {
 
         glm::ivec3 targetPos = replaceClicked ? clicked : context.getPlacementPos();
 
+        // Skull items are MC StandingAndWallBlockItems: clicking a horizontal
+        // face hangs the WALL variant against the clicked block, anything
+        // else stands the floor variant. Only when the placement actually
+        // resolved against the clicked face — a replaceable clicked block
+        // keeps the cell and there is no wall to hang from. The client
+        // mirrors this in ComputePredictedPlacement, so the choice never
+        // flips when this authoritative update lands.
+        if (!replaceClicked) {
+            blockToPlace = Game::SkullPlacementBlock(blockToPlace,
+                                                     context.getClickedFace());
+        }
+
         // Validate target position
         if (!world->IsValidPosition(targetPos.x, targetPos.y, targetPos.z)) {
             Log::Warning("HandleUseItemOn: Target position invalid (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
@@ -2485,6 +2678,12 @@ namespace Server {
         // A no-op for everything else.
         if (!growInPlace) {
             placedState = Game::ComputeWorldPlacementState(*world, targetPos, placedState);
+            // ComputeWorldPlacementState can change the BLOCK, not just its
+            // state: MC ConcretePowderBlock.getStateForPlacement returns the
+            // CONCRETE when the cell is in or beside water. Taking the block
+            // back off the returned state is what makes that land as concrete
+            // instead of powder wearing concrete's state index.
+            blockToPlace = placedState.Block();
         }
         // Applied last so it composes with, rather than overwrites, the
         // waterlogged bit ComputePlacementState sets when placing into a fluid.
@@ -2568,6 +2767,18 @@ namespace Server {
                     BroadcastBlockEntity(targetPos, be);
                 }
             }
+        }
+
+        // MC WitherSkullBlock.setPlacedBy / WitherWallSkullBlock.setPlacedBy →
+        // WitherSkullBlock.checkSpawn: placing a wither skeleton skull (floor
+        // OR wall) is the ONE trigger for the soul-sand ritual. Verified
+        // against the vanilla sources: SoulSandBlock/SoulSoilBlock have no
+        // setPlacedBy at all, so completing the T by placing the sand last
+        // does NOT summon — only the skull placement does, and that is
+        // reproduced here by hooking only this path.
+        if (blockToPlace == Game::BlockID::WitherSkeletonSkull ||
+            blockToPlace == Game::BlockID::WitherSkeletonWallSkull) {
+            server->CheckWitherSpawn(targetPos);
         }
 
         // TODO: Run block hooks when BlockRegistry is fully implemented
@@ -2674,7 +2885,7 @@ namespace Server {
         if (!m_player) return Game::UseResult::Pass;
 
         IntegratedServer* server = g_integratedServer.get();
-        Game::World* world = server ? server->GetWorld() : nullptr;
+        Game::World* world = SessionWorld();
 
         // :291-292 spectator → PASS. (No spectator interaction support — same
         // fallthrough note as HandleUseItemOn's dispatch.)
@@ -2833,9 +3044,8 @@ namespace Server {
         // Send authoritative block states back to client to resync
         if (m_connection) {
             // Get world
-            Server::IntegratedServer* server = Server::g_integratedServer.get();
-            if (server && server->GetWorld()) {
-                Game::World* world = server->GetWorld();
+            {
+                Game::World* world = SessionWorld();
 
                 // Send clicked block, WITH its state index. Dropping the state
                 // here is what made a full leaf litter clump spin north every
@@ -2881,18 +3091,15 @@ namespace Server {
         AckInteraction(sequence, false);
     }
 
+    // UNREACHABLE. The keep-alive response is handled on the network I/O
+    // thread now (ServerConnection::HandleKeepAliveResponse), because MC's
+    // handleKeepAlive carries no ensureRunningOnSameThread and answering it on
+    // the tick thread is what let a long tick time the player out.
+    //
+    // Do NOT call this from there: PlayerSession is tick-thread state. Latency
+    // is refreshed from the connection in Tick() instead.
     void PlayerSession::HandleKeepAlive(const Network::KeepAliveC2SPacket& packet) {
-        m_lastKeepAliveRx = std::chrono::steady_clock::now();
-        
-        // Calculate latency
-        auto roundTrip = std::chrono::duration<float, std::milli>(
-            m_lastKeepAliveRx - m_lastKeepAliveTx).count();
-        
-        {
-            std::lock_guard<std::mutex> lock(m_statsMutex);
-            m_stats.latency = roundTrip / 2.0f;
-            m_stats.lastKeepAlive = m_lastKeepAliveRx;
-        }
+        (void)packet;
     }
 
     // === SEND METHODS ===
@@ -2920,17 +3127,21 @@ namespace Server {
     }
     
     void PlayerSession::SendSingleBlockChange(const Network::BlockChangeS2CPacket& packet) {
-        // Send via integrated server (no connection check needed for integrated server)
+        // Send via integrated server (no connection check needed for integrated server).
+        // The dimension is this session's: the packet is positional and the
+        // server scopes the send to that world's watchers.
         if (g_integratedServer) {
-            g_integratedServer->SendBlockChangeS2CPacket(packet);
+            g_integratedServer->SendBlockChangeS2CPacket(
+                Game::DimensionFromRaw(GetDimensionId()), packet);
         }
         // TODO: Add network connection support for multiplayer
     }
-    
+
     void PlayerSession::SendSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
         // Send via integrated server (no connection check needed for integrated server)
         if (g_integratedServer) {
-            g_integratedServer->SendSectionBlocksUpdateS2CPacket(packet);
+            g_integratedServer->SendSectionBlocksUpdateS2CPacket(
+                Game::DimensionFromRaw(GetDimensionId()), packet);
         }
         // TODO: Add network connection support for multiplayer
     }
@@ -3034,6 +3245,13 @@ namespace Server {
             return m_player->getDimensionId();
         }
         return 0;
+    }
+
+    Game::World* PlayerSession::SessionWorld() const {
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server) return nullptr;
+        ServerLevel* level = server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+        return level ? level->World() : nullptr;
     }
     
     void PlayerSession::ResetStats() {

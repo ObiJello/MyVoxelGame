@@ -19,11 +19,24 @@
 #pragma once
 
 #include "../chunk/IBlockAccess.hpp"
+#include "DimensionId.hpp"
 
 namespace Game {
 
+    struct ScheduledTickAccess;
+
     class ILevelWrite : public IBlockAccess {
     public:
+        // Which world this is. Behaviours that run on both sides need it
+        // because some rules are dimension-gated — a nether portal only
+        // lights in the overworld or the nether (MC BaseFireBlock
+        // .inPortalDimension), so the client's prediction has to make the
+        // same call the server will.
+        //
+        // Defaulted rather than pure so an accessor that predates dimensions
+        // still compiles; every real level overrides it.
+        virtual DimensionId GetDimension() const { return DimensionId::Overworld; }
+
         // Mirrors World::SetBlock's flagged overload. `updateFlags` uses
         // Game::World::UpdateFlags values; the client implementation ignores
         // everything except the fact that a write happened (its remesh and
@@ -65,6 +78,16 @@ namespace Game {
         // return SUCCESS;` for exactly this reason, and this is the flag that
         // branch needs.
         virtual bool IsClientSide() const = 0;
+
+        // MC LevelAccessor's ScheduledTickAccess half — how a block behaviour
+        // books a delayed tick on itself ("fall two ticks from now").
+        //
+        // NULL is a legitimate answer and callers must check. The client
+        // returns null because block ticks are server authority: a predicted
+        // client-side tick would run against a world the server has not agreed
+        // to yet, and the correction would arrive as a visible rewind. Vanilla
+        // says the same thing by handing ClientLevel a BlackholeTickAccess.
+        virtual ScheduledTickAccess* Ticks() { return nullptr; }
     };
 
 } // namespace Game

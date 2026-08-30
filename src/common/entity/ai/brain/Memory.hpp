@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -85,16 +86,37 @@ namespace Game {
     // MC NearestVisibleLivingEntities — the sensor's snapshot, kept as its own
     // type because behaviours query it (`findClosest`, `contains`) rather than
     // iterating it.
+    //
+    // `entities` is ALL nearby living entities (sorted by distance); MC tests
+    // visibility LAZILY per query through a memoizing predicate, NOT at the
+    // sensor's 20-tick cadence — a mob that steps behind a wall vanishes from
+    // the next query, not up to a second later. IsVisible is that predicate
+    // (MC Sensor.isEntityTargetable via the per-snapshot cache); FindClosest
+    // applies it after the caller's filter, exactly as MC short-circuits.
     struct NearestVisibleLivingEntities {
         std::vector<LivingEntity*> entities;
+        // The snapshot's owner — the predicate needs the viewer. Null only in
+        // an empty/default snapshot, whose IsVisible is always false (MC's
+        // EMPTY instance behaves the same).
+        LivingEntity* owner = nullptr;
+        // MC's Object2BooleanOpenHashMap cache, one entry per queried entity.
+        // Keys are compared by pointer only and never dereferenced, so a
+        // stale key after an entity erase is inert (same object-identity
+        // caching MC does within one snapshot).
+        mutable std::vector<std::pair<const LivingEntity*, bool>> visibilityCache;
 
+        // Raw membership in the nearby list — callers wanting MC `contains`
+        // semantics must pair this with IsVisible.
         bool Contains(const LivingEntity* e) const;
-        // First entity matching `pred`, nearest first — the list is kept sorted
-        // by distance by the sensor that fills it.
+        // MC's lineOfSightTest — defined in CoreBehaviors.cpp next to the
+        // sensor that builds the snapshot.
+        bool IsVisible(LivingEntity* e) const;
+        // First entity matching `pred` AND visible, nearest first — the list
+        // is kept sorted by distance by the sensor that fills it.
         template <typename Pred>
         LivingEntity* FindClosest(Pred pred) const {
             for (LivingEntity* e : entities) {
-                if (pred(e)) return e;
+                if (pred(e) && IsVisible(e)) return e;
             }
             return nullptr;
         }

@@ -1,0 +1,335 @@
+{
+  "chunks_compared": 25,
+  "total_mismatches": 393,
+  "by_class": {
+    "missing": 44,
+    "extra": 16,
+    "wrong-block": 333
+  },
+  "by_type": [
+    {
+      "class": "wrong-block",
+      "type": "minecraft:cave_air",
+      "count": 156
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:lava",
+      "count": 77
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:moss_block",
+      "count": 34
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:clay",
+      "count": 21
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:short_grass",
+      "count": 18
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:water",
+      "count": 16
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:deepslate",
+      "count": 13
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:moss_carpet",
+      "count": 8
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:tall_grass",
+      "count": 6
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:short_grass",
+      "count": 4
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:big_dripleaf",
+      "count": 4
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:big_dripleaf",
+      "count": 4
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:big_dripleaf_stem",
+      "count": 4
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:big_dripleaf",
+      "count": 4
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:small_dripleaf",
+      "count": 3
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:azalea",
+      "count": 3
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:short_grass",
+      "count": 3
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:big_dripleaf_stem",
+      "count": 3
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:big_dripleaf_stem",
+      "count": 3
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:small_dripleaf",
+      "count": 2
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:small_dripleaf",
+      "count": 2
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:tuff",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:moss_carpet",
+      "count": 1
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:tall_grass",
+      "count": 1
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:glow_lichen",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:glow_lichen",
+      "count": 1
+    }
+  ],
+  "samples": {
+    "missing|minecraft:moss_carpet": [
+      "chunk(-11, 2) local(13,-8,7) world(-163,-8,39) java=minecraft:moss_carpet",
+      "chunk(-10, 2) local(13,-8,9) world(-147,-8,41) java=minecraft:moss_carpet",
+      "chunk(-10, 2) local(13,-8,10) world(-147,-8,42) java=minecraft:moss_carpet",
+      "chunk(-10, 2) local(14,-8,11) world(-146,-8,43) java=minecraft:moss_carpet",
+      "chunk(-10, 2) local(12,-9,5) world(-148,-9,37) java=minecraft:moss_carpet"
+    ],
+    "extra|minecraft:short_grass": [
+      "chunk(-11, 2) local(15,-2,9) world(-161,-2,41) cpp=minecraft:short_grass",
+      "chunk(-11, 2) local(15,-8,6) world(-161,-8,38) cpp=minecraft:short_grass",
+      "chunk(-10, 2) local(0,-2,9) world(-160,-2,41) cpp=minecraft:short_grass",
+      "chunk(-10, 2) local(5,-2,10) world(-155,-2,42) cpp=minecraft:short_grass"
+    ],
+    "wrong-block|minecraft:clay": [
+      "chunk(-11, 2) local(15,-11,6) world(-161,-11,38) java=minecraft:clay cpp=minecraft:tuff",
+      "chunk(-11, 2) local(15,-10,6) world(-161,-10,38) java=minecraft:clay cpp=minecraft:tuff",
+      "chunk(-10, 1) local(4,-12,11) world(-156,-12,27) java=minecraft:clay cpp=minecraft:deepslate[axis=y]",
+      "chunk(-10, 1) local(3,-12,12) world(-157,-12,28) java=minecraft:clay cpp=minecraft:deepslate[axis=y]",
+      "chunk(-10, 2) local(1,-11,6) world(-159,-11,38) java=minecraft:clay cpp=minecraft:tuff"
+    ],
+    "missing|minecraft:short_grass": [
+      "chunk(-11, 2) local(15,-4,8) world(-161,-4,40) java=minecraft:short_grass",
+      "chunk(-10, 2) local(12,-9,6) world(-148,-9,38) java=minecraft:short_grass",
+      "chunk(-10, 2) local(12,-9,8) world(-148,-9,40) java=minecraft:short_grass",
+      "chunk(-10, 2) local(11,-8,12) world(-149,-8,44) java=minecraft:short_grass",
+      "chunk(-10, 2) local(14,-8,13) world(-146,-8,45) java=minecraft:short_grass"
+    ],
+    "wrong-block|minecraft:tuff": [
+      "chunk(-11, 2) local(14,-13,5) world(-162,-13,37) java=minecraft:tuff cpp=minecraft:clay"
+    ],
+    "missing|minecraft:tall_grass": [
+      "chunk(-11, 2) local(15,-6,7) world(-161,-6,39) java=minecraft:tall_grass[half=lower]",
+      "chunk(-11, 2) local(15,-5,7) world(-161,-5,39) java=minecraft:tall_grass[half=upper]",
+      "chunk(-10, 2) local(13,-8,5) world(-147,-8,37) java=minecraft:tall_grass[half=lower]",
+      "chunk(-10, 2) local(12,-9,9) world(-148,-9,41) java=minecraft:tall_grass[half=lower]",
+      "chunk(-10, 2) local(12,-8,9) world(-148,-8,41) java=minecraft:tall_grass[half=upper]"
+    ],
+    "wrong-block|minecraft:water": [
+      "chunk(-11, 2) local(15,-9,6) world(-161,-9,38) java=minecraft:water[level=0] cpp=minecraft:moss_block",
+      "chunk(-10, 1) local(1,-10,13) world(-159,-10,29) java=minecraft:water[level=0] cpp=minecraft:small_dripleaf[facing=east,half=lower,waterlogged=true]",
+      "chunk(-10, 2) local(4,-10,0) world(-156,-10,32) java=minecraft:water[level=0] cpp=minecraft:small_dripleaf[facing=west,half=lower,waterlogged=true]",
+      "chunk(-10, 2) local(8,-10,7) world(-152,-10,39) java=minecraft:water[level=0] cpp=minecraft:clay",
+      "chunk(-10, 2) local(4,-9,6) world(-156,-9,38) java=minecraft:water[level=0] cpp=minecraft:clay"
+    ],
+    "wrong-block|minecraft:deepslate": [
+      "chunk(-10, 1) local(2,-10,10) world(-158,-10,26) java=minecraft:deepslate[axis=y] cpp=minecraft:clay",
+      "chunk(-10, 1) local(2,-11,10) world(-158,-11,26) java=minecraft:deepslate[axis=y] cpp=minecraft:clay",
+      "chunk(-10, 1) local(2,-12,10) world(-158,-12,26) java=minecraft:deepslate[axis=y] cpp=minecraft:clay",
+      "chunk(-10, 2) local(11,-9,0) world(-149,-9,32) java=minecraft:deepslate[axis=y] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(2,-12,5) world(-158,-12,37) java=minecraft:deepslate[axis=y] cpp=minecraft:clay"
+    ],
+    "missing|minecraft:small_dripleaf": [
+      "chunk(-10, 1) local(0,-9,13) world(-160,-9,29) java=minecraft:small_dripleaf[facing=east,half=upper,waterlogged=false]",
+      "chunk(-10, 2) local(0,-9,4) world(-160,-9,36) java=minecraft:small_dripleaf[facing=west,half=upper,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:big_dripleaf": [
+      "chunk(-10, 1) local(1,-10,14) world(-159,-10,30) java=minecraft:big_dripleaf[facing=east,tilt=none,waterlogged=true] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(10,-9,10) world(-150,-9,42) java=minecraft:big_dripleaf[facing=south,tilt=none,waterlogged=true] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(10,-10,2) world(-150,-10,34) java=minecraft:big_dripleaf[facing=east,tilt=none,waterlogged=true] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(6,-10,4) world(-154,-10,36) java=minecraft:big_dripleaf[facing=west,tilt=none,waterlogged=true] cpp=minecraft:water[level=0]"
+    ],
+    "wrong-block|minecraft:moss_block": [
+      "chunk(-10, 1) local(2,-9,10) world(-158,-9,26) java=minecraft:moss_block cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(12,-9,10) world(-148,-9,42) java=minecraft:moss_block cpp=minecraft:deepslate[axis=y]",
+      "chunk(-10, 2) local(12,-9,12) world(-148,-9,44) java=minecraft:moss_block cpp=minecraft:deepslate[axis=y]",
+      "chunk(-10, 2) local(12,-10,6) world(-148,-10,38) java=minecraft:moss_block cpp=minecraft:deepslate[axis=y]",
+      "chunk(-10, 2) local(12,-10,8) world(-148,-10,40) java=minecraft:moss_block cpp=minecraft:deepslate[axis=y]"
+    ],
+    "extra|minecraft:small_dripleaf": [
+      "chunk(-10, 1) local(1,-9,13) world(-159,-9,29) cpp=minecraft:small_dripleaf[facing=east,half=upper,waterlogged=false]",
+      "chunk(-10, 2) local(4,-9,0) world(-156,-9,32) cpp=minecraft:small_dripleaf[facing=west,half=upper,waterlogged=false]",
+      "chunk(-10, 2) local(5,-8,7) world(-155,-8,39) cpp=minecraft:small_dripleaf[facing=north,half=upper,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:small_dripleaf": [
+      "chunk(-10, 1) local(0,-10,13) world(-160,-10,29) java=minecraft:small_dripleaf[facing=east,half=lower,waterlogged=true] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(0,-10,4) world(-160,-10,36) java=minecraft:small_dripleaf[facing=west,half=lower,waterlogged=true] cpp=minecraft:water[level=0]"
+    ],
+    "extra|minecraft:big_dripleaf": [
+      "chunk(-10, 2) local(9,-6,6) world(-151,-6,38) cpp=minecraft:big_dripleaf[facing=north,tilt=none,waterlogged=false]",
+      "chunk(-10, 2) local(6,-9,3) world(-154,-9,35) cpp=minecraft:big_dripleaf[facing=south,tilt=none,waterlogged=false]",
+      "chunk(-10, 2) local(6,-9,5) world(-154,-9,37) cpp=minecraft:big_dripleaf[facing=north,tilt=none,waterlogged=false]",
+      "chunk(-10, 2) local(6,-9,1) world(-154,-9,33) cpp=minecraft:big_dripleaf[facing=east,tilt=none,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:big_dripleaf_stem": [
+      "chunk(-10, 2) local(7,-10,3) world(-153,-10,35) java=minecraft:big_dripleaf_stem[facing=north,waterlogged=true] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(8,-10,1) world(-152,-10,33) java=minecraft:big_dripleaf_stem[facing=south,waterlogged=true] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(3,-10,3) world(-157,-10,35) java=minecraft:big_dripleaf_stem[facing=east,waterlogged=true] cpp=minecraft:water[level=0]",
+      "chunk(-10, 2) local(11,-10,4) world(-149,-10,36) java=minecraft:big_dripleaf_stem[facing=north,waterlogged=true] cpp=minecraft:water[level=0]"
+    ],
+    "missing|minecraft:azalea": [
+      "chunk(-10, 2) local(13,-8,11) world(-147,-8,43) java=minecraft:azalea",
+      "chunk(-10, 2) local(12,-9,7) world(-148,-9,39) java=minecraft:azalea",
+      "chunk(-10, 2) local(15,-8,12) world(-145,-8,44) java=minecraft:azalea"
+    ],
+    "wrong-block|minecraft:short_grass": [
+      "chunk(-10, 2) local(4,-1,10) world(-156,-1,42) java=minecraft:short_grass cpp=minecraft:moss_carpet",
+      "chunk(-10, 2) local(0,-5,7) world(-160,-5,39) java=minecraft:short_grass cpp=minecraft:moss_carpet",
+      "chunk(-10, 2) local(1,-2,9) world(-159,-2,41) java=minecraft:short_grass cpp=minecraft:tall_grass[half=lower]"
+    ],
+    "missing|minecraft:big_dripleaf_stem": [
+      "chunk(-10, 2) local(11,-9,4) world(-149,-9,36) java=minecraft:big_dripleaf_stem[facing=north,waterlogged=false]",
+      "chunk(-10, 2) local(11,-8,4) world(-149,-8,36) java=minecraft:big_dripleaf_stem[facing=north,waterlogged=false]",
+      "chunk(-10, 2) local(11,-7,4) world(-149,-7,36) java=minecraft:big_dripleaf_stem[facing=north,waterlogged=false]"
+    ],
+    "missing|minecraft:big_dripleaf": [
+      "chunk(-10, 2) local(7,-9,3) world(-153,-9,35) java=minecraft:big_dripleaf[facing=north,tilt=none,waterlogged=false]",
+      "chunk(-10, 2) local(8,-9,1) world(-152,-9,33) java=minecraft:big_dripleaf[facing=south,tilt=none,waterlogged=false]",
+      "chunk(-10, 2) local(11,-6,4) world(-149,-6,36) java=minecraft:big_dripleaf[facing=north,tilt=none,waterlogged=false]",
+      "chunk(-10, 2) local(3,-9,3) world(-157,-9,35) java=minecraft:big_dripleaf[facing=east,tilt=none,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:moss_carpet": [
+      "chunk(-10, 2) local(3,-1,10) world(-157,-1,42) java=minecraft:moss_carpet cpp=minecraft:short_grass"
+    ],
+    "extra|minecraft:big_dripleaf_stem": [
+      "chunk(-10, 2) local(9,-9,6) world(-151,-9,38) cpp=minecraft:big_dripleaf_stem[facing=north,waterlogged=false]",
+      "chunk(-10, 2) local(9,-8,6) world(-151,-8,38) cpp=minecraft:big_dripleaf_stem[facing=north,waterlogged=false]",
+      "chunk(-10, 2) local(9,-7,6) world(-151,-7,38) cpp=minecraft:big_dripleaf_stem[facing=north,waterlogged=false]"
+    ],
+    "extra|minecraft:tall_grass": [
+      "chunk(-10, 2) local(1,-1,9) world(-159,-1,41) cpp=minecraft:tall_grass[half=upper]"
+    ],
+    "wrong-block|minecraft:cave_air": [
+      "chunk(-10, 4) local(13,20,6) world(-147,20,70) java=minecraft:cave_air cpp=minecraft:clay",
+      "chunk(-10, 4) local(15,20,1) world(-145,20,65) java=minecraft:cave_air cpp=minecraft:dirt",
+      "chunk(-10, 4) local(14,21,1) world(-146,21,65) java=minecraft:cave_air cpp=minecraft:stone",
+      "chunk(-10, 4) local(15,20,3) world(-145,20,67) java=minecraft:cave_air cpp=minecraft:stone",
+      "chunk(-10, 4) local(14,21,3) world(-146,21,67) java=minecraft:cave_air cpp=minecraft:stone"
+    ],
+    "extra|minecraft:glow_lichen": [
+      "chunk(-10, 4) local(10,-4,14) world(-150,-4,78) cpp=minecraft:glow_lichen[down=false,east=false,north=true,south=false,up=true,waterlogged=false,west=false]"
+    ],
+    "wrong-block|minecraft:lava": [
+      "chunk(-10, 4) local(15,18,2) world(-145,18,66) java=minecraft:lava[level=0] cpp=minecraft:stone",
+      "chunk(-10, 4) local(15,19,2) world(-145,19,66) java=minecraft:lava[level=0] cpp=minecraft:stone",
+      "chunk(-10, 4) local(15,19,4) world(-145,19,68) java=minecraft:lava[level=0] cpp=minecraft:stone",
+      "chunk(-10, 4) local(15,19,6) world(-145,19,70) java=minecraft:lava[level=0] cpp=minecraft:stone",
+      "chunk(-10, 4) local(14,19,2) world(-146,19,66) java=minecraft:lava[level=0] cpp=minecraft:stone"
+    ],
+    "wrong-block|minecraft:glow_lichen": [
+      "chunk(-10, 4) local(14,22,3) world(-146,22,67) java=minecraft:glow_lichen[down=false,east=false,north=true,south=false,up=false,waterlogged=false,west=false] cpp=minecraft:stone"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        -9,
+        4
+      ],
+      "count": 167
+    },
+    {
+      "chunk": [
+        -10,
+        2
+      ],
+      "count": 130
+    },
+    {
+      "chunk": [
+        -10,
+        4
+      ],
+      "count": 57
+    },
+    {
+      "chunk": [
+        -10,
+        1
+      ],
+      "count": 11
+    },
+    {
+      "chunk": [
+        -9,
+        3
+      ],
+      "count": 11
+    },
+    {
+      "chunk": [
+        -11,
+        2
+      ],
+      "count": 10
+    },
+    {
+      "chunk": [
+        -9,
+        2
+      ],
+      "count": 7
+    }
+  ]
+}

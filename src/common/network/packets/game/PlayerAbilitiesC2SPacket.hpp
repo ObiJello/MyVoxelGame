@@ -16,10 +16,15 @@ namespace Network {
 
     struct PlayerAbilitiesC2SPacket {
         static constexpr uint8_t FLAG_FLYING = 0x02; // same bit as the S2C packet
+        // Not a vanilla bit. Debug noclip is resolved entirely in the client's
+        // own physics, so this tells the server nothing it can enforce — it
+        // exists so the state can be SAVED and handed back on the next join.
+        static constexpr uint8_t FLAG_NOCLIP = 0x10; // same bit as the S2C packet
 
         uint8_t flags = 0;
 
         bool flying() const { return (flags & FLAG_FLYING) != 0; }
+        bool noclip() const { return (flags & FLAG_NOCLIP) != 0; }
     };
 
     namespace Serialization {

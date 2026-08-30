@@ -26,7 +26,7 @@ namespace Game {
     } // namespace
 
     bool IsFenceGateBlock(BlockID id) {
-        return EndsWith(BlockRegistry::Get(id).modelName, "_fence_gate");
+        return (BlockRegistry::FamilyBits(id) & BlockRegistry::FamilyFenceGate) != 0;
     }
 
     Direction FenceGateFacing(BlockState state) {

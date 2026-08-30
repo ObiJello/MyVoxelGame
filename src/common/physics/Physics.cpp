@@ -7,6 +7,7 @@
 #include "common/world/chunk/IBlockAccess.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace Game {
 
@@ -40,6 +41,104 @@ namespace Game {
             return false;
         }
         return blockAccess->IsChunkLoaded(chunkX, chunkZ);
+    }
+
+    bool PhysicsContext::ContainsWater(int x, int y, int z) const {
+        return blockAccess && blockAccess->ContainsWater(x, y, z);
+    }
+
+    bool IsCollisionShapeFullBlock(const PhysicsContext& context, int x, int y, int z) {
+        const BlockID bid = context.GetBlock(x, y, z);
+        if (!BlockRegistry::HasCollision(bid)) return false;
+        return BlockRegistry::GetBlockCollisionShapeSet(
+                   context.GetBlockState(x, y, z)).IsFullCube();
+    }
+
+    double FluidHeightAbove(const AABB& box, bool lava, const PhysicsContext& context) {
+        // MC updateFluidHeightAndDoFluidPushing deflates by 0.001 so a box
+        // exactly flush with a fluid cell's face doesn't count as inside it.
+        const double minX = box.min.x + 0.001, maxX = box.max.x - 0.001;
+        const double minY = box.min.y + 0.001, maxY = box.max.y - 0.001;
+        const double minZ = box.min.z + 0.001, maxZ = box.max.z - 0.001;
+
+        const auto isFluid = [&](int x, int y, int z) {
+            return lava ? context.GetBlock(x, y, z) == BlockID::Lava
+                        : context.ContainsWater(x, y, z);
+        };
+
+        // FlowingFluid.getOwnHeight for a source block — 8/9 of the cell.
+        constexpr double kSourceHeight = 8.0 / 9.0;
+
+        const int x0 = static_cast<int>(std::floor(minX));
+        const int x1 = static_cast<int>(std::floor(maxX));
+        const int y0 = static_cast<int>(std::floor(minY));
+        const int y1 = static_cast<int>(std::floor(maxY));
+        const int z0 = static_cast<int>(std::floor(minZ));
+        const int z1 = static_cast<int>(std::floor(maxZ));
+
+        double height = 0.0;
+        for (int x = x0; x <= x1; ++x) {
+            for (int y = y0; y <= y1; ++y) {
+                for (int z = z0; z <= z1; ++z) {
+                    if (!isFluid(x, y, z)) continue;
+                    // A fluid cell with the same fluid overhead is a
+                    // continuous column — MC FluidState.getHeight returns
+                    // 1.0 for it.
+                    const double surface = isFluid(x, y + 1, z)
+                        ? static_cast<double>(y) + 1.0
+                        : static_cast<double>(y) + kSourceHeight;
+                    height = std::max(height, surface - box.min.y);
+                }
+            }
+        }
+        return height;
+    }
+
+    void EscapeTowardsClosestSpace(const glm::dvec3& stuckPoint, float escapeSpeed,
+                                   glm::dvec3& velocity, const PhysicsContext& context) {
+        const int bx = static_cast<int>(std::floor(stuckPoint.x));
+        const int by = static_cast<int>(std::floor(stuckPoint.y));
+        const int bz = static_cast<int>(std::floor(stuckPoint.z));
+        const glm::dvec3 frac(stuckPoint.x - bx, stuckPoint.y - by, stuckPoint.z - bz);
+
+        // MC's candidate order: NORTH, SOUTH, WEST, EAST, UP — never down.
+        // {axis (0=X,1=Y,2=Z), step}
+        struct Candidate { int axis; int step; };
+        constexpr Candidate kDirections[] = {
+            {2, -1},   // north (−Z)
+            {2, +1},   // south (+Z)
+            {0, -1},   // west  (−X)
+            {0, +1},   // east  (+X)
+            {1, +1},   // up
+        };
+
+        // Nearest open face wins. MC's fallback when every neighbour is a full
+        // block is UP (closestDirection initialises to Direction.UP).
+        int    bestAxis = 1;
+        int    bestStep = +1;
+        double closest  = std::numeric_limits<double>::max();
+
+        for (const auto& dir : kDirections) {
+            const int nx = bx + (dir.axis == 0 ? dir.step : 0);
+            const int ny = by + (dir.axis == 1 ? dir.step : 0);
+            const int nz = bz + (dir.axis == 2 ? dir.step : 0);
+            if (IsCollisionShapeFullBlock(context, nx, ny, nz)) continue;
+
+            const double d = frac[dir.axis];
+            const double oriented = dir.step > 0 ? 1.0 - d : d;
+            if (oriented < closest) {
+                closest  = oriented;
+                bestAxis = dir.axis;
+                bestStep = dir.step;
+            }
+        }
+
+        // The stuck axis gets the full escape speed; the others keep 0.75 of
+        // whatever they had (Entity.java moveTowardsClosestSpace).
+        glm::dvec3 scaled = velocity * 0.75;
+        scaled[bestAxis] = static_cast<double>(bestStep) *
+                           static_cast<double>(escapeSpeed);
+        velocity = scaled;
     }
 
     // **NEW**: Main physics update function with PhysicsContext
@@ -123,15 +222,23 @@ namespace Game {
         // matters: the water/flight/noclip reset wins over a same-step
         // landing so falling into a pool never flushes damage.
         {
+            // MC Entity.checkFallDamage:1481-1495 accumulates UNCONDITIONALLY
+            // and only THEN tests onGround. The descent on the landing step is
+            // real distance fallen — clipping it out of an `!isOnGround` guard
+            // loses most of the final block, and CalculateFallDamage floors, so
+            // the shortfall shows up as a whole missing damage point on every
+            // integer-height drop. Mirrors Entity::CheckFallDamage.
             const float fallDy = physics.position.y - fallPrevY;
             if (physics.isInWater || physics.isFlying || physics.noclip) {
                 physics.fallDistance = 0.0f;      // MC resetFallDistance
-            } else if (!physics.isOnGround && fallDy < 0.0f) {
+            } else if (fallDy < 0.0f) {
                 physics.fallDistance += -fallDy;
             }
-            if (physics.isOnGround && physics.fallDistance > 0.0f) {
-                physics.landedFallDistance =
-                    std::max(physics.landedFallDistance, physics.fallDistance);
+            if (physics.isOnGround) {
+                if (physics.fallDistance > 0.0f) {
+                    physics.landedFallDistance =
+                        std::max(physics.landedFallDistance, physics.fallDistance);
+                }
                 physics.fallDistance = 0.0f;
             }
         }
@@ -611,6 +718,43 @@ namespace Game {
         int minZ = static_cast<int>(std::floor(box.min.z));
         int maxZ = static_cast<int>(std::floor(box.max.z));
 
+        // Same open-sky early-out as CollectBlockColliders: an all-air box
+        // cannot collide, and the section flags say so without a cell read.
+        if (context.blockAccess &&
+            context.blockAccess->IsRegionAllAir(glm::ivec3(minX, minY, minZ),
+                                                glm::ivec3(maxX, maxY, maxZ),
+                                                /*absentIsAir=*/true)) {
+            return false;
+        }
+
+        // Safety net behind the displacement clamp: never walk an absurd
+        // region cell by cell. Treat it as free space instead.
+        if (static_cast<size_t>(maxX - minX + 1) *
+            static_cast<size_t>(maxY - minY + 1) *
+            static_cast<size_t>(maxZ - minZ + 1) > 300000u) {
+            return false;
+        }
+
+        // Bulk read: every state in the box in one call (one chunk and one
+        // section lookup per tile) instead of one per cell.
+        thread_local std::vector<BlockState> t_states;
+        const int ny = maxY - minY + 1, nz = maxZ - minZ + 1;
+        t_states.resize(static_cast<size_t>(maxX - minX + 1) * ny * nz);
+        if (context.blockAccess) {
+            context.blockAccess->GetBlockStatesInBox(glm::ivec3(minX, minY, minZ),
+                                                     glm::ivec3(maxX, maxY, maxZ),
+                                                     t_states.data());
+        } else {
+            for (int x = minX; x <= maxX; ++x)
+                for (int y = minY; y <= maxY; ++y)
+                    for (int z = minZ; z <= maxZ; ++z)
+                        t_states[(static_cast<size_t>(x - minX) * ny + (y - minY)) * nz + (z - minZ)] =
+                            context.GetBlockState(x, y, z);
+        }
+        const auto stateAt = [&](int x, int y, int z) {
+            return t_states[(static_cast<size_t>(x - minX) * ny + (y - minY)) * nz + (z - minZ)];
+        };
+
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
@@ -630,8 +774,16 @@ namespace Game {
                     // `.noCollision()` blocks (flowers, grasses, leaf litter,
                     // torches, vines, …) plus air and the fluids report
                     // hasCollision=false and get walked straight through.
-                    const BlockID bid = context.GetBlock(x, y, z);
-                    if (!BlockRegistry::HasCollision(bid)) continue;
+                    // ONE state read, not a GetBlock followed by a
+                    // GetBlockState for the same cell. Both walk the identical
+                    // chain (World -> ChunkProvider -> memo -> Chunk -> Section
+                    // -> PalettedContainer -> BitStorage), so asking twice
+                    // doubled the cost of every collidable cell — and this loop
+                    // runs over the swept AABB of every moving entity, every
+                    // tick. BlockState::Block() is a table index off the state
+                    // we already have.
+                    const BlockState bstate = stateAt(x, y, z);
+                    if (!BlockRegistry::HasCollision(bstate.Block())) continue;
 
                     // Build the block's actual collision AABB from its model
                     // shape. Full cubes (shape=0..1) produce the same 1×1×1
@@ -642,9 +794,17 @@ namespace Game {
                     // through the gaps, etc.
                     // …and for a stair, all two or three boxes of its union,
                     // so the open half of the cell really is open.
-                    const auto shapes =
-                        BlockRegistry::GetBlockCollisionShapeSet(context.GetBlockState(x, y, z));
-                    for (const auto& shape : shapes) {
+                    // Single-box fast path: a reference into the shape cache
+                    // instead of a ~148-byte BlockShapeSet built and copied per
+                    // candidate cell. See GetSingleCollisionBox.
+                    const BlockRegistry::BlockShape* one =
+                        BlockRegistry::GetSingleCollisionBox(bstate);
+                    BlockRegistry::BlockShapeSet multi;
+                    if (!one) multi = BlockRegistry::GetBlockCollisionShapeSet(bstate);
+                    const BlockRegistry::BlockShape* boxes = one ? one : multi.begin();
+                    const size_t boxCount = one ? 1u : multi.count;
+                    for (size_t bi = 0; bi < boxCount; ++bi) {
+                        const BlockRegistry::BlockShape& shape = boxes[bi];
                         AABB blockAABB;
                         blockAABB.min = glm::vec3(x, y, z) + shape.min;
                         blockAABB.max = glm::vec3(x, y, z) + shape.max;
@@ -901,6 +1061,45 @@ namespace Game {
         const int minZ = static_cast<int>(std::floor(region.min.z));
         const int maxZ = static_cast<int>(std::floor(region.max.z));
 
+        // Open-sky early-out: the swept region grows with the move, and an
+        // entity thrown by a mass detonation sweeps tens of blocks a tick
+        // through nothing. One section-flag test per (column, section) tile
+        // answers "no colliders here" without visiting a cell. Exact — a
+        // region that is all air has no collision shapes in it.
+        if (context.blockAccess &&
+            context.blockAccess->IsRegionAllAir(glm::ivec3(minX, minY, minZ),
+                                                glm::ivec3(maxX, maxY, maxZ),
+                                                /*absentIsAir=*/true)) {
+            return;
+        }
+
+        // Safety net behind the displacement clamp: never walk an absurd
+        // region cell by cell. Treat it as free space instead.
+        if (static_cast<size_t>(maxX - minX + 1) *
+            static_cast<size_t>(maxY - minY + 1) *
+            static_cast<size_t>(maxZ - minZ + 1) > 300000u) {
+            return;
+        }
+
+        // Bulk read, as in CollidesAt.
+        thread_local std::vector<BlockState> t_states;
+        const int ny = maxY - minY + 1, nz = maxZ - minZ + 1;
+        t_states.resize(static_cast<size_t>(maxX - minX + 1) * ny * nz);
+        if (context.blockAccess) {
+            context.blockAccess->GetBlockStatesInBox(glm::ivec3(minX, minY, minZ),
+                                                     glm::ivec3(maxX, maxY, maxZ),
+                                                     t_states.data());
+        } else {
+            for (int x = minX; x <= maxX; ++x)
+                for (int y = minY; y <= maxY; ++y)
+                    for (int z = minZ; z <= maxZ; ++z)
+                        t_states[(static_cast<size_t>(x - minX) * ny + (y - minY)) * nz + (z - minZ)] =
+                            context.GetBlockState(x, y, z);
+        }
+        const auto stateAt = [&](int x, int y, int z) {
+            return t_states[(static_cast<size_t>(x - minX) * ny + (y - minY)) * nz + (z - minZ)];
+        };
+
         for (int x = minX; x <= maxX; ++x) {
             for (int y = minY; y <= maxY; ++y) {
                 for (int z = minZ; z <= maxZ; ++z) {
@@ -908,7 +1107,8 @@ namespace Game {
                     // a render-layer solidity flag. See the long note there for
                     // why: the two sides run different IBlockAccess impls and
                     // disagree about "solid", which desyncs host and joiner.
-                    const BlockID bid = context.GetBlock(x, y, z);
+                    const BlockState cellState = stateAt(x, y, z);
+                    const BlockID bid = cellState.Block();
                     if (!BlockRegistry::HasCollision(bid)) continue;
 
                     // The box UNION, not its bounds. MC's getCollisionShape is
@@ -916,8 +1116,14 @@ namespace Game {
                     // a stair contributes two or three, which is what lets the
                     // step-up search below find a half-block rise instead of a
                     // full-cube wall.
-                    const auto shapes =
-                        BlockRegistry::GetBlockCollisionShapeSet(context.GetBlockState(x, y, z));
+                    // Same single-box fast path as CollidesAt above — this is
+                    // the hotter of the two: 30.4% of the server thread.
+                    const BlockRegistry::BlockShape* one =
+                        BlockRegistry::GetSingleCollisionBox(cellState);
+                    BlockRegistry::BlockShapeSet multi;
+                    if (!one) multi = BlockRegistry::GetBlockCollisionShapeSet(cellState);
+                    const BlockRegistry::BlockShape* shapesBegin = one ? one : multi.begin();
+                    const size_t shapesCount = one ? 1u : multi.count;
 
                     // Portal passthrough is deliberately NOT consulted here.
                     // The hook's answer depends on the moving entity's own box
@@ -927,7 +1133,8 @@ namespace Game {
                     // about. Mobs therefore treat portal frames as solid, which
                     // is the intended behaviour: nothing but the player travels
                     // through a portal.
-                    for (const auto& shape : shapes) {
+                    for (size_t bi = 0; bi < shapesCount; ++bi) {
+                        const BlockRegistry::BlockShape& shape = shapesBegin[bi];
                         // Built in DOUBLES from the integer block coordinate,
                         // so a collider face is exact at any distance from the
                         // origin. As floats, `1000000 + 0.5` is not even
@@ -979,6 +1186,69 @@ namespace Game {
         return result;
     }
 
+    bool MoveApproximate(glm::dvec3& position, glm::dvec3& velocity, const glm::vec3& half,
+                         const glm::dvec3& delta, bool& onGround,
+                         bool& horizontalCollision, bool& verticalCollision,
+                         const PhysicsContext& ctx) {
+        // Feet-anchored, exactly as MoveEntity's own boxAt: the box rises by
+        // the FULL height from the position, which is the entity's feet.
+        const auto boxAt = [&](const glm::dvec3& p) {
+            AABB b;
+            b.min = glm::vec3(static_cast<float>(p.x) - half.x,
+                              static_cast<float>(p.y),
+                              static_cast<float>(p.z) - half.z);
+            b.max = glm::vec3(static_cast<float>(p.x) + half.x,
+                              static_cast<float>(p.y) + 2.0f * half.y,
+                              static_cast<float>(p.z) + half.z);
+            return b;
+        };
+
+        const glm::dvec3 from = position;
+        const bool wasOnGround = onGround;
+        position += delta;
+
+        horizontalCollision = false;
+        verticalCollision   = false;
+
+        if (CollidesAt(boxAt(position), ctx)) {
+            // Y first, because gravity means Y is what almost always hit. This
+            // is the one behaviour that has to survive the approximation: a
+            // primed TNT reads onGround to damp its motion, and an entity that
+            // never lands keeps accelerating downward forever if no position
+            // packet arrives for it — which is exactly what happens when the
+            // tracker is saturated.
+            position.y        = from.y;
+            velocity.y        = 0.0;
+            onGround          = true;
+            verticalCollision = true;
+
+            if (CollidesAt(boxAt(position), ctx)) {
+                // Still stuck with Y undone, so the horizontal half is what is
+                // blocked. Undo the whole move rather than resolving X and Z
+                // separately — one more overlap test, and a cosmetic entity
+                // pressed into a wall for a tick is not worth two.
+                position            = from;
+                velocity.x          = 0.0;
+                velocity.z          = 0.0;
+                horizontalCollision = true;
+            }
+            return true;
+        }
+
+        // Nothing hit. An entity that was already airborne and still moving
+        // down is still airborne — no probe needed, and that is the common case
+        // for a cloud of falling TNT. Anything else has to ask, because
+        // "resting on a block" is not visible from a non-overlapping box.
+        if (!wasOnGround && delta.y < 0.0) {
+            onGround = false;
+            return false;
+        }
+        glm::dvec3 probe = position;
+        probe.y -= 0.001;
+        onGround = CollidesAt(boxAt(probe), ctx);
+        return false;
+    }
+
     EntityMoveResult MoveEntity(glm::dvec3& pos, glm::dvec3& velocity,
                                 const glm::vec3& halfExtents,
                                 float maxUpStep, bool wasOnGround,
@@ -1001,6 +1271,58 @@ namespace Game {
         };
 
         const glm::dvec3 desired = velocity;
+
+        // ── The resting fast path ──────────────────────────────────────────
+        //
+        // An entity standing still on a block re-runs the FULL swept resolve
+        // every tick — a collider gather over the swept region expanded a block
+        // up and a block down, ~16-27 cells, then three ordered axis passes —
+        // only to conclude it did not move. The exact-zero test below almost
+        // never rescues it, because nothing at rest actually has zero velocity:
+        // gravity re-applies -0.04 every tick and the landing damp zeroes it
+        // again, so the steady state of a settled entity is a permanent -0.04.
+        //
+        // At a hundred thousand settled primed TNT that was ~2.5 million block
+        // reads a tick and the single largest cost on the server — MobTick's
+        // own body, 80 ms of a 205 ms tick.
+        //
+        // Conditions, all necessary:
+        //   * it was on the ground LAST tick, so there is something under it;
+        //   * the horizontal delta is under the same epsilon this function
+        //     already treats as "went the whole way", so skipping it cannot be
+        //     distinguished from the full resolve committing it;
+        //   * the vertical delta is a small DOWNWARD one — a rise, or a fall
+        //     large enough to matter, takes the real path.
+        //
+        // Then one overlap probe answers the whole question. If the probe hits,
+        // the entity is still touching what it was standing on and the full
+        // resolve would have moved it nowhere. If it misses — the block was
+        // mined out from under it — this falls through and the real path runs,
+        // so nothing hovers.
+        //
+        // THE DIVERGENCE: a resting entity accumulates no sub-epsilon
+        // horizontal drift it would otherwise have crept along at, which at
+        // <1e-5 blocks a tick is under a thousandth of a block a second.
+        constexpr double kRestingMaxDrop = 0.1;   // well inside one block
+        if (wasOnGround &&
+            std::abs(desired.x) < kEpsilon && std::abs(desired.z) < kEpsilon &&
+            desired.y <= 0.0 && desired.y > -kRestingMaxDrop) {
+            glm::dvec3 probe = pos;
+            probe.y -= 0.001;
+            const AABBd pb = boxAt(probe);
+            if (CollidesAt(AABB{ glm::vec3(pb.min), glm::vec3(pb.max) }, context)) {
+                // Still standing on it. Zero the components the full resolve
+                // would have zeroed, and report the same flags it would have.
+                velocity.x = 0.0;
+                velocity.z = 0.0;
+                velocity.y = 0.0;
+                result.onGround          = true;
+                result.verticalCollision = true;
+                return result;
+            }
+            // Nothing underneath any more — fall through to the real resolve.
+        }
+
         if (desired.x == 0.0 && desired.y == 0.0 && desired.z == 0.0) {
             // Still owe the caller an accurate onGround: an entity that did not
             // move this tick is usually one that is standing still ON something,
@@ -1013,13 +1335,28 @@ namespace Game {
             return result;
         }
 
+        // ── Displacement clamp ──────────────────────────────────────────
+        // Nothing natural moves anywhere near this fast: terminal velocity
+        // under 0.98 drag is a few blocks a tick. Speeds beyond it are the
+        // artifact of hundreds of same-tick explosion impulses stacking, and
+        // an unclamped multi-hundred-block sweep makes the collider region
+        // below cover hundreds of millions of cells — one such entity tick
+        // was measured at twenty-one SECONDS. The excess displacement simply
+        // is not taken this tick; the velocity is untouched, so the entity
+        // keeps flying and covers the rest over the following ticks.
+        constexpr double kMaxStep = 16.0;
+        const glm::dvec3 desiredRef(
+            std::clamp(desired.x, -kMaxStep, kMaxStep),
+            std::clamp(desired.y, -kMaxStep, kMaxStep),
+            std::clamp(desired.z, -kMaxStep, kMaxStep));
+
         const AABBd startBox = boxAt(pos);
 
         // One collider gather for the whole move, over the swept region. The
         // extra 1.0 of headroom on +Y covers the step-up candidates.
         AABBd region = startBox;
-        region.min += glm::dvec3(std::min(0.0, desired.x), std::min(0.0, desired.y), std::min(0.0, desired.z));
-        region.max += glm::dvec3(std::max(0.0, desired.x), std::max(0.0, desired.y), std::max(0.0, desired.z));
+        region.min += glm::dvec3(std::min(0.0, desiredRef.x), std::min(0.0, desiredRef.y), std::min(0.0, desiredRef.z));
+        region.max += glm::dvec3(std::max(0.0, desiredRef.x), std::max(0.0, desiredRef.y), std::max(0.0, desiredRef.z));
         region.max.y += std::max(1.0, static_cast<double>(maxUpStep));
         region.min -= glm::dvec3(1.0e-3);
         region.max += glm::dvec3(1.0e-3);
@@ -1034,7 +1371,23 @@ namespace Game {
         // widening all six would triple the cells scanned on every move.
         region.min.y -= 1.0;
 
-        std::vector<AABBd> colliders;
+        // Reused across calls instead of built and destroyed per entity per
+        // tick. A grounded 0.98-cube produces ~8 colliders, so the vector grew
+        // 1->2->4->8: four malloc/free pairs every entity every tick, ~2,000
+        // pairs a tick at 512 primed TNT. CollectBlockColliders already opens
+        // with out.clear() — it was written for a caller-owned buffer and never
+        // got one.
+        //
+        // thread_local, NOT a file-scope static: MoveEntity runs on the server
+        // tick thread, the client main thread, and the item/orb managers.
+        //
+        // Not re-entrant. Audited: nothing in the SetBlock/NotifyNeighborBlocks
+        // chain calls back into MoveEntity, and the resting-contact probe uses
+        // CollidesAt, which has its own inline cell loop. If the portal
+        // passthrough hook deliberately excluded from CollectBlockColliders
+        // (see the note ~line 1032) is ever revisited, this buffer would be
+        // live across that callback and would need a guard.
+        thread_local std::vector<AABBd> colliders;
         CollectBlockColliders(region, context, colliders);
 
         // MC Direction.axisStepOrder: resolve the LARGEST component first, so
@@ -1066,7 +1419,7 @@ namespace Game {
             return out;
         };
 
-        glm::dvec3 moved = resolve(desired, startBox);
+        glm::dvec3 moved = resolve(desiredRef, startBox);
 
         const bool blockedX = std::abs(moved.x - desired.x) > kEpsilon;
         const bool blockedZ = std::abs(moved.z - desired.z) > kEpsilon;

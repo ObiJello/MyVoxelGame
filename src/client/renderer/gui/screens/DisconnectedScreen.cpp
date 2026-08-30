@@ -4,6 +4,9 @@
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
 #include "Widgets.hpp"
+#include "TitleScreen.hpp"
+
+#include <memory>
 
 namespace Render {
 
@@ -96,9 +99,26 @@ namespace Render {
         m_backBtn = AddWidget(new Button(0, 0,
             WidgetDims::BUTTON_WIDTH, WidgetDims::BUTTON_HEIGHT,
             "Back to Title Screen", [this] {
-                // MC sets the screen to `parent` (a TitleScreen). Ours is
-                // already underneath, so pop back to it.
-                if (m_manager) m_manager->Pop();
+                // MC DisconnectedScreen.java:55 —
+                //     this.minecraft.setScreen(new TitleScreen())
+                // It REPLACES the screen; it does not pop one off. Ours used to
+                // Pop() on the assumption the title screen was already
+                // underneath, and that was both a divergence and a live bug:
+                // stack operations are deferred to the next Update, so this
+                // screen stays Current() for the rest of the frame and every
+                // further activation in that frame queues ANOTHER Pop. Two pops
+                // in one batch removed the DisconnectedScreen AND the
+                // TitleScreen beneath it, leaving an empty stack — which
+                // renders the panorama (drawn directly, outside the GUI) with
+                // no screen, no widgets and no input at all.
+                //
+                // Reachable in practice: the teardown after a disconnect runs
+                // for many seconds without polling, so the OS delivers a whole
+                // burst of accumulated key events into the first menu frame.
+                //
+                // Set() is idempotent under repeats — N of them still leave
+                // exactly one TitleScreen — as well as being what MC does.
+                if (m_manager) m_manager->Set(std::make_unique<TitleScreen>(/*fadeIn=*/false));
             }));
     }
 

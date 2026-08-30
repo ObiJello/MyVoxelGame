@@ -4,6 +4,8 @@
 #include "common/world/gen/IChunkGenerator.hpp"
 #include "RegionFileCache.hpp"
 #include "RegionDumper.hpp"
+#include "anvil/AnvilChunkStorage.hpp"
+#include "anvil/ChunkSerializer.hpp"
 #include "common/core/JobSystem.hpp"
 #include "platform/GameDirectory.hpp"
 #include <filesystem>
@@ -218,6 +220,13 @@ namespace Game {
     // === LIFECYCLE ===
 
     bool MinecraftChunkLoaderImpl::Initialize() {
+        // Read-only Anvil access to this world, used for the 1.18+ layout.
+        // Deliberately not gated on SaveRoot: that token gates WRITES, and a
+        // player's own Minecraft folder must remain readable.
+        if (!m_config.worldPath.empty()) {
+            m_anvilIo = Anvil::AnvilChunkIo::OpenReadOnly(m_config.worldPath);
+        }
+
         if (m_initialized) {
             return true;
         }
@@ -346,10 +355,16 @@ namespace Game {
             return false;
         }
 
-        // Check that chunk has reasonable structure
-        if (chunk.GetSectionCount() == 0) {
+        // Check that the chunk actually decoded to something.
+        //
+        // This used to be `GetSectionCount() == 0`, i.e. "no section objects
+        // exist". Sections are always allocated now, so that test would be
+        // permanently false and this gate would vanish silently, leaving the
+        // bedrock scan below as the only acceptance check on the load path.
+        // Ask about CONTENT instead, which is what it always meant.
+        if (chunk.IsEmpty()) {
             if (chunk.pos.x == 0 || chunk.pos.z == 0) {
-                Log::Debug("Chunk (%d, %d) has no sections (count=0)", chunk.pos.x, chunk.pos.z);
+                Log::Debug("Chunk (%d, %d) decoded to nothing but air", chunk.pos.x, chunk.pos.z);
             }
             return false;
         }
@@ -557,6 +572,22 @@ namespace Game {
         }
 
         try {
+            // 1.18+ layout goes through the shared Anvil path.
+            //
+            // That reader is the same one our own saves use, so an imported
+            // world gets everything the legacy path here never grew: biomes
+            // (the string "biomes" appears nowhere in SectionDataUnpacker, so
+            // every imported world was plains), block entities, .mcc external
+            // chunks, Status gating, and index validation on every palette
+            // lookup rather than an unchecked write into the section.
+            //
+            // Older worlds — pre-1.18 nests sections under `Level`, pre-1.13
+            // uses Blocks/Data byte arrays — keep the legacy reader below.
+            if (ChunkLoadResult modern = LoadModernChunk(position); modern.success) {
+                modern.wasFromDisk = true;
+                return modern;
+            }
+
             // Try loading from Minecraft region files first
             ChunkLoadResult result = LoadFromRegionFile(position);
 
@@ -579,6 +610,50 @@ namespace Game {
         } catch (const std::exception& e) {
             return ChunkLoadResult::Failure("Load failed: " + std::string(e.what()));
         }
+    }
+
+
+    // Read a 1.18+ chunk through the shared Anvil stack. Returns a failed
+    // result (with no error text) when this world is not in the modern layout,
+    // which sends the caller to the legacy reader.
+    ChunkLoadResult MinecraftChunkLoaderImpl::LoadModernChunk(Math::ChunkPos position) {
+        if (!m_anvilIo) return ChunkLoadResult::Failure("");
+
+        std::vector<uint8_t> nbt;
+        std::string error;
+        if (!m_anvilIo->ReadChunkNbt(Game::DimensionId::Overworld, Anvil::RegionKind::Chunks,
+                                     position, nbt, error)) {
+            return ChunkLoadResult::Failure(error);   // absent, or unreadable
+        }
+
+        // One parse to classify. Worth it only once per world in practice —
+        // after the first modern chunk the flag short-circuits it.
+        if (!m_layoutKnown) {
+            m_isModernLayout = Anvil::IsModernChunkLayout(nbt);
+            m_layoutKnown    = true;
+            Log::Info("[Anvil] imported world uses the %s chunk layout",
+                      m_isModernLayout ? "1.18+" : "legacy");
+        }
+        if (!m_isModernLayout) return ChunkLoadResult::Failure("");
+
+        auto chunk = std::make_shared<Chunk>();
+        // Lenient: vanilla relocates a misplaced chunk with a warning rather
+        // than dropping it, and refusing chunks real Minecraft accepts would
+        // make an imported world look broken.
+        // gameTime is left at 0 deliberately. This path reads SOMEBODY ELSE'S
+        // Minecraft save, whose clock has no relation to ours, so a saved tick
+        // delay rebased onto 0 simply comes due on the first simulated tick —
+        // which is the right answer: those appointments were already pending
+        // when that world was closed.
+        if (!Anvil::DeserialiseChunk(nbt, position, *chunk, error,
+                                     Anvil::ChunkSerializer_ReadMode_Lenient)) {
+            return ChunkLoadResult::Failure(error);
+        }
+
+        ChunkLoadResult result;
+        result.success = true;
+        result.chunk   = std::move(chunk);
+        return result;
     }
 
     ChunkLoadResult MinecraftChunkLoaderImpl::LoadFromRegionFile(Math::ChunkPos position) {

@@ -50,6 +50,14 @@ namespace Game {
             return (slot >= 0 && slot < SLOT_COUNT) ? m_cookingTime[slot] : 0;
         }
 
+        // Restoring from NBT. MC's CookingTimes / CookingTotalTimes.
+        void SetCookingProgress(int slot, int value) {
+            if (slot >= 0 && slot < SLOT_COUNT) m_cookingProgress[slot] = value;
+        }
+        void SetCookingTime(int slot, int value) {
+            if (slot >= 0 && slot < SLOT_COUNT) m_cookingTime[slot] = value;
+        }
+
         void Save(Network::PacketBuffer& out) const override;
         void Load(Network::PacketReader& in) override;
 

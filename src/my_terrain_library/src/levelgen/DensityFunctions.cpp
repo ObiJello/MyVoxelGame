@@ -134,6 +134,17 @@ EndIslandDensityFunction::EndIslandDensityFunction(int64_t seed) {
     LegacyRandomSource islandRandom(seed);
     islandRandom.consumeCount(17292);
     m_islandNoise = new ::minecraft::synth::SimplexNoise(islandRandom);
+    if (getenv("END_ISLAND_DEBUG")) {
+        fprintf(stderr, "[eid] seed=%lld xo=%.17g\n", (long long)seed, m_islandNoise->getXo());
+        fprintf(stderr, "[eid] noise(157,3)=%.17g noise(-80,120)=%.17g noise(200,-50)=%.17g\n",
+                m_islandNoise->getValue(157.0, 3.0),
+                m_islandNoise->getValue(-80.0, 120.0),
+                m_islandNoise->getValue(200.0, -50.0));
+        fprintf(stderr, "[eid] h(320,-8)=%.9g h(322,2)=%.9g h(400,120)=%.9g\n",
+                getHeightValue(m_islandNoise, 320, -8),
+                getHeightValue(m_islandNoise, 322, 2),
+                getHeightValue(m_islandNoise, 400, 120));
+    }
 }
 
 EndIslandDensityFunction::~EndIslandDensityFunction() {

@@ -620,7 +620,7 @@ namespace Launcher {
         });
 
         // Build "--name <X>" arg fragment if a non-empty username is set. Game's PlatformMain
-        // accepts an empty/missing name and lets the server auto-assign "PlayerN".
+        // accepts an empty/missing name and lets the server auto-assign its default ("Notch").
         auto buildNameArg = [&]() -> std::string {
             if (uiState.playerName.empty()) return "";
             return " --name " + uiState.playerName;

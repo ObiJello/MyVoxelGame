@@ -1,0 +1,60 @@
+{
+  "chunks_compared": 25,
+  "total_mismatches": 10,
+  "by_class": {
+    "wrong-properties": 5,
+    "extra": 3,
+    "missing": 2
+  },
+  "by_type": [
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:pale_moss_carpet",
+      "count": 5
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:pale_moss_carpet",
+      "count": 3
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:pale_moss_carpet",
+      "count": 2
+    }
+  ],
+  "samples": {
+    "wrong-properties|minecraft:pale_moss_carpet": [
+      "chunk(59999, -59996) local(14,120,4) world(959998,120,-959932) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=none,west=low] cpp=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=none,west=tall]",
+      "chunk(60000, -59996) local(7,119,7) world(960007,119,-959929) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=low,west=low] cpp=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=low,west=tall]",
+      "chunk(60000, -59996) local(3,119,12) world(960003,119,-959924) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=tall,west=none] cpp=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=low,west=none]",
+      "chunk(60000, -59996) local(4,119,14) world(960004,119,-959922) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=low,west=low] cpp=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=low,west=tall]",
+      "chunk(60000, -59996) local(5,119,6) world(960005,119,-959930) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=tall,west=low] cpp=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=low,west=low]"
+    ],
+    "extra|minecraft:pale_moss_carpet": [
+      "chunk(59999, -59996) local(14,121,4) world(959998,121,-959932) cpp=minecraft:pale_moss_carpet[bottom=false,east=none,north=none,south=none,west=low]",
+      "chunk(60000, -59996) local(4,120,14) world(960004,120,-959922) cpp=minecraft:pale_moss_carpet[bottom=false,east=none,north=none,south=none,west=low]",
+      "chunk(60000, -59996) local(7,120,7) world(960007,120,-959929) cpp=minecraft:pale_moss_carpet[bottom=false,east=none,north=none,south=none,west=low]"
+    ],
+    "missing|minecraft:pale_moss_carpet": [
+      "chunk(60000, -59996) local(5,120,6) world(960005,120,-959930) java=minecraft:pale_moss_carpet[bottom=false,east=none,north=none,south=low,west=none]",
+      "chunk(60000, -59996) local(3,120,12) world(960003,120,-959924) java=minecraft:pale_moss_carpet[bottom=false,east=none,north=none,south=low,west=none]"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        60000,
+        -59996
+      ],
+      "count": 8
+    },
+    {
+      "chunk": [
+        59999,
+        -59996
+      ],
+      "count": 2
+    }
+  ]
+}

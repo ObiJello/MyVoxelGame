@@ -3,6 +3,7 @@
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/physics/Physics.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/pathfinder/PathFinder.hpp"
 
@@ -160,11 +161,28 @@ namespace Game {
 
     bool AmphibiousPathNavigation::CanMoveDirectly(const glm::dvec3& from,
                                                    const glm::dvec3& to) const {
-        // MC only allows the straight-line shortcut while actually IN liquid.
-        // On land it must follow the path, because the shortcut test does not
-        // know about the step height.
-        (void)from; (void)to;
-        return m_mob && m_mob->IsInLiquid();
+        // MC only allows the straight-line shortcut while actually IN liquid —
+        // on land the path must be followed, because the shortcut test knows
+        // nothing about step height — and even in liquid the swept clearance
+        // test must pass (isClearForMovementBetween), or the mob would cut
+        // corners straight through the shoreline. Same sampled sweep as
+        // WaterBoundPathNavigation::CanMoveDirectly.
+        if (!m_mob || !m_mob->IsInLiquid()) return false;
+        if (!m_level->Blocks()) return false;
+
+        PhysicsContext ctx = m_level->Physics();
+        const glm::vec3 half = m_mob->HalfExtents();
+        const glm::dvec3 delta = to - from;
+        const double dist = glm::length(delta);
+        if (dist < 1.0e-8) return true;
+        const int steps = std::max(1, static_cast<int>(std::ceil(dist * 2.0)));
+
+        for (int i = 1; i <= steps; ++i) {
+            const glm::dvec3 p = from + delta * (static_cast<double>(i) / steps);
+            const AABB box(glm::vec3(p.x, p.y + half.y, p.z), half * 2.0f);
+            if (CollidesAt(box, ctx)) return false;
+        }
+        return true;
     }
 
     bool AmphibiousPathNavigation::IsStableDestination(const glm::ivec3& pos) const {

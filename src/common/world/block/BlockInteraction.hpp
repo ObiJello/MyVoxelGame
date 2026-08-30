@@ -165,6 +165,15 @@ namespace Game {
             }
             return getHorizontalDirection();
         }
+
+        // MC BlockPlaceContext.getNearestLookingVerticalDirection()
+        //     == Direction.getFacingAxis(player, Axis.Y).
+        // Unlike getNearestLookingDirection this ignores the horizontal
+        // component entirely: it is UP or DOWN and nothing else, chosen purely
+        // by the sign of the look vector's y. Pitch is positive looking DOWN.
+        Direction getNearestLookingVerticalDirection() const {
+            return playerPitch > 0.0f ? Direction::Down : Direction::Up;
+        }
     };
     
     // Helper to convert packet cursor coordinates to world-space hit point

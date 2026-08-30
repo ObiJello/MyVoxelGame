@@ -37,8 +37,36 @@ namespace Render {
         // drawn on top. Unknown/missing sets fall back to "vanilla".
         // Also installs the skybox fog-color override on EnvironmentState.
         void SetSkybox(const std::string& id, int mode);
-        const std::string& CurrentSkybox() const { return m_skyboxId; }
-        int CurrentSkyboxMode() const { return m_skyboxMode; }
+        const std::string& CurrentSkybox() const { return m_userSkyboxId; }
+        int CurrentSkyboxMode() const { return m_userSkyboxMode; }
+
+        // Which dimension the local player is in — raw Game::DimensionId
+        // (-1 nether, 0 overworld, 1 end). Driven by ChangeDimensionS2C.
+        //
+        // The sky is a property of the dimension in MC
+        // (DimensionSpecialEffects.SkyType), not of the player's settings: the
+        // End has its static starfield, the Nether has NO sky at all and shows
+        // only fog, and the player's chosen skybox applies to the overworld.
+        // Selecting it per dimension is why the End looked like a blue
+        // overworld sky — the End skybox already existed and nothing ever
+        // asked for it.
+        void SetDimension(int rawDimensionId);
+
+        // MC DimensionSpecialEffects.NetherEffects — the Nether draws no sky,
+        // so everything is the fog colour. This is nether_wastes' fog
+        // (#330808, data/minecraft/worldgen/biome/nether_wastes.json), which
+        // is what most of the Nether shows; per-biome fog needs a biome-aware
+        // fog system this engine does not have yet.
+        static constexpr float kNetherFog[3] = {0x33 / 255.0f, 0x08 / 255.0f, 0x08 / 255.0f};
+
+        // True while the active dimension draws no sky (the Nether). The
+        // cloud renderer reads it — MC has no clouds outside the overworld.
+        bool SkyHidden() const { return m_noSky; }
+
+        // True while the End's starfield is the active sky. Distinct from the
+        // player having CHOSEN the "end" skybox in settings — that is a purely
+        // cosmetic overworld choice and should not suppress clouds.
+        bool CurrentSkyboxIsEnd() const { return m_dimension == 1; }
 
         // proj: dedicated sky projection (far plane must cover the 512-radius
         //       disc — the main projection's far plane is too near at low
@@ -98,6 +126,20 @@ namespace Render {
         int m_skyboxMode = 2;
         bool m_skyboxValid = false;  // textures loaded, cube path active
         bool m_skyboxIsEnd = false;
+
+        // What the PLAYER chose, kept apart from what is currently ACTIVE so
+        // that a trip to the End does not overwrite their setting — and so
+        // coming home restores it.
+        std::string m_userSkyboxId = "vanilla";
+        int         m_userSkyboxMode = 2;
+        int         m_dimension = 0;
+        bool        m_noSky = false;
+
+        // Apply m_dimension + the user's choice to the active sky.
+        void ApplyDimensionSky();
+        // The old body of SetSkybox: load textures and install the fog
+        // override for one skybox id.
+        void ApplySkybox(const std::string& id, int mode);
         glm::vec3 m_skyboxFogColor{0.5f};
 
         bool m_initialized = false;

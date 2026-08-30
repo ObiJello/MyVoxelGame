@@ -22,7 +22,20 @@ if [ "$VULKAN_REF" = "@rpath/libvulkan.1.dylib" ]; then
 fi
 
 echo "Changing $VULKAN_REF -> @rpath/libvulkan.1.dylib"
-install_name_tool -change "$VULKAN_REF" "@rpath/libvulkan.1.dylib" "$EXECUTABLE"
 
-# Re-sign after modification (install_name_tool invalidates the code signature)
+# Apple's install_name_tool, by ABSOLUTE PATH, never whatever is first on PATH.
+#
+# Anaconda (and MacPorts, and some Homebrew formulae) ship a cctools-port build
+# of install_name_tool. It works, but after rewriting a load command it stamps
+# its own "fake signature" — and Apple's codesign then rejects the binary with
+#   <path>: bundle format unrecognized, invalid, or unsuitable
+# which fails the CMake post-build chain AFTER a completely successful compile
+# and link. The tell is a "[cctools-port]: generating fake signature" line in
+# the build output right before the error.
+INT=/usr/bin/install_name_tool
+[ -x "$INT" ] || INT="$(xcrun --find install_name_tool 2>/dev/null || echo install_name_tool)"
+
+"$INT" -change "$VULKAN_REF" "@rpath/libvulkan.1.dylib" "$EXECUTABLE"
+
+# Re-sign after modification (install_name_tool invalidates the code signature).
 codesign --force --sign - "$EXECUTABLE" 2>/dev/null || true

@@ -29,6 +29,15 @@ OUT_CPP = "src/common/entity/GeneratedMobDefs.cpp"
 HAND_WRITTEN = {"zombie", "skeleton", "creeper", "spider",
                 "cow", "pig", "sheep", "chicken"}
 
+PROJECTILES = {
+    # Entities, not mobs: no attributes, no goals, no def row. Their classes
+    # live in src/common/entity/projectile/ and follow the Arrow pattern.
+    "arrow", "snowball", "egg", "splash_potion",
+    "small_fireball", "fireball", "dragon_fireball", "wither_skull",
+    "shulker_bullet", "llama_spit", "trident",
+    "wind_charge", "breeze_wind_charge",
+}
+
 # MC attribute -> our Attribute enum. Anything not listed has no effect in this
 # engine yet (armour, luck, jump strength …) and is dropped rather than faked.
 ATTRS = {
@@ -294,6 +303,95 @@ BRAIN_LOOK = (r"SetEntityLookTargetSometimes\.create\(\s*EntityType\.PLAYER\s*,"
 # walks at five times a cow.
 SMOOTH_SWIM = (r"moveControl\s*=\s*new SmoothSwimmingMoveControl\(\s*this\s*,"
                r"\s*[^,]+,\s*[^,]+,\s*([^,]+),\s*([^,]+),")
+
+# ── Locomotion (createNavigation + the move/look control constructors) ────
+#
+# MC declares HOW a mob moves in three places: createNavigation picks the
+# search space (ground / air / water / walls), the constructor may install a
+# specialised move control (flyers, smooth swimmers), and FlyingAnimal flips
+# the vertical air friction. All three are per-class facts the generic mobs
+# need verbatim — a bat on ground navigation walks, a cod without the swim
+# control beaches itself.
+NAV_KINDS = [
+    ("Flying",      r"new FlyingPathNavigation\("),
+    ("Water",       r"new WaterBoundPathNavigation\("),
+    ("Amphibious",  r"new AmphibiousPathNavigation\("),
+    ("WallClimber", r"new WallClimberNavigation\("),
+]
+FLY_CTRL = re.compile(
+    r"moveControl\s*=\s*new FlyingMoveControl\(\s*this\s*,\s*(\d+)\s*,\s*(true|false)\s*\)")
+SMOOTH_SWIM_FULL = re.compile(
+    r"moveControl\s*=\s*new SmoothSwimmingMoveControl\(\s*this\s*,"
+    r"\s*(\d+)\s*,\s*(\d+)\s*,\s*([^,]+),\s*([^,]+),\s*(true|false)\s*\)")
+SWIM_LOOK = re.compile(
+    r"lookControl\s*=\s*new SmoothSwimmingLookControl\(\s*this\s*,\s*(\d+)\s*\)")
+NUMF = r"(?:\(double\)|\(float\))?\s*([\d.]+)[FfDd]?"
+SWIM_STROLL = re.compile(
+    r"new RandomSwimmingGoal\(\s*this\s*,\s*" + NUMF + r"\s*,\s*(\d+)\s*\)")
+# AbstractFish nests `FishSwimGoal extends RandomSwimmingGoal` and passes the
+# params through super(...) — same goal, one hop removed.
+SWIM_STROLL_SUB = re.compile(
+    r"extends RandomSwimmingGoal[\s\S]{0,400}?super\(\s*\w+\s*,\s*" + NUMF +
+    r"\s*,\s*(\d+)\s*\)")
+FLY_STROLL = re.compile(
+    r"new WaterAvoidingRandomFlyingGoal\(\s*this\s*,\s*" + NUMF)
+# Parrot nests `ParrotWanderGoal extends WaterAvoidingRandomFlyingGoal`.
+FLY_STROLL_SUB = re.compile(
+    r"extends WaterAvoidingRandomFlyingGoal[\s\S]{0,400}?super\(\s*\w+\s*,\s*" + NUMF)
+FISH_CTRL = re.compile(r"moveControl\s*=\s*new FishMoveControl\(")
+
+
+def locomotion(cls, files):
+    """Navigation kind, specialised controls and flight/swim stroll params."""
+    out = {"nav": "Ground", "flyctrl": None, "swimctrl": None, "swimlook": 0,
+           "flyanimal": False, "swimstroll": None, "flystroll": None,
+           "fishctrl": False}
+    nav_done = False
+    for c in chain(cls, files):
+        src = strip_comments(open(files[c], encoding="utf-8").read())
+
+        if not nav_done:
+            nav_body = method_body(src, "createNavigation")
+            if nav_body is not None:
+                for kind, pat in NAV_KINDS:
+                    if re.search(pat, nav_body):
+                        out["nav"] = kind
+                        break
+                nav_done = True
+
+        m = FLY_CTRL.search(src)
+        if m and out["flyctrl"] is None:
+            out["flyctrl"] = (int(m.group(1)), m.group(2) == "true")
+        m = SMOOTH_SWIM_FULL.search(src)
+        if m and out["swimctrl"] is None:
+            out["swimctrl"] = (int(m.group(1)), int(m.group(2)),
+                               num(m.group(3)), num(m.group(4)),
+                               m.group(5) == "true")
+        m = SWIM_LOOK.search(src)
+        if m and out["swimlook"] == 0:
+            out["swimlook"] = int(m.group(1))
+        if FISH_CTRL.search(src):
+            out["fishctrl"] = True
+        m = SWIM_STROLL_SUB.search(src)
+        if m and out["swimstroll"] is None:
+            out["swimstroll"] = (float(m.group(1)), int(m.group(2)))
+        m = FLY_STROLL_SUB.search(src)
+        if m and out["flystroll"] is None:
+            out["flystroll"] = float(m.group(1))
+
+        # `implements ... FlyingAnimal` on the class declaration line.
+        if re.search(r"class\s+%s\b[^{]*\bFlyingAnimal\b" % re.escape(c), src):
+            out["flyanimal"] = True
+
+        body = method_body(src, "registerGoals")
+        if body is not None:
+            m = SWIM_STROLL.search(body)
+            if m and out["swimstroll"] is None:
+                out["swimstroll"] = (float(m.group(1)), int(m.group(2)))
+            m = FLY_STROLL.search(body)
+            if m and out["flystroll"] is None:
+                out["flystroll"] = float(m.group(1))
+    return out
 
 
 def num(expr):
@@ -616,7 +714,7 @@ def main():
     item_ids = load_item_identifiers()
     rows, notex, unparsed, noattr, unknown_food = [], [], [], [], []
     for slug in slugs:
-        if slug in HAND_WRITTEN or slug == "arrow":
+        if slug in HAND_WRITTEN or slug in PROJECTILES:
             continue
 
         # The entity's OWN class, from its `Class::new` in EntityType.java —
@@ -649,19 +747,18 @@ def main():
         ours = BUILDER_DEFAULTS[OUR_BASE_BUILDER[base]]
         attrs = {a: v for a, v in effective.items() if ours.get(a) != v}
 
+        loco = locomotion(cls, ent_files)
+
         # MC omitting MOVEMENT_SPEED is a statement, not an oversight: every
         # mob that walks sets it, and the ones that don't are the swimmers,
-        # fliers and sitters whose registerGoals contains no ground stroll —
-        # fish, squid, bats, ghasts, phantoms, slimes, shulkers. They keep the
-        # registry default of 0.7, so handing them the strolling goal set makes
-        # them cross the landscape at three times a cow's pace.
-        #
-        # Since per-mob registerGoals is not generated (see the docstring), the
-        # nearest faithful stand-in is to drop them to the Mob base, which
-        # floats and looks around but never strolls. Monsters are exempt: their
-        # goal set is what makes them attack, and a vex that cannot chase is a
-        # worse error than a fast one.
-        if "MovementSpeed" not in attrs and base in ("Animal", "PathfinderMob"):
+        # fliers and sitters. NOW that swimmers and fliers carry their real
+        # navigation in the def, only the mobs whose movement is genuinely
+        # bespoke (squid's jet, bat's flitter, ghast, phantom, slime's hop)
+        # still get dropped to the floating Mob base — they have GROUND
+        # locomotion in the def because MC drives them outside the navigation
+        # system entirely.
+        if ("MovementSpeed" not in attrs and base in ("Animal", "PathfinderMob")
+                and loco["nav"] == "Ground" and not loco["flyctrl"]):
             base = "Mob"
             attrs = {a: v for a, v in attrs.items()
                      if BUILDER_DEFAULTS["createMobAttributes"].get(a) != v}
@@ -672,7 +769,8 @@ def main():
         rows.append((slug, base, attrs, tex, goal_params(cls, ent_files),
                      food_items(cls, ent_files, item_ids, unknown_food),
                      walk_anim(cls, ent_files),
-                     target_types(cls, ent_files, slug_of_class)))
+                     target_types(cls, ent_files, slug_of_class),
+                     loco))
 
     hpp = f"""// GENERATED by tools/gen_mob_defs.py — do not edit by hand.
 //
@@ -691,6 +789,9 @@ def main():
 namespace Game {{
 
     enum class MobBase : uint8_t {{ Mob, PathfinderMob, Monster, Animal }};
+
+    // MC createNavigation — which search space this mob paths through.
+    enum class MobNav : uint8_t {{ Ground, Flying, Water, Amphibious, WallClimber }};
 
     struct MobAttrOverride {{
         Attribute attribute;
@@ -747,6 +848,26 @@ namespace Game {{
         // MC RestrictSunGoal + FleeSunGoal. AbstractSkeleton only — a zombie
         // caught in daylight just burns, a skeleton runs for shade.
         bool   seeksShade;
+
+        // ── Locomotion (MC createNavigation + control constructors) ────────
+        MobNav nav;
+        // FlyingMoveControl(maxTurn, hoversInPlace); flyCtrl gates it.
+        bool flyCtrl;  int flyMaxTurn;  bool flyHover;
+        // SmoothSwimmingMoveControl(maxTurnX, maxTurnY, inWater, outsideWater,
+        // applyGravity); swimCtrl gates it.
+        bool swimCtrl; int swimMaxTurnX, swimMaxTurnY;
+        float swimInWater, swimOutsideWater; bool swimGravity;
+        // SmoothSwimmingLookControl's maxYRotFromCenter; 0 = default control.
+        int  swimLookMaxYRot;
+        // MC's FlyingAnimal marker — vertical air friction matches horizontal.
+        bool flyingAnimal;
+        // RandomSwimmingGoal(speed, interval) / WaterAvoidingRandomFlyingGoal
+        // (speed); 0 speed = the mob's registerGoals has none.
+        double swimStrollSpeed; int swimStrollInterval;
+        double flyStrollSpeed;
+        // MC AbstractFish's nested FishMoveControl (lerped speed + a direct
+        // vertical nudge) — distinct from SmoothSwimmingMoveControl.
+        bool fishCtrl;
     }};
 
     inline constexpr int kMobDefCount = {len(rows)};
@@ -776,7 +897,7 @@ namespace Game {{
 
     attr_rows, def_rows, food_rows = [], [], []
     target_rows, avoid_rows = [], []
-    for slug, base, attrs, tex, gp, food, wa, tt in rows:
+    for slug, base, attrs, tex, gp, food, wa, tt, loco in rows:
         hunt, flee, hunt_players, flee_players, seeks_shade, _skipped = tt
         ft, fv = len(target_rows), len(avoid_rows)
         target_rows += ["    EntityTypeId::%s," % camel(x) for x in hunt]
@@ -801,7 +922,23 @@ namespace Game {{
             f'{ft}, {len(hunt)}, {fv}, {len(flee)}, '
             f'{"true" if hunt_players else "false"}, '
             f'{"true" if flee_players else "false"}, '
-            f'{"true" if seeks_shade else "false"} }},')
+            f'{"true" if seeks_shade else "false"}, '
+            f'MobNav::{loco["nav"]}, '
+            f'{"true" if loco["flyctrl"] else "false"}, '
+            f'{loco["flyctrl"][0] if loco["flyctrl"] else 0}, '
+            f'{"true" if loco["flyctrl"] and loco["flyctrl"][1] else "false"}, '
+            f'{"true" if loco["swimctrl"] else "false"}, '
+            f'{loco["swimctrl"][0] if loco["swimctrl"] else 0}, '
+            f'{loco["swimctrl"][1] if loco["swimctrl"] else 0}, '
+            f'{cf(loco["swimctrl"][2] if loco["swimctrl"] else 0.0)}, '
+            f'{cf(loco["swimctrl"][3] if loco["swimctrl"] else 0.0)}, '
+            f'{"true" if loco["swimctrl"] and loco["swimctrl"][4] else "false"}, '
+            f'{loco["swimlook"]}, '
+            f'{"true" if loco["flyanimal"] else "false"}, '
+            f'{loco["swimstroll"][0] if loco["swimstroll"] else 0:g}, '
+            f'{loco["swimstroll"][1] if loco["swimstroll"] else 0}, '
+            f'{loco["flystroll"] or 0:g}, '
+            f'{"true" if loco["fishctrl"] else "false"} }},')
 
     cpp = "\n".join([
         "// GENERATED by tools/gen_mob_defs.py — do not edit by hand.",

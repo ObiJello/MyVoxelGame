@@ -19,7 +19,7 @@ ServerChunkCache::ServerChunkCache(
     int64_t seed,
     Executor mainThreadExecutor)
     : m_chunkMap(generator, randomState, seed, m_ticketStorage,
-                 mainThreadExecutor, mainThreadExecutor)  // Use same executor for both
+                 mainThreadExecutor, mainThreadExecutor, nullptr)  // Use same executor for both
     , m_mainThreadId(std::this_thread::get_id())
     , m_mainThreadExecutor(std::move(mainThreadExecutor))
 {
@@ -33,14 +33,16 @@ ServerChunkCache::ServerChunkCache(
     int64_t seed,
     Executor backgroundExecutor,
     Executor mainThreadExecutor,
+    Executor laneExecutor,
     world::BlockRegistry* blockRegistry,
     BlockState* airBlock,
     BlockState* defaultBlock,
     int32_t minY,
-    int32_t worldHeight)
+    int32_t worldHeight,
+    const std::string& storagePath)
     : m_chunkMap(generator, randomState, seed, m_ticketStorage,
-                 backgroundExecutor, mainThreadExecutor,
-                 "", "world", "overworld",  // storage path, levelId, dimension
+                 backgroundExecutor, mainThreadExecutor, laneExecutor,
+                 storagePath, "world", "overworld",  // storage path, levelId, dimension
                  blockRegistry, airBlock, defaultBlock, minY, worldHeight)
     , m_mainThreadId(std::this_thread::get_id())
     , m_mainThreadExecutor(std::move(mainThreadExecutor))
@@ -56,12 +58,11 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
 {
     // If not on main thread, dispatch and wait
     if (std::this_thread::get_id() != m_mainThreadId) {
-        // Game patch (docs/terrain-library-patches.md, Patch 1): abort-aware
-        // poll instead of blocking join() so workers can exit at shutdown.
         if (m_abort.load(std::memory_order_acquire)) return nullptr;
 
         auto future = getChunkFuture(x, z, targetStatus, loadOrGenerate);
 
+        // Poll with abort check instead of blocking join()
         while (!future->isDone()) {
             if (m_abort.load(std::memory_order_acquire)) return nullptr;
             std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -96,11 +97,9 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
     //   }
     ChunkResultType result = nullptr;
     while (!future->isDone()) {
-        // Game patch (Patch 1): allow shutdown to interrupt the wait.
         if (m_abort.load(std::memory_order_acquire)) {
             return nullptr;
         }
-
         // Poll task: run distance manager updates and generation tasks
         // Reference: ServerChunkCache.MainThreadExecutor.pollTask() returns true if work done
         bool didWork = runDistanceManagerUpdates();

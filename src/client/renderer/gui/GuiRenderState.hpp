@@ -124,6 +124,17 @@ namespace Render {
         void SubmitText(const TextCommand& cmd);
         void SubmitQuad(const QuadCommand& cmd);
 
+        // GuiGraphics mirrors its scissor stack here so command emitters
+        // that submit QuadCommands directly (iso block icons, the BEWLR
+        // chest/banner/bed/head renderers) inherit the active clip without
+        // each stamping it. Blit/Fill/Text already carry theirs from
+        // GuiGraphics. Without this, item icons in scrolling lists render
+        // outside the list bounds while everything else clips.
+        void SetActiveScissor(bool on, const ScissorRect& rect) {
+            m_scissorOn = on;
+            m_activeScissor = rect;
+        }
+
         // Flatten all commands for rendering (sorted by z-order)
         void GetAllBlits(std::vector<BlitCommand>& out) const;
         void GetAllFills(std::vector<FillCommand>& out) const;
@@ -134,6 +145,8 @@ namespace Render {
         std::unique_ptr<RenderNode> m_root;
         RenderNode* m_currentNode = nullptr;
         int m_currentZOrder = 0;
+        ScissorRect m_activeScissor;
+        bool m_scissorOn = false;
 
         void CollectBlits(const RenderNode* node, std::vector<BlitCommand>& out) const;
         void CollectFills(const RenderNode* node, std::vector<FillCommand>& out) const;

@@ -21,6 +21,8 @@
 #include <thread>
 #include <cassert>
 #include <array>
+#include <vector>
+#include <glm/glm.hpp>
 
 namespace Client {
 
@@ -73,8 +75,50 @@ namespace Client {
         uint32_t version = 0;         // Incremented on block changes
         uint32_t meshingVersion = 0;  // Version being meshed
         bool dirty = false;           // Needs remeshing
+        // Version of the section CONTENT the currently-uploaded GPU mesh (and
+        // its visibility mask) was built from — set in FinalizeSectionUpload
+        // from MeshBuildResult::generation. version != uploadedVersion means
+        // whatever is on the GPU (mask included) describes blocks that no
+        // longer exist. Unlike `dirty`, which is cleared when the mesh JOB is
+        // *scheduled* (seconds before its result uploads during a cascade),
+        // this only advances when the result actually lands, so the occlusion
+        // BFS keys its stale-mask-is-see-through rule off this. Keying it off
+        // `dirty` made rebuilds flap between see-through and stale-solid while
+        // remeshes were in flight — whole regions flashing during a TNT
+        // cascade.
+        uint32_t uploadedVersion = 0;
         bool hasCpuData = false;      // True when we have valid CPU view
+        // MIRROR of the live ChunkSection's hasOnlyAir. MC reads
+        // LevelChunk.getSection(i).hasOnlyAir() directly; this is a cached copy
+        // because SectionOcclusionGraph reads it once per cell over the whole
+        // render-distance cube every rebuild, and chasing chunkData ->
+        // GetSection there costs more than keeping the copy true.
+        //
+        // INVARIANT: every path that writes a block into ClientChunk::chunkData
+        // must re-derive this — call ClientChunkManager::RefreshSectionEmptiness.
+        // It gates `cell.renderable` in SectionOcclusionGraph, so a section left
+        // wrongly marked all-air is meshed, uploaded, and then never emitted
+        // into the draw list: the block is solid, collides, and is invisible.
         bool isAllAir = true;         // True when section contains only air
+
+        // MC CompiledSectionMesh.EMPTY, as distinct from UNCOMPILED.
+        //
+        // An all-air section is deliberately never compiled — there is nothing
+        // to draw and queueing it would mean 24 mesh jobs per chunk instead of
+        // the ~8 that can produce geometry. MC makes the same call, and then
+        // compensates for it: SectionOcclusionGraph.java:254-260 skips adding
+        // an empty section to the draw tree but does
+        //     sectionMesh.compareAndSet(UNCOMPILED, EMPTY)
+        // in the else branch, so LevelRenderer.isSectionCompiledAndVisible's
+        // `!= UNCOMPILED` test still passes for it.
+        //
+        // We had the skip without the compensation, and it deadlocked the join:
+        // a player who spawns in mid-air stands in an all-air section, which is
+        // therefore never dirty, never scheduled and never builtOnce — so
+        // LevelLoadTracker waited its full 30 s timeout before letting them
+        // move. Reproduced exactly: spawn at y=163.54 in a column whose
+        // section 160..175 is a single-value air palette.
+        bool meshResolvedEmpty = false;
         uint8_t lastNeighborMask = 0; // Which neighbors were present during last mesh (PX=1, NX=2, PZ=4, NZ=8)
         bool builtOnce = false;       // True after first successful build
         // MC's RenderSection.isDirtyFromPlayer — set when THIS client edited a
@@ -102,20 +146,33 @@ namespace Client {
         
         // Timing information
         std::chrono::steady_clock::time_point loadTime;
-        std::chrono::steady_clock::time_point lastAccessTime;
         
         // Per-section state tracking (24 sections per chunk)
         std::array<SectionInfo, 24> sectionInfos;
         
         // Legacy dirty section tracking (to be phased out)
         std::unordered_set<int> dirtySections;
-        
+
+        // WORLD-space positions of every BlockID::EndPortal in this chunk.
+        //
+        // The end portal's model has no elements — vanilla draws it from a
+        // dedicated screen-projected pass, not from the chunk mesh — so
+        // Render::EndPortalRenderer needs some way to find the blocks, and it
+        // cannot use the block-entity map the other BE renderers walk: block
+        // entities here are only ever created by World::SetBlock, so a
+        // stronghold portal that arrived inside a chunk packet has none.
+        //
+        // Maintained entirely by ClientChunkManager: rebuilt wholesale when
+        // chunk data lands, patched in place by SetBlockLocal. Empty for all
+        // but a handful of chunks in a world, which is what makes the
+        // renderer's per-chunk cull a size() check.
+        std::vector<glm::ivec3> endPortals;
+
         ClientChunk(Game::Math::ChunkPos pos) 
             : position(pos), loadTime(std::chrono::steady_clock::now())
-            , lastAccessTime(std::chrono::steady_clock::now()) {
+            {
         }
         bool IsLoaded() const { return state == ChunkState::LOADED; }
-        void UpdateAccessTime() { lastAccessTime = std::chrono::steady_clock::now(); }
     };
 
     // Client chunk manager (mirrors Minecraft's ClientChunkManager)
@@ -146,7 +203,6 @@ namespace Client {
         void ApplyChunkData(Game::Math::ChunkPos chunkPos, const Network::ChunkDataS2CPacket& packet);
         
         // Load chunk from serialized data
-        void LoadChunk(Game::Math::ChunkPos chunkPos, const Network::SerializedChunkData& serializedData);
         
         // Process block change packet
         void ProcessBlockChange(const Network::BlockChangeS2CPacket& packet);
@@ -185,6 +241,17 @@ namespace Client {
         void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId, Game::BlockStateIndex stateIndex = 0,
                            bool fromPlayer = false);
         
+
+        // Re-derive SectionInfo::isAllAir for one section from the live
+        // ChunkSection, and seed an occlusion-graph propagation if it changed.
+        //
+        // MUST be called by every path that writes a block into
+        // ClientChunk::chunkData. The flag is the renderer's only record of
+        // whether a section is worth drawing (SectionOcclusionGraph gates
+        // `cell.renderable` on it) and it used to be written ONLY at chunk-load
+        // time, so the first block placed into a section that was air when the
+        // chunk arrived was stored, collided, and then never meshed OR drawn.
+        void RefreshSectionEmptiness(ClientChunk& chunk, int sectionY);
 
         // Mark individual section dirty for mesh rebuilding
         void MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY, bool fromPlayer = false);
@@ -265,6 +332,10 @@ namespace Client {
         // chunk is gone or fully clean are lazily erased during scheduling, so
         // erase sites don't need to maintain it.
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_chunksWithDirtySections;
+        uint32_t m_schedulerSkip = 0;   // idle backoff, see ScheduleMeshBuildsWithSnapshots
+        // See MarkSectionDirty: counts section dirties toward a forced
+        // full visibility rebuild during mass destruction.
+        int m_dirtyMarksSinceRebuild = 0;
 
         // Pending diffs for chunks that haven't arrived yet
         std::unique_ptr<PendingDiffsManager> m_pendingDiffs;
@@ -296,13 +367,18 @@ namespace Client {
         // ========================================================================
 
         // Deserialize chunk data from packet
-        std::shared_ptr<Game::Chunk> DeserializeChunkData(const Network::SerializedChunkData& serializedData);
 
         // Transition chunk state
         void TransitionChunkState(ClientChunk* chunk, ChunkState newState);
         
         // Apply pending diffs after chunk load
         void ApplyPendingDiffsForChunk(Game::Math::ChunkPos chunkPos, ClientChunk* chunk);
+
+        // Rescan a chunk and rebuild ClientChunk::endPortals from scratch.
+        // Cheap despite being a full scan: each section is skipped on a
+        // palette-membership test, so only a section that genuinely contains
+        // portal blocks pays the 4096-voxel walk.
+        static void RebuildEndPortalIndex(ClientChunk& chunk);
         
         // Schedule mesh build for dirty sections
         void ScheduleDirtySectionMeshes();
@@ -329,7 +405,13 @@ namespace Client {
         MeshAcceptance AcceptMeshResult(const Network::MeshBuildResult& result);
         
         // Finalize section after successful GPU upload
-        void FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY, uint8_t neighborMask = 0);
+        void FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY, uint8_t neighborMask = 0,
+                                   uint32_t builtVersion = 0);
+
+        // A mesh result for this section failed or was rejected before upload.
+        // If it was the LATEST job for the section, re-dirty so the scheduler
+        // retries — otherwise the section reads as "in flight" forever.
+        void NoteMeshBuildFailed(Game::Math::ChunkPos chunkPos, int sectionY, uint32_t builtVersion);
         
     private:
 

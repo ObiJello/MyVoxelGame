@@ -15,6 +15,20 @@
 namespace minecraft {
 namespace levelgen {
 
+namespace {
+// Hoisted: Block::defaultBlockState() was re-fetched for every below-surface
+// block of the noise fill (measured 2026-08-30, ~6% of aquifer sampling).
+// Function-local statics so they resolve after Blocks::bootstrap.
+inline BlockState* kLavaState() {
+    static BlockState* const s = minecraft::world::level::block::Blocks::LAVA->defaultBlockState();
+    return s;
+}
+inline BlockState* kWaterState() {
+    static BlockState* const s = minecraft::world::level::block::Blocks::WATER->defaultBlockState();
+    return s;
+}
+} // namespace
+
 using namespace minecraft::core;
 using namespace minecraft::world;
 using Blocks = minecraft::world::level::block::Blocks;
@@ -48,7 +62,7 @@ Aquifer* Aquifer::create(
     NoiseChunk* noiseChunk,
     const world::ChunkPos& pos,
     const NoiseRouter& router,
-    XoroshiroPositionalRandomFactory* positionalRandomFactory,
+    ::minecraft::random::AnyPositionalRandomFactory* positionalRandomFactory,
     int32_t minBlockY,
     int32_t yBlockSize,
     FluidPicker* globalFluidPicker
@@ -97,7 +111,7 @@ NoiseBasedAquifer::NoiseBasedAquifer(
     NoiseChunk* noiseChunk,
     const world::ChunkPos& pos,
     const NoiseRouter& router,
-    XoroshiroPositionalRandomFactory* positionalRandomFactory,
+    ::minecraft::random::AnyPositionalRandomFactory* positionalRandomFactory,
     int32_t minBlockY,
     int32_t yBlockSize,
     FluidPicker* globalFluidPicker
@@ -213,9 +227,9 @@ BlockState* NoiseBasedAquifer::computeSubstance(
     }
 
     // Step 3: Global fluid is lava - return lava directly (Java lines 128-130)
-    if (globalFluid.at(posY) != nullptr && globalFluid.at(posY)->is(minecraft::world::level::block::Blocks::LAVA->defaultBlockState())) {
+    if (globalFluid.at(posY) != nullptr && globalFluid.at(posY)->is(kLavaState())) {
         m_shouldScheduleFluidUpdate = false;
-        return minecraft::world::level::block::Blocks::LAVA->defaultBlockState();
+        return kLavaState();
     }
 
     // Step 4: Find nearest aquifer grid cells (Java lines 132-192)
@@ -258,7 +272,7 @@ BlockState* NoiseBasedAquifer::computeSubstance(
                     location = existingLocation;
                 } else {
                     // Generate random location within cell using positional random
-                    XoroshiroRandomSource random = m_positionalRandomFactory->at(
+                    ::minecraft::random::AnyRandomSource random = m_positionalRandomFactory->at(
                         spacedGridX, spacedGridY, spacedGridZ
                     );
                     location = BlockPos::asLong(
@@ -321,9 +335,9 @@ BlockState* NoiseBasedAquifer::computeSubstance(
         return fluidState;
     }
 
-    if (fluidState != nullptr && fluidState->is(minecraft::world::level::block::Blocks::WATER->defaultBlockState()) &&
+    if (fluidState != nullptr && fluidState->is(kWaterState()) &&
         m_globalFluidPicker->computeFluid(posX, posY - 1, posZ).at(posY - 1) != nullptr &&
-        m_globalFluidPicker->computeFluid(posX, posY - 1, posZ).at(posY - 1)->is(minecraft::world::level::block::Blocks::LAVA->defaultBlockState())) {
+        m_globalFluidPicker->computeFluid(posX, posY - 1, posZ).at(posY - 1)->is(kLavaState())) {
         m_shouldScheduleFluidUpdate = true;
         return fluidState;
     }
@@ -462,10 +476,10 @@ double NoiseBasedAquifer::calculatePressure(
     BlockState* type2 = status2.at(posY);
 
     // Special case: lava-water boundary always has pressure (Java lines 266-268)
-    if ((type1 != nullptr && type1->is(minecraft::world::level::block::Blocks::LAVA->defaultBlockState()) &&
-         type2 != nullptr && type2->is(minecraft::world::level::block::Blocks::WATER->defaultBlockState())) ||
-        (type1 != nullptr && type1->is(minecraft::world::level::block::Blocks::WATER->defaultBlockState()) &&
-         type2 != nullptr && type2->is(minecraft::world::level::block::Blocks::LAVA->defaultBlockState()))) {
+    if ((type1 != nullptr && type1->is(kLavaState()) &&
+         type2 != nullptr && type2->is(kWaterState())) ||
+        (type1 != nullptr && type1->is(kWaterState()) &&
+         type2 != nullptr && type2->is(kLavaState()))) {
         return 2.0;
     }
 
@@ -615,7 +629,7 @@ BlockState* NoiseBasedAquifer::computeFluidType(
     if (fluidSurfaceLevel <= -10 &&
         fluidSurfaceLevel != WAY_BELOW_MIN_Y &&
         globalFluid.fluidType != nullptr &&
-        !globalFluid.fluidType->is(minecraft::world::level::block::Blocks::LAVA->defaultBlockState())) {
+        !globalFluid.fluidType->is(kLavaState())) {
 
         constexpr int32_t fluidTypeCellWidth = 64;
         constexpr int32_t fluidTypeCellHeight = 40;
@@ -629,7 +643,7 @@ BlockState* NoiseBasedAquifer::computeFluidType(
         );
 
         if (std::abs(lavaNoiseValue) > 0.3) {
-            fluidType = minecraft::world::level::block::Blocks::LAVA->defaultBlockState();
+            fluidType = kLavaState();
         }
     }
 

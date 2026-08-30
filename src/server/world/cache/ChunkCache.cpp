@@ -1,5 +1,7 @@
 // File: src/server/world/cache/ChunkCache.cpp
 #include "ChunkCache.hpp"
+#include "common/core/Profiling_Tracy.hpp"
+#include <vector>
 
 namespace Game {
 
@@ -40,12 +42,22 @@ namespace Game {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
 
         auto it = m_cache.find(position);
-        if (it != m_cache.end()) {
-            UpdateAccess(position);
-            return it->second.chunk;
-        }
+        if (it == m_cache.end()) return nullptr;
 
-        return nullptr;
+        // The LRU splice — a hash lookup, a list erase, a push_front and a hash
+        // store — only decides WHO GETS EVICTED, and nothing is evicted while
+        // the cache is below capacity. Skipping it under the watermark leaves
+        // exactly the same chunks resident and cuts the critical section down to
+        // the find, which is what matters now that eight threads reach this
+        // (MobManager's parallel TNT tick).
+        //
+        // NOT a shared_mutex. Tried that; it was measurably WORSE — 9,532
+        // mutex-wait samples became 12,978. libc++ implements std::shared_mutex
+        // on top of a std::mutex plus condition variables, so lock_shared still
+        // serialises on an internal mutex and adds bookkeeping on top of it. A
+        // shorter critical section beats a "cheaper" lock that is not cheap.
+        if (m_cache.size() >= EvictionWatermark()) UpdateAccess(position);
+        return it->second.chunk;
     }
 
     void ChunkCache::Put(Math::ChunkPos position, std::shared_ptr<Chunk> chunk) {
@@ -54,16 +66,22 @@ namespace Game {
             return;
         }
 
+        std::vector<PendingEviction> evicted;
+        {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
 
         // Check if already exists
         auto it = m_cache.find(position);
         if (it != m_cache.end()) {
             Log::Debug("Chunk (%d, %d) already exists in cache, keeping existing", position.x, position.z);
-            return;
+            return;     // nothing evicted yet, so nothing to flush
         }
 
-        // Add new entry
+        // Add new entry — this changes what Get() answers, so any memo of it
+        // must be invalidated. See ChunkCache::Generation.
+        m_generation.fetch_add(1, std::memory_order_release);
+        m_putGeneration.fetch_add(1, std::memory_order_release);
+
         chunk->pos = position;
         m_cache.emplace(position, ChunkCacheEntry(chunk));
 
@@ -78,33 +96,49 @@ namespace Game {
 
         // Evict if needed
         while (m_cache.size() > m_config.maxSize) {
-            EvictLRU();
+            EvictLRU(evicted);
         }
+        }   // m_cacheMutex released
+
+        // Serialising and compressing a chunk is far too much work to do while
+        // holding the lock every block read needs.
+        FlushEvictions(evicted);
     }
 
     bool ChunkCache::Remove(Math::ChunkPos position) {
-        std::lock_guard<std::mutex> lock(m_cacheMutex);
+        PROFILE_ZONE_N("ChunkCache.Remove");
+        std::vector<PendingEviction> evicted;
+        {
+            PROFILE_ZONE_N("Remove.Locked");
+            std::lock_guard<std::mutex> lock(m_cacheMutex);
 
-        auto it = m_cache.find(position);
-        if (it == m_cache.end()) {
-            return false;
-        }
+            auto it = m_cache.find(position);
+            if (it == m_cache.end()) {
+                return false;
+            }
 
-        ChunkCacheEntry entry = std::move(it->second);
-        m_cache.erase(it);
+            ChunkCacheEntry entry = std::move(it->second);
+            m_cache.erase(it);
+            m_generation.fetch_add(1, std::memory_order_release);
+            m_removeGeneration.fetch_add(1, std::memory_order_release);
 
-        // Remove from access order
-        auto accessIt = m_accessIterators.find(position);
-        if (accessIt != m_accessIterators.end()) {
-            m_accessOrder.erase(accessIt->second);
-            m_accessIterators.erase(accessIt);
-        }
+            // Remove from access order
+            auto accessIt = m_accessIterators.find(position);
+            if (accessIt != m_accessIterators.end()) {
+                m_accessOrder.erase(accessIt->second);
+                m_accessIterators.erase(accessIt);
+            }
 
-        m_stats.currentSize = m_cache.size();
+            m_stats.currentSize = m_cache.size();
 
-        // Save if dirty
-        if (entry.isDirty) {
-            EvictChunk(position, entry);
+            if (entry.isDirty) {
+                evicted.push_back(PendingEviction{position, entry.chunk, true});
+            }
+        }   // m_cacheMutex released
+
+        {
+            PROFILE_ZONE_N("Remove.Flush");
+            FlushEvictions(evicted);
         }
 
         Log::Debug("Removed chunk from cache at (%d, %d)", position.x, position.z);
@@ -220,6 +254,8 @@ namespace Game {
         m_cache.clear();
         m_accessOrder.clear();
         m_accessIterators.clear();
+        m_generation.fetch_add(1, std::memory_order_release);
+        m_removeGeneration.fetch_add(1, std::memory_order_release);
         m_stats.currentSize = 0;
         m_stats.dirtyChunks = 0;
     }
@@ -322,7 +358,7 @@ namespace Game {
         }
     }
 
-    void ChunkCache::EvictLRU() {
+    void ChunkCache::EvictLRU(std::vector<PendingEviction>& out) {
         if (m_accessOrder.empty()) {
             return;
         }
@@ -335,28 +371,36 @@ namespace Game {
         if (it != m_cache.end()) {
             ChunkCacheEntry entry = std::move(it->second);
             m_cache.erase(it);
+            m_generation.fetch_add(1, std::memory_order_release);
+            m_removeGeneration.fetch_add(1, std::memory_order_release);
             m_stats.currentSize = m_cache.size();
             m_stats.totalEvictions++;
 
-            EvictChunk(lruPos, entry);
+            // Bookkeeping only. The save and the callback happen once the
+            // caller has released m_cacheMutex.
+            out.push_back(PendingEviction{lruPos, entry.chunk, entry.isDirty});
         }
     }
 
-    void ChunkCache::EvictChunk(Math::ChunkPos position, ChunkCacheEntry& entry) {
-        bool wasDirty = entry.isDirty;
-
-        // Save if dirty and we have a saver
-        if (wasDirty && m_chunkSaver && entry.chunk) {
-            auto future = m_chunkSaver->SaveChunkAsync(*entry.chunk);
+    void ChunkCache::FlushEvictions(std::vector<PendingEviction>& pending) {
+        for (auto& e : pending) {
+            // Order preserved from the original EvictChunk: save first, then
+            // notify. ChunkProvider::OnChunkEvicted is wired to that callback
+            // and assumes the chunk has already been handed to the saver.
+            if (e.wasDirty && m_chunkSaver && e.chunk) {
+                // Deferred: the chunk has left the cache, so the saver may
+                // serialise it on its own thread (see IChunkSaver).
+                PROFILE_ZONE_N("Flush.SaveEvicted");
+                (void)m_chunkSaver->SaveEvictedAsync(e.chunk);
+            }
+            if (m_evictionCallback) {
+                PROFILE_ZONE_N("Flush.Callback");
+                m_evictionCallback(e.pos, e.chunk, e.wasDirty);
+            }
+            Log::Debug("Evicted chunk (%d, %d) %s",
+                       e.pos.x, e.pos.z, e.wasDirty ? "(was dirty)" : "");
         }
-
-        // Call eviction callback
-        if (m_evictionCallback) {
-            m_evictionCallback(position, entry.chunk, wasDirty);
-        }
-
-        Log::Debug("Evicted chunk (%d, %d) %s",
-                  position.x, position.z, wasDirty ? "(was dirty)" : "");
+        { PROFILE_ZONE_N("Flush.Clear"); pending.clear(); }
     }
 
     void ChunkCache::MoveFrom(ChunkCache&& other) noexcept {

@@ -62,6 +62,84 @@ namespace Client {
         return chunk->chunkData->StateAt(localX, worldY, localZ);
     }
 
+    bool ClientBlockAccess::IsRegionAllAir(const glm::ivec3& min, const glm::ivec3& max,
+                                           bool absentIsAir) const {
+        if (min.x > max.x || min.y > max.y || min.z > max.z) return true;
+        if (!g_clientChunkManager) return absentIsAir;
+        int s0, s1, unusedY;
+        Game::Math::WorldCoordinates::WorldYToSectionCoords(min.y, s0, unusedY);
+        Game::Math::WorldCoordinates::WorldYToSectionCoords(max.y, s1, unusedY);
+        s0 = std::max(s0, 0);
+        s1 = std::min(s1, Game::Math::SECTIONS_PER_CHUNK - 1);
+        if (s0 > s1) return true;
+        for (int cx = min.x >> 4; cx <= (max.x >> 4); ++cx) {
+            for (int cz = min.z >> 4; cz <= (max.z >> 4); ++cz) {
+                ClientChunk* chunk = g_clientChunkManager->GetChunk(Game::Math::ChunkPos{cx, cz});
+                if (!chunk || !chunk->IsLoaded() || !chunk->chunkData) {
+                    if (absentIsAir) continue;
+                    return false;
+                }
+                for (int si = s0; si <= s1; ++si) {
+                    const Game::ChunkSection* section = chunk->chunkData->GetSection(si);
+                    if (!section || !section->IsAllAir()) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    uint64_t ClientBlockAccess::RegionWriteStamp(const glm::ivec3& min, const glm::ivec3& max) const {
+        if (!g_clientChunkManager) return 0;
+        uint64_t sum = 0;
+        for (int cx = min.x >> 4; cx <= (max.x >> 4); ++cx) {
+            for (int cz = min.z >> 4; cz <= (max.z >> 4); ++cz) {
+                ClientChunk* chunk = g_clientChunkManager->GetChunk(Game::Math::ChunkPos{cx, cz});
+                if (chunk && chunk->chunkData)
+                    sum += chunk->chunkData->blockWriteCounter.load(std::memory_order_acquire);
+            }
+        }
+        return sum;
+    }
+
+    void ClientBlockAccess::GetBlockStatesInBox(const glm::ivec3& min, const glm::ivec3& max,
+                                                Game::BlockState* out) const {
+        if (min.x > max.x || min.y > max.y || min.z > max.z) return;
+        const int ny = max.y - min.y + 1, nz = max.z - min.z + 1;
+        const size_t total = static_cast<size_t>(max.x - min.x + 1) * ny * nz;
+        for (size_t i = 0; i < total; ++i) out[i] = Game::BlockState{};
+        if (!g_clientChunkManager) return;
+        const auto at = [&](int x, int y, int z) -> Game::BlockState& {
+            return out[(static_cast<size_t>(x - min.x) * ny + (y - min.y)) * nz + (z - min.z)];
+        };
+        const int y0 = std::max(min.y, Game::Math::WorldCoordinates::MIN_WORLD_Y);
+        const int y1 = std::min(max.y, Game::Math::WorldCoordinates::MIN_WORLD_Y +
+                                       Game::Math::SECTIONS_PER_CHUNK * Game::Math::SECTION_HEIGHT - 1);
+        if (y0 > y1) return;
+        for (int cx = min.x >> 4; cx <= (max.x >> 4); ++cx) {
+            for (int cz = min.z >> 4; cz <= (max.z >> 4); ++cz) {
+                ClientChunk* chunk = g_clientChunkManager->GetChunk(Game::Math::ChunkPos{cx, cz});
+                if (!chunk || !chunk->IsLoaded() || !chunk->chunkData) continue;
+                const Game::Chunk* data = chunk->chunkData.get();
+                const int bx0 = std::max(min.x, cx << 4), bx1 = std::min(max.x, (cx << 4) + 15);
+                const int bz0 = std::max(min.z, cz << 4), bz1 = std::min(max.z, (cz << 4) + 15);
+                for (int wy = y0; wy <= y1; ) {
+                    int sectionIndex, sectionY;
+                    Game::Math::WorldCoordinates::WorldYToSectionCoords(wy, sectionIndex, sectionY);
+                    if (sectionIndex < 0 || sectionIndex >= Game::Math::SECTIONS_PER_CHUNK) break;
+                    const int syTop = std::min(15, sectionY + (y1 - wy));
+                    const Game::ChunkSection* sec = data->GetSection(sectionIndex);
+                    if (sec && !sec->IsAllAir()) {
+                        for (int sy = sectionY; sy <= syTop; ++sy)
+                            for (int wz = bz0; wz <= bz1; ++wz)
+                                for (int wx = bx0; wx <= bx1; ++wx)
+                                    at(wx, wy + (sy - sectionY), wz) = sec->StateAt(wx & 15, sy, wz & 15);
+                    }
+                    wy += (syTop - sectionY) + 1;
+                }
+            }
+        }
+    }
+
     bool ClientBlockAccess::SetBlock(int worldX, int worldY, int worldZ,
                                      Game::BlockID blockId, uint32_t updateFlags) {
         // The block's DEFAULT state, not index 0 — see World::SetBlock.

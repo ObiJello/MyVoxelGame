@@ -16,17 +16,20 @@ namespace Server {
                    m_connection.GetConnectionId(), session.GetPlayerId());
     }
     
+    // UNREACHABLE. KeepAliveC2S is no longer decoded into a typed packet;
+    // ServerConnection answers it on the network I/O thread, which is what MC
+    // does (handleKeepAlive carries no ensureRunningOnSameThread) and what
+    // keeps the reply answerable while the tick thread is stalled.
+    //
+    // Deliberately NOT restored as a live handler: the old body called
+    // m_session.HandleKeepAlive, and PlayerSession is tick-thread state that
+    // the I/O thread must never touch.
     void ServerPlayPacketListener::onKeepAliveResponse(const Network::KeepAliveC2SPacket& packet) {
-        // Create a temporary payload for the legacy handler
-        // This is a temporary solution until we fully migrate to typed packets
-        Network::PacketBuffer buffer;
-        buffer.WriteLong(packet.keepAliveId);
-
-        // Call the existing handler
-        m_connection.HandleKeepAliveResponse(buffer.GetData());
-
-        // Also update the session's keep-alive time to prevent timeout
-        m_session.HandleKeepAlive(packet);
+        (void)packet;
+        Log::Warning("[ServerPlayPacketListener] onKeepAliveResponse reached on the tick thread "
+                     "for connection %u — KeepAliveC2S should be answered on the I/O thread. "
+                     "Did a typed decode case come back?",
+                     m_connection.GetConnectionId());
     }
     
     void ServerPlayPacketListener::handleUseItemOn(const Network::UseItemOnC2SPacket& packet) {
@@ -121,6 +124,13 @@ namespace Server {
 
     void ServerPlayPacketListener::onPlayerAbilitiesC2S(const Network::PlayerAbilitiesC2SPacket& packet) {
         m_session.HandlePlayerAbilities(packet);
+    }
+
+    void ServerPlayPacketListener::onPlayerPauseC2S(const Network::PlayerPauseC2SPacket& packet) {
+        // Deliberately NOT behind HasClientLoaded(): a client that opens the
+        // pause menu during world load is genuinely paused, and gating it there
+        // would leave the server thinking they are still playing.
+        m_session.SetPaused(packet.paused);
     }
 
     void ServerPlayPacketListener::onInteractC2S(const Network::InteractC2SPacket& packet) {

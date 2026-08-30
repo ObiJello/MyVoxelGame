@@ -24,5 +24,6 @@ void main() {
     if (t.a < 0.05) discard;
 
     vec3 base = t.rgb * vColor.rgb;
-    FragColor = vec4(mix(base, pc.uColor.rgb, pc.uColor.a), 1.0);
+    // Alpha carries through from the vertex colour — see entity.frag.
+    FragColor = vec4(mix(base, pc.uColor.rgb, pc.uColor.a), t.a * vColor.a);
 }

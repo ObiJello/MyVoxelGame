@@ -33,6 +33,18 @@ namespace Game {
         return m_canFloat;
     }
 
+    void PathNavigation::SetCanOpenDoors(bool v) {
+        // MC GroundPathNavigation.setCanOpenDoors — the evaluator flag that
+        // makes a closed wooden door a walkable node (malus 0) instead of a
+        // wall. Mirrored on the navigation for exactly the lazy-evaluator
+        // reason SetCanFloat documents: Zombie::SetCanBreakDoors calls this
+        // from FinalizeSpawn, usually before any path exists.
+        m_canOpenDoors = v;
+        if (m_pathFinder) m_pathFinder->GetNodeEvaluator().SetCanOpenDoors(v);
+    }
+
+    bool PathNavigation::CanOpenDoors() const { return m_canOpenDoors; }
+
     double PathNavigation::GetMaxPathLength() const {
         // MC: max(FOLLOW_RANGE, requiredPathLength). The follow range alone
         // would cap a 16-range mob's paths at 16 blocks, which is shorter than
@@ -98,11 +110,21 @@ namespace Game {
             // during mob construction. Without this the flag is silently lost
             // and a floating mob refuses to path across water.
             m_pathFinder->GetNodeEvaluator().SetCanFloat(m_canFloat);
+            m_pathFinder->GetNodeEvaluator().SetCanOpenDoors(m_canOpenDoors);
         }
 
+        // MC PathNavigation.createPath's gates, in order: a mob below the
+        // world floor cannot path at all, and one that cannot follow a path
+        // right now (an airborne walker, a beached fish) does not pay for a
+        // search whose result it could not use.
+        constexpr double kMinBuildY = -64.0;   // level.getMinY(); PathfindingContext::GetMinY
+        if (m_mob->position.y < kMinBuildY) return std::nullopt;
+        if (!CanUpdatePath()) return std::nullopt;
+
         // Already heading there and the path is still live — reuse it rather
-        // than paying for an identical search.
-        if (m_path && !m_path->IsDone() && m_path->GetTarget() == target) {
+        // than paying for an identical search. MC keys this on the STORED
+        // targetPos (what was last asked for), not the path's own target.
+        if (m_path && !m_path->IsDone() && m_targetPos && *m_targetPos == target) {
             return m_path;
         }
 
@@ -111,6 +133,15 @@ namespace Game {
             m_level->Blocks(), m_mob, targets,
             static_cast<float>(GetMaxPathLength()), reachRange,
             m_maxVisitedNodesMultiplier);
+
+        // MC: remember what was asked for so RecomputePath can re-issue the
+        // SAME request, and grant the fresh path a clean slate on the stuck
+        // and timeout bookkeeping.
+        if (path) {
+            m_targetPos = path->GetTarget();
+            m_reachRange = reachRange;
+            ResetStuckTimeout();
+        }
 
         return path;
     }
@@ -148,6 +179,11 @@ namespace Game {
             m_path = std::move(path);
         }
 
+        // MC re-checks isDone() AFTER installing: when the identical path was
+        // kept, its cursor may already have run off the end, and "keep doing
+        // what you were doing" must not report success for a finished path.
+        if (IsDone()) return false;
+
         TrimPath();
         if (m_path->GetNodeCount() <= 0) return false;
 
@@ -165,14 +201,17 @@ namespace Game {
     void PathNavigation::RecomputePath() {
         if (!m_level) return;
         const int64_t now = m_level->GetGameTime();
-        if (now - m_timeLastRecompute > kMaxTimeRecompute) {
-            if (m_path) {
-                const glm::ivec3 target = m_path->GetTarget();
+        // MC PathNavigation.recomputePath: only when the rate limit has lapsed
+        // AND the mob could follow the result; otherwise the request is
+        // deferred to a later tick. The re-search reuses the STORED target and
+        // reach — the path may be gone (Stop, timeout) but the ask survives it.
+        if (now - m_timeLastRecompute > kMaxTimeRecompute && CanUpdatePath()) {
+            if (m_targetPos) {
                 m_path.reset();
-                m_path = CreatePath(target, 1);
+                m_path = CreatePath(*m_targetPos, m_reachRange);
+                m_timeLastRecompute = now;
+                m_hasDelayedRecomputation = false;
             }
-            m_timeLastRecompute = now;
-            m_hasDelayedRecomputation = false;
         } else {
             m_hasDelayedRecomputation = true;
         }
@@ -291,23 +330,35 @@ namespace Game {
         if (nodeCentre == m_timeoutCachedNode) {
             m_timeoutTimer += static_cast<double>(now - m_lastTimeoutCheck);
         } else {
+            // MC only recomputes the limit here — the TIMER is deliberately
+            // NOT reset on a node change, so a mob inching along a path one
+            // node at a time can still trip the timeout. Only
+            // ResetStuckTimeout (fresh path, or the timeout firing) clears it.
             m_timeoutCachedNode = nodeCentre;
             const glm::dvec3 d = nodeCentre - mobPos;
             const double dist = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
             m_timeoutLimit = m_mob->GetSpeed() > 0.0f
                 ? dist / static_cast<double>(m_mob->GetSpeed()) * 20.0
                 : 0.0;
-            m_timeoutTimer = 0.0;
         }
 
         if (m_timeoutLimit > 0.0 && m_timeoutTimer > m_timeoutLimit * 3.0) {
-            m_timeoutCachedNode = glm::dvec3(0.0);
-            m_timeoutTimer = 0.0;
-            m_timeoutLimit = 0.0;
-            Stop();
+            TimeoutPath();
         }
 
         m_lastTimeoutCheck = now;
+    }
+
+    void PathNavigation::TimeoutPath() {
+        ResetStuckTimeout();
+        Stop();
+    }
+
+    void PathNavigation::ResetStuckTimeout() {
+        m_timeoutCachedNode = glm::dvec3(0.0);
+        m_timeoutTimer = 0.0;
+        m_timeoutLimit = 0.0;
+        m_isStuck = false;
     }
 
     // ── GroundPathNavigation ───────────────────────────────────────────────
@@ -322,56 +373,102 @@ namespace Game {
     }
 
     bool GroundPathNavigation::CanUpdatePath() const {
-        return m_mob->onGround || m_mob->IsInLiquid();
+        // MC GroundPathNavigation.canUpdatePath — a passenger counts as having
+        // footing: a chicken under a zombie jockey still follows its path.
+        return m_mob->onGround || m_mob->IsInLiquid() || m_mob->IsPassenger();
+    }
+
+    std::optional<Path> GroundPathNavigation::CreatePath(const glm::ivec3& target,
+                                                         int reachRange) {
+        // MC GroundPathNavigation.createPath: getChunkNow == null -> null. An
+        // unloaded chunk reports air, and pathing into fabricated air would
+        // send the mob marching at the world's loading edge.
+        const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr;
+        if (!blocks || !blocks->IsChunkLoaded(target.x >> 4, target.z >> 4)) {
+            return std::nullopt;
+        }
+        const glm::ivec3 pos =
+            m_canPathToTargetsBelowSurface ? target : FindSurfacePosition(target);
+        return PathNavigation::CreatePath(pos, reachRange);
+    }
+
+    glm::ivec3 GroundPathNavigation::FindSurfacePosition(const glm::ivec3& target) const {
+        // MC GroundPathNavigation.findSurfacePosition. A mid-air target (a
+        // player jumping, an item thrown off a cliff) is projected DOWN onto
+        // the first surface beneath it; a target with nothing at all below is
+        // walked UP out of its air pocket; a buried target is walked up out of
+        // the solid column. "Solid" here is MC's BlockState.isSolid — the
+        // engine's collision-based solidity test answers the same question.
+        const IBlockAccess& blocks = *m_level->Blocks();
+        constexpr int kMinY = -64, kMaxY = 319;   // world limits, as RandomPos::IsOutsideLimits
+        glm::ivec3 pos = target;
+
+        if (blocks.GetBlock(pos.x, pos.y, pos.z) == BlockID::Air) {
+            int y = pos.y - 1;
+            while (y >= kMinY && blocks.GetBlock(pos.x, y, pos.z) == BlockID::Air) {
+                --y;
+            }
+            if (y >= kMinY) return glm::ivec3(pos.x, y + 1, pos.z);
+
+            // Nothing below at all: climb until the air column ends.
+            y = pos.y + 1;
+            while (y <= kMaxY && blocks.GetBlock(pos.x, y, pos.z) == BlockID::Air) {
+                ++y;
+            }
+            pos.y = y;
+        }
+
+        if (!blocks.IsBlockSolid(pos.x, pos.y, pos.z)) return pos;
+
+        int y = pos.y + 1;
+        while (y <= kMaxY && blocks.IsBlockSolid(pos.x, y, pos.z)) {
+            ++y;
+        }
+        return glm::ivec3(pos.x, y, pos.z);
     }
 
     int GroundPathNavigation::GetSurfaceY() const {
         // A floating mob standing in water measures from the SURFACE, not from
         // the bottom, so its path nodes line up with where it actually is.
-        if (!m_mob->IsInWater() || !CanFloat()) {
+        const IBlockAccess* blocks = m_level->Blocks();
+        if (!m_mob->IsInWater() || !CanFloat() || !blocks) {
             return static_cast<int>(std::floor(m_mob->position.y + 0.5));
         }
 
-        const IBlockAccess* blocks = m_level->Blocks();
-        int y = static_cast<int>(std::floor(m_mob->position.y));
+        const int feetY = static_cast<int>(std::floor(m_mob->position.y));
         const int x = static_cast<int>(std::floor(m_mob->position.x));
         const int z = static_cast<int>(std::floor(m_mob->position.z));
 
-        // MC caps the walk-up at 16 so a mob at the bottom of an ocean does not
-        // scan the whole column.
-        for (int i = 0; i < 16 && blocks && blocks->IsBlockFluid(x, y, z); ++i) {
-            ++y;
+        // MC GroundPathNavigation.getSurfaceY matches Blocks.WATER only — a
+        // floater does not float on lava — and after 16 blocks of water it
+        // gives up and answers the FEET level, so a mob at the bottom of a
+        // deep column measures from where it is, not from a surface it is
+        // nowhere near.
+        int surface = feetY;
+        int steps = 0;
+        while (blocks->GetBlock(x, surface, z) == BlockID::Water) {
+            ++surface;
+            ++steps;
+            if (steps > 16) return feetY;
         }
-        return y;
+        return surface;
     }
 
     glm::dvec3 GroundPathNavigation::GetTempMobPos() const {
         return glm::dvec3(m_mob->position.x, static_cast<double>(GetSurfaceY()), m_mob->position.z);
     }
 
-    bool GroundPathNavigation::CanMoveDirectly(const glm::dvec3& from, const glm::dvec3& to) const {
-        // MC does a swept box test here. Reusing CollidesAt at a few samples
-        // along the segment is the same question asked more cheaply, and the
-        // only consequence of a false negative is that the mob follows its path
-        // node-by-node instead of cutting the corner.
-        if (!m_level->Blocks()) return false;
-
-        PhysicsContext ctx = m_level->Physics();
-        const glm::vec3 half = m_mob->HalfExtents();
-        const glm::dvec3 delta = to - from;
-        const double dist = std::sqrt(delta.x * delta.x + delta.z * delta.z);
-        const int steps = std::max(1, static_cast<int>(std::ceil(dist * 2.0)));
-
-        for (int i = 1; i <= steps; ++i) {
-            const glm::dvec3 p = from + delta * (static_cast<double>(i) / steps);
-            const AABB box(glm::vec3(p.x, p.y + half.y, p.z), half * 2.0f);
-            if (CollidesAt(box, ctx)) return false;
-        }
-        return true;
-    }
-
     void GroundPathNavigation::TrimPath() {
         if (!m_avoidSun || !m_path || !m_level) return;
+
+        // MC GroundPathNavigation.trimPath: a mob ALREADY standing in sunlight
+        // has nothing left to protect — truncating its escape path would
+        // strand it exactly where it is burning.
+        if (m_level->CanSeeSky(static_cast<int>(std::floor(m_mob->position.x)),
+                               static_cast<int>(std::floor(m_mob->position.y + 0.5)),
+                               static_cast<int>(std::floor(m_mob->position.z)))) {
+            return;
+        }
 
         // Skeletons stop at the first sky-lit node so they never path out of
         // the shade into their own death.
@@ -381,6 +478,68 @@ namespace Game {
                 m_path->TruncateNodes(i);
                 return;
             }
+        }
+    }
+
+    // ── WallClimberNavigation ──────────────────────────────────────────────
+
+    std::optional<Path> WallClimberNavigation::CreatePath(const glm::ivec3& target,
+                                                          int reachRange) {
+        // MC WallClimberNavigation.createPath — remember the ULTIMATE ask
+        // BEFORE delegating, unconditionally: a failed search leaves Tick
+        // something to climb at, and even a successful path keeps the stash so
+        // the spider finishes the approach after the path runs out.
+        m_pathToPosition = target;
+        return GroundPathNavigation::CreatePath(target, reachRange);
+    }
+
+    bool WallClimberNavigation::MoveTo(const Entity& target, double speedModifier) {
+        // MC WallClimberNavigation.moveTo: reach 0 — the spider wants to stand
+        // IN the target's block. With a path, the normal MoveTo verdict stands
+        // (the CreatePath override above has already stashed the position);
+        // with none, arm the speed and let Tick steer straight at the stash.
+        if (auto path = CreatePath(target, 0)) {
+            // Qualified: the override hides the base's other MoveTo overloads.
+            return PathNavigation::MoveTo(std::move(path), speedModifier);
+        }
+        m_pathToPosition = target.BlockPosition();
+        m_speedModifier = speedModifier;
+        return true;
+    }
+
+    void WallClimberNavigation::Tick() {
+        if (!IsDone()) {
+            GroundPathNavigation::Tick();
+            return;
+        }
+        if (!m_pathToPosition) return;
+
+        // MC BlockPos.closerToCenterThan — distance from the block's CENTRE,
+        // +0.5 in all THREE axes, against the mob's body width.
+        const double bbWidth = static_cast<double>(m_mob->GetBbWidth());
+        const auto closerToCenter = [&](const glm::ivec3& p) {
+            const double dx = (static_cast<double>(p.x) + 0.5) - m_mob->position.x;
+            const double dy = (static_cast<double>(p.y) + 0.5) - m_mob->position.y;
+            const double dz = (static_cast<double>(p.z) + 0.5) - m_mob->position.z;
+            return dx * dx + dy * dy + dz * dz < bbWidth * bbWidth;
+        };
+
+        // Keep steering until within the body width of the target block —
+        // either the block itself, or its column at the mob's own height once
+        // the mob has climbed above it.
+        if (!closerToCenter(*m_pathToPosition) &&
+            (!(m_mob->position.y > static_cast<double>(m_pathToPosition->y)) ||
+             !closerToCenter(glm::ivec3(m_pathToPosition->x,
+                                        static_cast<int>(std::floor(m_mob->position.y)),
+                                        m_pathToPosition->z)))) {
+            // MC hands the move control the RAW block coordinates — no +0.5
+            // centring; the climb cares about the column, not the tile centre.
+            m_mob->GetMoveControl().SetWantedPosition(
+                static_cast<double>(m_pathToPosition->x),
+                static_cast<double>(m_pathToPosition->y),
+                static_cast<double>(m_pathToPosition->z), m_speedModifier);
+        } else {
+            m_pathToPosition.reset();
         }
     }
 

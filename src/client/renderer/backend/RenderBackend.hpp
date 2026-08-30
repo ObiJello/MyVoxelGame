@@ -248,6 +248,39 @@ namespace Render {
 
         virtual void DrawIndexed(MeshHandle mesh, uint32_t indexCount,
                                 uint32_t indexOffset = 0) = 0;
+
+        // ── Instanced drawing ───────────────────────────────────────────────
+        //
+        // For the case where the same geometry is drawn many times with only a
+        // per-instance transform differing. The motivating one: a detonation
+        // puts tens of thousands of primed TNT on screen, and one draw call
+        // each costs ~1 us on Apple's GL driver before the GPU does anything.
+        //
+        // NOT supported by every backend, and that is deliberate rather than a
+        // gap to paper over: CreateInstancedMesh returns INVALID_MESH where it
+        // is unimplemented, and the CALLER MUST keep its per-instance draw path
+        // for that case. Silently drawing nothing would be worse than a slow
+        // draw.
+        virtual MeshHandle CreateInstancedMesh(BufferHandle /*vertexBuffer*/,
+                                               BufferHandle /*indexBuffer*/,
+                                               BufferHandle /*instanceBuffer*/,
+                                               const VertexLayout& /*vertexLayout*/,
+                                               const VertexLayout& /*instanceLayout*/) {
+            return INVALID_MESH;
+        }
+
+        // Draw `instanceCount` copies of [indexOffset, indexOffset+indexCount)
+        // from a mesh built by CreateInstancedMesh. `instanceByteOffset` is
+        // where in the instance buffer this group's data begins: on Vulkan
+        // buffer updates are visible at EXECUTION time, so several groups in
+        // one frame must live at distinct offsets (writing each at offset 0,
+        // which GL's orphaning semantics tolerated, would make every group
+        // render the LAST group's transforms). GL honours the offset by
+        // re-pointing the instance attributes.
+        virtual void DrawIndexedInstanced(MeshHandle /*mesh*/, uint32_t /*indexCount*/,
+                                          uint32_t /*indexOffset*/,
+                                          uint32_t /*instanceCount*/,
+                                          uint32_t /*instanceByteOffset*/ = 0) {}
         virtual void DrawArrays(MeshHandle mesh, uint32_t vertexCount,
                                uint32_t firstVertex = 0) = 0;
 

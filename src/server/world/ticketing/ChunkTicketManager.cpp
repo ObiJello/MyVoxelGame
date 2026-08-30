@@ -1,450 +1,365 @@
 // File: src/server/world/ticketing/ChunkTicketManager.cpp
-#include "ChunkTicketManager.hpp"
+#include "server/world/ticketing/ChunkTicketManager.hpp"
+
+#include "common/core/Log.hpp"
+
 #include <algorithm>
-#include <limits>
+#include <deque>
 
 namespace Server {
 
-    ChunkTicketManager::ChunkTicketManager() {
-        m_chunkLevels.reserve(4096); // Pre-allocate for typical world size
-    }
+    ChunkTicketManager::ChunkTicketManager() = default;
+    ChunkTicketManager::~ChunkTicketManager() = default;
 
-    ChunkTicketManager::~ChunkTicketManager() {
-        Clear();
-    }
+    // ── Ticket mutation ────────────────────────────────────────────────────
 
-    // === TICKET MANAGEMENT ===
-
-    void ChunkTicketManager::AddPlayerTicket(uint32_t playerId, Game::Math::ChunkPos chunk, int level) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        
-        // Create the ticket
-        PlayerTicket ticket(TicketType::PLAYER, level, playerId, m_currentTick);
-        
-        // Track player->chunks mapping
-        m_playerChunks[playerId].insert(chunk);
-        
-        // Add ticket to chunk
-        m_playerTickets[chunk].insert(ticket);
-        
-        // Invalidate cache
-        InvalidateLevelCache();
-    }
-
-    void ChunkTicketManager::RemovePlayerTicket(uint32_t playerId, Game::Math::ChunkPos chunk) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        
-        // Remove from player->chunks mapping
-        auto playerIt = m_playerChunks.find(playerId);
-        if (playerIt != m_playerChunks.end()) {
-            playerIt->second.erase(chunk);
-            if (playerIt->second.empty()) {
-                m_playerChunks.erase(playerIt);
+    void ChunkTicketManager::AddTicketLocked(Game::Math::ChunkPos chunk, TicketType type,
+                                             int level, int lifespan,
+                                             const std::string& identifier) {
+        auto& list = m_tickets[chunk];
+        for (Ticket& t : list) {
+            // MC TicketStorage.addTicket dedupes on (type, level). We refcount
+            // the duplicate instead, because two players in the same chunk must
+            // not have one leaving remove the other's ticket.
+            if (t.type == type && t.level == level && t.identifier == identifier) {
+                ++t.refCount;
+                t.createdTick = m_currentTick;   // refresh an expiring ticket
+                return;
             }
         }
-        
-        // Remove ticket from chunk
-        auto chunkIt = m_playerTickets.find(chunk);
-        if (chunkIt != m_playerTickets.end()) {
-            auto& tickets = chunkIt->second;
-            tickets.erase(PlayerTicket(TicketType::PLAYER, 0, playerId, 0));
-            if (tickets.empty()) {
-                m_playerTickets.erase(chunkIt);
+        list.push_back(Ticket{type, level, m_currentTick, lifespan, identifier, 1});
+        m_dirty = true;
+    }
+
+    void ChunkTicketManager::RemoveTicketLocked(Game::Math::ChunkPos chunk, TicketType type,
+                                                const std::string& identifier) {
+        auto it = m_tickets.find(chunk);
+        if (it == m_tickets.end()) return;
+
+        auto& list = it->second;
+        for (auto t = list.begin(); t != list.end(); ++t) {
+            if (t->type != type || t->identifier != identifier) continue;
+            if (--t->refCount > 0) return;   // someone else still holds it
+            list.erase(t);
+            m_dirty = true;
+            break;
+        }
+        if (list.empty()) m_tickets.erase(it);
+    }
+
+    // ── Players ────────────────────────────────────────────────────────────
+
+    void ChunkTicketManager::AddPlayer(Game::Math::ChunkPos chunk, uint32_t playerId) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        // Idempotent, and self-correcting: registering a player who is already
+        // registered somewhere else moves them rather than leaking a ticket.
+        // MC gets this for free because ChunkMap.move is the only mover and it
+        // always removes from lastSectionPos first; doing it here as well means
+        // a caller cannot leak by getting the order wrong.
+        auto existing = m_playerTicketChunk.find(playerId);
+        if (existing != m_playerTicketChunk.end()) {
+            if (existing->second == chunk) return;
+            const Game::Math::ChunkPos old = existing->second;
+            auto& occupants = m_playersPerChunk[old];
+            occupants.erase(playerId);
+            if (occupants.empty()) {
+                m_playersPerChunk.erase(old);
+                RemoveTicketLocked(old, TicketType::PlayerSimulation, {});
             }
         }
-        
-        InvalidateLevelCache();
+
+        m_playersPerChunk[chunk].insert(playerId);
+        m_playerTicketChunk[playerId] = chunk;
+        AddTicketLocked(chunk, TicketType::PlayerSimulation,
+                        ChunkLevel::PlayerTicketLevel(m_simulationDistance), -1, {});
+    }
+
+    void ChunkTicketManager::RemovePlayer(Game::Math::ChunkPos chunk, uint32_t playerId) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        auto occupantsIt = m_playersPerChunk.find(chunk);
+        if (occupantsIt == m_playersPerChunk.end()) return;
+
+        occupantsIt->second.erase(playerId);
+        if (occupantsIt->second.empty()) {
+            m_playersPerChunk.erase(occupantsIt);
+            RemoveTicketLocked(chunk, TicketType::PlayerSimulation, {});
+        }
+        auto recorded = m_playerTicketChunk.find(playerId);
+        if (recorded != m_playerTicketChunk.end() && recorded->second == chunk) {
+            m_playerTicketChunk.erase(recorded);
+        }
     }
 
     void ChunkTicketManager::RemoveAllPlayerTickets(uint32_t playerId) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        
-        // Find all chunks for this player
-        auto playerIt = m_playerChunks.find(playerId);
-        if (playerIt == m_playerChunks.end()) {
-            return;
+        Game::Math::ChunkPos chunk{0, 0};
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            auto it = m_playerTicketChunk.find(playerId);
+            if (it == m_playerTicketChunk.end()) return;
+            chunk = it->second;
         }
-        
-        // Remove tickets from each chunk
-        for (const auto& chunk : playerIt->second) {
-            auto chunkIt = m_playerTickets.find(chunk);
-            if (chunkIt != m_playerTickets.end()) {
-                auto& tickets = chunkIt->second;
-                tickets.erase(PlayerTicket(TicketType::PLAYER, 0, playerId, 0));
-                if (tickets.empty()) {
-                    m_playerTickets.erase(chunkIt);
-                }
+        RemovePlayer(chunk, playerId);
+    }
+
+    void ChunkTicketManager::SetSimulationDistance(int distance) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        distance = std::max(2, distance);
+        if (distance == m_simulationDistance) return;
+        m_simulationDistance = distance;
+
+        // MC TicketStorage.replaceTicketLevelOfType — re-level in place rather
+        // than tearing down and rebuilding, so no chunk momentarily drops out.
+        const int level = ChunkLevel::PlayerTicketLevel(distance);
+        for (auto& [chunk, list] : m_tickets) {
+            for (Ticket& t : list) {
+                if (t.type == TicketType::PlayerSimulation) t.level = level;
             }
         }
-        
-        // Remove player entry
-        m_playerChunks.erase(playerIt);
-        InvalidateLevelCache();
+        m_dirty = true;
     }
+
+    // ── Other sources ──────────────────────────────────────────────────────
 
     void ChunkTicketManager::AddSpawnTickets(Game::Math::ChunkPos spawnChunk, int radius) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        // Add tickets for spawn area using Chebyshev distance
+        // A single source at the centre would do, but MC keeps the spawn area
+        // explicitly FULL rather than merely reachable, so each chunk in the
+        // radius gets its own ticket at the full-chunk level. They are sources
+        // like any other; propagation still fills in around them.
         for (int dx = -radius; dx <= radius; ++dx) {
             for (int dz = -radius; dz <= radius; ++dz) {
-                Game::Math::ChunkPos chunk(spawnChunk.x + dx, spawnChunk.z + dz);
-                int distance = std::max(std::abs(dx), std::abs(dz));
-                // The spawn area's own radius is its simulation distance, so
-                // spawn chunks tick blocks out to radius - 1 the same way a
-                // player's do.
-                int level = CalculateTicketLevel(distance, radius);
-
-                SpawnTicket ticket(TicketType::SPAWN, level, "spawn", m_currentTick);
-                m_spawnTickets[chunk].insert(ticket);
+                AddTicketLocked(Game::Math::ChunkPos(spawnChunk.x + dx, spawnChunk.z + dz),
+                                TicketType::Spawn, ChunkLevel::FULL, -1, {});
             }
         }
-        
-        InvalidateLevelCache();
     }
 
-    void ChunkTicketManager::AddForcedTicket(const std::string& identifier, Game::Math::ChunkPos chunk, int level) {
+    void ChunkTicketManager::AddPlayerSpawnTicket(Game::Math::ChunkPos chunk, int radius,
+                                                  int lifespanTicks) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        ForcedTicket ticket(TicketType::FORCED, level, identifier, m_currentTick);
-        
-        m_forcedChunks[identifier].insert(chunk);
-        m_forcedTickets[chunk].insert(ticket);
-        
-        InvalidateLevelCache();
-    }
-
-    void ChunkTicketManager::RemoveForcedTicket(const std::string& identifier, Game::Math::ChunkPos chunk) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        
-        // Remove from identifier->chunks mapping
-        auto idIt = m_forcedChunks.find(identifier);
-        if (idIt != m_forcedChunks.end()) {
-            idIt->second.erase(chunk);
-            if (idIt->second.empty()) {
-                m_forcedChunks.erase(idIt);
+        // MC PLAYER_SPAWN: register("player_spawn", 20L, 2) — a LOADING ticket
+        // only. Level FULL, so the terrain arrives but nothing simulates, and
+        // it expires on its own if the join never completes.
+        for (int dx = -radius; dx <= radius; ++dx) {
+            for (int dz = -radius; dz <= radius; ++dz) {
+                AddTicketLocked(Game::Math::ChunkPos(chunk.x + dx, chunk.z + dz),
+                                TicketType::PlayerSpawn, ChunkLevel::FULL,
+                                lifespanTicks, {});
             }
         }
-        
-        // Remove ticket from chunk
-        auto chunkIt = m_forcedTickets.find(chunk);
-        if (chunkIt != m_forcedTickets.end()) {
-            auto& tickets = chunkIt->second;
-            tickets.erase(ForcedTicket(TicketType::FORCED, 0, identifier, 0));
-            if (tickets.empty()) {
-                m_forcedTickets.erase(chunkIt);
-            }
-        }
-        
-        InvalidateLevelCache();
     }
 
-    void ChunkTicketManager::AddTemporaryTicket(Game::Math::ChunkPos chunk, int level, int lifespanTicks) {
+    void ChunkTicketManager::AddForcedTicket(const std::string& identifier,
+                                             Game::Math::ChunkPos chunk, int level) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        TempTicket ticket(TicketType::TEMPORARY, level, m_currentTick, m_currentTick, lifespanTicks);
-        m_temporaryTickets[chunk].insert(ticket);
-        
-        InvalidateLevelCache();
+        AddTicketLocked(chunk, TicketType::Forced, level, -1, identifier);
     }
 
-    // === LEVEL QUERIES ===
+    void ChunkTicketManager::RemoveForcedTicket(const std::string& identifier,
+                                                Game::Math::ChunkPos chunk) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        RemoveTicketLocked(chunk, TicketType::Forced, identifier);
+    }
+
+    void ChunkTicketManager::AddTemporaryTicket(Game::Math::ChunkPos chunk, int level,
+                                                int lifespanTicks) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        AddTicketLocked(chunk, TicketType::Temporary, level, lifespanTicks, {});
+    }
+
+    // ── The solve ──────────────────────────────────────────────────────────
+
+    void ChunkTicketManager::SolveIfDirty() const {
+        if (!m_dirty) return;
+        m_dirty = false;
+        m_levels.clear();
+
+        // Multi-source BFS by level. Every edge costs exactly +1 over the 3x3
+        // neighbourhood, so processing sources in increasing level order and
+        // expanding level-by-level reaches every chunk with its minimum first —
+        // the same fixed point MC's DynamicGraphMinFixedPoint converges to.
+        //
+        // Bounded at MAX_LEVEL: past that a chunk is INACCESSIBLE and there is
+        // nothing to record.
+        std::vector<std::pair<Game::Math::ChunkPos, int>> sources;
+        sources.reserve(m_tickets.size());
+        for (const auto& [chunk, list] : m_tickets) {
+            int best = ChunkLevel::UNLOADED;
+            for (const Ticket& t : list) best = std::min(best, t.level);
+            if (best <= ChunkLevel::MAX_LEVEL) sources.emplace_back(chunk, best);
+        }
+        if (sources.empty()) return;
+
+        std::sort(sources.begin(), sources.end(),
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+
+        std::deque<Game::Math::ChunkPos> frontier;
+        size_t nextSource = 0;
+        int currentLevel = sources.front().second;
+
+        const auto seed = [&](int level) {
+            while (nextSource < sources.size() && sources[nextSource].second == level) {
+                const auto& [chunk, lvl] = sources[nextSource++];
+                auto it = m_levels.find(chunk);
+                if (it == m_levels.end() || lvl < it->second) {
+                    m_levels[chunk] = lvl;
+                    frontier.push_back(chunk);
+                }
+            }
+        };
+
+        seed(currentLevel);
+
+        while (!frontier.empty()) {
+            const size_t widthOfThisLevel = frontier.size();
+            for (size_t i = 0; i < widthOfThisLevel; ++i) {
+                const Game::Math::ChunkPos chunk = frontier.front();
+                frontier.pop_front();
+                if (m_levels[chunk] != currentLevel) continue;   // superseded
+                if (currentLevel >= ChunkLevel::MAX_LEVEL) continue;
+
+                const int nextLevel = currentLevel + 1;
+                for (int dx = -1; dx <= 1; ++dx) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        if (dx == 0 && dz == 0) continue;
+                        const Game::Math::ChunkPos n(chunk.x + dx, chunk.z + dz);
+                        auto it = m_levels.find(n);
+                        if (it != m_levels.end() && it->second <= nextLevel) continue;
+                        m_levels[n] = nextLevel;
+                        frontier.push_back(n);
+                    }
+                }
+            }
+            ++currentLevel;
+            seed(currentLevel);   // sources that start at this level join now
+        }
+    }
+
+    // ── Queries ────────────────────────────────────────────────────────────
+
+    int ChunkTicketManager::GetChunkLevelLocked(Game::Math::ChunkPos chunk) const {
+        SolveIfDirty();
+        const auto it = m_levels.find(chunk);
+        return it == m_levels.end() ? ChunkLevel::UNLOADED : it->second;
+    }
 
     int ChunkTicketManager::GetChunkLevel(Game::Math::ChunkPos chunk) const {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        RebuildLevelCacheIfNeeded();
-        
-        auto it = m_chunkLevels.find(chunk);
-        if (it != m_chunkLevels.end()) {
-            return it->second;
-        }
-        
-        return MAX_LEVEL; // No tickets = inaccessible
+        return GetChunkLevelLocked(chunk);
+    }
+
+    void ChunkTicketManager::RunAllUpdates() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        SolveIfDirty();
+    }
+
+    bool ChunkTicketManager::IsEntityTickingAfterUpdates(Game::Math::ChunkPos chunk) const {
+        // Deliberately NO lock and NO SolveIfDirty. See the header.
+        const auto it = m_levels.find(chunk);
+        return ChunkLevel::IsEntityTicking(it == m_levels.end() ? ChunkLevel::UNLOADED
+                                                                : it->second);
+    }
+
+    bool ChunkTicketManager::IsEntityTicking(Game::Math::ChunkPos chunk) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return ChunkLevel::IsEntityTicking(GetChunkLevelLocked(chunk));
+    }
+
+    bool ChunkTicketManager::IsBlockTicking(Game::Math::ChunkPos chunk) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return ChunkLevel::IsBlockTicking(GetChunkLevelLocked(chunk));
     }
 
     bool ChunkTicketManager::ShouldChunkBeLoaded(Game::Math::ChunkPos chunk) const {
-        return GetChunkLevel(chunk) < INACCESSIBLE_LEVEL;
-    }
-
-    bool ChunkTicketManager::ShouldChunkTickBlocks(Game::Math::ChunkPos chunk) const {
-        return GetChunkLevel(chunk) <= BLOCK_TICKING_LEVEL;
-    }
-
-    bool ChunkTicketManager::ShouldChunkTickEntities(Game::Math::ChunkPos chunk) const {
-        return GetChunkLevel(chunk) <= ENTITY_TICKING_LEVEL;
-    }
-
-    std::vector<Game::Math::ChunkPos> ChunkTicketManager::GetBlockTickingChunks() const {
         std::lock_guard<std::mutex> lock(m_mutex);
+        return ChunkLevel::IsLoaded(GetChunkLevelLocked(chunk));
+    }
 
-        RebuildLevelCacheIfNeeded();
-
-        std::vector<Game::Math::ChunkPos> result;
-        result.reserve(m_chunkLevels.size());
-
-        for (const auto& [chunk, level] : m_chunkLevels) {
-            if (level <= BLOCK_TICKING_LEVEL) {
-                result.push_back(chunk);
-            }
+    std::vector<Game::Math::ChunkPos>
+    ChunkTicketManager::CollectAtMostLocked(int maxLevel) const {
+        SolveIfDirty();
+        std::vector<Game::Math::ChunkPos> out;
+        out.reserve(m_levels.size());
+        for (const auto& [chunk, level] : m_levels) {
+            if (level <= maxLevel) out.push_back(chunk);
         }
-
-        return result;
+        // SORTED, so the order does not depend on the hash function.
+        //
+        // This list is what the random-tick pass walks, and that pass draws
+        // from the shared level RNG per chunk — so an unspecified iteration
+        // order made the world's evolution a function of ChunkPosHash's
+        // internals. Changing the hash (which was collapsing a whole region
+        // onto a handful of buckets) would silently have reshuffled every
+        // random tick in the world. Sorting removes the hash from the RNG path
+        // entirely, which is worth more than the microseconds it costs on a
+        // list of ~1,000 chunks.
+        std::sort(out.begin(), out.end(),
+                  [](const Game::Math::ChunkPos& a, const Game::Math::ChunkPos& b) {
+                      return a.x != b.x ? a.x < b.x : a.z < b.z;
+                  });
+        return out;
     }
 
     std::vector<Game::Math::ChunkPos> ChunkTicketManager::GetLoadedChunks() const {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        RebuildLevelCacheIfNeeded();
-        
-        std::vector<Game::Math::ChunkPos> result;
-        result.reserve(m_chunkLevels.size());
-        
-        for (const auto& [chunk, level] : m_chunkLevels) {
-            if (level < INACCESSIBLE_LEVEL) {
-                result.push_back(chunk);
-            }
-        }
-        
-        return result;
+        return CollectAtMostLocked(ChunkLevel::MAX_LEVEL);
     }
 
-    // === DISTANCE CALCULATIONS ===
-
-    int ChunkTicketManager::SimulationDistanceToLevel(int distance) {
-        // Convert simulation distance to ticket level
-        // Level 33 at distance 0, increases by 1 per chunk distance
-        return ENTITY_TICKING_LEVEL + distance;
+    std::vector<Game::Math::ChunkPos> ChunkTicketManager::GetBlockTickingChunks() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return CollectAtMostLocked(ChunkLevel::BLOCK_TICKING);
     }
 
-    int ChunkTicketManager::LevelToDistance(int level) {
-        // Convert ticket level back to distance
-        if (level < ENTITY_TICKING_LEVEL) {
-            return 0;
-        }
-        return level - ENTITY_TICKING_LEVEL;
+    std::vector<Game::Math::ChunkPos> ChunkTicketManager::GetEntityTickingChunks() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return CollectAtMostLocked(ChunkLevel::ENTITY_TICKING);
     }
 
-    int ChunkTicketManager::CalculateTicketLevel(int chunkDistance, int simulationDistance) {
-        // MC DistanceManager: a player's ticket level is anchored so that the
-        // EDGE of the simulation distance lands on BORDER_LEVEL, and the levels
-        // step inward from there:
-        //
-        //     d == simulationDistance      → 35  border      (generated only)
-        //     d == simulationDistance - 1  → 34  block ticking
-        //     d <= simulationDistance - 2  → 33  entity ticking
-        //
-        // i.e. level(d) = BORDER_LEVEL - simulationDistance + d.
-        //
-        // The previous formula was `ENTITY_TICKING_LEVEL + d`, which anchors the
-        // wrong end: it put level 33 at the player and 34 one chunk out, so
-        // ShouldChunkTickBlocks was true only within a single chunk no matter
-        // how large the simulation distance was. Nothing consumed those two
-        // predicates at the time, so the error was invisible; the random-tick
-        // loop is the first caller, and with the old formula crops would have
-        // stopped growing the moment you walked two chunks from your farm.
-        if (simulationDistance < 1) simulationDistance = 1;
-        const int level = BORDER_LEVEL - simulationDistance + chunkDistance;
-        // Never claim MORE than full simulation at the anchor, and never exceed
-        // the table's ceiling far away.
-        return std::clamp(level, ENTITY_TICKING_LEVEL, MAX_LEVEL);
-    }
-
-    // === MAINTENANCE ===
+    // ── Maintenance ────────────────────────────────────────────────────────
 
     void ChunkTicketManager::ProcessExpiredTickets(int64_t currentTick) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
         m_currentTick = currentTick;
-        bool anyExpired = false;
-        
-        // Process temporary tickets
-        for (auto it = m_temporaryTickets.begin(); it != m_temporaryTickets.end();) {
-            auto& tickets = it->second;
-            
-            // Remove expired tickets
-            for (auto ticketIt = tickets.begin(); ticketIt != tickets.end();) {
-                if (ticketIt->IsExpired(currentTick)) {
-                    ticketIt = tickets.erase(ticketIt);
-                    anyExpired = true;
-                } else {
-                    ++ticketIt;
-                }
-            }
-            
-            // Remove empty chunk entries
-            if (tickets.empty()) {
-                it = m_temporaryTickets.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        
-        if (anyExpired) {
-            InvalidateLevelCache();
-        }
-    }
 
-    void ChunkTicketManager::UpdateChunkLevels() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        InvalidateLevelCache();
-        RebuildLevelCacheIfNeeded();
-    }
-
-    ChunkTicketManager::Stats ChunkTicketManager::GetStats() const {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        
-        Stats stats{};
-        
-        // Count tickets by type
-        for (const auto& [chunk, tickets] : m_playerTickets) {
-            stats.playerTickets += tickets.size();
+        for (auto it = m_tickets.begin(); it != m_tickets.end();) {
+            auto& list = it->second;
+            const size_t before = list.size();
+            list.erase(std::remove_if(list.begin(), list.end(),
+                                      [&](const Ticket& t) { return t.IsExpired(currentTick); }),
+                       list.end());
+            if (list.size() != before) m_dirty = true;
+            it = list.empty() ? m_tickets.erase(it) : std::next(it);
         }
-        
-        for (const auto& [chunk, tickets] : m_spawnTickets) {
-            stats.spawnTickets += tickets.size();
-        }
-        
-        for (const auto& [chunk, tickets] : m_forcedTickets) {
-            stats.forcedTickets += tickets.size();
-        }
-        
-        for (const auto& [chunk, tickets] : m_temporaryTickets) {
-            stats.temporaryTickets += tickets.size();
-        }
-        
-        stats.totalTickets = stats.playerTickets + stats.spawnTickets + 
-                           stats.forcedTickets + stats.temporaryTickets;
-        
-        // Count chunks by load level
-        RebuildLevelCacheIfNeeded();
-        
-        for (const auto& [chunk, level] : m_chunkLevels) {
-            if (level < INACCESSIBLE_LEVEL) {
-                stats.loadedChunks++;
-                if (level <= BLOCK_TICKING_LEVEL) {
-                    stats.tickingChunks++;
-                    if (level <= ENTITY_TICKING_LEVEL) {
-                        stats.entityTickingChunks++;
-                    }
-                }
-            }
-        }
-        
-        return stats;
     }
 
     void ChunkTicketManager::Clear() {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        m_playerChunks.clear();
-        m_playerTickets.clear();
-        m_spawnTickets.clear();
-        m_forcedChunks.clear();
-        m_forcedTickets.clear();
-        m_temporaryTickets.clear();
-        m_chunkLevels.clear();
-        m_levelsCacheDirty = true;
+        m_tickets.clear();
+        m_playersPerChunk.clear();
+        m_playerTicketChunk.clear();
+        m_levels.clear();
+        m_dirty = true;
     }
 
-    // === INTERNAL HELPERS ===
+    ChunkTicketManager::Stats ChunkTicketManager::GetStats() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        SolveIfDirty();
 
-    int ChunkTicketManager::ComputeChunkLevel(Game::Math::ChunkPos chunk) const {
-        int minLevel = MAX_LEVEL;
-        
-        // Check player tickets
-        auto playerIt = m_playerTickets.find(chunk);
-        if (playerIt != m_playerTickets.end()) {
-            for (const auto& ticket : playerIt->second) {
-                minLevel = std::min(minLevel, ticket.level);
+        Stats s{};
+        for (const auto& [chunk, list] : m_tickets) {
+            s.totalTickets += list.size();
+            for (const Ticket& t : list) {
+                if (t.type == TicketType::PlayerSimulation) ++s.playerTickets;
             }
         }
-        
-        // Check spawn tickets
-        auto spawnIt = m_spawnTickets.find(chunk);
-        if (spawnIt != m_spawnTickets.end()) {
-            for (const auto& ticket : spawnIt->second) {
-                minLevel = std::min(minLevel, ticket.level);
-            }
+        for (const auto& [chunk, level] : m_levels) {
+            if (ChunkLevel::IsLoaded(level))        ++s.loadedChunks;
+            if (ChunkLevel::IsBlockTicking(level))  ++s.blockTickingChunks;
+            if (ChunkLevel::IsEntityTicking(level)) ++s.entityTickingChunks;
         }
-        
-        // Check forced tickets
-        auto forcedIt = m_forcedTickets.find(chunk);
-        if (forcedIt != m_forcedTickets.end()) {
-            for (const auto& ticket : forcedIt->second) {
-                minLevel = std::min(minLevel, ticket.level);
-            }
-        }
-        
-        // Check temporary tickets
-        auto tempIt = m_temporaryTickets.find(chunk);
-        if (tempIt != m_temporaryTickets.end()) {
-            for (const auto& ticket : tempIt->second) {
-                if (!ticket.IsExpired(m_currentTick)) {
-                    minLevel = std::min(minLevel, ticket.level);
-                }
-            }
-        }
-        
-        return minLevel;
-    }
-
-    void ChunkTicketManager::RemoveExpiredTemporaryTickets(Game::Math::ChunkPos chunk) {
-        auto it = m_temporaryTickets.find(chunk);
-        if (it == m_temporaryTickets.end()) {
-            return;
-        }
-        
-        auto& tickets = it->second;
-        for (auto ticketIt = tickets.begin(); ticketIt != tickets.end();) {
-            if (ticketIt->IsExpired(m_currentTick)) {
-                ticketIt = tickets.erase(ticketIt);
-            } else {
-                ++ticketIt;
-            }
-        }
-        
-        if (tickets.empty()) {
-            m_temporaryTickets.erase(it);
-        }
-    }
-
-    void ChunkTicketManager::InvalidateLevelCache() {
-        m_levelsCacheDirty = true;
-    }
-
-    void ChunkTicketManager::RebuildLevelCacheIfNeeded() const {
-        if (!m_levelsCacheDirty) {
-            return;
-        }
-        
-        m_chunkLevels.clear();
-        
-        // Collect all chunks with tickets
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> allChunks;
-        
-        for (const auto& [chunk, tickets] : m_playerTickets) {
-            allChunks.insert(chunk);
-        }
-        for (const auto& [chunk, tickets] : m_spawnTickets) {
-            allChunks.insert(chunk);
-        }
-        for (const auto& [chunk, tickets] : m_forcedTickets) {
-            allChunks.insert(chunk);
-        }
-        for (const auto& [chunk, tickets] : m_temporaryTickets) {
-            allChunks.insert(chunk);
-        }
-        
-        // Compute level for each chunk
-        for (const auto& chunk : allChunks) {
-            int level = ComputeChunkLevel(chunk);
-            if (level < MAX_LEVEL) {
-                m_chunkLevels[chunk] = level;
-            }
-        }
-        
-        m_levelsCacheDirty = false;
+        return s;
     }
 
 } // namespace Server

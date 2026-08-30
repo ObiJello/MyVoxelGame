@@ -278,9 +278,11 @@ namespace Render {
                 return;
             }
 
-            // Check if section has any blocks
+            // Check if section has any blocks. Content, not pointer: sections
+            // are always allocated now, so the null test alone would send
+            // every all-air section through a full 4096-voxel build.
             const Game::ChunkSection* section = chunk->GetSection(job.sectionY);
-            if (!section) {
+            if (!section || section->IsAllAir()) {
                 result.success = true; // Empty mesh is still a success
                 result.mesh = SectionMesh(job.chunkPos, job.sectionY);
                 EnqueueResult(std::move(result));

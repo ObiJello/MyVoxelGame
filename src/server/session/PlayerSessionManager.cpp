@@ -1,6 +1,7 @@
 // File: src/server/session/PlayerSessionManager.cpp
 #include "PlayerSessionManager.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/level/ServerLevel.hpp"   // TicketsForDimension / CleanupSession
 #include "server/entity/ServerLevelBridge.hpp"
 #include <algorithm>
 #include "../player/ServerPlayer.hpp"
@@ -29,13 +30,19 @@ namespace Server {
         SendScheduler* scheduler
     ) {
         m_config = config;
-        m_ticketManager = ticketMgr;
-        m_statusManager = statusMgr;
         m_sendScheduler = scheduler;
-        
-        // Initialize spawn chunks
-        InitializeSpawnChunks();
-        
+
+        // The ticket and status managers now belong to a ServerLevel, and a
+        // ServerLevel cannot be built until this manager exists (its mob
+        // bridge needs it). They arrive later, via SetLevelServices, which is
+        // also what adds the spawn tickets that depend on them.
+        //
+        // The two parameters are kept so every existing caller compiles, and
+        // are honoured when a caller does pass them — the server passes null.
+        if (ticketMgr || statusMgr) {
+            SetLevelServices(ticketMgr, statusMgr);
+        }
+
         m_initialized = true;
         
         Log::Info("PlayerSessionManager: Initialized with spawn at (%.1f, %.1f, %.1f)",
@@ -219,20 +226,21 @@ namespace Server {
             static_cast<int>(std::floor(spawnPos.z / 16.0f))
         );
         
-        // Add player tickets for simulation distance
-        if (m_ticketManager) {
-            for (int dx = -m_config.defaultSimulationDistance; dx <= m_config.defaultSimulationDistance; ++dx) {
-                for (int dz = -m_config.defaultSimulationDistance; dz <= m_config.defaultSimulationDistance; ++dz) {
-                    Game::Math::ChunkPos chunk(spawnChunk.x + dx, spawnChunk.z + dz);
-                    int distance = std::max(std::abs(dx), std::abs(dz));
-                    int level = ChunkTicketManager::CalculateTicketLevel(
-                        distance, m_config.defaultSimulationDistance);
-                    m_ticketManager->AddPlayerTicket(playerId, chunk, level);
-                }
-            }
+        // MC PrepareSpawnTask/Preparing.tick: a short, self-expiring
+        // PLAYER_SPAWN ticket at the position the player is about to occupy,
+        // so their terrain is already on its way before the entity exists.
+        //
+        // Deliberately NOT the simulation ticket. That one is placed by
+        // ProcessSessionTick from the player's LIVE position once they are
+        // attached — which is the ordering fix. Placing real PLAYER tickets
+        // here, around a spawn position the player may be nowhere near after
+        // their save is restored, is exactly what froze the world before.
+        if (ChunkTicketManager* tickets = TicketsForDimension(session->GetDimensionId())) {
+            tickets->AddPlayerSpawnTicket(spawnChunk, /*radius=*/3,
+                                          /*lifespanTicks=*/20);
         }
-        
-        // Trigger join callback
+
+        // Trigger join callback        // Trigger join callback
         if (m_joinCallback) {
             m_joinCallback(playerId);
         }
@@ -357,23 +365,25 @@ namespace Server {
     // === WORLD UPDATES ===
 
     void PlayerSessionManager::BroadcastBlockChange(
+        Game::DimensionId dimension,
         int worldX, int worldY, int worldZ,
         Game::BlockID newBlock
     ) {
         // Calculate chunk position
         Game::Math::ChunkPos chunk(worldX >> 4, worldZ >> 4);
-        
-        ForEachSessionWatching(chunk, [&](PlayerSession& session) {
+
+        ForEachSessionWatching(dimension, chunk, [&](PlayerSession& session) {
             session.QueueBlockChange(worldX, worldY, worldZ, newBlock);
         });
     }
 
     void PlayerSessionManager::BroadcastSectionChanges(
+        Game::DimensionId dimension,
         Game::Math::ChunkPos chunk,
         int section,
         const std::vector<Network::MultiBlockChangeS2CPacket::BlockChange>& changes
     ) {
-        ForEachSessionWatching(chunk, [&](PlayerSession& session) {
+        ForEachSessionWatching(dimension, chunk, [&](PlayerSession& session) {
             session.QueueSectionChanges(chunk, section, changes);
         });
     }
@@ -535,31 +545,48 @@ namespace Server {
 
     // === INTERNAL METHODS ===
 
-    void PlayerSessionManager::UpdatePlayerTickets(
-        uint32_t playerId,
-        Game::Math::ChunkPos oldAnchor,
-        Game::Math::ChunkPos newAnchor,
-        int simulationDistance
-    ) {
-        if (!m_ticketManager) {
-            return;
-        }
-        
-        // Remove old tickets
-        for (int dx = -simulationDistance; dx <= simulationDistance; ++dx) {
-            for (int dz = -simulationDistance; dz <= simulationDistance; ++dz) {
-                Game::Math::ChunkPos chunk(oldAnchor.x + dx, oldAnchor.z + dz);
-                m_ticketManager->RemovePlayerTicket(playerId, chunk);
-            }
-        }
-        
-        // Add new tickets
-        for (int dx = -simulationDistance; dx <= simulationDistance; ++dx) {
-            for (int dz = -simulationDistance; dz <= simulationDistance; ++dz) {
-                Game::Math::ChunkPos chunk(newAnchor.x + dx, newAnchor.z + dz);
-                int distance = std::max(std::abs(dx), std::abs(dz));
-                int level = ChunkTicketManager::CalculateTicketLevel(distance, simulationDistance);
-                m_ticketManager->AddPlayerTicket(playerId, chunk, level);
+    void PlayerSessionManager::UpdatePlayerTickets(uint32_t playerId,
+                                                   int rawDimensionId,
+                                                   Game::Math::ChunkPos chunk,
+                                                   int simulationDistance) {
+        // MC DistanceManager.addPlayer: ONE ticket, at the chunk the player
+        // occupies. No square, no old-versus-new, nothing centred by a caller.
+        //
+        // ChunkTicketManager::AddPlayer is idempotent and self-correcting — it
+        // moves the ticket if the player is registered somewhere else — so this
+        // is safe to call unconditionally, which is what lets ProcessSessionTick
+        // drop the anchor comparison entirely.
+        if (ChunkTicketManager* tickets = TicketsForDimension(rawDimensionId)) {
+            // The ticket manager owns the simulation distance now — it is what
+            // turns into a ticket LEVEL (ChunkLevel::PlayerTicketLevel), so it
+            // cannot live only on the session. Idempotent: SetSimulationDistance
+            // early-returns when unchanged, and re-levels every player ticket in
+            // place when it does change, so no chunk drops out mid-move.
+            //
+            // MC treats simulation distance as server-wide; ours is per-session,
+            // so with several players this is last-writer-wins per dimension —
+            // which lands on MC's semantics anyway.
+            tickets->SetSimulationDistance(simulationDistance);
+            tickets->AddPlayer(chunk, playerId);
+
+            // The one invariant worth asserting at runtime: a player's OWN
+            // chunk is always entity-ticking. We placed a ticket on it one line
+            // ago at level PlayerTicketLevel(simDist) <= 31, so this can only
+            // fail if propagation is broken.
+            //
+            // It is cheap and it never fires in a healthy world, which is
+            // exactly what makes it worth keeping — the bug it guards against
+            // (the player standing outside their own simulation range) froze
+            // every entity around them for a whole session and was invisible
+            // from every other vantage point: the server reported a healthy
+            // TPS, chunks streamed, commands answered, and damage still landed.
+            if (!tickets->IsEntityTicking(chunk)) {
+                Log::Warning("[Tickets] player %u at chunk (%d,%d) is NOT in its own "
+                             "entity-ticking range (level=%d, needs <= %d) — chunk "
+                             "level propagation is broken",
+                             playerId, chunk.x, chunk.z,
+                             tickets->GetChunkLevel(chunk),
+                             ChunkTicketManager::ENTITY_TICKING_LEVEL);
             }
         }
     }
@@ -568,6 +595,7 @@ namespace Server {
     // tracking view. There is no reverse chunk->players index to keep in sync,
     // and with a handful of players this is cheaper than maintaining one.
     void PlayerSessionManager::ForEachSessionWatching(
+        Game::DimensionId dimension,
         Game::Math::ChunkPos chunk,
         const std::function<void(PlayerSession&)>& fn) const {
         // Snapshot under the lock, invoke outside it. The callbacks here queue
@@ -580,7 +608,14 @@ namespace Server {
             std::lock_guard<std::mutex> lock(m_sessionMutex);
             watching.reserve(m_sessions.size());
             for (const auto& [playerId, session] : m_sessions) {
-                if (session && session->GetTrackingView().Contains(chunk)) {
+                if (!session) continue;
+                // The dimension test comes FIRST and is not an optimisation:
+                // a tracking view is a set of ChunkPos, which is the same set
+                // of numbers in every world, so Contains() alone would call a
+                // player in the Nether a watcher of the Overworld chunk they
+                // happen to share coordinates with.
+                if (Game::DimensionFromRaw(session->GetDimensionId()) != dimension) continue;
+                if (session->GetTrackingView().Contains(chunk)) {
                     watching.push_back(session);
                 }
             }
@@ -590,39 +625,55 @@ namespace Server {
         }
     }
 
-    std::vector<uint32_t> PlayerSessionManager::GetChunkWatchers(Game::Math::ChunkPos chunk) const {
+    std::vector<uint32_t> PlayerSessionManager::GetChunkWatchers(
+        Game::DimensionId dimension, Game::Math::ChunkPos chunk) const {
         std::vector<uint32_t> watchers;
-        ForEachSessionWatching(chunk, [&](PlayerSession& session) {
+        ForEachSessionWatching(dimension, chunk, [&](PlayerSession& session) {
+            // Only sessions the chunk's DATA has already been sent to. A
+            // block delta for a chunk the client has not received yet can
+            // only sit in its bounded pending-diffs buffer — and a mass
+            // detonation overflows that and silently loses blocks. The chunk
+            // is serialized and marked sent in the same server-thread block
+            // (PlayerSession::SendNextChunks), and deltas flush at tick
+            // start, so a change is always either inside the snapshot this
+            // session will get or broadcast after it — never dropped.
+            if (!session.HasSentChunk(chunk)) return;
             watchers.push_back(session.GetPlayerId());
         });
         return watchers;
     }
 
     void PlayerSessionManager::ProcessSessionTick(std::shared_ptr<PlayerSession> session) {
-        // Get old position for ticket updates
-        Game::Math::ChunkPos oldAnchor = session->GetAnchorChunk();
-
-        // Process the session tick
         session->Tick(m_currentTick);
 
-        // Check if anchor changed for ticket updates
-        Game::Math::ChunkPos newAnchor = session->GetAnchorChunk();
-        if (oldAnchor != newAnchor) {
-            UpdatePlayerTickets(
-                session->GetPlayerId(),
-                oldAnchor,
-                newAnchor,
-                session->GetSimulationDistance()
-            );
+        // Re-register the player's ticket from their LIVE position, every tick,
+        // unconditionally. This is the whole fix.
+        //
+        // MC calls ChunkMap.move on movement and compares lastSectionPos (where
+        // the ticket sits) against SectionPos.of(player) (where the player is) —
+        // never one cache against another. It gets away with an event-driven
+        // call because those two are written in the same statement block, so a
+        // missed call leaves the anchor AGREEING with the ticket and the next
+        // call repairs it.
+        //
+        // We had no such guarantee — three notions of player position with
+        // three writers — so rather than reproduce MC's convention we remove
+        // the question. AddPlayer is O(1) when the chunk has not changed, so
+        // asking every tick costs nothing and there is no cached value left
+        // that anyone could pre-answer. The bug this replaces froze every
+        // entity near the player for a whole session, because the ticket square
+        // stayed at world spawn while a cached anchor claimed it had moved.
+        if (ServerPlayer* player = session->GetPlayer()) {
+            UpdatePlayerTickets(session->GetPlayerId(),
+                                session->GetDimensionId(),
+                                player->getChunkPosition(),
+                                session->GetSimulationDistance());
         }
 
         // No watch-index synchronization: there is no index. "Who is watching
         // chunk X" is answered by asking each session's tracking view
         // (ForEachSessionWatching), exactly as MC asks each player's
-        // ChunkTrackingView in ChunkMap.onChunkReadyToSend. That removed a
-        // reverse map that cost ~1300 inserts on join and 70 mutations per
-        // chunk step, to answer a question a handful of players can answer
-        // directly.
+        // ChunkTrackingView in ChunkMap.onChunkReadyToSend.
     }
 
     bool PlayerSessionManager::IsSessionTimedOut(std::shared_ptr<PlayerSession> session) const {
@@ -650,11 +701,37 @@ namespace Server {
     }
 
     void PlayerSessionManager::CleanupSession(uint32_t playerId) {
-        // Remove all tickets for this player
-        if (m_ticketManager) {
+        // Remove all tickets for this player, in EVERY dimension. A player who
+        // walked through a portal and then disconnected holds tickets in both,
+        // and only the ones in the level they happen to be standing in now
+        // would be found by TicketsForDimension.
+        if (Server::g_integratedServer) {
+            Server::g_integratedServer->ForEachLevel([playerId](ServerLevel& level) {
+                if (level.Tickets()) level.Tickets()->RemoveAllPlayerTickets(playerId);
+            });
+        } else if (m_ticketManager) {
             m_ticketManager->RemoveAllPlayerTickets(playerId);
         }
         
+    }
+
+} // namespace Server
+namespace Server {
+
+    void PlayerSessionManager::SetLevelServices(ChunkTicketManager* tickets,
+                                                ChunkStatusManager* status) {
+        m_ticketManager = tickets;
+        m_statusManager = status;
+        InitializeSpawnChunks();
+    }
+
+    ChunkTicketManager* PlayerSessionManager::TicketsForDimension(int rawDimensionId) const {
+        if (Server::g_integratedServer) {
+            ServerLevel* level = Server::g_integratedServer->GetLevel(
+                Game::DimensionFromRaw(rawDimensionId));
+            if (level && level->Tickets()) return level->Tickets();
+        }
+        return m_ticketManager;
     }
 
 } // namespace Server

@@ -83,6 +83,7 @@ public:
     static Constant* ZERO();
 
 private:
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 1); keyDouble(out, m_value); }
     double m_value;
     static Constant* s_zero;
 };
@@ -114,12 +115,10 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<Noise*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 2); keyNoise(out, v, m_noise); keyDouble(out, m_xzScale); keyDouble(out, m_yScale); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 486: visitor.apply(new Noise(visitor.visitNoise(this.noise), ...))
         DensityFunction::NoiseHolder* visitedNoise = visitor.visitNoise(m_noise);
-        // Unchanged noise => the copy would equal this. See the note on
-        // Clamp::mapAll for why skipping the allocation is result-identical.
-        if (visitedNoise == m_noise) return visitor.apply(this);
         return visitor.apply(visitor.own(new Noise(visitedNoise, m_xzScale, m_yScale)));
     }
 
@@ -176,17 +175,16 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<ShiftedNoise*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 3); keyPtr(out, keyChild(v, m_shiftX)); keyPtr(out, keyChild(v, m_shiftY)); keyPtr(out, keyChild(v, m_shiftZ)); keyDouble(out, m_xzScale); keyDouble(out, m_yScale); keyNoise(out, v, m_noise); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 637
-        DensityFunction* sx = m_shiftX->mapAll(visitor);
-        DensityFunction* sy = m_shiftY->mapAll(visitor);
-        DensityFunction* sz = m_shiftZ->mapAll(visitor);
-        DensityFunction::NoiseHolder* n = visitor.visitNoise(m_noise);
-        if (sx == m_shiftX && sy == m_shiftY && sz == m_shiftZ && n == m_noise) {
-            return visitor.apply(this);
-        }
         return visitor.apply(visitor.own(new ShiftedNoise(
-            sx, sy, sz, m_xzScale, m_yScale, n
+            m_shiftX->mapAll(visitor),
+            m_shiftY->mapAll(visitor),
+            m_shiftZ->mapAll(visitor),
+            m_xzScale,
+            m_yScale,
+            visitor.visitNoise(m_noise)
         )));
     }
 
@@ -348,11 +346,10 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 4); keyPtr(out, keyChild(v, m_input)); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 789
-        DensityFunction* mapped = m_input->mapAll(visitor);
-        if (mapped == m_input) return visitor.apply(this);
-        return visitor.apply(visitor.own(new BlendDensity(mapped)));
+        return visitor.apply(visitor.own(new BlendDensity(m_input->mapAll(visitor))));
     }
 
     double minValue() const override {
@@ -400,17 +397,10 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 5); keyPtr(out, keyChild(v, m_input)); keyDouble(out, m_minValue); keyDouble(out, m_maxValue); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 814: new Clamp(this.input.mapAll(visitor), this.minValue, this.maxValue)
-        //
-        // Short-circuit when the child mapped to itself. In Java the fresh node
-        // is a record, so it is EQUAL to the original and the wrap memo collapses
-        // them; our memo keys on pointers, so without this we allocate a distinct
-        // duplicate of every unchanged node on every chunk. Returning the original
-        // is what MC's record semantics already produce.
-        DensityFunction* mapped = m_input->mapAll(visitor);
-        if (mapped == m_input) return this;
-        return visitor.own(new Clamp(mapped, m_minValue, m_maxValue));
+        return visitor.own(new Clamp(m_input->mapAll(visitor), m_minValue, m_maxValue));
     }
 
     double minValue() const override { return m_minValue; }
@@ -490,11 +480,10 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 6); keyInt(out, static_cast<int64_t>(m_type)); keyPtr(out, keyChild(v, m_input)); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 876: create(this.type, this.input.mapAll(visitor))
-        DensityFunction* mapped = m_input->mapAll(visitor);
-        if (mapped == m_input) return this;
-        return visitor.own(create(m_type, mapped));
+        return visitor.own(create(m_type, m_input->mapAll(visitor)));
     }
 
     double minValue() const override { return m_minValue; }
@@ -572,7 +561,8 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 7); keyInt(out, static_cast<int64_t>(m_specificType)); keyPtr(out, keyChild(v, m_input)); keyDouble(out, m_argument); keyDouble(out, m_minValue); keyDouble(out, m_maxValue); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java lines 1018-1036
         DensityFunction* function = m_input->mapAll(visitor);
         double min = function->minValue();
@@ -590,7 +580,6 @@ public:
             maxValue = min * m_argument;
         }
 
-        if (function == m_input) return this;
         return visitor.own(new MulOrAdd(m_specificType, function, minValue, maxValue, m_argument));
     }
 
@@ -709,16 +698,10 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 8); keyInt(out, static_cast<int64_t>(m_type)); keyPtr(out, keyChild(v, m_argument1)); keyPtr(out, keyChild(v, m_argument2)); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java lines 1100-1102: create(this.type, this.argument1.mapAll(visitor), this.argument2.mapAll(visitor))
-        //
-        // add/mul/min/max are the connective tissue of the whole router, so a
-        // missing short-circuit HERE defeats every other one: an unchanged child
-        // still gets a new parent, and "changed" then propagates to the root.
-        DensityFunction* a1 = m_argument1->mapAll(visitor);
-        DensityFunction* a2 = m_argument2->mapAll(visitor);
-        if (a1 == m_argument1 && a2 == m_argument2) return this;
-        return visitor.own(createTwoArgumentFunction(m_type, a1, a2));
+        return visitor.own(createTwoArgumentFunction(m_type, m_argument1->mapAll(visitor), m_argument2->mapAll(visitor)));
     }
 
     double minValue() const override { return m_minValue; }
@@ -769,10 +752,10 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<YClampedGradient*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
-        // YClampedGradient has no sub-functions, so a copy is ALWAYS identical
-        // to this — there was never anything for mapAll to change here.
-        return visitor.apply(this);
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 9); keyInt(out, m_fromY); keyInt(out, m_toY); keyDouble(out, m_fromValue); keyDouble(out, m_toValue); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
+        // YClampedGradient has no sub-functions, so just return copy
+        return visitor.apply(visitor.own(new YClampedGradient(m_fromY, m_toY, m_fromValue, m_toValue)));
     }
 
     double minValue() const override {
@@ -827,11 +810,10 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<ShiftA*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 10); keyNoise(out, v, m_offsetNoise); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 728-729: visitor.apply(new ShiftA(visitor.visitNoise(this.offsetNoise)))
-        DensityFunction::NoiseHolder* n = visitor.visitNoise(m_offsetNoise);
-        if (n == m_offsetNoise) return visitor.apply(this);
-        return visitor.apply(visitor.own(new ShiftA(n)));
+        return visitor.apply(visitor.own(new ShiftA(visitor.visitNoise(m_offsetNoise))));
     }
 
     double minValue() const override {
@@ -884,11 +866,10 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<ShiftB*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 11); keyNoise(out, v, m_offsetNoise); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 748-749: visitor.apply(new ShiftB(visitor.visitNoise(this.offsetNoise)))
-        DensityFunction::NoiseHolder* n = visitor.visitNoise(m_offsetNoise);
-        if (n == m_offsetNoise) return visitor.apply(this);
-        return visitor.apply(visitor.own(new ShiftB(n)));
+        return visitor.apply(visitor.own(new ShiftB(visitor.visitNoise(m_offsetNoise))));
     }
 
     double minValue() const override {
@@ -938,11 +919,10 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<Shift*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 12); keyNoise(out, v, m_offsetNoise); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 768-769: visitor.apply(new Shift(visitor.visitNoise(this.offsetNoise)))
-        DensityFunction::NoiseHolder* n = visitor.visitNoise(m_offsetNoise);
-        if (n == m_offsetNoise) return visitor.apply(this);
-        return visitor.apply(visitor.own(new Shift(n)));
+        return visitor.apply(visitor.own(new Shift(visitor.visitNoise(m_offsetNoise))));
     }
 
     double minValue() const override {
@@ -1012,18 +992,10 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 13); keyInt(out, static_cast<int64_t>(type())); keyPtr(out, keyChild(v, wrapped())); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 420-422
-        //
-        // When the marked subtree is unchanged, hand apply() the ORIGINAL marker
-        // pointer. That matters beyond saving an allocation: the wrap memo keys on
-        // pointers, so a freshly-built marker always misses and wrapNew builds
-        // another NoiseInterpolator / CacheAllInCell. Reusing the original marker
-        // means one cache per distinct marker, which is what MC's record equality
-        // gives it for free.
-        DensityFunction* mapped = wrapped()->mapAll(visitor);
-        if (mapped == wrapped()) return visitor.apply(this);
-        return visitor.apply(visitor.own(createMarker(type(), mapped)));
+        return visitor.apply(visitor.own(createMarker(type(), wrapped()->mapAll(visitor))));
     }
 
 private:
@@ -1159,9 +1131,7 @@ public:
 
         Coordinate* mapAll(DensityFunction::Visitor& visitor) {
             // Java line 1179-1181
-            DensityFunction* mapped = m_function->mapAll(visitor);
-            if (mapped == m_function) return this;
-            return visitor.ownObject(new Coordinate(mapped));
+            return visitor.ownObject(new Coordinate(m_function->mapAll(visitor)));
         }
 
         DensityFunction* function() const { return m_function; }
@@ -1196,7 +1166,8 @@ public:
         return static_cast<double>(m_spline->maxValue());
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 17); splineKey(out, m_spline, v); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 1126-1128
         // return visitor.apply(new Spline(this.spline.mapAll((c) -> c.mapAll(visitor))))
 
@@ -1218,14 +1189,24 @@ public:
 
         SplineCoordinateVisitor coordVisitor(visitor);
         SplineType* mappedSpline = m_spline->mapAll(coordVisitor);
-        // CubicSpline's mapAll now returns the original when nothing under it
-        // changed, so this comparison actually fires — and it is the one that
-        // matters most, since rebuilding a Multipoint re-runs its cubic bounds
-        // computation on every chunk.
-        if (mappedSpline == m_spline) return visitor.apply(this);
         return visitor.apply(visitor.own(new Spline(mappedSpline)));
     }
 
+    static void splineKey(std::string& out, const SplineType* sp, Visitor* v) {
+        if (auto* c = dynamic_cast<const SplineType::Constant*>(sp)) {
+            keyTag(out, 100); keyFloat(out, c->value()); return;
+        }
+        if (auto* mp = dynamic_cast<const SplineType::Multipoint*>(sp)) {
+            keyTag(out, 101);
+            keyPtr(out, mp->coordinate() ? (const void*)keyChild(v, mp->coordinate()->function()) : nullptr);
+            keyInt(out, static_cast<int64_t>(mp->locations().size()));
+            for (float f : mp->locations()) keyFloat(out, f);
+            for (float f : mp->derivatives()) keyFloat(out, f);
+            for (const SplineType* val : mp->values()) splineKey(out, val, v);
+            return;
+        }
+        keyTag(out, 102); keyPtr(out, sp);
+    }
     SplineType* spline() const { return m_spline; }
 
 private:
@@ -1281,16 +1262,15 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 14); keyPtr(out, keyChild(v, m_input)); keyDouble(out, m_minInclusive); keyDouble(out, m_maxExclusive); keyPtr(out, keyChild(v, m_whenInRange)); keyPtr(out, keyChild(v, m_whenOutOfRange)); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 680-682
-        DensityFunction* in   = m_input->mapAll(visitor);
-        DensityFunction* yes  = m_whenInRange->mapAll(visitor);
-        DensityFunction* no   = m_whenOutOfRange->mapAll(visitor);
-        if (in == m_input && yes == m_whenInRange && no == m_whenOutOfRange) {
-            return visitor.apply(this);
-        }
         return visitor.apply(visitor.own(new RangeChoice(
-            in, m_minInclusive, m_maxExclusive, yes, no
+            m_input->mapAll(visitor),
+            m_minInclusive,
+            m_maxExclusive,
+            m_whenInRange->mapAll(visitor),
+            m_whenOutOfRange->mapAll(visitor)
         )));
     }
 
@@ -1590,11 +1570,13 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<WeirdScaledSampler*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
-        DensityFunction* in = m_input->mapAll(visitor);
-        DensityFunction::NoiseHolder* n = visitor.visitNoise(m_noise);
-        if (in == m_input && n == m_noise) return visitor.apply(this);
-        return visitor.apply(visitor.own(new WeirdScaledSampler(in, n, m_mapper)));
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 15); keyPtr(out, keyChild(v, m_input)); keyNoise(out, v, m_noise); keyInt(out, static_cast<int64_t>(m_mapper)); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
+        return visitor.apply(visitor.own(new WeirdScaledSampler(
+            m_input->mapAll(visitor),
+            visitor.visitNoise(m_noise),
+            m_mapper
+        )));
     }
 
     // Java line 579-580
@@ -1720,10 +1702,12 @@ public:
         }
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
-        // EndIslandDensityFunction has no sub-functions to map
-        // Return a copy wrapped by visitor
-        // No sub-functions and no noise: a copy can never differ from this.
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
+        // Java: leaf function, default mapAll = visitor.apply(this).
+        // CRITICAL: must pass THIS, not a fresh copy - a new EndIsland(0)
+        // here would discard the world-seeded instance the RandomState
+        // visitor installed (sampler flattener + NoiseChunk wrapping call
+        // mapAll and would silently fall back to seed 0).
         return visitor.apply(this);
     }
 
@@ -1794,13 +1778,14 @@ public:
         contextProvider.fillAllDirectly(output, count, const_cast<FindTopSurface*>(this));
     }
 
-    DensityFunction* mapAll(Visitor& visitor) override {
+    void keyImpl(std::string& out, Visitor* v) const override { (void)v; keyTag(out, 16); keyPtr(out, keyChild(v, m_density)); keyPtr(out, keyChild(v, m_upperBound)); keyInt(out, m_lowerBound); keyInt(out, m_cellHeight); }
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         // Java line 1270-1272
-        DensityFunction* d = m_density->mapAll(visitor);
-        DensityFunction* u = m_upperBound->mapAll(visitor);
-        if (d == m_density && u == m_upperBound) return visitor.apply(this);
         return visitor.apply(visitor.own(new FindTopSurface(
-            d, u, m_lowerBound, m_cellHeight
+            m_density->mapAll(visitor),
+            m_upperBound->mapAll(visitor),
+            m_lowerBound,
+            m_cellHeight
         )));
     }
 

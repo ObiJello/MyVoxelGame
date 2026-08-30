@@ -67,6 +67,17 @@ namespace Render {
         bool generateStructures = true;
         bool bonusChest         = false;
 
+        // Superflat customization (worldType 1): vanilla preset short name
+        // ("" = MC's default flat settings) + optional custom
+        // "<layers>;<biome>" string (PresetFlatWorldScreen format, overrides
+        // the preset's layers/biome; flags/structures still from the preset).
+        std::string flatPreset;
+        std::string flatLayers;
+        // Single Biome customization (worldType 4): biome id.
+        std::string singleBiome = "minecraft:plains";
+        // World Properties sandbox tweaks (JSON; empty = pure vanilla).
+        std::string worldgenTweaks;
+
         // Day/night cycle state, persisted across sessions and written back
         // on world exit. 6000 = noon; doDaylightCycle defaults OFF (frozen).
         long long dayTime         = 6000;
@@ -162,12 +173,16 @@ namespace Render {
         void PlaySelected();
         void DeleteSelected();
         void RecreateSelected();
+        // Duplicate an imported Minecraft world into obeycraft/saves, where it
+        // becomes editable and saveable. The original is only ever read.
+        void CopySelected();
         void UpdateButtonStates();
 
         WorldListWidget* m_list = nullptr;
         Button* m_playButton     = nullptr;
         Button* m_deleteButton   = nullptr;
         Button* m_recreateButton = nullptr;
+        Button* m_copyButton     = nullptr;
     };
 
     // ── Create New World (modern MC three-tab layout) ───────────────────────

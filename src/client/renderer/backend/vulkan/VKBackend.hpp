@@ -88,6 +88,13 @@ namespace Render {
         // Meshes
         MeshHandle CreateMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
                              const VertexLayout& layout) override;
+        MeshHandle CreateInstancedMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
+                                       BufferHandle instanceBuffer,
+                                       const VertexLayout& vertexLayout,
+                                       const VertexLayout& instanceLayout) override;
+        void DrawIndexedInstanced(MeshHandle mesh, uint32_t indexCount,
+                                  uint32_t indexOffset, uint32_t instanceCount,
+                                  uint32_t instanceByteOffset = 0) override;
         void DestroyMesh(MeshHandle handle) override;
         void DeferredDestroyMesh(MeshHandle handle) override;
 
@@ -314,6 +321,8 @@ namespace Render {
             // RegisterShaderVertexLayout so pipelines get the right
             // VkVertexInputAttributeDescription entries.
             VertexLayout vertexLayout;
+            // Per-instance attributes (binding 1). Empty = not instanced.
+            VertexLayout instanceLayout;
         };
         std::unordered_map<uint32_t, VKShaderInfo> m_shaders;
 
@@ -325,6 +334,7 @@ namespace Render {
         // the backend can build matching VkVertexInputAttributeDescription
         // arrays in CreateGraphicsPipeline.
         void RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout);
+        void RegisterShaderInstanceLayout(ShaderHandle shader, const VertexLayout& layout);
     private:
 
         // ====================================================================
@@ -359,7 +369,13 @@ namespace Render {
             glm::vec4 uFogColor    = {1, 1, 1, 1};      // 304 — rgb=fog color, w=1
             glm::vec4 uFogEnv      = {1e9f, 1e9f, 1e9f, 1e9f}; // 320 — (envStart, envEnd, rdStart, rdEnd)
             glm::vec4 uCamPosBright= {0, 0, 0, 1};      // 336 — xyz=uCameraPos, w=uSkyBrightness
-        };                                              // 352 bytes
+            // MC's entity OVERLAY (OverlayTexture) — rgb = overlay colour,
+            // w = STRENGTH. Zero is a clean passthrough, which is why the
+            // alpha is inverted from vanilla's texel; see shaders/block.frag.
+            // Appended for the same reason the fog block was: a _vk shader may
+            // declare a smaller layout than the buffer it is bound to.
+            glm::vec4 uOverlayColor= {0, 0, 0, 0};      // 352 — rgb=colour, w=strength
+        };                                              // 368 bytes
         // 96-mat4 bone palette UBO for the viewmodel skinning shader.
         // 6144 bytes — well within the typical UBO size limit (16 KB).
         static constexpr int kMaxBones = 96;
@@ -395,6 +411,14 @@ namespace Render {
             VkDeviceMemory bonesMemory     = VK_NULL_HANDLE;
             uint8_t*       bonesMapped     = nullptr;
             uint32_t       bonesWriteSlot  = 0;
+            // Slot-reuse bookkeeping: a draw whose Common/Bones data has not
+            // changed since the previous draw rebinds the previous slot instead
+            // of burning a new one — see BindPortalDescriptorForDraw.
+            uint32_t lastCommonOffset = 0;
+            uint32_t lastBonesOffset  = 0;
+            bool     haveCommonSlot   = false;
+            bool     haveBonesSlot    = false;
+            bool     exhaustWarned    = false;
             // Per-frame descriptor set bound at set=1. Its CommonUBO
             // (binding=0) and BonesUBO (binding=1) entries point at the
             // BASE of the ring buffer with size = kCommonSlotStride /
@@ -407,8 +431,17 @@ namespace Render {
         // initialized from minUniformBufferOffsetAlignment at device
         // creation time (MoltenVK on Apple typically reports 16/64/256
         // — we round up to whichever covers both UBO sizes).
-        static constexpr uint32_t kCommonSlotCount = 256;
-        static constexpr uint32_t kBonesSlotCount  = 32;
+        // One slot per DRAW per frame. A scene with many individually-
+        // transformed entities burns these fast: a thousand primed TNT is a
+        // thousand draws, and 256 was not close.
+        //
+        // Cost is slotCount * alignUp(sizeof(UBO)) * MAX_FRAMES_IN_FLIGHT.
+        // CommonUBO is ~368 B, so 8192 slots is ~3 MB per frame in flight;
+        // BonesUBO is larger but only skinned mobs consume it, so it gets a
+        // smaller bump. Cheap insurance against a class of bug that manifests
+        // as the terrain flashing rather than as anything obviously wrong.
+        static constexpr uint32_t kCommonSlotCount = 8192;
+        static constexpr uint32_t kBonesSlotCount  = 512;
         uint32_t m_commonSlotStride = 0;   // aligned to device alignment, >= sizeof(CommonUBO)
         uint32_t m_bonesSlotStride  = 0;   // aligned, >= sizeof(BonesUBO)
         uint32_t m_uboAlignment     = 256; // discovered via VkPhysicalDeviceLimits
@@ -425,6 +458,10 @@ namespace Render {
             BufferHandle vertexBuffer = INVALID_BUFFER;
             BufferHandle indexBuffer = INVALID_BUFFER;
             VertexLayout layout;
+            // Instanced meshes (CreateInstancedMesh) additionally carry the
+            // per-instance buffer bound at vertex binding 1.
+            BufferHandle instanceBuffer = INVALID_BUFFER;
+            VertexLayout instanceLayout;
         };
         std::unordered_map<uint32_t, VKMeshInfo> m_meshes;
 
@@ -560,7 +597,7 @@ namespace Render {
         // descriptor set (with binding 0 rewritten to the current
         // texture). Called from DrawIndexed/DrawArrays when the bound
         // shader's layoutType == 1.
-        void BindPortalDescriptorForDraw(VkCommandBuffer cmd, TextureHandle tex);
+        bool BindPortalDescriptorForDraw(VkCommandBuffer cmd, TextureHandle tex);
 
         // ====================================================================
         // SWAPCHAIN RECREATION

@@ -232,6 +232,15 @@ namespace Game {
                          want, value.index());
             return;
         }
+        // MC Brain.setMemoryInternal: a value that is an EMPTY collection is
+        // ERASED, not stored — NEAREST_LIVING_ENTITIES with nobody around must
+        // read as VALUE_ABSENT or every present/absent gate on it inverts.
+        if (const auto* list = std::get_if<std::vector<Entity*>>(&value)) {
+            if (list->empty()) {
+                EraseMemory(module);
+                return;
+            }
+        }
         slot.value = ExpirableValue{ std::move(value), ttl };
     }
 

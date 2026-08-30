@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "server/level/WorldGenRegion.h"
 #include "server/level/ServerLevel.h"
 #include "core/BlockPos.h"
@@ -5,6 +6,8 @@
 #include "world/chunk/status/ChunkDependencies.h"
 #include "levelgen/WorldgenRandom.h"
 #include <stdexcept>
+#include <cstdio>
+#include <cstdlib>
 #include <locale>
 #include <sstream>
 
@@ -32,10 +35,20 @@ WorldGenRegion::WorldGenRegion(
     , m_currentlyGenerating(nullptr)
 {
     if (randomState != nullptr) {
-        random::PositionalRandomFactory* randomFactory =
-            randomState->getOrCreateRandomFactory("minecraft:worldgen_region_random");
-        const core::BlockPos worldPosition = m_center.getPos().getWorldPosition();
-        m_random = randomFactory->at(worldPosition.getX(), worldPosition.getY(), worldPosition.getZ());
+        if (randomState->random()->isLegacy()) {
+            // legacy_random_source dims (nether/end): no overworld consumer of
+            // the region random exists on these paths yet; getRandom() aborts
+            // loudly if one appears (extend to the Any wrapper then, Part D).
+            m_randomValid = false;
+            m_hasSkyLight = false;
+        } else {
+            ::minecraft::random::AnyPositionalRandomFactory* randomFactory =
+                randomState->getOrCreateRandomFactory("minecraft:worldgen_region_random");
+            const core::BlockPos worldPosition = m_center.getPos().getWorldPosition();
+            m_random = randomFactory
+                ->at(worldPosition.getX(), worldPosition.getY(), worldPosition.getZ())
+                .xoroshiro();
+        }
     }
 }
 
@@ -62,23 +75,35 @@ WorldGenRegion::ChunkAccess* WorldGenRegion::getChunk(
     bool /*loadOrGenerate*/)
 {
     // Calculate distance from center
-    int distance = m_center.getPos().getChessboardDistance(chunkX, chunkZ);
+    const int dx = chunkX - m_center.getPos().x();
+    const int dz = chunkZ - m_center.getPos().z();
+    int distance = std::max(std::abs(dx), std::abs(dz));
 
     // Get the maximum allowed status at this distance
     const ChunkDependencies& deps = m_generatingStep.directDependencies();
     const ChunkStatus* maxAllowedStatus = nullptr;
-
     if (distance < deps.size()) {
         maxAllowedStatus = &deps.get(distance);
     }
 
     GenerationChunkHolder* chunkHolder = nullptr;
     if (maxAllowedStatus != nullptr) {
-        chunkHolder = m_cache.get(chunkX, chunkZ);
-        if (chunkHolder != nullptr && targetStatus.isOrBefore(*maxAllowedStatus)) {
-            ChunkAccess* chunk = chunkHolder->getChunkIfPresentUnchecked(*maxAllowedStatus);
-            if (chunk != nullptr) {
-                return chunk;
+        // Resolved once per position (see m_chunkCache in the header).
+        if (m_chunkCache.empty()) {
+            m_chunkCacheRadius = static_cast<int>(deps.size());
+            m_chunkCache.assign(static_cast<size_t>((2 * m_chunkCacheRadius + 1) * (2 * m_chunkCacheRadius + 1)), nullptr);
+        }
+        const size_t slot = static_cast<size_t>((dx + m_chunkCacheRadius) * (2 * m_chunkCacheRadius + 1) + (dz + m_chunkCacheRadius));
+        if (ChunkAccess* cached = m_chunkCache[slot]) {
+            if (targetStatus.isOrBefore(*maxAllowedStatus)) return cached;
+        } else {
+            chunkHolder = m_cache.get(chunkX, chunkZ);
+            if (chunkHolder != nullptr && targetStatus.isOrBefore(*maxAllowedStatus)) {
+                ChunkAccess* chunk = chunkHolder->getChunkIfPresentUnchecked(*maxAllowedStatus);
+                if (chunk != nullptr) {
+                    m_chunkCache[slot] = chunk;
+                    return chunk;
+                }
             }
         }
     }
@@ -177,9 +202,17 @@ bool WorldGenRegion::setBlock(
         // In full implementation: level.updatePOIOnBlockStateChange(pos, oldState, blockState);
     }
 
-    // Handle block entities
-    // Reference: WorldGenRegion.java lines 261-279
-    // In full implementation: handle EntityBlock, block entity creation/removal
+    // Handle block entities.
+    // Reference: WorldGenRegion.java lines 261-279 - during generation (proto
+    // chunks) a BE-capable block gets the pending tag {x,y,z,id:"DUMMY"}
+    // (canonical E payload "{id:\"DUMMY\"}" since x/y/z are dropped);
+    // replacing a BE block with a non-BE block removes the entry. Producers
+    // (templates, loot chests, ...) overwrite the pending tag afterwards.
+    if (blockState != nullptr && blockState->hasBlockEntity()) {
+        chunk->setBlockEntityNbt(pos, "{id:\"DUMMY\"}");
+    } else if (oldState != nullptr && oldState->hasBlockEntity()) {
+        chunk->removeBlockEntity(pos);
+    }
 
     // Check for post-processing
     // Reference: WorldGenRegion.java lines 281-283
@@ -210,6 +243,12 @@ int64_t WorldGenRegion::getSeed() const {
 }
 
 minecraft::XoroshiroRandomSource& WorldGenRegion::getRandom() {
+    if (!m_randomValid) {
+        std::fprintf(stderr,
+            "FATAL: WorldGenRegion::getRandom() used on a legacy_random_source "
+            "dimension - port the region random to the Any wrapper first.\n");
+        std::abort();
+    }
     return m_random;
 }
 

@@ -29,8 +29,12 @@ private:
     static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_stoneOreReplaceables;
     static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_deepslateOreReplaceables;
     static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_naturalStone;
-    static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_netherrack;
+    // Java: new BlockMatchTest(Blocks.NETHERRACK) - NOT a tag test
+    static std::shared_ptr<levelgen::structure::templatesystem::RuleTest> s_netherrack;
     static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_netherOreReplaceables;
+
+    // Scattered-ore feature instance (ancient debris)
+    static levelgen::ScatteredOreFeature s_scatteredOreFeature;
 
     static bool s_initialized;
 
@@ -60,6 +64,16 @@ public:
     static levelgen::ConfiguredFeature* ORE_ANDESITE;
     static levelgen::ConfiguredFeature* ORE_TUFF;
     static levelgen::ConfiguredFeature* ORE_CLAY;
+
+    // Nether ores - Reference: OreFeatures.java lines 61-66, 88-89
+    static levelgen::ConfiguredFeature* ORE_MAGMA;
+    static levelgen::ConfiguredFeature* ORE_SOUL_SAND;
+    static levelgen::ConfiguredFeature* ORE_NETHER_GOLD;
+    static levelgen::ConfiguredFeature* ORE_QUARTZ;
+    static levelgen::ConfiguredFeature* ORE_GRAVEL_NETHER;
+    static levelgen::ConfiguredFeature* ORE_BLACKSTONE;
+    static levelgen::ConfiguredFeature* ORE_ANCIENT_DEBRIS_LARGE;
+    static levelgen::ConfiguredFeature* ORE_ANCIENT_DEBRIS_SMALL;
 
     /**
      * Bootstrap/initialize all ore features

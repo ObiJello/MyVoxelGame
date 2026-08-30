@@ -44,6 +44,14 @@ namespace Client {
         bool IsBlockFluid(int worldX, int worldY, int worldZ) const override;
         bool IsValidPosition(int worldX, int worldY, int worldZ) const override;
         bool IsClientSide() const override { return true; }
+        // Section-flag answers for the two hot physics queries, so the client
+        // simulation of a hundred thousand primed TNT pays one chunk lookup per
+        // gather rather than one per cell (see IBlockAccess).
+        bool IsRegionAllAir(const glm::ivec3& min, const glm::ivec3& max,
+                            bool absentIsAir = false) const override;
+        void GetBlockStatesInBox(const glm::ivec3& min, const glm::ivec3& max,
+                                 Game::BlockState* out) const override;
+        uint64_t RegionWriteStamp(const glm::ivec3& min, const glm::ivec3& max) const override;
 
     private:
         uint32_t m_sequence   = 0;

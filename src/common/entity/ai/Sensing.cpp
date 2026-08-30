@@ -40,6 +40,11 @@ namespace Game {
         const glm::dvec3 delta = to - from;
 
         const double distance = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+        // MC LivingEntity.hasLineOfSight: anything more than 128 blocks away
+        // is flatly invisible — the clip is never even attempted. Both a
+        // parity gate (a 64-follow-range ghast can still fail it after the
+        // eye-height offsets) and the cap on the DDA's cost.
+        if (distance > 128.0) return false;
         if (distance < 1.0e-4) return true;
 
         // Quarter-block steps: fine enough that a 1-block wall is never missed,

@@ -1,6 +1,6 @@
 #include "levelgen/NoiseRouter.h"
-#include "levelgen/NoiseChunk.h"
 #include "util/TerrainProfiling.h"
+#include "levelgen/NoiseChunk.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/DensityFunctions.h"
 #include "levelgen/MaterialRuleList.h"
@@ -148,7 +148,7 @@ public:
     double maxValue() const override { return m_noiseFiller->maxValue(); }
 
     // MapAll implementation - NoiseChunk handles wrapping
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 
@@ -222,7 +222,7 @@ public:
     double maxValue() const override { return m_noiseFiller->maxValue(); }
 
     // MapAll implementation
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 
@@ -304,7 +304,7 @@ public:
     double maxValue() const override { return m_function->maxValue(); }
 
     // MapAll implementation
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 
@@ -362,7 +362,7 @@ public:
     double maxValue() const override { return m_function->maxValue(); }
 
     // MapAll implementation
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 
@@ -433,7 +433,7 @@ public:
     double maxValue() const override { return m_noiseFiller->maxValue(); }
 
     // MapAll implementation
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 
@@ -509,7 +509,7 @@ public:
     double maxValue() const override { return 1.0; }
 
     // MapAll implementation
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 };
@@ -544,7 +544,7 @@ public:
     double maxValue() const override { return std::numeric_limits<double>::infinity(); }
 
     // MapAll implementation
-    DensityFunction* mapAll(Visitor& visitor) override {
+    DensityFunction* mapAllImpl(Visitor& visitor) override {
         return visitor.apply(this);
     }
 };
@@ -599,6 +599,21 @@ public:
 
     density::DensityFunction* apply(density::DensityFunction* input) override {
         return m_owner->wrap(input);
+    }
+
+    density::DensityFunction* lookupMapped(const density::DensityFunction* original) override {
+        return m_owner->lookupMapped(original);
+    }
+    bool memoises() const override { return true; }
+    density::DensityFunction* lookupPreMapped(const std::string& key) override {
+        return m_owner->lookupPreMapped(key);
+    }
+    void rememberPreMapped(const std::string& key, density::DensityFunction* mapped) override {
+        m_owner->rememberPreMapped(key, mapped);
+    }
+    void rememberMapped(const density::DensityFunction* original,
+                        density::DensityFunction* mapped) override {
+        m_owner->rememberMapped(original, mapped);
     }
 
     void takeOwnership(void* obj, void (*deleter)(void*)) override {
@@ -672,16 +687,14 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
     m_inCellY = 0;
     m_inCellZ = 0;
 
-    // Measured 2026-08-11: constructing a NoiseChunk costs 11.44 ms and 26.1 s
-    // across a session — MORE than generating the noise itself (10.25 ms). It is
-    // built once per chunk from Gen.Biomes, which is the first stage to need it.
-    // These sub-zones say which part of the construction that 11.44 ms actually is.
+    // Tracy sub-zones (game-local patch, docs/terrain-library-patches.md):
+    // constructing a NoiseChunk costs more than generating the noise itself;
+    // these say which part of the construction the time actually is.
     {
     TERRAIN_ZONE_N("NC.Arena");
     // Initialize arena for wrapped objects (eliminates ~200 malloc calls)
     // Must be done early since blend caches use it
     // ArenaStorage is WRAP_ARENA_ALIGN bytes each, so we need WRAP_ARENA_SIZE/WRAP_ARENA_ALIGN elements
-    // NOTE: resize() value-initializes, so this zero-fills the whole arena.
     m_wrapArena.resize(WRAP_ARENA_SIZE / WRAP_ARENA_ALIGN);
     m_wrapArenaOffset = 0;
     }
@@ -723,35 +736,23 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
     const minecraft::levelgen::NoiseRouter* router = randomState.router();
     // Pre-allocate space in the wrap cache to avoid rehashing
     // Typical density function tree has ~5500 nodes
-    //
-    // Prime suspect for the 11.44 ms: this rebuilds a wrapped copy of the ENTIRE
-    // density-function graph (~5500 nodes) for every chunk, with a hash lookup
-    // per node. The shape of that graph is identical chunk to chunk — only the
-    // NoiseChunk the wrappers point at differs — so if this dominates, pooling
-    // and resetting NoiseChunks is the fix rather than micro-optimising the walk.
+    m_wrapped.reserve(2048);
+    m_mapMemo.reserve(2048);
+    m_structural.reserve(2048);
+    m_preMap.reserve(2048);
+    TERRAIN_PLOT("Wrap/Structural", (int64_t)0);
     NoiseRouter wrappedRouter = [&]() {
-        // Inside the lambda so the zone ends with it — TERRAIN_ZONE_N is RAII and
-        // wrappedRouter has to stay in the enclosing scope.
+        // Inside the lambda so the zone ends with it — TERRAIN_ZONE_N is RAII
+        // and wrappedRouter has to stay in the enclosing scope.
         TERRAIN_ZONE_N("NC.WrapRouter");
-        m_wrapped.reserve(6000);
         WrapVisitor wrapVisitor(this);
         return router->mapAll(wrapVisitor);
     }();
-
-    // Measured: Visits 5736 / Distinct 5095 (ratio 1.13, so no DAG re-traversal),
-    // yet NC.WrapRouter costs 11.29 ms — ~1.97 us per visited node, which is an
-    // order of magnitude more than new + hash insert should ever be. So the real
-    // work is NOT in the density-node walk these two count.
-    //
-    // Prime suspect: Spline::mapAll rebuilds the whole cubic-spline tree and
-    // sinks its nodes through ownObject() -> takeMappedNodeOwnership, which
-    // m_wrapVisits never sees. OwnedOther counts exactly those. If it dwarfs
-    // Visits, the splines are the cost and the fix is to stop rebuilding a
-    // spline whose coordinates all mapped to themselves.
-    TERRAIN_PLOT("Wrap/Visits", (int64_t)m_wrapVisits);
     TERRAIN_PLOT("Wrap/Distinct", (int64_t)m_wrapped.size());
     TERRAIN_PLOT("Wrap/OwnedDensity", (int64_t)m_ownedMappedDensityNodes.size());
     TERRAIN_PLOT("Wrap/OwnedOther", (int64_t)m_ownedMappedNodes.size());
+    TERRAIN_PLOT("Wrap/Interpolators", (int64_t)m_interpolators.size());
+    TERRAIN_PLOT("Wrap/Structural", (int64_t)m_structural.size());
 
     // Get wrapped preliminary surface level (Java line 131)
     m_preliminarySurfaceLevel = wrappedRouter.preliminarySurfaceLevel();
@@ -911,12 +912,19 @@ NoiseChunk::~NoiseChunk() {
     // Destruct remaining arena-allocated objects from m_wrapped
     // These include FlatCache (from markers), CacheOnce, Cache2D, BlendAlpha, BlendOffset
     // that have std::vector members needing cleanup
+    // Only wrappers built by wrapNew live in the arena and need their
+    // destructor run here. Since the structural map (Java's record-keyed
+    // `wrapped`) several keys can share one wrapper, and a plain node can be
+    // mapped to a DIFFERENT plain node it equals — those are owned by
+    // m_ownedMappedDensityNodes and deleted below, so they must not be
+    // destructed here (double destruction crashed at startup 2026-08-29).
+    const char* arenaBegin = reinterpret_cast<const char*>(m_wrapArena.data());
+    const char* arenaEnd = arenaBegin + m_wrapArena.size() * sizeof(ArenaStorage);
     for (auto& [key, value] : m_wrapped) {
-        // Skip if already destructed or if value == key (not wrapped, not arena allocated)
-        if (value != key && destructed.find(value) == destructed.end()) {
-            // Virtual destructor calls correct derived class destructor
-            value->~DensityFunction();
-        }
+        const char* p = reinterpret_cast<const char*>(value);
+        if (p < arenaBegin || p >= arenaEnd) continue;
+        if (!destructed.insert(value).second) continue;
+        value->~DensityFunction();
     }
 
     // These are NOT in arena, need actual delete
@@ -941,6 +949,7 @@ NoiseChunk::~NoiseChunk() {
 // Java lines 202-219
 // OPTIMIZATION: Cache loop bounds
 void NoiseChunk::fillSlice(bool slice0, int cellX) {
+    TERRAIN_ZONE_N("Noise.FillSlice");   // interpolator corner evaluation (density DAG)
     m_cellStartBlockX = cellX * m_cellWidth;
     m_inCellX = 0;
 
@@ -998,7 +1007,7 @@ density::DensityFunction::FunctionContext* NoiseChunk::forIndex(int cellIndex) {
 
 // Java lines 248-263
 // OPTIMIZATION: Use local variables and restrict pointer
-void NoiseChunk::fillAllDirectly(double* __restrict output, int count, density::DensityFunction* function) {
+void NoiseChunk::fillAllDirectly(double* __restrict__ output, int count, density::DensityFunction* function) {
     (void)count;  // Unused - we iterate based on cell dimensions
 
     // Cache dimensions in local variables for faster access

@@ -301,9 +301,11 @@ namespace Render {
     }
 
     // ─── Input ───────────────────────────────────────────────────
-    // Left/right/middle make no difference to any of this screen's own zones —
-    // shift alone decides stack vs. single — so the button is unused here.
-    bool CreativeModeInventoryScreen::HandleExtraClick(int hit, int /*glfwButton*/, bool shift) {
+    // Shift decides stack vs. single for the pick paths, so left/right make no
+    // difference there. The one place the button DOES matter is deleting the
+    // cursor on the item grid, where vanilla clears it on left and removes a
+    // single item on right (CreativeModeInventoryScreen:254-257).
+    bool CreativeModeInventoryScreen::HandleExtraClick(int hit, int glfwButton, bool shift) {
         if (hit == HIT_TAB_SURVIVAL) { SwitchTab(Tab::Survival); return true; }
         if (hit == HIT_TAB_SEARCH)   { SwitchTab(Tab::Search);   return true; }
 
@@ -320,16 +322,19 @@ namespace Render {
         }
 
         if (hit == HIT_CREATIVE_GRID) {
-            // Empty cell + held cursor → delete the held item. The search grid
-            // doubles as a trash zone (the user-facing model is "drop it
-            // anywhere on the grid to delete it"). Routes through THROW with
-            // the OUTSIDE sentinel — the same path as click-outside-the-panel
-            // and shift+trash, both of which already discard the cursor.
+            // Empty cell + held cursor → DELETE the held item. Vanilla
+            // CreativeModeInventoryScreen:254-257 calls setCarried(EMPTY) on
+            // left click and carried.shrink(1) on right — the stack ceases to
+            // exist. This used to send THROW/OUTSIDE, which is the DROP path:
+            // the item you were trying to void landed on the floor at your
+            // feet and was picked straight back up.
             if (m_hoveredCreativeStack.IsEmpty()) {
                 if (!Carried().IsEmpty()) {
-                    QueueClick(Network::ContainerInput::THROW,
+                    const uint8_t deleteButton =
+                        (glfwButton == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : 0;
+                    QueueClick(Network::ContainerInput::CREATIVE_DELETE_CARRIED,
                                Network::InventorySlotSentinel::OUTSIDE,
-                               0 /*button 0 = whole stack (MC PRIMARY)*/);
+                               deleteButton);
                 }
                 return true;
             }
@@ -354,15 +359,18 @@ namespace Render {
         //   • Shift+click → clear ALL inventory slots (MC's
         //     CreativeModeInventoryScreen line 189-193:
         //     `if (slot == this.destroyItemSlot && quickKey)`).
-        //   • Plain click with a carried stack → discard the cursor.
+        //   • Plain click with a carried stack → DELETE the cursor. MC:195-196
+        //     is `menu.setCarried(ItemStack.EMPTY)` — no drop, whichever
+        //     button was used. This used to send THROW, which spawned the item
+        //     on the ground instead of destroying it.
         if (hit == HIT_TRASH) {
             if (shift) {
                 QueueClick(Network::ContainerInput::CREATIVE_DESTROY_ALL,
                            Network::InventorySlotSentinel::OUTSIDE, 0);
             } else if (!Carried().IsEmpty()) {
-                QueueClick(Network::ContainerInput::THROW,
+                QueueClick(Network::ContainerInput::CREATIVE_DELETE_CARRIED,
                            Network::InventorySlotSentinel::OUTSIDE,
-                           0 /*button 0 = whole stack (MC PRIMARY)*/);
+                           0 /*whole cursor*/);
             }
             return true;
         }

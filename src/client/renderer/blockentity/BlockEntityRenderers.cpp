@@ -4,6 +4,7 @@
 #include "ChestRenderer.hpp"
 #include "CampfireRenderer.hpp"
 #include "ShulkerBoxRenderer.hpp"
+#include "SkullBlockRenderer.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/core/Log.hpp"
 
@@ -49,6 +50,18 @@ namespace Render {
                 Log::Error("[BERenderers] CampfireRenderer init failed (type %u)",
                            static_cast<unsigned>(typeId));
             }
+        }
+
+        // Skulls / mob heads — one renderer for all seven kinds, floor and
+        // wall variants alike (MC registers SkullBlockRenderer once for
+        // BlockEntityType.SKULL). Like the chest, the skull's block model is
+        // element-less, so without this every placed skull is invisible.
+        auto skull = std::make_unique<SkullBlockRenderer>();
+        if (skull->Initialize()) {
+            g_blockEntityRenderDispatcher->Register(
+                Game::BlockEntityTypeIds::SKULL, std::move(skull));
+        } else {
+            Log::Error("[BERenderers] SkullBlockRenderer init failed");
         }
     }
 

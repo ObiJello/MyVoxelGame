@@ -42,6 +42,26 @@ namespace Game {
     // unconditionally.
     BlockState ComputePlacementState(BlockID id, const UseOnContext& context);
 
+    // ── Skulls / mob heads (MC StandingAndWallBlockItem) ────────────────────
+    //
+    // Skull items back TWO blocks — a floor block with a 16-segment ROTATION
+    // and a wall block with a FACING — and the click decides which one places.
+    // Shared (client predicts, server decides) exactly like the rest of this
+    // header.
+
+    // If `id` is a FLOOR skull/head block, writes its wall twin and returns
+    // true. The classifier the other helpers build on.
+    bool SkullWallVariantOf(BlockID id, BlockID& outWall);
+
+    // Is `id` one of the seven *_wall_skull / *_wall_head blocks?
+    bool IsWallSkullBlock(BlockID id);
+
+    // The block a held skull item actually places for a given clicked face:
+    // the wall variant when clicking a horizontal face, the floor variant
+    // otherwise. Non-skull blocks pass through unchanged, so callers can
+    // apply it unconditionally.
+    BlockID SkullPlacementBlock(BlockID held, Direction clickedFace);
+
     // ── Segmented ground cover (MC SegmentableBlock) ─────────────────────────
     //
     // Leaf litter, wildflowers and pink petals stack in place: right-clicking an
@@ -136,6 +156,14 @@ namespace Game {
     // Exposed because the fence/pane family asks it of every neighbour
     // (FenceBlock.connectsTo, IronBarsBlock.attachsTo).
     bool IsFaceSturdyAt(const IBlockAccess& level, const glm::ivec3& p, Direction face);
+
+    // MC BlockState.isFaceSturdy — the same question asked of a STATE the
+    // caller already holds, rather than of a world position. Needed wherever
+    // MC's own code reads the neighbour's state and then asks about it while
+    // passing an unrelated position for context (ConcretePowderBlock.
+    // touchesLiquid does exactly that), because looking the state back up from
+    // that position answers about the wrong block entirely.
+    bool IsStateFaceSturdy(BlockState state, Direction face);
 
     bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockID id);
 

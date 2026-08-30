@@ -36,6 +36,13 @@ namespace Game {
 
         bool MayPlace(const ItemStack& /*stack*/) const override { return false; }
 
+        // MC FurnaceResultSlot.onTake → checkTakeAchievements →
+        // awardUsedRecipesAndPopExperience: taking the output drains the
+        // banked XP into the click result for the session to pay out. On the
+        // client m_furnace is null and nothing accrues, which is exactly MC's
+        // serverPlayer-only branch.
+        void OnTake(const ItemStack& taken, ContainerClickResult& result) override;
+
     private:
         FurnaceBlockEntity* m_furnace = nullptr;   // null on the client
     };

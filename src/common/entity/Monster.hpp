@@ -15,8 +15,11 @@
 #pragma once
 
 #include "common/entity/Mob.hpp"
+#include "common/entity/SpawnReason.hpp"
 
 namespace Game {
+
+    class JavaRandom;
 
     class Monster : public PathfinderMob {
     public:
@@ -31,13 +34,27 @@ namespace Game {
         // animals.
         virtual bool ShouldDropLoot() const { return true; }
 
-        int GetXpReward() const { return TypeInfo().xpReward; }
+        // XP comes from Mob::GetXpReward — the type table already carries the
+        // per-monster ctor values (Monster.java:34's base 5 plus overrides).
 
-        // ── Spawn rules (MC Monster.checkMonsterSpawnRules) ────────────────
+        // ── Spawn rules (MC Monster.checkMonsterSpawnRules family) ─────────
         //
-        // Static because the spawner asks before an entity exists.
-        static bool CheckMonsterSpawnRules(EntityLevel& level, const glm::ivec3& pos);
-        static bool IsDarkEnoughToSpawn(EntityLevel& level, const glm::ivec3& pos);
+        // Static because the spawner asks before an entity exists. `rng` is
+        // MC's `random` parameter — the spawner passes the level's random, so
+        // the rolls stay on the shared stream.
+        static bool CheckMonsterSpawnRules(EntityLevel& level, SpawnReason reason,
+                                           const glm::ivec3& pos, JavaRandom& rng);
+        // MC Monster.checkAnyLightMonsterSpawnRules — blaze/breeze/zoglin and
+        // the endermite/silverfish base: peaceful and surface checks only, no
+        // light test.
+        static bool CheckAnyLightMonsterSpawnRules(EntityLevel& level, SpawnReason reason,
+                                                   const glm::ivec3& pos, JavaRandom& rng);
+        // MC Monster.checkSurfaceMonstersSpawnRules — husk/parched/camel husk:
+        // monster rules plus open sky.
+        static bool CheckSurfaceMonstersSpawnRules(EntityLevel& level, SpawnReason reason,
+                                                   const glm::ivec3& pos, JavaRandom& rng);
+        static bool IsDarkEnoughToSpawn(EntityLevel& level, const glm::ivec3& pos,
+                                        JavaRandom& rng);
 
     protected:
         void UpdateNoActionTime();

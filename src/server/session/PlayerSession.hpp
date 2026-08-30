@@ -2,6 +2,7 @@
 #pragma once
 
 #include "common/core/JavaRandom.hpp"               // Game::JavaRandom (loot rolls)
+#include "common/core/Log.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/BlockInteraction.hpp"  // Game::UseResult
 #include "common/network/PacketTypes.hpp"
@@ -133,6 +134,20 @@ namespace Server {
         bool HasClientLoaded() const {
             return !m_waitingForRespawn && m_clientLoadedTimeoutTimer <= 0;
         }
+
+        // ── Pause ───────────────────────────────────────────────────────────
+        //
+        // This player has a pause screen up (PlayerPauseC2SPacket). MC has no
+        // per-player equivalent — its integrated server reads the one embedded
+        // client — so this is the piece that lets the world freeze correctly
+        // with more than one person in it: IntegratedServer stops simulating
+        // only when EVERY session reports paused.
+        //
+        // Starts FALSE, which is the safe default: a client that never sends
+        // the packet is treated as playing, so it can never freeze the world
+        // for everyone else.
+        bool IsPaused() const { return m_paused; }
+        void SetPaused(bool paused) { m_paused = paused; }
         // :2073 — called once per tick from ServerPlayer.tick's first line.
         void TickClientLoadTimeout() {
             if (m_clientLoadedTimeoutTimer > 0) --m_clientLoadedTimeoutTimer;
@@ -180,6 +195,13 @@ namespace Server {
         // Check if chunk has been sent
         bool HasSentChunk(Game::Math::ChunkPos chunk) const;
 
+        // The whole set, for callers that probe it many times per tick and
+        // cannot afford a call per probe — the entity tracker asks
+        // "has this player got this chunk yet" once per (entity x player).
+        // MC's equivalent gate is ChunkMap.isChunkTracked.
+        const std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>&
+        GetSentChunks() const { return m_sentChunks; }
+
         // Get count of sent chunks
         size_t GetSentChunkCount() const { return m_sentChunks.size(); }
 
@@ -200,7 +222,11 @@ namespace Server {
         void DropChunk(Game::Math::ChunkPos pos);
 
         // Send next batch of chunks (called once per tick from IntegratedServer)
-        void SendNextChunks(Game::World* world);
+        // `outNotResident` receives pending chunks that are no longer in the
+        // cache (evicted under the LRU cap): they are dropped from the pending
+        // set and the caller must request them again, or they never arrive.
+        void SendNextChunks(Game::World* world,
+                            std::vector<Game::Math::ChunkPos>* outNotResident = nullptr);
 
         // Handle client's batch acknowledgment (updates send rate)
         void OnChunkBatchAck(float desiredRate);
@@ -382,13 +408,34 @@ namespace Server {
         glm::vec3 GetPosition() const;
         glm::vec2 GetRotation() const;
         int GetDimensionId() const;
+
+        // The world this session's player is standing in.
+        //
+        // Every block read or write a session performs must go through here
+        // rather than IntegratedServer::GetWorld(), which is the OVERWORLD's:
+        // a player in the Nether breaking a block would otherwise edit the
+        // Overworld at the same x/y/z — and the very first thing they do in
+        // the Nether is light a portal to come home.
+        //
+        // Null only before the level exists, which cannot happen for a session
+        // that has a player attached.
+        Game::World* SessionWorld() const;
         
         // View management getters
         Game::Math::ChunkPos GetChunkPosition() const { return m_currentChunk; }
         Game::Math::ChunkPos GetAnchorChunk() const { return m_anchorChunk; }
+
         
         int GetViewDistance() const { return m_viewDistance; }
         int GetSimulationDistance() const { return m_simulationDistance; }
+
+        // False between construction and Initialize(). A session is PUBLISHED
+        // by PlayerSessionManager::CreateSession and only initialized a few
+        // statements later, and the client's ClientConfigC2S regularly lands
+        // in that window — it is sent the instant LoginSuccess is received.
+        // Initialize() resets both distances from its Config, so anything
+        // applied to a session that is not yet initialized is thrown away.
+        bool IsInitialized() const { return m_initialized; }
 
     private:
         // The world's dropped-item store, or null if the server isn't up.
@@ -402,6 +449,14 @@ namespace Server {
         // the Q keybind and the container THROW / click-outside paths. No-op on
         // an empty stack.
         void DropItemFromPlayer(const Game::ItemStack& stack);
+
+        // Spawn experience orbs in the world (MC Block.popExperience /
+        // ExperienceOrb.award). No-op for amount <= 0 or before the server's
+        // orb manager exists.
+        void AwardWorldExperience(const glm::dvec3& pos, int amount);
+        // Round a furnace's banked float XP MC's way (floor + random chance
+        // at the remainder) and spawn the orbs — createExperience.
+        void AwardBankedExperience(const glm::dvec3& pos, float banked);
 
         // === IDENTIFIERS ===
         uint32_t m_playerId;
@@ -432,6 +487,8 @@ namespace Server {
         // === DISTANCES ===
         int m_simulationDistance = 8;
         int m_viewDistance = 8;
+        // See IsInitialized().
+        bool m_initialized = false;
         
         // === CHUNK TRACKING ===
         // MC ServerPlayer.chunkTrackingView. Centre + radius, not a container:
@@ -518,10 +575,18 @@ namespace Server {
         float m_lastSentHealth     = -1.0e8f;
         int   m_lastSentFood       = -1;
         float m_lastSentSaturation = -1.0f;
+
+        // XP dirty-check cache (MC ServerPlayer.lastSentExp) — impossible
+        // starting values force the first PLAYING tick to sync.
+        int   m_lastSentXpLevel    = -1;
+        float m_lastSentXpProgress = -1.0f;
         
         // === FLAGS ===
         bool m_isChangingDimension = false;
         bool m_isRespawning = false;
+
+        // Set by PlayerPauseC2SPacket — see IsPaused above.
+        bool m_paused = false;
 
         // MC ServerGamePacketListenerImpl.waitingForRespawn / clientLoadedTimeoutTimer.
         // See HasClientLoaded above. The initial values are MC's field defaults;

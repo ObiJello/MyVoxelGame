@@ -44,6 +44,8 @@ namespace Client {
         // MC WaitingForPlayerChunk.isReady: the section containing the player
         // has been compiled, or the player is outside build height.
         bool IsPlayerSectionCompiled(const glm::vec3& playerFeetPos) const;
+        // Explains a timeout: which section, and which neighbour column is missing.
+        void LogWaitDiagnosis(const glm::vec3& playerFeetPos) const;
 
         Stage m_stage = Stage::Idle;
         std::chrono::steady_clock::time_point m_timeoutAfter{};

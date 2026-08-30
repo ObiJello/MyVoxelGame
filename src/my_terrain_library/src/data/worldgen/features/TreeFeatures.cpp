@@ -1483,6 +1483,66 @@ void TreeFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
+    // =========================================================================
+    // NETHER HUGE FUNGI - Reference: TreeFeatures.java lines 175-179
+    // =========================================================================
+    {
+        static levelgen::HugeFungusFeature s_hugeFungusFeature;
+        // stemReplaceableBlocks - exact 59-entry list from line 175 (names of
+        // unregistered blocks simply never match; predicate is name-based).
+        auto stemReplaceableBlocks = levelgen::blockpredicates::BlockPredicate::matchesBlocks(
+            std::vector<std::string>{
+                "minecraft:oak_sapling", "minecraft:spruce_sapling", "minecraft:birch_sapling",
+                "minecraft:jungle_sapling", "minecraft:acacia_sapling", "minecraft:cherry_sapling",
+                "minecraft:dark_oak_sapling", "minecraft:pale_oak_sapling",
+                "minecraft:mangrove_propagule", "minecraft:dandelion", "minecraft:torchflower",
+                "minecraft:poppy", "minecraft:blue_orchid", "minecraft:allium",
+                "minecraft:azure_bluet", "minecraft:red_tulip", "minecraft:orange_tulip",
+                "minecraft:white_tulip", "minecraft:pink_tulip", "minecraft:oxeye_daisy",
+                "minecraft:cornflower", "minecraft:wither_rose", "minecraft:lily_of_the_valley",
+                "minecraft:brown_mushroom", "minecraft:red_mushroom", "minecraft:wheat",
+                "minecraft:sugar_cane", "minecraft:attached_pumpkin_stem",
+                "minecraft:attached_melon_stem", "minecraft:pumpkin_stem", "minecraft:melon_stem",
+                "minecraft:lily_pad", "minecraft:nether_wart", "minecraft:cocoa",
+                "minecraft:carrots", "minecraft:potatoes", "minecraft:chorus_plant",
+                "minecraft:chorus_flower", "minecraft:torchflower_crop", "minecraft:pitcher_crop",
+                "minecraft:beetroots", "minecraft:sweet_berry_bush", "minecraft:warped_fungus",
+                "minecraft:crimson_fungus", "minecraft:weeping_vines", "minecraft:weeping_vines_plant",
+                "minecraft:twisting_vines", "minecraft:twisting_vines_plant", "minecraft:cave_vines",
+                "minecraft:cave_vines_plant", "minecraft:spore_blossom", "minecraft:azalea",
+                "minecraft:flowering_azalea", "minecraft:moss_carpet", "minecraft:pink_petals",
+                "minecraft:wildflowers", "minecraft:big_dripleaf", "minecraft:big_dripleaf_stem",
+                "minecraft:small_dripleaf"
+            });
+
+        auto blockState = [](const char* name) -> BlockState* {
+            return minecraft::world::level::block::Blocks::getDefaultState(name);
+        };
+
+        auto makeFungus = [&](const char* nylium, const char* stem, const char* wart,
+                              bool planted) -> ConfiguredFeature* {
+            auto feature = std::make_unique<ConfiguredFeatureImpl<levelgen::HugeFungusConfiguration, levelgen::HugeFungusFeature>>(
+                &s_hugeFungusFeature,
+                levelgen::HugeFungusConfiguration(
+                    blockState(nylium),
+                    blockState(stem),
+                    blockState(wart),
+                    blockState("minecraft:shroomlight"),
+                    stemReplaceableBlocks,
+                    planted
+                )
+            );
+            ConfiguredFeature* raw = feature.get();
+            s_features.push_back(std::move(feature));
+            return raw;
+        };
+
+        CRIMSON_FUNGUS = makeFungus("minecraft:crimson_nylium", "minecraft:crimson_stem",
+                                    "minecraft:nether_wart_block", false);
+        WARPED_FUNGUS = makeFungus("minecraft:warped_nylium", "minecraft:warped_stem",
+                                   "minecraft:warped_wart_block", false);
+    }
+
     s_initialized = true;
 }
 

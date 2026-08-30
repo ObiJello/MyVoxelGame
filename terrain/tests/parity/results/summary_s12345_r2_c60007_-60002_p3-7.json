@@ -1,0 +1,882 @@
+{
+  "chunks_compared": 25,
+  "total_mismatches": 13173,
+  "by_class": {
+    "extra": 5551,
+    "wrong-properties": 1366,
+    "wrong-block": 1118,
+    "missing": 5138
+  },
+  "by_type": [
+    {
+      "class": "extra",
+      "type": "minecraft:dark_oak_leaves",
+      "count": 2165
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:dark_oak_leaves",
+      "count": 2154
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:oak_leaves",
+      "count": 1085
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:dark_oak_log",
+      "count": 920
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:dark_oak_log",
+      "count": 910
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:oak_leaves",
+      "count": 795
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:dark_oak_leaves",
+      "count": 735
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:leaf_litter",
+      "count": 527
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:leaf_litter",
+      "count": 483
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:leaf_litter",
+      "count": 407
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:dark_oak_leaves",
+      "count": 263
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:dark_oak_log",
+      "count": 238
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:birch_leaves",
+      "count": 190
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:red_mushroom_block",
+      "count": 180
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:pale_oak_leaves",
+      "count": 165
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:pale_oak_leaves",
+      "count": 150
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:birch_leaves",
+      "count": 149
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:grass_block",
+      "count": 118
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:dirt",
+      "count": 117
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:red_mushroom_block",
+      "count": 116
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:oak_log",
+      "count": 92
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:oak_leaves",
+      "count": 89
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:pale_oak_log",
+      "count": 84
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:oak_leaves",
+      "count": 84
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:brown_mushroom_block",
+      "count": 84
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:leaf_litter",
+      "count": 71
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:pale_oak_log",
+      "count": 70
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:oak_log",
+      "count": 63
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:pale_moss_block",
+      "count": 56
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:red_mushroom_block",
+      "count": 55
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:pale_oak_leaves",
+      "count": 50
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:pale_moss_carpet",
+      "count": 49
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:pale_hanging_moss",
+      "count": 43
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:mushroom_stem",
+      "count": 40
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:pale_hanging_moss",
+      "count": 39
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:birch_leaves",
+      "count": 37
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:brown_mushroom_block",
+      "count": 33
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:short_grass",
+      "count": 32
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:birch_leaves",
+      "count": 25
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:birch_log",
+      "count": 22
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:mushroom_stem",
+      "count": 22
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:pale_moss_carpet",
+      "count": 21
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:oak_log",
+      "count": 17
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:short_grass",
+      "count": 16
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:birch_log",
+      "count": 15
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:dirt",
+      "count": 14
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:pale_oak_leaves",
+      "count": 13
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:dirt",
+      "count": 13
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:short_grass",
+      "count": 9
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:tall_grass",
+      "count": 8
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:tall_grass",
+      "count": 7
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:mushroom_stem",
+      "count": 7
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:brown_mushroom_block",
+      "count": 6
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:pale_oak_log",
+      "count": 5
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:pale_hanging_moss",
+      "count": 4
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:pale_moss_carpet",
+      "count": 4
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:pale_moss_carpet",
+      "count": 4
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:creaking_heart",
+      "count": 1
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:red_mushroom",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:birch_log",
+      "count": 1
+    }
+  ],
+  "samples": {
+    "extra|minecraft:oak_leaves": [
+      "chunk(60005, -60004) local(15,109,12) world(960095,109,-960052) cpp=minecraft:oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60005, -60004) local(15,110,8) world(960095,110,-960056) cpp=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60005, -60004) local(15,110,12) world(960095,110,-960052) cpp=minecraft:oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60005, -60004) local(15,109,9) world(960095,109,-960055) cpp=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60005, -60004) local(15,110,9) world(960095,110,-960055) cpp=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "extra|minecraft:leaf_litter": [
+      "chunk(60005, -60004) local(15,108,8) world(960095,108,-960056) cpp=minecraft:leaf_litter[facing=north,segment_amount=4]",
+      "chunk(60005, -60004) local(14,103,15) world(960094,103,-960049) cpp=minecraft:leaf_litter[facing=east,segment_amount=3]",
+      "chunk(60005, -60004) local(15,106,10) world(960095,106,-960054) cpp=minecraft:leaf_litter[facing=east,segment_amount=1]",
+      "chunk(60005, -60003) local(14,102,6) world(960094,102,-960042) cpp=minecraft:leaf_litter[facing=west,segment_amount=1]",
+      "chunk(60005, -60003) local(14,102,7) world(960094,102,-960041) cpp=minecraft:leaf_litter[facing=east,segment_amount=3]"
+    ],
+    "wrong-properties|minecraft:dark_oak_leaves": [
+      "chunk(60005, -60004) local(14,110,15) world(960094,110,-960049) java=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(14,109,4) world(960094,109,-960044) java=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(14,110,4) world(960094,110,-960044) java=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(14,109,5) world(960094,109,-960043) java=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(14,110,1) world(960094,110,-960047) java=minecraft:dark_oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=1,persistent=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:dark_oak_leaves": [
+      "chunk(60005, -60003) local(15,108,4) world(960095,108,-960044) java=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(15,109,0) world(960095,109,-960048) java=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(15,109,4) world(960095,109,-960044) java=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(15,108,0) world(960095,108,-960048) java=minecraft:dark_oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60005, -60003) local(15,109,1) world(960095,109,-960047) java=minecraft:dark_oak_leaves[distance=1,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]"
+    ],
+    "extra|minecraft:dark_oak_leaves": [
+      "chunk(60005, -60001) local(15,102,4) world(960095,102,-960012) cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60005, -60001) local(15,103,6) world(960095,103,-960010) cpp=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60005, -60001) local(15,102,5) world(960095,102,-960011) cpp=minecraft:dark_oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60005, -60001) local(15,103,3) world(960095,103,-960013) cpp=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60005, -60001) local(15,102,6) world(960095,102,-960010) cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:pale_oak_leaves": [
+      "chunk(60006, -60004) local(13,123,0) world(960109,123,-960064) java=minecraft:pale_oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(8,123,5) world(960104,123,-960059) java=minecraft:pale_oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(6,122,1) world(960102,122,-960063) java=minecraft:pale_oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(14,123,3) world(960110,123,-960061) java=minecraft:pale_oak_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(15,124,3) world(960111,124,-960061) java=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "extra|minecraft:pale_oak_leaves": [
+      "chunk(60006, -60004) local(5,124,5) world(960101,124,-960059) cpp=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(3,124,2) world(960099,124,-960062) cpp=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(4,125,0) world(960100,125,-960064) cpp=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(5,125,3) world(960101,125,-960061) cpp=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(6,125,3) world(960102,125,-960061) cpp=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:short_grass": [
+      "chunk(60006, -60004) local(5,113,4) world(960101,113,-960060) java=minecraft:short_grass",
+      "chunk(60006, -60004) local(15,112,5) world(960111,112,-960059) java=minecraft:short_grass",
+      "chunk(60006, -60004) local(11,111,7) world(960107,111,-960057) java=minecraft:short_grass",
+      "chunk(60006, -60004) local(15,114,3) world(960111,114,-960061) java=minecraft:short_grass",
+      "chunk(60006, -60004) local(15,111,6) world(960111,111,-960058) java=minecraft:short_grass"
+    ],
+    "wrong-properties|minecraft:pale_oak_leaves": [
+      "chunk(60006, -60004) local(7,124,1) world(960103,124,-960063) java=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(12,118,2) world(960108,118,-960062) java=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(9,118,3) world(960105,118,-960061) java=minecraft:pale_oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(8,124,1) world(960104,124,-960063) java=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(7,125,3) world(960103,125,-960061) java=minecraft:pale_oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "wrong-properties|minecraft:pale_moss_carpet": [
+      "chunk(60006, -60004) local(13,110,9) world(960109,110,-960055) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=low,south=none,west=none] cpp=minecraft:pale_moss_carpet[base=true,east=none,north=low,south=none,west=none]",
+      "chunk(60006, -60004) local(12,116,1) world(960108,116,-960063) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=low,south=none,west=low] cpp=minecraft:pale_moss_carpet[base=true,east=none,north=low,south=none,west=low]",
+      "chunk(60006, -60004) local(5,108,11) world(960101,108,-960053) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=low,south=none,west=none] cpp=minecraft:pale_moss_carpet[base=true,east=none,north=low,south=none,west=none]",
+      "chunk(60006, -60004) local(13,110,10) world(960109,110,-960054) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=none,west=none] cpp=minecraft:pale_moss_carpet[base=true,east=none,north=none,south=none,west=none]",
+      "chunk(60006, -60004) local(11,111,8) world(960107,111,-960056) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=none,west=none] cpp=minecraft:pale_moss_carpet[base=true,east=none,north=none,south=none,west=none]"
+    ],
+    "missing|minecraft:pale_oak_log": [
+      "chunk(60006, -60004) local(9,122,4) world(960105,122,-960060) java=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(8,120,4) world(960104,120,-960060) java=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(7,121,4) world(960103,121,-960060) java=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(7,118,3) world(960103,118,-960061) java=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(15,118,1) world(960111,118,-960063) java=minecraft:pale_oak_log[axis=y]"
+    ],
+    "wrong-block|minecraft:pale_moss_block": [
+      "chunk(60006, -60004) local(15,111,5) world(960111,111,-960059) java=minecraft:pale_moss_block cpp=minecraft:grass_block[snowy=false]",
+      "chunk(60006, -60004) local(5,117,1) world(960101,117,-960063) java=minecraft:pale_moss_block cpp=minecraft:dirt",
+      "chunk(60006, -60004) local(14,116,0) world(960110,116,-960064) java=minecraft:pale_moss_block cpp=minecraft:grass_block[snowy=false]",
+      "chunk(60006, -60004) local(5,115,2) world(960101,115,-960062) java=minecraft:pale_moss_block cpp=minecraft:grass_block[snowy=false]",
+      "chunk(60006, -60004) local(15,113,3) world(960111,113,-960061) java=minecraft:pale_moss_block cpp=minecraft:grass_block[snowy=false]"
+    ],
+    "extra|minecraft:pale_oak_log": [
+      "chunk(60006, -60004) local(4,121,1) world(960100,121,-960063) cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(4,122,1) world(960100,122,-960063) cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(5,124,1) world(960101,124,-960063) cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(6,124,1) world(960102,124,-960063) cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(4,121,2) world(960100,121,-960062) cpp=minecraft:pale_oak_log[axis=y]"
+    ],
+    "wrong-block|minecraft:pale_oak_leaves": [
+      "chunk(60006, -60004) local(5,123,1) world(960101,123,-960063) java=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(6,123,1) world(960102,123,-960063) java=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(4,123,3) world(960100,123,-960061) java=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(5,123,2) world(960101,123,-960062) java=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_log[axis=y]",
+      "chunk(60006, -60004) local(5,122,2) world(960101,122,-960062) java=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:pale_oak_log[axis=y]"
+    ],
+    "extra|minecraft:dark_oak_log": [
+      "chunk(60006, -60004) local(15,106,15) world(960111,106,-960049) cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60004) local(14,106,15) world(960110,106,-960049) cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60004) local(15,107,15) world(960111,107,-960049) cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60004) local(14,107,15) world(960110,107,-960049) cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60004) local(14,111,14) world(960110,111,-960050) cpp=minecraft:dark_oak_log[axis=y]"
+    ],
+    "missing|minecraft:pale_hanging_moss": [
+      "chunk(60006, -60004) local(4,121,5) world(960100,121,-960059) java=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60006, -60004) local(8,121,0) world(960104,121,-960064) java=minecraft:pale_hanging_moss[tip=true]",
+      "chunk(60006, -60004) local(4,113,12) world(960100,113,-960052) java=minecraft:pale_hanging_moss[tip=true]",
+      "chunk(60006, -60004) local(8,113,13) world(960104,113,-960051) java=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60006, -60004) local(4,122,5) world(960100,122,-960059) java=minecraft:pale_hanging_moss[tip=false]"
+    ],
+    "extra|minecraft:pale_hanging_moss": [
+      "chunk(60006, -60004) local(5,112,7) world(960101,112,-960057) cpp=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60006, -60004) local(4,116,3) world(960100,116,-960061) cpp=minecraft:pale_hanging_moss[tip=true]",
+      "chunk(60006, -60004) local(7,113,13) world(960103,113,-960051) cpp=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60006, -60004) local(4,117,3) world(960100,117,-960061) cpp=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60006, -60004) local(4,113,13) world(960100,113,-960051) cpp=minecraft:pale_hanging_moss[tip=true]"
+    ],
+    "wrong-properties|minecraft:oak_leaves": [
+      "chunk(60006, -60004) local(13,109,13) world(960109,109,-960051) java=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(10,108,14) world(960106,108,-960050) java=minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(13,109,14) world(960109,109,-960050) java=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(11,108,13) world(960107,108,-960051) java=minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(12,108,13) world(960108,108,-960051) java=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:oak_leaves": [
+      "chunk(60006, -60004) local(11,111,15) world(960107,111,-960049) java=minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(9,109,15) world(960105,109,-960049) java=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(11,109,15) world(960107,109,-960049) java=minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(10,109,15) world(960106,109,-960049) java=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(11,110,15) world(960107,110,-960049) java=minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:pale_moss_carpet": [
+      "chunk(60006, -60004) local(6,116,2) world(960102,116,-960062) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=low,south=none,west=none]",
+      "chunk(60006, -60004) local(11,117,1) world(960107,117,-960063) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=tall,west=none]",
+      "chunk(60006, -60004) local(10,113,4) world(960106,113,-960060) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=low,south=tall,west=none]",
+      "chunk(60006, -60004) local(10,114,4) world(960106,114,-960060) java=minecraft:pale_moss_carpet[bottom=false,east=none,north=none,south=low,west=none]",
+      "chunk(60006, -60004) local(9,116,3) world(960105,116,-960061) java=minecraft:pale_moss_carpet[bottom=false,east=none,north=none,south=none,west=low]"
+    ],
+    "wrong-block|minecraft:grass_block": [
+      "chunk(60006, -60004) local(1,107,10) world(960097,107,-960054) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt",
+      "chunk(60006, -60004) local(14,104,15) world(960110,104,-960049) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt",
+      "chunk(60006, -60004) local(15,104,15) world(960111,104,-960049) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt",
+      "chunk(60006, -60003) local(2,102,3) world(960098,102,-960045) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt",
+      "chunk(60006, -60003) local(11,102,2) world(960107,102,-960046) java=minecraft:grass_block[snowy=false] cpp=minecraft:dirt"
+    ],
+    "missing|minecraft:tall_grass": [
+      "chunk(60006, -60004) local(14,117,0) world(960110,117,-960064) java=minecraft:tall_grass[half=lower]",
+      "chunk(60006, -60004) local(14,118,0) world(960110,118,-960064) java=minecraft:tall_grass[half=upper]",
+      "chunk(60007, -60004) local(10,111,10) world(960122,111,-960054) java=minecraft:tall_grass[half=lower]",
+      "chunk(60007, -60004) local(0,115,3) world(960112,115,-960061) java=minecraft:tall_grass[half=upper]",
+      "chunk(60007, -60004) local(0,114,3) world(960112,114,-960061) java=minecraft:tall_grass[half=lower]"
+    ],
+    "extra|minecraft:dirt": [
+      "chunk(60006, -60004) local(5,117,2) world(960101,117,-960062) cpp=minecraft:dirt",
+      "chunk(60006, -60004) local(4,117,2) world(960100,117,-960062) cpp=minecraft:dirt",
+      "chunk(60006, -60002) local(12,100,15) world(960108,100,-960017) cpp=minecraft:dirt",
+      "chunk(60006, -60001) local(15,98,10) world(960111,98,-960006) cpp=minecraft:dirt",
+      "chunk(60006, -60001) local(3,97,7) world(960099,97,-960009) cpp=minecraft:dirt"
+    ],
+    "wrong-block|minecraft:pale_oak_log": [
+      "chunk(60006, -60004) local(14,118,2) world(960110,118,-960062) java=minecraft:pale_oak_log[axis=y] cpp=minecraft:pale_oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(7,123,3) world(960103,123,-960061) java=minecraft:pale_oak_log[axis=y] cpp=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(8,123,3) world(960104,123,-960061) java=minecraft:pale_oak_log[axis=y] cpp=minecraft:pale_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(8,123,4) world(960104,123,-960060) java=minecraft:pale_oak_log[axis=y] cpp=minecraft:pale_oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60006, -60004) local(7,123,4) world(960103,123,-960060) java=minecraft:pale_oak_log[axis=y] cpp=minecraft:pale_oak_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:dirt": [
+      "chunk(60006, -60004) local(15,115,1) world(960111,115,-960063) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]",
+      "chunk(60006, -60004) local(14,115,1) world(960110,115,-960063) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]",
+      "chunk(60006, -60004) local(7,114,3) world(960103,114,-960061) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]",
+      "chunk(60006, -60004) local(8,114,3) world(960104,114,-960061) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]",
+      "chunk(60006, -60003) local(9,101,13) world(960105,101,-960035) java=minecraft:dirt cpp=minecraft:grass_block[snowy=false]"
+    ],
+    "wrong-properties|minecraft:pale_hanging_moss": [
+      "chunk(60006, -60004) local(6,113,6) world(960102,113,-960058) java=minecraft:pale_hanging_moss[tip=true] cpp=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60006, -60004) local(5,113,7) world(960101,113,-960057) java=minecraft:pale_hanging_moss[tip=true] cpp=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60006, -60004) local(9,113,10) world(960105,113,-960054) java=minecraft:pale_hanging_moss[tip=true] cpp=minecraft:pale_hanging_moss[tip=false]",
+      "chunk(60007, -60004) local(6,114,9) world(960118,114,-960055) java=minecraft:pale_hanging_moss[tip=true] cpp=minecraft:pale_hanging_moss[tip=false]"
+    ],
+    "extra|minecraft:oak_log": [
+      "chunk(60006, -60004) local(1,111,10) world(960097,111,-960054) cpp=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60004) local(1,110,10) world(960097,110,-960054) cpp=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60004) local(1,108,10) world(960097,108,-960054) cpp=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60004) local(1,109,10) world(960097,109,-960054) cpp=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60003) local(2,103,3) world(960098,103,-960045) cpp=minecraft:oak_log[axis=y]"
+    ],
+    "wrong-block|minecraft:creaking_heart": [
+      "chunk(60006, -60004) local(6,114,10) world(960102,114,-960054) java=minecraft:creaking_heart[axis=y,creaking_heart_state=dormant,natural=true] cpp=minecraft:pale_oak_log[axis=y]"
+    ],
+    "missing|minecraft:dirt": [
+      "chunk(60006, -60004) local(14,115,2) world(960110,115,-960062) java=minecraft:dirt",
+      "chunk(60006, -60004) local(15,115,2) world(960111,115,-960062) java=minecraft:dirt",
+      "chunk(60006, -60004) local(8,114,4) world(960104,114,-960060) java=minecraft:dirt",
+      "chunk(60006, -60004) local(7,114,4) world(960103,114,-960060) java=minecraft:dirt",
+      "chunk(60007, -60001) local(11,100,3) world(960123,100,-960013) java=minecraft:dirt"
+    ],
+    "wrong-block|minecraft:pale_moss_carpet": [
+      "chunk(60006, -60004) local(10,118,0) world(960106,118,-960064) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=none,west=none] cpp=minecraft:short_grass",
+      "chunk(60007, -60004) local(2,110,9) world(960114,110,-960055) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=low,south=none,west=none] cpp=minecraft:short_grass",
+      "chunk(60007, -60004) local(10,112,9) world(960122,112,-960055) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=none,west=none] cpp=minecraft:short_grass",
+      "chunk(60007, -60004) local(9,111,11) world(960121,111,-960053) java=minecraft:pale_moss_carpet[bottom=true,east=none,north=none,south=none,west=none] cpp=minecraft:tall_grass[half=lower]"
+    ],
+    "wrong-block|minecraft:short_grass": [
+      "chunk(60006, -60004) local(3,110,9) world(960099,110,-960055) java=minecraft:short_grass cpp=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(3,102,7) world(960099,102,-960041) java=minecraft:short_grass cpp=minecraft:leaf_litter[facing=west,segment_amount=2]",
+      "chunk(60006, -60003) local(0,102,5) world(960096,102,-960043) java=minecraft:short_grass cpp=minecraft:leaf_litter[facing=west,segment_amount=3]",
+      "chunk(60006, -60003) local(6,102,7) world(960102,102,-960041) java=minecraft:short_grass cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(14,104,0) world(960110,104,-960048) java=minecraft:short_grass cpp=minecraft:dirt"
+    ],
+    "wrong-properties|minecraft:birch_leaves": [
+      "chunk(60006, -60003) local(11,107,4) world(960107,107,-960044) java=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:birch_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(10,105,6) world(960106,105,-960042) java=minecraft:birch_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(10,106,4) world(960106,106,-960044) java=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:birch_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(12,105,3) world(960108,105,-960045) java=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:birch_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(13,105,3) world(960109,105,-960045) java=minecraft:birch_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:dark_oak_leaves": [
+      "chunk(60006, -60003) local(7,109,14) world(960103,109,-960034) java=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(9,109,10) world(960105,109,-960038) java=minecraft:dark_oak_leaves[distance=1,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(12,109,13) world(960108,109,-960035) java=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(10,108,9) world(960106,108,-960039) java=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(8,109,10) world(960104,109,-960038) java=minecraft:dark_oak_leaves[distance=2,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:oak_leaves": [
+      "chunk(60006, -60003) local(15,106,15) world(960111,106,-960033) java=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(14,106,15) world(960110,106,-960033) java=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(15,105,15) world(960111,105,-960033) java=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(14,105,15) world(960110,105,-960033) java=minecraft:oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(13,106,8) world(960109,106,-960024) java=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:leaf_litter": [
+      "chunk(60006, -60003) local(7,102,6) world(960103,102,-960042) java=minecraft:leaf_litter[facing=east,segment_amount=2]",
+      "chunk(60006, -60003) local(5,102,15) world(960101,102,-960033) java=minecraft:leaf_litter[facing=south,segment_amount=2]",
+      "chunk(60006, -60003) local(4,102,12) world(960100,102,-960036) java=minecraft:leaf_litter[facing=east,segment_amount=3]",
+      "chunk(60006, -60003) local(12,102,10) world(960108,102,-960038) java=minecraft:leaf_litter[facing=west,segment_amount=3]",
+      "chunk(60006, -60003) local(11,102,6) world(960107,102,-960042) java=minecraft:leaf_litter[facing=east,segment_amount=2]"
+    ],
+    "missing|minecraft:dark_oak_log": [
+      "chunk(60006, -60003) local(9,108,13) world(960105,108,-960035) java=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(10,106,12) world(960106,106,-960036) java=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(9,106,12) world(960105,106,-960036) java=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(8,108,11) world(960104,108,-960037) java=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(10,107,12) world(960106,107,-960036) java=minecraft:dark_oak_log[axis=y]"
+    ],
+    "wrong-properties|minecraft:leaf_litter": [
+      "chunk(60006, -60003) local(13,103,5) world(960109,103,-960043) java=minecraft:leaf_litter[facing=west,segment_amount=1] cpp=minecraft:leaf_litter[facing=north,segment_amount=3]",
+      "chunk(60006, -60003) local(11,102,14) world(960107,102,-960034) java=minecraft:leaf_litter[facing=south,segment_amount=3] cpp=minecraft:leaf_litter[facing=west,segment_amount=1]",
+      "chunk(60006, -60003) local(15,103,14) world(960111,103,-960034) java=minecraft:leaf_litter[facing=north,segment_amount=1] cpp=minecraft:leaf_litter[facing=north,segment_amount=3]",
+      "chunk(60006, -60003) local(7,102,15) world(960103,102,-960033) java=minecraft:leaf_litter[facing=south,segment_amount=4] cpp=minecraft:leaf_litter[facing=south,segment_amount=3]",
+      "chunk(60006, -60003) local(12,102,14) world(960108,102,-960034) java=minecraft:leaf_litter[facing=east,segment_amount=3] cpp=minecraft:leaf_litter[facing=east,segment_amount=2]"
+    ],
+    "wrong-block|minecraft:dark_oak_log": [
+      "chunk(60006, -60003) local(9,105,12) world(960105,105,-960036) java=minecraft:dark_oak_log[axis=y] cpp=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(9,104,13) world(960105,104,-960035) java=minecraft:dark_oak_log[axis=y] cpp=minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(9,105,13) world(960105,105,-960035) java=minecraft:dark_oak_log[axis=y] cpp=minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60003) local(9,102,12) world(960105,102,-960036) java=minecraft:dark_oak_log[axis=y] cpp=minecraft:leaf_litter[facing=north,segment_amount=2]",
+      "chunk(60006, -60003) local(10,105,12) world(960106,105,-960036) java=minecraft:dark_oak_log[axis=y] cpp=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:birch_leaves": [
+      "chunk(60006, -60003) local(11,105,3) world(960107,105,-960045) java=minecraft:birch_leaves[distance=4,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(11,106,3) world(960107,106,-960045) java=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60002) local(8,106,13) world(960104,106,-960019) java=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(8,106,14) world(960104,106,-960018) java=minecraft:birch_leaves[distance=1,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(9,106,14) world(960105,106,-960018) java=minecraft:birch_leaves[distance=2,persistent=false,waterlogged=false] cpp=minecraft:dark_oak_leaves[distance=2,persistent=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:leaf_litter": [
+      "chunk(60006, -60003) local(10,103,3) world(960106,103,-960045) java=minecraft:leaf_litter[facing=west,segment_amount=4] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(11,103,2) world(960107,103,-960046) java=minecraft:leaf_litter[facing=west,segment_amount=2] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(5,102,8) world(960101,102,-960040) java=minecraft:leaf_litter[facing=south,segment_amount=1] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(11,103,3) world(960107,103,-960045) java=minecraft:leaf_litter[facing=north,segment_amount=2] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60006, -60003) local(8,102,14) world(960104,102,-960034) java=minecraft:leaf_litter[facing=east,segment_amount=1] cpp=minecraft:oak_log[axis=y]"
+    ],
+    "extra|minecraft:birch_log": [
+      "chunk(60006, -60002) local(10,105,6) world(960106,105,-960026) cpp=minecraft:birch_log[axis=y]",
+      "chunk(60006, -60002) local(10,106,6) world(960106,106,-960026) cpp=minecraft:birch_log[axis=y]",
+      "chunk(60006, -60002) local(10,107,6) world(960106,107,-960026) cpp=minecraft:birch_log[axis=y]",
+      "chunk(60006, -60002) local(10,104,6) world(960106,104,-960026) cpp=minecraft:birch_log[axis=y]",
+      "chunk(60007, -60003) local(6,108,10) world(960118,108,-960038) cpp=minecraft:birch_log[axis=y]"
+    ],
+    "extra|minecraft:birch_leaves": [
+      "chunk(60006, -60002) local(11,106,4) world(960107,106,-960028) cpp=minecraft:birch_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(11,106,8) world(960107,106,-960024) cpp=minecraft:birch_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(10,106,4) world(960106,106,-960028) cpp=minecraft:birch_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(10,106,8) world(960106,106,-960024) cpp=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(12,106,4) world(960108,106,-960028) cpp=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:birch_leaves": [
+      "chunk(60006, -60002) local(7,104,12) world(960103,104,-960020) java=minecraft:birch_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(10,104,15) world(960106,104,-960017) java=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(8,104,12) world(960104,104,-960020) java=minecraft:birch_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(10,103,15) world(960106,103,-960017) java=minecraft:birch_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60006, -60002) local(9,103,15) world(960105,103,-960017) java=minecraft:birch_leaves[distance=1,persistent=false,waterlogged=false]"
+    ],
+    "missing|minecraft:birch_log": [
+      "chunk(60006, -60002) local(8,103,14) world(960104,103,-960018) java=minecraft:birch_log[axis=y]",
+      "chunk(60006, -60002) local(8,104,14) world(960104,104,-960018) java=minecraft:birch_log[axis=y]",
+      "chunk(60006, -60002) local(8,105,14) world(960104,105,-960018) java=minecraft:birch_log[axis=y]",
+      "chunk(60006, -60002) local(8,101,14) world(960104,101,-960018) java=minecraft:birch_log[axis=y]",
+      "chunk(60006, -60002) local(8,102,14) world(960104,102,-960018) java=minecraft:birch_log[axis=y]"
+    ],
+    "missing|minecraft:oak_log": [
+      "chunk(60006, -60002) local(14,104,6) world(960110,104,-960026) java=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60002) local(14,105,6) world(960110,105,-960026) java=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60002) local(14,108,6) world(960110,108,-960026) java=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60002) local(14,106,6) world(960110,106,-960026) java=minecraft:oak_log[axis=y]",
+      "chunk(60006, -60002) local(14,107,6) world(960110,107,-960026) java=minecraft:oak_log[axis=y]"
+    ],
+    "wrong-block|minecraft:oak_log": [
+      "chunk(60006, -60002) local(14,103,6) world(960110,103,-960026) java=minecraft:oak_log[axis=y] cpp=minecraft:leaf_litter[facing=south,segment_amount=1]",
+      "chunk(60007, -60002) local(0,103,1) world(960112,103,-960031) java=minecraft:oak_log[axis=y] cpp=minecraft:leaf_litter[facing=east,segment_amount=1]",
+      "chunk(60007, -60000) local(12,100,1) world(960124,100,-959999) java=minecraft:oak_log[axis=y] cpp=minecraft:leaf_litter[facing=north,segment_amount=2]",
+      "chunk(60008, -60003) local(13,110,5) world(960141,110,-960043) java=minecraft:oak_log[axis=x] cpp=minecraft:dark_oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "chunk(60008, -60003) local(14,110,4) world(960142,110,-960044) java=minecraft:oak_log[axis=x] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]"
+    ],
+    "extra|minecraft:tall_grass": [
+      "chunk(60007, -60004) local(12,118,2) world(960124,118,-960062) cpp=minecraft:tall_grass[half=lower]",
+      "chunk(60007, -60004) local(8,121,0) world(960120,121,-960064) cpp=minecraft:tall_grass[half=upper]",
+      "chunk(60007, -60004) local(12,119,2) world(960124,119,-960062) cpp=minecraft:tall_grass[half=upper]",
+      "chunk(60007, -60004) local(10,118,3) world(960122,118,-960061) cpp=minecraft:tall_grass[half=upper]",
+      "chunk(60007, -60004) local(10,117,3) world(960122,117,-960061) cpp=minecraft:tall_grass[half=lower]"
+    ],
+    "extra|minecraft:pale_moss_carpet": [
+      "chunk(60007, -60004) local(8,109,14) world(960120,109,-960050) cpp=minecraft:pale_moss_carpet[base=true,east=none,north=low,south=none,west=none]",
+      "chunk(60007, -60004) local(10,109,14) world(960122,109,-960050) cpp=minecraft:pale_moss_carpet[base=true,east=low,north=low,south=none,west=none]",
+      "chunk(60007, -60004) local(4,110,9) world(960116,110,-960055) cpp=minecraft:pale_moss_carpet[base=true,east=low,north=low,south=none,west=none]",
+      "chunk(60007, -60004) local(7,119,1) world(960119,119,-960063) cpp=minecraft:pale_moss_carpet[base=true,east=none,north=low,south=none,west=none]"
+    ],
+    "extra|minecraft:short_grass": [
+      "chunk(60007, -60004) local(4,112,5) world(960116,112,-960059) cpp=minecraft:short_grass",
+      "chunk(60007, -60004) local(1,111,5) world(960113,111,-960059) cpp=minecraft:short_grass",
+      "chunk(60007, -60004) local(3,111,6) world(960115,111,-960058) cpp=minecraft:short_grass",
+      "chunk(60007, -60004) local(14,117,1) world(960126,117,-960063) cpp=minecraft:short_grass",
+      "chunk(60007, -60004) local(6,113,6) world(960118,113,-960058) cpp=minecraft:short_grass"
+    ],
+    "extra|minecraft:red_mushroom": [
+      "chunk(60007, -60003) local(9,105,8) world(960121,105,-960040) cpp=minecraft:red_mushroom"
+    ],
+    "missing|minecraft:brown_mushroom_block": [
+      "chunk(60007, -60002) local(12,106,12) world(960124,106,-960020) java=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+      "chunk(60007, -60002) local(8,106,13) world(960120,106,-960019) java=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]",
+      "chunk(60007, -60002) local(13,106,12) world(960125,106,-960020) java=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+      "chunk(60007, -60002) local(14,106,11) world(960126,106,-960021) java=minecraft:brown_mushroom_block[down=false,east=true,north=true,south=false,up=true,west=false]",
+      "chunk(60007, -60002) local(10,106,12) world(960122,106,-960020) java=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]"
+    ],
+    "wrong-block|minecraft:brown_mushroom_block": [
+      "chunk(60007, -60002) local(14,106,15) world(960126,106,-960017) java=minecraft:brown_mushroom_block[down=false,east=true,north=false,south=true,up=true,west=false] cpp=minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "chunk(60007, -60002) local(13,106,14) world(960125,106,-960018) java=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false] cpp=minecraft:dark_oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60007, -60002) local(14,106,13) world(960126,106,-960019) java=minecraft:brown_mushroom_block[down=false,east=true,north=false,south=false,up=true,west=false] cpp=minecraft:dark_oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60007, -60002) local(13,106,15) world(960125,106,-960017) java=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false] cpp=minecraft:dark_oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "chunk(60007, -60002) local(14,106,14) world(960126,106,-960018) java=minecraft:brown_mushroom_block[down=false,east=true,north=false,south=false,up=true,west=false] cpp=minecraft:dark_oak_leaves[distance=5,persistent=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:birch_log": [
+      "chunk(60007, -60002) local(5,107,10) world(960117,107,-960022) java=minecraft:birch_log[axis=y] cpp=minecraft:oak_log[axis=x]"
+    ],
+    "missing|minecraft:mushroom_stem": [
+      "chunk(60007, -60002) local(11,104,13) world(960123,104,-960019) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60007, -60002) local(11,105,13) world(960123,105,-960019) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60007, -60002) local(11,103,13) world(960123,103,-960019) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60007, -60002) local(11,102,13) world(960123,102,-960019) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60007, -60001) local(13,96,5) world(960125,96,-960011) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]"
+    ],
+    "missing|minecraft:red_mushroom_block": [
+      "chunk(60007, -60001) local(4,101,14) world(960116,101,-960002) java=minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=false,west=true]",
+      "chunk(60007, -60001) local(8,101,15) world(960120,101,-960001) java=minecraft:red_mushroom_block[down=false,east=true,north=false,south=true,up=false,west=false]",
+      "chunk(60007, -60001) local(8,102,15) world(960120,102,-960001) java=minecraft:red_mushroom_block[down=false,east=true,north=false,south=true,up=true,west=false]",
+      "chunk(60007, -60001) local(4,100,15) world(960116,100,-960001) java=minecraft:red_mushroom_block[down=false,east=false,north=false,south=true,up=false,west=true]",
+      "chunk(60007, -60001) local(8,100,14) world(960120,100,-960002) java=minecraft:red_mushroom_block[down=false,east=true,north=false,south=false,up=false,west=false]"
+    ],
+    "wrong-block|minecraft:red_mushroom_block": [
+      "chunk(60007, -60001) local(7,103,15) world(960119,103,-960001) java=minecraft:red_mushroom_block[down=false,east=true,north=false,south=true,up=true,west=false] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60007, -60001) local(6,103,14) world(960118,103,-960002) java=minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60007, -60000) local(6,101,0) world(960118,101,-960000) java=minecraft:red_mushroom_block[down=false,east=false,north=false,south=true,up=false,west=false] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60007, -60000) local(5,102,0) world(960117,102,-960000) java=minecraft:red_mushroom_block[down=false,east=false,north=false,south=true,up=true,west=true] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60007, -60000) local(5,101,0) world(960117,101,-960000) java=minecraft:red_mushroom_block[down=false,east=false,north=false,south=true,up=false,west=true] cpp=minecraft:dark_oak_log[axis=y]"
+    ],
+    "wrong-block|minecraft:mushroom_stem": [
+      "chunk(60007, -60001) local(6,101,14) world(960118,101,-960002) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60007, -60001) local(6,102,14) world(960118,102,-960002) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true] cpp=minecraft:dark_oak_log[axis=y]",
+      "chunk(60008, -60001) local(2,101,10) world(960130,101,-960006) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true] cpp=minecraft:leaf_litter[facing=west,segment_amount=3]",
+      "chunk(60008, -60001) local(2,103,10) world(960130,103,-960006) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true] cpp=minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "chunk(60008, -60000) local(7,99,14) world(960135,99,-959986) java=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true] cpp=minecraft:birch_leaves[distance=2,persistent=false,waterlogged=false]"
+    ],
+    "extra|minecraft:red_mushroom_block": [
+      "chunk(60007, -60000) local(14,102,8) world(960126,102,-959992) cpp=minecraft:red_mushroom_block[down=false,east=false,north=false,south=true,up=false,west=true]",
+      "chunk(60007, -60000) local(14,104,6) world(960126,104,-959994) cpp=minecraft:red_mushroom_block[down=false,east=false,north=true,south=false,up=true,west=true]",
+      "chunk(60007, -60000) local(15,102,5) world(960127,102,-959995) cpp=minecraft:red_mushroom_block[down=false,east=false,north=true,south=false,up=false,west=true]",
+      "chunk(60007, -60000) local(15,102,9) world(960127,102,-959991) cpp=minecraft:red_mushroom_block[down=false,east=false,north=false,south=true,up=false,west=true]",
+      "chunk(60007, -60000) local(14,104,7) world(960126,104,-959993) cpp=minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]"
+    ],
+    "extra|minecraft:mushroom_stem": [
+      "chunk(60007, -60000) local(12,104,11) world(960124,104,-959989) cpp=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60007, -60000) local(12,105,11) world(960124,105,-959989) cpp=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60007, -60000) local(12,102,11) world(960124,102,-959989) cpp=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60007, -60000) local(12,103,11) world(960124,103,-959989) cpp=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+      "chunk(60008, -60000) local(0,100,7) world(960128,100,-959993) cpp=minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]"
+    ],
+    "extra|minecraft:brown_mushroom_block": [
+      "chunk(60007, -60000) local(15,107,13) world(960127,107,-959987) cpp=minecraft:brown_mushroom_block[down=false,east=true,north=false,south=true,up=true,west=false]",
+      "chunk(60008, -60000) local(12,104,7) world(960140,104,-959993) cpp=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+      "chunk(60008, -60000) local(9,104,8) world(960137,104,-959992) cpp=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+      "chunk(60008, -60000) local(8,104,8) world(960136,104,-959992) cpp=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]",
+      "chunk(60008, -60000) local(13,104,7) world(960141,104,-959993) cpp=minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        60008,
+        -60003
+      ],
+      "count": 1389
+    },
+    {
+      "chunk": [
+        60007,
+        -60002
+      ],
+      "count": 1243
+    },
+    {
+      "chunk": [
+        60009,
+        -60003
+      ],
+      "count": 1156
+    },
+    {
+      "chunk": [
+        60009,
+        -60002
+      ],
+      "count": 1025
+    },
+    {
+      "chunk": [
+        60008,
+        -60002
+      ],
+      "count": 896
+    },
+    {
+      "chunk": [
+        60007,
+        -60000
+      ],
+      "count": 861
+    },
+    {
+      "chunk": [
+        60007,
+        -60001
+      ],
+      "count": 752
+    },
+    {
+      "chunk": [
+        60009,
+        -60001
+      ],
+      "count": 733
+    },
+    {
+      "chunk": [
+        60006,
+        -60003
+      ],
+      "count": 731
+    },
+    {
+      "chunk": [
+        60008,
+        -60000
+      ],
+      "count": 723
+    },
+    {
+      "chunk": [
+        60008,
+        -60001
+      ],
+      "count": 708
+    },
+    {
+      "chunk": [
+        60006,
+        -60004
+      ],
+      "count": 601
+    },
+    {
+      "chunk": [
+        60006,
+        -60001
+      ],
+      "count": 594
+    },
+    {
+      "chunk": [
+        60006,
+        -60002
+      ],
+      "count": 501
+    },
+    {
+      "chunk": [
+        60007,
+        -60003
+      ],
+      "count": 431
+    },
+    {
+      "chunk": [
+        60007,
+        -60004
+      ],
+      "count": 367
+    },
+    {
+      "chunk": [
+        60009,
+        -60000
+      ],
+      "count": 246
+    },
+    {
+      "chunk": [
+        60006,
+        -60000
+      ],
+      "count": 65
+    },
+    {
+      "chunk": [
+        60008,
+        -60004
+      ],
+      "count": 55
+    },
+    {
+      "chunk": [
+        60009,
+        -60004
+      ],
+      "count": 48
+    },
+    {
+      "chunk": [
+        60005,
+        -60003
+      ],
+      "count": 23
+    },
+    {
+      "chunk": [
+        60005,
+        -60004
+      ],
+      "count": 13
+    },
+    {
+      "chunk": [
+        60005,
+        -60001
+      ],
+      "count": 12
+    }
+  ]
+}

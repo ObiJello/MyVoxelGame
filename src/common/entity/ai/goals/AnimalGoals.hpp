@@ -25,7 +25,11 @@ namespace Game {
     public:
         static constexpr double kDefaultStopDistance = 2.5;
 
-        TemptGoal(PathfinderMob* mob, double speedModifier, bool canScare);
+        // `temptItem` overrides the mob's own IsFood test — MC parameterises
+        // the goal on an item predicate, and the pig registers a SECOND tempt
+        // goal for carrot_on_a_stick (not a food). 0 keeps the food test.
+        TemptGoal(PathfinderMob* mob, double speedModifier, bool canScare,
+                  uint32_t temptItem = 0);
 
         bool CanUse() override;
         bool CanContinueToUse() override;
@@ -40,11 +44,22 @@ namespace Game {
 
         bool IsRunning() const { return m_isRunning; }
 
+    protected:
+        // MC TemptGoal.canScare is consulted per-check, and two subclasses
+        // waive it by STATE: OcelotTemptGoal for a trusting ocelot, and (when
+        // its selected-player detail lands) CatTemptGoal.
+        virtual bool CanScare() const { return m_canScare; }
+
     private:
+        // MC TemptGoal.shouldFollow — baked into the search selector so the
+        // nearest HOLDER wins, not the nearest player.
+        bool ShouldFollow(const LivingEntity& player) const;
+
         PathfinderMob* m_mob;
         LivingEntity*  m_player = nullptr;
         double m_speedModifier;
         bool   m_canScare;
+        uint32_t m_temptItem = 0;   // 0 = use the animal's IsFood
         bool   m_isRunning = false;
         int    m_calmDown = 0;
         double m_px = 0.0, m_py = 0.0, m_pz = 0.0;
@@ -73,6 +88,8 @@ namespace Game {
         Animal* m_partner = nullptr;
         double  m_speedModifier;
         int     m_loveTime = 0;
+        // MC PARTNER_TARGETING: forNonCombat().range(8).ignoreLineOfSight().
+        TargetingConditions m_partnerConditions;
     };
 
     // MC FollowParentGoal. Registers NO flags on purpose — a following baby can

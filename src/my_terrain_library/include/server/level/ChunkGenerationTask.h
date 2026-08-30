@@ -10,6 +10,7 @@
 #include <vector>
 #include <atomic>
 #include <memory>
+#include <string>
 
 // Reference: net/minecraft/server/level/ChunkGenerationTask.java
 
@@ -56,6 +57,8 @@ public:
      * @return A future to wait on, or nullptr if done
      */
     FutureType runUntilWait();
+    // Drop every generation ref this task holds (normally done by runUntilWait on completion).
+    void releaseClaim();
 
     /**
      * Mark this task for cancellation
@@ -73,6 +76,18 @@ public:
      * Get the target status
      */
     const world::chunk::status::ChunkStatus& getTargetStatus() const { return m_targetStatus; }
+    std::string debugString() const {
+        std::string s = "runs=" + std::to_string(m_runs.load()) + " target=" + m_targetStatus.getName();
+        s += " scheduled=" + (m_scheduledStatus ? m_scheduledStatus->getName() : std::string("none"));
+        s += " layer=" + std::to_string(m_scheduledLayer.size());
+        if (!m_scheduledLayerInfo.empty()) {
+            world::ChunkPos w(m_scheduledLayerInfo.back().first);
+            s += " waitsOn=" + w.toString() + "@" + std::to_string(m_scheduledLayerInfo.back().second);
+        }
+        if (!m_scheduledLayer.empty()) s += m_scheduledLayer.back()->isDone() ? "(done)" : "(waiting)";
+        s += m_markedForCancellation.load() ? " cancelled" : "";
+        return s;
+    }
 
     /**
      * Get the chunk position
@@ -101,7 +116,6 @@ private:
      * Release the claim on chunk holders
      * Reference: ChunkGenerationTask.java lines 75-82
      */
-    void releaseClaim();
 
     /**
      * Check if the chunk can be loaded without generation
@@ -141,8 +155,26 @@ private:
     world::ChunkPos m_pos;
     const world::chunk::status::ChunkStatus* m_scheduledStatus{nullptr};
     const world::chunk::status::ChunkStatus& m_targetStatus;
+    std::atomic<int> m_runs{0};   // diagnostics: how often runUntilWait ran
+public:
+    void noteRun() { m_runs.fetch_add(1, std::memory_order_relaxed); }
+    int runs() const { return m_runs.load(); }
+private:
     std::atomic<bool> m_markedForCancellation{false};
+    // Set by the first runUntilWait (started) and by a cancellation of a task
+    // that never started; whoever flips it first owns releaseClaim.
+    std::atomic<bool> m_started{false};
+    std::atomic<bool> m_claimReleased{false};
     std::vector<FutureType> m_scheduledLayer;
+    // Parallel to m_scheduledLayer: which (chunk key, status index) each
+    // pending future belongs to — diagnostics for stuck-task chains.
+    std::vector<std::pair<int64_t, int>> m_scheduledLayerInfo;
+public:
+    // Key/status the task is currently blocked on (last pending layer future), or {0,-1}.
+    std::pair<int64_t, int> waitingOn() const {
+        return m_scheduledLayerInfo.empty() ? std::make_pair(int64_t(0), -1) : m_scheduledLayerInfo.back();
+    }
+private:
     util::StaticCache2D<GenerationChunkHolder*> m_cache;
     bool m_needsGeneration{false};
 };

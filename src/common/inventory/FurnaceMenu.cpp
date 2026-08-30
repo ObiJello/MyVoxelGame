@@ -31,6 +31,13 @@ namespace Game {
         return m_furnace ? m_furnace->TakeStoredExperience() : 0.0f;
     }
 
+    void FurnaceResultSlot::OnTake(const ItemStack& /*taken*/,
+                                   ContainerClickResult& result) {
+        if (m_furnace) {
+            result.xpBanked += m_furnace->TakeStoredExperience();
+        }
+    }
+
     FurnaceMenu::FurnaceMenu(Inventory* playerInventory, FurnaceBlockEntity* furnace)
         : AbstractContainerMenu(playerInventory),
           m_kind(furnace ? furnace->Kind() : CookingKind::Smelting),

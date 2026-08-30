@@ -30,6 +30,21 @@ namespace Server {
     } // namespace
 
     // ── Spawning ───────────────────────────────────────────────────────────
+    int32_t ItemEntityManager::Adopt(Game::ItemEntity entity) {
+        if (entity.stack.IsEmpty()) return 0;
+
+        // A fresh session handle — ids are per-session and the saved one is
+        // meaningless here. The UUID is the identity that carries over, so it
+        // is minted only if the save did not supply one.
+        entity.id = m_nextId++;
+        if (Game::UuidIsNil(entity.uuid)) entity.uuid = Game::RandomUuid();
+        entity.needsSync = true;
+
+        const int32_t id = entity.id;
+        m_entities.emplace(id, std::move(entity));
+        return id;
+    }
+
 
     int32_t ItemEntityManager::Spawn(const glm::dvec3& pos, const glm::dvec3& vel,
                                      const Game::ItemStack& stack, int pickupDelay) {
@@ -45,6 +60,9 @@ namespace Server {
 
         Game::ItemEntity e;
         e.id          = m_nextId++;
+        // Persistent identity, minted where the session handle is assigned —
+        // the same lifecycle rule the mobs use.
+        e.uuid = Game::RandomUuid();
         e.stack       = stack;
         e.pos         = pos;
         e.vel         = vel;
@@ -74,6 +92,22 @@ namespace Server {
         // Velocity from MC's ItemEntity 5-arg constructor: a small horizontal
         // drift plus a fixed upward hop, which is what makes broken blocks pop
         // rather than dribble.
+        const glm::dvec3 vel{
+            m_random.NextDouble() * 0.2 - 0.1,
+            0.2,
+            m_random.NextDouble() * 0.2 - 0.1
+        };
+
+        Spawn(pos, vel, stack, Game::ItemEntity::kDefaultPickupDelay);
+    }
+
+    void ItemEntityManager::SpawnAtLocation(const glm::dvec3& pos,
+                                           const Game::ItemStack& stack) {
+        if (stack.IsEmpty()) return;
+
+        // MC Entity.spawnAtLocation(level, stack) -> new ItemEntity(level,
+        // getX(), getY(), getZ(), stack): the exact position, then the same
+        // 5-arg-constructor hop PopResource uses.
         const glm::dvec3 vel{
             m_random.NextDouble() * 0.2 - 0.1,
             0.2,
@@ -160,6 +194,23 @@ namespace Server {
 
     // ── Merging ────────────────────────────────────────────────────────────
 
+    namespace {
+        inline uint64_t MergeChunkKey(int cx, int cz) {
+            return (static_cast<uint64_t>(static_cast<uint32_t>(cx)) << 32) |
+                    static_cast<uint64_t>(static_cast<uint32_t>(cz));
+        }
+    }
+
+    void ItemEntityManager::RebuildMergeIndex() {
+        // Clear buckets in place so their capacity survives the tick.
+        for (auto& [key, bucket] : m_mergeIndex) bucket.clear();
+        for (auto& [id, e] : m_entities) {
+            if (e.stack.IsEmpty()) continue;
+            const Game::Math::ChunkPos cp = ChunkOf(e.pos);
+            m_mergeIndex[MergeChunkKey(cp.x, cp.z)].push_back(&e);
+        }
+    }
+
     int32_t ItemEntityManager::TryMergeWithNeighbours(Game::ItemEntity& entity) {
         if (!entity.IsMergable()) return 0;
 
@@ -174,7 +225,22 @@ namespace Server {
         const double minZ = box.min.z - Game::ItemEntity::kMergeInflateXZ;
         const double maxZ = box.max.z + Game::ItemEntity::kMergeInflateXZ;
 
-        for (auto& [otherId, other] : m_entities) {
+        // Only the chunks the (already inflated) search box actually spans —
+        // at most 2x2. The identical AABB tests below still decide every
+        // candidate, so this narrows WHO is examined, not WHAT qualifies.
+        const int minCX = static_cast<int>(std::floor(minX)) >> 4;
+        const int maxCX = static_cast<int>(std::floor(maxX)) >> 4;
+        const int minCZ = static_cast<int>(std::floor(minZ)) >> 4;
+        const int maxCZ = static_cast<int>(std::floor(maxZ)) >> 4;
+
+        for (int cx = minCX; cx <= maxCX; ++cx) {
+        for (int cz = minCZ; cz <= maxCZ; ++cz) {
+            const auto bucketIt = m_mergeIndex.find(MergeChunkKey(cx, cz));
+            if (bucketIt == m_mergeIndex.end()) continue;
+
+            for (Game::ItemEntity* otherPtr : bucketIt->second) {
+            Game::ItemEntity& other = *otherPtr;
+            const int32_t otherId = other.id;
             if (otherId == entity.id) continue;
             if (!other.IsMergable()) continue;
 
@@ -201,6 +267,8 @@ namespace Server {
             src->stack.Clear();
 
             return src->id;
+            }
+        }
         }
         return 0;
     }
@@ -223,7 +291,7 @@ namespace Server {
             const Game::Math::ChunkPos cp = ChunkOf(e.pos);
             if (!ctx.IsChunkLoaded(cp.x, cp.z)) continue;
 
-            if (!e.Tick(ctx)) {
+            if (!e.Tick(ctx, m_random)) {
                 e.stack.Clear();          // marks it for the sweep below
             }
         }
@@ -231,6 +299,7 @@ namespace Server {
         // 2. Merge. Only entities due on their cadence scan, and a merged-away
         // entity is emptied rather than erased so we never mutate the map while
         // iterating it.
+        RebuildMergeIndex();
         for (auto& [id, e] : m_entities) {
             if (e.stack.IsEmpty()) continue;
             const int interval = (e.vel.x != 0.0 || e.vel.z != 0.0)

@@ -1,5 +1,6 @@
 // File: src/server/world/storage/NBTParser.cpp
 #include "NBTParser.hpp"
+#include "common/nbt/ModifiedUtf8.hpp"
 #include "common/core/Log.hpp"
 #include <iomanip>
 #include <sstream>
@@ -583,11 +584,10 @@ namespace World {
     }
 
     std::string NBTParser::ReadStringBE(const std::vector<uint8_t>& data, size_t& offset) {
-        int16_t length = ReadInt16BE(data, offset);
-        if (length < 0) {
-            throw std::runtime_error("Invalid string length: " + std::to_string(length) +
-                                   " at offset " + std::to_string(offset - 2));
-        }
+        // UNSIGNED. Java writeUTF emits a u16 byte count, so a string between
+        // 32768 and 65535 bytes is perfectly legal; reading it as int16_t made
+        // it negative and threw "Invalid string length" on a valid file.
+        const uint16_t length = static_cast<uint16_t>(ReadInt16BE(data, offset));
 
         if (offset + length > data.size()) {
             throw std::runtime_error("Not enough data to read string of length " + std::to_string(length) +
@@ -596,7 +596,17 @@ namespace World {
                                    std::to_string(data.size() - offset) + ")");
         }
 
-        std::string result(reinterpret_cast<const char*>(&data[offset]), length);
+        // The bytes are Java modified UTF-8, not UTF-8 — U+0000 arrives as
+        // C0 80 and anything above the BMP as a surrogate pair of three-byte
+        // sequences. Copying them raw round-trips ASCII fine and mangles
+        // everything else, which is how an emoji on a sign survives a load
+        // and then gets written back double-encoded.
+        std::string result;
+        if (!Game::Nbt::DecodeModifiedUtf8(&data[offset], length, result)) {
+            // Malformed rather than fatal: fall back to the raw bytes so one
+            // bad string cannot take down a whole chunk or level.dat.
+            result.assign(reinterpret_cast<const char*>(&data[offset]), length);
+        }
         offset += length;
         return result;
     }

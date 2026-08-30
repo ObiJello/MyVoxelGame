@@ -1,7 +1,11 @@
 #include "levelgen/ChunkGenerator.h"
-#include "levelgen/WorldGenLevel.h"
+#include "levelgen/WorldGenTweaks.h"
 #include "util/TerrainProfiling.h"
+#include "world/biome/FixedBiomeSource.h"
+#include "levelgen/WorldGenLevel.h"
 #include <mutex>
+#include <set>
+#include <string>
 #include "levelgen/FeatureSorter.h"
 #include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/feature/Feature.h"
@@ -18,6 +22,7 @@
 #include "levelgen/FluidPicker.h"
 #include "levelgen/Aquifer.h"
 #include "levelgen/carver/CaveWorldCarver.h"
+#include "levelgen/carver/NetherWorldCarver.h"
 #include "levelgen/carver/CanyonWorldCarver.h"
 #include "levelgen/carver/CarvingContext.h"
 #include "levelgen/carver/ConfiguredWorldCarver.h"
@@ -29,6 +34,8 @@
 #include "random/RandomSupport.h"
 #include "random/LegacyRandomSource.h"
 #include "math/Mth.h"
+#include "levelgen/structure/StructureSet.h"
+#include "levelgen/structure/StructurePieceBehavior.h"
 
 // Reference: net/minecraft/world/level/chunk/ChunkGenerator.java
 
@@ -105,6 +112,7 @@ void ChunkGenerator::applyBiomeDecoration(
     // Java iterates each section's stored biome palette values, then retains only
     // biomes present in biomeSource.possibleBiomes().
     std::set<const world::biome::Biome*> possibleBiomes;
+    std::set<const world::biome::Biome*> candidateBiomes;
     world::biome::BiomeSource* biomeSource = nullptr;
     if (auto* noiseBasedGenerator = dynamic_cast<NoiseBasedChunkGenerator*>(this)) {
         biomeSource = noiseBasedGenerator->getBiomeSource();
@@ -117,15 +125,14 @@ void ChunkGenerator::applyBiomeDecoration(
             if (neighborChunk) {
                 for (int32_t sectionIndex = 0; sectionIndex < neighborChunk->getSectionsCount(); ++sectionIndex) {
                     const world::LevelChunkSection& section = neighborChunk->getSection(sectionIndex);
+                    // Dedupe by pointer FIRST: the name lookup ran once per
+                    // biome entry of every section of the 3x3 (measured
+                    // 2026-08-30 as most of the string work in decoration).
                     for (const world::biome::Biome* biome : section.getBiomes()) {
                         if (biome == nullptr) {
                             continue;
                         }
-                        if (biomeSource &&
-                            sourcePossibleBiomes.find(biome->getName()) == sourcePossibleBiomes.end()) {
-                            continue;
-                        }
-                        possibleBiomes.insert(biome);
+                        candidateBiomes.insert(biome);
                     }
                 }
             }
@@ -133,13 +140,145 @@ void ChunkGenerator::applyBiomeDecoration(
     }
 
     // Get number of generation steps
+    for (const world::biome::Biome* biome : candidateBiomes) {
+        if (biomeSource &&
+            sourcePossibleBiomes.find(biome->getName()) == sourcePossibleBiomes.end()) {
+            continue;
+        }
+        possibleBiomes.insert(biome);
+    }
     int32_t featureStepCount = static_cast<int32_t>(featuresPerStep.size());
     int32_t generationSteps = std::max(GenerationStep::DECORATION_COUNT, featureStepCount);
+
+    // Structures grouped by GenerationStep ordinal, registry (alphabetical id)
+    // order within each step. Reference: structuresRegistry.stream().collect(
+    // Collectors.groupingBy(s -> s.step().ordinal())) - groupingBy preserves
+    // encounter order.
+    static const std::vector<std::vector<const structure::StructureInfo*>>& s_structuresByStep =
+        []() -> const std::vector<std::vector<const structure::StructureInfo*>>& {
+            static std::vector<std::vector<const structure::StructureInfo*>> byStep(
+                static_cast<size_t>(GenerationStep::DECORATION_COUNT));
+            for (const structure::StructureInfo* info : structure::StructureSets::allStructures()) {
+                for (int32_t ord = 0; ord < GenerationStep::DECORATION_COUNT; ++ord) {
+                    if (GenerationStep::getName(static_cast<GenerationStep::Decoration>(ord))
+                        == info->step) {
+                        byStep[static_cast<size_t>(ord)].push_back(info);
+                        break;
+                    }
+                }
+            }
+            return byStep;
+        }();
+
+    // Writable area for structure placement.
+    // Reference: getWritableArea(chunk) - y in [minY+1, maxY].
+    structure::BoundingBox writableArea(
+        centerPos.getMinBlockX(), level->getMinY() + 1, centerPos.getMinBlockZ(),
+        centerPos.getMinBlockX() + 15, level->getMaxY(), centerPos.getMinBlockZ() + 15);
 
     // Iterate through all generation steps
     // Reference: for(int stepIndex = 0; stepIndex < generationSteps; ++stepIndex)
     for (int32_t stepIndex = 0; stepIndex < generationSteps; ++stepIndex) {
+        // Structure pass BEFORE features within each step.
+        // Reference: ChunkGenerator.java:299-322 - index counter restarts per
+        // step; setFeatureSeed per STRUCTURE (even when it has no starts here).
+        if (m_generateStructures && stepIndex < GenerationStep::DECORATION_COUNT) {
+            // Structure pieces are shared by every chunk the structure spans
+            // and their placement mutates piece state, so when decoration runs
+            // on several pool threads (ChunkStatusTasks::generateFeatures) the
+            // structure part must still be serialised — this is the one lock
+            // vanilla's single worldgen lane provided implicitly. Ordinary
+            // features (trees, ores, patches) below stay parallel.
+            static std::mutex s_structurePlacementMutex;
+            std::lock_guard<std::mutex> structureLock(s_structurePlacementMutex);
+            int32_t index = 0;
+            for (const structure::StructureInfo* info :
+                 s_structuresByStep[static_cast<size_t>(stepIndex)]) {
+                random.setFeatureSeed(decorationSeed, index, stepIndex);
+                // Reference: structureManager.startsForStructure(sectionPos,
+                // structure) - center chunk's refs -> starts in ref chunks,
+                // iterated in Java's LongOpenHashSet order (starts share the
+                // per-structure random; order is draw-stream-load-bearing).
+                for (int64_t ref : structure::fastutilLongSetOrder(
+                         chunk->getReferencesForStructure(info->name))) {
+                    ::world::ChunkPos refPos = ::world::ChunkPos::fromLong(ref);
+                    ::world::IChunk* refChunk = level->getChunk(refPos.x(), refPos.z());
+                    if (refChunk == nullptr) continue;
+                    structure::StructureStartData* start =
+                        refChunk->getMutableStartForStructure(info->name);
+                    if (start == nullptr || !start->isValid()) continue;
+                    // Reference: StructureStart.placeInChunk().
+                    const structure::BoundingBox& firstBox = start->pieces[0].boundingBox;
+                    core::BlockPos referencePos(firstBox.centerX(), firstBox.minY,
+                                                firstBox.centerZ());
+                    // Worker-task exceptions never complete the chunk future
+                    // (pipeline hang with idle workers), so the exception must
+                    // not be allowed to escape this loop. It is caught and the
+                    // structure SKIPPED rather than aborting the process.
+                    //
+                    // This used to std::abort(). That is the right call for a
+                    // complete implementation — Java crashes here too — but
+                    // this is a port, and the data is vanilla's: the first time
+                    // a player walks into content using a processor, predicate
+                    // or piece type that is not implemented yet, an abort takes
+                    // the whole game down with them. A bastion that fails to
+                    // place is a missing bastion; an abort is a lost session.
+                    //
+                    // Catching HERE rather than not catching at all is what
+                    // keeps the original concern satisfied: the loop finishes
+                    // normally, so the chunk future still completes and the
+                    // pipeline never stalls.
+                    try {
+                        for (size_t pieceIndex = 0; pieceIndex < start->pieces.size(); ++pieceIndex) {
+                            structure::StructurePieceData& piece = start->pieces[pieceIndex];
+                            if (!piece.boundingBox.intersects(writableArea)) continue;
+                            if (pieceIndex < start->behaviors.size() && start->behaviors[pieceIndex]) {
+                                start->behaviors[pieceIndex]->postProcess(
+                                    level, this, random, writableArea, centerPos,
+                                    referencePos, piece);
+                            }
+                        }
+                        // Reference: this.structure.afterPlace(...) - null
+                        // means Java's default no-op.
+                        if (start->afterPlace) {
+                            start->afterPlace(level, this, random, writableArea,
+                                              centerPos, *start);
+                        }
+                    } catch (const std::exception& e) {
+                        // Once per (structure, reason), not once per chunk —
+                        // an unimplemented feature repeats for every chunk the
+                        // structure touches, and a wall of identical lines
+                        // buries whatever else went wrong that session.
+                        static std::mutex s_reportedMutex;
+                        static std::set<std::string> s_reported;
+                        const std::string key = info->name + '|' + e.what();
+                        bool first = false;
+                        {
+                            std::lock_guard<std::mutex> lock(s_reportedMutex);
+                            first = s_reported.insert(key).second;
+                        }
+                        if (first) {
+                            std::cerr << "[structures] SKIPPED " << info->name
+                                      << " near chunk (" << centerPos.x() << ", "
+                                      << centerPos.z() << "): " << e.what()
+                                      << " -- further occurrences suppressed"
+                                      << std::endl;
+                        }
+                    }
+                }
+                ++index;
+            }
+        }
+
         if (stepIndex >= featureStepCount) {
+            continue;
+        }
+
+        // World Properties: per-step feature toggle (non-vanilla; the
+        // structure pass above already ran, mirroring the separate
+        // structures option).
+        if (stepIndex < static_cast<int32_t>(WorldGenTweaks::get().featureStepEnabled.size())
+            && !WorldGenTweaks::get().featureStepEnabled[static_cast<size_t>(stepIndex)]) {
             continue;
         }
 
@@ -152,8 +291,14 @@ void ChunkGenerator::applyBiomeDecoration(
 
         for (const world::biome::Biome* biome : possibleBiomes) {
             if (!biome) continue;
-            const auto& featuresInBiomeThisStep =
-                data::worldgen::BiomeFeatureRegistry::getFeaturesForStep(biome->getName(), stepIndex);
+            // Reference: generationSettingsGetter.apply(biome).features() -
+            // per-generator override (flat worlds) falls back to the registry.
+            static const std::vector<const placement::PlacedFeature*> s_noFeatures;
+            const auto* adjusted = featuresForBiomeOverride(biome->getName());
+            const auto& featuresInBiomeThisStep = adjusted
+                ? (stepIndex < static_cast<int32_t>(adjusted->size())
+                       ? (*adjusted)[stepIndex] : s_noFeatures)
+                : data::worldgen::BiomeFeatureRegistry::getFeaturesForStep(biome->getName(), stepIndex);
             for (const placement::PlacedFeature* feature : featuresInBiomeThisStep) {
                 int idx = stepFeatureData.getIndex(const_cast<placement::PlacedFeature*>(feature));
                 if (idx >= 0) {
@@ -228,6 +373,13 @@ void ChunkGenerator::applyBiomeDecoration(
     }
 }
 
+bool ChunkGenerator::hasFeatureInBiome(const std::string& biomeKey,
+                                       const placement::PlacedFeature* feature) const {
+    // Reference: getBiomeGenerationSettings(biome).hasFeature(feature) - the
+    // registry holds the vanilla per-biome lists; flat worlds override this.
+    return data::worldgen::BiomeFeatureRegistry::hasFeature(biomeKey, feature);
+}
+
 void ChunkGenerator::getWritableArea(
     const ::world::IChunk* chunk,
     int32_t& minX, int32_t& minY, int32_t& minZ,
@@ -246,6 +398,40 @@ void ChunkGenerator::getWritableArea(
 //=============================================================================
 // NoiseBasedChunkGenerator
 //=============================================================================
+
+const std::vector<StepFeatureData>* NoiseBasedChunkGenerator::customFeaturesPerStep() {
+    // Reference: ChunkGenerator.featuresPerStep - built from THIS generator's
+    // biomeSource.possibleBiomes(). Only single-biome (FixedBiomeSource)
+    // worlds need a per-generator build; dimension-wide sources keep the
+    // parity-proven static builds in the callers (nullptr).
+    auto* fixed = dynamic_cast<world::biome::FixedBiomeSource*>(m_biomeSource);
+    if (!fixed) return nullptr;
+    if (!m_singleBiomeFeaturesBuilt) {
+        std::vector<std::string> keys{fixed->biome()};
+        m_singleBiomeFeaturesPerStep = FeatureSorter::buildFeaturesPerStep<std::string>(
+            keys,
+            [this](const std::string& biomeKey) -> std::vector<std::vector<placement::PlacedFeature*>> {
+                const auto* adjusted = featuresForBiomeOverride(biomeKey);
+                const auto& features = adjusted
+                    ? *adjusted
+                    : data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
+                std::vector<std::vector<placement::PlacedFeature*>> result;
+                result.reserve(features.size());
+                for (const auto& stepFeatures : features) {
+                    std::vector<placement::PlacedFeature*> step;
+                    step.reserve(stepFeatures.size());
+                    for (const auto* f : stepFeatures) {
+                        step.push_back(const_cast<placement::PlacedFeature*>(f));
+                    }
+                    result.push_back(std::move(step));
+                }
+                return result;
+            },
+            true);
+        m_singleBiomeFeaturesBuilt = true;
+    }
+    return &m_singleBiomeFeaturesPerStep;
+}
 
 NoiseBasedChunkGenerator::NoiseBasedChunkGenerator(
     NoiseGeneratorSettings* settings,
@@ -298,6 +484,24 @@ NoiseBasedChunkGenerator::NoiseBasedChunkGenerator(
     , m_settings(nullptr)
     , m_biomeSource(nullptr)
 {}
+
+namespace {
+
+// Reference: NoiseBasedChunkGenerator.createNoiseChunk passes
+// Beardifier.forStructuresInChunk(structureManager, chunk.getPos()). The C++
+// per-chunk Beardifier is built by the chunk-status tasks (where the
+// dependency grid lives) and stored on the ProtoChunk; chunks without one
+// (structures off, or no adapted structure nearby) fall back to EMPTY.
+Beardifier* beardifierForChunk(::world::IChunk* chunk, Beardifier* generatorFallback) {
+    if (auto* proto = dynamic_cast<minecraft::world::ProtoChunk*>(chunk)) {
+        if (proto->structureBeardifier() != nullptr) {
+            return proto->structureBeardifier();
+        }
+    }
+    return generatorFallback != nullptr ? generatorFallback : Beardifier::EMPTY();
+}
+
+} // namespace
 
 NoiseBasedChunkGenerator::NoiseBasedChunkGenerator(
     int32_t seaLevel,
@@ -368,7 +572,7 @@ void NoiseBasedChunkGenerator::doFill(
             return NoiseChunk::forChunk(
                 c,
                 *randomState,
-                m_beardifier ? m_beardifier : Beardifier::EMPTY(),
+                beardifierForChunk(c, m_beardifier),
                 settingsRef,
                 m_fluidPicker,
                 Blender::empty()
@@ -520,6 +724,9 @@ void NoiseBasedChunkGenerator::applyCarvers(
     ::world::IChunk* chunk,
     GenerationStep::Decoration step
 ) {
+    // World Properties: caves/canyons toggle (non-vanilla; default true).
+    if (!WorldGenTweaks::get().carversEnabled) return;
+
     // Reference: NoiseBasedChunkGenerator.java applyCarvers() lines 198-231
 
     // Cast to ProtoChunk to access carving mask
@@ -542,7 +749,7 @@ void NoiseBasedChunkGenerator::applyCarvers(
         return NoiseChunk::forChunk(
             c,
             *randomState,
-            m_beardifier ? m_beardifier : Beardifier::EMPTY(),
+            beardifierForChunk(c, m_beardifier),
             settingsRef,
             m_fluidPicker,
             Blender::empty()
@@ -552,9 +759,15 @@ void NoiseBasedChunkGenerator::applyCarvers(
 
     // Create carving context with proper arguments
     // Note: surfaceRule is needed for topMaterial() when carvers carve grass_block
+    // CRITICAL: Java WorldGenerationContext = (max(level minY, generator minY),
+    // min(level height, generator getGenDepth = noiseSettings height)).
+    // In the nether the dimension is 256 tall but noise settings height is 128 —
+    // this clamps the carve ceiling (belowTop anchors, maxY-7) to y<=120.
+    int32_t ctxMinY = std::max(chunk->getMinBuildHeight(), m_minY);
+    int32_t ctxHeight = std::min(chunk->getMaxBuildHeight() - chunk->getMinBuildHeight(), m_height);
     carver::CarvingContext carvingContext(
-        chunk->getMinBuildHeight(),
-        chunk->getMaxBuildHeight() - chunk->getMinBuildHeight(),
+        ctxMinY,
+        ctxHeight,
         noiseChunk,
         randomState,
         m_surfaceRules
@@ -581,7 +794,74 @@ void NoiseBasedChunkGenerator::applyCarvers(
             // Reference: line 214 - biome.value().getGenerationSettings().getCarvers(step)
             // Reference: Carvers.java - CAVE, CAVE_EXTRA_UNDERGROUND, CANYON
             const world::biome::BiomeGenerationSettings* genSettings = nullptr;
-            if (sourceBiome) {
+            bool isNetherDimension = m_settings != nullptr
+                && m_settings->defaultBlock() != nullptr
+                && m_settings->defaultBlock()->getIdentifier() == "minecraft:netherrack";
+            if (const char* dbg = getenv("CARVER_DEBUG")) {
+                (void)dbg;
+                static std::once_flag dbgOnce;
+                std::call_once(dbgOnce, [&] {
+                    fprintf(stderr, "[carver-debug] settings=%p defaultBlock=%s isNether=%d sourceBiome=%d\n",
+                            (void*)m_settings,
+                            (m_settings && m_settings->defaultBlock()) ? m_settings->defaultBlock()->getIdentifier().c_str() : "<null>",
+                            (int)isNetherDimension, (int)(bool)sourceBiome);
+                });
+            }
+            if (sourceBiome && isNetherDimension) {
+                // All 5 nether biomes carry exactly minecraft:nether_cave.
+                // Reference: Carvers.java NETHER_CAVE - probability 0.2,
+                // UniformHeight(absolute(0), belowTop(1)), yScale const 0.5,
+                // lavaLevel aboveBottom(10), #nether_carver_replaceables,
+                // h/v mult const 1.0, floorLevel const -0.7.
+                static world::biome::BiomeGenerationSettings netherSettings;
+                static std::once_flag netherCarverInitOnce;
+                std::call_once(netherCarverInitOnce, [&] {
+                    // BlockTags.NETHER_CARVER_REPLACEABLES resolved from
+                    // data/minecraft/tags/block/nether_carver_replaceables.json
+                    static std::set<std::string> netherReplaceable = {
+                        // #base_stone_overworld
+                        "minecraft:stone", "minecraft:granite", "minecraft:diorite",
+                        "minecraft:andesite", "minecraft:tuff", "minecraft:deepslate",
+                        // #base_stone_nether
+                        "minecraft:netherrack", "minecraft:basalt", "minecraft:blackstone",
+                        // #dirt
+                        "minecraft:dirt", "minecraft:grass_block", "minecraft:podzol",
+                        "minecraft:coarse_dirt", "minecraft:mycelium", "minecraft:rooted_dirt",
+                        "minecraft:moss_block", "minecraft:pale_moss_block", "minecraft:mud",
+                        "minecraft:muddy_mangrove_roots",
+                        // #nylium
+                        "minecraft:crimson_nylium", "minecraft:warped_nylium",
+                        // #wart_blocks
+                        "minecraft:nether_wart_block", "minecraft:warped_wart_block",
+                        // direct entries
+                        "minecraft:soul_sand", "minecraft:soul_soil"
+                    };
+                    static carver::UniformHeight netherCaveHeight(
+                        VerticalAnchor::absolute(0),
+                        VerticalAnchor::belowTop(1)
+                    );
+                    static carver::ConstantFloat netherYScale(0.5f);
+                    static carver::ConstantFloat netherHorizontalMult(1.0f);
+                    static carver::ConstantFloat netherVerticalMult(1.0f);
+                    static carver::ConstantFloat netherFloorLevel(-0.7f);
+                    static carver::CaveCarverConfiguration netherCaveConfig(
+                        0.2f,
+                        &netherCaveHeight,
+                        &netherYScale,
+                        VerticalAnchor::aboveBottom(10),
+                        carver::CarverDebugSettings(),
+                        netherReplaceable,
+                        &netherHorizontalMult,
+                        &netherVerticalMult,
+                        &netherFloorLevel
+                    );
+                    static carver::NetherWorldCarver netherCarver;
+                    static carver::ConfiguredCaveCarver configuredNetherCarver(
+                        &netherCarver, netherCaveConfig);
+                    netherSettings.addCarver(&configuredNetherCarver);
+                });
+                genSettings = &netherSettings;
+            } else if (sourceBiome) {
                 // Configure all 3 default overworld carvers to match Java exactly.
                 // call_once: the old non-atomic bool guard raced when worker
                 // threads reached CARVERS for two chunks simultaneously.
@@ -788,7 +1068,7 @@ void NoiseBasedChunkGenerator::buildSurface(
                 return NoiseChunk::forChunk(
                     c,
                     *randomState,
-                    m_beardifier ? m_beardifier : Beardifier::EMPTY(),
+                    beardifierForChunk(c, m_beardifier),
                     settingsRef,
                     m_fluidPicker,
                     Blender::empty()
@@ -801,7 +1081,7 @@ void NoiseBasedChunkGenerator::buildSurface(
             noiseChunk = NoiseChunk::forChunk(
                 chunk,
                 *randomState,
-                m_beardifier ? m_beardifier : Beardifier::EMPTY(),
+                beardifierForChunk(chunk, m_beardifier),
                 settingsRef,
                 m_fluidPicker,
                 Blender::empty()
@@ -844,6 +1124,7 @@ int32_t NoiseBasedChunkGenerator::getBaseHeight(
     }
 
     // Get heightmap predicate
+    TERRAIN_ZONE_N("NBCG.BaseHeight");
     Heightmap::OpaquePredicate isOpaque = Heightmap::getOpaquePredicate(heightmapType);
 
     // Calculate cell dimensions
@@ -1027,11 +1308,11 @@ void NoiseBasedChunkGenerator::createBiomes(
     // Reference: NoiseBasedChunkGenerator.java doCreateBiomes() line 86:
     //   NoiseChunk noiseChunk = protoChunk.getOrCreateNoiseChunk((chunk) -> this.createNoiseChunk(...))
     // Note: Always use Blender::empty() for cached NoiseChunk
-    // Split out on purpose: BIOMES is the first stage to touch the NoiseChunk, so
-    // it pays to BUILD it (~2 MB — density tree, arena, caches; see the free in
-    // ChunkStatusTasks::full). Every later stage reuses it. Without this zone that
-    // construction is charged to Gen.Biomes and makes biome assignment look more
-    // expensive than terrain noise, which is backwards from Minecraft.
+    // Split out on purpose (game-local Tracy patch): BIOMES is the first stage
+    // to touch the NoiseChunk, so it pays to BUILD it (~2 MB — density tree,
+    // arena, caches). Every later stage reuses it. Without this zone that
+    // construction is charged to Gen.Biomes and makes biome assignment look
+    // more expensive than terrain noise, which is backwards from Minecraft.
     NoiseChunk* noiseChunk;
     {
         TERRAIN_ZONE_N("Biomes.NoiseChunkCreate");
@@ -1039,7 +1320,7 @@ void NoiseBasedChunkGenerator::createBiomes(
             return NoiseChunk::forChunk(
                 c,
                 *randomState,
-                m_beardifier ? m_beardifier : Beardifier::EMPTY(),
+                beardifierForChunk(c, m_beardifier),
                 *m_settings,
                 m_fluidPicker,
                 Blender::empty()
@@ -1080,8 +1361,8 @@ void NoiseBasedChunkGenerator::createBiomes(
     // We removed the resetLastResult() call to match Java's behavior.
     {
         // The actual biome assignment: one climate sample + RTree lookup per
-        // quart cell. Compare against Biomes.NoiseChunkCreate above to see which
-        // half of Gen.Biomes is worth attacking.
+        // quart cell. Compare against Biomes.NoiseChunkCreate above to see
+        // which half of Gen.Biomes is worth attacking.
         TERRAIN_ZONE_N("Biomes.Fill");
         protoChunk->fillBiomesFromNoise(m_biomeSource, cachedSampler);
     }

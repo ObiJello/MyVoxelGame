@@ -18,6 +18,7 @@
 
 #include "../backend/RenderTypes.hpp"
 #include "common/world/block/Blocks.hpp"
+#include "common/world/block/BlockModel.hpp"
 
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -54,6 +55,22 @@ namespace Render {
     bool BuildBlockModelMesh(Game::BlockID b, const std::string& modelOverride,
                              std::vector<ItemCubeVert>& verts,
                              std::vector<uint32_t>& idx);
+
+    // Same geometry walk, but from a model the caller has ALREADY resolved.
+    //
+    // The name-taking overload above is item-oriented: it prefers a
+    // `<name>_inventory` model when one exists, because that is what a fence or
+    // a button should look like in your hand. A falling BLOCK must look like
+    // the block, at its own state's rotation — so it resolves through
+    // BlockRegistry::GetBlockModel(BlockState), the identical call the chunk
+    // mesher makes, and hands the result straight here.
+    //
+    // Going through the same call is the point: it makes a falling anvil and
+    // the anvil it becomes on landing the same geometry BY CONSTRUCTION, rather
+    // than by two lookups that have to agree.
+    bool BuildBlockModelMeshFrom(const Game::BlockModel& model,
+                                 std::vector<ItemCubeVert>& verts,
+                                 std::vector<uint32_t>& idx);
 
     // Fallback: force the block into a 1×1×1 cube and take only its TEXTURES
     // from the model. Correct for a full cube and wrong for everything else — a

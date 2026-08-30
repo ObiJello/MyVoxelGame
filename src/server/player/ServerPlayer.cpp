@@ -4,6 +4,10 @@
 #include "common/entity/ConsumableBehavior.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
+#include "server/IntegratedServer.hpp"
+#include "server/session/PlayerSessionManager.hpp"
+#include "server/session/PlayerSession.hpp"
+#include "server/network/ServerConnection.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -545,8 +549,12 @@ namespace Server {
     }
 
     void ServerPlayer::addEffect(const StatusEffect& effect) {
-        // TODO: Implement status effects
-        // m_effects.push_back(effect);
+        // The real status-effect system lives on the mob side now: a player's
+        // effects are held and ticked by their PlayerEntityView
+        // (Game::LivingEntity::AddEffect — see ServerLevelBridge). This stub
+        // is the ITEM consumption path (suspicious stew, poison potato); when
+        // that wires up it should route into the view rather than grow a
+        // second effect list here.
         Log::Debug("ServerPlayer: Added effect %d to player %u", effect.effectId, m_playerId);
     }
 
@@ -614,7 +622,26 @@ namespace Server {
 
     void ServerPlayer::updatePosition(Game::World* world) {
         if (!world) return;
-        
+
+        // Noclip is exempt for exactly the reason flying is, and leaving it out
+        // is what made a noclipping player sink a couple of blocks across a
+        // rejoin while a FLYING one held station.
+        //
+        // In both states the CLIENT owns the position outright and reports it
+        // every tick. Anything integrated here is therefore either overwritten
+        // by the next move packet or — in the gap between packets — a drift the
+        // client never agreed to. With gravity running against a noclipping
+        // player who was holding still, m_position crept downward until
+        // checkCollision caught it, and whatever the drift had reached is what
+        // playerdata saved. Next login placed them there, and it compounded.
+        //
+        // Velocity is cleared rather than left alone so a residual from before
+        // the toggle cannot fire the instant noclip is switched off.
+        if (m_noclip) {
+            m_velocity = glm::vec3(0.0f);
+            return;
+        }
+
         // Apply gravity if not flying
         if (!m_flying && !m_onGround) {
             m_velocity.y -= 0.08f; // Minecraft gravity
@@ -699,6 +726,27 @@ namespace Server {
         m_containerMenu->containerId = nextId;
         m_containerMenu->setCarried(carried);
         return result;
+    }
+
+    void ServerPlayer::DisplayClientMessage(const std::string& text, bool actionBar) {
+        // MC Player.displayClientMessage -> ClientboundSystemChatPacket with
+        // overlay = actionBar. Position 2 is the action bar here, 1 the chat
+        // box; see IntegratedServer::BroadcastSystemMessage for the mapping.
+        auto* server = Server::g_integratedServer.get();
+        if (!server) return;
+        auto* sessions = server->GetSessionManager();
+        if (!sessions) return;
+        auto session = sessions->GetSessionByConnection(m_playerId);
+        if (!session) return;
+        auto* connection = session->GetConnection();
+        if (!connection) return;
+
+        Network::ChatMessageS2CPacket packet;
+        packet.senderId = 0;
+        packet.position = actionBar ? 2 : 1;
+        packet.segments.push_back(Network::ChatSegmentData{
+            text, 0xFFFFFFFFu, Network::ChatClickAction::None, "", ""});
+        connection->SendChatMessage(packet);
     }
 
     bool ServerPlayer::checkCollision(Game::World* world, const glm::dvec3& pos) const {

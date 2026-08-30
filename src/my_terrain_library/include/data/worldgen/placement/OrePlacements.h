@@ -62,6 +62,18 @@ public:
     static PlacedFeature* ORE_ANDESITE_LOWER;
     static PlacedFeature* ORE_TUFF;
 
+    // Nether ore placements - Reference: OrePlacements.java lines 109-116, 144-145
+    static PlacedFeature* ORE_MAGMA;
+    static PlacedFeature* ORE_SOUL_SAND;
+    static PlacedFeature* ORE_GOLD_DELTAS;
+    static PlacedFeature* ORE_QUARTZ_DELTAS;
+    static PlacedFeature* ORE_GOLD_NETHER;
+    static PlacedFeature* ORE_QUARTZ_NETHER;
+    static PlacedFeature* ORE_GRAVEL_NETHER;
+    static PlacedFeature* ORE_BLACKSTONE;
+    static PlacedFeature* ORE_ANCIENT_DEBRIS_LARGE;
+    static PlacedFeature* ORE_ANCIENT_DEBRIS_SMALL;
+
     /**
      * Bootstrap/initialize all ore placements
      * Must be called after OreFeatures::bootstrap()

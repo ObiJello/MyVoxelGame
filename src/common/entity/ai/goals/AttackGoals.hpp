@@ -23,6 +23,9 @@ namespace Game {
     class PathfinderMob;
     class LivingEntity;
     class Creeper;
+    class RangedAttackMob;
+    class PolarBear;
+    class Rabbit;
 
     class MeleeAttackGoal : public Goal {
     public:
@@ -54,6 +57,78 @@ namespace Game {
         int    m_ticksUntilNextPathRecalculation = 0;
         int    m_ticksUntilNextAttack = 0;
         int64_t m_lastCanUseCheck = 0;
+    };
+
+    // MC RangedBowAttackGoal — the skeleton's bow behaviour: close to within
+    // the attack radius, hold ground and strafe while drawing, release after
+    // 20 draw ticks, cool down for attackIntervalMin. The strafe flips
+    // direction with probability 0.3 every 20 strafing ticks, backs off inside
+    // 25% of the radius and closes beyond 75% — the dance every player knows.
+    //
+    // MC gates the goal on isHolding(BOW) and drives the draw through the
+    // item-use system; this port has no mob equipment or item use, so the mob
+    // is treated as permanently holding a bow and the draw is a goal-local
+    // counter with identical timing.
+    class RangedBowAttackGoal : public Goal {
+    public:
+        RangedBowAttackGoal(Mob* mob, RangedAttackMob* shooter, double speedModifier,
+                            int attackIntervalMin, float attackRadius);
+
+        void SetMinAttackInterval(int ticks) { m_attackIntervalMin = ticks; }
+
+        bool CanUse() override;
+        bool CanContinueToUse() override;
+        void Start() override;
+        void Stop() override;
+        void Tick() override;
+        bool RequiresUpdateEveryTick() const override { return true; }
+        const char* Name() const override { return "RangedBowAttackGoal"; }
+
+    private:
+        Mob*             m_mob;
+        RangedAttackMob* m_shooter;
+        double m_speedModifier;
+        int    m_attackIntervalMin;
+        float  m_attackRadiusSqr;
+        int    m_attackTime = -1;
+        int    m_seeTime = 0;
+        bool   m_strafingClockwise = false;
+        bool   m_strafingBackwards = false;
+        int    m_strafingTime = -1;
+        // The stand-in for MC's item-use draw: <0 = not drawing.
+        int    m_useTicks = -1;
+    };
+
+    // MC Spider.SpiderAttackGoal — MeleeAttackGoal(1.0, true) that drops its
+    // target with a 1-in-100 per-tick roll while in bright light (the spider's
+    // daytime truce). MC nests it in Spider.java; it lives here because every
+    // goal class in this port does.
+    class SpiderAttackGoal : public MeleeAttackGoal {
+    public:
+        explicit SpiderAttackGoal(PathfinderMob* mob);
+
+        bool CanContinueToUse() override;
+        const char* Name() const override { return "SpiderAttackGoal"; }
+    };
+
+    // MC PolarBear.PolarBearMeleeAttackGoal — MeleeAttackGoal(1.25, true)
+    // whose attack check is where the REAR-UP lives: inside warning range
+    // (target width + 3) the bear stands for the last 10 ticks of every
+    // attack cooldown and drops back down when it swings. MC nests it in
+    // PolarBear.java; it lives here because every goal class in this port
+    // does.
+    class PolarBearMeleeAttackGoal : public MeleeAttackGoal {
+    public:
+        explicit PolarBearMeleeAttackGoal(PolarBear* bear);
+
+        void Stop() override;
+        const char* Name() const override { return "PolarBearMeleeAttackGoal"; }
+
+    protected:
+        void CheckAndPerformAttack(LivingEntity& target) override;
+
+    private:
+        PolarBear* m_bear;
     };
 
     // MC ZombieAttackGoal — a melee goal that also drives the "arms out"
@@ -154,6 +229,24 @@ namespace Game {
         float  m_maxDistance;
         double m_walkSpeedModifier;
         double m_sprintSpeedModifier;
+    };
+
+    // MC Rabbit.RabbitAvoidEntityGoal — AvoidEntityGoal whose canUse is gated
+    // on the rabbit not being the EVIL variant. The variant system is not
+    // ported (every rabbit is a plain brown rabbit), so the gate always
+    // passes; the class is kept so the rabbit's goal table reads like MC's
+    // and the gate has a home when variants land. MC nests it in Rabbit.java;
+    // it lives here because every goal class in this port does.
+    class RabbitAvoidEntityGoal : public AvoidEntityGoal {
+    public:
+        // The player form and the type-list form, mirroring the base.
+        RabbitAvoidEntityGoal(Rabbit* rabbit, float maxDistance,
+                              double walkSpeedModifier, double sprintSpeedModifier);
+        RabbitAvoidEntityGoal(Rabbit* rabbit, const EntityTypeId* types, int typeCount,
+                              float maxDistance, double walkSpeedModifier,
+                              double sprintSpeedModifier);
+
+        const char* Name() const override { return "RabbitAvoidEntityGoal"; }
     };
 
     // The name this port used before the goal was generalised.

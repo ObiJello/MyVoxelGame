@@ -194,6 +194,16 @@ namespace Render {
         uint32_t offset;          // Byte offset within vertex
         bool normalized = false;  // Whether to normalize integer data
         AttribType type = AttribType::Float;  // Data type of components
+
+        // 0 = advance once per VERTEX (the default, and every attribute in a
+        // plain mesh). N = advance once per N INSTANCES, i.e. this attribute
+        // lives in the instance buffer of an instanced mesh. GL maps this
+        // straight onto glVertexAttribDivisor; Vulkan onto a binding whose
+        // inputRate is VK_VERTEX_INPUT_RATE_INSTANCE.
+        //
+        // A mat4 attribute is FOUR of these at consecutive locations, one per
+        // column — no graphics API has a mat4 vertex attribute.
+        uint32_t instanceDivisor = 0;
     };
 
     // Describes the full vertex layout (stride + attributes)

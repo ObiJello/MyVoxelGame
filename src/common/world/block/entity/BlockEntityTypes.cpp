@@ -43,23 +43,35 @@ namespace Game {
         // mean "no BE for this block".
         s_byBlockId.assign(static_cast<size_t>(BlockID::Count), nullptr);
 
-        // CHEST (backs Chest, TrappedChest, EnderChest)
+        // CHEST / TRAPPED_CHEST / ENDER_CHEST — three types, not one.
+        //
+        // These used to share the single "chest" type. That was harmless while
+        // block entities lived only in memory, but it is not once they are
+        // written to disk: vanilla validates a block entity's id against the
+        // block it sits on (BlockEntity.loadStatic / the type's validBlocks),
+        // so a trapped chest saved as `minecraft:chest` is rejected outright
+        // and the chest — contents and all — is DROPPED on load.
         {
-            std::unordered_set<BlockID> blocks = {
-                BlockID::Chest, BlockID::TrappedChest, BlockID::EnderChest,
-            };
-            const auto* type = RegisterType(
-                BlockEntityTypeIds::CHEST, "chest",
-                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
-                    return std::make_unique<ChestBlockEntity>(t, pos, id);
-                },
-                blocks);
-            s_byId[BlockEntityTypeIds::CHEST] = type;
-            g_byStringId[type->StringId()] = type;
-            for (BlockID id : blocks) {
-                const auto idx = static_cast<size_t>(id);
+            auto registerChest = [](uint16_t typeId, const char* stringId, BlockID block) {
+                std::unordered_set<BlockID> blocks = { block };
+                const auto* type = RegisterType(
+                    typeId, stringId,
+                    [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                        return std::make_unique<ChestBlockEntity>(t, pos, id);
+                    },
+                    blocks);
+                s_byId[typeId] = type;
+                g_byStringId[type->StringId()] = type;
+                const auto idx = static_cast<size_t>(block);
                 if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
-            }
+            };
+            registerChest(BlockEntityTypeIds::CHEST,         "chest",         BlockID::Chest);
+            registerChest(BlockEntityTypeIds::TRAPPED_CHEST, "trapped_chest", BlockID::TrappedChest);
+            // An ender chest's block entity carries NO Items in vanilla — the
+            // contents live in the player's EnderItems. Ours still holds slots
+            // so the UI works; the serialiser deliberately omits them rather
+            // than writing an Items list vanilla would discard.
+            registerChest(BlockEntityTypeIds::ENDER_CHEST,   "ender_chest",   BlockID::EnderChest);
         }
 
         // ── Plain storage containers ──────────────────────────────────────
@@ -163,6 +175,38 @@ namespace Game {
         registerCampfire(BlockEntityTypeIds::CAMPFIRE, "campfire", BlockID::Campfire);
         registerCampfire(BlockEntityTypeIds::SOUL_CAMPFIRE, "soul_campfire",
                          BlockID::SoulCampfire);
+
+        // ── Skulls / mob heads ────────────────────────────────────────────
+        // MC BlockEntityTypes.SKULL: one type, valid for every skull and head
+        // block, floor and wall variants alike. The base BlockEntity carries
+        // everything needed — MC's SkullBlockEntity adds only the player-head
+        // owner profile and the note-block-powered animation ticker, neither
+        // of which this port models yet. Orientation is NOT block-entity
+        // state: the renderer reads `rotation`/`facing` off the block state,
+        // the same way the chest renderer reads its facing.
+        {
+            std::unordered_set<BlockID> blocks = {
+                BlockID::SkeletonSkull,       BlockID::SkeletonWallSkull,
+                BlockID::WitherSkeletonSkull, BlockID::WitherSkeletonWallSkull,
+                BlockID::ZombieHead,          BlockID::ZombieWallHead,
+                BlockID::CreeperHead,         BlockID::CreeperWallHead,
+                BlockID::PlayerHead,          BlockID::PlayerWallHead,
+                BlockID::PiglinHead,          BlockID::PiglinWallHead,
+                BlockID::DragonHead,          BlockID::DragonWallHead,
+            };
+            const auto* type = RegisterType(
+                BlockEntityTypeIds::SKULL, "skull",
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<BlockEntity>(t, pos, id);
+                },
+                blocks);
+            s_byId[BlockEntityTypeIds::SKULL] = type;
+            g_byStringId[type->StringId()] = type;
+            for (BlockID id : blocks) {
+                const auto idx = static_cast<size_t>(id);
+                if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+            }
+        }
 
         Log::Info("[BlockEntityTypes] initialised with %zu type(s)", g_typeStorage.size());
     }

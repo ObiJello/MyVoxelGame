@@ -1,5 +1,6 @@
 // File: src/client/renderer/entity/ItemEntityRenderer.cpp
 #include "ItemEntityRenderer.hpp"
+#include "../core/Frustum.hpp"
 
 #include "../backend/RenderBackend.hpp"
 #include "../environment/EnvironmentState.hpp"
@@ -16,8 +17,100 @@
 #endif
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <cmath>
 #include <vector>
+
+
+namespace {
+
+    // ── Per-block-item mesh cache ──────────────────────────────────────────
+    //
+    // The block-item path used to rebuild the model mesh and issue TWO GPU
+    // uploads PER ITEM ENTITY PER FRAME. A crater's worth of dropped cobble is
+    // hundreds of identical meshes rebuilt every frame; a Tracy capture put the
+    // whole entity-render block at 67% of CPU.
+    //
+    // It was also a latent Vulkan bug, for the reason MobParticleSystem.cpp
+    // spells out: the Vulkan backend records buffer copies immediately but runs
+    // draws at submit, so uploading between draws clobbers the earlier upload.
+    // A pile of identical cobblestone hid it; a mixed pile would have drawn
+    // every stack with the last one's mesh.
+    //
+    // Sprite items already worked this way (HeldItemSpriteMesh::GetOrBuild);
+    // this is the same pattern for blocks. Each entry owns its buffers and is
+    // uploaded exactly once, at build.
+    struct BlockItemMesh {
+        Render::MeshHandle   mesh        = Render::INVALID_MESH;
+        Render::BufferHandle vertexBuffer = Render::INVALID_BUFFER;
+        Render::BufferHandle indexBuffer  = Render::INVALID_BUFFER;
+        uint32_t             indexCount  = 0;
+        // Derived from the geometry, so cached with it rather than recomputed
+        // by a min/max walk over every vertex every frame.
+        float                modelMinY   = 0.0f;
+        float                modelDepth  = 1.0f;
+        bool                 valid       = false;
+    };
+
+    std::unordered_map<std::string, BlockItemMesh> g_blockItemMeshes;
+
+    const BlockItemMesh* GetOrBuildBlockItemMesh(Game::BlockID blockId,
+                                                 const std::string& modelOverride) {
+        std::string key = std::to_string(static_cast<uint32_t>(blockId));
+        key += '|';
+        key += modelOverride;
+
+        const auto it = g_blockItemMeshes.find(key);
+        if (it != g_blockItemMeshes.end()) {
+            return it->second.valid ? &it->second : nullptr;
+        }
+
+        BlockItemMesh entry;
+        std::vector<Render::ItemCubeVert> verts;
+        std::vector<uint32_t>             idx;
+
+        if (!Render::BuildBlockModelMesh(blockId, modelOverride, verts, idx)) {
+            Render::BuildBlockCubeMesh(blockId, verts, idx);
+        }
+
+        if (!verts.empty() && !idx.empty() && Render::g_renderBackend) {
+            float minY = verts[0].y, minZ = verts[0].z, maxZ = verts[0].z;
+            for (const auto& v : verts) {
+                minY = std::min(minY, v.y);
+                minZ = std::min(minZ, v.z);
+                maxZ = std::max(maxZ, v.z);
+            }
+            entry.modelMinY  = minY;
+            entry.modelDepth = maxZ - minZ;
+
+            entry.vertexBuffer = Render::g_renderBackend->CreateBuffer(
+                Render::BufferUsage::Vertex, verts.size() * sizeof(Render::ItemCubeVert),
+                verts.data(), Render::BufferAccess::Static);
+            entry.indexBuffer = Render::g_renderBackend->CreateBuffer(
+                Render::BufferUsage::Index, idx.size() * sizeof(uint32_t),
+                idx.data(), Render::BufferAccess::Static);
+            entry.mesh = Render::g_renderBackend->CreateMesh(
+                entry.vertexBuffer, entry.indexBuffer, Render::GetBlockVertexLayout());
+            entry.indexCount = static_cast<uint32_t>(idx.size());
+            entry.valid = true;
+        }
+
+        auto [pos, ok] = g_blockItemMeshes.emplace(std::move(key), entry);
+        return pos->second.valid ? &pos->second : nullptr;
+    }
+
+    void ClearBlockItemMeshCache() {
+        if (Render::g_renderBackend) {
+            for (auto& [key, e] : g_blockItemMeshes) {
+                if (e.mesh != Render::INVALID_MESH) Render::g_renderBackend->DestroyMesh(e.mesh);
+                if (e.vertexBuffer != Render::INVALID_BUFFER) Render::g_renderBackend->DestroyBuffer(e.vertexBuffer);
+                if (e.indexBuffer != Render::INVALID_BUFFER) Render::g_renderBackend->DestroyBuffer(e.indexBuffer);
+            }
+        }
+        g_blockItemMeshes.clear();
+    }
+
+} // namespace
 
 namespace Render {
 
@@ -102,6 +195,7 @@ namespace Render {
 
     void ItemEntityRenderer::Shutdown() {
         if (!g_renderBackend) return;
+        ClearBlockItemMeshCache();
         if (m_cubeMesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(m_cubeMesh); m_cubeMesh = INVALID_MESH; }
         if (m_cubeVB   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(m_cubeVB); m_cubeVB = INVALID_BUFFER; }
         if (m_cubeIB   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(m_cubeIB); m_cubeIB = INVALID_BUFFER; }
@@ -115,6 +209,15 @@ namespace Render {
         }
         m_initialized = false;
     }
+    void ItemEntityRenderer::SetRenderDistanceChunks(int chunks) {
+        // A quarter of the chunks, times 16 blocks per chunk — i.e. chunks * 4.
+        // Float rather than integer division so a view distance that is not a
+        // multiple of four lands between the steps instead of snapping down a
+        // whole chunk.
+        m_maxRenderDistance =
+            std::max(kMinRenderDistance, static_cast<float>(chunks) * 4.0f);
+    }
+
 
     void ItemEntityRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
                                     const glm::vec3& cameraPos, float partialTick) {
@@ -126,7 +229,11 @@ namespace Render {
         if (entities.empty() && pickups.empty()) return;
 
         const glm::mat4 viewProj = projection * view;
-        const float maxDistSq = kMaxRenderDistance * kMaxRenderDistance;
+        const float maxDistSq = m_maxRenderDistance * m_maxRenderDistance;
+
+        // MC EntityRenderer.shouldRender — distance AND frustum. A crater's
+        // worth of drops behind the camera used to cost a full draw each.
+        const Frustum frustum = Frustum::FromMatrix(viewProj);
 
         std::vector<ItemCubeVert> verts;
         std::vector<uint32_t>     idx;
@@ -134,7 +241,17 @@ namespace Render {
         idx.reserve(kItemCubeMaxIdx);
 
         // ── Items lying in the world ───────────────────────────────────────
+        // Per-frame draw budget: every item is its own draw (worse on
+        // Vulkan, which has no instanced path here), and a mass detonation's
+        // drop field was measured at a quarter of a frozen frame. Beyond the
+        // budget the remaining items simply skip a frame's render — they are
+        // still there, still ticking, and the nearest ones win via the
+        // distance cull above them.
+        constexpr int kMaxItemDrawsPerFrame = 4096;
+        int itemDraws = 0;
+
         for (const auto& [id, ce] : entities) {
+            if (itemDraws >= kMaxItemDrawsPerFrame) break;
             const Game::ItemEntity& e = ce.sim;
             if (e.stack.IsEmpty()) continue;
 
@@ -147,10 +264,24 @@ namespace Render {
             const glm::vec3 d = pos - cameraPos;
             if (glm::dot(d, d) > maxDistSq) continue;
 
+            // MC inflates the culling box by 0.5. A dropped item is 0.25 on a
+            // side and bobs vertically, so the inflate is doing real work here
+            // rather than being a formality — a tight box would pop items at
+            // the screen edge as they rose.
+            {
+                const glm::vec3 half(Game::ItemEntity::kWidth * 0.5f + 0.5f,
+                                     Game::ItemEntity::kHeight     + 0.5f,
+                                     Game::ItemEntity::kWidth * 0.5f + 0.5f);
+                if (frustum.TestAABB(pos - half, pos + half) == FrustumResult::Outside) {
+                    continue;
+                }
+            }
+
             // MC's age is in ticks and includes the partial tick, so the bob
             // and spin advance smoothly within a tick rather than in steps.
             DrawItem(e.stack, pos, ce.ageTicks + partialTick, e.bobOffs,
                      viewProj, cameraPos, verts, idx);
+            ++itemDraws;
         }
 
         // ── Items flying into whoever collected them ───────────────────────
@@ -229,27 +360,18 @@ namespace Render {
             float preScale = 1.0f;
 
             if (isBlock) {
-                if (!BuildBlockModelMesh(item.blockId, item.blockModelOverride, verts, idx)) {
-                    BuildBlockCubeMesh(item.blockId, verts, idx);
-                }
-                if (verts.empty() || idx.empty()) return;   // no geometry to draw
+                // Built and uploaded ONCE, then reused — see the cache above.
+                // This used to rebuild the mesh and upload twice for every item
+                // entity, every frame.
+                const auto* entry =
+                    GetOrBuildBlockItemMesh(item.blockId, item.blockModelOverride);
+                if (!entry) return;   // no geometry to draw
 
-                float minY = verts[0].y, minZ = verts[0].z, maxZ = verts[0].z;
-                for (const auto& v : verts) {
-                    minY = std::min(minY, v.y);
-                    minZ = std::min(minZ, v.z);
-                    maxZ = std::max(maxZ, v.z);
-                }
-                modelMinY  = minY;
-                modelDepth = maxZ - minZ;
+                modelMinY  = entry->modelMinY;
+                modelDepth = entry->modelDepth;
 
-                g_renderBackend->UpdateBuffer(m_cubeVB, 0,
-                    verts.size() * sizeof(ItemCubeVert), verts.data());
-                g_renderBackend->UpdateBuffer(m_cubeIB, 0,
-                    idx.size() * sizeof(uint32_t), idx.data());
-
-                mesh       = m_cubeMesh;
-                indexCount = static_cast<uint32_t>(idx.size());
+                mesh       = entry->mesh;
+                indexCount = entry->indexCount;
                 if (g_atlasBuilder) tex = g_atlasBuilder->GetBackendTextureHandle();
             } else {
                 // Sprite items reuse the cached extruded mesh the hand uses.

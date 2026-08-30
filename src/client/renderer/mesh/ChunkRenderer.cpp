@@ -13,6 +13,9 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include "platform/GameDirectory.hpp"
 #include "client/network/NetworkClient.hpp"
+#include "client/input/Input.hpp"
+#include <set>
+#include <tuple>
 #include "../../world/ClientChunkManager.hpp"
 #include <algorithm>
 #include <chrono>
@@ -513,6 +516,7 @@ namespace Render {
 
         // World changed (mesh upload/unload, smart-cull toggle): existing
         // results are stale (but pointer-safe) — they trigger a refresh below.
+        if (m_occlusionGraph.ConsumeFullRebuildRequest()) m_visibleSectionsDirty = true;
         if (m_visibleSectionsDirty) {
             m_visibleSectionsDirty = false;
             m_worldVersion++;
@@ -522,6 +526,23 @@ namespace Render {
         int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
         if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
             renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
+        }
+
+        // RENDER-DISTANCE CHANGE invalidation. The reachable-slot cache is
+        // keyed by camera section + worldVersion but NOT by render distance,
+        // so without this a slot built at the old radius keeps serving its
+        // truncated list until some unrelated invalidation happens to land —
+        // seen as freshly streamed chunks staying culled from SOME camera
+        // sections after raising the setting (slots refreshed since the
+        // change are fine, older ones are not, so coverage looks arbitrary).
+        // Bumping worldVersion marks every slot stale at once; the async
+        // rebuild refreshes them at the new radius while the old lists keep
+        // rendering in the meantime. The live graph needs no explicit drop:
+        // HasGraphFor already compares renderDistance, so partial updates
+        // pause on their own until a rebuild at the new radius is adopted.
+        if (renderDistanceChunks != m_lastRenderDistanceChunks) {
+            m_lastRenderDistanceChunks = renderDistanceChunks;
+            m_worldVersion++;
         }
 
         // Pick the render source: exact-key slot if we have one, else the most
@@ -606,6 +627,7 @@ namespace Render {
         //
         // It only ever appends, so it cannot empty the list — the sky-flash
         // failure mode stays governed by the centerLoaded/blind guards above.
+        const size_t diagPrePartial = usable->sections.size();
         if (m_occlusionGraph.HasGraphFor(usable->cx, usable->cz, usable->sy,
                                          renderDistanceChunks, m_eraseToken)) {
             if (m_occlusionGraph.RunPartialUpdate(camera.position, usable->cx, usable->cz,
@@ -632,13 +654,33 @@ namespace Render {
             // are permissive (see RunPartialUpdate) and never remove anything,
             // so they must not be allowed to suppress the pass that does.
         }
+        if (!m_useProjectionOverride) {
+            m_diagPartialAdds += static_cast<int>(usable->sections.size() - diagPrePartial);
+        }
 
         // Kick an async refresh when the current view's data is missing or
         // stale and the worker is idle (one job in flight at a time — no
         // queue buildup, newest state wins).
         const bool haveExactFresh = exact && exact->worldVersion == m_worldVersion;
         bool startedFullRebuild = false;
-        if (!haveExactFresh && g_clientMeshManager && !m_occlusionGraph.Busy()) {
+        // REBUILD RATE LIMIT. During a post-blast remesh flood the world
+        // version bumps every frame (each section that remeshes to empty kicks
+        // MarkVisibleSectionsDirty), so this used to submit a rebuild every
+        // single frame — measured at 150-380/s — and each result REPLACED the
+        // visible list mid-churn, with consecutive snapshots disagreeing by 4x
+        // (733 vs 3425 visible in one second, stationary camera). That IS the
+        // flashing. MC only invalidates on an 8-block move or needsUpdate();
+        // we keep our richer triggers but floor the steady-camera cadence at
+        // 4/s. A camera-section change (no exact slot) still submits
+        // immediately — movement latency is untouched — and the per-frame
+        // partial updates keep ADDING new sections between rebuilds, so only
+        // removals wait, and a late removal is invisible over-draw.
+        const bool urgentRebuild = exact == nullptr;
+        const auto rebuildNow = std::chrono::steady_clock::now();
+        if (!haveExactFresh && g_clientMeshManager && !m_occlusionGraph.Busy() &&
+            (urgentRebuild ||
+             rebuildNow - m_lastRebuildSubmit >= std::chrono::milliseconds(250))) {
+            m_lastRebuildSubmit = rebuildNow;
             auto job = m_occlusionGraph.AcquireJob();
             job->keyCx = currentChunkX;
             job->keyCz = currentChunkZ;
@@ -653,6 +695,7 @@ namespace Render {
         // or needsUpdate(); anything above ~0 while standing still means
         // something is forcing rebuilds that propagation should be handling.
         PROFILE_PLOT("Bfs/FullRebuilds", static_cast<int64_t>(startedFullRebuild ? 1 : 0));
+        if (startedFullRebuild && !m_useProjectionOverride) m_diagRebuilds++;
 
         ReachableCacheSlot* slot = usable;
 
@@ -682,9 +725,13 @@ namespace Render {
             // emptied or unloaded resolves to null and contributes nothing —
             // the same silent skip MC gets from getBuffers(layer) == null.
             //
-            // Uses the CONST GetSectionInfo deliberately: the non-const overload
-            // calls UpdateAccessTime(), a steady_clock::now() plus a store, per
-            // section per frame, for a field nothing reads.
+            // Uses the CONST GetSectionInfo deliberately. It used to matter
+            // more: the non-const overload called UpdateAccessTime(), a
+            // steady_clock::now() per section per frame for a field nothing
+            // read. That field is gone now — a `sample` profile put it at 14%
+            // of the client main thread once a hundred thousand primed TNT were
+            // querying blocks through it — so this is now just the right
+            // overload for a read.
             //
             // Do NOT switch this to ClientMeshManager::GetSectionGPUData — that
             // takes shared_lock(m_gpuDataMutex), and UploadMeshResultToGPU holds
@@ -750,8 +797,125 @@ namespace Render {
         m_stats.sectionsSkipped = m_bfsOccludedCount;
         m_stats.sectionsAvailable = m_bfsVisitedCount;
 
+        // ── Culling diagnostics (main view only) ───────────────────────
+        if (!m_useProjectionOverride) {
+            m_diagVisMin = std::min(m_diagVisMin, m_visibleSections.size());
+            m_diagVisMax = std::max(m_diagVisMax, m_visibleSections.size());
+            const auto diagNow = std::chrono::steady_clock::now();
+            // Off by default: a per-second line in every session's log. Flip
+            // for a culling investigation — visMin<<visMax within one second
+            // IS the flashing, in numbers (see the F8 DumpViewRay as well).
+            constexpr bool kCullDiagLog = false;
+            if (kCullDiagLog && diagNow - m_diagLastLog >= std::chrono::seconds(1)) {
+                m_diagLastLog = diagNow;
+                Log::Info("[CullDiag] cam=(%d,%d,%d) rd=%d slot=(%d,%d,%d) slotVer=%llu/%llu exact=%d "
+                          "reach=%zu visMin=%zu visMax=%zu rebuilds=%d partialAdds=%d backlog=%zu graphOk=%d",
+                          currentChunkX, currentChunkZ, currentSectionY, renderDistanceChunks,
+                          usable->cx, usable->cz, usable->sy,
+                          static_cast<unsigned long long>(usable->worldVersion),
+                          static_cast<unsigned long long>(m_worldVersion),
+                          static_cast<int>(usable == exact),
+                          usable->sections.size(),
+                          m_diagVisMin == static_cast<size_t>(-1) ? 0 : m_diagVisMin, m_diagVisMax,
+                          m_diagRebuilds, m_diagPartialAdds,
+                          m_occlusionGraph.PendingSourceCount(),
+                          static_cast<int>(m_occlusionGraph.HasGraphFor(
+                              usable->cx, usable->cz, usable->sy,
+                              renderDistanceChunks, m_eraseToken)));
+                m_diagVisMin = static_cast<size_t>(-1);
+                m_diagVisMax = 0;
+                m_diagRebuilds = 0;
+                m_diagPartialAdds = 0;
+            }
+            if (Input::IsKeyPressed(Input::Key::F8)) {
+                DumpViewRay(camera, frustum, *usable, renderDistanceChunks);
+            }
+        }
+
         auto overallEndTime = std::chrono::high_resolution_clock::now();
         m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
+    }
+
+    // F8 diagnostic: walk the camera's view ray and log every culling-relevant
+    // fact about each section it passes through — is it in the reachable slot,
+    // does it pass the frustum, is its mesh present/stale/dirty, what does its
+    // visibility mask say. One press while looking at a hole tells us which
+    // stage dropped the missing section, without guessing.
+    void ChunkRenderer::DumpViewRay(const Camera& camera, const Frustum& frustum,
+                                    const ReachableCacheSlot& slot, int renderDistanceChunks) {
+        const auto* ccm = Client::g_clientChunkManager.get();
+        Log::Info("[CullDump] ==== pos=(%.1f,%.1f,%.1f) yaw=%.1f pitch=%.1f rd=%d "
+                  "slot=(%d,%d,%d) slotN=%zu slotVer=%llu/%llu backlog=%zu",
+                  camera.position.x, camera.position.y, camera.position.z,
+                  camera.yaw, camera.pitch, renderDistanceChunks,
+                  slot.cx, slot.cz, slot.sy, slot.sections.size(),
+                  static_cast<unsigned long long>(slot.worldVersion),
+                  static_cast<unsigned long long>(m_worldVersion),
+                  m_occlusionGraph.PendingSourceCount());
+        if (!ccm) return;
+        std::set<std::tuple<int, int, int>> inSlot;
+        for (const auto& s : slot.sections)
+            inSlot.insert({s.chunkPos.x, s.chunkPos.z, s.sectionY});
+        const glm::vec3 dir = camera.GetForward();
+        std::set<std::tuple<int, int, int>> seen;
+        int logged = 0;
+        const float maxDist = static_cast<float>(renderDistanceChunks) * 16.0f;
+        for (float d = 0.0f; d <= maxDist && logged < 96; d += 4.0f) {
+            const glm::vec3 p = glm::vec3(camera.position) + dir * d;
+            const int cx = static_cast<int>(std::floor(p.x / 16.0f));
+            const int cz = static_cast<int>(std::floor(p.z / 16.0f));
+            const int sy = static_cast<int>(std::floor((p.y - Config::MinY) / 16.0f));
+            if (sy < 0 || sy >= 24) continue;
+            if (!seen.insert({cx, cz, sy}).second) continue;
+            const float minX = cx * 16.0f;
+            const float minY = sy * 16.0f + static_cast<float>(Config::MinY);
+            const float minZ = cz * 16.0f;
+            const bool inFrustum = frustum.IsBoxVisible(
+                glm::vec3(minX, minY, minZ), glm::vec3(minX + 16.0f, minY + 16.0f, minZ + 16.0f));
+            const Client::SectionInfo* si =
+                ccm->GetSectionInfo(Game::Math::ChunkPos{cx, cz}, sy);
+            if (!si) {
+                Log::Info("[CullDump] d=%4.0f (%d,%d,%d) CHUNK-NOT-LOADED frustum=%d",
+                          d, cx, cz, sy, static_cast<int>(inFrustum));
+                ++logged;
+                continue;
+            }
+            GPUSectionData* gpu = si->gpuData.load(std::memory_order_acquire);
+            const bool hasGeom = gpu && gpu->HasGeometry();
+            // GROUND TRUTH from the actual block data, not the cached mirror:
+            // does the section really hold blocks, and how many? A section
+            // that reads air=0/gpu=0 (enclosed-solid claim) while the player
+            // flies through it is lying somewhere — this pins which side.
+            int actualAir = -1;   // -1 = no CPU data to check
+            int nonAir = -1;
+            if (const Client::ClientChunk* chunk = ccm->GetChunk({cx, cz});
+                chunk && chunk->chunkData) {
+                const auto* csec = chunk->chunkData->GetSection(sy);
+                actualAir = (csec == nullptr) || csec->IsAllAir() ? 1 : 0;
+                if (csec && actualAir == 0) {
+                    nonAir = 0;
+                    for (int by = 0; by < 16; ++by)
+                        for (int bz = 0; bz < 16; ++bz)
+                            for (int bx = 0; bx < 16; ++bx)
+                                if (csec->GetBlockID(bx, by, bz) != Game::BlockID::Air)
+                                    ++nonAir;
+                }
+            }
+            Log::Info("[CullDump] d=%4.0f (%d,%d,%d) inSlot=%d frustum=%d air=%d ACTUALAIR=%d NONAIR=%d "
+                      "dirty=%d built=%d mre=%d ver=%u up=%u mesh=%u gpu=%d vis=%016llx",
+                      d, cx, cz, sy,
+                      static_cast<int>(inSlot.count({cx, cz, sy}) > 0),
+                      static_cast<int>(inFrustum),
+                      static_cast<int>(si->isAllAir), actualAir, nonAir,
+                      static_cast<int>(si->dirty),
+                      static_cast<int>(si->builtOnce),
+                      static_cast<int>(si->meshResolvedEmpty),
+                      si->version, si->uploadedVersion, si->meshingVersion,
+                      static_cast<int>(hasGeom),
+                      static_cast<unsigned long long>(hasGeom ? gpu->visibilitySet.raw() : 0ULL));
+            ++logged;
+        }
+        Log::Info("[CullDump] ==== end (%d sections)", logged);
     }
 
     // Port of LevelRenderer.scheduleTranslucentSectionResort (LevelRenderer.java:953).

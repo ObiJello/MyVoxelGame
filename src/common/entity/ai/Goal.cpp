@@ -1,6 +1,7 @@
 // File: src/common/entity/ai/Goal.cpp
 #include "common/entity/ai/Goal.hpp"
 
+#include <cstddef>
 #include <cstring>
 
 namespace Game {
@@ -23,6 +24,22 @@ namespace Game {
 
     void GoalSelector::AddGoal(int priority, std::unique_ptr<Goal> goal) {
         m_goals.emplace_back(priority, std::move(goal));
+    }
+
+    void GoalSelector::RemoveGoal(const Goal* goal) {
+        for (size_t i = 0; i < m_goals.size(); ++i) {
+            if (m_goals[i].Get() != goal) continue;
+            m_goals[i].Stop();
+            // m_lockedFlags stores INDICES into m_goals, so the erase has to
+            // fix them up: the removed goal's locks release, anything after
+            // it shifts down one.
+            for (int& owner : m_lockedFlags) {
+                if (owner == static_cast<int>(i)) owner = -1;
+                else if (owner > static_cast<int>(i)) --owner;
+            }
+            m_goals.erase(m_goals.begin() + static_cast<ptrdiff_t>(i));
+            return;
+        }
     }
 
     bool GoalSelector::ContainsDisabledFlag(const WrappedGoal& goal) const {

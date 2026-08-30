@@ -1,0 +1,28 @@
+{
+  "chunks_compared": 49,
+  "total_mismatches": 1,
+  "by_class": {
+    "extra": 1
+  },
+  "by_type": [
+    {
+      "class": "extra",
+      "type": "minecraft:brown_mushroom",
+      "count": 1
+    }
+  ],
+  "samples": {
+    "extra|minecraft:brown_mushroom": [
+      "chunk(-7, 1) local(6,65,9) world(-106,65,25) cpp=minecraft:brown_mushroom"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        -7,
+        1
+      ],
+      "count": 1
+    }
+  ]
+}

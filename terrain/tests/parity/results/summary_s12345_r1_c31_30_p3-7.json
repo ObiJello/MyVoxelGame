@@ -1,0 +1,352 @@
+{
+  "chunks_compared": 9,
+  "total_mismatches": 1744,
+  "by_class": {
+    "wrong-block": 1131,
+    "missing": 254,
+    "extra": 311,
+    "wrong-properties": 48
+  },
+  "by_type": [
+    {
+      "class": "wrong-block",
+      "type": "minecraft:deepslate",
+      "count": 450
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:sculk",
+      "count": 301
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:sculk_vein",
+      "count": 295
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:sculk_vein",
+      "count": 241
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:tuff",
+      "count": 103
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:cave_air",
+      "count": 102
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:cobblestone",
+      "count": 96
+    },
+    {
+      "class": "wrong-properties",
+      "type": "minecraft:sculk_vein",
+      "count": 48
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:mossy_cobblestone",
+      "count": 35
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:sculk_vein",
+      "count": 29
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:sculk_sensor",
+      "count": 7
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:sculk_sensor",
+      "count": 6
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:cave_air",
+      "count": 5
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:deepslate",
+      "count": 5
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:gravel",
+      "count": 4
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:sculk",
+      "count": 2
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:chest",
+      "count": 2
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:sculk_sensor",
+      "count": 2
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:deepslate_diamond_ore",
+      "count": 2
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:sculk_catalyst",
+      "count": 2
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:sculk_shrieker",
+      "count": 1
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:sculk_catalyst",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:spawner",
+      "count": 1
+    },
+    {
+      "class": "extra",
+      "type": "minecraft:cobblestone",
+      "count": 1
+    },
+    {
+      "class": "missing",
+      "type": "minecraft:glow_lichen",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:glow_lichen",
+      "count": 1
+    },
+    {
+      "class": "wrong-block",
+      "type": "minecraft:sculk_shrieker",
+      "count": 1
+    }
+  ],
+  "samples": {
+    "wrong-block|minecraft:sculk": [
+      "chunk(30, 29) local(12,-41,12) world(492,-41,476) java=minecraft:sculk cpp=minecraft:deepslate[axis=y]",
+      "chunk(30, 29) local(11,-43,11) world(491,-43,475) java=minecraft:sculk cpp=minecraft:deepslate[axis=y]",
+      "chunk(30, 29) local(9,-45,15) world(489,-45,479) java=minecraft:sculk cpp=minecraft:deepslate[axis=y]",
+      "chunk(30, 29) local(11,-44,14) world(491,-44,478) java=minecraft:sculk cpp=minecraft:deepslate[axis=y]",
+      "chunk(30, 29) local(12,-43,11) world(492,-43,475) java=minecraft:sculk cpp=minecraft:deepslate[axis=y]"
+    ],
+    "missing|minecraft:sculk_vein": [
+      "chunk(30, 29) local(12,-42,11) world(492,-42,475) java=minecraft:sculk_vein[down=false,east=false,north=false,south=true,up=false,waterlogged=false,west=false]",
+      "chunk(30, 29) local(10,-42,15) world(490,-42,479) java=minecraft:sculk_vein[down=false,east=false,north=true,south=false,up=false,waterlogged=false,west=false]",
+      "chunk(30, 29) local(11,-41,13) world(491,-41,477) java=minecraft:sculk_vein[down=true,east=false,north=false,south=false,up=false,waterlogged=false,west=false]",
+      "chunk(30, 29) local(10,-43,15) world(490,-43,479) java=minecraft:sculk_vein[down=false,east=false,north=true,south=false,up=false,waterlogged=false,west=false]",
+      "chunk(30, 29) local(14,-42,11) world(494,-42,475) java=minecraft:sculk_vein[down=true,east=false,north=false,south=false,up=false,waterlogged=false,west=false]"
+    ],
+    "extra|minecraft:sculk_vein": [
+      "chunk(30, 29) local(7,-44,13) world(487,-44,477) cpp=minecraft:sculk_vein[down=false,east=true,north=false,south=false,up=false,waterlogged=false,west=false]",
+      "chunk(30, 29) local(7,-44,14) world(487,-44,478) cpp=minecraft:sculk_vein[down=false,east=true,north=false,south=true,up=false,waterlogged=false,west=false]",
+      "chunk(30, 30) local(13,-46,11) world(493,-46,491) cpp=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false]",
+      "chunk(30, 30) local(14,-46,11) world(494,-46,491) cpp=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false]",
+      "chunk(30, 30) local(15,-43,4) world(495,-43,484) cpp=minecraft:sculk_vein[down=false,east=false,north=false,south=true,up=false,waterlogged=false,west=false]"
+    ],
+    "wrong-block|minecraft:deepslate": [
+      "chunk(30, 30) local(15,-47,7) world(495,-47,487) java=minecraft:deepslate[axis=y] cpp=minecraft:sculk",
+      "chunk(30, 30) local(13,-45,10) world(493,-45,490) java=minecraft:deepslate[axis=y] cpp=minecraft:sculk",
+      "chunk(30, 30) local(15,-45,9) world(495,-45,489) java=minecraft:deepslate[axis=y] cpp=minecraft:sculk",
+      "chunk(30, 30) local(14,-45,9) world(494,-45,489) java=minecraft:deepslate[axis=y] cpp=minecraft:sculk",
+      "chunk(30, 30) local(14,-45,10) world(494,-45,490) java=minecraft:deepslate[axis=y] cpp=minecraft:sculk"
+    ],
+    "wrong-properties|minecraft:sculk_vein": [
+      "chunk(30, 30) local(15,-40,3) world(495,-40,483) java=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false] cpp=minecraft:sculk_vein[down=false,east=false,north=false,south=true,up=false,waterlogged=false,west=false]",
+      "chunk(30, 30) local(7,-45,1) world(487,-45,481) java=minecraft:sculk_vein[down=false,east=true,north=false,south=true,up=false,waterlogged=false,west=false] cpp=minecraft:sculk_vein[down=false,east=false,north=false,south=true,up=false,waterlogged=false,west=false]",
+      "chunk(30, 30) local(15,-44,4) world(495,-44,484) java=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=false,waterlogged=false,west=true] cpp=minecraft:sculk_vein[down=true,east=false,north=false,south=false,up=false,waterlogged=false,west=true]",
+      "chunk(30, 31) local(13,-53,14) world(493,-53,510) java=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false] cpp=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=true]",
+      "chunk(31, 29) local(5,-46,15) world(501,-46,479) java=minecraft:sculk_vein[down=false,east=false,north=true,south=false,up=false,waterlogged=false,west=false] cpp=minecraft:sculk_vein[down=true,east=false,north=true,south=false,up=false,waterlogged=false,west=false]"
+    ],
+    "missing|minecraft:sculk_sensor": [
+      "chunk(30, 30) local(15,-44,2) world(495,-44,482) java=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(31, 29) local(1,-45,15) world(497,-45,479) java=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(31, 30) local(8,-48,4) world(504,-48,484) java=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(32, 30) local(5,-41,2) world(517,-41,482) java=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(32, 30) local(0,-45,10) world(512,-45,490) java=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:gravel": [
+      "chunk(31, 29) local(6,-37,15) world(502,-37,479) java=minecraft:gravel cpp=minecraft:sculk",
+      "chunk(31, 29) local(7,-36,15) world(503,-36,479) java=minecraft:gravel cpp=minecraft:sculk",
+      "chunk(31, 30) local(8,-36,0) world(504,-36,480) java=minecraft:gravel cpp=minecraft:sculk",
+      "chunk(31, 30) local(7,-37,0) world(503,-37,480) java=minecraft:gravel cpp=minecraft:sculk"
+    ],
+    "wrong-block|minecraft:tuff": [
+      "chunk(31, 29) local(15,-47,14) world(511,-47,478) java=minecraft:tuff cpp=minecraft:sculk",
+      "chunk(31, 29) local(7,-43,15) world(503,-43,479) java=minecraft:tuff cpp=minecraft:sculk",
+      "chunk(31, 29) local(6,-43,15) world(502,-43,479) java=minecraft:tuff cpp=minecraft:sculk",
+      "chunk(31, 29) local(7,-44,14) world(503,-44,478) java=minecraft:tuff cpp=minecraft:sculk",
+      "chunk(31, 29) local(5,-44,14) world(501,-44,478) java=minecraft:tuff cpp=minecraft:sculk"
+    ],
+    "missing|minecraft:sculk_shrieker": [
+      "chunk(31, 29) local(3,-46,15) world(499,-46,479) java=minecraft:sculk_shrieker[can_summon=true,shrieking=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:cobblestone": [
+      "chunk(31, 30) local(2,-31,11) world(498,-31,491) java=minecraft:cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(4,-31,11) world(500,-31,491) java=minecraft:cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(5,-29,11) world(501,-29,491) java=minecraft:cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(1,-31,15) world(497,-31,495) java=minecraft:cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(3,-31,11) world(499,-31,491) java=minecraft:cobblestone cpp=minecraft:deepslate[axis=y]"
+    ],
+    "wrong-block|minecraft:cave_air": [
+      "chunk(31, 30) local(3,-32,13) world(499,-32,493) java=minecraft:cave_air cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(5,-31,14) world(501,-31,494) java=minecraft:cave_air cpp=minecraft:sculk",
+      "chunk(31, 30) local(2,-31,15) world(498,-31,495) java=minecraft:cave_air cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(3,-31,15) world(499,-31,495) java=minecraft:cave_air cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(7,-30,10) world(503,-30,490) java=minecraft:cave_air cpp=minecraft:sculk_vein[down=false,east=false,north=true,south=false,up=false,waterlogged=false,west=true]"
+    ],
+    "wrong-block|minecraft:sculk_vein": [
+      "chunk(31, 30) local(2,-29,12) world(498,-29,492) java=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false] cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(5,-32,14) world(501,-32,494) java=minecraft:sculk_vein[down=true,east=false,north=false,south=false,up=false,waterlogged=false,west=false] cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(4,-32,14) world(500,-32,494) java=minecraft:sculk_vein[down=true,east=false,north=false,south=true,up=false,waterlogged=false,west=false] cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(6,-32,14) world(502,-32,494) java=minecraft:sculk_vein[down=true,east=false,north=false,south=false,up=false,waterlogged=false,west=false] cpp=minecraft:cobblestone",
+      "chunk(31, 30) local(4,-29,13) world(500,-29,493) java=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false] cpp=minecraft:deepslate[axis=y]"
+    ],
+    "extra|minecraft:sculk": [
+      "chunk(31, 30) local(5,-29,15) world(501,-29,495) cpp=minecraft:sculk",
+      "chunk(31, 31) local(5,-29,0) world(501,-29,496) cpp=minecraft:sculk"
+    ],
+    "extra|minecraft:sculk_catalyst": [
+      "chunk(31, 30) local(9,-48,12) world(505,-48,492) cpp=minecraft:sculk_catalyst[bloom=false]"
+    ],
+    "wrong-block|minecraft:mossy_cobblestone": [
+      "chunk(31, 30) local(4,-33,14) world(500,-33,494) java=minecraft:mossy_cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(3,-33,14) world(499,-33,494) java=minecraft:mossy_cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(5,-33,13) world(501,-33,493) java=minecraft:mossy_cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(1,-33,14) world(497,-33,494) java=minecraft:mossy_cobblestone cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(4,-33,11) world(500,-33,491) java=minecraft:mossy_cobblestone cpp=minecraft:deepslate[axis=y]"
+    ],
+    "wrong-block|minecraft:spawner": [
+      "chunk(31, 30) local(4,-32,15) world(500,-32,495) java=minecraft:spawner cpp=minecraft:deepslate[axis=y]"
+    ],
+    "missing|minecraft:cave_air": [
+      "chunk(31, 30) local(5,-31,15) world(501,-31,495) java=minecraft:cave_air",
+      "chunk(31, 30) local(5,-30,15) world(501,-30,495) java=minecraft:cave_air",
+      "chunk(31, 31) local(5,-31,0) world(501,-31,496) java=minecraft:cave_air",
+      "chunk(31, 31) local(5,-30,0) world(501,-30,496) java=minecraft:cave_air",
+      "chunk(31, 31) local(6,-30,1) world(502,-30,497) java=minecraft:cave_air"
+    ],
+    "extra|minecraft:sculk_sensor": [
+      "chunk(31, 30) local(15,-46,10) world(511,-46,490) cpp=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(31, 30) local(15,-46,6) world(511,-46,486) cpp=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(31, 31) local(6,-52,7) world(502,-52,503) cpp=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(31, 31) local(4,-54,5) world(500,-54,501) cpp=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]",
+      "chunk(31, 31) local(5,-54,8) world(501,-54,504) cpp=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false]"
+    ],
+    "extra|minecraft:cobblestone": [
+      "chunk(31, 30) local(6,-29,13) world(502,-29,493) cpp=minecraft:cobblestone"
+    ],
+    "extra|minecraft:deepslate": [
+      "chunk(31, 30) local(5,-29,13) world(501,-29,493) cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 30) local(4,-29,15) world(500,-29,495) cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 31) local(4,-29,0) world(500,-29,496) cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 31) local(4,-29,1) world(500,-29,497) cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 31) local(5,-29,1) world(501,-29,497) cpp=minecraft:deepslate[axis=y]"
+    ],
+    "wrong-block|minecraft:chest": [
+      "chunk(31, 30) local(5,-32,12) world(501,-32,492) java=minecraft:chest[facing=south,type=single,waterlogged=false] cpp=minecraft:deepslate[axis=y]",
+      "chunk(31, 31) local(4,-32,2) world(500,-32,498) java=minecraft:chest[facing=north,type=single,waterlogged=false] cpp=minecraft:deepslate[axis=y]"
+    ],
+    "missing|minecraft:glow_lichen": [
+      "chunk(31, 30) local(14,-30,6) world(510,-30,486) java=minecraft:glow_lichen[down=false,east=false,north=true,south=false,up=false,waterlogged=false,west=false]"
+    ],
+    "wrong-block|minecraft:sculk_sensor": [
+      "chunk(31, 30) local(1,-46,3) world(497,-46,483) java=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false] cpp=minecraft:sculk_vein[down=true,east=false,north=false,south=false,up=false,waterlogged=false,west=true]",
+      "chunk(31, 31) local(3,-54,11) world(499,-54,507) java=minecraft:sculk_sensor[power=0,sculk_sensor_phase=inactive,waterlogged=false] cpp=minecraft:sculk_shrieker[can_summon=true,shrieking=false,waterlogged=false]"
+    ],
+    "wrong-block|minecraft:deepslate_diamond_ore": [
+      "chunk(32, 30) local(7,-31,10) world(519,-31,490) java=minecraft:deepslate_diamond_ore cpp=minecraft:sculk",
+      "chunk(32, 30) local(7,-31,9) world(519,-31,489) java=minecraft:deepslate_diamond_ore cpp=minecraft:sculk"
+    ],
+    "wrong-block|minecraft:glow_lichen": [
+      "chunk(32, 30) local(13,-32,8) world(525,-32,488) java=minecraft:glow_lichen[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false] cpp=minecraft:sculk_vein[down=false,east=false,north=false,south=false,up=true,waterlogged=false,west=false]"
+    ],
+    "wrong-block|minecraft:sculk_catalyst": [
+      "chunk(32, 30) local(2,-44,4) world(514,-44,484) java=minecraft:sculk_catalyst[bloom=false] cpp=minecraft:sculk",
+      "chunk(32, 30) local(0,-45,11) world(512,-45,491) java=minecraft:sculk_catalyst[bloom=false] cpp=minecraft:sculk"
+    ],
+    "wrong-block|minecraft:sculk_shrieker": [
+      "chunk(32, 30) local(2,-44,3) world(514,-44,483) java=minecraft:sculk_shrieker[can_summon=true,shrieking=false,waterlogged=false] cpp=minecraft:sculk_vein[down=true,east=false,north=false,south=false,up=false,waterlogged=false,west=false]"
+    ]
+  },
+  "worst_chunks": [
+    {
+      "chunk": [
+        31,
+        30
+      ],
+      "count": 647
+    },
+    {
+      "chunk": [
+        32,
+        30
+      ],
+      "count": 426
+    },
+    {
+      "chunk": [
+        31,
+        31
+      ],
+      "count": 324
+    },
+    {
+      "chunk": [
+        31,
+        29
+      ],
+      "count": 153
+    },
+    {
+      "chunk": [
+        30,
+        30
+      ],
+      "count": 70
+    },
+    {
+      "chunk": [
+        30,
+        29
+      ],
+      "count": 54
+    },
+    {
+      "chunk": [
+        32,
+        29
+      ],
+      "count": 51
+    },
+    {
+      "chunk": [
+        30,
+        31
+      ],
+      "count": 19
+    }
+  ]
+}

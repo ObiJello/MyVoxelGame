@@ -2,6 +2,7 @@
 #pragma once
 
 #include "common/world/math/WorldMath.hpp"
+#include <atomic>
 #include <unordered_set>
 #include <vector>
 #include <mutex>
@@ -71,6 +72,8 @@ namespace Game {
 
         // Mark a specific section as dirty
         void MarkSectionDirty(Math::ChunkPos chunkPos, int sectionIndex);
+        // See m_clearEpoch: callers memoising "already marked" validate on it.
+        uint64_t ClearEpoch() const { return m_clearEpoch.load(std::memory_order_acquire); }
 
         // Mark all sections in a chunk as dirty
         void MarkChunkDirty(Math::ChunkPos chunkPos);
@@ -140,6 +143,13 @@ namespace Game {
         DirtyTrackerConfig m_config;
 
         // Core dirty section storage
+        // Bumped by every clear. MarkSectionDirty keeps a per-thread memo of
+        // the last section it marked and the epoch it marked it in: within
+        // one epoch a second mark of the same section is a no-op (the set
+        // already holds it AND its neighbours), so the mutex, two set inserts
+        // and the stats lock are skipped. A landing sand column marks the
+        // same section thousands of times a tick.
+        std::atomic<uint64_t> m_clearEpoch{0};
         mutable std::mutex m_dirtyMutex;
         std::unordered_set<DirtySection, DirtySectionHash> m_dirtySections;
 

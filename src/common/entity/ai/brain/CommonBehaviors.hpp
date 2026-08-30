@@ -28,6 +28,11 @@ namespace Game {
     class PathfinderMob;
     class Animal;
 
+    // MC passes Function<LivingEntity, Float> speed modifiers to several
+    // shared behaviours (the axolotl swims at 0.5-0.6 and crawls at 0.15).
+    // The float ctors below stay for every fixed-speed user.
+    using SpeedFn = std::function<float(LivingEntity&)>;
+
     // MC CountDownCooldownTicks — decrement an int memory each tick and erase
     // it at zero. This is how every "cooldown" in the brain works: a behaviour
     // sets the memory, and its own entry condition is that memory being ABSENT.
@@ -71,14 +76,22 @@ namespace Game {
     // WALK_TARGET. A one-shot: it succeeds, sets the memory, and stops.
     class RandomStroll : public Behavior {
     public:
-        enum class Kind : uint8_t { Land, Swim };
+        enum class Kind : uint8_t { Land, Swim, Fly };
 
         // `mayStrollFromWater` false is MC's `stroll(speed, false)`, which stops
         // a swimming mob picking a land target it cannot path to.
         static BehaviorPtr Stroll(float speedModifier, bool mayStrollFromWater = true);
+        // MC's stroll(speed, maxHorizontalDistance, maxVerticalDistance) — the
+        // celebrating piglin shuffles within 2x1 instead of the default 10x7.
+        static BehaviorPtr Stroll(float speedModifier, int maxHorizontalDistance,
+                                  int maxVerticalDistance);
         static BehaviorPtr Swim(float speedModifier);
+        // MC's fly(speed) — the allay's drift: AirAndWaterRandomPos ahead of
+        // the current view direction.
+        static BehaviorPtr Fly(float speedModifier);
 
-        RandomStroll(float speedModifier, Kind kind, bool mayStrollFromWater);
+        RandomStroll(float speedModifier, Kind kind, bool mayStrollFromWater,
+                     int maxHorizontalDistance = 10, int maxVerticalDistance = 7);
         const char* DebugString() const override { return "RandomStroll"; }
 
     protected:
@@ -88,20 +101,30 @@ namespace Game {
         float m_speedModifier;
         Kind  m_kind;
         bool  m_mayStrollFromWater;
+        int   m_maxHorizontalDistance;
+        int   m_maxVerticalDistance;
     };
 
     // MC SetWalkTargetFromLookTarget — walk to whatever you are looking at.
     class SetWalkTargetFromLookTarget : public Behavior {
     public:
+        using Pred = std::function<bool(LivingEntity&)>;
+
         SetWalkTargetFromLookTarget(float speedModifier, int closeEnoughDistance);
+        // MC's create(canSetWalkTarget, speedModifier, closeEnough) overload —
+        // the axolotl only chases a look target on its own side of the
+        // water line.
+        SetWalkTargetFromLookTarget(Pred canSet, SpeedFn speed, int closeEnoughDistance);
         const char* DebugString() const override { return "SetWalkTargetFromLookTarget"; }
 
     protected:
         bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
 
     private:
-        float m_speedModifier;
-        int   m_closeEnoughDistance;
+        float   m_speedModifier;
+        int     m_closeEnoughDistance;
+        Pred    m_canSet;
+        SpeedFn m_speedFn;
     };
 
     // MC SetEntityLookTargetSometimes — glance at the nearest player on a
@@ -157,6 +180,9 @@ namespace Game {
 
         explicit FollowTemptation(float speedModifier,
                                   double closeEnoughDistance = 2.5);
+        // MC's Function<LivingEntity, Float> form (axolotl: 0.5 in water,
+        // 0.15 on land).
+        explicit FollowTemptation(SpeedFn speed, double closeEnoughDistance = 2.5);
         const char* DebugString() const override { return "FollowTemptation"; }
 
     protected:
@@ -166,8 +192,9 @@ namespace Game {
         void Stop(EntityLevel&, LivingEntity&, int64_t) override;
 
     private:
-        float  m_speedModifier;
-        double m_closeEnoughDistance;
+        float   m_speedModifier;
+        double  m_closeEnoughDistance;
+        SpeedFn m_speedFn;
     };
 
     // MC AnimalMakeLove — pair up with a nearby partner of the same type and
@@ -209,6 +236,25 @@ namespace Game {
         float   m_speedModifier;
         // MC's 60-tick throttle: the search is a Manhattan ball scan and doing
         // it every tick for every swimming mob is the expensive shape.
+        int64_t m_nextOkStartTime = 0;
+    };
+
+    // MC TryFindWater — a beached amphibian looks for water to slip back
+    // into. The mirror image of TryFindLand: scans the Manhattan ball for a
+    // water block, preferring one open to the air, else any water at least
+    // 1.5 blocks away.
+    class TryFindWater : public Behavior {
+    public:
+        TryFindWater(int range, float speedModifier);
+        const char* DebugString() const override { return "TryFindWater"; }
+
+    protected:
+        bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
+
+    private:
+        int     m_range;
+        float   m_speedModifier;
+        // MC's MutableLong throttle — 40 ticks between scans.
         int64_t m_nextOkStartTime = 0;
     };
 
@@ -289,11 +335,14 @@ namespace Game {
     class SetWalkTargetFromAttackTarget : public Behavior {
     public:
         explicit SetWalkTargetFromAttackTarget(float speedModifier);
+        // MC's speed-function form (axolotl: 0.6 chasing in water, 0.15 out).
+        explicit SetWalkTargetFromAttackTarget(SpeedFn speed);
         const char* DebugString() const override { return "SetWalkTargetFromAttackTarget"; }
     protected:
         bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
     private:
-        float m_speedModifier;
+        float   m_speedModifier;
+        SpeedFn m_speedFn;
     };
 
     // MC EraseMemoryIf — the brain's way of cancelling something: one behaviour
@@ -331,19 +380,33 @@ namespace Game {
     class BabyFollowAdult : public Behavior {
     public:
         BabyFollowAdult(int followRangeMin, int followRangeMax, float speedModifier);
+        // MC's speed-function form (axolotl: 0.6 in water, 0.15 on land).
+        BabyFollowAdult(int followRangeMin, int followRangeMax, SpeedFn speed);
+        // MC's full form — which memory to trail (the ghastling follows the
+        // nearest visible PLAYER as readily as an adult) and whether to aim at
+        // the eyes (targetEye).
+        BabyFollowAdult(int followRangeMin, int followRangeMax, SpeedFn speed,
+                        MemoryModule followMemory, bool targetEye);
         const char* DebugString() const override { return "BabyFollowAdult"; }
     protected:
         bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
     private:
-        int   m_min, m_max;
-        float m_speedModifier;
+        int     m_min, m_max;
+        float   m_speedModifier;
+        SpeedFn m_speedFn;
+        MemoryModule m_followMemory = MemoryModule::NearestVisibleAdult;
+        bool    m_targetEye = false;
     };
 
     // MC SetWalkTargetAwayFrom.entity — flee whatever a memory names.
+    // The Pos factory is MC's SetWalkTargetAwayFrom.pos: the same flee, from a
+    // BlockPos memory (the piglin backing away from its NEAREST_REPELLENT).
     class SetWalkTargetAwayFrom : public Behavior {
     public:
         SetWalkTargetAwayFrom(MemoryModule avoidMemory, float speedModifier,
                               int desiredDistance, bool interruptCurrentWalk);
+        static BehaviorPtr Pos(MemoryModule avoidMemory, float speedModifier,
+                               int desiredDistance, bool interruptCurrentWalk);
         const char* DebugString() const override { return "SetWalkTargetAwayFrom"; }
     protected:
         bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
@@ -352,6 +415,35 @@ namespace Game {
         float m_speedModifier;
         int   m_desiredDistance;
         bool  m_interruptCurrentWalk;
+        bool  m_isPosMemory = false;
+    };
+
+    // MC InteractWith — walk to and look at the nearest visible entity of a
+    // type, remembering it as the INTERACTION_TARGET. The piglin and brute
+    // socialising behaviour.
+    class InteractWith : public Behavior {
+    public:
+        InteractWith(EntityTypeId type, int interactionRange,
+                     float speedModifier, int stopDistance);
+        const char* DebugString() const override { return "InteractWith"; }
+    protected:
+        bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
+    private:
+        EntityTypeId m_type;
+        int   m_rangeSqr;
+        float m_speedModifier;
+        int   m_stopDistance;
+    };
+
+    // MC StopBeingAngryIfTargetDead — drop the ANGRY_AT grudge once its
+    // target dies. MC checks FORGIVE_DEAD_PLAYERS for player targets; that
+    // game rule defaults true, so the erase is unconditional here.
+    class StopBeingAngryIfTargetDead : public Behavior {
+    public:
+        StopBeingAngryIfTargetDead();
+        const char* DebugString() const override { return "StopBeingAngryIfTargetDead"; }
+    protected:
+        bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
     };
 
     // MC LongJumpMidJump — shared by frog and goat.
@@ -421,6 +513,22 @@ namespace Game {
         IsTemptation m_pred;
         // MC's TEMPTATION_RANGE.
         static constexpr double kTemptationRange = 10.0;
+    };
+
+    // MC PlayerSensor — every player within FOLLOW_RANGE, sorted by distance,
+    // plus the visible and the visible-attackable subsets. The creaking's
+    // freeze gate reads the raw list every tick; it and the warden both pick
+    // targets off the attackable ones.
+    class PlayerSensor : public Sensor {
+    public:
+        std::vector<MemoryModule> Requires() const override {
+            return { MemoryModule::NearestPlayers,
+                     MemoryModule::NearestVisiblePlayer,
+                     MemoryModule::NearestVisibleAttackablePlayer,
+                     MemoryModule::NearestVisibleAttackablePlayers };
+        }
+    protected:
+        void DoTick(EntityLevel&, LivingEntity&) override;
     };
 
     // MC's per-mob "attackables" sensors, parameterised. The frog's version

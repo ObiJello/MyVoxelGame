@@ -962,6 +962,101 @@ namespace Render {
         // VAO intentionally left bound — next DrawIndexed will rebind, avoiding redundant unbind/rebind cycles
     }
 
+    MeshHandle GLBackend::CreateInstancedMesh(BufferHandle vertexBuffer,
+                                              BufferHandle indexBuffer,
+                                              BufferHandle instanceBuffer,
+                                              const VertexLayout& vertexLayout,
+                                              const VertexLayout& instanceLayout) {
+        auto vbIt = m_buffers.find(vertexBuffer);
+        auto ibufIt = m_buffers.find(instanceBuffer);
+        if (vbIt == m_buffers.end() || ibufIt == m_buffers.end()) return INVALID_MESH;
+
+        GLuint vao = 0;
+        glGenVertexArrays(1, &vao);
+        if (vao == 0) return INVALID_MESH;
+        glBindVertexArray(vao);
+
+        // Two ARRAY_BUFFER bindings, one after the other. This works because
+        // glVertexAttribPointer captures whatever is bound to ARRAY_BUFFER *at
+        // the moment it is called* into the VAO's per-attribute state — the
+        // binding itself is not VAO state in GL 3.3, the captured source is.
+        const auto bindAttribs = [](GLuint bufferId, const VertexLayout& layout) {
+            glBindBuffer(GL_ARRAY_BUFFER, bufferId);
+            for (const auto& attr : layout.attributes) {
+                GLenum glType = (attr.type == AttribType::UByte) ? GL_UNSIGNED_BYTE : GL_FLOAT;
+                glVertexAttribPointer(attr.location, attr.componentCount, glType,
+                                      attr.normalized ? GL_TRUE : GL_FALSE,
+                                      layout.stride,
+                                      reinterpret_cast<void*>(
+                                          static_cast<uintptr_t>(attr.offset)));
+                glEnableVertexAttribArray(attr.location);
+                // Zero is the GL default, but set it explicitly: a VAO is fresh
+                // here, yet leaving the per-vertex case implicit makes the two
+                // layouts read as if only one of them had a divisor rule.
+                glVertexAttribDivisor(attr.location, attr.instanceDivisor);
+            }
+        };
+
+        bindAttribs(vbIt->second.glId, vertexLayout);
+        bindAttribs(ibufIt->second.glId, instanceLayout);
+
+        if (indexBuffer != INVALID_BUFFER) {
+            auto ibIt = m_buffers.find(indexBuffer);
+            if (ibIt != m_buffers.end()) {
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibIt->second.glId);
+            }
+        }
+
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        uint32_t handle = AllocHandle();
+        m_meshes[handle] = {vao, vertexBuffer, indexBuffer};
+        {
+            auto& gm = m_meshes[handle];
+            gm.instanceBuffer = instanceBuffer;
+            gm.instanceLayout = instanceLayout;
+        }
+        m_memStats.meshCount++;
+        return handle;
+    }
+
+    void GLBackend::DrawIndexedInstanced(MeshHandle mesh, uint32_t indexCount,
+                                         uint32_t indexOffset, uint32_t instanceCount,
+                                         uint32_t instanceByteOffset) {
+        if (instanceCount == 0 || indexCount == 0) return;
+        auto it = m_meshes.find(mesh);
+        if (it == m_meshes.end()) return;
+
+        glBindVertexArray(it->second.vao);
+
+        // Re-point the instance attributes when this group's data starts at
+        // a different offset than the pointers currently baked into the VAO.
+        // Attribute pointers are VAO state, so this persists until changed.
+        if (instanceByteOffset != it->second.lastInstanceOffset &&
+            it->second.instanceBuffer != INVALID_BUFFER) {
+            auto bufIt = m_buffers.find(it->second.instanceBuffer);
+            if (bufIt != m_buffers.end()) {
+                glBindBuffer(GL_ARRAY_BUFFER, bufIt->second.glId);
+                for (const auto& attr : it->second.instanceLayout.attributes) {
+                    GLenum glType = (attr.type == AttribType::UByte) ? GL_UNSIGNED_BYTE : GL_FLOAT;
+                    glVertexAttribPointer(attr.location, attr.componentCount, glType,
+                                          attr.normalized ? GL_TRUE : GL_FALSE,
+                                          it->second.instanceLayout.stride,
+                                          reinterpret_cast<void*>(static_cast<uintptr_t>(
+                                              instanceByteOffset + attr.offset)));
+                }
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                it->second.lastInstanceOffset = instanceByteOffset;
+            }
+        }
+
+        glDrawElementsInstanced(
+            ToGLPrimitive(m_currentState.primitiveType), indexCount, GL_UNSIGNED_INT,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(indexOffset * sizeof(uint32_t))),
+            instanceCount);
+    }
+
     void GLBackend::DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) {
         auto it = m_meshes.find(mesh);
         if (it == m_meshes.end()) return;

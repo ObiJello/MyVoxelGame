@@ -26,5 +26,10 @@ void main() {
     if (t.a < 0.05) discard;
 
     vec3 base = t.rgb * vColor.rgb;
-    FragColor = vec4(mix(base, uColor.rgb, uColor.a), 1.0);
+    // Alpha carries through from the vertex colour: the warden's pulsating
+    // emissive layers (MC RenderTypes.entityTranslucentEmissive) fade by a
+    // per-batch vertex alpha with blending enabled. Every ordinary batch
+    // draws with blending OFF and vertex alpha 1, so this changes nothing
+    // for them.
+    FragColor = vec4(mix(base, uColor.rgb, uColor.a), t.a * vColor.a);
 }

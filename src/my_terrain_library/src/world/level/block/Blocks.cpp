@@ -528,6 +528,1080 @@ protected:
     }
 };
 
+// Reference: StairBlock.java - FACING (horizontal, default north), HALF
+// (default bottom), SHAPE (default straight), WATERLOGGED (default false).
+// Stairs are not full blocks: noOcclusion so isSolidRender() is false
+// (StructurePiece.reorient relies on this for chest facing).
+class StairBlockImpl : public Block {
+public:
+    explicit StairBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::HALF, state::properties::Half(state::properties::Half::BOTTOM));
+            defaultState = defaultState->setValue(*BlockStateProperties::STAIRS_SHAPE, state::properties::StairsShape(state::properties::StairsShape::STRAIGHT));
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::HALF,
+                    BlockStateProperties::STAIRS_SHAPE, BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: SlabBlock.java - TYPE (default bottom), WATERLOGGED (false).
+class SlabBlockImpl : public Block {
+public:
+    explicit SlabBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::SLAB_TYPE, state::properties::SlabType(state::properties::SlabType::BOTTOM));
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::SLAB_TYPE, BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// One boolean property (pressure plates POWERED false, tnt UNSTABLE false,
+// redstone torch LIT true, ...).
+class SingleBoolBlockImpl : public Block {
+public:
+    SingleBoolBlockImpl(const Properties& properties,
+                        state::properties::BooleanProperty* property,
+                        bool defaultValue = false)
+        : Block(properties), m_property(property) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*m_property, defaultValue));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(m_property);
+    }
+
+private:
+    state::properties::BooleanProperty* m_property;
+};
+
+// Reference: BedBlock.java - FACING (north), PART (foot), OCCUPIED (false).
+class BedBlockImpl : public Block {
+public:
+    explicit BedBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::BED_PART, state::properties::BedPart(state::properties::BedPart::FOOT));
+            defaultState = defaultState->setValue(*BlockStateProperties::OCCUPIED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::BED_PART,
+                    BlockStateProperties::OCCUPIED);
+    }
+};
+
+// Reference: LadderBlock/WallSignBlock - FACING (north), WATERLOGGED (false).
+class HorizontalWaterloggedBlockImpl : public Block {
+public:
+    explicit HorizontalWaterloggedBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: BrewingStandBlock.java - HAS_BOTTLE_0/1/2 (false).
+class BrewingStandBlockImpl : public Block {
+public:
+    explicit BrewingStandBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HAS_BOTTLE_0, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::HAS_BOTTLE_1, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::HAS_BOTTLE_2, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HAS_BOTTLE_0, BlockStateProperties::HAS_BOTTLE_1,
+                    BlockStateProperties::HAS_BOTTLE_2);
+    }
+};
+
+// Reference: LayeredCauldronBlock.java - LEVEL (1-3, default 1).
+class LayeredCauldronBlockImpl : public Block {
+public:
+    explicit LayeredCauldronBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*BlockStateProperties::LEVEL_CAULDRON, 1));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::LEVEL_CAULDRON);
+    }
+};
+
+// Reference: StructureBlock.java - MODE (default load).
+class StructureBlockImpl : public Block {
+public:
+    explicit StructureBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*BlockStateProperties::STRUCTUREBLOCK_MODE,
+                state::properties::StructureMode(state::properties::StructureMode::LOAD)));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::STRUCTUREBLOCK_MODE);
+    }
+};
+
+// Reference: FurnaceBlock.java - FACING (north), LIT (false).
+class FurnaceBlockImpl : public Block {
+public:
+    explicit FurnaceBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::LIT, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::LIT);
+    }
+};
+
+// Reference: TrapDoorBlock.java - FACING (north), OPEN (false), HALF
+// (bottom), POWERED (false), WATERLOGGED (false).
+class TrapDoorBlockImpl : public Block {
+public:
+    explicit TrapDoorBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::OPEN, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::HALF, state::properties::Half(state::properties::Half::BOTTOM));
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::OPEN,
+                    BlockStateProperties::HALF, BlockStateProperties::POWERED,
+                    BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: BrushableBlock.java - DUSTED (0-3, default 0).
+class BrushableBlockImpl : public Block {
+public:
+    explicit BrushableBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*BlockStateProperties::DUSTED, 0));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::DUSTED);
+    }
+};
+
+// Reference: TripWireHookBlock.java - FACING (horizontal, north),
+// ATTACHED (false), POWERED (false).
+class TripWireHookBlockImpl : public Block {
+public:
+    explicit TripWireHookBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::ATTACHED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::ATTACHED,
+                    BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: TripWireBlock.java - POWERED/ATTACHED/DISARMED + 4 sides, all false.
+class TripWireBlockImpl : public Block {
+public:
+    explicit TripWireBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::ATTACHED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::DISARMED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::NORTH, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::EAST, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::SOUTH, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::WEST, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::POWERED, BlockStateProperties::ATTACHED,
+                    BlockStateProperties::DISARMED, BlockStateProperties::NORTH,
+                    BlockStateProperties::EAST, BlockStateProperties::SOUTH,
+                    BlockStateProperties::WEST);
+    }
+};
+
+// Reference: FireBlock.java - AGE (0) + NORTH/EAST/SOUTH/WEST/UP (false).
+class FireBlockImpl : public Block {
+public:
+    explicit FireBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::AGE_15, 0);
+            defaultState = defaultState->setValue(*BlockStateProperties::NORTH, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::EAST, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::SOUTH, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::WEST, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::UP, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::AGE_15, BlockStateProperties::NORTH,
+                    BlockStateProperties::EAST, BlockStateProperties::SOUTH,
+                    BlockStateProperties::WEST, BlockStateProperties::UP);
+    }
+};
+
+// Reference: RedStoneWireBlock.java - 4 RedstoneSide sides (none) + POWER (0).
+class RedStoneWireBlockImpl : public Block {
+public:
+    explicit RedStoneWireBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using state::properties::RedstoneSide;
+            defaultState = defaultState->setValue(*BlockStateProperties::NORTH_REDSTONE, RedstoneSide(RedstoneSide::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::EAST_REDSTONE, RedstoneSide(RedstoneSide::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::SOUTH_REDSTONE, RedstoneSide(RedstoneSide::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::WEST_REDSTONE, RedstoneSide(RedstoneSide::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::POWER, 0);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::NORTH_REDSTONE, BlockStateProperties::EAST_REDSTONE,
+                    BlockStateProperties::SOUTH_REDSTONE, BlockStateProperties::WEST_REDSTONE,
+                    BlockStateProperties::POWER);
+    }
+};
+
+// Reference: LeverBlock.java - FACE (wall), FACING (north), POWERED (false).
+class LeverBlockImpl : public Block {
+public:
+    explicit LeverBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using state::properties::AttachFace;
+            defaultState = defaultState->setValue(*BlockStateProperties::ATTACH_FACE, AttachFace(AttachFace::WALL));
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::ATTACH_FACE, BlockStateProperties::HORIZONTAL_FACING,
+                    BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: EndPortalFrameBlock.java - FACING (horizontal, north), EYE (false).
+class EndPortalFrameBlockImpl : public Block {
+public:
+    explicit EndPortalFrameBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::EYE, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::EYE);
+    }
+};
+
+// Reference: FenceGateBlock.java - FACING (north), OPEN/POWERED/IN_WALL (false).
+class FenceGateBlockImpl : public Block {
+public:
+    explicit FenceGateBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::OPEN, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::IN_WALL, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::OPEN,
+                    BlockStateProperties::POWERED, BlockStateProperties::IN_WALL);
+    }
+};
+
+// Reference: FarmBlock.java - MOISTURE (0-7, default 0).
+class FarmBlockImpl : public Block {
+public:
+    explicit FarmBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*BlockStateProperties::MOISTURE, 0));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::MOISTURE);
+    }
+};
+
+// Reference: CropBlock.java (wheat) - AGE (0-7, default 0).
+class CropBlockImpl : public Block {
+public:
+    explicit CropBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*BlockStateProperties::AGE_7, 0));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::AGE_7);
+    }
+};
+
+// Reference: WallSkullBlock.java - HORIZONTAL_FACING (default NORTH) +
+// POWERED (default false, from AbstractSkullBlock).
+class WallSkullBlockImpl : public Block {
+public:
+    explicit WallSkullBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState
+                ->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH)
+                ->setValue(*BlockStateProperties::POWERED, false));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING);
+        builder.add(BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: SaplingBlock.java - STAGE (0-1, default 0); keeps BushBlock
+// placement/replacement semantics.
+class SaplingBlockImpl : public BushBlock {
+public:
+    explicit SaplingBlockImpl(const Properties& properties) : BushBlock(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*BlockStateProperties::STAGE, 0));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::STAGE);
+    }
+};
+
+// Single integer-property block (beetroots AGE_3, ...).
+class SingleIntBlockImpl : public Block {
+public:
+    SingleIntBlockImpl(const Properties& properties,
+                       state::properties::IntegerProperty* property, int defaultValue)
+        : Block(properties), m_property(property), m_default(defaultValue) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*m_property, m_default));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(m_property);
+    }
+
+private:
+    state::properties::IntegerProperty* m_property;
+    int m_default;
+};
+
+// Reference: CopperBulbBlock.java - LIT (false), POWERED (false).
+class CopperBulbBlockImpl : public Block {
+public:
+    explicit CopperBulbBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::LIT, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::LIT, BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: CandleBlock.java - CANDLES (1-4, default 1), LIT, WATERLOGGED.
+class CandleBlockImpl : public Block {
+public:
+    explicit CandleBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::CANDLES, 1);
+            defaultState = defaultState->setValue(*BlockStateProperties::LIT, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::CANDLES, BlockStateProperties::LIT,
+                    BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: RedstoneWallTorchBlock.java - FACING (north), LIT (TRUE).
+class RedstoneWallTorchBlockImpl : public Block {
+public:
+    explicit RedstoneWallTorchBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::LIT, true);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::LIT);
+    }
+};
+
+// Reference: ComparatorBlock.java - FACING (north), MODE (compare), POWERED.
+class ComparatorBlockImpl : public Block {
+public:
+    explicit ComparatorBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using CM = state::properties::ComparatorMode;
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::MODE_COMPARATOR, CM(CM::COMPARE));
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::MODE_COMPARATOR,
+                    BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: DecoratedPotBlock.java - CRACKED (false), FACING (north),
+// WATERLOGGED (false).
+class DecoratedPotBlockImpl : public Block {
+public:
+    explicit DecoratedPotBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::CRACKED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::CRACKED, BlockStateProperties::HORIZONTAL_FACING,
+                    BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: HopperBlock.java - ENABLED (true), FACING (down).
+class HopperBlockImpl : public Block {
+public:
+    explicit HopperBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::ENABLED, true);
+            defaultState = defaultState->setValue(*BlockStateProperties::FACING, core::Direction::DOWN);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::ENABLED, BlockStateProperties::FACING);
+    }
+};
+
+// Reference: NoteBlock.java - INSTRUMENT (harp), NOTE (0), POWERED (false).
+class NoteBlockImpl : public Block {
+public:
+    explicit NoteBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using NBI = state::properties::NoteBlockInstrument;
+            defaultState = defaultState->setValue(*BlockStateProperties::NOTEBLOCK_INSTRUMENT, NBI(NBI::HARP));
+            defaultState = defaultState->setValue(*BlockStateProperties::NOTE, 0);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::NOTEBLOCK_INSTRUMENT, BlockStateProperties::NOTE,
+                    BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: PistonHeadBlock.java - FACING (all 6, north), SHORT (false),
+// TYPE (normal).
+class PistonHeadBlockImpl : public Block {
+public:
+    explicit PistonHeadBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using PT = state::properties::PistonType;
+            defaultState = defaultState->setValue(*BlockStateProperties::FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::SHORT_PISTON, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::PISTON_TYPE, PT(PT::DEFAULT));
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::FACING, BlockStateProperties::SHORT_PISTON,
+                    BlockStateProperties::PISTON_TYPE);
+    }
+};
+
+// Reference: SkullBlock.java - POWERED (false), ROTATION (0).
+class SkullBlockImpl : public Block {
+public:
+    explicit SkullBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::ROTATION_16, 0);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::POWERED, BlockStateProperties::ROTATION_16);
+    }
+};
+
+// Reference: TrialSpawnerBlock.java - OMINOUS (false), STATE (inactive).
+class TrialSpawnerBlockImpl : public Block {
+public:
+    explicit TrialSpawnerBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using TSS = state::properties::TrialSpawnerState;
+            defaultState = defaultState->setValue(*BlockStateProperties::OMINOUS, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::TRIAL_SPAWNER_STATE, TSS(TSS::INACTIVE));
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::OMINOUS, BlockStateProperties::TRIAL_SPAWNER_STATE);
+    }
+};
+
+// Reference: VaultBlock.java - FACING (north), OMINOUS (false),
+// STATE (inactive).
+class VaultBlockImpl : public Block {
+public:
+    explicit VaultBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using VS = state::properties::VaultState;
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::OMINOUS, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::VAULT_STATE, VS(VS::INACTIVE));
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::OMINOUS,
+                    BlockStateProperties::VAULT_STATE);
+    }
+};
+
+// Reference: BarrelBlock.java - FACING (all 6, north), OPEN (false).
+class BarrelBlockImpl : public Block {
+public:
+    explicit BarrelBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::OPEN, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::FACING, BlockStateProperties::OPEN);
+    }
+};
+
+// Reference: BellBlock.java - ATTACHMENT (floor), FACING (north), POWERED.
+class BellBlockImpl : public Block {
+public:
+    explicit BellBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using BAT = state::properties::BellAttachType;
+            defaultState = defaultState->setValue(*BlockStateProperties::BELL_ATTACHMENT, BAT(BAT::FLOOR));
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::BELL_ATTACHMENT, BlockStateProperties::HORIZONTAL_FACING,
+                    BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: CampfireBlock.java - FACING (north), LIT (TRUE), SIGNAL_FIRE,
+// WATERLOGGED (false).
+class CampfireBlockImpl : public Block {
+public:
+    explicit CampfireBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::LIT, true);
+            defaultState = defaultState->setValue(*BlockStateProperties::SIGNAL_FIRE, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::LIT,
+                    BlockStateProperties::SIGNAL_FIRE, BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: ComposterBlock.java - LEVEL (0-8, default 0).
+class ComposterBlockImpl : public Block {
+public:
+    explicit ComposterBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(*BlockStateProperties::LEVEL_COMPOSTER, 0));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::LEVEL_COMPOSTER);
+    }
+};
+
+// Reference: GrindstoneBlock.java - FACE (wall), FACING (north).
+class GrindstoneBlockImpl : public Block {
+public:
+    explicit GrindstoneBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using state::properties::AttachFace;
+            defaultState = defaultState->setValue(*BlockStateProperties::ATTACH_FACE, AttachFace(AttachFace::WALL));
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::ATTACH_FACE, BlockStateProperties::HORIZONTAL_FACING);
+    }
+};
+
+// Reference: LanternBlock.java - HANGING (false), WATERLOGGED (false).
+class LanternBlockImpl : public Block {
+public:
+    explicit LanternBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HANGING, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HANGING, BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: LecternBlock.java - FACING (north), HAS_BOOK/POWERED (false).
+class LecternBlockImpl : public Block {
+public:
+    explicit LecternBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::HAS_BOOK, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::HAS_BOOK,
+                    BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: PistonBaseBlock.java - FACING (all 6, north), EXTENDED (false).
+class PistonBlockImpl : public Block {
+public:
+    explicit PistonBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::EXTENDED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::FACING, BlockStateProperties::EXTENDED);
+    }
+};
+
+// Reference: RepeaterBlock.java - DELAY (1), FACING (north), LOCKED (false),
+// POWERED (false).
+class RepeaterBlockImpl : public Block {
+public:
+    explicit RepeaterBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::DELAY, 1);
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::LOCKED, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::DELAY, BlockStateProperties::HORIZONTAL_FACING,
+                    BlockStateProperties::LOCKED, BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: DispenserBlock.java - FACING (all 6, north), TRIGGERED (false).
+class DispenserBlockImpl : public Block {
+public:
+    explicit DispenserBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::TRIGGERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::FACING, BlockStateProperties::TRIGGERED);
+    }
+};
+
+// Reference: RailBlock.java - SHAPE (default north_south), WATERLOGGED (false).
+class RailBlockImpl : public Block {
+public:
+    explicit RailBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::RAIL_SHAPE,
+                state::properties::RailShape(state::properties::RailShape::NORTH_SOUTH));
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::RAIL_SHAPE, BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: WallTorchBlock.java - FACING (horizontal, north).
+class WallTorchBlockImpl : public Block {
+public:
+    explicit WallTorchBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            registerDefaultState(defaultState->setValue(
+                *BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH));
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING);
+    }
+};
+
+// Reference: ChainBlock.java - AXIS (default Y), WATERLOGGED (false).
+class ChainBlockImpl : public Block {
+public:
+    explicit ChainBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::AXIS, core::Axis::Y);
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::AXIS, BlockStateProperties::WATERLOGGED);
+    }
+};
+
+// Reference: DoorBlock.java - FACING (north), HALF (lower), HINGE (left),
+// OPEN (false), POWERED (false).
+class DoorBlockImpl : public Block {
+public:
+    explicit DoorBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::DOUBLE_BLOCK_HALF,
+                state::properties::DoubleBlockHalf(state::properties::DoubleBlockHalf::LOWER));
+            defaultState = defaultState->setValue(*BlockStateProperties::DOOR_HINGE,
+                state::properties::DoorHingeSide(state::properties::DoorHingeSide::LEFT));
+            defaultState = defaultState->setValue(*BlockStateProperties::OPEN, false);
+            defaultState = defaultState->setValue(*BlockStateProperties::POWERED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::DOUBLE_BLOCK_HALF,
+                    BlockStateProperties::DOOR_HINGE, BlockStateProperties::OPEN,
+                    BlockStateProperties::POWERED);
+    }
+};
+
+// Reference: WallBlock.java - UP (true), EAST/NORTH/SOUTH/WEST (WallSide
+// none), WATERLOGGED (false).
+class WallBlockImpl : public Block {
+public:
+    explicit WallBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            using WS = state::properties::WallSide;
+            defaultState = defaultState->setValue(*BlockStateProperties::UP, true);
+            defaultState = defaultState->setValue(*BlockStateProperties::EAST_WALL, WS(WS::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::NORTH_WALL, WS(WS::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::SOUTH_WALL, WS(WS::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::WEST_WALL, WS(WS::NONE));
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::UP, BlockStateProperties::EAST_WALL,
+                    BlockStateProperties::NORTH_WALL, BlockStateProperties::SOUTH_WALL,
+                    BlockStateProperties::WEST_WALL, BlockStateProperties::WATERLOGGED);
+    }
+};
+
 // Reference: CreakingHeartBlock.java - AXIS (default Y),
 // CREAKING_HEART_STATE (default uprooted), NATURAL (default false)
 class CreakingHeartBlockImpl : public Block {
@@ -591,8 +1665,18 @@ public:
         const core::BlockPos& pos
     ) const override {
         BlockState* below = level.getBlockState(pos.below());
-        return ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
-            below, "minecraft:mushroom_grow_block");
+        if (::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                below, "minecraft:mushroom_grow_block")) {
+            return true;
+        }
+        // Java fallback: getRawBrightness(pos, 0) < 13 && mayPlaceOn
+        // (= belowState.isSolidRender). During worldgen the raw brightness is
+        // 15 in skylight dimensions (overworld: fallback NEVER fires,
+        // gate-proven) and 0 in the nether/end (fallback ALWAYS fires).
+        if (level.hasSkyLight()) {
+            return false;
+        }
+        return below != nullptr && below->isSolidRender();
     }
 };
 
@@ -1361,9 +2445,8 @@ void minecraft::world::level::block::Blocks::bootstrap() {
         props.setId("minecraft:mycelium");
         registerBlock("minecraft:mycelium", new SnowyDirtBlockImpl(props));
     }
-    // Registered so surface rules never resolve to null states; Nether/End
-    // surfaces themselves are out of scope.
-    createSimpleBlock("minecraft:basalt");
+    // Reference: Blocks.java:1601 - basalt is a RotatedPillarBlock (AXIS, default y).
+    createLogBlock("minecraft:basalt");
     createSimpleBlock("minecraft:blackstone");
     createSimpleBlock("minecraft:crimson_nylium");
     createSimpleBlock("minecraft:end_stone");
@@ -1793,14 +2876,33 @@ void minecraft::world::level::block::Blocks::bootstrap() {
         MANGROVE_ROOTS = new WaterloggedDefaultFalseBlockImpl(rootsProps);
         registerBlock("minecraft:mangrove_roots", MANGROVE_ROOTS);
     }
-    OAK_SAPLING = createBushBlock("minecraft:oak_sapling", false);
-    SPRUCE_SAPLING = createBushBlock("minecraft:spruce_sapling", false);
-    BIRCH_SAPLING = createBushBlock("minecraft:birch_sapling", false);
-    JUNGLE_SAPLING = createBushBlock("minecraft:jungle_sapling", false);
-    ACACIA_SAPLING = createBushBlock("minecraft:acacia_sapling", false);
-    CHERRY_SAPLING = createBushBlock("minecraft:cherry_sapling", false);
-    DARK_OAK_SAPLING = createBushBlock("minecraft:dark_oak_sapling", false);
-    PALE_OAK_SAPLING = createBushBlock("minecraft:pale_oak_sapling", false);
+    // Reference: SaplingBlock - EVERY sapling carries STAGE (0-1), not just
+    // dark oak. acacia_sapling as a plain BushBlock made the template loader
+    // ABORT worldgen on village/savanna/houses/savanna_library_1 (its palette
+    // lists stage) - found by terrain/tests/template_sweep.cpp.
+    auto createSapling = [](const char* name) -> Block* {
+        Block::Properties saplingProps;
+        saplingProps.setId(name).replaceableByTrees();
+        auto* sapling = new SaplingBlockImpl(saplingProps);
+        registerBlock(name, sapling);
+        return sapling;
+    };
+    OAK_SAPLING = createSapling("minecraft:oak_sapling");
+    SPRUCE_SAPLING = createSapling("minecraft:spruce_sapling");
+    BIRCH_SAPLING = createSapling("minecraft:birch_sapling");
+    JUNGLE_SAPLING = createSapling("minecraft:jungle_sapling");
+    ACACIA_SAPLING = createSapling("minecraft:acacia_sapling");
+    CHERRY_SAPLING = createSapling("minecraft:cherry_sapling");
+    {
+        // Reference: SaplingBlock - STAGE property (mansion templates carry it);
+        // same BushBlock property flags as createBushBlock(name, false).
+        Block::Properties saplingProps;
+        saplingProps.setId("minecraft:dark_oak_sapling").replaceableByTrees();
+        auto darkOakSapling = new SaplingBlockImpl(saplingProps);
+        registerBlock("minecraft:dark_oak_sapling", darkOakSapling);
+        DARK_OAK_SAPLING = darkOakSapling;
+    }
+    PALE_OAK_SAPLING = createSapling("minecraft:pale_oak_sapling");
     {
         // Reference: MangrovePropaguleBlock - AGE_4 (0), STAGE (0), HANGING
         // (false), WATERLOGGED (false); not replaceable.
@@ -1821,6 +2923,945 @@ void minecraft::world::level::block::Blocks::bootstrap() {
         registerBlock("minecraft:chest", CHEST);
     }
     {
+        // Structure-piece blocks (B6). Stairs/cauldron/flower pot are not
+        // full blocks: noOcclusion => isSolidRender false, matching Java.
+        Block::Properties stairProps;
+        stairProps.setId("minecraft:spruce_stairs").noOcclusion();
+        registerBlock("minecraft:spruce_stairs", new StairBlockImpl(stairProps));
+
+        Block::Properties cauldronProps;
+        cauldronProps.setId("minecraft:cauldron").noOcclusion();
+        registerBlock("minecraft:cauldron", new Block(cauldronProps));
+
+        createSimpleBlock("minecraft:crafting_table");
+
+        Block::Properties potProps;
+        potProps.setId("minecraft:potted_red_mushroom").noOcclusion();
+        registerBlock("minecraft:potted_red_mushroom", new Block(potProps));
+
+        // Desert pyramid blocks (B6).
+        createSimpleBlock("minecraft:cut_sandstone");
+        createSimpleBlock("minecraft:chiseled_sandstone");
+        createSimpleBlock("minecraft:blue_terracotta");
+
+        Block::Properties ssStairProps;
+        ssStairProps.setId("minecraft:sandstone_stairs").noOcclusion();
+        registerBlock("minecraft:sandstone_stairs", new StairBlockImpl(ssStairProps));
+
+        Block::Properties ssSlabProps;
+        ssSlabProps.setId("minecraft:sandstone_slab").noOcclusion();
+        registerBlock("minecraft:sandstone_slab", new SlabBlockImpl(ssSlabProps));
+
+        Block::Properties plateProps;
+        plateProps.setId("minecraft:stone_pressure_plate").noCollission();
+        registerBlock("minecraft:stone_pressure_plate",
+                      new SingleBoolBlockImpl(plateProps, BlockStateProperties::POWERED));
+
+        Block::Properties tntProps;
+        tntProps.setId("minecraft:tnt");
+        registerBlock("minecraft:tnt",
+                      new SingleBoolBlockImpl(tntProps, BlockStateProperties::UNSTABLE));
+
+        Block::Properties susSandProps;
+        susSandProps.setId("minecraft:suspicious_sand");
+        registerBlock("minecraft:suspicious_sand", new BrushableBlockImpl(susSandProps));
+
+        // Ruined portal blocks (B6).
+        createSimpleBlock("minecraft:gold_block");
+        createSimpleBlock("minecraft:crying_obsidian");
+        createSimpleBlock("minecraft:jigsaw");
+        for (const char* slab : {"minecraft:smooth_stone_slab", "minecraft:stone_brick_slab",
+                                 "minecraft:mossy_stone_brick_slab"}) {
+            Block::Properties props;
+            props.setId(slab).noOcclusion();
+            registerBlock(slab, new SlabBlockImpl(props));
+        }
+        {
+            Block::Properties msbStairProps;
+            msbStairProps.setId("minecraft:mossy_stone_brick_stairs").noOcclusion();
+            registerBlock("minecraft:mossy_stone_brick_stairs", new StairBlockImpl(msbStairProps));
+        }
+
+        // Ocean ruin blocks (B6).
+        createSimpleBlock("minecraft:bricks");
+        createSimpleBlock("minecraft:light_blue_terracotta");
+        createSimpleBlock("minecraft:obsidian");
+        createSimpleBlock("minecraft:polished_diorite");
+        createSimpleBlock("minecraft:polished_granite");
+        createSimpleBlock("minecraft:prismarine");
+        createSimpleBlock("minecraft:sea_lantern");
+        {
+            Block::Properties sbStairProps;
+            sbStairProps.setId("minecraft:stone_brick_stairs").noOcclusion();
+            registerBlock("minecraft:stone_brick_stairs", new StairBlockImpl(sbStairProps));
+        }
+        {
+            Block::Properties susGravelProps;
+            susGravelProps.setId("minecraft:suspicious_gravel");
+            registerBlock("minecraft:suspicious_gravel", new BrushableBlockImpl(susGravelProps));
+        }
+
+        // Ocean monument blocks (B6).
+        createSimpleBlock("minecraft:prismarine_bricks");
+        createSimpleBlock("minecraft:dark_prismarine");
+        createSimpleBlock("minecraft:wet_sponge");
+
+        // Woodland mansion blocks (B6).
+        for (const char* wool : {"minecraft:black_wool", "minecraft:blue_wool",
+                                 "minecraft:brown_wool", "minecraft:cyan_wool",
+                                 "minecraft:gray_wool", "minecraft:green_wool",
+                                 "minecraft:light_blue_wool", "minecraft:light_gray_wool",
+                                 "minecraft:lime_wool", "minecraft:orange_wool",
+                                 "minecraft:red_wool", "minecraft:white_wool",
+                                 "minecraft:yellow_wool"}) {
+            createSimpleBlock(wool);
+        }
+        for (const char* carpet : {"minecraft:black_carpet", "minecraft:blue_carpet",
+                                   "minecraft:brown_carpet", "minecraft:cyan_carpet",
+                                   "minecraft:gray_carpet", "minecraft:green_carpet",
+                                   "minecraft:light_blue_carpet", "minecraft:lime_carpet",
+                                   "minecraft:magenta_carpet", "minecraft:pink_carpet",
+                                   "minecraft:purple_carpet", "minecraft:yellow_carpet"}) {
+            Block::Properties carpetProps;
+            carpetProps.setId(carpet).noOcclusion();
+            registerBlock(carpet, new Block(carpetProps));
+        }
+        createNoOcclusionBlock("minecraft:glass");
+        {
+            Block::Properties paneProps;
+            paneProps.setId("minecraft:glass_pane").noOcclusion();
+            registerBlock("minecraft:glass_pane", new FenceBlock(paneProps));
+        }
+        createSimpleBlock("minecraft:infested_cobblestone");
+        createSimpleBlock("minecraft:lapis_block");
+        createSimpleBlock("minecraft:diamond_block");
+        {
+            Block::Properties trappedProps;
+            trappedProps.setId("minecraft:trapped_chest");
+            registerBlock("minecraft:trapped_chest", new ChestBlockImpl(trappedProps));
+        }
+        for (const char* banner : {"minecraft:black_wall_banner", "minecraft:gray_wall_banner",
+                                   "minecraft:light_gray_wall_banner"}) {
+            Block::Properties bannerProps;
+            bannerProps.setId(banner).noCollission();
+            registerBlock(banner, new WallTorchBlockImpl(bannerProps));
+        }
+        for (const char* stem : {"minecraft:attached_melon_stem",
+                                 "minecraft:attached_pumpkin_stem"}) {
+            Block::Properties stemProps;
+            stemProps.setId(stem).noCollission();
+            registerBlock(stem, new WallTorchBlockImpl(stemProps));
+        }
+        {
+            Block::Properties pumpkinProps;
+            pumpkinProps.setId("minecraft:carved_pumpkin");
+            registerBlock("minecraft:carved_pumpkin", new WallTorchBlockImpl(pumpkinProps));
+        }
+        {
+            Block::Properties anvilProps;
+            anvilProps.setId("minecraft:damaged_anvil").noOcclusion();
+            registerBlock("minecraft:damaged_anvil", new WallTorchBlockImpl(anvilProps));
+        }
+        {
+            Block::Properties gateProps;
+            gateProps.setId("minecraft:dark_oak_fence_gate").noOcclusion();
+            registerBlock("minecraft:dark_oak_fence_gate", new FenceGateBlockImpl(gateProps));
+        }
+        {
+            Block::Properties farmProps;
+            farmProps.setId("minecraft:farmland").noOcclusion();
+            registerBlock("minecraft:farmland", new FarmBlockImpl(farmProps));
+        }
+        {
+            Block::Properties wheatProps;
+            wheatProps.setId("minecraft:wheat").noCollission();
+            registerBlock("minecraft:wheat", new CropBlockImpl(wheatProps));
+        }
+        for (const char* pot : {"minecraft:potted_allium", "minecraft:potted_azure_bluet",
+                                "minecraft:potted_birch_sapling", "minecraft:potted_blue_orchid",
+                                "minecraft:potted_dandelion", "minecraft:potted_oxeye_daisy",
+                                "minecraft:potted_poppy", "minecraft:potted_red_tulip",
+                                "minecraft:potted_white_tulip"}) {
+            createNoOcclusionBlock(pot);
+        }
+
+        // Ancient city / trail ruins / trial chambers blocks (B7 batch 2).
+        for (const char* simple : {"minecraft:chiseled_deepslate", "minecraft:chiseled_tuff",
+                                   "minecraft:chiseled_tuff_bricks", "minecraft:coal_block",
+                                   "minecraft:cobbled_deepslate", "minecraft:copper_block",
+                                   "minecraft:cyan_terracotta", "minecraft:gray_terracotta",
+                                   "minecraft:oxidized_cut_copper", "minecraft:polished_deepslate",
+                                   "minecraft:polished_tuff", "minecraft:red_concrete",
+                                   "minecraft:redstone_block", "minecraft:reinforced_deepslate",
+                                   "minecraft:tuff_bricks", "minecraft:waxed_chiseled_copper",
+                                   "minecraft:waxed_copper_block", "minecraft:waxed_cut_copper",
+                                   "minecraft:waxed_oxidized_chiseled_copper",
+                                   "minecraft:waxed_oxidized_copper",
+                                   "minecraft:waxed_oxidized_cut_copper",
+                                   "minecraft:white_concrete"}) {
+            createSimpleBlock(simple);
+        }
+        for (const char* glass : {"minecraft:black_stained_glass",
+                                  "minecraft:brown_stained_glass",
+                                  "minecraft:light_gray_stained_glass",
+                                  "minecraft:white_stained_glass"}) {
+            createNoOcclusionBlock(glass);
+        }
+        createNoOcclusionBlock("minecraft:flower_pot");
+    {
+        // Reference: Blocks.java:1510 - soul_fire is replaceable, no collision.
+        Block::Properties soulFireProps;
+        soulFireProps.setId("minecraft:soul_fire").noCollission().replaceable();
+        registerBlock("minecraft:soul_fire", new Block(soulFireProps));
+    }
+    {
+        // Reference: Blocks.java:1509 - fire is a FireBlock (AGE + N/E/S/W/UP),
+        // no collision, replaceable.
+        Block::Properties fireProps;
+        fireProps.setId("minecraft:fire").noCollission().replaceable();
+        registerBlock("minecraft:fire", new FireBlockImpl(fireProps));
+    }
+    // Reference: Blocks.java - glowstone/nether ores/ancient_debris are propertyless.
+    createSimpleBlock("minecraft:glowstone");
+    createSimpleBlock("minecraft:nether_gold_ore");
+    createSimpleBlock("minecraft:nether_quartz_ore");
+    createSimpleBlock("minecraft:ancient_debris");
+    {
+        // DriedGhastBlock: HORIZONTAL_FACING (north) + hydration (0) + WATERLOGGED.
+        class DriedGhastBlockImpl : public Block {
+        public:
+            explicit DriedGhastBlockImpl(const Properties& properties) : Block(properties) {
+                rebuildStateDefinition();
+                BlockState* defaultState = getStateDefinition().any();
+                if (defaultState) {
+                    defaultState = defaultState->setValue(
+                        *BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+                    defaultState = defaultState->setValue(*BlockStateProperties::DRIED_GHAST_HYDRATION, 0);
+                    defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+                    registerDefaultState(defaultState);
+                }
+            }
+        protected:
+            void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+                BlockStateProperties::initialize();
+                builder.add(BlockStateProperties::HORIZONTAL_FACING,
+                            BlockStateProperties::DRIED_GHAST_HYDRATION,
+                            BlockStateProperties::WATERLOGGED);
+            }
+        };
+        Block::Properties ghastProps;
+        ghastProps.setId("minecraft:dried_ghast").noOcclusion();
+        registerBlock("minecraft:dried_ghast", new DriedGhastBlockImpl(ghastProps));
+    }
+    // Bastion / end city template blocks:
+    createSimpleBlock("minecraft:purpur_block");
+    createSimpleBlock("minecraft:quartz_block");
+    createSimpleBlock("minecraft:smooth_quartz");
+    createSimpleBlock("minecraft:end_stone_bricks");
+    createLogBlock("minecraft:purpur_pillar");
+    {
+        Block::Properties purpurStairProps;
+        purpurStairProps.setId("minecraft:purpur_stairs").noOcclusion();
+        registerBlock("minecraft:purpur_stairs", new StairBlockImpl(purpurStairProps));
+    }
+    for (const char* slab : {"minecraft:purpur_slab", "minecraft:smooth_quartz_slab"}) {
+        Block::Properties slabProps;
+        slabProps.setId(slab).noOcclusion();
+        registerBlock(slab, new SlabBlockImpl(slabProps));
+    }
+    createNoOcclusionBlock("minecraft:magenta_stained_glass");
+    {
+        // WallBannerBlock: HORIZONTAL_FACING only (same shape as wall torch).
+        Block::Properties bannerProps;
+        bannerProps.setId("minecraft:magenta_wall_banner").noCollission();
+        registerBlock("minecraft:magenta_wall_banner", new WallTorchBlockImpl(bannerProps));
+    }
+    {
+        // EndRodBlock (RodBlock): FACING 6-dir, default UP.
+        class EndRodBlockImpl : public Block {
+        public:
+            explicit EndRodBlockImpl(const Properties& properties) : Block(properties) {
+                rebuildStateDefinition();
+                BlockState* defaultState = getStateDefinition().any();
+                if (defaultState) {
+                    registerDefaultState(defaultState->setValue(
+                        *BlockStateProperties::FACING, core::Direction::UP));
+                }
+            }
+        protected:
+            void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+                BlockStateProperties::initialize();
+                builder.add(BlockStateProperties::FACING);
+            }
+        };
+        Block::Properties rodProps;
+        rodProps.setId("minecraft:end_rod").noOcclusion();
+        registerBlock("minecraft:end_rod", new EndRodBlockImpl(rodProps));
+    }
+    {
+        // EnderChestBlock: HORIZONTAL_FACING (north) + WATERLOGGED (false).
+        class EnderChestBlockImpl : public Block {
+        public:
+            explicit EnderChestBlockImpl(const Properties& properties) : Block(properties) {
+                rebuildStateDefinition();
+                BlockState* defaultState = getStateDefinition().any();
+                if (defaultState) {
+                    defaultState = defaultState->setValue(
+                        *BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+                    defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+                    registerDefaultState(defaultState);
+                }
+            }
+        protected:
+            void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+                BlockStateProperties::initialize();
+                builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::WATERLOGGED);
+            }
+        };
+        Block::Properties enderProps;
+        enderProps.setId("minecraft:ender_chest").noOcclusion();
+        registerBlock("minecraft:ender_chest", new EnderChestBlockImpl(enderProps));
+    }
+    // Nether fortress blocks:
+    createSimpleBlock("minecraft:nether_bricks");
+    {
+        Block::Properties nbStairProps;
+        nbStairProps.setId("minecraft:nether_brick_stairs").noOcclusion();
+        registerBlock("minecraft:nether_brick_stairs", new StairBlockImpl(nbStairProps));
+    }
+    {
+        // NetherWartBlock: AGE 0-3 (default 0), noCollision.
+        class NetherWartBlockImpl : public Block {
+        public:
+            explicit NetherWartBlockImpl(const Properties& properties) : Block(properties) {
+                rebuildStateDefinition();
+                BlockState* defaultState = getStateDefinition().any();
+                if (defaultState) {
+                    registerDefaultState(defaultState->setValue(*BlockStateProperties::AGE_3, 0));
+                }
+            }
+        protected:
+            void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+                BlockStateProperties::initialize();
+                builder.add(BlockStateProperties::AGE_3);
+            }
+        };
+        Block::Properties wartProps;
+        wartProps.setId("minecraft:nether_wart").noCollission();
+        registerBlock("minecraft:nether_wart", new NetherWartBlockImpl(wartProps));
+    }
+    // BlackstoneReplaceProcessor outputs (ruined_portal_nether):
+    createSimpleBlock("minecraft:polished_blackstone");
+    for (const char* stairs : {"minecraft:blackstone_stairs",
+                               "minecraft:polished_blackstone_stairs",
+                               "minecraft:polished_blackstone_brick_stairs"}) {
+        Block::Properties stairProps;
+        stairProps.setId(stairs).noOcclusion();
+        registerBlock(stairs, new StairBlockImpl(stairProps));
+    }
+    for (const char* slab : {"minecraft:blackstone_slab",
+                             "minecraft:polished_blackstone_slab",
+                             "minecraft:polished_blackstone_brick_slab"}) {
+        Block::Properties slabProps;
+        slabProps.setId(slab).noOcclusion();
+        registerBlock(slab, new SlabBlockImpl(slabProps));
+    }
+    // Huge-fungus blocks: stems are RotatedPillarBlocks (AXIS), shroomlight simple.
+    createLogBlock("minecraft:crimson_stem");
+    createLogBlock("minecraft:warped_stem");
+    createSimpleBlock("minecraft:shroomlight");
+    // Nether plants - Reference: Blocks.java:2161-2177. RootsBlock/FungusBlock/
+    // NetherSproutsBlock are propertyless, noCollision; canSurvive = mayPlaceOn
+    // below in #nylium || soul_soil || (#dirt || farmland via VegetationBlock).
+    // (FungusBlock also lists mycelium explicitly, but mycelium is in #dirt.)
+    {
+        class NetherPlantBlockImpl : public BushBlock {
+        public:
+            explicit NetherPlantBlockImpl(const Properties& properties) : BushBlock(properties) {}
+        protected:
+            bool mayPlaceOn(BlockState* stateBelow) const override {
+                return ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                           stateBelow, "minecraft:nylium") ||
+                       (stateBelow && stateBelow->getIdentifier() == "minecraft:soul_soil") ||
+                       BushBlock::mayPlaceOn(stateBelow);
+            }
+        };
+        // roots + sprouts are .replaceable() in Java; fungus is NOT.
+        for (const char* name : {"minecraft:crimson_roots", "minecraft:warped_roots",
+                                 "minecraft:nether_sprouts"}) {
+            Block::Properties plantProps;
+            plantProps.setId(name).noCollission().replaceable();
+            registerBlock(name, new NetherPlantBlockImpl(plantProps));
+        }
+        for (const char* name : {"minecraft:crimson_fungus", "minecraft:warped_fungus"}) {
+            Block::Properties plantProps;
+            plantProps.setId(name).noCollission();
+            registerBlock(name, new NetherPlantBlockImpl(plantProps));
+        }
+    }
+    createNoCollisionBlock("minecraft:weeping_vines_plant");
+    createNoCollisionBlock("minecraft:twisting_vines_plant");
+    // End blocks - Reference: Blocks.java:1954-1965
+    {
+        // ChorusPlantBlock extends PipeBlock: 6 bools (N/E/S/W/UP/DOWN), all false.
+        class ChorusPlantBlockImpl : public Block {
+        public:
+            explicit ChorusPlantBlockImpl(const Properties& properties) : Block(properties) {
+                rebuildStateDefinition();
+                BlockState* defaultState = getStateDefinition().any();
+                if (defaultState) {
+                    defaultState = defaultState->setValue(*BlockStateProperties::NORTH, false);
+                    defaultState = defaultState->setValue(*BlockStateProperties::EAST, false);
+                    defaultState = defaultState->setValue(*BlockStateProperties::SOUTH, false);
+                    defaultState = defaultState->setValue(*BlockStateProperties::WEST, false);
+                    defaultState = defaultState->setValue(*BlockStateProperties::UP, false);
+                    defaultState = defaultState->setValue(*BlockStateProperties::DOWN, false);
+                    registerDefaultState(defaultState);
+                }
+            }
+        protected:
+            void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+                BlockStateProperties::initialize();
+                builder.add(BlockStateProperties::NORTH, BlockStateProperties::EAST,
+                            BlockStateProperties::SOUTH, BlockStateProperties::WEST,
+                            BlockStateProperties::UP, BlockStateProperties::DOWN);
+            }
+        };
+        Block::Properties chorusProps;
+        chorusProps.setId("minecraft:chorus_plant").noOcclusion();
+        registerBlock("minecraft:chorus_plant", new ChorusPlantBlockImpl(chorusProps));
+
+        // ChorusFlowerBlock: AGE_5 (0 default).
+        class ChorusFlowerBlockImpl : public Block {
+        public:
+            explicit ChorusFlowerBlockImpl(const Properties& properties) : Block(properties) {
+                rebuildStateDefinition();
+                BlockState* defaultState = getStateDefinition().any();
+                if (defaultState) {
+                    registerDefaultState(defaultState->setValue(*BlockStateProperties::AGE_5, 0));
+                }
+            }
+        protected:
+            void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+                BlockStateProperties::initialize();
+                builder.add(BlockStateProperties::AGE_5);
+            }
+        };
+        Block::Properties flowerProps;
+        flowerProps.setId("minecraft:chorus_flower").noOcclusion();
+        registerBlock("minecraft:chorus_flower", new ChorusFlowerBlockImpl(flowerProps));
+
+        Block::Properties gatewayProps;
+        gatewayProps.setId("minecraft:end_gateway").noCollission();
+        registerBlock("minecraft:end_gateway", new Block(gatewayProps));
+    }
+    {
+        // WeepingVinesBlock/TwistingVinesBlock (GrowingPlantHeadBlock): AGE 0-25.
+        Block::Properties weepingProps;
+        weepingProps.setId("minecraft:weeping_vines").noCollission();
+        registerBlock("minecraft:weeping_vines", new Age25HeadBlock(weepingProps));
+        Block::Properties twistingProps;
+        twistingProps.setId("minecraft:twisting_vines").noCollission();
+        registerBlock("minecraft:twisting_vines", new Age25HeadBlock(twistingProps));
+    }
+        createLogBlock("minecraft:mangrove_wood");
+        createLogBlock("minecraft:polished_basalt");
+        for (const char* stairs : {"minecraft:brick_stairs", "minecraft:cobbled_deepslate_stairs",
+                                   "minecraft:deepslate_brick_stairs",
+                                   "minecraft:deepslate_tile_stairs", "minecraft:mud_brick_stairs",
+                                   "minecraft:polished_deepslate_stairs",
+                                   "minecraft:waxed_cut_copper_stairs",
+                                   "minecraft:waxed_oxidized_cut_copper_stairs"}) {
+            Block::Properties props;
+            props.setId(stairs).noOcclusion();
+            registerBlock(stairs, new StairBlockImpl(props));
+        }
+        for (const char* slab : {"minecraft:brick_slab", "minecraft:cobbled_deepslate_slab",
+                                 "minecraft:deepslate_brick_slab", "minecraft:mud_brick_slab",
+                                 "minecraft:polished_deepslate_slab",
+                                 "minecraft:polished_tuff_slab",
+                                 "minecraft:waxed_cut_copper_slab",
+                                 "minecraft:waxed_oxidized_cut_copper_slab"}) {
+            Block::Properties props;
+            props.setId(slab).noOcclusion();
+            registerBlock(slab, new SlabBlockImpl(props));
+        }
+        for (const char* wall : {"minecraft:brick_wall", "minecraft:cobbled_deepslate_wall",
+                                 "minecraft:deepslate_brick_wall",
+                                 "minecraft:deepslate_tile_wall", "minecraft:mud_brick_wall",
+                                 "minecraft:polished_deepslate_wall",
+                                 // Blackstone family (BlackstoneReplaceProcessor targets)
+                                 "minecraft:blackstone_wall",
+                                 "minecraft:polished_blackstone_brick_wall"}) {
+            Block::Properties props;
+            props.setId(wall).noOcclusion();
+            registerBlock(wall, new WallBlockImpl(props));
+        }
+        for (const char* bed : {"minecraft:black_bed", "minecraft:brown_bed",
+                                "minecraft:gray_bed", "minecraft:light_blue_bed",
+                                "minecraft:light_gray_bed", "minecraft:magenta_bed",
+                                "minecraft:pink_bed"}) {
+            Block::Properties props;
+            props.setId(bed).noOcclusion();
+            registerBlock(bed, new BedBlockImpl(props));
+        }
+        for (const char* glazed : {"minecraft:black_glazed_terracotta",
+                                   "minecraft:cyan_glazed_terracotta",
+                                   "minecraft:light_gray_glazed_terracotta",
+                                   "minecraft:red_glazed_terracotta"}) {
+            Block::Properties props;
+            props.setId(glazed);
+            registerBlock(glazed, new WallTorchBlockImpl(props));
+        }
+        for (const char* trapdoor : {"minecraft:iron_trapdoor",
+                                     "minecraft:oxidized_copper_trapdoor",
+                                     "minecraft:waxed_oxidized_copper_trapdoor"}) {
+            Block::Properties props;
+            props.setId(trapdoor).noOcclusion();
+            registerBlock(trapdoor, new TrapDoorBlockImpl(props));
+        }
+        for (const char* door : {"minecraft:waxed_copper_door",
+                                 "minecraft:waxed_oxidized_copper_door"}) {
+            Block::Properties props;
+            props.setId(door).noOcclusion();
+            registerBlock(door, new DoorBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:oak_button").noCollission();
+            registerBlock("minecraft:oak_button", new LeverBlockImpl(props));
+        }
+        for (const char* candle : {"minecraft:candle", "minecraft:red_candle",
+                                   "minecraft:white_candle"}) {
+            Block::Properties props;
+            props.setId(candle).noOcclusion();
+            registerBlock(candle, new CandleBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:redstone_lamp");
+            registerBlock("minecraft:redstone_lamp",
+                          new SingleBoolBlockImpl(props, BlockStateProperties::LIT));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:redstone_wall_torch").noCollission();
+            registerBlock("minecraft:redstone_wall_torch", new RedstoneWallTorchBlockImpl(props));
+        }
+        for (const char* grate : {"minecraft:waxed_copper_grate",
+                                  "minecraft:waxed_oxidized_copper_grate"}) {
+            Block::Properties props;
+            props.setId(grate).noOcclusion();
+            registerBlock(grate, new SingleBoolBlockImpl(props, BlockStateProperties::WATERLOGGED));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:comparator").noOcclusion();
+            registerBlock("minecraft:comparator", new ComparatorBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:decorated_pot").noOcclusion();
+            registerBlock("minecraft:decorated_pot", new DecoratedPotBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:hopper").noOcclusion();
+            registerBlock("minecraft:hopper", new HopperBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:note_block");
+            registerBlock("minecraft:note_block", new NoteBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:piston_head").noOcclusion();
+            registerBlock("minecraft:piston_head", new PistonHeadBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:skeleton_skull").noOcclusion();
+            registerBlock("minecraft:skeleton_skull", new SkullBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:target");
+            registerBlock("minecraft:target",
+                          new SingleIntBlockImpl(props, BlockStateProperties::POWER, 0));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:trial_spawner").noOcclusion();
+            registerBlock("minecraft:trial_spawner", new TrialSpawnerBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:vault").noOcclusion();
+            registerBlock("minecraft:vault", new VaultBlockImpl(props));
+        }
+
+        // Processor-list output/input blocks (B7) - all 40 lists surveyed.
+        for (const char* simple : {"minecraft:chiseled_polished_blackstone",
+                                   "minecraft:cracked_deepslate_bricks",
+                                   "minecraft:cracked_deepslate_tiles",
+                                   "minecraft:cracked_polished_blackstone_bricks",
+                                   "minecraft:deepslate_bricks",
+                                   "minecraft:deepslate_tiles",
+                                   "minecraft:gilded_blackstone",
+                                   "minecraft:mud_bricks",
+                                   "minecraft:packed_mud",
+                                   "minecraft:polished_blackstone_bricks"}) {
+            createSimpleBlock(simple);
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:deepslate_tile_slab").noOcclusion();
+            registerBlock("minecraft:deepslate_tile_slab", new SlabBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:brown_stained_glass_pane").noOcclusion();
+            registerBlock("minecraft:brown_stained_glass_pane", new FenceBlock(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:soul_lantern").noOcclusion();
+            registerBlock("minecraft:soul_lantern", new LanternBlockImpl(props));
+        }
+        for (const char* crop : {"minecraft:carrots", "minecraft:potatoes"}) {
+            Block::Properties props;
+            props.setId(crop).noCollission();
+            registerBlock(crop, new CropBlockImpl(props));
+        }
+        {
+            // Reference: BeetrootBlock - AGE 0-3.
+            Block::Properties props;
+            props.setId("minecraft:beetroots").noCollission();
+            registerBlock("minecraft:beetroots",
+                          new SingleIntBlockImpl(props, BlockStateProperties::AGE_3, 0));
+        }
+        for (const char* bulb : {"minecraft:waxed_copper_bulb",
+                                 "minecraft:waxed_exposed_copper_bulb",
+                                 "minecraft:waxed_oxidized_copper_bulb",
+                                 "minecraft:waxed_weathered_copper_bulb"}) {
+            // Reference: CopperBulbBlock - LIT (false), POWERED (false).
+            Block::Properties props;
+            props.setId(bulb);
+            registerBlock(bulb, new CopperBulbBlockImpl(props));
+        }
+
+        // Village + pillager outpost blocks (B7). Grouped by impl class;
+        // jack_o_lantern: pile_pumpkin weighted provider (CarvedPumpkinBlock
+        // pattern - FACING only).
+        {
+            Block::Properties jackProps;
+            jackProps.setId("minecraft:jack_o_lantern");
+            registerBlock("minecraft:jack_o_lantern", new WallTorchBlockImpl(jackProps));
+        }
+        // property sets match the template palette scan exactly.
+        createSimpleBlock("minecraft:acacia_planks");
+        createSimpleBlock("minecraft:cartography_table");
+        createSimpleBlock("minecraft:fletching_table");
+        createSimpleBlock("minecraft:smithing_table");
+        createSimpleBlock("minecraft:lime_terracotta");
+        createSimpleBlock("minecraft:smooth_sandstone");
+        createSimpleBlock("minecraft:smooth_stone");
+        {
+            // Reference: DirtPathBlock - 15/16 slab (sturdiness rules in
+            // BlockState.cpp).
+            Block::Properties pathProps;
+            pathProps.setId("minecraft:dirt_path").noOcclusion();
+            registerBlock("minecraft:dirt_path", new Block(pathProps));
+        }
+        {
+            Block::Properties carpetProps;
+            carpetProps.setId("minecraft:orange_carpet").noOcclusion();
+            registerBlock("minecraft:orange_carpet", new Block(carpetProps));
+        }
+        createNoOcclusionBlock("minecraft:potted_dead_bush");
+        createNoOcclusionBlock("minecraft:potted_spruce_sapling");
+        createLogBlock("minecraft:hay_block");
+        createLogBlock("minecraft:acacia_wood");
+        createLogBlock("minecraft:spruce_wood");
+        createLogBlock("minecraft:stripped_oak_wood");
+        createLogBlock("minecraft:stripped_spruce_wood");
+        for (const char* stairs : {"minecraft:acacia_stairs", "minecraft:diorite_stairs",
+                                   "minecraft:granite_stairs", "minecraft:mossy_cobblestone_stairs",
+                                   "minecraft:smooth_sandstone_stairs"}) {
+            Block::Properties props;
+            props.setId(stairs).noOcclusion();
+            registerBlock(stairs, new StairBlockImpl(props));
+        }
+        for (const char* slab : {"minecraft:acacia_slab", "minecraft:diorite_slab",
+                                 "minecraft:mossy_cobblestone_slab",
+                                 "minecraft:smooth_sandstone_slab"}) {
+            Block::Properties props;
+            props.setId(slab).noOcclusion();
+            registerBlock(slab, new SlabBlockImpl(props));
+        }
+        for (const char* wall : {"minecraft:diorite_wall", "minecraft:granite_wall",
+                                 "minecraft:mossy_cobblestone_wall", "minecraft:sandstone_wall"}) {
+            Block::Properties props;
+            props.setId(wall).noOcclusion();
+            registerBlock(wall, new WallBlockImpl(props));
+        }
+        for (const char* fence : {"minecraft:acacia_fence"}) {
+            Block::Properties props;
+            props.setId(fence).noOcclusion();
+            registerBlock(fence, new FenceBlock(props));
+        }
+        for (const char* pane : {"minecraft:orange_stained_glass_pane",
+                                 "minecraft:white_stained_glass_pane",
+                                 "minecraft:yellow_stained_glass_pane"}) {
+            Block::Properties props;
+            props.setId(pane).noOcclusion();
+            registerBlock(pane, new FenceBlock(props));
+        }
+        for (const char* gate : {"minecraft:acacia_fence_gate", "minecraft:jungle_fence_gate",
+                                 "minecraft:oak_fence_gate", "minecraft:spruce_fence_gate"}) {
+            Block::Properties props;
+            props.setId(gate).noOcclusion();
+            registerBlock(gate, new FenceGateBlockImpl(props));
+        }
+        {
+            Block::Properties doorProps;
+            doorProps.setId("minecraft:acacia_door").noOcclusion();
+            registerBlock("minecraft:acacia_door", new DoorBlockImpl(doorProps));
+        }
+        for (const char* bed : {"minecraft:blue_bed", "minecraft:cyan_bed",
+                                "minecraft:green_bed", "minecraft:lime_bed",
+                                "minecraft:orange_bed", "minecraft:purple_bed",
+                                "minecraft:white_bed", "minecraft:yellow_bed"}) {
+            Block::Properties props;
+            props.setId(bed).noOcclusion();
+            registerBlock(bed, new BedBlockImpl(props));
+        }
+        for (const char* banner : {"minecraft:brown_wall_banner",
+                                   "minecraft:white_wall_banner"}) {
+            Block::Properties props;
+            props.setId(banner).noCollission();
+            registerBlock(banner, new WallTorchBlockImpl(props));
+        }
+        // ALL 16 glazed terracottas carry HORIZONTAL_FACING
+        // (GlazedTerracottaBlock). purple was once a propertyless simple
+        // block, which made the template loader ABORT worldgen on the LARGE
+        // underwater ruins (underwater_ruin/big_*_2) - found by
+        // terrain/tests/template_sweep.cpp after a field crash.
+        {
+            // Reference: WallSkullBlock (FACING north) + AbstractSkullBlock
+            // (POWERED false). end_city/ship's palette needs it - unregistered
+            // it ABORTED worldgen when an end-city ship placed (template_sweep).
+            Block::Properties props;
+            props.setId("minecraft:dragon_wall_head");
+            registerBlock("minecraft:dragon_wall_head", new WallSkullBlockImpl(props));
+        }
+        for (const char* facingOnly : {"minecraft:light_blue_glazed_terracotta",
+                                       "minecraft:lime_glazed_terracotta",
+                                       "minecraft:orange_glazed_terracotta",
+                                       "minecraft:white_glazed_terracotta",
+                                       "minecraft:yellow_glazed_terracotta",
+                                       "minecraft:purple_glazed_terracotta",
+                                       "minecraft:magenta_glazed_terracotta",
+                                       "minecraft:pink_glazed_terracotta",
+                                       "minecraft:gray_glazed_terracotta",
+                                       "minecraft:blue_glazed_terracotta",
+                                       "minecraft:brown_glazed_terracotta",
+                                       "minecraft:green_glazed_terracotta",
+                                       "minecraft:loom"}) {
+            Block::Properties props;
+            props.setId(facingOnly);
+            registerBlock(facingOnly, new WallTorchBlockImpl(props));
+        }
+        {
+            Block::Properties cutterProps;
+            cutterProps.setId("minecraft:stonecutter").noOcclusion();
+            registerBlock("minecraft:stonecutter", new WallTorchBlockImpl(cutterProps));
+        }
+        for (const char* plate : {"minecraft:acacia_pressure_plate",
+                                  "minecraft:oak_pressure_plate",
+                                  "minecraft:spruce_pressure_plate"}) {
+            Block::Properties props;
+            props.setId(plate).noCollission();
+            registerBlock(plate, new SingleBoolBlockImpl(props, BlockStateProperties::POWERED));
+        }
+        {
+            Block::Properties buttonProps;
+            buttonProps.setId("minecraft:jungle_button").noCollission();
+            registerBlock("minecraft:jungle_button", new LeverBlockImpl(buttonProps));
+        }
+        for (const char* furnaceLike : {"minecraft:blast_furnace", "minecraft:smoker"}) {
+            Block::Properties props;
+            props.setId(furnaceLike);
+            registerBlock(furnaceLike, new FurnaceBlockImpl(props));
+        }
+        {
+            Block::Properties signProps;
+            signProps.setId("minecraft:spruce_wall_sign").noCollission();
+            registerBlock("minecraft:spruce_wall_sign", new HorizontalWaterloggedBlockImpl(signProps));
+        }
+        for (const char* stem : {"minecraft:melon_stem", "minecraft:pumpkin_stem"}) {
+            Block::Properties props;
+            props.setId(stem).noCollission();
+            registerBlock(stem, new CropBlockImpl(props));
+        }
+        {
+            Block::Properties barrelProps;
+            barrelProps.setId("minecraft:barrel");
+            registerBlock("minecraft:barrel", new BarrelBlockImpl(barrelProps));
+        }
+        {
+            Block::Properties bellProps;
+            bellProps.setId("minecraft:bell").noOcclusion();
+            registerBlock("minecraft:bell", new BellBlockImpl(bellProps));
+        }
+        {
+            Block::Properties campfireProps;
+            campfireProps.setId("minecraft:campfire").noOcclusion();
+            registerBlock("minecraft:campfire", new CampfireBlockImpl(campfireProps));
+        }
+        {
+            Block::Properties composterProps;
+            composterProps.setId("minecraft:composter").noOcclusion();
+            registerBlock("minecraft:composter", new ComposterBlockImpl(composterProps));
+        }
+        {
+            Block::Properties grindProps;
+            grindProps.setId("minecraft:grindstone").noOcclusion();
+            registerBlock("minecraft:grindstone", new GrindstoneBlockImpl(grindProps));
+        }
+        {
+            Block::Properties lanternProps;
+            lanternProps.setId("minecraft:lantern").noOcclusion();
+            registerBlock("minecraft:lantern", new LanternBlockImpl(lanternProps));
+        }
+        {
+            Block::Properties lecternProps;
+            lecternProps.setId("minecraft:lectern").noOcclusion();
+            registerBlock("minecraft:lectern", new LecternBlockImpl(lecternProps));
+        }
+
+        // Stronghold blocks (B6). Java properties: torch/end_portal are
+        // noCollission; stone_button shares the LeverBlock property set
+        // (FACE wall / FACING north / POWERED false).
+        createSimpleBlock("minecraft:bookshelf");
+        createNoCollisionBlock("minecraft:torch");
+        createNoCollisionBlock("minecraft:end_portal");
+        {
+            Block::Properties buttonProps;
+            buttonProps.setId("minecraft:stone_button").noCollission();
+            registerBlock("minecraft:stone_button", new LeverBlockImpl(buttonProps));
+        }
+        {
+            Block::Properties frameProps;
+            frameProps.setId("minecraft:end_portal_frame").noOcclusion();
+            registerBlock("minecraft:end_portal_frame", new EndPortalFrameBlockImpl(frameProps));
+        }
+
+        // Jungle temple blocks (B6).
+        createSimpleBlock("minecraft:chiseled_stone_bricks");
+
+        Block::Properties hookProps;
+        hookProps.setId("minecraft:tripwire_hook").noCollission();
+        registerBlock("minecraft:tripwire_hook", new TripWireHookBlockImpl(hookProps));
+
+        Block::Properties wireProps;
+        wireProps.setId("minecraft:tripwire").noCollission();
+        registerBlock("minecraft:tripwire", new TripWireBlockImpl(wireProps));
+
+        Block::Properties redstoneProps;
+        redstoneProps.setId("minecraft:redstone_wire").noCollission();
+        registerBlock("minecraft:redstone_wire", new RedStoneWireBlockImpl(redstoneProps));
+
+        Block::Properties leverProps;
+        leverProps.setId("minecraft:lever").noCollission();
+        registerBlock("minecraft:lever", new LeverBlockImpl(leverProps));
+
+        Block::Properties pistonProps;
+        pistonProps.setId("minecraft:sticky_piston");
+        registerBlock("minecraft:sticky_piston", new PistonBlockImpl(pistonProps));
+
+        Block::Properties repeaterProps;
+        repeaterProps.setId("minecraft:repeater").noCollission();
+        registerBlock("minecraft:repeater", new RepeaterBlockImpl(repeaterProps));
+
+        Block::Properties dispenserProps;
+        dispenserProps.setId("minecraft:dispenser");
+        registerBlock("minecraft:dispenser", new DispenserBlockImpl(dispenserProps));
+
+        // Igloo blocks (B6 template placement).
+        createSimpleBlock("minecraft:stone_bricks");
+        createSimpleBlock("minecraft:mossy_stone_bricks");
+        createSimpleBlock("minecraft:cracked_stone_bricks");
+        createSimpleBlock("minecraft:infested_stone_bricks");
+        createSimpleBlock("minecraft:infested_mossy_stone_bricks");
+        createSimpleBlock("minecraft:infested_chiseled_stone_bricks");
+        createSimpleBlock("minecraft:polished_andesite");
+        for (const char* carpet : {"minecraft:white_carpet", "minecraft:light_gray_carpet",
+                                   "minecraft:red_carpet"}) {
+            Block::Properties carpetProps;
+            carpetProps.setId(carpet).noOcclusion();
+            registerBlock(carpet, new Block(carpetProps));
+        }
+        {
+            Block::Properties potProps;
+            potProps.setId("minecraft:potted_cactus").noOcclusion();
+            registerBlock("minecraft:potted_cactus", new Block(potProps));
+        }
+        {
+            Block::Properties bedProps;
+            bedProps.setId("minecraft:red_bed").noOcclusion();
+            registerBlock("minecraft:red_bed", new BedBlockImpl(bedProps));
+        }
+        {
+            Block::Properties ladderProps;
+            ladderProps.setId("minecraft:ladder").noCollission();
+            registerBlock("minecraft:ladder", new HorizontalWaterloggedBlockImpl(ladderProps));
+        }
+        {
+            Block::Properties signProps;
+            signProps.setId("minecraft:oak_wall_sign").noCollission();
+            registerBlock("minecraft:oak_wall_sign", new HorizontalWaterloggedBlockImpl(signProps));
+        }
+        {
+            // Iron bars share the fence/pane connection property set.
+            Block::Properties barsProps;
+            barsProps.setId("minecraft:iron_bars").noOcclusion();
+            registerBlock("minecraft:iron_bars", new FenceBlock(barsProps));
+        }
+        {
+            Block::Properties brewingProps;
+            brewingProps.setId("minecraft:brewing_stand").noOcclusion();
+            registerBlock("minecraft:brewing_stand", new BrewingStandBlockImpl(brewingProps));
+        }
+        {
+            Block::Properties cauldronProps2;
+            cauldronProps2.setId("minecraft:water_cauldron").noOcclusion();
+            registerBlock("minecraft:water_cauldron", new LayeredCauldronBlockImpl(cauldronProps2));
+        }
+        {
+            Block::Properties torchProps2;
+            torchProps2.setId("minecraft:redstone_torch").noCollission();
+            registerBlock("minecraft:redstone_torch",
+                          new SingleBoolBlockImpl(torchProps2, BlockStateProperties::LIT, true));
+        }
+        {
+            Block::Properties sbProps;
+            sbProps.setId("minecraft:structure_block");
+            registerBlock("minecraft:structure_block", new StructureBlockImpl(sbProps));
+        }
+        {
+            Block::Properties furnaceProps;
+            furnaceProps.setId("minecraft:furnace");
+            registerBlock("minecraft:furnace", new FurnaceBlockImpl(furnaceProps));
+        }
+        {
+            Block::Properties slabProps2;
+            slabProps2.setId("minecraft:spruce_slab").noOcclusion();
+            registerBlock("minecraft:spruce_slab", new SlabBlockImpl(slabProps2));
+        }
+    }
+    {
         Block::Properties props;
         props.setId("minecraft:bee_nest");
         BEE_NEST = new BeehiveBlockImpl(props);
@@ -1834,48 +3875,177 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     createSimpleBlock("minecraft:oak_planks");
     createSimpleBlock("minecraft:spruce_planks");
     createSimpleBlock("minecraft:dark_oak_planks");
-    createSimpleBlock("minecraft:spruce_stairs");
-    createSimpleBlock("minecraft:dark_oak_stairs");
-    createSimpleBlock("minecraft:spruce_fence");
-    createSimpleBlock("minecraft:dark_oak_fence");
-    createSimpleBlock("minecraft:oak_trapdoor");
-    createNoCollisionBlock("minecraft:rail");
+    // spruce_stairs is registered above with full stair properties (B6).
+    {
+        Block::Properties doStairProps;
+        doStairProps.setId("minecraft:dark_oak_stairs").noOcclusion();
+        registerBlock("minecraft:dark_oak_stairs", new StairBlockImpl(doStairProps));
+    }
+    {
+        Block::Properties spruceFenceProps;
+        spruceFenceProps.setId("minecraft:spruce_fence").noOcclusion();
+        registerBlock("minecraft:spruce_fence", new FenceBlock(spruceFenceProps));
+    }
+    {
+        // Mineshaft blocks with real properties (B6).
+        Block::Properties doFenceProps;
+        doFenceProps.setId("minecraft:dark_oak_fence").noOcclusion();
+        registerBlock("minecraft:dark_oak_fence", new FenceBlock(doFenceProps));
+
+        Block::Properties railProps;
+        railProps.setId("minecraft:rail").noCollission();
+        registerBlock("minecraft:rail", new RailBlockImpl(railProps));
+
+        Block::Properties chainProps;
+        chainProps.setId("minecraft:iron_chain").forceSolidOn().noOcclusion();
+        registerBlock("minecraft:iron_chain", new ChainBlockImpl(chainProps));
+
+        Block::Properties torchProps;
+        torchProps.setId("minecraft:wall_torch").noCollission();
+        registerBlock("minecraft:wall_torch", new WallTorchBlockImpl(torchProps));
+    }
+    {
+        Block::Properties trapdoorProps;
+        trapdoorProps.setId("minecraft:oak_trapdoor").noOcclusion();
+        registerBlock("minecraft:oak_trapdoor", new TrapDoorBlockImpl(trapdoorProps));
+    }
     createForceSolidOnNoCollisionBlock("minecraft:cobweb");
-    createForceSolidOnNoOcclusionBlock("minecraft:iron_chain");
-    createNoCollisionBlock("minecraft:wall_torch");
 
     // =========================================================================
     // Stairs - TEMPORARY: Using simple Block to avoid state system issues
     // TODO: Fix std::any_cast issue in StateDefinition and use StairBlock
     // =========================================================================
-    OAK_STAIRS = reinterpret_cast<StairBlock*>(createSimpleBlock("minecraft:oak_stairs"));
+    {
+        Block::Properties oakStairProps;
+        oakStairProps.setId("minecraft:oak_stairs").noOcclusion();
+        Block* oakStairs = new StairBlockImpl(oakStairProps);
+        registerBlock("minecraft:oak_stairs", oakStairs);
+        OAK_STAIRS = reinterpret_cast<StairBlock*>(oakStairs);
+    }
     STONE_STAIRS = reinterpret_cast<StairBlock*>(createSimpleBlock("minecraft:stone_stairs"));
-    COBBLESTONE_STAIRS = reinterpret_cast<StairBlock*>(createSimpleBlock("minecraft:cobblestone_stairs"));
+    {
+        // Real stair properties (B6 jungle temple places these).
+        Block::Properties cobbleStairProps;
+        cobbleStairProps.setId("minecraft:cobblestone_stairs").noOcclusion();
+        Block* cobbleStairs = new StairBlockImpl(cobbleStairProps);
+        registerBlock("minecraft:cobblestone_stairs", cobbleStairs);
+        COBBLESTONE_STAIRS = reinterpret_cast<StairBlock*>(cobbleStairs);
+    }
 
     // =========================================================================
     // Slabs - TEMPORARY: Using simple Block to avoid state system issues
     // =========================================================================
-    OAK_SLAB = reinterpret_cast<SlabBlock*>(createSimpleBlock("minecraft:oak_slab"));
-    STONE_SLAB = reinterpret_cast<SlabBlock*>(createSimpleBlock("minecraft:stone_slab"));
-    COBBLESTONE_SLAB = reinterpret_cast<SlabBlock*>(createSimpleBlock("minecraft:cobblestone_slab"));
+    {
+        Block::Properties oakSlabProps;
+        oakSlabProps.setId("minecraft:oak_slab").noOcclusion();
+        Block* oakSlab = new SlabBlockImpl(oakSlabProps);
+        registerBlock("minecraft:oak_slab", oakSlab);
+        OAK_SLAB = reinterpret_cast<SlabBlock*>(oakSlab);
+    }
+    {
+        Block::Properties stoneSlabProps;
+        stoneSlabProps.setId("minecraft:stone_slab").noOcclusion();
+        Block* stoneSlab = new SlabBlockImpl(stoneSlabProps);
+        registerBlock("minecraft:stone_slab", stoneSlab);
+        STONE_SLAB = reinterpret_cast<SlabBlock*>(stoneSlab);
+    }
+    {
+        Block::Properties cobbleSlabProps;
+        cobbleSlabProps.setId("minecraft:cobblestone_slab").noOcclusion();
+        Block* cobbleSlab = new SlabBlockImpl(cobbleSlabProps);
+        registerBlock("minecraft:cobblestone_slab", cobbleSlab);
+        COBBLESTONE_SLAB = reinterpret_cast<SlabBlock*>(cobbleSlab);
+    }
+    {
+        // Shipwreck wood families (B6).
+        createSimpleBlock("minecraft:birch_planks");
+        createSimpleBlock("minecraft:jungle_planks");
+        for (const char* fence : {"minecraft:birch_fence", "minecraft:jungle_fence"}) {
+            Block::Properties props;
+            props.setId(fence).noOcclusion();
+            registerBlock(fence, new FenceBlock(props));
+        }
+        for (const char* slab : {"minecraft:birch_slab", "minecraft:dark_oak_slab",
+                                 "minecraft:jungle_slab"}) {
+            Block::Properties props;
+            props.setId(slab).noOcclusion();
+            registerBlock(slab, new SlabBlockImpl(props));
+        }
+        for (const char* stairs : {"minecraft:birch_stairs", "minecraft:jungle_stairs"}) {
+            Block::Properties props;
+            props.setId(stairs).noOcclusion();
+            registerBlock(stairs, new StairBlockImpl(props));
+        }
+        for (const char* trapdoor : {"minecraft:dark_oak_trapdoor", "minecraft:jungle_trapdoor",
+                                     "minecraft:spruce_trapdoor"}) {
+            Block::Properties props;
+            props.setId(trapdoor).noOcclusion();
+            registerBlock(trapdoor, new TrapDoorBlockImpl(props));
+        }
+        for (const char* door : {"minecraft:dark_oak_door", "minecraft:jungle_door",
+                                 "minecraft:spruce_door"}) {
+            Block::Properties props;
+            props.setId(door).noOcclusion();
+            registerBlock(door, new DoorBlockImpl(props));
+        }
+    }
 
     // =========================================================================
     // Fences - TEMPORARY: Using simple Block to avoid state system issues
     // =========================================================================
-    OAK_FENCE = reinterpret_cast<FenceBlock*>(createSimpleBlock("minecraft:oak_fence"));
-    NETHER_BRICK_FENCE = reinterpret_cast<FenceBlock*>(createSimpleBlock("minecraft:nether_brick_fence"));
+    {
+        // Real FenceBlock instances (connection + waterlogged properties in
+        // the dump; noOcclusion => isSolidRender false like Java fences).
+        Block::Properties oakFenceProps;
+        oakFenceProps.setId("minecraft:oak_fence").noOcclusion();
+        OAK_FENCE = new FenceBlock(oakFenceProps);
+        registerBlock("minecraft:oak_fence", OAK_FENCE);
+
+        Block::Properties netherFenceProps;
+        netherFenceProps.setId("minecraft:nether_brick_fence").noOcclusion();
+        NETHER_BRICK_FENCE = new FenceBlock(netherFenceProps);
+        registerBlock("minecraft:nether_brick_fence", NETHER_BRICK_FENCE);
+    }
 
     // =========================================================================
     // Doors - TEMPORARY: Using simple Block to avoid state system issues
     // =========================================================================
-    OAK_DOOR = reinterpret_cast<DoorBlock*>(createSimpleBlock("minecraft:oak_door"));
-    IRON_DOOR = reinterpret_cast<DoorBlock*>(createSimpleBlock("minecraft:iron_door"));
+    {
+        Block::Properties oakDoorProps;
+        oakDoorProps.setId("minecraft:oak_door").noOcclusion();
+        Block* oakDoor = new DoorBlockImpl(oakDoorProps);
+        registerBlock("minecraft:oak_door", oakDoor);
+        OAK_DOOR = reinterpret_cast<DoorBlock*>(oakDoor);
+    }
+    {
+        Block::Properties ironDoorProps;
+        ironDoorProps.setId("minecraft:iron_door").noOcclusion();
+        Block* ironDoor = new DoorBlockImpl(ironDoorProps);
+        registerBlock("minecraft:iron_door", ironDoor);
+        IRON_DOOR = reinterpret_cast<DoorBlock*>(ironDoor);
+    }
 
     // =========================================================================
     // Walls - TEMPORARY: Using simple Block to avoid state system issues
     // =========================================================================
-    COBBLESTONE_WALL = reinterpret_cast<WallBlock*>(createSimpleBlock("minecraft:cobblestone_wall"));
-    STONE_BRICK_WALL = reinterpret_cast<WallBlock*>(createSimpleBlock("minecraft:stone_brick_wall"));
+    {
+        Block::Properties cobbleWallProps;
+        cobbleWallProps.setId("minecraft:cobblestone_wall").noOcclusion();
+        Block* cobbleWall = new WallBlockImpl(cobbleWallProps);
+        registerBlock("minecraft:cobblestone_wall", cobbleWall);
+        COBBLESTONE_WALL = reinterpret_cast<WallBlock*>(cobbleWall);
+    }
+    {
+        Block::Properties sbWallProps;
+        sbWallProps.setId("minecraft:stone_brick_wall").noOcclusion();
+        Block* sbWall = new WallBlockImpl(sbWallProps);
+        registerBlock("minecraft:stone_brick_wall", sbWall);
+        STONE_BRICK_WALL = reinterpret_cast<WallBlock*>(sbWall);
+
+        Block::Properties msbWallProps;
+        msbWallProps.setId("minecraft:mossy_stone_brick_wall").noOcclusion();
+        registerBlock("minecraft:mossy_stone_brick_wall", new WallBlockImpl(msbWallProps));
+    }
 
     // =========================================================================
     // Leaves

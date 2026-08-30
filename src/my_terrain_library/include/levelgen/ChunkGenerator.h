@@ -106,6 +106,14 @@ public:
         const std::vector<StepFeatureData>& featuresPerStep
     );
 
+    /**
+     * Reference: StructureManager.shouldGenerateStructures(). Set by the
+     * harness when it injects the structure state; gates the structure pass
+     * inside applyBiomeDecoration.
+     */
+    void setGenerateStructures(bool enabled) { m_generateStructures = enabled; }
+    bool generateStructures() const { return m_generateStructures; }
+
     //=========================================================================
     // Feature Logging Control (for parity debugging)
     //=========================================================================
@@ -217,6 +225,62 @@ public:
         return world::biome::BiomeGenerationSettings::empty();
     }
 
+    /**
+     * Reference: Java ChunkGenerator's generationSettingsGetter (biome ->
+     * BiomeGenerationSettings). The default (nullptr) means "use the global
+     * BiomeFeatureRegistry lists"; FlatLevelSource overrides it with its
+     * adjusted per-step lists (FlatLevelGeneratorSettings.
+     * adjustGenerationSettings). Indexed [step][featureIndex].
+     */
+    virtual const std::vector<std::vector<const placement::PlacedFeature*>>*
+    featuresForBiomeOverride(const std::string& /*biomeKey*/) const {
+        return nullptr;
+    }
+
+    /**
+     * Reference: BiomeFilter.shouldPlace ->
+     * context.generator().getBiomeGenerationSettings(biome).hasFeature(f).
+     * Default routes to BiomeFeatureRegistry::hasFeature; FlatLevelSource
+     * consults its adjusted lists. Implemented in ChunkGenerator.cpp.
+     */
+    virtual bool hasFeatureInBiome(const std::string& biomeKey,
+                                   const placement::PlacedFeature* feature) const;
+
+    /**
+     * Reference: Java ChunkGenerator.featuresPerStep - built per GENERATOR
+     * from Suppliers.memoize(FeatureSorter.buildFeaturesPerStep(
+     * List.copyOf(biomeSource.possibleBiomes()), ...)). The default (nullptr)
+     * keeps the historical per-dimension static builds in ChunkStatusTasks /
+     * ChunkGenerationRunner (whose key ORDER is parity-proven). Generators
+     * whose possibleBiomes differ from a full dimension (FixedBiomeSource
+     * single-biome worlds, FlatLevelSource) MUST override, or feature
+     * indices for setFeatureSeed diverge from Java.
+     */
+    virtual const std::vector<StepFeatureData>* customFeaturesPerStep() {
+        return nullptr;
+    }
+
+    /**
+     * Anchor of the columns getBaseColumn() fills: column[i] = block at
+     * y = getBaseColumnMinY() + i. Reference: Java NoiseColumn carries its
+     * own minY - the noise generator anchors at ITS minY, FlatLevelSource at
+     * the LEVEL's minY (heightAccessor.getMinY()). For noise dimensions the
+     * two are equal, which is why the old y - getMinY() convention held.
+     */
+    virtual int32_t getBaseColumnMinY() const { return getMinY(); }
+
+    /**
+     * The hosting LEVEL's height range (Java LevelHeightAccessor). Equal to
+     * the generator range for every noise dimension; FlatLevelSource
+     * overrides with the real level range (its own is 0/384 regardless of
+     * the level). Java structure code mixes the two - port each call site
+     * against the decompiled source (e.g. moveBelowSeaLevel uses the
+     * GENERATOR minY, JigsawPlacement padding and RuinedPortal findSuitableY
+     * use the LEVEL).
+     */
+    virtual int32_t getLevelMinY() const { return getMinY(); }
+    virtual int32_t getLevelHeight() const { return getGenDepth(); }
+
 protected:
     /**
      * Get writable area bounding box for a chunk
@@ -227,6 +291,9 @@ protected:
         int32_t& minX, int32_t& minY, int32_t& minZ,
         int32_t& maxX, int32_t& maxY, int32_t& maxZ
     );
+
+    // Reference: WorldOptions.generateStructures() via StructureManager.
+    bool m_generateStructures = false;
 };
 
 /**
@@ -248,6 +315,12 @@ private:
     Beardifier* m_beardifier;
     NoiseGeneratorSettings* m_settings;   // Store settings for NoiseChunk creation
     world::biome::BiomeSource* m_biomeSource;  // Biome source for createBiomes
+
+    // Memoized featuresPerStep for single-biome (FixedBiomeSource) worlds -
+    // Java builds featuresPerStep from possibleBiomes(), which is one biome
+    // there, NOT the whole dimension. Empty until first use.
+    std::vector<StepFeatureData> m_singleBiomeFeaturesPerStep;
+    bool m_singleBiomeFeaturesBuilt = false;
 
     /**
      * Internal terrain fill implementation
@@ -348,6 +421,11 @@ public:
     int32_t getCellWidth() const { return m_cellWidth; }
     int32_t getCellHeight() const { return m_cellHeight; }
     world::biome::BiomeSource* getBiomeSource() const { return m_biomeSource; }
+    const NoiseGeneratorSettings* getSettings() const { return m_settings; }
+
+    // Single-biome (FixedBiomeSource) worlds build featuresPerStep from their
+    // one biome, matching Java's per-generator possibleBiomes() build.
+    const std::vector<StepFeatureData>* customFeaturesPerStep() override;
 
     /**
      * Get base height at the given position

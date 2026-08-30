@@ -64,3 +64,7 @@ tools/docca/
 tools/inspect/
 tools/litre/
 tools/quickbook/
+
+# Prebuilt Tracy CLI tools (tracy-capture, tracy-csvexport) — 15 MB of
+# binaries, rebuildable from cmake-build-tracy/_deps/tracy-src/{capture,csvexport}
+tools/tracy/

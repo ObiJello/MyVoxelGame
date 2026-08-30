@@ -21,10 +21,20 @@ namespace Game {
         int          maxCount;
     };
 
+    // MC MobSpawnSettings.MobSpawnCost — the PotentialCalculator budget for a
+    // charged type in this biome (soul sand valley skeletons, etc.).
+    struct MobSpawnCost {
+        EntityTypeId type;
+        double       energyBudget;
+        double       charge;
+    };
+
     struct BiomeSpawnList {
         std::string_view     biome;
         const MobSpawnEntry* entries;
         int                  count;
+        const MobSpawnCost*  costs;      // null when the biome has none
+        int                  costCount;
     };
 
     // Sorted by biome slug so lookup can binary-search.
@@ -33,5 +43,8 @@ namespace Game {
 
     // Null when the biome has no spawns for any implemented mob.
     const BiomeSpawnList* FindBiomeSpawnList(std::string_view biomeSlug);
+
+    // Null when the biome assigns this type no spawn cost.
+    const MobSpawnCost* FindMobSpawnCost(const BiomeSpawnList* list, EntityTypeId type);
 
 } // namespace Game

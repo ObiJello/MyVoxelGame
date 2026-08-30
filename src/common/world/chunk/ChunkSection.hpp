@@ -148,6 +148,9 @@ namespace Game {
             if (prevRaw != rawID) {
                 if (BlockRandomlyTicks(prevRaw)) --randomTickingCount;
                 if (BlockRandomlyTicks(rawID))   ++randomTickingCount;
+                constexpr uint16_t airRaw = static_cast<uint16_t>(BlockID::Air);
+                if (prevRaw == airRaw)      ++nonAirCount;
+                else if (rawID == airRaw)   --nonAirCount;
             }
             if (state != BlockStates::Default(state.Block())) m_hasStates = true;
         }
@@ -176,12 +179,21 @@ namespace Game {
         // correctness.
         inline bool HasStates() const { return m_hasStates; }
 
-        // MC LevelChunkSection.hasOnlyAir — the single-value fast path the
-        // encoder, the mesh copy and the conversion all branch on.
-        inline bool IsAllAir() const {
-            return m_states.IsSingleValue() &&
-                   m_states.SingleValue() == BlockState{}.RawId();
-        }
+        // MC LevelChunkSection.hasOnlyAir — `nonEmptyBlockCount == 0`, a
+        // maintained census exactly like MC's.
+        //
+        // This USED to test the palette's single-value fast path instead
+        // (IsSingleValue() && value == air), which is subtly and disastrously
+        // wrong: a PalettedContainer that ever grew past one entry never
+        // collapses back, so a section whose every block was removed one by
+        // one — a TNT crater — kept answering "has blocks" forever. The
+        // emptiness mirror faithfully cached the lie, the mesher (correctly)
+        // produced an empty mesh for it, and the occlusion BFS then treated
+        // the section as enclosed solid: an invisible opaque lid that culled
+        // everything behind it. Diagnosed from an in-game F8 dump showing
+        // ACTUALAIR=0 (this function) with NONAIR=0 (a real scan of all 4096
+        // voxels) on every lid section.
+        inline bool IsAllAir() const { return nonAirCount == 0; }
 
         // Retrieve the BlockID at local (x,y,z) in [0..15].
         // Returns a raw uint16_t; static_cast<BlockID>(...) when needed.
@@ -220,6 +232,9 @@ namespace Game {
                 static_cast<uint16_t>(BlockState::FromRawId(previous).Block());
             if (BlockRandomlyTicks(prevRaw)) --randomTickingCount;
             if (BlockRandomlyTicks(rawID))   ++randomTickingCount;
+            constexpr uint16_t airRaw = static_cast<uint16_t>(BlockID::Air);
+            if (prevRaw == airRaw && rawID != airRaw)      ++nonAirCount;
+            else if (prevRaw != airRaw && rawID == airRaw) --nonAirCount;
         }
 
         inline void Set(int x, int y, int z, BlockID id) {
@@ -239,6 +254,9 @@ namespace Game {
             if (prevRaw != rawID) {
                 if (BlockRandomlyTicks(prevRaw)) --randomTickingCount;
                 if (BlockRandomlyTicks(rawID))   ++randomTickingCount;
+                constexpr uint16_t airRaw = static_cast<uint16_t>(BlockID::Air);
+                if (prevRaw == airRaw)      ++nonAirCount;
+                else if (rawID == airRaw)   --nonAirCount;
             }
             // "Something here is not at its block's default state." Compared
             // against the block's own default rather than against 0, which is
@@ -260,6 +278,12 @@ namespace Game {
         // reads per tick spent almost entirely on stone.
         uint16_t randomTickingCount = 0;
 
+        // MC LevelChunkSection.nonEmptyBlockCount: how many voxels are not
+        // air. Maintained on every write above and rebuilt by the recount
+        // below; IsAllAir() is `== 0`. A default-constructed section is all
+        // air, so 0 is the correct initial value.
+        uint16_t nonAirCount = 0;
+
         inline bool IsRandomlyTicking() const { return randomTickingCount > 0; }
 
         // Rebuild the census from scratch. Needed by any path that fills
@@ -273,14 +297,17 @@ namespace Game {
             // One pass over the DISTINCT values, not 4096 voxels — the palette
             // already knows how many of each there are (MC recalcBlockCounts
             // uses its container's count() the same way).
+            uint32_t nonAir = 0;
             m_states.ForEachValue([&](uint32_t stateId, int count) {
                 const BlockState st = BlockState::FromRawId(stateId);
                 if (BlockRandomlyTicks(static_cast<uint16_t>(st.Block()))) {
                     n += static_cast<uint32_t>(count);
                 }
+                if (st.Block() != BlockID::Air) nonAir += static_cast<uint32_t>(count);
                 if (st != BlockStates::Default(st.Block())) anyState = true;
             });
             randomTickingCount = static_cast<uint16_t>(n > 0xFFFFu ? 0xFFFFu : n);
+            nonAirCount = static_cast<uint16_t>(nonAir > 0xFFFFu ? 0xFFFFu : nonAir);
             m_hasStates = anyState;
         }
     };

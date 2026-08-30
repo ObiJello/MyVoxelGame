@@ -1,0 +1,15 @@
+[17:13:48] [main/INFO]: [STDOUT]: byStatus(FEATURES) = 34
+[17:13:48] [main/INFO]: [STDOUT]: byStatus(FULL) = 33
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(33) = minecraft:full
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(34) = minecraft:initialize_light
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(35) = minecraft:carvers
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(36) = minecraft:biomes
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(37) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(38) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(39) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(40) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(41) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(42) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(43) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(44) = minecraft:structure_starts
+[17:13:48] [main/INFO]: [STDOUT]: generationStatus(45) = null

@@ -50,12 +50,27 @@ namespace Server {
 
         // Raw spawn. `pos` is the entity's feet, `vel` is blocks per TICK.
         // Returns the new entity id, or 0 if the stack was empty.
+        // Reinstate an item restored from disk, keeping its saved state
+        // exactly. Spawn() cannot be used for this: it stamps a fresh uuid, a
+        // fresh bob offset and a default age, which is right for a NEW drop and
+        // wrong for one that has been lying on the ground since last session.
+        int32_t Adopt(Game::ItemEntity entity);
+
         int32_t Spawn(const glm::dvec3& pos, const glm::dvec3& vel,
                       const Game::ItemStack& stack, int pickupDelay);
 
         // MC Block.popResource — the standard "a block produced this" drop.
         // Scatters within the block cell and gives it a small upward hop.
         void PopResource(const glm::ivec3& blockPos, const Game::ItemStack& stack);
+
+        // MC Entity.spawnAtLocation — a drop that comes off an ENTITY rather
+        // than a block. Deliberately NOT PopResource: there is no ±0.25
+        // scatter and no half-height sink, because the spawn point is already
+        // an exact entity position rather than a block coordinate that has to
+        // be turned into one. A falling block that cannot land drops here, and
+        // routing it through PopResource visibly snapped the item to the
+        // centre of whatever cell the entity happened to be overlapping.
+        void SpawnAtLocation(const glm::dvec3& pos, const Game::ItemStack& stack);
 
         // MC Block.popResourceFromFace — drop nudged out of one face, used
         // when the item logically comes off a particular side of a block.
@@ -103,6 +118,13 @@ namespace Server {
         // ── Access ─────────────────────────────────────────────────────────
         const std::unordered_map<int32_t, Game::ItemEntity>& All() const { return m_entities; }
 
+        // Mutable view, for the few systems that act on every item at once
+        // rather than on one looked up by id — today only the explosion sweep
+        // (ServerLevelBridge::ApplyExplosionToLooseEntities), which pushes and
+        // destroys items caught in a blast. Clearing an entity's stack here is
+        // the destroy signal; Tick's step-4 sweep retires it and tells clients.
+        std::unordered_map<int32_t, Game::ItemEntity>& AllMutable() { return m_entities; }
+
         // Mutable lookup by id, for the command layer (/tp can move a dropped
         // item). Returns null when the id is unknown — an entity can despawn
         // between a selector resolving it and the caller acting on it, so the
@@ -147,6 +169,23 @@ namespace Server {
         std::unordered_map<int32_t, Game::ItemEntity> m_entities;
         int32_t  m_nextId = kItemEntityIdBase;
         Game::JavaRandom m_random{0};
+
+        // Chunk-bucketed index over m_entities, rebuilt at the start of the
+        // merge pass. Exists for the same reason MobManager's does: the merge
+        // search box is one item's AABB inflated by half a block, so it spans
+        // at most 2x2 chunks — but the scan used to walk EVERY item in the
+        // level for every mergeable one, which is O(n^2). MC does not do that
+        // either; ItemEntity.mergeWithNeighbours calls level.getEntities with
+        // the box, which is a section query.
+        //
+        // Measured before: 100,000 TNT blasting terrain produced enough debris
+        // to make ItemEntityTick spike to 1,109 ms in one tick.
+        //
+        // Raw pointers into m_entities are safe for the pass: the merge marks a
+        // consumed entity empty rather than erasing it (see the note in Tick),
+        // and nothing inserts while it runs.
+        std::unordered_map<uint64_t, std::vector<Game::ItemEntity*>> m_mergeIndex;
+        void RebuildMergeIndex();
 
         // Try to merge `entity` into any eligible neighbour. Returns the id of
         // whichever entity was consumed (0 if none merged).

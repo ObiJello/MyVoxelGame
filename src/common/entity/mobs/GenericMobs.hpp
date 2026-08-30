@@ -38,6 +38,11 @@ namespace Game {
     public:
         GenericMob(EntityTypeId type, EntityLevel* level);
 
+        // MC's FlyingAnimal marker, from the def — bees and
+        // parrots hold altitude with air friction on the
+        // vertical axis.
+        bool IsFlyingAnimal() const override;
+
     protected:
         void RegisterGoals() override;
     };
@@ -47,6 +52,11 @@ namespace Game {
     class GenericPathfinderMob : public PathfinderMob {
     public:
         GenericPathfinderMob(EntityTypeId type, EntityLevel* level);
+
+        // MC's FlyingAnimal marker, from the def — bees and
+        // parrots hold altitude with air friction on the
+        // vertical axis.
+        bool IsFlyingAnimal() const override;
 
     protected:
         void RegisterGoals() override;
@@ -58,6 +68,21 @@ namespace Game {
     class GenericMonster : public Monster {
     public:
         GenericMonster(EntityTypeId type, EntityLevel* level);
+
+        // MC's FlyingAnimal marker, from the def — bees and
+        // parrots hold altitude with air friction on the
+        // vertical axis.
+        bool IsFlyingAnimal() const override;
+
+        // MC Pillager.getMaxSpawnClusterSize (Pillager.java:137-139) — 1:
+        // outside a patrol a pillager spawns alone. Pillager rides this
+        // generic base, so the override is keyed on type here rather than in
+        // a one-method subclass.
+        int GetMaxSpawnClusterSize() const override {
+            return GetType() == EntityTypeId::Pillager
+                       ? 1
+                       : Monster::GetMaxSpawnClusterSize();
+        }
 
     protected:
         void RegisterGoals() override;
@@ -72,6 +97,11 @@ namespace Game {
         // tempts them and CreateBaby returns another of the same type.
         bool IsFood(uint32_t itemId) const override;
         std::unique_ptr<Animal> CreateBaby() override;
+
+        // MC's FlyingAnimal marker, from the def — bees and
+        // parrots hold altitude with air friction on the
+        // vertical axis.
+        bool IsFlyingAnimal() const override;
 
     protected:
         void RegisterGoals() override;

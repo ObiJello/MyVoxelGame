@@ -21,15 +21,21 @@ namespace Network {
     struct ItemEntitySpawnS2CPacket;
     struct ItemEntityMoveS2CPacket;
     struct TakeItemEntityS2CPacket;
+    struct XpOrbSpawnS2CPacket;
+    struct XpOrbMoveS2CPacket;
+    struct SetExperienceS2CPacket;
     struct AddEntityS2CPacket;
     struct MoveEntityS2CPacket;
     struct EntityPositionSyncS2CPacket;
+    struct EntityPositionSyncBatchS2CPacket;
     struct SetEntityMotionS2CPacket;
     struct SetEntityDataS2CPacket;
     struct EntityEventS2CPacket;
     struct HurtAnimationS2CPacket;
     struct TickingStateS2CPacket;
     struct TickingStepS2CPacket;
+    struct ChangeDimensionS2CPacket;
+    struct ExplodeS2CPacket;
     struct InteractC2SPacket;
     struct HotbarSyncS2CPacket;
     struct InventoryFullS2CPacket;
@@ -60,6 +66,7 @@ namespace Network {
     struct UseItemC2SPacket;
     struct PlayerActionC2SPacket;
     struct PlayerAbilitiesC2SPacket;
+    struct PlayerPauseC2SPacket;
     struct BlockActionC2SPacket;
     struct PlayerMoveC2SPacket;
     struct ChatMessageC2SPacket;
@@ -108,16 +115,33 @@ namespace Network {
         virtual void onItemEntityMoveS2C(const ItemEntityMoveS2CPacket& packet) {}
         virtual void onTakeItemEntityS2C(const TakeItemEntityS2CPacket& packet) {}
 
+        // Experience orbs (spawn/refresh + compact moves; pickup arrives via
+        // onTakeItemEntityS2C with an orb-range id, removal via
+        // onRemoveEntitiesS2C).
+        virtual void onXpOrbSpawnS2C(const XpOrbSpawnS2CPacket& packet) {}
+        virtual void onXpOrbMoveS2C(const XpOrbMoveS2CPacket& packet) {}
+
         // ── Mob entities ───────────────────────────────────────────────────
         virtual void onAddEntityS2C(const AddEntityS2CPacket& packet) {}
         virtual void onMoveEntityS2C(const MoveEntityS2CPacket& packet) {}
         virtual void onEntityPositionSyncS2C(const EntityPositionSyncS2CPacket& packet) {}
+        virtual void onEntityPositionSyncBatchS2C(const EntityPositionSyncBatchS2CPacket& packet) {}
         virtual void onSetEntityMotionS2C(const SetEntityMotionS2CPacket& packet) {}
         virtual void onSetEntityDataS2C(const SetEntityDataS2CPacket& packet) {}
         virtual void onEntityEventS2C(const EntityEventS2CPacket& packet) {}
         virtual void onHurtAnimationS2C(const HurtAnimationS2CPacket& packet) {}
         virtual void onTickingStateS2C(const TickingStateS2CPacket& packet) {}
         virtual void onTickingStepS2C(const TickingStepS2CPacket& packet) {}
+
+        // The player moved to another dimension. The handler must clear every
+        // cached world object before the first chunk of the new dimension
+        // arrives — see ChangeDimensionS2CPacket.hpp for the list.
+        virtual void onChangeDimensionS2C(const ChangeDimensionS2CPacket& packet) {}
+
+        // MC ClientboundExplodePacket — draw a blast that already happened
+        // server-side. See ExplodeS2CPacket.hpp for why the client is told
+        // rather than simulating.
+        virtual void onExplodeS2C(const ExplodeS2CPacket& packet) {}
 
         // Inventory sync
         virtual void onHotbarSyncS2C(const HotbarSyncS2CPacket& packet) {}
@@ -131,6 +155,9 @@ namespace Network {
 
         // Player stats (MC ClientboundSetHealthPacket)
         virtual void onSetHealthS2C(const SetHealthS2CPacket& packet) {}
+
+        // XP triple (MC ClientboundSetExperiencePacket)
+        virtual void onSetExperienceS2C(const SetExperienceS2CPacket& packet) {}
 
         // Block-prediction ack (MC ClientboundBlockChangedAckPacket)
         virtual void onBlockChangedAckS2C(const BlockChangedAckS2CPacket& packet) {}
@@ -176,6 +203,7 @@ namespace Network {
         // release-use, drop, swap-offhand, dig stages)
         virtual void onPlayerActionC2S(const PlayerActionC2SPacket& packet) {}
         virtual void onPlayerAbilitiesC2S(const PlayerAbilitiesC2SPacket& packet) {}
+        virtual void onPlayerPauseC2S(const PlayerPauseC2SPacket& packet) {}
         virtual void onInteractC2S(const InteractC2SPacket& packet) {}
         
         // Play phase - Player updates
