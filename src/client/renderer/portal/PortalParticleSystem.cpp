@@ -7,6 +7,7 @@
 #include "PortalParticleSystem.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "client/portal/ClientPortalManager.hpp"
+#include "client/world/ClientLevel.hpp"
 #include "common/core/Log.hpp"
 
 #include "stb_image.h"
@@ -240,8 +241,7 @@ void main() {
 
     void PortalParticleSystem::Shutdown() {
         if (!g_renderBackend) return;
-        if (m_mesh != INVALID_MESH)            { g_renderBackend->DestroyMesh(m_mesh);              m_mesh = INVALID_MESH; }
-        if (m_vb != INVALID_BUFFER)            { g_renderBackend->DestroyBuffer(m_vb);              m_vb = INVALID_BUFFER; }
+        DestroySlots();
         if (m_dummyTexture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_dummyTexture);   m_dummyTexture = INVALID_TEXTURE; }
         if (m_blueSprite != INVALID_TEXTURE)   { g_renderBackend->DestroyTexture(m_blueSprite);     m_blueSprite = INVALID_TEXTURE; }
         if (m_orangeSprite != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_orangeSprite);   m_orangeSprite = INVALID_TEXTURE; }
@@ -309,12 +309,35 @@ void main() {
                          "failed to load — falling back to procedural soft-disc rendering.");
         }
 
-        // Allocate an initial-empty streaming VB. We grow it on demand.
-        m_vbCapacityVerts = 1024;
-        m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-            m_vbCapacityVerts * 24, nullptr, BufferAccess::Streaming);
-        m_mesh = g_renderBackend->CreateMesh(m_vb, INVALID_BUFFER, GetBlockVertexLayout());
+        // The streaming buffers are made on first use (AcquireSlot).
         return true;
+    }
+
+    PortalParticleSystem::StreamSlot& PortalParticleSystem::AcquireSlot(size_t vertsNeeded, size_t minCapacity) {
+        StreamSlot& slot = m_slots[m_slotCursor];
+        m_slotCursor = (m_slotCursor + 1) % kStreamSlots;
+        if (slot.vb == INVALID_BUFFER || slot.capacityVerts < vertsNeeded) {
+            size_t newCap = std::max(slot.capacityVerts, minCapacity);
+            while (newCap < vertsNeeded) newCap *= 2;
+            // Deferred: the previous frame's draw from this slot may still
+            // be reading it.
+            if (slot.mesh != INVALID_MESH)  g_renderBackend->DeferredDestroyMesh(slot.mesh);
+            if (slot.vb   != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slot.vb);
+            slot.vb   = g_renderBackend->CreateBuffer(BufferUsage::Vertex, newCap * 24, nullptr,
+                                                      BufferAccess::Streaming);
+            slot.mesh = g_renderBackend->CreateMesh(slot.vb, INVALID_BUFFER, GetBlockVertexLayout());
+            slot.capacityVerts = newCap;
+        }
+        return slot;
+    }
+
+    void PortalParticleSystem::DestroySlots() {
+        for (StreamSlot& slot : m_slots) {
+            if (slot.mesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(slot.mesh);  slot.mesh = INVALID_MESH; }
+            if (slot.vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(slot.vb); slot.vb = INVALID_BUFFER; }
+            slot.capacityVerts = 0;
+        }
+        m_slotCursor = 0;
     }
 
     float& PortalParticleSystem::SpawnAccumFor(uint64_t gunId) {
@@ -506,6 +529,9 @@ void main() {
                 glm::vec3 tangent = glm::cross(glm::vec3(portal.normal), outward);
 
                 Particle p;
+                p.dimension = portal.dimension;
+                p.anchored  = true;
+                p.anchor    = glm::vec3(portal.origin);
                 p.position = worldPos;
                 p.velocity = outward * kRadialSpeed
                            + tangent * (Frand() - 0.5f) * 2.0f * kTangentialSpeedJitter;
@@ -586,6 +612,9 @@ void main() {
                     + portal.normal * ln;
 
                 Particle p;
+                p.dimension = portal.dimension;
+                p.anchored  = true;
+                p.anchor    = glm::vec3(portal.origin);
                 p.position = worldPos;
                 // PCF: speed_min=speed_max=0 → spawn AT REST. Twist + pull
                 // forces in the per-frame physics accelerate them to
@@ -644,6 +673,9 @@ void main() {
                     + portal.normal * kVacuumNormalOffset_m;
 
                 Particle p;
+                p.dimension   = portal.dimension;
+                p.anchored    = true;
+                p.anchor      = glm::vec3(portal.origin);
                 p.position    = worldPos;
                 // Small outward initial speed along portal normal (PCF
                 // speed_in_local z=70-100 HU/s).
@@ -680,6 +712,13 @@ void main() {
     void PortalParticleSystem::EmitProjectile(const glm::vec3& start,
                                               const glm::vec3& end,
                                               bool isOrange) {
+        EmitProjectileIn(Client::ClientLevels::ActiveDimension(), start, end, isOrange);
+    }
+
+    void PortalParticleSystem::EmitProjectileIn(Game::DimensionId dimension,
+                                                const glm::vec3& start,
+                                                const glm::vec3& end,
+                                                bool isOrange) {
         if (m_shader == INVALID_SHADER) return;
 
         // Portal exact constants from weapon_portalgun.cpp.
@@ -732,14 +771,22 @@ void main() {
                                        // visible bright dot regardless).
         p.isOrange    = isOrange;
         p.rotation    = 0.0f;
+        p.dimension   = dimension;
         m_particles.push_back(p);
     }
 
     void PortalParticleSystem::EmitOneShot(BurstKind kind,
                                            const glm::vec3& origin,
                                            const glm::vec3& normal,
-                                           bool isOrange) {
+                                           bool isOrange,
+                                           Game::DimensionId dimension) {
         if (m_shader == INVALID_SHADER) return; // init failed; silently skip
+        // Everything this call appends belongs to `dimension`.
+        const size_t firstNew = m_particles.size();
+        struct TagOnExit {
+            std::vector<Particle>& list; size_t first; Game::DimensionId dim;
+            ~TagOnExit() { for (size_t i = first; i < list.size(); ++i) list[i].dimension = dim; }
+        } tagOnExit{ m_particles, firstNew, dimension };
 
         // Build an orthonormal basis (right, up) in the plane perpendicular
         // to `normal` so we can spawn particles around the portal disc.
@@ -867,7 +914,9 @@ void main() {
 
     void PortalParticleSystem::Render(const glm::mat4& projection,
                                       const glm::mat4& view,
-                                      const glm::vec3& cameraPos) {
+                                      const glm::vec3& cameraPos,
+                                      Game::DimensionId dimension,
+                                      const glm::vec3* skipAnchor) {
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         if (m_particles.empty()) return;
 
@@ -1037,28 +1086,21 @@ void main() {
         // simply blueVerts. This lets the orange particles bind their
         // own sprite without re-sorting the VB.
         for (const auto& p : m_particles) {
+            if (p.dimension != dimension) continue;
+            if (skipAnchor && p.anchored && glm::length(p.anchor - *skipAnchor) < 0.05f) continue;
             if (!p.isOrange) { emitOne(p); blueVerts += 6; }
         }
         for (const auto& p : m_particles) {
+            if (p.dimension != dimension) continue;
+            if (skipAnchor && p.anchored && glm::length(p.anchor - *skipAnchor) < 0.05f) continue;
             if (p.isOrange)  { emitOne(p); orangeVerts += 6; }
         }
 
         if (verts.empty()) return;
 
-        // Grow the VB if needed. Power-of-two growth so we don't realloc
-        // every few particles.
-        if (verts.size() > m_vbCapacityVerts) {
-            size_t newCap = m_vbCapacityVerts;
-            while (newCap < verts.size()) newCap *= 2;
-            g_renderBackend->DestroyBuffer(m_vb);
-            m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-                newCap * 24, nullptr, BufferAccess::Streaming);
-            // Re-register the mesh against the new VB.
-            g_renderBackend->DestroyMesh(m_mesh);
-            m_mesh = g_renderBackend->CreateMesh(m_vb, INVALID_BUFFER, GetBlockVertexLayout());
-            m_vbCapacityVerts = newCap;
-        }
-        g_renderBackend->UpdateBuffer(m_vb, 0, verts.size() * 24, verts.data());
+        // This call's own buffer (see StreamSlot), grown if it must be.
+        StreamSlot& slot = AcquireSlot(verts.size(), 1024);
+        g_renderBackend->UpdateBuffer(slot.vb, 0, verts.size() * 24, verts.data());
 
         // Additive blending — particles add light without darkening
         // anything behind. Depth-test on (so they hide behind walls /
@@ -1100,7 +1142,7 @@ void main() {
             g_renderBackend->SetUniformInt(m_shader, "uSprite", 0);
             g_renderBackend->SetUniformInt(m_shader, "uHasSprite",
                 m_blueSprite != INVALID_TEXTURE ? 1 : 0);
-            g_renderBackend->DrawArrays(m_mesh, blueVerts, /*firstVertex=*/0);
+            g_renderBackend->DrawArrays(slot.mesh, blueVerts, /*firstVertex=*/0);
         }
         if (orangeVerts > 0) {
             g_renderBackend->BindTexture(
@@ -1108,7 +1150,7 @@ void main() {
             g_renderBackend->SetUniformInt(m_shader, "uSprite", 0);
             g_renderBackend->SetUniformInt(m_shader, "uHasSprite",
                 m_orangeSprite != INVALID_TEXTURE ? 1 : 0);
-            g_renderBackend->DrawArrays(m_mesh, orangeVerts, /*firstVertex=*/blueVerts);
+            g_renderBackend->DrawArrays(slot.mesh, orangeVerts, /*firstVertex=*/blueVerts);
         }
         g_renderBackend->UnbindMesh();
 

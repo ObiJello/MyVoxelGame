@@ -116,6 +116,8 @@ namespace Render {
         // regenerating any geometry. `indexCount` must equal what the section
         // was uploaded with — the region is not reallocated — otherwise the
         // call is rejected and the old order stays on the GPU.
+        // Input is section-relative uint16 like UploadSection; the absolute
+        // conversion happens here.
         bool UpdateSectionIndices(const MegaBufferSectionKey& key,
                                   const uint16_t* indexData, size_t indexCount);
 
@@ -126,14 +128,50 @@ namespace Render {
         // DRAW COMMANDS
         // ========================================================================
 
+        // 32-bit ABSOLUTE indices. Sections used to upload their uint16
+        // section-relative indices verbatim and draw with a per-section
+        // baseVertex, which halved index bandwidth but pinned the draw count
+        // at one sub-draw per section per layer (10k+ in a wide view — ~0.5us
+        // of CPU each inside glMultiDrawElementsBaseVertex on Apple's GL, and
+        // on MoltenVK the indirect command count is what scales QueueSubmit).
+        // Absolute indices make every section's draw parameters identical
+        // apart from its index range, so adjacent ranges in one slab collapse
+        // into one sub-draw — the renderer merges them (ChunkRenderer::
+        // SubmitMergedRuns). The doubled index memory is the price; the mesher's
+        // uint16 output is unchanged and converted at upload.
+        static constexpr size_t INDEX_SIZE = sizeof(uint32_t);
+
+        // Indices in the slab IBO are ABSOLUTE (already include the section's
+        // vertexOffset), so every section draws with baseVertex 0 — see
+        // INDEX_SIZE. That is what lets the renderer fuse neighbouring
+        // sections of one slab into a single sub-draw.
         struct DrawCommand {
             int32_t indexCount;
-            size_t indexByteOffset;   // Byte offset into slab's IBO
-            int32_t baseVertex;       // Added to each index by the backend
+            uint32_t indexOffset;     // In indices, into the slab's IBO
             uint32_t slabIndex;       // Which slab to bind before drawing
         };
 
         bool GetDrawCommand(const MegaBufferSectionKey& key, DrawCommand& outCmd) const;
+
+        // DEBUG ONLY (F8 CullDump): raw region bookkeeping + slab buffer
+        // handles, so the dump can read the actual GPU-side index/vertex data
+        // for a section and prove whether the bytes are alive.
+        bool DebugGetRegionInfo(const MegaBufferSectionKey& key, uint32_t& outSlab,
+                                size_t& outVtxOff, size_t& outVtxCnt,
+                                size_t& outIdxOff, size_t& outIdxCnt) const;
+        BufferHandle DebugGetSlabVbo(uint32_t slab) const;
+        BufferHandle DebugGetSlabIbo(uint32_t slab) const;
+
+        // Whether a draw may run straight across the index range
+        // [gapBegin, gapEnd) of `slabIndex` without any section's command
+        // covering it. Everything below a slab's high-water mark is one of:
+        // a live section (drawing it uninvited is harmless), a range zeroed on
+        // retire (degenerate triangles, draws nothing), or a range freed
+        // within the last kFreeDelayFrames that STILL HOLDS its old indices.
+        // Only the last kind is a problem — bridging it would keep drawing a
+        // mesh the player just replaced (a broken block lingering for three
+        // frames) — so this says no exactly when the gap touches one of them.
+        bool IsIndexGapDrawable(uint32_t slabIndex, size_t gapBegin, size_t gapEnd) const;
 
         // ========================================================================
         // SLAB BINDING
@@ -194,9 +232,19 @@ namespace Render {
             };
             std::vector<FreeBlock> freeVertexBlocks;
             std::vector<FreeBlock> freeIndexBlocks;
+
+            // Index ranges parked in m_pendingFrees for THIS slab, sorted by
+            // offset, for IsIndexGapDrawable. Rebuilt lazily (hotRangesDirty)
+            // because RemoveSection can run thousands of times in a frame
+            // during a remesh flood and the renderer only reads this a few
+            // thousand times per pass.
+            std::vector<FreeBlock> hotIndexRanges;
+            bool hotRangesDirty = false;
         };
 
-        std::vector<Slab> m_slabs;
+        // mutable: IsIndexGapDrawable is logically const but refreshes the
+        // per-slab hot-range cache on demand.
+        mutable std::vector<Slab> m_slabs;
         size_t m_slabVertexCapacity = 0;
         size_t m_slabIndexCapacity = 0;
         bool m_perSectionIndexBuffers = false;
@@ -238,6 +286,19 @@ namespace Render {
         // generous is a few hundred KB of briefly-unreusable slab space.
         static constexpr uint64_t kFreeDelayFrames = 3;
 
+        // Conversion scratch for TryUploadToSlab/UpdateSectionIndices: the
+        // mesher hands us uint16 section-relative indices, the slab wants
+        // uint32 absolute. Reused across calls so the steady-state upload
+        // path allocates nothing.
+        std::vector<uint32_t> m_indexScratch;
+        // Zero block written over retired index ranges. Grows to the largest
+        // region ever retired and stays there (a few hundred KB at most —
+        // a section layer is capped at 65,536 vertices / 98,304 indices).
+        std::vector<uint32_t> m_zeroScratch;
+
+        // Bring `slab`'s hotIndexRanges up to date with m_pendingFrees.
+        void RefreshHotRanges(Slab& slab, uint32_t slabIndex) const;
+
         // Slab management
         uint32_t AllocateSlab();
         bool TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
@@ -250,10 +311,10 @@ namespace Render {
         static void FreeRegion(std::vector<Slab::FreeBlock>& freeList,
                                size_t offset, size_t count);
 
-        static constexpr size_t VERTEX_STRIDE = 24;
-        // 16-bit indices: section-relative (drawn with baseVertex), halving
-        // index memory and GPU fetch bandwidth vs uint32.
-        static constexpr size_t INDEX_SIZE = sizeof(uint16_t);
+        // Bytes per terrain vertex — must equal sizeof(Render::TerrainVertex)
+        // and GetTerrainVertexLayout().stride (32 = block vertex 24 + the
+        // greedy-mesh sprite tile rect, 4x unorm16).
+        static constexpr size_t VERTEX_STRIDE = 32;
     };
 
 } // namespace Render

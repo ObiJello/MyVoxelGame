@@ -15,8 +15,11 @@
 #include <chrono>
 #include <array>
 #include <memory>
+#include <unordered_set>
 
 namespace Render {
+
+    class ChunkMegaBuffer;
 
     // Render pass configuration
     struct RenderPassConfig {
@@ -71,11 +74,22 @@ namespace Render {
         bool nearby = false;
 
         // NON-PERSISTENT. Valid only for the duration of the RenderAll that
-        // resolved it, and only in m_visibleSections — entries living in a
-        // ReachableCacheSlot always have this null. Never read it from a list
-        // that survived a frame boundary; that is the exact bug this redesign
-        // removes.
+        // resolved it, and only in m_visibleSections. Never read it from a
+        // list that survived a frame boundary; that is the exact bug this
+        // redesign removes.
         const GPUSectionData* resolved = nullptr;
+
+        // Resolution cache, on the ReachableCacheSlot entries. Live resolution
+        // costs an unordered_map find per visible section per frame; that is
+        // thousands of hash lookups for a list whose answer only changes when
+        // a mesh is uploaded or destroyed. So the answer is remembered with
+        // the ClientMeshManager GPU-data generation it was fetched at: equal
+        // stamp, same answer, no lookup. Not a stale-pointer risk — the
+        // generation is bumped before any GPUSectionData dies, so a matching
+        // stamp is proof the pointer is live. `resolved` is what the frame
+        // reads; this is only how it gets filled.
+        const GPUSectionData* cachedGpu = nullptr;
+        uint64_t cacheGeneration = 0;
 
         SectionRenderData(::Game::Math::ChunkPos pos, int secY, float dist)
             : chunkPos(pos), sectionY(secY), distanceToCamera(dist) {}
@@ -89,10 +103,16 @@ namespace Render {
         int sectionsAvailable = 0;  // Total sections checked before culling
         int totalDrawCalls = 0;
 
-        // Per-layer counters
+        // Per-layer counters: sections that contributed geometry...
         int opaqueSections = 0;
         int cutoutSections = 0;
         int translucentSections = 0;
+        // ...and the sub-draws they were issued as after run merging. The
+        // ratio is the merge win; draws is what the driver's per-command
+        // cost scales with.
+        int opaqueDraws = 0;
+        int cutoutDraws = 0;
+        int translucentDraws = 0;
 
         // Geometry statistics
         size_t totalVerticesRendered = 0;
@@ -122,6 +142,7 @@ namespace Render {
         void Reset() {
             sectionsRendered = sectionsSkipped = sectionsAvailable = totalDrawCalls = 0;
             opaqueSections = cutoutSections = translucentSections = 0;
+            opaqueDraws = cutoutDraws = translucentDraws = 0;
             totalVerticesRendered = totalIndicesRendered = 0;
             buildDrawListsTimeMs = chunkIterationTimeMs = gpuDataLoadTimeMs = 0.0f;
             frustumCullingTimeMs = sortingTimeMs = 0.0f;
@@ -137,8 +158,9 @@ namespace Render {
         ChunkRenderer();
         ~ChunkRenderer();
 
-        // Initialize renderer with shaders
-        bool Initialize();
+        // Initialize renderer with shaders, bound to the chunk and mesh
+        // managers of the SAME level (never the globals — see ClientLevel.hpp).
+        bool Initialize(Client::ClientChunkManager* chunks, ClientMeshManager* meshes);
         void Shutdown();
 
         // Convenience method to render all layers. Computes projection
@@ -190,6 +212,77 @@ namespace Render {
         // One frame stale: PrepareVisibleSections runs in the Render phase,
         // after MeshSchedule. MC culls and compiles back-to-back in renderLevel.
         const std::vector<SectionRenderData>& GetMainViewSections() const { return m_mainViewSections; }
+        // The sections of the view being drawn RIGHT NOW — the main view's,
+        // or a portal view's while one is rendering. Renderers that gather
+        // per pass (block entities) read this, so what a portal shows is
+        // gathered from the portal's own view rather than the main camera's.
+        const std::vector<SectionRenderData>& GetVisibleSections() const { return m_visibleSections; }
+
+        // Is (chunkPos, sectionY) in the draw list of the MOST RECENT
+        // PrepareVisibleSections — post-BFS, post-frustum, for whichever
+        // camera that pass ran with (the main view, or a portal recursion's
+        // virtual camera)? The entity and block-entity passes ask this right
+        // after the chunk pass of the same view, which is exactly the list
+        // they want; it is MC's isSectionCompiledAndVisible gate on
+        // extractVisibleEntities, tightened by the occlusion BFS.
+        //
+        // Answers "in the list" only. A section that is not in the list may be
+        // culled OR simply absent (all-air sections are never listed, unloaded
+        // chunks have no sections) — callers that need to tell those apart
+        // consult ClientChunkManager (see Render::EntityCulling).
+        // MAIN THREAD ONLY, like the list it mirrors.
+        bool IsSectionVisible(::Game::Math::ChunkPos chunkPos, int sectionY) const {
+            return m_visibleSectionKeys.find(VisibleSectionKey(chunkPos, sectionY))
+                != m_visibleSectionKeys.end();
+        }
+
+        // ── Debug cull override (detached free camera, F+C) ─────────────
+        // While set, PrepareVisibleSections runs ENTIRELY from the given
+        // camera + frustum: the occlusion-BFS origin/cache key, the per-frame
+        // frustum filter, the front-to-back/translucent sort origin, and the
+        // IsSectionVisible set the entity passes consult all come from the
+        // override view. BindSharedRenderState/RenderAll still build the MVP
+        // from the camera passed to RenderAll, so the scene is DRAWN from one
+        // viewpoint while being CULLED from another — which is the whole
+        // point: fly outside the frozen player's frustum and watch what the
+        // culler actually kept.
+        //
+        // The mesh scheduler snapshot (GetMainViewSections) is taken from the
+        // same pass, so with the override anchored at the player, detaching
+        // the render camera cannot perturb mesh scheduling either.
+        //
+        // Set immediately before the MAIN RenderChunksAll and cleared right
+        // after it — portal see-through re-entries must keep culling from
+        // their own virtual cameras.
+        void SetCullOverride(const Camera& camera, const Frustum& frustum) {
+            m_cullCamera         = camera;
+            m_cullFrustum        = frustum;
+            m_cullOverrideActive = true;
+        }
+        void ClearCullOverride() { m_cullOverrideActive = false; }
+
+        // While set, PrepareVisibleSections records its visible list as this
+        // renderer's MAIN view even under a projection override. For a level
+        // rendered only through a portal, the portal view IS its main view,
+        // and the mesh scheduler needs that list to compile from.
+        void SetRecordMainView(bool on) { m_recordMainView = on; }
+
+        // ── Portal-view occlusion seed ─────────────────────────────────
+        // A view through a portal has its camera wherever the portal's
+        // transform put it — usually inside rock behind the far surface —
+        // so an occlusion BFS from the CAMERA sees nothing. The Immersive
+        // Portals mod seeds its chunk culling at the portal's destination
+        // instead; this is that seed: a point just in front of the far
+        // surface, in air. While set (around a projection-override render),
+        // PrepareVisibleSections runs the ordinary cached, asynchronous BFS
+        // from it, keyed by the seed's section, and the frustum-only sweep
+        // is only the fallback for the frame or two before the first result
+        // lands. Without it a portal view drew EVERY section in its frustum,
+        // which in the Nether — solid terrain in every direction — was
+        // thousands of sections per view, and a chain of nested views ran
+        // the frame into seconds.
+        void SetPortalViewSeed(const glm::vec3& seed) { m_portalSeed = seed; m_portalSeedActive = true; }
+        void ClearPortalViewSeed() { m_portalSeedActive = false; }
 
         // Call when a GPUSectionData object is ERASED (chunk unload, section
         // remeshed to empty, mesh-manager shutdown) — cached reachable lists
@@ -203,6 +296,30 @@ namespace Render {
 
         // Debug rendering options
         void SetWireframeMode(bool enable);
+        // Greedy-mesh debug view: terrain draws as untextured lines (1x1 white
+        // texture + PolygonMode::Line), so merged quads read as large
+        // triangles and the grouping — and its reaction to block edits — is
+        // visible directly. Toggled from the Render Controls panel; the
+        // OBEY_GREEDY_DEBUG env var forces it on from launch for harness use.
+        // Also flips the mesher's debug coloring and triggers a full remesh,
+        // so the view applies immediately and updates on block edits.
+        void SetGreedyMeshDebug(bool enable);
+        void GetGreedyTotals(uint64_t& eligibleIn, uint64_t& rectsOut) const;
+
+        // Live culprit-isolation toggles (Render Controls): flip while staring
+        // at a rendering artifact to convict or clear a subsystem in place.
+        void SetDrawMergeEnabled(bool enable) { m_drawMergeEnabled = enable; }
+        void SetGapBridgingEnabled(bool enable) { m_gapBridgingEnabled = enable; }
+        bool IsGapBridgingEnabled() const { return m_gapBridgingEnabled; }
+        bool IsDrawMergeEnabled() const { return m_drawMergeEnabled; }
+        void SetGreedyMeshingEnabled(bool enable);   // remeshes the world
+        bool IsGreedyMeshingEnabled() const;
+
+        // Occlusion/frustum readout for the debug panel: sections the BFS
+        // reached from the (cull) camera, and how many survived the frustum.
+        uint32_t GetLastReachableCount() const { return m_lastReachableCount; }
+        uint32_t GetLastVisibleCount() const { return m_lastVisibleCount; }
+        bool IsGreedyMeshDebug() const { return m_greedyMeshDebug; }
         void SetShowSectionBounds(bool enable) { m_showSectionBounds = enable; }
         void SetDebugLayer(int layer) { m_debugLayer = layer; } // -1 = all, 0 = opaque, 1 = cutout, 2 = translucent
 
@@ -230,6 +347,20 @@ namespace Render {
         // the call returns.
         bool      m_useProjectionOverride = false;
         glm::mat4 m_projectionOverride{1.0f};
+        bool      m_recordMainView = false;
+        bool      m_portalSeedActive = false;
+        glm::vec3 m_portalSeed{0.0f};
+
+        // Debug cull override state — see SetCullOverride above. Copies, not
+        // pointers: the caller's camera is a per-frame temporary and the
+        // override outlives the call that set it.
+        // Same-level peers, set by Initialize.
+        Client::ClientChunkManager* m_chunks = nullptr;
+        ClientMeshManager*          m_meshes = nullptr;
+
+        bool    m_cullOverrideActive = false;
+        Camera  m_cullCamera;
+        Frustum m_cullFrustum{};
 
         // World-space portal clip plane — set by PortalRenderer before the
         // see-through scene render. Mirrors Portal's PushCustomClipPlane
@@ -241,11 +372,64 @@ namespace Render {
         static void SetPortalClipPlane(const glm::vec4& plane) {
             s_portalClipPlane = plane;
         }
+        static glm::vec4 PortalClipPlane() { return s_portalClipPlane; }
+        // Entities clip against the same plane with its kept side widened
+        // by this margin (world units). The immersive portal renderer's
+        // mark pass sits its stencil a few centimetres in front of the
+        // surface, which wipes anything of the near world in that band;
+        // the far view's entity passes draw the band back, and this is
+        // what lets them. Terrain keeps the exact plane — a wall flush
+        // with a gun portal's surface must stay out of the view.
+        static void  SetPortalEntityClipMargin(float margin) { s_portalEntityClipMargin = margin; }
+        static float PortalEntityClipMargin() { return s_portalEntityClipMargin; }
+        // The camera's near plane, ONE number for the whole frame. The chunk
+        // pass builds its own projection (on Vulkan always — the override
+        // is a GL-only oblique trick), and every other pass must build the
+        // same one or depth stops agreeing between terrain and everything
+        // else: mobs drawn through cave walls, the portal mark failing its
+        // depth test, the player's own body sinking into the ground. The
+        // number scales with the body (see PlayerPhysics::scale).
+        static void  SetNearPlane(float nearPlane) { s_nearPlane = nearPlane; }
+        static float NearPlane() { return s_nearPlane; }
+        static glm::vec4 PortalEntityClipPlane() {
+            glm::vec4 plane = s_portalClipPlane;
+            const float len = glm::length(glm::vec3(plane));
+            if (len > 0.0f) plane.w += s_portalEntityClipMargin * len;
+            return plane;
+        }
     private:
         static glm::vec4 s_portalClipPlane;
+        static float     s_portalEntityClipMargin;
+        static float     s_nearPlane;
 
         // Render configuration
         bool m_enableFrustumCulling = true;
+        bool m_greedyMeshDebug = false;
+        // Debug rendering phase: greedy-debug mode draws each pass twice —
+        // a depth-biased FILL phase in flat dark grey, then the colored LINE
+        // phase on top — so the world reads solid instead of see-through.
+        bool m_debugFillPhase = false;
+        bool m_drawMergeEnabled = true;   // seeded from OBEY_NO_DRAW_MERGE at init
+        // OFF by default (2026-08-31): bridged gaps draw CULLED sections, and
+        // the bridged set changes with the camera angle as run layout shifts —
+        // at silhouettes and the RD edge that is phantom terrain flickering in
+        // and out per angle, which players read as "random holes". Confirmed
+        // by pixel-diffing identical camera paths: merge-on frames contained
+        // EXTRA unstable geometry, never missing geometry. Exact-adjacent
+        // fusion (gap 0) is pixel-identical to unmerged and keeps most of the
+        // draw-count win; the checkbox re-enables bridging for benchmarks.
+        bool m_gapBridgingEnabled = false;
+        // Last frame's OPAQUE submitted runs, for the F8 dump's coverage check:
+        // (slab, beginIndex, endIndex) of every run actually handed to the
+        // backend. Proves whether an aimed section's range left the CPU.
+        std::vector<std::array<size_t, 3>> m_lastOpaqueRuns;
+        std::vector<std::array<size_t, 3>> m_callRuns;
+        uint32_t m_lastReachableCount = 0;
+        uint32_t m_lastVisibleCount = 0;
+        void ApplyDebugOverlayUniform(ShaderHandle shader);
+        TextureHandle m_whiteDebugTexture = INVALID_TEXTURE;  // lazy, greedy debug view
+        // Atlas normally; the lazy 1x1 white texture in greedy-debug view.
+        TextureHandle ActiveTerrainTexture();
         bool m_enableSmartCull = true;  // Occlusion culling via VisibilitySet BFS
         bool m_wireframeMode = false;
         bool m_showSectionBounds = false;
@@ -278,7 +462,9 @@ namespace Render {
             // at counter D can only be referenced by lists built at <= D.
             std::vector<SectionRenderData> sections;
         };
-        static constexpr int kReachableSlots = 4;  // Main camera + up to 3 portal views
+        // Main camera + portal views: every distinct far surface in view
+        // keys its own slot (a chain of views through one portal shares one).
+        static constexpr int kReachableSlots = 8;
         std::array<ReachableCacheSlot, kReachableSlots> m_reachableSlots;
         uint32_t m_prepareCounter = 0;  // Monotonic, for LRU slot eviction
 
@@ -328,6 +514,19 @@ namespace Render {
 
         bool m_visibleSectionsDirty = true;
 
+        // Hash-set mirror of m_visibleSections' identities, rebuilt alongside
+        // it in the per-frame frustum filter, so IsSectionVisible is one
+        // lookup instead of a scan of a few thousand entries per entity.
+        // Key packs chunk x/z (27 bits each — ±67M chunks, far past any world
+        // border) and the section index; a chunk beyond that range can only
+        // alias onto a false "visible", never a false cull.
+        std::unordered_set<uint64_t> m_visibleSectionKeys;
+        static uint64_t VisibleSectionKey(::Game::Math::ChunkPos pos, int sectionY) {
+            return (static_cast<uint64_t>(static_cast<uint32_t>(pos.x) & 0x7FFFFFFu) << 37)
+                 | (static_cast<uint64_t>(static_cast<uint32_t>(pos.z) & 0x7FFFFFFu) << 10)
+                 | (static_cast<uint64_t>(static_cast<uint32_t>(sectionY) & 0x3FFu));
+        }
+
         // --- Translucency re-sort scheduling (MC LevelRenderer:165, 953) ---
         // The cursor persists across frames and wraps modulo the visible count,
         // so every visible section eventually takes its turn in the sweep. A
@@ -336,18 +535,52 @@ namespace Render {
         size_t m_translucencyResortIndex = 0;
         glm::ivec3 m_lastTranslucentSortBlockPos{INT32_MIN, INT32_MIN, INT32_MIN};
 
-        // Per-slab multi-draw command arrays (reused each frame to avoid allocation)
-        std::vector<std::vector<int32_t>> m_perSlabCounts;
-        std::vector<std::vector<size_t>> m_perSlabOffsets;
-        std::vector<std::vector<int32_t>> m_perSlabBaseVertices;
-        // Parallel to the above; only populated for layers using per-section
-        // index buffers (translucent). INVALID_BUFFER elsewhere.
-        std::vector<std::vector<BufferHandle>> m_perSlabIbos;
+        // ── Draw-list scratch (members so the per-frame build allocates nothing)
+        // One entry per visible section that has geometry in the layer being
+        // drawn: where its indices live. Offsets/counts are in INDICES.
+        struct DrawEntry {
+            uint32_t slab;
+            uint32_t offset;
+            uint32_t count;
+            BufferHandle ibo;   // per-section-IBO layers only; INVALID_BUFFER otherwise
+        };
+        std::vector<DrawEntry> m_drawEntries;
+        // The runs (merged sub-draws) for the slab currently being flushed —
+        // exactly the arrays MultiDrawIndexedBaseVertex takes.
+        std::vector<int32_t> m_runCounts;
+        std::vector<size_t>  m_runByteOffsets;
+        // Translucent per-slab run buckets (SubmitOrderedRuns) — reused
+        // allocations, one bucket per slab.
+        std::vector<std::vector<int32_t>> m_slabRunCounts;
+        std::vector<std::vector<size_t>>  m_slabRunOffsets;
+        // Slab indices are absolute, so every sub-draw has baseVertex 0; the
+        // backend API still wants an array of them. Grown, never shrunk.
+        std::vector<int32_t> m_zeroBaseVertices;
 
-        // Distant cutout multi-draw arrays (rendered as solid in opaque pass)
-        std::vector<int32_t> m_distantCutoutCounts;
-        std::vector<size_t> m_distantCutoutOffsets;
-        std::vector<int32_t> m_distantCutoutBaseVertices;
+        // Opaque/cutout run merging: two sections in the same slab become one
+        // sub-draw when the index gap between them is at most this many
+        // indices. The gap is drawn too — it is either sections the frustum
+        // culled (drawn for nothing, a few thousand extra indices on a tile
+        // GPU is nothing next to a driver-side command) or space zeroed on
+        // free (degenerate triangles). 8192 indices ≈ 1365 quads, the size of
+        // a few small sections. Tune against Draws/Merged in Tracy.
+        static constexpr uint32_t kDrawMergeGapIndices = 8192;
+
+        // How many of this frame's visible sections carry translucent
+        // geometry. Set by PrepareVisibleSections so RenderAll can skip the
+        // translucent pass — shader bind, six uniform uploads, the resort
+        // sweep — outright when it would draw nothing, which is most frames
+        // away from water.
+        int m_visibleTranslucentSections = 0;
+
+        // Issue m_drawEntries for one layer. Merged: sorted by (slab, offset)
+        // and fused across small gaps — opaque/cutout, order irrelevant.
+        // Ordered: list order preserved exactly (back-to-front), fusing only
+        // zero-gap ascending neighbours — translucent. Each returns the number
+        // of sub-draws issued.
+        int SubmitMergedRuns(ChunkMegaBuffer& megaBuffer);
+        int SubmitOrderedRuns(ChunkMegaBuffer& megaBuffer);
+        int SubmitPerSectionIbos(ChunkMegaBuffer& megaBuffer);
 
         // Pass configurations
         RenderPassConfig m_opaqueConfig;
@@ -387,6 +620,12 @@ namespace Render {
         
         // Section preparation and culling
         void PrepareVisibleSections(const Camera& camera, const Frustum& frustum);
+        // The portal-view fallback (m_useProjectionOverride, no seed or no
+        // reachable slot yet): no occlusion BFS, no cache — every loaded
+        // section within render distance of the far camera that passes the
+        // portal-bounded frustum. See SetPortalViewSeed and the call site.
+        void PrepareVisibleSectionsThroughPortal(const Camera& camera, const Frustum& frustum,
+                                                 int renderDistanceChunks);
 
         // Port of LevelRenderer.scheduleTranslucentSectionResort (:953). Owns
         // the POLICY — which sections get re-sorted and how often; the per-
@@ -394,23 +633,24 @@ namespace Render {
         // mirroring MC's split between LevelRenderer and RenderSection.
         // Runs once a frame, immediately before the translucent pass.
         void ScheduleTranslucentSectionResort(const glm::vec3& cameraPos);
-        void SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack);
         
         // Bind shader, MVP, and atlas texture once per frame (shared across all 3 passes)
         void BindSharedRenderState(const Camera& camera);
         void SetEnvironmentUniforms(ShaderHandle shader, const Camera& camera);
 
-        // Render helpers
-        void RenderLayerPass(RenderLayer layer, uint8_t layerBit, bool reverseOrder = false);
-        void RenderSectionLayer(const SectionRenderData& section, RenderLayer layer);
+        // Render helpers. backToFront = walk the visible list in reverse and
+        // keep that order on the GPU (translucent); otherwise order is free
+        // and runs are merged.
+        void RenderLayerPass(RenderLayer layer, bool backToFront = false);
         void RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections);
         float CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY);
         bool IsSectionInFrustum(const Frustum& frustum, ::Game::Math::ChunkPos chunkPos, int sectionY);
         AABB GetSectionAABB(::Game::Math::ChunkPos chunkPos, int sectionY);
     };
 
-    // Global chunk renderer instance
-    extern std::unique_ptr<ChunkRenderer> g_chunkRenderer;
+    // The chunk renderer of the level the globals are BOUND to (see
+    // ClientLevel.hpp). Owned by ClientLevel; rebound by ClientLevels.
+    extern ChunkRenderer* g_chunkRenderer;
 
     // Runtime toggle for the per-pass GL_TIME_ELAPSED GPU timers (defined in
     // ChunkRenderer.cpp, exposed in the Debug UI's Render Controls panel).
@@ -418,9 +658,7 @@ namespace Render {
     // on Apple's GL — disable during Tracy captures for clean numbers.
     extern bool g_enableGpuPassTimers;
 
-    // Utility functions for integration
-    bool InitializeChunkRenderer();
-    void ShutdownChunkRenderer();
+    // Utility functions for integration (all act on the bound renderer)
 
     // Main rendering entry points
     void RenderChunksOpaque(const Camera& camera, const Frustum& frustum);

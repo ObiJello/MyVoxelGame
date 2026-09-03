@@ -387,9 +387,19 @@ namespace Threading {
         
         // Set generation from snapshot for version checking
         result.generation = job.snapshot->generation;
+        result.dimension  = job.snapshot->dimension;
         
         // Copy neighbor mask from snapshot (computed on main thread where chunk presence is known)
         result.neighborMask = job.snapshot->neighborMask;
+
+        // Palette stamp, read BEFORE the mesher runs: if the greedy-debug
+        // toggle flips mid-build the mesh may be half one palette, but the
+        // stamp stays OLD, so FinalizeSectionUpload's palette net re-dirties
+        // it. Reading after the build could stamp NEW on OLD-colored quads
+        // and strand them (the exact stale-overlay bug this exists to kill).
+        const uint32_t paletteGen = Render::Mesher::GreedyPaletteGen();
+        result.paletteGen = paletteGen;
+        result.jobSeq = job.snapshot->jobSeq;
         
         // Handle based on job type
         if (job.snapshot->jobType == Client::Render::MeshJobType::BorderOnly) {
@@ -408,6 +418,7 @@ namespace Threading {
         // the fast path fills the mesher's block cache with memcpys from the
         // snapshot's flat arrays instead of per-block virtual GetBlock calls.
         Render::Mesher mesher;
+        mesher.SetDimension(job.snapshot->dimension);
         Render::SectionMesh sectionMesh;
         mesher.BuildSectionMesh(job.snapshot->region, job.chunkPos, job.sectionY, sectionMesh);
         
@@ -415,6 +426,9 @@ namespace Threading {
         result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY);
         result.generation = job.snapshot->generation;  // Restore generation after conversion
         result.neighborMask = job.snapshot->neighborMask;  // Restore neighbor mask after conversion
+        result.paletteGen = paletteGen;                    // Restore palette stamp after conversion
+        result.jobSeq = job.snapshot->jobSeq;              // Restore job seq after conversion
+        result.dimension = job.snapshot->dimension;        // Restore level after conversion
         result.success = true;
         
         return result;
@@ -617,12 +631,15 @@ namespace Threading {
     // individual push_back calls per vertex. The Vertex struct layout
     // (vec3 pos, vec2 uv, uint32 packedColor) is 6 float-sized slots per vertex
     // (3 float pos + 2 float UV + 1 uint32 packed color).
-    static void CopyVertexLayer(const std::vector<Render::Vertex>& verts,
+    static void CopyVertexLayer(const std::vector<Render::TerrainVertex>& verts,
                                 std::vector<float>& outFloats) {
-        static_assert(sizeof(Render::Vertex) == 6 * sizeof(float),
-                      "Vertex layout changed — update CopyVertexLayer");
+        // The float vector is an opaque byte blob here — the tail of each
+        // vertex is unorm16 tile-rect data, not floats, but nothing ever
+        // interprets these values as floats; they ride to the GPU verbatim.
+        static_assert(sizeof(Render::TerrainVertex) == 8 * sizeof(float),
+                      "TerrainVertex layout changed — update CopyVertexLayer");
 
-        const size_t floatCount = verts.size() * 6;
+        const size_t floatCount = verts.size() * 8;
         outFloats.resize(floatCount);
         std::memcpy(outFloats.data(), verts.data(), floatCount * sizeof(float));
     }
@@ -663,7 +680,7 @@ namespace Threading {
             // re-sorts when the point of view changes.
             const glm::vec3 cameraPos = GetPlayerPosition();
             const float* v = result.meshData.translucentVertices.data();
-            constexpr size_t floatsPerVertex = sizeof(Render::Vertex) / sizeof(float);
+            constexpr size_t floatsPerVertex = sizeof(Render::TerrainVertex) / sizeof(float);
             const size_t quads = result.meshData.translucentVertexCount / 4;
             auto& centroids = result.meshData.translucentCentroids;
             centroids.clear();

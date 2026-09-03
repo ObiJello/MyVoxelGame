@@ -451,6 +451,10 @@ namespace Game {
             // dimension — see SharedBackgroundExecutor in the header.
             // ================================================================
             m_backgroundLease = std::make_unique<SharedExecutorLease>();
+            if (const char* deco = std::getenv("OBEY_DECO_THREADS")) {
+                const int n = std::atoi(deco);
+                if (n > 0) m_decorationPool = std::make_unique<BackgroundExecutor>(static_cast<size_t>(n), /*elevated=*/true);
+            }
             m_mainThreadExecutor = std::make_unique<MainThreadExecutor>();
             {
                 MainThreadExecutor* exec = m_mainThreadExecutor.get();
@@ -486,6 +490,7 @@ namespace Game {
                 levelHeight.height,
                 m_config.storagePath);
 
+            if (m_decorationPool) m_chunkCache->getChunkMap().worldGenContextMutable().decorationExecutor = m_decorationPool->getExecutor();
             m_chunkCache->setTaskPoller([this]() {
                 if (m_mainThreadExecutor->hasPendingTasks()) {
                     m_mainThreadExecutor->runPendingTasks();

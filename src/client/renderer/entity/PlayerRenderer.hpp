@@ -2,10 +2,15 @@
 #pragma once
 
 #include "../backend/RenderTypes.hpp"
+#include "EntityFrame.hpp"
+#include "StickFigureGeometry.hpp"
 #include "client/entity/RemotePlayerManager.hpp"
 #include <glm/glm.hpp>
 #include <unordered_set>
 #include <cstdint>
+#include <vector>
+
+struct Frustum;
 
 namespace Render {
 
@@ -34,11 +39,15 @@ namespace Render {
         // individually via RenderSingle with an entry-clip plane so the
         // half of the body that's "already through" the portal isn't
         // drawn twice. Pass nullptr to render everyone.
+        // `frustum` is this view's (main or portal recursion) — MC
+        // extractVisibleEntities' shouldRender AABB test plus the visible-
+        // section gate; see EntityCulling.hpp.
         void Render(const glm::mat4& projection, const glm::mat4& view,
-                    const glm::vec3& cameraPos,
+                    const glm::vec3& cameraPos, const Frustum& frustum,
                     const Client::RemotePlayerManager& remotePlayers,
                     float partialTick,
-                    const std::unordered_set<uint32_t>* skipIds = nullptr);
+                    const std::unordered_set<uint32_t>* skipIds = nullptr,
+                    const glm::vec4& clipPlane = glm::vec4(0.0f));
 
         // Render a single arbitrary player (NOT in RemotePlayerManager).
         // Used by the portal see-through pass to draw the LOCAL player as a
@@ -67,17 +76,48 @@ namespace Render {
                                const Client::RemotePlayerManager& remotePlayers,
                                int fbWidth, int fbHeight);
 
+        // What the last Render call did, for OBEY_PORTAL_DIAG: players in
+        // the bound level, and how many of those each gate dropped.
+        struct Tally {
+            int inLevel = 0, drawn = 0, cullDistance = 0, cullFrustum = 0, cullCrossing = 0;
+        };
+        const Tally& LastTally() const { return m_tally; }
+
     private:
+        Tally m_tally;
+        // Upload this call's m_triVerts / m_lineVerts into the frame's set
+        // and draw both passes. `clipPlane` is the portal ghost half-body
+        // plane (zero = off); the vertices are already in world space.
+        void SubmitFigures(const glm::mat4& mvp, const glm::vec3& cameraPos,
+                           const glm::vec4& clipPlane);
+
         ShaderHandle  m_shader       = INVALID_SHADER;
         TextureHandle m_dummyTexture = INVALID_TEXTURE;
 
-        // Line geometry (body, limbs, head outline, face features)
-        BufferHandle  m_lineVB   = INVALID_BUFFER;
-        MeshHandle    m_lineMesh = INVALID_MESH;
+        // Two streaming sets alternated per FRAME, every call in a frame
+        // (the bulk pass, each RenderSingle ghost, the portal pass's repeat
+        // of all of them) appending at a cursor — the scheme EntityFrame.hpp
+        // describes. One set rewritten per call was a Vulkan hazard: draws
+        // run at submit, so every ghost drawn this frame used to read the
+        // LAST call's vertices.
+        struct FrameBuffers {
+            // Line geometry (body, limbs, head outline, face features), as
+            // camera-facing thick strips.
+            BufferHandle lineVB   = INVALID_BUFFER;
+            MeshHandle   lineMesh = INVALID_MESH;
+            // Triangle geometry (head ring + filled back-of-head disc).
+            BufferHandle triVB    = INVALID_BUFFER;
+            MeshHandle   triMesh  = INVALID_MESH;
+        };
+        FrameBuffers m_frames[2];
+        EntityFrame::Cursor m_frameCursor;
+        size_t m_lineCursor = 0;   // strip vertices written this frame
+        size_t m_triCursor  = 0;   // triangle vertices written this frame
 
-        // Triangle geometry (filled back-of-head disc)
-        BufferHandle  m_triVB    = INVALID_BUFFER;
-        MeshHandle    m_triMesh  = INVALID_MESH;
+        // Build scratch, reused across calls so a frame allocates nothing.
+        std::vector<StickVertex> m_lineVerts;
+        std::vector<StickVertex> m_triVerts;
+        std::vector<StickVertex> m_stripVerts;
 
         static const char* s_vertSource;
         static const char* s_fragSource;
@@ -85,7 +125,7 @@ namespace Render {
         // Each line segment becomes a 6-vert camera-facing thick triangle strip.
         // Per player: head circle (64) + smile (32) + eyes (2) + body/limbs (~6) ≈
         // 100 segments × 6 ≈ 620 verts/player. 65 536 / 620 ≈ 105 players concurrent
-        // before this buffer fills.
+        // before this buffer fills. Per set, shared by every call in a frame.
         static constexpr size_t MAX_VERTICES = 65536;
     };
 

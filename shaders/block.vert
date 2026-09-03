@@ -8,6 +8,12 @@ layout (location = 2) in vec4 aColor;     // Vertex color (RGBA8 normalized by G
 
 // Uniforms
 uniform mat4 uMVP;  // Model-View-Projection matrix
+// The model matrix, for geometry authored in MODEL space (dropped items,
+// falling blocks, the held item): fog and camera distance are measured
+// from the WORLD position, and taking aPos for that put every such mesh at
+// the world origin — sky-coloured items for anyone playing farther from
+// 0,0 than their fog distance. World-space meshes pass the identity.
+uniform mat4 uModel;
 // World-space clip plane for portal see-through rendering. Mirrors
 // Portal's PushCustomClipPlane (portalrenderable_flatbasic.cpp:454).
 // xyz = plane normal (must be unit), w = -dot(normal, point on plane).
@@ -27,6 +33,6 @@ void main() {
         ? dot(uPortalClipPlane.xyz, aPos) + uPortalClipPlane.w
         : 1.0;
     fragTexCoord = aTexCoord;
-    fragWorldPos = aPos;
+    fragWorldPos = (uModel * vec4(aPos, 1.0)).xyz;
     fragColor = aColor;
 }

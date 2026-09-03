@@ -14,6 +14,7 @@
 #include "common/core/Log.hpp"
 #include "common/physics/Physics.hpp"  // Game::AABB
 #include "client/renderer/portal/PortalParticleSystem.hpp"
+#include "client/world/ClientLevel.hpp"
 #include "client/renderer/portal/PortalCrosshair.hpp"
 
 #include <GLFW/glfw3.h>
@@ -37,6 +38,10 @@ namespace Client {
         // normalize needed (and we want to skip the divide on the hot path).
         portal.right  = glm::cross(portal.upDir, portal.normal);
         portal.active = true;
+        portal.immersive = p.immersive != 0;
+        portal.dimension = p.dimensionId == Network::PortalSetS2CPacket::kDimensionUnknown
+            ? ClientLevels::ActiveDimension()
+            : Game::DimensionFromRaw(p.dimensionId);
 
         // Portal-authoritative timings (c_prop_portal.cpp:587-595): the new
         // portal opens from 0; if the OTHER color of the pair is already
@@ -106,6 +111,8 @@ namespace Client {
         // reached physically without the player AABB colliding with
         // the solid block immediately behind the portal block.
         for (const auto& [gunId, pair] : m_pairs) {
+            // Immersive pairs keep this passthrough too: the opening in the
+            // wall is the gun's, whichever system does the crossing.
             if (!(pair.blue.active && pair.orange.active)) continue;
             const ClientPortal* sides[2] = { &pair.blue, &pair.orange };
             for (const ClientPortal* p : sides) {
@@ -200,6 +207,7 @@ namespace Client {
         constexpr float kStraddleLateralT    = 1.2f;  // half-height 1.0 + 0.2 m margin
 
         for (const auto& [gunId, pair] : m_pairs) {
+            if (pair.blue.immersive || pair.orange.immersive) continue;   // the immersive surface's job
             if (!(pair.blue.active && pair.orange.active)) continue;
             struct Side { const ClientPortal* src; const ClientPortal* dst; };
             const Side sides[2] = {
@@ -263,6 +271,7 @@ namespace Client {
         constexpr float kEarlyPredictDistance = 0.085f;
 
         for (const auto& [gunId, pair] : m_pairs) {
+            if (pair.blue.immersive || pair.orange.immersive) continue;   // the immersive surface's job
             if (!(pair.blue.active && pair.orange.active)) continue;
             struct Side { const ClientPortal* src; const ClientPortal* dst; };
             const Side sides[2] = {
@@ -490,7 +499,10 @@ namespace Client {
         const auto kind = (p.reason == 1)
             ? Render::PortalParticleSystem::BurstKind::Close
             : Render::PortalParticleSystem::BurstKind::BadSurface;
-        Render::g_portalParticleSystem.EmitOneShot(kind, origin, normal, isOrange);
+        // The packet carries no dimension; a fizzle is where the player
+        // just fired or where a portal they can see collapsed.
+        Render::g_portalParticleSystem.EmitOneShot(kind, origin, normal, isOrange,
+                                                   ClientLevels::ActiveDimension());
     }
 
 } // namespace Client

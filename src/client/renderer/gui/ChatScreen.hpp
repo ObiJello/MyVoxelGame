@@ -33,6 +33,12 @@ namespace Render {
 
         // Input handling
         void OnCharInput(unsigned int codepoint);
+        // Paste: every printable character of `text` at the caret, in order,
+        // up to the message limit. Line breaks are dropped (MC's
+        // SharedConstants.filterText), so a pasted command stays one line.
+        void InsertText(const std::string& text);
+        // The current input line, for copy.
+        const std::string& InputText() const { return m_inputText; }
         bool OnKeyDown(int glfwKey);  // Returns true if key was consumed
 
         // Update cursor blink

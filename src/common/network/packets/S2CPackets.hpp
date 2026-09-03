@@ -49,6 +49,18 @@ namespace Packets {
     // CHUNK UNLOAD PACKET
     // ========================================================================
     
+    class ChunkUnchangedS2CPacketImpl : public IS2CPacket {
+    private:
+        ChunkUnchangedS2CPacket m_data;
+    public:
+        std::chrono::steady_clock::time_point m_timestamp = std::chrono::steady_clock::now();
+    public:
+        explicit ChunkUnchangedS2CPacketImpl(ChunkUnchangedS2CPacket data) : m_data(data) {}
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+        void apply(IPacketListener& listener) override { listener.onChunkUnchangedS2C(m_data); }
+        PacketId getId() const override { return PacketId::ChunkUnchangedS2C; }
+    };
+
     class UnloadChunkS2CPacketImpl : public IS2CPacket {
     private:
         UnloadChunkS2CPacket m_data;
@@ -628,6 +640,50 @@ namespace Packets {
     };
 
     // ========================================================================
+    // END DRAGON FIGHT
+    // ========================================================================
+
+    class BossEventS2CPacketImpl : public IS2CPacket {
+    private:
+        BossEventS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit BossEventS2CPacketImpl(BossEventS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onBossEventS2C(m_data);
+        }
+
+        const BossEventS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::BossEventS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class EndCrystalBeamS2CPacketImpl : public IS2CPacket {
+    private:
+        EndCrystalBeamS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit EndCrystalBeamS2CPacketImpl(EndCrystalBeamS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onEndCrystalBeamS2C(m_data);
+        }
+
+        const EndCrystalBeamS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::EndCrystalBeamS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // SIMPLE PACKETS (no data payload)
     // ========================================================================
     
@@ -864,6 +920,64 @@ namespace Packets {
         void apply(IPacketListener& listener) override { listener.onPlayerAbilitiesS2C(m_data); }
         const PlayerAbilitiesS2CPacket& getData() const { return m_data; }
         PacketId getId() const override { return PacketId::PlayerAbilities; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class DimensionScopeS2CPacketImpl : public IS2CPacket {
+    private:
+        DimensionScopeS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit DimensionScopeS2CPacketImpl(DimensionScopeS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onDimensionScopeS2C(m_data); }
+        const DimensionScopeS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::DimensionScopeS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+#if ENABLE_IMMERSIVE_PORTALS
+    class ImmersivePortalSyncS2CPacketImpl : public IS2CPacket {
+    private:
+        ImmersivePortalSyncS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ImmersivePortalSyncS2CPacketImpl(ImmersivePortalSyncS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onImmersivePortalSyncS2C(m_data); }
+        const ImmersivePortalSyncS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::ImmersivePortalSyncS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class ImmersivePortalRemoveS2CPacketImpl : public IS2CPacket {
+    private:
+        ImmersivePortalRemoveS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ImmersivePortalRemoveS2CPacketImpl(ImmersivePortalRemoveS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onImmersivePortalRemoveS2C(m_data); }
+        const ImmersivePortalRemoveS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::ImmersivePortalRemoveS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+#endif // ENABLE_IMMERSIVE_PORTALS
+
+    class AoRegionsS2CPacketImpl : public IS2CPacket {
+    private:
+        AoRegionsS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit AoRegionsS2CPacketImpl(AoRegionsS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onAoRegionsS2C(m_data); }
+        const AoRegionsS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::AoRegionsS2C; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 

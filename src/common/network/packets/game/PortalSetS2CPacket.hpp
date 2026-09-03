@@ -35,6 +35,15 @@ namespace Network {
         double   originX = 0.0, originY = 0.0, originZ = 0.0;
         float    normalX = 0.0f, normalY = 0.0f, normalZ = 1.0f;
         float    upX     = 0.0f, upY     = 1.0f, upZ     = 0.0f;
+        // Immersive mode: the see-through and the crossing belong to the
+        // immersive surface mirrored from this pair; the client draws only
+        // the gun's rim for it. Trailing, optional.
+        uint8_t  immersive = 0;
+        // The dimension the portal is in (Game::DimensionToRaw). Trailing,
+        // optional: kDimensionUnknown from an older server, and the client
+        // takes the dimension it is standing in.
+        static constexpr int8_t kDimensionUnknown = 127;
+        int8_t   dimensionId = kDimensionUnknown;
     };
 
     namespace Serialization {
@@ -52,6 +61,8 @@ namespace Network {
             b.WriteFloat(p.upX);
             b.WriteFloat(p.upY);
             b.WriteFloat(p.upZ);
+            b.WriteByte(p.immersive);
+            b.WriteByte(static_cast<uint8_t>(p.dimensionId));
             return b.GetData();
         }
 
@@ -69,6 +80,9 @@ namespace Network {
             p.upX     = r.ReadFloat();
             p.upY     = r.ReadFloat();
             p.upZ     = r.ReadFloat();
+            p.immersive = r.HasMore() ? r.ReadByte() : 0;
+            p.dimensionId = r.HasMore() ? static_cast<int8_t>(r.ReadByte())
+                                        : PortalSetS2CPacket::kDimensionUnknown;
             return p;
         }
 

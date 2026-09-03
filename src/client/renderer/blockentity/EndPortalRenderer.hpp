@@ -26,11 +26,13 @@
 #pragma once
 
 #include "../backend/RenderTypes.hpp"
+#include "../entity/EntityFrame.hpp"
+#include "BlockEntityRenderDispatcher.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <vector>
 
-namespace Client { class ClientChunkManager; }
+namespace Client { class ClientChunkManager; struct ClientChunk; }
 
 namespace Render {
 
@@ -78,12 +80,21 @@ namespace Render {
         TextureHandle m_skyTexture = INVALID_TEXTURE;   // MC Sampler0
         TextureHandle m_portalTexture = INVALID_TEXTURE; // MC Sampler1
 
-        BufferHandle m_vb = INVALID_BUFFER;
-        MeshHandle   m_mesh = INVALID_MESH;
-        size_t       m_vbCapacityVerts = 0;
+        // Two streaming sets alternated per frame — see EntityFrame.hpp.
+        // Grown on demand; the old set is deferred-destroyed so the frame
+        // still reading it finishes first.
+        struct FrameBuffers {
+            BufferHandle vb   = INVALID_BUFFER;
+            MeshHandle   mesh = INVALID_MESH;
+            size_t       capacityVerts = 0;
+        };
+        FrameBuffers m_frames[2];
+        EntityFrame::Cursor m_frameCursor;
 
         // Reused across frames so a steady-state frame does no allocation.
         std::vector<Vert> m_verts;
+        std::vector<Client::ClientChunk*> m_visibleChunks;
+        BlockEntityRenderDispatcher::ChunkSet m_seen;
 
         static const char* s_vertSource;
         static const char* s_fragSource;

@@ -35,7 +35,7 @@ namespace Game {
             : ThrowableProjectile(EntityTypeId::Snowball, level) {}
 
     protected:
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
     };
 
@@ -48,7 +48,27 @@ namespace Game {
             : ThrowableProjectile(EntityTypeId::Egg, level) {}
 
     protected:
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
+        void OnHit(const HitResult& hit) override;
+    };
+
+    // MC ThrownEnderpearl. 0 damage on a direct hit; on ANY hit the OWNER is
+    // pulled to the pearl's pre-impact position — the 5% endermite, the 5.0
+    // teleport damage and the fall-distance reset included. Ported minus,
+    // each noted at its site: the 32 PORTAL impact particles (no such
+    // ParticleKind), the teleport sound (sound system stub), MC 1.21's
+    // pearl chunk tickets / owner-logout survival / ENDER_PEARLS_VANISH_ON_
+    // DEATH gamerule (pearls here live like every other projectile, in
+    // loaded chunks with a live owner reference), and dimension travel (the
+    // engine's portals move players only — a pearl thrown into a portal
+    // sits, it does not cross).
+    class ThrownEnderpearl : public ThrowableProjectile {
+    public:
+        explicit ThrownEnderpearl(EntityLevel* level)
+            : ThrowableProjectile(EntityTypeId::EnderPearl, level) {}
+
+    protected:
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
     };
 

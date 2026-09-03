@@ -124,6 +124,8 @@ namespace Game {
         EyeOfEnder = 104,  // "eye_of_ender"
         FallingBlock = 105,  // "falling_block"
         Tnt = 106,  // "tnt"
+        EndCrystal = 107,  // "end_crystal"
+        EnderPearl = 108,  // "ender_pearl"
         Count
     };
 
@@ -155,7 +157,7 @@ namespace Game {
     // LivingEntity.DEFAULT_BABY_SCALE — one value for every type.
     inline constexpr float kBabyScale = 0.5f;
 
-    inline constexpr int kEntityTypeCount = 107;
+    inline constexpr int kEntityTypeCount = 109;
     extern const EntityTypeInfo kEntityTypeTable[kEntityTypeCount];
 
     inline const EntityTypeInfo& GetEntityTypeInfo(EntityTypeId t) {

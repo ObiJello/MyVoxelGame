@@ -63,7 +63,8 @@ namespace Client {
         void SendChatMessage(const std::string& message);
         
         // Send client settings
-        void SendClientSettings(int renderDistance, bool vsync, float mouseSensitivity);
+        void SendClientSettings(int renderDistance, int simulationDistance,
+                                bool vsync, float mouseSensitivity);
         
         // Send keep-alive response
         void SendKeepAliveResponse(uint64_t id);

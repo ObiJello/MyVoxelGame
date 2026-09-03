@@ -1,5 +1,8 @@
 // File: src/client/entity/ItemEntityManager.cpp
 #include "ItemEntityManager.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "common/portal/ImmersivePortal.hpp"
+#endif
 #include "../world/ClientBlockAccess.hpp"
 #include "RemotePlayerManager.hpp"
 
@@ -8,17 +11,18 @@
 
 namespace Client {
 
-    std::unique_ptr<ItemEntityManager> g_itemEntityManager = nullptr;
+    ItemEntityManager* g_itemEntityManager = nullptr;
 
-    void ItemEntityManager::Spawn(int32_t id, const glm::dvec3& pos,
+    bool ItemEntityManager::Spawn(int32_t id, const glm::dvec3& pos,
                                   const glm::vec3& vel, float bobOffs,
-                                  const Game::ItemStack& stack) {
+                                  const Game::ItemStack& stack, float scale) {
         auto& e = m_entities[id];
         const bool isNew = !e.initialized;
 
         e.sim.id      = id;
         e.sim.stack   = stack;
         e.sim.bobOffs = bobOffs;
+        e.sim.scale   = scale;
         e.sim.vel     = glm::dvec3(vel);
 
         if (isNew) {
@@ -33,6 +37,7 @@ namespace Client {
         } else {
             InterpolateTo(e, pos);
         }
+        return isNew;
     }
 
     void ItemEntityManager::Move(int32_t id, const glm::dvec3& pos,
@@ -70,6 +75,24 @@ namespace Client {
         e.interpTarget = target;
         e.prevTickPos  = e.sim.pos;
     }
+
+#if ENABLE_IMMERSIVE_PORTALS
+    void ItemEntityManager::CarryOver(int32_t id, const ClientItemEntity& from,
+                                      const Game::Immersive::Portal& via) {
+        auto it = m_entities.find(id);
+        if (it == m_entities.end()) return;
+        ClientItemEntity& e = it->second;
+        const glm::dvec3 serverPos = e.sim.pos;   // where the spawn put it
+        e.sim.pos            = via.TransformPoint(from.sim.pos);
+        e.sim.vel            = via.TransformLocalVec(from.sim.vel);
+        e.renderPrevPosition = via.TransformPoint(from.renderPrevPosition);
+        e.prevTickPos        = via.TransformPoint(from.prevTickPos);
+        e.ageTicks           = from.ageTicks;
+        e.interpSteps        = 0;
+        // Then converge on the server's position over the usual steps.
+        InterpolateTo(e, serverPos);
+    }
+#endif
 
     void ItemEntityManager::TakeItem(int32_t itemId, uint32_t playerId, int32_t amount) {
         auto it = m_entities.find(itemId);

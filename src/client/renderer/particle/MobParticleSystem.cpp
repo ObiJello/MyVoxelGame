@@ -2,10 +2,18 @@
 // See header for scope and the list of deliberate deviations.
 
 #include "MobParticleSystem.hpp"
+#include "common/core/Features.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "client/world/ClientLevel.hpp"
+#include "client/world/ClientBlockAccess.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "client/portal/ClientImmersivePortals.hpp"
+#endif
+#include "platform/GameDirectory.hpp"
 
 #include "stb_image.h"
 #include <algorithm>
@@ -59,7 +67,8 @@ void main() {
 )";
 
     MobParticleSystem::MobParticleSystem()
-        : m_rng(std::chrono::steady_clock::now().time_since_epoch().count()) {
+        : m_rng(std::chrono::steady_clock::now().time_since_epoch().count())
+        , m_limiterRng(std::chrono::steady_clock::now().time_since_epoch().count() ^ 0x5DEECE66DLL) {
         for (auto& t : m_textures) t = INVALID_TEXTURE;
     }
 
@@ -69,8 +78,7 @@ void main() {
 
     void MobParticleSystem::Shutdown() {
         if (!g_renderBackend) return;
-        if (m_mesh != INVALID_MESH)     { g_renderBackend->DestroyMesh(m_mesh);     m_mesh = INVALID_MESH; }
-        if (m_vb != INVALID_BUFFER)     { g_renderBackend->DestroyBuffer(m_vb);     m_vb = INVALID_BUFFER; }
+        DestroySlots();
         if (m_shader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_shader); m_shader = INVALID_SHADER; }
         for (auto& t : m_textures) {
             if (t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(t); t = INVALID_TEXTURE; }
@@ -145,12 +153,35 @@ void main() {
             m_textures[kTexSpell0 + i] = LoadParticleSprite(path);
         }
 
-        m_vbCapacityVerts = 4096;
-        m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-            m_vbCapacityVerts * 24, nullptr, BufferAccess::Streaming);
-        m_mesh = g_renderBackend->CreateMesh(m_vb, INVALID_BUFFER,
-                                             GetBlockVertexLayout());
+        // The streaming buffers are made on first use (AcquireSlot).
         return true;
+    }
+
+    MobParticleSystem::StreamSlot& MobParticleSystem::AcquireSlot(size_t vertsNeeded, size_t minCapacity) {
+        StreamSlot& slot = m_slots[m_slotCursor];
+        m_slotCursor = (m_slotCursor + 1) % kStreamSlots;
+        if (slot.vb == INVALID_BUFFER || slot.capacityVerts < vertsNeeded) {
+            size_t newCap = std::max(slot.capacityVerts, minCapacity);
+            while (newCap < vertsNeeded) newCap *= 2;
+            // Deferred: the previous frame's draw from this slot may still
+            // be reading it.
+            if (slot.mesh != INVALID_MESH)  g_renderBackend->DeferredDestroyMesh(slot.mesh);
+            if (slot.vb   != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slot.vb);
+            slot.vb   = g_renderBackend->CreateBuffer(BufferUsage::Vertex, newCap * 24, nullptr,
+                                                      BufferAccess::Streaming);
+            slot.mesh = g_renderBackend->CreateMesh(slot.vb, INVALID_BUFFER, GetBlockVertexLayout());
+            slot.capacityVerts = newCap;
+        }
+        return slot;
+    }
+
+    void MobParticleSystem::DestroySlots() {
+        for (StreamSlot& slot : m_slots) {
+            if (slot.mesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(slot.mesh);  slot.mesh = INVALID_MESH; }
+            if (slot.vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(slot.vb); slot.vb = INVALID_BUFFER; }
+            slot.capacityVerts = 0;
+        }
+        m_slotCursor = 0;
     }
 
     // ── Spawning — the MC particle constructors, constants verbatim ───────
@@ -163,8 +194,32 @@ void main() {
         return kind == Game::ParticleKind::ExplosionEmitter;
     }
 
+    bool MobParticleSystem::ShouldSpawn(const Client::ClientLevelBridge::QueuedParticle& q,
+                                        const glm::vec3& cameraPos) {
+        using Game::ParticleStatus;
+        const bool overrideLimiter = OverridesParticleLimiter(q.kind);
+        const bool alwaysShow = overrideLimiter;   // addAlwaysVisibleParticle
+
+        // calculateParticleLevel
+        ParticleStatus status = m_particleStatus;
+        if (alwaysShow && status == ParticleStatus::Minimal && m_limiterRng.NextInt(10) == 0) {
+            status = ParticleStatus::Decreased;
+        }
+        if (status == ParticleStatus::Decreased && m_limiterRng.NextInt(3) == 0) {
+            status = ParticleStatus::Minimal;
+        }
+
+        if (overrideLimiter) return true;
+        const double dx = q.x - static_cast<double>(cameraPos.x);
+        const double dy = q.y - static_cast<double>(cameraPos.y);
+        const double dz = q.z - static_cast<double>(cameraPos.z);
+        if (dx * dx + dy * dy + dz * dz > kParticleCutoffSq) return false;
+        return status != ParticleStatus::Minimal;
+    }
+
     void MobParticleSystem::SpawnFromRequest(
-        const Client::ClientLevelBridge::QueuedParticle& q) {
+        const Client::ClientLevelBridge::QueuedParticle& q,
+        Game::DimensionId dimension) {
         // Reserve headroom for the always-visible kinds.
         //
         // A flat cap refused an ExplosionEmitter exactly as readily as a smoke
@@ -349,6 +404,7 @@ void main() {
         }
 
         p.xo = p.x; p.yo = p.y; p.zo = p.z;
+        p.dimension = dimension;
         m_particles.push_back(p);
     }
 
@@ -484,30 +540,81 @@ void main() {
         }
     }
 
-    void MobParticleSystem::Update(float dt, Client::ClientMobManager* mobs,
-                                   const Game::IBlockAccess* blocks,
-                                   const glm::vec3& cameraPos) {
+    glm::vec3 MobParticleSystem::AnchorFor(Game::DimensionId dimension,
+                                           const glm::vec3& cameraPos) {
+        if (!Client::ClientLevels::HasSession()) return cameraPos;
+        if (dimension == Client::ClientLevels::ActiveDimension()) return cameraPos;
+#if ENABLE_IMMERSIVE_PORTALS
+        // The bound level is the active one here (main thread, between
+        // packet drains): its portals are the ones the player looks through.
+        const Game::Immersive::Portal* nearest = nullptr;
+        double nearestDist = 1e30;
+        const glm::dvec3 cam(cameraPos);
+        Client::GetClientImmersivePortals().ForEach([&](const Game::Immersive::Portal& p) {
+            const Game::DimensionId dest = p.IsMirror() ? p.dimension : p.destDimension;
+            if (dest != dimension) return;
+            glm::dvec3 mn, mx;
+            p.BoundingBox(mn, mx, 0.0);
+            const double d = glm::length(glm::clamp(cam, mn, mx) - cam);
+            if (d < nearestDist) { nearestDist = d; nearest = &p; }
+        });
+        if (nearest) return glm::vec3(nearest->TransformPoint(cam));
+#endif
+        return cameraPos;
+    }
+
+    void MobParticleSystem::Update(float dt, const glm::vec3& cameraPos) {
+        PROFILE_ZONE_N("MobParticles.Update");
         if (m_shader == INVALID_SHADER) return;
 
         // 1. Drain queued spawn requests (main thread — see the queue note
-        //    in ClientLevelBridge).
+        //    in ClientLevelBridge), from EVERY level the client holds: the
+        //    one the player stands in and the far sides it sees through
+        //    immersive portals. Each particle is stamped with its level.
         //
         //    MC ClientLevel.doAddParticle drops any non-overriding particle
         //    further than 32 blocks from the camera. Without it a big TNT
         //    chain across the map spawned its full 512-particle debris cloud
         //    at every blast, all of it invisible detail the simulation still
-        //    paid for every tick.
-        if (mobs) mobs->DrainParticles(m_incoming);
-        for (const auto& q : m_incoming) {
-            if (!OverridesParticleLimiter(q.kind)) {
-                const double dx = q.x - static_cast<double>(cameraPos.x);
-                const double dy = q.y - static_cast<double>(cameraPos.y);
-                const double dz = q.z - static_cast<double>(cameraPos.z);
-                if (dx * dx + dy * dy + dz * dz > kParticleCutoffSq) continue;
+        //    paid for every tick. For a far level the distance is measured
+        //    from the camera's image through the portal (AnchorFor).
+        //
+        //    The Particles option (All / Decreased / Minimal) gates the same
+        //    call — see ShouldSpawn. Read once here, on the main thread, and
+        //    published to each level bridge for the explosion debris spawner,
+        //    which consults it from wherever the explosion is processed.
+        m_particleStatus = static_cast<Game::ParticleStatus>(
+            Platform::g_gameSettings.GetParticles());
+        Client::ClientLevels::ForEach([&](Client::ClientLevel& level) {
+            Client::ClientMobManager* mobs = level.Mobs();
+            if (!mobs) return;
+            mobs->SetParticleStatus(m_particleStatus);
+            m_incoming.clear();
+            mobs->DrainParticles(m_incoming);
+            if (m_incoming.empty()) return;
+            const glm::vec3 anchor = AnchorFor(level.Dimension(), cameraPos);
+            for (const auto& q : m_incoming) {
+                if (!ShouldSpawn(q, anchor)) continue;
+                SpawnFromRequest(q, level.Dimension());
             }
-            SpawnFromRequest(q);
-        }
+        });
         m_incoming.clear();
+
+        // The block view each particle collides against — its own level's.
+        // Resolved once per Update; a level that vanished mid-frame reads as
+        // no collision, which is the same "fly through" the null case is.
+        const Game::IBlockAccess* blocksFor[Game::kDimensionCount] = {};
+        bool blocksKnown[Game::kDimensionCount] = {};
+        const auto blocksOf = [&](Game::DimensionId dim) -> const Game::IBlockAccess* {
+            const int slot = Game::DimensionSlot(dim);
+            if (!blocksKnown[slot]) {
+                blocksKnown[slot] = true;
+                Client::ClientLevel* level = Client::ClientLevels::HasSession()
+                    ? Client::ClientLevels::Get(dim) : nullptr;
+                blocksFor[slot] = level ? level->Blocks() : nullptr;
+            }
+            return blocksFor[slot];
+        };
 
         // 2. Fixed 20 Hz simulation, MC's tick rate — the ported constants
         //    (friction per tick, 0.04·gravity per tick) only mean anything
@@ -517,12 +624,20 @@ void main() {
         constexpr float kTick = 0.05f;
         int steps = 0;
         std::vector<Client::ClientLevelBridge::QueuedParticle> emitterSpawns;
+        std::vector<Game::DimensionId> emitterDims;
         while (m_tickAccum >= kTick && steps < 5) {
             m_tickAccum -= kTick;
             ++steps;
             emitterSpawns.clear();
+            emitterDims.clear();
             for (auto& p : m_particles) {
-                if (!p.removed) TickParticle(p, blocks, emitterSpawns);
+                if (p.removed) continue;
+                const size_t before = emitterSpawns.size();
+                TickParticle(p, blocksOf(p.dimension), emitterSpawns);
+                // The emitter's children live where the emitter does.
+                for (size_t i = before; i < emitterSpawns.size(); ++i) {
+                    emitterDims.push_back(p.dimension);
+                }
             }
             m_particles.erase(
                 std::remove_if(m_particles.begin(), m_particles.end(),
@@ -539,14 +654,10 @@ void main() {
             // Only the seed itself is force-added. A blast 500 blocks away was
             // spawning 48 full-cost particles vanilla drops — 24,576 across a
             // 512-blast chain, enough on its own to exhaust the pool.
-            for (const auto& q : emitterSpawns) {
-                if (!OverridesParticleLimiter(q.kind)) {
-                    const double dx = q.x - static_cast<double>(cameraPos.x);
-                    const double dy = q.y - static_cast<double>(cameraPos.y);
-                    const double dz = q.z - static_cast<double>(cameraPos.z);
-                    if (dx * dx + dy * dy + dz * dz > kParticleCutoffSq) continue;
-                }
-                SpawnFromRequest(q);
+            for (size_t i = 0; i < emitterSpawns.size(); ++i) {
+                const Game::DimensionId dim = emitterDims[i];
+                if (!ShouldSpawn(emitterSpawns[i], AnchorFor(dim, cameraPos))) continue;
+                SpawnFromRequest(emitterSpawns[i], dim);
             }
         }
         if (steps == 5) m_tickAccum = 0.0f;
@@ -611,7 +722,9 @@ void main() {
 
     void MobParticleSystem::Render(const glm::mat4& projection,
                                    const glm::mat4& view,
-                                   const glm::vec3& cameraPos) {
+                                   const glm::vec3& cameraPos,
+                                   Game::DimensionId dimension) {
+        PROFILE_ZONE_N("MobParticles.Render");
         (void)cameraPos;
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         if (m_particles.empty()) return;
@@ -632,6 +745,7 @@ void main() {
 
         const float pt = m_partialTick;
         for (const auto& p : m_particles) {
+            if (p.dimension != dimension) continue;
             const int texIdx = TextureIndexFor(p);
             if (texIdx < 0 || texIdx >= kTextureCount) continue;
             if (m_textures[texIdx] == INVALID_TEXTURE) continue;
@@ -690,21 +804,12 @@ void main() {
         // backend records the copies immediately but executes the draws at
         // submit, so a second upload would clobber the first. Same pitfall
         // PortalParticleSystem documents.)
-        if (totalVerts > m_vbCapacityVerts) {
-            size_t newCap = m_vbCapacityVerts;
-            while (newCap < totalVerts) newCap *= 2;
-            g_renderBackend->DestroyMesh(m_mesh);
-            g_renderBackend->DestroyBuffer(m_vb);
-            m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-                newCap * 24, nullptr, BufferAccess::Streaming);
-            m_mesh = g_renderBackend->CreateMesh(m_vb, INVALID_BUFFER,
-                                                 GetBlockVertexLayout());
-            m_vbCapacityVerts = newCap;
-        }
+        // This call's own buffer (see StreamSlot), grown if it must be.
+        StreamSlot& slot = AcquireSlot(totalVerts, 4096);
         size_t offset = 0;
         for (const auto& b : buckets) {
             if (b.empty()) continue;
-            g_renderBackend->UpdateBuffer(m_vb, offset * 24,
+            g_renderBackend->UpdateBuffer(slot.vb, offset * 24,
                                           b.size() * 24, b.data());
             offset += b.size();
         }
@@ -750,7 +855,7 @@ void main() {
                     continue;
                 }
                 g_renderBackend->BindTexture(m_textures[t], 0);
-                g_renderBackend->DrawArrays(m_mesh,
+                g_renderBackend->DrawArrays(slot.mesh,
                                             static_cast<uint32_t>(b.size()),
                                             /*firstVertex=*/first);
                 first += static_cast<uint32_t>(b.size());

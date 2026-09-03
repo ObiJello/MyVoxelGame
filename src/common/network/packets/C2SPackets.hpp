@@ -113,6 +113,34 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+#if ENABLE_IMMERSIVE_PORTALS
+    class PortalTeleportC2SPacketImpl : public IC2SPacket {
+    private:
+        PortalTeleportC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PortalTeleportC2SPacketImpl(PortalTeleportC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPortalTeleportC2S(m_data); }
+        PacketId getId() const override { return PacketId::PortalTeleportC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+#endif
+
+    class FillBlocksC2SPacketImpl : public IC2SPacket {
+    private:
+        FillBlocksC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit FillBlocksC2SPacketImpl(FillBlocksC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onFillBlocksC2S(m_data); }
+        PacketId getId() const override { return PacketId::FillBlocksC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class PlayerPauseC2SPacketImpl : public IC2SPacket {
     private:
         PlayerPauseC2SPacket m_data;
@@ -230,6 +258,20 @@ namespace Packets {
     // CHUNK BATCH ACK PACKET
     // ========================================================================
 
+    class ChunkRequestFullC2SPacketImpl : public IC2SPacket {
+    private:
+        int32_t m_x, m_z;
+        int8_t  m_dimension;
+    public:
+        std::chrono::steady_clock::time_point m_timestamp = std::chrono::steady_clock::now();
+    public:
+        ChunkRequestFullC2SPacketImpl(int32_t x, int32_t z, int8_t dimension)
+            : m_x(x), m_z(z), m_dimension(dimension) {}
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+        void apply(IPacketListener& listener) override { listener.onChunkRequestFull(m_dimension, m_x, m_z); }
+        PacketId getId() const override { return PacketId::ChunkRequestFullC2S; }
+    };
+
     class ChunkBatchAckC2SPacketImpl : public IC2SPacket {
     private:
         float m_desiredRate;
@@ -311,17 +353,21 @@ namespace Packets {
     class ClientConfigC2SPacketImpl : public IC2SPacket {
     private:
         int   m_renderDistance;
+        int   m_simulationDistance;
         bool  m_vsync;
         float m_mouseSensitivity;
         std::chrono::steady_clock::time_point m_timestamp;
     public:
-        ClientConfigC2SPacketImpl(int renderDistance, bool vsync, float mouseSensitivity)
+        ClientConfigC2SPacketImpl(int renderDistance, int simulationDistance,
+                                  bool vsync, float mouseSensitivity)
             : m_renderDistance(renderDistance)
+            , m_simulationDistance(simulationDistance)
             , m_vsync(vsync)
             , m_mouseSensitivity(mouseSensitivity)
             , m_timestamp(std::chrono::steady_clock::now()) {}
         void apply(IPacketListener& listener) override {
-            listener.onClientConfigC2S(m_renderDistance, m_vsync, m_mouseSensitivity);
+            listener.onClientConfigC2S(m_renderDistance, m_simulationDistance,
+                                       m_vsync, m_mouseSensitivity);
         }
         PacketId getId() const override { return PacketId::ClientConfigC2S; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }

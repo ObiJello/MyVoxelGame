@@ -4,6 +4,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 #ifdef __APPLE__
 #include <unistd.h>
 #endif
@@ -167,6 +168,7 @@ namespace Game {
             if (!j.contains("textures") && !j.contains("elements")
                 && !j.contains("ambientocclusion")) {
                 Log::Debug("  No-op child model, returning parent directly");
+                AnnotateFaceLayers(result);
                 s_models[name] = result;
                 return result;
             }
@@ -301,6 +303,7 @@ namespace Game {
 
         // **OPTIMIZATION**: Cache the resolved model immediately to avoid redundant work
         // This matches Minecraft's exact behavior where each model is resolved only once
+        AnnotateFaceLayers(result);
         s_models[name] = result;
 
         return result;
@@ -522,7 +525,34 @@ namespace Game {
     }
 
     void BlockModelRegistry::RegisterModel(const std::string& name, BlockModel model) {
+        AnnotateFaceLayers(model);
         s_models[name] = std::move(model);
+    }
+
+    void BlockModelRegistry::AnnotateFaceLayers(BlockModel& model) {
+        // Matched on the resolved sprite NAME rather than on the texture's
+        // pixels: an overlay is a modelling intent (this quad sits on top of
+        // another quad of the same block), and vanilla names every such sprite
+        // `*_overlay` (grass_block_side_overlay, redstone_dust_overlay). Pixel
+        // alpha would also catch sprites whose transparent texels lie outside
+        // the sub-rect the model samples — anvil_top, cake_side — and those are
+        // correctly drawn opaque, exactly as MC's solid layer draws them.
+        //
+        // A false positive (an `_overlay` sprite with no transparent texels)
+        // still renders correctly, just through the alpha-tested pass; a false
+        // negative would draw the overlay's transparent texels as solid colour
+        // now that the opaque shader has no discard. The name rule errs the
+        // right way.
+        constexpr std::string_view kOverlaySuffix = "_overlay";
+        for (Element& element : model.elements) {
+            for (auto& [dir, face] : element.faces) {
+                const std::string resolved = model.ResolveTexture(face.textureRef);
+                face.cutoutOverlay =
+                    resolved.size() >= kOverlaySuffix.size() &&
+                    resolved.compare(resolved.size() - kOverlaySuffix.size(),
+                                     kOverlaySuffix.size(), kOverlaySuffix) == 0;
+            }
+        }
     }
 
     // ========================================================================
@@ -640,6 +670,20 @@ namespace Game {
             return c + glm::vec3(8.0f);
         }
 
+        // MC BlockElementFace's default UV: the face's texture rectangle is its
+        // own footprint on the block, in the orientation each face is read.
+        // (BlockElement.uvsByFace in the model loader.)
+        glm::vec4 DefaultUv(FaceDir dir, const glm::vec3& from, const glm::vec3& to) {
+            switch (dir) {
+                case FaceDir::Down:  return { from.x, 16.0f - to.z, to.x, 16.0f - from.z };
+                case FaceDir::Up:    return { from.x, from.z, to.x, to.z };
+                case FaceDir::North: return { 16.0f - to.x, 16.0f - to.y, 16.0f - from.x, 16.0f - from.y };
+                case FaceDir::South: return { from.x, 16.0f - to.y, to.x, 16.0f - from.y };
+                case FaceDir::West:  return { from.z, 16.0f - to.y, to.z, 16.0f - from.y };
+                default:             return { 16.0f - to.z, 16.0f - to.y, 16.0f - from.z, 16.0f - from.y };
+            }
+        }
+
     } // namespace
 
     BlockModel BlockModelRegistry::RotateModel(const BlockModel& src, int xQuarterTurns,
@@ -686,6 +730,18 @@ namespace Game {
                 // uvLock: leave f.uvRotation as the source face authored it.
                 // The mesher's UVs already run along fixed world axes, so no
                 // correction IS the world-locked texture MC's uvlock asks for.
+                // The texture RECTANGLE has to follow the geometry, though:
+                // a partial face (the top of a stair's upper step, authored
+                // as the texture's right half over the block's right half)
+                // keeps its right-half rectangle while its footprint has
+                // turned to another half of the block, and the texture no
+                // longer lines up with the step below it. MC recomputes the
+                // rectangle for a uvlocked face (FaceBakery.recomputeUVs);
+                // for the axis-aligned boxes rotated here that is the face's
+                // default UV from the rotated element.
+                else {
+                    f.uv = DefaultUv(dstDir, r.from, r.to);
+                }
 
                 // Cullface is a world direction and must rotate with the face,
                 // or a rotated block stops culling against its neighbours (or

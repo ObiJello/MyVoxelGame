@@ -143,11 +143,24 @@ namespace Game {
         EntityTypeId GetType() const { return m_type; }
         const EntityTypeInfo& TypeInfo() const { return GetEntityTypeInfo(m_type); }
         EntityLevel* Level() const { return m_level; }
+        // Move the entity to another level's simulation. Only the portal
+        // travel code calls this, after taking the entity out of its old
+        // manager and before handing it to the new one; everything derived
+        // from the old level (a navigation's block view, a target in the
+        // old world) has to be reset by the override.
+        virtual void SetLevel(EntityLevel* level) { m_level = level; }
 
         // ── Position and motion ────────────────────────────────────────────
         // `position` is the entity's FEET, matching MoveEntity and MC.
         glm::dvec3 position{0.0};
         glm::dvec3 velocity{0.0};   // blocks per TICK
+
+        // MC Entity.getKnownMovement — how this entity actually moved this
+        // tick. For a simulated entity that IS the velocity; a player's view
+        // overrides it with the client-reported displacement, because its
+        // `velocity` field is a knockback accumulator, never integrated
+        // movement (MC ServerPlayer.getKnownMovement makes the same split).
+        virtual glm::dvec3 GetKnownMovement() const { return velocity; }
 
         // Settled-physics parking (see PrimedTnt::Tick). True while the
         // entity's mover is provably a no-op: on the ground, velocity zeroed
@@ -271,9 +284,19 @@ namespace Game {
         virtual void OnPoseUpdated() {}
 
         // ── Dimensions ─────────────────────────────────────────────────────
-        virtual float GetBbWidth()  const { return TypeInfo().width; }
-        virtual float GetBbHeight() const { return TypeInfo().height; }
-        virtual float GetEyeHeight() const { return TypeInfo().eyeHeight; }
+        // The entity's size, 1 = its type's own. A scaled immersive portal
+        // multiplies it on the way through, and /scale sets it; the box,
+        // the eye and the renderer all follow it. Types override the BASE
+        // box (a baby, a slime's size, a bear standing up); the size is
+        // applied on top of whatever they answer.
+        float scale = 1.0f;
+
+        virtual float BaseBbWidth()   const { return TypeInfo().width; }
+        virtual float BaseBbHeight()  const { return TypeInfo().height; }
+        virtual float BaseEyeHeight() const { return TypeInfo().eyeHeight; }
+        float GetBbWidth()   const { return BaseBbWidth()   * scale; }
+        float GetBbHeight()  const { return BaseBbHeight()  * scale; }
+        float GetEyeHeight() const { return BaseEyeHeight() * scale; }
 
         double GetEyeY() const { return position.y + GetEyeHeight(); }
         glm::dvec3 GetEyePosition() const {

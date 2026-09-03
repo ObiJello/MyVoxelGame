@@ -285,7 +285,10 @@ namespace Server {
                 if (!m_onGround[i]) {
                     // Expiry: out of the world for long enough, or simply too
                     // old. MC drops the item (gamerule permitting) and discards.
-                    if (doDrops) Game::DropItemStackAt(pos, Game::ItemStack(state.Block(), 1));
+                    if (doDrops) {
+                        Game::DropItemStackAt(m_level->Dimension(), pos,
+                                              Game::ItemStack(state.Block(), 1));
+                    }
                     m_dead[i] = 1;
                 } else if (level) {
                     // MC damps BEFORE trying to place, so a block that fails to
@@ -351,7 +354,10 @@ namespace Server {
                 [&](const ServerEntityTracker::TrackedPlayer& p) { return p.connectionId == m_slots[s]; });
             if (!present) RemovePlayer(m_slots[s]);
         }
-        struct Slot { int slot; const ServerEntityTracker::TrackedPlayer* p; };
+        // One slot per connection; a connection may contribute several
+        // entries (one per chunk loader — see ServerEntityTracker::Tick), and
+        // a row is in range if ANY of them reaches it.
+        struct Slot { int slot; std::vector<const ServerEntityTracker::TrackedPlayer*> ps; };
         std::vector<Slot> slots;
         for (const auto& p : players) {
             const int s = SlotOf(p.connectionId);
@@ -360,7 +366,11 @@ namespace Server {
                 if (!warned) { Log::Warning("[FallingBlockStore] more than %zu players; extras untracked", kMaxSlots); warned = true; }
                 continue;
             }
-            slots.push_back(Slot{s, &p});
+            bool merged = false;
+            for (Slot& existing : slots) {
+                if (existing.slot == s) { existing.ps.push_back(&p); merged = true; break; }
+            }
+            if (!merged) slots.push_back(Slot{s, {&p}});
         }
 
         // Per-slice outputs, merged in order below: the per-block evaluation
@@ -402,19 +412,25 @@ namespace Server {
                     memoTicking = (tickets == nullptr) || tickets->IsEntityTickingAfterUpdates(chunk);
                     memoSent = 0;
                     for (const Slot& s : slots) {
-                        if (s.p->sentChunks == nullptr || s.p->sentChunks->count(chunk) != 0) {
-                            memoSent |= 1ull << s.slot;
+                        for (const auto* p : s.ps) {
+                            if (p->sentChunks == nullptr || p->sentChunks->count(chunk) != 0) {
+                                memoSent |= 1ull << s.slot;
+                                break;
+                            }
                         }
                     }
                 }
                 // Watch set — MC ChunkMap.TrackedEntity.updatePlayer.
                 for (const Slot& s : slots) {
                     const uint64_t bit = 1ull << s.slot;
-                    const double visibleRange = std::min(static_cast<double>(effectiveRange),
-                                                         static_cast<double>(s.p->viewDistance) * 16.0);
-                    const double dx = s.p->position.x - pos.x, dz = s.p->position.z - pos.z;
-                    const bool inRange = (dx * dx + dz * dz) <= visibleRange * visibleRange &&
-                                         (memoSent & bit) != 0;
+                    bool inRangeXZ = false;
+                    for (const auto* p : s.ps) {
+                        const double visibleRange = std::min(static_cast<double>(effectiveRange),
+                                                             static_cast<double>(p->viewDistance) * 16.0);
+                        const double dx = p->position.x - pos.x, dz = p->position.z - pos.z;
+                        if ((dx * dx + dz * dz) <= visibleRange * visibleRange) { inRangeXZ = true; break; }
+                    }
+                    const bool inRange = inRangeXZ && (memoSent & bit) != 0;
                     const bool watching = (m_watchers[i] & bit) != 0;
                     if (inRange && !watching) {
                         m_watchers[i] |= bit;

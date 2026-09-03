@@ -43,9 +43,20 @@ namespace Game {
         Entity* GetOwner();                       // non-const: resolves lazily
         const EntityRef& OwnerRef() const { return m_ownerRef; }
 
+        // MC leftOwner (see m_leftOwner below). Public for the NBT layer.
+        bool HasLeftOwner() const { return m_leftOwner; }
+        void SetLeftOwner(bool left) { m_leftOwner = left; }
+
         // MC Projectile.shoot: normalise, add triangle(0, 0.0172275*inaccuracy)
         // per axis, scale by velocity; rotation snaps to the result.
         void Shoot(double xd, double yd, double zd, float velocity, float inaccuracy);
+
+        // MC Projectile.shootFromRotation: the shooter's view angles become
+        // the direction, then the shooter's OWN movement is added on top (the
+        // y component only while airborne) — a pearl thrown while sprinting
+        // leads the thrower, one thrown mid-fall drops with them.
+        void ShootFromRotation(const Entity& shooter, float xRot, float yRot,
+                               float yOffset, float velocity, float inaccuracy);
 
         // MC Projectile.getDimensionChangingDelay (Projectile.java:343) — 2
         // ticks, not Entity's 300. A thrown thing crossing a portal should
@@ -76,6 +87,11 @@ namespace Game {
             glm::ivec3    blockPos{0};      // valid for Block hits
             LivingEntity* entity = nullptr; // valid for Entity hits
             glm::dvec3    location{0.0};    // world-space hit point
+            // For a hit on an ender dragon: which of the eight part boxes the
+            // ray entered (MC's EntityHitResult carries the PART entity;
+            // index 0 is the head — see EnderDragon::kDragonPartHead). -1 for
+            // every other target.
+            int           dragonPart = -1;
 
             bool IsHit()    const { return type != Type::Miss; }
             bool IsBlock()  const { return type == Type::Block; }
@@ -91,16 +107,38 @@ namespace Game {
         HitResult Clip(const glm::dvec3& origin, const glm::dvec3& movement,
                        bool checkEntities);
 
-        // MC Projectile.canHitEntity: alive, not the owner, not this. Wind
-        // charges add their own exclusions on top.
+        // MC Projectile.canHitEntity: alive, not this, and not the owner
+        // UNLESS the projectile has already left the owner's box (leftOwner) —
+        // a pearl thrown straight up really does come down on its thrower.
+        // Wind charges add their own exclusions on top.
         virtual bool CanHitEntity(const Entity& entity) const;
+
+        // MC Projectile.checkLeftOwner — has this projectile's swept box
+        // (inflated 1.0) stopped overlapping its owner? Latched, never
+        // un-set. MC tests the owner's whole vehicle stack; no vehicle
+        // system here, so the owner alone (deviation).
+        bool CheckLeftOwner();
 
         // MC Projectile.onHit — dispatches to the entity/block halves. The
         // subclass overrides this, calls the base FIRST (MC's super.onHit()),
-        // then does its both-cases work (discard, explode).
+        // then does its both-cases work (discard, explode). OnHitEntity gets
+        // the whole HitResult because a dragon hit carries the part index.
         virtual void OnHit(const HitResult& hit);
-        virtual void OnHitEntity(LivingEntity& target) { (void)target; }
+        virtual void OnHitEntity(LivingEntity& target, const HitResult& hit) {
+            (void)target;
+            (void)hit;
+        }
         virtual void OnHitBlock(const HitResult& hit) { (void)hit; }
+
+        // MC: a projectile never hits the dragon ITSELF — it hits a part
+        // entity, whose hurt() routes EnderDragon.hurt(part, source, damage):
+        // full damage on the head, the body reduction elsewhere, and the
+        // sitting phases see this projectile as the direct entity (the
+        // arrow/wind-charge void-and-ignite). Every projectile's entity
+        // damage funnels through here so that routing is uniform.
+        bool DealHitDamage(LivingEntity& target, const HitResult& hit,
+                           MobDamageSource source, float amount,
+                           Entity* attacker);
 
         // MC BlockBehaviour.onProjectileHit — give the BLOCK a chance to react
         // before the projectile does. Today one block cares: TNT lights when a
@@ -133,6 +171,15 @@ namespace Game {
                               const AABB& box);
 
         EntityRef m_ownerRef;
+
+        // MC Projectile.leftOwner — false until the projectile's box stops
+        // overlapping the shooter's. While false the shooter is not a valid
+        // hit target; a projectile spawns at the shooter's eye, INSIDE their
+        // own hitbox, so without this grace every throw hits the thrower on
+        // its first tick. Updated once per tick at the top of Clip (this
+        // engine's equivalent of MC's tick() update — every projectile tick
+        // funnels through Clip). Saved as MC's "LeftOwner".
+        bool m_leftOwner = false;
     };
 
 } // namespace Game

@@ -1,6 +1,8 @@
 // File: src/common/entity/mobs/GenericMobs.cpp
 #include "common/entity/mobs/GenericMobs.hpp"
 
+#include "common/entity/EntityLevel.hpp"
+
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Fish.hpp"
@@ -261,6 +263,18 @@ namespace Game {
         AddAvoidGoal(this, m_goalSelector, def);
     }
 
+    // ── Endermite ──────────────────────────────────────────────────────────
+
+    void Endermite::AiStep() {
+        GenericMonster::AiStep();
+        // MC Endermite.aiStep: the client half scatters PORTAL particles (no
+        // particle system yet); the server half ages the mite out at 2400
+        // ticks, paused while persistence is required (a name tag).
+        if (!m_level || m_level->IsClientSide()) return;
+        if (!IsPersistenceRequired()) ++m_life;
+        if (m_life >= kMaxLife) Discard();
+    }
+
     // ── Animal ─────────────────────────────────────────────────────────────
 
     GenericAnimal::GenericAnimal(EntityTypeId type, EntityLevel* level)
@@ -339,6 +353,7 @@ namespace Game {
         // fall through to this function, and a type the server builds but the
         // client does not is a mob that ticks and never draws.
         switch (type) {
+            case EntityTypeId::Endermite: return std::make_unique<Endermite>(level);
             case EntityTypeId::Frog:      return std::make_unique<Frog>(level);
             case EntityTypeId::Axolotl:   return std::make_unique<Axolotl>(level);
             case EntityTypeId::Camel:     return std::make_unique<Camel>(level);

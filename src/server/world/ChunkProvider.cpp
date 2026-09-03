@@ -1,5 +1,7 @@
 // File: src/server/world/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
+#include "common/world/portal/PortalState.hpp"
+#include "common/world/block/Blocks.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/SaveVersion.hpp"
@@ -1385,6 +1387,32 @@ namespace Game {
             return nullptr;
         }
 
+        // Dimension stack: the bedrock at a seam becomes ordinary stone so
+        // the way down (or up) into the next dimension is open. Applied to
+        // every chunk that comes through, generated or loaded, so a world
+        // that gained the option later opens up as its chunks are touched.
+        if (Game::Portals::DimensionStackEnabled()) {
+            struct Band { int y0, y1; BlockID replacement; };
+            Band bands[2]; int nBands = 0;
+            switch (m_config.dimensionId) {
+                case DimensionId::Overworld:
+                    bands[nBands++] = { -64, -59, BlockID::Deepslate };
+                    break;
+                case DimensionId::Nether:
+                    bands[nBands++] = { 0, 5, BlockID::Netherrack };
+                    bands[nBands++] = { 123, 128, BlockID::Netherrack };
+                    break;
+                default: break;
+            }
+            for (int b = 0; b < nBands; ++b) {
+                for (int y = bands[b].y0; y < bands[b].y1; ++y)
+                    for (int x = 0; x < 16; ++x)
+                        for (int z = 0; z < 16; ++z)
+                            if (chunk->GetBlock(x, y, z) == BlockID::Bedrock)
+                                chunk->SetBlock(x, y, z, bands[b].replacement);
+            }
+        }
+
         // Check if chunk is already in cache before adding
         if (m_chunkCache->Contains(chunk->pos)) {
             Log::Debug("Chunk (%d, %d) already in cache during CompleteChunkLoad, returning existing",
@@ -1518,10 +1546,15 @@ namespace Game {
             return false;
         }
 
-        if (chunk->IsEmpty()) {
-            return false;
-        }
-
+        // NO emptiness check. An all-air chunk is a legitimate chunk: the End
+        // is mostly void, and every void chunk the generator hands back is
+        // exactly that. Rejecting them here put each one into
+        // failedChunkLoads, which the tick loop re-requests — an infinite
+        // generate/reject cycle ("Async chunk load failed ... conversion
+        // failed" every tick in the End). Generation FAILURE is signalled by a
+        // null chunk long before this point, never by an empty one. MC accepts
+        // any chunk that parses (SerializableChunkData.parse rejects only a
+        // missing Status tag).
         return ValidateChunkPosition(chunk->pos);
     }
 

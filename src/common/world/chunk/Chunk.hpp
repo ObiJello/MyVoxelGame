@@ -1,5 +1,6 @@
 // File: src/common/world/chunk/Chunk.hpp
 #pragma once
+#include <atomic>
 
 #include "ChunkSection.hpp"
 #include "Heightmap.hpp"
@@ -39,6 +40,16 @@ namespace Game {
     public:
         // Chunk position in world chunk coordinates
         Math::ChunkPos pos{0, 0};
+
+        // Modification stamp for the client's retention cache: bumped by every
+        // SetBlock/SetBlockEntity, persisted in the Anvil tag "ObeyModStamp",
+        // sent with ChunkDataS2C. A chunk re-entering a player's view whose
+        // stamp matches what that client already holds is sent as a 20-byte
+        // ChunkUnchangedS2C instead of ~20 KB of sections, and the client
+        // revives its parked meshes (instant revisit). 1 = fresh generation.
+        std::atomic<uint64_t> modStamp{1};
+        uint64_t ModStamp() const { return modStamp.load(std::memory_order_relaxed); }
+        void BumpModStamp() { modStamp.fetch_add(1, std::memory_order_relaxed); }
 
         // Array of chunk sections (24 sections of 16x16x16 each)
         std::array<std::unique_ptr<ChunkSection>, Math::SECTIONS_PER_CHUNK> sections;

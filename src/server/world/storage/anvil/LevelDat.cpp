@@ -160,6 +160,9 @@ namespace Game::Anvil {
         w.BeginCompound("game_rules");
         w.String("doDaylightCycle", data.doDaylightCycle ? "true" : "false");
         w.String("doMobSpawning",   data.doMobSpawning   ? "true" : "false");
+        w.String("immersivePortals", data.immersivePortals ? "true" : "false");
+        w.String("obeyWorldWrap",    std::to_string(data.worldWrapSize));
+        w.String("obeyDimensionStack", data.dimensionStack ? "true" : "false");
         w.String("mobGriefing",     data.mobGriefing     ? "true" : "false");
         w.String("randomTickSpeed", std::to_string(data.randomTickSpeed));
         w.EndCompound();

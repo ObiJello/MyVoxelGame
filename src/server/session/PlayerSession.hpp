@@ -1,6 +1,7 @@
 // File: src/server/session/PlayerSession.hpp
 #pragma once
 
+#include <set>
 #include "common/core/JavaRandom.hpp"               // Game::JavaRandom (loot rolls)
 #include "common/core/Log.hpp"
 #include "common/world/math/WorldMath.hpp"
@@ -8,6 +9,7 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "../world/watch/ChunkTrackingView.hpp"
+#include "../world/watch/ChunkLoader.hpp"
 #include <glm/glm.hpp>
 #include <functional>
 #include <array>
@@ -59,8 +61,13 @@ namespace Server {
     public:
         // Configuration
         struct Config {
-            int simulationDistance = 8;    // Chunks kept loaded around player
-            int viewDistance = 8;          // Chunks sent to client (≤ simulationDistance)
+            // The two distances are INDEPENDENT, as in MC's DistanceManager:
+            // viewDistance drives the PlayerTicketTracker (what is loaded
+            // and sent) and simulationDistance the SimulationChunkTracker
+            // (what ticks). A player can see 32 chunks and simulate 6 — that
+            // is the whole point of the Fast preset on a weak machine.
+            int simulationDistance = 10;   // Chunks ticked around the player (MC server default)
+            int viewDistance = 8;          // Chunks sent to the client
             int maxChunksPerTick = 12;     // Max chunks to send per tick
             int maxBytesPerTick = 1048576; // 1MB per tick max
             int maxDiffBytesPerTick = 524288; // 512KB for block changes per tick
@@ -116,7 +123,27 @@ namespace Server {
         void UpdateChunkPosition(Game::Math::ChunkPos newChunk);
         
         // Change dimension
-        void ChangeDimension(int newDimensionId, const glm::vec3& targetPos);
+#if ENABLE_IMMERSIVE_PORTALS
+        // The client reports its eye crossed an immersive portal. Validated
+        // and applied by IntegratedServer::OnClientPortalTeleport.
+        void HandlePortalTeleport(const Network::PortalTeleportC2SPacket& packet);
+        // The fill tool: the held block into every open cell of a box.
+        void HandleFillBlocks(const Network::FillBlocksC2SPacket& packet);
+#endif
+        // After the player was moved directly (teleport()), bring the
+        // session's chunk anchor in line with the player's new chunk.
+        void ResyncChunkPosition();
+        // Tell the client which dimension the server has it in, keeping its
+        // levels (a rejected portal crossing put it in the wrong one).
+        void SendDimensionResync();
+
+        // `keepPrevious`: the level being left stays resident on the client
+        // (a seamless portal crossing — it is still visible through the portal
+        // behind the player) and its chunks stay tracked by whatever loaders
+        // still cover them. Otherwise the client frees that level and the
+        // server forgets what it had sent there, without per-chunk unloads.
+        void ChangeDimension(int newDimensionId, const glm::vec3& targetPos,
+                             bool keepPrevious = false);
         
         // Respawn player
         void Respawn(const glm::vec3& spawnPos);
@@ -181,32 +208,56 @@ namespace Server {
         // No-ops when neither the centre chunk nor the view distance changed —
         // MC's identical early-out, and the reason moving WITHIN a chunk costs
         // nothing at all.
+        //
+        // MULTI-DIMENSION: the tracked set is the union of the session's
+        // chunk LOADERS (ChunkLoader.hpp) — its own view distance plus one
+        // circle per portal far side it may look into. `loaders` is the new
+        // set, computed by IntegratedServer::ComputeChunkLoaders; the diff
+        // against the previous union fires onEnter/onLeave with the chunk's
+        // dimension. Nothing happens when the loader set is unchanged.
         void UpdateChunkTracking(
-            const std::function<void(Game::Math::ChunkPos)>& onEnter,
-            const std::function<void(Game::Math::ChunkPos)>& onLeave);
+            std::vector<ChunkLoader> loaders,
+            const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onEnter,
+            const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onLeave);
 
-        // The set of chunks this player tracks. This is the authority for
-        // "does this player care about chunk X" — there is no reverse index.
-        const ChunkTrackingView& GetTrackingView() const { return m_trackingView; }
+        // Is (dimension, chunk) inside any of this session's loaders? This is
+        // the authority for "does this player care about chunk X" — there is
+        // no reverse index.
+        bool IsWatching(Game::DimensionId dimension, Game::Math::ChunkPos chunk) const;
+        // The player's OWN dimension. Kept for the callers that only ever
+        // meant "the world the player stands in".
+        bool IsWatching(Game::Math::ChunkPos chunk) const {
+            return IsWatching(Game::DimensionFromRaw(GetDimensionId()), chunk);
+        }
 
-        // Check if chunk is tracked by this player
-        bool IsWatching(Game::Math::ChunkPos chunk) const;
+        // Has this chunk's data gone out to the client?
+        bool HasSentChunk(Game::DimensionId dimension, Game::Math::ChunkPos chunk) const;
+        bool HasSentChunk(Game::Math::ChunkPos chunk) const {
+            return HasSentChunk(Game::DimensionFromRaw(GetDimensionId()), chunk);
+        }
 
-        // Check if chunk has been sent
-        bool HasSentChunk(Game::Math::ChunkPos chunk) const;
-
-        // The whole set, for callers that probe it many times per tick and
-        // cannot afford a call per probe — the entity tracker asks
-        // "has this player got this chunk yet" once per (entity x player).
-        // MC's equivalent gate is ChunkMap.isChunkTracked.
+        // The whole sent set for one dimension, for callers that probe it
+        // many times per tick and cannot afford a call per probe — the entity
+        // tracker asks "has this player got this chunk yet" once per
+        // (entity x player). MC's equivalent gate is ChunkMap.isChunkTracked.
         const std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>&
-        GetSentChunks() const { return m_sentChunks; }
+        GetSentChunks(Game::DimensionId dimension) const {
+            return m_dimState[Game::DimensionSlot(dimension)].sent;
+        }
 
-        // Get count of sent chunks
-        size_t GetSentChunkCount() const { return m_sentChunks.size(); }
+        // Count of sent chunks across every dimension (F3 readouts).
+        size_t GetSentChunkCount() const;
 
-        // Mark a chunk as sent (for legacy IntegratedServer path)
-        void MarkChunkSent(Game::Math::ChunkPos pos) { m_sentChunks.insert(pos); }
+        // Does any loader of this session sit in `dimension`? The player's own
+        // dimension always counts. This is what keeps a dimension ticking
+        // when it is only being looked into through a portal.
+        bool LoadsDimension(Game::DimensionId dimension) const;
+        // True the first time it is asked for `dimension` since the client
+        // last held that level: the global portals go out then.
+        bool MarkGlobalPortalsSynced(Game::DimensionId dimension) {
+            return m_globalPortalsSynced.insert(dimension).second;
+        }
+        const std::vector<ChunkLoader>& Loaders() const { return m_loaders; }
 
         // === CHUNK SENDER (Minecraft's PlayerChunkSender) ===
 
@@ -216,31 +267,40 @@ namespace Server {
         // generation completes and pushes it (IntegratedServer's
         // onChunkReadyToSend path). There is deliberately no "waiting for this
         // chunk" list on the session.
-        void MarkChunkPendingToSend(Game::Math::ChunkPos pos);
+        void MarkChunkPendingToSend(Game::DimensionId dimension, Game::Math::ChunkPos pos);
 
         // Drop a chunk: remove from pending, or send unload if already sent
-        void DropChunk(Game::Math::ChunkPos pos);
+        void DropChunk(Game::DimensionId dimension, Game::Math::ChunkPos pos);
 
-        // Send next batch of chunks (called once per tick from IntegratedServer)
+        // A chunk queued for sending, with the world it belongs to.
+        struct PendingChunkRef {
+            Game::DimensionId    dimension;
+            Game::Math::ChunkPos pos;
+        };
+
+        // Send next batch of chunks (called once per tick from IntegratedServer).
+        // `worldFor` resolves a dimension to its world (null = not loaded).
         // `outNotResident` receives pending chunks that are no longer in the
         // cache (evicted under the LRU cap): they are dropped from the pending
         // set and the caller must request them again, or they never arrive.
-        void SendNextChunks(Game::World* world,
-                            std::vector<Game::Math::ChunkPos>* outNotResident = nullptr);
+        void SendNextChunks(const std::function<Game::World*(Game::DimensionId)>& worldFor,
+                            std::vector<PendingChunkRef>* outNotResident = nullptr);
 
         // Handle client's batch acknowledgment (updates send rate)
         void OnChunkBatchAck(float desiredRate);
 
         // Chunk sender getters
-        size_t GetPendingChunksToSendCount() const { return m_pendingChunksToSend.size(); }
+        size_t GetPendingChunksToSendCount() const;
         float GetDesiredChunksPerTick() const { return m_desiredChunksPerTick; }
         int GetUnackedBatches() const { return m_unackedBatches; }
+        void OnChunkRequestFull(Game::DimensionId dimension, Game::Math::ChunkPos pos);
+        size_t GetUnchangedSentCount() const { return m_unchangedSent; }
+        size_t m_unchangedSent = 0;
         float GetBatchQuota() const { return m_batchQuota; }
         int GetMaxUnackedBatches() const { return m_maxUnackedBatches; }
-        const auto& GetPendingChunksToSend() const { return m_pendingChunksToSend; }
 
         // Send unload packet for chunk
-        void SendChunkUnload(Game::Math::ChunkPos chunk);
+        void SendChunkUnload(Game::DimensionId dimension, Game::Math::ChunkPos chunk);
 
         // === BLOCK UPDATES ===
 
@@ -420,6 +480,30 @@ namespace Server {
         // Null only before the level exists, which cannot happen for a session
         // that has a player attached.
         Game::World* SessionWorld() const;
+
+        // The world a block interaction addresses, and the eye position its
+        // reach is measured from. With immersive portals a client may dig or
+        // place in the level BEHIND a portal it is standing in front of; the
+        // packet carries that level's id (kDimensionUnknown = the player's
+        // own). For another level the eye is the player's eye mapped through
+        // the nearest portal that leads there, so the ordinary reach test
+        // applies unchanged. Null when no such portal is near the player —
+        // a client cannot reach into a level it has no surface into.
+        //
+        // Also latches the world for the block resyncs the handler may send
+        // (ResyncAndAck / SendSingleBlockChange) until the returned guard
+        // goes out of scope.
+        struct InteractionScope {
+            PlayerSession* session = nullptr;
+            ~InteractionScope() { if (session) session->m_interactionWorld = nullptr; }
+        };
+        // `portalSearchRadius`: how far from the player's eye a portal they
+        // may be reaching through can be. Zero means block reach; the
+        // portal gun's shot travels its whole range before it lands, so a
+        // gun impact may have come through a portal that far away.
+        Game::World* InteractionWorld(int8_t packetDimension, const glm::ivec3& target,
+                                      glm::vec3& outEye, InteractionScope& scope,
+                                      double portalSearchRadius = 0.0);
         
         // View management getters
         Game::Math::ChunkPos GetChunkPosition() const { return m_currentChunk; }
@@ -481,6 +565,10 @@ namespace Server {
         // === VIEW POSITION ===
         // Note: Authoritative position is in ServerPlayer, these are for view management
         Game::Math::ChunkPos m_currentChunk{0, 0};
+        // See InteractionWorld. Null outside a block interaction that
+        // targets another level.
+        Game::World*      m_interactionWorld = nullptr;
+        Game::DimensionId m_interactionDimension = Game::DimensionId::Overworld;
         Game::Math::ChunkPos m_anchorChunk{0, 0}; // Center for watch calculations
         Game::Math::ChunkPos m_lastKnownChunk{0, 0};
         
@@ -491,18 +579,42 @@ namespace Server {
         bool m_initialized = false;
         
         // === CHUNK TRACKING ===
-        // MC ServerPlayer.chunkTrackingView. Centre + radius, not a container:
-        // membership is arithmetic and the diff against the previous view
-        // allocates nothing. Starts EMPTY so the first update emits the whole
-        // initial set through the ordinary enter path.
-        ChunkTrackingView m_trackingView = ChunkTrackingView::Empty();
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_sentChunks;
+        // MC ServerPlayer.chunkTrackingView, generalised: the session holds a
+        // SET of loaders (its own view plus one per portal far side), and the
+        // union of their views is the tracked set. `m_watched` is that union,
+        // materialised so the diff between two loader sets — which may overlap
+        // in any way — is a set difference and nothing cleverer. Starts EMPTY
+        // so the first update emits the whole initial set through the
+        // ordinary enter path.
+        std::vector<ChunkLoader> m_loaders;
+        std::unordered_set<DimChunkKey, DimChunkKeyHash> m_watched;
+
+        // Per-dimension send state. A client holds one level per dimension,
+        // so "sent", "pending" and "what stamp does the client have" are
+        // questions with a different answer in each world.
+        struct DimensionSendState {
+            std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> sent;
+            // Chunk::modStamp of the last FULL ChunkDataS2C sent for each
+            // chunk. Survives DropChunk on purpose: it is what lets a chunk
+            // re-entering the view go out as ChunkUnchangedS2C.
+            std::unordered_map<Game::Math::ChunkPos, uint64_t, Game::Math::ChunkPosHash> clientStamps;
+            // MC PlayerChunkSender.pendingChunks. No "waiting for load" set:
+            // a chunk that is not loaded when it enters view is simply not
+            // queued, and is pushed here when generation finishes.
+            std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> pending;
+        };
+        std::array<DimensionSendState, Game::kDimensionCount> m_dimState;
+        DimensionSendState&       Dim(Game::DimensionId d)       { return m_dimState[Game::DimensionSlot(d)]; }
+        const DimensionSendState& Dim(Game::DimensionId d) const { return m_dimState[Game::DimensionSlot(d)]; }
+        // Squared chunk distance from `pos` to the nearest loader centre in
+        // `dimension` — the send order (nearest first, per the mod).
+        int DistanceSqToNearestLoader(Game::DimensionId dimension, Game::Math::ChunkPos pos) const;
+        // Drop everything sent/pending for one dimension WITHOUT telling the
+        // client (it is freeing the whole level). Loaders there are removed.
+        std::set<Game::DimensionId> m_globalPortalsSynced;
+        void ForgetDimensionSilently(Game::DimensionId dimension);
 
         // === CHUNK SENDER STATE (Minecraft's PlayerChunkSender) ===
-        // No "waiting for load" set: a chunk that is not loaded when it enters
-        // view is simply not queued, and is pushed here by the server when
-        // generation finishes. MC PlayerChunkSender holds exactly this one set.
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunksToSend;  // Chunks loaded and ready to send
         float m_desiredChunksPerTick = 9.0f;
         float m_batchQuota = 0.0f;
         int m_unackedBatches = 0;

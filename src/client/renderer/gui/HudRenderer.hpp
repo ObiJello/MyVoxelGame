@@ -57,6 +57,10 @@ namespace Render {
 
         void RenderAttackIndicator(GuiGraphics& graphics);
 
+        // MC BossHealthOverlay.render — the bar(s) across the top of the
+        // screen. State arrives via BossEventS2C into Client::g_bossBarState.
+        void RenderBossBar(GuiGraphics& graphics);
+
     private:
         // MC's Gui.java HUD element methods
         void RenderItemHotbar(GuiGraphics& graphics, const Game::Inventory& inventory);

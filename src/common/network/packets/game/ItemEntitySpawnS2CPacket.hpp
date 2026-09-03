@@ -24,6 +24,7 @@ namespace Network {
         glm::dvec3      position{0.0};
         glm::vec3       velocity{0.0f};   // blocks per TICK
         float           bobOffs  = 0.0f;  // render bob/spin phase
+        float           scale    = 1.0f;  // appended: ItemEntity::scale
         Game::ItemStack stack{};
     };
 
@@ -44,6 +45,7 @@ namespace Network {
             buffer.WriteFloat(packet.velocity.z);
             buffer.WriteFloat(packet.bobOffs);
             WriteItemStack(buffer, packet.stack);
+            buffer.WriteFloat(packet.scale);
             return buffer.GetData();
         }
 
@@ -60,6 +62,7 @@ namespace Network {
             packet.velocity.z = reader.ReadFloat();
             packet.bobOffs    = reader.ReadFloat();
             packet.stack      = ReadItemStack(reader);
+            packet.scale      = reader.HasMore() ? reader.ReadFloat() : 1.0f;
             return packet;
         }
 

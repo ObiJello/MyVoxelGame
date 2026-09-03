@@ -1,6 +1,7 @@
 // File: src/server/player/ServerPlayer.hpp
 #pragma once
 
+#include <algorithm>
 #include <glm/glm.hpp>
 #include <string>
 #include <memory>
@@ -328,6 +329,9 @@ namespace Server {
         
         // Check if player can reach position
         bool canReach(const glm::vec3& pos) const;
+        // The reach canReach tests against, for callers that measure from a
+        // different eye (a portal's image of it).
+        float getReachDistance() const { return m_reachDistance; }
         
         // === GETTERS ===
         
@@ -397,6 +401,12 @@ namespace Server {
         
         GameMode getGameMode() const { return m_gameMode; }
         bool isFlying() const { return m_flying; }
+        // The player's size (1 = vanilla): scaled immersive portals change
+        // it; the client keeps the same number. Eye height, reach and the
+        // body's box all follow it.
+        float getScale() const { return m_scale; }
+        void  setScale(float scale) { m_scale = std::clamp(scale, 0.05f, 32.0f); }
+        float getEyeHeight() const { return 1.62f * m_scale; }
 
         // Debug noclip. There is no vanilla equivalent — the flag exists so
         // the state survives a save and a rejoin, which is the only reason
@@ -522,6 +532,7 @@ namespace Server {
         bool m_noclip = false;
         bool m_instabuild = false; // creative instant break
         float m_reachDistance = 5.0f;
+        float m_scale = 1.0f;
         
         // === INVENTORY ===
         // 46-slot MC-compatible inventory (crafting + armor + main + hotbar + offhand).

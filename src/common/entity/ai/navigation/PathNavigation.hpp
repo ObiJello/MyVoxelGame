@@ -65,6 +65,9 @@ namespace Game {
         bool MoveTo(std::optional<Path> path, double speedModifier);
 
         void Stop();
+        // The mob moved to another level: path against its blocks from now
+        // on. Drops the current path — it was through the old world.
+        void SetLevel(EntityLevel* level) { m_level = level; Stop(); }
         bool IsDone() const { return !m_path.has_value() || m_path->IsDone(); }
         bool IsInProgress() const { return !IsDone(); }
         bool IsStuck() const { return m_isStuck; }

@@ -4,6 +4,7 @@
 #include "ChestBlockEntity.hpp"
 #include "FurnaceBlockEntity.hpp"
 #include "CampfireBlockEntity.hpp"
+#include "EndGatewayBlockEntity.hpp"
 #include "../../../core/Log.hpp"
 #include <memory>
 #include <unordered_map>
@@ -206,6 +207,24 @@ namespace Game {
                 const auto idx = static_cast<size_t>(id);
                 if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
             }
+        }
+
+        // ── End gateway ───────────────────────────────────────────────────
+        // MC BlockEntityType.END_GATEWAY. The fight's post-kill gateways and
+        // the return gateways placed at teleport time get theirs through
+        // World::SetBlock; worldgen gateways get one lazily on first entry
+        // (PortalTravel's EndGateway branch).
+        {
+            std::unordered_set<BlockID> blocks = { BlockID::EndGateway };
+            const auto* type = RegisterType(
+                BlockEntityTypeIds::END_GATEWAY, "end_gateway",
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<EndGatewayBlockEntity>(t, pos, id);
+                },
+                blocks);
+            s_byId[BlockEntityTypeIds::END_GATEWAY] = type;
+            g_byStringId[type->StringId()] = type;
+            s_byBlockId[static_cast<size_t>(BlockID::EndGateway)] = type;
         }
 
         Log::Info("[BlockEntityTypes] initialised with %zu type(s)", g_typeStorage.size());

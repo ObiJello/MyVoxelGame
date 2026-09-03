@@ -147,10 +147,15 @@ namespace Game {
 
         // === VALIDATION ===
 
-        // Validate that a loaded chunk is consistent and usable
+        // Validate that a loaded chunk is consistent and usable.
+        //
+        // Deliberately NOT `!chunk.IsEmpty()`: an all-air chunk is valid — the
+        // End is mostly void — and a rejected load falls through to
+        // regeneration, discarding whatever was saved. MC accepts any chunk
+        // that parses.
         virtual bool ValidateChunk(const Chunk& chunk) const {
-            // Default implementation does basic checks
-            return !chunk.IsEmpty(); // Only check if chunk has content
+            (void)chunk;
+            return true;
         }
 
         // === ERROR HANDLING ===

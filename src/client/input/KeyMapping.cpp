@@ -228,12 +228,16 @@ namespace Input {
             if (const NamedKey* n = FindNamedByName(suffix)) return Keyboard(n->code);
 
             // LEGACY: configs written before the table covered printable keys
-            // stored the layout glyph ("key.keyboard./"). Resolve those through
-            // glfwGetKeyName so nobody loses their bindings on upgrade; the
-            // next SaveKeyBindings rewrites them in the stable form.
-            //
-            // This is exactly the lookup that could fail across layouts, which
-            // is why it is now a fallback rather than the primary path.
+            // stored the layout glyph ("key.keyboard./"). The table's own US
+            // glyphs answer first — layout-free, so "/" is the slash key on
+            // any keyboard (on a Mac whose layout prints something else on
+            // that key, the glfwGetKeyName walk below found nothing and the
+            // command key silently became unbound). Then glfwGetKeyName, so
+            // a glyph the table lacks still resolves on the layout that
+            // wrote it. The next SaveKeyBindings rewrites the stable form.
+            for (const auto& n : kNamedKeys) {
+                if (suffix == n.display) return Keyboard(n.code);
+            }
             for (int k = GLFW_KEY_SPACE; k <= GLFW_KEY_LAST; ++k) {
                 if (const char* printable = glfwGetKeyName(k, 0)) {
                     if (suffix == printable) return Keyboard(k);
@@ -293,6 +297,10 @@ namespace Input {
         KeyMapping* Command = nullptr;
         KeyMapping* Hotbar[9] = {};
         KeyMapping* TogglePerspective = nullptr;
+        KeyMapping* ZoomIn      = nullptr;
+        KeyMapping* ZoomOut     = nullptr;
+        KeyMapping* CameraLeft  = nullptr;
+        KeyMapping* CameraRight = nullptr;
         KeyMapping* Fullscreen = nullptr;
         KeyMapping* ToggleCursor = nullptr;
         KeyMapping* Noclip = nullptr;
@@ -353,6 +361,14 @@ namespace Input {
         Binds::TogglePerspective = &Register("key.togglePerspective", "Miscellaneous",
                                              "Toggle Perspective",
                                              BoundKey::Keyboard(GLFW_KEY_F5));
+        Binds::ZoomIn      = &Register("key.zoomIn",      "Camera", "Zoom In",
+                                       BoundKey::Keyboard(GLFW_KEY_I));
+        Binds::ZoomOut     = &Register("key.zoomOut",     "Camera", "Zoom Out",
+                                       BoundKey::Keyboard(GLFW_KEY_O));
+        Binds::CameraLeft  = &Register("key.cameraLeft",  "Camera", "Orbit Camera Left",
+                                       BoundKey::Keyboard(GLFW_KEY_LEFT));
+        Binds::CameraRight = &Register("key.cameraRight", "Camera", "Orbit Camera Right",
+                                       BoundKey::Keyboard(GLFW_KEY_RIGHT));
         Binds::Fullscreen        = &Register("key.fullscreen", "Miscellaneous", "Toggle Fullscreen",
                                              BoundKey::Keyboard(GLFW_KEY_F11));
         // Engine-specific actions with no vanilla counterpart; still rebindable.
@@ -399,7 +415,16 @@ namespace Input {
         for (KeyMapping* m : s_ordered) {
             const std::string stored = settings.GetString("key_" + m->id, "");
             if (stored.empty()) continue;          // never rebound; keep the default
-            m->key = BoundKey::FromName(stored);
+            const BoundKey parsed = BoundKey::FromName(stored);
+            // A stored name that resolves to nothing is a name this build
+            // (or this keyboard) cannot read, not a choice to unbind — only
+            // "key.keyboard.unknown" means that. The default stays.
+            if (!parsed.IsBound() && stored != "key.keyboard.unknown" && stored != "key.mouse.unknown") {
+                Log::Warning("[KeyMapping] '%s' stored as '%s' could not be resolved; keeping the default '%s'",
+                             m->id.c_str(), stored.c_str(), m->defaultKey.Name().c_str());
+                continue;
+            }
+            m->key = parsed;
         }
     }
 

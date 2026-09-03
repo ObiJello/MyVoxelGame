@@ -1,5 +1,11 @@
 // File: src/client/network/ClientPacketHandler.cpp
+#include "common/core/Features.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "client/portal/ClientImmersivePortals.hpp"
+#endif
 #include "client/entity/ClientFallingBlocks.hpp"
+#include "client/world/ClientLevel.hpp"
+#include "client/renderer/mesh/Mesher.hpp"
 #include "ClientPacketHandler.hpp"
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/Player.hpp"
@@ -10,13 +16,16 @@
 #include "common/entity/ItemEntity.hpp"   // Game::IsItemEntityId
 #include "common/entity/Entity.hpp"       // Game::IsMobEntityId
 #include "common/core/Mth.hpp"            // rotation unpacking
+#include "common/core/Config.hpp"         // Config::MinY for AO-region section dirtying
 #include "NetworkClient.hpp"
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
+#include "../renderer/gui/BossBarState.hpp"
 #include "../renderer/gui/ChatScreen.hpp"   // SetServerCommandNames
 #include "../world/LevelLoadTracker.hpp"    // dimension change re-enters the load wait
 #include "../renderer/environment/SkyRenderer.hpp"  // per-dimension sky
 #include <cmath>
+#include <cstdlib>
 #if ENABLE_PORTAL_GUN
 #include "../portal/ClientPortalManager.hpp"
 #endif
@@ -46,13 +55,13 @@ namespace Render {
 
 namespace Client {
 
+    // The one client boss bar (see BossBarState.hpp).
+    BossBarState g_bossBarState;
+
     // Global client systems (defined elsewhere)
-    extern std::unique_ptr<ClientChunkManager> g_clientChunkManager;
     extern NetworkClient* g_networkClient;
 
     ClientPacketHandler::ClientPacketHandler() {
-        // Cache pointers to global systems
-        m_chunkManager = g_clientChunkManager.get();
         // Note: g_networkClient is accessed directly when needed, not cached
     }
 
@@ -63,13 +72,15 @@ namespace Client {
     // ========================================================================
 
     void ClientPacketHandler::handleChunkData(const Network::ChunkDataS2CPacket& packet) {
-        if (!m_chunkManager) {
+        if (!g_clientChunkManager) {
             Log::Warning("[ClientPacketHandler] ChunkManager not available for chunk data");
             return;
         }
         
         // Process chunk data on main thread
-        m_chunkManager->ProcessChunkDataS2CPacket(packet);
+        const auto t0 = std::chrono::steady_clock::now();
+        g_clientChunkManager->ProcessChunkDataS2CPacket(packet);
+        m_batchCalculator.onChunkApplied(std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count());
         m_stats.chunksReceived++;
         m_stats.packetsProcessed++;
         
@@ -77,15 +88,32 @@ namespace Client {
                   packet.chunkX, packet.chunkZ, packet.sections.size());
     }
 
+    void ClientPacketHandler::handleChunkUnchanged(const Network::ChunkUnchangedS2CPacket& packet) {
+        // Revive the retained copy; if we no longer have it (evicted), ask for
+        // the full chunk. Counts as a chunk for the batch calculator either way.
+        Game::Math::ChunkPos pos{packet.chunkX, packet.chunkZ};
+        const bool restored = g_clientChunkManager && g_clientChunkManager->RestoreRetainedChunk(pos, packet.modStamp);
+        if (!restored && g_networkClient && g_networkClient->IsConnected()) {
+            if (auto connection = g_networkClient->GetConnection()) {
+                Network::ChunkRequestFullC2SPacket req; req.chunkX = packet.chunkX; req.chunkZ = packet.chunkZ;
+                req.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(ClientLevels::BoundDimension()));
+                connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkRequestFullC2S),
+                                       Network::Serialization::Serialize(req));
+            }
+        }
+        m_stats.chunksReceived++;
+        m_stats.packetsProcessed++;
+    }
+
     void ClientPacketHandler::handleChunkUnload(const Network::UnloadChunkS2CPacket& packet) {
-        if (!m_chunkManager) {
+        if (!g_clientChunkManager) {
             Log::Warning("[ClientPacketHandler] ChunkManager not available for chunk unload");
             return;
         }
         
         // Unload chunk on main thread
         Game::Math::ChunkPos pos{packet.chunkX, packet.chunkZ};
-        m_chunkManager->UnloadChunk(pos);
+        g_clientChunkManager->UnloadChunk(pos);
         m_stats.chunksUnloaded++;
         m_stats.packetsProcessed++;
         
@@ -98,13 +126,13 @@ namespace Client {
     // ========================================================================
 
     void ClientPacketHandler::handleBlockChange(const Network::BlockChangeS2CPacket& packet) {
-        if (!m_chunkManager) {
+        if (!g_clientChunkManager) {
             Log::Warning("[ClientPacketHandler] ChunkManager not available for block change");
             return;
         }
         
         // Apply block change on main thread
-        m_chunkManager->ProcessBlockChange(packet);
+        g_clientChunkManager->ProcessBlockChange(packet);
         m_stats.blockChanges++;
         m_stats.packetsProcessed++;
         
@@ -113,15 +141,26 @@ namespace Client {
     }
 
     void ClientPacketHandler::handleBlockChangedAck(const Network::BlockChangedAckS2CPacket& packet) {
-        if (!m_chunkManager) return;
+        if (!g_clientChunkManager) return;
+        // The sequence counter is per client, but a prediction lives in the
+        // level it was made in — the far level when the crosshair reached
+        // through a portal — while this packet lands in whichever level the
+        // stream is scoped to. Retire the sequence in EVERY level (a no-op
+        // where nothing is pending); an unretired far-level prediction was
+        // rolled back by the next interaction, resurrecting a broken block.
+        ClientLevels::ForEach([&](ClientLevel& level) {
+            if (level.Chunks() && level.Chunks() != g_clientChunkManager) {
+                level.Chunks()->HandleBlockChangedAck(packet.sequence);
+            }
+        });
         // Every interaction up to this sequence is now settled — retire those
         // predictions, snapping back wherever the server disagreed with us.
-        m_chunkManager->HandleBlockChangedAck(packet.sequence);
+        g_clientChunkManager->HandleBlockChangedAck(packet.sequence);
         m_stats.packetsProcessed++;
     }
 
     void ClientPacketHandler::handleSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
-        if (!m_chunkManager) {
+        if (!g_clientChunkManager) {
             Log::Warning("[ClientPacketHandler] ChunkManager not available for section block update");
             return;
         }
@@ -149,7 +188,7 @@ namespace Client {
             singleChange.playSound = false; // Don't play sound for bulk changes
             singleChange.updateNeighbors = false;
             
-            m_chunkManager->ProcessBlockChange(singleChange);
+            g_clientChunkManager->ProcessBlockChange(singleChange);
         }
         
         m_stats.blockChanges += packet.packedRecords.size();
@@ -160,7 +199,7 @@ namespace Client {
     }
 
     void ClientPacketHandler::handleMultiBlockChange(const Network::MultiBlockChangeS2CPacket& packet) {
-        if (!m_chunkManager) {
+        if (!g_clientChunkManager) {
             Log::Warning("[ClientPacketHandler] ChunkManager not available for multi block change");
             return;
         }
@@ -176,7 +215,7 @@ namespace Client {
             singleChange.playSound = false; // Don't play sound for bulk changes
             singleChange.updateNeighbors = false;
             
-            m_chunkManager->ProcessBlockChange(singleChange);
+            g_clientChunkManager->ProcessBlockChange(singleChange);
         }
         
         m_stats.blockChanges += packet.changes.size();
@@ -192,7 +231,66 @@ namespace Client {
 
     void ClientPacketHandler::handlePlayerUpdate(const Network::PlayerUpdateS2CPacket& packet) {
         if (g_remotePlayerManager) {
-            g_remotePlayerManager->UpdatePlayer(packet.playerId, packet.position, packet.rotation, packet.isCrouching);
+            // Scale first: the update's teleport test scales with it.
+            g_remotePlayerManager->SetScale(packet.playerId, packet.scale);
+            Game::DimensionId dim = Game::DimensionFromRaw(packet.dimensionId);
+            glm::vec3 updatePos = packet.position;
+            glm::vec2 updateRot = packet.rotation;
+#if ENABLE_IMMERSIVE_PORTALS
+            // A crossing already pending on this copy takes the update first
+            // (a far-side position comes back through the portal).
+            dim = g_remotePlayerManager->ApplyPendingCrossing(packet.playerId, dim, updatePos, updateRot);
+            // A level change, or a jump too long for walking, that a portal
+            // of the player's old level accounts for — its far side is where
+            // the new position is, and the position it maps back to is a
+            // step from the last one — is a portal crossing: the copy is
+            // carried through the portal and keeps walking. Anything else
+            // is the teleport it looks like, and UpdatePlayer snaps.
+            {
+                const auto& players = g_remotePlayerManager->GetPlayers();
+                auto it = players.find(packet.playerId);
+                if (it != players.end() && it->second.positionInitialized) {
+                    const RemotePlayer& rp = it->second;
+                    const glm::vec3 jump = updatePos - rp.targetPosition;
+                    const float s = std::max(rp.scale, 0.05f);
+                    const bool suspicious = dim != rp.dimension ||
+                        (jump.x * jump.x + jump.z * jump.z) > (3.0f * s) * (3.0f * s) ||
+                        std::abs(jump.y) > 10.0f * s;
+                    if (suspicious) {
+                        const Game::DimensionId oldDim = rp.dimension;
+                        const Game::Immersive::Portal* through = nullptr;
+                        double best = 2.5 * std::max(s, 1.0f);   // a few ticks of any walk
+                        if (ClientLevel* from = ClientLevels::Get(rp.dimension)) {
+                            from->Portals().ForEach([&](const Game::Immersive::Portal& p) {
+                                if (p.IsMirror() || !p.Has(Game::Immersive::PortalFlag::Teleportable)) return;
+                                if (p.destDimension != dim) return;
+                                const glm::dvec3 back = p.InverseTransformPoint(glm::dvec3(updatePos));
+                                const double d = glm::length(back - glm::dvec3(rp.targetPosition));
+                                if (d < best) { best = d; through = &p; }
+                            });
+                        }
+                        if (through) {
+                            // Not mapped yet: the copy keeps walking here and
+                            // this update comes back through the portal; the
+                            // switch happens when its body is through.
+                            g_remotePlayerManager->BeginPortalCrossing(packet.playerId, *through, dim);
+                            dim = g_remotePlayerManager->ApplyPendingCrossing(packet.playerId, dim, updatePos, updateRot);
+                        }
+                        static const bool kPortalDiag = std::getenv("OBEY_PORTAL_DIAG") != nullptr;
+                        if (kPortalDiag) {
+                            Log::Info("[PortalDiag] player %u update %s -> %s at (%.2f,%.2f,%.2f): %s",
+                                      packet.playerId,
+                                      std::string(Game::DimensionName(oldDim)).c_str(),
+                                      std::string(Game::DimensionName(dim)).c_str(),
+                                      packet.position.x, packet.position.y, packet.position.z,
+                                      through ? "crossing pending - walking on here until through" : "no portal accounts for it - snapping");
+                        }
+                    }
+                }
+            }
+#endif
+            g_remotePlayerManager->UpdatePlayer(packet.playerId, updatePos, updateRot, packet.isCrouching,
+                                                dim);
             g_remotePlayerManager->SetHurtTime(packet.playerId, packet.hurtTime);
             g_remotePlayerManager->SetDeathTime(packet.playerId, packet.deathTime);
         }
@@ -235,9 +333,46 @@ namespace Client {
 
     void ClientPacketHandler::handleItemEntitySpawn(const Network::ItemEntitySpawnS2CPacket& packet) {
         if (g_itemEntityManager) {
-            g_itemEntityManager->Spawn(packet.entityId, packet.position,
-                                       packet.velocity, packet.bobOffs,
-                                       packet.stack);
+            const bool isNew = g_itemEntityManager->Spawn(packet.entityId, packet.position,
+                                                          packet.velocity, packet.bobOffs,
+                                                          packet.stack, packet.scale);
+            // A first spawn into a level the player is NOT standing in: the
+            // far side of a portal. Logged so a "cannot see the item through
+            // the portal" report shows whether the client ever got it.
+#if ENABLE_IMMERSIVE_PORTALS
+            // The same entity may still exist in another level's store: it
+            // just crossed a portal server-side (its removal there is on the
+            // wire too). Hand it over through the portal it came through so
+            // the render state is continuous, and drop the old copy now.
+            if (isNew && ClientLevels::HasSession()) {
+                const Game::DimensionId here = ClientLevels::BoundDimension();
+                ItemEntityManager* store = g_itemEntityManager;
+                ClientLevels::ForEach([&](ClientLevel& other) {
+                    if (other.Dimension() == here || !other.Items()) return;
+                    auto oldIt = other.Items()->GetEntities().find(packet.entityId);
+                    if (oldIt == other.Items()->GetEntities().end()) return;
+                    const glm::dvec3 oldPos = oldIt->second.sim.pos;
+                    const Game::Immersive::Portal* via = nullptr;
+                    double best = 3.0;   // within reach of a surface, else no hand-off
+                    other.Portals().ForEach([&](const Game::Immersive::Portal& p) {
+                        if (p.IsMirror() || p.destDimension != here) return;
+                        glm::dvec3 mn, mx;
+                        p.BoundingBox(mn, mx, 0.0);
+                        const double d = glm::length(glm::clamp(oldPos, mn, mx) - oldPos);
+                        if (d < best) { best = d; via = &p; }
+                    });
+                    if (via) store->CarryOver(packet.entityId, oldIt->second, *via);
+                    other.Items()->Remove(packet.entityId);
+                });
+            }
+#endif
+            if (isNew && ClientLevels::HasSession() &&
+                ClientLevels::BoundDimension() != ClientLevels::ActiveDimension()) {
+                Log::Info("[ImmersivePortals] Far item #%d spawned in %s at (%.1f, %.1f, %.1f)",
+                          packet.entityId,
+                          std::string(Game::DimensionName(ClientLevels::BoundDimension())).c_str(),
+                          packet.position.x, packet.position.y, packet.position.z);
+            }
         }
         m_stats.packetsProcessed++;
     }
@@ -314,6 +449,33 @@ namespace Client {
                                       packet.health, packet.flags, packet.variantData,
                                       packet.pose, packet.animState,
                                       packet.blockStateRaw);
+            g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
+#if ENABLE_IMMERSIVE_PORTALS
+            // The same mob may still be in another level's store: it just
+            // crossed a portal server-side. Hand it over through that portal
+            // and drop the old copy — see the item spawn handler.
+            if (ClientLevels::HasSession()) {
+                const Game::DimensionId here = ClientLevels::BoundDimension();
+                ClientMobManager* store = g_clientMobManager;
+                ClientLevels::ForEach([&](ClientLevel& other) {
+                    if (other.Dimension() == here || !other.Mobs()) return;
+                    auto oldIt = other.Mobs()->All().find(packet.entityId);
+                    if (oldIt == other.Mobs()->All().end() || !oldIt->second.mob) return;
+                    const glm::dvec3 oldPos = oldIt->second.mob->position;
+                    const Game::Immersive::Portal* via = nullptr;
+                    double best = 3.0;
+                    other.Portals().ForEach([&](const Game::Immersive::Portal& p) {
+                        if (p.IsMirror() || p.destDimension != here) return;
+                        glm::dvec3 mn, mx;
+                        p.BoundingBox(mn, mx, 0.0);
+                        const double d = glm::length(glm::clamp(oldPos, mn, mx) - oldPos);
+                        if (d < best) { best = d; via = &p; }
+                    });
+                    if (via) store->CarryOver(packet.entityId, oldIt->second, *via);
+                    other.Mobs()->Remove(packet.entityId);
+                });
+            }
+#endif
         }
         m_stats.packetsProcessed++;
     }
@@ -389,6 +551,7 @@ namespace Client {
                                         packet.variantData, packet.hurtTime, packet.deathTime,
                                         packet.swellDir, packet.swell,
                                         packet.pose, packet.animState);
+            g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
         }
         m_stats.packetsProcessed++;
     }
@@ -402,6 +565,36 @@ namespace Client {
             m_player->hurtDuration = 10;
             m_player->hurtTime     = m_player->hurtDuration;
             m_player->hurtDir      = packet.yaw;
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleBossEvent(const Network::BossEventS2CPacket& packet) {
+        // MC ClientPacketListener.handleBossUpdate → the Gui's events map;
+        // one bar here (see BossBarState.hpp).
+        switch (packet.op) {
+            case Network::BossEventS2CPacket::Op::Add:
+                g_bossBarState.visible  = true;
+                g_bossBarState.progress = packet.progress;
+                g_bossBarState.color    = static_cast<uint8_t>(packet.color);
+                g_bossBarState.notches  = packet.notches;
+                g_bossBarState.name     = packet.name;
+                break;
+            case Network::BossEventS2CPacket::Op::Remove:
+                g_bossBarState.visible = false;
+                break;
+            case Network::BossEventS2CPacket::Op::UpdateProgress:
+                g_bossBarState.progress = packet.progress;
+                break;
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleEndCrystalBeam(
+            const Network::EndCrystalBeamS2CPacket& packet) {
+        if (g_clientMobManager) {
+            g_clientMobManager->SetEndCrystalBeam(packet.entityId, packet.hasTarget,
+                                                  packet.target);
         }
         m_stats.packetsProcessed++;
     }
@@ -442,10 +635,14 @@ namespace Client {
         m_stats.packetsProcessed++;
         Log::Info("[ClientPacketHandler] Disconnected: %s", reason.c_str());
 
-        // Clean up chunk manager
-        if (m_chunkManager) {
-            m_chunkManager->ClearAllChunks();
-        }
+        // A boss bar from the departed server must not survive into the next
+        // session (MC clears the Gui's events map with the level).
+        g_bossBarState.visible = false;
+
+        // Clean up every level (the one the player stood in and any seen
+        // through a portal). The session teardown destroys them; this just
+        // empties them for the disconnect screen.
+        ClientLevels::ClearAll();
 #if ENABLE_PORTAL_GUN
         // Drop any portals carried over from this server. The next server's
         // SyncToClient will repopulate from authoritative state.
@@ -485,6 +682,7 @@ namespace Client {
         m_player->instabuild   = packet.instabuild();
         m_player->flyingSpeed  = packet.flyingSpeed;
         m_player->physics.mayFly = packet.mayFly();
+        m_player->physics.scale  = packet.scale;
 
         // MC ClientPacketListener.handlePlayerAbilities:1884 assigns
         // `abilities.flying = packet.isFlying()` unconditionally, and this used
@@ -582,26 +780,21 @@ namespace Client {
                   static_cast<int>(packet.dimensionId),
                   packet.HasSkyLight() ? 1 : 0, packet.HasCeiling() ? 1 : 0);
 
-        // ORDER MATTERS. Chunks first: their sections own GPU buffers, and the
-        // renderers below hold raw pointers into them.
-        //
-        // ClearAllChunks also drops every outstanding block prediction, which
-        // this path needs for its own reason: a prediction is keyed by
-        // position with no dimension, so a late ack would otherwise roll back
-        // into a block in the wrong world.
-        if (Client::g_clientChunkManager) {
-            Client::g_clientChunkManager->ClearAllChunks();
-        }
+        // The player's level changes; the world objects do not get wiped —
+        // each dimension is its own ClientLevel now (ClientLevel.hpp). The
+        // level being left is destroyed unless the server says to keep it
+        // (a seamless crossing, where it stays visible through the portal),
+        // which is where the old "throw everything away" went.
+        const Game::DimensionId dimension = Game::DimensionFromRaw(packet.dimensionId);
+        ClientLevels::SetActive(dimension, packet.KeepPrevious());
+        ClientLevels::SetPacketDimension(dimension);
 
-        // Every entity id is re-issued by the destination dimension's own
-        // managers, which start their counters at the same per-type bases —
-        // so a surviving entity would collide with a new one and the client
-        // would render a Nether zombie wearing an Overworld cow's position.
-        if (Client::g_remotePlayerManager) Client::g_remotePlayerManager->Clear();
-        if (Client::g_itemEntityManager)   Client::g_itemEntityManager->Clear();
-        if (Client::g_xpOrbManager)        Client::g_xpOrbManager->Clear();
-        if (Client::g_clientMobManager)    Client::g_clientMobManager->Clear();
-        if (Client::g_clientFallingBlocks) Client::g_clientFallingBlocks->Clear();
+        // The boss bar belongs to the dimension being left (the fight's
+        // player scan re-adds it on re-entry before the first progress tick).
+        g_bossBarState.visible = false;
+
+        // Remote players are global (one list, each tagged with a
+        // dimension); their positions are re-sent within a tick.
 
         // The sky is a property of the dimension, not of the player's
         // settings — the End its starfield, the Nether no sky at all. Applied
@@ -612,7 +805,12 @@ namespace Client {
         // Go back to waiting for a level. Without this the loading screen has
         // already been dismissed for the old dimension and the player spends
         // the arrival standing in an empty void watching chunks pop in.
-        Client::g_levelLoadTracker.StartClientLoad();
+        //
+        // Not on a seamless crossing (keepPrevious): the far side was
+        // streamed in before the player stepped through, and a loading
+        // screen would be exactly the hitch immersive portals exist to
+        // remove.
+        if (!packet.KeepPrevious()) Client::g_levelLoadTracker.StartClientLoad();
 
         m_stats.packetsProcessed++;
     }
@@ -855,6 +1053,118 @@ namespace Client {
 
     void ClientPacketHandler::onBlockEntityRemoveS2C(const Network::BlockEntityRemoveS2CPacket& packet) {
         if (m_connection) m_connection->HandleBlockEntityRemove(packet);
+    }
+
+#if ENABLE_IMMERSIVE_PORTALS
+    namespace {
+        // The cells whose faces lie on a dimension's axis-aligned portal
+        // surfaces, handed to the mesher (Mesher::PortalFace), and the
+        // sections those cells are in marked for a rebuild — the ones the
+        // old list covered as well, so a removed portal gets its culling
+        // back.
+        void RefreshPortalFaces(Game::DimensionId dim) {
+            std::vector<::Render::Mesher::PortalFace> before = ::Render::Mesher::PortalFacesFor(dim);
+            std::vector<::Render::Mesher::PortalFace> after;
+            if (ClientLevel* level = ClientLevels::Get(dim)) {
+                level->Portals().ForEach([&](const Game::Immersive::Portal& p) {
+                    if (!p.Has(Game::Immersive::PortalFlag::Visible)) return;
+                    const glm::dvec3 n = p.Normal();
+                    int axis = 0;
+                    if (std::abs(n.y) > std::abs(n[axis])) axis = 1;
+                    if (std::abs(n.z) > std::abs(n[axis])) axis = 2;
+                    if (std::abs(n[axis]) < 0.999) return;               // not axis-aligned
+                    const double planeCoord = p.origin[axis];
+                    const double snapped = std::round(planeCoord);
+                    if (std::abs(planeCoord - snapped) > 0.05) return;   // mid-block: touches no face
+                    const int sign = n[axis] > 0.0 ? 1 : -1;
+                    // The surface's extent in the plane.
+                    glm::dvec3 mn, mx;
+                    p.BoundingBox(mn, mx, 0.0);
+                    ::Render::Mesher::PortalFace f;
+                    f.dimension = dim;
+                    for (int a = 0; a < 3; ++a) {
+                        if (a == axis) {
+                            const int cell = sign > 0 ? static_cast<int>(snapped) : static_cast<int>(snapped) - 1;
+                            f.min[a] = f.max[a] = cell;
+                        } else {
+                            f.min[a] = static_cast<int>(std::floor(mn[a] + 1e-6));
+                            f.max[a] = static_cast<int>(std::ceil(mx[a] - 1e-6)) - 1;
+                            if (f.max[a] < f.min[a]) f.max[a] = f.min[a];
+                        }
+                    }
+                    f.dir = glm::ivec3(0);
+                    f.dir[axis] = -sign;   // from the cell into the surface
+                    after.push_back(f);
+                });
+            }
+            ::Render::Mesher::SetPortalFaces(dim, after);
+
+            auto remesh = [&](const std::vector<::Render::Mesher::PortalFace>& faces) {
+                ClientLevels::ForEach([&](ClientLevel& level) {
+                    if (level.Dimension() != dim || !level.Chunks()) return;
+                    for (const auto& f : faces) {
+                        const glm::ivec3 lo = f.min - glm::ivec3(1), hi = f.max + glm::ivec3(1);
+                        for (int cx = lo.x >> 4; cx <= (hi.x >> 4); ++cx)
+                            for (int cz = lo.z >> 4; cz <= (hi.z >> 4); ++cz)
+                                for (int sy = (lo.y - Config::MinY) >> 4; sy <= ((hi.y - Config::MinY) >> 4); ++sy)
+                                    level.Chunks()->MarkSectionDirty(Game::Math::ChunkPos{cx, cz}, sy);
+                    }
+                });
+            };
+            remesh(before);
+            remesh(after);
+        }
+    }
+
+    void ClientPacketHandler::handleImmersivePortalSync(
+            const Network::ImmersivePortalSyncS2CPacket& packet) {
+        if (GetClientImmersivePortals().OnSync(packet.portal)) {
+            RefreshPortalFaces(packet.portal.dimension);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleImmersivePortalRemove(
+            const Network::ImmersivePortalRemoveS2CPacket& packet) {
+        const Game::DimensionId dim = ClientLevels::BoundDimension();
+        GetClientImmersivePortals().OnRemove(packet.portalId);
+        RefreshPortalFaces(dim);
+        m_stats.packetsProcessed++;
+    }
+#endif
+
+    void ClientPacketHandler::handleAoRegions(const Network::AoRegionsS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        const Game::DimensionId dim = Game::DimensionFromRaw(packet.dimensionId);
+        // The union of old and new boxes is what needs remeshing: a removed
+        // box gets its shading back, an added one loses it.
+        std::vector<::Render::Mesher::AoExclusion> before = ::Render::Mesher::AoExclusionsFor(dim);
+        std::vector<::Render::Mesher::AoExclusion> after;
+        after.reserve(packet.boxes.size());
+        for (const auto& b : packet.boxes) after.push_back({dim, b.min, b.max});
+        ::Render::Mesher::SetAoExclusions(dim, after);
+
+        auto remesh = [&](const std::vector<::Render::Mesher::AoExclusion>& boxes) {
+            ClientLevels::ForEach([&](ClientLevel& level) {
+                if (level.Dimension() != dim || !level.Chunks()) return;
+                for (const auto& box : boxes) {
+                    // A block of margin: the faces at the box's edge share
+                    // sections (and AO samples) with the blocks beside it.
+                    const glm::ivec3 lo = box.min - glm::ivec3(1), hi = box.max + glm::ivec3(1);
+                    for (int cx = lo.x >> 4; cx <= (hi.x >> 4); ++cx)
+                        for (int cz = lo.z >> 4; cz <= (hi.z >> 4); ++cz)
+                            for (int sy = (lo.y - Config::MinY) >> 4; sy <= ((hi.y - Config::MinY) >> 4); ++sy)
+                                level.Chunks()->MarkSectionDirty(Game::Math::ChunkPos{cx, cz}, sy);
+                }
+            });
+        };
+        remesh(before);
+        remesh(after);
+    }
+
+    void ClientPacketHandler::onDimensionScopeS2C(const Network::DimensionScopeS2CPacket& packet) {
+        ClientLevels::SetPacketDimension(packet.Dimension());
+        m_stats.packetsProcessed++;
     }
 
 } // namespace Client

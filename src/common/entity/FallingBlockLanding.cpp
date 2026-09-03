@@ -20,10 +20,11 @@ namespace Game {
         // At the ENTITY's exact position: popping it from the block cell
         // instead snapped the item to the centre of whatever cell the block
         // happened to be overlapping, a visible sideways jump.
-        void DropAsItem(const glm::dvec3& position, BlockState state) {
+        void DropAsItem(DimensionId dimension, const glm::dvec3& position,
+                        BlockState state) {
             const BlockID id = state.Block();
             if (id == BlockID::Air) return;
-            DropItemStackAt(position, ItemStack(id, 1));
+            DropItemStackAt(dimension, position, ItemStack(id, 1));
         }
     }
 
@@ -102,7 +103,7 @@ namespace Game {
             // dropping case gives up here.
             if (mayDrop) {
                 FallingBlockOnBrokenAfterFall(level, pos, state);
-                DropAsItem(position, state);
+                DropAsItem(level.GetDimension(), position, state);
                 return FallingBlockLandOutcome::Dropped;
             }
             return FallingBlockLandOutcome::Retry;
@@ -112,7 +113,7 @@ namespace Game {
         // break and drops only when it is going to drop.
         if (mayDrop) {
             FallingBlockOnBrokenAfterFall(level, pos, state);
-            DropAsItem(position, state);
+            DropAsItem(level.GetDimension(), position, state);
             return FallingBlockLandOutcome::Dropped;
         }
         return FallingBlockLandOutcome::Broken;

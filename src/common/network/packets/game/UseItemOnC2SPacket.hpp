@@ -29,6 +29,10 @@ namespace Network {
         bool     insideBlock = false; // raycast started inside the block volume
         uint32_t sequence = 0;        // VarInt: monotonic interaction id for ack
         bool     altInteract = false; // false = right-click (default), true = left-click
+        // Immersive portals: the dimension the clicked block is in (see
+        // BlockActionC2SPacket::dimensionId). Trailing, optional.
+        static constexpr int8_t kDimensionUnknown = 127;
+        int8_t   dimensionId = kDimensionUnknown;
                                       //   "use" semantics (only meaningful for items
                                       //   that overload left-click — currently just
                                       //   PortalGun: left=blue, right=orange).
@@ -57,6 +61,7 @@ namespace Network {
             buffer.WriteByte(packet.insideBlock ? 0x01 : 0x00);
             buffer.WriteVarInt(packet.sequence);
             buffer.WriteByte(packet.altInteract ? 0x01 : 0x00);
+            buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
             return buffer.GetData();
         }
 
@@ -76,6 +81,7 @@ namespace Network {
             // altInteract — appended at end so older serialized packets
             // (without this byte) cleanly default to false.
             packet.altInteract = reader.HasMore() ? (reader.ReadByte() != 0) : false;
+            packet.dimensionId = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte()) : packet.kDimensionUnknown;
             return packet;
         }
 

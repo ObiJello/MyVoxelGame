@@ -144,9 +144,19 @@ namespace Game {
         // partial-tick interval (Camera.java:85): when the physics tick
         // snaps the player up onto a slab/stair, the rendered camera
         // interpolates over one tick rather than teleporting.
+        // The player's size, 1 = vanilla. A scaled immersive portal
+        // multiplies it on the way through (the mod does this through
+        // Pehkui): the body, eye height, reach, speed and jump all follow,
+        // so a world twice as large feels like the one you left.
+        float scale = 1.0f;
+
+        float GetWidth() const { return WIDTH * scale; }
+        float GetEyeHeight() const {
+            return (isSneaking ? EYE_HEIGHT_SNEAKING : EYE_HEIGHT_STANDING) * scale;
+        }
+
         glm::vec3 GetEyePosition() const {
-            float eyeHeight = isSneaking ? EYE_HEIGHT_SNEAKING : EYE_HEIGHT_STANDING;
-            return position + glm::vec3(0.0f, eyeHeight + stepVisualOffset, 0.0f);
+            return position + glm::vec3(0.0f, GetEyeHeight() + stepVisualOffset, 0.0f);
         }
 
         // Visual-only Y offset applied on top of the physical position. When
@@ -161,7 +171,7 @@ namespace Game {
 
         // Get current height
         float GetCurrentHeight() const {
-            return isSneaking ? HEIGHT_SNEAKING : HEIGHT_STANDING;
+            return (isSneaking ? HEIGHT_SNEAKING : HEIGHT_STANDING) * scale;
         }
 
         // Get player's AABB
@@ -169,7 +179,7 @@ namespace Game {
             float height = GetCurrentHeight();
             return AABB(
                 glm::vec3(position.x, position.y + height * 0.5f, position.z),
-                glm::vec3(WIDTH, height, WIDTH)
+                glm::vec3(GetWidth(), height, GetWidth())
             );
         }
     };
@@ -215,6 +225,16 @@ namespace Game {
     // hot loop, the null-check + call cost has to stay near zero.
     using PortalPassthroughFn = bool(*)(int x, int y, int z, const AABB& playerAABB);
     void SetPortalPassthroughFn(PortalPassthroughFn fn);
+
+    // The other half of cross-portal collision (immersive portals): a cell
+    // that is NOT solid in this world may be solid on the far side of a
+    // portal the entity is about to go through. When the hook says so the
+    // cell collides as a full cube — the far floor holds you up before your
+    // feet have crossed, and the far wall stops you. Same cost rule as the
+    // passthrough hook: plain pointer, null-checked in the hot loop, and only
+    // consulted for cells that would otherwise be walked through.
+    using PortalExtraSolidFn = bool(*)(int x, int y, int z, const AABB& playerAABB);
+    void SetPortalExtraSolidFn(PortalExtraSolidFn fn);
 
     // **UPDATED**: Main physics update function now takes PhysicsContext
     void UpdatePlayerPhysics(PlayerPhysics& physics,

@@ -66,6 +66,10 @@ namespace Render {
                                          // 3 AMPLIFIED, 4 Single Biome
         bool generateStructures = true;
         bool bonusChest         = false;
+        // Immersive-portal world options (default off, see PortalState.hpp):
+        // wrap width in blocks (0 = off) and the dimension stack.
+        int  worldWrap          = 0;
+        bool dimensionStack     = false;
 
         // Superflat customization (worldType 1): vanilla preset short name
         // ("" = MC's default flat settings) + optional custom

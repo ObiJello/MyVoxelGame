@@ -1064,7 +1064,7 @@ namespace Debug {
 
         // GPU memory estimate (approximate: indices->quads->vertices)
         size_t estVertices = (metrics.totalIndicesRendered / 6) * 4;
-        float gpuMemMB = (float)(estVertices * sizeof(Render::Vertex) +
+        float gpuMemMB = (float)(estVertices * sizeof(Render::TerrainVertex) +
                                  metrics.totalIndicesRendered * sizeof(uint32_t)) / (1024.0f * 1024.0f);
         ImGui::Text("~GPU Mesh Memory: %.2f MB", gpuMemMB);
         ImGui::Text("  ~Vertices: %zu  Indices: %zu", estVertices, metrics.totalIndicesRendered);
@@ -1310,15 +1310,75 @@ namespace Debug {
                 Render::g_chunkRenderer->SetWireframeMode(wireframe);
             }
 
+            // Greedy-mesh view: untextured lines, so merged quads show as
+            // large triangles (mirrors the renderer state — OBEY_GREEDY_DEBUG
+            // can force it on from launch).
+            bool greedyView = Render::g_chunkRenderer->IsGreedyMeshDebug();
+            if (ImGui::Checkbox("Greedy Mesh View", &greedyView)) {
+                Render::g_chunkRenderer->SetGreedyMeshDebug(greedyView);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Terrain as colored lines (remeshes the world):\n"
+                                  "red = eligible but unmerged, green = big merge,\n"
+                                  "blue-gray = can't merge by rule. Break blocks to\n"
+                                  "watch the grouping rebuild.");
+            }
+            if (greedyView) {
+                ImGui::Indent();
+                ImGui::TextColored(ImVec4(1.00f, 0.15f, 0.10f, 1.0f), "1x1 (nothing merged)");
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.10f, 1.0f), "small");
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.10f, 1.00f, 0.15f, 1.0f), "16x16");
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.45f, 0.52f, 0.70f, 1.0f), "ineligible");
+                uint64_t gIn = 0, gOut = 0;
+                Render::g_chunkRenderer->GetGreedyTotals(gIn, gOut);
+                if (gIn > 0) {
+                    ImGui::Text("eligible quads %llu -> %llu rects (%.1f%% merged away)",
+                                (unsigned long long)gIn, (unsigned long long)gOut,
+                                100.0 * (double)(gIn - gOut) / (double)gIn);
+                }
+                ImGui::Unindent();
+            }
+
             bool frustumCulling = Render::g_chunkRenderer->IsEnabledFrustumCulling();
             if (ImGui::Checkbox("Frustum Culling", &frustumCulling)) {
                 Render::g_chunkRenderer->SetEnableFrustumCulling(frustumCulling);
+            }
+
+            // Culprit-isolation toggles: flip these one at a time while
+            // staring at a hole/ghost — whichever flip heals it names the
+            // subsystem (2026-08-30 hole hunt).
+            bool drawMerge = Render::g_chunkRenderer->IsDrawMergeEnabled();
+            if (ImGui::Checkbox("Merge Draw Runs", &drawMerge)) {
+                Render::g_chunkRenderer->SetDrawMergeEnabled(drawMerge);
+            }
+            bool bridgeGaps = Render::g_chunkRenderer->IsGapBridgingEnabled();
+            if (ImGui::Checkbox("Bridge Merge Gaps", &bridgeGaps)) {
+                Render::g_chunkRenderer->SetGapBridgingEnabled(bridgeGaps);
+            }
+            if (Render::g_renderBackend) {
+                bool indirect = Render::g_renderBackend->DebugGetMultiDrawIndirect();
+                if (ImGui::Checkbox("VK Indirect Draws", &indirect)) {
+                    Render::g_renderBackend->DebugSetMultiDrawIndirect(indirect);
+                }
+            }
+            bool greedyOn = Render::g_chunkRenderer->IsGreedyMeshingEnabled();
+            if (ImGui::Checkbox("Greedy Meshing (remeshes)", &greedyOn)) {
+                Render::g_chunkRenderer->SetGreedyMeshingEnabled(greedyOn);
             }
 
             bool smartCull = Render::g_chunkRenderer->IsEnabledSmartCull();
             if (ImGui::Checkbox("Occlusion Culling", &smartCull)) {
                 Render::g_chunkRenderer->SetEnableSmartCull(smartCull);
             }
+
+            // Live proof the culling stages work: toggle the boxes above and
+            // watch reachable (occlusion BFS) and visible (frustum) move.
+            ImGui::Text("occlusion: %u reachable -> %u in frustum",
+                        Render::g_chunkRenderer->GetLastReachableCount(),
+                        Render::g_chunkRenderer->GetLastVisibleCount());
 
             static int debugLayer = -1;
             const char* layerNames[] = {"All Layers", "Opaque Only", "Cutout Only", "Translucent Only"};

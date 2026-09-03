@@ -1,6 +1,7 @@
 // File: src/platform/GameDirectory.hpp
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <filesystem>
@@ -42,20 +43,28 @@ namespace Platform {
         void SetVersion(int version) { SetInt("version", version); }
 
         // Audio/Video Settings
+        // MC `ao` — smooth lighting. Mesh-time: the mesher reads it through
+        // Render::Mesher::SyncMeshOptionsFromSettings; a change remeshes.
         bool GetAO() const { return GetBool("ao", true); }
-        void SetAO(bool enabled) { SetBool("ao", enabled); }
+        void SetAO(bool enabled) { SetBool("ao", enabled); NoteGraphicsOptionChanged(); }
 
         bool GetFogEnabled() const { return GetBool("fogEnabled", true); }
         void SetFogEnabled(bool enabled) { SetBool("fogEnabled", enabled); }
 
-        int GetBiomeBlendRadius() const { return GetInt("biomeBlendRadius", 2); }
-        void SetBiomeBlendRadius(int radius) { SetInt("biomeBlendRadius", radius); }
+        // MC biomeBlendRadius 0..7 — (2r+1)² biome samples per tinted quad at
+        // mesh time; 0 is a single lookup. Clamped on read so a hand-edited
+        // file cannot make the mesher sample a 1000-wide square.
+        int GetBiomeBlendRadius() const { return std::clamp(GetInt("biomeBlendRadius", 2), 0, 7); }
+        void SetBiomeBlendRadius(int radius) { SetInt("biomeBlendRadius", std::clamp(radius, 0, 7)); NoteGraphicsOptionChanged(); }
 
         bool GetVSync() const { return GetBool("enableVsync", true); }
         void SetVSync(bool enabled) { SetBool("enableVsync", enabled); }
 
-        float GetEntityDistanceScaling() const { return GetFloat("entityDistanceScaling", 1.0f); }
-        void SetEntityDistanceScaling(float scaling) { SetFloat("entityDistanceScaling", scaling); }
+        // MC entityDistanceScaling 0.5..5.0 — multiplies the entity render
+        // cutoff (Entity.shouldRenderAtSqrDistance via
+        // Render::EntityCulling::SetViewScale).
+        float GetEntityDistanceScaling() const { return std::clamp(GetFloat("entityDistanceScaling", 1.0f), 0.5f, 5.0f); }
+        void SetEntityDistanceScaling(float scaling) { SetFloat("entityDistanceScaling", std::clamp(scaling, 0.5f, 5.0f)); NoteGraphicsOptionChanged(); }
 
         bool GetEntityShadows() const { return GetBool("entityShadows", false); }
         void SetEntityShadows(bool enabled) { SetBool("entityShadows", enabled); }
@@ -87,7 +96,7 @@ namespace Platform {
         void SetGlintStrength(float strength) { SetFloat("glintStrength", strength); }
 
         int GetPrioritizeChunkUpdates() const { return GetInt("prioritizeChunkUpdates", 0); }
-        void SetPrioritizeChunkUpdates(int priority) { SetInt("prioritizeChunkUpdates", priority); }
+        void SetPrioritizeChunkUpdates(int priority) { SetInt("prioritizeChunkUpdates", priority); NoteGraphicsOptionChanged(); }
 
         bool GetFullscreen() const { return GetBool("fullscreen", false); }
         void SetFullscreen(bool enabled) { SetBool("fullscreen", enabled); }
@@ -95,8 +104,71 @@ namespace Platform {
         float GetGamma() const { return GetFloat("gamma", 1.0f); }
         void SetGamma(float gamma) { SetFloat("gamma", gamma); }
 
-        int GetGraphicsMode() const { return GetInt("graphicsMode", 1); }
-        void SetGraphicsMode(int mode) { SetInt("graphicsMode", mode); }
+        // ── Graphics preset (MC GraphicsPreset) ─────────────────────────────
+        //
+        // MC split the old Fast/Fancy/Fabulous mode into a one-shot MACRO
+        // plus independent per-feature options (client/GraphicsPreset.java):
+        // picking a preset writes a table of values into the individual
+        // options, and touching any of those options afterwards flips the
+        // preset to CUSTOM (Options.setGraphicsPresetToCustom). Nothing in
+        // the engine ever asks "am I in Fancy mode" — every consumer reads
+        // its own option. This is the same design.
+        //
+        // The stored key is `graphicsPreset` (fast / fancy / custom). An
+        // options.txt from before the split has no such key and reads as
+        // CUSTOM, which is exactly what MC's own datafixer does
+        // (OptionsSetGraphicsPresetToCustomFix) — the player's individual
+        // settings are kept as they are, nothing is re-applied over them.
+        enum class GraphicsPreset { Fast, Fancy, Custom };
+        GraphicsPreset GetGraphicsPreset() const;
+        // Write the preset's table into the individual options. Does NOT
+        // apply anything to the engine: the caller raises the matching
+        // ScreenManager APPLY_ bits (or the startup path reads the values
+        // fresh). Custom is a no-op.
+        void ApplyGraphicsPreset(GraphicsPreset preset);
+        // Called by the setter of every option a preset covers; flips the
+        // preset to Custom unless a preset is being applied right now.
+        void NoteGraphicsOptionChanged();
+        static const char* GraphicsPresetName(GraphicsPreset preset);
+
+        // `cutoutLeaves` is MC's key for what the old Fast/Fancy graphics
+        // split changed (Options.java "options.cutoutLeaves",
+        // LeavesBlock.setCutoutLeaves):
+        //   true  (Fancy): leaves in the cutout layer, every leaf face drawn.
+        //   false (Fast):  leaves in the solid layer with alpha ignored, and a
+        //                  leaf face touching ANY other leaf block is skipped
+        //                  at mesh time — a tree interior collapses to a shell,
+        //                  which is where the real saving is.
+        // Consumed by the mesher via Render::Mesher::SyncMeshOptionsFromSettings.
+        //
+        // Older files carry `graphicsMode` (0 = Fast, 1 = Fancy) instead;
+        // it is honoured as the fallback and otherwise left inert.
+        bool GetCutoutLeaves() const {
+            return GetBool("cutoutLeaves", GetInt("graphicsMode", 1) != 0);
+        }
+        void SetCutoutLeaves(bool cutout) { SetBool("cutoutLeaves", cutout); NoteGraphicsOptionChanged(); }
+        bool IsFancyGraphics() const { return GetCutoutLeaves(); }
+
+        // macOS only: render at the display's native (Retina) pixel density.
+        // GLFW_COCOA_RETINA_FRAMEBUFFER is a window-creation hint, so this
+        // takes effect on the next launch. Default OFF on Intel Macs — the
+        // integrated GPUs there share system RAM for bandwidth, and Retina
+        // is four times the fragment work of the logical resolution — and ON
+        // on Apple Silicon, which is where the engine's baselines were taken.
+        bool GetRetinaFramebuffer() const;
+        void SetRetinaFramebuffer(bool enabled) { SetBool("retinaFramebuffer", enabled); }
+        // The window is created before options.txt is loaded through the
+        // normal path, so the window hint reads the saved value straight off
+        // the disk. Same file, same key; the hardware default when absent.
+        static bool PeekRetinaFramebufferFromDisk();
+
+        // Engine-specific, no MC equivalent (it is the "Cull Leaves" mod's
+        // behaviour): with Fancy graphics, drop a leaf face whose neighbour is
+        // any leaf block, while keeping leaves in the cutout layer and
+        // non-occluding for everything else. Default OFF so Fancy stays
+        // MC-exact; it is a no-op under Fast, which already skips those faces.
+        bool GetCullLeaves() const { return GetBool("cullLeaves", false); }
+        void SetCullLeaves(bool enabled) { SetBool("cullLeaves", enabled); }
 
         // 0 = Auto (MC behavior: largest scale that keeps a 320×240 GUI).
         int GetGuiScale() const { return GetInt("guiScale", 0); }
@@ -108,29 +180,40 @@ namespace Platform {
         std::string GetInactivityFPSLimit() const { return GetString("inactivityFpsLimit", "afk"); }
         void SetInactivityFPSLimit(const std::string& limit) { SetString("inactivityFpsLimit", limit); }
 
-        int GetMipmapLevels() const { return GetInt("mipmapLevels", 4); }
-        void SetMipmapLevels(int levels) { SetInt("mipmapLevels", levels); }
+        // MC mipmapLevels 0..4; 0 = no mipmapping. Applied to the block atlas
+        // at build time and live through Render::AtlasBuilder::SetMipmapLevels.
+        int GetMipmapLevels() const { return std::clamp(GetInt("mipmapLevels", 4), 0, 4); }
+        void SetMipmapLevels(int levels) { SetInt("mipmapLevels", std::clamp(levels, 0, 4)); NoteGraphicsOptionChanged(); }
 
         int GetNarrator() const { return GetInt("narrator", 0); }
         void SetNarrator(int mode) { SetInt("narrator", mode); }
 
-        int GetParticles() const { return GetInt("particles", 1); }
-        void SetParticles(int level) { SetInt("particles", level); }
+        // MC particles: 0 = All, 1 = Decreased, 2 = Minimal (ParticleStatus
+        // ordinals, the same numbers MC writes). Default All, as MC.
+        // Consumed by Render::MobParticleSystem (spawn limiter) and the
+        // explosion debris spawner (Game::SpawnExplosionVisualEffects).
+        int GetParticles() const { return std::clamp(GetInt("particles", 0), 0, 2); }
+        void SetParticles(int level) { SetInt("particles", std::clamp(level, 0, 2)); NoteGraphicsOptionChanged(); }
 
         bool GetReducedDebugInfo() const { return GetBool("reducedDebugInfo", false); }
         void SetReducedDebugInfo(bool reduced) { SetBool("reducedDebugInfo", reduced); }
 
         std::string GetRenderClouds() const { return GetString("renderClouds", "true"); }
-        void SetRenderClouds(const std::string& mode) { SetString("renderClouds", mode); }
+        void SetRenderClouds(const std::string& mode) { SetString("renderClouds", mode); NoteGraphicsOptionChanged(); }
 
         int GetCloudRange() const { return GetInt("cloudRange", 128); }
-        void SetCloudRange(int range) { SetInt("cloudRange", range); }
+        void SetCloudRange(int range) { SetInt("cloudRange", range); NoteGraphicsOptionChanged(); }
 
-        int GetRenderDistance() const { return GetInt("renderDistance", 12); }
-        void SetRenderDistance(int distance) { SetInt("renderDistance", distance); }
+        int GetRenderDistance() const { return std::clamp(GetInt("renderDistance", 12), 2, 32); }
+        void SetRenderDistance(int distance) { SetInt("renderDistance", std::clamp(distance, 2, 32)); NoteGraphicsOptionChanged(); }
 
-        int GetSimulationDistance() const { return GetInt("simulationDistance", 12); }
-        void SetSimulationDistance(int distance) { SetInt("simulationDistance", distance); }
+        // MC simulationDistance 5..32 (2..32 on the wire): how far from the
+        // player the server ticks entities, random ticks and fluids. Sent to
+        // the server in ClientConfigC2S alongside the render distance and
+        // applied to the player's PLAYER_SIMULATION ticket level — it is the
+        // CPU-side counterpart of the render distance, and independent of it.
+        int GetSimulationDistance() const { return std::clamp(GetInt("simulationDistance", 12), 2, 32); }
+        void SetSimulationDistance(int distance) { SetInt("simulationDistance", std::clamp(distance, 2, 32)); NoteGraphicsOptionChanged(); }
 
         float GetScreenEffectScale() const { return GetFloat("screenEffectScale", 1.0f); }
         void SetScreenEffectScale(float scale) { SetFloat("screenEffectScale", scale); }
@@ -394,9 +477,23 @@ namespace Platform {
     private:
         std::unordered_map<std::string, std::string> m_settings;
         bool m_initialized = false;
+        // Re-entrancy guard for ApplyGraphicsPreset (MC
+        // Options.isApplyingGraphicsPreset): the setters it calls must not
+        // flip the preset it is writing back to Custom.
+        bool m_applyingGraphicsPreset = false;
 
         // Create default settings
         void CreateDefaults();
+
+        // Bring an older options.txt up to the current layout. Keyed on
+        // `optionsSchema`; each step is idempotent and documented in place.
+        void MigrateSchema();
+
+        // First launch on this machine (no options.txt): seed the graphics
+        // preset from the hardware tier so a weak machine starts on Fast
+        // instead of discovering the options screen after a bad first
+        // session. Never runs against an existing file.
+        void ApplyFirstRunHardwareDefaults();
 
         // Parse a line from options.txt
         bool ParseLine(const std::string& line);

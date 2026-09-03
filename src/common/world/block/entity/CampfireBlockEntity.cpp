@@ -73,7 +73,9 @@ namespace Game {
             // campfire you left still gets you the meal. The retry is harmless
             // because a cooked item has no campfire recipe, so the next attempt
             // re-derives the same stack.
-            if (DropItemStackNear(GetWorldPos(), result)) {
+            if (DropItemStackNear(world ? world->GetDimension()
+                                        : DimensionId::Overworld,
+                                  GetWorldPos(), result)) {
                 SetItem(slot, ItemStack{});
                 m_cookingProgress[slot] = 0;
                 m_cookingTime[slot]     = 0;

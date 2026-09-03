@@ -41,6 +41,14 @@ namespace Game {
 
     PathNavigation&       Mob::GetNavigation()       { return *m_navigation; }
     const PathNavigation& Mob::GetNavigation() const { return *m_navigation; }
+
+    void Mob::SetLevel(EntityLevel* level) {
+        LivingEntity::SetLevel(level);
+        if (m_navigation) m_navigation->SetLevel(level);
+        // The target lived in the old level. The portal travel code sets a
+        // new one (the same player's view in the new level) once it exists.
+        m_target = nullptr;
+    }
     Sensing&              Mob::GetSensing()          { return *m_sensing; }
 
     void Mob::SetNavigation(std::unique_ptr<PathNavigation> navigation) {

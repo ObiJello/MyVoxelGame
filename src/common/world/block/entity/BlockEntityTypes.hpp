@@ -46,11 +46,15 @@ namespace Game {
         // SkullBlockRenderer has something to render — the skull BLOCK model is
         // empty in vanilla, all visuals are the block-entity renderer's.
         constexpr uint16_t SKULL         = 17;
-        // ... 18..29 reserved for the remaining MC BE types (Sign, Banner, Bed,
-        // Bell, Conduit, EndPortal, EndGateway, EnchantingTable, Lectern,
-        // MobSpawner, TrialSpawner, Vault, StructureBlock, TestInstanceBlock,
-        // Piston, BrushableBlock, DecoratedPot,
-        // CopperGolemStatue, Shelf, HangingSign). Added in later stages.
+        // 18 stays reserved for EndPortal (the End portal renders off a
+        // per-chunk block index today, not a BE — see EndPortalRenderer).
+        // MC TheEndGatewayBlockEntity: age / cooldown / cached exit position.
+        constexpr uint16_t END_GATEWAY   = 19;
+        // ... 20..29 reserved for the remaining MC BE types (Sign, Banner,
+        // Bed, Bell, Conduit, EnchantingTable, Lectern, MobSpawner,
+        // TrialSpawner, Vault, StructureBlock, TestInstanceBlock, Piston,
+        // BrushableBlock, DecoratedPot, CopperGolemStatue, Shelf,
+        // HangingSign). Added in later stages.
         constexpr uint16_t MAX_ID        = 64;
     }
 

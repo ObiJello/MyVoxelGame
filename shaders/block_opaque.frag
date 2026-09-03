@@ -1,9 +1,15 @@
 // File: shaders/block_opaque.frag
-// Opaque fragment shader with minimal alpha cutoff.
-// Uses a hardcoded constant (not a uniform) so the GPU compiler can optimize
-// the discard path aggressively — it fires only for truly transparent pixels
-// (e.g., grass block side overlay regions). This is much cheaper than the
-// cutout shader's uniform-based threshold which prevents early-z entirely.
+// Opaque (solid-layer) fragment shader. NO discard, NO alpha test — like MC's
+// terrain.fsh outside ALPHA_CUTOUT. Every fragment lands, alpha ignored, so the
+// GPU keeps early-z and the pass runs at pure fill cost.
+//
+// INVARIANT (enforced by the mesher, not here): nothing routed into the opaque
+// layer relies on transparent texels being dropped. The one opaque block that
+// did — grass_block's side overlay — has just those quads routed to the cutout
+// layer (FaceDef::cutoutOverlay), and every block MC renders in cutout is
+// registered Cutout in BlockDefs.inc. Fast-graphics leaves are the deliberate
+// case of alpha-0 texels drawn here, which is exactly MC's Fast look.
+// Reintroducing a discard would only paper over a block in the wrong layer.
 #version 330 core
 
 // Input from vertex shader
@@ -29,10 +35,6 @@ float linearFog(float d, float s, float e) {
 
 void main() {
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
-
-    // Discard fully transparent pixels (grass side overlay, etc.)
-    // Hardcoded constant lets GPU optimize better than a uniform threshold
-    if (textureColor.a < 0.1) discard;
 
     // Vertex color contains: biome tint * AO * directional face shade
     vec3 finalColor = textureColor.rgb * fragColor.rgb;

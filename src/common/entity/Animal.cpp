@@ -32,15 +32,15 @@ namespace Game {
         if (m_age == 0) m_age = m_forcedAge;
     }
 
-    float AgeableMob::GetBbWidth() const {
+    float AgeableMob::BaseBbWidth() const {
         return IsBaby() ? TypeInfo().width * kBabyScale : TypeInfo().width;
     }
 
-    float AgeableMob::GetBbHeight() const {
+    float AgeableMob::BaseBbHeight() const {
         return IsBaby() ? TypeInfo().height * kBabyScale : TypeInfo().height;
     }
 
-    float AgeableMob::GetEyeHeight() const {
+    float AgeableMob::BaseEyeHeight() const {
         return Game::GetEyeHeight(GetType(), IsBaby());
     }
 

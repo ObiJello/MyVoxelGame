@@ -47,7 +47,7 @@ namespace Game {
             : HurtingProjectile(EntityTypeId::SmallFireball, level) {}
 
     protected:
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHitBlock(const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
     };
@@ -68,7 +68,7 @@ namespace Game {
         void SetExplosionPower(int power) { m_explosionPower = power; }
 
     protected:
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
 
     private:
@@ -102,7 +102,7 @@ namespace Game {
         }
         bool ShouldBurn() const override { return false; }
 
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
 
     private:
@@ -145,7 +145,7 @@ namespace Game {
         // exclusion waits for end crystals.)
         bool CanHitEntity(const Entity& entity) const override;
 
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHitBlock(const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
 
@@ -188,7 +188,7 @@ namespace Game {
             : AbstractWindCharge(EntityTypeId::BreezeWindCharge, level) {}
 
     protected:
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void Explode(const glm::dvec3& at) override {
             // The breeze's: bigger radius, no multiplier (MC's shared
             // AbstractWindCharge damage calculator has none).

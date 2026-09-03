@@ -2,6 +2,7 @@
 #pragma once
 
 #include <utility>
+#include <string>
 
 // Forward declare GLFWwindow
 struct GLFWwindow;
@@ -19,6 +20,7 @@ namespace Input {
         Right,
         Space,
         LeftControl,
+        LeftAlt,   // fill tool modifier (Option on a Mac)
         Escape,
         LeftMouse,
         RightMouse,
@@ -28,6 +30,7 @@ namespace Input {
         P,
         T,
         F,   // swap main/off hand (MC default)
+        C,   // second half of the F+C debug free-camera chord (raw key, no bind)
         Q,   // drop held item (MC default)
         Slash,
         Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6, Alpha7, Alpha8, Alpha9,
@@ -74,6 +77,10 @@ namespace Input {
 
     // Reset the accumulated scroll offsets to zero; call once per frame
     void ResetScrollOffset();
+
+    // The system clipboard, for text fields (Cmd/Ctrl+V and +C).
+    std::string GetClipboardText();
+    void SetClipboardText(const std::string& text);
 
     // Check if a key was just pressed this frame (not held)
     bool IsKeyPressed(Key key);
@@ -136,4 +143,15 @@ namespace Input {
     //
     // Returns false when the queue is empty. Drain it in a while loop.
     bool PopUiKeyPress(int& glfwKey, int& glfwMods);
+    // Drop every queued UI key press. Chat and the inventory take their
+    // keys by other routes and never drain this queue, so what was typed
+    // in them (Tab, Space, Enter) used to sit here and replay into the
+    // next screen that opened — a pause menu that focused and pressed its
+    // own "Save and Quit to Title" button out of a chat line.
+    void ClearUiKeyPresses();
+
+    // Escape, from the key callback: true once per physical press since the
+    // last call. Polling glfwGetKey missed a tap shorter than a frame, which
+    // at portal-view frame times meant pressing it twice.
+    bool ConsumeEscapePress();
 }

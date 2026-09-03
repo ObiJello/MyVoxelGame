@@ -1,13 +1,11 @@
 // File: src/common/core/ThreadAllocator.cpp
 #include "ThreadAllocator.hpp"
+#include "HardwareProfile.hpp"
 #include "Log.hpp"
 #include <sstream>
 #include <cstdint>
 #include <algorithm>
 #include <thread>
-#if defined(__APPLE__)
-    #include <sys/sysctl.h>
-#endif
 
 namespace Core {
 
@@ -76,35 +74,19 @@ namespace Core {
     }
 
     size_t ThreadAllocator::GetPhysicalCoreCount() {
-        size_t cores = std::thread::hardware_concurrency();
-
-        if (cores == 0) {
-            Log::Warning("Failed to detect CPU cores, using fallback value of %zu", DEFAULT_FALLBACK_CORES);
-            return DEFAULT_FALLBACK_CORES;
-        }
-
-        return cores;
+        // HardwareProfile already substitutes DEFAULT_FALLBACK_CORES when
+        // hardware_concurrency() reports 0.
+        return HardwareProfile::Get().logicalCores;
     }
 
     size_t ThreadAllocator::GetPerformanceCoreCount() {
-#if defined(__APPLE__)
         // Apple Silicon is heterogeneous and hardware_concurrency() counts every
         // core equally — an M4 reports 10 when only 4 of them are performance
         // cores. Sizing latency-sensitive pools off that number is how you end
         // up with more frame-critical workers than fast cores to run them on.
-        //
-        // perflevel0 is always the FASTEST level on Apple's scheme. Intel Macs
-        // have no perflevel keys at all, so a failed lookup correctly falls
-        // through to the homogeneous answer.
-        uint32_t perfCores = 0;
-        size_t size = sizeof(perfCores);
-        if (sysctlbyname("hw.perflevel0.logicalcpu", &perfCores, &size, nullptr, 0) == 0
-            && perfCores > 0) {
-            return static_cast<size_t>(perfCores);
-        }
-#endif
-        // Homogeneous CPU (or detection failed): every core is a fast core.
-        return GetPhysicalCoreCount();
+        // HardwareProfile reads hw.perflevel0 for the real number and falls
+        // back to the homogeneous answer everywhere else.
+        return HardwareProfile::Get().performanceCores;
     }
 
     bool ThreadAllocator::HasSufficientCores() {
@@ -114,6 +96,39 @@ namespace Core {
     }
 
     void ThreadAllocator::DistributeWorkers(ThreadAllocation& allocation) {
+        // ── Small machines first ────────────────────────────────────────────
+        //
+        // Everything below this block was tuned on a 10-core M4 and, before
+        // this existed, applied its floors to every machine: a 2-core/4-thread
+        // Intel MacBook got ONE mesh worker (correct) and then FOUR server
+        // workers from the clamp at the bottom — more worker threads than it
+        // has hardware threads, before the render thread, the server tick,
+        // the terrain library's own pool, the occlusion thread and the I/O
+        // threads are counted. Fourteen threads on two cores, and the frame
+        // lost every scheduling contest to work that could have waited.
+        //
+        // MC's rule is a single background pool of clamp(cores - 1, 1, ...)
+        // (Util.maxAllowedExecutorThreads) with no floors anywhere, and it
+        // deliberately skips its thread-priority boosts on <= 4 cores so the
+        // pool cannot starve the game thread (Minecraft.run:849). The
+        // budget here is the same total — cores - 1 — split between the two
+        // pools, with the server pool (disk loads, conversions, saves: work
+        // that can wait a frame) taking the smaller share.
+        //
+        //   logical cores   mesh   server   (+3 reserved: render, tick, I/O)
+        //   2               1      1
+        //   3-4             1      2
+        //   5-6             2      2
+        //   7+              unchanged from the tuned split below
+        //
+        // Machines with 7+ threads keep the exact numbers they had, so a
+        // fast machine's allocation is untouched by this branch.
+        if (allocation.totalCores <= 6) {
+            allocation.clientMeshWorkers  = allocation.totalCores >= 5 ? 2 : 1;
+            allocation.serverWorldWorkers = allocation.totalCores >= 3 ? 2 : 1;
+            return;
+        }
+
         // Strategy: 50/50 split between client and server for balanced performance
         if (allocation.availableWorkers <= 2) {
             // Minimum allocation
@@ -122,8 +137,12 @@ namespace Core {
         } else {
             // Equal split for all systems (no cap on client workers)
             // Client mesh building is critical for smooth gameplay
-            allocation.clientMeshWorkers = allocation.availableWorkers / 2;
-            allocation.serverWorldWorkers = allocation.availableWorkers - allocation.clientMeshWorkers;
+            // Mesh workers get the larger share: chunk arrival is ~1,300/s on a
+            // saved area now and meshing was the next limiter (2026-08-30);
+            // the server pool is clamped to 4..6 below regardless, and both
+            // pools idle when their queue is empty.
+            allocation.clientMeshWorkers = std::max(size_t(3), allocation.availableWorkers - 2);
+            allocation.serverWorldWorkers = std::max(size_t(4), allocation.availableWorkers - allocation.clientMeshWorkers);
         }
 
         // Heterogeneous-CPU correction. The split above counts efficiency cores
@@ -137,7 +156,9 @@ namespace Core {
         // creates threads that contend with the frame for the same few cores.
         // One core is left for the main thread, which outranks both.
         if (allocation.performanceCores > 0 && allocation.performanceCores < allocation.totalCores) {
-            const size_t meshCap = std::max(size_t(1), allocation.performanceCores - 1);
+            // +1 over the performance cores (was -1): a saved area arrives at
+            // ~1,300 chunks/s now and meshing was the next limiter (2026-08-30).
+            const size_t meshCap = std::max(size_t(1), allocation.performanceCores + 1);
             if (allocation.clientMeshWorkers > meshCap) {
                 // Reassign rather than discard: the surplus is still useful as
                 // throughput work on the efficiency cores.
@@ -190,6 +211,10 @@ namespace Core {
         // hands misses to MyTerrainGenerator and results come back through
         // IntegratedServer::PumpChunkPipeline). The pool now only does disk
         // loads, chunk conversions and saves, so it is a CPU budget again.
+        //
+        // Only reached with 7+ logical cores (see the small-machine block at
+        // the top): the floor of 4 is a number for machines that have the
+        // cores to spend on it.
         allocation.serverWorldWorkers = std::clamp(allocation.serverWorldWorkers, size_t(4), size_t(6));
     }
 

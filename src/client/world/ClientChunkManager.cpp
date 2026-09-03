@@ -11,7 +11,13 @@
 #include "../renderer/mesh/MeshJobData.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include "../renderer/mesh/ChunkRenderer.hpp"
+#include "../renderer/mesh/Mesher.hpp"   // GreedyPaletteGen (debug-palette staleness)
 #include "platform/GameDirectory.hpp"
+#include "common/core/HardwareProfile.hpp"
+#include "common/core/Features.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "../portal/ClientImmersivePortals.hpp"
+#endif
 #include <glad/glad.h>
 #include <unordered_map>
 #include <string>
@@ -21,9 +27,27 @@
 
 namespace Client {
 
-    // Global instance
-    std::unique_ptr<ClientChunkManager> g_clientChunkManager = nullptr;
+    // Bound-level pointer, owned by ClientLevel (see ClientLevel.hpp).
+    ClientChunkManager* g_clientChunkManager = nullptr;
 
+
+    size_t ClientChunkManager::ComputeRetainBudgetBytes() {
+        // 1.5 GB is the tuned value from the M-series machines the streaming
+        // work was measured on (16 GB+); below that, a tenth of RAM. MC's
+        // equivalent knobs scale from memory the same way (the render-
+        // distance ceiling on maxMemory, SectionBufferBuilderPool's
+        // maxMemory * 0.3). Floored so a tiny machine still gets the
+        // instant-revisit benefit for the chunks right around the player.
+        constexpr size_t kMaxBudget = size_t(1536) << 20;   // 1.5 GB
+        constexpr size_t kMinBudget = size_t(128)  << 20;   // 128 MB
+        const uint64_t ram = Core::HardwareProfile::Get().physicalMemoryBytes;
+        if (ram == 0) return kMaxBudget;   // detection failed: the old constant
+        const size_t tenth = static_cast<size_t>(ram / 10);
+        const size_t budget = std::clamp(tenth, kMinBudget, kMaxBudget);
+        Log::Info("Client chunk retention budget: %zu MB (RAM %llu MB)",
+                  budget >> 20, static_cast<unsigned long long>(ram >> 20));
+        return budget;
+    }
 
     ClientChunkManager::ClientChunkManager() {
         m_pendingDiffs = std::make_unique<PendingDiffsManager>();
@@ -65,7 +89,16 @@ namespace Client {
     void ClientChunkManager::Shutdown() {
         ASSERT_MAIN_THREAD();
         Log::Info("Shutting down ClientChunkManager...");
-        
+
+        // Stale-border-mesh accounting for the session (see the counters in
+        // the header): how many uploads were built with a neighbour chunk
+        // missing, and how many sections had to be rebuilt because that
+        // neighbour later turned out to exist.
+        Log::Info("Border-mesh convergence: %zu meshes built with a missing "
+                  "neighbour, %zu rebuilt after the neighbour arrived",
+                  m_partialNeighborBuilds, m_staleBorderRemeshes);
+
+
         // Clear all chunks
         m_chunks.clear();
         
@@ -86,6 +119,12 @@ namespace Client {
         PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
         Log::Debug("CLIENT UNLOAD: chunk (%d, %d)", chunkPos.x, chunkPos.z);
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // A portal lives in its origin chunk: it leaves with it (and comes
+        // back with the chunk's next send, retained or not).
+        GetClientImmersivePortals().OnChunkUnloaded(chunkPos);
+#endif
 
         // Mark neighbor chunks' sections as dirty BEFORE unloading
         // This ensures they rebuild their meshes to show previously culled faces
@@ -115,22 +154,40 @@ namespace Client {
             m_pendingDiffs->DropChunkDiffs(chunkPos);
         }
 
-        // Clean up GPU resources (vertex/index buffers) before erasing chunk data
-        if (::Render::g_clientMeshManager) {
-            PROFILE_ZONE_N("Unload.GPUData");
-            ::Render::g_clientMeshManager->RemoveChunkGPUData(chunkPos);
-        }
-
         auto it = m_chunks.find(chunkPos);
+        if (it != m_chunks.end() && it->second->chunkData && m_meshes) {
+            // Park instead of free (retention cache, see RestoreRetainedChunk).
+            PROFILE_ZONE_N("Unload.Park");
+            std::unique_ptr<ClientChunk> chunk = std::move(it->second);
+            m_chunks.erase(it);
+            m_chunksWithDirtySections.erase(chunkPos);
+            TransitionChunkState(chunk.get(), ChunkState::UNLOADED);
+            size_t bytes = m_meshes->ParkChunkGPUData(chunkPos);
+            for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+                if (const auto* sec = chunk->chunkData->GetSection(sy)) {
+                    bytes += sec->States().RawWords().size() * 8 + sec->Biomes().RawWords().size() * 8;
+                }
+            }
+            bytes += sizeof(ClientChunk) + sizeof(Game::Chunk);
+            if (m_retained.count(chunkPos)) DiscardRetained(chunkPos);
+            m_retainedLru.push_front(chunkPos);
+            m_retained[chunkPos] = Retained{std::move(chunk), bytes, m_retainedLru.begin()};
+            m_retainedBytes += bytes;
+            while (m_retainedBytes > m_retainBudgetBytes && !m_retainedLru.empty()) {
+                DiscardRetained(m_retainedLru.back());
+            }
+            return;
+        }
+        // Clean up GPU resources (vertex/index buffers) before erasing chunk data
+        if (m_meshes) {
+            PROFILE_ZONE_N("Unload.GPUData");
+            m_meshes->RemoveChunkGPUData(chunkPos);
+        }
         if (it != m_chunks.end()) {
             PROFILE_ZONE_N("Unload.Erase");
             m_chunks.erase(it);
             Log::Debug("Unloaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
         }
-
-        // The scheduler no longer walks this index (candidates come from the
-        // visible list), so it has to be pruned here — a stale entry would keep
-        // ScheduleMeshBuildsWithSnapshots' empty() early-out from ever firing.
         m_chunksWithDirtySections.erase(chunkPos);
     }
 
@@ -159,13 +216,13 @@ namespace Client {
             // see SectionOcclusionGraph::BuildInput) — seed a propagation so
             // the partial update walks through it THIS frame instead of
             // waiting for a full rebuild.
-            if (::Render::g_chunkRenderer) {
-                ::Render::g_chunkRenderer->SchedulePropagationFrom(chunkPos, sectionY);
+            if (m_renderer) {
+                m_renderer->SchedulePropagationFrom(chunkPos, sectionY);
             }
             if (++m_dirtyMarksSinceRebuild >= 256) {
                 m_dirtyMarksSinceRebuild = 0;
-                if (::Render::g_chunkRenderer) {
-                    ::Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+                if (m_renderer) {
+                    m_renderer->MarkVisibleSectionsDirty();
                 }
             }
             Log::Debug("Marked chunk (%d, %d) section %d as dirty (version now %u)",
@@ -207,8 +264,8 @@ namespace Client {
         // (`needDirtyWalk` is false), so a section that is not in the list is
         // never even handed to the mesher. Until the graph learns the section
         // is renderable, marking it dirty accomplishes nothing.
-        if (::Render::g_chunkRenderer) {
-            ::Render::g_chunkRenderer->SchedulePropagationFrom(chunk.position, sectionY);
+        if (m_renderer) {
+            m_renderer->SchedulePropagationFrom(chunk.position, sectionY);
         }
     }
 
@@ -258,6 +315,27 @@ namespace Client {
         auto markNeighborDirty = [&](Game::Math::ChunkPos neighborPos, const char* dirLabel) {
             auto neighborIt = m_chunks.find(neighborPos);
             if (neighborIt == m_chunks.end() || neighborIt->second->state != ChunkState::LOADED) {
+                // PARKED neighbours must be dirtied too. A chunk in the
+                // retention cache is not in m_chunks, so it used to be skipped
+                // outright — and then RestoreRetainedChunk revived meshes that
+                // were built against blocks this chunk has since replaced (or
+                // against a chunk that is now gone). The parked chunk keeps its
+                // sectionInfos/dirtySections through the park, and
+                // RestoreRetainedChunk re-registers any dirty sections with the
+                // scheduler on revival, so marking here is enough to make the
+                // revived meshes converge.
+                auto parkedIt = m_retained.find(neighborPos);
+                if (parkedIt != m_retained.end() && parkedIt->second.chunk) {
+                    ClientChunk& parked = *parkedIt->second.chunk;
+                    for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                        auto& si = parked.sectionInfos[sectionY];
+                        if (si.isAllAir || si.dirty) continue;
+                        if (sourceChunk && sourceChunk->sectionInfos[sectionY].isAllAir) continue;
+                        si.version++;
+                        si.dirty = true;
+                        parked.dirtySections.insert(sectionY);
+                    }
+                }
                 return;
             }
             int dirtyCount = 0;
@@ -440,23 +518,6 @@ namespace Client {
     // GLOBAL FUNCTIONS
     // ========================================================================
 
-    void InitializeClientChunkManager() {
-        if (g_clientChunkManager) {
-            Log::Warning("ClientChunkManager already initialized");
-            return;
-        }
-
-        g_clientChunkManager = std::make_unique<ClientChunkManager>();
-        g_clientChunkManager->Initialize();
-    }
-
-    void ShutdownClientChunkManager() {
-        if (g_clientChunkManager) {
-            g_clientChunkManager->Shutdown();
-            g_clientChunkManager.reset();
-        }
-    }
-
     ClientChunk* GetClientChunk(Game::Math::ChunkPos chunkPos) {
         return g_clientChunkManager ? g_clientChunkManager->GetChunk(chunkPos) : nullptr;
     }
@@ -470,6 +531,32 @@ namespace Client {
     }
 
     // Process ChunkDataS2CPacket (new format)
+    std::shared_ptr<Game::Chunk> ClientChunkManager::PrebuildChunk(const Network::ChunkDataS2CPacket& packet) {
+        PROFILE_ZONE_N("PrebuildChunk");
+        auto built = std::make_shared<Game::Chunk>();
+        for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK &&
+                        y < static_cast<int>(packet.sections.size()); ++y) {
+            auto* section = built->GetSection(y);
+            if (!section) continue;
+            auto& mutableSection = const_cast<Network::ChunkDataS2CPacket::SectionData&>(packet.sections[y]);
+            Game::PalettedContainer states(
+                Game::PaletteStrategy::ForBlockStates(Game::kBlockStateBits),
+                Game::BlockState{}.RawId());
+            Game::PalettedContainer biomes = Game::ChunkSection::MakeBiomeContainer();
+            const bool okStates = states.ReadFrom(mutableSection.states.bits,
+                std::move(mutableSection.states.palette), std::move(mutableSection.states.words));
+            const bool okBiomes = biomes.ReadFrom(mutableSection.biomes.bits,
+                std::move(mutableSection.biomes.palette), std::move(mutableSection.biomes.words));
+            if (!okStates || !okBiomes) {
+                Log::Warning("Failed to decode section %d for chunk (%d, %d)", y, packet.chunkX, packet.chunkZ);
+                continue;
+            }
+            section->AdoptStates(std::move(states));
+            section->AdoptBiomes(std::move(biomes));
+        }
+        return built;
+    }
+
     void ClientChunkManager::ProcessChunkDataS2CPacket(const Network::ChunkDataS2CPacket& packet) {
         PROFILE_ZONE_N("ProcessChunkData");
         ASSERT_MAIN_THREAD();
@@ -549,6 +636,12 @@ namespace Client {
         } else if (prevBlockId != Game::BlockID::EndPortal && blockId == Game::BlockID::EndPortal) {
             chunk->endPortals.push_back(pos);
         }
+        if (prevBlockId == Game::BlockID::EndGateway && blockId != Game::BlockID::EndGateway) {
+            auto& list = chunk->endGateways;
+            list.erase(std::remove(list.begin(), list.end(), pos), list.end());
+        } else if (prevBlockId != Game::BlockID::EndGateway && blockId == Game::BlockID::EndGateway) {
+            chunk->endGateways.push_back(pos);
+        }
 
         // Mark section as dirty for remeshing
         MarkSectionDirty(chunkPos, sectionY, fromPlayer);
@@ -612,6 +705,7 @@ namespace Client {
         ASSERT_MAIN_THREAD();
         
         // Get or create client chunk
+        if (m_retained.count(chunkPos)) DiscardRetained(chunkPos);   // full data supersedes the parked copy
         auto it = m_chunks.find(chunkPos);
         if (it == m_chunks.end()) {
             auto clientChunk = std::make_unique<ClientChunk>(chunkPos);
@@ -628,9 +722,7 @@ namespace Client {
         }
         
         // Create or replace chunk data
-        if (!chunk->chunkData || packet.groundUpContinuous) {
-            chunk->chunkData = std::make_shared<Game::Chunk>();
-        }
+
         
         // Initialize ALL sections first (for ground-up loads)
         if (packet.groundUpContinuous) {
@@ -644,9 +736,21 @@ namespace Client {
                 // ready before its blocks have been parsed.
                 sectionInfo.meshResolvedEmpty = false;
                 sectionInfo.state = SectionState::LOADED;
-                sectionInfo.version = 0;
+                // version is NOT reset. On a re-send of a chunk that is
+                // already loaded, zeroing it made every future job's
+                // generation smaller than uploadedVersion, so AcceptMeshResult
+                // dropped every new mesh as Drop_Replaced FOREVER and the
+                // section kept the pre-reload geometry. Versions must stay
+                // monotonic for the section's whole client lifetime; the
+                // per-section ++ below is what marks the new content.
                 sectionInfo.dirty = false;
                 sectionInfo.meshingVersion = 0;
+                // Any in-flight job snapshotted the PREVIOUS content; its
+                // result is wasted work at best, so stop it early.
+                if (sectionInfo.lastMeshJob) {
+                    sectionInfo.lastMeshJob->Cancel();
+                    sectionInfo.lastMeshJob.reset();
+                }
             }
         }
         
@@ -663,78 +767,30 @@ namespace Client {
         // wholesale, taking `AdoptBiomes` with it. That is precisely why the
         // sky had no biomes: the block data being empty says nothing about
         // whether the biome container is.
+        // Adopt the chunk built on the I/O thread (or build it here if a
+        // packet arrived without one), then derive the per-section bookkeeping.
+        std::shared_ptr<Game::Chunk> built = packet.prebuilt ? packet.prebuilt : PrebuildChunk(packet);
+        built->pos = chunkPos;
+        built->modStamp.store(packet.modStamp, std::memory_order_relaxed);
+        chunk->chunkData = built;
         for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK &&
                         y < static_cast<int>(packet.sections.size()); ++y) {
-            const auto& sectionData = packet.sections[y];
             auto* section = chunk->chunkData->GetSection(y);
-            if (!section) continue;   // out-of-range only; unreachable here
-
-            // MC LevelChunkSection.read: hand the wire's bits, palette and
-            // words straight to the container. No per-voxel unpacking — the
-            // words ARE the storage.
-            Game::PalettedContainer states(
-                Game::PaletteStrategy::ForBlockStates(Game::kBlockStateBits),
-                Game::BlockState{}.RawId());
-            Game::PalettedContainer biomes = Game::ChunkSection::MakeBiomeContainer();
-
-            // MOVE the wire buffers into the containers. The packet is this
-            // handler's to consume (it is destroyed right after apply), and
-            // the copies were most of ApplyChunkData — which sets the client
-            // batch budget (7 ms / cost per chunk), i.e. the whole
-            // server->client chunk rate for saved areas.
-            auto& mutableSection = const_cast<Network::ChunkDataS2CPacket::SectionData&>(sectionData);
-            auto stateWords  = std::move(mutableSection.states.words);
-            auto statePal    = std::move(mutableSection.states.palette);
-            auto biomeWords  = std::move(mutableSection.biomes.words);
-            auto biomePal    = std::move(mutableSection.biomes.palette);
-
-            const bool okStates = states.ReadFrom(
-                sectionData.states.bits, std::move(statePal), std::move(stateWords));
-            const bool okBiomes = biomes.ReadFrom(
-                sectionData.biomes.bits, std::move(biomePal), std::move(biomeWords));
-
-            if (!okStates || !okBiomes) {
-                Log::Warning("Failed to decode section %d for chunk (%d, %d)",
-                             y, chunkPos.x, chunkPos.z);
-                continue;
-            }
-
-            section->AdoptStates(std::move(states));
-            section->AdoptBiomes(std::move(biomes));
-
+            if (!section) continue;
             auto& sectionInfo = chunk->sectionInfos[y];
             sectionInfo.hasCpuData = true;
             sectionInfo.isAllAir = section->IsAllAir();
             sectionInfo.version++;        // 0->1 on first load, +1 on updates
             sectionInfo.state = SectionState::LOADED;
-
-            // Only sections with something in them are worth compiling. This
-            // is the one place the emptiness of the BLOCK data still matters,
-            // and it is deliberately separate from the decode above: without
-            // the split, every chunk arrival would queue 24 mesh jobs instead
-            // of the ~8 that can produce geometry, and the extra 16 would be
-            // dropped one stage later for having nothing to draw.
             if (!sectionInfo.isAllAir) {
                 sectionInfo.dirty = true;
                 chunk->dirtySections.insert(y);
                 m_chunksWithDirtySections.insert(chunkPos);
                 m_schedulerSkip = 0;
             } else {
-                // MC SectionOcclusionGraph.java:259 —
-                //     sectionMesh.compareAndSet(UNCOMPILED, EMPTY)
-                // The section stays uncompiled and undrawn, but it is now
-                // RESOLVED rather than pending. Without this the section has no
-                // terminal state at all: not dirty, so never scheduled; never
-                // scheduled, so never builtOnce; and anything waiting on it
-                // waits forever. See SectionInfo::meshResolvedEmpty.
                 sectionInfo.meshResolvedEmpty = true;
             }
         }
-        
-        // Biomes arrived inside each section's container above (MC keeps them
-        // on LevelChunkSection, not the chunk). This one-shot log stays because
-        // a silent break anywhere upstream just looks like "every chunk is
-        // plains", which is indistinguishable from a colour bug on screen.
         {
             static bool s_loggedBiomes = false;
             if (!s_loggedBiomes && chunk->chunkData) {
@@ -784,6 +840,7 @@ namespace Client {
     
     void ClientChunkManager::RebuildEndPortalIndex(ClientChunk& chunk) {
         chunk.endPortals.clear();
+        chunk.endGateways.clear();
         if (!chunk.chunkData) return;
 
         for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
@@ -800,7 +857,10 @@ namespace Client {
             if (!states.IsGlobalPalette()) {
                 bool present = false;
                 for (uint32_t rawState : states.Palette()) {
-                    if (Game::BlockState::FromRawId(rawState).Block() == Game::BlockID::EndPortal) {
+                    const Game::BlockID id =
+                        Game::BlockState::FromRawId(rawState).Block();
+                    if (id == Game::BlockID::EndPortal ||
+                        id == Game::BlockID::EndGateway) {
                         present = true;
                         break;
                     }
@@ -812,11 +872,20 @@ namespace Client {
             for (int y = 0; y < Game::Math::SECTION_HEIGHT; ++y) {
                 for (int z = 0; z < Game::Math::CHUNK_SIZE_Z; ++z) {
                     for (int x = 0; x < Game::Math::CHUNK_SIZE_X; ++x) {
-                        if (section->GetBlockID(x, y, z) != Game::BlockID::EndPortal) continue;
-                        chunk.endPortals.push_back({
+                        const Game::BlockID id = section->GetBlockID(x, y, z);
+                        if (id != Game::BlockID::EndPortal &&
+                            id != Game::BlockID::EndGateway) {
+                            continue;
+                        }
+                        const glm::ivec3 pos{
                             chunk.position.x * Game::Math::CHUNK_SIZE_X + x,
                             baseY + y,
-                            chunk.position.z * Game::Math::CHUNK_SIZE_Z + z});
+                            chunk.position.z * Game::Math::CHUNK_SIZE_Z + z};
+                        if (id == Game::BlockID::EndPortal) {
+                            chunk.endPortals.push_back(pos);
+                        } else {
+                            chunk.endGateways.push_back(pos);
+                        }
                     }
                 }
             }
@@ -1043,8 +1112,8 @@ namespace Client {
         m_meshCandidates.clear();
         bool usedVisibleList = false;
 
-        if (kScheduleFromVisible && ::Render::g_chunkRenderer) {
-            const auto& visible = ::Render::g_chunkRenderer->GetMainViewSections();
+        if (kScheduleFromVisible && m_renderer) {
+            const auto& visible = m_renderer->GetMainViewSections();
             Game::Math::ChunkPos lastPos{INT32_MIN, INT32_MIN};
             ClientChunk* lastChunk = nullptr;
             for (const auto& vs : visible) {
@@ -1334,7 +1403,9 @@ namespace Client {
         if (sectionInfo.version != expectedVersion) return false;
 
         outSnapshot = std::make_shared<Render::MeshJobData>(chunkPos, sectionY);
+        outSnapshot->dimension = m_dimension;
         outSnapshot->generation = expectedVersion;
+        outSnapshot->jobSeq = ++sectionInfo.lastJobSeq;
 
         // MC LevelRenderer.compileSections hands every section the SAME
         // RenderRegionCache, so the 3x3x3 neighbourhoods overlap and each
@@ -1399,6 +1470,14 @@ namespace Client {
         if (result.generation < sectionInfo.uploadedVersion) {
             return { MeshApplyAction::Drop_Replaced };
         }
+        // Same-version tie-break: a re-dirty reschedules at an unchanged
+        // version, so generations alone cannot order the two jobs — the seq
+        // does. Dropping the older seq is what stops a stale-data result
+        // (built before an ApplyChunkData resend or a mass-edit wave) from
+        // overwriting the fresher mesh: the hole/ghost bug.
+        if (result.jobSeq != 0 && result.jobSeq < sectionInfo.uploadedJobSeq) {
+            return { MeshApplyAction::Drop_Replaced };
+        }
 
         // Accept any result for a loaded chunk — better to show something than nothing.
         // FinalizeSectionUpload will mark it dirty for re-mesh if the version changed.
@@ -1415,7 +1494,9 @@ namespace Client {
     }
     
     void ClientChunkManager::FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY,
-                                                   uint8_t neighborMask, uint32_t builtVersion) {
+                                                   uint8_t neighborMask, uint32_t builtVersion,
+                                                   uint32_t paletteGen,
+                                                   uint32_t jobSeq) {
         ASSERT_MAIN_THREAD();
         
         auto it = m_chunks.find(chunkPos);
@@ -1446,6 +1527,8 @@ namespace Client {
         // moved past builtVersion and the occlusion BFS keeps treating the
         // mask as stale (see SectionInfo::uploadedVersion).
         sectionInfo.uploadedVersion = builtVersion;
+        sectionInfo.builtPaletteGen = paletteGen;
+        if (jobSeq != 0) sectionInfo.uploadedJobSeq = jobSeq;
 
         // If version changed while meshing (neighbor loaded/unloaded), keep dirty for re-mesh
         // but still show this mesh result so the player sees something
@@ -1460,10 +1543,65 @@ namespace Client {
             chunk->dirtySections.erase(sectionY);
         }
         
+        // ── Convergence safety net ───────────────────────────────────────────
+        // This mesh was built with a horizontal neighbour missing (treated as
+        // air by the mesher) and that neighbour is loaded NOW. Whatever
+        // ordering let that happen — the arrival's MarkNeighborSectionsDirty
+        // raced this job, or an arrival path missed the dirtying — the result
+        // on the GPU has border quads against a chunk that exists, and nothing
+        // else is guaranteed to reschedule it. Re-dirty so the pipeline always
+        // converges to the neighbour-complete mesh. Terminates: the rebuild
+        // snapshots the neighbour, so its finalize carries the fuller mask and
+        // this cannot re-fire for the same gap. All-air sections are skipped —
+        // their mesh is empty regardless of neighbours.
+        if ((neighborMask & 0xF) != 0xF) {
+            ++m_partialNeighborBuilds;
+            const uint8_t missingAtBuild = static_cast<uint8_t>(~neighborMask & 0xF);
+            // Already-dirty sections are skipped: the branch above (version
+            // moved while meshing — which is what a neighbour arrival's
+            // MarkNeighborSectionsDirty does) has queued a rebuild against
+            // fresh data, and double-marking would just bump the version again.
+            if (!sectionInfo.dirty && !sectionInfo.isAllAir &&
+                (missingAtBuild & CurrentNeighborMask(chunkPos)) != 0) {
+                MarkSectionDirty(chunkPos, sectionY);
+                ++m_staleBorderRemeshes;
+            }
+        }
+        // ── Palette safety net ───────────────────────────────────────────────
+        // Same convergence idea as the neighbour net above, for the greedy-
+        // debug palette: a build that raced the toggle carries a stale stamp
+        // and would otherwise keep the wrong colors until the next edit.
+        if (paletteGen != ::Render::Mesher::GreedyPaletteGen() &&
+            !sectionInfo.dirty && !sectionInfo.isAllAir) {
+            MarkSectionDirty(chunkPos, sectionY);
+        }
+
+        // Cumulative count of uploads whose mesh saw a missing neighbour —
+        // flat in a healthy run once loading settles; a run that lands in the
+        // inflated-GPU state shows this climbing without matching remeshes.
+        PROFILE_PLOT("Mesh/PartialNeighborBuilds",
+                     static_cast<int64_t>(m_partialNeighborBuilds));
+
         Log::Debug("[mesh] FINALIZED: chunk(%d,%d) sy=%d neighborMask: 0x%X -> 0x%X (changed=%s)",
-                  chunkPos.x, chunkPos.z, sectionY, 
+                  chunkPos.x, chunkPos.z, sectionY,
                   prevMask, neighborMask,
                   prevMask != neighborMask ? "YES" : "NO");
+    }
+
+    uint8_t ClientChunkManager::CurrentNeighborMask(Game::Math::ChunkPos pos) const {
+        // Same bit layout as BuildSectionRegion derives from the region
+        // snapshot: +X=1, -X=2, +Z=4, -Z=8.
+        auto loaded = [this](int x, int z) {
+            auto it = m_chunks.find(Game::Math::ChunkPos{x, z});
+            return it != m_chunks.end() && it->second &&
+                   it->second->state == ChunkState::LOADED;
+        };
+        uint8_t mask = 0;
+        if (loaded(pos.x + 1, pos.z)) mask |= 1;
+        if (loaded(pos.x - 1, pos.z)) mask |= 2;
+        if (loaded(pos.x, pos.z + 1)) mask |= 4;
+        if (loaded(pos.x, pos.z - 1)) mask |= 8;
+        return mask;
     }
     
     void ClientChunkManager::NoteMeshBuildFailed(Game::Math::ChunkPos chunkPos, int sectionY,
@@ -1474,7 +1612,13 @@ namespace Client {
         if (it == m_chunks.end() || !it->second) return;
         auto& chunk = it->second;
         auto& si = chunk->sectionInfos[sectionY];
-        si.lastMeshJob.reset();
+        // Drop the cancellation handle only if it belongs to the job that just
+        // failed. A STALE job's failure (an older generation, cancelled when a
+        // newer job was submitted) used to clear the NEWER job's handle here,
+        // which quietly disabled per-task cancellation for that section.
+        if (si.lastMeshJob && si.lastMeshJob->generation == builtVersion) {
+            si.lastMeshJob.reset();
+        }
         // Only the LATEST job's failure needs recovery: a cancelled job always
         // has a newer one behind it (cancellation happens at the moment the
         // newer job is submitted), and that newer job carries the section
@@ -1491,14 +1635,142 @@ namespace Client {
         }
     }
 
+    void ClientChunkManager::DiscardRetained(Game::Math::ChunkPos pos) {
+        auto it = m_retained.find(pos);
+        if (it == m_retained.end()) return;
+        if (m_meshes) m_meshes->DiscardParkedChunkGPUData(pos);
+        m_retainedBytes -= std::min(m_retainedBytes, it->second.bytes);
+        m_retainedLru.erase(it->second.lru);
+        m_retained.erase(it);
+    }
+
+    bool ClientChunkManager::RestoreRetainedChunk(Game::Math::ChunkPos pos, uint64_t modStamp) {
+        ASSERT_MAIN_THREAD();
+        auto it = m_retained.find(pos);
+        if (it == m_retained.end()) return false;
+        if (!it->second.chunk || !it->second.chunk->chunkData ||
+            it->second.chunk->chunkData->ModStamp() != modStamp) {
+            DiscardRetained(pos);
+            return false;
+        }
+        if (m_chunks.count(pos)) {   // a full load raced ahead; keep it
+            DiscardRetained(pos);
+            return true;
+        }
+        std::unique_ptr<ClientChunk> chunk = std::move(it->second.chunk);
+        m_retainedBytes -= std::min(m_retainedBytes, it->second.bytes);
+        m_retainedLru.erase(it->second.lru);
+        m_retained.erase(it);
+        ClientChunk* raw = chunk.get();
+        raw->generation = m_nextGeneration.fetch_add(1);
+        for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+            auto& si = raw->sectionInfos[sy];
+            si.lastMeshJob.reset();
+            si.dirtyFromPlayer = false;
+        }
+        m_chunks.emplace(pos, std::move(chunk));
+        TransitionChunkState(raw, ChunkState::LOADED);
+        if (m_meshes) m_meshes->UnparkChunkGPUData(pos);
+        if (!raw->dirtySections.empty()) { m_chunksWithDirtySections.insert(pos); m_schedulerSkip = 0; }
+
+        // ── Reconcile neighbour-presence with the meshes on both sides ──────
+        //
+        // This restore is the ONE chunk-arrival path that used not to dirty
+        // anything, and it is how the ~2x GPU-section state was born: unload
+        // dirties the 4 neighbours (UnloadChunk), they remesh against the now
+        // MISSING chunk — the mesher reads a missing section as air
+        // (RegionSnapshot::SectionForLocal -> nullptr), so solid underground
+        // sections grow a full wall of border quads — and then the chunk came
+        // back through this 20-byte ChunkUnchangedS2C path with no dirtying at
+        // all. Nothing ever rescheduled those sections (not dirty, versions
+        // match), so the air-built border geometry persisted for the session.
+        // MC has no retention cache; its equivalent arrival path
+        // (ClientChunkCache.replace -> onChunkLoaded) always dirties the ring.
+        //
+        // Targeted, not MarkNeighborSectionsDirty: blanket-dirtying 4x24
+        // sections on every revisit would defeat the cache's "no meshing on
+        // revisit" purpose. lastNeighborMask records which neighbours each
+        // mesh was actually built against, so only sections meshed while a
+        // now-present chunk was absent (or vice versa) are re-dirtied — on a
+        // clean park/revive round-trip that is zero sections.
+        {
+            struct { int dx, dz; uint8_t bitTowardUs; } const kDirs[4] = {
+                { +1, 0, 2 },   // east neighbour sees us as its -X
+                { -1, 0, 1 },   // west neighbour sees us as its +X
+                { 0, +1, 8 },   // south neighbour sees us as its -Z
+                { 0, -1, 4 },   // north neighbour sees us as its +Z
+            };
+            for (const auto& d : kDirs) {
+                const Game::Math::ChunkPos nPos{pos.x + d.dx, pos.z + d.dz};
+                auto nIt = m_chunks.find(nPos);
+                if (nIt == m_chunks.end() || nIt->second->state != ChunkState::LOADED) continue;
+                for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+                    const auto& nsi = nIt->second->sectionInfos[sy];
+                    // Meshed while we were absent (mask bit clear) -> its
+                    // border wall must come down now that we exist again.
+                    // All-air sections have no geometry either way; already
+                    // dirty ones will be rebuilt against fresh data anyway.
+                    if (!nsi.builtOnce || nsi.isAllAir || nsi.dirty) continue;
+                    if ((nsi.lastNeighborMask & d.bitTowardUs) != 0) continue;
+                    MarkSectionDirty(nPos, sy);
+                    ++m_staleBorderRemeshes;
+                }
+            }
+
+            // And our own revived meshes: if the set of loaded horizontal
+            // neighbours differs from what they were built against — a
+            // neighbour unloaded or arrived while we were parked, which
+            // MarkNeighborSectionsDirty could not tell us about before it
+            // learned to reach parked chunks — rebuild those sections too.
+            const uint8_t presentNow = CurrentNeighborMask(pos);
+            for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+                const auto& si = raw->sectionInfos[sy];
+                if (!si.builtOnce || si.isAllAir || si.dirty) continue;
+                // A stale greedy-debug palette also forces a rebuild: the
+                // toggle's RemeshAll cannot reach a chunk that is parked, so
+                // revival is where its meshes catch up with the palette.
+                const bool paletteStale =
+                    si.builtPaletteGen != ::Render::Mesher::GreedyPaletteGen();
+                if (!paletteStale && si.lastNeighborMask == presentNow) continue;
+                MarkSectionDirty(pos, sy);
+                if (!paletteStale) ++m_staleBorderRemeshes;
+            }
+        }
+
+        // A neighbour that comes back CHANGED while we are LOADED re-dirties
+        // our border sections through its own ApplyChunkData ->
+        // MarkNeighborSectionsDirty (which now also reaches us while parked).
+        ApplyPendingDiffsForChunk(pos, raw);
+        ++m_retainRestored;
+        return true;
+    }
+
     void ClientChunkManager::ClearAllChunks() {
         ASSERT_MAIN_THREAD();
+        // Cancel every in-flight job first: a result landing after the
+        // chunks are gone would be dropped anyway, and cancelling stops the
+        // worker spending a permit on it. Live GPU data goes with the chunks
+        // — only parked data was released here before, which leaked a whole
+        // level's meshes on every dimension change.
+        for (auto& [pos, chunk] : m_chunks) {
+            if (!chunk) continue;
+            for (auto& si : chunk->sectionInfos) {
+                if (si.lastMeshJob) { si.lastMeshJob->Cancel(); si.lastMeshJob.reset(); }
+            }
+        }
+        while (!m_retainedLru.empty()) DiscardRetained(m_retainedLru.back());
+        if (m_meshes) {
+            for (const auto& [pos, chunk] : m_chunks) m_meshes->RemoveChunkGPUData(pos);
+        }
         m_chunks.clear();
         m_chunksWithDirtySections.clear();
         // Predictions reference positions in chunks that no longer exist —
         // drop them rather than letting a late ack roll back into a chunk
         // that has since been reloaded from scratch.
         m_prediction.Clear();
+#if ENABLE_IMMERSIVE_PORTALS
+        GetClientImmersivePortals().Clear();
+#endif
         Log::Info("Cleared all chunks from ClientChunkManager");
     }
     
@@ -1523,15 +1795,15 @@ namespace Client {
         ASSERT_MAIN_THREAD();
         // Notify the occlusion graph that a chunk loaded — sections deferred by
         // hasAllNeighbors will be re-evaluated on the next BFS rebuild.
-        if (::Render::g_chunkRenderer) {
-            ::Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        if (m_renderer) {
+            m_renderer->MarkVisibleSectionsDirty();
         }
     }
     
     void ClientChunkManager::NotifyRenderGridChunkUnloaded(Game::Math::ChunkPos pos) {
         ASSERT_MAIN_THREAD();
-        if (::Render::g_chunkRenderer) {
-            ::Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        if (m_renderer) {
+            m_renderer->MarkVisibleSectionsDirty();
         }
     }
     

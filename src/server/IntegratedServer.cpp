@@ -4,6 +4,7 @@
 #include <cctype>
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
+#include "common/entity/EndCrystal.hpp"
 #include "common/core/SaveVersion.hpp"
 #include "server/world/storage/anvil/WorldFolder.hpp"
 #include "server/world/storage/anvil/PlayerDataStore.hpp"
@@ -11,6 +12,7 @@
 #include "commands/TeleportCommand.hpp"
 #include "commands/KickCommand.hpp"
 #include "commands/GameModeCommand.hpp"
+#include "commands/DifficultyCommand.hpp"
 #include "commands/KillCommand.hpp"
 #include "commands/EntityStatsCommand.hpp"
 #include "commands/ShapeCommand.hpp"
@@ -32,6 +34,7 @@
 #include "world/ticketing/ChunkTicketManager.hpp"
 #include "common/core/Assert.hpp"   // ASSERT_SERVER_THREAD in GetOrCreateLevel
 #include "level/ServerLevel.hpp"
+#include "level/EndDragonFight.hpp"
 #include "level/PortalTravel.hpp"
 #include "world/status/ChunkStatusManager.hpp"
 #include "world/tracking/SectionChangeAccumulator.hpp"
@@ -87,8 +90,19 @@
 #if ENABLE_PORTAL_GUN
 #include "portal/PortalRegistry.hpp"
 #endif
+#if ENABLE_IMMERSIVE_PORTALS
+#include "portal/ImmersivePortalRegistry.hpp"
+#include "portal/NetherPortalGeneration.hpp"
+#include "portal/EntityPortalTravel.hpp"
+#include "commands/PortalCommand.hpp"
+#include "common/world/portal/ImmersiveFrame.hpp"
+#include "common/world/portal/PortalState.hpp"
+#endif
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <filesystem>
+#include <nlohmann/json.hpp>
 #include <thread>
 
 namespace Server {
@@ -120,6 +134,9 @@ namespace Server {
     }
 
     IntegratedServer::~IntegratedServer() {
+#if ENABLE_IMMERSIVE_PORTALS
+        Game::Portals::SetImmersiveFrameLitHandler(nullptr);
+#endif
         if (m_running.load()) {
             Stop();
         }
@@ -186,7 +203,11 @@ namespace Server {
 
         Log::Info("[IntegratedServer] Dimension '%s' is now live",
                   std::string(Game::DimensionName(dimension)).c_str());
+        if (level->World()) level->World()->SetDifficulty(static_cast<Game::Difficulty>(m_config.difficulty));
         m_levels[slot] = std::move(level);
+#if ENABLE_IMMERSIVE_PORTALS
+        EnsureGlobalPortals(dimension);
+#endif
         return m_levels[slot].get();
     }
 
@@ -305,6 +326,13 @@ namespace Server {
                     meta.gameType        = m_config.defaultGameMode;
                     meta.dayTime         = m_config.initialDayTime;
                     meta.doDaylightCycle = m_config.doDaylightCycle;
+                    meta.immersivePortals = m_config.immersivePortals;
+                    meta.worldWrapSize    = m_config.worldWrapSize;
+                    meta.dimensionStack   = m_config.dimensionStack;
+        meta.immersivePortals = m_config.immersivePortals;
+        meta.worldWrapSize    = m_config.worldWrapSize;
+        meta.dimensionStack   = m_config.dimensionStack;
+        meta.difficulty       = m_config.difficulty;
                     // The SEED matters more than anything else here:
                     // Minecraft generates the chunks beyond ours with it, so a
                     // wrong seed means terrain that does not line up at the
@@ -339,6 +367,42 @@ namespace Server {
                 Game::DimensionSlot(Game::DimensionId::Overworld))] =
                 std::make_unique<ServerLevel>(cfg, m_sessionManager.get(), this);
         }
+        if (Game::World* overworld = GetWorld()) {
+            overworld->SetDifficulty(static_cast<Game::Difficulty>(m_config.difficulty));
+        }
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // After the overworld exists (the registry reads its save root) and
+        // before any session can be created, so the first chunk a client
+        // gets already carries its portals.
+        m_immersivePortals = std::make_unique<ImmersivePortalRegistry>(*this);
+        m_immersivePortals->Load();
+        LoadAoRegions();
+#if ENABLE_PORTAL_GUN
+        // Portal-gun surfaces are mirrored from the gun registry, which is
+        // not persisted: any saved with the file are orphans from the last
+        // session and go before a client can see them.
+        {
+            std::vector<Game::Immersive::PortalId> stale;
+            m_immersivePortals->ForEach([&](const Game::Immersive::Portal& p) {
+                if (p.kind == Game::Immersive::PortalKind::PortalGun) stale.push_back(p.id);
+            });
+            for (auto id : stale) m_immersivePortals->Remove(id);
+        }
+        // ...then the saved pairs come back, and their surfaces with them.
+        Game::Portal::ServerRegistry().Load();
+        Game::Portal::ServerRegistry().RebuildImmersive();
+#endif
+        m_netherPortalGeneration = std::make_unique<NetherPortalGeneration>(*this);
+        m_entityTravel           = std::make_unique<EntityPortalTravel>(*this);
+        Game::Portals::SetImmersiveNetherPortals(m_config.immersivePortals);
+        Game::Portals::SetWorldWrapSize(m_config.worldWrapSize);
+        Game::Portals::SetDimensionStack(m_config.dimensionStack);
+#if ENABLE_IMMERSIVE_PORTALS
+        EnsureGlobalPortals(Game::DimensionId::Overworld);
+#endif
+        Game::Portals::SetImmersiveFrameLitHandler(&IntegratedServer::OnImmersiveFrameLit);
+#endif
 
         if (!m_config.minecraftWorldPath.empty()) {
             Log::Info("Server world configured with Minecraft world: %s%s",
@@ -410,6 +474,7 @@ namespace Server {
         TeleportCommand::Register(m_commandDispatcher);
         KickCommand::Register(m_commandDispatcher);
         GameModeCommand::Register(m_commandDispatcher);
+        DifficultyCommand::Register(m_commandDispatcher);
         KillCommand::Register(m_commandDispatcher);
         EntityStatsCommand::Register(m_commandDispatcher);
         ShapeCommand::Register(m_commandDispatcher);
@@ -418,6 +483,9 @@ namespace Server {
         TimeCommand::Register(m_commandDispatcher);
         GameRuleCommand::Register(m_commandDispatcher);
         SeedCommand::Register(m_commandDispatcher);
+#if ENABLE_IMMERSIVE_PORTALS
+        PortalCommand::Register(m_commandDispatcher);
+#endif
         TickCommand::Register(m_commandDispatcher);
         Log::Info("Server commands registered");
 
@@ -535,10 +603,12 @@ namespace Server {
             // entity list without touching a block, so every occupied chunk is
             // reconsidered. O(entities), not O(loaded chunks).
             if (level.Entities()) level.Entities()->SaveAllLoaded();
+            if (level.DragonFightController()) level.DragonFightController()->Save();
         });
 
         SaveAllPlayers();
         WriteLevelDat();
+        SaveImmersivePortals();
 
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started).count();
@@ -582,6 +652,15 @@ namespace Server {
         }
     }
 
+    void IntegratedServer::SetDifficulty(int difficulty) {
+        ASSERT_SERVER_THREAD();
+        m_config.difficulty = std::clamp(difficulty, 0, 3);
+        ForEachLevel([&](ServerLevel& level) {
+            if (level.World()) level.World()->SetDifficulty(static_cast<Game::Difficulty>(m_config.difficulty));
+        });
+        WriteLevelDat();
+    }
+
     void IntegratedServer::WriteLevelDat() {
         if (m_config.savePath.empty() || m_config.readOnlyWorld) return;
         if (!m_levels[0] || !m_levels[0]->World()) return;
@@ -596,6 +675,10 @@ namespace Server {
         meta.seed            = m_levels[0]->World()->GetGenerationSeed();
         meta.dayTime         = m_levels[0]->World()->GetDayTime();
         meta.doDaylightCycle = m_config.doDaylightCycle;
+        meta.immersivePortals = m_config.immersivePortals;
+        meta.worldWrapSize    = m_config.worldWrapSize;
+        meta.dimensionStack   = m_config.dimensionStack;
+        meta.difficulty       = m_config.difficulty;
         meta.spawnX          = static_cast<int>(std::floor(m_worldSpawn.x));
         meta.spawnY          = static_cast<int>(std::floor(m_worldSpawn.y));
         meta.spawnZ          = static_cast<int>(std::floor(m_worldSpawn.z));
@@ -635,6 +718,7 @@ namespace Server {
                       std::string(Game::DimensionName(level.Dimension())).c_str());
             level.World()->SaveAllChunks();
             if (level.Entities()) level.Entities()->SaveAllLoaded();
+            if (level.DragonFightController()) level.DragonFightController()->Save();
         });
         // Rewrite level.dat now that the values it describes are settled. At
         // Initialize the seed had not been pushed in yet and the world spawn
@@ -642,6 +726,7 @@ namespace Server {
         // placeholders. Vanilla rewrites it on every autosave and on shutdown
         // for the same reason.
         WriteLevelDat();
+        SaveImmersivePortals();
 
         // Release the session lock LAST, once everything is durable — while it
         // is held, no other process can be writing this world.
@@ -1026,6 +1111,7 @@ namespace Server {
         // Track current server tick
         static int64_t serverTick = 0;
         serverTick++;
+        m_currentServerTick = serverTick;
 
         // Network I/O is now handled by dedicated thread (no need to poll)
         // The I/O thread runs continuously and processes all async operations
@@ -1117,6 +1203,7 @@ namespace Server {
                         if (level.Entities()) level.Entities()->SaveAllLoaded();
                     });
                     WriteLevelDat();
+                    SaveImmersivePortals();
                 } else {
                     // MC forceTimeSynchronization() on resume (:117). The
                     // clients kept counting their own day-time while the server
@@ -1168,6 +1255,13 @@ namespace Server {
         // portal is a world event, not a networking one.
         if (SimulationRuns()) {
             Game::Portal::ServerRegistry().Tick(this);
+        }
+#endif
+#if ENABLE_IMMERSIVE_PORTALS
+        // Nether portal generation (far-side search/build) and the frame
+        // integrity sweep. Simulation, so frozen with it.
+        if (SimulationRuns() && m_netherPortalGeneration) {
+            m_netherPortalGeneration->Tick(serverTick);
         }
 #endif
 
@@ -1232,7 +1326,7 @@ namespace Server {
                     // collected entity client-side, and it has to arrive while
                     // the client still has the entity to animate.
                     if (!pickups.empty()) {
-                        BroadcastItemEntityPickups(pickups);
+                        BroadcastItemEntityPickups(level.Dimension(), pickups);
                     }
                     if (!removed.empty()) {
                         BroadcastItemEntityRemovals(level.Dimension(), removed);
@@ -1249,7 +1343,7 @@ namespace Server {
                     std::vector<XpOrbPickupEvent> pickups;
                     level.Orbs()->Tick(world, m_sessionManager.get(), removed, pickups);
                     if (!pickups.empty()) {
-                        BroadcastXpOrbPickups(pickups);
+                        BroadcastXpOrbPickups(level.Dimension(), pickups);
                     }
                     if (!removed.empty()) {
                         BroadcastItemEntityRemovals(level.Dimension(), removed);
@@ -1271,6 +1365,12 @@ namespace Server {
                 // move, so the contact test runs against this tick's positions
                 // rather than last tick's.
                 TickPortals(level);
+#if ENABLE_IMMERSIVE_PORTALS
+                // Immersive surfaces: mobs, items and orbs that pierced one
+                // this tick move through it — after the vanilla portal tick
+                // for the same reason it follows TickMobs.
+                if (m_entityTravel) m_entityTravel->Tick(level, serverTick);
+#endif
             });
         }
 
@@ -1278,29 +1378,39 @@ namespace Server {
         if (m_sessionManager) {
             auto sessions = m_sessionManager->GetAllSessions();
             for (auto& session : sessions) {
-                // The world the player is actually standing in — sending them
-                // the overworld's copy of a chunk they are watching in the
-                // Nether is the whole failure mode this refactor exists for.
-                ServerLevel& L = LevelOf(*session);
-                std::vector<Game::Math::ChunkPos> notResident;
-                session->SendNextChunks(L.World(), &notResident);
-                for (const auto& pos : notResident) {
+                // Each pending chunk names its own dimension — the session
+                // may be streaming the far side of a portal alongside the
+                // world it stands in.
+                std::vector<PlayerSession::PendingChunkRef> notResident;
+                session->SendNextChunks(
+                    [this](Game::DimensionId dim) -> Game::World* {
+                        ServerLevel* level = GetLevel(dim);
+                        return level ? level->World() : nullptr;
+                    },
+                    &notResident);
+                for (const auto& ref : notResident) {
+                    ServerLevel* L = GetLevel(ref.dimension);
+                    if (!L) continue;
                     // Same split as ProcessWatchSetChanges' onEnter: a chunk
                     // that came back into the cache meanwhile only needs to be
                     // queued again (RequestChunkLoad's already-loaded branch
                     // deliberately does not queue it).
-                    if (L.World() && L.World()->IsChunkLoaded(pos.x, pos.z)) {
-                        if (L.Entities()) L.Entities()->RequestLoad(pos);
-                        session->MarkChunkPendingToSend(pos);
+                    if (L->World() && L->World()->IsChunkLoaded(ref.pos.x, ref.pos.z)) {
+                        if (L->Entities()) L->Entities()->RequestLoad(ref.pos);
+                        session->MarkChunkPendingToSend(ref.dimension, ref.pos);
                     } else {
-                        RequestChunkLoad(L.Dimension(), pos, 0);
+                        RequestChunkLoad(ref.dimension, ref.pos, 0);
                     }
                 }
             }
         }
 
-        // === 5. BROADCAST PLAYER POSITIONS to other players (~10 Hz) ===
-        if (m_sessionManager && (serverTick % 2 == 0)) {
+        // === 5. BROADCAST PLAYER POSITIONS to other players (every tick) ===
+        // MC sends entity movement every tick and the client interpolates
+        // over three; at half rate the lerp never reached its target
+        // before the next one landed, and a fast body — a scaled player
+        // covers metres a tick — moved in visible lurches.
+        if (m_sessionManager) {
             m_sessionManager->BroadcastPlayerPositions();
         }
 
@@ -1460,7 +1570,7 @@ namespace Server {
                 if (m_sessionManager) {
                     m_sessionManager->ForEachSessionWatching(
                         dimension, chunkPos,
-                        [&](PlayerSession& session) { session.MarkChunkPendingToSend(chunkPos); });
+                        [&](PlayerSession& session) { session.MarkChunkPendingToSend(dimension, chunkPos); });
                 }
             }
         }
@@ -1484,6 +1594,7 @@ namespace Server {
         packet.velocity = glm::vec3(e.vel);
         packet.bobOffs  = e.bobOffs;
         packet.stack    = e.stack;
+        packet.scale    = e.scale;
 
         const auto data = Network::Serialization::Serialize(packet);
         SendToChunkWatchers(level.Dimension(), e.pos,
@@ -1652,6 +1763,10 @@ namespace Server {
                     return std::make_unique<Game::FallingBlockEntity>(level);
                 case Game::EntityTypeId::Tnt:
                     return std::make_unique<Game::PrimedTnt>(level);
+                case Game::EntityTypeId::EndCrystal:
+                    return std::make_unique<Game::EndCrystal>(level);
+                case Game::EntityTypeId::EnderPearl:
+                    return std::make_unique<Game::ThrownEnderpearl>(level);
                 default: break;
             }
             // Everything else is built from its generated def. Promoting one to
@@ -1700,6 +1815,11 @@ namespace Server {
         //    room under the caps.
         RunNaturalSpawner(level, serverTick);
 
+        // 3b. The End's dragon fight (MC ServerLevel.tick's dragonFight.tick).
+        //     After the mobs so it sees this tick's deaths, before the emit so
+        //     a dragon it spawns is tracked this same tick.
+        if (auto* fight = level.DragonFightController()) fight->Tick();
+
         // 4. Emit. The tracker owns who-knows-what, so removals go through it
         //    rather than being broadcast blindly.
         std::vector<EntityPacketOut> outgoing;
@@ -1717,17 +1837,29 @@ namespace Server {
         std::vector<ServerEntityTracker::TrackedPlayer> players;
         for (const auto& session : m_sessionManager->GetAllSessions()) {
             if (!session || !session->GetPlayer()) continue;
-            if (Game::DimensionFromRaw(session->GetDimensionId()) != level.Dimension()) continue;
-
-            ServerEntityTracker::TrackedPlayer tp;
-            tp.connectionId = session->GetConnectionId();
-            tp.position     = session->GetPlayer()->getPosition();
-            // MC ChunkMap.getPlayerViewDistance — clamps the tracking range.
-            tp.viewDistance = session->GetViewDistance();
-            // MC ChunkMap.isChunkTracked — entity updates never precede the
-            // chunk they stand in.
-            tp.sentChunks   = &session->GetSentChunks();
-            players.push_back(tp);
+            // One entry per LOADER this session has in this level: where the
+            // player stands, and every portal far side they can look into.
+            // The tracker ORs the entries of one connection, so an entity is
+            // visible if ANY of them reaches it — the mod's "watched chunk
+            // within tracking range of its loader" rule.
+            for (const ChunkLoader& loader : session->Loaders()) {
+                if (loader.dimension != level.Dimension()) continue;
+                ServerEntityTracker::TrackedPlayer tp;
+                tp.connectionId = session->GetConnectionId();
+                if (loader.source == ChunkLoader::Source::Player) {
+                    tp.position = session->GetPlayer()->getPosition();
+                } else {
+                    tp.position = glm::dvec3(loader.Center().x * 16.0 + 8.0,
+                                             session->GetPlayer()->getPosition().y,
+                                             loader.Center().z * 16.0 + 8.0);
+                }
+                // MC ChunkMap.getPlayerViewDistance — clamps the tracking range.
+                tp.viewDistance = loader.Radius();
+                // MC ChunkMap.isChunkTracked — entity updates never precede the
+                // chunk they stand in.
+                tp.sentChunks   = &session->GetSentChunks(level.Dimension());
+                players.push_back(tp);
+            }
         }
 
         tracker->Tick(*mobs, *mobLevel, players, level.Tickets(), outgoing);
@@ -1738,8 +1870,9 @@ namespace Server {
         for (const auto& packet : outgoing) {
             auto session = m_sessionManager->GetSession(packet.connectionId);
             if (!session || !session->GetConnection()) continue;
-            session->GetConnection()->SendPacket(static_cast<uint8_t>(packet.packetId),
-                                                 packet.payload);
+            session->GetConnection()->SendPacketIn(level.Dimension(),
+                                                   static_cast<uint8_t>(packet.packetId),
+                                                   packet.payload);
         }
 
         // 6. Knockback the mob system applied to players. The player is
@@ -1783,6 +1916,17 @@ namespace Server {
             // world, and the same coordinates in another one hold something
             // else entirely.
             entity.CheckInsideBlocks(*world);
+
+#if ENABLE_IMMERSIVE_PORTALS
+            // Immersive mode: a vanilla nether portal block is scenery; the
+            // see-through surface handles crossing (End portals are still
+            // vanilla).
+            if (Game::Portals::ImmersiveNetherPortals() && entity.portal.IsInPortal() &&
+                entity.portal.CurrentPortal() == Game::BlockID::NetherPortal) {
+                entity.portal.Reset();
+                return;
+            }
+#endif
 
             if (!entity.portal.IsInPortal() && !entity.portal.IsOnCooldown()) {
                 return;   // nothing to advance; the overwhelmingly common case
@@ -2352,15 +2496,60 @@ namespace Server {
         return spawned;
     }
 
+    bool IntegratedServer::PlaceEndCrystalFromUse(PlayerSession& session,
+                                                  const glm::ivec3& clicked) {
+        // MC EndCrystalItem.useOn, transcribed: only on obsidian or bedrock,
+        // only with an empty 1x2x1 above, only with no entity standing there.
+        ServerLevel& level = LevelOf(session);
+        Game::World* world = level.World();
+        ServerLevelBridge* bridge = level.MobLevel();
+        MobManager* mobs = level.Mobs();
+        if (!world || !bridge || !mobs) return false;
+
+        const Game::BlockID base = world->GetBlock(clicked.x, clicked.y, clicked.z);
+        if (base != Game::BlockID::Obsidian && base != Game::BlockID::Bedrock) {
+            return false;
+        }
+
+        const glm::ivec3 above = clicked + glm::ivec3(0, 1, 0);
+        if (world->GetBlock(above.x, above.y, above.z) != Game::BlockID::Air) {
+            return false;
+        }
+
+        Game::AABB box;
+        box.min = glm::vec3(above);
+        box.max = glm::vec3(above) + glm::vec3(1.0f, 2.0f, 1.0f);
+        std::vector<Game::Entity*> occupants;
+        bridge->GetEntitiesInBox(box, nullptr, occupants);
+        if (!occupants.empty()) return false;
+        std::vector<Game::LivingEntity*> players;
+        bridge->GetPlayers(players);
+        for (Game::LivingEntity* p : players) {
+            if (p && p->GetAABB().Intersects(box)) return false;
+        }
+
+        auto crystal = std::make_unique<Game::EndCrystal>(bridge);
+        crystal->position = glm::dvec3(above.x + 0.5, above.y, above.z + 0.5);
+        // MC: a placed crystal has no bedrock base slab.
+        crystal->SetShowBottom(false);
+        if (mobs->Add(std::move(crystal)) == 0) return false;
+
+        // MC: `if (dragonFight != null) dragonFight.tryRespawn()`.
+        if (auto* fight = level.DragonFightController()) fight->TryRespawn();
+        return true;
+    }
+
     bool IntegratedServer::SpawnMobFromItemUse(Game::EntityTypeId type,
                                                const glm::ivec3& spawnPos,
-                                               bool tryMoveDown, bool movedUp) {
-        // OVERWORLD. The caller chain — ItemBehaviors -> Game::SpawnMobFromItem
-        // -> here — lives in `common` and carries neither a player nor a
-        // dimension; giving it one means changing an interface `common` owns.
-        // Until then a spawn egg used in the Nether creates its mob in the
-        // Overworld's manager.
-        ServerLevel&       level    = Overworld();
+                                               bool tryMoveDown, bool movedUp,
+                                               Game::DimensionId dimension,
+                                               int portalCooldownTicks) {
+        // The level of the world that was clicked — the player's own, or
+        // the one behind a portal they reached through. The caller chain
+        // (ItemBehaviors -> Game::SpawnMobFromItem -> here) passes the
+        // clicked world's dimension along.
+        ServerLevel* clicked = GetLevel(dimension);
+        ServerLevel&       level    = clicked ? *clicked : Overworld();
         MobManager*        mobs     = level.Mobs();
         ServerLevelBridge* mobLevel = level.MobLevel();
         Game::World*       world    = level.World();
@@ -2417,6 +2606,10 @@ namespace Server {
 
         // MC does NOT mark egg-spawned mobs persistent — they despawn like any
         // natural spawn. /summon is the one that pins them (see SummonMobs).
+        // A mob born IN a portal (the nether portal's zombified piglin) is
+        // held out of it for a while — MC Entity.setPortalCooldown on the
+        // spawn — or it would step through on its first wander.
+        if (portalCooldownTicks > 0) mob->portal.SetCooldown(portalCooldownTicks);
         return mobs->Add(std::move(mob)) != 0;
     }
 
@@ -2624,7 +2817,8 @@ namespace Server {
     }
 
     void IntegratedServer::HandleInteract(uint32_t connectionId, int32_t entityId,
-                                          bool attack, bool sprinting) {
+                                          bool attack, bool sprinting,
+                                          int dragonPart) {
         if (!m_sessionManager) return;
 
         // Everything below — the attacker's view, the target's id, the mob
@@ -2647,8 +2841,82 @@ namespace Server {
         // both PvE and PvP without a kind byte.
         Game::LivingEntity* target = nullptr;
         Game::Mob*          mobTarget = nullptr;
+        // A mob reached THROUGH a portal lives in another level. Ids are
+        // process-wide, so it is found by search; the attacker then acts
+        // from their image through the nearest portal into that level —
+        // reach, knockback direction and everything else read the view's
+        // position, which is moved for the duration of the hit and put
+        // back after. The mob keeps no reference to a view of another
+        // level (it would dangle when that player leaves), so a hit does
+        // not make it retaliate across the portal; the chase logic in
+        // EntityPortalTravel is what follows a player through.
+        struct AttackerImage {
+            Server::PlayerEntityView* view = nullptr;
+            glm::dvec3 position{0.0}, oldPosition{0.0};
+            float yRot = 0.0f;
+            Game::Mob* mob = nullptr;
+            ~AttackerImage() {
+                if (!view) return;
+                if (mob) mob->ClearReferenceTo(view);
+                view->position = position; view->oldPosition = oldPosition; view->yRot = yRot;
+            }
+        } image;
         if (Game::IsMobEntityId(entityId)) {
             mobTarget = mobs->Find(entityId);
+#if ENABLE_IMMERSIVE_PORTALS
+            if (m_immersivePortals) {
+                // The level the mob is in: the attacker's own, or another.
+                ServerLevel* targetLevel = mobTarget ? &level : nullptr;
+                if (!targetLevel) {
+                    ForEachLevel([&](ServerLevel& other) {
+                        if (targetLevel || &other == &level || !other.Mobs() || !other.MobLevel()) return;
+                        if (other.Mobs()->Find(entityId)) targetLevel = &other;
+                    });
+                }
+                Game::Mob* found = targetLevel ? targetLevel->Mobs()->Find(entityId) : nullptr;
+                if (found) {
+                    // Out of direct reach (or in another level altogether):
+                    // the portal that brings the attacker's image closest to
+                    // the mob is the one they are hitting through.
+                    constexpr double kDirectRangeSq = 6.0 * 6.0;
+                    const glm::dvec3 eye = attacker->GetEyePosition();
+                    const bool direct = (targetLevel == &level) &&
+                        found->GetAABBd().DistanceToSqr(eye) < kDirectRangeSq;
+                    if (!direct) {
+                        const Game::Immersive::Portal* via = nullptr;
+                        double best = 1e30;
+                        const glm::dvec3 mobCentre = found->position + glm::dvec3(0.0, 0.5 * found->GetBbHeight(), 0.0);
+                        for (const Game::Immersive::Portal* p :
+                             m_immersivePortals->CollectNear(level.Dimension(), eye, 6.0)) {
+                            if (p->IsMirror() || p->destDimension != targetLevel->Dimension()) continue;
+                            if (!p->Has(Game::Immersive::PortalFlag::Interactable)) continue;
+                            const double d = glm::length(p->TransformPoint(eye) - mobCentre);
+                            if (d < best) { best = d; via = p; }
+                        }
+                        if (!via && targetLevel != &level) return;   // no surface into that level
+                        if (via) {
+                            image.view = attacker;
+                            image.position = attacker->position;
+                            image.oldPosition = attacker->oldPosition;
+                            image.yRot = attacker->yRot;
+                            attacker->position    = via->TransformPoint(attacker->position);
+                            attacker->oldPosition = via->TransformPoint(attacker->oldPosition);
+                            {
+                                const glm::vec3 fwd = Game::Mth::ViewVector(0.0f, attacker->yRot);
+                                attacker->yRot = Game::Mth::YRotFromVector(
+                                    glm::vec3(via->TransformLocalVecNonScale(glm::dvec3(fwd))));
+                            }
+                            // Only a view of ANOTHER level must not be remembered
+                            // by the mob; in its own level the view is a normal target.
+                            if (targetLevel != &level) image.mob = found;
+                        }
+                    }
+                    mobs      = targetLevel->Mobs();
+                    mobLevel  = targetLevel->MobLevel();
+                    mobTarget = found;
+                }
+            }
+#endif
             target = mobTarget;
         } else if (entityId >= 0 && entityId < Game::kItemEntityIdBase) {
             // A player. Never yourself: MC's pick never returns the attacker,
@@ -2681,7 +2949,33 @@ namespace Server {
         constexpr double kReachBuffer            = 3.0;   // handleInteract's slack
         constexpr double kMaxRangeSq =
             (kEntityInteractionRange + kReachBuffer) * (kEntityInteractionRange + kReachBuffer);
-        if (target->GetAABBd().DistanceToSqr(attacker->GetEyePosition()) >= kMaxRangeSq) return;
+
+        // ── Ender dragon: the PART is the target (MC EnderDragonPart) ──────
+        //
+        // MC's interact packet names a part entity and every check runs
+        // against that part's own box; the dragon body itself is not
+        // pickable. Here the part index rides the packet, so: require one,
+        // clamp it, recompute the server's own part layout, and measure
+        // reach against THAT box — the 16-block body box must not validate a
+        // click vanilla's parts would reject.
+        auto* dragonTarget = dynamic_cast<Game::EnderDragon*>(mobTarget);
+        bool dragonHeadHit = false;
+        if (dragonTarget) {
+            if (dragonPart < 0 ||
+                dragonPart >= Game::EnderDragon::kDragonPartCount) {
+                return;   // no part claimed — vanilla has nothing to hit either
+            }
+            Game::AABB parts[Game::EnderDragon::kDragonPartCount];
+            dragonTarget->ComputePartBoxes(parts);
+            const Game::AABBd partBox = Game::ToAABBd(parts[dragonPart]);
+            if (partBox.DistanceToSqr(attacker->GetEyePosition()) >= kMaxRangeSq) {
+                return;
+            }
+            dragonHeadHit = (dragonPart == Game::EnderDragon::kDragonPartHead);
+        } else if (target->GetAABBd().DistanceToSqr(attacker->GetEyePosition()) >=
+                   kMaxRangeSq) {
+            return;
+        }
 
         // ── INTERACT (right-click) ─────────────────────────────────────────
         // MC Player.interactOn, in ITS order:
@@ -2795,7 +3089,14 @@ namespace Server {
                         && player->getKnownHorizontalMovement() < kMaxSweepSpeed
                         && Game::IsSwordItem(held.itemId);
 
-        const bool hit = target->Hurt(Game::MobDamageSource::PlayerAttack, damage, attacker);
+        // MC Player.attack reaches the dragon through the part entity's
+        // hurtServer -> EnderDragon.hurt(part, ...): a head hit is full
+        // damage, everything else the body reduction (HurtPart's default).
+        const bool hit = dragonTarget
+            ? dragonTarget->HurtPart(Game::MobDamageSource::PlayerAttack, damage,
+                                     attacker, dragonHeadHit,
+                                     /*direct=*/attacker)
+            : target->Hurt(Game::MobDamageSource::PlayerAttack, damage, attacker);
         if (hit) {
             attacker->SetLastHurtMob(target);
             // MC's sprint hit adds 0.5 extra knockback on top of the base the
@@ -2992,12 +3293,17 @@ namespace Server {
         }
     }
 
-    void IntegratedServer::BroadcastItemEntityPickups(
+    void IntegratedServer::BroadcastItemEntityPickups(Game::DimensionId dimension,
             const std::vector<ItemPickupEvent>& pickups) {
-        if (pickups.empty() || !m_networkServer) return;
+        if (pickups.empty() || !m_sessionManager) return;
 
-        // Unscoped, like removals: a client that never knew the entity simply
-        // finds nothing to animate and ignores the packet.
+        // Scoped to the item's dimension like every other positional packet.
+        // This used to be an unscoped broadcast ("a client that never knew
+        // the entity ignores it"), which stopped being true with several
+        // levels per client: an unscoped packet lands in whichever level the
+        // client's stream was last pointed at, and while a portal view is
+        // streaming another dimension that is often the wrong one — the take
+        // then retires nothing and the item stays on the floor.
         for (const auto& p : pickups) {
             Network::TakeItemEntityS2CPacket packet;
             packet.itemEntityId = p.itemEntityId;
@@ -3005,8 +3311,12 @@ namespace Server {
             packet.amount       = p.amount;
 
             const auto data = Network::Serialization::Serialize(packet);
-            m_networkServer->BroadcastPacket(
-                static_cast<uint8_t>(Network::PacketId::TakeItemEntityS2C), data);
+            for (const auto& session : m_sessionManager->GetAllSessions()) {
+                if (!session || !session->GetConnection()) continue;
+                if (!session->LoadsDimension(dimension)) continue;
+                session->GetConnection()->SendPacketIn(dimension,
+                    static_cast<uint8_t>(Network::PacketId::TakeItemEntityS2C), data);
+            }
         }
     }
 
@@ -3032,8 +3342,11 @@ namespace Server {
 
         for (const auto& session : m_sessionManager->GetAllSessions()) {
             if (!session || !session->GetConnection()) continue;
-            if (Game::DimensionFromRaw(session->GetDimensionId()) != dimension) continue;
-            session->GetConnection()->SendPacket(
+            // Every session that holds chunks of this dimension — with
+            // immersive portals that includes a player standing in another
+            // one, looking in through a surface.
+            if (!session->LoadsDimension(dimension)) continue;
+            session->GetConnection()->SendPacketIn(dimension,
                 static_cast<uint8_t>(Network::PacketId::EntityDestroy), data);
         }
     }
@@ -3104,12 +3417,13 @@ namespace Server {
         }
     }
 
-    void IntegratedServer::BroadcastXpOrbPickups(
+    void IntegratedServer::BroadcastXpOrbPickups(Game::DimensionId dimension,
             const std::vector<XpOrbPickupEvent>& pickups) {
-        if (pickups.empty() || !m_networkServer) return;
+        if (pickups.empty() || !m_sessionManager) return;
 
         // MC broadcasts ClientboundTakeItemEntityPacket for orbs too; the
-        // client routes on the id range. Unscoped, like the item pickups.
+        // client routes on the id range. Dimension-scoped — see
+        // BroadcastItemEntityPickups.
         for (const auto& p : pickups) {
             Network::TakeItemEntityS2CPacket packet;
             packet.itemEntityId = p.orbId;
@@ -3117,8 +3431,12 @@ namespace Server {
             packet.amount       = 1;
 
             const auto data = Network::Serialization::Serialize(packet);
-            m_networkServer->BroadcastPacket(
-                static_cast<uint8_t>(Network::PacketId::TakeItemEntityS2C), data);
+            for (const auto& session : m_sessionManager->GetAllSessions()) {
+                if (!session || !session->GetConnection()) continue;
+                if (!session->LoadsDimension(dimension)) continue;
+                session->GetConnection()->SendPacketIn(dimension,
+                    static_cast<uint8_t>(Network::PacketId::TakeItemEntityS2C), data);
+            }
         }
     }
 
@@ -3142,9 +3460,489 @@ namespace Server {
         m_sessionManager->ForEachSessionWatching(dimension, chunk,
                                                  [&](PlayerSession& session) {
             if (auto* conn = session.GetConnection()) {
-                conn->SendPacket(static_cast<uint8_t>(packetId), data);
+                conn->SendPacketIn(dimension, static_cast<uint8_t>(packetId), data);
             }
         });
+    }
+
+    void IntegratedServer::OnChunkSentToClient(PlayerSession& session, Game::DimensionId dimension,
+                                               Game::Math::ChunkPos chunk) {
+#if ENABLE_IMMERSIVE_PORTALS
+        if (!m_immersivePortals) return;
+        auto* conn = session.GetConnection();
+        if (!conn) return;
+        // The dimension's global surfaces ride the first chunk the client
+        // gets of it: by then the client holds a level for the dimension.
+        if (session.MarkGlobalPortalsSynced(dimension)) {
+            m_immersivePortals->SyncGlobalsToClient(*conn, dimension);
+            SendAoRegions(*conn, dimension);
+        }
+        m_immersivePortals->SyncChunkToClient(*conn, dimension, chunk);
+#else
+        (void)session; (void)dimension; (void)chunk;
+#endif
+    }
+
+    void IntegratedServer::OnObsidianRemoved(Game::DimensionId dimension, const glm::ivec3& pos) {
+#if ENABLE_IMMERSIVE_PORTALS
+        if (m_netherPortalGeneration) m_netherPortalGeneration->OnObsidianRemoved(dimension, pos);
+#else
+        (void)dimension; (void)pos;
+#endif
+    }
+
+#if ENABLE_IMMERSIVE_PORTALS
+    void IntegratedServer::SetImmersivePortals(bool on) {
+        m_config.immersivePortals = on;
+        Game::Portals::SetImmersiveNetherPortals(on);
+        Log::Info("[ImmersivePortals] nether portals are now %s", on ? "immersive" : "vanilla");
+    }
+
+    bool IntegratedServer::OnImmersiveFrameLit(Game::ILevelWrite& level, const glm::ivec3& firePos) {
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server || !server->m_netherPortalGeneration) return false;
+        const Game::DimensionId dimension = level.GetDimension();
+        const auto shape = Game::Immersive::FrameShape::Find(level, firePos);
+        if (!shape) return false;
+        return server->m_netherPortalGeneration->OnFrameLit(dimension, *shape);
+    }
+
+    void IntegratedServer::OnClientPortalTeleport(PlayerSession& session,
+                                                  const Network::PortalTeleportC2SPacket& packet) {
+        ASSERT_SERVER_THREAD();
+        ServerPlayer* player = session.GetPlayer();
+        if (!player || !m_immersivePortals) return;
+
+        // The mod's bounds: the client is trusted about WHERE it crossed,
+        // within reason.
+        constexpr double kMaxPositionError  = 16.0;
+        constexpr double kMaxPortalDistance = 20.0;
+
+        const Game::DimensionId here = Game::DimensionFromRaw(player->getDimensionId());
+        const glm::dvec3 eyeBefore(packet.eyeX, packet.eyeY, packet.eyeZ);
+        const glm::dvec3 serverFeet = player->getPosition();
+
+        auto reject = [&](const char* why) {
+            Log::Warning("[ImmersivePortals] Rejected portal crossing of '%s' through #%u: %s",
+                         player->getName().c_str(), packet.portalId, why);
+            session.SendDimensionResync();
+            if (auto* conn = session.GetConnection()) {
+                conn->Teleport(serverFeet.x, serverFeet.y, serverFeet.z,
+                               player->getYaw(), player->getPitch());
+            }
+        };
+
+        const Game::Immersive::Portal* portal = m_immersivePortals->Get(packet.portalId);
+        if (!portal) { reject("unknown portal"); return; }
+        if (!portal->Has(Game::Immersive::PortalFlag::Teleportable)) { reject("not teleportable"); return; }
+        if (portal->specificPlayerId != 0 && portal->specificPlayerId != player->getPlayerId()) {
+            reject("not this player's portal"); return;
+        }
+        if (portal->dimension != here || Game::DimensionFromRaw(packet.dimensionBefore) != here) {
+            reject("dimension mismatch"); return;
+        }
+        const double eyeHeight = std::clamp(eyeBefore.y - serverFeet.y, 0.5, 2.0);
+        if (glm::length(eyeBefore - (serverFeet + glm::dvec3(0.0, eyeHeight, 0.0))) > kMaxPositionError) {
+            reject("too far from the server's position"); return;
+        }
+        {
+            glm::dvec3 mn, mx;
+            portal->BoundingBox(mn, mx, 0.0);
+            if (glm::length(glm::clamp(eyeBefore, mn, mx) - eyeBefore) > kMaxPortalDistance) {
+                reject("too far from the portal"); return;
+            }
+        }
+
+        if (!TeleportPlayerThroughPortal(session, *portal, eyeBefore, packet.yaw, packet.pitch,
+                                         /*clientPredicted=*/true)) {
+            reject("destination dimension unavailable");
+        }
+    }
+
+    bool IntegratedServer::TeleportPlayerThroughPortal(PlayerSession& session,
+                                                       const Game::Immersive::Portal& portal,
+                                                       const glm::dvec3& eyeBefore,
+                                                       float yaw, float pitch, bool clientPredicted) {
+        ASSERT_SERVER_THREAD();
+        ServerPlayer* player = session.GetPlayer();
+        if (!player) return false;
+        const Game::DimensionId here = Game::DimensionFromRaw(player->getDimensionId());
+        const glm::dvec3 serverFeet = player->getPosition();
+        const double eyeHeight = std::clamp(eyeBefore.y - serverFeet.y, 0.05, 40.0);
+        // The body scales with the portal (the client does the same): the
+        // eye offset maps through the scale so the feet land on the far
+        // ground, and the player's size is multiplied for everything that
+        // reads it — reach, eye height, the placement box.
+        const double portalScale = portal.IsMirror() ? 1.0 : portal.scale;
+        const glm::dvec3 newEye  = portal.TransformPoint(eyeBefore);
+        const glm::dvec3 newFeet = newEye - glm::dvec3(0.0, eyeHeight * portalScale, 0.0);
+        const Game::DimensionId dest = portal.IsMirror() ? here : portal.destDimension;
+        player->setScale(static_cast<float>(player->getScale() * portalScale));
+
+        // The mobs hunting this player follow them to the portal (and
+        // through it, see EntityPortalTravel). Before the dimension flips:
+        // the player's view in the level being left is what they target.
+        if (m_entityTravel) {
+            if (ServerLevel* from = GetLevel(here)) {
+                m_entityTravel->OnPlayerCrossed(*from, portal, session.GetConnectionId(),
+                                                m_currentServerTick);
+            }
+        }
+
+        if (dest != here) {
+            ServerLevel* from = GetLevel(here);
+            ServerLevel* to   = GetOrCreateLevel(dest);
+            if (!to) return false;
+            // Player tickets are per level; drop them where the player was
+            // BEFORE the dimension flips, or the removal aims at the wrong
+            // manager (see PortalTravel::MovePlayer).
+            if (from && from->Tickets()) from->Tickets()->RemoveAllPlayerTickets(player->getPlayerId());
+            session.ChangeDimension(Game::DimensionToRaw(dest), glm::vec3(newFeet), /*keepPrevious=*/true);
+        } else {
+            player->teleport(newFeet);
+            session.ResyncChunkPosition();
+        }
+        player->setRotation(yaw, pitch);
+        // A crossing the client did not predict: it is still standing where
+        // it was. ChangeDimension only switches its level (a seamless
+        // crossing carries no position — the predicting client already
+        // moved), so the position goes separately, after it, in every case.
+        // Without this the client kept its old coordinates in the new
+        // dimension — the far side of the world, at sea, on one report.
+        if (!clientPredicted) {
+            if (auto* conn = session.GetConnection()) {
+                conn->Teleport(newFeet.x, newFeet.y, newFeet.z, yaw, pitch);
+                // The size changed on the server alone: the abilities packet
+                // carries it to the client.
+                conn->SendPlayerAbilities(*player);
+            }
+        }
+        // The arrival point may sit inside a vanilla portal block (the
+        // frame's interior); its own transition must not fire on top.
+        player->portalState().SetCooldown(Game::Portals::kPlayerPortalCooldown);
+        // The server's own crossing watch starts over on the far side.
+        if (m_entityTravel) {
+            m_entityTravel->OnPlayerTeleported(session.GetConnectionId(), dest, newEye,
+                                               m_currentServerTick);
+        }
+        // A gun pair flashes when something goes through it.
+        Game::Portal::ServerRegistry().OnImmersiveCrossing(portal.tag);
+
+        Log::Info("[ImmersivePortals] '%s' crossed #%u into %s at (%.1f, %.1f, %.1f)%s",
+                  player->getName().c_str(), portal.id,
+                  std::string(Game::DimensionName(dest)).c_str(), newFeet.x, newFeet.y, newFeet.z,
+                  clientPredicted ? "" : " (server-detected)");
+        return true;
+    }
+#endif
+
+    std::vector<ChunkLoader> IntegratedServer::ComputeChunkLoaders(const PlayerSession& session) const {
+        std::vector<ChunkLoader> loaders;
+        const Game::DimensionId here = Game::DimensionFromRaw(session.GetDimensionId());
+
+        // 1. The player's own view — MC's one and only loader.
+        {
+            ChunkLoader own;
+            own.dimension = here;
+            own.view      = ChunkTrackingView::Of(session.GetAnchorChunk(), session.GetViewDistance());
+            own.source    = ChunkLoader::Source::Player;
+            loaders.push_back(own);
+        }
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // 2. One loader per portal the player is near, at the portal's
+        //    destination, shrinking with distance — the mod's
+        //    ChunkVisibility.getGeneralDirectPortalLoader numbers:
+        //    full view distance within 5 blocks, two thirds within 15,
+        //    a third beyond. The mod caps these at 8 chunks; here the
+        //    direct loader is not capped — standing at a portal loads its
+        //    far side to the player's own view distance — and only the
+        //    indirect loaders (a portal seen through a portal) keep the cap.
+        // 3. One level of INDIRECT loaders: portals near each far side get a
+        //    quarter-radius loader at their own destination, so a portal seen
+        //    through a portal is not a hole.
+        if (m_immersivePortals && session.GetPlayer()) {
+            constexpr double kVisiblePortalRangeBlocks  = 128.0;   // 8 chunks
+            constexpr double kIndirectPortalRangeBlocks = 32.0;    // 2 chunks
+            constexpr int    kIndirectLoadingRadiusCap  = 8;
+            const int viewDistance = session.GetViewDistance();
+            const uint32_t playerId = session.GetPlayerId();
+            const glm::dvec3 playerPos = session.GetPlayer()->getPosition();
+
+            auto usable = [&](const Game::Immersive::Portal& p) {
+                if (!p.Has(Game::Immersive::PortalFlag::Visible)) return false;
+                if (p.specificPlayerId != 0 && p.specificPlayerId != playerId) return false;
+                return true;
+            };
+            auto distanceTo = [](const Game::Immersive::Portal& p, const glm::dvec3& from) {
+                glm::dvec3 mn, mx;
+                p.BoundingBox(mn, mx, 0.0);
+                const glm::dvec3 c = glm::clamp(from, mn, mx);
+                return glm::length(c - from);
+            };
+            auto directRadius = [&](double distance) {
+                int r = viewDistance;
+                if (distance >= 15.0)     r = viewDistance / 3;
+                else if (distance >= 5.0) r = viewDistance * 2 / 3;
+                return std::max(r, 1);
+            };
+            auto chunkOf = [](const glm::dvec3& p) {
+                return Game::Math::ChunkPos{ static_cast<int>(std::floor(p.x)) >> 4,
+                                             static_cast<int>(std::floor(p.z)) >> 4 };
+            };
+            auto add = [&](Game::DimensionId dim, Game::Math::ChunkPos center, int radius,
+                           ChunkLoader::Source source) {
+                // Same centre, same dimension: keep the larger — a set union
+                // does not care, and it keeps the ticket count down.
+                for (ChunkLoader& existing : loaders) {
+                    if (existing.dimension == dim && existing.view.center == center) {
+                        if (radius > existing.view.viewDistance) {
+                            existing.view = ChunkTrackingView::Of(center, radius);
+                            if (existing.source != ChunkLoader::Source::Player) existing.source = source;
+                        }
+                        return;
+                    }
+                }
+                ChunkLoader l;
+                l.dimension = dim;
+                l.view      = ChunkTrackingView::Of(center, radius);
+                l.source    = source;
+                loaders.push_back(l);
+            };
+
+            const auto near = m_immersivePortals->CollectNear(here, playerPos, kVisiblePortalRangeBlocks);
+            for (const Game::Immersive::Portal* portal : near) {
+                if (!usable(*portal)) continue;
+                const double distance = distanceTo(*portal, playerPos);
+                int radius = directRadius(distance);
+                // A portal that enlarges the far side needs proportionally
+                // more of it loaded to fill the view.
+                if (portal->scale > 2.0) radius = std::min(radius * 2, viewDistance);
+                // A global surface is kilometres wide: what its far side
+                // needs loaded is around the player's image through it, not
+                // its centre.
+                const glm::dvec3 farPos = portal->Has(Game::Immersive::PortalFlag::Global)
+                    ? portal->TransformPoint(playerPos)
+                    : (portal->IsMirror() ? portal->origin : portal->destination);
+                add(portal->destDimension, chunkOf(farPos), radius, ChunkLoader::Source::Portal);
+                if (portal->Has(Game::Immersive::PortalFlag::Global)) continue;
+
+                // Indirect: portals near the far side, seen through this one.
+                const auto beyond = m_immersivePortals->CollectNear(portal->destDimension, farPos,
+                                                                    kIndirectPortalRangeBlocks);
+                for (const Game::Immersive::Portal* second : beyond) {
+                    if (second == portal || !usable(*second)) continue;
+                    const glm::dvec3 farFar = second->IsMirror() ? second->origin : second->destination;
+                    add(second->destDimension, chunkOf(farFar),
+                        std::clamp(radius / 4, 1, kIndirectLoadingRadiusCap),
+                        ChunkLoader::Source::IndirectPortal);
+                }
+            }
+        }
+#endif
+        return loaders;
+    }
+
+    void IntegratedServer::EnsureGlobalPortals(Game::DimensionId dimension) {
+#if ENABLE_IMMERSIVE_PORTALS
+        if (!m_immersivePortals) return;
+        using Game::Immersive::Portal;
+        namespace PortalFlag = Game::Immersive::PortalFlag;
+        const int  wrap  = m_config.worldWrapSize;
+        const bool stack = m_config.dimensionStack;
+        if (wrap <= 0 && !stack) return;
+
+        const std::string dimName(Game::DimensionName(dimension));
+        auto exists = [&](const std::string& tag) {
+            bool found = false;
+            m_immersivePortals->ForEachInDimension(dimension, [&](const Portal& p) {
+                if (p.tag == tag) found = true;
+            });
+            return found;
+        };
+        auto global = [&](const std::string& tag) {
+            Portal p;
+            p.dimension = dimension;
+            p.flags = PortalFlag::Global | PortalFlag::Teleportable | PortalFlag::Visible |
+                      PortalFlag::CrossPortalCollision | PortalFlag::RenderPlayer;
+            p.kind = Game::Immersive::PortalKind::Generic;
+            p.tag  = tag;
+            return p;
+        };
+
+        const double minY   = Game::DimensionMinY(dimension);
+        const double maxY   = minY + Game::DimensionLogicalHeight(dimension);
+        const double midY   = 0.5 * (minY + maxY);
+        const double height = maxY - minY;
+
+        // The wrap width of THIS dimension: the Nether is an eighth of the
+        // Overworld, as its portal coordinates are.
+        double width = static_cast<double>(wrap);
+        if (dimension == Game::DimensionId::Nether) width = std::max(64.0, std::floor(wrap / 128.0) * 16.0);
+        const double half = 0.5 * width;
+
+        if (wrap > 0) {
+            // East border faces −X (into the world), leads to the west
+            // border; AddBiWay makes the west face (+X) from it. Its width
+            // runs along +Z so that cross(W, up) is −X.
+            const std::string tagX = "global:wrap_x:" + dimName;
+            if (!exists(tagX)) {
+                Portal p = global(tagX);
+                p.origin = { half, midY, 0.0 };
+                p.axisW  = { 0.0, 0.0, 1.0 };
+                p.axisH  = { 0.0, 1.0, 0.0 };
+                p.width  = width;
+                p.height = height;
+                p.destDimension = dimension;
+                p.destination   = { -half, midY, 0.0 };
+                m_immersivePortals->AddBiWay(p);
+            }
+            const std::string tagZ = "global:wrap_z:" + dimName;
+            if (!exists(tagZ)) {
+                Portal p = global(tagZ);
+                p.origin = { 0.0, midY, half };
+                p.axisW  = { -1.0, 0.0, 0.0 };   // cross(−X, up) = −Z, into the world
+                p.axisH  = { 0.0, 1.0, 0.0 };
+                p.width  = width;
+                p.height = height;
+                p.destDimension = dimension;
+                p.destination   = { 0.0, midY, -half };
+                m_immersivePortals->AddBiWay(p);
+            }
+        }
+
+        if (stack) {
+            // This dimension's floor onto the next one's ceiling, 1:1.
+            // Overworld over Nether over End over Overworld.
+            Game::DimensionId below;
+            switch (dimension) {
+                case Game::DimensionId::Overworld: below = Game::DimensionId::Nether;    break;
+                case Game::DimensionId::Nether:    below = Game::DimensionId::End;       break;
+                default:                           below = Game::DimensionId::Overworld; break;
+            }
+            const std::string tag = "global:stack:" + dimName;
+            if (!exists(tag)) {
+                const double extent = wrap > 0 ? static_cast<double>(wrap) : 200000.0;
+                const double belowTop = Game::DimensionMinY(below) + Game::DimensionLogicalHeight(below);
+                Portal p = global(tag);
+                p.origin = { 0.0, minY, 0.0 };
+                p.axisW  = { 1.0, 0.0, 0.0 };
+                p.axisH  = { 0.0, 0.0, -1.0 };   // cross(+X, −Z) = +Y: the front is above
+                p.width  = extent;
+                p.height = extent;
+                p.destDimension = below;
+                p.destination   = { 0.0, belowTop, 0.0 };
+                m_immersivePortals->AddBiWay(p);
+            }
+        }
+        Log::Info("[ImmersivePortals] Global portals ensured for %s (wrap %d, stack %s)",
+                  dimName.c_str(), wrap, stack ? "on" : "off");
+#else
+        (void)dimension;
+#endif
+    }
+
+    // ── "No ambient occlusion" boxes ──────────────────────────────────────
+
+    namespace {
+        std::string AoRegionsPath(IntegratedServer& server) {
+            ServerLevel* overworld = server.GetLevel(Game::DimensionId::Overworld);
+            if (!overworld) return {};
+            const std::string& root = overworld->Config().savePath;
+            if (root.empty()) return {};
+            return (std::filesystem::path(root) / "data" / "ao_regions.json").string();
+        }
+    }
+
+    void IntegratedServer::AddAoRegion(Game::DimensionId dimension, const glm::ivec3& a, const glm::ivec3& b) {
+        AoRegion r;
+        r.dimension = dimension;
+        r.min = glm::min(a, b);
+        r.max = glm::max(a, b);
+        m_aoRegions.push_back(r);
+        BroadcastAoRegions(dimension);
+        SaveAoRegions();
+    }
+
+    size_t IntegratedServer::RemoveAoRegionsAt(Game::DimensionId dimension, const glm::ivec3& pos) {
+        const size_t before = m_aoRegions.size();
+        m_aoRegions.erase(std::remove_if(m_aoRegions.begin(), m_aoRegions.end(), [&](const AoRegion& r) {
+            return r.dimension == dimension &&
+                   pos.x >= r.min.x && pos.x <= r.max.x &&
+                   pos.y >= r.min.y && pos.y <= r.max.y &&
+                   pos.z >= r.min.z && pos.z <= r.max.z;
+        }), m_aoRegions.end());
+        const size_t removed = before - m_aoRegions.size();
+        if (removed) { BroadcastAoRegions(dimension); SaveAoRegions(); }
+        return removed;
+    }
+
+    void IntegratedServer::SendAoRegions(ServerConnection& connection, Game::DimensionId dimension) const {
+        Network::AoRegionsS2CPacket packet;
+        packet.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(dimension));
+        for (const AoRegion& r : m_aoRegions) {
+            if (r.dimension == dimension) packet.boxes.push_back({r.min, r.max});
+        }
+        connection.SendPacketIn(dimension, static_cast<uint8_t>(Network::PacketId::AoRegionsS2C),
+                                Network::Serialization::Serialize(packet));
+    }
+
+    void IntegratedServer::BroadcastAoRegions(Game::DimensionId dimension) const {
+        if (!m_sessionManager) return;
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            if (!session || !session->LoadsDimension(dimension)) continue;
+            if (auto* conn = session->GetConnection()) SendAoRegions(*conn, dimension);
+        }
+    }
+
+    void IntegratedServer::LoadAoRegions() {
+        m_aoRegions.clear();
+        const std::string path = AoRegionsPath(*this);
+        if (path.empty()) return;
+        std::ifstream in(path);
+        if (!in.is_open()) return;
+        try {
+            nlohmann::json j; in >> j;
+            for (const auto& e : j.value("regions", nlohmann::json::array())) {
+                AoRegion r;
+                r.dimension = Game::DimensionFromRaw(e.value("dimension", 0));
+                const auto mn = e.at("min"), mx = e.at("max");
+                r.min = { mn.at(0).get<int>(), mn.at(1).get<int>(), mn.at(2).get<int>() };
+                r.max = { mx.at(0).get<int>(), mx.at(1).get<int>(), mx.at(2).get<int>() };
+                m_aoRegions.push_back(r);
+            }
+            Log::Info("[AoRegions] Loaded %zu box(es) from %s", m_aoRegions.size(), path.c_str());
+        } catch (const std::exception& e) {
+            Log::Warning("[AoRegions] Could not read %s: %s", path.c_str(), e.what());
+        }
+    }
+
+    void IntegratedServer::SaveAoRegions() const {
+        const std::string path = AoRegionsPath(const_cast<IntegratedServer&>(*this));
+        if (path.empty()) return;
+        nlohmann::json j;
+        j["regions"] = nlohmann::json::array();
+        for (const AoRegion& r : m_aoRegions) {
+            j["regions"].push_back({
+                {"dimension", Game::DimensionToRaw(r.dimension)},
+                {"min", {r.min.x, r.min.y, r.min.z}},
+                {"max", {r.max.x, r.max.y, r.max.z}},
+            });
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+        std::ofstream out(path);
+        if (out.is_open()) out << j.dump(2);
+    }
+
+    void IntegratedServer::SaveImmersivePortals() {
+        SaveAoRegions();
+#if ENABLE_IMMERSIVE_PORTALS
+        if (m_immersivePortals) m_immersivePortals->Save();
+#endif
+#if ENABLE_PORTAL_GUN
+        Game::Portal::ServerRegistry().Save();
+#endif
     }
 
     void IntegratedServer::ProcessAsyncChunkResults() {
@@ -3240,7 +4038,7 @@ namespace Server {
                         m_sessionManager->ForEachSessionWatching(
                             result.dimension, result.position,
                             [&](PlayerSession& session) {
-                                session.MarkChunkPendingToSend(result.position);
+                                session.MarkChunkPendingToSend(result.dimension, result.position);
                             });
                     }
                 }
@@ -3467,7 +4265,13 @@ namespace Server {
         {
             std::vector<Game::Math::ChunkPos> anchors;
             for (const auto& session : m_sessionManager->GetAllSessions()) {
-                if (session) anchors.push_back(session->GetAnchorChunk());
+                if (!session) continue;
+                anchors.push_back(session->GetAnchorChunk());
+                // Portal far sides are anchors too — their chunks are wanted
+                // as urgently as the ones around the player.
+                for (const ChunkLoader& loader : session->Loaders()) {
+                    if (loader.source != ChunkLoader::Source::Player) anchors.push_back(loader.Center());
+                }
             }
             Threading::SetServerChunkLoadAnchors(std::move(anchors));
         }
@@ -3488,19 +4292,13 @@ namespace Server {
         for (const auto& session : sessions) {
             if (!session) continue;
 
-            // The level this player is standing in. Everything below is asked
-            // of it and only it — "is this chunk loaded" has a different
-            // answer in every world.
-            ServerLevel& L = LevelOf(*session);
-            Game::World* world = L.World();
-            if (!world) continue;
-
             // Library-side view tickets (MC player tickets) are OFF: see
             // MyTerrainGenerator::RequestChunkGeneration. Kept behind a flag for
             // when library unloading is re-enabled (they are what expires the
             // area behind the player).
             static constexpr bool kLibraryViewTickets = false;
             if (kLibraryViewTickets) {
+                ServerLevel& L = LevelOf(*session);
                 ForEachLevel([&](ServerLevel& other) {
                     auto* gen = other.TerrainGenerator();
                     if (!gen) return;
@@ -3510,12 +4308,20 @@ namespace Server {
                 });
             }
 
+            // Every chunk the diff reports names its dimension: the session's
+            // loaders span the world it stands in and every portal far side
+            // near it. A far side's level is built on demand — a portal into
+            // the Nether is what brings the Nether into being, exactly as
+            // walking through one did before.
             session->UpdateChunkTracking(
-                [&](Game::Math::ChunkPos pos) {
+                ComputeChunkLoaders(*session),
+                [&](Game::DimensionId dim, Game::Math::ChunkPos pos) {
+                    ServerLevel* L = GetOrCreateLevel(dim);
+                    if (!L || !L->World()) return;
                     // MC markChunkPendingToSend: getChunkToSend() returns null
                     // for a chunk that is not loaded, and the call quietly does
                     // nothing. Ours asks the world the same question.
-                    if (world->IsChunkLoaded(pos.x, pos.z)) {
+                    if (L->World()->IsChunkLoaded(pos.x, pos.z)) {
                         // Claim its entities. This branch NEVER goes through
                         // RequestChunkLoad, so it was the one route by which a
                         // chunk could become visible to a player without its
@@ -3523,43 +4329,39 @@ namespace Server {
                         // route the SPAWN chunks take, the player's own chunk
                         // among them, because those are already resident by the
                         // time the session starts tracking them.
-                        //
-                        // Symptom it caused: everything you dropped at your feet
-                        // was still on disk and simply never came back, while
-                        // mob drops one chunk over reloaded fine.
-                        if (L.Entities()) L.Entities()->RequestLoad(pos);
-                        session->MarkChunkPendingToSend(pos);
+                        if (L->Entities()) L->Entities()->RequestLoad(pos);
+                        session->MarkChunkPendingToSend(dim, pos);
                     } else {
-                        RequestChunkLoad(L.Dimension(), pos, 0);
+                        RequestChunkLoad(dim, pos, 0);
                     }
                 },
-                [&](Game::Math::ChunkPos pos) {
-                    session->DropChunk(pos);
+                [&](Game::DimensionId dim, Game::Math::ChunkPos pos) {
+                    session->DropChunk(dim, pos);
 
+                    ServerLevel* L = GetLevel(dim);
+                    if (!L) return;
                     // A load still in flight for a chunk nobody watches any
                     // more is pure waste — and after a far teleport that is
                     // most of the queue: measured 2026-08-29, ~1,500 chunks of
                     // the OLD area kept generating for 30 s after the player
-                    // left (6 workers x 65 ms each), landing in the cache only
-                    // to be unloaded 3 s later ("Unloaded 280 unwatched
-                    // chunks" every sweep, 250 ms server stalls each). MC has
-                    // no equivalent because its tickets ARE the request: drop
-                    // the ticket and the chunk holder's future is cancelled.
+                    // left. MC has no equivalent because its tickets ARE the
+                    // request: drop the ticket and the chunk holder's future
+                    // is cancelled.
                     //
-                    // The session's own view is not updated until after this
+                    // The session's own set is not updated until after this
                     // callback, so it still reports the chunk as watched —
                     // only OTHER sessions count.
-                    auto pending = L.pendingChunkLoads.find(pos);
-                    if (pending != L.pendingChunkLoads.end()) {
+                    auto pending = L->pendingChunkLoads.find(pos);
+                    if (pending != L->pendingChunkLoads.end()) {
                         bool watchedByOther = false;
                         m_sessionManager->ForEachSessionWatching(
-                            L.Dimension(), pos, [&](PlayerSession& other) {
+                            dim, pos, [&](PlayerSession& other) {
                                 if (&other != session.get()) watchedByOther = true;
                             });
                         if (!watchedByOther) {
-                            L.pendingChunkLoads.erase(pending);
+                            L->pendingChunkLoads.erase(pending);
                             if (Threading::g_serverWorkerPool) {
-                                Threading::g_serverWorkerPool->CancelChunkJobs(L.Dimension(), pos);
+                                Threading::g_serverWorkerPool->CancelChunkJobs(dim, pos);
                             }
                         }
                     }
@@ -3615,8 +4417,7 @@ namespace Server {
                     // player standing in the Nether pins the Overworld chunks
                     // at the same x/z — forever, since nobody is ever going to
                     // stop tracking them.
-                    if (Game::DimensionFromRaw(session->GetDimensionId()) != dimension) continue;
-                    if (session->GetTrackingView().Contains(pos)) return true;
+                    if (session->IsWatching(dimension, pos)) return true;
                 }
                 return false;
             };
@@ -3624,8 +4425,25 @@ namespace Server {
             // Mobs are removed for ALL unloaded chunks in one batched call
             // after the loop — see MobManager::RemoveInChunks.
             std::vector<Game::Math::ChunkPos> unloadedForMobs;
+            // Grace before an unwatched chunk is really unloaded (instant
+            // revisits: the client keeps its meshes, the server keeps the
+            // data, so coming back is a 20-byte packet per chunk). Over the
+            // soft cap the oldest-unwatched go first, down to the 3 s the
+            // sweep always had.
+            static constexpr int64_t kResidencyGraceTicks = 20 * 120;   // 2 minutes
+            static constexpr size_t  kResidencySoftCap    = 12000;      // loaded chunks per level
+            const int64_t now = m_currentServerTick;
+            const bool overCap = loadedPositions.size() > kResidencySoftCap;
             for (const auto& pos : loadedPositions) {
-                if (anyoneTracking(pos)) continue;
+                if (anyoneTracking(pos)) { level.unwatchedSince.erase(pos); continue; }
+                auto since = level.unwatchedSince.find(pos);
+                if (since == level.unwatchedSince.end()) {
+                    level.unwatchedSince.emplace(pos, now);
+                    continue;
+                }
+                const int64_t age = now - since->second;
+                if (age < kResidencyGraceTicks && !(overCap && age >= 60)) continue;
+                level.unwatchedSince.erase(since);
                 {
                     PROFILE_ZONE_N("Unload.CacheRemove");
                     if (!chunkProvider->UnloadChunk(pos)) continue;
@@ -3678,7 +4496,7 @@ namespace Server {
                 for (const auto& packet : outgoing) {
                     auto session = m_sessionManager->GetSession(packet.connectionId);
                     if (!session || !session->GetConnection()) continue;
-                    session->GetConnection()->SendPacket(
+                    session->GetConnection()->SendPacketIn(level.Dimension(),
                         static_cast<uint8_t>(packet.packetId), packet.payload);
                 }
             }
@@ -3772,7 +4590,7 @@ namespace Server {
             // breaking either of the two wall blocks behind a portal
             // destroys it.
             Game::Portal::ServerRegistry().OnBlockChanged(
-                glm::ivec3(worldX, worldY, worldZ));
+                Game::DimensionId::Overworld, glm::ivec3(worldX, worldY, worldZ));
 #endif
 
             Log::Debug("Applied block change at (%d, %d, %d): %d",
@@ -4031,6 +4849,39 @@ namespace Server {
             session->SendInventoryFull();
             Log::Info("[IntegratedServer] Sent full inventory sync to client");
 
+            // A returning player who logged out in another dimension: the
+            // client boots assuming the Overworld, so before the join
+            // teleport it must be told the real dimension (sky, build
+            // range), and the LEVEL must exist for the chunk stream —
+            // LevelOf(session) resolves whatever the player's saved
+            // dimension says. MC does this through the login packet's
+            // dimension field; this engine's equivalent is the same
+            // ChangeDimensionS2C a portal crossing sends. Fresh joiners are
+            // dimension 0 and skip all of it.
+            if (playerPtr->getDimensionId() != 0) {
+                const Game::DimensionId dim =
+                    Game::DimensionFromRaw(playerPtr->getDimensionId());
+                GetOrCreateLevel(dim);
+
+                Network::ChangeDimensionS2CPacket dimPacket;
+                dimPacket.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(dim));
+                dimPacket.flags = static_cast<uint8_t>(
+                    (Game::DimensionHasSkyLight(dim)
+                         ? Network::ChangeDimensionS2CPacket::kFlagHasSkyLight : 0) |
+                    (Game::DimensionHasCeiling(dim)
+                         ? Network::ChangeDimensionS2CPacket::kFlagHasCeiling : 0));
+                dimPacket.ambientLight =
+                    (dim == Game::DimensionId::Nether) ? 0.1f : 0.0f;
+                dimPacket.minY   = Game::DimensionMinY(dim);
+                dimPacket.height = Game::DimensionLogicalHeight(dim);
+                connection->SendPacket(
+                    static_cast<uint8_t>(Network::PacketId::ChangeDimensionS2C),
+                    Network::Serialization::Serialize(dimPacket));
+                connection->SetOutboundDimension(dim);
+                Log::Info("[IntegratedServer] '%s' rejoins in dimension %d",
+                          playerName.c_str(), playerPtr->getDimensionId());
+            }
+
             // MC PlayerList.placeNewPlayer:171-178 —
             //
             //   component = Component.translatable("multiplayer.player.joined",
@@ -4232,7 +5083,8 @@ namespace Server {
     // CLIENT SETTINGS
     // ========================================================================
 
-    void IntegratedServer::OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance) {
+    void IntegratedServer::OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance,
+                                                    int requestedSimulationDistance) {
         // Note the ordering: a missing session manager must still stash, not
         // return. Bailing out before the stash would lose the settings exactly
         // when they are most likely to arrive early — during startup.
@@ -4259,10 +5111,12 @@ namespace Server {
         // chunks a view distance of 2 covers.
         {
             std::lock_guard<std::mutex> lock(m_pendingViewDistanceMutex);
-            m_pendingClientViewDistance[connectionId] = requestedViewDistance;
+            m_pendingClientViewDistance[connectionId] =
+                ClientDistances{ requestedViewDistance, requestedSimulationDistance };
         }
-        Log::Info("[IntegratedServer] Client settings for connection %u: view distance %d "
-                  "queued for the server thread", connectionId, requestedViewDistance);
+        Log::Info("[IntegratedServer] Client settings for connection %u: view distance %d, "
+                  "simulation distance %d queued for the server thread",
+                  connectionId, requestedViewDistance, requestedSimulationDistance);
     }
 
     void IntegratedServer::ApplyPendingClientViewDistances() {
@@ -4272,14 +5126,14 @@ namespace Server {
         // lookups below — those take PlayerSessionManager's own mutex, and
         // nesting two locks in one order here and the other order anywhere
         // else is how this deadlocks later.
-        std::unordered_map<uint32_t, int> pending;
+        std::unordered_map<uint32_t, ClientDistances> pending;
         {
             std::lock_guard<std::mutex> lock(m_pendingViewDistanceMutex);
             if (m_pendingClientViewDistance.empty()) return;
             pending.swap(m_pendingClientViewDistance);
         }
 
-        std::unordered_map<uint32_t, int> stillWaiting;
+        std::unordered_map<uint32_t, ClientDistances> stillWaiting;
         for (const auto& [connectionId, requested] : pending) {
             auto session = m_sessionManager->GetSessionByConnection(connectionId);
             // Not ready is not a failure: the join is mid-flight and the next
@@ -4305,15 +5159,28 @@ namespace Server {
 
     void IntegratedServer::ApplyClientViewDistance(PlayerSession& session,
                                                    uint32_t connectionId,
-                                                   int requestedViewDistance) {
+                                                   ClientDistances requested) {
         // Clamp client's requested distance to [2, serverViewDistance]
-        int effectiveViewDistance = std::clamp(requestedViewDistance, 2, m_config.serverViewDistance);
+        const int effectiveViewDistance =
+            std::clamp(requested.viewDistance, 2, m_config.serverViewDistance);
+        // MC IntegratedServer.tickServer: max(2, options.simulationDistance),
+        // capped by the same server ceiling as the view distance so a client
+        // cannot ask this machine to tick more than it would ever send.
+        const int effectiveSimulationDistance =
+            std::clamp(requested.simulationDistance, 2, m_config.serverViewDistance);
 
-        Log::Info("[IntegratedServer] Player %u requested view distance %d, effective: %d (server cap: %d)",
-                  session.GetPlayerId(), requestedViewDistance, effectiveViewDistance, m_config.serverViewDistance);
+        Log::Info("[IntegratedServer] Player %u requested view distance %d (effective %d), "
+                  "simulation distance %d (effective %d), server cap %d",
+                  session.GetPlayerId(), requested.viewDistance, effectiveViewDistance,
+                  requested.simulationDistance, effectiveSimulationDistance,
+                  m_config.serverViewDistance);
 
         // Update session view distance (triggers watch set recalculation)
         session.SetViewDistance(effectiveViewDistance);
+        // The ticket manager picks this up on the session's next tick
+        // (PlayerSessionManager::UpdatePlayerTickets) and re-levels the
+        // player's PLAYER_SIMULATION ticket in place.
+        session.SetSimulationDistance(effectiveSimulationDistance);
 
         // Send effective view distance back to client
         SendSetChunkCacheRadius(connectionId, effectiveViewDistance);
@@ -4505,7 +5372,9 @@ namespace Server {
         
         // Configure session manager
         PlayerSessionManager::Config sessionConfig;
-        sessionConfig.defaultSimulationDistance = 8;
+        // Only in force between CreateSession and the client's first
+        // ClientConfigC2S a tick later. MC's server.properties default.
+        sessionConfig.defaultSimulationDistance = 10;
         sessionConfig.defaultViewDistance = m_config.defaultViewDistance;
         sessionConfig.maxViewDistance = m_config.serverViewDistance;  // Server's view distance cap
         // Placeholder at init time — the server thread recomputes the real

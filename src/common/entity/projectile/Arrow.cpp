@@ -72,7 +72,7 @@ namespace Game {
         needsSync = true;
     }
 
-    void Arrow::OnHitEntity(LivingEntity& target) {
+    void Arrow::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         const double speed = glm::length(velocity);
         const int damage = static_cast<int>(std::ceil(
             std::clamp(speed * m_baseDamage, 0.0, 2.147483647e9)));
@@ -90,8 +90,9 @@ namespace Game {
         // skeleton-vs-zombie fights. (MC aims the knockback from the arrow's
         // own position; here it derives from the attacker, which for a
         // just-fired arrow points the same way.)
-        if (target.Hurt(MobDamageSource::Projectile, static_cast<float>(damage),
-                        GetOwner() ? GetOwner() : this)) {
+        if (DealHitDamage(target, hit, MobDamageSource::Projectile,
+                          static_cast<float>(damage),
+                          GetOwner() ? GetOwner() : this)) {
             // MC AbstractArrow.doPostHurtEffects → Arrow.doPostHurtEffects:
             // the tip's effects land after a successful hit, attributed to the
             // shooter (getEffectSource).
@@ -161,7 +162,7 @@ namespace Game {
         // ── Advance, then resolve whichever hit came first ─────────────────
         if (hit.IsEntity() && hit.entity) {
             position = hit.location;
-            OnHitEntity(*hit.entity);
+            OnHitEntity(*hit.entity, hit);
             if (IsRemoved()) return;
         } else if (hit.IsBlock()) {
             OnHitBlockArrow(hit.location, hit.blockPos);

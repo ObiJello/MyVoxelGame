@@ -49,8 +49,8 @@ namespace Game {
         bool FireImmune() const override { return true; }
 
         // MC getDimensions: EntityDimensions.scalable(radius * 2, 0.5).
-        float GetBbWidth() const override { return m_radius * 2.0f; }
-        float GetBbHeight() const override { return 0.5f; }
+        float BaseBbWidth() const override { return m_radius * 2.0f; }
+        float BaseBbHeight() const override { return 0.5f; }
 
         // MC setRadius clamps to [0, 32]; the discard-below-minimum rule
         // lives in the tick, as in MC.

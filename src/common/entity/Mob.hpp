@@ -101,6 +101,9 @@ namespace Game {
         // depend on Mob), and dereferencing a unique_ptr to an incomplete type
         // in an inline body would force every caller to include them too.
         PathNavigation&       GetNavigation();
+        // See Entity::SetLevel. Re-points the navigation and drops the
+        // target: it was an entity of the old level.
+        void SetLevel(EntityLevel* level) override;
         const PathNavigation& GetNavigation() const;
         Sensing&              GetSensing();
 
@@ -206,6 +209,14 @@ namespace Game {
         // MC Mob.checkDespawn. Runs BEFORE tick() for every mob, whether or not
         // it is in ticking range.
         virtual void CheckDespawn();
+
+        // MC Entity.kill(ServerLevel), as the /kill command's fallback for a
+        // mob whose Hurt refused the blow (primed TNT, projectiles, the
+        // dragon's players-and-explosions-only gate). The default is the
+        // command's old plain discard; the dragon overrides it to hand its
+        // fight the victory first — a bare discard just made the fight
+        // respawn a fresh dragon.
+        virtual void KillFromCommand() { Discard(); }
 
         // MC Mob.finalizeSpawn — the post-construction randomisation every
         // spawn path runs: EntityType.create calls it for spawn eggs and for

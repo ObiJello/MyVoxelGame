@@ -658,6 +658,10 @@ namespace Game {
                                 : ParticleKind::ExplosionEmitter,
                           cx, cy, cz, 1.0, 0.0, 0.0);
 
+        // MC ClientExplosionTracker:26 — anything but Particles: All clears
+        // the whole debris list; only the fireball above survives.
+        if (level.GetParticleStatus() != ParticleStatus::All) return;
+
         // MC ClientExplosionTracker.addParticle × min(blockCount, 512):
         // random direction, radius cbrt-distributed within the blast, only
         // where the world is air, speed falling off with distance. The

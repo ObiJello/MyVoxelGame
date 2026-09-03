@@ -171,6 +171,7 @@ namespace Game::Anvil {
         // The ONE hard requirement: SerializableChunkData.parse returns null on
         // an empty Status, and the chunk then counts as absent entirely.
         w.String("Status", kStatusFull);
+        w.Long("ObeyModStamp", static_cast<int64_t>(chunk.ModStamp()));   // see Chunk::modStamp
 
         {
             auto sections = w.BeginList("sections", Nbt::TagType::Compound);
@@ -317,6 +318,7 @@ namespace Game::Anvil {
                          expected.x, expected.z, xPos, zPos);
         }
         out.pos = expected;
+        out.modStamp.store(static_cast<uint64_t>(rootC->GetValue<int64_t>("ObeyModStamp", 0)), std::memory_order_relaxed);
 
         auto sections = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("sections"));
         if (sections) {

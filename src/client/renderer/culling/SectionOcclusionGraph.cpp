@@ -52,14 +52,14 @@ namespace Render {
         job.occludedCount = 0;
         job.centerLoaded = false;
 
-        if (!Client::g_clientChunkManager) return;
+        if (!m_chunks) return;
 
         for (int rz = 0; rz < diameter; ++rz) {
             for (int rx = 0; rx < diameter; ++rx) {
                 const int cx = job.playerChunkX - renderDistance + rx;
                 const int cz = job.playerChunkZ - renderDistance + rz;
                 const Client::ClientChunk* chunk =
-                    Client::g_clientChunkManager->GetChunk({cx, cz});
+                    m_chunks->GetChunk({cx, cz});
                 if (!chunk || chunk->state != Client::ChunkState::LOADED) continue;
 
                 const int ci = rz * diameter + rx;
@@ -316,7 +316,7 @@ namespace Render {
             return false;
         }
         if (!HasGraphFor(cameraChunkX, cameraChunkZ, cameraSectionY, renderDistance, eraseToken) ||
-            !Client::g_clientChunkManager) {
+            !m_chunks) {
             // Graph is for another viewpoint (or missing). KEEP the sources.
             //
             // MC keeps them too, and is explicit about it —
@@ -369,7 +369,7 @@ namespace Render {
             LiveCell c{0, false, false};
             const int cx = m_graph.cx - m_graph.renderDistance + rx;
             const int cz = m_graph.cz - m_graph.renderDistance + rz;
-            const Client::ClientChunk* chunk = Client::g_clientChunkManager->GetChunk({cx, cz});
+            const Client::ClientChunk* chunk = m_chunks->GetChunk({cx, cz});
             if (!chunk || chunk->state != Client::ChunkState::LOADED) return c;
             c.loaded = true;
             const auto& si = chunk->sectionInfos[sy];
@@ -505,6 +505,8 @@ namespace Render {
                 VisibilitySet vis;
                 vis.setRaw(cell.visBits);
 
+                const uint8_t travelDirs =
+                    m_graph.nodes[getIdx(entry.rx, entry.rz, entry.sy)].directions;
                 for (int dir = 0; dir < 6; dir++) {
                     const int nrx = entry.rx + DIR_DX[dir];
                     const int nrz = entry.rz + DIR_DZ[dir];
@@ -513,12 +515,9 @@ namespace Render {
                     if (nsy < 0 || nsy >= sectionsY) continue;
 
                     const int nIdx = getIdx(nrx, nrz, nsy);
-                    if (m_graph.nodes[nIdx].generation == gen) {
-                        // Already reachable — just record the extra approach
-                        // direction, MC's existingNode.addSourceDirection.
-                        m_graph.nodes[nIdx].sourceDirections |= (1 << dir);
+                    // MC backtrack rule — see Run().
+                    if (m_graph.smartCull && (travelDirs & (1u << Direction::opposite(dir))))
                         continue;
-                    }
 
                     if (m_graph.smartCull) {
                         bool canReach = false;
@@ -532,8 +531,16 @@ namespace Render {
                     const LiveCell ncell = fetchCell(nrx, nrz, nsy);
                     if (!m_graph.blind && !ncell.loaded) continue;
 
+                    // Visited-augment BELOW the gates — see Run().
+                    if (m_graph.nodes[nIdx].generation == gen) {
+                        m_graph.nodes[nIdx].sourceDirections |= (1 << dir);
+                        continue;
+                    }
+
                     m_graph.nodes[nIdx].generation = gen;
                     m_graph.nodes[nIdx].sourceDirections = static_cast<uint8_t>(1 << dir);
+                    m_graph.nodes[nIdx].directions =
+                        static_cast<uint8_t>(travelDirs | (1u << dir));
                     m_graph.nodes[nIdx].emitted = 0;
 
                     if (ncell.renderable) {
@@ -616,6 +623,7 @@ namespace Render {
         const int startIdx = getIdx(startRX, startRZ, startSY);
         job.nodes[startIdx].generation = gen;
         job.nodes[startIdx].sourceDirections = 0x3F;
+        job.nodes[startIdx].directions = 0;   // no travel history at the camera
         job.nodes[startIdx].emitted = 0;
 
         scratch.curQueue.push_back({static_cast<int16_t>(startRX), static_cast<int16_t>(startRZ),
@@ -700,10 +708,12 @@ namespace Render {
 
                 const int nIdx = getIdx(nrx, nrz, nsy);
 
-                if (job.nodes[nIdx].generation == gen) {
-                    job.nodes[nIdx].sourceDirections |= (1 << dir);
+                // MC backtrack rule (SectionOcclusionGraph.runUpdates:267,
+                // `!node.hasDirection(direction.getOpposite())`): never step
+                // toward the opposite of any direction already traveled on
+                // this path — paths are monotone per axis, exactly vanilla.
+                if (smartCull && (node.directions & (1u << Direction::opposite(dir))))
                     continue;
-                }
 
                 if (!blind && !job.chunkLoaded[nrz * diameter + nrx])
                     continue;
@@ -785,8 +795,19 @@ namespace Render {
                     }
                 }
 
+                // Already reachable: record the extra approach direction and
+                // stop. Sits BELOW the gates (MC runUpdates:316) — augmenting
+                // on a REJECTED approach used to widen future propagation and
+                // let the BFS spread where MC culls (the phantom-caves bug).
+                if (job.nodes[nIdx].generation == gen) {
+                    job.nodes[nIdx].sourceDirections |= (1 << dir);
+                    continue;
+                }
+
                 job.nodes[nIdx].generation = gen;
                 job.nodes[nIdx].sourceDirections = (1 << dir);
+                job.nodes[nIdx].directions =
+                    static_cast<uint8_t>(node.directions | (1u << dir));  // MC runUpdates:319
                 job.nodes[nIdx].emitted = 0;
 
                 scratch.nextQueue.push_back({static_cast<int16_t>(nrx), static_cast<int16_t>(nrz),

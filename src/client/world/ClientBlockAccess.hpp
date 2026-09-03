@@ -6,12 +6,17 @@
 
 namespace Client {
 
+    class ClientChunkManager;
+
     // IBlockAccess implementation backed by the client chunk cache.
     // Used for physics and raycasting when connected to a remote server
     // (no server-side World available in the same process).
     class ClientBlockAccess : public Game::ILevelWrite {
     public:
-        ClientBlockAccess() = default;
+        // Reads the given chunk manager — its own level's, never the
+        // global, so a level renders and collides correctly whichever level
+        // the globals are bound to (see ClientLevel.hpp).
+        explicit ClientBlockAccess(ClientChunkManager* chunks) : m_chunks(chunks) {}
         ~ClientBlockAccess() override = default;
 
         // ── Prediction window ───────────────────────────────────────────
@@ -54,6 +59,7 @@ namespace Client {
         uint64_t RegionWriteStamp(const glm::ivec3& min, const glm::ivec3& max) const override;
 
     private:
+        ClientChunkManager* m_chunks = nullptr;
         uint32_t m_sequence   = 0;
         bool     m_predicting = false;
     };

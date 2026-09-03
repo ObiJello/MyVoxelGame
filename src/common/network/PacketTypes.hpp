@@ -25,6 +25,8 @@
 // Server → Client (game phase)
 #include "packets/game/ChunkDataS2CPacket.hpp"
 #include "packets/game/UnloadChunkS2CPacket.hpp"
+#include "packets/game/ChunkUnchangedS2CPacket.hpp"
+#include "packets/game/ChunkRequestFullC2SPacket.hpp"
 #include "packets/game/ChunkBatchStartS2CPacket.hpp"
 #include "packets/game/ChunkBatchFinishedS2CPacket.hpp"
 #include "packets/game/SetChunkCacheRadiusS2CPacket.hpp"
@@ -43,7 +45,9 @@
 #include "packets/game/MobEntityPackets.hpp"
 #include "packets/game/TickingPackets.hpp"
 #include "packets/game/ChangeDimensionS2CPacket.hpp"
+#include "packets/game/DimensionScopeS2CPacket.hpp"
 #include "packets/game/ExplodeS2CPacket.hpp"
+#include "packets/game/DragonPackets.hpp"
 #include "packets/game/PlayerInfoS2CPacket.hpp"
 #include "packets/game/ClientboundPlayerPositionPacket.hpp"
 #include "packets/game/InventoryFullS2CPacket.hpp"
@@ -56,6 +60,10 @@
 #include "packets/game/SetHealthS2CPacket.hpp"
 #include "packets/game/BlockChangedAckS2CPacket.hpp"
 #include "packets/game/PlayerAbilitiesS2CPacket.hpp"
+#include "packets/game/ImmersivePortalPackets.hpp"       // Features.hpp ENABLE_IMMERSIVE_PORTALS strips body
+#include "packets/game/AoRegionsS2CPacket.hpp"
+#include "packets/game/PortalTeleportC2SPacket.hpp"
+#include "packets/game/FillBlocksC2SPacket.hpp"        // Features.hpp ENABLE_IMMERSIVE_PORTALS strips body
 #include "packets/game/PortalSetS2CPacket.hpp"            // Features.hpp ENABLE_PORTAL_GUN strips body
 #include "packets/game/PortalRemoveS2CPacket.hpp"         // Features.hpp ENABLE_PORTAL_GUN strips body
 #include "packets/game/PortalTeleportFlashS2CPacket.hpp"  // Features.hpp ENABLE_PORTAL_GUN strips body

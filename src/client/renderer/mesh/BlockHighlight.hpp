@@ -30,6 +30,13 @@ namespace Render {
                     const glm::vec3& shapeMin = glm::vec3(0.0f),
                     const glm::vec3& shapeMax = glm::vec3(1.0f));
 
+        // Outline the unit cube [0,1]³ under an arbitrary model matrix — any
+        // oriented box, not just an axis-aligned block. The edge shader tags
+        // edges by MODEL-space axis, so the model matrix may rotate freely.
+        // Used for the immersive-portal debug outline.
+        void RenderOriented(const glm::mat4& model, const glm::mat4& projectionMatrix,
+                            const glm::mat4& viewMatrix);
+
         // Check if a hit is valid for highlighting (in range, solid block, etc.)
         static bool IsValidHighlight(const std::optional<Game::RaycastHit>& hit);
 

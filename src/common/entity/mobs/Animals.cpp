@@ -1012,11 +1012,11 @@ namespace Game {
         }
     }
 
-    float PolarBear::GetBbHeight() const {
+    float PolarBear::BaseBbHeight() const {
         // MC PolarBear.getDefaultDimensions: while the stand animation runs,
         // the hitbox is 1 + (anim / 6) times taller. Client-only in effect —
         // the server's animation stays at 0, exactly as in MC.
-        const float base = Animal::GetBbHeight();
+        const float base = Animal::BaseBbHeight();
         if (m_clientSideStandAnimation > 0.0f) {
             const float standFactor = m_clientSideStandAnimation / 6.0f;
             return base * (1.0f + standFactor);

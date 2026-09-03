@@ -212,7 +212,13 @@ namespace Server {
         // The client sends its actual render distance via ClientConfigC2S right after login,
         // which calls OnClientSettingsReceived → SetViewDistance to expand to the real value.
         PlayerSession::Config sessionConfig;
-        sessionConfig.simulationDistance = m_config.maxViewDistance;
+        // The server default only until ClientConfigC2S lands (see
+        // IntegratedServer::ApplyClientViewDistance). This was
+        // maxViewDistance (32) for a long time — not by design but because
+        // SetViewDistance capped at the simulation distance, so the only way
+        // to let a client see 32 chunks was to tick 32 chunks for it. That
+        // cap is gone; the two distances are independent, as in MC.
+        sessionConfig.simulationDistance = m_config.defaultSimulationDistance;
         sessionConfig.viewDistance = 2;
         sessionConfig.maxChunksPerTick = m_config.maxChunksPerPlayerPerTick;
         sessionConfig.maxBytesPerTick = m_config.maxBytesPerPlayerPerTick;
@@ -434,6 +440,13 @@ namespace Server {
                 }
             }
             packet.sequenceNumber = 0;
+            // The receiving client files the update under this dimension's
+            // level, so a player in the Nether is not drawn at Nether
+            // coordinates inside the Overworld.
+            packet.dimensionId = static_cast<int8_t>(srcSession->GetDimensionId());
+            // The body size, so /scale and a scaled portal show on every
+            // other client's copy of this player.
+            packet.scale = srcPlayer->getScale();
 
             auto data = Network::Serialization::Serialize(packet);
 
@@ -614,8 +627,10 @@ namespace Server {
                 // of numbers in every world, so Contains() alone would call a
                 // player in the Nether a watcher of the Overworld chunk they
                 // happen to share coordinates with.
-                if (Game::DimensionFromRaw(session->GetDimensionId()) != dimension) continue;
-                if (session->GetTrackingView().Contains(chunk)) {
+                // A session may watch chunks in several dimensions at once
+                // (its own view plus portal far sides); IsWatching is keyed
+                // by (dimension, chunk), so this is exact.
+                if (session->IsWatching(dimension, chunk)) {
                     watching.push_back(session);
                 }
             }
@@ -637,7 +652,7 @@ namespace Server {
             // (PlayerSession::SendNextChunks), and deltas flush at tick
             // start, so a change is always either inside the snapshot this
             // session will get or broadcast after it — never dropped.
-            if (!session.HasSentChunk(chunk)) return;
+            if (!session.HasSentChunk(dimension, chunk)) return;
             watchers.push_back(session.GetPlayerId());
         });
         return watchers;
@@ -668,6 +683,25 @@ namespace Server {
                                 session->GetDimensionId(),
                                 player->getChunkPosition(),
                                 session->GetSimulationDistance());
+        }
+
+        // Portal far sides (ChunkLoader::Source::Portal/IndirectPortal) are
+        // kept loaded with a temporary ticket at the loader's centre, refreshed
+        // well inside its lifespan. The level is chosen so everything within
+        // the loader radius is at least FULL (loaded) and the chunks nearest
+        // the destination are entity-ticking — mobs on the far side move,
+        // as the mod's region tickets make them.
+        constexpr int kLoaderTicketRefreshTicks = 20;
+        constexpr int kLoaderTicketLifespan     = 40;
+        if ((m_currentTick % kLoaderTicketRefreshTicks) == (session->GetPlayerId() % kLoaderTicketRefreshTicks)) {
+            for (const ChunkLoader& loader : session->Loaders()) {
+                if (loader.source == ChunkLoader::Source::Player) continue;
+                ChunkTicketManager* tickets = TicketsForDimension(Game::DimensionToRaw(loader.dimension));
+                if (!tickets) continue;
+                const int level = std::min(ChunkTicketManager::FULL_LEVEL - loader.Radius(),
+                                           ChunkTicketManager::ENTITY_TICKING_LEVEL - 1);
+                tickets->AddTemporaryTicket(loader.Center(), std::max(0, level), kLoaderTicketLifespan);
+            }
         }
 
         // No watch-index synchronization: there is no index. "Who is watching
@@ -732,6 +766,14 @@ namespace Server {
             if (level && level->Tickets()) return level->Tickets();
         }
         return m_ticketManager;
+    }
+
+    bool PlayerSessionManager::AnySessionLoadsDimension(Game::DimensionId dimension) const {
+        std::lock_guard<std::mutex> lock(m_sessionMutex);
+        for (const auto& [playerId, session] : m_sessions) {
+            if (session && session->LoadsDimension(dimension)) return true;
+        }
+        return false;
     }
 
 } // namespace Server

@@ -6,6 +6,8 @@
 #include "../backend/RenderBackend.hpp"
 #include "../environment/EnvironmentState.hpp"
 #include "../../world/ClientChunkManager.hpp"
+#include "../mesh/ChunkRenderer.hpp"
+#include "common/core/Config.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
@@ -226,16 +228,18 @@ void main() {
 
         // 12 verts per portal block (two faces × two triangles). A vanilla
         // portal is 9 blocks, so this covers several in view before the
-        // buffer has to grow.
-        m_vbCapacityVerts = 12 * 64;
-        m_vb = g_renderBackend->CreateBuffer(
-            BufferUsage::Vertex, m_vbCapacityVerts * sizeof(Vert),
-            nullptr, BufferAccess::Streaming);
-        m_mesh = g_renderBackend->CreateMesh(m_vb, INVALID_BUFFER, GetBlockVertexLayout());
-        if (m_vb == INVALID_BUFFER || m_mesh == INVALID_MESH) {
-            Log::Warning("[EndPortalRenderer] failed to create mesh — disabled");
-            Shutdown();
-            return false;
+        // buffer has to grow. One set per frame parity.
+        for (FrameBuffers& fb : m_frames) {
+            fb.capacityVerts = 12 * 64;
+            fb.vb = g_renderBackend->CreateBuffer(
+                BufferUsage::Vertex, fb.capacityVerts * sizeof(Vert),
+                nullptr, BufferAccess::Streaming);
+            fb.mesh = g_renderBackend->CreateMesh(fb.vb, INVALID_BUFFER, GetBlockVertexLayout());
+            if (fb.vb == INVALID_BUFFER || fb.mesh == INVALID_MESH) {
+                Log::Warning("[EndPortalRenderer] failed to create mesh — disabled");
+                Shutdown();
+                return false;
+            }
         }
 
         m_initialized = true;
@@ -245,14 +249,19 @@ void main() {
 
     void EndPortalRenderer::Shutdown() {
         if (!g_renderBackend) return;
-        if (m_mesh != INVALID_MESH)   { g_renderBackend->DestroyMesh(m_mesh);   m_mesh = INVALID_MESH; }
-        if (m_vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_vb);   m_vb = INVALID_BUFFER; }
+        for (FrameBuffers& fb : m_frames) {
+            if (fb.mesh != INVALID_MESH)   { g_renderBackend->DestroyMesh(fb.mesh);   fb.mesh = INVALID_MESH; }
+            if (fb.vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(fb.vb);   fb.vb = INVALID_BUFFER; }
+            fb.capacityVerts = 0;
+        }
         if (m_skyTexture    != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_skyTexture);    m_skyTexture = INVALID_TEXTURE; }
         if (m_portalTexture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_portalTexture); m_portalTexture = INVALID_TEXTURE; }
         if (m_shader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_shader); m_shader = INVALID_SHADER; }
-        m_vbCapacityVerts = 0;
         m_verts.clear();
         m_verts.shrink_to_fit();
+        m_visibleChunks.clear();
+        m_visibleChunks.shrink_to_fit();
+        m_seen.clear();
         m_initialized = false;
     }
 
@@ -263,10 +272,13 @@ void main() {
 
         PROFILE_ZONE_N("EndPortals");
 
-        // Snapshot rather than iterate the live map — chunk packets land on
-        // the network thread. Same reasoning as BlockEntityRenderDispatcher.
-        std::vector<std::pair<Game::Math::ChunkPos, Client::ClientChunk*>> snap;
-        chunkMgr->SnapshotLoadedChunks(snap);
+        // The same enumeration the block-entity dispatcher walks: only the
+        // chunks with a section in this frame's draw list, each once. A
+        // full walk of every loaded chunk was a second copy of the
+        // dispatcher's per-frame cost, for a block that exists in one or
+        // two chunks of a world.
+        BlockEntityRenderDispatcher::CollectVisibleChunks(chunkMgr, m_visibleChunks, m_seen);
+        const ChunkRenderer* sections = g_chunkRenderer;
 
         m_verts.clear();
         const float maxDistSq = kViewDistance * kViewDistance;
@@ -289,13 +301,20 @@ void main() {
             }
         };
 
-        for (const auto& [pos, chunk] : snap) {
+        for (const Client::ClientChunk* chunk : m_visibleChunks) {
             if (!chunk) continue;
             // Empty for all but a handful of chunks in a world — this is the
             // cull that actually matters, and it is a size() check.
-            if (chunk->endPortals.empty()) continue;
+            if (chunk->endPortals.empty() && chunk->endGateways.empty()) continue;
 
             for (const glm::ivec3& block : chunk->endPortals) {
+                // The section gate, per block — MC's visibleSections walk
+                // would never reach a portal in a section that is not drawn.
+                if (sections &&
+                    !sections->IsSectionVisible(chunk->position,
+                                                (block.y - Config::MinY) >> 4)) {
+                    continue;
+                }
                 const glm::vec3 base(block);
                 // Distance cull against the block's centre, MC's cheap
                 // horizontal test (BlockEntityRenderDispatcher does the same).
@@ -328,27 +347,90 @@ void main() {
                 emitQuad(down);
                 emitQuad(up);
             }
+
+            // ── End gateways — the same starfield as a full cube ──────────
+            //
+            // MC TheEndGatewayRenderer draws all six faces of the block
+            // (shouldRenderFace against the neighbours; the frame is bedrock,
+            // so in practice the four sides plus whichever ends are open).
+            // All six are emitted here — hidden faces lose the depth test
+            // against the bedrock around them — inset a hair so an exposed
+            // face cannot z-fight coplanar neighbour geometry.
+            for (const glm::ivec3& block : chunk->endGateways) {
+                if (sections &&
+                    !sections->IsSectionVisible(chunk->position,
+                                                (block.y - Config::MinY) >> 4)) {
+                    continue;
+                }
+                const glm::vec3 base(block);
+                const float dx = base.x + 0.5f - cameraPos.x;
+                const float dz = base.z + 0.5f - cameraPos.z;
+                if (dx * dx + dz * dz > maxDistSq) continue;
+
+                constexpr float e0 = 0.001f;
+                constexpr float e1 = 1.0f - 0.001f;
+                // Each face wound counter-clockwise seen from OUTSIDE.
+                const glm::vec3 gDown[4] = {
+                    base + glm::vec3(e0, e0, e0), base + glm::vec3(e1, e0, e0),
+                    base + glm::vec3(e1, e0, e1), base + glm::vec3(e0, e0, e1),
+                };
+                const glm::vec3 gUp[4] = {
+                    base + glm::vec3(e0, e1, e1), base + glm::vec3(e1, e1, e1),
+                    base + glm::vec3(e1, e1, e0), base + glm::vec3(e0, e1, e0),
+                };
+                const glm::vec3 gNorth[4] = {
+                    base + glm::vec3(e1, e0, e0), base + glm::vec3(e0, e0, e0),
+                    base + glm::vec3(e0, e1, e0), base + glm::vec3(e1, e1, e0),
+                };
+                const glm::vec3 gSouth[4] = {
+                    base + glm::vec3(e0, e0, e1), base + glm::vec3(e1, e0, e1),
+                    base + glm::vec3(e1, e1, e1), base + glm::vec3(e0, e1, e1),
+                };
+                const glm::vec3 gWest[4] = {
+                    base + glm::vec3(e0, e0, e0), base + glm::vec3(e0, e0, e1),
+                    base + glm::vec3(e0, e1, e1), base + glm::vec3(e0, e1, e0),
+                };
+                const glm::vec3 gEast[4] = {
+                    base + glm::vec3(e1, e0, e1), base + glm::vec3(e1, e0, e0),
+                    base + glm::vec3(e1, e1, e0), base + glm::vec3(e1, e1, e1),
+                };
+                emitQuad(gDown);
+                emitQuad(gUp);
+                emitQuad(gNorth);
+                emitQuad(gSouth);
+                emitQuad(gWest);
+                emitQuad(gEast);
+            }
         }
 
         if (m_verts.empty()) return;
 
-        if (m_verts.size() > m_vbCapacityVerts) {
-            size_t newCap = m_vbCapacityVerts;
+        // This pass runs once per frame, so the parity flip IS the frame
+        // boundary; the previous frame's set may still be in flight on
+        // Vulkan, which is why there are two. See EntityFrame.hpp.
+        m_frameCursor.Advance();
+        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+
+        if (m_verts.size() > fb.capacityVerts) {
+            size_t newCap = fb.capacityVerts;
             while (newCap < m_verts.size()) newCap *= 2;
-            g_renderBackend->DestroyMesh(m_mesh);
-            g_renderBackend->DestroyBuffer(m_vb);
-            m_vb = g_renderBackend->CreateBuffer(
+            // Deferred: the frame that last drew from this set may still be
+            // reading it. Immediate destroy here was a use-after-free on
+            // Vulkan for the one frame a portal room first comes into view.
+            g_renderBackend->DeferredDestroyMesh(fb.mesh);
+            g_renderBackend->DeferredDestroyBuffer(fb.vb);
+            fb.vb = g_renderBackend->CreateBuffer(
                 BufferUsage::Vertex, newCap * sizeof(Vert),
                 nullptr, BufferAccess::Streaming);
-            m_mesh = g_renderBackend->CreateMesh(m_vb, INVALID_BUFFER, GetBlockVertexLayout());
-            m_vbCapacityVerts = newCap;
-            if (m_vb == INVALID_BUFFER || m_mesh == INVALID_MESH) {
+            fb.mesh = g_renderBackend->CreateMesh(fb.vb, INVALID_BUFFER, GetBlockVertexLayout());
+            fb.capacityVerts = newCap;
+            if (fb.vb == INVALID_BUFFER || fb.mesh == INVALID_MESH) {
                 m_initialized = false;   // stop trying rather than draw garbage
                 Log::Warning("[EndPortalRenderer] vertex buffer growth failed — disabled");
                 return;
             }
         }
-        g_renderBackend->UpdateBuffer(m_vb, 0, m_verts.size() * sizeof(Vert), m_verts.data());
+        g_renderBackend->UpdateBuffer(fb.vb, 0, m_verts.size() * sizeof(Vert), m_verts.data());
 
         // MC RenderPipelines.END_PORTAL_SNIPPET (RenderPipelines.java:154) +
         // END_PORTAL (line 211): no withBlend, no withDepthWrite(false), no
@@ -397,7 +479,7 @@ void main() {
         g_renderBackend->BindTexture(m_portalTexture, 1);
         g_renderBackend->BindTexture(m_skyTexture, 0);
 
-        g_renderBackend->DrawArrays(m_mesh, static_cast<uint32_t>(m_verts.size()));
+        g_renderBackend->DrawArrays(fb.mesh, static_cast<uint32_t>(m_verts.size()));
         g_renderBackend->UnbindMesh();
 
         // Restore the default pipeline (mirrors every other standalone pass).

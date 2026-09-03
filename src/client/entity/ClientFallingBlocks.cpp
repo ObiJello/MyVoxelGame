@@ -12,7 +12,7 @@
 
 namespace Client {
 
-    std::unique_ptr<ClientFallingBlocks> g_clientFallingBlocks;
+    ClientFallingBlocks* g_clientFallingBlocks = nullptr;
 
     namespace {
         glm::vec3 Half() {

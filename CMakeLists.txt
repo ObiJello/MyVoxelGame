@@ -485,6 +485,10 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/block_vk.frag
             ${VK_SHADER_DIR}/block_opaque_vk.frag
             ${VK_SHADER_DIR}/block_solid_vk.frag
+            ${VK_SHADER_DIR}/terrain_vk.vert
+            ${VK_SHADER_DIR}/terrain_opaque_vk.frag
+            ${VK_SHADER_DIR}/terrain_cutout_vk.frag
+            ${VK_SHADER_DIR}/terrain_solid_vk.frag
             ${VK_SHADER_DIR}/crosshair_vk.vert
             ${VK_SHADER_DIR}/crosshair_vk.frag
             ${VK_SHADER_DIR}/highlight_vk.vert
@@ -517,6 +521,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/entity_vk.frag
             ${VK_SHADER_DIR}/end_portal_vk.vert
             ${VK_SHADER_DIR}/end_portal_vk.frag
+            ${VK_SHADER_DIR}/blockentity_vk.vert
+            ${VK_SHADER_DIR}/blockentity_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})
@@ -584,6 +590,8 @@ set(GAME_SOURCES
             src/common/core/TickParallel.hpp
             src/common/core/ThreadAllocator.cpp
             src/common/core/ThreadAllocator.hpp
+            src/common/core/HardwareProfile.cpp
+            src/common/core/HardwareProfile.hpp
             src/common/core/ThreadPriority.cpp
             src/common/core/ThreadPriority.hpp
             src/common/core/Config.hpp
@@ -618,6 +626,7 @@ set(GAME_SOURCES
             src/client/renderer/entity/PlayerRenderer.hpp
             src/client/renderer/entity/ItemEntityRenderer.cpp
             src/client/renderer/entity/BlockCubeEntityRenderer.cpp
+            src/client/renderer/mesh/FillPreviewRenderer.cpp
             src/client/renderer/entity/BlockCubeEntityRenderer.hpp
             src/client/renderer/entity/ItemEntityRenderer.hpp
             src/client/renderer/entity/XpOrbRenderer.cpp
@@ -899,6 +908,11 @@ set(GAME_SOURCES
             src/common/entity/FallingBlockEntity.hpp
             src/common/entity/PrimedTnt.cpp
             src/common/entity/PrimedTnt.hpp
+            src/common/entity/EndCrystal.cpp
+            src/common/entity/EndCrystal.hpp
+            src/common/entity/DragonFight.hpp
+            src/common/world/block/entity/EndGatewayBlockEntity.cpp
+            src/common/world/block/entity/EndGatewayBlockEntity.hpp
             src/common/world/level/WorldMobSpawn.cpp
             src/common/world/block/GeneratedBlockShapes.cpp
             src/common/world/block/GeneratedWaterlogged.cpp
@@ -1164,6 +1178,7 @@ set(GAME_SOURCES
             src/server/commands/KickCommand.cpp
             src/server/commands/GameModeCommand.hpp
             src/server/commands/GameModeCommand.cpp
+            src/server/commands/DifficultyCommand.cpp
             src/server/commands/KillCommand.hpp
             src/server/commands/KillCommand.cpp
             src/server/commands/EntityStatsCommand.cpp
@@ -1215,6 +1230,9 @@ set(GAME_SOURCES
             src/server/level/LevelEntityStore.hpp
             src/server/level/ServerLevel.cpp
             src/server/level/ServerLevel.hpp
+            src/server/level/EndDragonFight.cpp
+            src/server/level/EndDragonFight.hpp
+            src/client/renderer/gui/BossBarState.hpp
             src/server/level/NetherPortalIndex.cpp
             src/server/level/NetherPortalIndex.hpp
             src/server/level/PortalForcer.cpp
@@ -1409,6 +1427,31 @@ set(GAME_SOURCES
             src/server/portal/PortalRegistry.hpp
             src/client/portal/ClientPortalManager.cpp
             src/client/portal/ClientPortalManager.hpp
+
+            # Immersive portals — Features.hpp ENABLE_IMMERSIVE_PORTALS strips
+            # bodies when off (safe to always list). See docs/immersive-portals.md.
+            src/common/portal/ImmersivePortal.cpp
+            src/common/portal/ImmersivePortal.hpp
+            src/server/portal/ImmersivePortalRegistry.cpp
+            src/server/portal/ImmersivePortalRegistry.hpp
+            src/server/commands/PortalCommand.cpp
+            src/server/commands/PortalCommand.hpp
+            src/client/portal/ClientImmersivePortals.cpp
+            src/client/portal/ClientImmersivePortals.hpp
+            src/client/world/ClientLevel.cpp
+            src/client/world/ClientLevel.hpp
+            src/client/renderer/portal/ImmersivePortalRenderer.cpp
+            src/client/renderer/portal/ImmersivePortalRenderer.hpp
+            src/client/portal/ImmersivePortalTraveler.cpp
+            src/client/portal/ImmersivePortalCollision.cpp
+            src/client/portal/ImmersivePortalTraveler.hpp
+            src/common/world/portal/ImmersiveFrame.cpp
+            src/common/world/portal/ImmersiveFrame.hpp
+            src/server/portal/NetherPortalGeneration.cpp
+            src/server/portal/EntityPortalTravel.cpp
+            src/common/entity/PortalWandBehavior.cpp
+            src/common/entity/AoWandBehavior.cpp
+            src/server/portal/NetherPortalGeneration.hpp
             src/client/renderer/portal/PortalRenderer.cpp
             src/client/renderer/portal/PortalRenderer.hpp
             src/client/renderer/portal/PortalCameraTransform.cpp
@@ -1668,6 +1711,12 @@ if(HAS_VULKAN)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CMAKE_BINARY_DIR}/shaders/block_vk.frag.spv"
                 "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.frag.spv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_BINARY_DIR}/shaders/blockentity_vk.vert.spv"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/blockentity_vk.vert.spv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_BINARY_DIR}/shaders/blockentity_vk.frag.spv"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/blockentity_vk.frag.spv"
         )
 
         # Don't hardcode GLFW's Vulkan path - let it find the bundled one via RPATH

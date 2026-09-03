@@ -17,6 +17,7 @@
 #include "../blockentity/BlockEntityRenderer.hpp"
 #include "../blockentity/BlockEntityRenderDispatcher.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -317,6 +318,7 @@ namespace Render {
     void HeldItemRenderer::Tick(Game::ItemID mainItem, Game::ItemID offhandItem,
                                 bool attackPressedThisTick, float mainHandSwapScale,
                                 float viewPitchDeg, float viewYawDeg) {
+        PROFILE_ZONE_N("HeldItem.Tick");
         // MC LocalPlayer.applyInput: the lagging view angles advance half the
         // remaining gap each tick.
         //
@@ -429,6 +431,7 @@ namespace Render {
                                   float walkDistance,
                                   float viewPitchDeg, float viewYawDeg,
                                   bool renderMainHand) {
+        PROFILE_ZONE_N("HeldItemRender");
         if (!m_initialized || !g_renderBackend) return;
         const bool drawMain = renderMainHand && m_hands[0].displayed != 0;
         const bool drawOff  = m_hands[1].displayed != 0;
@@ -473,6 +476,7 @@ namespace Render {
 
     void HeldItemRenderer::RenderHand(int hand, float aspect, float partialTick,
                                       float walkDistance) {
+        PROFILE_ZONE_N("HeldItemRender.Hand");
         const HandState& hs = m_hands[hand];
         const float invert = (hand == 0) ? 1.0f : -1.0f;   // right / left arm
         const bool leftHand = (hand == 1);
@@ -751,6 +755,9 @@ namespace Render {
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(tex, 0);
         g_renderBackend->SetUniformMat4 (m_shader, "uMVP", mvp);
+        // Fog is off for the hand (uFogColor alpha 0 below), so the world
+        // position is not read; the identity keeps the uniform defined.
+        g_renderBackend->SetUniformMat4 (m_shader, "uModel", glm::mat4(1.0f));
         // Cube path: tiny threshold (0.01) drops fully-transparent
         // texels so glass etc. doesn't get a faint outline; the rest
         // of the alpha range goes through the blend equation above.

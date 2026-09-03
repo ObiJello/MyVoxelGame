@@ -15,12 +15,12 @@ namespace Client {
             return Game::BlockID::Air;
         }
 
-        if (!g_clientChunkManager) {
+        if (!m_chunks) {
             return Game::BlockID::Air;
         }
 
         Game::Math::ChunkPos chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-        ClientChunk* chunk = g_clientChunkManager->GetChunk(chunkPos);
+        ClientChunk* chunk = m_chunks->GetChunk(chunkPos);
         if (!chunk || !chunk->IsLoaded() || !chunk->chunkData) {
             return Game::BlockID::Air;
         }
@@ -31,12 +31,12 @@ namespace Client {
     }
 
     uint16_t ClientBlockAccess::GetBiome(int worldX, int worldY, int worldZ) const {
-        if (!IsValidPosition(worldX, worldY, worldZ) || !g_clientChunkManager) {
+        if (!IsValidPosition(worldX, worldY, worldZ) || !m_chunks) {
             return Game::kFallbackBiomeId;
         }
 
         Game::Math::ChunkPos chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-        ClientChunk* chunk = g_clientChunkManager->GetChunk(chunkPos);
+        ClientChunk* chunk = m_chunks->GetChunk(chunkPos);
         if (!chunk || !chunk->chunkData) {
             return Game::kFallbackBiomeId;
         }
@@ -47,12 +47,12 @@ namespace Client {
     }
 
     Game::BlockState ClientBlockAccess::GetBlockState(int worldX, int worldY, int worldZ) const {
-        if (!IsValidPosition(worldX, worldY, worldZ) || !g_clientChunkManager) {
+        if (!IsValidPosition(worldX, worldY, worldZ) || !m_chunks) {
             return Game::BlockState{};
         }
 
         Game::Math::ChunkPos chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-        ClientChunk* chunk = g_clientChunkManager->GetChunk(chunkPos);
+        ClientChunk* chunk = m_chunks->GetChunk(chunkPos);
         if (!chunk || !chunk->IsLoaded() || !chunk->chunkData) {
             return Game::BlockState{};
         }
@@ -65,7 +65,7 @@ namespace Client {
     bool ClientBlockAccess::IsRegionAllAir(const glm::ivec3& min, const glm::ivec3& max,
                                            bool absentIsAir) const {
         if (min.x > max.x || min.y > max.y || min.z > max.z) return true;
-        if (!g_clientChunkManager) return absentIsAir;
+        if (!m_chunks) return absentIsAir;
         int s0, s1, unusedY;
         Game::Math::WorldCoordinates::WorldYToSectionCoords(min.y, s0, unusedY);
         Game::Math::WorldCoordinates::WorldYToSectionCoords(max.y, s1, unusedY);
@@ -74,7 +74,7 @@ namespace Client {
         if (s0 > s1) return true;
         for (int cx = min.x >> 4; cx <= (max.x >> 4); ++cx) {
             for (int cz = min.z >> 4; cz <= (max.z >> 4); ++cz) {
-                ClientChunk* chunk = g_clientChunkManager->GetChunk(Game::Math::ChunkPos{cx, cz});
+                ClientChunk* chunk = m_chunks->GetChunk(Game::Math::ChunkPos{cx, cz});
                 if (!chunk || !chunk->IsLoaded() || !chunk->chunkData) {
                     if (absentIsAir) continue;
                     return false;
@@ -89,11 +89,11 @@ namespace Client {
     }
 
     uint64_t ClientBlockAccess::RegionWriteStamp(const glm::ivec3& min, const glm::ivec3& max) const {
-        if (!g_clientChunkManager) return 0;
+        if (!m_chunks) return 0;
         uint64_t sum = 0;
         for (int cx = min.x >> 4; cx <= (max.x >> 4); ++cx) {
             for (int cz = min.z >> 4; cz <= (max.z >> 4); ++cz) {
-                ClientChunk* chunk = g_clientChunkManager->GetChunk(Game::Math::ChunkPos{cx, cz});
+                ClientChunk* chunk = m_chunks->GetChunk(Game::Math::ChunkPos{cx, cz});
                 if (chunk && chunk->chunkData)
                     sum += chunk->chunkData->blockWriteCounter.load(std::memory_order_acquire);
             }
@@ -107,7 +107,7 @@ namespace Client {
         const int ny = max.y - min.y + 1, nz = max.z - min.z + 1;
         const size_t total = static_cast<size_t>(max.x - min.x + 1) * ny * nz;
         for (size_t i = 0; i < total; ++i) out[i] = Game::BlockState{};
-        if (!g_clientChunkManager) return;
+        if (!m_chunks) return;
         const auto at = [&](int x, int y, int z) -> Game::BlockState& {
             return out[(static_cast<size_t>(x - min.x) * ny + (y - min.y)) * nz + (z - min.z)];
         };
@@ -117,7 +117,7 @@ namespace Client {
         if (y0 > y1) return;
         for (int cx = min.x >> 4; cx <= (max.x >> 4); ++cx) {
             for (int cz = min.z >> 4; cz <= (max.z >> 4); ++cz) {
-                ClientChunk* chunk = g_clientChunkManager->GetChunk(Game::Math::ChunkPos{cx, cz});
+                ClientChunk* chunk = m_chunks->GetChunk(Game::Math::ChunkPos{cx, cz});
                 if (!chunk || !chunk->IsLoaded() || !chunk->chunkData) continue;
                 const Game::Chunk* data = chunk->chunkData.get();
                 const int bx0 = std::max(min.x, cx << 4), bx1 = std::min(max.x, (cx << 4) + 15);
@@ -154,22 +154,22 @@ namespace Client {
         // BeginPrediction. Outside one this is a hard no-op: the client is not
         // authoritative and an unreconciled local write would desync until the
         // next chunk reload.
-        if (!m_predicting || !g_clientChunkManager) return false;
+        if (!m_predicting || !m_chunks) return false;
         if (!IsValidPosition(worldX, worldY, worldZ)) return false;
 
         // updateFlags is intentionally ignored: neighbour dirtying and the
         // remesh are ClientChunkManager's job, and the client has no
         // neighbour-notification or lighting pipeline to drive with them.
-        g_clientChunkManager->PredictBlockChange({worldX, worldY, worldZ}, blockId, m_sequence,
+        m_chunks->PredictBlockChange({worldX, worldY, worldZ}, blockId, m_sequence,
                                                 stateIndex);
         return true;
     }
 
     bool ClientBlockAccess::IsChunkLoaded(int chunkX, int chunkZ) const {
-        if (!g_clientChunkManager) {
+        if (!m_chunks) {
             return false;
         }
-        return g_clientChunkManager->IsChunkLoaded({chunkX, chunkZ});
+        return m_chunks->IsChunkLoaded({chunkX, chunkZ});
     }
 
     bool ClientBlockAccess::IsPositionLoaded(int worldX, int worldY, int worldZ) const {

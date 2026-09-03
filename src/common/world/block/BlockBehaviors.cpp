@@ -23,15 +23,24 @@
 #include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
 #include "common/world/portal/PortalShape.hpp"
+#include "common/world/portal/PortalState.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include "common/world/level/World.hpp"
+#include "common/core/JavaRandom.hpp"
 #include "common/entity/Entity.hpp"
 #include "common/entity/IUsePlayer.hpp"
 #include "common/entity/Item.hpp"
+#include "common/core/SoundEvents.hpp"
+#include "common/world/level/WorldMobSpawn.hpp"
+#include "common/entity/GeneratedEntityTypes.hpp"
+#include "GeneratedBlockStates.hpp"
+#include <string_view>
 #include "common/inventory/MenuType.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 #include "common/core/Log.hpp"
 
 #include <array>
+#include <random>
 #include <string>
 
 namespace Game {
@@ -52,6 +61,55 @@ namespace Game {
             if (!player) return UseResult::Pass;
             player->OpenMenu(MenuType::Crafting, pos);
             return UseResult::Success;
+        }
+
+        // MC DragonEggBlock.teleport — the egg blinks to a random air block
+        // within ±15/±7/±15, up to 1000 attempts. MC triggers it from both
+        // useWithoutItem and attack (a survival punch), and both are wired
+        // below; only a creative instabreak actually mines it, exactly as in
+        // vanilla.
+        //
+        // File-local RNG rather than a level random: ILevelWrite carries no
+        // random, and the offsets are pure cosmetics — no vanilla RNG stream
+        // runs through a block use.
+        UseResult DragonEggUse(ILevelWrite* world, const glm::ivec3& pos,
+                               IUsePlayer* /*player*/,
+                               const BlockHitResult& /*hit*/) {
+            if (!world) return UseResult::Pass;
+            if (world->GetBlock(pos.x, pos.y, pos.z) != BlockID::DragonEgg) {
+                return UseResult::Pass;
+            }
+            static JavaRandom rng(
+                static_cast<int64_t>(std::random_device{}()));
+            const int minY = DimensionMinY(world->GetDimension());
+            const int maxY = minY + DimensionLogicalHeight(world->GetDimension()) - 1;
+            for (int i = 0; i < 1000; ++i) {
+                const glm::ivec3 testPos =
+                    pos + glm::ivec3(rng.NextInt(16) - rng.NextInt(16),
+                                     rng.NextInt(8) - rng.NextInt(8),
+                                     rng.NextInt(16) - rng.NextInt(16));
+                if (testPos.y < minY || testPos.y > maxY) continue;
+                if (world->GetBlock(testPos.x, testPos.y, testPos.z) !=
+                    BlockID::Air) {
+                    continue;
+                }
+                if (!world->IsClientSide()) {
+                    // MC: setBlock(dest, state, 2) + removeBlock(origin).
+                    world->SetBlock(testPos.x, testPos.y, testPos.z,
+                                    BlockID::DragonEgg,
+                                    World::UpdateFlags::All);
+                    world->SetBlock(pos.x, pos.y, pos.z, BlockID::Air,
+                                    World::UpdateFlags::All);
+                }
+                // MC's client draws the 128-particle portal trail here.
+                return UseResult::Success;
+            }
+            return UseResult::Success;
+        }
+
+        // MC DragonEggBlock.attack — the same teleport, from a punch.
+        void DragonEggAttack(ILevelWrite& world, const glm::ivec3& pos) {
+            DragonEggUse(&world, pos, nullptr, BlockHitResult{});
         }
 
         // MC RedStoneWireBlock.useWithoutItem: right-clicking a wire that is a
@@ -148,6 +206,17 @@ namespace Game {
             // frame in the End just holds a fire.
             if (!DimensionAllowsNetherPortal(level.GetDimension())) return;
 
+            // Immersive mode: any closed obsidian loop becomes a see-through
+            // surface, decided server-side (the handler finds the loop and
+            // starts the far-side generation). No purple blocks are ever
+            // placed; a vanilla rectangle is a closed loop too, so nothing
+            // that used to light still fails to.
+            if (Portals::ImmersiveNetherPortals()) {
+                if (level.IsClientSide()) return;
+                if (auto handler = Portals::GetImmersiveFrameLitHandler()) handler(level, pos);
+                return;
+            }
+
             // MC always probes X first and lets findPortalShape fall through
             // to Z. The clicked face never reaches here — onPlace has no idea
             // how the fire got placed — which is also why the axis preference
@@ -174,6 +243,9 @@ namespace Game {
         void PortalEntityInside(ILevelWrite& /*level*/, const glm::ivec3& pos,
                                 BlockState state, Entity& entity) {
             if (!entity.CanUsePortal(false)) return;
+            // Immersive mode: a leftover vanilla portal block is scenery; the
+            // see-through surface handles crossing.
+            if (state.Block() == BlockID::NetherPortal && Portals::ImmersiveNetherPortals()) return;
             entity.portal.SetAsInsidePortal(state.Block(), pos,
                                             entity.GetDimensionChangingDelay());
         }
@@ -328,6 +400,55 @@ namespace Game {
             return UseResult::Success;
         }
 
+        // ── Nether portal: zombified piglins ─────────────────────────────
+        // MC NetherPortalBlock.randomTick: in a natural dimension (the
+        // Overworld), with mob spawning on, each random tick of a portal
+        // block has `difficulty / 2000` odds of putting a zombified piglin
+        // in the air above it. Peaceful is 0, so nothing on peaceful.
+        bool NetherPortalTicksRandomly(BlockState /*state*/) { return true; }
+        void NetherPortalRandomTick(ILevelWrite& level, const glm::ivec3& pos,
+                                    BlockState /*state*/, JavaRandom& random) {
+            if (level.IsClientSide()) return;
+            if (level.GetDimension() != DimensionId::Overworld) return;
+            const World* world = dynamic_cast<const World*>(&level);
+            if (!world || !world->GetDoMobSpawning()) return;
+            const int difficultyId = static_cast<int>(world->GetDifficulty());
+            if (random.NextInt(2000) >= difficultyId) return;
+            const glm::ivec3 above = pos + glm::ivec3(0, 1, 0);
+            if (level.GetBlock(above.x, above.y, above.z) != BlockID::Air) return;
+            // MC: the spawned piglin gets setPortalCooldown (300 ticks), so
+            // it does not step straight back through the portal it stands in.
+            SpawnMobFromItem(EntityTypeId::ZombifiedPiglin, above, /*tryMoveDown=*/false,
+                             /*movedUp=*/false, level.GetDimension(), /*portalCooldownTicks=*/300);
+        }
+
+        // ── Doors ─────────────────────────────────────────────────────────
+        // MC DoorBlock.useWithoutItem: a wooden door swings on a click from
+        // either half, and setOpen mirrors the other half. Runs on both
+        // sides like the gate: the client predicts the swing.
+        UseResult DoorUse(ILevelWrite* world, const glm::ivec3& pos,
+                          IUsePlayer* player, const BlockHitResult& /*hit*/) {
+            if (!world || !player) return UseResult::Pass;
+            const BlockID id = world->GetBlock(pos.x, pos.y, pos.z);
+            if (!IsWoodenDoorBlock(id)) return UseResult::Pass;
+
+            const BlockState state = world->GetBlockState(pos.x, pos.y, pos.z);
+            const bool wasOpen = state.GetIndex(PropertyId::OPEN) == 0;   // booleans list true first
+            const std::string_view to = wasOpen ? "false" : "true";
+            world->SetBlock(pos.x, pos.y, pos.z, state.SetName(PropertyId::OPEN, to), World::UpdateFlags::All);
+
+            const bool lower = state.GetName(PropertyId::DOUBLE_BLOCK_HALF) == "lower";
+            const glm::ivec3 other = pos + glm::ivec3(0, lower ? 1 : -1, 0);
+            const BlockState otherState = world->GetBlockState(other.x, other.y, other.z);
+            if (otherState.Block() == id &&
+                otherState.GetName(PropertyId::DOUBLE_BLOCK_HALF) == (lower ? "upper" : "lower")) {
+                world->SetBlock(other.x, other.y, other.z, otherState.SetName(PropertyId::OPEN, to),
+                                World::UpdateFlags::All);
+            }
+            PlaySound(wasOpen ? "block.wooden_door.close" : "block.wooden_door.open", pos);
+            return UseResult::Success;
+        }
+
         // Every container block does the same thing on a right-click: ask for
         // its menu. MC spreads this across ChestBlock.useWithoutItem,
         // BarrelBlock, DispenserBlock, HopperBlock, AbstractFurnaceBlock… each
@@ -433,6 +554,15 @@ namespace Game {
             wire->neighborChanged = &RedstoneWireNeighborChanged;
         }
 
+        // ── Dragon egg ────────────────────────────────────────────────────
+        // MC DragonEggBlock routes BOTH useWithoutItem and attack into the
+        // same teleport() — right-click or punch, the egg blinks away. Its
+        // FALLING behaviour needs no entry: IsFallingBlock lists DragonEgg.
+        if (Block* egg = forSlug("dragon_egg")) {
+            egg->useWithoutItem = &DragonEggUse;
+            egg->attack         = &DragonEggAttack;
+        }
+
         // ── Nether portal ─────────────────────────────────────────────────
         // The only behaviour the BLOCK itself owns. Lighting a portal lives in
         // the flint-and-steel item behaviour (MC puts it in BaseFireBlock
@@ -466,6 +596,19 @@ namespace Game {
         } else {
             Log::Warning("[BlockBehaviors] no block with registrySlug "
                          "'end_portal' — the End is unreachable");
+        }
+
+        // ── End gateway ───────────────────────────────────────────────────
+        // Same contact hook; the travel itself is PortalTravel's EndGateway
+        // branch (a same-dimension hop to the outer islands, any entity). MC
+        // gates entityInside on the block entity's 40-tick cooldown at
+        // contact time; here the same BE cooldown gates the traverse itself —
+        // one use per gateway per two seconds either way.
+        if (Block* gateway = forSlug("end_gateway")) {
+            gateway->entityInside = &PortalEntityInside;
+        } else {
+            Log::Warning("[BlockBehaviors] no block with registrySlug "
+                         "'end_gateway' — gateways will not teleport");
         }
 
         // ── Vines ─────────────────────────────────────────────────────────
@@ -515,6 +658,21 @@ namespace Game {
             if (IsFenceGateBlock(static_cast<BlockID>(i))) {
                 blocks[i].useWithoutItem  = &FenceGateUse;
                 blocks[i].neighborChanged = &FenceGateNeighborChanged;
+            }
+        }
+
+        // ── Nether portal: the piglin spawn tick ─────────────────────────
+        {
+            auto& portal = blocks[static_cast<size_t>(BlockID::NetherPortal)];
+            portal.isRandomlyTicking = &NetherPortalTicksRandomly;
+            portal.randomTick        = &NetherPortalRandomTick;
+        }
+
+        // ── Doors ─────────────────────────────────────────────────────────
+        // The swing, by hand, for every door but iron.
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (IsWoodenDoorBlock(static_cast<BlockID>(i))) {
+                blocks[i].useWithoutItem = &DoorUse;
             }
         }
 

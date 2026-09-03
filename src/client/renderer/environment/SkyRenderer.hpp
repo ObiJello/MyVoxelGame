@@ -74,6 +74,15 @@ namespace Render {
         // viewRotation: the camera view matrix with translation stripped.
         void Render(const glm::mat4& proj, const glm::mat4& viewRotation);
 
+        // The sky of `rawDimensionId` from this viewpoint, whatever the
+        // active dimension is — the far side of a portal. The Nether draws
+        // nothing (fog only), the End its starfield, the Overworld the
+        // vanilla procedural sky (a cubemap chosen in settings is only
+        // resident while the Overworld is active). The caller installs the
+        // matching EnvironmentState frame override first.
+        void RenderForDimension(int rawDimensionId, const glm::mat4& proj,
+                                const glm::mat4& viewRotation);
+
     private:
         struct Vertex {
             float x, y, z;
@@ -126,6 +135,9 @@ namespace Render {
         int m_skyboxMode = 2;
         bool m_skyboxValid = false;  // textures loaded, cube path active
         bool m_skyboxIsEnd = false;
+        // Loads end_sky.png if it is not resident (a far-side End view while
+        // the active sky is another dimension's).
+        bool EnsureEndTexture();
 
         // What the PLAYER chose, kept apart from what is currently ACTIVE so
         // that a trip to the End does not overwrite their setting — and so

@@ -633,6 +633,23 @@ namespace Render {
         }
     }
 
+    void AtlasBuilder::SetMipmapLevels(int levels) {
+        levels = std::max(0, std::min(4, levels));
+        const bool enabled = levels > 0;
+        const int  level   = enabled ? levels : m_mipmapLevel;
+        if (enabled == mipmapEnabled && level == m_mipmapLevel) return;
+        mipmapEnabled = enabled;
+        m_mipmapLevel = level;
+        if (m_atlasTexture != Render::INVALID_TEXTURE) {
+            UpdateTextureParameters();
+            // The chain is CPU-authored (see SetMipmapLevel), so a deeper
+            // chain has to be rebuilt; switching OFF only needs the sampler
+            // change above, the unused levels can stay resident.
+            if (enabled) BuildAndUploadMipChain(textureSources, m_packedRects);
+            Log::Info("AtlasBuilder mipmap levels -> %d (%s)", levels, enabled ? "on" : "off");
+        }
+    }
+
     void AtlasBuilder::UpdateTextureParameters() {
         if (m_atlasTexture == Render::INVALID_TEXTURE || !Render::g_renderBackend) return;
 

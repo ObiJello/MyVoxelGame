@@ -11,6 +11,7 @@ namespace Network {
 
     // Forward declarations for packet types
     struct ChunkDataS2CPacket;
+    struct ChunkUnchangedS2CPacket;
     struct UnloadChunkS2CPacket;
     struct BlockChangeS2CPacket;
     struct ClientboundBlockUpdateS2CPacket;
@@ -35,7 +36,10 @@ namespace Network {
     struct TickingStateS2CPacket;
     struct TickingStepS2CPacket;
     struct ChangeDimensionS2CPacket;
+    struct DimensionScopeS2CPacket;
     struct ExplodeS2CPacket;
+    struct BossEventS2CPacket;
+    struct EndCrystalBeamS2CPacket;
     struct InteractC2SPacket;
     struct HotbarSyncS2CPacket;
     struct InventoryFullS2CPacket;
@@ -54,6 +58,13 @@ namespace Network {
     struct BlockEntityDataS2CPacket;
     struct BlockEntityRemoveS2CPacket;
     struct BlockEntityActionS2CPacket;
+    struct AoRegionsS2CPacket;
+#if ENABLE_IMMERSIVE_PORTALS
+    struct ImmersivePortalSyncS2CPacket;
+    struct ImmersivePortalRemoveS2CPacket;
+    struct PortalTeleportC2SPacket;
+    struct FillBlocksC2SPacket;
+#endif
 #if ENABLE_PORTAL_GUN
     struct PortalSetS2CPacket;
     struct PortalRemoveS2CPacket;
@@ -93,6 +104,7 @@ namespace Network {
         // Chunk management
         virtual void onChunkDataS2C(const ChunkDataS2CPacket& packet) {}
         virtual void onUnloadChunkS2C(const UnloadChunkS2CPacket& packet) {}
+        virtual void onChunkUnchangedS2C(const ChunkUnchangedS2CPacket& packet) {}
         virtual void onChunkBatchStart() {}
         virtual void onChunkBatchFinished(int batchSize) {}
         
@@ -130,6 +142,10 @@ namespace Network {
         virtual void onSetEntityDataS2C(const SetEntityDataS2CPacket& packet) {}
         virtual void onEntityEventS2C(const EntityEventS2CPacket& packet) {}
         virtual void onHurtAnimationS2C(const HurtAnimationS2CPacket& packet) {}
+
+        // ── End dragon fight ───────────────────────────────────────────────
+        virtual void onBossEventS2C(const BossEventS2CPacket& packet) {}
+        virtual void onEndCrystalBeamS2C(const EndCrystalBeamS2CPacket& packet) {}
         virtual void onTickingStateS2C(const TickingStateS2CPacket& packet) {}
         virtual void onTickingStepS2C(const TickingStepS2CPacket& packet) {}
 
@@ -137,6 +153,10 @@ namespace Network {
         // cached world object before the first chunk of the new dimension
         // arrives — see ChangeDimensionS2CPacket.hpp for the list.
         virtual void onChangeDimensionS2C(const ChangeDimensionS2CPacket& packet) {}
+
+        // Stream scope: the dimension every following world-scoped packet
+        // belongs to. See DimensionScopeS2CPacket.hpp.
+        virtual void onDimensionScopeS2C(const DimensionScopeS2CPacket& packet) {}
 
         // MC ClientboundExplodePacket — draw a blast that already happened
         // server-side. See ExplodeS2CPacket.hpp for why the client is told
@@ -164,6 +184,16 @@ namespace Network {
 
         // Abilities + game mode (MC ClientboundPlayerAbilitiesPacket + CHANGE_GAME_MODE)
         virtual void onPlayerAbilitiesS2C(const PlayerAbilitiesS2CPacket& packet) {}
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // Immersive portals: a full portal record to upsert, or an id to
+        // drop. Delivered with the portal's origin chunk — see
+        // ImmersivePortalPackets.hpp.
+        virtual void onImmersivePortalSyncS2C(const ImmersivePortalSyncS2CPacket& packet) {}
+        virtual void onImmersivePortalRemoveS2C(const ImmersivePortalRemoveS2CPacket& packet) {}
+#endif
+        // The occlusion wand's boxes of one dimension (AoRegionsS2CPacket.hpp).
+        virtual void onAoRegionsS2C(const AoRegionsS2CPacket& packet) {}
 
 #if ENABLE_PORTAL_GUN
         // Portal gun (server-authoritative pair state). Default no-op handlers
@@ -208,6 +238,12 @@ namespace Network {
         
         // Play phase - Player updates
         virtual void onPlayerMoveC2S(const PlayerMoveC2SPacket& packet) {}
+#if ENABLE_IMMERSIVE_PORTALS
+        // The client crossed an immersive portal (see PortalTeleportC2SPacket.hpp)
+        virtual void onPortalTeleportC2S(const PortalTeleportC2SPacket& packet) {}
+#endif
+        // The fill tool's box (see FillBlocksC2SPacket.hpp)
+        virtual void onFillBlocksC2S(const FillBlocksC2SPacket& packet) {}
         
         // Play phase - Chat
         virtual void onChatMessageC2S(const ChatMessageC2SPacket& packet) {}
@@ -224,6 +260,7 @@ namespace Network {
 
         // Play phase - Chunk batch acknowledgment
         virtual void onChunkBatchAck(float desiredChunksPerTick) {}
+        virtual void onChunkRequestFull(int8_t dimensionId, int32_t chunkX, int32_t chunkZ) {}
 
         // Play phase - client reports its own level is ready
         // (MC ServerGamePacketListener.handleAcceptPlayerLoad)
@@ -250,7 +287,8 @@ namespace Network {
         // Play phase - client settings (MC ServerboundClientInformationPacket).
         // Passed as fields rather than the struct because ClientConfigC2SPacket
         // carries no deserializer; the wire read lives in DecodePacket.
-        virtual void onClientConfigC2S(int renderDistance, bool vsync, float mouseSensitivity) {}
+        virtual void onClientConfigC2S(int renderDistance, int simulationDistance,
+                                       bool vsync, float mouseSensitivity) {}
     };
 
 } // namespace Network

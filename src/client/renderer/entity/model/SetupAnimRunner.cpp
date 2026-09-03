@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace Render {
 
@@ -46,115 +47,222 @@ namespace Render {
                     - period * 0.25f) / (period * 0.25f);
         }
 
-        float StateValue(const EntityRenderState& s, std::string_view n) {
-            if (n == "WalkPos")      return s.walkAnimationPos;
-            if (n == "WalkSpeed")    return s.walkAnimationSpeed;
-            if (n == "AgeInTicks")   return s.ageInTicks;
-            if (n == "XRot")         return s.xRot;
-            if (n == "YRot")         return s.yRot;
-            if (n == "AttackTime")   return s.attackTime;
-            if (n == "AgeScale")     return s.ageScale;
-            if (n == "Flap")         return s.flap;
-            if (n == "FlapSpeed")    return s.flapSpeed;
-            if (n == "SpeedValue")   return s.speedValue;
-            if (n == "SwimAmount")   return s.swimAmount;
-            if (n == "MainArm")      return s.mainArm;
-            if (n == "RightArmPose") return static_cast<float>(s.rightArmPose);
-            if (n == "LeftArmPose")  return static_cast<float>(s.leftArmPose);
-            if (n == "Squish")               return s.squish;
-            if (n == "FlapTime")             return s.flapTime;
-            if (n == "TentacleAngle")        return s.tentacleAngle;
-            if (n == "EatAnim")              return s.eatAnimation;
-            if (n == "StandAnim")            return s.standAnimation;
-            if (n == "FeedingAnim")          return s.feedingAnimation;
-            if (n == "PlayingDead")          return s.playingDeadFactor;
-            if (n == "InWaterFactor")        return s.inWaterFactor;
-            if (n == "OnGroundFactor")       return s.onGroundFactor;
-            if (n == "MovingFactor")         return s.movingFactor;
-            if (n == "StandScale")           return s.standScale;
-            if (n == "RammingXHeadRot")      return s.rammingXHeadRot;
-            if (n == "AttackTicksRemaining") return s.attackTicksRemaining;
-            if (n == "AttackAnimRemaining")  return s.attackAnimationRemainingTicks;
-            if (n == "StunnedTicks")         return s.stunnedTicksRemaining;
-            if (n == "JumpCompletion")       return s.jumpCompletion;
-            if (n == "HoldingProgress")      return s.holdingAnimationProgress;
-            if (n == "TendrilAnim")          return s.tendrilAnimation;
-            if (n == "SpikesAnim")           return s.spikesAnimation;
-            if (n == "TailAnim")             return s.tailAnimation;
-            if (n == "EntityId")             return s.entityId;
-            if (n == "JumpCooldown")         return s.jumpCooldown;
-            if (n == "HeadRollAngle")        return s.headRollAngle;
-            if (n == "TailAngle")            return s.tailAngle;
-            if (n == "LieDown")              return s.lieDownAmount;
-            if (n == "LieDownTail")          return s.lieDownAmountTail;
-            if (n == "RelaxOne")             return s.relaxStateOneAmount;
-            if (n == "SitAmount")            return s.sitAmount;
-            if (n == "LieOnBack")            return s.lieOnBackAmount;
-            if (n == "RollAmount")           return s.rollAmount;
-            if (n == "SneezeTime")           return s.sneezeTime;
-            if (n == "CrouchAmount")         return s.crouchAmount;
-            if (n == "PeekAmount")           return s.peekAmount;
-            if (n == "SpinningProgress")     return s.spinningProgress;
-            if (n == "OfferFlowerTick")      return s.offerFlowerTick;
-            if (n == "RoarAnim")             return s.roarAnimation;
-            if (n == "YHeadRotAbs")          return s.yHeadRotAbs;
-            if (n == "YBodyRotAbs")          return s.yBodyRotAbs;
-            if (n == "MobArmPose")           return s.mobArmPose;
-            if (n == "MobPose")              return s.mobPose;
-            if (n == "SwingAnimType")        return s.swingAnimType;
-            return 0.0f;
-        }
-
-        float BoolValue(const EntityRenderState& s, std::string_view n) {
-            if (n == "IsAggressive")  return s.isAggressive  ? 1.0f : 0.0f;
-            if (n == "IsBaby")        return s.isBaby        ? 1.0f : 0.0f;
-            if (n == "IsCrouching")   return s.isCrouching   ? 1.0f : 0.0f;
-            if (n == "IsSprinting")   return s.isSprinting   ? 1.0f : 0.0f;
-            if (n == "IsInWater")     return s.isInWater     ? 1.0f : 0.0f;
-            if (n == "IsOnGround")    return s.isOnGround    ? 1.0f : 0.0f;
-            if (n == "IsFallFlying")  return s.isFallFlying  ? 1.0f : 0.0f;
-            if (n == "IsPassenger")   return s.isPassenger   ? 1.0f : 0.0f;
-            if (n == "IsUsingItem")   return s.isUsingItem   ? 1.0f : 0.0f;
-            if (n == "IsSitting")     return s.isSitting     ? 1.0f : 0.0f;
-            if (n == "IsHoldingBow")  return s.isHoldingBow  ? 1.0f : 0.0f;
-            if (n == "IsHidingInShell") return s.isHidingInShell ? 1.0f : 0.0f;
-            if (n == "IsResting")     return s.isResting     ? 1.0f : 0.0f;
-            if (n == "CanMove")       return s.canMove       ? 1.0f : 0.0f;
-            if (n == "IsSearching")   return s.isSearching   ? 1.0f : 0.0f;
-            if (n == "IsHoldingItem") return s.isHoldingItem ? 1.0f : 0.0f;
-            if (n == "IsMoving")      return s.isMoving      ? 1.0f : 0.0f;
-            if (n == "AnimateTail")   return s.animateTail   ? 1.0f : 0.0f;
-            if (n == "HasChest")      return s.hasChest      ? 1.0f : 0.0f;
-            if (n == "HasLeftHorn")   return s.hasLeftHorn   ? 1.0f : 0.0f;
-            if (n == "HasRightHorn")  return s.hasRightHorn  ? 1.0f : 0.0f;
-            if (n == "HasEgg")        return s.hasEgg        ? 1.0f : 0.0f;
-            if (n == "IsOnLand")      return s.isOnLand      ? 1.0f : 0.0f;
-            if (n == "IsLayingEgg")   return s.isLayingEgg   ? 1.0f : 0.0f;
-            if (n == "IsAngry")       return s.isAngry       ? 1.0f : 0.0f;
-            if (n == "HasStinger")    return s.hasStinger    ? 1.0f : 0.0f;
-            if (n == "IsSheared")     return s.isSheared     ? 1.0f : 0.0f;
-            if (n == "IsUnhappy")     return s.isUnhappy     ? 1.0f : 0.0f;
-            if (n == "IsCharging")    return s.isCharging    ? 1.0f : 0.0f;
-            if (n == "IsRidden")      return s.isRidden      ? 1.0f : 0.0f;
-            if (n == "IsCreepy")      return s.isCreepy      ? 1.0f : 0.0f;
-            if (n == "IsDancing")     return s.isDancing     ? 1.0f : 0.0f;
-            if (n == "IsFaceplanted") return s.isFaceplanted ? 1.0f : 0.0f;
-            if (n == "IsSwimming")    return s.isSwimming    ? 1.0f : 0.0f;
-            if (n == "IsSleeping")    return s.isSleeping    ? 1.0f : 0.0f;
-            if (n == "IsSpinning")    return s.isSpinning    ? 1.0f : 0.0f;
-            if (n == "IsSneezing")    return s.isSneezing    ? 1.0f : 0.0f;
-            if (n == "IsEating")      return s.isEating      ? 1.0f : 0.0f;
-            if (n == "IsScared")      return s.isScared      ? 1.0f : 0.0f;
-            if (n == "HasMainHandItem") return s.hasMainHandItem ? 1.0f : 0.0f;
-            return 0.0f;
-        }
-
     } // namespace
+
+    // Name -> index, once per node at bake. The names are the generator's
+    // (tools/gen_setup_anim.py) and this table is the only place they are
+    // spelled at runtime; an unknown name resolves to None and reads as 0.
+    SetupAnimProgram::StateRef SetupAnimProgram::ResolveStateRef(std::string_view n) {
+        struct Entry { std::string_view name; StateRef ref; };
+        static constexpr Entry kTable[] = {
+            { "WalkPos",              StateRef::WalkPos },
+            { "WalkSpeed",            StateRef::WalkSpeed },
+            { "AgeInTicks",           StateRef::AgeInTicks },
+            { "XRot",                 StateRef::XRot },
+            { "YRot",                 StateRef::YRot },
+            { "AttackTime",           StateRef::AttackTime },
+            { "AgeScale",             StateRef::AgeScale },
+            { "Flap",                 StateRef::Flap },
+            { "FlapSpeed",            StateRef::FlapSpeed },
+            { "SpeedValue",           StateRef::SpeedValue },
+            { "SwimAmount",           StateRef::SwimAmount },
+            { "MainArm",              StateRef::MainArm },
+            { "RightArmPose",         StateRef::RightArmPose },
+            { "LeftArmPose",          StateRef::LeftArmPose },
+            { "Squish",               StateRef::Squish },
+            { "FlapTime",             StateRef::FlapTime },
+            { "TentacleAngle",        StateRef::TentacleAngle },
+            { "EatAnim",              StateRef::EatAnim },
+            { "StandAnim",            StateRef::StandAnim },
+            { "FeedingAnim",          StateRef::FeedingAnim },
+            { "PlayingDead",          StateRef::PlayingDead },
+            { "InWaterFactor",        StateRef::InWaterFactor },
+            { "OnGroundFactor",       StateRef::OnGroundFactor },
+            { "MovingFactor",         StateRef::MovingFactor },
+            { "StandScale",           StateRef::StandScale },
+            { "RammingXHeadRot",      StateRef::RammingXHeadRot },
+            { "AttackTicksRemaining", StateRef::AttackTicksRemaining },
+            { "AttackAnimRemaining",  StateRef::AttackAnimRemaining },
+            { "StunnedTicks",         StateRef::StunnedTicks },
+            { "JumpCompletion",       StateRef::JumpCompletion },
+            { "HoldingProgress",      StateRef::HoldingProgress },
+            { "TendrilAnim",          StateRef::TendrilAnim },
+            { "SpikesAnim",           StateRef::SpikesAnim },
+            { "TailAnim",             StateRef::TailAnim },
+            { "EntityId",             StateRef::EntityId },
+            { "JumpCooldown",         StateRef::JumpCooldown },
+            { "HeadRollAngle",        StateRef::HeadRollAngle },
+            { "TailAngle",            StateRef::TailAngle },
+            { "LieDown",              StateRef::LieDown },
+            { "LieDownTail",          StateRef::LieDownTail },
+            { "RelaxOne",             StateRef::RelaxOne },
+            { "SitAmount",            StateRef::SitAmount },
+            { "LieOnBack",            StateRef::LieOnBack },
+            { "RollAmount",           StateRef::RollAmount },
+            { "SneezeTime",           StateRef::SneezeTime },
+            { "CrouchAmount",         StateRef::CrouchAmount },
+            { "PeekAmount",           StateRef::PeekAmount },
+            { "SpinningProgress",     StateRef::SpinningProgress },
+            { "OfferFlowerTick",      StateRef::OfferFlowerTick },
+            { "RoarAnim",             StateRef::RoarAnim },
+            { "YHeadRotAbs",          StateRef::YHeadRotAbs },
+            { "YBodyRotAbs",          StateRef::YBodyRotAbs },
+            { "MobArmPose",           StateRef::MobArmPose },
+            { "MobPose",              StateRef::MobPose },
+            { "SwingAnimType",        StateRef::SwingAnimType },
+            { "IsAggressive",         StateRef::IsAggressive },
+            { "IsBaby",               StateRef::IsBaby },
+            { "IsCrouching",          StateRef::IsCrouching },
+            { "IsSprinting",          StateRef::IsSprinting },
+            { "IsInWater",            StateRef::IsInWater },
+            { "IsOnGround",           StateRef::IsOnGround },
+            { "IsFallFlying",         StateRef::IsFallFlying },
+            { "IsPassenger",          StateRef::IsPassenger },
+            { "IsUsingItem",          StateRef::IsUsingItem },
+            { "IsSitting",            StateRef::IsSitting },
+            { "IsHoldingBow",         StateRef::IsHoldingBow },
+            { "IsHidingInShell",      StateRef::IsHidingInShell },
+            { "IsResting",            StateRef::IsResting },
+            { "CanMove",              StateRef::CanMove },
+            { "IsSearching",          StateRef::IsSearching },
+            { "IsHoldingItem",        StateRef::IsHoldingItem },
+            { "IsMoving",             StateRef::IsMoving },
+            { "AnimateTail",          StateRef::AnimateTail },
+            { "HasChest",             StateRef::HasChest },
+            { "HasLeftHorn",          StateRef::HasLeftHorn },
+            { "HasRightHorn",         StateRef::HasRightHorn },
+            { "HasEgg",               StateRef::HasEgg },
+            { "IsOnLand",             StateRef::IsOnLand },
+            { "IsLayingEgg",          StateRef::IsLayingEgg },
+            { "IsAngry",              StateRef::IsAngry },
+            { "HasStinger",           StateRef::HasStinger },
+            { "IsSheared",            StateRef::IsSheared },
+            { "IsUnhappy",            StateRef::IsUnhappy },
+            { "IsCharging",           StateRef::IsCharging },
+            { "IsRidden",             StateRef::IsRidden },
+            { "IsCreepy",             StateRef::IsCreepy },
+            { "IsDancing",            StateRef::IsDancing },
+            { "IsFaceplanted",        StateRef::IsFaceplanted },
+            { "IsSwimming",           StateRef::IsSwimming },
+            { "IsSleeping",           StateRef::IsSleeping },
+            { "IsSpinning",           StateRef::IsSpinning },
+            { "IsSneezing",           StateRef::IsSneezing },
+            { "IsEating",             StateRef::IsEating },
+            { "IsScared",             StateRef::IsScared },
+            { "HasMainHandItem",      StateRef::HasMainHandItem },
+        };
+        for (const Entry& e : kTable) {
+            if (e.name == n) return e.ref;
+        }
+        return StateRef::None;
+    }
+
+    float SetupAnimProgram::ReadState(const EntityRenderState& s, StateRef ref) {
+        const auto b = [](bool v) { return v ? 1.0f : 0.0f; };
+        switch (ref) {
+            case StateRef::None:                 return 0.0f;
+            case StateRef::WalkPos:              return s.walkAnimationPos;
+            case StateRef::WalkSpeed:            return s.walkAnimationSpeed;
+            case StateRef::AgeInTicks:           return s.ageInTicks;
+            case StateRef::XRot:                 return s.xRot;
+            case StateRef::YRot:                 return s.yRot;
+            case StateRef::AttackTime:           return s.attackTime;
+            case StateRef::AgeScale:             return s.ageScale;
+            case StateRef::Flap:                 return s.flap;
+            case StateRef::FlapSpeed:            return s.flapSpeed;
+            case StateRef::SpeedValue:           return s.speedValue;
+            case StateRef::SwimAmount:           return s.swimAmount;
+            case StateRef::MainArm:              return s.mainArm;
+            case StateRef::RightArmPose:         return static_cast<float>(s.rightArmPose);
+            case StateRef::LeftArmPose:          return static_cast<float>(s.leftArmPose);
+            case StateRef::Squish:               return s.squish;
+            case StateRef::FlapTime:             return s.flapTime;
+            case StateRef::TentacleAngle:        return s.tentacleAngle;
+            case StateRef::EatAnim:              return s.eatAnimation;
+            case StateRef::StandAnim:            return s.standAnimation;
+            case StateRef::FeedingAnim:          return s.feedingAnimation;
+            case StateRef::PlayingDead:          return s.playingDeadFactor;
+            case StateRef::InWaterFactor:        return s.inWaterFactor;
+            case StateRef::OnGroundFactor:       return s.onGroundFactor;
+            case StateRef::MovingFactor:         return s.movingFactor;
+            case StateRef::StandScale:           return s.standScale;
+            case StateRef::RammingXHeadRot:      return s.rammingXHeadRot;
+            case StateRef::AttackTicksRemaining: return s.attackTicksRemaining;
+            case StateRef::AttackAnimRemaining:  return s.attackAnimationRemainingTicks;
+            case StateRef::StunnedTicks:         return s.stunnedTicksRemaining;
+            case StateRef::JumpCompletion:       return s.jumpCompletion;
+            case StateRef::HoldingProgress:      return s.holdingAnimationProgress;
+            case StateRef::TendrilAnim:          return s.tendrilAnimation;
+            case StateRef::SpikesAnim:           return s.spikesAnimation;
+            case StateRef::TailAnim:             return s.tailAnimation;
+            case StateRef::EntityId:             return s.entityId;
+            case StateRef::JumpCooldown:         return s.jumpCooldown;
+            case StateRef::HeadRollAngle:        return s.headRollAngle;
+            case StateRef::TailAngle:            return s.tailAngle;
+            case StateRef::LieDown:              return s.lieDownAmount;
+            case StateRef::LieDownTail:          return s.lieDownAmountTail;
+            case StateRef::RelaxOne:             return s.relaxStateOneAmount;
+            case StateRef::SitAmount:            return s.sitAmount;
+            case StateRef::LieOnBack:            return s.lieOnBackAmount;
+            case StateRef::RollAmount:           return s.rollAmount;
+            case StateRef::SneezeTime:           return s.sneezeTime;
+            case StateRef::CrouchAmount:         return s.crouchAmount;
+            case StateRef::PeekAmount:           return s.peekAmount;
+            case StateRef::SpinningProgress:     return s.spinningProgress;
+            case StateRef::OfferFlowerTick:      return s.offerFlowerTick;
+            case StateRef::RoarAnim:             return s.roarAnimation;
+            case StateRef::YHeadRotAbs:          return s.yHeadRotAbs;
+            case StateRef::YBodyRotAbs:          return s.yBodyRotAbs;
+            case StateRef::MobArmPose:           return s.mobArmPose;
+            case StateRef::MobPose:              return s.mobPose;
+            case StateRef::SwingAnimType:        return s.swingAnimType;
+            case StateRef::IsAggressive:         return b(s.isAggressive);
+            case StateRef::IsBaby:               return b(s.isBaby);
+            case StateRef::IsCrouching:          return b(s.isCrouching);
+            case StateRef::IsSprinting:          return b(s.isSprinting);
+            case StateRef::IsInWater:            return b(s.isInWater);
+            case StateRef::IsOnGround:           return b(s.isOnGround);
+            case StateRef::IsFallFlying:         return b(s.isFallFlying);
+            case StateRef::IsPassenger:          return b(s.isPassenger);
+            case StateRef::IsUsingItem:          return b(s.isUsingItem);
+            case StateRef::IsSitting:            return b(s.isSitting);
+            case StateRef::IsHoldingBow:         return b(s.isHoldingBow);
+            case StateRef::IsHidingInShell:      return b(s.isHidingInShell);
+            case StateRef::IsResting:            return b(s.isResting);
+            case StateRef::CanMove:              return b(s.canMove);
+            case StateRef::IsSearching:          return b(s.isSearching);
+            case StateRef::IsHoldingItem:        return b(s.isHoldingItem);
+            case StateRef::IsMoving:             return b(s.isMoving);
+            case StateRef::AnimateTail:          return b(s.animateTail);
+            case StateRef::HasChest:             return b(s.hasChest);
+            case StateRef::HasLeftHorn:          return b(s.hasLeftHorn);
+            case StateRef::HasRightHorn:         return b(s.hasRightHorn);
+            case StateRef::HasEgg:               return b(s.hasEgg);
+            case StateRef::IsOnLand:             return b(s.isOnLand);
+            case StateRef::IsLayingEgg:          return b(s.isLayingEgg);
+            case StateRef::IsAngry:              return b(s.isAngry);
+            case StateRef::HasStinger:           return b(s.hasStinger);
+            case StateRef::IsSheared:            return b(s.isSheared);
+            case StateRef::IsUnhappy:            return b(s.isUnhappy);
+            case StateRef::IsCharging:           return b(s.isCharging);
+            case StateRef::IsRidden:             return b(s.isRidden);
+            case StateRef::IsCreepy:             return b(s.isCreepy);
+            case StateRef::IsDancing:            return b(s.isDancing);
+            case StateRef::IsFaceplanted:        return b(s.isFaceplanted);
+            case StateRef::IsSwimming:           return b(s.isSwimming);
+            case StateRef::IsSleeping:           return b(s.isSleeping);
+            case StateRef::IsSpinning:           return b(s.isSpinning);
+            case StateRef::IsSneezing:           return b(s.isSneezing);
+            case StateRef::IsEating:             return b(s.isEating);
+            case StateRef::IsScared:             return b(s.isScared);
+            case StateRef::HasMainHandItem:      return b(s.hasMainHandItem);
+        }
+        return 0.0f;
+    }
 
     SetupAnimProgram SetupAnimProgram::Bake(ModelPart& root, const AnimProgram& prog) {
         SetupAnimProgram out;
         out.m_prog = &prog;
-        out.m_localCount = prog.localCount;
         out.m_parts.reserve(static_cast<size_t>(prog.statementCount));
 
         const auto find = [&root](std::string_view n) -> ModelPart* {
@@ -177,12 +285,18 @@ namespace Render {
             }
         }
 
+        out.m_locals.assign(static_cast<size_t>(std::max(1, prog.localCount)), 0.0f);
+
         if (hi > lo) {
             out.m_nodeLo = lo;
-            out.m_nodeParts.assign(static_cast<size_t>(hi - lo),
-                                   PartRef{ nullptr, PartField::XRot });
+            out.m_nodes.assign(static_cast<size_t>(hi - lo), NodeBind{});
             for (int i = lo; i < hi; ++i) {
                 const AnimNode& n = kAnimNodes[i];
+                NodeBind& bind = out.m_nodes[static_cast<size_t>(i - lo)];
+                if (n.op == AnimOp::State || n.op == AnimOp::BState) {
+                    bind.ref = ResolveStateRef(n.name);
+                    continue;
+                }
                 if (n.op != AnimOp::Part) continue;
                 const size_t bar = n.name.find('|');
                 if (bar == std::string_view::npos) continue;
@@ -198,19 +312,31 @@ namespace Render {
                 else if (fname == "XScale") f = PartField::XScale;
                 else if (fname == "YScale") f = PartField::YScale;
                 else if (fname == "ZScale") f = PartField::ZScale;
-                out.m_nodeParts[static_cast<size_t>(i - lo)] = PartRef{ find(pname), f };
+                bind.part = find(pname);
+                bind.field = f;
             }
         }
         return out;
     }
 
-    void SetupAnimProgram::Run(const EntityRenderState& state) const {
+    void SetupAnimProgram::Run(const EntityRenderState& state) {
         if (!m_prog) return;
 
         // Deep enough for every generated program; MC's expressions nest four
         // or five operands at most.
         float stack[32];
-        std::vector<float> locals(static_cast<size_t>(std::max(1, m_localCount)), 0.0f);
+        std::vector<float>& locals = m_locals;
+        std::fill(locals.begin(), locals.end(), 0.0f);
+
+        // Node k's bake-time binding, or a null bind for a node outside the
+        // baked range (cannot happen for a well-formed program; the guard
+        // keeps a malformed one reading zeros rather than off the end).
+        static const NodeBind kUnbound{};
+        const auto bindOf = [&](int nodeIndex) -> const NodeBind& {
+            const int k = nodeIndex - m_nodeLo;
+            return (k >= 0 && k < static_cast<int>(m_nodes.size()))
+                ? m_nodes[static_cast<size_t>(k)] : kUnbound;
+        };
 
         const auto eval = [&](int first, int count) -> float {
             int sp = 0;
@@ -220,17 +346,18 @@ namespace Render {
                 const auto pop = [&]() -> float { return sp > 0 ? stack[--sp] : 0.0f; };
                 switch (n.op) {
                     case AnimOp::Const:  push(n.value); break;
-                    case AnimOp::State:  push(StateValue(state, n.name)); break;
-                    case AnimOp::BState: push(BoolValue(state, n.name)); break;
+                    case AnimOp::State:
+                    case AnimOp::BState:
+                        push(ReadState(state, bindOf(first + i).ref));
+                        break;
                     case AnimOp::Local:
-                        push(n.arg < static_cast<int>(locals.size())
+                        push(n.arg >= 0 && n.arg < static_cast<int>(locals.size())
                                  ? locals[static_cast<size_t>(n.arg)] : 0.0f);
                         break;
                     case AnimOp::Part: {
-                        const int k = (first + i) - m_nodeLo;
                         float v = 0.0f;
-                        if (k >= 0 && k < static_cast<int>(m_nodeParts.size())) {
-                            const PartRef& r = m_nodeParts[static_cast<size_t>(k)];
+                        {
+                            const NodeBind& r = bindOf(first + i);
                             if (r.part) {
                                 switch (r.field) {
                                     case PartField::X:      v = r.part->x; break;

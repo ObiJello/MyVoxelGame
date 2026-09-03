@@ -23,7 +23,7 @@ namespace Game {
         void Tick() override;
 
     protected:
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHitBlock(const HitResult& hit) override;
     };
 

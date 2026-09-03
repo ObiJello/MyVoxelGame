@@ -51,6 +51,7 @@ namespace Render {
                        RelativePos rel, Mode mode) const;
         void RebuildMesh(int cellX, int cellZ, RelativePos rel, Mode mode, int radiusCells);
         void DestroyMeshBuffers(bool deferred);
+        void DestroySlot(size_t slot, bool deferred);
 
         static const char* vertexShaderSource;
         static const char* fragmentShaderSource;
@@ -63,10 +64,29 @@ namespace Render {
         int m_texWidth = 0;
         int m_texHeight = 0;
 
-        BufferHandle m_vb = INVALID_BUFFER;
-        BufferHandle m_ib = INVALID_BUFFER;
-        MeshHandle m_mesh = INVALID_MESH;
+        // GPU mesh, double-buffered. A rebuild writes into host-visible
+        // (Dynamic) buffers IN PLACE with UpdateBuffer — on Vulkan that is a
+        // plain memcpy with no GPU sync, and the previous frame may still be
+        // reading the cloud mesh. So each rebuild targets the slot the
+        // previous rebuild did NOT use: with two frames in flight and at
+        // most one rebuild per frame, that slot was last read two or more
+        // frames ago, and BeginFrame's fence wait has already retired it.
+        // Buffers only get recreated (deferred-destroy + new) when a rebuild
+        // needs more capacity than the slot has; before this, every rebuild
+        // was two Static uploads = two full vkQueueWaitIdle drains.
+        struct MeshSlot {
+            BufferHandle vb = INVALID_BUFFER;
+            BufferHandle ib = INVALID_BUFFER;
+            MeshHandle mesh = INVALID_MESH;
+            size_t vbCapacity = 0;   // bytes
+            size_t ibCapacity = 0;   // bytes
+        };
+        MeshSlot m_slots[2];
+        size_t m_activeSlot = 0;     // slot the last rebuild filled
         uint32_t m_indexCount = 0;
+        // Scratch reused across rebuilds so a cell crossing does not reallocate.
+        std::vector<Vertex> m_scratchVerts;
+        std::vector<uint32_t> m_scratchIndices;
 
         // Rebuild keys.
         int m_lastCellX = INT32_MIN;

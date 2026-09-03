@@ -145,7 +145,8 @@ namespace Game::ConsumableBehavior {
                     // Inventory full — the remainder (an empty bucket, a bowl)
                     // goes on the ground at the player's feet rather than
                     // being destroyed.
-                    DropItemStackNear(glm::ivec3(glm::floor(player.getPosition())),
+                    DropItemStackNear(DimensionFromRaw(player.getDimensionId()),
+                                      glm::ivec3(glm::floor(player.getPosition())),
                                       ItemStack(remainderStack.itemId, leftover));
                 }
             }

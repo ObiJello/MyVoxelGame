@@ -218,6 +218,8 @@ namespace Game::Anvil {
         // Engine-only, inside the vanilla `abilities` compound where it reads
         // as an unknown key Minecraft ignores. There is no vanilla noclip.
         w.Bool ("obey_noclip",  player.isNoclip());
+        // The body's size from scaled immersive portals; 1 is vanilla.
+        w.Float("obey_scale",   player.getScale());
         w.EndCompound();
 
         w.EndRootCompound();
@@ -321,11 +323,25 @@ namespace Game::Anvil {
                 player.setFlying(abilities->GetValue<int8_t>("flying", 0) != 0);
             }
             player.setNoclip(abilities->GetValue<int8_t>("obey_noclip", 0) != 0);
+            player.setScale(abilities->GetValue<float>("obey_scale", 1.0f));
         }
 
         player.setHealthDirect(data->GetValue<float>("Health", 20.0f));
         player.setOnGround(data->GetValue<int8_t>("OnGround", 1) != 0);
-        player.setDimensionId(data->GetValue<int32_t>("playerDimensionId", player.getDimensionId()));
+        // The WRITE side stores MC's string key ("minecraft:the_end"); this
+        // used to read an int key nothing ever wrote, so a player who logged
+        // out in the End always rejoined in the Overworld. The int fallback
+        // stays for any file that predates the string.
+        {
+            const std::string dim = data->GetValue<std::string>("Dimension", "");
+            if (dim == "minecraft:the_nether")      player.setDimensionId(-1);
+            else if (dim == "minecraft:the_end")    player.setDimensionId(1);
+            else if (dim == "minecraft:overworld")  player.setDimensionId(0);
+            else {
+                player.setDimensionId(data->GetValue<int32_t>(
+                    "playerDimensionId", player.getDimensionId()));
+            }
+        }
 
         auto& food = player.getFoodData();
         food.setFoodLevel (data->GetValue<int32_t>("foodLevel", 20));

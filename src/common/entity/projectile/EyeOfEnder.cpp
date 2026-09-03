@@ -125,7 +125,9 @@ namespace Game {
                 // through, so the eye needs no hook of its own in the mob
                 // removal path — where it would otherwise have to be noticed
                 // between being discarded and being erased.
-                DropItemStackNear(BlockPosition(), m_item);
+                DropItemStackNear(m_level ? m_level->Dimension()
+                                          : DimensionId::Overworld,
+                                  BlockPosition(), m_item);
             }
             // MC's shatter is levelEvent 2003 (a particle + sound burst).
             // There is no level-event packet, so a shattered eye simply

@@ -1,5 +1,6 @@
 // File: src/client/world/ClientChunkManager.hpp
 #pragma once
+#include <list>
 
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/chunk/Chunk.hpp"
@@ -23,6 +24,12 @@
 #include <array>
 #include <vector>
 #include <glm/glm.hpp>
+#include "common/world/level/DimensionId.hpp"
+
+namespace Render {
+    class ClientMeshManager;
+    class ChunkRenderer;
+}
 
 namespace Client {
 
@@ -120,6 +127,24 @@ namespace Client {
         // section 160..175 is a single-value air palette.
         bool meshResolvedEmpty = false;
         uint8_t lastNeighborMask = 0; // Which neighbors were present during last mesh (PX=1, NX=2, PZ=4, NZ=8)
+        // Greedy-debug palette generation the uploaded mesh was built under
+        // (Mesher::GreedyPaletteGen at build start). A parked chunk revived
+        // with a stale stamp is re-dirtied in RestoreRetainedChunk — the
+        // toggle's RemeshAll only reaches ACTIVE sections, and this is what
+        // kept debug-colored meshes alive past the toggle on revisits.
+        uint32_t builtPaletteGen = 0;
+        // Total order over this section's mesh jobs, independent of `version`.
+        // Two jobs CAN legitimately share a version: every re-dirty that
+        // resets meshingVersion (convergence nets, NoteMeshBuildFailed,
+        // ApplyChunkData resends) reschedules at the same content version, so
+        // the strictly-less generation guard in AcceptMeshResult cannot order
+        // them — whichever finished LAST won, even when built from older
+        // data. That race is the 2026-08-30 hole/ghost bug: an empty result
+        // landing after a solid one leaves a hole; the reverse leaves ghost
+        // terrain. lastJobSeq increments per schedule (main thread), a result
+        // carries its seq, and accept drops anything older than uploadedJobSeq.
+        uint32_t lastJobSeq = 0;
+        uint32_t uploadedJobSeq = 0;
         bool builtOnce = false;       // True after first successful build
         // MC's RenderSection.isDirtyFromPlayer — set when THIS client edited a
         // block in the section, cleared when it is scheduled. Drives the
@@ -167,6 +192,10 @@ namespace Client {
         // but a handful of chunks in a world, which is what makes the
         // renderer's per-chunk cull a size() check.
         std::vector<glm::ivec3> endPortals;
+        // Same contract for END GATEWAYS — the block renders invisible in the
+        // chunk mesh (MC RenderShape.INVISIBLE) and EndPortalRenderer draws
+        // its starfield cube off this index.
+        std::vector<glm::ivec3> endGateways;
 
         ClientChunk(Game::Math::ChunkPos pos) 
             : position(pos), loadTime(std::chrono::steady_clock::now())
@@ -192,12 +221,29 @@ namespace Client {
         void Initialize();
         void Shutdown();
 
+        // Which dimension this manager holds. Stamped onto every mesh job so
+        // the result comes back to THIS level's mesh manager and not to
+        // whichever level the globals point at when it lands.
+        void SetDimension(Game::DimensionId d) { m_dimension = d; }
+        Game::DimensionId Dimension() const { return m_dimension; }
+
+        // The mesh manager and renderer of the SAME level. Set once by
+        // ClientLevel after all three exist; never the globals, which may be
+        // bound to another level while a packet or portal view is applied.
+        void SetPeers(::Render::ClientMeshManager* meshes, ::Render::ChunkRenderer* renderer) {
+            m_meshes = meshes;
+            m_renderer = renderer;
+        }
+
         // ========================================================================
         // CHUNK STATE MANAGEMENT
         // ========================================================================
 
         // Process ChunkDataS2CPacket (UNLOADED → LOADED)
         void ProcessChunkDataS2CPacket(const Network::ChunkDataS2CPacket& packet);
+        // Unpack the wire containers into a Game::Chunk. Pure and thread-safe;
+        // called on the network I/O thread by ClientConnection::DecodePacket.
+        static std::shared_ptr<Game::Chunk> PrebuildChunk(const Network::ChunkDataS2CPacket& packet);
         
         // Apply chunk data with generation tracking
         void ApplyChunkData(Game::Math::ChunkPos chunkPos, const Network::ChunkDataS2CPacket& packet);
@@ -292,6 +338,15 @@ namespace Client {
         // Force unload specific chunk
         void UnloadChunk(Game::Math::ChunkPos chunkPos);
 
+        // Retention cache (instant revisits). UnloadChunk parks the chunk
+        // (CPU data + GPU meshes) instead of freeing it; a later
+        // ChunkUnchangedS2C with a matching Chunk::modStamp revives it with
+        // no transfer and no meshing. Bounded by m_retainBudgetBytes, LRU.
+        bool RestoreRetainedChunk(Game::Math::ChunkPos pos, uint64_t modStamp);
+        size_t GetRetainedChunkCount() const { return m_retained.size(); }
+        size_t GetRetainedBytes() const { return m_retainedBytes; }
+        size_t m_retainRestored = 0;
+
 
         // ========================================================================
         // BASIC STATISTICS
@@ -332,6 +387,23 @@ namespace Client {
         // chunk is gone or fully clean are lazily erased during scheduling, so
         // erase sites don't need to maintain it.
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_chunksWithDirtySections;
+        struct Retained {
+            std::unique_ptr<ClientChunk> chunk;
+            size_t bytes = 0;
+            std::list<Game::Math::ChunkPos>::iterator lru;
+        };
+        std::unordered_map<Game::Math::ChunkPos, Retained, Game::Math::ChunkPosHash> m_retained;
+        std::list<Game::Math::ChunkPos> m_retainedLru;   // front = most recent
+        size_t m_retainedBytes = 0;
+        // Sized from physical RAM (see ComputeRetainBudgetBytes): 1.5 GB on
+        // a 16 GB+ machine, a tenth of RAM below that. A parked chunk holds
+        // its GPU meshes, and on every Mac and every integrated-GPU PC the
+        // GPU's memory IS this RAM — a flat 1.5 GB was most of an 8 GB
+        // Intel MacBook's graphics budget spent on chunks the player had
+        // walked away from.
+        const size_t m_retainBudgetBytes = ComputeRetainBudgetBytes();
+        static size_t ComputeRetainBudgetBytes();
+        void DiscardRetained(Game::Math::ChunkPos pos);
         uint32_t m_schedulerSkip = 0;   // idle backoff, see ScheduleMeshBuildsWithSnapshots
         // See MarkSectionDirty: counts section dirties toward a forced
         // full visibility rebuild during mass destruction.
@@ -406,27 +478,49 @@ namespace Client {
         
         // Finalize section after successful GPU upload
         void FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY, uint8_t neighborMask = 0,
-                                   uint32_t builtVersion = 0);
+                                   uint32_t builtVersion = 0, uint32_t paletteGen = 0,
+                                   uint32_t jobSeq = 0);
 
         // A mesh result for this section failed or was rejected before upload.
         // If it was the LATEST job for the section, re-dirty so the scheduler
         // retries — otherwise the section reads as "in flight" forever.
         void NoteMeshBuildFailed(Game::Math::ChunkPos chunkPos, int sectionY, uint32_t builtVersion);
-        
-    private:
 
+    private:
+        // Which of the four horizontal neighbour chunks are LOADED right now,
+        // in the same bit layout BuildSectionRegion derives from the region
+        // (+X=1, -X=2, +Z=4, -Z=8) so it is directly comparable with
+        // SectionInfo::lastNeighborMask / MeshBuildResult::neighborMask.
+        uint8_t CurrentNeighborMask(Game::Math::ChunkPos pos) const;
+
+        // ── Stale-border-mesh instrumentation ────────────────────────────────
+        // A mesh built while a horizontal neighbour chunk was absent treats the
+        // missing chunk as air, so solid underground sections grow a wall of
+        // border quads (nearly 2x GPU sections in the worst orderings). These
+        // count, cumulatively per session:
+        //   m_partialNeighborBuilds — uploads whose mesh was built with >=1
+        //     horizontal neighbour missing (plotted as
+        //     "Mesh/PartialNeighborBuilds" in Tracy).
+        //   m_staleBorderRemeshes — sections re-dirtied because a neighbour
+        //     that was missing when they were meshed is present now (the
+        //     convergence paths in FinalizeSectionUpload and
+        //     RestoreRetainedChunk). Summarised by Shutdown().
+        size_t m_partialNeighborBuilds = 0;
+        size_t m_staleBorderRemeshes = 0;
+
+        Game::DimensionId          m_dimension = Game::DimensionId::Overworld;
+        ::Render::ClientMeshManager* m_meshes   = nullptr;
+        ::Render::ChunkRenderer*     m_renderer = nullptr;
     };
 
     // ========================================================================
     // GLOBAL ACCESS
     // ========================================================================
 
-    // Global client chunk manager instance
-    extern std::unique_ptr<ClientChunkManager> g_clientChunkManager;
-
-    // Convenience functions
-    void InitializeClientChunkManager();
-    void ShutdownClientChunkManager();
+    // The chunk manager of the level the globals are BOUND to — see
+    // ClientLevel.hpp. Not owned here: ClientLevel owns it, ClientLevels
+    // rebinds this pointer. Null outside a session.
+    extern ClientChunkManager* g_clientChunkManager;
 
     // Direct access functions
     ClientChunk* GetClientChunk(Game::Math::ChunkPos chunkPos);

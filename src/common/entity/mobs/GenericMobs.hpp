@@ -88,6 +88,26 @@ namespace Game {
         void RegisterGoals() override;
     };
 
+    // MC Endermite — the generic monster shape plus its one bespoke rule:
+    // the 2400-tick lifetime. A pearl-spawned endermite ages out after two
+    // minutes unless persistence is required (MC Endermite.aiStep's `life`
+    // counter, saved as "Lifetime").
+    class Endermite : public GenericMonster {
+    public:
+        static constexpr int kMaxLife = 2400;   // MC Endermite.MAX_LIFE
+
+        explicit Endermite(EntityLevel* level)
+            : GenericMonster(EntityTypeId::Endermite, level) {}
+
+        void AiStep() override;
+
+        int  GetLife() const { return m_life; }
+        void SetLife(int life) { m_life = life; }
+
+    private:
+        int m_life = 0;
+    };
+
     // MC Animal's shape: panic when hurt, follow food, breed, wander.
     class GenericAnimal : public Animal {
     public:

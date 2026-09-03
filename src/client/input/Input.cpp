@@ -65,6 +65,7 @@ namespace Input {
             case GLFW_KEY_RIGHT:        out = Key::Right; return true;
             case GLFW_KEY_SPACE:        out = Key::Space; return true;
             case GLFW_KEY_LEFT_CONTROL: out = Key::LeftControl; return true;
+            case GLFW_KEY_LEFT_ALT:     out = Key::LeftAlt; return true;
             case GLFW_KEY_ESCAPE:       out = Key::Escape; return true;
             case GLFW_KEY_LEFT_SHIFT:   out = Key::LeftShift; return true;
             case GLFW_KEY_TAB:          out = Key::Tab; return true;
@@ -72,6 +73,7 @@ namespace Input {
             case GLFW_KEY_P:            out = Key::P; return true;
             case GLFW_KEY_T:            out = Key::T; return true;
             case GLFW_KEY_F:            out = Key::F; return true;
+            case GLFW_KEY_C:            out = Key::C; return true;
             case GLFW_KEY_Q:            out = Key::Q; return true;
             case GLFW_KEY_SLASH:        out = Key::Slash; return true;
             case GLFW_KEY_1:            out = Key::Alpha1; return true;
@@ -135,8 +137,13 @@ namespace Input {
         RecordAction(key, pressed);
     }
 
+    static int escapePresses = 0;
+
     static void KeyCallback(GLFWwindow* /*window*/, int glfwKey, int /*scancode*/,
                             int action, int mods) {
+        // Escape is edge-detected from here, screen or no screen: a press
+        // is a press even if it was released before the next frame polled.
+        if (glfwKey == GLFW_KEY_ESCAPE && action == GLFW_PRESS) ++escapePresses;
         // While a screen is up the press belongs to the UI, not the world.
         if (uiActive) {
             // Arrows honour auto-repeat, so holding one keeps nudging a
@@ -165,6 +172,16 @@ namespace Input {
         Key key;
         if (!KeyFromGlfwKey(glfwKey, key)) return;
         RecordAction(key, pressed);
+    }
+
+    std::string GetClipboardText() {
+        if (!gWindow) return {};
+        const char* clip = glfwGetClipboardString(gWindow);
+        return clip ? std::string(clip) : std::string();
+    }
+
+    void SetClipboardText(const std::string& text) {
+        if (gWindow) glfwSetClipboardString(gWindow, text.c_str());
     }
 
     // Character callback: queues typed characters
@@ -242,6 +259,16 @@ namespace Input {
     void SetUiActive(bool active) { uiActive = active; }
     bool IsUiActive()             { return uiActive; }
 
+    void ClearUiKeyPresses() { uiKeyPresses.clear(); }
+
+    bool ConsumeEscapePress() {
+        // Several presses inside one long frame collapse to one: the screen
+        // stack applies its pops next frame, and two would blow through it.
+        const bool pressed = escapePresses > 0;
+        escapePresses = 0;
+        return pressed;
+    }
+
     bool PopUiKeyPress(int& glfwKey, int& glfwMods) {
         if (uiKeyPresses.empty()) return false;
         glfwKey  = uiKeyPresses.front().key;
@@ -263,6 +290,8 @@ namespace Input {
     }
 
     void ReleaseAll() {
+        // A screen just opened: nothing queued before it is its business.
+        uiKeyPresses.clear();
         // MC KeyMapping.releaseAll: clickCount = 0 AND setDown(false).
         for (auto& [key, st] : actionStates) {
             st.down = false;
@@ -316,6 +345,7 @@ namespace Input {
             case Key::Right:       glfwKey = GLFW_KEY_RIGHT; break;
             case Key::Space:       glfwKey = GLFW_KEY_SPACE; break;
             case Key::LeftControl: glfwKey = GLFW_KEY_LEFT_CONTROL; break;
+            case Key::LeftAlt:     glfwKey = GLFW_KEY_LEFT_ALT; break;
             case Key::Escape:      glfwKey = GLFW_KEY_ESCAPE; break;
             case Key::LeftShift:   glfwKey = GLFW_KEY_LEFT_SHIFT; break;
             case Key::Tab:         glfwKey = GLFW_KEY_TAB; break;
@@ -323,6 +353,7 @@ namespace Input {
             case Key::P:           glfwKey = GLFW_KEY_P; break;
             case Key::T:           glfwKey = GLFW_KEY_T; break;
             case Key::F:           glfwKey = GLFW_KEY_F; break;
+            case Key::C:           glfwKey = GLFW_KEY_C; break;
             case Key::Q:           glfwKey = GLFW_KEY_Q; break;
             case Key::Slash:       glfwKey = GLFW_KEY_SLASH; break;
             case Key::Alpha1:      glfwKey = GLFW_KEY_1; break;
@@ -422,6 +453,7 @@ namespace Input {
         currentKeyStates[Key::P] = IsKeyDown(Key::P);
         currentKeyStates[Key::T] = IsKeyDown(Key::T);
         currentKeyStates[Key::F] = IsKeyDown(Key::F);
+        currentKeyStates[Key::C] = IsKeyDown(Key::C);
         currentKeyStates[Key::Q] = IsKeyDown(Key::Q);
         currentKeyStates[Key::Slash] = IsKeyDown(Key::Slash);
         currentKeyStates[Key::Alpha1] = IsKeyDown(Key::Alpha1);

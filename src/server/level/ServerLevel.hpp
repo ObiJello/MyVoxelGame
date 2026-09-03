@@ -66,6 +66,7 @@ namespace Server {
     class ExperienceOrbManager;
     class ServerLevelBridge;
     class MobManager;
+    class EndDragonFight;
     class FallingBlockStore;
     class ServerEntityTracker;
     class PlayerSessionManager;
@@ -142,6 +143,8 @@ namespace Server {
         // persist (imported read-only, or seed-only).
         LevelEntityStore*         Entities()    const { return m_entityStore.get(); }
         ServerEntityTracker*      MobTracker()  const { return m_mobTracker.get(); }
+        // MC ServerLevel.dragonFight — non-null only for the End.
+        EndDragonFight*           DragonFightController() const { return m_dragonFight.get(); }
 
         // The terrain generator behind the chunk provider, or null before the
         // provider is built. Server thread only.
@@ -152,6 +155,11 @@ namespace Server {
         // one set would make the second request look like a duplicate of the
         // first and silently never load.
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> pendingChunkLoads;
+        // Residency grace: server tick at which a loaded chunk first had no
+        // watcher. Unwatched chunks stay resident (nothing ticks them — mobs
+        // and block ticks are gated by tickets) so a player coming back gets
+        // them without a disk read; see IntegratedServer::UnloadUnwatchedChunks.
+        std::unordered_map<Game::Math::ChunkPos, int64_t, Game::Math::ChunkPosHash> unwatchedSince;
         // Ticket-driven generation: chunks the disk did not have, waiting to be
         // handed to the terrain library (IntegratedServer::ServiceGenerationQueues).
         std::vector<Game::Math::ChunkPos> generationBacklog;
@@ -197,6 +205,8 @@ namespace Server {
         std::unique_ptr<FallingBlockStore>        m_fallingBlocks;
         std::unique_ptr<LevelEntityStore> m_entityStore;
         std::unique_ptr<ServerEntityTracker>      m_mobTracker;
+        // End only (MC ServerLevel.dragonFight).
+        std::unique_ptr<EndDragonFight>           m_dragonFight;
 
         // By value: it is a pair of hash sets with no dependencies, and it
         // must survive every chunk in the level unloading (see its header).

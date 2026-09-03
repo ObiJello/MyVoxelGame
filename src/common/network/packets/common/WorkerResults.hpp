@@ -52,10 +52,19 @@ namespace Network {
 
     // Mesh build results (Client worker → Client render thread).
     struct MeshBuildResult {
+        // The level the section was built for (see MeshJobData::dimension).
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
         Game::Math::ChunkPos chunkPos;
         int sectionY;
         uint32_t generation = 0;   // Version number for staleness checking
         uint8_t  neighborMask = 0; // Neighbor presence mask (PX=1, NX=2, PZ=4, NZ=8)
+        // Greedy-debug palette generation the mesh was BUILT under (captured
+        // before the build starts, so a mid-build toggle reads as stale and
+        // the upload safety net re-dirties). 0 = legacy/failed result.
+        uint32_t paletteGen = 0;
+        // Per-section schedule sequence (SectionInfo::lastJobSeq): totally
+        // orders results when generations tie — see ClientChunkManager.hpp.
+        uint32_t jobSeq = 0;
 
         struct SectionMeshData {
             // Indices are 16-bit: relative to the section's baseVertex, and a

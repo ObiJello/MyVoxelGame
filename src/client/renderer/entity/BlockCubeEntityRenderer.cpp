@@ -1,5 +1,7 @@
 // File: src/client/renderer/entity/BlockCubeEntityRenderer.cpp
+#include "../mesh/ChunkRenderer.hpp"
 #include "BlockCubeEntityRenderer.hpp"
+#include "EntityCulling.hpp"
 #include "../core/Frustum.hpp"
 
 #include "../backend/RenderBackend.hpp"
@@ -86,18 +88,19 @@ namespace Render {
             return false;
         }
 
-        m_cubeVB = g_renderBackend->CreateBuffer(
-            BufferUsage::Vertex, kItemCubeMaxVerts * sizeof(ItemCubeVert),
-            nullptr, BufferAccess::Streaming);
-        m_cubeIB = g_renderBackend->CreateBuffer(
-            BufferUsage::Index, kItemCubeMaxIdx * sizeof(uint32_t),
-            nullptr, BufferAccess::Streaming);
-        m_cubeMesh = g_renderBackend->CreateMesh(
-            m_cubeVB, m_cubeIB, GetBlockVertexLayout());
+        for (FrameBuffers& fb : m_cubeFrames) {
+            fb.vb = g_renderBackend->CreateBuffer(
+                BufferUsage::Vertex, kItemCubeMaxVerts * sizeof(ItemCubeVert),
+                nullptr, BufferAccess::Streaming);
+            fb.ib = g_renderBackend->CreateBuffer(
+                BufferUsage::Index, kItemCubeMaxIdx * sizeof(uint32_t),
+                nullptr, BufferAccess::Streaming);
+            fb.mesh = g_renderBackend->CreateMesh(fb.vb, fb.ib, GetBlockVertexLayout());
+        }
 
         // ── The instanced path, if the backend has one ─────────────────────
         //
-        // Every failure below is non-fatal and leaves m_instMesh invalid, which
+        // Every failure below is non-fatal and leaves instMesh invalid, which
         // Render reads as "use the per-entity loop". That is why the shader is
         // loaded through the plain path and not the Vulkan portal path: Vulkan
         // has no CreateInstancedMesh, so it never gets here anyway.
@@ -147,12 +150,26 @@ namespace Render {
                     vk->RegisterShaderInstanceLayout(m_instShader, instanceLayout);
                 }
 #endif
-                m_instMesh = g_renderBackend->CreateInstancedMesh(
-                    m_cubeVB, m_cubeIB, m_instanceVB,
-                    GetBlockVertexLayout(), instanceLayout);
+                for (FrameBuffers& fb : m_cubeFrames) {
+                    fb.instMesh = g_renderBackend->CreateInstancedMesh(
+                        fb.vb, fb.ib, m_instanceVB,
+                        GetBlockVertexLayout(), instanceLayout);
+                }
+                // Both or neither: a set without its instanced mesh would
+                // flip paths mid-frame, and the two are not interchangeable
+                // within a pass (see Render's useInstanced).
+                if (m_cubeFrames[0].instMesh == INVALID_MESH ||
+                    m_cubeFrames[1].instMesh == INVALID_MESH) {
+                    for (FrameBuffers& fb : m_cubeFrames) {
+                        if (fb.instMesh != INVALID_MESH) {
+                            g_renderBackend->DestroyMesh(fb.instMesh);
+                            fb.instMesh = INVALID_MESH;
+                        }
+                    }
+                }
             }
 
-            if (m_instMesh == INVALID_MESH) {
+            if (m_cubeFrames[0].instMesh == INVALID_MESH) {
                 Log::Info("[BlockCubeEntityRenderer] no instanced path — falling "
                           "back to one draw per entity");
             }
@@ -165,21 +182,26 @@ namespace Render {
 
     void BlockCubeEntityRenderer::Shutdown() {
         if (!g_renderBackend) return;
-        if (m_instMesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(m_instMesh); m_instMesh = INVALID_MESH; }
+        for (FrameBuffers& fb : m_cubeFrames) {
+            if (fb.instMesh != INVALID_MESH) { g_renderBackend->DestroyMesh(fb.instMesh); fb.instMesh = INVALID_MESH; }
+        }
         if (m_instanceVB != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(m_instanceVB); m_instanceVB = INVALID_BUFFER; }
         if (m_instShader != INVALID_SHADER){ g_renderBackend->DestroyShader(m_instShader); m_instShader = INVALID_SHADER; }
-        if (m_cubeMesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(m_cubeMesh); m_cubeMesh = INVALID_MESH; }
-        if (m_cubeVB   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(m_cubeVB); m_cubeVB = INVALID_BUFFER; }
-        if (m_cubeIB   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(m_cubeIB); m_cubeIB = INVALID_BUFFER; }
+        for (FrameBuffers& fb : m_cubeFrames) {
+            if (fb.mesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(fb.mesh); fb.mesh = INVALID_MESH; }
+            if (fb.vb   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(fb.vb); fb.vb = INVALID_BUFFER; }
+            if (fb.ib   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(fb.ib); fb.ib = INVALID_BUFFER; }
+        }
         if (m_shader   != INVALID_SHADER){ g_renderBackend->DestroyShader(m_shader); m_shader = INVALID_SHADER; }
         m_initialized = false;
     }
 
-    void BlockCubeEntityRenderer::SetRenderDistanceChunks(int chunks) {
+    void BlockCubeEntityRenderer::SetRenderDistanceChunks(int chunks, float entityDistanceScaling) {
         // chunks * 4 blocks — a quarter of the render distance, matching
         // ItemEntityRenderer. See its note for why this deliberately diverges
-        // from MC's shouldRenderAtSqrDistance.
-        m_cullRadius = static_cast<float>(std::max(chunks, 2) * 4);
+        // from MC's shouldRenderAtSqrDistance. The Entity Distance option
+        // multiplies it, as there.
+        m_cullRadius = static_cast<float>(std::max(chunks, 2) * 4) * entityDistanceScaling;
     }
 
     void BlockCubeEntityRenderer::Render(const glm::mat4& projection,
@@ -200,6 +222,16 @@ namespace Render {
         // performance one.
         const Frustum frustum = Frustum::FromMatrix(viewProj);
 
+        // Which streaming set this call writes, and where in it — see
+        // EntityFrame.hpp. Decided up front so useInstanced can name the
+        // set's instanced mesh.
+        if (m_frameCursor.Advance()) {
+            m_vertCursor = 0;
+            m_idxCursor  = 0;
+        }
+        FrameBuffers& fb = m_cubeFrames[m_frameCursor.parity];
+        if (fb.mesh == INVALID_MESH) return;
+
         // The client's own block view, for the shouldRender guard below.
         const Game::IBlockAccess* blocks =
             Client::g_clientMobManager->Level().Blocks();
@@ -213,7 +245,7 @@ namespace Render {
         // model matrix by different routes (uMVP uniform vs per-instance
         // attribute) and are not interchangeable mid-pass.
         const bool useInstanced =
-            m_instMesh != INVALID_MESH && m_instShader != INVALID_SHADER;
+            fb.instMesh != INVALID_MESH && m_instShader != INVALID_SHADER;
         const ShaderHandle shader = useInstanced ? m_instShader : m_shader;
 
         bool anyDrawn = false;
@@ -235,7 +267,7 @@ namespace Render {
                 g_renderBackend->BindTexture(g_atlasBuilder->GetBackendTextureHandle(), 0);
             }
             g_renderBackend->SetUniformFloat(shader, "uAlphaTest", 0.01f);
-            g_renderBackend->SetUniformVec4(shader, "uPortalClipPlane", glm::vec4(0.0f));
+            g_renderBackend->SetUniformVec4(shader, "uPortalClipPlane", ::Render::ChunkRenderer::PortalEntityClipPlane());
 
             // A falling block IS in the world, so it fades into fog and dims at
             // night exactly like the terrain it fell from. Packing matches
@@ -282,8 +314,13 @@ namespace Render {
         // Read from the tick's proxies, not the entities: see
         // ClientMobManager::BlockEntityProxy for why. Nothing below touches
         // a Mob.
+        // `sectionGate` — the visible-section test (EntityCulling) reads the
+        // chunk map, which asserts main-thread access, so the parallel gather
+        // runs with it OFF. That is also where it would cost more than it
+        // saves: past a few thousand entities the per-entity lookups outweigh
+        // the draws they could skip, and the frustum test still stands.
         const auto gatherOne = [&](const Client::BlockEntityProxy& px,
-                                   std::vector<DrawItem>& out) {
+                                   std::vector<DrawItem>& out, bool sectionGate) {
             if (!px.drawable) return;
             const bool falling = px.type == static_cast<uint8_t>(Game::EntityTypeId::FallingBlock);
 
@@ -362,6 +399,10 @@ namespace Render {
                     bmax = worldPos + glm::vec3(px.half.x + 0.5f, size.y + 0.5f, px.half.z + 0.5f);
                 }
                 if (frustum.TestAABB(bmin, bmax) == FrustumResult::Outside) return;
+                if (!EntityCulling::PassesCrossingFilter(bmin, bmax)) return;
+                // MC isSectionCompiledAndVisible, tightened by the occlusion
+                // BFS — see EntityCulling.hpp.
+                if (sectionGate && !EntityCulling::BoxTouchesVisibleSection(bmin, bmax)) return;
             }
 
             Instance inst{worldPos, 1.0f};
@@ -441,7 +482,7 @@ namespace Render {
                     part.clear();
                     const size_t begin = si * kSlice;
                     const size_t end   = std::min(n, begin + kSlice);
-                    for (size_t i = begin; i < end; ++i) gatherOne(at(i), part);
+                    for (size_t i = begin; i < end; ++i) gatherOne(at(i), part, false);
                 });
                 size_t total = 0;
                 for (size_t si = 0; si < slices; ++si) total += m_gatherParts[si].size();
@@ -455,7 +496,7 @@ namespace Render {
             } else {
                 items.reserve(n);
                 for (size_t i = 0; i < n && items.size() < gatherCap; ++i) {
-                    gatherOne(at(i), items);
+                    gatherOne(at(i), items, true);
                 }
             }
         }
@@ -489,17 +530,21 @@ namespace Render {
                     continue;
                 }
 
-                // Bounded by the shared streaming buffers. Dropping a state is
-                // better than overrunning them; with one block model per state this
-                // is only reachable with an implausible variety on screen at once.
-                if (verts.size() + stateVerts.size() > kItemCubeMaxVerts ||
-                    idx.size()   + stateIdx.size()   > kItemCubeMaxIdx) {
+                // Bounded by what is left of this frame's streaming set.
+                // Dropping a state is better than overrunning it; with one
+                // block model per state this is only reachable with an
+                // implausible variety on screen at once.
+                if (m_vertCursor + verts.size() + stateVerts.size() > kItemCubeMaxVerts ||
+                    m_idxCursor  + idx.size()   + stateIdx.size()   > kItemCubeMaxIdx) {
                     ranges.emplace(key, MeshRange{0, 0});
                     continue;
                 }
 
-                const uint32_t baseVertex = static_cast<uint32_t>(verts.size());
-                const uint32_t firstIndex = static_cast<uint32_t>(idx.size());
+                // Indices are absolute into the set's vertex buffer: this
+                // call's vertices start at the frame cursor. The recorded
+                // firstIndex is likewise absolute into the index buffer.
+                const uint32_t baseVertex = static_cast<uint32_t>(m_vertCursor + verts.size());
+                const uint32_t firstIndex = static_cast<uint32_t>(m_idxCursor + idx.size());
 
                 verts.insert(verts.end(), stateVerts.begin(), stateVerts.end());
                 // Base vertex folded into the indices rather than passed to the
@@ -519,10 +564,12 @@ namespace Render {
         // ── Pass 3: ONE upload, then every draw ───────────────────────────
         {
             PROFILE_ZONE_N("BlockCube.Upload");
-            g_renderBackend->UpdateBuffer(m_cubeVB, 0,
+            g_renderBackend->UpdateBuffer(fb.vb, m_vertCursor * sizeof(ItemCubeVert),
                 verts.size() * sizeof(ItemCubeVert), verts.data());
-            g_renderBackend->UpdateBuffer(m_cubeIB, 0,
+            g_renderBackend->UpdateBuffer(fb.ib, m_idxCursor * sizeof(uint32_t),
                 idx.size() * sizeof(uint32_t), idx.data());
+            m_vertCursor += verts.size();
+            m_idxCursor  += idx.size();
         }
 
         {
@@ -582,7 +629,7 @@ namespace Render {
                     g_renderBackend->SetUniformVec4(shader, "uOverlayColor",
                                                     overlayOf(flash));
                     g_renderBackend->DrawIndexedInstanced(
-                        m_instMesh, it->second.indexCount, it->second.firstIndex,
+                        fb.instMesh, it->second.indexCount, it->second.firstIndex,
                         static_cast<uint32_t>(insts.size()), instanceBytesUsed);
                     instanceBytesUsed += groupBytes;
                 }
@@ -599,7 +646,18 @@ namespace Render {
                     g_renderBackend->SetUniformVec4(shader, "uOverlayColor",
                                                     overlayOf(item.whiteFlash));
                     g_renderBackend->SetUniformMat4(shader, "uMVP", viewProj * model);
-                    g_renderBackend->DrawIndexed(m_cubeMesh, it->second.indexCount,
+                    g_renderBackend->SetUniformMat4(shader, "uModel", model);   // fog from the WORLD position
+                    // block.vert clips in aPos space, which is model space on
+                    // this path — give it the plane in model space (Mᵀ p). See
+                    // ItemEntityRenderer for the full note.
+                    {
+                        const glm::vec4 plane = ::Render::ChunkRenderer::PortalEntityClipPlane();
+                        if (plane.x != 0.0f || plane.y != 0.0f || plane.z != 0.0f) {
+                            g_renderBackend->SetUniformVec4(shader, "uPortalClipPlane",
+                                                            glm::transpose(model) * plane);
+                        }
+                    }
+                    g_renderBackend->DrawIndexed(fb.mesh, it->second.indexCount,
                                                  it->second.firstIndex);
                 }
             }

@@ -25,6 +25,7 @@
 
 #include "../backend/RenderTypes.hpp"
 #include "../viewmodel/ItemMeshBuilder.hpp"   // ItemCubeVert
+#include "EntityFrame.hpp"
 #include "common/world/block/BlockState.hpp"
 
 #include <glm/glm.hpp>
@@ -47,7 +48,7 @@ namespace Render {
         // Same quarter-of-render-distance rule ItemEntityRenderer uses: the
         // server only sends these within its own tracking range, so drawing
         // further would promise more than the wire delivers.
-        void SetRenderDistanceChunks(int chunks);
+        void SetRenderDistanceChunks(int chunks, float entityDistanceScaling = 1.0f);
 
     private:
         // The geometry for ONE block state. Called once per distinct state per
@@ -59,9 +60,22 @@ namespace Render {
         bool m_initialized = false;
 
         ShaderHandle  m_shader = INVALID_SHADER;
-        BufferHandle  m_cubeVB   = INVALID_BUFFER;
-        BufferHandle  m_cubeIB   = INVALID_BUFFER;
-        MeshHandle    m_cubeMesh = INVALID_MESH;
+
+        // The per-frame state-mesh geometry: two streaming sets alternated
+        // per FRAME, each call in a frame (main pass, portal recursions)
+        // appending at a cursor — see EntityFrame.hpp. `instMesh` is the
+        // instanced VAO over the SAME vertex/index buffers plus the shared
+        // instance buffer (INVALID where the backend has no instancing).
+        struct FrameBuffers {
+            BufferHandle vb       = INVALID_BUFFER;
+            BufferHandle ib       = INVALID_BUFFER;
+            MeshHandle   mesh     = INVALID_MESH;
+            MeshHandle   instMesh = INVALID_MESH;
+        };
+        FrameBuffers m_cubeFrames[2];
+        EntityFrame::Cursor m_frameCursor;
+        size_t m_vertCursor = 0;
+        size_t m_idxCursor  = 0;
 
         // ── The instanced path ─────────────────────────────────────────────
         //
@@ -78,7 +92,6 @@ namespace Render {
         // an accelerator, not a replacement.
         ShaderHandle  m_instShader = INVALID_SHADER;
         BufferHandle  m_instanceVB = INVALID_BUFFER;
-        MeshHandle    m_instMesh   = INVALID_MESH;
 
         // One instance on the wire: world translation and a uniform scale.
         // Both block entities' model transforms collapse to exactly that —

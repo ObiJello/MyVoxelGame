@@ -1049,10 +1049,28 @@ void main() {
                                 const Frustum& /*frustum*/,
                                 float aspect,
                                 float farPlane,
-                                const SceneRenderFn& renderScene) {
+                                int8_t dimensionFilter,
+                                const SceneRenderFn& renderScene,
+                                const glm::dvec3* skipRimAt) {
         if (!m_initialized || !g_renderBackend) return;
         auto& mgr = Client::GetClientPortalManager();
         if (mgr.PairCount() == 0) return;
+        // Only the portals of the level being drawn: the main view draws
+        // the player's level, a portal view draws the level it shows. A
+        // nether-side rim drawn in the overworld at nether coordinates
+        // was harmless but useless; the one drawn in the view THROUGH the
+        // nether portal is the one that was missing.
+        // `skipRimAt`: inside a view THROUGH a portal, the rim of the
+        // surface the view comes out of. That surface is never drawn in
+        // its own view (the immersive renderer's cannotRenderInMe), and its
+        // rim sits on the view's own clip plane — drawn, it is the other
+        // colour's ring flickering around the edge of the view at grazing
+        // angles. Its sparks are skipped the same way (PortalParticleSystem).
+        auto inLevel = [&](const Client::ClientPortal& p) {
+            if (dimensionFilter != kAnyDimension && Game::DimensionToRaw(p.dimension) != dimensionFilter) return false;
+            if (skipRimAt && glm::length(p.origin - *skipRimAt) < 0.05) return false;
+            return true;
+        };
 
         // Pulse used by both flat-oval fallback and the depth-refill /
         // stencil-mark sub-passes — keeps the silhouette breathing slightly
@@ -1364,6 +1382,56 @@ void main() {
         // uOutlineMode=2. Inactive portals can also flash on... well,
         // they can't get teleported through (no destination), but we keep
         // the flash uniform plumbing consistent — always 0 for inactive.
+        // Immersive mode: the immersive surface has already drawn the
+        // see-through (and restored the surface's depth); only the rim is
+        // ours. Same draw as SeeThroughPass's outline step, on its own.
+        auto RimPass = [&](const Client::ClientPortal& src, const PortalPalette& palette,
+                           bool isOrange, float flashIntensity, float openAmount,
+                           float staticAmount) {
+            // A hair in front of the plane: the immersive surface stamped this
+            // plane's depth from a different mesh, and two meshes on one plane
+            // z-fight. (The see-through path draws the rim from the very
+            // vertices that stamped the depth, so it never needed this.)
+            glm::mat4 rimModel = PortalModel(src);
+            rimModel[3] += glm::vec4(src.normal * 0.01f, 0.0f);
+            const glm::mat4 mvp = projectionMatrix * viewMatrix * rimModel;
+            PipelineState rimState = OutlineState(kStencilRef);
+            rimState.depthBiasEnabled  = true;   // same bias as the surface it sits on
+            rimState.depthBiasSlope    = -2.0f;
+            rimState.depthBiasConstant = -2.0f;
+            g_renderBackend->SetPipelineState(rimState);
+            g_renderBackend->BindShader(m_shader);
+            const bool useTex = (m_noiseTexture != INVALID_TEXTURE &&
+                                 (isOrange ? m_orangeColorRamp : m_blueColorRamp) != INVALID_TEXTURE);
+            if (useTex) {
+                g_renderBackend->BindTexture(m_noiseTexture, 0);
+                g_renderBackend->BindTexture(isOrange ? m_orangeColorRamp : m_blueColorRamp, 1);
+                g_renderBackend->SetUniformInt(m_shader, "uPortalNoiseTex", 0);
+                g_renderBackend->SetUniformInt(m_shader, "uPortalColorTex", 1);
+                g_renderBackend->SetUniformFloat(m_shader, "uColorScale", 4.0f);
+                g_renderBackend->SetUniformInt(m_shader, "uUseTextures", 1);
+            } else {
+                g_renderBackend->BindTexture(m_dummyTexture, 0);
+                g_renderBackend->SetUniformInt(m_shader, "uUseTextures", 0);
+            }
+            g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", palette.mid);
+            g_renderBackend->SetUniformVec3(m_shader, "uColorDark",   palette.dark);
+            g_renderBackend->SetUniformVec3(m_shader, "uColorHot",    palette.hot);
+            g_renderBackend->SetUniformFloat(m_shader, "uPulse", pulse);
+            g_renderBackend->SetUniformFloat(m_shader, "uForceFarDepth", 0.0f);
+            g_renderBackend->SetUniformFloat(m_shader, "uOutlineMode", 1.0f);
+            g_renderBackend->SetUniformFloat(m_shader, "uTime", t);
+            g_renderBackend->SetUniformFloat(m_shader, "uTimeVS", t);
+            g_renderBackend->SetUniformFloat(m_shader, "uOpenAmountVS", openAmount);
+            g_renderBackend->SetUniformFloat(m_shader, "uFlashIntensity", flashIntensity);
+            g_renderBackend->SetUniformFloat(m_shader, "uOpenAmount",   openAmount);
+            g_renderBackend->SetUniformFloat(m_shader, "uStaticAmount", staticAmount);
+            g_renderBackend->SetUniformFloat(m_shader, "uPortalActive", 1.0f - staticAmount);
+            g_renderBackend->DrawIndexed(m_mesh, m_indexCount);
+            g_renderBackend->UnbindMesh();
+        };
+
         auto InactivePortal = [&](const Client::ClientPortal& p, const PortalPalette& palette,
                                   bool  isOrange,
                                   float openAmount) {
@@ -1463,15 +1531,25 @@ void main() {
             // within 5 cm. Mirrors Source SDK's eye-transform approach
             // (c_portal_player.cpp:CalcPortalView).
             const bool both = pair.blue.active && pair.orange.active;
-            if (both) {
+            const bool immersive = pair.blue.immersive || pair.orange.immersive;
+            if (both && immersive) {
+                if (inLevel(pair.blue))
+                    RimPass(pair.blue,   kBluePalette,   /*isOrange=*/false, flash,
+                            OpenAmount(pair.blue),   StaticAmount(pair.blue));
+                if (inLevel(pair.orange))
+                    RimPass(pair.orange, kOrangePalette, /*isOrange=*/true,  flash,
+                            OpenAmount(pair.orange), StaticAmount(pair.orange));
+            } else if (both) {
                 SeeThroughPass(pair.blue,   pair.orange, kBluePalette,   /*isOrange=*/false, flash,
                                OpenAmount(pair.blue),   StaticAmount(pair.blue));
                 SeeThroughPass(pair.orange, pair.blue,   kOrangePalette, /*isOrange=*/true,  flash,
                                OpenAmount(pair.orange), StaticAmount(pair.orange));
             } else {
-                if (pair.blue.active)   InactivePortal(pair.blue,   kBluePalette,   /*isOrange=*/false,
+                if (pair.blue.active && inLevel(pair.blue))
+                    InactivePortal(pair.blue,   kBluePalette,   /*isOrange=*/false,
                                                       OpenAmount(pair.blue));
-                if (pair.orange.active) InactivePortal(pair.orange, kOrangePalette, /*isOrange=*/true,
+                if (pair.orange.active && inLevel(pair.orange))
+                    InactivePortal(pair.orange, kOrangePalette, /*isOrange=*/true,
                                                       OpenAmount(pair.orange));
             }
         });

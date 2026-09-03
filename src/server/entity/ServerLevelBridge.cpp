@@ -45,6 +45,16 @@ namespace Server {
         SetId(entityId);
         SyncFromPlayer();
 
+        // The view's UUID is the OFFLINE uuid derived from the player's name —
+        // the same derivation playerdata/<uuid>.dat and ResolvePlayer use.
+        // Without it EntityRef::Set on a view stored nil and the ref read as
+        // Empty, so a projectile's owner check (CanHitEntity → Matches) never
+        // recognised the thrower: the first thrown ender pearl clipped its own
+        // thrower's hitbox on tick one and teleported them in place.
+        if (m_player) {
+            SetUuid(Game::Anvil::OfflinePlayerUuid(m_player->getName()));
+        }
+
         // MC Entity.restoreFrom(:3008-3009) — the dimension change's other
         // half. See ServerPlayer::portalState(): a view is per LEVEL, so this
         // constructor IS the "entity recreated in the destination", and the
@@ -72,6 +82,13 @@ namespace Server {
 
         oldPosition = position;
         position = m_player->getPosition();
+        // The player's size (scaled portals, /scale): the mobs' view of
+        // them is as tall and as wide as they are.
+        scale = m_player->getScale();
+        // The client reports its ground state with every move packet;
+        // mirrored here so shootFromRotation's "add the shooter's y movement
+        // only while airborne" reads the truth.
+        onGround = m_player->isOnGround();
 
         yRotO = yRot;
         xRotO = xRot;
@@ -564,6 +581,16 @@ namespace Server {
         // MC LightLayer.SKY — the raw stored value, NOT time-adjusted. With no
         // light engine this is the open-sky stand-in: 15 outdoors, 0 under a
         // roof, at any hour.
+        //
+        // ZERO in a dimension without skylight (MC DimensionType.hasSkyLight:
+        // the End and the Nether store an all-zero sky layer). The Nether got
+        // this right by accident — its bedrock roof fails CanSeeSky — but the
+        // End's open sky read as full daylight here, which is exactly the
+        // condition the monster-spawn darkness test rejects: no enderman ever
+        // spawned on the island.
+        if (m_world && !Game::DimensionHasSkyLight(m_world->GetDimension())) {
+            return 0;
+        }
         return CanSeeSky(x, y, z) ? 15 : 0;
     }
 
@@ -750,7 +777,7 @@ namespace Server {
         Network::HurtAnimationS2CPacket p;
         p.entityId = connectionId;
         p.yaw      = hurtDir;
-        connection->SendPacket(
+        connection->SendPacketIn(Dimension(),
             static_cast<uint8_t>(Network::PacketId::HurtAnimationS2C),
             Network::Serialization::Serialize(p));
     }
@@ -804,7 +831,7 @@ namespace Server {
                    p.z < b.center.z - reach || p.z > b.center.z + reach;
         };
 
-        if (auto* items = server->GetItemEntities()) {
+        if (auto* items = m_items) {
             for (auto& [id, item] : items->AllMutable()) {
                 if (item.stack.IsEmpty()) continue;
                 if (outOfReachAll(item.pos)) continue;
@@ -829,7 +856,7 @@ namespace Server {
             }
         }
 
-        if (auto* orbs = server->GetXpOrbs()) {
+        if (auto* orbs = m_orbs) {
             for (auto& [id, orb] : orbs->AllMutable()) {
                 if (outOfReachAll(orb.pos)) continue;
                 for (size_t i = 0; i < count; ++i) {
@@ -881,7 +908,7 @@ namespace Server {
         // tick sweeps empty entities and broadcasts the removal (see step 4 of
         // ItemEntityManager::Tick), so the client is told without a second
         // removal path.
-        if (auto* items = server->GetItemEntities()) {
+        if (auto* items = m_items) {
             for (auto& [id, item] : items->AllMutable()) {
                 if (item.stack.IsEmpty()) continue;
                 if (outOfReach(item.pos)) continue;
@@ -911,7 +938,7 @@ namespace Server {
 
         // XP orbs: MC ExperienceOrb has no explosion damage (its hurtServer
         // ignores everything but the void), only the push.
-        if (auto* orbs = server->GetXpOrbs()) {
+        if (auto* orbs = m_orbs) {
             for (auto& [id, orb] : orbs->AllMutable()) {
                 if (outOfReach(orb.pos)) continue;
 
@@ -962,7 +989,7 @@ namespace Server {
             view->ConsumePendingKnockback(knockback);
             packet.playerKnockback = glm::vec3(knockback);
 
-            connection->SendPacket(
+            connection->SendPacketIn(Dimension(),
                 static_cast<uint8_t>(Network::PacketId::ExplodeS2C),
                 Network::Serialization::Serialize(packet));
         }
@@ -974,8 +1001,8 @@ namespace Server {
         // grazing a fern yields nothing — the wool IS the yield.
         if (dropResources) {
             const Game::BlockID was = m_world->GetBlock(pos.x, pos.y, pos.z);
-            if (was != Game::BlockID::Air) {
-                Game::DropItemStackNear(pos, Game::ItemStack(
+            if (was != Game::BlockID::Air && m_items) {
+                m_items->PopResource(pos, Game::ItemStack(
                     Game::ItemRegistry::FromBlock(was), 1));
             }
         }
@@ -996,6 +1023,37 @@ namespace Server {
         // in vanilla, and the same combination BlockGrowth's random ticks use.
         m_world->SetBlock(pos.x, pos.y, pos.z, state,
                           Game::World::UpdateFlags::MarkDirty);
+    }
+
+    bool ServerLevelBridge::DoMobSpawning() const {
+        return m_world ? m_world->GetDoMobSpawning() : true;
+    }
+
+    bool ServerLevelBridge::TeleportPlayer(Game::LivingEntity& player,
+                                           const glm::dvec3& pos) {
+        // The view's id IS the connection id (see the id-space note in
+        // HandleInteract). Keep the player's own look; zero the velocity —
+        // MC's pearl teleport carries Relative.ROTATION and drops the delta.
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        if (!view || !m_sessions) return false;
+        auto session = m_sessions->GetSessionByConnection(
+            static_cast<uint32_t>(view->GetId()));
+        if (!session) return false;
+        ServerPlayer* serverPlayer = session->GetPlayer();
+        auto* connection = session->GetConnection();
+        if (!serverPlayer || !connection) return false;
+
+        connection->Teleport(pos.x, pos.y, pos.z,
+                             serverPlayer->getYaw(), serverPlayer->getPitch(),
+                             0.0, 0.0, 0.0);
+        // MC resetFallDistance on arrival — the server-side accumulator half;
+        // the client's own resets when it applies the teleport.
+        view->ResetFallDistance();
+        return true;
+    }
+
+    Game::DimensionId ServerLevelBridge::Dimension() const {
+        return m_world ? m_world->GetDimension() : Game::DimensionId::Overworld;
     }
 
     int ServerLevelBridge::GetMinY() const {
@@ -1069,14 +1127,15 @@ namespace Server {
     void ServerLevelBridge::SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) {
         if (count <= 0) return;
 
-        // DropItemStackNear takes a BLOCK position — it is MC's popResource,
-        // which scatters within the cell and adds a small hop. That is the
-        // right behaviour for a death drop too, so the entity's continuous
-        // position is floored rather than a second drop path being added.
+        // MC popResource: scatter within the cell with a small hop, so the
+        // entity's continuous position is floored to its block. THIS level's
+        // item manager, not the Game::DropItemStackNear free function — that
+        // helper is Overworld-pinned (IntegratedServer::GetItemEntities), so
+        // an End enderman's pearl was dropping a dimension away.
         const glm::ivec3 blockPos(static_cast<int>(std::floor(pos.x)),
                                   static_cast<int>(std::floor(pos.y)),
                                   static_cast<int>(std::floor(pos.z)));
-        Game::DropItemStackNear(blockPos, Game::ItemStack(itemId, count));
+        if (m_items) m_items->PopResource(blockPos, Game::ItemStack(itemId, count));
     }
 
     void ServerLevelBridge::AwardExperience(const glm::dvec3& pos, int amount,
@@ -1087,11 +1146,11 @@ namespace Server {
         // into MC's denominations, that fly to whichever player comes within
         // 8 blocks. The kill credit no longer matters here — it gated whether
         // XP drops at all (the callers check that), not who may collect it.
-        auto* server = Server::g_integratedServer.get();
-        if (!server) return;
-        if (auto* orbs = server->GetXpOrbs()) {
-            orbs->Award(pos, amount);
-        }
+        //
+        // THIS level's manager, not IntegratedServer::GetXpOrbs() — that
+        // accessor is Overworld-pinned, and the dragon's death shower was
+        // landing a dimension away from its corpse.
+        if (m_orbs) m_orbs->Award(pos, amount);
     }
 
     void ServerLevelBridge::AddFreshEntity(std::unique_ptr<Game::Entity> entity) {

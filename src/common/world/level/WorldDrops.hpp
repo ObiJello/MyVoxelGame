@@ -13,6 +13,8 @@
 // menus live in common and must not depend on server headers.
 #pragma once
 
+#include "common/world/level/DimensionId.hpp"
+
 #include <glm/glm.hpp>
 
 namespace Game {
@@ -20,21 +22,31 @@ namespace Game {
     struct ItemStack;
     class  ILevelWrite;
 
+    // Every function here takes the DIMENSION the drop belongs to. It used to
+    // be implicit — always the Overworld — which is how an item dropped in
+    // the End or the Nether spawned a dimension away from the player who
+    // dropped it. Callers derive it from whatever context they hold:
+    // ILevelWrite::GetDimension(), EntityLevel::Dimension(), or
+    // IUsePlayer::getDimensionId().
+
     // Spawn `stack` as a dropped item at `pos`, with MC's popResource scatter
     // and hop. Returns false only when there is no server to spawn into (the
     // stack is then still the caller's), which in practice means a client-side
     // call or a torn-down world. An empty stack is a no-op and returns true.
-    bool DropItemStackNear(const glm::ivec3& pos, const ItemStack& stack);
+    bool DropItemStackNear(DimensionId dimension, const glm::ivec3& pos,
+                           const ItemStack& stack);
 
     // MC Entity.spawnAtLocation — a drop from an ENTITY, at its exact double
     // position, with no block-centre scatter. See ItemEntityManager::
     // SpawnAtLocation for why the two are not the same call.
-    bool DropItemStackAt(const glm::dvec3& pos, const ItemStack& stack);
+    bool DropItemStackAt(DimensionId dimension, const glm::dvec3& pos,
+                         const ItemStack& stack);
 
     // MC Block.popResourceFromFace — same, but nudged out of one face of the
     // block and launched away from it, for items that logically come off a
     // particular side. `face` is a Direction ordinal (0=down .. 5=east).
-    bool DropItemStackFromFace(const glm::ivec3& pos, int face, const ItemStack& stack);
+    bool DropItemStackFromFace(DimensionId dimension, const glm::ivec3& pos,
+                               int face, const ItemStack& stack);
 
     // MC Level.destroyBlock(pos, dropResources=true) — roll the block's loot
     // table, pop the results, then clear the cell with a full update.

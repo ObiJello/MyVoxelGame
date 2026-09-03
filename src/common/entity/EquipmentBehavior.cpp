@@ -97,7 +97,8 @@ namespace Game::EquipmentBehavior {
                 // Inventory full — the armour that just came off goes on the
                 // ground rather than being destroyed. Swapping helmets with a
                 // full pack used to silently eat the old one.
-                DropItemStackNear(glm::ivec3(glm::floor(player.getPosition())),
+                DropItemStackNear(DimensionFromRaw(player.getDimensionId()),
+                                  glm::ivec3(glm::floor(player.getPosition())),
                                   inEquipmentSlot);
             }
         }

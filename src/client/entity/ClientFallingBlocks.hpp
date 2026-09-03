@@ -71,6 +71,7 @@ namespace Client {
         std::unordered_map<int32_t, size_t> m_index;
     };
 
-    extern std::unique_ptr<ClientFallingBlocks> g_clientFallingBlocks;
+    // Bound-level pointer, owned by ClientLevel (see ClientLevel.hpp).
+    extern ClientFallingBlocks* g_clientFallingBlocks;
 
 } // namespace Client

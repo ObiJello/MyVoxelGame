@@ -173,19 +173,31 @@ void main() {
         return true;
     }
 
-    void CloudRenderer::DestroyMeshBuffers(bool deferred) {
+    void CloudRenderer::DestroySlot(size_t slot, bool deferred) {
         if (!g_renderBackend) return;
-        if (m_mesh != INVALID_MESH) { g_renderBackend->DestroyMesh(m_mesh); m_mesh = INVALID_MESH; }
-        if (m_vb != INVALID_BUFFER) {
-            if (deferred) g_renderBackend->DeferredDestroyBuffer(m_vb);
-            else g_renderBackend->DestroyBuffer(m_vb);
-            m_vb = INVALID_BUFFER;
+        MeshSlot& ms = m_slots[slot];
+        if (ms.mesh != INVALID_MESH) {
+            if (deferred) g_renderBackend->DeferredDestroyMesh(ms.mesh);
+            else g_renderBackend->DestroyMesh(ms.mesh);
+            ms.mesh = INVALID_MESH;
         }
-        if (m_ib != INVALID_BUFFER) {
-            if (deferred) g_renderBackend->DeferredDestroyBuffer(m_ib);
-            else g_renderBackend->DestroyBuffer(m_ib);
-            m_ib = INVALID_BUFFER;
+        if (ms.vb != INVALID_BUFFER) {
+            if (deferred) g_renderBackend->DeferredDestroyBuffer(ms.vb);
+            else g_renderBackend->DestroyBuffer(ms.vb);
+            ms.vb = INVALID_BUFFER;
         }
+        if (ms.ib != INVALID_BUFFER) {
+            if (deferred) g_renderBackend->DeferredDestroyBuffer(ms.ib);
+            else g_renderBackend->DestroyBuffer(ms.ib);
+            ms.ib = INVALID_BUFFER;
+        }
+        ms.vbCapacity = 0;
+        ms.ibCapacity = 0;
+    }
+
+    void CloudRenderer::DestroyMeshBuffers(bool deferred) {
+        DestroySlot(0, deferred);
+        DestroySlot(1, deferred);
         m_indexCount = 0;
     }
 
@@ -262,8 +274,10 @@ void main() {
 
     void CloudRenderer::RebuildMesh(int cellX, int cellZ, RelativePos rel, Mode mode,
                                     int radiusCells) {
-        std::vector<Vertex> verts;
-        std::vector<uint32_t> indices;
+        std::vector<Vertex>& verts = m_scratchVerts;
+        std::vector<uint32_t>& indices = m_scratchIndices;
+        verts.clear();
+        indices.clear();
 
         // MC's ring iteration: manhattan rings outward, circle-clamped.
         for (int ring = 0; ring <= 2 * radiusCells; ++ring) {
@@ -277,15 +291,47 @@ void main() {
             }
         }
 
-        DestroyMeshBuffers(true);
-        if (!indices.empty()) {
-            m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-                                                 verts.size() * sizeof(Vertex), verts.data());
-            m_ib = g_renderBackend->CreateBuffer(BufferUsage::Index,
-                                                 indices.size() * sizeof(uint32_t), indices.data());
-            m_mesh = g_renderBackend->CreateMesh(m_vb, m_ib, GetBlockVertexLayout());
-            m_indexCount = static_cast<uint32_t>(indices.size());
+        m_indexCount = static_cast<uint32_t>(indices.size());
+        if (indices.empty()) return;   // nothing to draw; old slots stay allocated for the next fill
+
+        // Alternate slots so the write never lands on the mesh a queued frame
+        // is still reading (see MeshSlot in the header).
+        const size_t slot = (m_activeSlot + 1) % 2;
+        MeshSlot& ms = m_slots[slot];
+        const size_t vbBytes = verts.size() * sizeof(Vertex);
+        const size_t ibBytes = indices.size() * sizeof(uint32_t);
+
+        // Grow only when a rebuild does not fit. Growth deferred-destroys the
+        // old buffers (a frame may still read them) and allocates with 50%
+        // headroom so a slowly growing radius does not reallocate every time.
+        const bool growVB = vbBytes > ms.vbCapacity;
+        const bool growIB = ibBytes > ms.ibCapacity;
+        if (growVB || growIB) {
+            if (ms.mesh != INVALID_MESH) { g_renderBackend->DeferredDestroyMesh(ms.mesh); ms.mesh = INVALID_MESH; }
+            if (growVB) {
+                if (ms.vb != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(ms.vb);
+                ms.vbCapacity = vbBytes + vbBytes / 2;
+                ms.vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, ms.vbCapacity,
+                                                      nullptr, BufferAccess::Dynamic);
+            }
+            if (growIB) {
+                if (ms.ib != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(ms.ib);
+                ms.ibCapacity = ibBytes + ibBytes / 2;
+                ms.ib = g_renderBackend->CreateBuffer(BufferUsage::Index, ms.ibCapacity,
+                                                      nullptr, BufferAccess::Dynamic);
+            }
+            if (ms.vb == INVALID_BUFFER || ms.ib == INVALID_BUFFER) {
+                Log::Error("CloudRenderer: cloud mesh buffer allocation failed");
+                DestroySlot(slot, true);
+                m_indexCount = 0;
+                return;
+            }
+            ms.mesh = g_renderBackend->CreateMesh(ms.vb, ms.ib, GetBlockVertexLayout());
         }
+
+        g_renderBackend->UpdateBuffer(ms.vb, 0, vbBytes, verts.data());
+        g_renderBackend->UpdateBuffer(ms.ib, 0, ibBytes, indices.data());
+        m_activeSlot = slot;
     }
 
     void CloudRenderer::Render(const glm::mat4& proj, const glm::mat4& view,
@@ -338,7 +384,8 @@ void main() {
             m_lastMode = mode;
             m_lastRadiusCells = radiusCells;
         }
-        if (m_mesh == INVALID_MESH || m_indexCount == 0) return;
+        const MeshSlot& active = m_slots[m_activeSlot];
+        if (active.mesh == INVALID_MESH || m_indexCount == 0) return;
 
         // Camera-relative model: cell-local mesh → world offset around camera.
         const glm::mat4 model = glm::translate(
@@ -371,7 +418,7 @@ void main() {
         const float cloudFogEnd = std::min(static_cast<float>(radiusBlocks), 2048.0f);
         g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
                                         glm::vec4(0.0f, cloudFogEnd, 1e9f, 1e9f));
-        g_renderBackend->DrawIndexed(m_mesh, m_indexCount);
+        g_renderBackend->DrawIndexed(active.mesh, m_indexCount);
         g_renderBackend->UnbindMesh();
 
         PipelineState defaultState;

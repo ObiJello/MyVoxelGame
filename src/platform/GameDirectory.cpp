@@ -1,5 +1,6 @@
 // File: src/platform/GameDirectory.cpp
 #include "GameDirectory.hpp"
+#include "common/core/HardwareProfile.hpp"
 #include "common/core/Log.hpp"
 #include "server/world/storage/NBTParser.hpp"
 #include <zlib.h>
@@ -46,8 +47,11 @@ namespace Platform {
         // Try to load from options.txt
         if (!Load()) {
             Log::Warning("Could not load options.txt, using defaults");
+            ApplyFirstRunHardwareDefaults();
             // Save defaults to create the file
             Save();
+        } else {
+            MigrateSchema();
         }
 
         m_initialized = true;
@@ -142,13 +146,17 @@ namespace Platform {
         SetInt("prioritizeChunkUpdates", 0);
         SetBool("fullscreen", false);
         SetFloat("gamma", 1.0f);
-        SetInt("graphicsMode", 1);
+        SetString("graphicsPreset", "custom");
+        SetBool("cutoutLeaves", true);
+        SetBool("cullLeaves", false);
         SetInt("guiScale", 3);
         SetInt("maxFps", 120);
         SetString("inactivityFpsLimit", "afk");
         SetInt("mipmapLevels", 4);
         SetInt("narrator", 0);
-        SetInt("particles", 1);
+        SetInt("particles", 0);
+        // Layout version of this file — see MigrateSchema.
+        SetInt("optionsSchema", 2);
         SetBool("reducedDebugInfo", false);
         SetString("renderClouds", "true");
         SetInt("cloudRange", 128);
@@ -297,6 +305,138 @@ namespace Platform {
         SetBool("modelPart_hat", true);
 
         Log::Info("Created %zu default Minecraft-style settings", m_settings.size());
+    }
+
+    // ── Schema migration ────────────────────────────────────────────────────
+    //
+    // MC ships datafixers for options.txt (OptionsGraphicsModeSplitFix and
+    // friends); this is the same idea at our scale. `optionsSchema` names the
+    // layout a file was last written in. Absent = 1, the layout before the
+    // graphics options were wired up.
+    void GameSettings::MigrateSchema() {
+        const int schema = GetInt("optionsSchema", 1);
+        constexpr int kCurrentSchema = 2;
+        if (schema >= kCurrentSchema) return;
+
+        if (schema < 2) {
+            // Schema 1 wrote `particles:1` (Decreased) as its default while
+            // nothing read the key. Now that the limiter is live, that value
+            // would silently drop a third of every player's particles on the
+            // first launch after the update. MC's default is All (0) and the
+            // key never did anything, so the old default is rewritten; a
+            // player who later picks Decreased on purpose keeps it.
+            if (GetInt("particles", 0) == 1) {
+                SetInt("particles", 0);
+                Log::Info("options.txt migration: particles 1 -> 0 (old inert default)");
+            }
+            // The preset key did not exist; an existing file's individual
+            // settings are whatever the player left them at, which is CUSTOM
+            // (MC OptionsSetGraphicsPresetToCustomFix does the same).
+            if (m_settings.find("graphicsPreset") == m_settings.end()) {
+                SetString("graphicsPreset", "custom");
+            }
+        }
+
+        SetInt("optionsSchema", kCurrentSchema);
+        Log::Info("options.txt migrated: schema %d -> %d", schema, kCurrentSchema);
+        Save();
+    }
+
+    void GameSettings::ApplyFirstRunHardwareDefaults() {
+        const auto& hw = Core::HardwareProfile::Get();
+        if (!hw.IsLowEnd()) return;
+        // MC gates its own defaults on hardware too (the render-distance
+        // ceiling on maxMemory, Fabulous's transparency on the GPU warnlist);
+        // a first launch on a low-end machine gets the Fast table.
+        ApplyGraphicsPreset(GraphicsPreset::Fast);
+        Log::Info("First run on a low-end machine (%s): Fast graphics preset applied",
+                  hw.ToString().c_str());
+    }
+
+    // ── Graphics preset ─────────────────────────────────────────────────────
+
+    const char* GameSettings::GraphicsPresetName(GraphicsPreset preset) {
+        switch (preset) {
+            case GraphicsPreset::Fast:  return "fast";
+            case GraphicsPreset::Fancy: return "fancy";
+            case GraphicsPreset::Custom: break;
+        }
+        return "custom";
+    }
+
+    GameSettings::GraphicsPreset GameSettings::GetGraphicsPreset() const {
+        const std::string name = GetString("graphicsPreset", "custom");
+        if (name == "fast")  return GraphicsPreset::Fast;
+        if (name == "fancy") return GraphicsPreset::Fancy;
+        return GraphicsPreset::Custom;
+    }
+
+    void GameSettings::NoteGraphicsOptionChanged() {
+        if (m_applyingGraphicsPreset) return;
+        if (GetString("graphicsPreset", "custom") != "custom") {
+            SetString("graphicsPreset", "custom");
+        }
+    }
+
+    // The table is MC's (client/GraphicsPreset.java:38-103), minus the
+    // options this engine does not have (Fabulous transparency, anisotropy,
+    // texture filtering, weather radius, menu blur) and with cloudRange in
+    // blocks rather than chunks because that is what the slider stores.
+    //
+    //   option                  Fast          Fancy
+    //   renderDistance          8             16
+    //   simulationDistance      6             12
+    //   ao (smooth lighting)    off           on
+    //   cutoutLeaves            off           on
+    //   particles               Decreased     All
+    //   biomeBlendRadius        1             2
+    //   renderClouds            fast          fancy ("true")
+    //   entityDistanceScaling   0.75          1.0
+    //   mipmapLevels            2             4
+    //   prioritizeChunkUpdates  NONE          PLAYER_AFFECTED
+    //   cloudRange (blocks)     64            128
+    void GameSettings::ApplyGraphicsPreset(GraphicsPreset preset) {
+        if (preset == GraphicsPreset::Custom) return;
+        const bool fancy = preset == GraphicsPreset::Fancy;
+
+        m_applyingGraphicsPreset = true;
+        SetRenderDistance(fancy ? 16 : 8);
+        SetSimulationDistance(fancy ? 12 : 6);
+        SetAO(fancy);
+        SetCutoutLeaves(fancy);
+        SetParticles(fancy ? 0 : 1);
+        SetBiomeBlendRadius(fancy ? 2 : 1);
+        SetRenderClouds(fancy ? "true" : "fast");
+        SetEntityDistanceScaling(fancy ? 1.0f : 0.75f);
+        SetMipmapLevels(fancy ? 4 : 2);
+        SetPrioritizeChunkUpdates(fancy ? 1 : 0);
+        SetCloudRange(fancy ? 128 : 64);
+        SetString("graphicsPreset", GraphicsPresetName(preset));
+        m_applyingGraphicsPreset = false;
+
+        Log::Info("Graphics preset applied: %s", GraphicsPresetName(preset));
+    }
+
+    // ── HiDPI framebuffer ───────────────────────────────────────────────────
+
+    bool GameSettings::GetRetinaFramebuffer() const {
+        return GetBool("retinaFramebuffer", !Core::HardwareProfile::Get().intelMac);
+    }
+
+    bool GameSettings::PeekRetinaFramebufferFromDisk() {
+        const bool fallback = !Core::HardwareProfile::Get().intelMac;
+        const std::string path = GameDirectory::GetDefaultGameDirectory() + "/options.txt";
+        std::ifstream file(path);
+        if (!file.is_open()) return fallback;
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.rfind("retinaFramebuffer:", 0) != 0) continue;
+            std::string value = line.substr(sizeof("retinaFramebuffer:") - 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t\r") + 1);
+            return value == "true";
+        }
+        return fallback;
     }
 
     bool GameSettings::ParseLine(const std::string& line) {

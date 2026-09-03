@@ -41,6 +41,9 @@ namespace Game::Anvil {
         // game_rules compound stores every rule regardless of its type.
         bool doDaylightCycle  = false;
         bool doMobSpawning    = true;
+        bool immersivePortals = true;   // this engine's rule, not vanilla's
+        int  worldWrapSize   = 0;       // engine world option (0 = off)
+        bool dimensionStack  = false;   // engine world option
         bool mobGriefing      = true;
         int  randomTickSpeed  = 3;
     };

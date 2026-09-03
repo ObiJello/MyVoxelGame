@@ -106,12 +106,12 @@ namespace Server {
         m_connection.HandleChatMessage(packet);
     }
 
-    void ServerPlayPacketListener::onClientConfigC2S(int renderDistance, bool vsync,
-                                                     float mouseSensitivity) {
+    void ServerPlayPacketListener::onClientConfigC2S(int renderDistance, int simulationDistance,
+                                                     bool vsync, float mouseSensitivity) {
         // MC ServerGamePacketListenerImpl.handleClientInformation (:1952), which
         // — unlike its configuration-phase twin — defers to the main thread
         // because there is a player to update. We are on the server thread here.
-        m_connection.ApplyClientSettings(renderDistance, vsync, mouseSensitivity);
+        m_connection.ApplyClientSettings(renderDistance, simulationDistance, vsync, mouseSensitivity);
     }
 
     void ServerPlayPacketListener::onHeldItemChangeC2S(const Network::HeldItemChangeC2SPacket& packet) {
@@ -147,11 +147,16 @@ namespace Server {
         Server::g_integratedServer->HandleInteract(
             m_connection.GetConnectionId(), packet.entityId,
             packet.action == Network::InteractC2SPacket::Action::Attack,
-            packet.sprinting);
+            packet.sprinting, packet.dragonPart);
     }
 
     void ServerPlayPacketListener::onInventoryCloseC2S(const Network::InventoryCloseC2SPacket& packet) {
         m_session.HandleInventoryClose(packet);
+    }
+
+    void ServerPlayPacketListener::onChunkRequestFull(int8_t dimensionId, int32_t chunkX, int32_t chunkZ) {
+        m_session.OnChunkRequestFull(Game::DimensionFromRaw(dimensionId),
+                                     Game::Math::ChunkPos{chunkX, chunkZ});
     }
 
     void ServerPlayPacketListener::onChunkBatchAck(float desiredChunksPerTick) {
@@ -167,6 +172,16 @@ namespace Server {
     void ServerPlayPacketListener::onPlayerLoaded() {
         // MC ServerGamePacketListenerImpl.handleAcceptPlayerLoad -> markClientLoaded()
         m_session.MarkClientLoaded();
+    }
+
+#if ENABLE_IMMERSIVE_PORTALS
+    void ServerPlayPacketListener::onPortalTeleportC2S(const Network::PortalTeleportC2SPacket& packet) {
+        m_session.HandlePortalTeleport(packet);
+    }
+#endif
+
+    void ServerPlayPacketListener::onFillBlocksC2S(const Network::FillBlocksC2SPacket& packet) {
+        m_session.HandleFillBlocks(packet);
     }
 
 } // namespace Server

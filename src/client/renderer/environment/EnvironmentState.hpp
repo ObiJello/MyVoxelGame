@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <glm/glm.hpp>
+#include "common/world/level/DimensionId.hpp"
 
 namespace Render {
 
@@ -67,7 +68,16 @@ namespace Render {
         void UpdateFrame(float partialTick, const glm::vec3& cameraForward,
                          float cameraY, int renderDistChunks, bool fogEnabled);
 
-        const EnvironmentFrame& Frame() const { return m_frame; }
+        // The frame renderers read. While a portal view is being drawn, an
+        // OVERRIDE — the far dimension's frame — stands in for it.
+        const EnvironmentFrame& Frame() const { return m_frameOverride ? *m_frameOverride : m_frame; }
+        void SetFrameOverride(const EnvironmentFrame* frame) { m_frameOverride = frame; }
+        const EnvironmentFrame* FrameOverride() const { return m_frameOverride; }
+
+        // The frame this moment would have in another dimension (its own
+        // fog, sky and ambient rules, this frame's time and camera). Used by
+        // the immersive portal renderer for the far side of a portal.
+        EnvironmentFrame FrameForDimension(Game::DimensionId dimension);
 
         // Interpolated times for renderers (clouds drift off gameTime).
         double DayTimeF(float partialTick) const;
@@ -122,6 +132,13 @@ namespace Render {
         // Skybox fog override (main thread only).
         bool m_skyboxActive = false;
         bool m_constantAmbientLight = false;
+        const EnvironmentFrame* m_frameOverride = nullptr;
+        // Last UpdateFrame inputs, so FrameForDimension can recompose.
+        float     m_lastPartialTick = 0.0f;
+        glm::vec3 m_lastCameraForward{0.0f, 0.0f, 1.0f};
+        float     m_lastCameraY = 64.0f;
+        int       m_lastRenderDistChunks = 8;
+        bool      m_lastFogEnabled = true;
         glm::vec3 m_skyboxFogBase{0.5f};
         int m_skyboxMode = 2;
 

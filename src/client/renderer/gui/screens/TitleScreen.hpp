@@ -52,6 +52,9 @@ namespace Render {
         std::string worldgenTweaks;             // World Properties JSON ("" = vanilla)
         long long   dayTime  = 6000;          // world time restored from worlds.json (6000 = noon)
         bool        doDaylightCycle = false;  // gamerule restored from worlds.json
+        int         difficulty = 2;           // 0 peaceful .. 3 hard (WorldEntry::difficulty)
+        int         worldWrap = 0;            // world option (WorldEntry::worldWrap)
+        bool        dimensionStack = false;   // world option (WorldEntry::dimensionStack)
         std::string skybox = "vanilla";       // per-world sky (see WorldEntry::skybox)
         int         skyboxMode = 2;           // 0 static, 1 darken, 2 darken+celestials
 

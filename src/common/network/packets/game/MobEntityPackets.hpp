@@ -91,6 +91,8 @@ namespace Network {
         // state), which is the right answer for every entity that carries no
         // block. Same compatibility rule vehicleId's own note describes.
         uint32_t   blockStateRaw = 0;
+        // APPENDED FIELD: the entity's size (Entity::scale). Absent = 1.
+        float      scale = 1.0f;
     };
 
     // MC ClientboundMoveEntityPacket.Pos / .Rot / .PosRot, merged into one
@@ -158,6 +160,7 @@ namespace Network {
         uint8_t pose = 0;           // Game::Pose ordinal — see AddEntity
         uint8_t animState = 0;      // per-type animation state — see AddEntity
         int32_t vehicleId = -1;     // id ridden, -1 none — see AddEntity's note
+        float   scale = 1.0f;       // appended: Entity::scale
     };
 
     // MC ClientboundEntityEventPacket. One byte: 3 death, 60 poof, 10 eat,
@@ -191,6 +194,13 @@ namespace Network {
         // here, so it has to travel. See IntegratedServer::HandleInteract for
         // why trusting it is safe.
         bool    sprinting = false;
+        // The ender-dragon PART the client's pick hit (EnderDragon::
+        // kDragonPart* indices), -1 for everything else. MC has no such
+        // field because its parts are real entities with their own ids; here
+        // the index travels beside the dragon's one id and the server
+        // re-validates it against its own part layout before routing the
+        // head-vs-body damage. APPENDED FIELD — absence decodes as -1.
+        int8_t  dragonPart = -1;
     };
 
     namespace Serialization {
@@ -218,6 +228,7 @@ namespace Network {
             // and zig-zag would buy nothing for a full-range id.
             b.WriteInt(static_cast<uint32_t>(p.vehicleId));
             b.WriteInt(p.blockStateRaw);
+            b.WriteFloat(p.scale);
             return b.GetData();
         }
 
@@ -247,6 +258,7 @@ namespace Network {
             // old server's stream simply ends here, and an old client leaves
             // the extra four bytes unread.
             if (r.Remaining() >= 4) p.blockStateRaw = r.ReadInt();
+            if (r.Remaining() >= 4) p.scale = r.ReadFloat();
             return p;
         }
 
@@ -409,6 +421,7 @@ namespace Network {
             b.WriteByte(p.animState);
             // Appended (riding) — see AddEntity's serializer.
             b.WriteInt(static_cast<uint32_t>(p.vehicleId));
+            b.WriteFloat(p.scale);
             return b.GetData();
         }
 
@@ -428,6 +441,7 @@ namespace Network {
             p.animState   = r.ReadByte();
             // Appended field — absent on old streams, default -1 (not riding).
             if (r.Remaining() >= 4) p.vehicleId = static_cast<int32_t>(r.ReadInt());
+            if (r.Remaining() >= 4) p.scale = r.ReadFloat();
             return p;
         }
 
@@ -472,6 +486,7 @@ namespace Network {
             b.WriteByte(static_cast<uint8_t>(p.action));
             b.WriteByte(p.sneaking ? 1 : 0);
             b.WriteByte(p.sprinting ? 1 : 0);
+            b.WriteByte(static_cast<uint8_t>(p.dragonPart));
             return b.GetData();
         }
 
@@ -482,6 +497,9 @@ namespace Network {
             p.action   = static_cast<InteractC2SPacket::Action>(r.ReadByte());
             p.sneaking = r.ReadByte() != 0;
             p.sprinting = r.ReadByte() != 0;
+            // Appended field — an older peer's stream simply ends here, and
+            // the struct default (-1, no part) is the right answer for it.
+            if (r.Remaining() >= 1) p.dragonPart = static_cast<int8_t>(r.ReadByte());
             return p;
         }
 

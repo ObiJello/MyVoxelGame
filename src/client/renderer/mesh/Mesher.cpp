@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/Mesher.cpp
 #include "Mesher.hpp"
+#include <atomic>
 #include "MeshJobData.hpp"
 #include "../culling/VisGraph.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -10,15 +11,82 @@
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "platform/GameDirectory.hpp"
 #include <chrono>
+#include <mutex>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 namespace Render {
 
     // Thread-local block property cache and UV cache definitions
     thread_local std::array<Mesher::CachedBlockProps, Mesher::BLOCK_ID_COUNT> Mesher::s_blockPropsCache{};
     thread_local bool Mesher::s_blockPropsCacheValid = false;
+    thread_local uint32_t Mesher::s_blockPropsCacheGeneration = 0;
+    // Packed defaults = MeshOptions{}: cutoutLeaves set, cullLeaves clear,
+    // smoothLighting set, biomeBlendRadius 2.
+    // Bit layout in PackMeshOptions; 0x25 = cutoutLeaves | smoothLighting |
+    // biomeBlendRadius 2, i.e. MeshOptions{}.
+    std::atomic<uint16_t> Mesher::s_meshOptionsPacked{0x0025};
+    std::atomic<uint32_t> Mesher::s_meshOptionsGeneration{0};
+    thread_local Mesher::MeshOptions Mesher::s_activeMeshOptions{};
+
+    namespace {
+        std::mutex g_aoExclusionMutex;
+        std::shared_ptr<const std::vector<Mesher::AoExclusion>> g_aoExclusions =
+            std::make_shared<const std::vector<Mesher::AoExclusion>>();
+        std::shared_ptr<const std::vector<Mesher::PortalFace>> g_portalFaces =
+            std::make_shared<const std::vector<Mesher::PortalFace>>();
+    }
+
+    void Mesher::SetPortalFaces(Game::DimensionId dimension, const std::vector<PortalFace>& faces) {
+        std::lock_guard<std::mutex> lock(g_aoExclusionMutex);
+        auto next = std::make_shared<std::vector<PortalFace>>();
+        for (const PortalFace& f : *g_portalFaces) if (f.dimension != dimension) next->push_back(f);
+        for (const PortalFace& f : faces) next->push_back(f);
+        g_portalFaces = std::move(next);
+    }
+
+    std::vector<Mesher::PortalFace> Mesher::PortalFacesFor(Game::DimensionId dimension) {
+        std::shared_ptr<const std::vector<PortalFace>> list;
+        { std::lock_guard<std::mutex> lock(g_aoExclusionMutex); list = g_portalFaces; }
+        std::vector<PortalFace> out;
+        for (const PortalFace& f : *list) if (f.dimension == dimension) out.push_back(f);
+        return out;
+    }
+
+    void Mesher::SetAoExclusions(Game::DimensionId dimension, const std::vector<AoExclusion>& boxes) {
+        std::lock_guard<std::mutex> lock(g_aoExclusionMutex);
+        auto next = std::make_shared<std::vector<AoExclusion>>();
+        for (const AoExclusion& e : *g_aoExclusions) if (e.dimension != dimension) next->push_back(e);
+        for (const AoExclusion& e : boxes) next->push_back(e);
+        g_aoExclusions = std::move(next);
+    }
+
+    std::vector<Mesher::AoExclusion> Mesher::AoExclusionsFor(Game::DimensionId dimension) {
+        std::shared_ptr<const std::vector<AoExclusion>> list;
+        { std::lock_guard<std::mutex> lock(g_aoExclusionMutex); list = g_aoExclusions; }
+        std::vector<AoExclusion> out;
+        for (const AoExclusion& e : *list) if (e.dimension == dimension) out.push_back(e);
+        return out;
+    }
+
+    void Mesher::SetDimension(Game::DimensionId dimension) {
+        m_dimension = dimension;
+        std::shared_ptr<const std::vector<AoExclusion>> list;
+        std::shared_ptr<const std::vector<PortalFace>>  faces;
+        {
+            std::lock_guard<std::mutex> lock(g_aoExclusionMutex);
+            list  = g_aoExclusions;
+            faces = g_portalFaces;
+        }
+        m_aoExclusions.clear();
+        for (const AoExclusion& e : *list) if (e.dimension == dimension) m_aoExclusions.push_back(e);
+        m_portalFaces.clear();
+        for (const PortalFace& f : *faces) if (f.dimension == dimension) m_portalFaces.push_back(f);
+    }
     thread_local std::vector<std::array<glm::vec4, 64>> Mesher::s_ctmUVs{};
     static_assert(CTM::kMaxVariants == 64,
                   "s_ctmUVs is declared with a literal 64 in Mesher.hpp to keep "
@@ -44,6 +112,83 @@ namespace Render {
         { 1,  0,  0}, // PositiveX
         {-1,  0,  0}  // NegativeX
     };
+
+    // ========================================================================
+    // GREEDY FACE MERGING — per-thread scratch
+    // ========================================================================
+    //
+    // The merge is per SECTION, per LAYER (opaque/cutout only), per FACE
+    // DIRECTION, per PLANE: each of the 6 directions has 16 candidate planes
+    // in a 16^3 section, and each plane is a 16x16 grid of cells. A cell holds
+    // at most one stashed quad (index+1 into t_pending; 0 = empty).
+    // FlushGreedyQuads scans each touched plane and merges maximal rectangles
+    // of cells whose (sprite rect, packed corner color) match exactly.
+    //
+    // Translucent almost never merges: the back-to-front re-sort orders per
+    // QUAD by centroid, and a merged quad is a coarser sorting unit — a large
+    // glass sheet could then blend in the wrong order against water in front
+    // of one of its corners. Correctness over reduction, and translucent is
+    // the smallest of the three passes anyway.
+    //
+    // The ONE carve-out is still-fluid horizontal surfaces — the flat ocean
+    // top, merged by FluidMeshBuilder's own grid (BeginGreedySection /
+    // FlushGreedyFluidQuads, driven from this file's flush). A flat ocean is
+    // safe because coplanar quads cannot occlude one another, so their
+    // relative blend order never matters. The accepted residual risk is
+    // STACKED translucent along a ray through one plate: a merged plate sorts
+    // by its coarser centroid, so glass or a second water surface above/below
+    // one corner of a large plate can blend in the wrong order right there.
+    // Rare (fluid-over-translucent stacks only), bounded, and taken
+    // deliberately for the ocean win.
+    //
+    // Everything is thread_local because the mesher runs on worker threads
+    // (same pattern as s_blockPropsCache). The grid is ~192 KB per thread and
+    // relies on thread-storage zero-initialization for its empty state;
+    // FlushGreedyQuads returns every touched cell to 0 as it consumes it.
+    namespace {
+        namespace Greedy {
+            // One stashed full-cube face, kept EXACTLY as GenerateQuad would
+            // have emitted it. A 1x1 survivor re-emits these verbatim
+            // (tile rect = 0), so a quad that fails to merge is bit-identical
+            // to the non-greedy build.
+            struct PendingQuad {
+                std::array<Vertex, 4> verts;
+                glm::vec4 uvRect;   // full sprite rect in atlas UV (x,y = min; z,w = max)
+                uint32_t  color;    // the shared corner color (all four equal)
+            };
+
+            // [layer][face][plane][v][u]: layer 0 = opaque, 1 = cutout.
+            thread_local int32_t t_grid[2][6][16][16][16];
+            thread_local std::vector<PendingQuad> t_pending;
+            thread_local bool t_planeTouched[2][6][16];
+            struct PlaneRef { uint8_t layer, face, plane; };
+            thread_local std::vector<PlaneRef> t_touched;
+
+            // OBEY_NO_GREEDY: launch-time A/B switch, same pattern as
+            // DevRenderSkip's OBEY_SKIP. Read once per thread; merging is
+            // decided at MESH time, so flipping it needs a remesh (fine — it
+            // is set at launch and the world load remeshes everything).
+            inline bool Disabled() {
+                static const bool disabled = std::getenv("OBEY_NO_GREEDY") != nullptr;
+                return disabled;
+            }
+
+            // Drop any leftovers without emitting them. Called at the start of
+            // every section build purely defensively — a flush that somehow
+            // did not run must not leak a previous section's quads into this
+            // one's mesh.
+            inline void ResetThreadState() {
+                if (t_touched.empty() && t_pending.empty()) return;
+                for (const PlaneRef& pr : t_touched) {
+                    std::memset(t_grid[pr.layer][pr.face][pr.plane], 0,
+                                sizeof(t_grid[0][0][0]));
+                    t_planeTouched[pr.layer][pr.face][pr.plane] = false;
+                }
+                t_touched.clear();
+                t_pending.clear();
+            }
+        }
+    }
 
     // Read-only IBlockAccess adapter over the mesher's 18^3 block cache.
     // Passed to downstream code that still takes the interface (FluidMeshBuilder,
@@ -181,8 +326,131 @@ namespace Render {
         m_world = world;
     }
 
+    namespace {
+        constexpr uint16_t kLeafCutoutBit     = 0x0001;
+        constexpr uint16_t kLeafCullBit       = 0x0002;
+        constexpr uint16_t kSmoothLightingBit = 0x0004;
+        constexpr int      kBiomeRadiusShift  = 4;
+        constexpr uint16_t kBiomeRadiusMask   = 0x00F0;
+
+        uint16_t PackMeshOptions(Mesher::MeshOptions o) {
+            const uint16_t radius = static_cast<uint16_t>(std::min<int>(o.biomeBlendRadius, 7));
+            return static_cast<uint16_t>((o.cutoutLeaves   ? kLeafCutoutBit     : 0) |
+                                         (o.cullLeaves     ? kLeafCullBit       : 0) |
+                                         (o.smoothLighting ? kSmoothLightingBit : 0) |
+                                         (radius << kBiomeRadiusShift));
+        }
+        Mesher::MeshOptions UnpackMeshOptions(uint16_t packed) {
+            return Mesher::MeshOptions{
+                .cutoutLeaves     = (packed & kLeafCutoutBit)     != 0,
+                .cullLeaves       = (packed & kLeafCullBit)       != 0,
+                .smoothLighting   = (packed & kSmoothLightingBit) != 0,
+                .biomeBlendRadius = static_cast<uint8_t>((packed & kBiomeRadiusMask) >> kBiomeRadiusShift) };
+        }
+    }
+
+    // Greedy-debug coloring state + totals. Plain atomics: read per flush /
+    // per quad-emit only while the debug view is on.
+    static std::atomic<bool>     s_greedyDebugColors{false};
+    static std::atomic<uint32_t> s_greedyPaletteGen{1};
+    static std::atomic<bool>     s_greedyEnabled{true};
+
+    void Mesher::SetGreedyEnabled(bool enable) {
+        s_greedyEnabled.store(enable, std::memory_order_release);
+    }
+    bool Mesher::GreedyEnabled() {
+        return s_greedyEnabled.load(std::memory_order_acquire);
+    }
+    static std::atomic<uint64_t> s_greedyEligibleIn{0};
+    static std::atomic<uint64_t> s_greedyRectsOut{0};
+
+    void Mesher::SetGreedyDebugColors(bool enable) {
+        // exchange, not store: the palette generation must move only when the
+        // palette actually changes, or every no-op call would trigger the
+        // staleness nets into pointless remeshes.
+        if (s_greedyDebugColors.exchange(enable, std::memory_order_acq_rel) != enable) {
+            s_greedyPaletteGen.fetch_add(1, std::memory_order_release);
+        }
+    }
+    uint32_t Mesher::GreedyPaletteGen() {
+        return s_greedyPaletteGen.load(std::memory_order_acquire);
+    }
+    bool Mesher::GreedyDebugColors() {
+        return s_greedyDebugColors.load(std::memory_order_acquire);
+    }
+    void Mesher::GetGreedyTotals(uint64_t& eligibleIn, uint64_t& rectsOut) {
+        eligibleIn = s_greedyEligibleIn.load(std::memory_order_relaxed);
+        rectsOut   = s_greedyRectsOut.load(std::memory_order_relaxed);
+    }
+
+    namespace {
+        // Heat color for a merged rectangle of `area` cells: 1 -> red,
+        // 256 (16x16) -> green, log-scaled through yellow, so a glance says
+        // how well a surface merged. Returned as the same packed byte layout
+        // the vertex color attribute uses (via Vertex::SetColor).
+        uint32_t GreedyHeatColor(int area) {
+            const float t = std::min(1.0f, std::log2(std::max(1.0f, (float)area)) / 8.0f);
+            const glm::vec4 c(std::min(1.0f, 2.0f * (1.0f - t)),
+                              std::min(1.0f, 2.0f * t),
+                              0.08f, 1.0f);
+            Vertex v{}; v.SetColor(c);
+            return v.packedColor;
+        }
+        // Rule-ineligible quads (partial blocks, rotated/sub-rect UVs, corner
+        // gradients, translucent): dim blue-gray, visually distinct from the
+        // heat scale so "couldn't merge by rule" never reads as "merged badly".
+        const glm::vec4 kGreedyIneligibleColor(0.35f, 0.42f, 0.60f, 1.0f);
+    }
+
+    // Shared with FluidMeshBuilder's still-fluid merge pass so the greedy
+    // debug view speaks one color language across terrain and water.
+    uint32_t Mesher::GreedyDebugHeatColor(int area) {
+        return GreedyHeatColor(area);
+    }
+    uint32_t Mesher::GreedyDebugIneligibleColor() {
+        Vertex v{};
+        v.SetColor(kGreedyIneligibleColor);
+        return v.packedColor;
+    }
+
+    bool Mesher::SetMeshOptions(MeshOptions options) {
+        const uint16_t packed = PackMeshOptions(options);
+        if (packed == s_meshOptionsPacked.load(std::memory_order_relaxed)) return false;
+        s_meshOptionsPacked.store(packed, std::memory_order_relaxed);
+        // Release pairs with the acquire in EnsureBlockPropsCache: a worker
+        // that sees the new generation is guaranteed to see `packed` too.
+        s_meshOptionsGeneration.fetch_add(1, std::memory_order_release);
+        Log::Info("Mesher: options -> %s leaves, cullLeaves=%s, smoothLighting=%s, "
+                  "biomeBlend=%d (all sections must remesh)",
+                  options.cutoutLeaves ? "fancy" : "fast",
+                  options.cullLeaves ? "on" : "off",
+                  options.smoothLighting ? "on" : "off",
+                  static_cast<int>(options.biomeBlendRadius));
+        return true;
+    }
+
+    Mesher::MeshOptions Mesher::GetMeshOptions() {
+        return UnpackMeshOptions(s_meshOptionsPacked.load(std::memory_order_acquire));
+    }
+
+    bool Mesher::SyncMeshOptionsFromSettings() {
+        const auto& settings = Platform::g_gameSettings;
+        return SetMeshOptions(MeshOptions{
+            .cutoutLeaves     = settings.GetCutoutLeaves(),
+            .cullLeaves       = settings.GetCullLeaves(),
+            .smoothLighting   = settings.GetAO(),
+            .biomeBlendRadius = static_cast<uint8_t>(settings.GetBiomeBlendRadius()) });
+    }
+
     void Mesher::EnsureBlockPropsCache() {
-        if (s_blockPropsCacheValid) return;
+        // Acquire: everything published before this generation was bumped
+        // (the packed mesh options) is visible below.
+        const uint32_t generation = s_meshOptionsGeneration.load(std::memory_order_acquire);
+        if (s_blockPropsCacheValid && s_blockPropsCacheGeneration == generation) return;
+        s_blockPropsCacheGeneration = generation;
+        const MeshOptions leafOptions =
+            UnpackMeshOptions(s_meshOptionsPacked.load(std::memory_order_relaxed));
+        s_activeMeshOptions = leafOptions;
 
         // Rebuilt alongside the props it is indexed from; stale slots would
         // otherwise point at the previous atlas's rects after a reload.
@@ -391,6 +659,34 @@ namespace Render {
                 case Game::RenderLayer::Cutout:      s_blockPropsCache[i].renderLayer = RenderLayer::Cutout; break;
                 case Game::RenderLayer::Translucent:  s_blockPropsCache[i].renderLayer = RenderLayer::Translucent; break;
                 default:                              s_blockPropsCache[i].renderLayer = RenderLayer::Opaque; break;
+            }
+
+            // MC LeavesBlock, matched on name the way the tint and
+            // skipRendering families above are: every vanilla `*_leaves`
+            // block is a LeavesBlock (leaf_litter is not, and does not match).
+            {
+                const std::string& n = block.modelName;
+                constexpr std::string_view kSuffix = "_leaves";
+                auto& p = s_blockPropsCache[i];
+                p.isLeaves = n.size() >= kSuffix.size() &&
+                             n.compare(n.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+                // ItemBlockRenderTypes.getChunkRenderType:
+                //   block instanceof LeavesBlock -> cutoutLeaves ? CUTOUT : SOLID
+                // Under Fast the whole canopy goes through the opaque pass,
+                // which has no alpha test, so a leaf's transparent texels draw
+                // as whatever colour the artist left under them — vanilla's
+                // Fast look. The block's OCCLUSION does not change with it:
+                // vanilla leaves are `noOcclusion()` in every mode, so a stone
+                // face behind a Fast leaf is still drawn and AO still treats
+                // the leaf as open. Only the layer and skipRendering move.
+                if (p.isLeaves && !leafOptions.cutoutLeaves) {
+                    p.renderLayer = RenderLayer::Opaque;
+                }
+                // LeavesBlock.skipRendering's `!cutoutLeaves` clause, plus the
+                // engine's cullLeaves option, which asks for that clause under
+                // Fancy too (the "Cull Leaves" mod).
+                p.skipAgainstLeaves = p.isLeaves &&
+                                      (!leafOptions.cutoutLeaves || leafOptions.cullLeaves);
             }
         }
 
@@ -612,6 +908,21 @@ namespace Render {
 
         m_lastStats = {};
 
+        // Defensive: a previous build on this thread must not leak stashed
+        // quads into this section (see Greedy::ResetThreadState).
+        Greedy::ResetThreadState();
+
+        // Arm (or disarm) the fluid builder's still-fluid merge grid for this
+        // section. The switch is resolved HERE — config flag and OBEY_NO_GREEDY
+        // together — so the terrain and fluid greedy passes can never disagree
+        // about whether merging is on. Also performs the fluid grid's own
+        // defensive leftover reset, mirroring ResetThreadState above.
+        if (m_fluidBuilder) {
+            m_fluidBuilder->BeginGreedySection(
+                m_config.enableGreedyMeshing && !Greedy::Disabled() && GreedyEnabled(),
+                m_sectionBaseWorldX, m_sectionBaseWorldY, m_sectionBaseWorldZ);
+        }
+
         outMesh.Clear();
         outMesh.chunkPos = chunkPos;
         outMesh.sectionY = sectionY;
@@ -652,6 +963,10 @@ namespace Render {
                 }
             }
         }
+
+        // Emit everything the greedy pass parked: merged rectangles where
+        // neighbours matched, verbatim originals where they did not.
+        FlushGreedyQuads(outMesh);
 
         // Resolve visibility graph (which face pairs can see through this section)
         outMesh.visibilitySet = visGraph.resolve();
@@ -744,7 +1059,15 @@ namespace Render {
                 // cullface was turned to a different direction than its normal
                 // (RotateModel rewrites the cullface for exactly that reason,
                 // and that rewrite was being thrown away here).
-                if (m_config.enableFaceCulling && faceDef.cullfaceDir >= 0) {
+                // A face lying on a portal surface is drawn whatever is
+                // behind it: through the portal the neighbour is another
+                // world, and a culled face there was a hole in the block.
+                const bool onPortalSurface =
+                    !m_portalFaces.empty() && faceDef.cullfaceDir >= 0 &&
+                    IsPortalFace(worldX, worldY, worldZ,
+                                 FACE_OFFSETS[static_cast<int>(FaceDirToBlockFace(
+                                     static_cast<Game::FaceDir>(faceDef.cullfaceDir)))]);
+                if (m_config.enableFaceCulling && faceDef.cullfaceDir >= 0 && !onPortalSurface) {
                     const BlockFace cullAgainst =
                         FaceDirToBlockFace(static_cast<Game::FaceDir>(faceDef.cullfaceDir));
                     if (ShouldCullFace(worldX, worldY, worldZ, cullAgainst)) {
@@ -757,17 +1080,40 @@ namespace Render {
                     // neighbour, which is what keeps a glass wall or an ice
                     // sheet a single clean surface instead of a stack of
                     // blended internal panes.
-                    if (s_blockPropsCache[static_cast<size_t>(blockId)].cullsAgainstSelf) {
+                    const auto& props = s_blockPropsCache[static_cast<size_t>(blockId)];
+                    if (props.cullsAgainstSelf || props.skipAgainstLeaves) {
                         const glm::ivec3& off = FACE_OFFSETS[static_cast<int>(cullAgainst)];
-                        if (GetCachedBlock(worldX + off.x, worldY + off.y, worldZ + off.z) == blockId) {
+                        const Game::BlockID neighbour =
+                            GetCachedBlock(worldX + off.x, worldY + off.y, worldZ + off.z);
+                        if (props.cullsAgainstSelf && neighbour == blockId) {
+                            m_lastStats.facesCulled++;
+                            continue;
+                        }
+                        // LeavesBlock.skipRendering: ANY leaf neighbour, not
+                        // just the same species — oak against birch is
+                        // skipped too. This is what turns a canopy from ~6N
+                        // quads into its outer shell.
+                        if (props.skipAgainstLeaves &&
+                            s_blockPropsCache[static_cast<size_t>(neighbour)].isLeaves) {
                             m_lastStats.facesCulled++;
                             continue;
                         }
                     }
                 }
 
+                // Per-face layer: an overlay quad of an opaque block (the
+                // grass side fringe) is the one thing in the opaque layer
+                // that needs an alpha test, so it alone goes to cutout. See
+                // FaceDef::cutoutOverlay. The invariant this maintains is the
+                // one the opaque shaders rely on: every texel drawn by the
+                // opaque pass is meant to land, alpha ignored.
+                const RenderLayer faceLayer =
+                    (blockLayer == RenderLayer::Opaque && faceDef.cutoutOverlay)
+                        ? RenderLayer::Cutout
+                        : blockLayer;
+
                 glm::vec3 faceNormal = GetFaceNormal(blockFace);
-                AddBlockFace(blocks, model, element, faceDir, faceDef, worldPos, faceNormal, blockId, stateIndex, worldX, worldY, worldZ, blockLayer, mesh);
+                AddBlockFace(blocks, model, element, faceDir, faceDef, worldPos, faceNormal, blockId, stateIndex, worldX, worldY, worldZ, faceLayer, mesh);
                 m_lastStats.facesGenerated++;
             }
         }
@@ -887,10 +1233,11 @@ namespace Render {
         //
         // Without it every flower and tuft of grass sits dead centre in its
         // cell, and a meadow reads as a lattice instead of scatter.
-        if (const glm::vec3 offset =
-                Game::BlockRegistry::GetBlockOffset(blockId, worldX, worldZ);
-            offset != glm::vec3(0.0f)) {
-            for (Vertex& v : faceVerts) v.pos += offset;
+        const glm::vec3 blockOffset =
+            Game::BlockRegistry::GetBlockOffset(blockId, worldX, worldZ);
+        const bool hasBlockOffset = blockOffset != glm::vec3(0.0f);
+        if (hasBlockOffset) {
+            for (Vertex& v : faceVerts) v.pos += blockOffset;
         }
 
         // Bake AO and directional shading into vertex colors (Minecraft-style)
@@ -910,7 +1257,12 @@ namespace Render {
         // crossed planes at visibly different shades and their bases darkened
         // against the ground block, where vanilla draws them uniformly at 1.0.
         const float directionalShade = element.shade ? GetDirectionalShade(blockFace) : 1.0f;
-        const bool  useAO = model.ambientOcclusion;
+        // MC ModelBlockRenderer.tesselateBlock:42 — the per-model flag AND
+        // the Smooth Lighting option (Minecraft.useAmbientOcclusion()). Off
+        // takes renderModelFaceFlat's single value per face.
+        // The occlusion wand's boxes: a block inside one bakes no AO.
+        const bool  useAO = model.ambientOcclusion && s_activeMeshOptions.smoothLighting &&
+                            !AoDisabledAt(worldX, worldY, worldZ);
         float aoShades[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         if (useAO) {
             ComputeFaceAO(blocks, worldX, worldY, worldZ, blockFace, aoLocal, aoShades);
@@ -924,17 +1276,35 @@ namespace Render {
             faceVerts[v].SetColor(c);
         }
 
-        // Add to appropriate mesh layer
-        switch (layer) {
-            case RenderLayer::Opaque:
-                GenerateQuad(faceVerts, mesh.opaqueVerts, mesh.opaqueIdxs);
-                break;
-            case RenderLayer::Cutout:
-                GenerateQuad(faceVerts, mesh.cutoutVerts, mesh.cutoutIdxs);
-                break;
-            case RenderLayer::Translucent:
-                GenerateQuad(faceVerts, mesh.translucentVerts, mesh.translucentIdxs);
-                break;
+        // Greedy routing: a full-cube, full-sprite, uniformly-lit opaque or
+        // cutout face parks in the merge grid and is emitted by
+        // FlushGreedyQuads; everything else — and every translucent quad,
+        // which must stay per-block for back-to-front sorting — goes straight
+        // out exactly as before.
+        bool stashed = false;
+        if (layer != RenderLayer::Translucent) {
+            stashed = TryStashGreedyQuad(faceVerts, uvRect, element, faceDef,
+                                         blockFace, hasBlockOffset, layer,
+                                         worldX, worldY, worldZ);
+        }
+        if (!stashed) {
+            // Debug view: mark rule-ineligible quads (never entered the merge
+            // grid) in the flat ineligible color. Translucent water included —
+            // it is excluded from merging by design.
+            if (s_greedyDebugColors.load(std::memory_order_relaxed)) {
+                for (auto& fv : faceVerts) fv.SetColor(kGreedyIneligibleColor);
+            }
+            switch (layer) {
+                case RenderLayer::Opaque:
+                    GenerateQuad(faceVerts, mesh.opaqueVerts, mesh.opaqueIdxs);
+                    break;
+                case RenderLayer::Cutout:
+                    GenerateQuad(faceVerts, mesh.cutoutVerts, mesh.cutoutIdxs);
+                    break;
+                case RenderLayer::Translucent:
+                    GenerateQuad(faceVerts, mesh.translucentVerts, mesh.translucentIdxs);
+                    break;
+            }
         }
 
         m_lastStats.quadsGenerated++;
@@ -966,8 +1336,11 @@ namespace Render {
     // cheaper here shows up as a hard seam at every biome border.
     glm::vec4 Mesher::BlendedBiomeTint(BiomeChannel channel,
                                        int worldX, int worldY, int worldZ) const {
-        constexpr int kRadius = 2;    // Options.biomeBlendRadius default
-        constexpr int kSize = (kRadius * 2 + 1) * (kRadius * 2 + 1);
+        // Options.biomeBlendRadius (0..7), published per build. Radius 0 is
+        // MC's single-lookup fast path — the loop below degenerates to one
+        // sample, which is the same thing without a second code path.
+        const int kRadius = s_activeMeshOptions.biomeBlendRadius;
+        const int kSize = (kRadius * 2 + 1) * (kRadius * 2 + 1);
 
         int r = 0, g = 0, b = 0;
         for (int dz = -kRadius; dz <= kRadius; ++dz) {
@@ -1064,7 +1437,7 @@ namespace Render {
     }
 
     void Mesher::GenerateQuad(const std::array<Vertex, 4>& quadVerts,
-                             std::vector<Vertex>& outVerts, std::vector<uint16_t>& outIndices) {
+                             std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices) {
         // 16-bit index guard: a section layer cannot exceed 65,536 vertices.
         // Unreachable for real content (worst-case checkerboard is ~49k verts);
         // dropping the quad beats corrupting indices if it ever happens.
@@ -1084,6 +1457,293 @@ namespace Render {
             static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
             static_cast<uint16_t>(baseIndex + 3)   // Second triangle: 0->2->3
         });
+    }
+
+    bool Mesher::TryStashGreedyQuad(const std::array<Vertex, 4>& faceVerts,
+                                    const glm::vec4& uvRect,
+                                    const Game::Element& element,
+                                    const Game::FaceDef& faceDef,
+                                    BlockFace face, bool hasBlockOffset,
+                                    RenderLayer layer,
+                                    int worldX, int worldY, int worldZ) {
+        if (!m_config.enableGreedyMeshing || Greedy::Disabled() || !GreedyEnabled()) return false;
+
+        // Eligibility — every test errs toward NOT merging, because a merged
+        // quad must be pixel-identical to the quads it replaces:
+        //
+        //   • Full-cube element only. A partial element's face is not a full
+        //     unit square (or not on the cell boundary), so tiling its sprite
+        //     across neighbours would stretch or shift texels.
+        //   • No element rotation and no per-block offset: either moves the
+        //     vertices off the grid plane the merge assumes.
+        //   • Face UV must be the sprite's FULL tile ((0,0,16,16), rotation 0).
+        //     A sub-rect or rotated mapping cannot be reproduced by the
+        //     shader's `tileOrigin + fract(uv) * tileSize`.
+        //   • All four corner colors identical. Colors bake AO * tint * face
+        //     shade; a quad with any corner gradient (AO darkening, a biome
+        //     tint blend edge) would smear that gradient across the merged
+        //     rectangle instead of repeating it per block.
+        if (hasBlockOffset) return false;
+        if (element.from != glm::vec3(0.0f) || element.to != glm::vec3(16.0f)) return false;
+        if (!element.rotation.IsIdentity()) return false;
+        if (faceDef.uvRotation != 0) return false;
+        if (faceDef.uv != glm::vec4(0.0f, 0.0f, 16.0f, 16.0f)) return false;
+        const uint32_t color = faceVerts[0].packedColor;
+        if (faceVerts[1].packedColor != color ||
+            faceVerts[2].packedColor != color ||
+            faceVerts[3].packedColor != color) {
+            return false;
+        }
+
+        // Section-local cell coordinates. ProcessBlock only ever hands us
+        // interior cells, but the guard is cheap and a mis-indexed grid write
+        // would corrupt another plane's merge.
+        const int lx = worldX - m_sectionBaseWorldX;
+        const int ly = worldY - m_sectionBaseWorldY;
+        const int lz = worldZ - m_sectionBaseWorldZ;
+        if (static_cast<unsigned>(lx) > 15u || static_cast<unsigned>(ly) > 15u ||
+            static_cast<unsigned>(lz) > 15u) {
+            return false;
+        }
+
+        // Grid coordinates: `plane` walks the face's normal axis, (u, v) span
+        // the two in-plane axes. These are pure GRID coordinates — the
+        // texture-space orientation is applied at emission, per face.
+        int plane, u, v;
+        switch (face) {
+            case BlockFace::PositiveY:
+            case BlockFace::NegativeY: plane = ly; u = lx; v = lz; break;
+            case BlockFace::PositiveZ:
+            case BlockFace::NegativeZ: plane = lz; u = lx; v = ly; break;
+            default:                   plane = lx; u = lz; v = ly; break;
+        }
+
+        const int layerIdx = (layer == RenderLayer::Cutout) ? 1 : 0;
+        int32_t& cell = Greedy::t_grid[layerIdx][static_cast<int>(face)][plane][v][u];
+        // Two coplanar quads in one cell — e.g. stacked identical element
+        // faces in a multi-element model. Keep the first, emit the second
+        // directly; merging must never drop or reorder same-cell geometry.
+        if (cell != 0) return false;
+
+        Greedy::t_pending.push_back({faceVerts, uvRect, color});
+        cell = static_cast<int32_t>(Greedy::t_pending.size());
+        if (!Greedy::t_planeTouched[layerIdx][static_cast<int>(face)][plane]) {
+            Greedy::t_planeTouched[layerIdx][static_cast<int>(face)][plane] = true;
+            Greedy::t_touched.push_back({static_cast<uint8_t>(layerIdx),
+                                         static_cast<uint8_t>(face),
+                                         static_cast<uint8_t>(plane)});
+        }
+        return true;
+    }
+
+    void Mesher::FlushGreedyQuads(SectionMesh& outMesh) {
+        using Greedy::PendingQuad;
+
+        int mergedQuads = 0;
+        int cellsMerged = 0;
+        int survivorQuads = 0;
+
+        // Still-fluid plates first: the fluid builder ran its own merge grid
+        // during the block loop (BeginGreedySection armed it). Its flush
+        // shares THIS function's counters, so the per-section MeshStats, the
+        // since-launch eligible/rects totals and the Mesh/QuadsMerged plot
+        // cover water and terrain merges alike from one accounting path.
+        if (m_fluidBuilder) {
+            m_fluidBuilder->FlushGreedyFluidQuads(outMesh, mergedQuads,
+                                                  cellsMerged, survivorQuads);
+        }
+
+        // Nothing entered either grid — an all-ineligible (or greedy-off)
+        // section updates no stats, exactly as before.
+        if (Greedy::t_touched.empty() && cellsMerged == 0 && survivorQuads == 0) {
+            return;
+        }
+
+        // Sprite tile rect, quantized once per merged quad. unorm16 rounding
+        // moves an atlas coordinate by at most 0.5/65535 (~0.03 texel in a
+        // 4096px atlas) — the merged path's only deviation from exact float
+        // UVs; unmerged quads never go through it.
+
+        // Emit one merged rectangle: cells [u0, u0+w) x [v0, v0+h) of `plane`
+        // in direction `face`. Positions are the exact corner values the
+        // outermost original quads carried (integer block coords, same float
+        // math), so merged geometry never cracks against unmerged neighbours.
+        // UVs are TILE-space (0..16 block repeats); the fragment shader folds
+        // them back onto the sprite with fract().
+        auto emitMerged = [&](int face, int plane, int u0, int v0, int w, int h,
+                              const PendingQuad& q,
+                              std::vector<TerrainVertex>& outVerts,
+                              std::vector<uint16_t>& outIdxs) {
+            // Same 16-bit cap policy as GenerateQuad.
+            if (outVerts.size() + 4 > 65536) return;
+
+            const float fu0 = static_cast<float>(u0);
+            const float fu1 = static_cast<float>(u0 + w);
+            const float fv0 = static_cast<float>(v0);
+            const float fv1 = static_cast<float>(v0 + h);
+            const float p0  = static_cast<float>(plane);
+            const float p1  = static_cast<float>(plane + 1);
+
+            // Section-local corner positions, in the exact winding
+            // CreateFaceVertices uses per face (verified corner by corner —
+            // the grid's (u, v) map to world axes as in TryStashGreedyQuad).
+            glm::vec3 local[4];
+            switch (static_cast<BlockFace>(face)) {
+                case BlockFace::PositiveY:
+                    local[0] = {fu0, p1, fv1}; local[1] = {fu1, p1, fv1};
+                    local[2] = {fu1, p1, fv0}; local[3] = {fu0, p1, fv0};
+                    break;
+                case BlockFace::NegativeY:
+                    local[0] = {fu0, p0, fv0}; local[1] = {fu1, p0, fv0};
+                    local[2] = {fu1, p0, fv1}; local[3] = {fu0, p0, fv1};
+                    break;
+                case BlockFace::PositiveZ:
+                    local[0] = {fu0, fv0, p1}; local[1] = {fu1, fv0, p1};
+                    local[2] = {fu1, fv1, p1}; local[3] = {fu0, fv1, p1};
+                    break;
+                case BlockFace::NegativeZ:
+                    local[0] = {fu1, fv0, p0}; local[1] = {fu0, fv0, p0};
+                    local[2] = {fu0, fv1, p0}; local[3] = {fu1, fv1, p0};
+                    break;
+                case BlockFace::PositiveX:
+                    local[0] = {p1, fv0, fu1}; local[1] = {p1, fv0, fu0};
+                    local[2] = {p1, fv1, fu0}; local[3] = {p1, fv1, fu1};
+                    break;
+                case BlockFace::NegativeX:
+                    local[0] = {p0, fv0, fu0}; local[1] = {p0, fv0, fu1};
+                    local[2] = {p0, fv1, fu1}; local[3] = {p0, fv1, fu0};
+                    break;
+            }
+
+            // Tile-space UV from the local position, per face. Derived from
+            // CreateFaceVertices' corner assignment — e.g. on -Y the sprite's
+            // V axis runs OPPOSITE to +Z, hence `16 - z`. Interpolated between
+            // block boundaries these reproduce exactly the per-block UV ramp
+            // the original quads had (fract(16 - z) == the original V lerp).
+            auto tileUV = [face](const glm::vec3& l) -> glm::vec2 {
+                switch (static_cast<BlockFace>(face)) {
+                    case BlockFace::PositiveY: return {l.x,         l.z};
+                    case BlockFace::NegativeY: return {l.x,         16.0f - l.z};
+                    case BlockFace::PositiveZ: return {l.x,         16.0f - l.y};
+                    case BlockFace::NegativeZ: return {16.0f - l.x, 16.0f - l.y};
+                    case BlockFace::PositiveX: return {16.0f - l.z, 16.0f - l.y};
+                    default:                   return {l.z,         16.0f - l.y};
+                }
+            };
+
+            const uint16_t originU = TerrainVertex::EncodeUnorm16(q.uvRect.x);
+            const uint16_t originV = TerrainVertex::EncodeUnorm16(q.uvRect.y);
+            const uint16_t sizeU   = TerrainVertex::EncodeUnorm16(q.uvRect.z - q.uvRect.x);
+            const uint16_t sizeV   = TerrainVertex::EncodeUnorm16(q.uvRect.w - q.uvRect.y);
+
+            const glm::vec3 base(static_cast<float>(m_sectionBaseWorldX),
+                                 static_cast<float>(m_sectionBaseWorldY),
+                                 static_cast<float>(m_sectionBaseWorldZ));
+
+            const uint16_t baseIndex = static_cast<uint16_t>(outVerts.size());
+            // Debug view: color the whole rectangle by its merged area.
+            const uint32_t quadColor =
+                s_greedyDebugColors.load(std::memory_order_relaxed)
+                    ? GreedyHeatColor(w * h) : q.color;
+            for (int k = 0; k < 4; ++k) {
+                TerrainVertex tv;
+                tv.pos = base + local[k];
+                tv.uv = tileUV(local[k]);
+                tv.packedColor = quadColor;
+                tv.tileOriginU = originU;
+                tv.tileOriginV = originV;
+                tv.tileSizeU = sizeU;
+                tv.tileSizeV = sizeV;
+                outVerts.push_back(tv);
+            }
+            outIdxs.insert(outIdxs.end(), {
+                static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 1),
+                static_cast<uint16_t>(baseIndex + 2),
+                static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
+                static_cast<uint16_t>(baseIndex + 3)
+            });
+        };
+
+        for (const Greedy::PlaneRef& pr : Greedy::t_touched) {
+            auto& grid = Greedy::t_grid[pr.layer][pr.face][pr.plane];
+            Greedy::t_planeTouched[pr.layer][pr.face][pr.plane] = false;
+
+            std::vector<TerrainVertex>& outVerts =
+                (pr.layer == 0) ? outMesh.opaqueVerts : outMesh.cutoutVerts;
+            std::vector<uint16_t>& outIdxs =
+                (pr.layer == 0) ? outMesh.opaqueIdxs : outMesh.cutoutIdxs;
+
+            // Classic 2D greedy scan: for each unconsumed cell, extend the run
+            // along u, then grow whole rows along v while every cell matches.
+            // Cells are compared on (sprite rect, packed color) — the full
+            // visual identity of a stashed quad.
+            for (int v = 0; v < 16; ++v) {
+                for (int u = 0; u < 16; ++u) {
+                    const int32_t cellIdx = grid[v][u];
+                    if (cellIdx == 0) continue;
+                    const PendingQuad& q = Greedy::t_pending[cellIdx - 1];
+
+                    auto matches = [&](int32_t other) {
+                        if (other == 0) return false;
+                        const PendingQuad& o = Greedy::t_pending[other - 1];
+                        return o.color == q.color && o.uvRect == q.uvRect;
+                    };
+
+                    int w = 1;
+                    while (u + w < 16 && matches(grid[v][u + w])) ++w;
+
+                    int h = 1;
+                    while (v + h < 16) {
+                        bool rowOk = true;
+                        for (int du = 0; du < w; ++du) {
+                            if (!matches(grid[v + h][u + du])) { rowOk = false; break; }
+                        }
+                        if (!rowOk) break;
+                        ++h;
+                    }
+
+                    if (w == 1 && h == 1) {
+                        // No neighbour matched: re-emit the ORIGINAL quad
+                        // verbatim (tile rect stays 0), bit-identical to the
+                        // non-greedy path. Debug view: pure red = eligible
+                        // but found nothing to merge with.
+                        grid[v][u] = 0;
+                        ++survivorQuads;
+                        if (s_greedyDebugColors.load(std::memory_order_relaxed)) {
+                            std::array<Vertex, 4> dbg = q.verts;
+                            const uint32_t red = GreedyHeatColor(1);
+                            for (auto& dv2 : dbg) dv2.packedColor = red;
+                            GenerateQuad(dbg, outVerts, outIdxs);
+                        } else {
+                            GenerateQuad(q.verts, outVerts, outIdxs);
+                        }
+                        continue;
+                    }
+
+                    for (int dv = 0; dv < h; ++dv)
+                        for (int du = 0; du < w; ++du)
+                            grid[v + dv][u + du] = 0;
+
+                    emitMerged(pr.face, pr.plane, u, v, w, h, q, outVerts, outIdxs);
+                    ++mergedQuads;
+                    cellsMerged += w * h;
+                }
+            }
+        }
+
+        Greedy::t_touched.clear();
+        Greedy::t_pending.clear();
+
+        m_lastStats.quadsMerged += mergedQuads;
+        m_lastStats.quadsMergedAway += cellsMerged - mergedQuads;
+        // Since-launch totals for the debug panel ("eligible -> rects").
+        s_greedyEligibleIn.fetch_add(static_cast<uint64_t>(cellsMerged + survivorQuads),
+                                     std::memory_order_relaxed);
+        s_greedyRectsOut.fetch_add(static_cast<uint64_t>(mergedQuads + survivorQuads),
+                                   std::memory_order_relaxed);
+        // Quads this section did NOT emit thanks to merging — the win the
+        // whole pass exists for, plotted per section build.
+        PROFILE_PLOT("Mesh/QuadsMerged", static_cast<int64_t>(cellsMerged - mergedQuads));
     }
 
     bool Mesher::ShouldCullFace(int worldX, int worldY, int worldZ, BlockFace face) {

@@ -131,7 +131,9 @@ namespace Server {
         // starve (MC gates via Player.tick's abilities checks — exhaustion
         // sources never fire in creative and food is hidden).
         if (m_gameMode == GameMode::SURVIVAL || m_gameMode == GameMode::ADVENTURE) {
-            m_foodData.tick(*this);
+            const bool peaceful = Server::g_integratedServer &&
+                                  Server::g_integratedServer->GetDifficulty() == 0;
+            m_foodData.tick(*this, peaceful);
         }
 
         // TODO: Handle portal cooldown
@@ -612,10 +614,10 @@ namespace Server {
 
     bool ServerPlayer::canReach(const glm::vec3& pos) const {
         // Calculate distance from eye position
-        glm::vec3 eyePos = glm::vec3(m_position) + glm::vec3(0.0f, 1.62f, 0.0f); // Eye height
+        glm::vec3 eyePos = glm::vec3(m_position) + glm::vec3(0.0f, getEyeHeight(), 0.0f);
         float distance = glm::length(pos - eyePos);
         
-        return distance <= m_reachDistance;
+        return distance <= m_reachDistance * m_scale;
     }
 
     // === INTERNAL METHODS ===

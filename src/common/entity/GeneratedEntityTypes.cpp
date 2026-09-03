@@ -112,6 +112,10 @@ namespace Game {
         { "eye_of_ender", 0.25f, 0.25f, 0.2125f, MobCategory::Misc, 4, 4, 0.0f, 0, false },
         { "falling_block", 0.98f, 0.98f, 0.833f, MobCategory::Misc, 10, 20, 0.0f, 0, false },
         { "tnt", 0.98f, 0.98f, 0.15f, MobCategory::Misc, 10, 10, 0.0f, 0, false },
+        // MC updateInterval is Integer.MAX_VALUE (a crystal never moves);
+        // INT32_MAX here — the tracker's `tickCount % interval` never fires.
+        { "end_crystal", 2.0f, 2.0f, 1.7f, MobCategory::Misc, 16, 2147483647, 0.0f, 0, false },
+        { "ender_pearl", 0.25f, 0.25f, 0.2125f, MobCategory::Misc, 4, 10, 0.0f, 0, false },
     };
 
 } // namespace Game

@@ -10,8 +10,10 @@
 #include "common/world/level/World.hpp"
 #include "common/network/AsioInclude.hpp"
 #include "commands/CommandDispatcher.hpp"
+#include "server/world/watch/ChunkLoader.hpp"
 #include "ServerTickRateManager.hpp"
 #include <memory>
+#include <vector>
 #include <atomic>
 #include <thread>
 #include <chrono>
@@ -23,6 +25,7 @@
 #include "common/world/level/DimensionId.hpp"
 
 namespace Game {
+    class ILevelWrite;
     class ClientPlayer;
     class MyTerrainGenerator;
     class Entity;
@@ -32,9 +35,16 @@ namespace Game {
 // here rather than forward-declared.
 #include "common/entity/EntityType.hpp"
 
+namespace Game::Immersive { struct Portal; }
+
 namespace Server {
 
     class PlayerEntityView;
+#if ENABLE_IMMERSIVE_PORTALS
+    class ImmersivePortalRegistry;
+    class NetherPortalGeneration;
+    class EntityPortalTravel;
+#endif
 
     // MC's summon carries an NBT compound for per-entity overrides
     // (`/summon tnt ~ ~ ~ {Fuse:40}`). There is no NBT parser here, so the
@@ -158,6 +168,16 @@ namespace Server {
         int defaultGameMode = 0;               // World game mode applied to joining players (GameMode raw: 0 survival, 1 creative)
         int64_t initialDayTime = 6000;         // World time restored from world metadata (6000 = noon)
         bool doDaylightCycle = false;          // doDaylightCycle gamerule restored from world metadata
+        // Immersive nether portals (see-through, no purple blocks) vs the
+        // vanilla block portals. /gamerule immersive_portals, --vanilla-portals.
+        bool immersivePortals = true;
+        // World options (see Game::Portals::WorldWrapSize / DimensionStack).
+        int  worldWrapSize = 0;
+        bool dimensionStack = false;
+        // 0 peaceful, 1 easy, 2 normal, 3 hard (MC Difficulty ids). Applied
+        // to every level's World; /difficulty changes it for the session and
+        // the save.
+        int  difficulty = 2;
 
         // MC IntegratedServer.java:69 — `setSingleplayerProfile(minecraft
         // .getGameProfile())`. The name of the player who launched this
@@ -237,6 +257,55 @@ namespace Server {
 
         // The overworld, which always exists once Initialize has run.
         ServerLevel& Overworld() const;
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // Every immersive portal in every dimension — see
+        // server/portal/ImmersivePortalRegistry.hpp. Null until Initialize
+        // has built the overworld (the registry loads from its save root).
+        ImmersivePortalRegistry* ImmersivePortals() const { return m_immersivePortals.get(); }
+        NetherPortalGeneration*  NetherPortals()    const { return m_netherPortalGeneration.get(); }
+        EntityPortalTravel*      EntityTravel()     const { return m_entityTravel.get(); }
+        // The immersive/vanilla switch (config + the common-side global).
+        void SetImmersivePortals(bool on);
+        bool ImmersivePortalsEnabled() const { return m_config.immersivePortals; }
+#endif
+        // A block of obsidian was removed somewhere (World::SetBlock). Breaks
+        // any immersive nether portal whose frame it belonged to.
+        void OnObsidianRemoved(Game::DimensionId dimension, const glm::ivec3& pos);
+
+        // A chunk's data (full or "unchanged") just went out to a session.
+        // Anything anchored in that chunk that the client must hold alongside
+        // it — today the immersive portals — is sent here, right behind it.
+        // Called by PlayerSession::SendNextChunks; server thread.
+        void OnChunkSentToClient(PlayerSession& session, Game::DimensionId dimension,
+                                 Game::Math::ChunkPos chunk);
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // A client's eye crossed an immersive portal (PortalTeleportC2S).
+        // Validate loosely — the reported position must be near where the
+        // server has the player, and near the portal — then move the
+        // server's player through the portal's transform, into the far
+        // level if it leads there, without a respawn. A rejection resyncs
+        // the client to the server's position and dimension. Server thread.
+        void OnClientPortalTeleport(PlayerSession& session,
+                                    const Network::PortalTeleportC2SPacket& packet);
+        // Move a player through `portal` from `eyeBefore` (already judged
+        // legitimate), into the far level if it leads there, and face
+        // `yaw`/`pitch` on arrival. `clientPredicted`: the client is
+        // already there and needs no position packet; otherwise (the
+        // server saw the crossing itself, EntityPortalTravel::TickPlayers)
+        // the client is teleported. Server thread.
+        bool TeleportPlayerThroughPortal(PlayerSession& session,
+                                         const Game::Immersive::Portal& portal,
+                                         const glm::dvec3& eyeBefore,
+                                         float yaw, float pitch, bool clientPredicted);
+#endif
+
+        // The set of chunk loaders a session wants right now: its own view
+        // distance, plus the far side of every immersive portal near it (and,
+        // one level deep, portals near those far sides). See ChunkLoader.hpp
+        // and the mod's ChunkVisibility. Server thread.
+        std::vector<ChunkLoader> ComputeChunkLoaders(const PlayerSession& session) const;
 
         // The level a session's player is standing in. Falls back to the
         // overworld for a session with no player attached yet.
@@ -407,14 +476,24 @@ namespace Server {
         // Called when a player disconnects (TCP close)
         void OnPlayerDisconnected(std::shared_ptr<class ServerConnection> connection);
 
-        // Called when server receives client settings (render distance, etc.)
-        void OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance);
+        // A client's requested distances, as they travel from the I/O thread
+        // to the server thread. View = chunks streamed to it; simulation =
+        // chunks the server ticks around it. Independent, as in MC's
+        // DistanceManager (PlayerTicketTracker vs SimulationChunkTracker).
+        struct ClientDistances {
+            int viewDistance;
+            int simulationDistance;
+        };
 
-        // Clamp + apply a client's requested view distance to its session and
-        // echo the effective value back. Shared by the normal path and the
-        // deferred one below.
+        // Called when server receives client settings (render distance, etc.)
+        void OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance,
+                                      int requestedSimulationDistance);
+
+        // Clamp + apply a client's requested distances to its session and
+        // echo the effective view distance back. Shared by the normal path
+        // and the deferred one below.
         void ApplyClientViewDistance(PlayerSession& session, uint32_t connectionId,
-                                     int requestedViewDistance);
+                                     ClientDistances requested);
 
         // Apply every stashed client view distance whose session is now ready.
         // Server thread only. Called from the join path (so the first chunk
@@ -438,7 +517,7 @@ namespace Server {
         // what MC does: handleClientInformation defers to the main thread.
         // Entries are erased on disconnect so a reused connection id cannot
         // inherit a stale one.
-        std::unordered_map<uint32_t, int> m_pendingClientViewDistance;
+        std::unordered_map<uint32_t, ClientDistances> m_pendingClientViewDistance;
         mutable std::mutex                m_pendingViewDistanceMutex;
 
         // Send the effective view distance to the client
@@ -450,6 +529,11 @@ namespace Server {
 
         void SetConfig(const IntegratedServerConfig& config) { m_config = config; }
         const IntegratedServerConfig& GetConfig() const { return m_config; }
+
+        // The world's difficulty (MC Difficulty id, 0 peaceful .. 3 hard),
+        // pushed to every level's World and written to the save.
+        int  GetDifficulty() const { return m_config.difficulty; }
+        void SetDifficulty(int difficulty);
 
         // ========================================================================
         // STATISTICS
@@ -503,6 +587,48 @@ namespace Server {
         // dimension's edits to another's identically-numbered chunk.
         std::array<std::unique_ptr<ServerLevel>, Game::kDimensionCount> m_levels;
 
+#if ENABLE_IMMERSIVE_PORTALS
+        // One for the whole server, not per level: ids are global because a
+        // client holds portals from several dimensions at once, and a
+        // portal's partners live in the other dimension.
+        std::unique_ptr<ImmersivePortalRegistry> m_immersivePortals;
+        std::unique_ptr<NetherPortalGeneration>  m_netherPortalGeneration;
+        // Mobs, items and orbs crossing surfaces; mobs chasing players
+        // through them. Reaches the private entity broadcasts.
+        std::unique_ptr<EntityPortalTravel>      m_entityTravel;
+        friend class EntityPortalTravel;
+        // Game::Portals' frame-lit handler — the fire block's route into
+        // NetherPortalGeneration.
+        static bool OnImmersiveFrameLit(Game::ILevelWrite& level, const glm::ivec3& firePos);
+#endif
+        // No-op when the feature is off or nothing changed.
+        void SaveImmersivePortals();
+
+        // ── "No ambient occlusion" boxes (the occlusion wand) ────────────
+        // Inclusive block boxes per dimension. Kept whole on the server,
+        // saved to <save>/data/ao_regions.json, sent whole to every client
+        // holding the dimension on change and on first hold.
+        struct AoRegion {
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            glm::ivec3 min{0};
+            glm::ivec3 max{0};
+        };
+        std::vector<AoRegion> m_aoRegions;
+    public:
+        // The wand's two entry points (AoWandBehavior.cpp).
+        void AddAoRegion(Game::DimensionId dimension, const glm::ivec3& a, const glm::ivec3& b);
+        // Remove every box containing `pos`; returns how many went.
+        size_t RemoveAoRegionsAt(Game::DimensionId dimension, const glm::ivec3& pos);
+    private:
+        void SendAoRegions(ServerConnection& connection, Game::DimensionId dimension) const;
+        void BroadcastAoRegions(Game::DimensionId dimension) const;
+        void LoadAoRegions();
+        void SaveAoRegions() const;
+        // The world-sized portals a dimension's world options ask for (wrap
+        // borders, stack seams), created once per dimension when its level
+        // comes up. Idempotent per tag.
+        void EnsureGlobalPortals(Game::DimensionId dimension);
+
         // By value, not a unique_ptr: it has no dependencies to construct and
         // the server loop reads it every iteration, so an indirection would be
         // on the hot path for nothing.
@@ -541,6 +667,7 @@ namespace Server {
         // true` (IntegratedServer.java:58). An empty server is a paused one, so
         // starting false would make the very first tick look like a pause
         // TRANSITION and fire a full world save before the world exists.
+        int64_t m_currentServerTick = 0;   // set each ServerTick, read by the unload sweep
         std::atomic<bool> m_paused{true};
 
         // New player architecture
@@ -603,15 +730,6 @@ namespace Server {
         // CHUNK MANAGEMENT
         // ========================================================================
 
-        // Request chunk loading (either sync or async via ServerWorkerPool).
-        //
-        // `dimension` names the level to load into. It travels all the way to
-        // the worker and back on the result, because a ChunkPos alone cannot
-        // say which world it belongs to — and the in-flight guard is per level
-        // for exactly that reason (see ServerLevel::pendingChunkLoads).
-        void RequestChunkLoad(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
-                              int priority = 0);
-
         // Process async chunk load results from ServerWorkerPool
         void ProcessAsyncChunkResults();
 
@@ -673,8 +791,11 @@ namespace Server {
         // client-authoritative here; MC reads it from its own copy of the
         // player. It only ever REMOVES a crit and adds knockback, so a client
         // lying about it can make its own hits weaker, not stronger.
+        // `dragonPart` is the client-picked EnderDragon part index (-1 for
+        // everything else); re-validated against the server's own part
+        // layout before it can route head damage.
         void HandleInteract(uint32_t connectionId, int32_t entityId, bool attack,
-                            bool sprinting);
+                            bool sprinting, int dragonPart = -1);
 
         // MC PlayerList.broadcastSystemMessage(component, false): a server
         // message with no sender, delivered to every connected client. Used for
@@ -728,7 +849,30 @@ namespace Server {
         // puts a mob exactly where it is told, an egg drops it onto the surface
         // it was clicked against.
         bool SpawnMobFromItemUse(Game::EntityTypeId type, const glm::ivec3& spawnPos,
-                                 bool tryMoveDown, bool movedUp);
+                                 bool tryMoveDown, bool movedUp, Game::DimensionId dimension,
+                                 int portalCooldownTicks = 0);
+
+        // MC EndCrystalItem.useOn — place a crystal entity on obsidian or
+        // bedrock, and let the End's dragon fight test for the respawn
+        // ritual. Returns whether one was placed (the caller consumes the
+        // item). Server-side for the same reason as the spawn eggs: item
+        // code in `common` cannot spawn entities or reach the fight.
+        bool PlaceEndCrystalFromUse(PlayerSession& session, const glm::ivec3& clicked);
+
+        // Request chunk loading (either sync or async via ServerWorkerPool).
+        //
+        // `dimension` names the level to load into. It travels all the way to
+        // the worker and back on the result, because a ChunkPos alone cannot
+        // say which world it belongs to — and the in-flight guard is per level
+        // for exactly that reason (see ServerLevel::pendingChunkLoads).
+        //
+        // PUBLIC because EndDragonFight streams its own arena: chunk loading
+        // is watch-set driven here, and MC's DRAGON ticket has no other
+        // equivalent (forced tickets only keep loaded chunks ticking).
+        // Duplicate requests are absorbed by pendingChunkLoads, so external
+        // callers cannot flood the pipeline.
+        void RequestChunkLoad(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
+                              int priority = 0);
 
         // MC WitherSkullBlock.checkSpawn — the soul-sand ritual. Called by
         // PlayerSession right after a wither skeleton skull block (floor or
@@ -756,7 +900,7 @@ namespace Server {
         // Tell clients a player collected items, so they can play the
         // fly-into-the-player animation. This ALSO retires the entity
         // client-side for a full pickup — see BroadcastItemEntityRemovals.
-        void BroadcastItemEntityPickups(
+        void BroadcastItemEntityPickups(Game::DimensionId dimension,
             const std::vector<ItemPickupEvent>& pickups);
 
         // Full spawn packet for one entity, to the watchers of its chunk in
@@ -769,7 +913,8 @@ namespace Server {
         // dispatched by id range client-side.
         void BroadcastXpOrbUpdates(ServerLevel& level, int64_t serverTick);
         void BroadcastXpOrbSpawn(ServerLevel& level, int32_t id);
-        void BroadcastXpOrbPickups(const std::vector<XpOrbPickupEvent>& pickups);
+        void BroadcastXpOrbPickups(Game::DimensionId dimension,
+                                   const std::vector<XpOrbPickupEvent>& pickups);
 
     public:
         // Send one already-serialized packet to every player IN `dimension`

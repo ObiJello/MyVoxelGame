@@ -1,6 +1,8 @@
 // File: src/client/renderer/mesh/MeshJobData.hpp
 #pragma once
 
+#include "common/world/level/DimensionId.hpp"
+
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/biome/Biomes.hpp"
@@ -153,6 +155,12 @@ namespace Render {
     
     // Complete mesh job data with all information needed for meshing
     struct MeshJobData {
+        // Which level the section belongs to. Copied onto the result so it is
+        // routed back to that level's mesh manager (ClientMeshManager::
+        // DrainMeshResults); a ChunkPos alone would be ambiguous between
+        // dimensions.
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
+
         // Chunk position
         Game::Math::ChunkPos chunkPos;
         
@@ -179,6 +187,7 @@ namespace Render {
         // Neighbor chunk presence mask (PX=1, NX=2, PZ=4, NZ=8)
         // Computed on main thread where we know which chunks exist
         uint8_t neighborMask = 0;
+        uint32_t jobSeq = 0;   // SectionInfo::lastJobSeq at schedule time
 
         // Per-task cancellation flag (Minecraft-style AtomicBoolean isCancelled)
         std::atomic<bool> cancelled{false};

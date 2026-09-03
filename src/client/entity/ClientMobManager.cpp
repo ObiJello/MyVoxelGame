@@ -1,10 +1,14 @@
 // File: src/client/entity/ClientMobManager.cpp
 #include "client/entity/ClientMobManager.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "common/portal/ImmersivePortal.hpp"
+#endif
 #include "common/core/TickParallel.hpp"
 
 #include <atomic>
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
+#include "common/entity/EndCrystal.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
@@ -29,7 +33,7 @@
 
 namespace Client {
 
-    std::unique_ptr<ClientMobManager> g_clientMobManager;
+    ClientMobManager* g_clientMobManager = nullptr;
 
     // Declared in common/network/packets/S2CPackets.hpp (the packet impls call
     // it from apply(), which only ever runs on the client main thread) — the
@@ -193,6 +197,10 @@ namespace Client {
                     return std::make_unique<Game::FallingBlockEntity>(level);
                 case Game::EntityTypeId::Tnt:
                     return std::make_unique<Game::PrimedTnt>(level);
+                case Game::EntityTypeId::EndCrystal:
+                    return std::make_unique<Game::EndCrystal>(level);
+                case Game::EntityTypeId::EnderPearl:
+                    return std::make_unique<Game::ThrownEnderpearl>(level);
                 default: break;
             }
             // MUST mirror IntegratedServer::MakeMob's fallthrough. The server
@@ -410,6 +418,30 @@ namespace Client {
         }
     }
 
+    void ClientLevelBridge::GetEntitiesInBox(const Game::AABB& box,
+                                             const Game::Entity* except,
+                                             std::vector<Game::Entity*>& out) const {
+        // MC ClientLevel.getEntities over the mirror. The dense list, not the
+        // map — same reasoning as every other render-side walk.
+        if (!m_mobManager) return;
+        for (const ClientMob* entry : m_mobManager->MobList()) {
+            if (!entry || !entry->mob) continue;
+            Game::Mob* mob = entry->mob.get();
+            if (mob == except || mob->IsRemoved()) continue;
+            if (mob->GetAABB().Intersects(box)) out.push_back(mob);
+        }
+    }
+
+    void ClientMobManager::SetEndCrystalBeam(int32_t id, bool hasTarget,
+                                             const glm::ivec3& target) {
+        ClientMob* entry = Find(id);
+        if (!entry || !entry->mob) return;
+        if (auto* crystal = dynamic_cast<Game::EndCrystal*>(entry->mob.get())) {
+            if (hasTarget) crystal->SetBeamTarget(target);
+            else           crystal->ClearBeamTarget();
+        }
+    }
+
     void ClientMobManager::SetData(int32_t id, float health, uint8_t flags, uint8_t variantData,
                                    uint8_t hurtTime, uint8_t deathTime, uint8_t swellDir,
                                    uint8_t swell, uint8_t pose, uint8_t animState) {
@@ -479,6 +511,35 @@ namespace Client {
             entry->wantedVehicleId = vehicleId;
         }
     }
+
+#if ENABLE_IMMERSIVE_PORTALS
+    void ClientMobManager::CarryOver(int32_t id, const ClientMob& from,
+                                     const Game::Immersive::Portal& via) {
+        auto it = m_mobs.find(id);
+        if (it == m_mobs.end() || !it->second.mob || !from.mob) return;
+        ClientMob& e = it->second;
+        const glm::dvec3 serverPos = e.mob->position;   // where the spawn put it
+        // A yaw through the portal: rotate its forward vector.
+        const auto yawThrough = [&](float yaw) {
+            const glm::vec3 fwd = Game::Mth::ViewVector(0.0f, yaw);
+            const glm::dvec3 t = via.TransformLocalVecNonScale(glm::dvec3(fwd));
+            return Game::Mth::YRotFromVector(glm::vec3(t));
+        };
+        e.mob->position    = via.TransformPoint(from.mob->position);
+        e.mob->oldPosition = via.TransformPoint(from.mob->oldPosition);
+        e.mob->velocity    = via.TransformLocalVec(from.mob->velocity);
+        e.renderPrevPosition = via.TransformPoint(from.renderPrevPosition);
+        e.renderPrevYRot     = yawThrough(from.renderPrevYRot);
+        e.renderPrevYHeadRot = yawThrough(from.renderPrevYHeadRot);
+        e.renderPrevYBodyRot = yawThrough(from.renderPrevYBodyRot);
+        e.renderPrevXRot     = from.renderPrevXRot;
+        e.swell = from.swell; e.oldSwell = from.oldSwell;
+        e.swimAmount = from.swimAmount; e.swimAmountO = from.swimAmountO;
+        // Then converge on the server's spawn position over the usual steps.
+        e.targetPosition = serverPos;
+        e.interpSteps    = kInterpSteps;
+    }
+#endif
 
     void ClientMobManager::Remove(int32_t id) {
         // This path never runs Entity::Remove (the mob is erased outright), so

@@ -68,7 +68,7 @@ namespace Game {
 
     // ── SmallFireball ──────────────────────────────────────────────────────
 
-    void SmallFireball::OnHitEntity(LivingEntity& target) {
+    void SmallFireball::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
 
         if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
@@ -79,7 +79,7 @@ namespace Game {
         // when the hit did not land (fire-immune target, invulnerability).
         const int previousFireTicks = target.GetRemainingFireTicks();
         target.IgniteForSeconds(5);
-        if (!target.Hurt(MobDamageSource::Projectile, 5.0f,
+        if (!DealHitDamage(target, hit, MobDamageSource::Projectile, 5.0f,
                          GetOwner() ? GetOwner() : this)) {
             target.SetRemainingFireTicks(previousFireTicks);
         }
@@ -99,12 +99,13 @@ namespace Game {
 
     // ── LargeFireball ──────────────────────────────────────────────────────
 
-    void LargeFireball::OnHitEntity(LivingEntity& target) {
+    void LargeFireball::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
         if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
             livingOwner->SetLastHurtMob(&target);
         }
-        target.Hurt(MobDamageSource::Projectile, 6.0f, GetOwner() ? GetOwner() : this);
+        DealHitDamage(target, hit, MobDamageSource::Projectile, 6.0f,
+                      GetOwner() ? GetOwner() : this);
     }
 
     void LargeFireball::OnHit(const HitResult& hit) {
@@ -133,19 +134,21 @@ namespace Game {
 
     // ── WitherSkull ────────────────────────────────────────────────────────
 
-    void WitherSkull::OnHitEntity(LivingEntity& target) {
+    void WitherSkull::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
 
         bool wasHurt;
         if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
             livingOwner->SetLastHurtMob(&target);
-            wasHurt = target.Hurt(MobDamageSource::Projectile, 8.0f, livingOwner);
+            wasHurt = DealHitDamage(target, hit, MobDamageSource::Projectile, 8.0f,
+                                    livingOwner);
             if (wasHurt && !target.IsAlive()) {
                 // MC: a kill heals the wither 5.
                 livingOwner->Heal(5.0f);
             }
         } else {
-            wasHurt = target.Hurt(MobDamageSource::Generic, 5.0f, this);
+            wasHurt = DealHitDamage(target, hit, MobDamageSource::Generic, 5.0f,
+                                    this);
         }
 
         // MC WitherSkull.onHitEntity: a landed hit applies WITHER II
@@ -250,13 +253,14 @@ namespace Game {
         return HurtingProjectile::CanHitEntity(entity);
     }
 
-    void AbstractWindCharge::OnHitEntity(LivingEntity& target) {
+    void AbstractWindCharge::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
 
         if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
             livingOwner->SetLastHurtMob(&target);
         }
-        target.Hurt(MobDamageSource::Projectile, 1.0f, GetOwner() ? GetOwner() : this);
+        DealHitDamage(target, hit, MobDamageSource::Projectile, 1.0f,
+                      GetOwner() ? GetOwner() : this);
         Explode(position);
     }
 
@@ -275,7 +279,7 @@ namespace Game {
         if (m_level && !m_level->IsClientSide()) Discard();
     }
 
-    void BreezeWindCharge::OnHitEntity(LivingEntity& target) {
+    void BreezeWindCharge::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         // MC Breeze.isInvulnerableTo: breezes shrug off wind-charge damage —
         // the burst still fires, the 1.0 damage does not land.
         if (!m_level || m_level->IsClientSide()) return;
@@ -283,7 +287,7 @@ namespace Game {
             Explode(position);
             return;
         }
-        AbstractWindCharge::OnHitEntity(target);
+        AbstractWindCharge::OnHitEntity(target, hit);
     }
 
 } // namespace Game

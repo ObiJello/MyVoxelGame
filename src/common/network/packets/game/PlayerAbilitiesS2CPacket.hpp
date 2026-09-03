@@ -32,6 +32,8 @@ namespace Network {
         float   flyingSpeed  = 0.05f;   // MC Abilities.flyingSpeed default
         float   walkingSpeed = 0.1f;    // MC Abilities.walkingSpeed default
         uint8_t gameMode     = 0;       // Server::GameMode raw value (0 = survival)
+        // The player's size (scaled immersive portals). Trailing, optional.
+        float   scale        = 1.0f;
 
         bool invulnerable() const { return (flags & FLAG_INVULNERABLE) != 0; }
         bool flying()       const { return (flags & FLAG_FLYING) != 0; }
@@ -48,6 +50,7 @@ namespace Network {
             buffer.WriteFloat(packet.flyingSpeed);
             buffer.WriteFloat(packet.walkingSpeed);
             buffer.WriteByte(packet.gameMode);
+            buffer.WriteFloat(packet.scale);
             return buffer.GetData();
         }
 
@@ -58,6 +61,7 @@ namespace Network {
             packet.flyingSpeed  = reader.ReadFloat();
             packet.walkingSpeed = reader.ReadFloat();
             packet.gameMode     = reader.ReadByte();
+            packet.scale        = reader.HasMore() ? reader.ReadFloat() : 1.0f;
             return packet;
         }
 

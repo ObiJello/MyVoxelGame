@@ -1118,7 +1118,9 @@ namespace Game {
                 }
             }
 
-            for (const Collected& c : collected) DropItemStackNear(c.pos, c.stack);
+            for (const Collected& c : collected) {
+                DropItemStackNear(level.Dimension(), c.pos, c.stack);
+            }
         }
 
         // MC ServerExplosion.createFire — one in three eligible cells.

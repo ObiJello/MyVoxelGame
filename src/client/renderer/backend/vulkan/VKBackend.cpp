@@ -1,9 +1,11 @@
 // File: src/client/renderer/backend/vulkan/VKBackend.cpp
 #ifdef HAS_VULKAN
 
+#include <chrono>
 #include "VKBackend.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "platform/GameDirectory.hpp"
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -11,6 +13,7 @@
 
 #include <set>
 #include <fstream>
+#include <filesystem>
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -98,6 +101,7 @@ namespace Render {
         if (!CreateSurface(window)) return false;
         if (!PickPhysicalDevice()) return false;
         if (!CreateLogicalDevice()) return false;
+        if (m_multiDrawIndirect && !CreateIndirectRing()) m_multiDrawIndirect = false;
         if (!CreateSwapchain(window)) return false;
         if (!CreateImageViews()) return false;
         if (!CreateDepthResources()) return false;
@@ -133,6 +137,10 @@ namespace Render {
         if (m_device == VK_NULL_HANDLE) return;
 
         vkDeviceWaitIdle(m_device);
+        // Persist the pipeline cache first: everything below is destruction
+        // and none of it can add to the cache.
+        SavePipelineCache();
+        DestroyIndirectRing();
 
         // Flush all deferred deletion queues before destroying resources
         for (auto& queue : m_deletionQueues) {
@@ -143,15 +151,7 @@ namespace Render {
             queue.clear();
         }
 
-        // Destroy persistent texture staging buffer
-        if (m_texStagingBuffer != VK_NULL_HANDLE) {
-            vkUnmapMemory(m_device, m_texStagingMemory);
-            vkDestroyBuffer(m_device, m_texStagingBuffer, nullptr);
-            vkFreeMemory(m_device, m_texStagingMemory, nullptr);
-            m_texStagingBuffer = VK_NULL_HANDLE;
-            m_texStagingMapped = nullptr;
-            m_texStagingCapacity = 0;
-        }
+        DestroyTexStaging();
         m_pendingTextureUpdates.clear();
 
         // Destroy all user resources
@@ -159,6 +159,7 @@ namespace Render {
         m_meshes.clear();
 
         for (auto& [h, buf] : m_buffers) {
+            if (buf.mapped) vkUnmapMemory(m_device, buf.memory);
             if (buf.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_device, buf.buffer, nullptr);
             if (buf.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, buf.memory, nullptr);
         }
@@ -178,10 +179,7 @@ namespace Render {
         }
         m_shaders.clear();
 
-        for (auto& [hash, pipeline] : m_pipelines) {
-            vkDestroyPipeline(m_device, pipeline, nullptr);
-        }
-        m_pipelines.clear();
+        DestroyAllPipelines();
 
         // Destroy core resources
         if (m_timestampPool != VK_NULL_HANDLE) {
@@ -209,10 +207,14 @@ namespace Render {
         if (m_imguiDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
 
         CleanupSwapchain();
+        if (m_renderPass != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(m_device, m_renderPass, nullptr);
+            m_renderPass = VK_NULL_HANDLE;
+        }
 
+        DestroyRenderFinishedSemaphores();
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vkDestroySemaphore(m_device, m_imageAvailableSemaphores[i], nullptr);
-            vkDestroySemaphore(m_device, m_renderFinishedSemaphores[i], nullptr);
             vkDestroyFence(m_device, m_inFlightFences[i], nullptr);
         }
 
@@ -292,9 +294,13 @@ namespace Render {
         }
 
         vkResetFences(m_device, 1, &m_inFlightFences[m_currentFrame]);
+        // Committed to this frame: from here on, queued texture updates belong
+        // to the NEXT frame's flush (see m_texStaging).
+        ++m_frameNumber;
 
         // Reset and begin command buffer
         vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
+        if (!m_indirectOffset.empty()) m_indirectOffset[static_cast<size_t>(m_currentFrame)] = 0;   // indirect ring: frame's fence passed
 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -372,7 +378,11 @@ namespace Render {
         // Reset per-frame state (each command buffer starts with nothing bound)
         m_currentPipeline = VK_NULL_HANDLE;
         m_boundShader = INVALID_SHADER;
+        m_boundShaderInfo = nullptr;
+        m_boundLayout = VK_NULL_HANDLE;
+        m_boundIsPortal = false;
         m_boundTexture = INVALID_TEXTURE;
+        ResetRecordedBindings();
 
         // Reset the per-frame UBO ring write cursor — each frame starts
         // writing into slot 0 of its own ring buffer. (The previous
@@ -427,7 +437,10 @@ namespace Render {
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &m_commandBuffers[m_currentFrame];
 
-        VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_currentFrame]};
+        // Indexed by the acquired IMAGE: the present engine keeps waiting on
+        // this semaphore until the image is actually shown, which can be after
+        // the frame SLOT has been reused when there are more images than slots.
+        VkSemaphore signalSemaphores[] = {m_renderFinishedSemaphores[m_currentImageIndex]};
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -435,8 +448,9 @@ namespace Render {
         // and committed to Metal, so it is NOT free — it scales with how many
         // commands the frame recorded, unlike a native Vulkan driver where
         // submit is nearly instant.
+        VkResult submitResult;
         { PROFILE_ZONE_N("Vk.QueueSubmit");
-        vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_inFlightFences[m_currentFrame]);
+        submitResult = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_inFlightFences[m_currentFrame]);
         }
 
         // Present
@@ -452,12 +466,33 @@ namespace Render {
         { PROFILE_ZONE_N("Vk.QueuePresent");
         result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
         }
+        // A frame that fails here is a picture that never changes while the
+        // game keeps running — invisible in the log until now. Logged at
+        // most once a second so a persistent failure does not flood it.
+        if (submitResult != VK_SUCCESS ||
+            (result != VK_SUCCESS && result != VK_ERROR_OUT_OF_DATE_KHR && result != VK_SUBOPTIMAL_KHR)) {
+            static auto s_lastLog = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+            const auto now = std::chrono::steady_clock::now();
+            if (now - s_lastLog >= std::chrono::seconds(1)) {
+                s_lastLog = now;
+                Log::Error("VKBackend: frame not presented (vkQueueSubmit=%d, vkQueuePresentKHR=%d)",
+                           static_cast<int>(submitResult), static_cast<int>(result));
+            }
+        }
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_framebufferResized) {
             m_framebufferResized = false;
             RecreateSwapchain(window);
         }
 
         m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+        // Write new pipelines to disk once the burst that produced them has
+        // settled (~5 s at 60 fps), so a crash or a kill -9 later in the
+        // session does not throw away what this session compiled. Shutdown
+        // saves whatever is left.
+        if (m_pipelinesSinceSave > 0 && m_frameNumber - m_lastPipelineFrame > 300) {
+            SavePipelineCache();
+        }
     }
 
     void VKBackend::SetClearColor(float r, float g, float b, float a) {
@@ -581,22 +616,30 @@ namespace Render {
                 m_memStats.peakUsage = m_memStats.totalAllocated;
             return handle;
         } else {
-            // Host-visible buffer (dynamic/streaming)
-            VkBuffer buffer;
-            VkDeviceMemory memory;
-            CreateVkBuffer(size, vkUsage,
-                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                          buffer, memory);
-
-            if (data != nullptr) {
-                void* mapped;
-                vkMapMemory(m_device, memory, 0, size, 0, &mapped);
-                std::memcpy(mapped, data, size);
-                vkUnmapMemory(m_device, memory);
+            // Host-visible buffer (dynamic/streaming), mapped for its whole
+            // life. HOST_COHERENT means no vkFlushMappedMemoryRanges is needed
+            // after a write; the ordering guarantee comes from the queue
+            // submit that follows.
+            VkBuffer buffer = VK_NULL_HANDLE;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            if (!CreateVkBuffer(size, vkUsage,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                buffer, memory)) {
+                Log::Error("VKBackend: failed to create host-visible buffer (%zu bytes)", size);
+                return INVALID_BUFFER;
             }
 
+            void* mapped = nullptr;
+            if (vkMapMemory(m_device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+                Log::Error("VKBackend: failed to map host-visible buffer (%zu bytes)", size);
+                vkDestroyBuffer(m_device, buffer, nullptr);
+                vkFreeMemory(m_device, memory, nullptr);
+                return INVALID_BUFFER;
+            }
+            if (data != nullptr) std::memcpy(mapped, data, size);
+
             uint32_t handle = AllocHandle();
-            m_buffers[handle] = {buffer, memory, size, usage};
+            m_buffers[handle] = {buffer, memory, size, usage, static_cast<uint8_t*>(mapped)};
             m_memStats.bufferMemory += size;
             m_memStats.totalAllocated += size;
             m_memStats.bufferCount++;
@@ -608,18 +651,77 @@ namespace Render {
 
     void VKBackend::UpdateBuffer(BufferHandle handle, size_t offset, size_t size, const void* data) {
         auto it = m_buffers.find(handle);
-        if (it == m_buffers.end()) return;
+        if (it == m_buffers.end() || size == 0 || data == nullptr) return;
+        if (offset + size > it->second.size) {
+            Log::Error("VKBackend: UpdateBuffer range [%zu, %zu) exceeds buffer size %zu",
+                       offset, offset + size, it->second.size);
+            return;
+        }
 
-        void* mapped;
-        vkMapMemory(m_device, it->second.memory, offset, size, 0, &mapped);
+        if (it->second.mapped) {
+            // Persistently mapped, host-coherent: the write is the whole job.
+            // Same synchronisation contract as before (none) — a caller that
+            // rewrites a range a queued frame still reads must version it.
+            std::memcpy(it->second.mapped + offset, data, size);
+            return;
+        }
+
+        // Device-local (Static) buffer. These were never meant to be updated,
+        // but the old code mapped them anyway and got away with it on unified
+        // memory. Do it properly: stage + copy. This drains the queue, so it is
+        // logged once per buffer — a caller hitting it should be using Dynamic.
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            Log::Warning("VKBackend: UpdateBuffer on a Static (device-local) buffer — "
+                         "staging copy with queue drain; create it as Dynamic instead");
+        }
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        if (!CreateVkBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            stagingBuffer, stagingMemory)) return;
+        void* mapped = nullptr;
+        vkMapMemory(m_device, stagingMemory, 0, size, 0, &mapped);
         std::memcpy(mapped, data, size);
-        vkUnmapMemory(m_device, it->second.memory);
+        vkUnmapMemory(m_device, stagingMemory);
+
+        VkCommandBuffer cmd = BeginSingleTimeCommands();
+        VkBufferCopy region{};
+        region.srcOffset = 0;
+        region.dstOffset = offset;
+        region.size = size;
+        vkCmdCopyBuffer(cmd, stagingBuffer, it->second.buffer, 1, &region);
+        EndSingleTimeCommands(cmd);
+
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+    }
+
+    void VKBackend::UpdateBufferUnsynchronized(BufferHandle handle, size_t offset,
+                                               size_t size, const void* data) {
+        // On Vulkan there is no synchronised path to opt out of: UpdateBuffer
+        // is already a bare memcpy into persistently mapped memory. The
+        // override exists so the intent is explicit at the call site and so
+        // the GL backend's map-unsynchronized semantics have a Vulkan twin.
+        // VK callers must double-buffer by frame themselves (the GUI and the
+        // translucency re-sort both do).
+        UpdateBuffer(handle, offset, size, data);
     }
 
     void VKBackend::DestroyBuffer(BufferHandle handle) {
         auto it = m_buffers.find(handle);
         if (it == m_buffers.end()) return;
 
+        // If this buffer is what the active command buffer last bound, forget
+        // that: a new buffer could otherwise be handed the same VkBuffer value
+        // and the redundancy check would skip a bind it must record.
+        for (uint32_t i = 0; i < 2; ++i) {
+            if (m_recorded.vertexBuffers[i] == it->second.buffer) m_recorded.vertexCount = 0;
+        }
+        if (m_recorded.indexBuffer == it->second.buffer) m_recorded.indexBuffer = VK_NULL_HANDLE;
+
+        if (it->second.mapped) vkUnmapMemory(m_device, it->second.memory);
         vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         vkFreeMemory(m_device, it->second.memory, nullptr);
         m_memStats.bufferMemory -= it->second.size;
@@ -753,56 +855,88 @@ namespace Render {
                                    int width, int height, const void* data) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end() || !data) return;
-
-        size_t dataSize = static_cast<size_t>(width) * height * 4;
-        const auto* src = static_cast<const unsigned char*>(data);
-
-        PendingTextureUpdate update;
-        update.image = it->second.image;
-        update.x = x;
-        update.y = y;
-        update.width = width;
-        update.height = height;
-        update.data.assign(src, src + dataSize);
-        m_pendingTextureUpdates.push_back(std::move(update));
+        QueueTextureUpdate(it->second.image, 0, x, y, width, height, data);
     }
 
-    void VKBackend::EnsureTexStagingBuffer(size_t requiredSize) {
-        if (requiredSize <= m_texStagingCapacity) return;
+    void VKBackend::QueueTextureUpdate(VkImage image, uint32_t mipLevel, int x, int y,
+                                       int width, int height, const void* data) {
+        if (width <= 0 || height <= 0) return;
+        const size_t dataSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
 
-        // Destroy old buffer
-        if (m_texStagingBuffer != VK_NULL_HANDLE) {
-            vkUnmapMemory(m_device, m_texStagingMemory);
-            vkDestroyBuffer(m_device, m_texStagingBuffer, nullptr);
-            vkFreeMemory(m_device, m_texStagingMemory, nullptr);
-            m_texStagingMapped = nullptr;
+        // The pixels go straight into the staging slot the next BeginFrame
+        // will copy from — the only CPU copy they make. See m_texStaging for
+        // why writing here, before that frame's fence wait, is safe.
+        size_t offset = 0;
+        uint8_t* dst = ReserveTexStaging(dataSize, offset);
+        if (!dst) return;
+        std::memcpy(dst, data, dataSize);
+
+        PendingTextureUpdate update;
+        update.image         = image;
+        update.x             = x;
+        update.y             = y;
+        update.width         = width;
+        update.height        = height;
+        update.mipLevel      = mipLevel;
+        update.stagingOffset = offset;
+        update.byteSize      = dataSize;
+        m_pendingTextureUpdates.push_back(update);
+    }
+
+    uint8_t* VKBackend::ReserveTexStaging(size_t bytes, size_t& outOffset) {
+        TexStagingSlot& slot = PendingTexStaging();
+        const size_t required = slot.used + bytes;
+        if (required > slot.capacity) {
+            // Grow, preserving what this slot already holds for the upcoming
+            // flush. The slot is not in flight (that is the whole point of the
+            // ring), so destroying its old buffer here is safe.
+            const size_t newCapacity = std::max(required, std::max(slot.capacity * 2, size_t(256 * 1024)));
+            VkBuffer newBuffer = VK_NULL_HANDLE;
+            VkDeviceMemory newMemory = VK_NULL_HANDLE;
+            if (!CreateVkBuffer(newCapacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                newBuffer, newMemory)) {
+                Log::Error("VKBackend: failed to grow texture staging to %zu bytes", newCapacity);
+                return nullptr;
+            }
+            void* mapped = nullptr;
+            if (vkMapMemory(m_device, newMemory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+                vkDestroyBuffer(m_device, newBuffer, nullptr);
+                vkFreeMemory(m_device, newMemory, nullptr);
+                return nullptr;
+            }
+            if (slot.mapped && slot.used > 0) std::memcpy(mapped, slot.mapped, slot.used);
+            if (slot.buffer != VK_NULL_HANDLE) {
+                vkUnmapMemory(m_device, slot.memory);
+                vkDestroyBuffer(m_device, slot.buffer, nullptr);
+                vkFreeMemory(m_device, slot.memory, nullptr);
+            }
+            slot.buffer   = newBuffer;
+            slot.memory   = newMemory;
+            slot.capacity = newCapacity;
+            slot.mapped   = static_cast<uint8_t*>(mapped);
         }
+        outOffset = slot.used;
+        slot.used += bytes;
+        return slot.mapped + outOffset;
+    }
 
-        // Grow to at least 256KB or 2x the requirement
-        m_texStagingCapacity = std::max(requiredSize, std::max(m_texStagingCapacity * 2, size_t(256 * 1024)));
-
-        CreateVkBuffer(m_texStagingCapacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                      m_texStagingBuffer, m_texStagingMemory);
-
-        vkMapMemory(m_device, m_texStagingMemory, 0, m_texStagingCapacity, 0, &m_texStagingMapped);
+    void VKBackend::DestroyTexStaging() {
+        for (TexStagingSlot& slot : m_texStaging) {
+            if (slot.mapped) vkUnmapMemory(m_device, slot.memory);
+            if (slot.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_device, slot.buffer, nullptr);
+            if (slot.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, slot.memory, nullptr);
+            slot = TexStagingSlot{};
+        }
     }
 
     void VKBackend::FlushPendingTextureUpdates(VkCommandBuffer cmd) {
-        if (m_pendingTextureUpdates.empty()) return;
-
-        // Calculate total staging size and ensure buffer is large enough
-        size_t totalSize = 0;
-        for (const auto& update : m_pendingTextureUpdates)
-            totalSize += update.data.size();
-        EnsureTexStagingBuffer(totalSize);
-
-        // Copy all pixel data into the persistent staging buffer
-        size_t offset = 0;
-        for (const auto& update : m_pendingTextureUpdates) {
-            std::memcpy(static_cast<char*>(m_texStagingMapped) + offset,
-                       update.data.data(), update.data.size());
-            offset += update.data.size();
+        // BeginFrame advanced m_frameNumber before calling; this is the slot
+        // writers were targeting as "pending" until that moment.
+        TexStagingSlot& slot = m_texStaging[static_cast<size_t>(m_frameNumber % kTexStagingSlots)];
+        if (m_pendingTextureUpdates.empty()) {
+            slot.used = 0;
+            return;
         }
 
         // Collect unique images for barrier deduplication (typically just the atlas)
@@ -838,19 +972,17 @@ namespace Render {
             static_cast<uint32_t>(barriers.size()), barriers.data());
 
         // Record all buffer-to-image copies
-        offset = 0;
         for (const auto& update : m_pendingTextureUpdates) {
             VkBufferImageCopy region{};
-            region.bufferOffset = offset;
+            region.bufferOffset = update.stagingOffset;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.imageSubresource.mipLevel   = update.mipLevel;
             region.imageSubresource.layerCount = 1;
             region.imageOffset = {update.x, update.y, 0};
             region.imageExtent = {static_cast<uint32_t>(update.width),
                                   static_cast<uint32_t>(update.height), 1};
-            vkCmdCopyBufferToImage(cmd, m_texStagingBuffer, update.image,
+            vkCmdCopyBufferToImage(cmd, slot.buffer, update.image,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-            offset += update.data.size();
         }
 
         // Transition all images back: TRANSFER_DST → SHADER_READ_ONLY
@@ -866,6 +998,10 @@ namespace Render {
             static_cast<uint32_t>(barriers.size()), barriers.data());
 
         m_pendingTextureUpdates.clear();
+        // The slot's bytes are now owned by this frame's command buffer; the
+        // next writer to land on this slot is frame + kTexStagingSlots, which
+        // starts from an empty cursor.
+        slot.used = 0;
     }
 
     // Recreate the sampler from the texture's cached state and rewrite the
@@ -1115,18 +1251,7 @@ namespace Render {
         // Same deferred path as UpdateTexture2D: animated sprites call this
         // mid-frame, so the copy has to ride the frame's command buffer rather
         // than stall the queue.
-        const size_t dataSize = static_cast<size_t>(width) * height * 4;
-        const auto* src = static_cast<const unsigned char*>(data);
-
-        PendingTextureUpdate update;
-        update.image    = it->second.image;
-        update.x        = x;
-        update.y        = y;
-        update.width    = width;
-        update.height   = height;
-        update.mipLevel = static_cast<uint32_t>(level);
-        update.data.assign(src, src + dataSize);
-        m_pendingTextureUpdates.push_back(std::move(update));
+        QueueTextureUpdate(it->second.image, static_cast<uint32_t>(level), x, y, width, height, data);
     }
 
     void VKBackend::DestroyTexture(TextureHandle handle) {
@@ -1182,6 +1307,11 @@ namespace Render {
         return INVALID_SHADER;
     }
 
+    const void* VKBackend::DebugGetMappedBufferPtr(BufferHandle handle) const {
+        auto it = m_buffers.find(handle);
+        return it != m_buffers.end() ? it->second.mapped : nullptr;
+    }
+
     ShaderHandle VKBackend::CreateShaderFromFiles(const std::string& vertexPath,
                                                   const std::string& fragmentPath) {
         // For Vulkan, expect .spv files; derive path from GLSL path
@@ -1226,6 +1356,24 @@ namespace Render {
     void VKBackend::DestroyShader(ShaderHandle handle) {
         auto it = m_shaders.find(handle);
         if (it == m_shaders.end()) return;
+        if (m_boundShader == handle) {
+            m_boundShader     = INVALID_SHADER;
+            m_boundShaderInfo = nullptr;   // about to dangle
+            m_boundLayout     = VK_NULL_HANDLE;
+            m_boundIsPortal   = false;
+        }
+        // Pipelines built from these modules can no longer be rebuilt after a
+        // swapchain recreate, and they are dead weight now anyway.
+        vkDeviceWaitIdle(m_device);
+        for (auto pit = m_pipelines.begin(); pit != m_pipelines.end(); ) {
+            if (pit->second.shader == handle) {
+                vkDestroyPipeline(m_device, pit->second.pipeline, nullptr);
+                if (m_currentPipeline == pit->second.pipeline) m_currentPipeline = VK_NULL_HANDLE;
+                pit = m_pipelines.erase(pit);
+            } else {
+                ++pit;
+            }
+        }
         vkDestroyShaderModule(m_device, it->second.vertModule, nullptr);
         vkDestroyShaderModule(m_device, it->second.fragModule, nullptr);
         m_memStats.shaderCount--;
@@ -1234,6 +1382,25 @@ namespace Render {
 
     void VKBackend::BindShader(ShaderHandle handle) {
         m_boundShader = handle;
+        // Resolve the layout here, once, instead of in every draw path.
+        auto it = m_shaders.find(handle);
+        m_boundShaderInfo = (it != m_shaders.end()) ? &it->second : nullptr;
+        m_boundIsPortal   = m_boundShaderInfo && m_boundShaderInfo->layoutType == 1 &&
+                            m_portalPipelineLayout != VK_NULL_HANDLE;
+        m_boundLayout     = m_boundIsPortal ? m_portalPipelineLayout : m_pipelineLayout;
+    }
+
+    // Uniform names are matched by string on every call, from every draw of
+    // every subsystem. std::string == const char* costs a strlen plus a
+    // memcmp per candidate, and SetUniformFloat walks up to twenty of them.
+    // With the literal's length known at compile time, a candidate is
+    // rejected on size, then on its LAST character (every name starts with
+    // 'u', so the first is useless), before any memcmp runs.
+    template <size_t N>
+    static inline bool NameIs(const std::string& name, const char (&lit)[N]) {
+        constexpr size_t len = N - 1;
+        return name.size() == len && name[len - 1] == lit[len - 1] &&
+               std::memcmp(name.data(), lit, len) == 0;
     }
 
     // ----------------------------------------------------------------
@@ -1268,14 +1435,14 @@ namespace Render {
 
     void VKBackend::SetUniformMat4(ShaderHandle handle, const std::string& name,
                                    const glm::mat4& value) {
-        if (name == "uMVP" || name == "uViewProj") {
+        if (NameIs(name, "uMVP") || NameIs(name, "uViewProj")) {
             // "uViewProj" is the instanced block shader's name for the same
             // push-constant slot — its model matrix arrives per instance.
             const glm::mat4 vkMVP = kVkZCorrect * value;
             m_pushConstants.uMVP    = vkMVP;
             m_commonUBOData.uMVP    = vkMVP;
             m_commonUBODirty = true;
-        } else if (name == "uModel") {
+        } else if (NameIs(name, "uModel")) {
             m_commonUBOData.uModel  = value;
             m_commonUBODirty = true;
         } else if (name.rfind("uBones[", 0) == 0) {
@@ -1293,8 +1460,8 @@ namespace Render {
     }
 
     void VKBackend::SetUniformVec4(ShaderHandle, const std::string& name, const glm::vec4& value) {
-        if (name == "uTint" || name == "uColor" || name == "uClipPlane" ||
-            name == "uPortalClipPlane") {
+        if (NameIs(name, "uTint") || NameIs(name, "uColor") || NameIs(name, "uClipPlane") ||
+            NameIs(name, "uPortalClipPlane")) {
             // uClipPlane (PlayerRenderer's portal-ghost half-space cull)
             // AND uPortalClipPlane (block shaders' world-space portal
             // plane → gl_ClipDistance[0]) are aliased onto the same
@@ -1305,17 +1472,22 @@ namespace Render {
             m_pushConstants.uColor  = value;
             m_commonUBOData.uTint   = value;
             m_commonUBODirty = true;
-        } else if (name == "uFogColor") {
+        } else if (NameIs(name, "uEntityClipPlane")) {
+            // The entity shaders' portal clip plane. Their uColor slot is the
+            // hurt overlay, so the plane rides in the uUVRange slot, which
+            // they do not otherwise use (entity_vk.vert).
+            m_pushConstants.uUVRange = value;
+        } else if (NameIs(name, "uFogColor")) {
             // Environment fog block (sky/clouds/chunk shaders) — dedicated
             // CommonUBO fields, NOT aliased onto uTint: block shaders need
             // uPortalClipPlane (which lives in the uColor/uTint slot) and
             // fog uniforms simultaneously.
             m_commonUBOData.uFogColor = value;
             m_commonUBODirty = true;
-        } else if (name == "uFogEnv") {
+        } else if (NameIs(name, "uFogEnv")) {
             m_commonUBOData.uFogEnv = value;
             m_commonUBODirty = true;
-        } else if (name == "uOverlayColor") {
+        } else if (NameIs(name, "uOverlayColor")) {
             // MC's entity overlay — the primed-TNT white flash. Its own UBO
             // field rather than an alias onto uTint, because the block shaders
             // need uPortalClipPlane (which lives in the uColor/uTint slot) at
@@ -1325,41 +1497,41 @@ namespace Render {
         }
     }
     void VKBackend::SetUniformVec3(ShaderHandle, const std::string& name, const glm::vec3& value) {
-        if (name == "uPortalColor") {
+        if (NameIs(name, "uPortalColor")) {
             m_pushConstants.uColor          = glm::vec4(value, m_pushConstants.uColor.a);
             m_commonUBOData.uPortalColor    = glm::vec4(value, m_commonUBOData.uPortalColor.a);
             m_commonUBODirty = true;
-        } else if (name == "uColorDark") {
+        } else if (NameIs(name, "uColorDark")) {
             m_commonUBOData.uColorDark      = glm::vec4(value, m_commonUBOData.uColorDark.a);
             m_commonUBODirty = true;
-        } else if (name == "uColorHot") {
+        } else if (NameIs(name, "uColorHot")) {
             m_commonUBOData.uColorHot       = glm::vec4(value, m_commonUBOData.uColorHot.a);
             m_commonUBODirty = true;
-        } else if (name == "uKeyDir") {
+        } else if (NameIs(name, "uKeyDir")) {
             m_commonUBOData.uKeyDir         = glm::vec4(value, m_commonUBOData.uKeyDir.a);
             m_commonUBODirty = true;
-        } else if (name == "uTint" || name == "uColor") {
+        } else if (NameIs(name, "uTint") || NameIs(name, "uColor")) {
             m_pushConstants.uColor          = glm::vec4(value, m_pushConstants.uColor.a);
             m_commonUBOData.uTint           = glm::vec4(value, m_commonUBOData.uTint.a);
             m_commonUBODirty = true;
-        } else if (name == "uCameraPos") {
+        } else if (NameIs(name, "uCameraPos")) {
             m_commonUBOData.uCamPosBright   = glm::vec4(value, m_commonUBOData.uCamPosBright.w);
             m_commonUBODirty = true;
-        } else if (name == "uFogColor") {
+        } else if (NameIs(name, "uFogColor")) {
             m_commonUBOData.uFogColor       = glm::vec4(value, m_commonUBOData.uFogColor.a);
             m_commonUBODirty = true;
         }
     }
     void VKBackend::SetUniformVec2(ShaderHandle, const std::string& name, const glm::vec2& value) {
-        if (name == "uScreenSize") {
+        if (NameIs(name, "uScreenSize")) {
             m_pushConstants.uScreenSize     = value;
             m_commonUBOData.uScreenSize     = value;
             m_commonUBODirty = true;
-        } else if (name == "uUVMin") {
+        } else if (NameIs(name, "uUVMin")) {
             m_pushConstants.uUVRange.x = value.x; m_pushConstants.uUVRange.y = value.y;
             m_commonUBOData.uUVRange.x = value.x; m_commonUBOData.uUVRange.y = value.y;
             m_commonUBODirty = true;
-        } else if (name == "uUVMax") {
+        } else if (NameIs(name, "uUVMax")) {
             m_pushConstants.uUVRange.z = value.x; m_pushConstants.uUVRange.w = value.y;
             m_commonUBOData.uUVRange.z = value.x; m_commonUBOData.uUVRange.w = value.y;
             m_commonUBODirty = true;
@@ -1367,37 +1539,37 @@ namespace Render {
     }
     void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
         // Push-constant block-style aliases:
-        if (name == "uLineWidth")           { m_pushConstants.uLineWidth = value; }
-        else if (name == "uAlphaTest")      { m_pushConstants.uAlphaTest = value; }
+        if (NameIs(name, "uLineWidth"))           { m_pushConstants.uLineWidth = value; }
+        else if (NameIs(name, "uAlphaTest"))      { m_pushConstants.uAlphaTest = value; }
         // Portal renderer + crosshair scalar packing:
-        else if (name == "uPulse")          { m_pushConstants.uScalars.x = value; m_commonUBOData.uPortalColor.a = value; m_commonUBODirty = true; }
-        else if (name == "uOpenAmount")     { m_pushConstants.uScalars.z = value; m_commonUBOData.uColorDark.a    = value; m_commonUBODirty = true; }
-        else if (name == "uOpenAmountVS")   { m_commonUBOData.uColorHot.a    = value; m_commonUBODirty = true; }
-        else if (name == "uKeyIntensity")   { m_commonUBOData.uKeyDir.a      = value; m_commonUBODirty = true; }
-        else if (name == "uTime")           { m_pushConstants.uScalars.y = value; m_commonUBOData.uScalarsA.x = value; m_commonUBODirty = true; }
-        else if (name == "uTimeVS")         { m_commonUBOData.uScalarsA.y = value; m_commonUBODirty = true; }
-        else if (name == "uStaticAmount")   { m_commonUBOData.uScalarsA.z = value; m_commonUBODirty = true; }
-        else if (name == "uColorScale")     { m_commonUBOData.uScalarsA.w = value; m_commonUBODirty = true; }
-        else if (name == "uPortalActive")   { m_commonUBOData.uScalarsB.x = value; m_commonUBODirty = true; }
-        else if (name == "uForceFarDepth")  { m_commonUBOData.uScalarsB.y = value; m_commonUBODirty = true; }
-        else if (name == "uOutlineMode")    { m_commonUBOData.uScalarsB.z = value; m_commonUBODirty = true; }
-        else if (name == "uFlashIntensity") { m_pushConstants.uScalars.w = value; m_commonUBOData.uScalarsB.w = value; m_commonUBODirty = true; }
-        else if (name == "uAmbient")        { m_commonUBOData.uScalarsC.x = value; m_commonUBODirty = true; }
-        else if (name == "uAlphaCutoff")    { m_commonUBOData.uScalarsC.y = value; m_commonUBODirty = true; }
-        else if (name == "uHasSprite")      { m_commonUBOData.uScalarsD.x = value; m_commonUBODirty = true; }
-        else if (name == "uUseSkin")        { m_commonUBOData.uScalarsD.y = value; m_commonUBODirty = true; }
-        else if (name == "uUseTextures")    { m_commonUBOData.uScalarsD.z = value; m_commonUBODirty = true; }
-        else if (name == "uSkyBrightness")  { m_commonUBOData.uCamPosBright.w = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uPulse"))          { m_pushConstants.uScalars.x = value; m_commonUBOData.uPortalColor.a = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uOpenAmount"))     { m_pushConstants.uScalars.z = value; m_commonUBOData.uColorDark.a    = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uOpenAmountVS"))   { m_commonUBOData.uColorHot.a    = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uKeyIntensity"))   { m_commonUBOData.uKeyDir.a      = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uTime"))           { m_pushConstants.uScalars.y = value; m_commonUBOData.uScalarsA.x = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uTimeVS"))         { m_commonUBOData.uScalarsA.y = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uStaticAmount"))   { m_commonUBOData.uScalarsA.z = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uColorScale"))     { m_commonUBOData.uScalarsA.w = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uPortalActive"))   { m_commonUBOData.uScalarsB.x = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uForceFarDepth"))  { m_commonUBOData.uScalarsB.y = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uOutlineMode"))    { m_commonUBOData.uScalarsB.z = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uFlashIntensity")) { m_pushConstants.uScalars.w = value; m_commonUBOData.uScalarsB.w = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uAmbient"))        { m_commonUBOData.uScalarsC.x = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uAlphaCutoff"))    { m_commonUBOData.uScalarsC.y = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uHasSprite"))      { m_commonUBOData.uScalarsD.x = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uUseSkin"))        { m_commonUBOData.uScalarsD.y = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uUseTextures"))    { m_commonUBOData.uScalarsD.z = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uSkyBrightness"))  { m_commonUBOData.uCamPosBright.w = value; m_commonUBODirty = true; }
     }
     void VKBackend::SetUniformInt(ShaderHandle, const std::string& name, int value) {
         // Texture-sampler bindings come through as integers (legacy
         // GL pattern). Vulkan binds textures via descriptor sets, so
         // we ignore those names. Other ints fall through into the
         // float path's uUseTextures slot etc.
-        if (name == "uUseTextures") {
+        if (NameIs(name, "uUseTextures")) {
             m_commonUBOData.uScalarsD.z = (float)value;
             m_commonUBODirty = true;
-        } else if (name == "uHasSprite") {
+        } else if (NameIs(name, "uHasSprite")) {
             // PortalParticleSystem uses uHasSprite to select between the
             // Portal-extracted sprite texture path and the procedural
             // soft-disc fallback. Routed into BOTH the push-constant
@@ -1452,47 +1624,13 @@ namespace Render {
         if (vbIt == m_buffers.end() || ibIt == m_buffers.end() ||
             instIt == m_buffers.end()) return;
 
-        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
-        if (pipeline == VK_NULL_HANDLE) return;
-
         VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
-
-        if (pipeline != m_currentPipeline) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            m_currentPipeline = pipeline;
-        }
-        ApplyDynamicStencilState(cmd);
-
-        VkPipelineLayout pl = m_pipelineLayout;
-        bool isPortalShader = false;
-        {
-            auto sit = m_shaders.find(m_boundShader);
-            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
-                m_portalPipelineLayout != VK_NULL_HANDLE) {
-                pl = m_portalPipelineLayout;
-                isPortalShader = true;
-            }
-        }
-
-        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, sizeof(PushConstantBlock), &m_pushConstants);
-
-        if (isPortalShader) {
-            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
-        } else {
-            auto texIt = m_textures.find(m_boundTexture);
-            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
-                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
-            } else {
-                return;
-            }
-        }
+        if (!PrepareDraw(cmd)) return;
 
         VkBuffer     vertexBuffers[2] = { vbIt->second.buffer, instIt->second.buffer };
         VkDeviceSize offsets[2]       = { 0, instanceByteOffset };
-        vkCmdBindVertexBuffers(cmd, 0, 2, vertexBuffers, offsets);
-        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
+        BindVertexBuffersCached(cmd, 2, vertexBuffers, offsets);
+        BindIndexBufferCached(cmd, ibIt->second.buffer, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cmd, indexCount, instanceCount, indexOffset, 0, 0);
     }
 
@@ -1540,6 +1678,10 @@ namespace Render {
             state.stencilReadMask    = m_stencilOverride.readMask;
             state.stencilWriteMask   = m_stencilOverride.writeMask;
         }
+        if (m_cullInvert) {
+            if (state.cullMode == CullMode::Back)       state.cullMode = CullMode::Front;
+            else if (state.cullMode == CullMode::Front) state.cullMode = CullMode::Back;
+        }
         m_currentPipelineState = state;
     }
 
@@ -1571,58 +1713,13 @@ namespace Render {
         auto ibIt = m_buffers.find(meshIt->second.indexBuffer);
         if (vbIt == m_buffers.end() || ibIt == m_buffers.end()) return;
 
-        // Get or create pipeline for current state + shader
-        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
-        if (pipeline == VK_NULL_HANDLE) return;
-
         VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
-
-        if (pipeline != m_currentPipeline) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            m_currentPipeline = pipeline;
-        }
-        // Push per-draw stencil dynamic state. Sticky across pipeline binds
-        // within a command buffer, so re-pushing every draw is mildly
-        // wasteful but never wrong; the early-out on stencilTestEnabled
-        // keeps the overhead at zero when stencil isn't in use.
-        ApplyDynamicStencilState(cmd);
-
-        // Select pipeline layout based on shader's layoutType.
-        VkPipelineLayout pl = m_pipelineLayout;
-        bool isPortalShader = false;
-        {
-            auto sit = m_shaders.find(m_boundShader);
-            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
-                m_portalPipelineLayout != VK_NULL_HANDLE) {
-                pl = m_portalPipelineLayout;
-                isPortalShader = true;
-            }
-        }
-
-        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, sizeof(PushConstantBlock), &m_pushConstants);
-
-        if (isPortalShader) {
-            // Portal-feature shader: bind UBO+texture descriptor set
-            // (BindPortalDescriptorForDraw also uploads any dirty UBO data).
-            // A false return means no valid binding — recording the draw
-            // anyway would use the PREVIOUS draw's texture and offsets.
-            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
-        } else {
-            // Block-style shader: original texture-only descriptor path.
-            auto texIt = m_textures.find(m_boundTexture);
-            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
-                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
-            } else {
-                return;
-            }
-        }
+        if (!PrepareDraw(cmd)) return;
 
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
+        BindVertexBuffersCached(cmd, 1, vertexBuffers, offsets);
+        BindIndexBufferCached(cmd, ibIt->second.buffer, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cmd, indexCount, 1, indexOffset, 0, 0);
     }
 
@@ -1635,48 +1732,96 @@ namespace Render {
         auto vbIt = m_buffers.find(meshIt->second.vertexBuffer);
         if (vbIt == m_buffers.end()) return;
 
-        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
-        if (pipeline == VK_NULL_HANDLE) return;
-
         VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
+        if (!PrepareDraw(cmd)) return;
+
+        VkBuffer vertexBuffers[] = {vbIt->second.buffer};
+        VkDeviceSize offsets[] = {0};
+        BindVertexBuffersCached(cmd, 1, vertexBuffers, offsets);
+
+        vkCmdDraw(cmd, vertexCount, 1, firstVertex, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Shared draw front half + redundancy filters
+    // ------------------------------------------------------------------
+
+    void VKBackend::ResetRecordedBindings() {
+        m_recorded = RecordedBindings{};
+    }
+
+    bool VKBackend::PrepareDraw(VkCommandBuffer cmd) {
+        if (!m_boundShaderInfo) return false;
+
+        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
+        if (pipeline == VK_NULL_HANDLE) return false;
         if (pipeline != m_currentPipeline) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             m_currentPipeline = pipeline;
         }
-        // Push per-draw stencil dynamic state. Sticky across pipeline binds
-        // within a command buffer, so re-pushing every draw is mildly
-        // wasteful but never wrong; the early-out on stencilTestEnabled
-        // keeps the overhead at zero when stencil isn't in use.
+        // Per-draw stencil dynamic state. Sticky across pipeline binds within
+        // a command buffer, so re-pushing every draw is mildly wasteful but
+        // never wrong; the early-out on stencilTestEnabled keeps the overhead
+        // at zero when stencil isn't in use.
         ApplyDynamicStencilState(cmd);
 
-        // Pipeline layout + descriptor binding (mirrors DrawIndexed).
-        VkPipelineLayout pl = m_pipelineLayout;
-        bool isPortalShader = false;
-        {
-            auto sit = m_shaders.find(m_boundShader);
-            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
-                m_portalPipelineLayout != VK_NULL_HANDLE) {
-                pl = m_portalPipelineLayout;
-                isPortalShader = true;
-            }
-        }
-        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, sizeof(PushConstantBlock), &m_pushConstants);
-        if (isPortalShader) {
-            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
-        } else {
-            auto texIt = m_textures.find(m_boundTexture);
-            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
-                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
-            }
+        // Push constants only when they changed. Push constants are bound per
+        // pipeline LAYOUT, so a layout switch always re-pushes even if the
+        // bytes match.
+        const VkPipelineLayout pl = m_boundLayout;
+        if (!m_recorded.pushValid || m_recorded.pushLayout != pl ||
+            std::memcmp(&m_lastPushed, &m_pushConstants, sizeof(PushConstantBlock)) != 0) {
+            vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstantBlock), &m_pushConstants);
+            m_lastPushed          = m_pushConstants;
+            m_recorded.pushLayout = pl;
+            m_recorded.pushValid  = true;
         }
 
-        VkBuffer vertexBuffers[] = {vbIt->second.buffer};
-        VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        if (m_boundIsPortal) {
+            // Portal-feature shader: UBO + texture descriptor sets with per-
+            // draw dynamic offsets (BindPortalDescriptorForDraw also uploads
+            // any dirty UBO data). A false return means no valid binding —
+            // recording the draw anyway would use the PREVIOUS draw's texture
+            // and offsets. It rebinds set 0, so the block-path cache is stale.
+            m_recorded.textureSet = VK_NULL_HANDLE;
+            return BindPortalDescriptorForDraw(cmd, m_boundTexture);
+        }
 
-        vkCmdDraw(cmd, vertexCount, 1, firstVertex, 0);
+        // Block-style shader: texture-only descriptor at set 0. Skipped when
+        // the same set is already bound with the same layout (the portal
+        // path binds with a different layout, which invalidates set 0 for
+        // this one — hence the reset above).
+        auto texIt = m_textures.find(m_boundTexture);
+        if (texIt == m_textures.end() || texIt->second.descriptorSet == VK_NULL_HANDLE) return false;
+        if (m_recorded.textureSet != texIt->second.descriptorSet) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
+                                    0, 1, &texIt->second.descriptorSet, 0, nullptr);
+            m_recorded.textureSet = texIt->second.descriptorSet;
+        }
+        return true;
+    }
+
+    void VKBackend::BindVertexBuffersCached(VkCommandBuffer cmd, uint32_t count,
+                                            const VkBuffer* buffers, const VkDeviceSize* offsets) {
+        bool same = (m_recorded.vertexCount == count);
+        for (uint32_t i = 0; same && i < count; ++i) {
+            same = m_recorded.vertexBuffers[i] == buffers[i] && m_recorded.vertexOffsets[i] == offsets[i];
+        }
+        if (same) return;
+        vkCmdBindVertexBuffers(cmd, 0, count, buffers, offsets);
+        m_recorded.vertexCount = count;
+        for (uint32_t i = 0; i < 2; ++i) {
+            m_recorded.vertexBuffers[i] = (i < count) ? buffers[i] : VK_NULL_HANDLE;
+            m_recorded.vertexOffsets[i] = (i < count) ? offsets[i] : 0;
+        }
+    }
+
+    void VKBackend::BindIndexBufferCached(VkCommandBuffer cmd, VkBuffer buffer, VkIndexType type) {
+        if (m_recorded.indexBuffer == buffer && m_recorded.indexType == type) return;
+        vkCmdBindIndexBuffer(cmd, buffer, 0, type);
+        m_recorded.indexBuffer = buffer;
+        m_recorded.indexType   = type;
     }
 
     // ========================================================================
@@ -1701,52 +1846,16 @@ namespace Render {
         auto ibIt = m_buffers.find(m_megaBoundIBO);
         if (vbIt == m_buffers.end() || ibIt == m_buffers.end()) return;
 
-        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
-        if (pipeline == VK_NULL_HANDLE) return;
-
         VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
-
-        if (pipeline != m_currentPipeline) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            m_currentPipeline = pipeline;
-        }
-        // Push per-draw stencil dynamic state. Sticky across pipeline binds
-        // within a command buffer, so re-pushing every draw is mildly
-        // wasteful but never wrong; the early-out on stencilTestEnabled
-        // keeps the overhead at zero when stencil isn't in use.
-        ApplyDynamicStencilState(cmd);
-
-        VkPipelineLayout pl = m_pipelineLayout;
-        bool isPortalShader = false;
-        {
-            auto sit = m_shaders.find(m_boundShader);
-            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
-                m_portalPipelineLayout != VK_NULL_HANDLE) {
-                pl = m_portalPipelineLayout;
-                isPortalShader = true;
-            }
-        }
-        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, sizeof(PushConstantBlock), &m_pushConstants);
-        if (isPortalShader) {
-            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
-        } else {
-            auto texIt = m_textures.find(m_boundTexture);
-            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
-                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
-            } else {
-                return;
-            }
-        }
+        if (!PrepareDraw(cmd)) return;
 
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        BindVertexBuffersCached(cmd, 1, vertexBuffers, offsets);
 
         const bool u16 = (indexType == IndexType::Uint16);
-        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0,
-                             u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+        BindIndexBufferCached(cmd, ibIt->second.buffer,
+                              u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
 
         uint32_t firstIndex = static_cast<uint32_t>(
             indexByteOffset / (u16 ? sizeof(uint16_t) : sizeof(uint32_t)));
@@ -1766,61 +1875,79 @@ namespace Render {
         auto ibIt = m_buffers.find(m_megaBoundIBO);
         if (vbIt == m_buffers.end() || ibIt == m_buffers.end()) return;
 
-        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
-        if (pipeline == VK_NULL_HANDLE) return;
-
         VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
-
-        if (pipeline != m_currentPipeline) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            m_currentPipeline = pipeline;
-        }
-        // Push per-draw stencil dynamic state. Sticky across pipeline binds
-        // within a command buffer, so re-pushing every draw is mildly
-        // wasteful but never wrong; the early-out on stencilTestEnabled
-        // keeps the overhead at zero when stencil isn't in use.
-        ApplyDynamicStencilState(cmd);
-
-        VkPipelineLayout pl = m_pipelineLayout;
-        bool isPortalShader = false;
-        {
-            auto sit = m_shaders.find(m_boundShader);
-            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
-                m_portalPipelineLayout != VK_NULL_HANDLE) {
-                pl = m_portalPipelineLayout;
-                isPortalShader = true;
-            }
-        }
-        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, sizeof(PushConstantBlock), &m_pushConstants);
-        if (isPortalShader) {
-            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return;
-        } else {
-            auto texIt = m_textures.find(m_boundTexture);
-            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
-                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
-            } else {
-                return;
-            }
-        }
+        if (!PrepareDraw(cmd)) return;
 
         // Bind VBO + IBO once for the entire batch
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize vbOffsets[] = {0};
-        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, vbOffsets);
+        BindVertexBuffersCached(cmd, 1, vertexBuffers, vbOffsets);
 
         const bool u16 = (indexType == IndexType::Uint16);
         const size_t indexSize = u16 ? sizeof(uint16_t) : sizeof(uint32_t);
-        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0,
-                             u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+        BindIndexBufferCached(cmd, ibIt->second.buffer,
+                              u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
 
         // Issue one draw per section (cheap — just command buffer recording)
+        if (m_multiDrawIndirect && !m_indirectBuffers.empty()) {
+            const size_t frame = static_cast<size_t>(m_currentFrame);
+            VkDeviceSize& off = m_indirectOffset[frame];
+            const VkDeviceSize need = VkDeviceSize(drawCount) * sizeof(VkDrawIndexedIndirectCommand);
+            if (off + need <= kIndirectRingBytes) {
+                auto* cmds = reinterpret_cast<VkDrawIndexedIndirectCommand*>(
+                    static_cast<char*>(m_indirectMapped[frame]) + off);
+                uint32_t n = 0;
+                for (uint32_t i = 0; i < drawCount; i++) {
+                    if (indexCounts[i] <= 0) continue;
+                    cmds[n].indexCount = static_cast<uint32_t>(indexCounts[i]);
+                    cmds[n].instanceCount = 1;
+                    cmds[n].firstIndex = static_cast<uint32_t>(indexByteOffsets[i] / indexSize);
+                    cmds[n].vertexOffset = baseVertices[i];
+                    cmds[n].firstInstance = 0;
+                    ++n;
+                }
+                if (n > 0) {
+                    vkCmdDrawIndexedIndirect(cmd, m_indirectBuffers[frame], off, n,
+                                             sizeof(VkDrawIndexedIndirectCommand));
+                }
+                off += VkDeviceSize(n) * sizeof(VkDrawIndexedIndirectCommand);
+                return;
+            }
+        }
         for (uint32_t i = 0; i < drawCount; i++) {
             if (indexCounts[i] <= 0) continue;
             uint32_t firstIndex = static_cast<uint32_t>(indexByteOffsets[i] / indexSize);
             vkCmdDrawIndexed(cmd, indexCounts[i], 1, firstIndex, baseVertices[i], 0);
         }
+    }
+
+    bool VKBackend::CreateIndirectRing() {
+        m_indirectBuffers.assign(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+        m_indirectMemory.assign(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+        m_indirectMapped.assign(MAX_FRAMES_IN_FLIGHT, nullptr);
+        m_indirectOffset.assign(MAX_FRAMES_IN_FLIGHT, 0);
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (!CreateVkBuffer(kIndirectRingBytes, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                m_indirectBuffers[i], m_indirectMemory[i])) {
+                DestroyIndirectRing();
+                return false;
+            }
+            if (vkMapMemory(m_device, m_indirectMemory[i], 0, kIndirectRingBytes, 0, &m_indirectMapped[i]) != VK_SUCCESS) {
+                DestroyIndirectRing();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void VKBackend::DestroyIndirectRing() {
+        for (size_t i = 0; i < m_indirectBuffers.size(); ++i) {
+            if (m_indirectMapped[i]) vkUnmapMemory(m_device, m_indirectMemory[i]);
+            if (m_indirectBuffers[i] != VK_NULL_HANDLE) vkDestroyBuffer(m_device, m_indirectBuffers[i], nullptr);
+            if (m_indirectMemory[i] != VK_NULL_HANDLE) vkFreeMemory(m_device, m_indirectMemory[i], nullptr);
+        }
+        m_indirectBuffers.clear(); m_indirectMemory.clear(); m_indirectMapped.clear(); m_indirectOffset.clear();
     }
 
     // ========================================================================
@@ -1970,6 +2097,11 @@ namespace Render {
         ImDrawData* drawData = ImGui::GetDrawData();
         if (drawData && drawData->CmdListsCount > 0) {
             ImGui_ImplVulkan_RenderDrawData(drawData, m_commandBuffers[m_currentFrame]);
+            // ImGui bound its own pipeline, descriptor set, vertex/index
+            // buffers and push constants into OUR command buffer; nothing the
+            // redundancy filters remember is still true.
+            m_currentPipeline = VK_NULL_HANDLE;
+            ResetRecordedBindings();
         }
     }
 
@@ -2121,9 +2253,9 @@ namespace Render {
             return false;
         }
 
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
-        Log::Info("VKBackend: Selected GPU: %s", props.deviceName);
+        vkGetPhysicalDeviceProperties(m_physicalDevice, &m_deviceProperties);
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &m_memProperties);
+        Log::Info("VKBackend: Selected GPU: %s", m_deviceProperties.deviceName);
         return true;
     }
 
@@ -2152,6 +2284,19 @@ namespace Render {
         // gl_ClipDistance write — the portal clip fails and the chunk
         // shader has no way to clip at the dst plane.
         deviceFeatures.shaderClipDistance = VK_TRUE;
+        {
+            VkPhysicalDeviceFeatures supported{};
+            vkGetPhysicalDeviceFeatures(m_physicalDevice, &supported);
+            m_multiDrawIndirect = supported.multiDrawIndirect == VK_TRUE;
+            // Depth clamp for the immersive portal surfaces (see
+            // PipelineState::depthClampEnabled); optional, so request it
+            // only where the device has it.
+            m_depthClampSupported = supported.depthClamp == VK_TRUE;
+            deviceFeatures.depthClamp = supported.depthClamp;
+            deviceFeatures.multiDrawIndirect = supported.multiDrawIndirect;
+            if (std::getenv("OBEY_VK_NO_INDIRECT")) m_multiDrawIndirect = false;   // A/B switch
+            Log::Info("[VKBackend] multiDrawIndirect: %s", m_multiDrawIndirect ? "yes" : "no");
+        }
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2392,7 +2537,6 @@ namespace Render {
 
     bool VKBackend::CreateSyncObjects() {
         m_imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-        m_renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
         m_inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
 
         VkSemaphoreCreateInfo semInfo{};
@@ -2403,11 +2547,30 @@ namespace Render {
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             if (vkCreateSemaphore(m_device, &semInfo, nullptr, &m_imageAvailableSemaphores[i]) != VK_SUCCESS ||
-                vkCreateSemaphore(m_device, &semInfo, nullptr, &m_renderFinishedSemaphores[i]) != VK_SUCCESS ||
                 vkCreateFence(m_device, &fenceInfo, nullptr, &m_inFlightFences[i]) != VK_SUCCESS)
                 return false;
         }
+        return CreateRenderFinishedSemaphores();
+    }
+
+    bool VKBackend::CreateRenderFinishedSemaphores() {
+        DestroyRenderFinishedSemaphores();
+        m_renderFinishedSemaphores.assign(m_swapchainImages.size(), VK_NULL_HANDLE);
+        VkSemaphoreCreateInfo semInfo{};
+        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        for (VkSemaphore& sem : m_renderFinishedSemaphores) {
+            if (vkCreateSemaphore(m_device, &semInfo, nullptr, &sem) != VK_SUCCESS) return false;
+        }
         return true;
+    }
+
+    void VKBackend::DestroyRenderFinishedSemaphores() {
+        // Callers hold a vkDeviceWaitIdle (Shutdown / RecreateSwapchain), so
+        // no present is still waiting on any of these.
+        for (VkSemaphore sem : m_renderFinishedSemaphores) {
+            if (sem != VK_NULL_HANDLE) vkDestroySemaphore(m_device, sem, nullptr);
+        }
+        m_renderFinishedSemaphores.clear();
     }
 
     bool VKBackend::CreateDescriptorPool() {
@@ -2723,9 +2886,134 @@ namespace Render {
     }
 
     bool VKBackend::CreatePipelineCache() {
+        // <obeycraft>/cache/vk_pipeline_cache.bin — the same directory tree
+        // as saves, logs and options, so it is per-user and survives updates.
+        {
+            // The backend is created before GameDirectory::Initialize runs
+            // (window first, then settings), so the instance path is empty
+            // here; the static default is the same directory it will resolve.
+            std::string gameDir = Platform::g_gameDirectory.GetGameDirectory();
+            if (gameDir.empty()) gameDir = Platform::GameDirectory::GetDefaultGameDirectory();
+            if (!gameDir.empty()) {
+                m_pipelineCacheFile = gameDir + "/cache/vk_pipeline_cache.bin";
+            }
+        }
+
+        std::vector<char> blob = LoadPipelineCacheBlob();
+
         VkPipelineCacheCreateInfo cacheInfo{};
-        cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-        return vkCreatePipelineCache(m_device, &cacheInfo, nullptr, &m_pipelineCache) == VK_SUCCESS;
+        cacheInfo.sType           = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+        cacheInfo.initialDataSize = blob.size();
+        cacheInfo.pInitialData    = blob.empty() ? nullptr : blob.data();
+        if (vkCreatePipelineCache(m_device, &cacheInfo, nullptr, &m_pipelineCache) == VK_SUCCESS) {
+            if (!blob.empty()) {
+                Log::Info("VKBackend: pipeline cache loaded (%zu bytes) from %s",
+                          blob.size(), m_pipelineCacheFile.c_str());
+            }
+            return true;
+        }
+        // A driver may reject initial data it cannot parse even when the
+        // header matched; an empty cache is always acceptable.
+        if (!blob.empty()) {
+            Log::Warning("VKBackend: driver rejected the on-disk pipeline cache — starting empty");
+            cacheInfo.initialDataSize = 0;
+            cacheInfo.pInitialData    = nullptr;
+            return vkCreatePipelineCache(m_device, &cacheInfo, nullptr, &m_pipelineCache) == VK_SUCCESS;
+        }
+        return false;
+    }
+
+    std::vector<char> VKBackend::LoadPipelineCacheBlob() const {
+        if (m_pipelineCacheFile.empty()) return {};
+        std::vector<char> blob = ReadBinaryFile(m_pipelineCacheFile);
+        if (blob.empty()) return {};
+
+        // Validate the header ourselves rather than trusting the driver to:
+        // the spec only says the data "must" have been produced by the same
+        // device/driver, and feeding a stale blob to a driver that does not
+        // check is undefined. The layout is fixed by VkPipelineCacheHeaderVersionOne.
+        if (blob.size() < sizeof(VkPipelineCacheHeaderVersionOne)) {
+            Log::Warning("VKBackend: pipeline cache file too small — ignoring");
+            return {};
+        }
+        VkPipelineCacheHeaderVersionOne header{};
+        std::memcpy(&header, blob.data(), sizeof(header));
+        const bool valid =
+            header.headerSize    == sizeof(VkPipelineCacheHeaderVersionOne) &&
+            header.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+            header.vendorID      == m_deviceProperties.vendorID &&
+            header.deviceID      == m_deviceProperties.deviceID &&
+            std::memcmp(header.pipelineCacheUUID, m_deviceProperties.pipelineCacheUUID,
+                        VK_UUID_SIZE) == 0;
+        if (!valid) {
+            Log::Info("VKBackend: pipeline cache on disk is for a different device/driver — ignoring");
+            return {};
+        }
+        return blob;
+    }
+
+    void VKBackend::SavePipelineCache() {
+        if (m_pipelineCache == VK_NULL_HANDLE || m_pipelineCacheFile.empty()) return;
+        m_pipelinesSinceSave = 0;
+
+        size_t size = 0;
+        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, nullptr) != VK_SUCCESS || size == 0) return;
+        std::vector<char> blob(size);
+        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, blob.data()) != VK_SUCCESS) return;
+        blob.resize(size);
+
+        // Write to a sibling and rename so a crash mid-write cannot leave a
+        // truncated file that the next launch would hand to the driver.
+        std::error_code ec;
+        const std::filesystem::path path(m_pipelineCacheFile);
+        std::filesystem::create_directories(path.parent_path(), ec);
+        const std::filesystem::path tmp = path.string() + ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            if (!out.is_open()) {
+                Log::Warning("VKBackend: cannot write pipeline cache to %s", tmp.string().c_str());
+                return;
+            }
+            out.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+            if (!out.good()) {
+                Log::Warning("VKBackend: pipeline cache write failed (%s)", tmp.string().c_str());
+                return;
+            }
+        }
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            Log::Warning("VKBackend: pipeline cache rename failed: %s", ec.message().c_str());
+            return;
+        }
+        Log::Info("VKBackend: pipeline cache saved (%zu bytes, %zu pipelines)", blob.size(), m_pipelines.size());
+    }
+
+    void VKBackend::DestroyAllPipelines() {
+        for (auto& [key, rec] : m_pipelines) {
+            if (rec.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, rec.pipeline, nullptr);
+        }
+        m_pipelines.clear();
+        m_currentPipeline = VK_NULL_HANDLE;
+    }
+
+    void VKBackend::RebuildAllPipelines() {
+        PROFILE_ZONE_N("Vk.RebuildAllPipelines");
+        // One hitch here, now, instead of one per (state, shader) combination
+        // spread across the next few frames as draws rediscover them.
+        size_t rebuilt = 0;
+        for (auto it = m_pipelines.begin(); it != m_pipelines.end(); ) {
+            PipelineRecord& rec = it->second;
+            if (rec.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, rec.pipeline, nullptr);
+            rec.pipeline = CreateGraphicsPipeline(rec.state, rec.shader);
+            if (rec.pipeline == VK_NULL_HANDLE) {
+                it = m_pipelines.erase(it);   // shader gone; the draw path will retry lazily
+            } else {
+                ++rebuilt;
+                ++it;
+            }
+        }
+        m_currentPipeline = VK_NULL_HANDLE;
+        Log::Info("VKBackend: rebuilt %zu pipelines for the new render pass", rebuilt);
     }
 
     // ========================================================================
@@ -2740,43 +3028,58 @@ namespace Render {
             glfwWaitEvents();
         }
         vkDeviceWaitIdle(m_device);
+        const VkFormat oldColorFormat = m_swapchainFormat;
+        const VkFormat oldDepthFormat = m_depthFormat;
         CleanupSwapchain();
-
-        // Destroy old render pass — format or present mode may have changed
-        if (m_renderPass != VK_NULL_HANDLE) {
-            vkDestroyRenderPass(m_device, m_renderPass, nullptr);
-            m_renderPass = VK_NULL_HANDLE;
-        }
-
-        // Invalidate all cached pipelines (they reference the old render pass)
-        for (auto& [hash, pipeline] : m_pipelines) {
-            vkDestroyPipeline(m_device, pipeline, nullptr);
-        }
-        m_pipelines.clear();
-        m_currentPipeline = VK_NULL_HANDLE;
 
         CreateSwapchain(window);
         CreateImageViews();
-        CreateRenderPass();
         CreateDepthResources();
-        CreateFramebuffers();
 
-        Log::Info("VKBackend: Swapchain recreated (pipelines invalidated)");
+        // The render pass — and therefore every pipeline — only has to change
+        // when an attachment FORMAT changes. Render-pass compatibility is
+        // defined on attachment format + sample count alone (not extent, not
+        // load/store ops, not layouts), and a VkPipeline is usable with any
+        // render pass compatible with the one it was built against. A resize
+        // or a vsync toggle keeps the same surface format and the depth
+        // format is a fixed per-device choice, so the common case keeps the
+        // render pass object itself and touches no pipeline at all. (Keeping
+        // the object also keeps ImGui's pipeline valid — it was initialised
+        // against this handle and was never told about a replacement.)
+        const bool formatsChanged = (m_swapchainFormat != oldColorFormat) || (m_depthFormat != oldDepthFormat);
+        if (m_renderPass == VK_NULL_HANDLE || formatsChanged) {
+            if (m_renderPass != VK_NULL_HANDLE) {
+                vkDestroyRenderPass(m_device, m_renderPass, nullptr);
+                m_renderPass = VK_NULL_HANDLE;
+            }
+            CreateRenderPass();
+            RebuildAllPipelines();
+            Log::Info("VKBackend: Swapchain recreated with new attachment formats (render pass + pipelines rebuilt)");
+        } else {
+            Log::Info("VKBackend: Swapchain recreated (%ux%u), render pass and pipelines kept",
+                      m_swapchainExtent.width, m_swapchainExtent.height);
+        }
+        CreateFramebuffers();
+        // Image count can change with the present mode (vsync toggle), and the
+        // render-finished semaphores are one per image.
+        CreateRenderFinishedSemaphores();
+        m_currentPipeline = VK_NULL_HANDLE;
     }
 
     void VKBackend::CleanupSwapchain() {
+        // Deliberately leaves m_renderPass alone — see RecreateSwapchain.
         if (m_depthImageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_depthImageView, nullptr);
         if (m_depthImage != VK_NULL_HANDLE) vkDestroyImage(m_device, m_depthImage, nullptr);
         if (m_depthMemory != VK_NULL_HANDLE) vkFreeMemory(m_device, m_depthMemory, nullptr);
         for (auto fb : m_framebuffers) vkDestroyFramebuffer(m_device, fb, nullptr);
         for (auto iv : m_swapchainImageViews) vkDestroyImageView(m_device, iv, nullptr);
         if (m_swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
-        if (m_renderPass != VK_NULL_HANDLE) vkDestroyRenderPass(m_device, m_renderPass, nullptr);
+        m_framebuffers.clear();
+        m_swapchainImageViews.clear();
         m_depthImageView = VK_NULL_HANDLE;
         m_depthImage = VK_NULL_HANDLE;
         m_depthMemory = VK_NULL_HANDLE;
         m_swapchain = VK_NULL_HANDLE;
-        m_renderPass = VK_NULL_HANDLE;
     }
 
     // ========================================================================
@@ -2859,10 +3162,10 @@ namespace Render {
     }
 
     uint32_t VKBackend::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const {
-        VkPhysicalDeviceMemoryProperties memProperties;
-        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
-        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+        // m_memProperties was captured in PickPhysicalDevice; it is immutable
+        // for the life of the physical device, and this runs per allocation.
+        for (uint32_t i = 0; i < m_memProperties.memoryTypeCount; i++) {
+            if ((typeFilter & (1u << i)) && (m_memProperties.memoryTypes[i].propertyFlags & properties) == properties)
                 return i;
         }
         Log::Error("VKBackend: Failed to find suitable memory type");
@@ -3007,6 +3310,10 @@ namespace Render {
     }
 
     void VKBackend::EndSingleTimeCommands(VkCommandBuffer cmd) {
+        // This is a full GPU drain (vkQueueWaitIdle). It belongs at load time
+        // only; if the zone shows up inside a frame, whatever called it is
+        // the hitch.
+        PROFILE_ZONE_N("Vk.SingleTimeSubmit+Drain");
         vkEndCommandBuffer(cmd);
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3131,6 +3438,7 @@ namespace Render {
         pack(static_cast<uint64_t>(state.stencilFailOp), 3);
         pack(static_cast<uint64_t>(state.stencilDepthFailOp), 3);
         pack(static_cast<uint64_t>(state.stencilPassOp), 3);
+        pack((state.depthClampEnabled && m_depthClampSupported) ? 1 : 0, 1);
         pack(static_cast<uint64_t>(layoutType), 1);
         pack(shader, 27);
         return static_cast<size_t>(key);
@@ -3153,16 +3461,21 @@ namespace Render {
     VkPipeline VKBackend::GetOrCreatePipeline(const PipelineState& state, ShaderHandle shader) {
         size_t hash = HashPipelineState(state, shader);
         auto it = m_pipelines.find(hash);
-        if (it != m_pipelines.end()) return it->second;
+        if (it != m_pipelines.end()) return it->second.pipeline;
 
         VkPipeline pipeline = CreateGraphicsPipeline(state, shader);
         if (pipeline != VK_NULL_HANDLE) {
-            m_pipelines[hash] = pipeline;
+            m_pipelines[hash] = PipelineRecord{state, shader, pipeline};
+            ++m_pipelinesSinceSave;
+            m_lastPipelineFrame = m_frameNumber;
         }
         return pipeline;
     }
 
     VkPipeline VKBackend::CreateGraphicsPipeline(const PipelineState& state, ShaderHandle shader) {
+        // On MoltenVK this is a Metal shader/pipeline-state compile unless the
+        // VkPipelineCache already holds it. Mid-frame, that is a hitch.
+        PROFILE_ZONE_N("Vk.CreateGraphicsPipeline");
         auto shaderIt = m_shaders.find(shader);
         if (shaderIt == m_shaders.end()) return VK_NULL_HANDLE;
 
@@ -3206,6 +3519,18 @@ namespace Render {
                             case 2: fmt = VK_FORMAT_R32G32_SFLOAT;          break;
                             case 3: fmt = VK_FORMAT_R32G32B32_SFLOAT;       break;
                             case 4: fmt = VK_FORMAT_R32G32B32A32_SFLOAT;    break;
+                        }
+                    } else if (a.type == AttribType::UShort) {
+                        // unorm16 terrain tile rect (and any future 16-bit
+                        // attribute). R16G16(B16A16)_UNORM are mandatory
+                        // vertex-buffer formats in Vulkan, so no capability
+                        // query is needed.
+                        if (a.componentCount == 2) {
+                            fmt = a.normalized ? VK_FORMAT_R16G16_UNORM
+                                               : VK_FORMAT_R16G16_UINT;
+                        } else if (a.componentCount == 4) {
+                            fmt = a.normalized ? VK_FORMAT_R16G16B16A16_UNORM
+                                               : VK_FORMAT_R16G16B16A16_UINT;
                         }
                     } else { // UByte
                         // 4 components: UNORM if normalized (vec4 0..1
@@ -3256,6 +3581,14 @@ namespace Render {
                             case 2: fmt = VK_FORMAT_R32G32_SFLOAT;       break;
                             case 3: fmt = VK_FORMAT_R32G32B32_SFLOAT;    break;
                             case 4: fmt = VK_FORMAT_R32G32B32A32_SFLOAT; break;
+                        }
+                    } else if (a.type == AttribType::UShort) {
+                        if (a.componentCount == 2) {
+                            fmt = a.normalized ? VK_FORMAT_R16G16_UNORM
+                                               : VK_FORMAT_R16G16_UINT;
+                        } else if (a.componentCount == 4) {
+                            fmt = a.normalized ? VK_FORMAT_R16G16B16A16_UNORM
+                                               : VK_FORMAT_R16G16B16A16_UINT;
                         }
                     } else if (a.componentCount == 4) {
                         fmt = a.normalized ? VK_FORMAT_R8G8B8A8_UNORM
@@ -3310,7 +3643,7 @@ namespace Render {
         // Rasterizer
         VkPipelineRasterizationStateCreateInfo rasterizer{};
         rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.depthClampEnable = (state.depthClampEnabled && m_depthClampSupported) ? VK_TRUE : VK_FALSE;
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         rasterizer.polygonMode = (state.polygonMode == PolygonMode::Fill) ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE;
         rasterizer.lineWidth = state.lineWidth;

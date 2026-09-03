@@ -208,3 +208,39 @@ event): 10% -> 3% of the main thread in a loaded view, +12 fps there.
   virtual calls per candidate block in ore placement before). Noise fill
   profiled after all of the above: ImprovedNoise (Perlin) ~33%, aquifer
   body 15%, interpolation 12% — vanilla's own algorithms, no port waste left.
+
+## Chunk streaming additions outside the library (2026-08-30, "do everything" round)
+- Instant revisits: `Chunk::modStamp` (bumped by SetBlock/SetBlockEntity, persisted as
+  Anvil `ObeyModStamp`, carried on ChunkDataS2C). `PlayerSession::m_clientStamps`
+  remembers what each client holds across DropChunk; a re-entering chunk whose stamp
+  matches goes out as `ChunkUnchangedS2C` (0x47, 20 bytes, outside the batch quota);
+  `ChunkRequestFullC2S` (0x98) is the client's "I evicted it" answer. Client
+  `ClientChunkManager::UnloadChunk` PARKS chunks (CPU data + GPU meshes via
+  `ClientMeshManager::ParkChunkGPUData`, mega-buffer allocations kept) in a 1.5 GB LRU;
+  `RestoreRetainedChunk` revives them. Server keeps unwatched chunks resident for 2 min /
+  12k soft cap (`ServerLevel::unwatchedSince`) so a return needs no disk read.
+  Measured: return to a 3,725-chunk area fully on screen < 1 s after the teleport
+  (3,719 restored in the first second; was ~3.5 s). One-off GL driver stall (~110 ms)
+  on the first frame that draws the re-activated buffers.
+- Transfer: chunks are unpacked into `Game::Chunk` on the network I/O thread
+  (`ClientChunkManager::PrebuildChunk`, `ChunkDataS2CPacket::prebuilt`); the main thread
+  adopts the pointer (ApplyChunkData 0.077 -> 0.003 ms). `DrainIncomingPackets` has a
+  6 ms/frame budget; the batch estimator measures apply time instead of wall time.
+  Mesh workers: max(3, available-2) (5 on an M4). Saved 3,725-chunk area: all chunks and
+  meshes on screen by t=2 (was t=6 at the start of the day).
+- Parallel decoration (item 3): `FeatureClaims` now has per-chunk radius (2 for plain
+  chunks, 9 when either chunk has structure references — structure pieces read up to 8
+  chunks away; the first attempt at radius 2 for everyone crashed). Opt-in via
+  `OBEY_PARALLEL_FEATURES=1`; `OBEY_DECO_THREADS=n` adds an elevated-QoS decoration
+  pool. Measured on an M4 (4P+6E): correct, no crashes, lane time -60%, but the far
+  teleport view took 57-58 s vs 53 s serial (decoration moved from the lane's
+  P-core to E-core pool threads; 5,280 claim retries on 7,450 chunks). Default stays
+  serial. Region diffs under parallel decoration are the same kinds as serial
+  run-to-run diffs (border ore veins, trees, moss, vines).
+- VK indirect draws (item 4): `VKBackend::MultiDrawIndexedBaseVertex` writes
+  VkDrawIndexedIndirectCommands into a per-frame host-visible ring (4 MB) and issues
+  one vkCmdDrawIndexedIndirect per multi-draw; needs `multiDrawIndirect` (MoltenVK:
+  yes); `OBEY_VK_NO_INDIRECT=1` = loop. Return-phase per-frame: SubmitMultiDraw
+  0.19 -> 0.06 ms, QueueSubmit 2.9 -> 2.4 ms, RenderAll 2.3 -> 1.8 ms.
+- getBaseHeight memo (item 5): `NoiseBasedChunkGenerator::m_baseHeightCache`
+  (bounded, mutex) — structure layouts re-ask the same columns.

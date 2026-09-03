@@ -38,7 +38,7 @@ namespace Server {
 
     int32_t MobManager::Add(std::unique_ptr<Game::Mob> mob) {
         if (!mob) return 0;
-        const int32_t id = m_nextId++;
+        const int32_t id = AllocateId();
         mob->SetId(id);
         // Mint only if unset: the entity loader stamps a saved UUID before
         // handing the mob over, and that identity must survive.
@@ -56,6 +56,49 @@ namespace Server {
         ptr->spatialIndexKey = ChunkKeyOf(*ptr);
         m_byChunk[ptr->spatialIndexKey].push_back(ptr);
         return id;
+    }
+
+    std::unique_ptr<Game::Mob> MobManager::Extract(int32_t id) {
+        auto it = m_mobs.find(id);
+        if (it == m_mobs.end()) return nullptr;
+        Game::Mob* leaving = it->second.get();
+
+        // Riding links: the mob is not removed, but its vehicle and riders
+        // stay in this level, so the links cannot survive the move.
+        leaving->EjectPassengers();
+        leaving->StopRiding();
+
+        // Announce the departure to everything that might point at it —
+        // the same rule as the death sweep (see Entity::HoldsEntityRefs).
+        for (Game::Mob* other : m_mobList) {
+            if (other != leaving && other->HoldsEntityRefs()) other->ClearReferenceTo(leaving);
+        }
+        if (m_level) {
+            for (PlayerEntityView* view : m_level->PlayerViews()) view->ClearReferenceTo(leaving);
+        }
+
+        // Order-preserving erase from the tick list, then the maps.
+        m_mobList.erase(std::remove(m_mobList.begin(), m_mobList.end(), leaving), m_mobList.end());
+        m_deathLootDropped.erase(id);
+        m_byUuid.erase(leaving->GetUuid());
+        std::unique_ptr<Game::Mob> owned = std::move(it->second);
+        m_mobs.erase(it);
+        RebuildIndex();
+        return owned;
+    }
+
+    bool MobManager::AddExisting(std::unique_ptr<Game::Mob> mob) {
+        if (!mob) return false;
+        const int32_t id = mob->GetId();
+        if (id == 0 || m_mobs.count(id)) return false;
+        mob->MintUuidIfUnset();
+        Game::Mob* ptr = mob.get();
+        m_byUuid[ptr->GetUuid()] = id;
+        m_mobs.emplace(id, std::move(mob));
+        m_mobList.push_back(ptr);
+        ptr->spatialIndexKey = ChunkKeyOf(*ptr);
+        m_byChunk[ptr->spatialIndexKey].push_back(ptr);
+        return true;
     }
 
     Game::Mob* MobManager::Find(int32_t id) const {
@@ -977,7 +1020,6 @@ namespace Server {
         m_byUuid.clear();
         m_byChunk.clear();
         m_deathLootDropped.clear();
-        m_nextId = Game::kMobEntityIdBase;
         for (auto& c : m_categoryCounts) c.store(0, std::memory_order_relaxed);
         for (auto& c : m_typeCounts) c.store(0, std::memory_order_relaxed);
     }

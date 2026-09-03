@@ -156,11 +156,11 @@ namespace Game {
         Discard();
     }
 
-    void ShulkerBullet::OnHitEntity(LivingEntity& target) {
+    void ShulkerBullet::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
 
         auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner());
-        const bool wasHurt = target.Hurt(MobDamageSource::Projectile, 4.0f,
+        const bool wasHurt = DealHitDamage(target, hit, MobDamageSource::Projectile, 4.0f,
                                          livingOwner ? GetOwner() : this);
         // MC ShulkerBullet.onHitEntity: a landed hit applies LEVITATION for
         // 200 ticks (10 s), attributed to firstNonNull(owner, this). On a

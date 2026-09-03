@@ -30,6 +30,7 @@
 #include "common/physics/Physics.hpp"
 
 #include <glm/glm.hpp>
+#include "common/world/level/DimensionId.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -80,6 +81,13 @@ namespace Server {
         // MC CommandSourceStack.getPosition() — the origin for `distance`,
         // `dx/dy/dz` and every sort. Selector `x=`/`y=`/`z=` override it.
         glm::dvec3 position{0.0};
+        // MC CommandSourceStack.getLevel() — the DIMENSION the selector
+        // enumerates mobs and items from. MC selectors are level-scoped
+        // (EntitySelector.getEntities walks source.getLevel() unless
+        // currentEntity), and before this field existed every one of them
+        // silently searched the Overworld: `/kill @e` from the End cleared
+        // the wrong world. Fill it from the sender's session.
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
     };
 
     // MC EntityArgument's four flavours. They differ in two ways: whether more

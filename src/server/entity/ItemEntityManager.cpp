@@ -6,6 +6,10 @@
 #include "server/player/ServerPlayer.hpp"
 #include "server/session/PlayerSession.hpp"
 #include "server/session/PlayerSessionManager.hpp"
+#include "common/core/Features.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "server/portal/EntityPortalTravel.hpp"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -36,7 +40,7 @@ namespace Server {
         // A fresh session handle — ids are per-session and the saved one is
         // meaningless here. The UUID is the identity that carries over, so it
         // is minted only if the save did not supply one.
-        entity.id = m_nextId++;
+        entity.id = Game::AllocateItemEntityId();
         if (Game::UuidIsNil(entity.uuid)) entity.uuid = Game::RandomUuid();
         entity.needsSync = true;
 
@@ -46,6 +50,25 @@ namespace Server {
     }
 
 
+    std::optional<Game::ItemEntity> ItemEntityManager::Extract(int32_t id) {
+        auto it = m_entities.find(id);
+        if (it == m_entities.end()) return std::nullopt;
+        Game::ItemEntity e = std::move(it->second);
+        m_entities.erase(it);
+        return e;
+    }
+
+    bool ItemEntityManager::AdoptWithId(Game::ItemEntity entity) {
+        if (entity.id == 0 || entity.stack.IsEmpty()) return false;
+        if (m_entities.count(entity.id)) return false;
+        if (Game::UuidIsNil(entity.uuid)) entity.uuid = Game::RandomUuid();
+        entity.pendingSpawn = true;
+        entity.needsSync    = true;
+        const int32_t id = entity.id;
+        m_entities.emplace(id, std::move(entity));
+        return true;
+    }
+
     int32_t ItemEntityManager::Spawn(const glm::dvec3& pos, const glm::dvec3& vel,
                                      const Game::ItemStack& stack, int pickupDelay) {
         if (stack.IsEmpty()) return 0;
@@ -53,13 +76,14 @@ namespace Server {
         // Seed the RNG lazily off the clock. Item scatter is cosmetic — it is
         // deliberately NOT part of the deterministic loot roll, which has its
         // own seeded stream in PlayerSession.
-        if (m_nextId == kItemEntityIdBase) {
+        if (!m_randomSeeded) {
+            m_randomSeeded = true;
             m_random.SetSeed(static_cast<int64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count()));
         }
 
         Game::ItemEntity e;
-        e.id          = m_nextId++;
+        e.id          = Game::AllocateItemEntityId();
         // Persistent identity, minted where the session handle is assigned —
         // the same lifecycle rule the mobs use.
         e.uuid = Game::RandomUuid();
@@ -311,12 +335,25 @@ namespace Server {
 
         // 3. Pickup.
         if (sessions) {
+            // Collectors in THIS level: players standing here, plus the image
+            // of any player standing at a portal that leads here (see
+            // PickupSourcesFor). Without the feature, players standing here.
+#if ENABLE_IMMERSIVE_PORTALS
+            const std::vector<PickupSource> collectors = PickupSourcesFor(*sessions, world->GetDimension());
+#else
+            struct PickupSource { ServerPlayer* player; glm::dvec3 pos; };
+            std::vector<PickupSource> collectors;
             for (auto& session : sessions->GetAllSessions()) {
-                if (!session) continue;
-                ServerPlayer* player = session->GetPlayer();
+                if (!session || !session->GetPlayer()) continue;
+                if (Game::DimensionFromRaw(session->GetPlayer()->getDimensionId()) != world->GetDimension()) continue;
+                collectors.push_back(PickupSource{session->GetPlayer(), session->GetPlayer()->getPosition()});
+            }
+#endif
+            for (const PickupSource& collector : collectors) {
+                ServerPlayer* player = collector.player;
                 if (!player || player->isDead()) continue;
 
-                const glm::dvec3 ppos = player->getPosition();
+                const glm::dvec3 ppos = collector.pos;
 
                 // MC Player.aiStep collects with getBoundingBox().inflate(1.0,
                 // 0.5, 1.0) and calls playerTouch on everything that box
@@ -386,7 +423,6 @@ namespace Server {
 
     void ItemEntityManager::Clear() {
         m_entities.clear();
-        m_nextId = kItemEntityIdBase;
     }
 
     void ItemEntityManager::CollectSyncSets(int64_t serverTick,

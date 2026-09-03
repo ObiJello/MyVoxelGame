@@ -6,6 +6,8 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/math/WorldCoordinates.hpp"
 #include <algorithm>
+#include <array>
+#include <cstring>
 
 namespace Render {
 
@@ -47,7 +49,336 @@ namespace Render {
         return uvRect.y + f * (uvRect.w - uvRect.y);
     }
 
+    // ========================================================================
+    // STILL-FLUID GREEDY MERGING — per-thread scratch
+    // ========================================================================
+    //
+    // The fluid twin of Mesher.cpp's Greedy namespace, and deliberately the
+    // same shape: thread_local grids relying on thread-storage zero-init,
+    // stash during the section's block loop, one flush per section. It is a
+    // SEPARATE grid because fluid quads live on fractional Y planes (the
+    // surface sits at y + 0.899 inside cell y) and merge on fluid-domain keys
+    // (surface height, still-sprite rect, tint-baked color) that the solid
+    // grid has no slot for.
+    //
+    // Only three quad shapes ever enter: the flat full-cell TOP surface, its
+    // reverse-wound underside copy (backwardUpFace), and the flat full-cell
+    // volume BOTTOM. Each gets its own plane family (`kind`) so an up-facing
+    // plate can never merge with a down-facing one. Side faces and any top
+    // whose four corner heights differ stay per-block, always.
+    namespace {
+        namespace FluidGreedy {
+            constexpr int kKindTopUp   = 0;  // top surface, wound +Y-out
+            constexpr int kKindTopDown = 1;  // backwardUpFace copy, wound -Y-out
+            constexpr int kKindBottom  = 2;  // volume underside, wound -Y-out
+            constexpr int kKindCount   = 3;
+
+            // One stashed quad, kept EXACTLY as EmitFluidQuad would have
+            // inserted it so a 1x1 survivor re-emits verbatim (tile rect = 0),
+            // bit-identical to the non-greedy build.
+            struct PendingQuad {
+                std::array<Vertex, 4> verts;
+                glm::vec4 uvRect;    // full still-sprite rect in atlas UV
+                uint32_t  color;     // shared corner color (tint * shade, all four equal)
+                float     y;         // the quad's world-space Y (all four corners equal)
+                bool      translucent; // routing: water -> translucent, lava -> opaque
+            };
+
+            // [kind][plane(local y)][z][x]: index+1 into t_pending, 0 = empty.
+            // 3*16*16*16*4 = 48 KB per thread.
+            thread_local int32_t t_grid[kKindCount][16][16][16];
+            thread_local std::vector<PendingQuad> t_pending;
+            thread_local bool t_planeTouched[kKindCount][16];
+            struct PlaneRef { uint8_t kind, plane; };
+            thread_local std::vector<PlaneRef> t_touched;
+        }
+
+        // The canonical still-top layout, exactly as CreateFluidQuad (and a
+        // zero-slope CreateSlopedSurface) emits it: NW, SW, SE, NE with the
+        // sprite's full rect mapped V-along-+Z. One check enforces all of
+        // (a) flat — four equal corner heights, (b) full-cell footprint, and
+        // (c) the UV orientation the merged plate's tile math reproduces.
+        // Float compares are exact: every value is an integer-valued float
+        // plus the same constants, computed identically per block. Anything
+        // that deviates (a real slope once per-corner heights exist, a future
+        // UV change) simply fails the check and stays per-block.
+        bool IsCanonicalStillTopQuad(const std::vector<Vertex>& v, glm::vec3 blockPos,
+                                     const glm::vec4& rect) {
+            if (v.size() != 4) return false;
+            const float y = v[0].pos.y;
+            if (v[1].pos.y != y || v[2].pos.y != y || v[3].pos.y != y) return false;
+            const float x0 = blockPos.x, x1 = blockPos.x + 1.0f;
+            const float z0 = blockPos.z, z1 = blockPos.z + 1.0f;
+            return v[0].pos.x == x0 && v[0].pos.z == z0 &&
+                   v[1].pos.x == x0 && v[1].pos.z == z1 &&
+                   v[2].pos.x == x1 && v[2].pos.z == z1 &&
+                   v[3].pos.x == x1 && v[3].pos.z == z0 &&
+                   v[0].uv == glm::vec2(rect.x, rect.y) &&
+                   v[1].uv == glm::vec2(rect.x, rect.w) &&
+                   v[2].uv == glm::vec2(rect.z, rect.w) &&
+                   v[3].uv == glm::vec2(rect.z, rect.y);
+        }
+
+        // Same idea for CreateFluidBottomFace's walk: SW-top, NW-top corner
+        // order in MC's clockwise-from-above winding, V again along +Z.
+        bool IsCanonicalStillBottomQuad(const std::vector<Vertex>& v, glm::vec3 blockPos,
+                                        const glm::vec4& rect) {
+            if (v.size() != 4) return false;
+            const float y = v[0].pos.y;
+            if (v[1].pos.y != y || v[2].pos.y != y || v[3].pos.y != y) return false;
+            const float x0 = blockPos.x, x1 = blockPos.x + 1.0f;
+            const float z0 = blockPos.z, z1 = blockPos.z + 1.0f;
+            return v[0].pos.x == x0 && v[0].pos.z == z1 &&
+                   v[1].pos.x == x0 && v[1].pos.z == z0 &&
+                   v[2].pos.x == x1 && v[2].pos.z == z0 &&
+                   v[3].pos.x == x1 && v[3].pos.z == z1 &&
+                   v[0].uv == glm::vec2(rect.x, rect.w) &&
+                   v[1].uv == glm::vec2(rect.x, rect.y) &&
+                   v[2].uv == glm::vec2(rect.z, rect.y) &&
+                   v[3].uv == glm::vec2(rect.z, rect.w);
+        }
+    }
+
     FluidMeshBuilder::FluidMeshBuilder(const FluidMeshConfig& config) : m_config(config) {
+    }
+
+    void FluidMeshBuilder::BeginGreedySection(bool enabled,
+                                              int baseWorldX, int baseWorldY, int baseWorldZ) {
+        m_greedyEnabled = enabled;
+        m_greedyBaseX = baseWorldX;
+        m_greedyBaseY = baseWorldY;
+        m_greedyBaseZ = baseWorldZ;
+
+        // Defensive: drop any leftovers a previous build on this thread failed
+        // to flush, exactly as Greedy::ResetThreadState does for the solid
+        // grid — stale quads must never leak into this section's mesh.
+        if (FluidGreedy::t_touched.empty() && FluidGreedy::t_pending.empty()) return;
+        for (const FluidGreedy::PlaneRef& pr : FluidGreedy::t_touched) {
+            std::memset(FluidGreedy::t_grid[pr.kind][pr.plane], 0,
+                        sizeof(FluidGreedy::t_grid[0][0]));
+            FluidGreedy::t_planeTouched[pr.kind][pr.plane] = false;
+        }
+        FluidGreedy::t_touched.clear();
+        FluidGreedy::t_pending.clear();
+    }
+
+    bool FluidMeshBuilder::TryStashGreedyFluidQuad(int kind, Game::BlockID fluidType,
+                                                   const std::vector<Vertex>& verts,
+                                                   const glm::vec4& uvRect,
+                                                   int worldX, int worldY, int worldZ) {
+        if (!m_greedyEnabled || verts.size() != 4) return false;
+
+        // All four corner colors identical — same rule as terrain. The tint is
+        // applied uniformly per block today, so this only ever fails if a
+        // per-corner gradient (future smooth water tint, per-corner light) is
+        // introduced; the block then just stays per-quad, correctly.
+        const uint32_t color = verts[0].packedColor;
+        if (verts[1].packedColor != color ||
+            verts[2].packedColor != color ||
+            verts[3].packedColor != color) {
+            return false;
+        }
+
+        // Section-local cell. BuildFluidBlock only sees interior cells, but a
+        // mis-indexed write would corrupt another plane's merge — same cheap
+        // guard as TryStashGreedyQuad.
+        const int lx = worldX - m_greedyBaseX;
+        const int ly = worldY - m_greedyBaseY;
+        const int lz = worldZ - m_greedyBaseZ;
+        if (static_cast<unsigned>(lx) > 15u || static_cast<unsigned>(ly) > 15u ||
+            static_cast<unsigned>(lz) > 15u) {
+            return false;
+        }
+
+        int32_t& cell = FluidGreedy::t_grid[kind][ly][lz][lx];
+        if (cell != 0) return false;  // one fluid quad per cell per kind; defensive
+
+        FluidGreedy::t_pending.push_back({{verts[0], verts[1], verts[2], verts[3]},
+                                          uvRect, color, verts[0].pos.y,
+                                          IsTranslucentFluid(fluidType)});
+        cell = static_cast<int32_t>(FluidGreedy::t_pending.size());
+        if (!FluidGreedy::t_planeTouched[kind][ly]) {
+            FluidGreedy::t_planeTouched[kind][ly] = true;
+            FluidGreedy::t_touched.push_back({static_cast<uint8_t>(kind),
+                                              static_cast<uint8_t>(ly)});
+        }
+        return true;
+    }
+
+    void FluidMeshBuilder::FlushGreedyFluidQuads(SectionMesh& mesh, int& mergedQuads,
+                                                 int& cellsMerged, int& survivorQuads) {
+        using FluidGreedy::PendingQuad;
+        if (FluidGreedy::t_touched.empty()) return;
+
+        const bool debugColors = Mesher::GreedyDebugColors();
+
+        // Emit one merged plate: cells [u0, u0+w) x [v0, v0+h) of `plane`,
+        // where u = local x and v = local z. Corner positions are the exact
+        // values the outermost original quads carried — integer world x/z
+        // (exactly representable) and the stashed quad's own float y — so a
+        // plate never cracks against an unmerged neighbour. UVs are TILE-space
+        // section-local coordinates: for all three kinds the sprite's U axis
+        // runs along +X and its V axis along +Z (read off CreateFluidQuad /
+        // CreateFluidBottomFace corner by corner), so fract(local) reproduces
+        // exactly the per-block UV ramp the original quads had.
+        auto emitPlate = [&](int kind, int u0, int v0, int w, int h,
+                             const PendingQuad& q) {
+            std::vector<TerrainVertex>& outVerts =
+                q.translucent ? mesh.translucentVerts : mesh.opaqueVerts;
+            std::vector<uint16_t>& outIdxs =
+                q.translucent ? mesh.translucentIdxs : mesh.opaqueIdxs;
+            // Same 16-bit cap policy as GenerateQuad / EmitFluidQuad.
+            if (outVerts.size() + 4 > 65536) return;
+
+            const float x0 = static_cast<float>(m_greedyBaseX + u0);
+            const float x1 = static_cast<float>(m_greedyBaseX + u0 + w);
+            const float z0 = static_cast<float>(m_greedyBaseZ + v0);
+            const float z1 = static_cast<float>(m_greedyBaseZ + v0 + h);
+            const float tu0 = static_cast<float>(u0);
+            const float tu1 = static_cast<float>(u0 + w);
+            const float tv0 = static_cast<float>(v0);
+            const float tv1 = static_cast<float>(v0 + h);
+            const float y = q.y;
+
+            // Winding per kind, matching the single-quad emitters corner by
+            // corner (a 1x1 plate here is vertex-identical to the original
+            // apart from the tile rect). The facing lives in the VERTEX order,
+            // never the index order — the translucent re-sort rebuilds every
+            // quad's indices from the one forward template, so a plate whose
+            // facing rode in its indices would be re-wound and back-face
+            // culled, exactly like the backward-up face it replaces.
+            glm::vec3 pos[4];
+            glm::vec2 uv[4];
+            switch (kind) {
+                case FluidGreedy::kKindTopUp:    // NW, SW, SE, NE (CCW from above)
+                    pos[0] = {x0, y, z0}; uv[0] = {tu0, tv0};
+                    pos[1] = {x0, y, z1}; uv[1] = {tu0, tv1};
+                    pos[2] = {x1, y, z1}; uv[2] = {tu1, tv1};
+                    pos[3] = {x1, y, z0}; uv[3] = {tu1, tv0};
+                    break;
+                case FluidGreedy::kKindTopDown:  // the exact reverse walk
+                    pos[0] = {x1, y, z0}; uv[0] = {tu1, tv0};
+                    pos[1] = {x1, y, z1}; uv[1] = {tu1, tv1};
+                    pos[2] = {x0, y, z1}; uv[2] = {tu0, tv1};
+                    pos[3] = {x0, y, z0}; uv[3] = {tu0, tv0};
+                    break;
+                default:                         // kKindBottom: CW from above
+                    pos[0] = {x0, y, z1}; uv[0] = {tu0, tv1};
+                    pos[1] = {x0, y, z0}; uv[1] = {tu0, tv0};
+                    pos[2] = {x1, y, z0}; uv[2] = {tu1, tv0};
+                    pos[3] = {x1, y, z1}; uv[3] = {tu1, tv1};
+                    break;
+            }
+
+            // Sprite tile rect, unorm16-quantized exactly as the terrain
+            // emitMerged does (~0.03 texel worst case in a 4096px atlas).
+            const uint16_t originU = TerrainVertex::EncodeUnorm16(q.uvRect.x);
+            const uint16_t originV = TerrainVertex::EncodeUnorm16(q.uvRect.y);
+            const uint16_t sizeU   = TerrainVertex::EncodeUnorm16(q.uvRect.z - q.uvRect.x);
+            const uint16_t sizeV   = TerrainVertex::EncodeUnorm16(q.uvRect.w - q.uvRect.y);
+
+            const uint32_t quadColor =
+                debugColors ? Mesher::GreedyDebugHeatColor(w * h) : q.color;
+
+            const uint16_t base = static_cast<uint16_t>(outVerts.size());
+            for (int k = 0; k < 4; ++k) {
+                TerrainVertex tv;
+                tv.pos = pos[k];
+                tv.uv = uv[k];
+                tv.packedColor = quadColor;
+                tv.tileOriginU = originU;
+                tv.tileOriginV = originV;
+                tv.tileSizeU = sizeU;
+                tv.tileSizeV = sizeV;
+                outVerts.push_back(tv);
+            }
+            outIdxs.insert(outIdxs.end(), {
+                static_cast<uint16_t>(base + 0), static_cast<uint16_t>(base + 1),
+                static_cast<uint16_t>(base + 2),
+                static_cast<uint16_t>(base + 0), static_cast<uint16_t>(base + 2),
+                static_cast<uint16_t>(base + 3)
+            });
+        };
+
+        // A 1x1 survivor: the ORIGINAL quad verbatim (tile rect stays 0),
+        // bit-identical to the non-greedy build. Deliberately not routed
+        // through EmitFluidQuad — its debug path paints INELIGIBLE, and a
+        // survivor is eligible-but-unmerged, which the debug view shows as
+        // pure red (GreedyHeatColor(1)), same as terrain survivors.
+        auto emitSurvivor = [&](const PendingQuad& q) {
+            std::vector<TerrainVertex>& outVerts =
+                q.translucent ? mesh.translucentVerts : mesh.opaqueVerts;
+            std::vector<uint16_t>& outIdxs =
+                q.translucent ? mesh.translucentIdxs : mesh.opaqueIdxs;
+            if (outVerts.size() + 4 > 65536) return;
+            const uint16_t base = static_cast<uint16_t>(outVerts.size());
+            for (int k = 0; k < 4; ++k) {
+                TerrainVertex tv(q.verts[static_cast<size_t>(k)]);
+                if (debugColors) tv.packedColor = Mesher::GreedyDebugHeatColor(1);
+                outVerts.push_back(tv);
+            }
+            outIdxs.insert(outIdxs.end(), {
+                static_cast<uint16_t>(base + 0), static_cast<uint16_t>(base + 1),
+                static_cast<uint16_t>(base + 2),
+                static_cast<uint16_t>(base + 0), static_cast<uint16_t>(base + 2),
+                static_cast<uint16_t>(base + 3)
+            });
+        };
+
+        for (const FluidGreedy::PlaneRef& pr : FluidGreedy::t_touched) {
+            auto& grid = FluidGreedy::t_grid[pr.kind][pr.plane];
+            FluidGreedy::t_planeTouched[pr.kind][pr.plane] = false;
+
+            // Classic 2D greedy scan, identical structure to the solid flush.
+            // Cells match on the quad's full visual identity: surface height
+            // (float, computed identically per block so equality is exact),
+            // sprite rect, packed color, and output layer.
+            for (int v = 0; v < 16; ++v) {
+                for (int u = 0; u < 16; ++u) {
+                    const int32_t cellIdx = grid[v][u];
+                    if (cellIdx == 0) continue;
+                    const PendingQuad& q = FluidGreedy::t_pending[cellIdx - 1];
+
+                    auto matches = [&](int32_t other) {
+                        if (other == 0) return false;
+                        const PendingQuad& o = FluidGreedy::t_pending[other - 1];
+                        return o.color == q.color && o.uvRect == q.uvRect &&
+                               o.y == q.y && o.translucent == q.translucent;
+                    };
+
+                    int w = 1;
+                    while (u + w < 16 && matches(grid[v][u + w])) ++w;
+
+                    int h = 1;
+                    while (v + h < 16) {
+                        bool rowOk = true;
+                        for (int du = 0; du < w; ++du) {
+                            if (!matches(grid[v + h][u + du])) { rowOk = false; break; }
+                        }
+                        if (!rowOk) break;
+                        ++h;
+                    }
+
+                    if (w == 1 && h == 1) {
+                        grid[v][u] = 0;
+                        ++survivorQuads;
+                        emitSurvivor(q);
+                        continue;
+                    }
+
+                    for (int dv = 0; dv < h; ++dv)
+                        for (int du = 0; du < w; ++du)
+                            grid[v + dv][u + du] = 0;
+
+                    emitPlate(pr.kind, u, v, w, h, q);
+                    ++mergedQuads;
+                    cellsMerged += w * h;
+                }
+            }
+        }
+
+        FluidGreedy::t_touched.clear();
+        FluidGreedy::t_pending.clear();
     }
 
     bool FluidMeshBuilder::IsTranslucentFluid(Game::BlockID fluidType) {
@@ -76,14 +407,32 @@ namespace Render {
         if (verts.size() != 4) return false;
 
         const bool translucent = IsTranslucentFluid(fluidType);
-        std::vector<Vertex>&   outVerts = translucent ? mesh.translucentVerts : mesh.opaqueVerts;
-        std::vector<uint16_t>& outIdxs  = translucent ? mesh.translucentIdxs  : mesh.opaqueIdxs;
+        // Terrain buffers hold 32-byte TerrainVertex; the fluid builder's
+        // 24-byte Vertex quads convert on insert (tile rect = 0, i.e. plain
+        // atlas sampling). Only flat full-cell STILL tops/bottoms are greedy-
+        // merged, and those are stashed before reaching here (see
+        // BeginGreedySection / FlushGreedyFluidQuads); everything on this
+        // direct path — side faces, and any surface whose corner heights
+        // differ — stays per-block because its heights and UV sub-rects vary.
+        std::vector<TerrainVertex>& outVerts = translucent ? mesh.translucentVerts : mesh.opaqueVerts;
+        std::vector<uint16_t>&      outIdxs  = translucent ? mesh.translucentIdxs  : mesh.opaqueIdxs;
 
         // 16-bit index guard: section layer capped at 65,536 vertices.
         if (outVerts.size() + 4 > 65536) return false;
 
         const uint16_t base = static_cast<uint16_t>(outVerts.size());
         outVerts.insert(outVerts.end(), verts.begin(), verts.end());
+
+        // Debug view: a fluid quad on this path never entered a merge grid —
+        // it is rule-ineligible (or merging is off), so it takes the same dim
+        // blue-gray AddBlockFace paints its ineligible quads with. Survivors
+        // and merged plates are colored by the flush instead.
+        if (Mesher::GreedyDebugColors()) {
+            const uint32_t c = Mesher::GreedyDebugIneligibleColor();
+            for (size_t k = outVerts.size() - 4; k < outVerts.size(); ++k) {
+                outVerts[k].packedColor = c;
+            }
+        }
         outIdxs.insert(outIdxs.end(), {
             static_cast<uint16_t>(base + 0), static_cast<uint16_t>(base + 1),
             static_cast<uint16_t>(base + 2),
@@ -137,7 +486,8 @@ namespace Render {
         // Create top surface if exposed to air or different fluid
         if (ShouldRenderFluidFace(blocks, worldX, worldY, worldZ,
                                   BlockFace::PositiveY, fluidType, fluidHeight)) {
-            CreateFluidTopSurface(fluidType, worldPos, fluidHeight, flowDir, tint, outMesh,
+            CreateFluidTopSurface(fluidType, worldPos, worldX, worldY, worldZ,
+                                  fluidHeight, flowDir, tint, outMesh,
                                   ShouldRenderBackwardUpFace(blocks, worldX, worldY, worldZ, fluidType));
         }
 
@@ -154,7 +504,8 @@ namespace Render {
         }
 
         if (renderDown) {
-            CreateFluidBottomFace(fluidType, worldPos, bottomOffset, tint, outMesh);
+            CreateFluidBottomFace(fluidType, worldPos, worldX, worldY, worldZ,
+                                  bottomOffset, tint, outMesh);
         }
     }
 
@@ -206,6 +557,7 @@ namespace Render {
     }
 
     void FluidMeshBuilder::CreateFluidTopSurface(Game::BlockID fluidType, glm::vec3 blockPos,
+                                                int worldX, int worldY, int worldZ,
                                                 float height, FlowDirection flow,
                                                 const glm::vec4& tint, SectionMesh& mesh,
                                                 bool backwardUpFace) {
@@ -240,6 +592,28 @@ namespace Render {
 
         // Apply Minecraft directional face shading
         ApplyDirectionalShade(surfaceVerts, BlockFace::PositiveY);
+
+        // Still-fluid greedy routing: a flat, full-cell, canonically-mapped,
+        // uniformly-tinted top surface parks in the merge grid and is emitted
+        // by FlushGreedyFluidQuads — the ocean win. The geometric check is the
+        // eligibility rule: today even "flowing" tops are flat (per-corner
+        // heights don't exist yet, CreateSlopedSurface's lowHeight == height)
+        // and merge pixel-identically; the moment real corner heights arrive
+        // they fail the flatness check and drop back to per-block, no code
+        // change needed. The reverse-wound underside copy merges in its own
+        // plane family by the same rules.
+        if (m_greedyEnabled && IsCanonicalStillTopQuad(surfaceVerts, blockPos, uvRect) &&
+            TryStashGreedyFluidQuad(FluidGreedy::kKindTopUp, fluidType, surfaceVerts,
+                                    uvRect, worldX, worldY, worldZ)) {
+            if (backwardUpFace) {
+                const std::vector<Vertex> backVerts(surfaceVerts.rbegin(), surfaceVerts.rend());
+                if (!TryStashGreedyFluidQuad(FluidGreedy::kKindTopDown, fluidType, backVerts,
+                                             uvRect, worldX, worldY, worldZ)) {
+                    EmitFluidQuad(fluidType, backVerts, mesh);
+                }
+            }
+            return;
+        }
 
         if (!EmitFluidQuad(fluidType, surfaceVerts, mesh)) {
             return;
@@ -345,6 +719,7 @@ namespace Render {
     }
 
     void FluidMeshBuilder::CreateFluidBottomFace(Game::BlockID fluidType, glm::vec3 blockPos,
+                                                 int worldX, int worldY, int worldZ,
                                                  float bottomOffset, const glm::vec4& tint,
                                                  SectionMesh& mesh) {
 
@@ -365,6 +740,14 @@ namespace Render {
         faceVerts[3] = Vertex(blockPos + glm::vec3(1.0f, bottomOffset, 1.0f), normal, glm::vec2(uvRect.z, uvRect.w), tint);
 
         ApplyDirectionalShade(faceVerts, BlockFace::NegativeY);
+
+        // Always flat and full-cell by construction, so it merges by the same
+        // rules as the top surface — its own plane family, its own winding.
+        if (m_greedyEnabled && IsCanonicalStillBottomQuad(faceVerts, blockPos, uvRect) &&
+            TryStashGreedyFluidQuad(FluidGreedy::kKindBottom, fluidType, faceVerts,
+                                    uvRect, worldX, worldY, worldZ)) {
+            return;
+        }
         EmitFluidQuad(fluidType, faceVerts, mesh);
     }
 

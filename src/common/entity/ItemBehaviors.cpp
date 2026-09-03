@@ -99,8 +99,9 @@ namespace Game {
         // hanging_roots item).
         void PopResourceFromFace(ILevelWrite* world, const glm::ivec3& pos,
                                  int face, BlockID dropId) {
-            (void)world;
-            DropItemStackFromFace(pos, face, ItemStack(dropId, 1));
+            DropItemStackFromFace(world ? world->GetDimension()
+                                        : DimensionId::Overworld,
+                                  pos, face, ItemStack(dropId, 1));
         }
 
         // MC `level.isClientSide()` is `false` server-side. All our useOn
@@ -684,7 +685,8 @@ namespace Game {
             // :91-105 spawnMob. The peaceful-difficulty rule and the placement
             // slide live server-side with the mob managers; see
             // IntegratedServer::SpawnMobFromItemUse.
-            if (SpawnMobFromItem(type, spawnPos, /*tryMoveDown=*/true, movedUp)) {
+            if (SpawnMobFromItem(type, spawnPos, /*tryMoveDown=*/true, movedUp,
+                                 ctx.world->GetDimension())) {
                 // :101 itemStack.consume(1, user) — only on a successful spawn,
                 // so an egg rejected by difficulty is not eaten. Creative is
                 // restored by the dispatch's stack snapshot.
@@ -986,6 +988,36 @@ namespace Game {
             return UseResult::Success;
         }
 
+        // ── EnderPearl.use — mirrors EnderpearlItem.java ───────────────────
+        //
+        // Throw a ThrownEnderpearl from the player's rotation (power 1.5,
+        // inaccuracy 1.0) and spend one. The ENDER_PEARL_THROW sound is the
+        // stubbed sound system; the 1-second useCooldown from the item's
+        // properties waits on a cooldown system (noted in DispatchUseItem) —
+        // until then pearls can be thrown back-to-back.
+        UseResult Use_EnderPearl(ILevelWrite* world, IUsePlayer* player,
+                                 uint32_t /*hand*/, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+
+            // MC guards the spawn with `if (level instanceof ServerLevel)`
+            // and still returns success — the client swings and waits for
+            // the entity on the wire (same shape as the ender eye above).
+            if (world->IsClientSide()) return UseResult::Success;
+
+            if (!ThrowEnderPearl(player->getDimensionId(), *player)) {
+                return UseResult::Fail;
+            }
+
+            PlaySound("entity.ender_pearl.throw",
+                      glm::ivec3(glm::floor(player->getPosition())));
+            // MC itemStack.consume(1, player) — creative keeps the pearl.
+            if (!player->isCreative()) {
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+            }
+            return UseResult::Success;
+        }
+
         UseResult Use_EmptyBucket(ILevelWrite* world, IUsePlayer* player,
                                   uint32_t hand, ItemStack& stack) {
             if (!world || !player) return UseResult::Pass;
@@ -1246,6 +1278,7 @@ namespace Game {
             if (it != pureItems.end()) it->second.use = fn;
         };
         wireUse(Items::EnderEye,    &Use_EnderEye);
+        wireUse(Items::EnderPearl,  &Use_EnderPearl);
         wireUse(Items::Bucket,      &Use_EmptyBucket);
         wireUse(Items::WaterBucket, &Use_FilledBucket);
         wireUse(Items::LavaBucket,  &Use_FilledBucket);

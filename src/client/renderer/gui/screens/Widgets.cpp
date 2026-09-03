@@ -1,5 +1,6 @@
 // File: src/client/renderer/gui/screens/Widgets.cpp
 #include "Widgets.hpp"
+#include "client/input/Input.hpp"
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
 #include <GLFW/glfw3.h>
@@ -180,8 +181,25 @@ namespace Render {
         }
     }
 
-    bool EditBox::KeyPressed(int glfwKey, int) {
+    bool EditBox::KeyPressed(int glfwKey, int glfwMods) {
         if (!m_focused) return false;
+        // Cmd on a Mac, Ctrl elsewhere: paste, and copy the whole field
+        // (there is no selection to copy part of it).
+        const bool shortcut = (glfwMods & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER)) != 0;
+        if (shortcut && glfwKey == GLFW_KEY_V) {
+            std::string clip = Input::GetClipboardText();
+            // Text fields take printable ASCII, one line; anything else
+            // pasted is dropped rather than shown as garbage.
+            std::string clean;
+            clean.reserve(clip.size());
+            for (const unsigned char c : clip) if (c >= 32 && c <= 126) clean.push_back(static_cast<char>(c));
+            if (!clean.empty()) InsertText(clean);
+            return true;
+        }
+        if (shortcut && glfwKey == GLFW_KEY_C) {
+            if (!m_text.empty()) Input::SetClipboardText(m_text);
+            return true;
+        }
         switch (glfwKey) {
             case GLFW_KEY_BACKSPACE: DeleteChars(-1); return true;
             case GLFW_KEY_DELETE:    DeleteChars(+1); return true;

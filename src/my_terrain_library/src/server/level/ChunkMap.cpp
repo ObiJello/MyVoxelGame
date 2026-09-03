@@ -66,7 +66,14 @@ ChunkMap::ChunkMap(
     // pieces read blocks well outside the decorating chunk's 3x3, i.e. in
     // chunks another decoration task may be writing. Vanilla's single
     // worldgen lane is the invariant that makes those reads safe; keep it.
-    m_worldGenContext.featureClaims = nullptr;
+    // Parallel decoration under FeatureClaims is OPT-IN (OBEY_PARALLEL_FEATURES=1).
+    // Measured 2026-08-30 on an M4 (4P+6E): correct and crash-free with the
+    // distance rule, but the far-teleport view took 57-58 s vs 53 s serial —
+    // decoration moved off the lane's performance core onto default-QoS pool
+    // threads (efficiency cores) and the frontier serialised on claims
+    // (5,280 retries / 7,450 chunks). The serial lane is the better default here.
+    m_worldGenContext.featureClaims = std::getenv("OBEY_PARALLEL_FEATURES")
+        ? std::make_shared<world::chunk::status::FeatureClaims>() : nullptr;
     m_worldGenContext.unsavedListener = [this](int x, int z) {
         // Mark chunk as unsaved
         int64_t key = world::ChunkPos::asLong(x, z);

@@ -4,6 +4,7 @@
 // Sends an entire chunk's section data to the client. Each section is a
 // palletted container: blockCount + bitsPerEntry + (palette + dataArray).
 #pragma once
+#include <memory>
 
 #include "common/network/PacketRegistry.hpp"
 #include "common/world/math/WorldMath.hpp"   // SECTIONS_PER_CHUNK
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <algorithm>
 
+namespace Game { class Chunk; }
 namespace Network {
 
     struct ChunkDataS2CPacket {
@@ -22,6 +24,11 @@ namespace Network {
         // If true this is a full chunk load (the client throws away whatever
         // it had); otherwise an update to a chunk it already holds.
         bool groundUpContinuous = true;
+        uint64_t modStamp = 0;   // Chunk::modStamp at send time (retention cache key)
+        // Built on the network I/O thread right after decoding (see
+        // Client::ClientChunkManager::PrebuildChunk); the main thread adopts it
+        // with a pointer swap instead of unpacking 48 containers per chunk.
+        mutable std::shared_ptr<Game::Chunk> prebuilt;
 
         // NO SECTION BITMASK. MC removed `primaryBitMask` when it moved to
         // 3D biomes: ClientboundLevelChunkPacketData.extractChunkData:81 is
@@ -189,6 +196,7 @@ namespace Network {
             buffer.WriteInt(packet.chunkX);
             buffer.WriteInt(packet.chunkZ);
             buffer.WriteByte(packet.groundUpContinuous ? 1 : 0);
+            buffer.WriteLong(packet.modStamp);
 
             // Every section, ascending Y, positionally — MC
             // ClientboundLevelChunkPacketData.extractChunkData:81. No mask and
@@ -210,6 +218,7 @@ namespace Network {
             packet.chunkX = reader.ReadInt();
             packet.chunkZ = reader.ReadInt();
             packet.groundUpContinuous = reader.ReadByte() != 0;
+            packet.modStamp = reader.ReadLong();
 
             // Fixed count, from the shared constant rather than a literal —
             // the sender loops SECTIONS_PER_CHUNK, and with the mask gone the

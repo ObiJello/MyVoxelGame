@@ -20,6 +20,7 @@
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockPlacement.hpp"
+#include <limits>
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/block/entity/ChestBlockEntity.hpp"
@@ -29,6 +30,7 @@
 #include "common/world/level/World.hpp"
 #include "common/world/loot/LootTables.hpp"
 #include "../IntegratedServer.hpp"
+#include "../portal/ImmersivePortalRegistry.hpp"   // self-guarded by ENABLE_IMMERSIVE_PORTALS
 #include "common/inventory/AbstractContainerMenu.hpp"
 #include "common/inventory/ChestMenu.hpp"
 #include "common/inventory/CraftingMenu.hpp"
@@ -46,6 +48,7 @@
 #include "../portal/PortalRegistry.hpp"
 #endif
 #include "common/entity/Item.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/Inventory.hpp"
 #include <algorithm>
 #include <array>
@@ -129,8 +132,14 @@ namespace {
 namespace Server {
 
     ItemEntityManager* PlayerSession::ItemEntitiesOrNull() const {
+        // THIS session's dimension — GetItemEntities() is Overworld-pinned,
+        // which is how an item dropped in the End spawned (invisibly, a
+        // dimension away) in the Overworld.
         auto* server = g_integratedServer.get();
-        return server ? server->GetItemEntities() : nullptr;
+        if (!server) return nullptr;
+        ServerLevel* level =
+            server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+        return level ? level->Items() : nullptr;
     }
 
     PlayerSession::PlayerSession(uint32_t playerId, uint32_t connectionId)
@@ -153,8 +162,8 @@ namespace Server {
 
     void PlayerSession::Initialize(const Config& config, int dimensionId, const glm::vec3& spawnPos) {
         m_config = config;
-        m_simulationDistance = config.simulationDistance;
-        m_viewDistance = std::min(config.viewDistance, m_simulationDistance);
+        m_simulationDistance = std::clamp(config.simulationDistance, 2, 32);
+        m_viewDistance = std::clamp(config.viewDistance, 2, 32);
         
         // Calculate initial chunk position
         m_currentChunk = Game::Math::ChunkPos(
@@ -411,36 +420,30 @@ namespace Server {
                   m_playerId, m_lastKnownChunk.x, m_lastKnownChunk.z, newChunk.x, newChunk.z);
     }
 
-    void PlayerSession::ChangeDimension(int newDimensionId, const glm::vec3& targetPos) {
-        if (!m_player) return;
-        
-        if (m_player->getDimensionId() == newDimensionId) {
-            return;
-        }
-        
-        Log::Info("PlayerSession: Player %u changing dimension from %d to %d", 
-                 m_playerId, m_player->getDimensionId(), newDimensionId);
-        
+    void PlayerSession::ChangeDimension(int newDimensionId, const glm::vec3& targetPos,
+                                        bool keepPrevious) {
+        if (m_player && m_player->getDimensionId() == newDimensionId) return;
+        const int previousRaw = m_player ? m_player->getDimensionId() : 0;
+        const Game::DimensionId previous = Game::DimensionFromRaw(previousRaw);
+        const Game::DimensionId dim      = Game::DimensionFromRaw(newDimensionId);
+
         m_isChangingDimension = true;
 
-        // ONE barrier packet, not one unload per tracked chunk.
-        //
-        // The old shape sent an UnloadChunk for every chunk in the tracking
-        // view. At view distance 32 that is over four thousand packets in a
-        // single tick, against an incoming queue that holds 2048 and DROPS the
-        // overflow — so the tail of the unloads, and then the head of the new
-        // dimension's chunk data, would simply vanish. ChangeDimensionS2C
-        // tells the client to throw the whole level away in one message, which
-        // is both cheaper and the only version that cannot half-apply.
+        // One barrier packet, not one unload per chunk. The client holds a
+        // level per dimension (ClientLevel): this switches its active level
+        // and, unless keepPrevious, frees the one being left. At view
+        // distance 32 that is ~3,000 chunks in a single message rather than a
+        // packet each, which is what overflowed the old inbound queue.
         if (m_connection) {
-            const Game::DimensionId dim = Game::DimensionFromRaw(newDimensionId);
             Network::ChangeDimensionS2CPacket packet;
             packet.dimensionId  = static_cast<int8_t>(Game::DimensionToRaw(dim));
             packet.flags = static_cast<uint8_t>(
                 (Game::DimensionHasSkyLight(dim)
                      ? Network::ChangeDimensionS2CPacket::kFlagHasSkyLight : 0) |
                 (Game::DimensionHasCeiling(dim)
-                     ? Network::ChangeDimensionS2CPacket::kFlagHasCeiling : 0));
+                     ? Network::ChangeDimensionS2CPacket::kFlagHasCeiling : 0) |
+                (keepPrevious
+                     ? Network::ChangeDimensionS2CPacket::kFlagKeepPrevious : 0));
             // MC DimensionTypes.java: the Nether's ambient light is 0.1, and
             // everywhere else it is 0.
             packet.ambientLight = (dim == Game::DimensionId::Nether) ? 0.1f : 0.0f;
@@ -450,32 +453,65 @@ namespace Server {
             m_connection->SendPacket(
                 static_cast<uint8_t>(Network::PacketId::ChangeDimensionS2C),
                 Network::Serialization::Serialize(packet));
+            // The client's stream scope is now the new dimension.
+            m_connection->SetOutboundDimension(dim);
         }
 
-        // Clear all watch sets. The tracking view must become genuinely EMPTY
-        // rather than merely stale: ProcessWatchSetChanges diffs the new view
-        // against this one, and a leftover view would make it believe the
-        // player already has chunks that were just thrown away.
-        ClearWatchSets();
+        if (!keepPrevious) {
+            // The client freed the previous level wholesale, so the server's
+            // record of what that level held must go the same way — silently,
+            // or the next tracking diff would send an unload for every chunk
+            // of a level that no longer exists.
+            ForgetDimensionSilently(previous);
+        }
+        // Any loader still covering the previous dimension (a portal at the
+        // arrival point looking back) is re-evaluated by the next
+        // UpdateChunkTracking from the new position.
         ClearQueues();
         ClearDiffs();
-        m_trackingView = ChunkTrackingView::Empty();
-        m_sentChunks.clear();
 
-        // Update player dimension and position
-        m_player->setDimensionId(newDimensionId);
-        m_player->teleport(glm::dvec3(targetPos));
+        if (m_player) {
+            m_player->setDimensionId(newDimensionId);
+            m_player->teleport(glm::dvec3(targetPos));
+            m_currentChunk = m_player->getChunkPosition();
+            m_anchorChunk  = m_currentChunk;
+        }
 
-        m_currentChunk = m_player->getChunkPosition();
-        m_anchorChunk = m_currentChunk;
-
-        // Back to waiting for a level, so the loading screen stays up until
-        // the destination's chunks are actually there. Mirrors the respawn
-        // path, which has exactly the same problem.
-        RestartClientLoadTimerAfterRespawn();
-
-        // Recompute watch set for new dimension
+        // A hard change shows the loading screen until the new level's chunks
+        // arrive (MC's respawn path). A seamless crossing does not: the far
+        // side was already streamed in through the portal.
+        if (!keepPrevious) RestartClientLoadTimerAfterRespawn();
         m_isChangingDimension = false;
+    }
+
+#if ENABLE_IMMERSIVE_PORTALS
+    void PlayerSession::HandlePortalTeleport(const Network::PortalTeleportC2SPacket& packet) {
+        ASSERT_SERVER_THREAD();
+        if (!HasClientLoaded()) return;
+        if (m_player && m_player->isDead()) return;
+        if (g_integratedServer) g_integratedServer->OnClientPortalTeleport(*this, packet);
+    }
+#endif
+
+    void PlayerSession::ResyncChunkPosition() {
+        if (m_player) UpdateChunkPosition(m_player->getChunkPosition());
+    }
+
+    void PlayerSession::SendDimensionResync() {
+        if (!m_connection || !m_player) return;
+        const Game::DimensionId dim = Game::DimensionFromRaw(m_player->getDimensionId());
+        Network::ChangeDimensionS2CPacket packet;
+        packet.dimensionId  = static_cast<int8_t>(Game::DimensionToRaw(dim));
+        packet.flags = static_cast<uint8_t>(
+            (Game::DimensionHasSkyLight(dim) ? Network::ChangeDimensionS2CPacket::kFlagHasSkyLight : 0) |
+            (Game::DimensionHasCeiling(dim)  ? Network::ChangeDimensionS2CPacket::kFlagHasCeiling  : 0) |
+            Network::ChangeDimensionS2CPacket::kFlagKeepPrevious);
+        packet.ambientLight = (dim == Game::DimensionId::Nether) ? 0.1f : 0.0f;
+        packet.minY   = Game::DimensionMinY(dim);
+        packet.height = Game::DimensionLogicalHeight(dim);
+        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChangeDimensionS2C),
+                                 Network::Serialization::Serialize(packet));
+        m_connection->SetOutboundDimension(dim);
     }
 
     void PlayerSession::Respawn(const glm::vec3& spawnPos) {
@@ -514,10 +550,15 @@ namespace Server {
             return;
         }
         
-        // Clamp to valid range and simulation distance
-        m_viewDistance = std::clamp(distance, 2, std::min(32, m_simulationDistance));
-        
-        Log::Info("PlayerSession: Player %u view distance changed to %d", 
+        // MC ChunkMap.setServerViewDistance / PlayerList.setViewDistance:
+        // clamped to the protocol range only. This used to be capped at the
+        // simulation distance as well, which is why the session manager had
+        // to set every player's simulation distance to the server's view
+        // cap (32) just to let them SEE 32 chunks — and so the server ticked
+        // a 65x65-chunk area for everyone, whatever their settings said.
+        m_viewDistance = std::clamp(distance, 2, 32);
+
+        Log::Info("PlayerSession: Player %u view distance changed to %d",
                  m_playerId, m_viewDistance);
     }
 
@@ -525,102 +566,204 @@ namespace Server {
         if (distance == m_simulationDistance) {
             return;
         }
-        
+
+        // Independent of the view distance (see Config). The ticket manager
+        // reads this on the next session tick (PlayerSessionManager::
+        // UpdatePlayerTickets) and re-levels the player's ticket in place.
         m_simulationDistance = std::clamp(distance, 2, 32);
-        
-        // Ensure view distance doesn't exceed simulation distance
-        if (m_viewDistance > m_simulationDistance) {
-            m_viewDistance = m_simulationDistance;
-        }
-        
-        
-        Log::Info("PlayerSession: Player %u simulation distance changed to %d", 
+
+        Log::Info("PlayerSession: Player %u simulation distance changed to %d",
                  m_playerId, m_simulationDistance);
     }
 
-    // === CHUNK TRACKING (MC ChunkMap.updateChunkTracking) ===
+    // === CHUNK TRACKING (MC ChunkMap.updateChunkTracking, per loader) ===
 
     void PlayerSession::UpdateChunkTracking(
-        const std::function<void(Game::Math::ChunkPos)>& onEnter,
-        const std::function<void(Game::Math::ChunkPos)>& onLeave) {
+        std::vector<ChunkLoader> loaders,
+        const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onEnter,
+        const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onLeave) {
         PROFILE_ZONE;
 
-        const ChunkTrackingView next =
-            ChunkTrackingView::Of(m_anchorChunk, m_viewDistance);
+        // MC ChunkMap.updateChunkTracking's early-out: same loaders means the
+        // tracked set is identical, so there is nothing to diff. This runs
+        // every tick for every session, and this branch is what makes that
+        // free — a player moving within one chunk does no work.
+        bool same = loaders.size() == m_loaders.size();
+        for (size_t i = 0; same && i < loaders.size(); ++i) {
+            same = loaders[i].SameAs(m_loaders[i]);
+        }
+        if (same) return;
 
-        // MC ChunkMap.updateChunkTracking's early-out: same centre and same
-        // view distance means the tracked set is identical, so there is nothing
-        // to diff. This runs every tick for every session, and this branch is
-        // what makes that free — a player moving within one chunk does no work.
-        if (m_trackingView.SameAs(next)) {
-            return;
+        std::unordered_set<DimChunkKey, DimChunkKeyHash> next;
+        for (const ChunkLoader& loader : loaders) {
+            loader.view.ForEach([&](Game::Math::ChunkPos pos) {
+                next.insert(DimChunkKey::Of(loader.dimension, pos));
+            });
         }
 
+        // The callbacks run while m_watched is still the PREVIOUS set (MC
+        // applyChunkTrackingView assigns the new view after difference()
+        // too) — see MarkChunkPendingToSend for why that matters.
         int entered = 0, left = 0;
-        ChunkTrackingView::Difference(
-            m_trackingView, next,
-            [&](Game::Math::ChunkPos pos) { ++entered; onEnter(pos); },
-            [&](Game::Math::ChunkPos pos) { ++left;    onLeave(pos); });
+        for (const DimChunkKey& key : next) {
+            if (m_watched.count(key)) continue;
+            ++entered;
+            onEnter(key.Dimension(), key.Pos());
+        }
+        for (const DimChunkKey& key : m_watched) {
+            if (next.count(key)) continue;
+            ++left;
+            onLeave(key.Dimension(), key.Pos());
+        }
 
-        m_trackingView = next;
+        m_watched = std::move(next);
+        m_loaders = std::move(loaders);
 
-        Log::Info("UpdateChunkTracking: player %u centre=(%d,%d) viewDist=%d entered=%d left=%d",
-                  m_playerId, m_anchorChunk.x, m_anchorChunk.z, m_viewDistance, entered, left);
+        Log::Info("UpdateChunkTracking: player %u loaders=%zu watched=%zu entered=%d left=%d",
+                  m_playerId, m_loaders.size(), m_watched.size(), entered, left);
 
         {
             std::lock_guard<std::mutex> lock(m_statsMutex);
-            m_stats.chunksInWatch = m_sentChunks.size() + m_pendingChunksToSend.size();
-            m_stats.chunksPending = m_pendingChunksToSend.size();
+            m_stats.chunksInWatch = GetSentChunkCount() + GetPendingChunksToSendCount();
+            m_stats.chunksPending = GetPendingChunksToSendCount();
         }
     }
 
-    bool PlayerSession::IsWatching(Game::Math::ChunkPos chunk) const {
-        return m_trackingView.Contains(chunk);
+    bool PlayerSession::IsWatching(Game::DimensionId dimension, Game::Math::ChunkPos chunk) const {
+        return m_watched.count(DimChunkKey::Of(dimension, chunk)) > 0;
     }
 
-    bool PlayerSession::HasSentChunk(Game::Math::ChunkPos chunk) const {
-        return m_sentChunks.count(chunk) > 0;
+    bool PlayerSession::HasSentChunk(Game::DimensionId dimension, Game::Math::ChunkPos chunk) const {
+        return Dim(dimension).sent.count(chunk) > 0;
+    }
+
+    size_t PlayerSession::GetSentChunkCount() const {
+        size_t n = 0;
+        for (const auto& st : m_dimState) n += st.sent.size();
+        return n;
+    }
+
+    size_t PlayerSession::GetPendingChunksToSendCount() const {
+        size_t n = 0;
+        for (const auto& st : m_dimState) n += st.pending.size();
+        return n;
+    }
+
+    bool PlayerSession::LoadsDimension(Game::DimensionId dimension) const {
+        if (Game::DimensionFromRaw(GetDimensionId()) == dimension) return true;
+        for (const ChunkLoader& loader : m_loaders) {
+            if (loader.dimension == dimension) return true;
+        }
+        return false;
+    }
+
+    int PlayerSession::DistanceSqToNearestLoader(Game::DimensionId dimension,
+                                                 Game::Math::ChunkPos pos) const {
+        int best = INT32_MAX;
+        for (const ChunkLoader& loader : m_loaders) {
+            if (loader.dimension != dimension) continue;
+            const int dx = pos.x - loader.view.center.x;
+            const int dz = pos.z - loader.view.center.z;
+            best = std::min(best, dx * dx + dz * dz);
+        }
+        if (best == INT32_MAX) {
+            const int dx = pos.x - m_anchorChunk.x;
+            const int dz = pos.z - m_anchorChunk.z;
+            best = dx * dx + dz * dz;
+        }
+        return best;
+    }
+
+    void PlayerSession::ForgetDimensionSilently(Game::DimensionId dimension) {
+        m_globalPortalsSynced.erase(dimension);
+        DimensionSendState& st = Dim(dimension);
+        st.sent.clear();
+        st.pending.clear();
+        st.clientStamps.clear();
+        for (auto it = m_watched.begin(); it != m_watched.end();) {
+            it = (it->Dimension() == dimension) ? m_watched.erase(it) : std::next(it);
+        }
+        m_loaders.erase(std::remove_if(m_loaders.begin(), m_loaders.end(),
+                                       [&](const ChunkLoader& l) { return l.dimension == dimension; }),
+                        m_loaders.end());
     }
 
     // === CHUNK SENDER (Minecraft's PlayerChunkSender) ===
 
-    void PlayerSession::MarkChunkPendingToSend(Game::Math::ChunkPos pos) {
+    void PlayerSession::MarkChunkPendingToSend(Game::DimensionId dimension, Game::Math::ChunkPos pos) {
         // Queue unconditionally, exactly like MC
         // PlayerChunkSender.markChunkPendingToSend, which is a bare
         // `pendingChunks.add(chunk.getPos().toLong())`.
         //
-        // There must be NO tracking-view test here. Both callers have already
+        // There must be NO tracking test here. Both callers have already
         // established membership, and one of them cannot pass such a test:
-        // UpdateChunkTracking runs the enter callbacks while m_trackingView is
-        // still the PREVIOUS view (MC applyChunkTrackingView assigns the new
+        // UpdateChunkTracking runs the enter callbacks while m_watched is
+        // still the PREVIOUS set (MC applyChunkTrackingView assigns the new
         // view after difference() too), so a chunk that just entered is by
-        // definition absent from it. A Contains() guard here therefore drops
-        // every already-loaded chunk at the moment it comes into view — which
-        // meant the spawn chunk, generated before the player joined, was never
+        // definition absent from it. A guard here therefore drops every
+        // already-loaded chunk at the moment it comes into view — which meant
+        // the spawn chunk, generated before the player joined, was never
         // sent, and the client then ran its occlusion BFS from a camera chunk
         // it did not have.
         //
         // The push path does the test at its own call site
-        // (PlayerSessionManager::ForEachSessionWatching), where the view is
+        // (PlayerSessionManager::ForEachSessionWatching), where the set is
         // current, and SendNextChunks re-checks before sending — so a chunk
         // queued and then walked away from is still dropped correctly.
-        m_pendingChunksToSend.insert(pos);
+        Dim(dimension).pending.insert(pos);
     }
 
-    void PlayerSession::DropChunk(Game::Math::ChunkPos pos) {
-        if (!m_pendingChunksToSend.erase(pos)) {
+    void PlayerSession::DropChunk(Game::DimensionId dimension, Game::Math::ChunkPos pos) {
+        DimensionSendState& st = Dim(dimension);
+        if (!st.pending.erase(pos)) {
             // Wasn't pending to send — if already sent, send unload to client
-            if (m_sentChunks.erase(pos)) {
-                SendChunkUnload(pos);
+            if (st.sent.erase(pos)) {
+                SendChunkUnload(dimension, pos);
             }
         }
     }
 
-    void PlayerSession::SendNextChunks(Game::World* world,
-                                       std::vector<Game::Math::ChunkPos>* outNotResident) {
-        if (!world || !m_connection) return;
-        if (m_pendingChunksToSend.empty()) return;
+    void PlayerSession::SendNextChunks(const std::function<Game::World*(Game::DimensionId)>& worldFor,
+                                       std::vector<PendingChunkRef>* outNotResident) {
+        if (!m_connection) return;
+        bool anyPending = false;
+        for (const auto& st : m_dimState) if (!st.pending.empty()) { anyPending = true; break; }
+        if (!anyPending) return;
         PROFILE_ZONE_N("SendNextChunks");
+
+        // Retained-on-client chunks go out immediately, outside the batch
+        // quota: a ChunkUnchangedS2C is 20 bytes and the client's work for it
+        // is a pointer swap, so pacing them like 20 KB chunk payloads would
+        // only delay an instant revisit. Capped per tick for sanity.
+        {
+            size_t sentUnchanged = 0;
+            for (int slot = 0; slot < Game::kDimensionCount && sentUnchanged < 4096; ++slot) {
+                DimensionSendState& st = m_dimState[slot];
+                if (st.pending.empty()) continue;
+                const Game::DimensionId dim = Game::DimensionFromSlot(slot);
+                Game::World* world = worldFor(dim);
+                if (!world) continue;
+                for (auto it = st.pending.begin(); it != st.pending.end() && sentUnchanged < 4096; ) {
+                    const Game::Math::ChunkPos pos = *it;
+                    auto known = st.clientStamps.find(pos);
+                    if (known == st.clientStamps.end() || !IsWatching(dim, pos)) { ++it; continue; }
+                    auto chunk = world->GetLoadedChunk(pos.x, pos.z);
+                    if (!chunk || chunk->ModStamp() != known->second) { ++it; continue; }
+                    Network::ChunkUnchangedS2CPacket unchanged;
+                    unchanged.chunkX = pos.x; unchanged.chunkZ = pos.z; unchanged.modStamp = known->second;
+                    m_connection->SendPacketIn(dim,
+                                               static_cast<uint8_t>(Network::PacketId::ChunkUnchangedS2C),
+                                               Network::Serialization::Serialize(unchanged));
+                    st.sent.insert(pos);
+                    if (g_integratedServer) g_integratedServer->OnChunkSentToClient(*this, dim, pos);
+                    ++m_unchangedSent; ++sentUnchanged;
+                    it = st.pending.erase(it);
+                }
+            }
+            anyPending = false;
+            for (const auto& st : m_dimState) if (!st.pending.empty()) { anyPending = true; break; }
+            if (!anyPending) return;
+        }
 
         // Back-pressure: don't send if too many unacknowledged batches
         if (m_unackedBatches >= m_maxUnackedBatches) return;
@@ -633,49 +776,53 @@ namespace Server {
 
         int maxBatch = static_cast<int>(m_batchQuota);
 
-        // Collect loaded chunks, sorted by distance from anchor
+        // Collect loaded chunks from EVERY dimension, sorted by distance from
+        // the loader that wants them — nearest first across all worlds, as
+        // the mod's PlayerChunkLoading does.
         struct ChunkDist {
+            Game::DimensionId dimension;
             Game::Math::ChunkPos pos;
             std::shared_ptr<Game::Chunk> chunk;
             int distSq;
         };
         std::vector<ChunkDist> candidates;
-        candidates.reserve(m_pendingChunksToSend.size());
+        candidates.reserve(GetPendingChunksToSendCount());
 
-        // Also collect chunks to remove from pending if they left the view
-        std::vector<Game::Math::ChunkPos> staleChunks;
+        for (int slot = 0; slot < Game::kDimensionCount; ++slot) {
+            DimensionSendState& st = m_dimState[slot];
+            if (st.pending.empty()) continue;
+            const Game::DimensionId dim = Game::DimensionFromSlot(slot);
+            Game::World* world = worldFor(dim);
 
-        for (const auto& pos : m_pendingChunksToSend) {
-            // Skip chunks no longer tracked (queued, then the player walked away)
-            if (!m_trackingView.Contains(pos)) {
-                staleChunks.push_back(pos);
-                continue;
+            // Also collect chunks to remove from pending if they left the view
+            std::vector<Game::Math::ChunkPos> staleChunks;
+            for (const auto& pos : st.pending) {
+                // Skip chunks no longer tracked (queued, then the player walked away)
+                if (!IsWatching(dim, pos)) {
+                    staleChunks.push_back(pos);
+                    continue;
+                }
+                // Cache-only. This chunk was queued because it WAS loaded, but
+                // it can have been evicted since — and the blocking GetChunk
+                // would then regenerate it here, on the server thread, inside
+                // the send loop. Skipping is what "picked up later" means.
+                auto chunk = world ? world->GetLoadedChunk(pos.x, pos.z) : nullptr;
+                if (!chunk) {
+                    // Evicted between "ready" and "sent" (or its level is not
+                    // built yet). Nothing reloads a chunk that is already
+                    // watched, so hand it back to the caller to request again
+                    // instead of waiting here forever.
+                    staleChunks.push_back(pos);
+                    if (outNotResident) outNotResident->push_back(PendingChunkRef{dim, pos});
+                    continue;
+                }
+                candidates.push_back({dim, pos, chunk, DistanceSqToNearestLoader(dim, pos)});
             }
-
-            // Cache-only. This chunk was queued because it WAS loaded, but it
-            // can have been evicted since — and the blocking GetChunk would
-            // then regenerate it here, on the server thread, inside the send
-            // loop. Skipping is what the "picked up later" below always meant.
-            auto chunk = world->GetLoadedChunk(pos.x, pos.z);
-            if (!chunk) {
-                // Evicted between "ready" and "sent". Nothing reloads a chunk
-                // that is already in the tracking view, so hand it back to the
-                // caller to request again instead of waiting here forever.
-                staleChunks.push_back(pos);
-                if (outNotResident) outNotResident->push_back(pos);
-                continue;
+            for (const auto& pos : staleChunks) {
+                st.pending.erase(pos);
+                Log::Debug("SendNextChunks: removed stale chunk (%d, %d) from pending (no longer watched)",
+                          pos.x, pos.z);
             }
-
-            int dx = pos.x - m_anchorChunk.x;
-            int dz = pos.z - m_anchorChunk.z;
-            candidates.push_back({pos, chunk, dx * dx + dz * dz});
-        }
-
-        // Remove stale chunks from pending set
-        for (const auto& pos : staleChunks) {
-            m_pendingChunksToSend.erase(pos);
-            Log::Debug("SendNextChunks: removed stale chunk (%d, %d) from pending (no longer watched)",
-                      pos.x, pos.z);
         }
 
         if (candidates.empty()) return;
@@ -699,13 +846,35 @@ namespace Server {
         size_t sentCount = 0;
         for (size_t i = 0; i < toSend; ++i) {
             const auto& cd = candidates[i];
+            DimensionSendState& st = Dim(cd.dimension);
             PROFILE_ZONE_N("SerializeChunk");
+
+            // Retained on the client and unchanged since -> 20-byte packet.
+            {
+                const uint64_t stamp = cd.chunk->ModStamp();
+                auto known = st.clientStamps.find(cd.pos);
+                if (known != st.clientStamps.end() && known->second == stamp) {
+                    Network::ChunkUnchangedS2CPacket unchanged;
+                    unchanged.chunkX = cd.pos.x; unchanged.chunkZ = cd.pos.z; unchanged.modStamp = stamp;
+                    m_connection->SendPacketIn(cd.dimension,
+                                               static_cast<uint8_t>(Network::PacketId::ChunkUnchangedS2C),
+                                               Network::Serialization::Serialize(unchanged));
+                    st.pending.erase(cd.pos);
+                    st.sent.insert(cd.pos);
+                    if (g_integratedServer) g_integratedServer->OnChunkSentToClient(*this, cd.dimension, cd.pos);
+                    sentCount++;
+                    ++m_unchangedSent;
+                    continue;
+                }
+                st.clientStamps[cd.pos] = stamp;
+            }
 
             // Build ChunkDataS2CPacket
             Network::ChunkDataS2CPacket packet;
             packet.chunkX = cd.pos.x;
             packet.chunkZ = cd.pos.z;
             packet.groundUpContinuous = true;
+            packet.modStamp = cd.chunk->ModStamp();
             packet.sections.reserve(Game::Math::SECTIONS_PER_CHUNK);
 
             // MC ClientboundLevelChunkPacketData.extractChunkData:
@@ -779,14 +948,38 @@ namespace Server {
             // keeps them — not as a flat per-chunk array.
 
             auto data = Network::Serialization::Serialize(packet);
-            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data);
+            m_connection->SendPacketIn(cd.dimension,
+                                       static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data);
+
+            // The chunk's block entities follow it (MC carries them inside
+            // ClientboundLevelChunkWithLightPacket). Without this a chest
+            // only ever reached a client that watched it being placed: a
+            // chunk streamed in — a rejoin, a walk back — had the chest
+            // block and nothing to draw or open in it.
+            for (const auto& [localPos, be] : cd.chunk->GetAllBlockEntities()) {
+                if (!be || !be->GetType()) continue;
+                const glm::ivec3 world = be->GetWorldPos();
+                Network::BlockEntityDataS2CPacket bePacket(world.x, world.y, world.z,
+                                                           be->GetType()->TypeId());
+                Network::PacketBuffer scratch;
+                be->Save(scratch);
+                bePacket.dataBlob = scratch.GetData();
+                m_connection->SendPacketIn(cd.dimension,
+                                           static_cast<uint8_t>(Network::PacketId::BlockEntityDataS2C),
+                                           Network::Serialization::Serialize(bePacket));
+            }
 
             // Move from pending to sent
-            m_pendingChunksToSend.erase(cd.pos);
-            m_sentChunks.insert(cd.pos);
+            st.pending.erase(cd.pos);
+            st.sent.insert(cd.pos);
+            // Portals (and, later, anything else anchored in the chunk) ride
+            // right behind the terrain so the client never holds one without
+            // the blocks it sits in.
+            if (g_integratedServer) g_integratedServer->OnChunkSentToClient(*this, cd.dimension, cd.pos);
             sentCount++;
 
-            Log::Debug("Sent chunk (%d, %d) to player %u", cd.pos.x, cd.pos.z, m_playerId);
+            Log::Debug("Sent chunk (%d, %d) [%s] to player %u", cd.pos.x, cd.pos.z,
+                       std::string(Game::DimensionName(cd.dimension)).c_str(), m_playerId);
         }
 
         // Send ChunkBatchFinishedS2C
@@ -803,6 +996,17 @@ namespace Server {
                   sentCount, m_batchQuota, m_unackedBatches, m_desiredChunksPerTick, m_playerId);
     }
 
+    void PlayerSession::OnChunkRequestFull(Game::DimensionId dimension, Game::Math::ChunkPos pos) {
+        // The client evicted its retained copy: forget the stamp so the next
+        // send is a full ChunkDataS2C, and queue it again if still in view.
+        DimensionSendState& st = Dim(dimension);
+        st.clientStamps.erase(pos);
+        if (IsWatching(dimension, pos)) {
+            st.sent.erase(pos);
+            st.pending.insert(pos);
+        }
+    }
+
     void PlayerSession::OnChunkBatchAck(float desiredRate) {
         m_unackedBatches--;
         m_desiredChunksPerTick = std::isnan(desiredRate) ? 0.01f : std::clamp(desiredRate, 0.01f, 256.0f);   // matches the client clamp (was vanilla's 64)
@@ -813,27 +1017,28 @@ namespace Server {
                   m_desiredChunksPerTick, m_unackedBatches, m_maxUnackedBatches, m_playerId);
     }
 
-    void PlayerSession::SendChunkUnload(Game::Math::ChunkPos chunk) {
+    void PlayerSession::SendChunkUnload(Game::DimensionId dimension, Game::Math::ChunkPos chunk) {
         // Send UnloadChunkS2CPacket directly through the connection
         // (SendScheduler's sendCallback is not implemented, so bypass it)
         if (m_connection) {
             Network::UnloadChunkS2CPacket packet(chunk.x, chunk.z);
             auto data = Network::Serialization::Serialize(packet);
-            m_connection->SendPacket(
+            m_connection->SendPacketIn(dimension,
                 static_cast<uint8_t>(Network::PacketId::UnloadChunkS2C), data);
         }
 
-        // Remove from sets. Not from the tracking view — that is a function of
-        // position and view distance, and unloading a chunk changes neither.
+        // Remove from sets. Not from the watched set — that is a function of
+        // the loaders, and unloading a chunk changes none of them.
         // (MC's dropChunk likewise only touches the sender's queues.)
-        m_sentChunks.erase(chunk);
-        m_pendingChunksToSend.erase(chunk);
+        DimensionSendState& st = Dim(dimension);
+        st.sent.erase(chunk);
+        st.pending.erase(chunk);
 
         // Clear any pending diffs for this chunk
         m_pendingDiffs.erase(chunk);
-        
-        Log::Debug("UNLOAD SENT: chunk (%d, %d) to player %u",
-                  chunk.x, chunk.z, m_playerId);
+
+        Log::Debug("UNLOAD SENT: chunk (%d, %d) [%s] to player %u",
+                  chunk.x, chunk.z, std::string(Game::DimensionName(dimension)).c_str(), m_playerId);
     }
 
     // === BLOCK UPDATES ===
@@ -981,6 +1186,14 @@ namespace Server {
         // being well-behaved.
         if (!HasClientLoaded()) return;
 
+        // A move stamped with another dimension was produced before the
+        // client learned of (or predicted) a dimension change; its
+        // coordinates belong to the other world.
+        if (m_player && packet.dimensionId != Network::PlayerMoveC2SPacket::kDimensionUnknown &&
+            packet.dimensionId != m_player->getDimensionId()) {
+            return;
+        }
+
         const bool awaitingTeleport =
             m_connection && m_connection->UpdateAwaitingTeleport();
 
@@ -1047,7 +1260,10 @@ namespace Server {
         //    Sanity clamp: terminal-velocity falls in a 384-block world
         //    can't meaningfully exceed ~512 blocks.
         if (packet.fallDistance > 0.0f && !p.isFlying() && !inWater) {
-            const float fd = std::min(packet.fallDistance, 512.0f);
+            // In body heights, not blocks: a player half the size falls
+            // twice as far relative to themselves (the scaled portal's
+            // "the world is just bigger" rule, see ApplyGravity).
+            const float fd = std::min(packet.fallDistance, 512.0f) / std::max(p.getScale(), 0.05f);
             const int dmg = static_cast<int>(std::floor(fd + 1.0e-6f - 3.0f));
             if (dmg > 0) {
                 p.damage(static_cast<float>(dmg), DamageSource::FALL);
@@ -1141,12 +1357,24 @@ namespace Server {
         }
 
         switch (packet.action) {
-            // MC's START_DESTROY / ABORT_DESTROY are purely informational
-            // (the server doesn't track per-player mining progress for
-            // single-player; the client is authoritative on timing).
-            // Treat them as no-ops for now — could be wired into anti-cheat /
-            // per-player "currently mining" state later.
-            case Network::BlockActionType::START_DESTROY:
+            // MC's START_DESTROY / ABORT_DESTROY are purely informational for
+            // mining progress (the client is authoritative on timing) — but
+            // START is also where MC fires BlockBehaviour.attack, the block's
+            // reaction to being punched. ServerPlayerGameMode only attacks in
+            // survival; a creative press instabreaks without ever attacking.
+            case Network::BlockActionType::START_DESTROY: {
+                if (m_player->isCreative()) break;
+                const glm::ivec3 pos(packet.worldX, packet.worldY, packet.worldZ);
+                glm::vec3 eye;
+                InteractionScope scope;
+                Game::World* world = InteractionWorld(packet.dimensionId, pos, eye, scope);
+                if (!world) break;
+                if (glm::length(glm::vec3(pos) + glm::vec3(0.5f) - eye) > m_player->getReachDistance()) break;
+                const Game::BlockID id = world->GetBlock(pos.x, pos.y, pos.z);
+                const Game::Block& def = Game::BlockRegistry::Get(id);
+                if (def.attack) def.attack(*world, pos);
+                break;
+            }
             case Network::BlockActionType::ABORT_DESTROY:
                 break;
             // Both BREAK (legacy) and STOP_DESTROY (new) finalize the dig.
@@ -1156,15 +1384,21 @@ namespace Server {
 
                 // Validate reach
                 glm::vec3 blockCenter = glm::vec3(pos) + glm::vec3(0.5f);
-                if (!m_player->canReach(blockCenter)) {
+                // The world the block is in (its own level, or one reached
+                // through a portal) and the eye the reach is measured from.
+                glm::vec3 eye;
+                InteractionScope scope;
+                Game::World* world = InteractionWorld(packet.dimensionId, pos, eye, scope);
+                if (!world) {
+                    Log::Warning("HandleBlockAction: Player %u has no way into dimension %d for (%d,%d,%d)",
+                                m_playerId, static_cast<int>(packet.dimensionId), pos.x, pos.y, pos.z);
+                    return;
+                }
+                if (glm::length(blockCenter - eye) > m_player->getReachDistance()) {
                     Log::Warning("HandleBlockAction: Player %u cannot reach (%d,%d,%d)",
                                 m_playerId, pos.x, pos.y, pos.z);
                     return;
                 }
-
-                // Get world and break the block (set to air)
-                Game::World* world = SessionWorld();
-                if (!world) return;
 
                 // Trust the packet's blockId for inventory purposes. In integrated-server
                 // mode the client and server share one World, so by the time we get here
@@ -1203,6 +1437,17 @@ namespace Server {
                 if (oldBlock == Game::BlockID::Chest ||
                     oldBlock == Game::BlockID::TrappedChest) {
                     ResetOrphanedChestPartners(*world, pos);
+                }
+                // A door's other half goes with the one that was broken (MC
+                // does it through updateShape; this engine has no double-
+                // block linkage, so it is explicit here, as in the zombie's
+                // break-door goal).
+                if (Game::IsDoorBlock(oldBlock)) {
+                    const bool lower = oldBlockState.GetValueByName("half") == "lower";
+                    const glm::ivec3 other = pos + glm::ivec3(0, lower ? 1 : -1, 0);
+                    if (world->GetBlock(other.x, other.y, other.z) == oldBlock) {
+                        world->SetBlock(other.x, other.y, other.z, Game::BlockID::Air);
+                    }
                 }
 
                 // MC Containers.dropContents (called from BaseEntityBlock's
@@ -1277,7 +1522,18 @@ namespace Server {
                 // Remove any portal mounted on this block. Block-break
                 // bypasses IntegratedServer::ApplyBlockChange so the
                 // notification has to happen here too.
-                Game::Portal::ServerRegistry().OnBlockChanged(pos);
+                Game::Portal::ServerRegistry().OnBlockChanged(world->GetDimension(), pos);
+#endif
+#if ENABLE_IMMERSIVE_PORTALS
+                // An immersive nether portal's frame block. World::SetBlock's
+                // own obsidian hook does not fire on this path: in integrated
+                // mode the client's prediction cleared the shared cell before
+                // the packet arrived, so the SetBlock above saw air -> air.
+                // The packet still says what was broken.
+                if ((oldBlock == Game::BlockID::Obsidian || oldBlock == Game::BlockID::CryingObsidian) &&
+                    g_integratedServer) {
+                    g_integratedServer->OnObsidianRemoved(world->GetDimension(), pos);
+                }
 #endif
                 Log::Debug("HandleBlockAction: Player %u broke block at (%d,%d,%d)",
                           m_playerId, pos.x, pos.y, pos.z);
@@ -1629,9 +1885,13 @@ namespace Server {
 
     void PlayerSession::AwardWorldExperience(const glm::dvec3& pos, int amount) {
         if (amount <= 0) return;
+        // THIS session's level — GetXpOrbs() is Overworld-pinned, so mining
+        // or smelting XP earned in another dimension paid out a world away.
         auto* server = g_integratedServer.get();
         if (!server) return;
-        if (auto* orbs = server->GetXpOrbs()) {
+        ServerLevel* level =
+            server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+        if (auto* orbs = level ? level->Orbs() : nullptr) {
             orbs->Award(pos, amount);
         }
     }
@@ -2166,7 +2426,26 @@ namespace Server {
             return;
         }
         
-        Game::World* world = SessionWorld();
+        // The clicked block's world — the player's own, or the level behind
+        // a portal they are reaching through — and the eye to measure reach
+        // from (mapped through that portal in the second case).
+        glm::vec3 interactionEye;
+        InteractionScope interactionScope;
+        double portalSearchRadius = 0.0;
+#if ENABLE_PORTAL_GUN
+        // A gun shot lands up to its whole range away, and the portal it
+        // flew through can be anywhere along that line (the reach check
+        // below uses the same 256 for the gun).
+        {
+            const int slot = m_player->getInventory().GetSelectedSlot();
+            const Game::ItemStack& held = m_player->getInventory().GetSlot(
+                Game::Inventory::HotbarToIndex(slot));
+            if (held.itemId == Game::Items::PortalGun) portalSearchRadius = 256.0;
+        }
+#endif
+        Game::World* world = InteractionWorld(packet.dimensionId,
+                                              glm::ivec3(packet.blockX, packet.blockY, packet.blockZ),
+                                              interactionEye, interactionScope, portalSearchRadius);
         if (!world) {
             Log::Warning("HandleUseItemOn: No world available");
             return;
@@ -2226,10 +2505,9 @@ namespace Server {
         // === 4. Reach validation ===
 
         // Reconstruct ray from player eye to hit point
-        glm::dvec3 playerPos = m_player->getPosition();
-        glm::vec3 eyePos = glm::vec3(playerPos.x, playerPos.y + 1.62, playerPos.z); // Eye height
+        const glm::vec3 eyePos = interactionEye;   // the player's eye, or its image through the portal
         float distance = glm::length(hitPoint - eyePos);
-        float maxReach = m_player->getGameMode() == GameMode::CREATIVE ? 5.0f : 4.5f;
+        float maxReach = (m_player->getGameMode() == GameMode::CREATIVE ? 5.0f : 4.5f) * m_player->getScale();
 
 #if ENABLE_PORTAL_GUN
         // The portal gun fires a projectile that travels up to
@@ -2347,6 +2625,22 @@ namespace Server {
                     }
                 }
             }
+        }
+
+        // ── End crystal (MC EndCrystalItem.useOn) ─────────────────────────
+        // Lives here rather than in ItemBehaviors because placing one spawns
+        // an ENTITY into this session's level and pokes the dragon fight —
+        // neither of which common item code can reach (the same reason spawn
+        // eggs route server-side).
+        if (!heldStack.IsEmpty() && heldStack.itemId == Game::Items::EndCrystal) {
+            const bool placed = server->PlaceEndCrystalFromUse(*this, clicked);
+            if (placed && !isCreative) {
+                heldStack.count -= 1;
+                if (heldStack.count <= 0) heldStack.Clear();
+            }
+            AckInteraction(packet.sequence, placed);
+            m_lastInteractionSequence = packet.sequence;
+            return;
         }
 
         // Item.useOn — the item acts on the targeted block (FlintAndSteel,
@@ -2632,7 +2926,10 @@ namespace Server {
         
         // Check if any players are in the target block space
         // TODO: Get all players from PlayerSessionManager
-        glm::dvec3 playerPosDouble = m_player->getPosition();
+        // Where the player stands IN THE WORLD BEING EDITED: their own feet,
+        // or their image through the portal they are reaching through
+        // (the interaction eye is that image's eye).
+        const glm::dvec3 playerPosDouble = glm::dvec3(interactionEye) - glm::dvec3(0.0, m_player->getEyeHeight(), 0.0);
         glm::vec3 playerCollisionPos = glm::vec3(playerPosDouble.x, playerPosDouble.y, playerPosDouble.z);
         glm::vec3 blockCenter = glm::vec3(targetPos) + glm::vec3(0.5f, 0.5f, 0.5f);
         
@@ -2645,11 +2942,13 @@ namespace Server {
         // you can't add a segment to the clump you're standing on, or put a
         // flower down at your own feet.
         bool playerCollides = false;
+        const float bodyHalfWidth = 0.3f * m_player->getScale();
+        const float bodyHeight    = 1.8f * m_player->getScale();
         if (Game::BlockRegistry::HasCollision(blockToPlace) &&
-            std::abs(playerCollisionPos.x - blockCenter.x) < 0.8f &&
-            std::abs(playerCollisionPos.z - blockCenter.z) < 0.8f &&
+            std::abs(playerCollisionPos.x - blockCenter.x) < 0.5f + bodyHalfWidth &&
+            std::abs(playerCollisionPos.z - blockCenter.z) < 0.5f + bodyHalfWidth &&
             playerCollisionPos.y < targetPos.y + 1.0f &&
-            playerCollisionPos.y + 1.8f > targetPos.y) {
+            playerCollisionPos.y + bodyHeight > targetPos.y) {
             playerCollides = true;
         }
         
@@ -2685,6 +2984,22 @@ namespace Server {
             // instead of powder wearing concrete's state index.
             blockToPlace = placedState.Block();
         }
+        // A door is two cells tall (MC DoorBlock.getStateForPlacement):
+        // the cell above must be free too, and the hinge comes from the
+        // walls beside it and the side of the cell that was clicked.
+        const bool placingDoor = Game::IsDoorBlock(blockToPlace);
+        if (placingDoor) {
+            const glm::ivec3 above = targetPos + glm::ivec3(0, 1, 0);
+            Game::PlacementClick aboveClick;
+            aboveClick.replacingClickedOnBlock = false;
+            if (!world->IsValidPosition(above.x, above.y, above.z) ||
+                !Game::CanBeReplacedByPlacement(world->GetBlockState(above.x, above.y, above.z),
+                                                blockToPlace, sneaking, aboveClick)) {
+                failPlacement(targetPos);
+                return;
+            }
+            placedState = Game::DoorPlacementState(*world, targetPos, placedState, hitPoint);
+        }
         // Applied last so it composes with, rather than overwrites, the
         // waterlogged bit ComputePlacementState sets when placing into a fluid.
         // MC clears WATERLOGGED when merging to a double; SetIndex on TYPE
@@ -2719,6 +3034,12 @@ namespace Server {
             Log::Warning("HandleUseItemOn: SetBlock failed at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
             ResyncAndAck(clicked, targetPos, packet.sequence);
             return;
+        }
+        if (placingDoor) {
+            // MC DoorBlock.setPlacedBy: the upper half goes in above.
+            const glm::ivec3 above = targetPos + glm::ivec3(0, 1, 0);
+            world->SetBlock(above.x, above.y, above.z, blockToPlace,
+                            Game::World::UpdateFlags::All, Game::DoorUpperState(placedState).Index());
         }
 
         // A chest that placed itself as LEFT/RIGHT chose a partner; that
@@ -2827,6 +3148,109 @@ namespace Server {
                   static_cast<int>(blockToPlace), targetPos.x, targetPos.y, targetPos.z);
     }
     
+    void PlayerSession::HandleFillBlocks(const Network::FillBlocksC2SPacket& packet) {
+        ASSERT_SERVER_THREAD();
+        if (!m_player || !m_connection) return;
+        if (!HasClientLoaded()) return;
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server) return;
+
+        const GameMode mode = m_player->getGameMode();
+        if (mode == GameMode::SPECTATOR || mode == GameMode::ADVENTURE) {
+            m_connection->SendChatMessage("You cannot build here", 1);
+            return;
+        }
+
+        // The box, and its size before anything is touched.
+        const glm::ivec3 a(packet.x0, packet.y0, packet.z0), b(packet.x1, packet.y1, packet.z1);
+        const glm::ivec3 lo = glm::min(a, b), hi = glm::max(a, b);
+        const glm::ivec3 size = hi - lo + glm::ivec3(1);
+        constexpr int64_t kMaxFillBlocks = 32768;   // a 32-block cube, a 181×181 floor
+        const int64_t volume = static_cast<int64_t>(size.x) * size.y * size.z;
+        if (volume > kMaxFillBlocks) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "Fill too large: %lld blocks (the most is %lld)",
+                          static_cast<long long>(volume), static_cast<long long>(kMaxFillBlocks));
+            m_connection->SendChatMessage(buf, 1);
+            return;
+        }
+        // Both corners were placement targets in reach; the box between
+        // them is the player's to fill, but not from across the map.
+        constexpr double kMaxCornerDistance = 128.0;
+        const glm::dvec3 here = m_player->getPosition();
+        if (glm::length(glm::dvec3(lo) - here) > kMaxCornerDistance ||
+            glm::length(glm::dvec3(hi) - here) > kMaxCornerDistance) {
+            m_connection->SendChatMessage("That box is too far away", 1);
+            return;
+        }
+
+        glm::vec3 interactionEye;
+        InteractionScope interactionScope;
+        Game::World* world = InteractionWorld(packet.dimensionId, (lo + hi) / 2,
+                                              interactionEye, interactionScope, 0.0);
+        if (!world) return;
+
+        const Game::BlockID block = m_player->getHeldBlock();
+        if (block == Game::BlockID::Air) {
+            m_connection->SendChatMessage("Hold a block to fill with", 1);
+            return;
+        }
+        // The state the client previewed, if it is a state of the held
+        // block; the block's default otherwise.
+        Game::BlockState state = Game::BlockState::FromRawId(packet.rawState);
+        if (state.Block() != block) state = Game::BlockStates::Default(block);
+
+        auto& inv = m_player->getInventory();
+        auto& slot = inv.MutableSlot(Game::Inventory::HOTBAR_BEGIN + inv.GetSelectedSlot());
+        const bool creative = mode == GameMode::CREATIVE;
+        const int budget = creative ? std::numeric_limits<int>::max() : slot.count;
+
+        // The player's own body: nothing is placed through it.
+        const double bodyHalfWidth = 0.3 * m_player->getScale();
+        const double bodyHeight    = 1.8 * m_player->getScale();
+        const bool solid = Game::BlockRegistry::HasCollision(block);
+
+        Game::PlacementClick click;
+        click.replacingClickedOnBlock = false;
+        int placed = 0, skipped = 0;
+        bool outOfItems = false;
+        for (int z = lo.z; z <= hi.z && !outOfItems; ++z) {
+            for (int y = lo.y; y <= hi.y && !outOfItems; ++y) {
+                for (int x = lo.x; x <= hi.x; ++x) {
+                    if (placed >= budget) { outOfItems = true; break; }
+                    if (!world->IsValidPosition(x, y, z) || !world->IsPositionLoaded(x, y, z)) { ++skipped; continue; }
+                    const Game::BlockState existing = world->GetBlockState(x, y, z);
+                    if (existing == state) continue;   // already there
+                    if (!Game::CanBeReplacedByPlacement(existing, block, false, click)) { ++skipped; continue; }
+                    if (solid &&
+                        std::abs(x + 0.5 - here.x) < 0.5 + bodyHalfWidth &&
+                        std::abs(z + 0.5 - here.z) < 0.5 + bodyHalfWidth &&
+                        here.y < y + 1.0 && here.y + bodyHeight > y) { ++skipped; continue; }
+                    const glm::ivec3 pos(x, y, z);
+                    if (!Game::CanSurviveAt(*world, pos, state)) { ++skipped; continue; }
+                    if (world->SetBlock(x, y, z, block, Game::World::UpdateFlags::All, state.Index())) ++placed;
+                    else ++skipped;
+                }
+            }
+        }
+        if (!creative && placed > 0) {
+            slot.count -= placed;
+            if (slot.count <= 0) slot.Clear();
+            // The client did not predict the fill's cost; the slot goes back
+            // to it as it now is.
+            SendInventoryFull();
+        }
+
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "Placed %d block%s%s%s", placed, placed == 1 ? "" : "s",
+                      skipped > 0 ? " (some cells were not free)" : "",
+                      outOfItems ? " - out of items" : "");
+        m_connection->SendChatMessage(buf, 1);
+        Log::Info("[Fill] %s filled (%d,%d,%d)-(%d,%d,%d) with %d: %d placed, %d skipped",
+                  m_player->getName().c_str(), lo.x, lo.y, lo.z, hi.x, hi.y, hi.z,
+                  static_cast<int>(block), placed, skipped);
+    }
+
     void PlayerSession::HandleUseItem(const Network::UseItemC2SPacket& packet) {
         // Mirrors ServerGamePacketListenerImpl.handleUseItem
         // (ServerGamePacketListenerImpl.java:1329-1354).
@@ -3045,7 +3469,7 @@ namespace Server {
         if (m_connection) {
             // Get world
             {
-                Game::World* world = SessionWorld();
+                Game::World* world = m_interactionWorld ? m_interactionWorld : SessionWorld();
 
                 // Send clicked block, WITH its state index. Dropping the state
                 // here is what made a full leaf litter clump spin north every
@@ -3132,7 +3556,8 @@ namespace Server {
         // server scopes the send to that world's watchers.
         if (g_integratedServer) {
             g_integratedServer->SendBlockChangeS2CPacket(
-                Game::DimensionFromRaw(GetDimensionId()), packet);
+                m_interactionWorld ? m_interactionDimension
+                                   : Game::DimensionFromRaw(GetDimensionId()), packet);
         }
         // TODO: Add network connection support for multiplayer
     }
@@ -3190,8 +3615,8 @@ namespace Server {
     }
     
     void PlayerSession::OnChunkSendComplete(Game::Math::ChunkPos chunk) {
-        // Mark as sent
-        m_sentChunks.insert(chunk);
+        // Mark as sent (legacy path: the player's own dimension)
+        Dim(Game::DimensionFromRaw(GetDimensionId())).sent.insert(chunk);
 
         // Process any buffered diffs for this chunk
         auto diffIt = m_pendingDiffs.find(chunk);
@@ -3213,8 +3638,9 @@ namespace Server {
         // Ensure chunk is removed from all sets. The tracking view is not a
         // set and is not touched here — it is derived from position and view
         // distance, and a chunk being unloaded does not change either.
-        m_sentChunks.erase(chunk);
-        m_pendingChunksToSend.erase(chunk);
+        DimensionSendState& st = Dim(Game::DimensionFromRaw(GetDimensionId()));
+        st.sent.erase(chunk);
+        st.pending.erase(chunk);
     }
 
     // === STATISTICS ===
@@ -3253,6 +3679,64 @@ namespace Server {
         ServerLevel* level = server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
         return level ? level->World() : nullptr;
     }
+
+    Game::World* PlayerSession::InteractionWorld(int8_t packetDimension, const glm::ivec3& target,
+                                                 glm::vec3& outEye, InteractionScope& scope,
+                                                 double portalSearchRadius) {
+        m_interactionWorld = nullptr;
+        scope.session = this;
+        if (!m_player) return nullptr;
+        const glm::dvec3 feet = m_player->getPosition();
+        outEye = glm::vec3(feet.x, feet.y + m_player->getEyeHeight(), feet.z);
+
+        constexpr int8_t kUnknown = 127;
+        const int8_t own = GetDimensionId();
+        const bool sameDimension = (packetDimension == kUnknown || packetDimension == own);
+
+#if ENABLE_IMMERSIVE_PORTALS
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server || !server->ImmersivePortals()) return sameDimension ? SessionWorld() : nullptr;
+        const Game::DimensionId here  = Game::DimensionFromRaw(own);
+        const Game::DimensionId there = sameDimension ? here : Game::DimensionFromRaw(packetDimension);
+        ServerLevel* level = server->GetLevel(there);
+        if (!level || !level->World()) return nullptr;
+
+        // The eye the reach is measured from: the player's own, or its
+        // image through the nearby portal that puts it closest to the
+        // target — whichever is nearer. A portal into the player's OWN
+        // dimension (a gun pair in one world) is a candidate too: the
+        // packet cannot tell that case apart, but the distances can.
+        // Reach through a portal is bounded by the player's reach on both
+        // legs, so a portal farther than that is not a candidate.
+        const glm::dvec3 eye(outEye);
+        const double reach = portalSearchRadius > 0.0
+            ? portalSearchRadius
+            : static_cast<double>(m_player->getReachDistance() * m_player->getScale()) + 1.0;
+        const glm::dvec3 targetCentre = glm::dvec3(target) + glm::dvec3(0.5);
+        const Game::Immersive::Portal* best = nullptr;
+        double bestDist = sameDimension ? glm::length(eye - targetCentre) : 1e30;
+        for (const Game::Immersive::Portal* p : server->ImmersivePortals()->CollectNear(here, eye, reach)) {
+            if (!p->Has(Game::Immersive::PortalFlag::Interactable)) continue;
+            if (p->IsMirror() || p->destDimension != there) continue;
+            const double d = glm::length(p->TransformPoint(eye) - targetCentre);
+            if (d < bestDist) { bestDist = d; best = p; }
+        }
+        if (!best) {
+            if (sameDimension) return SessionWorld();   // the own eye is the nearest
+            return nullptr;                             // no surface into that level
+        }
+
+        outEye = glm::vec3(best->TransformPoint(eye));
+        if (!sameDimension) {
+            m_interactionWorld     = level->World();
+            m_interactionDimension = there;
+        }
+        return level->World();
+#else
+        (void)target;
+        return nullptr;
+#endif
+    }
     
     void PlayerSession::ResetStats() {
         std::lock_guard<std::mutex> lock(m_statsMutex);
@@ -3279,12 +3763,13 @@ namespace Server {
     }
 
     void PlayerSession::ClearWatchSets() {
-        m_trackingView = ChunkTrackingView::Empty();
-        m_sentChunks.clear();
+        m_loaders.clear();
+        m_watched.clear();
+        for (auto& st : m_dimState) { st.sent.clear(); st.clientStamps.clear(); }
     }
 
     void PlayerSession::ClearQueues() {
-        m_pendingChunksToSend.clear();
+        for (auto& st : m_dimState) st.pending.clear();
 
         // Clear diff queue
         while (!m_diffQueue.empty()) {

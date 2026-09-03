@@ -23,6 +23,16 @@ layout (push_constant) uniform PushConstants {
 } pc;
 
 // Output to fragment shader
+// The Common UBO of the portal pipeline layout (see block_vk.frag for the
+// full block). Only the model matrix is read here: geometry authored in
+// MODEL space (dropped items, falling blocks, the held item) gets its
+// WORLD position for the fragment shader's fog from it. World-space meshes
+// set the identity.
+layout (std140, set = 1, binding = 0) uniform Common {
+    mat4  uMVP_;
+    mat4  uModel_;
+} U;
+
 layout (location = 0) out vec2 fragTexCoord;
 layout (location = 1) out vec3 fragWorldPos;
 layout (location = 2) out vec4 fragColor;
@@ -53,6 +63,6 @@ void main() {
         ? dot(pc.uPortalClipPlane.xyz, aPos) + pc.uPortalClipPlane.w
         : 1.0;
     fragTexCoord = aTexCoord;
-    fragWorldPos = aPos;
+    fragWorldPos = (U.uModel_ * vec4(aPos, 1.0)).xyz;
     fragColor = aColor;
 }

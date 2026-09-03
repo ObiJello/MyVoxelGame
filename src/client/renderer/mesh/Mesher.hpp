@@ -12,6 +12,10 @@
 #include "../texture/AtlasBuilder.hpp"
 #include <glm/glm.hpp>
 #include <array>
+#include "common/world/level/DimensionId.hpp"
+#include <mutex>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 
 // **NEW**: Forward declaration to avoid circular dependency
@@ -45,7 +49,12 @@ namespace Render {
         float biomeTintStrength = 1.0f;
 
         // Performance settings
-        bool enableGreedyMeshing = false;  // Future optimization
+        // Greedy face merging: coplanar full-cube faces with the same sprite
+        // and identical corner colors collapse into one quad per maximal
+        // rectangle (see Mesher::FlushGreedyQuads). Launch-time A/B kill
+        // switch: OBEY_NO_GREEDY=1 disables merging at mesh time (a remesh —
+        // i.e. a fresh world load — is needed for it to take effect).
+        bool enableGreedyMeshing = true;
         int maxQuadsPerSection = 16384;    // Safety limit
     };
 
@@ -64,6 +73,24 @@ namespace Render {
     // Core meshing class - turns block data into renderable geometry
     class Mesher {
     public:
+        // An inclusive block box in one dimension whose faces bake no ambient
+        // occlusion (the occlusion wand). See "No ambient occlusion" below.
+        struct AoExclusion {
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            glm::ivec3 min{0};
+            glm::ivec3 max{0};
+        };
+        // The cells in front of an axis-aligned portal surface, and the
+        // direction from each into the surface. A face of such a cell that
+        // lies ON the surface is never culled against the block behind it:
+        // through the portal that block is not there, and a culled face
+        // was a hole in the block beside the portal. See "portal faces".
+        struct PortalFace {
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            glm::ivec3 min{0};
+            glm::ivec3 max{0};
+            glm::ivec3 dir{0};
+        };
         explicit Mesher(const MeshConfig& config = MeshConfig{});
 
         // **NEW**: Set world reference for cross-chunk neighbor access
@@ -93,6 +120,12 @@ namespace Render {
             int facesGenerated = 0;
             int facesCulled = 0;
             int quadsGenerated = 0;
+            // Greedy merging accounting for this section: how many merged
+            // rectangles were emitted, and how many input quads they replaced
+            // beyond themselves (i.e. quadsMergedAway quads never reached the
+            // GPU). Final quad count = quadsGenerated - quadsMergedAway.
+            int quadsMerged = 0;
+            int quadsMergedAway = 0;
             float buildTimeMs = 0.0f;
         };
         const MeshStats& GetLastStats() const { return m_lastStats; }
@@ -163,10 +196,131 @@ namespace Render {
             // over every BlockID, and 256 bytes each would cost ~300 KB a
             // thread to serve eighteen glass types.
             int16_t ctmSlot = -1;
+
+            // MC `instanceof LeavesBlock`: every block whose class chain
+            // reaches LeavesBlock (all `*_leaves`, including the azaleas,
+            // cherry, pale oak and MangroveLeavesBlock). The identity that
+            // LeavesBlock.skipRendering tests its NEIGHBOUR for.
+            bool isLeaves = false;
+            // MC LeavesBlock.skipRendering, evaluated for this block:
+            //   !cutoutLeaves && neighbour instanceof LeavesBlock -> skip
+            // i.e. true for a leaf block when leaves are not cutout (Fast
+            // graphics), and also — engine extension — when the `cullLeaves`
+            // option is on under Fancy. A face touching any `isLeaves`
+            // neighbour is then dropped, whatever species it is.
+            bool skipAgainstLeaves = false;
         };
         static constexpr size_t BLOCK_ID_COUNT = static_cast<size_t>(Game::BlockID::Count);
         static thread_local std::array<CachedBlockProps, BLOCK_ID_COUNT> s_blockPropsCache;
+        Game::DimensionId m_dimension = Game::DimensionId::Overworld;
+        // This dimension's "no AO" boxes, snapshotted by SetDimension once per
+        // section build so the per-face test below touches no lock.
+        std::vector<AoExclusion> m_aoExclusions;
+        std::vector<PortalFace>  m_portalFaces;
+        bool IsPortalFace(int worldX, int worldY, int worldZ, const glm::ivec3& dir) const {
+            for (const PortalFace& f : m_portalFaces) {
+                if (f.dir != dir) continue;
+                if (worldX >= f.min.x && worldX <= f.max.x &&
+                    worldY >= f.min.y && worldY <= f.max.y &&
+                    worldZ >= f.min.z && worldZ <= f.max.z) return true;
+            }
+            return false;
+        }
+        bool AoDisabledAt(int worldX, int worldY, int worldZ) const {
+            for (const AoExclusion& e : m_aoExclusions) {
+                if (worldX >= e.min.x && worldX <= e.max.x &&
+                    worldY >= e.min.y && worldY <= e.max.y &&
+                    worldZ >= e.min.z && worldZ <= e.max.z) return true;
+            }
+            return false;
+        }
         static thread_local bool s_blockPropsCacheValid;
+
+        // The video options that change what a section mesh CONTAINS. They
+        // live here as one packed atomic — NOT read from GameSettings —
+        // because section builds run on worker threads, and GameSettings is
+        // a string map the main thread writes to whenever the options screen
+        // is touched. The main thread publishes a snapshot with
+        // SetMeshOptions; every worker picks it up the next time
+        // EnsureBlockPropsCache runs, which compares its thread-local
+        // generation against the published one, rebuilds the block props
+        // cache on a mismatch and copies the snapshot into the thread-local
+        // s_activeMeshOptions the build reads. One acquire load per section
+        // build, no per-block cost.
+        //
+        // Defaults match GameSettings' defaults (Fancy leaves, cullLeaves
+        // off, smooth lighting on, biome blend 2) so a client that never
+        // publishes still meshes MC-exact.
+        struct MeshOptions {
+            // MC cutoutLeaves (the old Fast/Fancy split).
+            bool cutoutLeaves = true;
+            // Engine `cullLeaves` option (the Cull Leaves mod's behaviour).
+            bool cullLeaves   = false;
+            // MC `ao` — Minecraft.useAmbientOcclusion(): off means every
+            // face takes one flat light value (ModelBlockRenderer
+            // renderModelFaceFlat) instead of the four-corner AO gradient.
+            bool smoothLighting = true;
+            // MC biomeBlendRadius 0..7 — ClientLevel.calculateBlockTint
+            // averages a (2r+1)² square of biome colours per tinted quad.
+            uint8_t biomeBlendRadius = 2;
+            bool operator==(const MeshOptions&) const = default;
+        };
+        // Main thread only. Returns true when the snapshot actually changed,
+        // which is the caller's cue to schedule a full remesh — an existing
+        // mesh built under the old options is simply wrong under the new
+        // ones (leaves in the other layer, faces present or missing, a
+        // different light gradient, a different tint).
+        static bool SetMeshOptions(MeshOptions options);
+
+        // ── "No ambient occlusion" boxes (the occlusion wand) ────────────
+        // Inclusive block boxes per dimension inside which faces bake no AO
+        // darkening. The list is small and replaced whole; workers take a
+        // shared snapshot per section build (AoExclusion is declared at the
+        // top of the class, before the member that holds the snapshot).
+        static void SetAoExclusions(Game::DimensionId dimension, const std::vector<AoExclusion>& boxes);
+        static std::vector<AoExclusion> AoExclusionsFor(Game::DimensionId dimension);
+        // ── Portal faces (see PortalFace) ────────────────────────────────
+        static void SetPortalFaces(Game::DimensionId dimension, const std::vector<PortalFace>& faces);
+        static std::vector<PortalFace> PortalFacesFor(Game::DimensionId dimension);
+        // The level this mesher instance is building for (the worker sets it
+        // per job); takes that dimension's exclusion snapshot at the same time.
+        void SetDimension(Game::DimensionId dimension);
+
+        // Greedy-debug coloring (Render Controls "Greedy Mesh View"): when on,
+        // meshes are built with information colors instead of lighting —
+        // merged rectangles on a red(1x1)->green(16x16) heat scale by area,
+        // rule-ineligible quads (partial blocks, rotated UVs, AO gradients,
+        // translucent) in dim blue-gray. Mesh-time state, so the toggle
+        // triggers a remesh (ChunkRenderer::SetGreedyMeshDebug does).
+        static void SetGreedyDebugColors(bool enable);
+        static bool GreedyDebugColors();
+        // Monotonic generation, bumped whenever the debug palette flips.
+        // Meshes are stamped with it at build start (MeshBuildResult::
+        // paletteGen); a parked chunk revived with a stale stamp re-dirties
+        // in RestoreRetainedChunk, and an upload that raced the toggle
+        // re-dirties in FinalizeSectionUpload — the toggle's RemeshAll only
+        // reaches sections that are ACTIVE at that moment.
+        static uint32_t GreedyPaletteGen();
+        // Runtime master switch for greedy meshing (Render Controls checkbox;
+        // OBEY_NO_GREEDY still forces it off at launch). Mesh-time state —
+        // the caller triggers RemeshAll, same as the debug palette.
+        static void SetGreedyEnabled(bool enable);
+        static bool GreedyEnabled();
+        // Packed debug-view colors, exposed for FluidMeshBuilder's still-fluid
+        // merge pass so water plates read on the same red->green heat scale
+        // (and the same ineligible blue-gray) as terrain, from one definition.
+        static uint32_t GreedyDebugHeatColor(int area);
+        static uint32_t GreedyDebugIneligibleColor();
+        // Since-launch totals: greedy-ELIGIBLE quads that entered the merge
+        // grids (terrain AND still-fluid), and the rectangles they became
+        // (survivors count in both).
+        static void GetGreedyTotals(uint64_t& eligibleIn, uint64_t& rectsOut);
+        static MeshOptions GetMeshOptions();
+        // Main thread only: reads cutoutLeaves / cullLeaves / ao /
+        // biomeBlendRadius from Platform::g_gameSettings and publishes them.
+        // Same return as SetMeshOptions. Call once after settings load and
+        // again whenever any of those options is changed.
+        static bool SyncMeshOptionsFromSettings();
         // Atlas rects for a block's connected-texture tiles, indexed by
         // Render::CTM::SlotFor(). One entry per participating block (see
         // CachedBlockProps::ctmSlot). Sized to CTM::kMaxVariants (64) so the
@@ -180,6 +334,20 @@ namespace Render {
         std::unique_ptr<FluidMeshBuilder> m_fluidBuilder;  // Fluid mesh builder
 
         void EnsureBlockPropsCache();
+
+        // Published MeshOptions, packed so the set is one atomic: bit 0 =
+        // cutoutLeaves, bit 1 = cullLeaves, bit 2 = smoothLighting, bits 4-7
+        // = biomeBlendRadius. The generation is bumped AFTER the packed value
+        // is stored (release) and read BEFORE it (acquire), so a worker that
+        // observes a new generation also observes the options that came with
+        // it.
+        static std::atomic<uint16_t> s_meshOptionsPacked;
+        static std::atomic<uint32_t> s_meshOptionsGeneration;
+        // Generation the calling thread's s_blockPropsCache was built for.
+        static thread_local uint32_t s_blockPropsCacheGeneration;
+        // The snapshot the calling thread's builds read (AO, biome blend).
+        // Written only by EnsureBlockPropsCache, alongside the cache.
+        static thread_local MeshOptions s_activeMeshOptions;
 
         // Per-section block/opaque caches: 18x18x18 covering the 16x16x16 section
         // plus a 1-block border on all sides. Built once at the start of
@@ -266,7 +434,26 @@ namespace Render {
                          int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh);
 
         void GenerateQuad(const std::array<Vertex, 4>& quadVerts,
-                         std::vector<Vertex>& outVerts, std::vector<uint16_t>& outIndices);
+                         std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices);
+
+        // Greedy face merging. AddBlockFace routes each opaque/cutout quad
+        // through TryStashGreedyQuad; a quad that passes the (deliberately
+        // strict) eligibility test parks in a per-(layer, face, plane) 16x16
+        // grid instead of being emitted, and FlushGreedyQuads — called once
+        // per section after the block loop — runs a classic 2D maximal-
+        // rectangle merge per grid and emits one tiled quad per rectangle.
+        // Everything ineligible (and every 1x1 survivor) is emitted through
+        // GenerateQuad exactly as before, so the rendered image only ever
+        // changes by having fewer, larger quads for the same pixels.
+        // Returns false when the quad was NOT stashed and must be emitted.
+        bool TryStashGreedyQuad(const std::array<Vertex, 4>& faceVerts,
+                                const glm::vec4& uvRect,
+                                const Game::Element& element,
+                                const Game::FaceDef& faceDef,
+                                BlockFace face, bool hasBlockOffset,
+                                RenderLayer layer,
+                                int worldX, int worldY, int worldZ);
+        void FlushGreedyQuads(SectionMesh& outMesh);
 
         // Culling and optimization (uses m_opaqueCache for fast neighbor lookups)
         bool ShouldCullFace(int worldX, int worldY, int worldZ, BlockFace face);

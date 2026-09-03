@@ -1340,4 +1340,77 @@ namespace Render {
         }
     }
 
+    // ── EndCrystalModel ────────────────────────────────────────────────────
+
+    float EndCrystalModel::GetY(float ageInTicks) {
+        // MC EndCrystalRenderer.getY, verbatim.
+        float hh = std::sin(ageInTicks * 0.2f) / 2.0f + 0.5f;
+        hh = (hh * hh + hh) * 0.4f;
+        return hh - 1.4f;
+    }
+
+    EndCrystalModel::EndCrystalModel() {
+        m_texWidth = 64.0f;
+        m_texHeight = 32.0f;
+
+        // MC EndCrystalModel.createBodyLayer. Each of MC's quaternion
+        // rotations — a Y spin composed with the fixed 60° tilt about the
+        // (1,0,1)/√2 axis — is expressed as a chain of helper parts, using
+        // Ry(45°)·Rx(60°)·Ry(−45°) for the axis-angle. (The tilt's SENSE may
+        // mirror MC's; a fixed diagonal tilt spinning at the same rate is
+        // visually identical either way.)
+        constexpr float kTilt = 60.0f * kDegToRad;
+        constexpr float kQuarter = 45.0f * kDegToRad;
+
+        // outer_glass: PartPose.offset(0, 24, 0), spun by the anim.
+        m_outerSpin = m_root.AddChild("og_spin", PartPose::Offset(0.0f, 24.0f, 0.0f));
+        ModelPart* ogTilt = m_outerSpin->AddChild(
+            "og_tilt", PartPose::OffsetAndRotation(0, 0, 0, kTilt, 0, 0));
+        ModelPart* ogPost = ogTilt->AddChild(
+            "og_post", PartPose::OffsetAndRotation(0, 0, 0, 0, -kQuarter, 0));
+        AddBox(ogPost, 0, 0, -4.0f, -4.0f, -4.0f, 8.0f, 8.0f, 8.0f);
+
+        // inner_glass: child of outer, pose scale 0.875, its own spin.
+        PartPose innerPose = PartPose::OffsetAndRotation(0, 0, 0, 0, kQuarter, 0);
+        innerPose.xScale = innerPose.yScale = innerPose.zScale = 0.875f;
+        ModelPart* igPre = ogPost->AddChild("ig_pre", innerPose);
+        ModelPart* igTilt = igPre->AddChild(
+            "ig_tilt", PartPose::OffsetAndRotation(0, 0, 0, kTilt, 0, 0));
+        m_innerSpin = igTilt->AddChild("ig_spin", PartPose::Zero());
+        AddBox(m_innerSpin, 0, 0, -4.0f, -4.0f, -4.0f, 8.0f, 8.0f, 8.0f);
+
+        // cube (the core): child of inner, pose scale 0.765625, texOffs(32,0).
+        PartPose cubePose = PartPose::OffsetAndRotation(0, 0, 0, 0, kQuarter, 0);
+        cubePose.xScale = cubePose.yScale = cubePose.zScale = 0.765625f;
+        ModelPart* cPre = m_innerSpin->AddChild("c_pre", cubePose);
+        ModelPart* cTilt = cPre->AddChild(
+            "c_tilt", PartPose::OffsetAndRotation(0, 0, 0, kTilt, 0, 0));
+        m_cubeSpin = cTilt->AddChild("c_spin", PartPose::Zero());
+        AddBox(m_cubeSpin, 32, 0, -4.0f, -4.0f, -4.0f, 8.0f, 8.0f, 8.0f);
+
+        // base: the bedrock slab, texOffs(0, 16).
+        m_base = m_root.AddChild("base", PartPose::Zero());
+        AddBox(m_base, 0, 16, -6.0f, 0.0f, -6.0f, 12.0f, 4.0f, 12.0f);
+
+        m_root.ResetPose();
+    }
+
+    void EndCrystalModel::SetupAnim(const EntityRenderState& state) {
+        // MC EndCrystalModel.setupAnim: the shells spin at 3°/tick — the
+        // outer with the Y bob, the inner and core with their own quaternion
+        // phase (the −45° here is the euler chain's closing rotation folded
+        // into the spin).
+        m_root.ResetPose();
+        m_base->visible = state.crystalShowsBottom;
+
+        constexpr float kQuarter = 45.0f * kDegToRad;
+        const float spin = state.ageInTicks * 3.0f * kDegToRad;
+        const float crystalY = GetY(state.ageInTicks) * 16.0f;
+
+        m_outerSpin->y += crystalY / 2.0f;
+        m_outerSpin->yRot = spin + kQuarter;
+        m_innerSpin->yRot = spin - kQuarter;
+        m_cubeSpin->yRot = spin - kQuarter;
+    }
+
 } // namespace Render

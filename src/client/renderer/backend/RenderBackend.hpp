@@ -83,6 +83,14 @@ namespace Render {
         // Default implementation calls immediate destroy (correct for OpenGL).
         virtual void DeferredDestroyBuffer(BufferHandle handle) { DestroyBuffer(handle); }
 
+        // DEBUG ONLY (F8 CullDump): the CPU-visible mapping of a host-visible
+        // buffer, so diagnostics can read back what the GPU actually sees.
+        // Null when the backend has no persistent mapping for it (GL).
+        virtual const void* DebugGetMappedBufferPtr(BufferHandle) const { return nullptr; }
+        // DEBUG: runtime switch for the VK indirect multi-draw path (no-op on GL).
+        virtual void DebugSetMultiDrawIndirect(bool) {}
+        virtual bool DebugGetMultiDrawIndirect() const { return false; }
+
         // ====================================================================
         // TEXTURE MANAGEMENT
         // ====================================================================
@@ -242,6 +250,14 @@ namespace Render {
                                         uint32_t  /*readMask*/   = 0xFFu,
                                         uint32_t  /*writeMask*/  = 0xFFu) {}
 
+        // Cull inversion: while set, every SetPipelineState swaps Back and
+        // Front culling. A mirror portal's reflection flips winding, so the
+        // far world is drawn with the opposite face culled — the mod's
+        // applyMirrorFaceCulling. Read back with CullInverted() so nested
+        // views can restore what they found.
+        virtual void SetCullInvert(bool invert) { m_cullInvert = invert; }
+        bool CullInverted() const { return m_cullInvert; }
+
         // ====================================================================
         // DRAWING
         // ====================================================================
@@ -354,6 +370,10 @@ namespace Render {
         virtual void ImGuiNewFrame() = 0;
         virtual void ImGuiRender() = 0;
         virtual void ImGuiShutdown() = 0;
+
+    protected:
+        // See SetCullInvert.
+        bool m_cullInvert = false;
     };
 
     // Factory function

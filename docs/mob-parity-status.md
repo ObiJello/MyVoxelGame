@@ -441,10 +441,15 @@ DATA_DROWNED_CONVERSION shaking visual (no renderer hook) and the 1040/1041
 conversion sounds.
 
 **Boss machinery** — the ender dragon's PHASES AND FLIGHT landed in wave
-three (see below); still gated: the boss bar (dragon + wither), the End
-dimension layer (crystals + healing, the podium/egg, the perch phase cycle),
-and the dragon's 200-tick death cinematic. (The elder guardian's mining
-fatigue landed with status effects.)
+three (see below), and the END DIMENSION LAYER landed 2026-09: the full
+EndDragonFight (server/level/EndDragonFight), End crystals + crystal
+healing, the exit portal/podium + egg, end gateways (blocks, block entity,
+teleport), the perch phase cycle, the 200-tick death cinematic with the XP
+shower, and the boss bar (BossEventS2C + HudRenderer). Still gated: the
+wither's boss bar (the packet exists; nothing sends it for the wither),
+dragon/crystal sounds (Game::PlaySound is a stub), and dragon-breath
+particles (the AreaEffectCloud damages invisibly). (The elder guardian's
+mining fatigue landed with status effects.)
 
 **Home/restriction positions** (`restrictTo`) — MoveTowardsRestrictionGoal for
 guardian/elder guardian/blaze, SeekShelterGoal, patrol leaders.
@@ -554,19 +559,20 @@ neck/tail kinematics from the pre-lerped flight history
 (EntityRenderState's dragon block), and MobRenderer poses the body from
 history sample 7 + the 5-vs-10 climb pitch with MC's exact pose-stack chain
 (the dragon.png sheet replacing the def row's beam-sheet artefact).
+The End dimension layer landed 2026-09: EndDragonFight (spawns the fight
+dragon at (0,128,0) with fightOrigin ZERO exactly as MC), End crystals with
+healing + beams, the perch cycle (LandingApproach/Landing/SittingScanning/
+SittingAttacking/SittingFlaming with the AreaEffectCloud breath),
+ChargingPlayer now reachable through SittingScanning, the crystal-aware
+node-ring/odds gating, and the 200-tick TickDeath cinematic (float-up, XP
+shower 12,000 first kill / 500 after, setDragonKilled at 200).
 Documented deviations/skips, each at its site: the eight sub-entity
 hitboxes (whole-box; sweeps and the head position rebuilt from the tickPart
-layout), no End dimension (fight origin = spawn point anchors the node
-ring; node height floors at the origin instead of MC's absolute 73; the
-perch cycle LandingApproach/Landing/Sitting* is unported and the holding
-pattern's landing roll is drawn-and-ignored), a summoned dragon STARTS the
-holding pattern (MC's bare /summon hovers forever — the EndDragonFight
-spawn stands in; hover + the sitting-takeoff rule still work if a phase is
-forced), the 200-tick death cinematic (standard 20-tick death; the DYING
-dive itself is in), crystals/crystal healing, sounds and particles, and
-noPhysics (collision stands in; the carve makes it moot while griefing).
-ChargingPlayer is complete but unreachable until the perch cycle lands —
-its only vanilla trigger is SittingScanning.
+layout; the crystal-explosion hit routes through HurtPart's head path), a
+summoned dragon outside a fight anchors its node ring on its spawn point
+(node height floors at the origin instead of MC's absolute 73), sounds and
+particles, and noPhysics (collision stands in; the carve makes it moot
+while griefing).
 
 **AreaEffectCloud** — new Misc entity (projectile/AreaEffectCloud.{hpp,cpp},
 EntityTypeId 103) per AreaEffectCloud.java: wait/duration aging,

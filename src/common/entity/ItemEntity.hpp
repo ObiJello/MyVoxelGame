@@ -124,6 +124,9 @@ namespace Game {
         int   age         = 0;
         int   pickupDelay = 0;
         bool  onGround    = false;
+        // The item's size, 1 = vanilla: a scaled portal multiplies it, and
+        // /scale sets it. Rendering only; the pickup box stays 0.25.
+        float scale       = 1.0f;
 
         // MC ItemEntity.health — 5, reduced by damage (fire, lava, a blast)
         // and the item is destroyed at zero. Only the explosion path writes it

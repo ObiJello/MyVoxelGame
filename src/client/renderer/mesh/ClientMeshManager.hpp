@@ -10,6 +10,8 @@
 #include "ChunkMegaBuffer.hpp"
 #include "Mesher.hpp"          // For RenderLayer enum
 #include <memory>
+#include "common/world/level/DimensionId.hpp"
+#include <functional>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -58,12 +60,19 @@ namespace Render {
         void Initialize(Client::ClientChunkManager* chunkManager);
         void Shutdown();
 
+        // The renderer of the SAME level (see ClientChunkManager::SetPeers).
+        void SetRenderer(ChunkRenderer* renderer) { m_renderer = renderer; }
+
         // ========================================================================
         // FRAME PROCESSING (Called by ClientThread)
         // ========================================================================
 
-        // Process mesh build results from ClientWorkerPool
-        void ProcessMeshBuildResults();
+        // Drain the (process-wide) mesh result queue, handing each result to
+        // the mesh manager of the level it was built for. `resolve` maps a
+        // dimension to that manager, or null to drop the result (its level
+        // is gone). Static because the queue is shared by every level.
+        static void DrainMeshResults(
+            const std::function<ClientMeshManager*(Game::DimensionId)>& resolve);
 
         // Schedule new mesh builds for LOADED chunks
         void ScheduleMeshBuilds(const glm::vec3& playerPosition);
@@ -138,12 +147,32 @@ namespace Render {
         // Remove GPU data for entire chunk (all 24 sections)
         void RemoveChunkGPUData(::Game::Math::ChunkPos chunkPos);
 
+        // Retention cache (instant revisits): a parked chunk's GPU sections
+        // keep their mega-buffer allocations but leave m_gpuData, so nothing
+        // renders or BFS-walks them. Unpark re-registers them as they were.
+        // Returns the approximate GPU bytes parked.
+        size_t ParkChunkGPUData(::Game::Math::ChunkPos chunkPos);
+        bool UnparkChunkGPUData(::Game::Math::ChunkPos chunkPos);
+        void DiscardParkedChunkGPUData(::Game::Math::ChunkPos chunkPos);
+        size_t ParkedSectionCount() const { std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex); return m_parkedGpuData.size(); }
+
         // ========================================================================
         // MEGA-BUFFER ACCESS (for ChunkRenderer multi-draw)
         // ========================================================================
 
         // Get the mega-buffer for a given render layer (opaque/cutout/translucent)
         ChunkMegaBuffer* GetMegaBuffer(RenderLayer layer);
+
+        // Monotonic stamp advanced every time ANY SectionInfo::gpuData pointer
+        // is stored or a GPUSectionData is destroyed. ChunkRenderer caches the
+        // resolved GPUSectionData* on its reachable-list entries tagged with
+        // the generation it was resolved at: while the generation is unchanged
+        // every cached pointer is still exactly what a live lookup would
+        // return, so the steady-state frame binds thousands of sections with
+        // no hash lookups at all; a bump means one frame of full lookups.
+        // Bumped under m_gpuDataMutex BEFORE the erase that would invalidate
+        // a pointer, so a matching stamp always implies a live object.
+        uint64_t GetGpuDataGeneration() const { return m_gpuDataGeneration.load(std::memory_order_acquire); }
 
         // Direct GPU data lookup by section position (for occlusion graph BFS)
         GPUSectionData* GetGPUSectionData(::Game::Math::ChunkPos chunkPos, int sectionY) {
@@ -247,6 +276,15 @@ namespace Render {
         // Force mesh rebuild for debugging
         void ForceMeshRebuild(::Game::Math::ChunkPos chunkPos);
 
+        // Mark every active section (everything in m_gpuData) dirty so it is
+        // rebuilt against current chunk data — the engine's LevelRenderer
+        // .allChanged(), scoped to sections that actually hold geometry.
+        // MAIN THREAD ONLY. Diagnostic/harness hook: if GetGPUDataCount()
+        // drops after this settles, the previous meshes were stale (e.g. built
+        // while a neighbour chunk was missing). Note the scope limit: a
+        // section whose stale mesh is EMPTY (not in m_gpuData) is not touched.
+        void RemeshAll();
+
         // Clear all mesh data
         static void ClearAllMeshes();
 
@@ -255,8 +293,12 @@ namespace Render {
         // Configuration
         ClientMeshConfig m_config;
 
-        // System references
+        // System references — same-level peers, never the globals.
         Client::ClientChunkManager* m_chunkManager = nullptr;
+        ChunkRenderer*              m_renderer     = nullptr;
+        // The shared vertex format is a backend-global resource; the first
+        // manager creates it, the last one destroys it.
+        bool                        m_holdsSharedVao = false;
 
         // Player position for prioritization
         mutable std::mutex m_playerMutex;
@@ -296,6 +338,12 @@ namespace Render {
         mutable std::shared_mutex m_gpuDataMutex;
         using GpuDataMap = std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash>;
         GpuDataMap m_gpuData;
+        GpuDataMap m_parkedGpuData;   // retention cache, see ParkChunkGPUData
+
+        // See GetGpuDataGeneration. Starts at 1 so a zero-initialised cache
+        // stamp never matches.
+        std::atomic<uint64_t> m_gpuDataGeneration{1};
+        void BumpGpuDataGeneration() { m_gpuDataGeneration.fetch_add(1, std::memory_order_acq_rel); }
 
         // Scratch for translucent re-sorting. Render-thread only — the sort
         // runs inline, so these are shared across sections rather than
@@ -347,7 +395,6 @@ namespace Render {
         // Drains every pending mesh result. Bounded by the upload permit pool
         // (MeshUploadPermits), not by a time or count budget — see the comment
         // on the definition and MC's uploadAllPendingUploads.
-        void UploadAllPendingResults();
 
         // Check if chunk needs mesh builds
         bool ChunkNeedsMeshBuild(::Game::Math::ChunkPos chunkPos) const;
@@ -370,16 +417,15 @@ namespace Render {
     // GLOBAL ACCESS
     // ========================================================================
 
-    // Global client mesh manager instance
-    extern std::unique_ptr<ClientMeshManager> g_clientMeshManager;
-
-    // Convenience functions
-    void InitializeClientMeshManager(Client::ClientChunkManager* chunkManager);
-    void ShutdownClientMeshManager();
+    // The mesh manager of the level the globals are BOUND to (see
+    // ClientLevel.hpp). Owned by ClientLevel; rebound by ClientLevels.
+    extern ClientMeshManager* g_clientMeshManager;
 
     // Frame processing functions (called by ClientThread)
-    void ProcessClientMeshBuildResults();
+    // Schedules for the BOUND level (the active one, in the frame loop).
     void ScheduleClientMeshBuilds(const glm::vec3& playerPosition);
+    // Runs every level's per-frame GPU maintenance and drains the shared
+    // result queue into whichever level each result belongs to.
     void PerformClientGPUUploads();
 
     // Player position updates

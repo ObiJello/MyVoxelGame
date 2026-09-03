@@ -43,6 +43,20 @@ namespace Game {
         ItemID PortalGun = 0;
     }
 #endif
+    namespace Wands {
+        UseResult OnAoWandUseOn(const UseOnContext& ctx, ItemStack& stack);   // AoWandBehavior.cpp
+    }
+    namespace Items {
+        ItemID AoWand = 0;
+    }
+#if ENABLE_IMMERSIVE_PORTALS
+    namespace Portal {
+        UseResult OnWandUseOn(const UseOnContext& ctx, ItemStack& stack);
+    }
+    namespace Items {
+        ItemID PortalWand = 0;
+    }
+#endif
 }
 
 namespace Game {
@@ -448,6 +462,39 @@ namespace Game {
             Log::Info("[ItemRegistry] Registered Portal Gun at ItemID %u", gunId);
         }
 #endif
+#if ENABLE_IMMERSIVE_PORTALS
+        {
+            // Slot 1 after the pure-item table (the gun holds slot 0, whether
+            // or not it is compiled in).
+            const ItemID wandId = PURE_ITEM_BASE
+                                + static_cast<ItemID>(kPureItemTableSize)
+                                + 1;
+            Item wand;
+            wand.name         = "Portal Wand";
+            wand.renderType   = ItemRenderType::Sprite;
+            wand.spriteName   = "blaze_rod";   // assets/textures/item/blaze_rod.png
+            wand.maxStackSize = 1;
+            wand.useOn        = &Portal::OnWandUseOn;   // PortalWandBehavior.cpp
+            g_pureItems[wandId] = std::move(wand);
+            Items::PortalWand   = wandId;
+            Log::Info("[ItemRegistry] Registered Portal Wand at ItemID %u", wandId);
+        }
+#endif
+        {
+            // Slot 2 after the pure-item table (gun 0, portal wand 1).
+            const ItemID aoId = PURE_ITEM_BASE
+                              + static_cast<ItemID>(kPureItemTableSize)
+                              + 2;
+            Item wand;
+            wand.name         = "Occlusion Wand";
+            wand.renderType   = ItemRenderType::Sprite;
+            wand.spriteName   = "stick";   // assets/textures/item/stick.png
+            wand.maxStackSize = 1;
+            wand.useOn        = &Wands::OnAoWandUseOn;   // AoWandBehavior.cpp
+            g_pureItems[aoId] = std::move(wand);
+            Items::AoWand     = aoId;
+            Log::Info("[ItemRegistry] Registered Occlusion Wand at ItemID %u", aoId);
+        }
 
         g_initialized = true;
         Log::Info("[ItemRegistry] Initialized: %zu block items, %zu pure items",

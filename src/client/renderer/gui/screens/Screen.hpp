@@ -155,11 +155,20 @@ namespace Render {
         // Options screens set these; the host loop (PlatformMain) drains them
         // and pokes the engine (GLFW / render backend / server session).
         enum AppliedSetting : uint32_t {
-            APPLY_VSYNC           = 1u << 0,
-            APPLY_FULLSCREEN      = 1u << 1,
-            APPLY_RENDER_DISTANCE = 1u << 2,
-            APPLY_RAW_MOUSE       = 1u << 3,
-            APPLY_MAX_FPS         = 1u << 4,
+            APPLY_VSYNC               = 1u << 0,
+            APPLY_FULLSCREEN          = 1u << 1,
+            APPLY_RENDER_DISTANCE     = 1u << 2,
+            APPLY_RAW_MOUSE           = 1u << 3,
+            APPLY_MAX_FPS             = 1u << 4,
+            // Simulation distance rides the same ClientConfigC2S packet as
+            // the render distance; either bit re-sends it.
+            APPLY_SIMULATION_DISTANCE = 1u << 5,
+            // Mesh-time options (smooth lighting, leaves, biome blend):
+            // re-publish to the mesher and remesh every active section.
+            APPLY_MESH_OPTIONS        = 1u << 6,
+            // Block-atlas mip chain rebuild (MC rebuilds the atlas when the
+            // video screen closes; ours applies on the same event).
+            APPLY_MIPMAPS             = 1u << 7,
         };
         void MarkSettingApplied(uint32_t bit) { m_appliedBits |= bit; }
         uint32_t ConsumeAppliedSettings() { uint32_t b = m_appliedBits; m_appliedBits = 0; return b; }

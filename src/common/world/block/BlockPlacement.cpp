@@ -88,7 +88,7 @@ namespace Game {
             //    there. The classification stays because it is the truth about
             //    FACING and keeps this table a description of MC's categories.
             if (Has(n, "_stairs") || Is(n, "campfire") || Is(n, "soul_campfire") ||
-                Has(n, "_fence_gate") ||
+                Has(n, "_fence_gate") || Has(n, "_door") ||
                 Is(n, "decorated_pot") || Is(n, "calibrated_sculk_sensor") ||
                 Is(n, "grindstone")) {
                 return PlacementRule::Horizontal;
@@ -1005,6 +1005,69 @@ namespace Game {
 
         const BlockState belowState = level.GetBlockState(below.x, below.y, below.z);
         return CanSurviveOn(id, belowState);
+    }
+
+    // ── Doors ───────────────────────────────────────────────────────────
+
+    bool IsDoorBlock(BlockID id) {
+        if (id == BlockID::Air) return false;
+        const std::string& slug = BlockRegistry::Get(id).registrySlug;
+        return slug.size() > 5 && slug.compare(slug.size() - 5, 5, "_door") == 0 &&
+               slug.find("trapdoor") == std::string::npos;
+    }
+
+    bool IsWoodenDoorBlock(BlockID id) {
+        // MC DoorBlock.type().canOpenByHand(): every door but iron.
+        return IsDoorBlock(id) && id != BlockID::IronDoor;
+    }
+
+    BlockState DoorPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
+                                  BlockState state, const glm::vec3& clickWorld) {
+        // MC DoorBlock.getHinge. A full block beside the door pushes the
+        // hinge to the other side; a lower door half beside it makes the
+        // pair a double door; otherwise the click's side of the cell decides.
+        const BlockID id = state.Block();
+        const Direction facing =
+            HorizontalFacingFromIndex(state.GetIndex(PropertyId::HORIZONTAL_FACING));
+        const Direction ccw = Opposite(ClockWise(facing));
+        const Direction cw  = ClockWise(facing);
+        auto at = [&](Direction d, int dy) {
+            return glm::ivec3(pos.x + StepX(d), pos.y + dy, pos.z + StepZ(d));
+        };
+        auto full = [&](const glm::ivec3& p) {
+            return BlockRegistry::GetBlockShapeSet(level.GetBlockState(p.x, p.y, p.z)).IsFullCube();
+        };
+        auto lowerDoor = [&](const glm::ivec3& p) {
+            const BlockState s = level.GetBlockState(p.x, p.y, p.z);
+            return s.Block() == id && s.GetName(PropertyId::DOUBLE_BLOCK_HALF) == "lower";
+        };
+        const glm::ivec3 left = at(ccw, 0), right = at(cw, 0);
+        const int i = (full(left) ? -1 : 0) + (full(at(ccw, 1)) ? -1 : 0) +
+                      (full(right) ? 1 : 0) + (full(at(cw, 1)) ? 1 : 0);
+        const bool leftIsDoor  = lowerDoor(left);
+        const bool rightIsDoor = lowerDoor(right);
+        bool hingeLeft;
+        if ((!leftIsDoor || rightIsDoor) && i <= 0) {
+            if ((!rightIsDoor || leftIsDoor) && i >= 0) {
+                const int j = StepX(facing), k = StepZ(facing);
+                const double d0 = static_cast<double>(clickWorld.x) - pos.x;
+                const double d1 = static_cast<double>(clickWorld.z) - pos.z;
+                hingeLeft = (j >= 0 || !(d1 < 0.5)) && (j <= 0 || !(d1 > 0.5)) &&
+                            (k >= 0 || !(d0 > 0.5)) && (k <= 0 || !(d0 < 0.5));
+            } else {
+                hingeLeft = true;
+            }
+        } else {
+            hingeLeft = false;
+        }
+        return state.SetName(PropertyId::HINGE, hingeLeft ? "left" : "right")
+                    .SetName(PropertyId::DOUBLE_BLOCK_HALF, "lower")
+                    .SetName(PropertyId::OPEN, "false")
+                    .SetName(PropertyId::POWERED, "false");
+    }
+
+    BlockState DoorUpperState(BlockState lower) {
+        return lower.SetName(PropertyId::DOUBLE_BLOCK_HALF, "upper");
     }
 
 } // namespace Game

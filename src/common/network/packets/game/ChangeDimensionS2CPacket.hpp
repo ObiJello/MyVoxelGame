@@ -50,9 +50,14 @@ namespace Network {
 
         static constexpr uint8_t kFlagHasSkyLight = 1u << 0;
         static constexpr uint8_t kFlagHasCeiling  = 1u << 1;
+        // The level being left stays resident on the client (a seamless
+        // portal crossing, where it is still visible through the portal
+        // behind the player). Without it the client frees that level.
+        static constexpr uint8_t kFlagKeepPrevious = 1u << 2;
 
-        bool HasSkyLight() const { return (flags & kFlagHasSkyLight) != 0; }
-        bool HasCeiling()  const { return (flags & kFlagHasCeiling)  != 0; }
+        bool HasSkyLight()  const { return (flags & kFlagHasSkyLight)  != 0; }
+        bool HasCeiling()   const { return (flags & kFlagHasCeiling)   != 0; }
+        bool KeepPrevious() const { return (flags & kFlagKeepPrevious) != 0; }
     };
 
     namespace Serialization {

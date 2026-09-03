@@ -3,6 +3,8 @@
 #include "server/world/ticketing/ChunkTicketManager.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
+#include "common/entity/EndCrystal.hpp"
+#include "common/network/packets/game/DragonPackets.hpp"
 #include "common/network/packets/game/RemoveEntitiesS2CPacket.hpp"
 #include "server/entity/MobManager.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
@@ -67,6 +69,7 @@ namespace Server {
         // Riding link on first sight — MC sends ClientboundSetPassengersPacket
         // in sendPairingData; here the same fact rides the add packet.
         p.vehicleId  = mob.GetVehicle() ? mob.GetVehicle()->GetId() : -1;
+        p.scale      = mob.scale;
 
         // The block a block-shaped entity carries. Sent once, on the add
         // packet, because neither entity's state changes after spawn — a
@@ -141,6 +144,20 @@ namespace Server {
         thread_local std::vector<uint8_t> t_memoSent;
         t_memoSent.assign(players.size(), 0);
 
+        // A connection may appear more than once — one entry per chunk loader
+        // (its own view plus portal far sides). Visibility is the OR over a
+        // connection's entries, decided once per connection, so the second
+        // entry can never undo what the first added in the same tick.
+        thread_local std::vector<size_t>  t_firstOf;   // index of the first entry with this connection
+        thread_local std::vector<uint8_t> t_anyInRange;
+        t_firstOf.assign(players.size(), 0);
+        for (size_t i = 0; i < players.size(); ++i) {
+            t_firstOf[i] = i;
+            for (size_t j = 0; j < i; ++j) {
+                if (players[j].connectionId == players[i].connectionId) { t_firstOf[i] = t_firstOf[j]; break; }
+            }
+        }
+
         // The ordered list, not the node map: sequential memory instead of a
         // cache miss per mob.
         for (Game::Mob* mobPtr : mobs.List()) {
@@ -195,9 +212,9 @@ namespace Server {
                 }
             }
 
+            t_anyInRange.assign(players.size(), 0);
             for (size_t pi = 0; pi < players.size(); ++pi) {
                 const auto& p = players[pi];
-                const uint32_t connId = p.connectionId;
                 const glm::dvec3& playerPos = p.position;
 
                 // MC: min(getEffectiveRange(), playerViewDistance * 16).
@@ -225,7 +242,13 @@ namespace Server {
                 // the moment it was already struggling to keep up with chunks.
                 const bool chunkTracked = t_memoSent[pi] != 0;
 
-                const bool inRange = inRangeXZ && chunkTracked;
+                if (inRangeXZ && chunkTracked) t_anyInRange[t_firstOf[pi]] = 1;
+            }
+
+            for (size_t pi = 0; pi < players.size(); ++pi) {
+                if (t_firstOf[pi] != pi) continue;   // decided with its first entry
+                const uint32_t connId = players[pi].connectionId;
+                const bool inRange = t_anyInRange[pi] != 0;
                 const bool watching = tracked.watchers.count(connId) != 0;
 
                 if (inRange && !watching) {
@@ -233,6 +256,21 @@ namespace Server {
                     EmitTo(connId, Network::PacketId::AddEntityS2C,
                            Network::Serialization::Serialize(BuildAddPacket(mob, basePos)),
                            EntityPacketOut::Kind::Add, out);
+                    // MC sends a crystal's DATA_BEAM_TARGET with the entity
+                    // data on tracking start; here it is its own packet (see
+                    // DragonPackets.hpp). Only when a target is set — the
+                    // client default is "no beam".
+                    if (const auto* crystal =
+                            dynamic_cast<const Game::EndCrystal*>(&mob);
+                        crystal && crystal->HasBeamTarget()) {
+                        Network::EndCrystalBeamS2CPacket beam;
+                        beam.entityId = id;
+                        beam.hasTarget = true;
+                        beam.target = crystal->BeamTarget();
+                        EmitTo(connId, Network::PacketId::EndCrystalBeamS2C,
+                               Network::Serialization::Serialize(beam),
+                               EntityPacketOut::Kind::Data, out);
+                    }
                 } else if (!inRange && watching) {
                     tracked.watchers.erase(connId);
                     Network::RemoveEntitiesS2CPacket removal;
@@ -250,6 +288,21 @@ namespace Server {
                     const bool stillHere = std::any_of(players.begin(), players.end(),
                         [&](const TrackedPlayer& p) { return p.connectionId == *it; });
                     it = stillHere ? std::next(it) : tracked.watchers.erase(it);
+                }
+            }
+
+            // A crystal whose beam target changed this tick (the respawn
+            // ritual retargets them mid-flight) tells every current watcher.
+            if (auto* crystal = dynamic_cast<Game::EndCrystal*>(mobPtr);
+                crystal && crystal->ConsumeBeamDirty()) {
+                Network::EndCrystalBeamS2CPacket beam;
+                beam.entityId = id;
+                beam.hasTarget = crystal->HasBeamTarget();
+                beam.target = crystal->BeamTarget();
+                const auto payload = Network::Serialization::Serialize(beam);
+                for (uint32_t connId : tracked.watchers) {
+                    EmitTo(connId, Network::PacketId::EndCrystalBeamS2C,
+                           payload, EntityPacketOut::Kind::Data, out);
                 }
             }
 
@@ -327,6 +380,7 @@ namespace Server {
                 swell != tracked.lastSwell || pose != tracked.lastPose ||
                 (animState != tracked.lastAnimState && !mob.AnimStateTicksOnClient()) ||
                 vehicleId != tracked.lastVehicleId ||
+                std::abs(mob.scale - tracked.lastScale) > 1.0e-4f ||
                 std::abs(mob.GetHealth() - tracked.lastHealth) > 1.0e-4f;
 
 
@@ -544,6 +598,7 @@ namespace Server {
                 p.pose = pose;
                 p.animState = animState;
                 p.vehicleId = vehicleId;
+                p.scale     = mob.scale;
 
                 const auto payload = Network::Serialization::Serialize(p);
                 for (uint32_t connId : tracked.watchers) {
@@ -560,6 +615,7 @@ namespace Server {
                 tracked.lastPose = pose;
                 tracked.lastAnimState = animState;
                 tracked.lastVehicleId = vehicleId;
+                tracked.lastScale     = mob.scale;
             }
         }
 

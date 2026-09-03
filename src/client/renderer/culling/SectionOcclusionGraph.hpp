@@ -25,6 +25,8 @@
 #include <condition_variable>
 #include <cstdint>
 
+namespace Client { class ClientChunkManager; }
+
 namespace Render {
 
     struct SectionRenderData;
@@ -35,11 +37,21 @@ namespace Render {
         SectionOcclusionGraph() = default;
         ~SectionOcclusionGraph();
 
+        // The chunk manager of the level this graph belongs to. Set by the
+        // owning ChunkRenderer; never the global (see ClientLevel.hpp).
+        void SetChunkManager(const Client::ClientChunkManager* chunks) { m_chunks = chunks; }
+
         // One visited-grid cell. Declared before BfsJob because the job now
         // carries the finished grid out as output.
         struct GridNodeOut {
             uint32_t generation = 0;
             uint8_t  sourceDirections = 0;
+            // Directions traveled along the path that first reached this node
+            // (MC Node.directions). The backtrack rule forbids stepping toward
+            // the opposite of any bit set here — BFS paths are monotone per
+            // axis, exactly vanilla's behaviour. Re-applied 2026-08-30 after
+            // the audit revert once the holes proved unrelated.
+            uint8_t  directions = 0;
             // Whether this section has been pushed into the draw list for the
             // current generation. A section can be REACHED before it has been
             // meshed — it becomes a node with no geometry to emit — and must
@@ -83,6 +95,12 @@ namespace Render {
             int keyCx = 0, keyCz = 0, keySy = 0;  // camera section this was built for
             uint64_t worldVersion = 0;             // staleness tracking
             uint64_t eraseToken = 0;               // pointer-safety: mismatched results are discarded
+            // Built for a view THROUGH a portal (seeded at the far surface,
+            // see ChunkRenderer::SetPortalViewSeed). Its result fills a
+            // reachable slot like any other, but its grid is never adopted
+            // as the live graph: the per-frame partial updates belong to the
+            // main view, and a portal view's grid would silence them.
+            bool portalView = false;
 
             // Whether the snapshot saw the camera's own chunk as LOADED.
             // When false, the BFS seed cannot spread (its chunk column is
@@ -178,6 +196,8 @@ namespace Render {
         size_t PendingSourceCount() const { return m_propagateFrom.size(); }
 
     private:
+        const Client::ClientChunkManager* m_chunks = nullptr;
+
         // Per-run scratch (visited grid + BFS queues). One instance for the
         // sync path and one owned by the worker so a cold-start sync run can
         // never race an in-flight async run.

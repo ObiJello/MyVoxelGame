@@ -15,11 +15,18 @@
 #include "server/session/PlayerSessionManager.hpp"
 #include "server/world/ticketing/ChunkTicketManager.hpp"
 
+#include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
 #include "common/entity/Entity.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/world/level/DimensionId.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/entity/BlockEntityType.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/entity/EndGatewayBlockEntity.hpp"
+#include "common/world/chunk/Chunk.hpp"
 #include "common/world/level/World.hpp"
+#include "server/level/EndDragonFight.hpp"
 #include "common/world/portal/BlockUtil.hpp"
 #include "common/world/portal/PortalShape.hpp"
 
@@ -242,10 +249,260 @@ namespace Server {
                           landing.position.x, landing.position.y, landing.position.z);
             }
 
+            // ── End gateways (MC TheEndGatewayBlockEntity) ─────────────────
+
+            // The gateway's block entity, created lazily for worldgen-placed
+            // gateways (worldgen writes blocks, never block entities — see
+            // EndGatewayBlockEntity.hpp).
+            Game::EndGatewayBlockEntity* GetOrCreateGatewayEntity(
+                Game::World& world, const glm::ivec3& pos) {
+                if (world.GetBlock(pos.x, pos.y, pos.z) != Game::BlockID::EndGateway) {
+                    return nullptr;
+                }
+                const auto chunkPos =
+                    Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+                auto chunk = world.GetChunk(chunkPos.x, chunkPos.z);
+                if (!chunk) return nullptr;
+                const int localX = pos.x - chunkPos.x * 16;
+                const int localZ = pos.z - chunkPos.z * 16;
+                if (auto* be = chunk->GetBlockEntity(localX, pos.y, localZ)) {
+                    return dynamic_cast<Game::EndGatewayBlockEntity*>(be);
+                }
+                const auto* type = Game::BlockEntityTypes::ForId(
+                    Game::BlockEntityTypeIds::END_GATEWAY);
+                if (!type) return nullptr;
+                auto be = type->Create(pos, Game::BlockID::EndGateway);
+                auto* raw = dynamic_cast<Game::EndGatewayBlockEntity*>(be.get());
+                chunk->SetBlockEntity(localX, pos.y, localZ, std::move(be));
+                return raw;
+            }
+
+            // MC TheEndGatewayBlockEntity.findTallestBlock: the highest
+            // collision-shape-full block within `dist` of `around` in X/Z
+            // (optionally skipping bedrock), or `around` when there is none.
+            glm::ivec3 FindTallestBlock(Game::World& world, const glm::ivec3& around,
+                                        int dist, bool allowBedrock) {
+                const int maxY = Game::DimensionMinY(Game::DimensionId::End) +
+                                 Game::DimensionLogicalHeight(Game::DimensionId::End) - 1;
+                glm::ivec3 tallest = around;
+                bool found = false;
+                for (int xd = -dist; xd <= dist; ++xd) {
+                    for (int zd = -dist; zd <= dist; ++zd) {
+                        if (xd == 0 && zd == 0 && !allowBedrock) continue;
+                        for (int y = maxY; y > (found ? tallest.y : 0); --y) {
+                            const Game::BlockID id = world.GetBlock(
+                                around.x + xd, y, around.z + zd);
+                            if (id == Game::BlockID::Air) continue;
+                            if (!Game::BlockRegistry::HasCollision(id)) continue;
+                            if (!allowBedrock && id == Game::BlockID::Bedrock) continue;
+                            tallest = glm::ivec3(around.x + xd, y, around.z + zd);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                return tallest;
+            }
+
+            // MC findValidSpawnInChunk: the END_STONE block with two clear
+            // cells above it, closest to the WORLD origin (vanilla's quirk).
+            bool FindValidSpawnInChunk(Game::World& world, int chunkX, int chunkZ,
+                                       glm::ivec3& out) {
+                bool found = false;
+                double bestDist = 0.0;
+                for (int x = chunkX * 16; x < chunkX * 16 + 16; ++x) {
+                    for (int z = chunkZ * 16; z < chunkZ * 16 + 16; ++z) {
+                        for (int y = 30; y < 255; ++y) {
+                            if (world.GetBlock(x, y, z) != Game::BlockID::EndStone) {
+                                continue;
+                            }
+                            if (Game::BlockRegistry::HasCollision(
+                                    world.GetBlock(x, y + 1, z)) ||
+                                Game::BlockRegistry::HasCollision(
+                                    world.GetBlock(x, y + 2, z))) {
+                                continue;
+                            }
+                            const double dist = static_cast<double>(x) * x +
+                                                static_cast<double>(y) * y +
+                                                static_cast<double>(z) * z;
+                            if (!found || dist < bestDist) {
+                                found = true;
+                                bestDist = dist;
+                                out = glm::ivec3(x, y, z);
+                            }
+                        }
+                    }
+                }
+                return found;
+            }
+
+            // MC EndIslandFeature.place, transcribed: start at a random size
+            // (nextInt(3) + 4), lay one end-stone disc per layer downward,
+            // shrinking by nextInt(2) + 0.5 each layer until the disc is
+            // smaller than half a block — the island a gateway conjures when
+            // its ray lands in open void.
+            void PlaceSmallEndIsland(Game::World& world, Game::JavaRandom& rng,
+                                     const glm::ivec3& origin) {
+                float size = static_cast<float>(rng.NextInt(3)) + 4.0f;
+                for (int y = 0; size > 0.5f; --y) {
+                    const int lo = static_cast<int>(std::floor(-size));
+                    const int hi = static_cast<int>(std::ceil(size));
+                    for (int x = lo; x <= hi; ++x) {
+                        for (int z = lo; z <= hi; ++z) {
+                            if (static_cast<float>(x * x + z * z) >
+                                (size + 1.0f) * (size + 1.0f)) {
+                                continue;
+                            }
+                            world.SetBlock(origin.x + x, origin.y + y,
+                                           origin.z + z,
+                                           Game::BlockID::EndStone,
+                                           Game::World::UpdateFlags::All);
+                        }
+                    }
+                    size -= static_cast<float>(rng.NextInt(2)) + 0.5f;
+                }
+            }
+
+            // MC findOrCreateValidTeleportPos + findExitPortalXZPosTentative:
+            // walk ~1024 blocks outward along the gateway's bearing, step
+            // back over empty chunks and forward over non-empty ones, then
+            // pick (or build) somewhere to stand. Loads chunks synchronously
+            // — the same freeze vanilla has on a first gateway use.
+            glm::ivec3 FindOrCreateGatewayExit(ServerLevel& level,
+                                               const glm::ivec3& entryPos) {
+                Game::World& world = *level.World();
+                glm::dvec3 dir(entryPos.x, 0.0, entryPos.z);
+                const double len = std::sqrt(dir.x * dir.x + dir.z * dir.z);
+                dir = len > 1.0e-6 ? dir / len : glm::dvec3(1.0, 0.0, 0.0);
+                glm::dvec3 tentative = dir * 1024.0;
+
+                const auto chunkEmpty = [&](const glm::dvec3& p) {
+                    const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(
+                        static_cast<int>(std::floor(p.x)),
+                        static_cast<int>(std::floor(p.z)));
+                    auto chunk = world.GetChunk(cp.x, cp.z);
+                    return !chunk || chunk->HighestFilledSectionIndex() ==
+                                         Game::Chunk::kNoFilledSection;
+                };
+
+                for (int i = 16; !chunkEmpty(tentative) && i-- > 0;) {
+                    tentative += dir * -16.0;
+                }
+                for (int i = 16; chunkEmpty(tentative) && i-- > 0;) {
+                    tentative += dir * 16.0;
+                }
+
+                const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(
+                    static_cast<int>(std::floor(tentative.x)),
+                    static_cast<int>(std::floor(tentative.z)));
+                glm::ivec3 spawn;
+                if (!FindValidSpawnInChunk(world, cp.x, cp.z, spawn)) {
+                    spawn = glm::ivec3(
+                        static_cast<int>(std::floor(tentative.x + 0.5)), 75,
+                        static_cast<int>(std::floor(tentative.z + 0.5)));
+                    Log::Info("[PortalTravel] Gateway ray hit open void — "
+                              "building an island at (%d, %d, %d)",
+                              spawn.x, spawn.y, spawn.z);
+                    PlaceSmallEndIsland(world, level.MobLevel()->Random(),
+                                        spawn);
+                }
+                return FindTallestBlock(world, spawn, 16, /*allowBedrock=*/true);
+            }
+
+            // MC EndGatewayBlock.getPortalDestination for a player, fused
+            // with the teleport itself — a SAME-dimension hop, so the session
+            // keeps its dimension and only the position moves.
+            void TraverseEndGateway(IntegratedServer& server, ServerLevel& level,
+                                    Game::Entity& entity, const glm::ivec3& entryPos) {
+                if (level.Dimension() != Game::DimensionId::End) return;
+                if (!level.World()) return;
+                Game::World& world = *level.World();
+
+                // MC EndGatewayBlock.entityInside teleports ANY entity that
+                // canUsePortal — a mob shoved in comes out on the far
+                // islands. (Players move by packet below; everything else
+                // moves in place.)
+                auto* view = dynamic_cast<Server::PlayerEntityView*>(&entity);
+                Server::ServerPlayer* player = view ? view->GetPlayer() : nullptr;
+
+                Game::EndGatewayBlockEntity* gateway =
+                    GetOrCreateGatewayEntity(world, entryPos);
+                if (!gateway) return;
+                if (gateway->IsCoolingDown()) return;
+                gateway->TriggerCooldown();
+
+                if (!gateway->HasExitPosition()) {
+                    // First use: resolve the far end and build the return
+                    // gateway 10 above it, aimed back at THIS gateway.
+                    const glm::ivec3 ground = FindOrCreateGatewayExit(level, entryPos);
+                    const glm::ivec3 exitPortal = ground + glm::ivec3(0, 10, 0);
+                    EndDragonFight::PlaceGatewayFrame(world, exitPortal);
+                    if (Game::EndGatewayBlockEntity* returnGateway =
+                            GetOrCreateGatewayEntity(world, exitPortal)) {
+                        // MC EndGatewayConfiguration.knownExit(entry, false).
+                        returnGateway->SetExitPosition(entryPos, false);
+                    }
+                    gateway->SetExitPosition(exitPortal, false);
+                }
+
+                const glm::ivec3 exit = gateway->ExitPosition();
+                EnsureExitAreaLoaded(level, exit);
+                glm::ivec3 landingBlock;
+                if (gateway->ExactTeleport()) {
+                    landingBlock = exit;
+                } else {
+                    // MC findExitPosition: tallest non-bedrock block within 5
+                    // of exit+2, then one above it.
+                    landingBlock = FindTallestBlock(world, exit + glm::ivec3(0, 2, 0),
+                                                    5, /*allowBedrock=*/false) +
+                                   glm::ivec3(0, 1, 0);
+                }
+
+                const glm::dvec3 landing(landingBlock.x + 0.5, landingBlock.y,
+                                         landingBlock.z + 0.5);
+                PlacePortalTicket(level, landing);
+
+                if (player) {
+                    player->portalState().CopyFrom(entity.portal);
+                    if (auto* sessions = server.GetSessionManager()) {
+                        if (auto session =
+                                sessions->GetSession(player->getPlayerId())) {
+                            if (auto* connection = session->GetConnection()) {
+                                connection->Teleport(landing.x, landing.y,
+                                                     landing.z,
+                                                     player->getYaw(),
+                                                     player->getPitch(),
+                                                     0.0, 0.0, 0.0);
+                            }
+                        }
+                    }
+                    Log::Info("[PortalTravel] Player %u took a gateway to "
+                              "(%.1f, %.1f, %.1f)",
+                              player->getPlayerId(), landing.x, landing.y,
+                              landing.z);
+                } else {
+                    // MC's non-pearl TeleportTransition keeps DELTA and
+                    // ROTATION relative — the entity arrives moving the way
+                    // it entered, fall distance reset by the transition.
+                    entity.position = landing;
+                    entity.fallDistance = 0.0f;
+                    entity.needsSync = true;
+                    Log::Info("[PortalTravel] Entity %d took a gateway to "
+                              "(%.1f, %.1f, %.1f)",
+                              entity.GetId(), landing.x, landing.y, landing.z);
+                }
+            }
+
         } // namespace
 
         void Traverse(IntegratedServer& server, ServerLevel& from, Game::Entity& entity,
                       Game::BlockID portal, const glm::ivec3& entryPos) {
+            // End gateways are a hop WITHIN the End, not a dimension change.
+            if (portal == Game::BlockID::EndGateway) {
+                TraverseEndGateway(server, from, entity, entryPos);
+                return;
+            }
+
             const Game::DimensionId fromDim = from.Dimension();
 
             // ── Which dimension ────────────────────────────────────────────

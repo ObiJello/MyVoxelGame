@@ -198,12 +198,18 @@ namespace {
             {"teleport",    "/teleport <target|x y z> [<dest>|<x y z>] [yaw pitch | facing x y z]"},
             {"kick",        "/kick <player> [reason]"},
             {"gamemode",    "/gamemode <survival|creative|adventure|spectator> [player]"},
+            {"difficulty",  "/difficulty [peaceful|easy|normal|hard]"},
             {"kill",        "/kill [<player>|@e[type=...]|@a|@p|@r|@s]"},
             {"summon",      "/summon <entity> [count] [<x> <y> <z>] [fuse=n] [delay=n]"},
             {"sheepeat",    "/sheepeat [radius]"},
             {"seed",        "/seed"},
             {"time",        "/time <set|add|query> <value>"},
             {"gamerule",    "/gamerule <rule> [value]"},
+            {"portal",      "/portal <make|make_biway|make_full> <w> <h> <dim> <x> <y> <z> | "
+                            "make_loop <w> <h> <dx> <dy> <dz> [turn] | make_mirror <w> <h> | "
+                            "set_rotation <ax> <ay> <az> <deg> | set_scale <s> | "
+                            "list | info | remove [id] | remove_all"},
+            {"scale",       "/scale [0.1-32] [player|radius] (no value resets you; a name scales that player, a radius scales mobs and items around you)"},
             {"entitystats", "/entitystats [tnt|all]"},
             {"tick",        "/tick <query|rate|freeze|unfreeze|step|sprint> [...]"},
             {"clearchat",   "/clearchat"},
@@ -272,6 +278,14 @@ namespace {
             } else if (cmd == "tp" || cmd == "teleport") {
                 if (argIndex == 1 || argIndex == 2) {
                     candidates = CollectPlayerNames();
+                    // "/tp Alice <TAB>": the destination is someone else —
+                    // the name already typed as the target is not offered.
+                    if (argIndex == 2 && tokens.size() >= 2) {
+                        const std::string target = ToLowerCopy(tokens[1]);
+                        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                                        [&](const std::string& n) { return ToLowerCopy(n) == target; }),
+                                         candidates.end());
+                    }
                     candidates.push_back("@a"); candidates.push_back("@e");
                     candidates.push_back("@p"); candidates.push_back("@r");
                     candidates.push_back("@s");
@@ -283,6 +297,8 @@ namespace {
                 }
             } else if (cmd == "kick") {
                 if (argIndex == 1) candidates = CollectPlayerNames();
+            } else if (cmd == "difficulty") {
+                if (argIndex == 1) candidates = {"easy", "hard", "normal", "peaceful"};
             } else if (cmd == "gamemode") {
                 if (argIndex == 1) {
                     candidates = {"adventure", "creative", "spectator", "survival"};
@@ -352,6 +368,37 @@ namespace {
                         }
                     }
                 }
+            } else if (cmd == "portal") {
+                const std::string sub = tokens.size() > 1 ? ToLowerCopy(tokens[1]) : "";
+                if (argIndex == 1) {
+                    candidates = {"info", "list", "make", "make_biway", "make_full", "make_loop",
+                                  "make_mirror", "remove", "remove_all", "set_rotation", "set_scale"};
+                } else if (sub == "make" || sub == "make_biway" || sub == "make_full") {
+                    // <w> <h> <dim> <x> <y> <z>
+                    if (argIndex == 2 || argIndex == 3) candidates = {"1", "2", "3", "4"};
+                    else if (argIndex == 4)             candidates = {"end", "nether", "overworld"};
+                    else if (argIndex <= 7)             candidates = {"~"};
+                } else if (sub == "make_loop") {
+                    // <w> <h> <dx> <dy> <dz> [turn]
+                    if (argIndex == 2 || argIndex == 3) candidates = {"1", "2", "3", "4"};
+                    else if (argIndex <= 6)             candidates = {"0", "-8", "8"};
+                    else if (argIndex == 7)             candidates = {"0", "90", "180", "-90"};
+                } else if (sub == "make_mirror") {
+                    if (argIndex == 2 || argIndex == 3) candidates = {"1", "2", "3", "4"};
+                } else if (sub == "set_rotation") {
+                    // <ax> <ay> <az> <degrees>
+                    if (argIndex <= 4)       candidates = {"0", "1"};
+                    else if (argIndex == 5)  candidates = {"180", "45", "90"};
+                } else if (sub == "set_scale") {
+                    if (argIndex == 2) candidates = {"0.5", "2", "4"};
+                }
+            } else if (cmd == "scale") {
+                if (argIndex == 1)      candidates = {"0.5", "1", "2", "4"};
+                else if (argIndex == 2) {
+                    candidates = CollectPlayerNames();
+                    candidates.push_back("@s");
+                    candidates.push_back("8"); candidates.push_back("16"); candidates.push_back("32");
+                }
             } else if (cmd == "tick") {
                 if (argIndex == 1) {
                     candidates = {"freeze", "query", "rate", "sprint", "step", "unfreeze"};
@@ -386,7 +433,7 @@ namespace Render {
         // It is deliberately NOT kept up to date — the whole point of the
         // packet is that this list stops mattering.
         std::vector<std::string> s_serverCommandNames = {
-            "entitystats", "gamemode", "gamerule", "kick", "kill", "seed",
+            "difficulty", "entitystats", "gamemode", "gamerule", "kick", "kill", "portal", "scale", "seed",
             "shape", "sheepeat", "summon", "teleport", "tick", "time", "tp",
         };
     } // namespace
@@ -440,6 +487,15 @@ namespace Render {
     void ChatScreen::MoveCursor(int dir) { SetCursorPosition(m_cursorPos + dir); }
     void ChatScreen::MoveCursorToStart() { SetCursorPosition(0); }
     void ChatScreen::MoveCursorToEnd()   { SetCursorPosition(static_cast<int>(m_inputText.size())); }
+
+    void ChatScreen::InsertText(const std::string& text) {
+        if (!m_open) return;
+        for (const char c : text) {
+            const unsigned char u = static_cast<unsigned char>(c);
+            if (u == '\n' || u == '\r' || u == '\t') continue;
+            OnCharInput(u);
+        }
+    }
 
     void ChatScreen::OnCharInput(unsigned int codepoint) {
         if (!m_open) return;

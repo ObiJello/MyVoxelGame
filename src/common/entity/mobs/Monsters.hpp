@@ -1097,11 +1097,11 @@ namespace Game {
         void SetVariantByte(uint8_t v) override { SetPhantomSize(v); }
 
         // MC getDefaultDimensions: the base box scaled by 1 + 0.15 * size.
-        float GetBbWidth() const override {
-            return Mob::GetBbWidth() * (1.0f + 0.15f * static_cast<float>(m_size));
+        float BaseBbWidth() const override {
+            return Mob::BaseBbWidth() * (1.0f + 0.15f * static_cast<float>(m_size));
         }
-        float GetBbHeight() const override {
-            return Mob::GetBbHeight() * (1.0f + 0.15f * static_cast<float>(m_size));
+        float BaseBbHeight() const override {
+            return Mob::BaseBbHeight() * (1.0f + 0.15f * static_cast<float>(m_size));
         }
 
         // ── The shared state the goals and controls read ──────────────────
@@ -1600,11 +1600,10 @@ namespace Game {
     };
 
     // MC EnderDragonPhase registration ids, verbatim — the anim byte carries
-    // one, so the numbering is wire-visible. Implemented this wave:
-    // HoldingPattern, StrafePlayer, Takeoff, ChargingPlayer, Dying, Hovering.
-    // The perch cycle (LandingApproach, Landing, SittingFlaming,
-    // SittingScanning, SittingAttacking) is SKIPPED — it needs the End podium
-    // / egg / crystal layer; the ids are kept so a later port slots in.
+    // one, so the numbering is wire-visible. All eleven phases are
+    // implemented, the perch cycle (LandingApproach, Landing, SittingFlaming,
+    // SittingScanning, SittingAttacking) included — it landed with the End
+    // dragon-fight layer (EndDragonFight, crystals, the podium).
     enum class DragonPhase : uint8_t {
         HoldingPattern  = 0,
         StrafePlayer    = 1,
@@ -1621,6 +1620,8 @@ namespace Game {
     };
 
     class EnderDragon;
+    class EndCrystal;
+    class IDragonFight;
 
     // MC DragonPhaseInstance / AbstractDragonPhaseInstance — the per-phase
     // strategy the dragon's aiStep flight consults. Concrete phases live in
@@ -1641,7 +1642,18 @@ namespace Game {
             (void)out;
             return false;
         }
-        virtual float OnHurt(float damage) { return damage; }
+        // MC onHurt(DamageSource, float). `direct` is MC's
+        // source.getDirectEntity() — the projectile itself, not its shooter —
+        // which the sitting phases inspect for the arrow/wind-charge void.
+        virtual float OnHurt(MobDamageSource source, float damage,
+                             Entity* direct) {
+            (void)source;
+            (void)direct;
+            return damage;
+        }
+        // MC onCrystalDestroyed(crystal, pos, source, player) — `player` is
+        // the blamed player (may be null). Only the holding pattern reacts.
+        virtual void OnCrystalDestroyed(Entity* player) { (void)player; }
         // MC AbstractDragonPhaseInstance.getTurnSpeed — defined out of line
         // (reads the dragon's velocity).
         virtual float GetTurnSpeed() const;
@@ -1671,15 +1683,22 @@ namespace Game {
     // rule), knockback suppressed while sitting, total effect immunity, and
     // never despawning.
     //
+    // Ported with the dragon-fight layer (2026-09): crystal healing
+    // (checkCrystals + nearestCrystal), the fight hooks (updateDragon /
+    // setDragonKilled / onCrystalDestroyed via EntityLevel::DragonFight),
+    // the crystal-aware node gating and phase odds, the full perch cycle,
+    // and the 200-tick death cinematic with the XP shower (TickDeath
+    // override; GetXpReward returns 0 so the standard death-loot award
+    // cannot pay the 12,000 a second time).
+    //
     // Not modelled, each named at its site: the EIGHT SUB-ENTITY hitboxes
     // (head/neck/body/3 tails/2 wings — one whole-box entity here; every hit
     // takes MC's non-head reduction because MC routes plain hurtServer
-    // through the body part), the End dimension layer (EndDragonFight,
-    // crystals + crystal healing, the podium/egg), the 200-tick death with
-    // rays and the XP shower (the standard 20-tick death stands in), the
-    // growl/flap sounds and every particle, and noPhysics (the mover has no
-    // ghost mode — CheckWalls carves the dragon's tunnel instead, which is
-    // also MC's mobGriefing behaviour).
+    // through the body part — except the crystal-explosion hit, which MC
+    // routes through the HEAD and so does HurtFromCrystal), the growl/flap
+    // sounds, and noPhysics (the mover has no ghost mode — CheckWalls carves
+    // the dragon's tunnel instead, which is also MC's mobGriefing
+    // behaviour).
     class EnderDragon : public Mob {
     public:
         explicit EnderDragon(EntityLevel* level);
@@ -1693,8 +1712,15 @@ namespace Game {
         float flapTime = 0.0f;
         bool  inWall = false;
         float yRotA = 0.0f;
+        // MC nearestCrystal — the healing beam's far end. Maintained on BOTH
+        // sides (the client scans its own mirror so the renderer can draw the
+        // beam, exactly as MC's client-side checkCrystals does).
+        EndCrystal* nearestCrystal = nullptr;
 
-        // ── Fight origin (MC fightOrigin — here: the spawn point) ─────────
+        // ── Fight origin (MC fightOrigin) ─────────────────────────────────
+        // BlockPos.ZERO by default, exactly as in MC: only EndDragonFight's
+        // createNewDragon sets it. It anchors the PERCH podium (and the
+        // dying dive); the flight-node ring is absolute (see EnsureNodes).
         const glm::ivec3& GetFightOrigin() const { return m_fightOrigin; }
         void SetFightOrigin(const glm::ivec3& pos) { m_fightOrigin = pos; }
 
@@ -1746,11 +1772,24 @@ namespace Game {
         void AiStep() override;
 
         // MC hurt(part, ...): every hit is a body hit here (multipart
-        // hitboxes skipped) — quarter damage + min(damage, 1), players only,
-        // the DYING pin, the sitting takeoff rule.
+        // hitboxes skipped) — quarter damage + min(damage, 1), players and
+        // explosions only (MC ALWAYS_HURTS_ENDER_DRAGONS is the explosion
+        // damage types), the DYING pin, the sitting takeoff rule.
         bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
         // The DYING pin lives here — see the .cpp.
         void Die(MobDamageSource source, Entity* attacker) override;
+        // MC tickDeath — the 200-tick cinematic: float up 0.1/tick, the XP
+        // shower (12,000 on a first kill, 500 after), setDragonKilled at 200.
+        void TickDeath() override;
+        // The cinematic pays the XP itself; zero here keeps MobManager's
+        // standard death award from paying the table's 12,000 AGAIN.
+        int GetXpReward() const override { return 0; }
+
+        // ── Dragon-fight hooks (MC EnderDragon.onCrystalDestroyed) ────────
+        // Called by the fight when a crystal pops: the head takes the 10.0
+        // explosion hit if it was the healing crystal, and the current phase
+        // gets its reaction (the holding pattern strafes the culprit).
+        void OnCrystalDestroyed(EndCrystal& crystal, Entity* player);
         // MC knockback: suppressed while sitting.
         void Knockback(double power, double dx, double dz) override;
         // MC addEffect returns false — nothing sticks to a dragon.
@@ -1761,11 +1800,43 @@ namespace Game {
         // MC checkDespawn is empty — a dragon never despawns.
         void CheckDespawn() override {}
         bool RemoveWhenFarAway(double) const override { return false; }
-        // MC EnderDragon.isPickable: false — the dragon's own box is not
-        // targetable, only its EnderDragonPart hitboxes are. `override` was
-        // missing, which is the same silent-collision hazard that let
-        // Parrot::IsFlying shadow an unrelated Entity virtual.
+        // MC EnderDragon.isPickable: false — the dragon's own 16x8 box is
+        // not targetable; only the eight PART boxes are. This port has no
+        // part ENTITIES, but the pick paths reproduce the geometry: the
+        // client raycasts ComputePartBoxes' output (PlayerController::
+        // PickEntity's dragon branch), the part index rides InteractC2S, and
+        // the server re-validates it in HandleInteract before routing the
+        // hit through HurtPart. Leaving this true instead would make the
+        // whole 16-block box clickable, which vanilla never allows.
         bool IsPickable() const override { return false; }
+        // MC Entity.kill, as the /kill command reaches it: instant removal
+        // plus the fight's victory hand-off — no DYING dive and no XP shower
+        // (vanilla's kill() removes before tickDeath ever runs too). Without
+        // this the command's discard fallback bypassed setDragonKilled and
+        // the fight simply respawned a fresh dragon.
+        void KillFromCommand() override;
+
+        // ── The eight sub-entity boxes (MC EnderDragonPart) ───────────────
+        //
+        // MC's parts are real entities repositioned every aiStep by tickPart;
+        // here the same layout is computed on demand from the dragon's own
+        // synced state (position, yRot, yRotA, flight history — all present
+        // on the client mirror too, which is what lets the client pick
+        // against the true geometry). Order and sizes are MC's constructor
+        // order: head 1x1, neck 3x3, body 5x3, tail1..3 2x2, wing1/2 4x2.
+        static constexpr int kDragonPartCount = 8;
+        static constexpr int kDragonPartHead  = 0;
+        void ComputePartBoxes(AABB out[kDragonPartCount]) const;
+
+        // MC EnderDragon.hurt(part, source, damage): a head hit takes full
+        // damage, everything else the quarter+min(1) body reduction. Public
+        // because the server's interact handler routes the picked part here
+        // (MC reaches it through the part entity's hurtServer). `direct` is
+        // the source's direct entity — a projectile passes itself so the
+        // sitting phases can void and ignite it (MC's
+        // source.getDirectEntity() instanceof AbstractArrow check).
+        bool HurtPart(MobDamageSource source, float amount, Entity* attacker,
+                      bool headHit, Entity* direct = nullptr);
         // MC EntityType.ENDER_DRAGON is fireImmune.
         bool FireImmune() const override { return true; }
 
@@ -1781,6 +1852,11 @@ namespace Game {
     private:
         // MC getHeadYOffset.
         float GetHeadYOffset() const;
+        // MC ServerLevel.getDragonFight() as the dragon sees it — null on the
+        // client and outside the End.
+        IDragonFight* Fight() const;
+        // MC checkCrystals — nearestCrystal upkeep + the 1 HP / 10 ticks heal.
+        void CheckCrystals();
         // MC checkWalls over one box: destroys every non-immune block the box
         // overlaps (mobGriefing), returns whether an immune block resisted.
         bool CheckWalls(const AABB& box);
@@ -1790,7 +1866,6 @@ namespace Game {
         void EnsureNodes();
 
         glm::ivec3 m_fightOrigin{0};
-        bool m_fightOriginSet = false;
 
         // Phase machinery (lazily created instances, MC's phases[] array).
         std::unique_ptr<DragonPhaseInstance>

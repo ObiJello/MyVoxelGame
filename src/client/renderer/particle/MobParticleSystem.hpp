@@ -42,8 +42,10 @@
 #include "../backend/RenderTypes.hpp"
 #include "client/entity/ClientMobManager.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/world/level/DimensionId.hpp"
 
 #include <glm/glm.hpp>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -64,14 +66,20 @@ namespace Render {
         // at MC's fixed 20 Hz, with the remainder kept as the render
         // partial tick. `blocks` feeds the hasPhysics types' block
         // collision (null = no collision, particles fly through).
-        void Update(float dt, Client::ClientMobManager* mobs,
-                    const Game::IBlockAccess* blocks,
-                    const glm::vec3& cameraPos);
+        //
+        // Every client level's queue is drained (the active one and the
+        // far sides seen through immersive portals); each particle remembers
+        // its level and collides against that level's blocks. The distance
+        // cull for a far level is measured from the camera's image through
+        // the nearest portal that leads there.
+        void Update(float dt, const glm::vec3& cameraPos);
 
         // Draw every live particle as a camera-facing billboard, one draw
         // call per sprite texture in use.
+        // Only the particles of `dimension` — the main pass draws the active
+        // level's, a portal view draws its far level's.
         void Render(const glm::mat4& projection, const glm::mat4& view,
-                    const glm::vec3& cameraPos);
+                    const glm::vec3& cameraPos, Game::DimensionId dimension);
 
         size_t Count() const { return m_particles.size(); }
 
@@ -82,6 +90,22 @@ namespace Render {
         // shows its fireball but not the debris cloud around it.
         static constexpr double kParticleCutoffSq = 1024.0;   // 32 blocks
         static bool OverridesParticleLimiter(Game::ParticleKind kind);
+
+        // MC ClientLevel.doAddParticle, all three gates in MC's order:
+        //
+        //     status = calculateParticleLevel(alwaysShow)
+        //     if (overrideLimiter)            create
+        //     else if (distSq > 1024)         drop
+        //     else if (status == MINIMAL)     drop
+        //     else                            create
+        //
+        // where calculateParticleLevel (ClientLevel.java:687) reads the
+        // Particles option and randomly downgrades it — DECREASED drops one
+        // in three, and an always-show particle under MINIMAL gets a one-in-
+        // ten reprieve to DECREASED. `alwaysShow` is the addAlwaysVisible-
+        // Particle flag; the emitter is the only kind spawned that way.
+        bool ShouldSpawn(const Client::ClientLevelBridge::QueuedParticle& q,
+                         const glm::vec3& cameraPos);
 
     private:
         // Sprite textures, one file each — index into m_textures.
@@ -119,6 +143,7 @@ namespace Render {
         // where MC uses doubles.
         struct Particle {
             Game::ParticleKind kind;
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
             double x = 0, y = 0, z = 0;
             double xo = 0, yo = 0, zo = 0;
             double xd = 0, yd = 0, zd = 0;
@@ -143,7 +168,11 @@ namespace Render {
         };
 
         void SpawnFromRequest(
-            const Client::ClientLevelBridge::QueuedParticle& q);
+            const Client::ClientLevelBridge::QueuedParticle& q,
+            Game::DimensionId dimension);
+        // Where the 32-block spawn cull is measured from for a level: the
+        // camera, or its image through the nearest portal into that level.
+        static glm::vec3 AnchorFor(Game::DimensionId dimension, const glm::vec3& cameraPos);
         void TickParticle(Particle& p, const Game::IBlockAccess* blocks,
                           std::vector<Client::ClientLevelBridge::QueuedParticle>&
                               emitterSpawns);
@@ -163,17 +192,39 @@ namespace Render {
         std::vector<Particle> m_particles;
         std::vector<Client::ClientLevelBridge::QueuedParticle> m_incoming;
         Game::JavaRandom m_rng;
+        // MC ClientLevel.random, which calculateParticleLevel draws from —
+        // a different stream from the ParticleEngine's, so the limiter's
+        // rolls do not perturb the particle constructors' sequence.
+        Game::JavaRandom m_limiterRng;
+        // The Particles option, read once per Update on the main thread.
+        Game::ParticleStatus m_particleStatus = Game::ParticleStatus::All;
 
         float m_tickAccum = 0.0f;   // seconds toward the next 20 Hz step
         float m_partialTick = 0.0f; // 0..1 for render interpolation
 
-        // GPU resources — one shader, one streaming VB (block vertex
-        // layout: pos3f + uv2f + rgba8 = 24 bytes), one mesh.
+        // GPU resources — one shader, a ring of streaming VBs (block vertex
+        // layout: pos3f + uv2f + rgba8 = 24 bytes) with a mesh each.
         ShaderHandle  m_shader = INVALID_SHADER;
-        BufferHandle  m_vb     = INVALID_BUFFER;
-        MeshHandle    m_mesh   = INVALID_MESH;
         TextureHandle m_textures[kTextureCount];
-        size_t        m_vbCapacityVerts = 0;
+
+        // One streaming vertex buffer per Render CALL, not per frame. The
+        // system draws once per view — the main one and every portal view —
+        // and the Vulkan backend records an upload immediately but runs
+        // the draws at submit: a second upload into the same buffer
+        // clobbers what the first draw will read, and growing that buffer
+        // destroys one a recorded draw still references — VK_ERROR_
+        // DEVICE_LOST, the picture freezing while the game runs on. Calls
+        // cycle through the ring; a slot grows on its own, deferred.
+        struct StreamSlot {
+            BufferHandle vb = INVALID_BUFFER;
+            MeshHandle   mesh = INVALID_MESH;
+            size_t       capacityVerts = 0;
+        };
+        static constexpr size_t kStreamSlots = 8;
+        std::array<StreamSlot, kStreamSlots> m_slots;
+        size_t m_slotCursor = 0;
+        StreamSlot& AcquireSlot(size_t vertsNeeded, size_t minCapacity);
+        void DestroySlots();
 
         static const char* s_vertSource;
         static const char* s_fragSource;

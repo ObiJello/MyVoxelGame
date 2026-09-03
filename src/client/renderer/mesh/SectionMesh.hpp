@@ -15,20 +15,27 @@ namespace Render {
     class RenderBackend;
 
     // Plain-old data struct to hold CPU-side mesh buffers for one 16x16x16 section.
-    // Indices are 16-bit: they are relative to the section's own vertex range
-    // (drawn with a per-section baseVertex), and a section layer is capped at
-    // 65,536 vertices — see the guards in Mesher::GenerateQuad / FluidMeshBuilder.
+    // Indices are 16-bit and relative to the section's own vertex range; a
+    // section layer is capped at 65,536 vertices — see the guards in
+    // Mesher::GenerateQuad / FluidMeshBuilder. The mega-buffer rebases them to
+    // absolute uint32 at upload (ChunkMegaBuffer::INDEX_SIZE), so nothing on
+    // the GPU side ever sees these as-is.
+    //
+    // Vertices are the 32-byte TERRAIN format (TerrainVertex: block vertex +
+    // sprite tile rect for greedy-merged quads). Everything downstream of the
+    // mesher — MeshBuildResult float blobs, ChunkMegaBuffer::VERTEX_STRIDE,
+    // the terrain shaders — assumes this stride.
     struct SectionMesh {
         // Opaque geometry (solid blocks like stone, dirt)
-        std::vector<Vertex> opaqueVerts;
+        std::vector<TerrainVertex> opaqueVerts;
         std::vector<uint16_t> opaqueIdxs;
 
         // Cutout geometry (alpha-test blocks like leaves, grass)
-        std::vector<Vertex> cutoutVerts;
+        std::vector<TerrainVertex> cutoutVerts;
         std::vector<uint16_t> cutoutIdxs;
 
         // Translucent geometry (blended blocks like glass, water, ice)
-        std::vector<Vertex> translucentVerts;
+        std::vector<TerrainVertex> translucentVerts;
         std::vector<uint16_t> translucentIdxs;
 
         // Section position
@@ -105,11 +112,13 @@ namespace Render {
         int sectionY = 0;
 
         // Cached mega-buffer draw commands (populated at upload, read during rendering).
-        // Eliminates per-frame hash lookups in RenderLayerPass.
+        // Eliminates per-frame hash lookups in RenderLayerPass. Offsets are in
+        // INDICES, not bytes — the renderer merges adjacent sections by index
+        // range and converts to bytes only when it emits the draw. No
+        // baseVertex: slab indices are absolute (ChunkMegaBuffer::INDEX_SIZE).
         struct CachedDrawCmd {
             int32_t indexCount = 0;
-            size_t indexByteOffset = 0;
-            int32_t baseVertex = 0;
+            uint32_t indexOffset = 0;
             bool valid = false;
             uint32_t slabIndex = 0;
             // Per-section index buffer, set only for layers whose pool uses
@@ -148,8 +157,10 @@ namespace Render {
 
         // Get total memory usage estimate
         size_t GetMemoryUsage() const {
-            return (opaqueIndexCount + cutoutIndexCount + translucentIndexCount) *
-                   (sizeof(Vertex) + sizeof(uint16_t));
+            // Vertices are ~2/3 of the index count (4 per 6); uint32 indices
+            // on the GPU side, see ChunkMegaBuffer::INDEX_SIZE.
+            return (opaqueVertexCount + cutoutVertexCount + translucentVertexCount) * sizeof(TerrainVertex) +
+                   (opaqueIndexCount + cutoutIndexCount + translucentIndexCount) * sizeof(uint32_t);
         }
 
         // No-op: GPU resources are now owned by ChunkMegaBuffer.

@@ -8,6 +8,7 @@
 // function bridges it, and the include lives in the .cpp.
 #pragma once
 
+#include "common/world/level/DimensionId.hpp"
 #include "common/entity/EntityType.hpp"
 
 #include <glm/glm.hpp>
@@ -26,8 +27,13 @@ namespace Game {
     // Returns false when there is no server to spawn into, when the type is
     // unknown, or when MC's peaceful-difficulty rule rejects it — MC's own
     // `spawn(...) != null` test, which is what gates consuming the egg.
+    // `dimension` is the clicked world's — an egg used in the Nether spawns
+    // in the Nether (and one used through a portal spawns on the far side).
+    // `portalCooldownTicks` > 0 keeps the new mob out of any portal for that
+    // long (a mob spawned inside one).
     bool SpawnMobFromItem(EntityTypeId type, const glm::ivec3& spawnPos,
-                          bool tryMoveDown, bool movedUp);
+                          bool tryMoveDown, bool movedUp, DimensionId dimension,
+                          int portalCooldownTicks = 0);
 
     struct ItemStack;
 
@@ -45,5 +51,15 @@ namespace Game {
     // world that has nowhere to send it — so the caller must not shrink the
     // stack when this answers false.
     bool ThrowEnderEye(int dimensionId, const glm::dvec3& from, const ItemStack& stack);
+
+    class IUsePlayer;
+
+    // MC EnderpearlItem.use's server half: spawn a ThrownEnderpearl owned by
+    // the throwing player (shootFromRotation, power 1.5, inaccuracy 1.0).
+    // Its own bridge for the eye's reason — the owner must be the player's
+    // server-side entity view, which only the server can resolve. Returns
+    // false with no server or no view (the caller then does not spend the
+    // pearl).
+    bool ThrowEnderPearl(int dimensionId, IUsePlayer& player);
 
 } // namespace Game

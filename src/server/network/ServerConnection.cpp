@@ -479,8 +479,10 @@ namespace Server {
         // what "creative" means.
         Network::PlayerAbilitiesS2CPacket BuildAbilitiesPacket(GameMode mode,
                                                                bool flying, bool canFly,
-                                                               bool noclip = false) {
+                                                               bool noclip = false,
+                                                               float scale = 1.0f) {
             Network::PlayerAbilitiesS2CPacket packet;
+            packet.scale = scale;
             if (noclip) packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_NOCLIP;
             if (mode == GameMode::CREATIVE || mode == GameMode::SPECTATOR) {
                 packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INVULNERABLE;
@@ -498,7 +500,7 @@ namespace Server {
     void ServerConnection::SendPlayerAbilities(const ServerPlayer& player) {
         auto data = Network::Serialization::Serialize(
             BuildAbilitiesPacket(player.getGameMode(), player.isFlying(), player.canFly(),
-                                 player.isNoclip()));
+                                 player.isNoclip(), player.getScale()));
         SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
     }
 
@@ -822,16 +824,30 @@ namespace Server {
         const int renderDistance = reader.ReadVarInt();
         const bool vsync = reader.ReadByte() != 0;
         const float mouseSensitivity = reader.ReadFloat();
-        ApplyClientSettings(std::clamp(renderDistance, 2, 32), vsync, mouseSensitivity);
+        const int simulationDistance = ReadSimulationDistance(reader, renderDistance);
+        ApplyClientSettings(std::clamp(renderDistance, 2, 32), simulationDistance,
+                            vsync, mouseSensitivity);
     }
 
-    void ServerConnection::ApplyClientSettings(int renderDistance, bool vsync, float mouseSensitivity) {
-        Log::Info("[Server#%u] Client settings: renderDistance=%d, vsync=%s, sensitivity=%.2f",
-                  GetConnectionId(), renderDistance, vsync ? "true" : "false", mouseSensitivity);
+    int ServerConnection::ReadSimulationDistance(Network::PacketReader& reader, int renderDistance) {
+        // Appended after the original three fields. A client built before the
+        // field existed sends none, and for it the old behaviour — simulate
+        // everything it can see — is exactly what it expects.
+        if (!reader.HasMore()) return std::clamp(renderDistance, 2, 32);
+        return std::clamp(static_cast<int>(reader.ReadVarInt()), 2, 32);
+    }
 
-        // Forward to IntegratedServer for per-player view distance update
+    void ServerConnection::ApplyClientSettings(int renderDistance, int simulationDistance,
+                                               bool vsync, float mouseSensitivity) {
+        Log::Info("[Server#%u] Client settings: renderDistance=%d, simulationDistance=%d, "
+                  "vsync=%s, sensitivity=%.2f",
+                  GetConnectionId(), renderDistance, simulationDistance,
+                  vsync ? "true" : "false", mouseSensitivity);
+
+        // Forward to IntegratedServer for per-player view/simulation distance update
         if (Server::g_integratedServer) {
-            Server::g_integratedServer->OnClientSettingsReceived(GetConnectionId(), renderDistance);
+            Server::g_integratedServer->OnClientSettingsReceived(GetConnectionId(), renderDistance,
+                                                                 simulationDistance);
         }
     }
 
@@ -955,6 +971,13 @@ namespace Server {
                 }
                 break;
             
+            case PacketId::ChunkRequestFullC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeChunkRequestFullC2S(payload);
+                    return std::make_unique<Network::Packets::ChunkRequestFullC2SPacketImpl>(data.chunkX, data.chunkZ, data.dimensionId);
+                }
+                break;
+
             case PacketId::ChunkBatchAckC2S:
                 if (m_phase == ConnectionPhase::PLAY) {
                     auto data = Network::Serialization::DeserializeChunkBatchAckC2S(payload);
@@ -980,6 +1003,21 @@ namespace Server {
                 if (m_phase == ConnectionPhase::PLAY) {
                     auto data = Network::Serialization::DeserializePlayerPauseC2S(payload);
                     return std::make_unique<Network::Packets::PlayerPauseC2SPacketImpl>(data);
+                }
+                break;
+
+#if ENABLE_IMMERSIVE_PORTALS
+            case PacketId::PortalTeleportC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializePortalTeleportC2S(payload);
+                    return std::make_unique<Network::Packets::PortalTeleportC2SPacketImpl>(data);
+                }
+                break;
+#endif
+            case PacketId::FillBlocksC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeFillBlocksC2S(payload);
+                    return std::make_unique<Network::Packets::FillBlocksC2SPacketImpl>(data);
                 }
                 break;
 
@@ -1046,8 +1084,9 @@ namespace Server {
                     const int renderDistance = std::clamp(static_cast<int>(reader.ReadVarInt()), 2, 32);
                     const bool vsync = reader.ReadByte() != 0;
                     const float mouseSensitivity = reader.ReadFloat();
+                    const int simulationDistance = ReadSimulationDistance(reader, renderDistance);
                     return std::make_unique<Network::Packets::ClientConfigC2SPacketImpl>(
-                        renderDistance, vsync, mouseSensitivity);
+                        renderDistance, simulationDistance, vsync, mouseSensitivity);
                 }
                 break;
 
@@ -1086,6 +1125,18 @@ namespace Server {
         Log::Warning("[ServerConnection %u] Unexpected packet 0x%02X in state %d", 
                     GetConnectionId(), packetId, static_cast<int>(m_phase.load()));
         return nullptr;
+    }
+
+    void ServerConnection::SendPacketIn(Game::DimensionId dimension, uint8_t packetId,
+                                        const std::vector<uint8_t>& data) {
+        if (dimension != m_outboundDimension) {
+            Network::DimensionScopeS2CPacket scope;
+            scope.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(dimension));
+            SendPacket(static_cast<uint8_t>(Network::PacketId::DimensionScopeS2C),
+                       Network::Serialization::Serialize(scope));
+            m_outboundDimension = dimension;
+        }
+        SendPacket(packetId, data);
     }
 
 } // namespace Server

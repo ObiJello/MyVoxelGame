@@ -1,5 +1,6 @@
 // File: src/common/entity/projectile/Projectile.cpp
 #include "common/entity/projectile/Projectile.hpp"
+#include "common/entity/mobs/Monsters.hpp"
 #include "common/world/block/TntBlock.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
@@ -83,6 +84,25 @@ namespace Game {
         yHeadRot = yBodyRot = yRot;
     }
 
+    void Projectile::ShootFromRotation(const Entity& shooter, float xRot,
+                                       float yRot, float yOffset,
+                                       float velocityScale, float inaccuracy) {
+        // MC Projectile.shootFromRotation, transcribed: view angles → unit
+        // direction, shoot(), then the shooter's own known movement is added
+        // (its y only while airborne — a jump-throw leads upward, a grounded
+        // sprint only leads forward).
+        const float xd = -std::sin(yRot * Mth::kDegToRad) *
+                          std::cos(xRot * Mth::kDegToRad);
+        const float yd = -std::sin((xRot + yOffset) * Mth::kDegToRad);
+        const float zd =  std::cos(yRot * Mth::kDegToRad) *
+                          std::cos(xRot * Mth::kDegToRad);
+        Shoot(xd, yd, zd, velocityScale, inaccuracy);
+        const glm::dvec3 known = shooter.GetKnownMovement();
+        velocity += glm::dvec3(known.x, shooter.onGround ? 0.0 : known.y,
+                               known.z);
+        needsSync = true;
+    }
+
     float Projectile::LerpRotation(float from, float to, float step) {
         while (to - from < -180.0f) from -= 360.0f;
         while (to - from >= 180.0f) from += 360.0f;
@@ -106,8 +126,26 @@ namespace Game {
         // Identity compare, not a resolve: "am I allowed to hit this" must
         // answer the same whether or not my shooter is currently loaded, and
         // it keeps this method const.
-        if (&entity == this || m_ownerRef.Matches(entity)) return false;
+        if (&entity == this) return false;
+        // MC: the owner is protected only until leftOwner — after that a
+        // shooter can be hit by their own projectile (MC also spares the
+        // owner's co-passengers; no vehicle system here).
+        if (!m_leftOwner && m_ownerRef.Matches(entity)) return false;
         return entity.IsAlive();
+    }
+
+    bool Projectile::CheckLeftOwner() {
+        Entity* owner = GetOwner();
+        if (!owner) return true;
+        // MC Projectile.checkLeftOwner: this box expanded towards the
+        // movement, inflated 1.0, against the owner's box.
+        AABB box = GetAABB();
+        const glm::vec3 v(velocity);
+        box.min = glm::min(box.min, box.min + v);
+        box.max = glm::max(box.max, box.max + v);
+        box.min -= glm::vec3(1.0f);
+        box.max += glm::vec3(1.0f);
+        return !box.Intersects(owner->GetAABB());
     }
 
     Projectile::HitResult Projectile::Clip(const glm::dvec3& origin,
@@ -116,6 +154,11 @@ namespace Game {
         HitResult result;
         if (!m_level || !m_level->Blocks()) return result;
         const IBlockAccess& blocks = *m_level->Blocks();
+
+        // MC Projectile.tick's `if (!leftOwner) leftOwner = checkLeftOwner()`.
+        // Clip is the funnel every projectile tick passes through, and it runs
+        // before this tick's movement is applied — the same ordering as MC.
+        if (!m_leftOwner) m_leftOwner = CheckLeftOwner();
 
         const double moveLen = glm::length(movement);
         if (moveLen < 1.0e-9) return result;
@@ -141,6 +184,7 @@ namespace Game {
 
         // ── Entity clip (MC findHitEntities + inflate(0.3)) ────────────────
         LivingEntity* hitEntity = nullptr;
+        int hitDragonPart = -1;
         double tEntity = tBlock;
         if (checkEntities) {
             AABB sweep = GetAABB();
@@ -155,6 +199,31 @@ namespace Game {
                 auto* living = dynamic_cast<LivingEntity*>(e);
                 if (!living || !CanHitEntity(*living)) continue;
 
+                // ── Ender dragon: clip against the eight PART boxes ────────
+                //
+                // MC's arrows collide with the EnderDragonPart entities, not
+                // the dragon's 16x8 body box — an arrow through the gap
+                // between a wing and the tail passes clean through. The part
+                // index rides HitResult.dragonPart; DealHitDamage routes it
+                // into HurtPart so a head shot takes full damage, exactly as
+                // the part entity's hurt() would.
+                if (auto* dragon = dynamic_cast<EnderDragon*>(living)) {
+                    AABB parts[EnderDragon::kDragonPartCount];
+                    dragon->ComputePartBoxes(parts);
+                    for (int p = 0; p < EnderDragon::kDragonPartCount; ++p) {
+                        AABB pbox = parts[p];
+                        pbox.min -= glm::vec3(0.3f);
+                        pbox.max += glm::vec3(0.3f);
+                        const double t = RayAabb(origin, movement, pbox);
+                        if (t >= 0.0 && t < tEntity) {
+                            tEntity = t;
+                            hitEntity = living;
+                            hitDragonPart = p;
+                        }
+                    }
+                    continue;
+                }
+
                 AABB box = living->GetAABB();
                 box.min -= glm::vec3(0.3f);   // MC canHitEntity inflate
                 box.max += glm::vec3(0.3f);
@@ -162,6 +231,7 @@ namespace Game {
                 if (t >= 0.0 && t < tEntity) {
                     tEntity = t;
                     hitEntity = living;
+                    hitDragonPart = -1;
                 }
             }
         }
@@ -170,6 +240,7 @@ namespace Game {
             result.type = HitResult::Type::Entity;
             result.t = tEntity;
             result.entity = hitEntity;
+            result.dragonPart = hitDragonPart;
             result.location = origin + movement * tEntity;
         } else if (tBlock < 1.0) {
             result.type = HitResult::Type::Block;
@@ -180,9 +251,23 @@ namespace Game {
         return result;
     }
 
+    bool Projectile::DealHitDamage(LivingEntity& target, const HitResult& hit,
+                                   MobDamageSource source, float amount,
+                                   Entity* attacker) {
+        if (auto* dragon = dynamic_cast<EnderDragon*>(&target)) {
+            // MC: the ray hit an EnderDragonPart, whose hurt() routes
+            // EnderDragon.hurt(part, source, damage) — the head takes full
+            // damage, and the phase's onHurt sees this projectile as the
+            // direct entity.
+            const bool headHit = hit.dragonPart == EnderDragon::kDragonPartHead;
+            return dragon->HurtPart(source, amount, attacker, headHit, this);
+        }
+        return target.Hurt(source, amount, attacker);
+    }
+
     void Projectile::OnHit(const HitResult& hit) {
         if (hit.IsEntity() && hit.entity) {
-            OnHitEntity(*hit.entity);
+            OnHitEntity(*hit.entity, hit);
         } else if (hit.IsBlock()) {
             // MC BlockBehaviour.onProjectileHit runs BEFORE the projectile's
             // own block handling — a flaming arrow lights the TNT it hit and

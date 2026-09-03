@@ -66,6 +66,28 @@ struct Frustum {
         return f;
     }
 
+    // A "portal frustum": the four side planes pass through `eye` and the
+    // edges of a quad (the far side of a portal surface, in the order the
+    // portal's corners come in), so only what is visible THROUGH the quad
+    // passes. Near and far planes are taken from `base`. This is the
+    // Immersive Portals mod's FrustumCuller inner culling.
+    static Frustum ThroughQuad(const glm::vec3& eye, const glm::vec3 corners[4], const Frustum& base) {
+        Frustum f = base;
+        const glm::vec3 center = (corners[0] + corners[1] + corners[2] + corners[3]) * 0.25f;
+        for (int i = 0; i < 4; ++i) {
+            const glm::vec3 a = corners[i] - eye;
+            const glm::vec3 b = corners[(i + 1) % 4] - eye;
+            glm::vec3 n = glm::cross(a, b);
+            const float len = glm::length(n);
+            if (len < 1e-9f) continue;          // degenerate edge: keep the base plane
+            n /= len;
+            // Inward: the quad's centre must be on the positive side.
+            if (glm::dot(n, center - eye) < 0.0f) n = -n;
+            f.planes[i] = glm::vec4(n, -glm::dot(n, eye));
+        }
+        return f;
+    }
+
     // Test if an AABB is at least partially inside (or intersects) the frustum.
     bool IsBoxVisible(const AABB& box) const {
         return IsBoxVisible(box.min, box.max);

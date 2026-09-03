@@ -1,5 +1,13 @@
 // File: shaders/block_opaque_vk.frag (Vulkan version of block_opaque.frag)
-// Opaque shader — hardcoded 0.1 discard constant for early-z optimization.
+// Opaque (solid-layer) fragment shader. NO discard, NO alpha test — every
+// fragment lands, alpha ignored, so early-z stays on and the pass is pure fill.
+//
+// INVARIANT (enforced by the mesher, not here): nothing routed into the opaque
+// layer relies on transparent texels being dropped. grass_block's side overlay
+// quads go to the cutout layer (FaceDef::cutoutOverlay), every block MC draws
+// in cutout is registered Cutout in BlockDefs.inc, and Fast-graphics leaves
+// deliberately draw their alpha-0 texels here — MC's Fast look. Do not add a
+// discard back; fix the block's layer instead. Keep in step with the GL file.
 #version 450
 
 // Input from vertex shader
@@ -50,10 +58,6 @@ float linearFog(float d, float s, float e) {
 
 void main() {
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
-
-    // Discard fully transparent pixels (grass side overlay, etc.)
-    // Hardcoded constant lets GPU optimize better than a push constant threshold
-    if (textureColor.a < 0.1) discard;
 
     // Vertex color contains: biome tint * AO * directional face shade
     vec3 finalColor = textureColor.rgb * fragColor.rgb;

@@ -398,7 +398,7 @@ namespace Game {
 
         // MC PolarBear.getDefaultDimensions — the hitbox grows with the
         // stand animation (client-side only, where the animation runs).
-        float GetBbHeight() const override;
+        float BaseBbHeight() const override;
 
         // MC PolarBearRenderer.extractRenderState: the RAW 0..1 lerp — the
         // MODEL is what squares it.

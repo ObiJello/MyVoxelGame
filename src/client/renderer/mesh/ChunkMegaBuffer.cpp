@@ -29,7 +29,7 @@ namespace Render {
         // Allocate the first slab
         AllocateSlab();
 
-        Log::Info("ChunkMegaBuffer initialized: slab size=%zu verts (%.1f MB) / %zu indices (%.1f MB)",
+        Log::Info("ChunkMegaBuffer initialized: slab size=%zu verts (%.1f MB) / %zu indices (%.1f MB, uint32 absolute)",
                   m_slabVertexCapacity,
                   static_cast<double>(m_slabVertexCapacity * VERTEX_STRIDE) / (1024.0 * 1024.0),
                   m_slabIndexCapacity,
@@ -117,6 +117,19 @@ namespace Render {
     // SECTION MANAGEMENT
     // ========================================================================
 
+    // uint16 section-relative -> uint32 absolute, into m_indexScratch. The
+    // add cannot overflow: a slab holds at most m_slabVertexCapacity vertices
+    // (hundreds of thousands) and a section layer at most 65,536.
+    static void ConvertToAbsolute(std::vector<uint32_t>& scratch,
+                                  const uint16_t* indexData, size_t indexCount,
+                                  size_t vertexOffset) {
+        scratch.resize(indexCount);
+        const uint32_t base = static_cast<uint32_t>(vertexOffset);
+        for (size_t i = 0; i < indexCount; ++i) {
+            scratch[i] = base + static_cast<uint32_t>(indexData[i]);
+        }
+    }
+
     bool ChunkMegaBuffer::UploadSection(const MegaBufferSectionKey& key,
                                          const float* vertexData, size_t vertexCount,
                                          const uint16_t* indexData, size_t indexCount) {
@@ -169,13 +182,16 @@ namespace Render {
                                        vertexCount * VERTEX_STRIDE,
                                        vertexData);
 
-        // Upload index data
+        // Upload index data, rebased to absolute so the draw needs no
+        // baseVertex (see INDEX_SIZE). Both modes get the same layout so the
+        // renderer never has to know which one it is drawing from.
+        ConvertToAbsolute(m_indexScratch, indexData, indexCount, vertexOffset);
         BufferHandle sectionIbo = INVALID_BUFFER;
         if (m_perSectionIndexBuffers) {
             sectionIbo = g_renderBackend->CreateBuffer(
                 BufferUsage::Index,
                 indexCount * INDEX_SIZE,
-                indexData,
+                m_indexScratch.data(),
                 BufferAccess::Dynamic);
             if (sectionIbo == INVALID_BUFFER) {
                 FreeRegion(slab.freeVertexBlocks, vertexOffset, vertexCount);
@@ -185,7 +201,7 @@ namespace Render {
             g_renderBackend->UpdateBuffer(slab.ibo,
                                            indexOffset * INDEX_SIZE,
                                            indexCount * INDEX_SIZE,
-                                           indexData);
+                                           m_indexScratch.data());
         }
 
         m_uploadedBytes += vertexCount * VERTEX_STRIDE + indexCount * INDEX_SIZE;
@@ -210,23 +226,28 @@ namespace Render {
         if (indexCount != region.indexCount) return false;
         if (region.slabIndex >= m_slabs.size()) return false;
 
+        // Same rebase as the upload; the section's vertices never move, so
+        // its vertexOffset is the same one the original indices were built on.
+        ConvertToAbsolute(m_indexScratch, indexData, indexCount, region.vertexOffset);
+
         // Per-section mode writes a buffer only this section draws from, so the
         // driver has no in-flight draws to serialise against — that stall is the
         // entire reason this mode exists.
         if (m_perSectionIndexBuffers) {
             if (region.sectionIbo == INVALID_BUFFER) return false;
             g_renderBackend->UpdateBuffer(region.sectionIbo, 0,
-                                          indexCount * INDEX_SIZE, indexData);
+                                          indexCount * INDEX_SIZE, m_indexScratch.data());
         } else {
             // Unsynchronised: this is a same-length permutation of the section's
             // own quad range (enforced above), so a torn read is a mix of two
-            // valid orderings, never an invalid index. See
-            // RenderBackend::UpdateBufferUnsynchronized.
+            // valid orderings, never an invalid index — absolute indices keep
+            // that property, every word written still lands inside this
+            // section's own vertex range. See RenderBackend::UpdateBufferUnsynchronized.
             g_renderBackend->UpdateBufferUnsynchronized(
                 m_slabs[region.slabIndex].ibo,
                 region.indexOffset * INDEX_SIZE,
                 indexCount * INDEX_SIZE,
-                indexData);
+                m_indexScratch.data());
         }
         m_uploadedBytes += indexCount * INDEX_SIZE;
         return true;
@@ -253,9 +274,31 @@ namespace Render {
                                       region.indexOffset, region.indexCount,
                                       !m_perSectionIndexBuffers,
                                       m_frameCounter});
+            // The parked range still holds live-looking indices until retire
+            // zeroes it; the renderer must not bridge a merged draw across it.
+            if (!m_perSectionIndexBuffers) slab.hotRangesDirty = true;
             if (slab.sectionCount > 0) slab.sectionCount--;
         }
         m_regions.erase(it);
+    }
+
+    bool ChunkMegaBuffer::DebugGetRegionInfo(const MegaBufferSectionKey& key, uint32_t& outSlab,
+                                             size_t& outVtxOff, size_t& outVtxCnt,
+                                             size_t& outIdxOff, size_t& outIdxCnt) const {
+        auto it = m_regions.find(key);
+        if (it == m_regions.end()) return false;
+        outSlab   = it->second.slabIndex;
+        outVtxOff = it->second.vertexOffset;
+        outVtxCnt = it->second.vertexCount;
+        outIdxOff = it->second.indexOffset;
+        outIdxCnt = it->second.indexCount;
+        return true;
+    }
+    BufferHandle ChunkMegaBuffer::DebugGetSlabVbo(uint32_t slab) const {
+        return slab < m_slabs.size() ? m_slabs[slab].vbo : INVALID_BUFFER;
+    }
+    BufferHandle ChunkMegaBuffer::DebugGetSlabIbo(uint32_t slab) const {
+        return slab < m_slabs.size() ? m_slabs[slab].ibo : INVALID_BUFFER;
     }
 
     void ChunkMegaBuffer::RetireFreedRegions() {
@@ -272,11 +315,62 @@ namespace Render {
                 Slab& slab = m_slabs[p.slabIndex];
                 FreeRegion(slab.freeVertexBlocks, p.vertexOffset, p.vertexCount);
                 if (p.freeIndices) {
+                    // Zero the range before it becomes free space. Index 0 is
+                    // always a valid vertex (slab vertex 0), so a run of zeros
+                    // is a run of zero-area triangles that rasterise nothing —
+                    // which is what makes it legal for the renderer to draw
+                    // straight across freed gaps when merging sections (see
+                    // IsIndexGapDrawable). Written here rather than at
+                    // RemoveSection because a frame may still be drawing this
+                    // range then, and tearing the old mesh out from under it
+                    // is precisely the one-frame hole the delay exists to
+                    // prevent. Free-list reuse re-fills whatever gets
+                    // allocated; what stays free stays zero.
+                    if (m_zeroScratch.size() < p.indexCount) {
+                        m_zeroScratch.resize(p.indexCount, 0u);
+                    }
+                    if (g_renderBackend && slab.ibo != INVALID_BUFFER) {
+                        g_renderBackend->UpdateBuffer(slab.ibo,
+                                                      p.indexOffset * INDEX_SIZE,
+                                                      p.indexCount * INDEX_SIZE,
+                                                      m_zeroScratch.data());
+                        m_uploadedBytes += p.indexCount * INDEX_SIZE;
+                    }
                     FreeRegion(slab.freeIndexBlocks, p.indexOffset, p.indexCount);
+                    slab.hotRangesDirty = true;
                 }
             }
         }
         m_pendingFrees.resize(keep);
+    }
+
+    void ChunkMegaBuffer::RefreshHotRanges(Slab& slab, uint32_t slabIndex) const {
+        slab.hotIndexRanges.clear();
+        for (const PendingFree& p : m_pendingFrees) {
+            if (p.slabIndex == slabIndex && p.freeIndices) {
+                slab.hotIndexRanges.push_back({p.indexOffset, p.indexCount});
+            }
+        }
+        std::sort(slab.hotIndexRanges.begin(), slab.hotIndexRanges.end(),
+                  [](const Slab::FreeBlock& a, const Slab::FreeBlock& b) { return a.offset < b.offset; });
+        slab.hotRangesDirty = false;
+    }
+
+    bool ChunkMegaBuffer::IsIndexGapDrawable(uint32_t slabIndex, size_t gapBegin, size_t gapEnd) const {
+        if (gapEnd <= gapBegin) return true;               // no gap at all
+        if (slabIndex >= m_slabs.size()) return false;
+        Slab& slab = m_slabs[slabIndex];
+        if (slab.hotRangesDirty) RefreshHotRanges(slab, slabIndex);
+        if (slab.hotIndexRanges.empty()) return true;
+
+        // Ranges are disjoint (distinct regions) and sorted by offset, so the
+        // only one that can reach into [gapBegin, gapEnd) is the last one
+        // starting before gapEnd.
+        auto it = std::upper_bound(slab.hotIndexRanges.begin(), slab.hotIndexRanges.end(), gapEnd,
+                                   [](size_t end, const Slab::FreeBlock& b) { return end <= b.offset; });
+        if (it == slab.hotIndexRanges.begin()) return true;
+        --it;
+        return it->offset + it->size <= gapBegin;
     }
 
     bool ChunkMegaBuffer::HasSection(const MegaBufferSectionKey& key) const {
@@ -293,8 +387,9 @@ namespace Render {
 
         const Region& r = it->second;
         outCmd.indexCount = static_cast<int32_t>(r.indexCount);
-        outCmd.indexByteOffset = r.indexOffset * INDEX_SIZE;
-        outCmd.baseVertex = static_cast<int32_t>(r.vertexOffset);
+        // Per-section IBO mode keeps its indices at offset 0 of its own
+        // buffer; shared mode addresses the slab IBO.
+        outCmd.indexOffset = r.sectionIbo != INVALID_BUFFER ? 0u : static_cast<uint32_t>(r.indexOffset);
         outCmd.slabIndex = r.slabIndex;
         return true;
     }

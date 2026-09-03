@@ -8,7 +8,7 @@
 
 namespace Client {
 
-    std::unique_ptr<XpOrbManager> g_xpOrbManager = nullptr;
+    XpOrbManager* g_xpOrbManager = nullptr;
 
     void XpOrbManager::Spawn(int32_t id, const glm::dvec3& pos,
                              const glm::vec3& vel, int32_t value) {

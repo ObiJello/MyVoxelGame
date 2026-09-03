@@ -7,10 +7,16 @@
 #include "common/world/level/World.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "../network/NetworkClient.hpp"
+#include "Input.hpp"
 #include "../network/ClientConnection.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include "../world/ClientChunkManager.hpp"
 #include "../world/ClientBlockAccess.hpp"
+#include "../world/ClientLevel.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "../portal/ClientImmersivePortals.hpp"
+#endif
+#include <limits>
 #include "../world/ClientUsePlayer.hpp"
 #include "../entity/ClientMobManager.hpp"
 #include "common/world/block/BlockInteraction.hpp"
@@ -18,6 +24,7 @@
 #include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
 #include "common/entity/Item.hpp"
+#include "common/entity/mobs/Monsters.hpp"
 #include "common/data/DataComponents.hpp"
 #if ENABLE_PORTAL_GUN
 #include "../renderer/portal/PortalParticleSystem.hpp"
@@ -33,7 +40,6 @@ namespace Game {
     ClientPlayerController::ClientPlayerController()
         : player(nullptr)
         , networkClient(nullptr)
-        , lastMoveSend(std::chrono::steady_clock::now())
     {
         Log::Info("ClientPlayerController initialized");
     }
@@ -62,9 +68,24 @@ namespace Game {
         packet.blockState = blockState.Index();
         packet.face = 0;
         packet.sequenceNumber = ++interactSeq;
+        // The dimension of the block. A START (or an instant BREAK) targets
+        // what the crosshair reaches now. So does a STOP for the block still
+        // under the crosshair — creative instabreak sends STOP with no START
+        // before it, so it cannot rely on a captured value. Only a STOP /
+        // ABORT for a block the crosshair has left refers back to the dig it
+        // started.
+        if (player) {
+            const bool startsHere = action == Network::BlockActionType::START_DESTROY ||
+                                    action == Network::BlockActionType::BREAK;
+            const bool underCrosshair = player->lastBlockHit.has_value() &&
+                                        player->lastBlockHit->blockPos == pos;
+            if (startsHere || underCrosshair) digDimension = player->lastBlockHitDimension;
+        }
+        packet.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(digDimension));
         auto data = Network::Serialization::Serialize(packet);
         auto connection = networkClient->GetConnection();
         if (connection) {
+            FlushMovement();   // the server measures reach from where we are NOW
             connection->SendPacket(static_cast<uint8_t>(Network::PacketId::BlockActionC2S), data);
         }
         return packet.sequenceNumber;
@@ -153,9 +174,6 @@ namespace Game {
         UpdatePendingPortalProjectiles(deltaTime);
 #endif
 
-        // Send movement packets if due (TODO: Implement for networking)
-        SendMovementIfDue();
-
         // Fly-state sync — MC LocalPlayer.sendIsSprintingIfNeeded-style
         // dirty check: whenever the local fly flag changes (double-tap
         // toggle, landing auto-cancel, server revoke), ship the new state
@@ -188,20 +206,12 @@ namespace Game {
         }
     }
 
-    void ClientPlayerController::SendMovementIfDue() {
-        // TODO: Implement network movement sending at 20Hz (50ms intervals)
-        // This would check if 50ms have passed since lastMoveSend
-        // and send a movement packet with player->predictedPos, yaw, pitch
-        
-        // auto now = std::chrono::steady_clock::now();
-        // auto timeSinceLastSend = std::chrono::duration_cast<std::chrono::milliseconds>
-        //                          (now - lastMoveSend);
-        // if (timeSinceLastSend.count() >= 50) {
-        //     // Send movement packet
-        //     // net->SendPlayerMove(player->predictedPos, player->yaw, player->pitch, 
-        //     //                     player->physics.isOnGround, ++moveSeq);
-        //     lastMoveSend = now;
-        // }
+    void ClientPlayerController::SetMovementFlush(std::function<void()> flush) {
+        movementFlush = std::move(flush);
+    }
+
+    void ClientPlayerController::FlushMovement() {
+        if (movementFlush) movementFlush();
     }
 
     void ClientPlayerController::StartDig(const glm::ivec3& pos, int /*face*/) {
@@ -289,7 +299,8 @@ namespace Game {
         digState.destroyDelay = CREATIVE_BREAK_DELAY_TICKS;
     }
 
-    uint32_t ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract) {
+    uint32_t ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract,
+                                                   std::optional<Game::DimensionId> dimension) {
         // Build and send BlockPlaceC2S packet (Minecraft-compatible)
         Log::Debug("SendUseItemOn called for block (%d,%d,%d), hand=%d alt=%d",
                   hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, hand, altInteract ? 1 : 0);
@@ -322,11 +333,16 @@ namespace Game {
             ++interactSeq,          // Sequence number
             altInteract             // true = left-click "use" semantics
         );
+        // Immersive portals: the clicked block's level.
+        packet.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(
+            dimension ? *dimension
+                      : (player ? player->lastBlockHitDimension : Game::DimensionId::Overworld)));
         
         // Serialize and send
         auto data = Network::Serialization::Serialize(packet);
         auto connection = networkClient->GetConnection();
         if (connection) {
+            FlushMovement();   // the server tests reach and the player-in-block overlap against this position
             connection->SendPacket(static_cast<uint8_t>(Network::PacketId::UseItemOnC2S), data);
             Log::Debug("Sent UseItemOnC2S: pos(%d,%d,%d) face=%d cursor=(%.2f,%.2f,%.2f) seq=%d",
                       hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, direction,
@@ -350,6 +366,102 @@ namespace Game {
             case 5: return 2;  // -Z -> north
             default: return 1;
         }
+    }
+
+    bool ClientPlayerController::HandleFillClick(const std::optional<RaycastHit>& hit) {
+        if (!player) return false;
+        const bool alt = Input::IsKeyDown(Input::Key::LeftAlt);
+        if (!alt && !m_fill.armed) return false;
+        const Game::DimensionId dim = Client::ClientLevels::ActiveDimension();
+        glm::ivec3 pos{0};
+        BlockID    block = BlockID::Air;
+        BlockState state;
+        const bool can = hit.has_value() && ComputePredictedPlacement(*hit, pos, block, state);
+        if (alt) {
+            if (!can) {
+                // Alt on air or on something that cannot take a block:
+                // the mark is dropped, and the click is spent.
+                m_fill.armed = false;
+                return true;
+            }
+            m_fill.armed     = true;
+            m_fill.cell      = pos;
+            m_fill.dimension = dim;
+            m_fill.state     = state;
+            return true;
+        }
+        // A plain click with a corner marked. On a block, the cell a block
+        // would go into; on nothing, a cell out in the air along the look.
+        // Where a block would not go, the click keeps its usual meaning (a
+        // chest opens, a door swings).
+        if (m_fill.dimension != dim) return false;
+        if (!can) {
+            if (hit.has_value() || !FillAirCell(pos, state)) return false;
+        }
+        SendFillBlocks(m_fill.cell, pos, state);
+        m_fill.armed = false;
+        return true;
+    }
+
+    bool ClientPlayerController::FillAirCell(glm::ivec3& outCell, Game::BlockState& outState) const {
+        if (!player || !m_fill.armed) return false;
+        // The block in hand must still be the marked one; its state
+        // (orientation) is the mark's.
+        const BlockID held = player->GetSelectedBlock();
+        if (held == BlockID::Air || held != m_fill.state.Block()) return false;
+        constexpr float kAirCornerDistance = 5.0f;
+        const glm::vec3 eye = player->GetEyePosition();
+        const glm::vec3 dir = glm::normalize(player->lookDir);
+        const glm::vec3 point = eye + dir * kAirCornerDistance;
+        const glm::ivec3 cell(static_cast<int>(std::floor(point.x)),
+                              static_cast<int>(std::floor(point.y)),
+                              static_cast<int>(std::floor(point.z)));
+        Game::PlacementClick click;
+        click.replacingClickedOnBlock = false;
+        if (!Game::CanBeReplacedByPlacement(ReadBlockState(cell), held,
+                                            player->physics.isSneaking, click)) {
+            return false;
+        }
+        outCell  = cell;
+        outState = m_fill.state;
+        return true;
+    }
+
+    void ClientPlayerController::SendFillBlocks(const glm::ivec3& a, const glm::ivec3& b,
+                                                Game::BlockState state) {
+        if (!networkClient || !networkClient->IsConnected()) return;
+        auto connection = networkClient->GetConnection();
+        if (!connection) return;
+        Network::FillBlocksC2SPacket packet;
+        packet.hand = 0;
+        packet.x0 = a.x; packet.y0 = a.y; packet.z0 = a.z;
+        packet.x1 = b.x; packet.y1 = b.y; packet.z1 = b.z;
+        packet.rawState    = state.RawId();
+        packet.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension()));
+        connection->SendPacket(static_cast<uint8_t>(Network::PacketId::FillBlocksC2S),
+                               Network::Serialization::Serialize(packet));
+    }
+
+    bool ClientPlayerController::FillPreview(const std::optional<RaycastHit>& hit, glm::ivec3& outLo,
+                                             glm::ivec3& outHi, Game::BlockState& outState) const {
+        if (!m_fill.armed || !player) return false;
+        if (m_fill.dimension != Client::ClientLevels::ActiveDimension()) return false;
+        glm::ivec3 pos = m_fill.cell;
+        BlockID    block = BlockID::Air;
+        BlockState state = m_fill.state;
+        if (hit.has_value()) {
+            if (!ComputePredictedPlacement(*hit, pos, block, state)) {
+                pos   = m_fill.cell;
+                state = m_fill.state;
+            }
+        } else if (!FillAirCell(pos, state)) {
+            pos   = m_fill.cell;
+            state = m_fill.state;
+        }
+        outLo    = glm::min(m_fill.cell, pos);
+        outHi    = glm::max(m_fill.cell, pos);
+        outState = state;
+        return true;
     }
 
     bool ClientPlayerController::ComputePredictedPlacement(const RaycastHit& hit,
@@ -538,6 +650,20 @@ namespace Game {
             // placement the server will refuse would flash a floating button.
             if (!Game::CanSurviveAt(*blockAccess, target, outState)) return false;
         }
+        // A door: the cell above must be free as well, and the hinge is
+        // chosen the way the server chooses it, so the pair predicts true.
+        if (Game::IsDoorBlock(outBlock)) {
+            const glm::ivec3 above = target + glm::ivec3(0, 1, 0);
+            Game::PlacementClick aboveClick;
+            aboveClick.replacingClickedOnBlock = false;
+            if (!Game::CanBeReplacedByPlacement(ReadBlockState(above), outBlock,
+                                                player->physics.isSneaking, aboveClick)) {
+                return false;
+            }
+            if (blockAccess) {
+                outState = Game::DoorPlacementState(*blockAccess, target, outState, ctx.hitResult.hitPoint);
+            }
+        }
         return true;
     }
 
@@ -554,6 +680,13 @@ namespace Game {
         // SpawnPortalProjectile, so running it here would double-fire.
         if (heldId != Game::Items::Air && heldId == Game::Items::PortalGun) return false;
 #endif
+#if ENABLE_IMMERSIVE_PORTALS
+        // The portal wand's useOn is server state only (it talks to the
+        // immersive registry and casts its player to the server's); the
+        // client sends the click and shows nothing until the reply.
+        if (heldId != Game::Items::Air && heldId == Game::Items::PortalWand) return false;
+#endif
+        if (heldId != Game::Items::Air && heldId == Game::Items::AoWand) return false;   // server state only
 
         Client::ClientUsePlayer usePlayer(player);
         float yawDeg, pitchDeg; LookAngles(yawDeg, pitchDeg);
@@ -677,6 +810,7 @@ namespace Game {
 
         auto data = Network::Serialization::Serialize(packet);
         if (auto connection = networkClient->GetConnection()) {
+            FlushMovement();
             connection->SendPacket(static_cast<uint8_t>(Network::PacketId::UseItem), data);
             Log::Debug("Sent UseItemC2S: hand=%d seq=%d yRot=%.1f xRot=%.1f",
                        hand, interactSeq, yRot, xRot);
@@ -785,6 +919,14 @@ namespace Game {
         }
 
         if (!breakButtonHeld) {
+            if (digState.isDestroying) AbortDig();
+            return;
+        }
+
+        // The fill tool's cancel: Alt + left-click drops the marked corner
+        // and breaks nothing.
+        if (m_fill.armed && Input::IsKeyDown(Input::Key::LeftAlt)) {
+            m_fill.armed = false;
             if (digState.isDestroying) AbortDig();
             return;
         }
@@ -939,7 +1081,13 @@ namespace Game {
                                                            predictState);
         const uint32_t sequence = SendUseItemOn(*currentHit, 0);
         const bool usedOn = PredictUseItemOn(*currentHit, 0, sequence);
-        if (!usedOn && predictable) PredictBlock(predictPos, predictBlock, sequence, predictState);
+        if (!usedOn && predictable) {
+            PredictBlock(predictPos, predictBlock, sequence, predictState);
+            if (Game::IsDoorBlock(predictBlock)) {
+                PredictBlock(predictPos + glm::ivec3(0, 1, 0), predictBlock, sequence,
+                             Game::DoorUpperState(predictState));
+            }
+        }
         // Same guards as the edge path in StartUseItem: a block that swallowed
         // the click consumes nothing server-side, creative never consumes at
         // all, and a placement the server will reject consumes nothing either
@@ -985,20 +1133,18 @@ namespace Game {
     void ClientPlayerController::OnPickBlock(BlockID picked) {
         if (!player) return;
         if (picked == BlockID::Air) return;
+        // Slabs need no normalisation: all three halves ARE one BlockID, so
+        // pick-block yields the right item without asking which half it
+        // landed on (placement re-derives the orientation from the click).
+        OnPickItem(Game::ItemRegistry::FromBlock(picked));
+    }
 
-        // MC normalises blockstate-only variants back to the canonical block
-        // before giving the player an item — picking a TOP slab yields the
-        // base slab item (placement-time logic re-derives the orientation
-        // from the click). Without this, pick-block on a top slab would put
-        // a "top" item in the inventory which renders weird in the HUD and
-        // bypasses the normal SlabBlock.getStateForPlacement decision.
-        // Slabs need no normalisation any more: all three halves ARE one
-        // BlockID, so pick-block yields the right item without asking which
-        // half it landed on.
+    void ClientPlayerController::OnPickItem(Game::ItemID itemId) {
+        if (!player) return;
+        if (itemId == Game::Items::Air) return;
 
         const int slot = player->inventory.GetSelectedSlot();
         const int unifiedSlot = Game::Inventory::HotbarToIndex(slot);
-        const Game::ItemID itemId = Game::ItemRegistry::FromBlock(picked);
 
         // Predictive client-side fill so the HUD updates instantly. The server
         // will echo back an InventorySetSlotS2C that either confirms or
@@ -1030,17 +1176,18 @@ namespace Game {
         Log::Debug("Respawn request (TODO: Implement for multiplayer)");
     }
 
-    int32_t ClientPlayerController::PickEntity() const {
+    int32_t ClientPlayerController::PickEntityAlong(const glm::vec3& origin, const glm::vec3& dir,
+                                                    float range, float blockLimit,
+                                                    int* outDragonPart) const {
+        if (outDragonPart) *outDragonPart = -1;
         if (!player) return 0;
         if (!Client::g_clientMobManager) return 0;
 
         // MC's entity pick distance in survival is 3.0 blocks
         // (Attributes.ENTITY_INTERACTION_RANGE). The server re-checks with a
         // more generous 6.0 to absorb latency — see HandleInteract.
-        constexpr float kPickRange = 3.0f;
-
-        const glm::vec3 origin = player->GetEyePosition();
-        const glm::vec3 dir = glm::normalize(player->lookDir);
+        // `range` is the pick distance left along this ray, `blockLimit` the
+        // distance at which the crosshair's block stops it.
 
         // Ray-vs-AABB over the mobs in range, nearest wins. MC inflates each
         // candidate box by 0.3 (EntityHitResult's pick margin) so a target is
@@ -1049,7 +1196,7 @@ namespace Game {
         constexpr float kPickInflate = 0.3f;
 
         int32_t bestId = 0;
-        float bestT = kPickRange;
+        float bestT = range;
 
         // Other players first, so the loop below can only beat them on
         // distance. A remote player's id IS its connection id, which is what
@@ -1057,6 +1204,7 @@ namespace Game {
         if (Client::g_remotePlayerManager) {
             for (const auto& [pid, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                 if (!rp.positionInitialized) continue;
+                if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
 
                 // MC's player box: 0.6 wide, 1.8 tall, feet at the position.
                 Game::AABB box;
@@ -1081,11 +1229,7 @@ namespace Game {
                     if (tMin > tMax) { hit = false; break; }
                 }
                 if (!hit || tMin >= bestT) continue;
-                if (player->lastBlockHit.has_value()) {
-                    const float blockDist =
-                        glm::length(player->lastBlockHit->hitPoint - origin);
-                    if (blockDist < tMin) continue;
-                }
+                if (blockLimit < tMin) continue;
                 bestT = tMin;
                 bestId = static_cast<int32_t>(pid);
             }
@@ -1101,6 +1245,50 @@ namespace Game {
             if (!centry || !centry->mob) continue;
             const Game::Mob& mob = *centry->mob;
             if (!mob.IsAlive()) continue;
+            // ── Ender dragon: pick the PART boxes, never the whole box ──
+            //
+            // MC's dragon body is not pickable; its eight EnderDragonPart
+            // entities are, each tested with the same 0.3 pick margin. The
+            // parts are not entities here, so the ray is tested against
+            // ComputePartBoxes' layout and the winning part index rides the
+            // interact packet for the server's head-vs-body routing.
+            if (const auto* dragon =
+                    dynamic_cast<const Game::EnderDragon*>(&mob)) {
+                Game::AABB parts[Game::EnderDragon::kDragonPartCount];
+                dragon->ComputePartBoxes(parts);
+                for (int pi = 0; pi < Game::EnderDragon::kDragonPartCount; ++pi) {
+                    Game::AABB pbox = parts[pi];
+                    pbox.min -= glm::vec3(kPickInflate);
+                    pbox.max += glm::vec3(kPickInflate);
+
+                    float tMin = 0.0f;
+                    float tMax = bestT;
+                    bool hit = true;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const float o = origin[axis];
+                        const float d = dir[axis];
+                        const float lo = pbox.min[axis];
+                        const float hi = pbox.max[axis];
+                        if (std::abs(d) < 1e-8f) {
+                            if (o < lo || o > hi) { hit = false; break; }
+                            continue;
+                        }
+                        float t1 = (lo - o) / d;
+                        float t2 = (hi - o) / d;
+                        if (t1 > t2) std::swap(t1, t2);
+                        tMin = std::max(tMin, t1);
+                        tMax = std::min(tMax, t2);
+                        if (tMin > tMax) { hit = false; break; }
+                    }
+                    if (!hit || tMin >= bestT) continue;
+                    if (blockLimit < tMin) continue;
+                    bestT = tMin;
+                    bestId = id;
+                    if (outDragonPart) *outDragonPart = pi;
+                }
+                continue;
+            }
+
             // MC Entity.isPickable — the gate MC's GameRenderer.pick applies
             // through its ProjectileUtil.getEntityHitResult predicate. Without
             // it every entity steals the crosshair, including the ones you
@@ -1139,22 +1327,82 @@ namespace Game {
 
             // A block between us and the mob wins. lastBlockHit is the
             // per-frame block raycast, already in the same units.
-            if (player->lastBlockHit.has_value()) {
-                const float blockDist = glm::length(player->lastBlockHit->hitPoint - origin);
-                if (blockDist < tMin) continue;
-            }
+            if (blockLimit < tMin) continue;
 
             bestT = tMin;
             bestId = id;
+            // A nearer non-dragon hit outranks an earlier dragon-part hit.
+            if (outDragonPart) *outDragonPart = -1;
         }
 
         return bestId;
     }
 
+    int32_t ClientPlayerController::PickEntity(int* outDragonPart) const {
+        if (outDragonPart) *outDragonPart = -1;
+        if (!player) return 0;
+        // MC's entity pick distance in survival is 3.0 blocks
+        // (Attributes.ENTITY_INTERACTION_RANGE). The server re-checks with a
+        // more generous 6.0 to absorb latency — see HandleInteract.
+        constexpr float kPickRange = 3.0f;
+        const glm::vec3 origin = player->GetEyePosition();
+        const glm::vec3 dir = glm::normalize(player->lookDir);
+        // The block under the crosshair caps the pick, as a distance along
+        // the ray: a hit through a portal is in another level's coordinates,
+        // so its point is no use here but its distance is.
+        const float blockLimit = player->lastBlockHit.has_value()
+            ? player->lastBlockHit->distance : std::numeric_limits<float>::max();
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // The ray starts in the level the player STANDS in, whatever level
+        // happens to be bound: the dig logic ticks with the far level bound
+        // while the crosshair reaches through a portal, and this pick is
+        // what stops a dig when a mob is in the way.
+        if (!Client::ClientLevels::HasSession()) {
+            return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart);
+        }
+        int32_t nearId = 0;
+        Client::ClientLevels::WithLevel(Client::ClientLevels::ActiveDimension(), [&]() {
+            nearId = PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart);
+        });
+        if (nearId != 0) return nearId;
+
+        // Through a portal: the rest of the ray continues in the far level,
+        // the same way the block raycast does (ClientPlayer::UpdateRaycast).
+        namespace PortalFlag = Game::Immersive::PortalFlag;
+        const glm::dvec3 from(origin);
+        const glm::dvec3 to = from + glm::dvec3(dir) * static_cast<double>(kPickRange);
+        const Game::Immersive::Portal* best = nullptr;
+        double bestT = 2.0;
+        glm::dvec3 pierce{0.0};
+        Client::ClientLevels::Active().Portals().ForEach([&](const Game::Immersive::Portal& p) {
+            if (!p.Has(PortalFlag::Interactable) || !p.Has(PortalFlag::Visible)) return;
+            const auto hit = p.RaytraceSegment(from, to, p.CrossingLeniency());   // whole opening for a gun portal
+            if (!hit || hit->t >= bestT) return;
+            best = &p; bestT = hit->t; pierce = hit->point;
+        });
+        if (!best || best->IsMirror()) return 0;
+        const Game::Immersive::Portal portal = *best;   // copy: the level rebinds below
+        const float travelled = static_cast<float>(glm::length(pierce - from));
+        if (travelled >= kPickRange || travelled >= blockLimit) return 0;
+        const glm::vec3 farOrigin(portal.TransformPoint(pierce) + portal.ContentDirection() * 0.001);
+        const glm::vec3 farDir(glm::normalize(portal.TransformLocalVecNonScale(glm::dvec3(dir))));
+        int32_t farId = 0;
+        Client::ClientLevels::WithLevel(portal.destDimension, [&]() {
+            farId = PickEntityAlong(farOrigin, farDir, kPickRange - travelled,
+                                    blockLimit - travelled, outDragonPart);
+        });
+        return farId;
+#else
+        return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart);
+#endif
+    }
+
     bool ClientPlayerController::TryAttackEntity() {
         if (!player || !networkClient) return false;
 
-        const int32_t bestId = PickEntity();
+        int dragonPart = -1;
+        const int32_t bestId = PickEntity(&dragonPart);
         if (bestId == 0) return false;
 
         Network::InteractC2SPacket packet;
@@ -1162,6 +1410,7 @@ namespace Game {
         packet.action = Network::InteractC2SPacket::Action::Attack;
         packet.sneaking = player->sneakPressed;
         packet.sprinting = player->physics.isSprinting;
+        packet.dragonPart = static_cast<int8_t>(dragonPart);
 
         // Mirror the server's ticker so the attack indicator reads the same
         // charge the server will use. MC does exactly this — the bar is the
@@ -1170,6 +1419,7 @@ namespace Game {
 
         auto connection = networkClient->GetConnection();
         if (connection) {
+            FlushMovement();   // the server measures the attack's reach from here
             connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InteractC2S),
                                    Network::Serialization::Serialize(packet));
         }
@@ -1344,18 +1594,31 @@ namespace Game {
                 //
                 // This is what dye-on-sheep (and every future saddle / name
                 // tag / shears interaction) arrives through.
-                if (const int32_t pickedEntity = PickEntity(); pickedEntity != 0) {
+                int interactDragonPart = -1;
+                if (const int32_t pickedEntity = PickEntity(&interactDragonPart);
+                    pickedEntity != 0) {
                     if (networkClient) {
                         Network::InteractC2SPacket packet;
                         packet.entityId = pickedEntity;
                         packet.action   = Network::InteractC2SPacket::Action::Interact;
                         packet.sneaking = player->sneakPressed;
+                        packet.dragonPart = static_cast<int8_t>(interactDragonPart);
                         if (auto connection = networkClient->GetConnection()) {
+                            FlushMovement();
                             connection->SendPacket(
                                 static_cast<uint8_t>(Network::PacketId::InteractC2S),
                                 Network::Serialization::Serialize(packet));
                         }
                     }
+                    armSwingPending = true;
+                    rightClickDelay = PLACE_REFIRE_TICKS;
+                    placeButtonHeld = true;
+                    return;
+                }
+
+                // The fill tool first: with Alt held the click marks a
+                // corner; with a corner marked it sends the box.
+                if (HandleFillClick(currentHit)) {
                     armSwingPending = true;
                     rightClickDelay = PLACE_REFIRE_TICKS;
                     placeButtonHeld = true;
@@ -1399,6 +1662,10 @@ namespace Game {
                     // later; the server's ack confirms it or rolls it back.
                     if (!usedOn && predictable) {
                         PredictBlock(predictPos, predictBlock, sequence, predictState);
+                        if (Game::IsDoorBlock(predictBlock)) {
+                            PredictBlock(predictPos + glm::ivec3(0, 1, 0), predictBlock, sequence,
+                                         Game::DoorUpperState(predictState));
+                        }
                     }
 
                     // Predictive consumption — ONLY for block placement, and
@@ -1581,6 +1848,7 @@ namespace Game {
         p.age        = 0.0f;
         p.isOrange   = isOrange;
         p.hand       = 0;
+        p.dimension  = Client::ClientLevels::ActiveDimension();
         m_pendingPortalProjectiles.push_back(p);
 
         // Visual bolt — spawn at the gun's muzzle, not the eye. The
@@ -1632,9 +1900,42 @@ namespace Game {
         // muzzle and the crosshair.
         const float reachM = kPortalProjSpeed_m_per_s * kPortalProjMaxLifetime;
         auto aimHit = Raycast::CastRay(origin, front, reachM);
-        const glm::vec3 aimPoint = aimHit.has_value()
+        glm::vec3 aimPoint = aimHit.has_value()
             ? aimHit->hitPoint
             : (origin + front * reachM);
+#if ENABLE_IMMERSIVE_PORTALS
+        // An aim line that pierces an immersive portal before its block:
+        // the bolt ends at the surface, and a second bolt carries on from
+        // the far surface, in the far level, to where the shot will land.
+        {
+            const float aimDist = glm::length(aimPoint - origin);
+            const Game::Immersive::Portal* crossed = nullptr;
+            double bestT = 1.0;
+            glm::dvec3 crossPoint{0.0};
+            const glm::dvec3 from(origin), to(origin + front * aimDist);
+            Client::ClientLevels::Active().Portals().ForEach([&](const Game::Immersive::Portal& portal) {
+                if (!portal.Has(Game::Immersive::PortalFlag::Teleportable)) return;
+                const auto s = portal.RaytraceSegment(from, to, portal.CrossingLeniency());
+                if (!s || s->t >= bestT) return;
+                bestT = s->t; crossed = &portal; crossPoint = s->point;
+            });
+            if (crossed) {
+                aimPoint = glm::vec3(crossPoint);
+                const glm::dvec3 farDir = glm::normalize(crossed->TransformLocalVecNonScale(glm::dvec3(front)));
+                const glm::vec3 farStart(crossed->TransformPoint(crossPoint) + farDir * 0.01);
+                const Game::DimensionId farDim =
+                    crossed->IsMirror() ? Client::ClientLevels::ActiveDimension() : crossed->destDimension;
+                const float farReach = reachM - static_cast<float>(bestT) * aimDist;
+                glm::vec3 farEnd = farStart + glm::vec3(farDir) * farReach;
+                Client::ClientLevels::WithLevel(farDim, [&]() {
+                    if (auto farHit = Raycast::CastRay(farStart, glm::vec3(farDir), farReach)) {
+                        farEnd = farHit->hitPoint;
+                    }
+                });
+                Render::g_portalParticleSystem.EmitProjectileIn(farDim, farStart, farEnd, isOrange);
+            }
+        }
+#endif
         Render::g_portalParticleSystem.EmitProjectile(muzzle, aimPoint, isOrange);
 
         // Play the real Source @fire1 animation — 15-frame, 0.625s
@@ -1646,7 +1947,6 @@ namespace Game {
     void ClientPlayerController::UpdatePendingPortalProjectiles(float deltaTime) {
         if (m_pendingPortalProjectiles.empty()) return;
 
-        const float segmentDist = kPortalProjSpeed_m_per_s * deltaTime;
         auto it = m_pendingPortalProjectiles.begin();
         while (it != m_pendingPortalProjectiles.end()) {
             PendingPortalProjectile& p = *it;
@@ -1656,19 +1956,56 @@ namespace Game {
                 continue;
             }
 
-            // Sweep one short segment per frame using the shared block
-            // raycast (same one the look-aim uses, just stepped forward
-            // from the projectile's current position).
-            auto hit = Raycast::CastRay(p.currentPos, p.direction, segmentDist);
-            if (hit.has_value()) {
-                // altInteract=true → blue portal (matches LMB semantics).
-                SendUseItemOn(*hit, p.hand, /*altInteract=*/!p.isOrange);
-                it = m_pendingPortalProjectiles.erase(it);
-                continue;
+            // Sweep this frame's segment with the shared block raycast (the
+            // one the look-aim uses), in the level the projectile is in. An
+            // immersive portal pierced before the block hands the rest of
+            // the segment to the far level with position and direction
+            // mapped through — the same crossing the player makes. Bounded:
+            // two facing portals must not bounce the sweep forever inside
+            // one frame.
+            float remaining = kPortalProjSpeed_m_per_s * deltaTime;
+            bool impacted = false;
+            for (int hop = 0; hop < 8 && remaining > 1.0e-4f; ++hop) {
+                std::optional<RaycastHit> hit;
+                Client::ClientLevels::WithLevel(p.dimension, [&]() {
+                    hit = Raycast::CastRay(p.currentPos, p.direction, remaining);
+                });
+                const float blockDist = hit ? glm::length(hit->hitPoint - p.currentPos) : remaining;
+
+#if ENABLE_IMMERSIVE_PORTALS
+                const Game::Immersive::Portal* crossed = nullptr;
+                double bestT = 1.0;
+                glm::dvec3 crossPoint{0.0};
+                if (Client::ClientLevel* level = Client::ClientLevels::Get(p.dimension)) {
+                    const glm::dvec3 from(p.currentPos), to(p.currentPos + p.direction * remaining);
+                    level->Portals().ForEach([&](const Game::Immersive::Portal& portal) {
+                        if (!portal.Has(Game::Immersive::PortalFlag::Teleportable)) return;
+                        const auto s = portal.RaytraceSegment(from, to, portal.CrossingLeniency());
+                        if (!s || s->t >= bestT) return;
+                        bestT = s->t; crossed = &portal; crossPoint = s->point;
+                    });
+                }
+                if (crossed && static_cast<float>(bestT) * remaining < blockDist) {
+                    const glm::dvec3 dir = glm::normalize(crossed->TransformLocalVecNonScale(glm::dvec3(p.direction)));
+                    p.currentPos = glm::vec3(crossed->TransformPoint(crossPoint) + dir * 0.01);
+                    p.direction  = glm::vec3(dir);
+                    if (!crossed->IsMirror()) p.dimension = crossed->destDimension;
+                    remaining -= static_cast<float>(bestT) * remaining;
+                    continue;
+                }
+#endif
+                if (hit.has_value()) {
+                    // altInteract=true → blue portal (matches LMB semantics).
+                    SendUseItemOn(*hit, p.hand, /*altInteract=*/!p.isOrange, p.dimension);
+                    impacted = true;
+                    break;
+                }
+                p.currentPos += p.direction * remaining;
+                remaining = 0.0f;
             }
 
-            p.currentPos += p.direction * segmentDist;
-            ++it;
+            if (impacted) it = m_pendingPortalProjectiles.erase(it);
+            else          ++it;
         }
     }
 #endif

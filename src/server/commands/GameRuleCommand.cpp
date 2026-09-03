@@ -18,6 +18,7 @@
 // (`random_tick_speed`, not the pre-1.21.9 `randomTickSpeed`). The old camelCase
 // spellings are kept as aliases so anything already typing them keeps working.
 #include "GameRuleCommand.hpp"
+#include "common/core/Features.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../IntegratedServer.hpp"
 #include "common/world/level/World.hpp"
@@ -73,6 +74,21 @@ namespace Server {
                     [](Game::World& w) { return std::to_string(w.GetRandomTickSpeed()); },
                     [](Game::World& w, const std::string& v) { w.SetRandomTickSpeed(std::stoi(v)); },
                 },
+#if ENABLE_IMMERSIVE_PORTALS
+                Rule{
+                    // Not a vanilla rule. Immersive (see-through, walk-through)
+                    // nether portals vs vanilla purple blocks. Server-wide.
+                    "immersive_portals", "immersivePortals", RuleType::Bool,
+                    0, 0,
+                    [](Game::World&) {
+                        return std::string(g_integratedServer && g_integratedServer->ImmersivePortalsEnabled()
+                                               ? "true" : "false");
+                    },
+                    [](Game::World&, const std::string& v) {
+                        if (g_integratedServer) g_integratedServer->SetImmersivePortals(v == "true");
+                    },
+                },
+#endif
                 Rule{
                     "advance_time", "doDaylightCycle", RuleType::Bool,
                     0, 0,

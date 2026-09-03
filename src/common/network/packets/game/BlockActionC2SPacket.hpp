@@ -33,6 +33,11 @@ namespace Network {
         // without it every loot condition on a state reads the DEFAULT: a fully
         // grown wheat evaluated as age=0 and dropped seeds instead of wheat.
         Game::BlockStateIndex         blockState = 0;
+        // Immersive portals: the dimension the targeted block is in, which
+        // is not the player's own when they reach through a portal. Trailing
+        // and optional on the wire; kDimensionUnknown = the player's own.
+        static constexpr int8_t kDimensionUnknown = 127;
+        int8_t          dimensionId = kDimensionUnknown;
 
         BlockActionC2SPacket() = default;
         BlockActionC2SPacket(int x, int y, int z, BlockActionType act)
@@ -56,6 +61,7 @@ namespace Network {
             buffer.WriteFloat(packet.hitPosition.z);
             buffer.WriteVarInt(packet.sequenceNumber);
             buffer.WriteShort(packet.blockState);
+            buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
             return buffer.GetData();
         }
 
@@ -75,8 +81,11 @@ namespace Network {
             // Tail-appended, same pattern as BlockChangeS2CPacket's state byte:
             // absent from a pre-state sender, which means "default state" — the
             // correct reading for a block that carries no properties.
-            if (reader.Remaining() >= 1) {
+            if (reader.Remaining() >= 2) {
                 packet.blockState = reader.ReadShort();
+            }
+            if (reader.Remaining() >= 1) {
+                packet.dimensionId = static_cast<int8_t>(reader.ReadByte());
             }
             return packet;
         }

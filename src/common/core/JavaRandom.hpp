@@ -64,6 +64,16 @@ namespace Game {
 
         bool NextBool() { return Next(1) != 0; }
 
+        // java.util.Random.nextLong — ((long)next(32) << 32) + next(32).
+        // Note Java's documented quirk: the low half is SIGNED, so the sum
+        // can borrow from the high half. Used by the End-spike seed
+        // derivation (SpikeFeature.getSpikesForLevel), which must reproduce
+        // the terrain library's LegacyRandomSource stream exactly.
+        int64_t NextLong() {
+            const int64_t high = static_cast<int64_t>(Next(32)) << 32;
+            return high + static_cast<int64_t>(Next(32));
+        }
+
         // MC RandomSource.triangle(mode, deviation) — the sum of two uniform
         // draws gives a triangular distribution centred on `mode`. Draw order
         // (two NextDoubles) is part of the stream, so this is a method rather

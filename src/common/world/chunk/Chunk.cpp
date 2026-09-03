@@ -143,6 +143,7 @@ namespace Game {
 
     void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId, BlockStateIndex stateIndex) {
         blockWriteCounter.fetch_add(1, std::memory_order_release);
+        BumpModStamp();
         // Exclusive against the serialiser (see Chunk::LockShared). Cheap: this
         // is the player-edit / block-update path, not terrain generation —
         // generation fills sections in bulk through AdoptStates and never
@@ -200,6 +201,7 @@ namespace Game {
     }
 
     void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId) {
+        BumpModStamp();
         // Exclusive against the serialiser (see Chunk::LockShared). Cheap: this
         // is the player-edit / block-update path, not terrain generation —
         // generation fills sections in bulk through AdoptStates and never
@@ -372,6 +374,7 @@ namespace Game {
 
     void Chunk::SetBlockEntity(int localX, int worldY, int localZ,
                                 std::unique_ptr<BlockEntity> entity) {
+        BumpModStamp();
         const auto guard = LockExclusive();
         if (!entity) {
             m_blockEntities.erase(glm::ivec3(localX, worldY, localZ));
@@ -426,11 +429,13 @@ namespace Game {
     // the same: is there anything in this column at all.
     //
     // This USED to be `every section pointer is null`, which is permanently
-    // false now that the constructor fills them. That mattered: eight guards
-    // read it, including three that decide whether a chunk is worth saving and
-    // two that decide whether a loaded chunk is valid enough to enter the
-    // cache. Left pointer-based, a chunk that failed to generate would have
-    // validated as good and been persisted.
+    // false now that the constructor fills them.
+    //
+    // NOTE: empty is NOT invalid. The End's void chunks are all air and
+    // perfectly legitimate; the load/generation validators accept them
+    // (rejecting them regenerated saved End chunks on every load and spun the
+    // async pipeline in a request/fail loop). Failure on those paths is a
+    // null chunk, never an empty one.
     bool Chunk::IsEmpty() const {
         return HighestFilledSectionIndex() == kNoFilledSection;
     }

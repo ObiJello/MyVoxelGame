@@ -15,7 +15,15 @@ layout(push_constant) uniform PushConstants {
     float uLineWidth;   // 72-75
     float uAlphaTest;   // 76-79
     vec4 uColor;        // 80-95  — the hurt/swell overlay
+    vec4 uUVRange;      // 96-111 — here: the portal clip plane (uEntityClipPlane)
 } pc;
+
+// gl_ClipDistance must be advertised explicitly — see block_vk.vert.
+out gl_PerVertex {
+    vec4  gl_Position;
+    float gl_PointSize;
+    float gl_ClipDistance[1];
+};
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
@@ -27,4 +35,9 @@ void main() {
     vUV = aUV;
     vColor = aColor;
     gl_Position = pc.uMVP * vec4(aPos, 1.0);
+    // Portal clip plane in aPos space (camera-relative world; the renderer
+    // folds the camera offset into .w). Zero = no clipping.
+    gl_ClipDistance[0] = (any(notEqual(pc.uUVRange.xyz, vec3(0.0))))
+        ? dot(pc.uUVRange.xyz, aPos) + pc.uUVRange.w
+        : 1.0;
 }

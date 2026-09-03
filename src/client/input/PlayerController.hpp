@@ -1,10 +1,13 @@
 // File: src/client/input/PlayerController.hpp
 #pragma once
 
+#include "common/world/level/DimensionId.hpp"
 #include "../entity/Player.hpp"
 #include "common/core/Features.hpp"
 #include "common/physics/RayCast.hpp"
 #include <chrono>
+#include <functional>
+#include <optional>
 #include <glm/glm.hpp>
 #if ENABLE_PORTAL_GUN
 #include <vector>
@@ -28,6 +31,28 @@ namespace Game {
     // Client-side player controller that handles interaction and (future) networking
     class ClientPlayerController {
     public:
+        // ── The fill tool ────────────────────────────────────────────────
+        // Alt + right-click marks the cell a plain click would have placed
+        // into; the next plain right-click fills the box between that cell
+        // and its own target with the held block (FillBlocksC2S). Alt +
+        // right-click on nothing clears the mark.
+        struct FillMark {
+            bool              armed = false;
+            glm::ivec3        cell{0};
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            Game::BlockState  state;
+        };
+        const FillMark& GetFillMark() const { return m_fill; }
+
+        // Pick block on an ENTITY: the item (its spawn egg) into the hotbar,
+        // creative style — MC Minecraft.pickBlock's entity branch.
+        void OnPickItem(Game::ItemID itemId);
+        void ClearFillMark() { m_fill.armed = false; }
+        // The box and block to preview this frame: the mark to the cell the
+        // crosshair would place into (the mark alone when it would not).
+        bool FillPreview(const std::optional<RaycastHit>& hit, glm::ivec3& outLo,
+                         glm::ivec3& outHi, Game::BlockState& outState) const;
+
         // Configuration
         static constexpr float INTERACTION_RANGE = 5.0f;
         // MC's continuous-mining tick rate (20 TPS). The mining state machine
@@ -65,6 +90,14 @@ namespace Game {
         // Set references (must be called after creation)
         void SetPlayer(ClientPlayer* player);
         void SetNetworkClient(Client::NetworkClient* networkClient);
+        // Sends the player's CURRENT position to the server if it has moved
+        // since the last position packet. Called right before every
+        // interaction packet, so the server judges reach and "is the player
+        // standing in that block" against the same position the client
+        // predicted with — MC gets that for free because its click and its
+        // position packet come out of the same tick; here physics runs per
+        // frame and the position goes out per tick. Installed by PlatformMain.
+        void SetMovementFlush(std::function<void()> flush);
 
         // Block reader for interaction logic. REQUIRED, and in both modes it
         // is ClientBlockAccess — the client chunk cache. The controller
@@ -101,7 +134,11 @@ namespace Game {
         // Public because both the attack path and the block-highlight pass
         // have to agree on it — an outline drawn on a block you cannot mine is
         // the visible half of the same bug.
-        int32_t PickEntity() const;
+        // `outDragonPart` receives the EnderDragon part index the ray hit
+        // (EnderDragon::kDragonPart*), or -1 when the pick is not a dragon —
+        // the dragon's own box is not pickable (MC parity), only its eight
+        // part boxes are.
+        int32_t PickEntity(int* outDragonPart = nullptr) const;
 
         // MC Minecraft.crosshairPickEntity, reduced to what the attack
         // indicator needs: is there a LIVING thing under the crosshair right
@@ -166,6 +203,10 @@ namespace Game {
         // References
         ClientPlayer* player;
         const IBlockAccess* blockAccess = nullptr;  // Block reads — the client chunk cache, both modes
+        // The level the current dig is in (immersive portals: the far level
+        // when the crosshair reaches through one). Captured when the dig
+        // starts so STOP / ABORT go to the same world the START did.
+        Game::DimensionId digDimension = Game::DimensionId::Overworld;
         Client::NetworkClient* networkClient;  // Network client for sending packets
 
         // Mining state — mirrors MultiPlayerGameMode's fields exactly.
@@ -199,9 +240,7 @@ namespace Game {
         int missTime = 0;
         int rightClickDelay = 0;
 
-        // Network state (placeholders for future implementation)
-        std::chrono::steady_clock::time_point lastMoveSend;
-        int moveSeq = 0;         // Movement sequence number
+        // Network state
         int interactSeq = 0;     // Interaction sequence number
         bool sentPlayerLoaded = false;  // Track if we've sent initial spawn
         bool lastSentFlying = false;    // Fly state last shipped via PlayerAbilitiesC2S
@@ -223,7 +262,8 @@ namespace Game {
         // server's ack can confirm or roll it back.
         void PredictBlock(const glm::ivec3& pos, BlockID newBlock, uint32_t sequence,
                           BlockState state = BlockState{});
-        void SendMovementIfDue();  // TODO: Implement for networking
+        void FlushMovement();
+        std::function<void()> movementFlush;
         void StartDig(const glm::ivec3& pos, int face);
         void AbortDig();
         void FinishDig();
@@ -234,7 +274,15 @@ namespace Game {
         void CreativeDestroy(const glm::ivec3& pos);
         // Returns the interaction sequence the packet was stamped with (0 if
         // nothing was sent) so a matching block prediction can be filed.
-        uint32_t SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false);  // altInteract=true → left-click "use" semantics (PortalGun blue)
+        // The entity pick along one ray in the BOUND level; PickEntity runs it
+        // in the player's level and, past a portal, in the far level.
+        int32_t PickEntityAlong(const glm::vec3& origin, const glm::vec3& dir, float range,
+                                float blockLimit, int* outDragonPart) const;
+        // altInteract=true → left-click "use" semantics (PortalGun blue).
+        // `dimension` stamps the packet with the clicked block's level;
+        // absent, it is the level the crosshair's block is in.
+        uint32_t SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false,
+                               std::optional<Game::DimensionId> dimension = std::nullopt);
 
         // Raycast face numbering -> MC Direction ordinals. Shared by the
         // outgoing packet and the local placement prediction, so the two
@@ -258,6 +306,15 @@ namespace Game {
         bool ComputePredictedPlacement(const RaycastHit& hit,
                                        glm::ivec3& outPos, BlockID& outBlock,
                                        BlockState& outState) const;
+
+        // The fill tool's share of a right-click; true when it took the
+        // click (a corner marked, a box sent) and nothing else should.
+        bool HandleFillClick(const std::optional<RaycastHit>& hit);
+        // The cell a fill corner lands in when the crosshair is on nothing:
+        // a few blocks out along the look, if the held block could go there.
+        bool FillAirCell(glm::ivec3& outCell, Game::BlockState& outState) const;
+        void SendFillBlocks(const glm::ivec3& a, const glm::ivec3& b, Game::BlockState state);
+        FillMark m_fill;
 
         // Run the shared block-use / item-useOn chain locally so its block
         // edits land this frame, exactly as MC does inside
@@ -302,6 +359,12 @@ namespace Game {
             float     age = 0.0f;
             bool      isOrange = false;
             int       hand = 0;
+            // The level the projectile is flying in. A shot that pierces an
+            // immersive portal continues in the far level with its
+            // position and direction mapped through — the impact is sent
+            // stamped with THAT level, so a portal can be fired through a
+            // nether portal onto the Nether's walls.
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
         };
         std::vector<PendingPortalProjectile> m_pendingPortalProjectiles;
         void SpawnPortalProjectile(bool isOrange);

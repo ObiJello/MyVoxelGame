@@ -21,7 +21,9 @@
 #include "../backend/RenderTypes.hpp"
 #include "../core/Camera.hpp"
 #include <glm/glm.hpp>
+#include <array>
 #include <vector>
+#include "common/world/level/DimensionId.hpp"
 
 namespace Client { class ClientPortalManager; }
 
@@ -44,8 +46,12 @@ namespace Render {
         // (Portal-game-style energy spark). Uses CPU-built per-frame
         // vertex buffer — particle counts are small (a few dozen across
         // all portals) so per-frame upload is cheap.
+        // Only the particles of `dimension`: the level being drawn. Those
+        // anchored to the portal at `skipAnchor` (the surface a portal
+        // view comes out of) are left out — see PortalRenderer::Render.
         void Render(const glm::mat4& projection, const glm::mat4& view,
-                    const glm::vec3& cameraPos);
+                    const glm::vec3& cameraPos, Game::DimensionId dimension,
+                    const glm::vec3* skipAnchor = nullptr);
 
         // One-shot burst kinds — matches the reason byte in
         // PortalFizzleS2CPacket. See `portal_X_close` in portals_dump.txt
@@ -68,7 +74,8 @@ namespace Render {
         //     twist + drag=0.25, 1s lifetime). Conveys "portal collapsed."
         // `isOrange` selects the per-color palette / twist direction.
         void EmitOneShot(BurstKind kind, const glm::vec3& origin,
-                         const glm::vec3& normal, bool isOrange);
+                         const glm::vec3& normal, bool isOrange,
+                         Game::DimensionId dimension);
 
         // Spawn a visual portal-gun projectile travelling from `start`
         // to `end`. Speed = 57.15 m/s (Portal's BLAST_SPEED = 3000 HU/s),
@@ -77,8 +84,12 @@ namespace Render {
         // The visual is a coloured energy bolt (per-color sprite +
         // sprite trail) flying along the straight line gun→impact.
         // Server placement remains instant; this is purely visual.
+        // The bolt flies in the level the player stands in; EmitProjectileIn
+        // puts one in `dimension` (the far leg of a shot through a portal).
         void EmitProjectile(const glm::vec3& start, const glm::vec3& end,
                             bool isOrange);
+        void EmitProjectileIn(Game::DimensionId dimension, const glm::vec3& start,
+                              const glm::vec3& end, bool isOrange);
 
     private:
         // Particle classification — mirrors Portal's two separate continuous
@@ -97,6 +108,12 @@ namespace Render {
             float     lifetime = 0.7f;
             float     birthSizeM = 0.06f;  // initial billboard size in metres
             ParticleType type = ParticleType::Spark;
+            // The level the particle lives in; drawn only with that level.
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            // The portal this particle belongs to (its origin), for the
+            // continuous rim effects; unanchored for bolts and bursts.
+            bool      anchored = false;
+            glm::vec3 anchor{0.0f};
             // Swirl-only: portal anchor for the vortex force (pull toward
             // origin + twist around normal). Mirrors Portal's
             // "Pull towards control point" + "twist around axis" operators.
@@ -139,8 +156,7 @@ namespace Render {
         // buffer rebuilt per frame (small N, no need for instancing /
         // persistent map).
         ShaderHandle  m_shader        = INVALID_SHADER;
-        BufferHandle  m_vb            = INVALID_BUFFER;
-        MeshHandle    m_mesh          = INVALID_MESH;
+        // (The single streaming VB is a ring now — see StreamSlot below.)
         TextureHandle m_dummyTexture  = INVALID_TEXTURE;
         // Portal-extracted sprite textures (assets/textures/portal/).
         // Blue = portal_1_particle.vtf (64×64), Orange = portal_2_particle.vtf
@@ -149,7 +165,25 @@ namespace Render {
         // when these are bound.
         TextureHandle m_blueSprite    = INVALID_TEXTURE;
         TextureHandle m_orangeSprite  = INVALID_TEXTURE;
-        size_t        m_vbCapacityVerts = 0;
+
+        // One streaming vertex buffer per Render CALL, not per frame. The
+        // system draws once per view — the main one and every portal view —
+        // and the Vulkan backend records an upload immediately but runs
+        // the draws at submit: a second upload into the same buffer
+        // clobbers what the first draw will read, and growing that buffer
+        // destroys one a recorded draw still references — VK_ERROR_
+        // DEVICE_LOST, the picture freezing while the game runs on. Calls
+        // cycle through the ring; a slot grows on its own, deferred.
+        struct StreamSlot {
+            BufferHandle vb = INVALID_BUFFER;
+            MeshHandle   mesh = INVALID_MESH;
+            size_t       capacityVerts = 0;
+        };
+        static constexpr size_t kStreamSlots = 8;
+        std::array<StreamSlot, kStreamSlots> m_slots;
+        size_t m_slotCursor = 0;
+        StreamSlot& AcquireSlot(size_t vertsNeeded, size_t minCapacity);
+        void DestroySlots();
 
         static const char* s_vertSource;
         static const char* s_fragSource;

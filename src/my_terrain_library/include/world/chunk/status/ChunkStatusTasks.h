@@ -708,12 +708,13 @@ public:
         auto chunksCopy = std::make_shared<const std::vector<std::vector<::world::IChunk*>>>(chunks);
         // Self-rescheduling attempt: if a neighbour is decorating, go to the
         // back of the pool's queue and try again after the work ahead of us.
+        const bool structural = chunk->hasAnyStructureReferences();   // pieces read far; see FeatureClaims
         auto attempt = std::make_shared<std::function<void()>>();
-        *attempt = [ctx, stepp, chunksCopy, chunk, pos, future, attempt]() {
-            if (!ctx->featureClaims->acquireOrWait(pos.x(), pos.z(), *attempt)) {
+        *attempt = [ctx, stepp, chunksCopy, chunk, pos, future, attempt, structural]() {
+            if (!ctx->featureClaims->acquireOrWait(pos.x(), pos.z(), structural, *attempt)) {
                 return;   // parked; a release will re-submit us
             }
-            auto submit = [ctx](std::function<void()> fn) { ctx->backgroundExecutor(std::move(fn)); };
+            auto submit = [ctx](std::function<void()> fn) { (ctx->decorationExecutor ? ctx->decorationExecutor : ctx->backgroundExecutor)(std::move(fn)); };
             try {
                 TERRAIN_ZONE_N("Gen.Features");
                 decorateStep(*ctx, *stepp, *chunksCopy, chunk);
@@ -725,7 +726,7 @@ public:
             ctx->featureClaims->release(pos.x(), pos.z(), submit);
             future->complete(chunk);
         };
-        context.backgroundExecutor(*attempt);
+        (context.decorationExecutor ? context.decorationExecutor : context.backgroundExecutor)(*attempt);
         return future;
     }
 

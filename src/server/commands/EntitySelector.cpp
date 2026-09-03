@@ -3,6 +3,7 @@
 
 #include "../IntegratedServer.hpp"
 #include "../entity/ItemEntityManager.hpp"
+#include "../level/ServerLevel.hpp"
 #include "../entity/MobManager.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../session/PlayerSession.hpp"
@@ -397,9 +398,11 @@ namespace Server {
             }
         }
 
-        void CollectMobs(std::vector<SelectedEntity>& out) {
+        void CollectMobs(const CommandSource& src, std::vector<SelectedEntity>& out) {
             if (!g_integratedServer) return;
-            MobManager* mobs = g_integratedServer->GetMobs();
+            // The SENDER's level, not the Overworld — see CommandSource.
+            ServerLevel* level = g_integratedServer->GetLevel(src.dimension);
+            MobManager* mobs = level ? level->Mobs() : nullptr;
             if (!mobs) return;
 
             for (const auto& [id, mob] : mobs->All()) {
@@ -419,9 +422,10 @@ namespace Server {
             }
         }
 
-        void CollectItems(std::vector<SelectedEntity>& out) {
+        void CollectItems(const CommandSource& src, std::vector<SelectedEntity>& out) {
             if (!g_integratedServer) return;
-            ItemEntityManager* items = g_integratedServer->GetItemEntities();
+            ServerLevel* level = g_integratedServer->GetLevel(src.dimension);
+            ItemEntityManager* items = level ? level->Items() : nullptr;
             if (!items) return;
 
             for (const auto& [id, item] : items->All()) {
@@ -591,8 +595,8 @@ namespace Server {
         } else {
             CollectPlayers(source, candidates);
             if (sel.includesEntities) {
-                CollectMobs(candidates);
-                CollectItems(candidates);
+                CollectMobs(source, candidates);
+                CollectItems(source, candidates);
             }
         }
 

@@ -7,6 +7,7 @@
 #include "common/network/ProtocolTypes.hpp"
 #include "common/network/IPacketListener.hpp"
 #include "common/network/packets/game/ChatMessageS2CPacket.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include <glm/glm.hpp>
 #include <memory>
 #include <optional>
@@ -97,6 +98,22 @@ namespace Server {
         
         // Send block change
         void SendBlockChange(const Network::BlockChangeS2CPacket& packet);
+
+        // ── Dimension scope ────────────────────────────────────────────
+        // Send a WORLD-SCOPED packet (chunk, block change, entity…) for a
+        // dimension. Emits a DimensionScopeS2C first when `dimension` is not
+        // the scope the stream is currently in, so the client applies the
+        // packet to the right level. Every send that knows its dimension
+        // should use this; plain SendPacket is for packets that are not
+        // about a world (chat, inventory, health) — see
+        // DimensionScopeS2CPacket.hpp. Server thread only.
+        void SendPacketIn(Game::DimensionId dimension, uint8_t packetId,
+                          const std::vector<uint8_t>& data);
+        // The scope the client is in after a ChangeDimensionS2C: the packet
+        // itself resets the client's scope, so the server's mirror of it
+        // must follow without emitting a marker.
+        void SetOutboundDimension(Game::DimensionId dimension) { m_outboundDimension = dimension; }
+        Game::DimensionId OutboundDimension() const { return m_outboundDimension; }
         
         // Send chat message
         void SendChatMessage(const std::string& message, uint8_t position = 0, uint32_t senderId = 0);
@@ -174,7 +191,8 @@ namespace Server {
         // Reached from two places on purpose, mirroring MC: the typed PLAY-phase
         // path via the listener, and the pre-PLAY inline path where there is no
         // session yet and the value is parked for one.
-        void ApplyClientSettings(int renderDistance, bool vsync, float mouseSensitivity);
+        void ApplyClientSettings(int renderDistance, int simulationDistance,
+                                 bool vsync, float mouseSensitivity);
 
         // ========================================================================
         // PACKET HANDLERS (OVERRIDE FROM BASE)
@@ -206,6 +224,9 @@ namespace Server {
         // ApplyClientSettings. Every other C2S packet now has a typed
         // representation and reaches the listener on the server thread.
         void HandleClientSettings(const std::vector<uint8_t>& payload);
+        // The trailing simulation-distance field of ClientConfigC2S, with
+        // the pre-field default when an older client sent none.
+        static int ReadSimulationDistance(Network::PacketReader& reader, int renderDistance);
 
         // ========================================================================
         // INTERNAL HELPERS
@@ -255,6 +276,10 @@ namespace Server {
         // for the 20-tick retry. Paired with m_tickCount, bumped in tick().
         int32_t m_awaitingTeleportTime = 0;
         int32_t m_tickCount = 0;
+
+        // Dimension the outbound stream is currently scoped to (see
+        // SendPacketIn). Starts where the client starts: the overworld.
+        Game::DimensionId m_outboundDimension = Game::DimensionId::Overworld;
         
         // Connection state
         // Atomic because it is genuinely cross-thread now: written on the

@@ -26,6 +26,12 @@ namespace Network {
         // server's 20 Hz snapshots miss bunny-hop landings entirely.
         float     fallDistance = 0.0f;
         uint32_t  sequenceNumber = 0;
+        // The dimension the client was standing in when it produced this
+        // move. The server ignores a move stamped with another dimension: it
+        // was produced before the client learned of (or predicted) a
+        // dimension change, and its coordinates belong to the other world.
+        static constexpr int8_t kDimensionUnknown = 127;
+        int8_t    dimensionId = kDimensionUnknown;
         std::chrono::steady_clock::time_point timestamp;
 
         PlayerMoveC2SPacket() = default;
@@ -50,6 +56,7 @@ namespace Network {
             buffer.WriteByte(flags);
             buffer.WriteFloat(packet.fallDistance);
             buffer.WriteVarInt(packet.sequenceNumber);
+            buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
             return buffer.GetData();
         }
 
@@ -68,6 +75,8 @@ namespace Network {
             packet.jumpedThisTick = (flags & 0x08) != 0;
             packet.fallDistance   = reader.ReadFloat();
             packet.sequenceNumber = reader.ReadVarInt();
+            packet.dimensionId = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte())
+                                                  : PlayerMoveC2SPacket::kDimensionUnknown;
             packet.timestamp = std::chrono::steady_clock::now();
             return packet;
         }

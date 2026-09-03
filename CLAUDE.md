@@ -77,6 +77,30 @@ To add a new color, append one row to `Game::kPlayerColorTable` in `src/common/e
 ### MSVC compatibility fixes (Windows build)
 The game uses GCC/Clang-specific features that need MSVC equivalents:
 
+## Hardware scaling (low-end machines)
+
+Every budget that depends on the machine reads `Core::HardwareProfile::Get()`
+(`src/common/core/HardwareProfile.hpp`: logical/performance cores, RAM, Intel-vs-Apple
+Silicon, and a Low/High tier). The rule for any new budget: **a fast machine must get
+exactly the number it had; only weaker hardware scales down.** Consumers today:
+
+- `Core::ThreadAllocator` — ≤6 logical cores use MC's `cores - 1` budget with no floors;
+  7+ keep the tuned split (table in `docs/thread-model.md`).
+- Mesh upload permits (`PlatformMain`) — `max(128, hw*8)` at 8+ threads, `max(32, hw*16)` below.
+- `ClientChunkManager::ComputeRetainBudgetBytes` — `min(1.5 GB, RAM/10)`.
+- `GameSettings` — first run on a Low-tier machine applies the Fast graphics preset;
+  `retinaFramebuffer` defaults off on Intel Macs (a window-creation hint, read from
+  disk before the window exists via `PeekRetinaFramebufferFromDisk`).
+
+Graphics options follow MC's modern model: `graphicsPreset` (fast/fancy/custom) is a
+one-shot macro in `GameSettings::ApplyGraphicsPreset`; the individual options
+(`cutoutLeaves`, `ao`, `biomeBlendRadius`, `particles`, `mipmapLevels`,
+`entityDistanceScaling`, `simulationDistance`, …) are what the engine reads, and each
+setter flips the preset to custom. Mesh-time options travel to workers through
+`Render::Mesher::SetMeshOptions` (one packed atomic + generation), never through
+`g_gameSettings` directly. Simulation distance is per-client on the wire
+(`ClientConfigC2S`, trailing field) and independent of view distance in `PlayerSession`.
+
 ## Profiling with Tracy
 
 Tracy is the profiler of record for this project. Currently **v0.14.0** (client pinned in
@@ -117,6 +141,40 @@ from either will never connect. Check before debugging a "won't connect" report.
 | Who is blocked on whom? | **Wait stacks** |
 | CPU or GPU bound? | GPU zones; also `g_enableGpuPassTimers` (ChunkRenderer.cpp), but it costs ~2.3 ms/call on Apple's GL driver — read it, then turn it off |
 | Which part of the session was this? | **Sections** (new in 0.14) — mark world-load vs steady-state, then range-limit stats |
+
+### Per-stage GPU attribution: `OBEY_SKIP` (A/B by subtraction)
+
+Apple's TBDR runs the whole frame as one render pass, so per-pass GPU timestamps
+are meaningless there. `src/client/renderer/core/DevRenderSkip.hpp` skips whole
+stages instead and you measure the difference in frame time:
+
+```bash
+OBEY_SKIP=cutout OBEY_SKIP_PERIOD=4 ./MyVoxelGame --vulkan --world "OG with Structs" \
+    --exec "/tp @s 0.5 75 0.5 0 15" --exec-delay 6 --quit-after 58
+```
+
+Tokens: `sky opaque cutout translucent players items mobs
+blockentities particles clouds helditem hud`. **Always use `OBEY_SKIP_PERIOD`**
+(toggles on/off every N s and logs `[DevSkip] phase=`) and pair it with the
+per-second `[Harness]` fps lines: this MacBook Air is fanless and throttles within
+~40 s of sustained GPU load, so two separate runs are NOT comparable (identical
+baselines measured 153 vs 128 fps back-to-back). Pin the camera with `/tp` — the
+player otherwise gets shoved by mobs and the saved position drifts run to run.
+
+### Culling / meshing debug tools (2026-08-30)
+
+- **F+C in-world** toggles a detached fly camera: view/projection follow the fly
+  camera, but ALL culling (terrain frustum, occlusion BFS, entity gating, mesh
+  scheduling) stays frozen at the player's view — fly outside the frustum to
+  watch sections/entities get culled. The player is frozen and rendered in
+  third person; block interaction and gameplay keys are dead while detached.
+  Chord caveat: pressing F first fires the offhand swap before the chord forms.
+- **Render Controls → "Greedy Mesh View"** (or launch with `OBEY_GREEDY_DEBUG=1`)
+  draws terrain as dark-grey solid faces with colored lines on top (remeshes with debug colors baked in): red =
+  eligible-but-unmerged 1x1, yellow->green = merged rect by area (log scale to
+  16x16), blue-gray = rule-ineligible (partial blocks, AO gradients,
+  translucent). Panel shows a legend + since-launch merge totals; break blocks
+  to watch grouping rebuild. `OBEY_NO_GREEDY=1` disables greedy meshing at mesh time for A/B.
 
 ### macOS-specific limits — important when diagnosing stalls
 
@@ -341,4 +399,4 @@ These still exist if you ever need manual control:
 - **Build numbers**: `tools/game_build_number`, `tools/launcher_build_number`
 - **Auto-release scripts**: `tools/bump_version.sh`, `tools/auto_release.sh`, `tools/update_plist_version.sh`
 - **Launcher app icon**: `assets/launcher/logo.png` (converted to `AppIcon.icns` via `iconutil`)
-- **DMG builder**: `tools/create_dmg.sh`                                                                                                             
+- **DMG builder**: `tools/create_dmg.sh`

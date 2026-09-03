@@ -27,6 +27,7 @@
 #include "common/entity/Mob.hpp"
 #include "common/core/JavaRandom.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -35,7 +36,12 @@
 
 namespace Game { struct IBlockAccess; }
 
+#include "common/core/Features.hpp"
+namespace Game::Immersive { struct Portal; }
+
 namespace Client {
+
+    class ClientMobManager;
 
     // Game::EntityLevel over the client's block view. Most of the interface is
     // inert here: a client mob never spawns anything, never drops items, and
@@ -48,6 +54,15 @@ namespace Client {
 
         const Game::IBlockAccess* Blocks() const override { return m_blocks; }
         bool IsClientSide() const override { return true; }
+        // Published once per frame from the Particles option (see
+        // MobParticleSystem::Update); the explosion debris spawner reads it
+        // from a worker thread, hence the atomic.
+        void SetParticleStatus(Game::ParticleStatus status) {
+            m_particleStatus.store(static_cast<uint8_t>(status), std::memory_order_relaxed);
+        }
+        Game::ParticleStatus GetParticleStatus() const override {
+            return static_cast<Game::ParticleStatus>(m_particleStatus.load(std::memory_order_relaxed));
+        }
         int64_t GetGameTime() const override { return m_gameTime; }
         int64_t GetDayTime()  const override { return m_dayTime; }
         Game::JavaRandom& Random() override { return m_random; }
@@ -62,8 +77,14 @@ namespace Client {
         bool MonstersBurn() const override { return false; }
         bool IsDay() const override { return (m_dayTime % 24000) < 12000; }
 
-        void GetEntitiesInBox(const Game::AABB&, const Game::Entity*,
-                              std::vector<Game::Entity*>&) const override {}
+        // REAL, unlike the rest of the entity queries: MC's client runs
+        // checkCrystals on its own mirror (EnderDragon.aiStep client branch)
+        // so the renderer knows which crystal the healing beam attaches to —
+        // this scan is that. Out of line: ClientMobManager is incomplete
+        // here. Null manager (tests) answers "nothing".
+        void SetMobManager(const ClientMobManager* mobs) { m_mobManager = mobs; }
+        void GetEntitiesInBox(const Game::AABB& box, const Game::Entity* except,
+                              std::vector<Game::Entity*>& out) const override;
         Game::LivingEntity* GetNearestPlayer(double, double, double, double) const override {
             return nullptr;
         }
@@ -138,12 +159,15 @@ namespace Client {
 
     private:
         const Game::IBlockAccess* m_blocks = nullptr;
+        const ClientMobManager* m_mobManager = nullptr;
         int64_t m_dayTime = 0;
         int64_t m_gameTime = 0;
         Game::JavaRandom m_random{0};
         std::vector<QueuedParticle> m_particleQueue;
         // Guards the queue: primed TNT ticks in parallel and enqueues here.
         std::mutex m_particleMutex;
+        // Game::ParticleStatus ordinal; see SetParticleStatus.
+        std::atomic<uint8_t> m_particleStatus{0};
     };
 
     // One mirrored mob, plus the interpolation state layered on top.
@@ -222,6 +246,8 @@ namespace Client {
 
     class ClientMobManager {
     public:
+        ClientMobManager() { m_level.SetMobManager(this); }
+
         static constexpr int kInterpSteps = 3;
         // Past this the mob is snapped rather than interpolated — a correction
         // that large is a teleport or a missed packet, and easing into it would
@@ -247,6 +273,9 @@ namespace Client {
         void Teleport(int32_t id, const glm::dvec3& pos, const glm::vec3& vel,
                       float yRot, float xRot, float yHeadRot, bool onGround);
         void SetMotion(int32_t id, const glm::vec3& vel);
+        // MC DATA_BEAM_TARGET, arriving as EndCrystalBeamS2C — see
+        // DragonPackets.hpp. No-op for anything that is not an End crystal.
+        void SetEndCrystalBeam(int32_t id, bool hasTarget, const glm::ivec3& target);
         void SetData(int32_t id, float health, uint8_t flags, uint8_t variantData,
                      uint8_t hurtTime, uint8_t deathTime, uint8_t swellDir, uint8_t swell,
                      uint8_t pose, uint8_t animState);
@@ -257,6 +286,14 @@ namespace Client {
         // in S2CPackets.hpp).
         void SetVehicle(int32_t passengerId, int32_t vehicleId);
         void Remove(int32_t id);
+#if ENABLE_IMMERSIVE_PORTALS
+        // A mob that just spawned here (`id`, already in this store) is the
+        // same one that was `from` in another level a moment ago, having
+        // crossed `via` (a portal of that level leading here). Carry its
+        // render state through the portal so the frame's interpolation
+        // continues across the surface — see ItemEntityManager::CarryOver.
+        void CarryOver(int32_t id, const ClientMob& from, const Game::Immersive::Portal& via);
+#endif
         void Clear();
 
         // 20 Hz client tick.
@@ -292,6 +329,14 @@ namespace Client {
             m_level.DrainParticles(out);
         }
 
+        // The Particles option, published once per frame by
+        // Render::MobParticleSystem::Update so the explosion debris spawner
+        // (which reads it through EntityLevel::GetParticleStatus) sees the
+        // same value the limiter uses.
+        void SetParticleStatus(Game::ParticleStatus status) {
+            m_level.SetParticleStatus(status);
+        }
+
         // The last decoded position for an id, kept so MoveEntity deltas can be
         // accumulated against the same base the server encoded against. MC
         // keeps this in the entity's VecDeltaCodec; here it is explicit because
@@ -304,6 +349,19 @@ namespace Client {
         // has no entity to hang them off, because the TNT that produced it was
         // discarded server-side a tick before the packet went out.
         Game::EntityLevel& Level() { return m_level; }
+
+        // The type of a mob the client knows, Count when it does not (pick
+        // block on an entity asks for its spawn egg).
+        Game::EntityTypeId EntityTypeOf(int32_t id) {
+            ClientMob* cm = Find(id);
+            return (cm && cm->mob) ? cm->mob->GetType() : Game::EntityTypeId::Count;
+        }
+
+        // The synced size of a mob (Entity::scale), applied by the packet
+        // handler on add and on every data update.
+        void SetEntityScale(int32_t id, float scale) {
+            if (ClientMob* cm = Find(id); cm && cm->mob) cm->mob->scale = scale;
+        }
 
     private:
         ClientMob* Find(int32_t id);
@@ -345,6 +403,7 @@ namespace Client {
         std::vector<int32_t> m_removedThisTick;
     };
 
-    extern std::unique_ptr<ClientMobManager> g_clientMobManager;
+    // Bound-level pointer, owned by ClientLevel (see ClientLevel.hpp).
+    extern ClientMobManager* g_clientMobManager;
 
 } // namespace Client

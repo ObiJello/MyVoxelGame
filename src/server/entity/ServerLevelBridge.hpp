@@ -43,6 +43,8 @@ namespace Server {
     class ServerPlayer;
     class PlayerSessionManager;
     class MobManager;
+    class ItemEntityManager;
+    class ExperienceOrbManager;
     class IntegratedServer;
 
     // A mob-facing view of one player. See the header note.
@@ -60,9 +62,19 @@ namespace Server {
         // hostile mobs.
         bool IsAttackable() const override { return !IsCreative() && !IsSpectator(); }
 
-        float GetBbWidth()  const override { return 0.6f; }
-        float GetBbHeight() const override { return 1.8f; }
-        float GetEyeHeight() const override { return 1.62f; }
+        // The base box; Entity::scale (set from the player's size when the
+        // view syncs) sits on top of it.
+        float BaseBbWidth()   const override { return 0.6f; }
+        float BaseBbHeight()  const override { return 1.8f; }
+        float BaseEyeHeight() const override { return 1.62f; }
+
+        // MC ServerPlayer.getKnownMovement: the movement the client actually
+        // reported, not `velocity` (which on a view is only the knockback
+        // accumulator). SyncFromPlayer keeps oldPosition exactly one tick
+        // behind, so the difference IS last tick's displacement.
+        glm::dvec3 GetKnownMovement() const override {
+            return position - oldPosition;
+        }
 
         // MC Player.getDimensionChangingDelay (Player.java:383) — TEN ticks,
         // against Entity's generic 300.
@@ -170,6 +182,16 @@ namespace Server {
         ~ServerLevelBridge();
 
         void SetMobManager(MobManager* mobs) { m_mobs = mobs; }
+        // THIS level's item and orb managers. AwardExperience and
+        // SpawnItemDrop used to route through IntegratedServer's Overworld-
+        // pinned accessors, which is how a dragon killed in the End paid its
+        // 12,000 XP into the Overworld at (0, 65, 0) and an End enderman's
+        // pearl dropped a dimension away.
+        void SetItemAndOrbManagers(ItemEntityManager* items,
+                                   ExperienceOrbManager* orbs) {
+            m_items = items;
+            m_orbs  = orbs;
+        }
 
         // ── EntityLevel ────────────────────────────────────────────────────
         const Game::IBlockAccess* Blocks() const override;
@@ -267,7 +289,16 @@ namespace Server {
         // MC ServerLevel.explode's per-player ClientboundExplodePacket send.
         void BroadcastExplosion(const glm::dvec3& center, float radius,
                                 int blockCount, bool small) override;
+        // MC ServerLevel.getDragonFight — set by ServerLevel for the End,
+        // null everywhere else. See common/entity/DragonFight.hpp.
+        void SetDragonFight(Game::IDragonFight* fight) { m_dragonFight = fight; }
+        Game::IDragonFight* DragonFight() override { return m_dragonFight; }
+
+        Game::DimensionId Dimension() const override;
         bool MobGriefing() const override;
+        bool DoMobSpawning() const override;
+        bool TeleportPlayer(Game::LivingEntity& player,
+                            const glm::dvec3& pos) override;
         int  GetMinY() const override;
         int  GetMaxY() const override;
         bool TntExplodes() const override;
@@ -310,6 +341,9 @@ namespace Server {
         Game::World*          m_world;
         PlayerSessionManager* m_sessions;
         MobManager*           m_mobs = nullptr;
+        ItemEntityManager*    m_items = nullptr;
+        ExperienceOrbManager* m_orbs = nullptr;
+        Game::IDragonFight*   m_dragonFight = nullptr;   // End only
 
         mutable Game::JavaRandom m_random{0};
 

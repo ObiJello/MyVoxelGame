@@ -10,6 +10,7 @@
 // "trapped", "ender") and loaded on first request from
 // `assets/textures/entity/chest/{variant}.png`.
 #include "ChestRenderer.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include <functional>
 #include "../backend/RenderBackend.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
@@ -38,8 +39,9 @@ namespace Render {
         static_assert(sizeof(CubeVert) == 24, "match GetBlockVertexLayout");
 
         // GLSL: world-space MVP, sampler2D, vertex-colour modulation.
-        // We do the [0,64]→[0,1] UV divide in the vertex shader so the
-        // CPU-side UV math stays in MC's native pixel space.
+        // The [0,64]→[0,1] UV divide is baked into the mesh at build time
+        // (see Initialize) so this shader — and the shared Vulkan pair
+        // blockentity_vk.* — take normalized UVs.
         constexpr const char* kVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
@@ -50,7 +52,7 @@ out vec2 vUV;
 out vec4 vColor;
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV / 64.0;
+    vUV = aUV;
     vColor = aColor;
 }
 )GLSL";
@@ -156,7 +158,13 @@ void main() {
     bool ChestRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        m_shader = g_renderBackend->CreateShader(kVS, kFS);
+        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
+            // VKBackend cannot compile GLSL source; it loads the shared
+            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
+            // rewrites the .vert/.frag names). GL keeps the inline source.
+            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
+                                                     "shaders/blockentity.frag")
+            : g_renderBackend->CreateShader(kVS, kFS);
         if (m_shader == INVALID_SHADER) {
             Log::Error("[ChestRenderer] shader compile failed");
             return false;
@@ -180,6 +188,9 @@ void main() {
             std::vector<uint32_t> idx;
             verts.reserve(72); idx.reserve(108);
             emit(verts, idx);
+            // AddCube works in the chest sheet's 64-px space; normalize here
+            // so the shaders (GL inline and shared VK pair) are divide-free.
+            for (auto& vert : verts) { vert.u /= 64.0f; vert.v /= 64.0f; }
             m_vb[v] = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
                 verts.size() * sizeof(CubeVert), verts.data());
             m_ib[v] = g_renderBackend->CreateBuffer(BufferUsage::Index,
@@ -270,6 +281,7 @@ void main() {
                                 const glm::mat4& proj,
                                 const glm::mat4& view,
                                 const glm::vec3& /*cameraPos*/) {
+        PROFILE_ZONE_N("BE.Chest");
         if (!m_geomBuilt || !g_renderBackend) return;
 
         // Which of the three models, and which texture. MC ChestRenderer reads
@@ -358,6 +370,9 @@ void main() {
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(tex, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+        // VK: the shared shader reads the threshold from a push constant.
+        // GL: the inline FS hardcodes 0.05 and silently ignores this.
+        g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
         g_renderBackend->DrawIndexed(m_mesh[variant], m_indexCount[variant]);
         g_renderBackend->UnbindMesh();
     }
@@ -382,6 +397,7 @@ void main() {
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(tex, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+        g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
         g_renderBackend->DrawIndexed(m_mesh[kSingle], m_indexCount[kSingle]);
         g_renderBackend->UnbindMesh();
     }

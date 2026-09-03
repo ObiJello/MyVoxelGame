@@ -73,7 +73,22 @@
 
 **Work Guard**: Prevents `io_context` from exiting when no pending work
 
-### Client Worker Pool (2-4 threads)
+### Client Worker Pool (1-5 threads, sized by `Core::ThreadAllocator`)
+
+Thread counts come from `Core::ThreadAllocator::GetOptimalAllocation()`, which reads
+`Core::HardwareProfile` (logical cores, performance cores, RAM). Small machines get
+MC's `cores - 1` total budget with no floors; 7+ logical cores keep the tuned split:
+
+| logical cores | mesh workers | server workers |
+|---|---|---|
+| 2 | 1 | 1 |
+| 3-4 | 1 | 2 |
+| 5-6 | 2 | 2 |
+| 7+ | `max(3, available - 2)`, capped at performance cores + 1 | clamp(rest, 4, 6) |
+
+Mesh upload permits (`PlatformMain`) and the client chunk retention budget
+(`ClientChunkManager::ComputeRetainBudgetBytes`) scale from the same profile.
+
 **DO:**
 - Process mesh build requests from `ClientMeshManager`
 - Perform CPU-intensive greedy meshing algorithm
@@ -88,7 +103,7 @@
 
 **Work Distribution**: Priority-based scheduling (near-to-far from player position)
 
-### Server Worker Pool (2-4 threads)
+### Server Worker Pool (1-6 threads, see table above)
 **DO:**
 - Load chunks from Anvil files (.mca format) asynchronously
 - Generate chunks procedurally when not found in storage

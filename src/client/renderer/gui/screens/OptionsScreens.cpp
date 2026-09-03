@@ -1,5 +1,10 @@
 // File: src/client/renderer/gui/screens/OptionsScreens.cpp
 #include "OptionsScreens.hpp"
+// glad must precede GLFW (GLFW includes the system GL header otherwise), and
+// ClientMeshManager/ClientChunkManager pull glad in transitively.
+#include "../../mesh/Mesher.hpp"
+#include "../../mesh/ClientMeshManager.hpp"
+#include "../../../world/ClientChunkManager.hpp"
 #include <GLFW/glfw3.h>
 #include "PanoramaRenderer.hpp"
 #include "WorldSelectScreens.hpp"
@@ -7,6 +12,7 @@
 #include "../FontRenderer.hpp"
 #include "../../environment/SkyRenderer.hpp"
 #include "platform/GameDirectory.hpp"
+#include "common/core/HardwareProfile.hpp"
 #include "common/core/Log.hpp"
 #include <algorithm>
 #include <cmath>
@@ -17,6 +23,29 @@ namespace Render {
 
     namespace {
         Platform::GameSettings& Settings() { return Platform::g_gameSettings; }
+
+        // Mesh-time options (leaves, smooth lighting, biome blend): publish
+        // to the mesher and, when the snapshot actually changed, remesh the
+        // world. MC does the same through LevelRenderer.allChanged(); the
+        // engine has no allChanged, so the smallest correct equivalent is to
+        // dirty every section that has geometry. Sections without GPU data
+        // are empty and have nothing to rebuild. Keys are collected first:
+        // MarkSectionDirty takes the chunk manager's locks, and
+        // ForEachActiveSection holds the mesh manager's, so the two are kept
+        // from nesting.
+        void ApplyMeshOptions() {
+            if (!Render::Mesher::SyncMeshOptionsFromSettings()) return;
+            if (!Render::g_clientMeshManager || !Client::g_clientChunkManager) return;
+            std::vector<Render::ClientMeshManager::SectionKey> keys;
+            Render::g_clientMeshManager->ForEachActiveSection(
+                [&keys](const Render::ClientMeshManager::SectionKey& key, const Render::GPUSectionData*) {
+                    keys.push_back(key);
+                });
+            for (const auto& key : keys) {
+                Client::g_clientChunkManager->MarkSectionDirty(key.chunkPos, key.sectionY);
+            }
+            Log::Info("Mesh options changed: %zu sections queued for remesh", keys.size());
+        }
 
         std::string FormatInt(const std::string& caption, int v, const char* suffix = "") {
             char buf[96];
@@ -251,20 +280,82 @@ namespace Render {
                   [&s] { int g = s.GetGuiScale(); return (g >= 0 && g <= 8) ? g : 0; }(),
                   [](int i) { Settings().SetGuiScale(i); }));
 
-        m_list->AddSmall(
-            OnOff("Fullscreen", s.GetFullscreen(), [&mgr](bool on) {
+        {
+            auto* fullscreen = OnOff("Fullscreen", s.GetFullscreen(), [&mgr](bool on) {
                 Settings().SetFullscreen(on);
                 mgr.MarkSettingApplied(ScreenManager::APPLY_FULLSCREEN);
-            }),
+            });
+#ifdef __APPLE__
+            // GLFW_COCOA_RETINA_FRAMEBUFFER is a window-creation hint: the
+            // change lands on the next launch, like MC's own restart-only
+            // options. The hardware default is what a missing key reads as.
+            auto* retina = OnOff("Retina Resolution", s.GetRetinaFramebuffer(),
+                                 [](bool on) { Settings().SetRetinaFramebuffer(on); });
+            retina->SetTooltip({"Render at the display's full pixel",
+                                "density. OFF draws a quarter of the",
+                                "pixels - much faster on Intel Macs.",
+                                "Takes effect after restart."});
+            m_list->AddSmall(fullscreen, retina);
+#else
+            m_list->AddSmall(fullscreen, nullptr);
+#endif
+        }
+
+        m_list->AddSmall(
             ValueSlider("Brightness", s.GetGamma(), 0.0, 1.0, 0.01,
                 [](double v) -> std::string {
                     if (v <= 0.0) return "Moody";
                     if (v >= 1.0) return "Bright";
                     return std::to_string(static_cast<int>(std::lround(v * 100.0))) + "%";
                 },
-                [](double v) { Settings().SetGamma(static_cast<float>(v)); }));
+                [](double v) { Settings().SetGamma(static_cast<float>(v)); }),
+            nullptr);
 
         m_list->AddHeader("Graphics Quality");
+
+        // ── Graphics preset (MC GraphicsPreset) ───────────────────────────
+        //
+        // A one-shot macro, not a mode: picking Fast or Fancy writes MC's
+        // table into the individual options below (GameSettings::
+        // ApplyGraphicsPreset) and every one of those options' setters flips
+        // the preset back to Custom when touched afterwards. Applying a
+        // preset changes most of the rows on this screen, so the screen is
+        // rebuilt in place to show the new values — the same thing MC's
+        // VideoSettingsScreen does by re-initialising itself.
+        //
+        // "Custom" is shown only while it is the current state, as in MC;
+        // cycling from it goes to Fast.
+        {
+            using Preset = Platform::GameSettings::GraphicsPreset;
+            const Preset current = s.GetGraphicsPreset();
+            std::vector<std::string> values = {"Fast", "Fancy"};
+            if (current == Preset::Custom) values.push_back("Custom");
+            const int initial = current == Preset::Fast ? 0 : (current == Preset::Fancy ? 1 : 2);
+            auto* graphics = Cycle("Graphics", values, initial, [&mgr](int i) {
+                if (i >= 2) return;   // "Custom" is a state, not a choice
+                Settings().ApplyGraphicsPreset(i == 0 ? Preset::Fast : Preset::Fancy);
+                ApplyMeshOptions();
+                mgr.MarkSettingApplied(ScreenManager::APPLY_RENDER_DISTANCE |
+                                       ScreenManager::APPLY_SIMULATION_DISTANCE |
+                                       ScreenManager::APPLY_MESH_OPTIONS |
+                                       ScreenManager::APPLY_MIPMAPS);
+                mgr.Set(std::make_unique<VideoSettingsScreen>());
+            });
+            const bool lowEnd = Core::HardwareProfile::Get().IsLowEnd();
+            graphics->SetTooltip({"Fast: 8 chunks, simulation 6, solid",
+                                  "leaves, flat lighting, fewer particles.",
+                                  "Fancy: 16 chunks, simulation 12,",
+                                  "see-through leaves, smooth lighting.",
+                                  lowEnd ? "Fast is recommended for this machine."
+                                         : "Changing any option below = Custom."});
+            auto* cull = OnOff("Cull Leaves", s.GetCullLeaves(),
+                               [](bool on) { Settings().SetCullLeaves(on); ApplyMeshOptions(); });
+            cull->SetTooltip({"Fancy leaves only: skip leaf faces",
+                              "that touch another leaf block.",
+                              "Faster; the inside of a canopy",
+                              "looks hollow up close."});
+            m_list->AddSmall(graphics, cull);
+        }
 
         m_list->AddSmall(
             ValueSlider("Render Distance", s.GetRenderDistance(), 2, 32, 1,
@@ -275,25 +366,38 @@ namespace Render {
                 }),
             ValueSlider("Simulation Distance", s.GetSimulationDistance(), 5, 32, 1,
                 [](double v) { return std::to_string(static_cast<int>(v)) + " chunks"; },
-                [](double v) { Settings().SetSimulationDistance(static_cast<int>(v)); }));
+                [&mgr](double v) {
+                    Settings().SetSimulationDistance(static_cast<int>(v));
+                    mgr.MarkSettingApplied(ScreenManager::APPLY_SIMULATION_DISTANCE);
+                }));
 
-        m_list->AddSmall(
-            ValueSlider("Biome Blend", s.GetBiomeBlendRadius(), 0, 7, 1,
+        {
+            auto* leaves = OnOff("Fancy Leaves", s.GetCutoutLeaves(),
+                                 [](bool on) { Settings().SetCutoutLeaves(on); ApplyMeshOptions(); });
+            leaves->SetTooltip({"ON: see-through leaves (MC Fancy).",
+                                "OFF: solid leaves and every leaf",
+                                "face inside a canopy is skipped",
+                                "(MC Fast) - far fewer triangles."});
+            auto* biome = ValueSlider("Biome Blend", s.GetBiomeBlendRadius(), 0, 7, 1,
                 [](double v) -> std::string {
                     int r = static_cast<int>(v);
                     if (r == 0) return "OFF";
                     int d = r * 2 + 1;
                     return std::to_string(d) + "x" + std::to_string(d);
                 },
-                [](double v) { Settings().SetBiomeBlendRadius(static_cast<int>(v)); }),
-            Cycle("Graphics", {"Fast", "Fancy"},
-                  s.GetGraphicsMode() == 0 ? 0 : 1,
-                  [](int i) { Settings().SetGraphicsMode(i); }));
+                [](double v) { Settings().SetBiomeBlendRadius(static_cast<int>(v)); ApplyMeshOptions(); });
+            biome->SetTooltip({"How far grass, leaf and water colours",
+                               "blend across biome borders. Higher is",
+                               "smoother and slower to build chunks."});
+            m_list->AddSmall(leaves, biome);
+        }
 
         {
             auto* ao = OnOff("Smooth Lighting", s.GetAO(),
-                             [](bool on) { Settings().SetAO(on); });
-            ao->SetTooltip({"Applies to newly meshed chunks;", "fully applies after restart."});
+                             [](bool on) { Settings().SetAO(on); ApplyMeshOptions(); });
+            ao->SetTooltip({"Per-corner ambient occlusion on",
+                            "block faces. OFF is flat lighting",
+                            "and faster chunk building."});
             auto* clouds = Cycle("Clouds", {"Fancy", "Fast", "OFF"},
                 [&s] {
                     const std::string c = s.GetRenderClouds();
@@ -311,27 +415,36 @@ namespace Render {
             auto* fog = OnOff("Fog", s.GetFogEnabled(),
                               [](bool on) { Settings().SetFogEnabled(on); });
             fog->SetTooltip({"Fades distant terrain into the sky", "like Minecraft. Applies instantly."});
-            m_list->AddSmall(fog,
-                Cycle("Particles", {"All", "Decreased", "Minimal"},
-                      [&s] { int p = s.GetParticles(); return (p >= 0 && p <= 2) ? p : 1; }(),
-                      [](int i) { Settings().SetParticles(i); }));
+            auto* particles = Cycle("Particles", {"All", "Decreased", "Minimal"},
+                      s.GetParticles(),
+                      [](int i) { Settings().SetParticles(i); });
+            particles->SetTooltip({"Decreased drops a third of particles",
+                                   "and all explosion debris; Minimal",
+                                   "keeps only the always-visible ones."});
+            m_list->AddSmall(fog, particles);
         }
 
-        m_list->AddSmall(
-            ValueSlider("Mipmap Levels", s.GetMipmapLevels(), 0, 4, 1,
+        {
+            auto* mipmaps = ValueSlider("Mipmap Levels", s.GetMipmapLevels(), 0, 4, 1,
                 [](double v) -> std::string {
                     int m = static_cast<int>(v);
                     return m == 0 ? "OFF" : std::to_string(m);
                 },
-                [](double v) { Settings().SetMipmapLevels(static_cast<int>(v)); }),
-            nullptr);
-
-        m_list->AddSmall(
-            OnOff("Entity Shadows", s.GetEntityShadows(),
-                  [](bool on) { Settings().SetEntityShadows(on); }),
-            ValueSlider("Entity Distance", s.GetEntityDistanceScaling() * 100.0, 50, 500, 25,
+                [&mgr](double v) {
+                    Settings().SetMipmapLevels(static_cast<int>(v));
+                    mgr.MarkSettingApplied(ScreenManager::APPLY_MIPMAPS);
+                });
+            mipmaps->SetTooltip({"Smoother distant textures. Applied",
+                                 "when this screen closes; animated",
+                                 "textures pick it up after restart."});
+            auto* entityDist = ValueSlider("Entity Distance", s.GetEntityDistanceScaling() * 100.0, 50, 500, 25,
                 [](double v) { return std::to_string(static_cast<int>(v)) + "%"; },
-                [](double v) { Settings().SetEntityDistanceScaling(static_cast<float>(v / 100.0)); }));
+                [](double v) { Settings().SetEntityDistanceScaling(static_cast<float>(v / 100.0)); });
+            entityDist->SetTooltip({"How far away mobs, players, items",
+                                    "and orbs are still drawn. 100% is",
+                                    "Minecraft's distance."});
+            m_list->AddSmall(mipmaps, entityDist);
+        }
 
         m_list->AddSmall(
             Cycle("Chunk Builder", {"Threaded", "Semi Blocking", "Fully Blocking"},

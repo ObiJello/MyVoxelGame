@@ -90,7 +90,7 @@ namespace Game {
         // always searches.
         virtual bool FindsHitEntities() const { return true; }
 
-        void OnHitEntity(LivingEntity& target) override;
+        void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         virtual void OnHitBlockArrow(const glm::dvec3& hitPos,
                                      const glm::ivec3& blockPos);
 

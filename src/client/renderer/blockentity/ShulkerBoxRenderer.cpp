@@ -1,5 +1,6 @@
 // File: src/client/renderer/blockentity/ShulkerBoxRenderer.cpp
 #include "ShulkerBoxRenderer.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -24,8 +25,8 @@ namespace Render {
         };
         static_assert(sizeof(CubeVert) == 24, "match GetBlockVertexLayout");
 
-        // Same pair as ChestRenderer: the [0,64] -> [0,1] UV divide happens in
-        // the vertex shader so the CPU side stays in MC's pixel space.
+        // Same pair as ChestRenderer: the [0,64] -> [0,1] UV divide is baked
+        // into the mesh at build time so the shaders take normalized UVs.
         constexpr const char* kVS = R"GLSL(
 #version 330 core
 layout(location=0) in vec3 aPos;
@@ -36,7 +37,7 @@ out vec2 vUV;
 out vec4 vColor;
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV / 64.0;
+    vUV = aUV;
     vColor = aColor;
 }
 )GLSL";
@@ -162,7 +163,13 @@ void main() {
     bool ShulkerBoxRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        m_shader = g_renderBackend->CreateShader(kVS, kFS);
+        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
+            // VKBackend cannot compile GLSL source; it loads the shared
+            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
+            // rewrites the .vert/.frag names). GL keeps the inline source.
+            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
+                                                     "shaders/blockentity.frag")
+            : g_renderBackend->CreateShader(kVS, kFS);
         if (m_shader == INVALID_SHADER) {
             Log::Error("[ShulkerBoxRenderer] shader compile failed");
             return false;
@@ -185,6 +192,8 @@ void main() {
             std::vector<uint32_t> idx;
             verts.reserve(24); idx.reserve(36);
             AddCube(verts, idx, from, to, tx, ty, w, h, d);
+            // Normalize the 64-px sheet UVs; see ChestRenderer::Initialize.
+            for (auto& vert : verts) { vert.u /= 64.0f; vert.v /= 64.0f; }
             m_vb[p] = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
                 verts.size() * sizeof(CubeVert), verts.data());
             m_ib[p] = g_renderBackend->CreateBuffer(BufferUsage::Index,
@@ -309,6 +318,7 @@ void main() {
                                     const glm::mat4& proj,
                                     const glm::mat4& view,
                                     const glm::vec3& /*cameraPos*/) {
+        PROFILE_ZONE_N("BE.ShulkerBox");
         if (!m_geomBuilt || !g_renderBackend) return;
 
         TextureHandle tex = LoadColourTexture(TextureStemForBlock(be.GetBlockId()));
@@ -338,6 +348,7 @@ void main() {
         g_renderBackend->SetPipelineState(s);
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(tex, 0);
+        g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
 
         for (int part = 0; part < kPartCount; ++part) {
             const glm::mat4 mvp = proj * view * toWorld *
@@ -381,6 +392,7 @@ void main() {
         g_renderBackend->SetPipelineState(s);
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(tex, 0);
+        g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
 
         for (int part = 0; part < kPartCount; ++part) {
             const glm::mat4 m = mvp * toItem *

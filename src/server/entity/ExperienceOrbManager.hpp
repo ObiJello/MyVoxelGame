@@ -11,6 +11,8 @@
 // stack merging), and the sync bookkeeping is the only true overlap.
 #pragma once
 
+#include "common/entity/EntityIdAllocator.hpp"
+
 #include "common/entity/ExperienceOrb.hpp"
 #include "common/entity/Entity.hpp"     // kXpOrbEntityIdBase
 #include "common/physics/Physics.hpp"
@@ -19,6 +21,7 @@
 
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -60,6 +63,9 @@ namespace Server {
         // age intact. SpawnOrb splits a value into vanilla-sized orbs and
         // would turn one saved orb into several.
         int32_t Adopt(Game::ExperienceOrb orb);
+        // Moving between levels — same contract as ItemEntityManager's.
+        std::optional<Game::ExperienceOrb> Extract(int32_t id);
+        bool AdoptWithId(Game::ExperienceOrb orb);
 
         const std::unordered_map<int32_t, Game::ExperienceOrb>& All() const {
             return m_entities;
@@ -84,7 +90,6 @@ namespace Server {
         static constexpr int kSyncIntervalTicks = 20;
 
         std::unordered_map<int32_t, Game::ExperienceOrb> m_entities;
-        int32_t m_nextId = Game::kXpOrbEntityIdBase;
         Game::JavaRandom m_random{0};
         bool m_seeded = false;
 

@@ -355,39 +355,17 @@ namespace Game {
             return false;
         }
 
-        // Check that the chunk actually decoded to something.
-        //
-        // This used to be `GetSectionCount() == 0`, i.e. "no section objects
-        // exist". Sections are always allocated now, so that test would be
-        // permanently false and this gate would vanish silently, leaving the
-        // bedrock scan below as the only acceptance check on the load path.
-        // Ask about CONTENT instead, which is what it always meant.
-        if (chunk.IsEmpty()) {
-            if (chunk.pos.x == 0 || chunk.pos.z == 0) {
-                Log::Debug("Chunk (%d, %d) decoded to nothing but air", chunk.pos.x, chunk.pos.z);
-            }
-            return false;
-        }
-
-        // Check for bedrock layer at bottom (Minecraft-specific)
-        bool hasBedrockLayer = false;
-        for (int x = 0; x < 16; ++x) {
-            for (int z = 0; z < 16; ++z) {
-                BlockID block = chunk.GetBlock(x, Math::WorldCoordinates::MIN_WORLD_Y, z);
-                if (block == BlockID::Bedrock) {
-                    hasBedrockLayer = true;
-                    break;
-                }
-            }
-            if (hasBedrockLayer) break;
-        }
-        
-        if (chunk.pos.x == 0 || chunk.pos.z == 0) {
-            Log::Debug("Chunk (%d, %d) bedrock check: %s", 
-                      chunk.pos.x, chunk.pos.z, hasBedrockLayer ? "PASSED" : "FAILED");
-        }
-
-        return hasBedrockLayer;
+        // NO content heuristics — neither "must not be all air" nor "must
+        // have bedrock at MIN_WORLD_Y". Both were Overworld-shaped guesses at
+        // "did the decode work", and both reject every chunk of the End: the
+        // void between islands decodes to all air legitimately, and even the
+        // main island has no bedrock floor. A rejection here silently falls
+        // through to REGENERATION, so a saved End chunk — player edits
+        // included — was thrown away on every load. MC's own acceptance check
+        // is structural only (SerializableChunkData.parse rejects a chunk
+        // whose Status tag is missing, nothing else); our equivalent is
+        // ValidateChunkNBT, which already ran before the NBT was decoded.
+        return true;
     }
 
     // === ERROR HANDLING ===
@@ -1033,14 +1011,9 @@ namespace Game {
     }
 
     bool MinecraftChunkLoaderImpl::ValidateChunkData(const Chunk& chunk) const {
-        // Additional validation beyond the base class
-        if (chunk.IsEmpty()) {
-            return false;
-        }
-
-        // Check chunk position matches
-        // (would need access to expected position)
-
+        // No emptiness check — an all-air chunk (End void) is valid data.
+        // See ValidateChunk above.
+        (void)chunk;
         return true;
     }
 

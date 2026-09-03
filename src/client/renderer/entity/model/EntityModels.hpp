@@ -244,6 +244,9 @@ namespace Render {
         bool isResting      = false;
         bool isHoldingItem  = false;
 
+        // MC EndCrystalRenderState.showsBottom — the bedrock base slab.
+        bool crystalShowsBottom = true;
+
         // ── Ender dragon flight inputs (MC EnderDragonRenderState) ─────────
         //
         // The model's neck/tail kinematics read the flight history at fixed
@@ -656,6 +659,31 @@ namespace Render {
     // path exactly as MC's does. When hasDragonHistory is false (a state
     // built without a dragon behind it) the old constant-history hover pose
     // stands in, which is MC's own pose for a hovering dragon.
+    // MC EndCrystalModel — the two spinning glass shells and the core cube
+    // over the bedrock base. MC composes each shell's rotation as a
+    // quaternion (Y-spin × the fixed 60° tilt about the (1,0,1)/√2 axis);
+    // ModelPart carries euler angles only, so each compound rotation is a
+    // CHAIN of helper parts — Ry(45°)·Rx(60°)·Ry(-45°) is exactly that
+    // axis-angle, and nesting the chains reproduces MC's outer→inner→cube
+    // parenting (the nested pose scales multiply the same way). Texture
+    // entity/end_crystal/end_crystal.png, 64x32.
+    class EndCrystalModel : public EntityModel {
+    public:
+        EndCrystalModel();
+        void SetupAnim(const EntityRenderState& state) override;
+
+        // MC EndCrystalRenderer.getY — the vertical bob, shared with the
+        // beam anchors (a beam ends where the glass is, not where the entity
+        // stands).
+        static float GetY(float ageInTicks);
+
+    private:
+        ModelPart* m_base = nullptr;
+        ModelPart* m_outerSpin = nullptr;   // Ry(age·3° + 45°) + the bob
+        ModelPart* m_innerSpin = nullptr;   // Ry(age·3° − 45°)
+        ModelPart* m_cubeSpin = nullptr;    // Ry(age·3° − 45°)
+    };
+
     class DragonModel : public GeneratedModel {
     public:
         DragonModel();

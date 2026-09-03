@@ -185,7 +185,9 @@ namespace Render {
     };
 
     // Attribute data type
-    enum class AttribType : uint8_t { Float = 0, UByte = 1 };
+    // UShort is used (normalized) by the terrain layout's unorm16 tile rect;
+    // both backends map it (GL_UNSIGNED_SHORT / VK_FORMAT_R16G16[B16A16]_UNORM).
+    enum class AttribType : uint8_t { Float = 0, UByte = 1, UShort = 2 };
 
     // Describes how one vertex attribute is laid out
     struct VertexAttribute {
@@ -229,6 +231,13 @@ namespace Render {
         FrontFace frontFace   = FrontFace::CounterClockwise;
         PolygonMode polygonMode = PolygonMode::Fill;
         float lineWidth       = 1.0f;
+
+        // Depth clamp: fragments beyond the near/far planes are clamped to
+        // them instead of discarded. The immersive portal renderer draws the
+        // portal surface with it so the mask has no hole when the camera
+        // stands in the surface (GL_DEPTH_CLAMP / VkPipelineRasterization
+        // StateCreateInfo::depthClampEnable).
+        bool depthClampEnabled = false;
 
         // Depth bias (polygon offset) to prevent z-fighting
         bool depthBiasEnabled = false;
@@ -293,6 +302,27 @@ namespace Render {
             {0, 3, 0, false, AttribType::Float},                                      // Position: 3 floats at offset 0
             {1, 2, static_cast<uint32_t>(sizeof(float) * 3), false, AttribType::Float},  // UV: 2 floats at offset 12
             {2, 4, static_cast<uint32_t>(sizeof(float) * 5), true, AttribType::UByte},   // Color: 4 ubytes normalized at offset 20
+        };
+        return layout;
+    }
+
+    // ========================================================================
+    // TERRAIN VERTEX LAYOUT (32 bytes per vertex)
+    // ========================================================================
+
+    // Chunk-TERRAIN layout: the block layout plus the greedy-meshing sprite
+    // tile rect (see Render::TerrainVertex in core/Vertex.hpp). Kept separate
+    // from GetBlockVertexLayout on purpose — a dozen non-terrain renderers
+    // (entities, block entities, portals, GUI) build 24-byte buffers against
+    // the block layout and must stay untouched.
+    inline VertexLayout GetTerrainVertexLayout() {
+        VertexLayout layout;
+        layout.stride = 32;
+        layout.attributes = {
+            {0, 3, 0, false, AttribType::Float},   // Position: 3 floats at offset 0
+            {1, 2, 12, false, AttribType::Float},  // UV (atlas or tile space): 2 floats at offset 12
+            {2, 4, 20, true, AttribType::UByte},   // Color: 4 ubytes normalized at offset 20
+            {3, 4, 24, true, AttribType::UShort},  // Tile rect: origin.xy + size.zw, 4 unorm16 at offset 24
         };
         return layout;
     }

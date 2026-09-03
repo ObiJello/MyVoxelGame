@@ -79,6 +79,19 @@ namespace Game {
     // Does this block carry a segment count at all?
     bool IsSegmentedBlock(BlockID id);
 
+    // ── Doors (MC DoorBlock) ────────────────────────────────────────────
+    // Every "*_door" block: two cells tall, placed as a lower and an upper
+    // half, opened by hand unless iron.
+    bool IsDoorBlock(BlockID id);
+    bool IsWoodenDoorBlock(BlockID id);
+    // MC DoorBlock.getStateForPlacement's hinge choice for the lower half at
+    // `pos`, from the walls beside it and, when they say nothing, which side
+    // of the cell the click landed on. `state` carries the facing already.
+    BlockState DoorPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
+                                  BlockState state, const glm::vec3& clickWorld);
+    // The upper half that goes above a lower half of `lower`.
+    BlockState DoorUpperState(BlockState lower);
+
     // 1..4, or 0 when `id` isn't segmented.
     int SegmentAmountOf(BlockState state);
 

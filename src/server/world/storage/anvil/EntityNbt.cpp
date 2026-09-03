@@ -2,6 +2,7 @@
 #include "server/world/storage/anvil/EntityNbt.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
+#include "common/entity/EndCrystal.hpp"
 #include "common/world/block/FallingBlock.hpp"
 
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
@@ -21,6 +22,7 @@
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Fish.hpp"
+#include "common/entity/mobs/GenericMobs.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/entity/mobs/Monsters.hpp"
@@ -570,16 +572,18 @@ namespace Game::Anvil {
         void WriteProjectileLayer(Nbt::Writer& w, const Projectile& p) {
             WriteRef(w, "Owner", p.OwnerRef());
             // MC writes HasBeenShot unconditionally and LeftOwner only when
-            // set. Neither is modelled here — a projectile in this engine is
-            // always already shot, and the left-owner grace period does not
-            // exist — so HasBeenShot is emitted as the constant vanilla would
-            // have written for an in-flight projectile and LeftOwner omitted.
+            // set (Projectile.addAdditionalSaveData). HasBeenShot is not
+            // modelled — a projectile in this engine is always already shot —
+            // so it is emitted as the constant vanilla would have written for
+            // an in-flight projectile.
             w.Bool("HasBeenShot", true);
+            if (p.HasLeftOwner()) w.Bool("LeftOwner", true);
         }
 
         void ReadProjectileLayer(const CT& tag, Projectile& p) {
             Uuid uuid{};
             if (ReadUuid(tag, "Owner", uuid)) p.SetOwnerUuid(uuid);
+            p.SetLeftOwner(tag.GetValue<int8_t>("LeftOwner", 0) != 0);
         }
 
         // AbstractArrow. `pickup`, `crit`, `PierceLevel`, `SoundEvent`,
@@ -855,6 +859,12 @@ namespace Game::Anvil {
                     }
                 }
                 break;
+            case EntityTypeId::Endermite:
+                // MC Endermite.addAdditionalSaveData — the two-minute clock.
+                if (const auto* em = dynamic_cast<const Endermite*>(&mob)) {
+                    w.Int("Lifetime", em->GetLife());
+                }
+                break;
             case EntityTypeId::Vex:
                 if (const auto* v = dynamic_cast<const Vex*>(&mob)) {
                     if (v->HasBoundOrigin()) {
@@ -898,6 +908,23 @@ namespace Game::Anvil {
             case EntityTypeId::EnderDragon:
                 if (const auto* d = dynamic_cast<const EnderDragon*>(&mob)) {
                     w.Int("DragonPhase", static_cast<int32_t>(d->GetPhase()));
+                    // MC DRAGON_DEATH_TIME_KEY — a save mid-cinematic resumes
+                    // the float-up rather than restarting a live dragon.
+                    w.Int("DragonDeathTime", d->deathTime);
+                }
+                break;
+            case EntityTypeId::EndCrystal:
+                if (const auto* c = dynamic_cast<const EndCrystal*>(&mob)) {
+                    // MC stores beam_target with BlockPos.CODEC — an int
+                    // array — and ShowBottom as a byte. Invulnerable (the
+                    // four ritual crystals) rides WriteEntityBase.
+                    if (c->HasBeamTarget()) {
+                        const int beam[3] = { c->BeamTarget().x,
+                                              c->BeamTarget().y,
+                                              c->BeamTarget().z };
+                        w.IntArray("beam_target", beam, 3);
+                    }
+                    w.Bool("ShowBottom", c->ShowsBottom());
                 }
                 break;
             case EntityTypeId::Piglin:
@@ -1245,6 +1272,11 @@ namespace Game::Anvil {
                     sh->SetRawPeekAmount(tag.GetValue<int8_t>("Peek", 0));
                 }
                 break;
+            case EntityTypeId::Endermite:
+                if (auto* em = dynamic_cast<Endermite*>(&mob)) {
+                    em->SetLife(tag.GetValue<int32_t>("Lifetime", 0));
+                }
+                break;
             case EntityTypeId::Vex:
                 if (auto* v = dynamic_cast<Vex*>(&mob)) {
                     if (auto arr = As<::World::NBTTagIntArray>(tag.GetTag("bound_pos"));
@@ -1288,6 +1320,17 @@ namespace Game::Anvil {
                         d->SetPhase(static_cast<DragonPhase>(
                             tag.GetValue<int32_t>("DragonPhase", 0)));
                     }
+                    d->deathTime = tag.GetValue<int32_t>("DragonDeathTime", 0);
+                }
+                break;
+            case EntityTypeId::EndCrystal:
+                if (auto* c = dynamic_cast<EndCrystal*>(&mob)) {
+                    if (auto arr = As<::World::NBTTagIntArray>(tag.GetTag("beam_target"));
+                        arr && arr->value.size() == 3) {
+                        c->SetBeamTarget(glm::ivec3(arr->value[0], arr->value[1],
+                                                    arr->value[2]));
+                    }
+                    c->SetShowBottom(tag.GetValue<int8_t>("ShowBottom", 1) != 0);
                 }
                 break;
             case EntityTypeId::Piglin:

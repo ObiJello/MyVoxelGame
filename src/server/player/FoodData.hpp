@@ -24,7 +24,9 @@ namespace Server {
         void eatFinal(int nutrition, float saturation);
 
         // Per-tick hunger logic — FoodData.java:32-73.
-        void tick(ServerPlayer& player);
+        // `peaceful`: MC Difficulty.PEACEFUL — hunger never drains below
+        // its level and refills, and health regenerates on its own.
+        void tick(ServerPlayer& player, bool peaceful = false);
 
         // FoodData.java:101-103 (clamped at 40).
         void addExhaustion(float amount);
@@ -43,6 +45,7 @@ namespace Server {
         float m_saturationLevel = 5.0f;
         float m_exhaustionLevel = 0.0f;
         int   m_tickTimer       = 0;
+        int m_peacefulTicks = 0;   // peaceful regen/refill clock
 
         // FoodData.add — :19-22.
         void add(int food, float saturation);

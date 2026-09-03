@@ -28,6 +28,10 @@ namespace Game {
     void SetPortalPassthroughFn(PortalPassthroughFn fn) {
         g_portalPassthrough = fn;
     }
+    namespace { PortalExtraSolidFn g_portalExtraSolid = nullptr; }
+    void SetPortalExtraSolidFn(PortalExtraSolidFn fn) {
+        g_portalExtraSolid = fn;
+    }
 
     bool PhysicsContext::IsBlockSolid(int x, int y, int z) const {
         if (!blockAccess) {
@@ -245,11 +249,18 @@ namespace Game {
     }
 
     void ApplyGravity(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context) {
-        // Water gravity is handled in HandleMovement's water branch
-        physics.velocity.y += PlayerPhysics::GRAVITY * deltaTime;
+        // Water gravity is handled in HandleMovement's water branch.
+        // Gravity scales with the body, like speed and the jump: a world
+        // seen through a scaled portal is "just bigger", so every length in
+        // the motion scales and every time stays the same — a jump lasts as
+        // long as it always did and rises the same number of body heights.
+        // With gravity left at vanilla a small player was slammed back down
+        // in a fraction of the time.
+        physics.velocity.y += PlayerPhysics::GRAVITY * physics.scale * deltaTime;
 
-        if (physics.velocity.y < PlayerPhysics::TERMINAL_VELOCITY) {
-            physics.velocity.y = PlayerPhysics::TERMINAL_VELOCITY;
+        const float terminal = PlayerPhysics::TERMINAL_VELOCITY * physics.scale;
+        if (physics.velocity.y < terminal) {
+            physics.velocity.y = terminal;
         }
     }
 
@@ -266,15 +277,18 @@ namespace Game {
         const bool stuckInBlock =
             jumpPressed && !physics.isOnGround &&
             CheckCollision(physics.position, physics, context);
+        // A scaled player jumps their own height in the usual time: with
+        // gravity scaled too (ApplyGravity), the velocity scales linearly.
+        const float jumpVelocity = PlayerPhysics::JUMP_VELOCITY * physics.scale;
         if (stuckInBlock) {
-            physics.velocity.y = PlayerPhysics::JUMP_VELOCITY;
+            physics.velocity.y = jumpVelocity;
             physics.lastJumpTime = physics.totalTime;
             return;
         }
 
         // Normal ground jump
         if (jumpPressed && physics.isOnGround) {
-            physics.velocity.y = PlayerPhysics::JUMP_VELOCITY;
+            physics.velocity.y = jumpVelocity;
             physics.isOnGround = false;
             physics.lastJumpTime = physics.totalTime;
             physics.didJumpThisStep = true;
@@ -313,8 +327,8 @@ namespace Game {
         // split — notably the speed-driven FOV in PlatformMain, which used to
         // zoom IN while sneaking because this function folded the two together.
         // The sneak scale is applied to the movement vector in HandleMovement.
-        physics.baseSpeed = physics.isSprinting ? PlayerPhysics::SPRINT_SPEED
-                                                : PlayerPhysics::WALK_SPEED;
+        physics.baseSpeed = (physics.isSprinting ? PlayerPhysics::SPRINT_SPEED
+                                                 : PlayerPhysics::WALK_SPEED) * physics.scale;
 
         // Reset current speed when changing movement modes
         if (!physics.isSprinting) {
@@ -491,7 +505,7 @@ namespace Game {
                 // (ApplyGravity/HandleJump are skipped upstream).
                 const float sprintMul = physics.isSprinting
                                       ? PlayerPhysics::FLY_SPRINT_MULTIPLIER : 1.0f;
-                speed = PlayerPhysics::FLY_HORIZONTAL_SPEED * sprintMul;
+                speed = PlayerPhysics::FLY_HORIZONTAL_SPEED * sprintMul * physics.scale;
                 // Direct vertical control: Space up / Shift down. Use the
                 // input's sign — CalculateMovementInput normalizes the whole
                 // vector, so the raw y magnitude shrinks when combined with
@@ -507,7 +521,7 @@ namespace Game {
                 // flight uniformly in every direction.
                 const float vert = movementInput.y > 0.01f ? 1.0f
                                  : movementInput.y < -0.01f ? -1.0f : 0.0f;
-                physics.velocity.y = vert * PlayerPhysics::FLY_VERTICAL_SPEED * sprintMul;
+                physics.velocity.y = vert * PlayerPhysics::FLY_VERTICAL_SPEED * sprintMul * physics.scale;
             }
 
             glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
@@ -783,7 +797,17 @@ namespace Game {
                     // tick. BlockState::Block() is a table index off the state
                     // we already have.
                     const BlockState bstate = stateAt(x, y, z);
-                    if (!BlockRegistry::HasCollision(bstate.Block())) continue;
+                    if (!BlockRegistry::HasCollision(bstate.Block())) {
+                        // Empty here — but maybe solid on the far side of a
+                        // portal this box is entering (see PortalExtraSolidFn).
+                        if (g_portalExtraSolid && g_portalExtraSolid(x, y, z, box)) {
+                            AABB cube;
+                            cube.min = glm::vec3(x, y, z);
+                            cube.max = cube.min + glm::vec3(1.0f);
+                            if (box.Intersects(cube)) return true;
+                        }
+                        continue;
+                    }
 
                     // Build the block's actual collision AABB from its model
                     // shape. Full cubes (shape=0..1) produce the same 1×1×1
@@ -839,16 +863,16 @@ namespace Game {
         const float height = physics.GetCurrentHeight();
         return CollidesAt(
             AABB(glm::vec3(position.x, position.y + height * 0.5f, position.z),
-                 glm::vec3(PlayerPhysics::WIDTH, height, PlayerPhysics::WIDTH)),
+                 glm::vec3(physics.GetWidth(), height, physics.GetWidth())),
             context);
     }
 
     bool HasSupportBelow(const glm::vec3& position, const PlayerPhysics& physics,
                         const PhysicsContext& context) {
 
-        float halfWidth = PlayerPhysics::WIDTH / 2.0f;
-        float offsets[] = { -halfWidth + PlayerPhysics::OVERHANG_MARGIN,
-                           halfWidth - PlayerPhysics::OVERHANG_MARGIN };
+        float halfWidth = physics.GetWidth() / 2.0f;
+        float offsets[] = { -halfWidth + PlayerPhysics::OVERHANG_MARGIN * physics.scale,
+                           halfWidth - PlayerPhysics::OVERHANG_MARGIN * physics.scale };
 
         for (float xOffset : offsets) {
             for (float zOffset : offsets) {
@@ -876,7 +900,22 @@ namespace Game {
                     // leaf-litter pile the same way you walk through it, and
                     // air and the fluids hold nothing up.
                     bid = context.GetBlock(blockX, by, blockZ);
-                    if (!BlockRegistry::HasCollision(bid)) continue;
+                    if (!BlockRegistry::HasCollision(bid)) {
+                        // The far side of a portal underfoot can be the floor
+                        // (see PortalExtraSolidFn) — a full cube, so the probe
+                        // point is inside it whenever it is in the cell.
+                        if (g_portalExtraSolid) {
+                            AABB pointAABB;
+                            pointAABB.min = cornerPosition;
+                            pointAABB.max = cornerPosition;
+                            if (g_portalExtraSolid(blockX, by, blockZ, pointAABB)) {
+                                inside = true;
+                                blockY = by;
+                                break;
+                            }
+                        }
+                        continue;
+                    }
 
                     // The check point is 0.1 below the foot — confirm it
                     // actually lies inside the block's collision shape (its top
@@ -922,7 +961,7 @@ namespace Game {
         // Scan the player's AABB (deflated by 0.001 like Minecraft) for water blocks.
         // Track the highest water surface touching the player to compute waterDepth.
         float height = physics.GetCurrentHeight();
-        float halfWidth = PlayerPhysics::WIDTH * 0.5f - 0.001f;
+        float halfWidth = physics.GetWidth() * 0.5f - 0.001f;
         float feetY = physics.position.y + 0.001f;
         float topY = physics.position.y + height - 0.001f;
 

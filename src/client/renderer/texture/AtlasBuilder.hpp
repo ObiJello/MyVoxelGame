@@ -120,6 +120,12 @@ namespace Render {
         bool IsMipmapEnabled() const { return mipmapEnabled; }
         void SetMipmapLevel(int level); // Control mipmap level (0-4)
         int GetMipmapLevel() const { return m_mipmapLevel; }
+        // The Video Settings "Mipmap Levels" option (MC mipmapLevels 0..4):
+        // 0 turns mipmapping OFF (nearest sampling, no chain), 1..4 is the
+        // chain depth. One rebuild whichever fields change, unlike calling
+        // SetMipmapEnabled + SetMipmapLevel in sequence. Safe before the
+        // atlas exists — the values are picked up by BuildFromJSON.
+        void SetMipmapLevels(int levels);
         
         // Border extrusion control (for toggling between rendering modes)
         void SetBorderExtrusionEnabled(bool enabled) { m_borderExtrusionEnabled = enabled; }

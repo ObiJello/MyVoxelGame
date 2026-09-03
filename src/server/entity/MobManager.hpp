@@ -32,6 +32,7 @@
 #pragma once
 
 #include "common/entity/Entity.hpp"
+#include "common/entity/EntityIdAllocator.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/EntityType.hpp"
 #include "common/world/math/WorldMath.hpp"
@@ -58,6 +59,16 @@ namespace Server {
 
         // Takes ownership and assigns an id. Returns the id, or 0 on failure.
         int32_t Add(std::unique_ptr<Game::Mob> mob);
+
+        // ── Moving a mob between levels (immersive portal travel) ────────
+        // Take a live mob out of this manager WITHOUT destroying it. Every
+        // other mob's and player view's reference to it is cleared first,
+        // exactly as for a death — it is leaving this level's simulation.
+        // Null if the id is unknown.
+        std::unique_ptr<Game::Mob> Extract(int32_t id);
+        // The other half: insert a mob that KEEPS its id and uuid (ids are
+        // process-wide, see EntityIdAllocator). False if the id is taken.
+        bool AddExisting(std::unique_ptr<Game::Mob> mob);
 
         // One server tick. `tickingChunks` is the block-ticking set — mobs
         // outside it are despawn-checked but not simulated.
@@ -134,7 +145,8 @@ namespace Server {
         // the compact falling-block store, whose entries share this range
         // (the client tells mobs from items and players by id alone) and
         // must never collide with a real mob's id.
-        int32_t AllocateId() { return m_nextId++; }
+        // Process-wide, so ids never collide across dimensions (EntityIdAllocator.hpp).
+        int32_t AllocateId() { return Game::AllocateMobEntityId(); }
 
         // Is an entity with this identity already live in this level?
         bool HasUuid(const Game::Uuid& uuid) const { return m_byUuid.count(uuid) != 0; }
@@ -215,7 +227,6 @@ namespace Server {
 
         // Ids are handed out from the mob range so the client can tell a mob
         // removal from a player or item removal by id alone.
-        int32_t m_nextId = Game::kMobEntityIdBase;
 
         // chunk key -> mob ids. Rebuilt each tick; see the header note.
         std::unordered_map<uint64_t, std::vector<Game::Mob*>> m_byChunk;

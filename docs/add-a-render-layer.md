@@ -550,3 +550,35 @@ Memory Impact Analysis
 
 Adding a new render layer requires careful coordination between mesh generation, GPU upload, and rendering systems, with particular attention to performance budgets and memory usage. The emissive
 layer example demonstrates the complete process while maintaining the established architecture patterns.
+
+---
+
+## Addendum (2026-08-30): slab indices are absolute, draws are merged
+
+Anything above that shows a per-section `baseVertex` or `IndexType::Uint16` is
+out of date. What a new layer has to respect now:
+
+- **Slab IBOs hold uint32 ABSOLUTE indices.** The mesher still emits uint16
+  section-relative indices (a layer is capped at 65,536 vertices); the
+  mega-buffer adds the section's `vertexOffset` at upload
+  (`ChunkMegaBuffer::TryUploadToSlab` / `UpdateSectionIndices`). Every draw is
+  `IndexType::Uint32` with `baseVertex 0`. `CachedDrawCmd` carries
+  `indexOffset` in *indices*; multiply by `ChunkMegaBuffer::INDEX_SIZE` only
+  when emitting the draw.
+- **Freed index ranges are zeroed on retire** (`RetireFreedRegions`), so a run
+  of free space is a run of degenerate triangles and it is legal to draw across
+  it. A range freed within the last `kFreeDelayFrames` still holds its old
+  mesh and is NOT drawable — `IsIndexGapDrawable` answers that per gap.
+- **Opaque/cutout runs are merged** (`ChunkRenderer::SubmitMergedRuns`):
+  entries sorted by (slab, indexOffset), consecutive entries fused when the
+  gap is at most `kDrawMergeGapIndices` (8192) indices and drawable. A new
+  layer whose order does not matter should draw through this path. Draw order
+  within the pass is *not* front-to-back any more.
+- **Order-dependent layers use `SubmitOrderedRuns`**: exact list order,
+  slab rebound on change, only zero-gap ascending neighbours fused. Never
+  bucket an order-dependent layer by slab — that was the translucent bug.
+- Tracy: `Draws/Chunk` (sections) vs `Draws/Merged` (sub-draws issued);
+  `Sections/Lookups` (resolve-cache misses). `OBEY_NO_DRAW_MERGE=1` disables
+  merging for A/B.
+- `RenderStats` now has `opaqueDraws/cutoutDraws/translucentDraws` beside the
+  `*Sections` counters — add both for a new layer.

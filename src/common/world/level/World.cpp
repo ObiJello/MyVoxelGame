@@ -543,6 +543,17 @@ namespace Game {
             }
         }
 
+#if ENABLE_IMMERSIVE_PORTALS
+        // An obsidian block removed may have been a nether portal's frame.
+        // Cheap gate (obsidian only) here; the periodic sweep in
+        // NetherPortalGeneration catches everything else.
+        if (oldBlockId != blockId &&
+            (oldBlockId == BlockID::Obsidian || oldBlockId == BlockID::CryingObsidian) &&
+            Server::g_integratedServer) {
+            Server::g_integratedServer->OnObsidianRemoved(m_dimension, glm::ivec3(worldX, worldY, worldZ));
+        }
+#endif
+
         return true;
     }
     

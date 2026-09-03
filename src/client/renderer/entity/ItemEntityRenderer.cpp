@@ -1,5 +1,7 @@
 // File: src/client/renderer/entity/ItemEntityRenderer.cpp
+#include "../mesh/ChunkRenderer.hpp"
 #include "ItemEntityRenderer.hpp"
+#include "EntityCulling.hpp"
 #include "../core/Frustum.hpp"
 
 #include "../backend/RenderBackend.hpp"
@@ -11,6 +13,7 @@
 #include "common/entity/Item.hpp"
 #include "common/entity/ItemEntity.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 
 #ifdef HAS_VULKAN
 #include "../backend/vulkan/VKBackend.hpp"
@@ -209,22 +212,26 @@ namespace Render {
         }
         m_initialized = false;
     }
-    void ItemEntityRenderer::SetRenderDistanceChunks(int chunks) {
+    void ItemEntityRenderer::SetRenderDistanceChunks(int chunks, float entityDistanceScaling) {
         // A quarter of the chunks, times 16 blocks per chunk — i.e. chunks * 4.
         // Float rather than integer division so a view distance that is not a
         // multiple of four lands between the steps instead of snapping down a
-        // whole chunk.
+        // whole chunk. Then the Entity Distance option, as a multiplier, the
+        // same way MC folds it into viewScale.
         m_maxRenderDistance =
-            std::max(kMinRenderDistance, static_cast<float>(chunks) * 4.0f);
+            std::max(kMinRenderDistance, static_cast<float>(chunks) * 4.0f) * entityDistanceScaling;
     }
 
 
     void ItemEntityRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
                                     const glm::vec3& cameraPos, float partialTick) {
+        PROFILE_ZONE_N("ItemEntityRender");
+        m_tally = Tally{};
         if (!m_initialized || !g_renderBackend) return;
         if (!Client::g_itemEntityManager) return;
 
         const auto& entities = Client::g_itemEntityManager->GetEntities();
+        m_tally.entities = static_cast<int>(entities.size());
         const auto& pickups  = Client::g_itemEntityManager->GetPickups();
         if (entities.empty() && pickups.empty()) return;
 
@@ -235,10 +242,9 @@ namespace Render {
         // worth of drops behind the camera used to cost a full draw each.
         const Frustum frustum = Frustum::FromMatrix(viewProj);
 
-        std::vector<ItemCubeVert> verts;
-        std::vector<uint32_t>     idx;
-        verts.reserve(kItemCubeMaxVerts);
-        idx.reserve(kItemCubeMaxIdx);
+        // Bound lazily by the first item that draws; nothing is bound for a
+        // frame with every item culled.
+        PassState pass;
 
         // ── Items lying in the world ───────────────────────────────────────
         // Per-frame draw budget: every item is its own draw (worse on
@@ -262,7 +268,7 @@ namespace Render {
                 glm::mix(ce.renderPrevPosition, e.pos, static_cast<double>(partialTick)));
 
             const glm::vec3 d = pos - cameraPos;
-            if (glm::dot(d, d) > maxDistSq) continue;
+            if (glm::dot(d, d) > maxDistSq) { ++m_tally.cullDistance; continue; }
 
             // MC inflates the culling box by 0.5. A dropped item is 0.25 on a
             // side and bobs vertically, so the inflate is doing real work here
@@ -272,7 +278,16 @@ namespace Render {
                 const glm::vec3 half(Game::ItemEntity::kWidth * 0.5f + 0.5f,
                                      Game::ItemEntity::kHeight     + 0.5f,
                                      Game::ItemEntity::kWidth * 0.5f + 0.5f);
+                if (!EntityCulling::PassesCrossingFilter(pos - half, pos + half)) continue;
                 if (frustum.TestAABB(pos - half, pos + half) == FrustumResult::Outside) {
+                    ++m_tally.cullFrustum;
+                    continue;
+                }
+                // MC isSectionCompiledAndVisible, tightened by the occlusion
+                // BFS — an item on the far side of a wall is a draw for
+                // nothing. See EntityCulling.hpp.
+                if (!EntityCulling::BoxTouchesVisibleSection(pos - half, pos + half)) {
+                    ++m_tally.cullSection;
                     continue;
                 }
             }
@@ -280,8 +295,9 @@ namespace Render {
             // MC's age is in ticks and includes the partial tick, so the bob
             // and spin advance smoothly within a tick rather than in steps.
             DrawItem(e.stack, pos, ce.ageTicks + partialTick, e.bobOffs,
-                     viewProj, cameraPos, verts, idx);
+                     viewProj, cameraPos, pass, e.scale);
             ++itemDraws;
+            ++m_tally.drawn;
         }
 
         // ── Items flying into whoever collected them ───────────────────────
@@ -315,8 +331,10 @@ namespace Render {
             // Frozen age: a collected item keeps the orientation it had when it
             // was picked up instead of continuing to spin as it flies.
             DrawItem(p.stack, pos, p.ageTicks, p.bobOffs,
-                     viewProj, cameraPos, verts, idx);
+                     viewProj, cameraPos, pass);
         }
+
+        if (pass.begun) g_renderBackend->UnbindMesh();
     }
 
     void ItemEntityRenderer::DrawItem(const Game::ItemStack& stack,
@@ -324,8 +342,7 @@ namespace Render {
                                       float bobOffs,
                                       const glm::mat4& viewProj,
                                       const glm::vec3& cameraPos,
-                                      std::vector<ItemCubeVert>& verts,
-                                      std::vector<uint32_t>& idx) {
+                                      PassState& pass, float scale) {
             const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
 
             // Bob: sin(age/10 + phase) * 0.1 + 0.1, so it oscillates in
@@ -395,28 +412,8 @@ namespace Render {
                 modelDepth  = 1.0f / 16.0f;
             }
 
-            // ── Pipeline state ─────────────────────────────────────────────
-            PipelineState state;
-            state.depthTestEnabled  = true;
-            state.depthWriteEnabled = true;
-            state.blendEnabled      = true;
-            state.srcBlendFactor    = BlendFactor::SrcAlpha;
-            state.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
-            // Block meshes are closed, so back-face culling is free. The
-            // sprite mesh's "outward" side depends on the spin angle, so
-            // culling it would make items vanish for half of every rotation.
-            state.cullMode  = isBlock ? CullMode::Back : CullMode::None;
-            state.frontFace = FrontFace::CounterClockwise;
-            state.primitiveType = PrimitiveType::Triangles;
-            g_renderBackend->SetPipelineState(state);
-
-            g_renderBackend->BindShader(m_shader);
-            g_renderBackend->BindTexture(tex, 0);
-            g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest",
-                isBlock ? 0.01f : 0.5f);
-            g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane",
-                glm::vec4(0.0f));
-
+            // ── Pass-wide state, bound by the first item drawn ─────────────
+            //
             // Unlike the viewmodel, a dropped item IS in the world, so it gets
             // the real fog and sky-brightness environment — an item lying in
             // the distance should fade into the fog like the terrain it sits
@@ -424,13 +421,49 @@ namespace Render {
             // Packing matches ChunkRenderer's — the block shader reads the
             // same four fog fields, so terrain and the items lying on it fade
             // together instead of at different rates.
-            const auto& env = EnvironmentState::Get().Frame();
-            g_renderBackend->SetUniformFloat(m_shader, "uSkyBrightness", env.skyBrightness);
-            g_renderBackend->SetUniformVec4(m_shader, "uFogColor",
-                glm::vec4(env.fogColor, 1.0f));
-            g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
-                glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
-            g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", cameraPos);
+            //
+            // None of this changes between items, and it used to be re-sent
+            // for every one — six uniforms plus a shader and pipeline bind
+            // per item, times a crater's worth of drops.
+            if (!pass.begun) {
+                pass.begun = true;
+                g_renderBackend->BindShader(m_shader);
+                g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ::Render::ChunkRenderer::PortalEntityClipPlane());
+                const auto& env = EnvironmentState::Get().Frame();
+                g_renderBackend->SetUniformFloat(m_shader, "uSkyBrightness", env.skyBrightness);
+                g_renderBackend->SetUniformVec4(m_shader, "uFogColor",
+                    glm::vec4(env.fogColor, 1.0f));
+                g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
+                    glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
+                g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", cameraPos);
+                // Force the per-kind state below to bind on this first item.
+                pass.lastBlock = !isBlock;
+                pass.lastTex   = INVALID_TEXTURE;
+            }
+
+            // ── Per-kind state: block vs sprite item ───────────────────────
+            if (pass.lastBlock != isBlock) {
+                pass.lastBlock = isBlock;
+                PipelineState state;
+                state.depthTestEnabled  = true;
+                state.depthWriteEnabled = true;
+                state.blendEnabled      = true;
+                state.srcBlendFactor    = BlendFactor::SrcAlpha;
+                state.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
+                // Block meshes are closed, so back-face culling is free. The
+                // sprite mesh's "outward" side depends on the spin angle, so
+                // culling it would make items vanish for half of every rotation.
+                state.cullMode  = isBlock ? CullMode::Back : CullMode::None;
+                state.frontFace = FrontFace::CounterClockwise;
+                state.primitiveType = PrimitiveType::Triangles;
+                g_renderBackend->SetPipelineState(state);
+                g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest",
+                    isBlock ? 0.01f : 0.5f);
+            }
+            if (pass.lastTex != tex) {
+                pass.lastTex = tex;
+                g_renderBackend->BindTexture(tex, 0);
+            }
 
             // MC ItemEntityRenderer: lift so the model's lowest point sits
             // ITEM_MIN_HOVER_HEIGHT (1/16) above the entity origin, measured
@@ -478,8 +511,8 @@ namespace Render {
                 //   translate(-0.5, -0.5, -0.5)     — centring, IS scaled
                 // Getting this backwards shrinks the ground lift by the scale
                 // factor and leaves the model spinning about a corner.
-                model = glm::translate(model, glm::vec3(0.0f, groundLift, 0.0f));
-                model = glm::scale(model, glm::vec3(groundScale));
+                model = glm::translate(model, glm::vec3(0.0f, groundLift * scale, 0.0f));
+                model = glm::scale(model, glm::vec3(groundScale * scale));
                 model = glm::translate(model, glm::vec3(-0.5f, -0.5f, -0.5f));
                 // Sprite meshes are authored in 0..16; bring them into the unit
                 // cube the centring above assumes.
@@ -488,10 +521,22 @@ namespace Render {
                 }
 
                 g_renderBackend->SetUniformMat4(m_shader, "uMVP", viewProj * model);
+                g_renderBackend->SetUniformMat4(m_shader, "uModel", model);   // fog from the WORLD position
+                // block.vert clips with dot(plane, aPos) — correct for terrain,
+                // whose aPos is world space, and wrong here, where aPos is the
+                // item mesh's own space: the plane's offset term alone then
+                // decided whether an item seen through a portal existed at
+                // all. Hand the shader the plane expressed in this draw's
+                // model space instead: p_local = p_world * M, i.e. Mᵀ p.
+                {
+                    const glm::vec4 plane = ::Render::ChunkRenderer::PortalEntityClipPlane();
+                    if (plane.x != 0.0f || plane.y != 0.0f || plane.z != 0.0f) {
+                        g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane",
+                                                        glm::transpose(model) * plane);
+                    }
+                }
                 g_renderBackend->DrawIndexed(mesh, indexCount);
             }
-
-            g_renderBackend->UnbindMesh();
     }
 
 } // namespace Render

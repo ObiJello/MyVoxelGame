@@ -3,6 +3,7 @@
 #include "EntitySelector.hpp"
 #include "CommandCoords.hpp"
 #include "../IntegratedServer.hpp"
+#include "../level/ServerLevel.hpp"
 #include "../entity/ItemEntityManager.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../player/ServerPlayer.hpp"
@@ -68,7 +69,8 @@ namespace Server {
         //
         // Returns false only for a position outside the spawnable bounds, which
         // MC turns into commands.teleport.invalidPosition.
-        bool PerformTeleport(const SelectedEntity& victim, const glm::dvec3& pos,
+        bool PerformTeleport(const CommandSource& source,
+                             const SelectedEntity& victim, const glm::dvec3& pos,
                              const Rotation& rot) {
             if (!InSpawnableBounds(pos)) return false;
 
@@ -114,7 +116,9 @@ namespace Server {
 
                 case SelectedEntity::Kind::Item: {
                     if (!g_integratedServer) return true;
-                    ItemEntityManager* items = g_integratedServer->GetItemEntities();
+                    // The sender's level — matches CollectItems' scoping.
+                    ServerLevel* level = g_integratedServer->GetLevel(source.dimension);
+                    ItemEntityManager* items = level ? level->Items() : nullptr;
                     if (!items) return true;
                     Game::ItemEntity* item = items->Find(victim.id);
                     if (!item) return true;
@@ -154,6 +158,12 @@ namespace Server {
         source.sender   = &sender;
         source.sessions = &sessionManager;
         source.position = sender.getPosition();
+        // The sender's DIMENSION — selectors are level-scoped (see
+        // CommandSource); without this `/kill @e` from the End acted on the
+        // Overworld's mobs.
+        if (auto session = sessionManager.GetSession(sender.getPlayerId())) {
+            source.dimension = Game::DimensionFromRaw(session->GetDimensionId());
+        }
 
         // The source's own rotation, in MC's convention, for `~` in a rotation
         // argument and as the fallback when no rotation is given.
@@ -210,7 +220,7 @@ namespace Server {
 
             int moved = 0;
             for (const SelectedEntity& victim : targets) {
-                if (PerformTeleport(victim, dest.position, rot)) ++moved;
+                if (PerformTeleport(source, victim, dest.position, rot)) ++moved;
             }
             if (moved == 0) {
                 connection.SendChatMessage("Invalid position for teleport", 1);
@@ -327,7 +337,7 @@ namespace Server {
                 moved_.position = pos;
                 rot = LookAtRotation(AnchorPos(moved_, facingEyes), facingTarget);
             }
-            if (PerformTeleport(victim, pos, rot)) ++moved;
+            if (PerformTeleport(source, victim, pos, rot)) ++moved;
             else anyOutOfBounds = true;
         }
 

@@ -5,6 +5,11 @@
 #include "server/player/ServerPlayer.hpp"
 #include "server/session/PlayerSession.hpp"
 #include "server/session/PlayerSessionManager.hpp"
+#include "common/core/Features.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "server/portal/EntityPortalTravel.hpp"
+#endif
+#include <unordered_set>
 
 #include <algorithm>
 #include <chrono>
@@ -52,7 +57,7 @@ namespace Server {
     int32_t ExperienceOrbManager::Adopt(Game::ExperienceOrb orb) {
         if (orb.value <= 0) return 0;
 
-        orb.id = m_nextId++;
+        orb.id = Game::AllocateXpOrbEntityId();
         if (Game::UuidIsNil(orb.uuid)) orb.uuid = Game::RandomUuid();
 
         const int32_t id = orb.id;
@@ -61,9 +66,28 @@ namespace Server {
     }
 
 
+    std::optional<Game::ExperienceOrb> ExperienceOrbManager::Extract(int32_t id) {
+        auto it = m_entities.find(id);
+        if (it == m_entities.end()) return std::nullopt;
+        Game::ExperienceOrb orb = std::move(it->second);
+        m_entities.erase(it);
+        return orb;
+    }
+
+    bool ExperienceOrbManager::AdoptWithId(Game::ExperienceOrb orb) {
+        if (orb.id == 0 || orb.value <= 0) return false;
+        if (m_entities.count(orb.id)) return false;
+        if (Game::UuidIsNil(orb.uuid)) orb.uuid = Game::RandomUuid();
+        orb.pendingSpawn = true;
+        orb.needsSync    = true;
+        const int32_t id = orb.id;
+        m_entities.emplace(id, std::move(orb));
+        return true;
+    }
+
     int32_t ExperienceOrbManager::SpawnOrb(const glm::dvec3& pos, int value) {
         Game::ExperienceOrb orb;
-        orb.id    = m_nextId++;
+        orb.id    = Game::AllocateXpOrbEntityId();
         // Persistent identity, minted where the session handle is assigned —
         // the same lifecycle rule the mobs use.
         orb.uuid = Game::RandomUuid();
@@ -122,17 +146,33 @@ namespace Server {
         // `if (takeXpDelay > 0) --takeXpDelay`).
         std::vector<PlayerView> players;
         if (sessions) {
+            // Collectors in THIS level — see ItemEntityManager::Tick. A player
+            // may appear more than once (own position and portal images);
+            // the take delay counts down once per player.
+#if ENABLE_IMMERSIVE_PORTALS
+            const std::vector<PickupSource> collectors = PickupSourcesFor(*sessions, world->GetDimension());
+#else
+            struct PickupSource { ServerPlayer* player; glm::dvec3 pos; };
+            std::vector<PickupSource> collectors;
             for (auto& session : sessions->GetAllSessions()) {
-                if (!session) continue;
-                ServerPlayer* player = session->GetPlayer();
+                if (!session || !session->GetPlayer()) continue;
+                if (Game::DimensionFromRaw(session->GetPlayer()->getDimensionId()) != world->GetDimension()) continue;
+                collectors.push_back(PickupSource{session->GetPlayer(), session->GetPlayer()->getPosition()});
+            }
+#endif
+            std::unordered_set<uint32_t> counted;
+            for (const PickupSource& collector : collectors) {
+                ServerPlayer* player = collector.player;
                 if (!player) continue;
                 const bool eligible = !player->isDead()
                     && player->getGameMode() != GameMode::SPECTATOR;
                 players.push_back(PlayerView{ player->getPlayerId(),
-                                              player->getPosition(),
+                                              collector.pos,
                                               player, eligible });
-                int& delay = m_takeDelay[player->getPlayerId()];
-                if (delay > 0) --delay;
+                if (counted.insert(player->getPlayerId()).second) {
+                    int& delay = m_takeDelay[player->getPlayerId()];
+                    if (delay > 0) --delay;
+                }
             }
         }
         // Prune delay entries for players that left.
@@ -306,7 +346,6 @@ namespace Server {
     void ExperienceOrbManager::Clear() {
         m_entities.clear();
         m_takeDelay.clear();
-        m_nextId = Game::kXpOrbEntityIdBase;
     }
 
     void ExperienceOrbManager::CollectSyncSets(int64_t serverTick,

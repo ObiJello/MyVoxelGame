@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/ClientMeshManager.cpp
 #include "ClientMeshManager.hpp"
+#include "client/world/ClientLevel.hpp"
 #include "ChunkRenderer.hpp"
 #include "MeshUploadPermits.hpp"
 #include <cstring>
@@ -22,8 +23,8 @@ namespace Render {
         opaqueVertexCount = cutoutVertexCount = translucentVertexCount = 0;
     }
 
-    // Global instance
-    std::unique_ptr<ClientMeshManager> g_clientMeshManager = nullptr;
+    // Bound-level pointer, owned by ClientLevel (see ClientLevel.hpp).
+    ClientMeshManager* g_clientMeshManager = nullptr;
     
     // Static mesh result queue (shared between ClientMeshManager and ClientWorkerPool)
     static Network::ResultQueue<Network::MeshBuildResult> s_meshResultQueue;
@@ -87,13 +88,14 @@ namespace Render {
         {
             std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
             m_gpuData.clear();
+            BumpGpuDataGeneration();
         }
 
         // Every GPUSectionData was just destroyed — cached reachable lists in
         // the chunk renderer must be discarded before the next world renders.
-        if (Render::g_chunkRenderer) {
-            Render::g_chunkRenderer->MarkSectionDataErased();
-            Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        if (m_renderer) {
+            m_renderer->MarkSectionDataErased();
+            m_renderer->MarkVisibleSectionsDirty();
         }
 
         // Clear any pending destroys (mega-buffers already cleaned up)
@@ -110,30 +112,6 @@ namespace Render {
     // ========================================================================
     // FRAME PROCESSING
     // ========================================================================
-
-    void ClientMeshManager::ProcessMeshBuildResults() {
-        if (!m_chunkManager) return;
-
-        auto startTime = std::chrono::steady_clock::now();
-
-        // Drain all completed mesh build results
-        auto& meshResultQueue = GetMeshResultQueue();
-        auto results = meshResultQueue.DrainAll();
-
-        for (const auto& result : results) {
-            ProcessMeshBuildResult(result);
-        }
-
-        meshResultQueue.ResetProcessedCount();
-
-        // Record timing
-        auto endTime = std::chrono::steady_clock::now();
-        float processingTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
-        if (!results.empty()) {
-            Log::Debug("Processed %zu mesh build results in %.2fms", results.size(), processingTime);
-        }
-    }
 
     void ClientMeshManager::ScheduleMeshBuilds(const glm::vec3& playerPosition) {
         if (!m_chunkManager) return;
@@ -175,17 +153,10 @@ namespace Render {
             m_translucentMegaBuffer.CompactIfNeeded();
         }
 
+        // The results themselves are drained by DrainMeshResults, once per
+        // frame for every level, because the queue they sit in is shared.
         m_stats.meshUploadsThisFrame = 0;
-        auto startTime = std::chrono::steady_clock::now();
-
-        UploadAllPendingResults();
-
-        // Kept for the F3 readout only. Do NOT reintroduce a threshold on this
-        // number to throttle uploads: it measures how long the CPU spent
-        // handing work to the driver, which is not what the frame ends up
-        // paying. The permit pool is the throttle now.
-        auto endTime = std::chrono::steady_clock::now();
-        m_stats.gpuUploadTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+        m_stats.gpuUploadTimeMs = 0.0f;
     }
 
     // ========================================================================
@@ -317,6 +288,22 @@ namespace Render {
         LogMeshActivity("Forced mesh rebuild", chunkPos);
     }
 
+    void ClientMeshManager::RemeshAll() {
+        if (!m_chunkManager) return;
+        // Collect first: MarkSectionDirty runs renderer/chunk-map code, and
+        // ForEachActiveSection holds m_gpuDataMutex for its whole iteration —
+        // calling out while holding it invites lock-order trouble.
+        std::vector<SectionKey> keys;
+        keys.reserve(GetGPUDataCount());
+        ForEachActiveSection([&keys](const SectionKey& key, const GPUSectionData*) {
+            keys.push_back(key);
+        });
+        for (const auto& key : keys) {
+            m_chunkManager->MarkSectionDirty(key.chunkPos, key.sectionY);
+        }
+        Log::Info("RemeshAll: marked %zu active sections dirty", keys.size());
+    }
+
     void ClientMeshManager::ClearAllMeshes() {
         if (Threading::g_clientWorkerPool) {
             Threading::g_clientWorkerPool->CancelAllJobs();
@@ -373,7 +360,8 @@ namespace Render {
 
                 { PROFILE_ZONE_N("FinalizeUpload");
                 m_chunkManager->FinalizeSectionUpload(result.chunkPos, result.sectionY,
-                                                      result.neighborMask, result.generation);
+                                                      result.neighborMask, result.generation,
+                                                      result.paletteGen, result.jobSeq);
                 }
 
                 m_stats.meshBuildsCompleted.fetch_add(1, std::memory_order_relaxed);
@@ -393,8 +381,15 @@ namespace Render {
                 break;
                 
             case Client::MeshApplyAction::Drop_Replaced:
-                // Superseded by newer mesh
+                // Superseded by newer mesh. Still route through
+                // NoteMeshBuildFailed: it re-dirties ONLY when the dropped
+                // result was somehow the section's latest job (its generation
+                // matches meshingVersion), which would otherwise leave the
+                // section reading as "in flight" forever with a stale mesh on
+                // the GPU. For a genuinely superseded result it is a no-op.
                 m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
+                m_chunkManager->NoteMeshBuildFailed(result.chunkPos, result.sectionY,
+                                                    result.generation);
                 LogMeshActivity("Dropped replaced mesh", result.chunkPos, result.sectionY);
                 break;
         }
@@ -410,9 +405,13 @@ namespace Render {
     // wrong thing anyway: glBufferSubData returns once the driver has staged
     // the copy, so the loop can exit well inside budget having handed the GPU
     // more work than it can retire — and Present pays the difference.
-    void ClientMeshManager::UploadAllPendingResults() {
+    void ClientMeshManager::DrainMeshResults(
+            const std::function<ClientMeshManager*(Game::DimensionId)>& resolve) {
         PROFILE_ZONE_N("DrainUploads");
         int uploadsThisFrame = 0;
+        // Managers touched this drain, for the byte plot below (at most one
+        // per dimension).
+        ClientMeshManager* touched[Game::kDimensionCount] = {};
 
         auto& meshResultQueue = GetMeshResultQueue();
         auto& permits = GetMeshUploadPermits();
@@ -478,19 +477,34 @@ namespace Render {
             // MeshBuildResult::holdsUploadPermit.
             if (result.holdsUploadPermit) ++banked.count;
 
-            ProcessMeshBuildResult(result);
+            // Route by the dimension the job was built for. A result for a
+            // level that no longer exists is simply dropped — its permit is
+            // already banked above.
+            ClientMeshManager* target = resolve(result.dimension);
+            if (!target) continue;
+            touched[Game::DimensionSlot(result.dimension)] = target;
+
+            const auto t0 = std::chrono::steady_clock::now();
+            target->ProcessMeshBuildResult(result);
+            target->m_stats.gpuUploadTimeMs += std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
             uploadsThisFrame++;
-            m_stats.meshUploadsThisFrame++;
+            target->m_stats.meshUploadsThisFrame++;
         }
 
         }  // banked releases here — loop is done, so it cannot be re-fed.
 
         PROFILE_PLOT("Upload/Sections",  static_cast<int64_t>(uploadsThisFrame));
         PROFILE_PLOT("Upload/InFlight",  static_cast<int64_t>(permits.InFlight()));
-        PROFILE_PLOT("Upload/Bytes", static_cast<int64_t>(
-            m_opaqueMegaBuffer.ConsumeUploadedBytes() +
-            m_cutoutMegaBuffer.ConsumeUploadedBytes() +
-            m_translucentMegaBuffer.ConsumeUploadedBytes()));
+        int64_t uploadedBytes = 0;
+        for (ClientMeshManager* m : touched) {
+            if (!m) continue;
+            uploadedBytes += static_cast<int64_t>(
+                m->m_opaqueMegaBuffer.ConsumeUploadedBytes() +
+                m->m_cutoutMegaBuffer.ConsumeUploadedBytes() +
+                m->m_translucentMegaBuffer.ConsumeUploadedBytes());
+        }
+        PROFILE_PLOT("Upload/Bytes", uploadedBytes);
     }
     
     bool ClientMeshManager::ChunkNeedsMeshBuild(::Game::Math::ChunkPos chunkPos) const {
@@ -538,6 +552,15 @@ namespace Render {
         return distance <= m_config.highPriorityRadius;
     }
     
+    // Float-sized slots per terrain vertex in the MeshBuildResult blobs.
+    // 32-byte TerrainVertex = 8 slots (pos3f + uv2f + rgba8 + tile unorm16x4);
+    // the tail rides the float vector as opaque bytes (see CopyVertexLayer).
+    // This was a literal 6 from the 24-byte era — the greedy-meshing stride
+    // bump missed it, and every non-empty mesh failed validation, which
+    // NoteMeshBuildFailed then re-dirtied: 10k rebuilds/s, zero uploads.
+    static constexpr size_t kTerrainVertexFloatSlots =
+        sizeof(Render::TerrainVertex) / sizeof(float);
+
     bool ClientMeshManager::ValidateMeshBuildResult(const Network::MeshBuildResult& result) {
         // Validate section index
         if (result.sectionY < 0 || result.sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
@@ -560,8 +583,8 @@ namespace Render {
             if (result.meshData.opaqueVertices.empty() != result.meshData.opaqueIndices.empty()) {
                 return false;
             }
-            if (result.meshData.opaqueVertexCount * 6 != result.meshData.opaqueVertices.size()) {
-                return false; // 6 float-sized slots per vertex
+            if (result.meshData.opaqueVertexCount * kTerrainVertexFloatSlots != result.meshData.opaqueVertices.size()) {
+                return false; // see kTerrainVertexFloatSlots
             }
             if (result.meshData.opaqueIndexCount != result.meshData.opaqueIndices.size()) {
                 return false;
@@ -573,7 +596,7 @@ namespace Render {
             if (result.meshData.cutoutVertices.empty() != result.meshData.cutoutIndices.empty()) {
                 return false;
             }
-            if (result.meshData.cutoutVertexCount * 6 != result.meshData.cutoutVertices.size()) {
+            if (result.meshData.cutoutVertexCount * kTerrainVertexFloatSlots != result.meshData.cutoutVertices.size()) {
                 return false;
             }
             if (result.meshData.cutoutIndexCount != result.meshData.cutoutIndices.size()) {
@@ -586,7 +609,7 @@ namespace Render {
             if (result.meshData.translucentVertices.empty() != result.meshData.translucentIndices.empty()) {
                 return false;
             }
-            if (result.meshData.translucentVertexCount * 6 != result.meshData.translucentVertices.size()) {
+            if (result.meshData.translucentVertexCount * kTerrainVertexFloatSlots != result.meshData.translucentVertices.size()) {
                 return false;
             }
             if (result.meshData.translucentIndexCount != result.meshData.translucentIndices.size()) {
@@ -627,6 +650,7 @@ namespace Render {
             if (sectionInfo) {
                 sectionInfo->gpuData.store(nullptr, std::memory_order_release);
             }
+            BumpGpuDataGeneration();
             m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
 
             // Remove from mega-buffers (frees GPU regions)
@@ -640,10 +664,68 @@ namespace Render {
             // stops resolving — there is no pointer left to keep alive.
             m_gpuData.erase(it);
 
-            if (Render::g_chunkRenderer) {
-                Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+            if (m_renderer) {
+                m_renderer->MarkVisibleSectionsDirty();
             }
             LogMeshActivity("Removed section GPU data", chunkPos, sectionY);
+        }
+    }
+
+    size_t ClientMeshManager::ParkChunkGPUData(::Game::Math::ChunkPos chunkPos) {
+        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
+        size_t bytes = 0;
+        for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+            SectionKey key{chunkPos, sectionY};
+            auto it = m_gpuData.find(key);
+            if (it == m_gpuData.end()) continue;
+            const GPUSectionData& d = it->second;
+            bytes += (size_t(d.opaqueVertexCount) + d.cutoutVertexCount + d.translucentVertexCount) * 16
+                   + (size_t(d.opaqueIndexCount) + d.cutoutIndexCount + d.translucentIndexCount) * 4;
+            if (auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY)) {
+                sectionInfo->gpuData.store(nullptr, std::memory_order_release);
+            }
+            BumpGpuDataGeneration();
+            m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
+            // Node handle: the GPUSectionData object keeps its address.
+            auto node = m_gpuData.extract(it);
+            m_parkedGpuData.insert(std::move(node));
+        }
+        if (m_renderer) m_renderer->MarkVisibleSectionsDirty();
+        return bytes;
+    }
+
+    bool ClientMeshManager::UnparkChunkGPUData(::Game::Math::ChunkPos chunkPos) {
+        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
+        bool any = false;
+        for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+            SectionKey key{chunkPos, sectionY};
+            auto it = m_parkedGpuData.find(key);
+            if (it == m_parkedGpuData.end()) continue;
+            auto node = m_parkedGpuData.extract(it);
+            auto ins = m_gpuData.insert(std::move(node));
+            GPUSectionData* data = &ins.position->second;
+            if (auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY)) {
+                sectionInfo->gpuData.store(data, std::memory_order_release);
+            }
+            BumpGpuDataGeneration();
+            m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, data);
+            any = true;
+        }
+        if (any && m_renderer) m_renderer->MarkVisibleSectionsDirty();
+        return any;
+    }
+
+    void ClientMeshManager::DiscardParkedChunkGPUData(::Game::Math::ChunkPos chunkPos) {
+        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
+        for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+            SectionKey key{chunkPos, sectionY};
+            auto it = m_parkedGpuData.find(key);
+            if (it == m_parkedGpuData.end()) continue;
+            MegaBufferSectionKey megaKey{chunkPos, sectionY};
+            m_opaqueMegaBuffer.RemoveSection(megaKey);
+            m_cutoutMegaBuffer.RemoveSection(megaKey);
+            m_translucentMegaBuffer.RemoveSection(megaKey);
+            m_parkedGpuData.erase(it);
         }
     }
 
@@ -667,6 +749,7 @@ namespace Render {
                 if (sectionInfo) {
                     sectionInfo->gpuData.store(nullptr, std::memory_order_release);
                 }
+                BumpGpuDataGeneration();
 
                 m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
 
@@ -675,8 +758,8 @@ namespace Render {
             }
         }
 
-        if (Render::g_chunkRenderer) {
-            Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        if (m_renderer) {
+            m_renderer->MarkVisibleSectionsDirty();
         }
 
         LogMeshActivity("Removed chunk GPU data from mega-buffers", chunkPos);
@@ -745,8 +828,7 @@ namespace Render {
             // Cache draw command to avoid per-frame hash lookup in RenderLayerPass
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_opaqueMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                gpuData.opaqueDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                         cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex};
+                gpuData.opaqueDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
             }
         }
         if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
@@ -759,8 +841,7 @@ namespace Render {
             gpuData.cutoutIndexCount = static_cast<uint32_t>(meshData.cutoutIndexCount);
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_cutoutMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                gpuData.cutoutDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                         cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex};
+                gpuData.cutoutDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
             }
         }
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
@@ -774,8 +855,7 @@ namespace Render {
             gpuData.translucentIndexCount = static_cast<uint32_t>(meshData.translucentIndexCount);
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_translucentMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                gpuData.translucentDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                              cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex,
+                gpuData.translucentDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex,
                                               m_translucentMegaBuffer.GetSectionIndexBuffer(megaKey)};
             }
 
@@ -787,8 +867,8 @@ namespace Render {
             {
                 // Sorted on the worker (ClientWorkerPool::ConvertSectionMeshToResult);
                 // keep the centroids for later re-sorts and record the view.
-                static_assert(sizeof(Render::Vertex) == 24,
-                              "translucent centroid extraction assumes the 24-byte vertex");
+                static_assert(sizeof(Render::TerrainVertex) == 32,
+                              "translucent centroid extraction assumes the 32-byte terrain vertex");
                 const size_t quads = meshData.translucentCentroids.size() / 3;
                 gpuData.translucentCentroids.resize(quads);
                 if (quads > 0) {
@@ -817,6 +897,7 @@ namespace Render {
             if (emptySectionInfo) {
                 emptySectionInfo->gpuData.store(nullptr, std::memory_order_release);
             }
+            BumpGpuDataGeneration();
             auto it = m_gpuData.find(key);
             if (hadEntry) {
                 // Had geometry, remeshed to empty: cached reachable lists may
@@ -827,8 +908,8 @@ namespace Render {
                 // Fresh entry created by this very call — nothing references it.
                 m_gpuData.erase(it);
             }
-            if (Render::g_chunkRenderer) {
-                Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+            if (m_renderer) {
+                m_renderer->MarkVisibleSectionsDirty();
             }
             return;
         }
@@ -841,6 +922,11 @@ namespace Render {
 
             // Atomically update the GPU data pointer
             GPUSectionData* oldPtr = sectionInfo->gpuData.exchange(gpuDataPtr, std::memory_order_release);
+            // A fresh entry changes what the section resolves to — a renderer
+            // cache stamped before this must look it up again. A re-upload of
+            // an existing entry keeps its address, but bumping anyway costs one
+            // frame of lookups and keeps the rule simple: any store, any bump.
+            BumpGpuDataGeneration();
 
             // If there was old data, mark it for deferred deletion
             if (oldPtr && oldPtr != gpuDataPtr) {
@@ -860,7 +946,7 @@ namespace Render {
         m_stats.meshUploadedToGPU.fetch_add(1, std::memory_order_relaxed);
         m_stats.meshUploadsThisFrame++;
 
-        if (Render::g_chunkRenderer) {
+        if (m_renderer) {
             // MC LevelRenderer.addRecentlyCompiledSection -> schedulePropagationFrom.
             //
             // Note what is deliberately NOT here: MarkVisibleSectionsDirty.
@@ -880,7 +966,7 @@ namespace Render {
             // live each frame (ChunkRenderer's frustum filter), so a stale entry
             // resolves to null and costs one failed lookup instead of a wrong
             // draw. There is nothing left for a periodic rebuild to collect.
-            Render::g_chunkRenderer->SchedulePropagationFrom(chunkPos, sectionY);
+            m_renderer->SchedulePropagationFrom(chunkPos, sectionY);
         }
 
         LogMeshActivity("Uploaded mesh result to GPU", chunkPos, sectionY);
@@ -890,14 +976,22 @@ namespace Render {
     // SHARED BLOCK VERTEX FORMAT
     // ========================================================================
 
+    // One vertex format per backend, however many levels exist: the first
+    // manager to need it creates it, the last to let go destroys it.
+    static int s_sharedVaoRefs = 0;
+
     void ClientMeshManager::CreateSharedBlockVAO() {
-        if (g_renderBackend) {
+        if (m_holdsSharedVao) return;
+        m_holdsSharedVao = true;
+        if (s_sharedVaoRefs++ == 0 && g_renderBackend) {
             g_renderBackend->SetupBlockVertexFormat();
         }
     }
 
     void ClientMeshManager::DestroySharedBlockVAO() {
-        if (g_renderBackend) {
+        if (!m_holdsSharedVao) return;
+        m_holdsSharedVao = false;
+        if (--s_sharedVaoRefs == 0 && g_renderBackend) {
             g_renderBackend->DestroyBlockVertexFormat();
         }
     }
@@ -925,29 +1019,6 @@ namespace Render {
     // GLOBAL FUNCTIONS
     // ========================================================================
 
-    void InitializeClientMeshManager(Client::ClientChunkManager* chunkManager) {
-        if (g_clientMeshManager) {
-            Log::Warning("ClientMeshManager already initialized");
-            return;
-        }
-
-        g_clientMeshManager = std::make_unique<ClientMeshManager>();
-        g_clientMeshManager->Initialize(chunkManager);
-    }
-
-    void ShutdownClientMeshManager() {
-        if (g_clientMeshManager) {
-            g_clientMeshManager->Shutdown();
-            g_clientMeshManager.reset();
-        }
-    }
-
-    void ProcessClientMeshBuildResults() {
-        if (g_clientMeshManager) {
-            g_clientMeshManager->ProcessMeshBuildResults();
-        }
-    }
-
     void ScheduleClientMeshBuilds(const glm::vec3& playerPosition) {
         if (g_clientMeshManager) {
             g_clientMeshManager->ScheduleMeshBuilds(playerPosition);
@@ -955,9 +1026,13 @@ namespace Render {
     }
 
     void PerformClientGPUUploads() {
-        if (g_clientMeshManager) {
-            g_clientMeshManager->PerformGPUUploads();
-        }
+        Client::ClientLevels::ForEach([](Client::ClientLevel& level) {
+            if (auto* meshes = level.Meshes()) meshes->PerformGPUUploads();
+        });
+        ClientMeshManager::DrainMeshResults([](Game::DimensionId dimension) -> ClientMeshManager* {
+            Client::ClientLevel* level = Client::ClientLevels::Get(dimension);
+            return level ? level->Meshes() : nullptr;
+        });
     }
 
     void SetClientMeshPlayerPosition(const glm::vec3& position) {

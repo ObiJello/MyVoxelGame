@@ -30,6 +30,9 @@
 #include <memory>
 #include <cstdint>
 
+#include "common/core/Features.hpp"
+namespace Game::Immersive { struct Portal; }
+
 namespace Client {
 
     struct ClientItemEntity {
@@ -90,8 +93,10 @@ namespace Client {
         // Spawn or full-refresh. Re-sending a known id updates in place; the
         // server uses that as its periodic "resync this entity" path, which is
         // also how an entity is introduced to a player who just walked up.
-        void Spawn(int32_t id, const glm::dvec3& pos, const glm::vec3& vel,
-                   float bobOffs, const Game::ItemStack& stack);
+        // Returns true when the id was not known before (a first spawn, as
+        // opposed to the periodic full refresh of a known entity).
+        bool Spawn(int32_t id, const glm::dvec3& pos, const glm::vec3& vel,
+                   float bobOffs, const Game::ItemStack& stack, float scale = 1.0f);
 
         // Periodic position/velocity refresh. `count` keeps the rendered stack
         // size in step with merges and partial pickups, which change it
@@ -115,6 +120,16 @@ namespace Client {
         // pickup animation has to fly toward whoever collected it, and the
         // local player is not in any entity map to look up.
         void Tick(const glm::dvec3& localPlayerPos);
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // An entity that just spawned here (`id`, already in this store) is
+        // the SAME entity that was `from` in another level a moment ago,
+        // having crossed `via` (a portal of that level leading here). Carry
+        // its render state through the portal — age, previous positions,
+        // motion — so the frame's interpolation continues across the
+        // surface instead of restarting at the far side.
+        void CarryOver(int32_t id, const ClientItemEntity& from, const Game::Immersive::Portal& via);
+#endif
 
         const std::unordered_map<int32_t, ClientItemEntity>& GetEntities() const {
             return m_entities;
@@ -154,6 +169,7 @@ namespace Client {
         std::vector<ItemPickupAnim> m_pickups;
     };
 
-    extern std::unique_ptr<ItemEntityManager> g_itemEntityManager;
+    // Bound-level pointer, owned by ClientLevel (see ClientLevel.hpp).
+    extern ItemEntityManager* g_itemEntityManager;
 
 } // namespace Client

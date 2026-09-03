@@ -63,6 +63,7 @@
             SetChunkCacheRadiusS2C = 0x26, // Server tells client the effective view distance
             PlayerInfoS2C          = 0x27, // Player list updates (join/leave with name)
             ClientboundPlayerPosition = 0x28, // Authoritative position snap (MC: ClientboundPlayerPositionPacket)
+            ChunkUnchangedS2C      = 0x47, // Retained chunk still current (see ChunkUnchangedS2CPacket)
             InventoryFullS2C       = 0x29, // Full 46-slot inventory + carried + selected hotbar slot
             InventorySetSlotS2C    = 0x2A, // Single-slot delta (slot, blockId, count)
             InventorySetCarriedS2C = 0x2B, // Cursor item update
@@ -117,6 +118,26 @@
             // the real destroyed-block count, nor the local player's knockback.
             ExplodeS2C             = 0x45, // MC ClientboundExplodePacket
             EntityPositionSyncBatchS2C = 0x46, // many EntityPositionSyncS2C in one (falling-block store)
+
+            // ── End dragon fight ───────────────────────────────────────────
+            BossEventS2C           = 0x48, // MC ClientboundBossEventPacket (reduced)
+            EndCrystalBeamS2C      = 0x49, // crystal beam target (MC DATA_BEAM_TARGET)
+
+            // ── Immersive portals (see-through / walk-through surfaces) ────
+            // Full-record upsert and removal of Game::Immersive::Portal,
+            // delivered to the watchers of the portal's origin chunk. See
+            // packets/game/ImmersivePortalPackets.hpp.
+#if ENABLE_IMMERSIVE_PORTALS
+            ImmersivePortalSyncS2C   = 0x4A,
+            ImmersivePortalRemoveS2C = 0x4B,
+#endif
+            // "Everything that follows is for dimension D" — stream state that
+            // tags every world-scoped packet with its dimension now that a
+            // client holds more than one. See DimensionScopeS2CPacket.hpp.
+            DimensionScopeS2C        = 0x4C,
+            // The occlusion wand's boxes of one dimension, whole. See
+            // packets/game/AoRegionsS2CPacket.hpp.
+            AoRegionsS2C             = 0x4D,
 #if ENABLE_PORTAL_GUN
             PortalSetS2C            = 0x2C, // Portal placed / moved (per-gun, per-color)
             PortalRemoveS2C         = 0x2D, // Portal pair cleared
@@ -144,6 +165,7 @@
             Animation           = 0x8D,
             EntityAction        = 0x8E,
             SteerVehicle        = 0x8F,
+            ChunkRequestFullC2S = 0x98,  // Client evicted a retained chunk; send the full data
             ChunkBatchAckC2S    = 0x90,  // Client acknowledges batch with desired send rate
             ServerboundAcceptTeleportation = 0x91, // Echo of teleport id (MC: ServerboundAcceptTeleportationPacket)
             InventoryClickC2S   = 0x92,  // One inventory action (mirrors MC ContainerInput dispatch)
@@ -152,6 +174,10 @@
             InteractC2S         = 0x95,  // Attack or interact with an entity (mirrors MC ServerboundInteractPacket)
             PlayerLoadedC2S     = 0x96,  // "my level is ready" (mirrors MC ServerboundPlayerLoadedPacket) — no payload
             PlayerPauseC2S      = 0x97,  // Pause screen opened/closed — the server freezes the world only when EVERY player is paused
+#if ENABLE_IMMERSIVE_PORTALS
+            PortalTeleportC2S   = 0x99,  // "my eye crossed immersive portal P" — see PortalTeleportC2SPacket.hpp
+#endif
+            FillBlocksC2S       = 0x9A,  // The fill tool's box of held blocks — see FillBlocksC2SPacket.hpp
         };
 
         // Convert PacketId to string for logging
@@ -190,6 +216,8 @@
                 case PacketId::TickingStateS2C: return "TickingStateS2C";
                 case PacketId::TickingStepS2C: return "TickingStepS2C";
                 case PacketId::ChangeDimensionS2C: return "ChangeDimensionS2C";
+                case PacketId::BossEventS2C: return "BossEventS2C";
+                case PacketId::EndCrystalBeamS2C: return "EndCrystalBeamS2C";
                 case PacketId::EntityDestroy: return "EntityDestroy";
                 case PacketId::ChatMessageS2C: return "ChatMessageS2C";
                 case PacketId::TimeUpdate: return "TimeUpdate";
@@ -200,6 +228,7 @@
                 case PacketId::WorldSpawn: return "WorldSpawn";
                 case PacketId::ChunkDataS2C: return "ChunkDataS2C";
                 case PacketId::UnloadChunkS2C: return "UnloadChunkS2C";
+                case PacketId::ChunkUnchangedS2C: return "ChunkUnchangedS2C";
                 case PacketId::ClientboundSectionBlocksUpdate: return "ClientboundSectionBlocksUpdate";
                 case PacketId::ChunkBatchStartS2C: return "ChunkBatchStartS2C";
                 case PacketId::ChunkBatchFinishedS2C: return "ChunkBatchFinishedS2C";
@@ -215,6 +244,12 @@
                 case PacketId::BlockEntityActionS2C: return "BlockEntityActionS2C";
                 case PacketId::SetHealthS2C: return "SetHealthS2C";
                 case PacketId::BlockChangedAckS2C: return "BlockChangedAckS2C";
+                case PacketId::DimensionScopeS2C: return "DimensionScopeS2C";
+#if ENABLE_IMMERSIVE_PORTALS
+                case PacketId::ImmersivePortalSyncS2C:   return "ImmersivePortalSyncS2C";
+                case PacketId::ImmersivePortalRemoveS2C: return "ImmersivePortalRemoveS2C";
+#endif
+                case PacketId::AoRegionsS2C:             return "AoRegionsS2C";
 #if ENABLE_PORTAL_GUN
                 case PacketId::PortalSetS2C:           return "PortalSetS2C";
                 case PacketId::PortalRemoveS2C:        return "PortalRemoveS2C";
@@ -241,6 +276,7 @@
                 case PacketId::EntityAction: return "EntityAction";
                 case PacketId::SteerVehicle: return "SteerVehicle";
                 case PacketId::ChunkBatchAckC2S: return "ChunkBatchAckC2S";
+                case PacketId::ChunkRequestFullC2S: return "ChunkRequestFullC2S";
                 case PacketId::ServerboundAcceptTeleportation: return "ServerboundAcceptTeleportation";
                 case PacketId::InventoryClickC2S: return "InventoryClickC2S";
                 case PacketId::InventoryCloseC2S: return "InventoryCloseC2S";
@@ -248,6 +284,10 @@
                 case PacketId::PlayerPauseC2S: return "PlayerPauseC2S";
                 case PacketId::InteractC2S: return "InteractC2S";
                 case PacketId::PlayerLoadedC2S: return "PlayerLoadedC2S";
+#if ENABLE_IMMERSIVE_PORTALS
+                case PacketId::PortalTeleportC2S: return "PortalTeleportC2S";
+                case PacketId::FillBlocksC2S:     return "FillBlocksC2S";
+#endif
 
                 default: return "Unknown";
             }

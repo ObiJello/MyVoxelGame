@@ -23,6 +23,7 @@
 // so the y-down mesh needs no hand-conversion and every translation/angle can
 // be checked against the Java line it came from.
 #include "SkullBlockRenderer.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -58,12 +59,11 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;     // in texture-pixel coords
 layout(location=2) in vec4 aColor;
 uniform mat4 uMVP;
-uniform vec2 uTexSize;
 out vec2 vUV;
 out vec4 vColor;
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV / uTexSize;
+    vUV = aUV;
     vColor = aColor;
 }
 )GLSL";
@@ -242,7 +242,13 @@ void main() {
     bool SkullBlockRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        m_shader = g_renderBackend->CreateShader(kVS, kFS);
+        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
+            // VKBackend cannot compile GLSL source; it loads the shared
+            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
+            // rewrites the .vert/.frag names). GL keeps the inline source.
+            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
+                                                     "shaders/blockentity.frag")
+            : g_renderBackend->CreateShader(kVS, kFS);
         if (m_shader == INVALID_SHADER) {
             Log::Error("[SkullRenderer] shader compile failed");
             return false;
@@ -253,6 +259,13 @@ void main() {
             std::vector<uint32_t> idx;
             verts.reserve(7 * 24); idx.reserve(7 * 36);
             emit(verts, idx);
+            // AddCube emits pixel-space UVs; each kind's sheet size differs
+            // (64x32 .. 256x256), so normalize per kind here instead of the
+            // old uTexSize uniform — one shared shader serves every sheet.
+            for (auto& vert : verts) {
+                vert.u /= kKindInfo[kind].texW;
+                vert.v /= kKindInfo[kind].texH;
+            }
             m_vb[kind] = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
                 verts.size() * sizeof(CubeVert), verts.data());
             m_ib[kind] = g_renderBackend->CreateBuffer(BufferUsage::Index,
@@ -374,6 +387,7 @@ void main() {
                                     const glm::mat4& proj,
                                     const glm::mat4& view,
                                     const glm::vec3& /*cameraPos*/) {
+        PROFILE_ZONE_N("BE.Skull");
         if (!m_geomBuilt || !g_renderBackend) return;
 
         int  kind = -1;
@@ -432,8 +446,7 @@ void main() {
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(tex, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", proj * view * model);
-        g_renderBackend->SetUniformVec2(m_shader, "uTexSize",
-                                        glm::vec2(kKindInfo[kind].texW, kKindInfo[kind].texH));
+        g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.1f);
         g_renderBackend->DrawIndexed(m_mesh[kind], m_indexCount[kind]);
         g_renderBackend->UnbindMesh();
     }

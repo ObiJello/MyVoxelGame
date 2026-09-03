@@ -43,9 +43,9 @@ namespace Game {
             return static_cast<int>(static_cast<float>(ticksUntilAdult / 20) * 0.1f);
         }
 
-        float GetBbWidth()  const override;
-        float GetBbHeight() const override;
-        float GetEyeHeight() const override;
+        float BaseBbWidth()   const override;
+        float BaseBbHeight()  const override;
+        float BaseEyeHeight() const override;
 
         void AiStep() override;
 

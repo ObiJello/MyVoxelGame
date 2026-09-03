@@ -1,5 +1,6 @@
 // File: src/client/renderer/blockentity/CampfireRenderer.cpp
 #include "CampfireRenderer.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "../viewmodel/HeldItemSpriteMesh.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
@@ -77,7 +78,13 @@ void main() {
 
     bool CampfireRenderer::Initialize() {
         if (!g_renderBackend) return false;
-        m_shader = g_renderBackend->CreateShader(kVS, kFS);
+        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
+            // VKBackend cannot compile GLSL source; it loads the shared
+            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
+            // rewrites the .vert/.frag names). GL keeps the inline source.
+            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
+                                                     "shaders/blockentity.frag")
+            : g_renderBackend->CreateShader(kVS, kFS);
         if (m_shader == INVALID_SHADER) {
             Log::Error("[CampfireRenderer] shader compile failed");
             return false;
@@ -100,6 +107,7 @@ void main() {
                                   const glm::mat4& proj,
                                   const glm::mat4& view,
                                   const glm::vec3& /*cameraPos*/) {
+        PROFILE_ZONE_N("BE.Campfire");
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
 
         const auto* campfire = dynamic_cast<const Game::CampfireBlockEntity*>(&be);
@@ -184,6 +192,9 @@ void main() {
             if (!stateSet) {
                 g_renderBackend->SetPipelineState(s);
                 g_renderBackend->BindShader(m_shader);
+                // Food sprites cut at 0.5 (MC cutout) — VK push constant;
+                // GL's inline FS hardcodes it and ignores this.
+                g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.5f);
                 stateSet = true;
             }
             g_renderBackend->BindTexture(entry->texture, 0);

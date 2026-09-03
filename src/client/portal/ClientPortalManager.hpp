@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <glm/glm.hpp>
+#include "common/world/level/DimensionId.hpp"
 
 namespace Game { struct AABB; }
 
@@ -43,6 +44,15 @@ namespace Client {
         glm::vec3  upDir {0.0f, 1.0f, 0.0f};
         glm::vec3  right {1.0f, 0.0f, 0.0f};   // recomputed on Set
         bool       active = false;
+        // Immersive mode (PortalSetS2CPacket::immersive): the immersive
+        // surface renders the see-through and does the crossing; this
+        // record only drives the rim. Prediction, wall passthrough and
+        // ghost bodies all skip such a pair.
+        bool       immersive = false;
+        // The level this portal is in. The rim and the sparks are drawn
+        // with that level — in the main view when the player stands in
+        // it, in a portal view that shows it otherwise.
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
 
         // Portal-authoritative animation state. Mirrors c_prop_portal.cpp's
         // m_fOpenAmount and m_fStaticAmount (see ClientThink at line 219).

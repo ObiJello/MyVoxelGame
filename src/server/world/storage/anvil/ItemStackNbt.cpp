@@ -1,4 +1,6 @@
 // File: src/server/world/storage/anvil/ItemStackNbt.cpp
+#include "common/core/Features.hpp"
+#include <optional>
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
 
 #include "common/core/Log.hpp"
@@ -17,8 +19,13 @@ namespace Game::Anvil {
 
         constexpr std::string_view kNamespace = "minecraft:";
 
+        // This engine's own items live under their own namespace so a
+        // vanilla reader sees them as unknown rather than as a wrong item.
+        constexpr std::string_view kOwnNamespace = "obeycraft:";
+
         std::string_view StripNamespace(std::string_view name) {
             if (name.rfind(kNamespace, 0) == 0) return name.substr(kNamespace.size());
+            if (name.rfind(kOwnNamespace, 0) == 0) return name.substr(kOwnNamespace.size());
             return name;
         }
 
@@ -38,6 +45,16 @@ namespace Game::Anvil {
                         map[slug] = static_cast<ItemID>(PURE_ITEM_BASE + i);
                     }
                 }
+#if ENABLE_PORTAL_GUN
+                // Custom items past the pure-item table have no table slug;
+                // without an entry here the gun was dropped from every
+                // inventory on load.
+                if (Items::PortalGun != Items::Air) map["portal_gun"] = Items::PortalGun;
+#endif
+#if ENABLE_IMMERSIVE_PORTALS
+                if (Items::PortalWand != Items::Air) map["portal_wand"] = Items::PortalWand;
+#endif
+                if (Items::AoWand != Items::Air) map["ao_wand"] = Items::AoWand;
                 return map;
             }();
             return index;
@@ -46,6 +63,13 @@ namespace Game::Anvil {
     } // namespace
 
     std::string ItemName(ItemID id) {
+#if ENABLE_PORTAL_GUN
+        if (id == Items::PortalGun && id != Items::Air) return std::string(kOwnNamespace) + "portal_gun";
+#endif
+#if ENABLE_IMMERSIVE_PORTALS
+        if (id == Items::PortalWand && id != Items::Air) return std::string(kOwnNamespace) + "portal_wand";
+#endif
+        if (id == Items::AoWand && id != Items::Air) return std::string(kOwnNamespace) + "ao_wand";
         if (id >= PURE_ITEM_BASE) {
             const size_t index = static_cast<size_t>(id - PURE_ITEM_BASE);
             if (index < kPureItemTableSize) {
@@ -78,10 +102,21 @@ namespace Game::Anvil {
         const auto customName = stack.components.get(DataComponents::CUSTOM_NAME);
         const auto stored     = stack.components.get(DataComponents::STORED_ENCHANTMENTS);
         const bool hasEnchants = stored.has_value() && !stored->entries.empty();
+#if ENABLE_PORTAL_GUN
+        // The gun's pair is keyed by this id (PortalRegistry); losing it on
+        // save orphaned the saved pair from the reloaded gun.
+        const auto gunInstance = stack.components.get(DataComponents::PORTAL_GUN_INSTANCE_ID);
+#else
+        const std::optional<uint64_t> gunInstance;
+#endif
 
-        if (!customName.has_value() && !hasEnchants) return;
+        if (!customName.has_value() && !hasEnchants && !gunInstance.has_value()) return;
 
         w.BeginCompound("components");
+        if (gunInstance.has_value()) {
+            w.Long(std::string(kOwnNamespace) + "portal_gun_instance_id",
+                   static_cast<int64_t>(*gunInstance));
+        }
         if (customName.has_value()) {
             // The custom_name component is a text Component. Its NBT codec
             // accepts a bare string and reads it as literal text, which is
@@ -118,6 +153,13 @@ namespace Game::Anvil {
 
         auto components = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("components"));
         if (!components) return stack;
+
+#if ENABLE_PORTAL_GUN
+        if (auto gun = std::dynamic_pointer_cast<::World::NBTTagLong>(
+                components->GetTag(std::string(kOwnNamespace) + "portal_gun_instance_id"))) {
+            stack.components.set(DataComponents::PORTAL_GUN_INSTANCE_ID, static_cast<uint64_t>(gun->value));
+        }
+#endif
 
         if (auto name = std::dynamic_pointer_cast<::World::NBTTagString>(
                 components->GetTag("minecraft:custom_name"))) {

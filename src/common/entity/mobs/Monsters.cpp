@@ -2,6 +2,8 @@
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/world/level/Explosion.hpp"
 #include "common/entity/EntityLevel.hpp"
+#include "common/entity/EndCrystal.hpp"
+#include "common/entity/DragonFight.hpp"
 #include "common/entity/ai/goals/BasicGoals.hpp"
 #include "common/entity/ai/goals/AttackGoals.hpp"
 #include "common/entity/ai/goals/RangedGoals.hpp"
@@ -3577,6 +3579,7 @@ namespace Game {
             }
 
             void DoServerTick() override;
+            void OnCrystalDestroyed(Entity* player) override;
 
         private:
             void FindNewTarget();
@@ -3699,6 +3702,168 @@ namespace Game {
             int  m_timeSinceCharge = 0;
         };
 
+        // ── The perch cycle (MC LandingApproach → Landing → SittingScanning
+        //    → SittingAttacking → SittingFlaming ×4 → Takeoff) ──────────────
+
+        class DragonLandingApproachPhase : public DragonPhaseInstance {
+        public:
+            using DragonPhaseInstance::DragonPhaseInstance;
+
+            DragonPhase GetPhase() const override {
+                return DragonPhase::LandingApproach;
+            }
+
+            void Begin() override {
+                m_hasPath = false;
+                m_hasTarget = false;
+            }
+
+            bool GetFlyTargetLocation(glm::dvec3& out) const override {
+                out = m_targetLocation;
+                return m_hasTarget;
+            }
+
+            void DoServerTick() override;
+
+        private:
+            void FindNewTarget();
+            void NavigateToNextPathNode();
+
+            EnderDragon::FlightPath m_currentPath;
+            bool       m_hasPath = false;
+            glm::dvec3 m_targetLocation{0.0};
+            bool       m_hasTarget = false;
+        };
+
+        class DragonLandingPhase : public DragonPhaseInstance {
+        public:
+            using DragonPhaseInstance::DragonPhaseInstance;
+
+            DragonPhase GetPhase() const override { return DragonPhase::Landing; }
+
+            void Begin() override { m_hasTarget = false; }
+
+            float GetFlySpeed() const override { return 1.5f; }
+
+            float GetTurnSpeed() const override {
+                // MC DragonLandingPhase.getTurnSpeed — min(speed, 40) / speed,
+                // much sharper than the cruising default.
+                const double hx = m_dragon->velocity.x;
+                const double hz = m_dragon->velocity.z;
+                const float rotSpeed =
+                    static_cast<float>(std::sqrt(hx * hx + hz * hz)) + 1.0f;
+                return std::min(rotSpeed, 40.0f) / rotSpeed;
+            }
+
+            bool GetFlyTargetLocation(glm::dvec3& out) const override {
+                out = m_targetLocation;
+                return m_hasTarget;
+            }
+
+            void DoServerTick() override;
+
+        private:
+            glm::dvec3 m_targetLocation{0.0};
+            bool m_hasTarget = false;
+        };
+
+        // MC AbstractDragonSittingPhase.onHurt: an arrow or wind charge
+        // hitting a perched dragon deals nothing and is set on fire for a
+        // second; every other source (a sword, an explosion) goes through.
+        class AbstractDragonSittingPhase : public DragonPhaseInstance {
+        public:
+            using DragonPhaseInstance::DragonPhaseInstance;
+
+            bool IsSitting() const override { return true; }
+
+            float OnHurt(MobDamageSource source, float damage,
+                         Entity* direct) override {
+                if (dynamic_cast<Arrow*>(direct) ||
+                    dynamic_cast<AbstractWindCharge*>(direct)) {
+                    direct->IgniteForSeconds(1);
+                    return 0.0f;
+                }
+                return DragonPhaseInstance::OnHurt(source, damage, direct);
+            }
+        };
+
+        class DragonSittingFlamingPhase : public AbstractDragonSittingPhase {
+        public:
+            using AbstractDragonSittingPhase::AbstractDragonSittingPhase;
+
+            static constexpr int kFlameDuration = 200;             // MC
+            static constexpr int kSittingFlameAttacksCount = 4;    // MC
+            static constexpr int kWarmupTime = 10;                 // MC
+
+            DragonPhase GetPhase() const override {
+                return DragonPhase::SittingFlaming;
+            }
+
+            void Begin() override {
+                m_flameTicks = 0;
+                ++m_flameCount;
+            }
+
+            void End() override;
+            void DoServerTick() override;
+
+            void ResetFlameCount() { m_flameCount = 0; }
+
+            void ClearReferenceTo(const Entity* entity) override {
+                if (m_flame == entity) m_flame = nullptr;
+            }
+
+        private:
+            int m_flameTicks = 0;
+            int m_flameCount = 0;
+            AreaEffectCloud* m_flame = nullptr;
+        };
+
+        class DragonSittingScanningPhase : public AbstractDragonSittingPhase {
+        public:
+            using AbstractDragonSittingPhase::AbstractDragonSittingPhase;
+
+            static constexpr int kSittingScanningIdleTicks = 100;  // MC
+            static constexpr int kSittingAttackYViewRange = 10;    // MC
+            static constexpr int kSittingAttackViewRange = 20;     // MC
+            static constexpr int kSittingChargeViewRange = 150;    // MC
+
+            DragonPhase GetPhase() const override {
+                return DragonPhase::SittingScanning;
+            }
+
+            void Begin() override { m_scanningTime = 0; }
+
+            void DoServerTick() override;
+
+        private:
+            int m_scanningTime = 0;
+        };
+
+        class DragonSittingAttackingPhase : public AbstractDragonSittingPhase {
+        public:
+            using AbstractDragonSittingPhase::AbstractDragonSittingPhase;
+
+            static constexpr int kRoarDuration = 40;   // MC
+
+            DragonPhase GetPhase() const override {
+                return DragonPhase::SittingAttacking;
+            }
+
+            void Begin() override { m_attackingTicks = 0; }
+
+            void DoServerTick() override {
+                // MC: 40 ticks of roar (the sound is doClientTick's — no
+                // sound system), then the flame breath.
+                if (m_attackingTicks++ >= kRoarDuration) {
+                    m_dragon->SetPhase(DragonPhase::SittingFlaming);
+                }
+            }
+
+        private:
+            int m_attackingTicks = 0;
+        };
+
         class DragonDeathPhase : public DragonPhaseInstance {
         public:
             using DragonPhaseInstance::DragonPhaseInstance;
@@ -3772,12 +3937,16 @@ namespace Game {
             JavaRandom& rng = level->Random();
 
             if (m_hasPath && m_currentPath.IsDone()) {
-                // MC: crystalsAlive is 0 with no dragon fight.
+                // MC: crystalsAlive from the dragon fight (0 without one).
+                IDragonFight* fight = level->DragonFight();
+                const int crystals = fight ? fight->CrystalsAlive() : 0;
+
                 // MC rand(crystals + 3) == 0 → LANDING_APPROACH: the perch
-                // cycle, SKIPPED (no podium / sitting phases) — the roll is
-                // drawn so the RNG stream keeps MC's shape, and the dragon
-                // circles on instead of landing.
-                (void)rng.NextInt(3);
+                // cycle. More standing crystals = rarer landings.
+                if (rng.NextInt(crystals + 3) == 0) {
+                    m_dragon->SetPhase(DragonPhase::LandingApproach);
+                    return;
+                }
 
                 // MC: the player nearest the podium decides the strafe odds.
                 const glm::ivec3 egg = m_dragon->GetPodiumPos();
@@ -3802,7 +3971,7 @@ namespace Game {
 
                 if (player != nullptr &&
                     (rng.NextInt(static_cast<int>(distSqr + 2.0)) == 0 ||
-                     rng.NextInt(/*crystals + 2*/ 2) == 0)) {
+                     rng.NextInt(crystals + 2) == 0)) {
                     // MC strafePlayer(player).
                     m_dragon->SetPhase(DragonPhase::StrafePlayer);
                     static_cast<DragonStrafePlayerPhase&>(
@@ -3822,11 +3991,17 @@ namespace Game {
                 if (m_clockwise) ++targetNodeIndex;
                 else --targetNodeIndex;
 
-                // MC: with a dragon fight and crystals the outer ring (%12);
-                // without one — this port's always — the inner 8-ring:
-                targetNodeIndex -= 12;
-                targetNodeIndex &= 7;
-                targetNodeIndex += 12;
+                // MC: with a dragon fight, the outer 12-ring (the crystals-
+                // alive check reads `>= 0`, i.e. always); without one, the
+                // inner 8-ring — a summoned dragon circles tight.
+                if (m_dragon->Level() && m_dragon->Level()->DragonFight()) {
+                    targetNodeIndex %= 12;
+                    if (targetNodeIndex < 0) targetNodeIndex += 12;
+                } else {
+                    targetNodeIndex -= 12;
+                    targetNodeIndex &= 7;
+                    targetNodeIndex += 12;
+                }
 
                 m_hasPath = m_dragon->FindPath(currentNodeIndex, targetNodeIndex,
                                                nullptr, m_currentPath);
@@ -3836,6 +4011,17 @@ namespace Game {
             }
 
             NavigateToNextPathNode();
+        }
+
+        void DragonHoldingPatternPhase::OnCrystalDestroyed(Entity* player) {
+            // MC: strafe whoever popped the crystal.
+            auto* living = dynamic_cast<LivingEntity*>(player);
+            if (living != nullptr && living->IsAttackable()) {
+                m_dragon->SetPhase(DragonPhase::StrafePlayer);
+                static_cast<DragonStrafePlayerPhase&>(
+                    m_dragon->GetPhaseInstance(DragonPhase::StrafePlayer))
+                    .SetTarget(living);
+            }
         }
 
         void DragonHoldingPatternPhase::NavigateToNextPathNode() {
@@ -3993,10 +4179,16 @@ namespace Game {
                 if (m_holdingPatternClockwise) ++targetNodeIndex;
                 else --targetNodeIndex;
 
-                // No dragon fight → MC's inner-ring branch.
-                targetNodeIndex -= 12;
-                targetNodeIndex &= 7;
-                targetNodeIndex += 12;
+                // MC: outer 12-ring while crystals stand, inner 8-ring after.
+                IDragonFight* fight = level->DragonFight();
+                if (fight != nullptr && fight->CrystalsAlive() > 0) {
+                    targetNodeIndex %= 12;
+                    if (targetNodeIndex < 0) targetNodeIndex += 12;
+                } else {
+                    targetNodeIndex -= 12;
+                    targetNodeIndex &= 7;
+                    targetNodeIndex += 12;
+                }
 
                 m_hasPath = m_dragon->FindPath(currentNodeIndex, targetNodeIndex,
                                                nullptr, m_currentPath);
@@ -4052,10 +4244,17 @@ namespace Game {
                 origin.x - look.x * 40.0, origin.y + 30.0,
                 origin.z - look.z * 40.0);
 
-            // No dragon fight → MC's inner-ring branch.
-            targetNodeIndex -= 12;
-            targetNodeIndex &= 7;
-            targetNodeIndex += 12;
+            // MC: outer 12-ring while crystals stand, inner 8-ring after.
+            IDragonFight* fight =
+                m_dragon->Level() ? m_dragon->Level()->DragonFight() : nullptr;
+            if (fight != nullptr && fight->CrystalsAlive() > 0) {
+                targetNodeIndex %= 12;
+                if (targetNodeIndex < 0) targetNodeIndex += 12;
+            } else {
+                targetNodeIndex -= 12;
+                targetNodeIndex &= 7;
+                targetNodeIndex += 12;
+            }
 
             m_hasPath = m_dragon->FindPath(currentNodeIndex, targetNodeIndex,
                                            nullptr, m_currentPath);
@@ -4105,6 +4304,252 @@ namespace Game {
             }
         }
 
+        // ── DragonLandingApproachPhase ─────────────────────────────────────
+
+        void DragonLandingApproachPhase::DoServerTick() {
+            // MC DragonLandingApproachPhase.doServerTick.
+            const double distToTarget =
+                !m_hasTarget ? 0.0
+                             : glm::dot(m_targetLocation - m_dragon->position,
+                                        m_targetLocation - m_dragon->position);
+            if (distToTarget < 100.0 || distToTarget > 22500.0 ||
+                m_dragon->horizontalCollision || m_dragon->verticalCollision) {
+                FindNewTarget();
+            }
+        }
+
+        void DragonLandingApproachPhase::FindNewTarget() {
+            // MC findNewTarget: path to the node OPPOSITE the player nearest
+            // the podium (so the dragon lands facing them), finished with a
+            // final node on the podium itself; arrival hands over to LANDING.
+            EntityLevel* level = m_dragon->Level();
+            if (!level) return;
+
+            if (!m_hasPath || m_currentPath.IsDone()) {
+                const int currentNodeIndex = m_dragon->FindClosestNode();
+                const glm::ivec3 egg = m_dragon->GetPodiumPos();
+                LivingEntity* player = level->GetNearestPlayer(
+                    egg.x + 0.5, egg.y + 0.5, egg.z + 0.5, -1.0);
+                if (player && !player->IsAttackable()) player = nullptr;
+
+                const glm::ivec3& origin = m_dragon->GetFightOrigin();
+                int targetNodeIndex;
+                if (player != nullptr) {
+                    // MC: findClosestNode(-aim.x*40, 105, -aim.z*40) with aim
+                    // the player's NORMALISED ABSOLUTE position — vanilla's
+                    // own quirk (not the direction from the podium). Origin-
+                    // relative here, matching the node graph's anchoring; MC's
+                    // y=105 is origin.y+105 with the fight's origin at 0.
+                    const glm::dvec3 aim = SafeNormalize(glm::dvec3(
+                        player->position.x, 0.0, player->position.z));
+                    targetNodeIndex = m_dragon->FindClosestNode(
+                        origin.x - aim.x * 40.0, origin.y + 105.0,
+                        origin.z - aim.z * 40.0);
+                } else {
+                    targetNodeIndex = m_dragon->FindClosestNode(
+                        origin.x + 40.0, static_cast<double>(egg.y),
+                        origin.z + 0.0);
+                }
+
+                const glm::ivec3 finalNode(egg.x, egg.y, egg.z);
+                m_hasPath = m_dragon->FindPath(currentNodeIndex, targetNodeIndex,
+                                               &finalNode, m_currentPath);
+                if (m_hasPath) m_currentPath.Advance();
+            }
+
+            NavigateToNextPathNode();
+            if (m_hasPath && m_currentPath.IsDone()) {
+                m_dragon->SetPhase(DragonPhase::Landing);
+            }
+        }
+
+        void DragonLandingApproachPhase::NavigateToNextPathNode() {
+            if (m_hasPath && !m_currentPath.IsDone()) {
+                const glm::ivec3 current = m_currentPath.NextNodePos();
+                m_currentPath.Advance();
+
+                JavaRandom& rng = m_dragon->Level()->Random();
+                double yTarget;
+                do {
+                    yTarget = static_cast<double>(
+                        static_cast<float>(current.y) + rng.NextFloat() * 20.0f);
+                } while (yTarget < static_cast<double>(current.y));
+
+                m_targetLocation = glm::dvec3(current.x, yTarget, current.z);
+                m_hasTarget = true;
+            }
+        }
+
+        // ── DragonLandingPhase ─────────────────────────────────────────────
+
+        void DragonLandingPhase::DoServerTick() {
+            // MC DragonLandingPhase.doServerTick: dive at the podium surface;
+            // within 1 block, reset the flame budget and start scanning.
+            // (doClientTick's dragon-breath spray from the head — client
+            // particles, see MobParticleSystem's dragon hook.)
+            if (!m_hasTarget) {
+                const glm::ivec3 egg = m_dragon->GetPodiumPos();
+                m_targetLocation = glm::dvec3(egg.x + 0.5, egg.y, egg.z + 0.5);
+                m_hasTarget = true;
+            }
+
+            const double distToTarget =
+                glm::dot(m_targetLocation - m_dragon->position,
+                         m_targetLocation - m_dragon->position);
+            if (distToTarget < 1.0) {
+                static_cast<DragonSittingFlamingPhase&>(
+                    m_dragon->GetPhaseInstance(DragonPhase::SittingFlaming))
+                    .ResetFlameCount();
+                m_dragon->SetPhase(DragonPhase::SittingScanning);
+            }
+        }
+
+        // ── DragonSittingFlamingPhase ──────────────────────────────────────
+
+        void DragonSittingFlamingPhase::End() {
+            // MC end(): the cloud dies with the phase.
+            if (m_flame != nullptr) {
+                m_flame->Discard();
+                m_flame = nullptr;
+            }
+        }
+
+        void DragonSittingFlamingPhase::DoServerTick() {
+            // MC DragonSittingFlamingPhase.doServerTick, transcribed.
+            EntityLevel* level = m_dragon->Level();
+            if (!level) return;
+
+            ++m_flameTicks;
+            if (m_flameTicks >= kFlameDuration) {
+                if (m_flameCount >= kSittingFlameAttacksCount) {
+                    m_dragon->SetPhase(DragonPhase::Takeoff);
+                } else {
+                    m_dragon->SetPhase(DragonPhase::SittingScanning);
+                }
+                return;
+            }
+            if (m_flameTicks != kWarmupTime) return;
+
+            // The breath pools 2.5 blocks ahead of the head, dropped to the
+            // first solid block below.
+            const glm::dvec3 head = m_dragon->GetHeadPosition();
+            const glm::dvec3 look = SafeNormalize(glm::dvec3(
+                head.x - m_dragon->position.x, 0.0,
+                head.z - m_dragon->position.z));
+            const double x = head.x + look.x * 5.0 / 2.0;
+            const double z = head.z + look.z * 5.0 / 2.0;
+            const double initialY = head.y + 0.5;
+            double y = initialY;
+            if (const IBlockAccess* blocks = level->Blocks()) {
+                glm::ivec3 pos(static_cast<int>(std::floor(x)),
+                               static_cast<int>(std::floor(initialY)),
+                               static_cast<int>(std::floor(z)));
+                while (blocks->GetBlock(pos.x, pos.y, pos.z) == BlockID::Air) {
+                    --y;
+                    if (y < 0.0) {
+                        y = initialY;
+                        break;
+                    }
+                    pos.y = static_cast<int>(std::floor(y));
+                }
+            }
+            y = static_cast<double>(static_cast<int>(std::floor(y)) + 1);
+
+            auto flame = std::make_unique<AreaEffectCloud>(level);
+            flame->position = glm::dvec3(x, y, z);
+            flame->SetOwner(m_dragon);
+            // MC: setCustomParticle(DRAGON_BREATH) — the cloud's client
+            // mirror renders dragon breath for a dragon owner.
+            flame->SetRadius(5.0f);
+            flame->SetDuration(kFlameDuration);
+            flame->SetPotionDurationScale(0.25f);
+            flame->AddCloudEffect(
+                MobEffectInstance(MobEffectId::InstantDamage, 1, 0));
+            m_flame = flame.get();
+            level->AddFreshEntity(std::move(flame));
+        }
+
+        // ── DragonSittingScanningPhase ─────────────────────────────────────
+
+        void DragonSittingScanningPhase::DoServerTick() {
+            // MC DragonSittingScanningPhase.doServerTick, transcribed.
+            EntityLevel* level = m_dragon->Level();
+            if (!level) return;
+
+            ++m_scanningTime;
+
+            // MC scanTargeting: range 20, |dy| <= 10 relative to the dragon.
+            LivingEntity* attackTarget = level->GetNearestPlayer(
+                m_dragon->position.x, m_dragon->position.y, m_dragon->position.z,
+                static_cast<double>(kSittingAttackViewRange));
+            if (attackTarget &&
+                (!attackTarget->IsAttackable() ||
+                 std::abs(attackTarget->position.y - m_dragon->position.y) >
+                     static_cast<double>(kSittingAttackYViewRange))) {
+                attackTarget = nullptr;
+            }
+
+            if (attackTarget != nullptr) {
+                if (m_scanningTime > 25) {
+                    m_dragon->SetPhase(DragonPhase::SittingAttacking);
+                    return;
+                }
+                // Turn the head-facing toward the player when off by > 10°.
+                const glm::dvec3 aim = SafeNormalize(glm::dvec3(
+                    attackTarget->position.x - m_dragon->position.x, 0.0,
+                    attackTarget->position.z - m_dragon->position.z));
+                const float yRotRad = m_dragon->yRot * Mth::kDegToRad;
+                const glm::dvec3 dir = SafeNormalize(glm::dvec3(
+                    std::sin(yRotRad), 0.0, -std::cos(yRotRad)));
+                const float dot = static_cast<float>(glm::dot(dir, aim));
+                const float angle =
+                    std::acos(Mth::Clamp(dot, -1.0f, 1.0f)) * Mth::kRadToDeg +
+                    0.5f;
+                if (angle < 0.0f || angle > 10.0f) {
+                    const glm::dvec3 head = m_dragon->GetHeadPosition();
+                    const double xAttackDist = attackTarget->position.x - head.x;
+                    const double zAttackDist = attackTarget->position.z - head.z;
+                    const double yRotDelta = Mth::Clamp(
+                        static_cast<double>(Mth::WrapDegrees(
+                            180.0f -
+                            static_cast<float>(std::atan2(xAttackDist,
+                                                          zAttackDist)) *
+                                Mth::kRadToDeg -
+                            m_dragon->yRot)),
+                        -100.0, 100.0);
+                    m_dragon->yRotA *= 0.8f;
+                    float dist = static_cast<float>(std::sqrt(
+                                     xAttackDist * xAttackDist +
+                                     zAttackDist * zAttackDist)) +
+                                 1.0f;
+                    const float rotSpeed = dist;
+                    if (dist > 40.0f) dist = 40.0f;
+                    m_dragon->yRotA +=
+                        static_cast<float>(yRotDelta) * (0.7f / dist / rotSpeed);
+                    m_dragon->yRot += m_dragon->yRotA;
+                }
+                return;
+            }
+
+            if (m_scanningTime >= kSittingScanningIdleTicks) {
+                // MC: nobody close — take off, or CHARGE anyone within 150.
+                LivingEntity* chargeTarget = level->GetNearestPlayer(
+                    m_dragon->position.x, m_dragon->position.y,
+                    m_dragon->position.z,
+                    static_cast<double>(kSittingChargeViewRange));
+                if (chargeTarget && !chargeTarget->IsAttackable()) {
+                    chargeTarget = nullptr;
+                }
+                m_dragon->SetPhase(DragonPhase::Takeoff);
+                if (chargeTarget != nullptr) {
+                    m_dragon->SetPhase(DragonPhase::ChargingPlayer);
+                    static_cast<DragonChargePlayerPhase&>(
+                        m_dragon->GetPhaseInstance(DragonPhase::ChargingPlayer))
+                        .SetTarget(chargeTarget->position);
+                }
+            }
+        }
+
         // ── DragonDeathPhase ───────────────────────────────────────────────
 
         void DragonDeathPhase::DoServerTick() {
@@ -4125,9 +4570,10 @@ namespace Game {
                 !m_dragon->horizontalCollision && !m_dragon->verticalCollision) {
                 m_dragon->SetHealth(1.0f);
             } else {
+                // Arrival (or a wall): health to 0 and the 200-tick death
+                // cinematic takes over — EnderDragon::TickDeath (float-up,
+                // XP shower, setDragonKilled at tick 200).
                 m_dragon->SetHealth(0.0f);
-                // MC's 200-tick death cinematic (float-up, rays, XP shower)
-                // is skipped — the standard death path stands in.
                 m_dragon->Die(MobDamageSource::Generic, nullptr);
             }
         }
@@ -4190,6 +4636,21 @@ namespace Game {
                 case DragonPhase::ChargingPlayer:
                     slot = std::make_unique<DragonChargePlayerPhase>(this);
                     break;
+                case DragonPhase::LandingApproach:
+                    slot = std::make_unique<DragonLandingApproachPhase>(this);
+                    break;
+                case DragonPhase::Landing:
+                    slot = std::make_unique<DragonLandingPhase>(this);
+                    break;
+                case DragonPhase::SittingFlaming:
+                    slot = std::make_unique<DragonSittingFlamingPhase>(this);
+                    break;
+                case DragonPhase::SittingScanning:
+                    slot = std::make_unique<DragonSittingScanningPhase>(this);
+                    break;
+                case DragonPhase::SittingAttacking:
+                    slot = std::make_unique<DragonSittingAttackingPhase>(this);
+                    break;
                 case DragonPhase::Dying:
                     slot = std::make_unique<DragonDeathPhase>(this);
                     break;
@@ -4197,9 +4658,8 @@ namespace Game {
                     slot = std::make_unique<DragonHoverPhase>(this);
                     break;
                 default:
-                    // The perch cycle (LandingApproach/Landing/Sitting*) is
-                    // unported; MC's getById falls back to HOLDING_PATTERN
-                    // for an unknown id and so does this.
+                    // MC's getById falls back to HOLDING_PATTERN for an
+                    // unknown id and so does this.
                     slot = std::make_unique<DragonHoldingPatternPhase>(this);
                     break;
             }
@@ -4234,10 +4694,10 @@ namespace Game {
     void EnderDragon::EnsureNodes() {
         // MC EnderDragon.findClosestNode's lazy node build — 12 outer nodes
         // at r=60, 8 middle at r=40 (+10 height), 4 inner at r=20, each at
-        // the surface plus the adjustment. DEVIATION (class comment): MC's
-        // coordinates are absolute around the End's 0,0 with a y floor of 73
-        // (the island top); here they centre on the fight origin and floor at
-        // its height, so the ring follows the dragon's spawn point.
+        // the surface plus the adjustment. Coordinates are ABSOLUTE around
+        // the world's 0,0 with a y floor of 73 — MC does not centre the ring
+        // on the fight origin (only the perch podium follows fightOrigin), so
+        // a /summon'ed dragon flies the same ring vanilla's would.
         if (m_nodesBuilt) return;
         m_nodesBuilt = true;
 
@@ -4272,11 +4732,16 @@ namespace Game {
                                              static_cast<float>(multiplier)))));
             }
 
-            nodeX += m_fightOrigin.x;
-            nodeZ += m_fightOrigin.z;
             const int surfaceY =
-                blocks ? MotionBlockingY(*blocks, nodeX, nodeZ) : m_fightOrigin.y;
-            const int nodeY = std::max(m_fightOrigin.y, surfaceY + yAdjustment);
+                blocks ? MotionBlockingY(*blocks, nodeX, nodeZ) : 0;
+            // MC: `Math.max(73, heightmap + adjustment)` — and that absolute
+            // floor is load-bearing here too: a column sampled while its
+            // chunk was still streaming reads as empty, and without the
+            // floor a node latched from that reading sat at the void floor,
+            // where the dragon flew DOWN into the island's underside, could
+            // not carve through END STONE (dragon-immune), and hung there
+            // pinned forever.
+            const int nodeY = std::max(73, surfaceY + yAdjustment);
             m_nodes[i] = glm::ivec3(nodeX, nodeY, nodeZ);
         }
     }
@@ -4286,15 +4751,19 @@ namespace Game {
     }
 
     int EnderDragon::FindClosestNode(double tX, double tY, double tZ) {
-        // MC findClosestNode(x, y, z). With no dragon fight the search starts
-        // at the inner nodes (index 12), exactly MC's crystals-gone branch.
+        // MC findClosestNode(x, y, z): the outer ring only counts while the
+        // fight has crystals alive; without a fight — or with every crystal
+        // popped — the search starts at the inner nodes (index 12).
         EnsureNodes();
         float closestDist = 10000.0f;
         int closestIndex = 0;
         const glm::ivec3 currentPos(static_cast<int>(std::floor(tX)),
                                     static_cast<int>(std::floor(tY)),
                                     static_cast<int>(std::floor(tZ)));
-        for (int i = 12; i < 24; ++i) {
+        IDragonFight* fight = Fight();
+        const int startIndex =
+            (fight == nullptr || fight->CrystalsAlive() == 0) ? 12 : 0;
+        for (int i = startIndex; i < 24; ++i) {
             const glm::ivec3 d = m_nodes[i] - currentPos;
             const float dist = static_cast<float>(d.x) * d.x +
                                static_cast<float>(d.y) * d.y +
@@ -4357,8 +4826,10 @@ namespace Game {
         nodes[from].inOpen = true;
 
         int closest = from;
-        // MC minimumNodeIndex: 12 with no crystals (always, here).
-        constexpr int kMinimumNodeIndex = 12;
+        // MC minimumNodeIndex: 0 while the fight has crystals, 12 after.
+        IDragonFight* fight = Fight();
+        const int kMinimumNodeIndex =
+            (fight == nullptr || fight->CrystalsAlive() == 0) ? 12 : 0;
 
         for (;;) {
             // Pop the open node with the smallest f.
@@ -4475,13 +4946,15 @@ namespace Game {
 
         oFlapTime = flapTime;
         if (IsDeadOrDying()) {
-            // MC: random explosion particles around the corpse — no particle
-            // system. (tickDeath's +0.1/tick float and the 200-tick timer are
-            // the skipped death cinematic; the standard 20-tick death runs.)
+            // MC: random explosion particles around the corpse — the client's
+            // renderer keys them off the synced deathTime. The float-up, XP
+            // shower and fight hand-off run in TickDeath (via BaseTick).
             return;
         }
 
-        // MC checkCrystals — crystal healing SKIPPED: no EndCrystal entity.
+        // MC checkCrystals — both sides: the server heals off the nearest
+        // crystal, the client keeps its own pointer for the beam renderer.
+        CheckCrystals();
 
         // The flap clock. The server measures real velocity; the client copy
         // is position-synced, so it measures its own per-tick displacement.
@@ -4645,7 +5118,115 @@ namespace Game {
             const bool b = CheckWalls(PartBox(neck, 3.0f, 3.0f));
             const bool c = CheckWalls(bodyBox);
             inWall = a || b || c;
-            // MC dragonFight.updateDragon — no End fight layer.
+            // MC dragonFight.updateDragon — health onto the boss bar, the
+            // dragon-seen timer reset.
+            if (IDragonFight* fight = Fight()) fight->UpdateDragon(*this);
+        }
+    }
+
+    IDragonFight* EnderDragon::Fight() const {
+        // MC level.getDragonFight() — null on the client and outside the End.
+        return m_level ? m_level->DragonFight() : nullptr;
+    }
+
+    void EnderDragon::CheckCrystals() {
+        // MC EnderDragon.checkCrystals, transcribed. Both sides run it (the
+        // client's mirror scans its own entity set for the beam renderer);
+        // only the server writes health.
+        if (nearestCrystal != nullptr) {
+            if (nearestCrystal->IsRemoved()) {
+                nearestCrystal = nullptr;
+            } else if (tickCount % 10 == 0 && GetHealth() < GetMaxHealth() &&
+                       m_level && !m_level->IsClientSide()) {
+                SetHealth(GetHealth() + 1.0f);
+            }
+        }
+
+        if (m_level && m_level->Random().NextInt(10) == 0) {
+            AABB box = GetAABB();
+            box.min -= glm::vec3(32.0f);
+            box.max += glm::vec3(32.0f);
+            std::vector<Entity*> nearby;
+            m_level->GetEntitiesInBox(box, this, nearby);
+
+            EndCrystal* nearest = nullptr;
+            double bestDist = std::numeric_limits<double>::max();
+            for (Entity* e : nearby) {
+                auto* crystal = dynamic_cast<EndCrystal*>(e);
+                if (!crystal || crystal->IsRemoved()) continue;
+                const double dist = DistanceToSqr(*crystal);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    nearest = crystal;
+                }
+            }
+            nearestCrystal = nearest;
+        }
+    }
+
+    void EnderDragon::OnCrystalDestroyed(EndCrystal& crystal, Entity* player) {
+        // MC EnderDragon.onCrystalDestroyed. With no player on the damage
+        // source, MC blames the nearest player within 64 of the crystal.
+        if (player == nullptr && m_level) {
+            LivingEntity* nearest = m_level->GetNearestPlayer(
+                crystal.position.x, crystal.position.y, crystal.position.z,
+                64.0);
+            if (nearest && nearest->IsAttackable()) player = nearest;
+        }
+
+        if (&crystal == nearestCrystal) {
+            // MC: hurt(head, damageSources().explosion(crystal, player), 10) —
+            // a HEAD hit, so no body-part damage reduction.
+            HurtPart(MobDamageSource::Explosion, 10.0f, player,
+                     /*headHit=*/true);
+        }
+
+        if (m_currentPhase) m_currentPhase->OnCrystalDestroyed(player);
+    }
+
+    void EnderDragon::TickDeath() {
+        // MC EnderDragon.tickDeath — REPLACES the 20-tick fall-over with the
+        // 200-tick cinematic. deathTime rides the ordinary SetEntityData sync
+        // (200 fits its byte), so the client's copy drives the white fade and
+        // the death rays at the same clock.
+        IDragonFight* fight = Fight();
+        if (fight) fight->UpdateDragon(*this);
+
+        ++deathTime;
+
+        // MC: 12,000 on a world's first kill, 500 on every respawned kill.
+        int xpCount = 500;
+        if (fight != nullptr && !fight->HasPreviouslyKilledDragon()) {
+            xpCount = 12000;
+        }
+
+        const bool clientSide = m_level && m_level->IsClientSide();
+        if (!clientSide && m_level) {
+            // MC: 8% of the total every 5 ticks from tick 151 (10 bursts),
+            // the remaining 20% with the removal at tick 200.
+            if (deathTime > 150 && deathTime % 5 == 0) {
+                m_level->AwardExperience(
+                    position,
+                    static_cast<int>(std::floor(
+                        static_cast<float>(xpCount) * 0.08f)),
+                    LastHurtByPlayerId());
+            }
+            // MC deathTime == 1: globalLevelEvent 1028, the world-wide death
+            // roar — sound system pending (Game::PlaySound is a stub).
+        }
+
+        // MC: move(SELF, (0, 0.1, 0)) — the corpse floats up as it burns out.
+        Move(glm::dvec3(0.0, 0.1, 0.0));
+
+        if (deathTime >= 200 && !clientSide && m_level && !IsRemoved()) {
+            m_level->AwardExperience(
+                position,
+                static_cast<int>(std::floor(static_cast<float>(xpCount) * 0.2f)),
+                LastHurtByPlayerId());
+            // MC setDragonKilled: the exit portal activates, a gateway
+            // spawns, the egg on a first kill.
+            if (fight) fight->SetDragonKilled(*this);
+            Remove(RemovalReason::Killed);
         }
     }
 
@@ -4737,19 +5318,29 @@ namespace Game {
 
     bool EnderDragon::Hurt(MobDamageSource source, float amount,
                            Entity* attacker) {
-        // MC EnderDragon.hurt(part, source, damage) with part == body always
-        // (multipart hitboxes skipped) — so every hit takes the non-head
-        // reduction, which is also what MC's plain hurtServer routes to.
+        // MC EnderDragon.hurtServer routes through the BODY part; the crystal
+        // path (OnCrystalDestroyed) routes through the HEAD. For a melee hit
+        // the direct entity IS the attacker (MC's getDirectEntity() for a
+        // player swing); projectiles bypass this and call HurtPart with
+        // themselves as `direct`.
+        return HurtPart(source, amount, attacker, /*headHit=*/false, attacker);
+    }
+
+    bool EnderDragon::HurtPart(MobDamageSource source, float amount,
+                               Entity* attacker, bool headHit, Entity* direct) {
+        // MC EnderDragon.hurt(part, source, damage). A body hit takes the
+        // non-head reduction; a head hit takes full damage.
         if (!m_level || m_level->IsClientSide()) return false;
         if (GetPhase() == DragonPhase::Dying) return false;
 
-        if (m_currentPhase) amount = m_currentPhase->OnHurt(amount);
-        amount = amount / 4.0f + std::min(amount, 1.0f);
+        if (m_currentPhase) amount = m_currentPhase->OnHurt(source, amount, direct);
+        if (!headHit) amount = amount / 4.0f + std::min(amount, 1.0f);
         if (amount < 0.01f) return false;
 
-        // MC: only players (and ALWAYS_HURTS_ENDER_DRAGONS — end-crystal
-        // explosions, which do not exist here) actually damage the dragon.
-        if (attacker != nullptr && attacker->IsPlayer()) {
+        // MC: only players and ALWAYS_HURTS_ENDER_DRAGONS (the explosion
+        // damage types — end crystals, TNT, beds) actually damage the dragon.
+        if ((attacker != nullptr && attacker->IsPlayer()) ||
+            source == MobDamageSource::Explosion) {
             const float healthBefore = GetHealth();
             // MC reallyHurt == super.hurtServer; the DYING pin on a lethal
             // hit lives in the Die override below.
@@ -4780,6 +5371,79 @@ namespace Game {
         Mob::Die(source, attacker);
     }
 
+    void EnderDragon::ComputePartBoxes(AABB out[kDragonPartCount]) const {
+        // MC aiStep's tickPart layout, verbatim — the same math the wing
+        // sweeps and the head bite already rebuild, gathered here so the pick
+        // paths and the sweeps agree on where the dragon actually is. Runs on
+        // BOTH sides: everything read (position, yRot, yRotA, the flight
+        // history) is recorded on the client mirror too.
+        const float tilt =
+            static_cast<float>(flightHistory.Get(5).y - flightHistory.Get(10).y) *
+            10.0f * Mth::kDegToRad;
+        const float ccTilt = std::cos(tilt);
+        const float ssTilt = std::sin(tilt);
+        const float rot1 = yRot * Mth::kDegToRad;
+        const float ss1 = std::sin(rot1);
+        const float cc1 = std::cos(rot1);
+
+        // Head (1x1) and neck (3x3) — 6.5 and 5.5 along the corrected facing.
+        const glm::dvec3 head = GetHeadPosition();
+        const glm::dvec3 neck = position + (head - position) * (5.5 / 6.5);
+        out[kDragonPartHead] = PartBox(head, 1.0f, 1.0f);
+        out[1] = PartBox(neck, 3.0f, 3.0f);
+
+        // Body (5x3), half a block behind centre.
+        out[2] = PartBox(position + glm::dvec3(ss1 * 0.5, 0.0, -cc1 * 0.5),
+                         5.0f, 3.0f);
+
+        // Tails (2x2 x3) — MC tickPart(tailN, ...) with the history samples.
+        const DragonFlightHistory::Sample p1 = flightHistory.Get(5);
+        for (int i = 0; i < 3; ++i) {
+            const DragonFlightHistory::Sample p0 = flightHistory.Get(12 + i * 2);
+            const float rot = yRot * Mth::kDegToRad +
+                              Mth::WrapDegrees(static_cast<float>(
+                                  p0.yRot - p1.yRot)) * Mth::kDegToRad;
+            const float ss = std::sin(rot);
+            const float cc = std::cos(rot);
+            const float dd = static_cast<float>(i + 1) * 2.0f;
+            out[3 + i] = PartBox(
+                position + glm::dvec3(-(ss1 * 1.5f + ss * dd) * ccTilt,
+                                      p0.y - p1.y - (dd + 1.5f) * ssTilt + 1.5f,
+                                      (cc1 * 1.5f + cc * dd) * ccTilt),
+                2.0f, 2.0f);
+        }
+
+        // Wings (4x2 x2).
+        out[6] = PartBox(position + glm::dvec3(cc1 * 4.5, 2.0, ss1 * 4.5),
+                         4.0f, 2.0f);
+        out[7] = PartBox(position + glm::dvec3(cc1 * -4.5, 2.0, ss1 * -4.5),
+                         4.0f, 2.0f);
+    }
+
+    void EnderDragon::KillFromCommand() {
+        // DELIBERATE DIVERGENCE from MC EnderDragon.kill(ServerLevel), which
+        // removes instantly (no dive, no XP — tickDeath never runs there).
+        // Requested behaviour: /kill plays the whole death — the DYING dive
+        // to the podium, the 200-tick cinematic, the XP shower, and the
+        // fight's portal/gateway/egg through the normal setDragonKilled path.
+        // Implemented as a lethal blow: pin to 1 HP and enter DYING exactly
+        // as a killing player hit does; while perched (sitting phases have
+        // no dive) go straight to the death clock via health 0.
+        if (m_level && !m_level->IsClientSide() &&
+            GetPhase() != DragonPhase::Dying) {
+            if (!IsPhaseSitting()) {
+                SetHealth(1.0f);
+                SetPhase(DragonPhase::Dying);
+            } else {
+                SetHealth(0.0f);
+                Mob::Die(MobDamageSource::Generic, nullptr);
+            }
+            return;
+        }
+        // Already dying (or a client mirror asked, which cannot happen):
+        // nothing to add — the cinematic is on its way.
+    }
+
     void EnderDragon::Knockback(double power, double dx, double dz) {
         // MC EnderDragon.knockback: suppressed while sitting only (the
         // flight physics overwrite it in the air anyway, as in MC).
@@ -4791,21 +5455,16 @@ namespace Game {
     std::shared_ptr<SpawnGroupData>
     EnderDragon::FinalizeSpawn(SpawnReason reason,
                                std::shared_ptr<SpawnGroupData> groupData) {
-        groupData = Mob::FinalizeSpawn(reason, std::move(groupData));
-        if (!m_fightOriginSet) {
-            m_fightOrigin = BlockPosition();
-            m_fightOriginSet = true;
-        }
-        // DEVIATION, documented: MC's EndDragonFight spawns its dragon into
-        // the phase cycle while a bare /summon hovers forever; here the
-        // summoned dragon IS the fight dragon, so it starts the holding
-        // pattern around its spawn point (the "podium" anchor).
-        SetPhase(DragonPhase::HoldingPattern);
-        return groupData;
+        // MC has no dragon-specific finalizeSpawn: a bare /summon keeps the
+        // constructor's HOVERING phase (it hangs in place until hurt) and
+        // fightOrigin stays BlockPos.ZERO — only EndDragonFight's
+        // createNewDragon sets the origin and the HOLDING_PATTERN phase.
+        return Mob::FinalizeSpawn(reason, std::move(groupData));
     }
 
     void EnderDragon::ClearReferenceTo(const Entity* entity) {
         Mob::ClearReferenceTo(entity);
+        if (nearestCrystal == entity) nearestCrystal = nullptr;
         for (auto& phase : m_phases) {
             if (phase) phase->ClearReferenceTo(entity);
         }

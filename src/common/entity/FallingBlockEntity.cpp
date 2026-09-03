@@ -231,7 +231,8 @@ namespace Game {
         // from BlockPosition() instead snapped the item to the centre of
         // whatever cell the block happened to be overlapping, which reads as a
         // visible sideways jump at the moment a falling block gives up.
-        DropItemStackAt(position, ItemStack(id, 1));
+        DropItemStackAt(m_level ? m_level->Dimension() : DimensionId::Overworld,
+                        position, ItemStack(id, 1));
     }
 
     bool FallingBlockEntity::CauseFallDamage(double fallDist, float /*damageMultiplier*/) {

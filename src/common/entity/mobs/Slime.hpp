@@ -81,9 +81,9 @@ namespace Game {
         virtual float SquishDecay() const { return 0.6f; }
 
         // MC dimensions scale linearly with size.
-        float GetBbWidth()  const override { return 0.52f * m_size; }
-        float GetBbHeight() const override { return 0.52f * m_size; }
-        float GetEyeHeight() const override { return 0.52f * m_size * 0.625f; }
+        float BaseBbWidth()   const override { return 0.52f * m_size; }
+        float BaseBbHeight()  const override { return 0.52f * m_size; }
+        float BaseEyeHeight() const override { return 0.52f * m_size * 0.625f; }
 
         // MC Slime.jumpFromGround: the hop is EXACTLY jump power, not the
         // max-with-current-motion the base takes — a slime mid-bounce does

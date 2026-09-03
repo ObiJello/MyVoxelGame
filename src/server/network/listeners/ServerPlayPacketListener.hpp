@@ -52,6 +52,10 @@ namespace Server {
         
         // Player updates
         void onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) override;
+#if ENABLE_IMMERSIVE_PORTALS
+        void onPortalTeleportC2S(const Network::PortalTeleportC2SPacket& packet) override;
+#endif
+        void onFillBlocksC2S(const Network::FillBlocksC2SPacket& packet) override;
         
         // Chat
         void onChatMessageC2S(const Network::ChatMessageC2SPacket& packet) override;
@@ -65,6 +69,7 @@ namespace Server {
 
         // Chunk batch acknowledgment
         void onChunkBatchAck(float desiredChunksPerTick) override;
+        void onChunkRequestFull(int8_t dimensionId, int32_t chunkX, int32_t chunkZ) override;
 
         // Client reports its own level is ready (MC handleAcceptPlayerLoad)
         void onPlayerLoaded() override;
@@ -73,7 +78,8 @@ namespace Server {
         void onAcceptTeleportation(int32_t teleportId) override;
 
         // Client settings, PLAY phase (MC handleClientInformation)
-        void onClientConfigC2S(int renderDistance, bool vsync, float mouseSensitivity) override;
+        void onClientConfigC2S(int renderDistance, int simulationDistance,
+                               bool vsync, float mouseSensitivity) override;
     };
     
 } // namespace Server

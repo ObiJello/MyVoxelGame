@@ -63,3 +63,21 @@
 #ifndef PORTAL_RECURSION_DEPTH
 #define PORTAL_RECURSION_DEPTH 5
 #endif
+
+// ─── Immersive Portals (see-through, walk-through, cross-dimension) ─────────
+// Portals modelled after the Immersive Portals mod: a planar surface anywhere
+// in any dimension that shows — and leads to — another place, possibly in a
+// different dimension, with no loading screen. The data model, its network
+// sync and the server registry live behind this flag; later phases add
+// client multi-dimension state, per-player cross-dimension chunk loading,
+// stencil recursion rendering, seamless teleport and nether-portal frames.
+//
+// Distinct from ENABLE_PORTAL_GUN, which is the Valve-style pair-of-ovals
+// feature. That system predates this one and is planned to become a client
+// of it (see docs/immersive-portals.md).
+//
+// Cost when ENABLED: small until rendering lands — a registry per server, two
+// packets, and the per-chunk sync of portal records to clients.
+#ifndef ENABLE_IMMERSIVE_PORTALS
+#define ENABLE_IMMERSIVE_PORTALS 1
+#endif

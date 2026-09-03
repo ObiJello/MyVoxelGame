@@ -1,6 +1,7 @@
 // File: src/client/entity/Player.hpp
 #pragma once
 
+#include "common/world/level/DimensionId.hpp"
 #include "common/entity/Inventory.hpp"
 #include "common/entity/PlayerColors.hpp"
 #include "common/physics/RayCast.hpp"
@@ -107,6 +108,12 @@ namespace Game {
         
         // === Raycast Cache ===
         std::optional<RaycastHit> lastBlockHit;  // Cached result from per-frame raycast
+        // Immersive portals: the level the hit block is in, and the portal
+        // the ray went through to reach it (0 = a plain hit in the player's
+        // own level). The controller binds that level while it digs and
+        // places, and the packets carry the dimension.
+        Game::DimensionId lastBlockHitDimension = Game::DimensionId::Overworld;
+        uint32_t          lastBlockHitPortalId  = 0;
         // Last camera-space forward vector — refreshed every frame by
         // UpdateRaycast(camera). Use this instead of yaw/pitch fields
         // when you need the live look direction; the yaw/pitch members

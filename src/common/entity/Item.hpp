@@ -64,6 +64,16 @@ namespace Game {
         // read after ItemRegistry::Initialize() runs.
         extern ItemID PortalGun;
 #endif
+        // The occlusion wand (AoWandBehavior.cpp): click two blocks and every
+        // block in the box between them bakes no ambient occlusion, for all
+        // players. Shift-click a block inside such a box to lift it.
+        extern ItemID AoWand;
+#if ENABLE_IMMERSIVE_PORTALS
+        // The portal wand (PortalWandBehavior.cpp): click the two corners
+        // of a surface, then the two corners of the far one, and the pair
+        // is made. Registered right after the gun's slot.
+        extern ItemID PortalWand;
+#endif
     }
 
     enum class ItemRenderType : uint8_t {

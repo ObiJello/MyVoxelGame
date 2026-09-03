@@ -248,8 +248,61 @@ namespace Render {
         return static_cast<double>(m_gameTime) + static_cast<double>(partialTick);
     }
 
+    EnvironmentFrame EnvironmentState::FrameForDimension(Game::DimensionId dimension) {
+        // Recompose with the dimension's rules in place of the current
+        // ones, capture, and put everything back. The Nether and the End
+        // values are the ones SkyRenderer::ApplyDimensionSky installs.
+        const bool      savedAmbient  = m_constantAmbientLight;
+        const bool      savedSkybox   = m_skyboxActive;
+        const glm::vec3 savedFogBase  = m_skyboxFogBase;
+        const int       savedMode     = m_skyboxMode;
+        const bool      savedDarkDisc = m_showDarkDisc;
+        const EnvironmentFrame savedFrame = m_frame;
+        const EnvironmentFrame* savedOverride = m_frameOverride;
+        m_frameOverride = nullptr;
+
+        switch (dimension) {
+            case Game::DimensionId::Nether:
+                m_constantAmbientLight = true;
+                m_skyboxActive = true;
+                m_skyboxFogBase = glm::vec3(0x33 / 255.0f, 0x08 / 255.0f, 0x08 / 255.0f);
+                m_skyboxMode = 0;
+                break;
+            case Game::DimensionId::End:
+                m_constantAmbientLight = true;
+                m_skyboxActive = true;
+                // SkyRenderer's End fog: the end_sky tint (0x28) scaled 0.35.
+                m_skyboxFogBase = glm::vec3(0x28 / 255.0f) * 0.35f;
+                m_skyboxMode = 0;
+                break;
+            case Game::DimensionId::Overworld:
+                m_constantAmbientLight = false;
+                // The vanilla sky: a cubemap chosen in settings only exists
+                // while the overworld is the active level.
+                m_skyboxActive = false;
+                break;
+        }
+        UpdateFrame(m_lastPartialTick, m_lastCameraForward, m_lastCameraY,
+                    m_lastRenderDistChunks, m_lastFogEnabled);
+        const EnvironmentFrame result = m_frame;
+
+        m_constantAmbientLight = savedAmbient;
+        m_skyboxActive = savedSkybox;
+        m_skyboxFogBase = savedFogBase;
+        m_skyboxMode = savedMode;
+        m_showDarkDisc = savedDarkDisc;
+        m_frame = savedFrame;
+        m_frameOverride = savedOverride;
+        return result;
+    }
+
     void EnvironmentState::UpdateFrame(float partialTick, const glm::vec3& cameraForward,
                                        float cameraY, int renderDistChunks, bool fogEnabled) {
+        m_lastPartialTick      = partialTick;
+        m_lastCameraForward    = cameraForward;
+        m_lastCameraY          = cameraY;
+        m_lastRenderDistChunks = renderDistChunks;
+        m_lastFogEnabled       = fogEnabled;
         ApplyPendingSync();
         const double dayTimeF = DayTimeF(partialTick);
 

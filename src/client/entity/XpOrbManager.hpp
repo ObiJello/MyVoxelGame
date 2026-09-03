@@ -113,6 +113,7 @@ namespace Client {
         Game::JavaRandom m_random{0x9E3779B9LL};
     };
 
-    extern std::unique_ptr<XpOrbManager> g_xpOrbManager;
+    // Bound-level pointer, owned by ClientLevel (see ClientLevel.hpp).
+    extern XpOrbManager* g_xpOrbManager;
 
 } // namespace Client

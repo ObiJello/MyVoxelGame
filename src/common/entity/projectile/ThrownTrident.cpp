@@ -4,7 +4,7 @@
 
 namespace Game {
 
-    void ThrownTrident::OnHitEntity(LivingEntity& target) {
+    void ThrownTrident::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         // MC ThrownTrident.onHitEntity: fixed 8.0 (enchantment damage
         // modifiers wait on the enchantment system), dealtDamage set BEFORE
         // the hurt, then ProjectileDeflection.REVERSE plus the near-total
@@ -19,7 +19,7 @@ namespace Game {
         // (MC skips the post-hurt effects for endermen because the trident
         // never actually lands on one — the enderman Hurt override's teleport
         // dodge covers that here.)
-        target.Hurt(MobDamageSource::Projectile, kTridentDamage,
+        DealHitDamage(target, hit, MobDamageSource::Projectile, kTridentDamage,
                     GetOwner() ? GetOwner() : this);
 
         // Deflection: REVERSE (-0.5) then the (0.02, 0.2, 0.02) multiply.

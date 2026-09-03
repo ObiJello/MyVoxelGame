@@ -67,6 +67,8 @@ namespace Render {
                 e.worldgenTweaks     = w.value("worldgenTweaks", std::string());
                 e.generateStructures = w.value("generateStructures", true);
                 e.bonusChest         = w.value("bonusChest", false);
+                e.worldWrap          = w.value("worldWrap", 0);
+                e.dimensionStack     = w.value("dimensionStack", false);
                 e.dayTime            = w.value("dayTime", 6000LL);
                 e.doDaylightCycle    = w.value("doDaylightCycle", false);
                 e.skybox             = w.value("skybox", std::string("vanilla"));
@@ -101,6 +103,8 @@ namespace Render {
                     {"worldgenTweaks", e.worldgenTweaks},
                     {"generateStructures", e.generateStructures},
                     {"bonusChest", e.bonusChest},
+                    {"worldWrap", e.worldWrap},
+                    {"dimensionStack", e.dimensionStack},
                     {"dayTime", e.dayTime},
                     {"doDaylightCycle", e.doDaylightCycle},
                     {"skybox", e.skybox},
@@ -228,6 +232,9 @@ namespace Render {
             a.worldgenTweaks = e.worldgenTweaks;
             a.dayTime         = e.dayTime;
             a.doDaylightCycle = e.doDaylightCycle;
+            a.difficulty      = e.difficulty;
+            a.worldWrap       = e.worldWrap;
+            a.dimensionStack  = e.dimensionStack;
             a.skybox          = e.skybox;
             a.skyboxMode      = e.skyboxMode;
             SetTitleAction(std::move(a));
@@ -2306,7 +2313,8 @@ namespace Render {
             (m_draft.difficulty >= 0 && m_draft.difficulty <= 3) ? m_draft.difficulty : 2,
             [this](int idx) { m_draft.difficulty = idx; }));
         m_difficultyButton->SetTooltip({"How dangerous the world is.",
-                                        "(Not enforced by the engine yet.)"});
+                                        "Peaceful spawns no monsters and",
+                                        "heals you; /difficulty changes it later."});
         y += 28;
 
         m_commandsButton = AddWidget(CycleButton::MakeOnOff(cx - 105, y, 210, 20,
@@ -2369,6 +2377,28 @@ namespace Render {
         m_bonusChestButton->SetTooltip({"A chest with starter items near spawn.",
                                         "(Not implemented yet.)"});
         y += 24;
+
+        // Immersive-portal world options. Default off.
+        {
+            static const int kWrapSizes[] = { 0, 512, 1024, 2048, 4096 };
+            int wrapIdx = 0;
+            for (int i = 0; i < 5; ++i) if (kWrapSizes[i] == m_draft.worldWrap) wrapIdx = i;
+            auto* wrap = AddWidget(new CycleButton(cx - 155, y, 150, 20, "World Wrap",
+                {"Off", "512", "1024", "2048", "4096"}, wrapIdx,
+                [this](int idx) { m_draft.worldWrap = kWrapSizes[idx]; }));
+            wrap->SetTooltip({"The world is this many blocks across and",
+                              "its borders are portals onto the opposite",
+                              "border: walk off one edge, arrive at the",
+                              "other. The Nether wraps at an eighth."});
+            auto* stack = AddWidget(CycleButton::MakeOnOff(cx + 5, y, 150, 20,
+                "Dimension Stack", m_draft.dimensionStack,
+                [this](bool on) { m_draft.dimensionStack = on; }));
+            stack->SetTooltip({"The bottom of each dimension opens onto",
+                               "the top of the next: Overworld over Nether",
+                               "over End over Overworld. Seam bedrock",
+                               "generates as stone."});
+            y += 24;
+        }
 
         AddWidget(new Button(cx - 155, y, 310, 20, "World Properties...", [this] {
             m_manager->Push(std::make_unique<WorldGenPropertiesScreen>(&m_draft));

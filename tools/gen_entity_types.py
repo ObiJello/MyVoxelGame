@@ -67,6 +67,13 @@ MISC_KEEP = {
     # of common/entity/FallingBlockEntity.hpp. Neither has a MobDef, goals or
     # a spawn entry, so gen_mob_defs.py skips them.
     "falling_block", "tnt",
+    # The End crystal (2026-09, dragon fight). A plain Entity in MC; rides the
+    # Mob pipeline here like the other Misc entries. No MobDef, no goals, no
+    # spawn entry — gen_mob_defs.py skips it.
+    "end_crystal",
+    # The thrown ender pearl (2026-09) — same projectile pipeline as the
+    # snowball and the eye of ender.
+    "ender_pearl",
 }
 
 CATEGORY_CPP = {
@@ -120,6 +127,9 @@ def parse():
             continue
 
         def num(name, default):
+            # end_crystal passes Integer.MAX_VALUE for updateInterval.
+            if re.search(name + r"\(Integer\.MAX_VALUE\)", tail):
+                return 2147483647
             m = re.search(name + r"\(([-0-9.]+)F?\)", tail)
             return float(m.group(1)) if m else default
 

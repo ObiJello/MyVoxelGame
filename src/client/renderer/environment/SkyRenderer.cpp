@@ -708,4 +708,46 @@ void main() {
         }
     }
 
+    bool SkyRenderer::EnsureEndTexture() {
+        if (m_endTexture != INVALID_TEXTURE) return true;
+        if (!g_renderBackend) return false;
+        m_endTexture = LoadEnvTexture("assets/textures/environment/end_sky.png");
+        if (m_endTexture == INVALID_TEXTURE) return false;
+        g_renderBackend->SetTextureWrap(m_endTexture, TextureWrap::Repeat, TextureWrap::Repeat);
+        return true;
+    }
+
+    void SkyRenderer::RenderForDimension(int rawDimensionId, const glm::mat4& proj,
+                                         const glm::mat4& viewRotation) {
+        if (!m_initialized || !g_renderBackend) return;
+        if (rawDimensionId == m_dimension) { Render(proj, viewRotation); return; }
+        if (rawDimensionId == -1) return;   // MC SkyType.NONE — fog only
+
+        const bool        savedNoSky   = m_noSky;
+        const bool        savedValid   = m_skyboxValid;
+        const bool        savedIsEnd   = m_skyboxIsEnd;
+        const std::string savedId      = m_skyboxId;
+        const int         savedMode    = m_skyboxMode;
+
+        m_noSky = false;
+        if (rawDimensionId == 1) {
+            if (!EnsureEndTexture()) return;
+            m_skyboxValid = true;
+            m_skyboxIsEnd = true;
+            m_skyboxId    = "end";
+            m_skyboxMode  = 0;
+        } else {
+            m_skyboxValid = false;
+            m_skyboxIsEnd = false;
+            m_skyboxId    = "vanilla";
+        }
+        Render(proj, viewRotation);
+
+        m_noSky        = savedNoSky;
+        m_skyboxValid  = savedValid;
+        m_skyboxIsEnd  = savedIsEnd;
+        m_skyboxId     = savedId;
+        m_skyboxMode   = savedMode;
+    }
+
 } // namespace Render

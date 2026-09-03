@@ -68,7 +68,11 @@ namespace Render {
                     const Frustum& frustum,
                     float aspect,
                     float farPlane,
-                    const SceneRenderFn& renderScene);
+                    int8_t dimensionFilter,
+                    const SceneRenderFn& renderScene,
+                    const glm::dvec3* skipRimAt = nullptr);
+        // Draw every portal regardless of the level it is in.
+        static constexpr int8_t kAnyDimension = 127;
 
     private:
         // Resources are created once and held for the renderer's lifetime.

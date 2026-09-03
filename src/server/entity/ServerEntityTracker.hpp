@@ -153,6 +153,7 @@ namespace Server {
             // Sentinel distinct from every real value (-1 means "no vehicle"),
             // so the first data send always carries the riding link.
             int32_t lastVehicleId = INT32_MIN;
+            float   lastScale = -1.0f;
 
             std::unordered_set<uint32_t> watchers;
         };

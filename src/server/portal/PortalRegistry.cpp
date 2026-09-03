@@ -23,6 +23,17 @@
 #include "common/network/packets/game/PortalRemoveS2CPacket.hpp"
 #include "common/network/packets/game/PortalTeleportFlashS2CPacket.hpp"
 #include "common/network/packets/game/PortalFizzleS2CPacket.hpp"
+#include "common/world/portal/PortalState.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "server/portal/ImmersivePortalRegistry.hpp"
+#include <glm/gtc/quaternion.hpp>
+#endif
+#include "server/level/ServerLevel.hpp"
+#include <nlohmann/json.hpp>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -222,6 +233,104 @@ namespace Game::Portal {
         // its own portals to render them in Phase 4). On a server with no
         // sessions yet (early startup, or feature-on/no-clients), these are
         // safe no-ops.
+        // ── Immersive mode ───────────────────────────────────────────────
+        //
+        // With immersive portals on, a linked pair is not rendered and
+        // crossed by the gun's own machinery (PortalRenderer, the client's
+        // eye-crossing prediction, Tick below) but by the immersive system:
+        // the pair is mirrored into the ImmersivePortalRegistry as a bi-way
+        // cluster of two oval surfaces, blue → orange and back, each in its
+        // own dimension. That is what makes a blue portal in the Overworld
+        // and an orange one in the Nether a working, see-through link. The
+        // client's gun manager receives nothing in this mode, so every gun
+        // visual it drives (rim, ghost bodies, prediction) stays off.
+        bool ImmersiveMode() {
+#if ENABLE_IMMERSIVE_PORTALS
+            return Game::Portals::ImmersiveNetherPortals() &&
+                   Server::g_integratedServer && Server::g_integratedServer->ImmersivePortals();
+#else
+            return false;
+#endif
+        }
+
+#if ENABLE_IMMERSIVE_PORTALS
+        std::string GunTag(uint64_t gunId) { return "gun:" + std::to_string(gunId); }
+
+        void RemoveImmersive(uint64_t gunId) {
+            auto* registry = Server::g_integratedServer->ImmersivePortals();
+            const std::string tag = GunTag(gunId);
+            std::vector<Game::Immersive::PortalId> ids;
+            registry->ForEach([&](const Game::Immersive::Portal& p) {
+                if (p.tag == tag) ids.push_back(p.id);
+            });
+            for (auto id : ids) registry->Remove(id);
+        }
+
+        // The gun's oval as an immersive surface shape, in the surface's
+        // local block units (u across, v up). The SAME hole the client's
+        // PortalRenderer cuts — Portal-exact 1 : 1.6875, half-height
+        // 0.84375 — so its rim sits exactly on this surface's edge.
+        // PortalRenderer's mesh extents are the OUTER border of the rim; the
+        // hole edge sits at 1 / (1 + kOuterBorder) = 1 / 1.075 of them.
+        constexpr float kOvalHalfWidth  = 0.5f     / 1.075f;
+        constexpr float kOvalHalfHeight = 0.84375f / 1.075f;
+        Game::Immersive::PortalShape OvalShape() {
+            Game::Immersive::PortalShape shape;
+            shape.type = Game::Immersive::PortalShape::Type::Mesh;
+            constexpr int kSegments = 48;
+            shape.vertices.emplace_back(0.0f, 0.0f);
+            for (int i = 0; i < kSegments; ++i) {
+                const float a = static_cast<float>(i) / kSegments * 6.28318530718f;
+                shape.vertices.emplace_back(kOvalHalfWidth * std::cos(a), kOvalHalfHeight * std::sin(a));
+            }
+            for (int i = 0; i < kSegments; ++i) {
+                shape.indices.push_back(0);
+                shape.indices.push_back(static_cast<uint32_t>(1 + i));
+                shape.indices.push_back(static_cast<uint32_t>(1 + (i + 1) % kSegments));
+            }
+            return shape;
+        }
+
+        // Rebuild the immersive cluster for a gun from its pair: none unless
+        // both ends are open.
+        void SyncImmersive(uint64_t gunId, const PortalPair& pair) {
+            RemoveImmersive(gunId);
+            if (!pair.blue.active || !pair.orange.active) return;
+            auto* registry = Server::g_integratedServer->ImmersivePortals();
+
+            const Portal& b = pair.blue;
+            const Portal& o = pair.orange;
+            // Entering blue's face (moving along −n_blue) exits orange's face
+            // (moving along +n_orange) with up kept up: the rotation takes
+            // blue's basis (right, up, n) onto (−right, up, −n) of orange —
+            // a proper rotation, since two axes flip.
+            const glm::dmat3 A(glm::dvec3(b.right), glm::dvec3(b.upDir), glm::dvec3(b.normal));
+            const glm::dmat3 B(-glm::dvec3(o.right), glm::dvec3(o.upDir), -glm::dvec3(o.normal));
+            const glm::dquat rotation = glm::normalize(glm::quat_cast(B * glm::transpose(A)));
+
+            Game::Immersive::Portal front;
+            front.kind          = Game::Immersive::PortalKind::PortalGun;
+            front.flags         = Game::Immersive::PortalFlag::Default;
+            front.dimension     = b.dimension;
+            front.origin        = b.origin;
+            front.axisW         = glm::dvec3(b.right);
+            front.axisH         = glm::dvec3(b.upDir);
+            front.width         = 2.0 * kOvalHalfWidth;
+            front.height        = 2.0 * kOvalHalfHeight;
+            front.destDimension = o.dimension;
+            front.destination   = o.origin;
+            front.rotation      = rotation;
+            front.scale         = 1.0;
+            front.shape         = OvalShape();
+            front.tag           = GunTag(gunId);
+            const auto id = registry->AddBiWay(front);
+            if (id == Game::Immersive::kInvalidPortalId) {
+                Log::Warning("[PortalGun] Could not mirror gun=%llu into the immersive registry",
+                             static_cast<unsigned long long>(gunId));
+            }
+        }
+#endif
+
         Network::PortalSetS2CPacket BuildSetPacket(uint64_t gunId,
                                                    PortalColor color,
                                                    const Portal& p) {
@@ -237,6 +346,8 @@ namespace Game::Portal {
             pk.upX     = p.upDir.x;
             pk.upY     = p.upDir.y;
             pk.upZ     = p.upDir.z;
+            pk.immersive = ImmersiveMode() ? 1 : 0;
+            pk.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(p.dimension));
             return pk;
         }
 
@@ -328,6 +439,9 @@ namespace Game::Portal {
     void PortalRegistry::ClearPair(uint64_t gunId) {
         auto it = m_pairs.find(gunId);
         if (it == m_pairs.end()) return;
+#if ENABLE_IMMERSIVE_PORTALS
+        if (ImmersiveMode()) RemoveImmersive(gunId);
+#endif
         // Broadcast a close burst for each active portal BEFORE erasing
         // the pair, since the burst origin needs the old portal pose.
         if (it->second.blue.active) {
@@ -358,7 +472,122 @@ namespace Game::Portal {
                   static_cast<unsigned long long>(gunId));
     }
 
-    void PortalRegistry::OnBlockChanged(const glm::ivec3& pos) {
+    namespace {
+        std::string GunSavePath() {
+            if (!Server::g_integratedServer) return {};
+            Server::ServerLevel* overworld = Server::g_integratedServer->GetLevel(Game::DimensionId::Overworld);
+            if (!overworld) return {};
+            const std::string& root = overworld->Config().savePath;
+            if (root.empty()) return {};
+            return (std::filesystem::path(root) / "data" / "portal_gun.json").string();
+        }
+        nlohmann::json PortalToJson(const Portal& p) {
+            return {
+                {"active", p.active},
+                {"dimension", Game::DimensionToRaw(p.dimension)},
+                {"origin", {p.origin.x, p.origin.y, p.origin.z}},
+                {"normal", {p.normal.x, p.normal.y, p.normal.z}},
+                {"up",     {p.upDir.x, p.upDir.y, p.upDir.z}},
+                {"right",  {p.right.x, p.right.y, p.right.z}},
+                {"wallA",  {p.wallA.x, p.wallA.y, p.wallA.z}},
+                {"wallB",  {p.wallB.x, p.wallB.y, p.wallB.z}},
+            };
+        }
+        bool PortalFromJson(const nlohmann::json& j, Portal& p) {
+            auto v3 = [&](const char* key, auto& out) {
+                if (!j.contains(key) || !j[key].is_array() || j[key].size() != 3) return false;
+                out = {j[key][0].get<double>(), j[key][1].get<double>(), j[key][2].get<double>()};
+                return true;
+            };
+            glm::dvec3 o, n, u, r, a, b;
+            if (!v3("origin", o) || !v3("normal", n) || !v3("up", u) || !v3("right", r) ||
+                !v3("wallA", a) || !v3("wallB", b)) return false;
+            p.origin = o; p.normal = glm::vec3(n); p.upDir = glm::vec3(u); p.right = glm::vec3(r);
+            p.wallA = glm::ivec3(a); p.wallB = glm::ivec3(b);
+            p.active = j.value("active", false);
+            p.dimension = Game::DimensionFromRaw(j.value("dimension", 0));
+            return true;
+        }
+    }
+
+    bool PortalRegistry::Save() const {
+        const std::string path = GunSavePath();
+        if (path.empty()) return false;
+        try {
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+            nlohmann::json j;
+            j["version"] = 1;
+            j["nextId"]  = m_nextId;
+            nlohmann::json pairs = nlohmann::json::array();
+            for (const auto& [gunId, pair] : m_pairs) {
+                pairs.push_back({{"gun", gunId},
+                                 {"blue", PortalToJson(pair.blue)},
+                                 {"orange", PortalToJson(pair.orange)}});
+            }
+            j["pairs"] = std::move(pairs);
+            const std::string tmp = path + ".tmp";
+            {
+                std::ofstream f(tmp, std::ios::trunc);
+                if (!f) return false;
+                f << j.dump(2);
+            }
+            std::filesystem::rename(tmp, path, ec);
+            return !ec;
+        } catch (const std::exception& e) {
+            Log::Warning("[PortalGun] Could not write %s: %s", path.c_str(), e.what());
+            return false;
+        }
+    }
+
+    bool PortalRegistry::Load() {
+        const std::string path = GunSavePath();
+        if (path.empty()) return false;
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) return false;
+        try {
+            std::ifstream f(path);
+            nlohmann::json j;
+            f >> j;
+            m_pairs.clear();
+            if (j.contains("pairs") && j["pairs"].is_array()) {
+                for (const auto& pj : j["pairs"]) {
+                    const uint64_t gunId = pj.value("gun", uint64_t{0});
+                    if (gunId == 0) continue;
+                    PortalPair pair;
+                    if (pj.contains("blue"))   PortalFromJson(pj["blue"], pair.blue);
+                    if (pj.contains("orange")) PortalFromJson(pj["orange"], pair.orange);
+                    if (!pair.blue.active && !pair.orange.active) continue;
+                    m_pairs[gunId] = pair;
+                    m_nextId = std::max(m_nextId, gunId + 1);
+                }
+            }
+            m_nextId = std::max(m_nextId, j.value("nextId", uint64_t{1}));
+            Log::Info("[PortalGun] Loaded %zu pair(s) from %s", m_pairs.size(), path.c_str());
+            return true;
+        } catch (const std::exception& e) {
+            Log::Warning("[PortalGun] Could not read %s: %s", path.c_str(), e.what());
+            return false;
+        }
+    }
+
+    void PortalRegistry::OnImmersiveCrossing(const std::string& tag) {
+        constexpr const char* kPrefix = "gun:";
+        if (tag.rfind(kPrefix, 0) != 0) return;
+        uint64_t gunId = 0;
+        try { gunId = std::stoull(tag.substr(4)); } catch (...) { return; }
+        if (m_pairs.find(gunId) == m_pairs.end()) return;
+        BroadcastTeleportFlash(gunId);
+    }
+
+    void PortalRegistry::RebuildImmersive() {
+#if ENABLE_IMMERSIVE_PORTALS
+        if (!ImmersiveMode()) return;
+        for (const auto& [gunId, pair] : m_pairs) SyncImmersive(gunId, pair);
+#endif
+    }
+
+    void PortalRegistry::OnBlockChanged(Game::DimensionId dimension, const glm::ivec3& pos) {
         // Walk every pair and drop any portal whose wallA or wallB
         // matches the changed block. Per-color drop so an orphaned
         // sibling on a different wall keeps rendering as an inactive
@@ -369,6 +598,7 @@ namespace Game::Portal {
 
             auto destroy = [&](Portal& portal, PortalColor color) {
                 if (!portal.active) return;
+                if (portal.dimension != dimension) return;
                 if (portal.wallA != pos && portal.wallB != pos) return;
                 // Snapshot pose before clearing so the close burst lands
                 // at the doomed portal's actual location.
@@ -390,8 +620,14 @@ namespace Game::Portal {
                           static_cast<unsigned long long>(gunId));
             };
 
+            const bool wasLinked = pair.blue.active && pair.orange.active;
             destroy(pair.blue,   PortalColor::Blue);
             destroy(pair.orange, PortalColor::Orange);
+#if ENABLE_IMMERSIVE_PORTALS
+            if (wasLinked && !(pair.blue.active && pair.orange.active) && ImmersiveMode()) {
+                RemoveImmersive(gunId);
+            }
+#endif
 
             // Drop the pair entry once both colors are gone so the
             // gun's PORTAL_GUN_INSTANCE_ID can re-fire from scratch.
@@ -504,6 +740,7 @@ namespace Game::Portal {
         }
 
         Portal p;
+        p.dimension = world->GetDimension();
         p.origin = chosen->origin;
         p.normal = chosen->normal;
         p.upDir  = chosen->upDir;
@@ -546,12 +783,21 @@ namespace Game::Portal {
         // Broadcast the placement (or move) to every connected client. The
         // firing client also receives this — it's how the local renderer
         // (Phase 4) finds out where to draw the portal.
+#if ENABLE_IMMERSIVE_PORTALS
+        // The immersive surfaces carry the see-through and the crossing;
+        // the pair still goes to the client (flagged immersive) for the
+        // gun's own rim.
+        if (ImmersiveMode()) SyncImmersive(gunId, pair);
+#endif
         BroadcastPortalSet(gunId, color, p);
         return PlaceResult::Placed;
     }
 
     void PortalRegistry::Tick(Server::IntegratedServer* server) {
         if (!server || m_pairs.empty()) return;
+        // Immersive mode: crossings are the immersive traveler's (client) and
+        // EntityPortalTravel's (server); this contact test would double up.
+        if (ImmersiveMode()) return;
 
         auto* sessionManager = server->GetSessionManager();
         if (!sessionManager) return;

@@ -10,6 +10,8 @@
 // Game::World::EntityTick() stays the empty stub it has always been.
 #pragma once
 
+#include "common/entity/EntityIdAllocator.hpp"
+
 #include "common/entity/ItemEntity.hpp"
 #include "common/entity/Item.hpp"
 #include "common/physics/Physics.hpp"
@@ -19,6 +21,7 @@
 
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -55,6 +58,14 @@ namespace Server {
         // fresh bob offset and a default age, which is right for a NEW drop and
         // wrong for one that has been lying on the ground since last session.
         int32_t Adopt(Game::ItemEntity entity);
+        // ── Moving between levels (immersive portal travel) ──────────────
+        // Take an entity out without a removal broadcast (the caller sends
+        // one scoped to the old dimension); nullopt if unknown.
+        std::optional<Game::ItemEntity> Extract(int32_t id);
+        // Insert keeping id and uuid (ids are process-wide). The entity is
+        // flagged pendingSpawn so the next sync sends it as a fresh spawn
+        // to this level's watchers. False if the id is taken.
+        bool AdoptWithId(Game::ItemEntity entity);
 
         int32_t Spawn(const glm::dvec3& pos, const glm::dvec3& vel,
                       const Game::ItemStack& stack, int pickupDelay);
@@ -167,7 +178,7 @@ namespace Server {
         static constexpr int kSyncIntervalTicks = 20;
 
         std::unordered_map<int32_t, Game::ItemEntity> m_entities;
-        int32_t  m_nextId = kItemEntityIdBase;
+        bool     m_randomSeeded = false;
         Game::JavaRandom m_random{0};
 
         // Chunk-bucketed index over m_entities, rebuilt at the start of the

@@ -24,6 +24,8 @@
 #include <memory>
 #include <vector>
 
+#include "common/world/level/DimensionId.hpp"
+
 namespace Game {
 
     struct CollisionGrid;
@@ -37,6 +39,7 @@ namespace Game {
     class LivingEntity;
     class JavaRandom;
     class BaseContainerBlockEntity;
+    class IDragonFight;
 
     // MC net.minecraft.world.Difficulty. Nothing in this engine set a
     // difficulty before mobs existed, so the level implementations default to
@@ -88,6 +91,16 @@ namespace Game {
         // Smoke and Poof do — that is MC's own choice, not a stand-in — tinted
         // per block through AddColorParticle.
         FallingDust,
+    };
+
+    // MC client ParticleStatus (Options "particles"): the ordinals are the
+    // numbers options.txt stores. Lives in common so the explosion debris
+    // spawner — client-only logic that runs from common entity code — can
+    // ask the level for it the way ClientExplosionTracker reads Options.
+    enum class ParticleStatus : uint8_t {
+        All       = 0,
+        Decreased = 1,
+        Minimal   = 2,
     };
 
     // Custom entity-event bytes — DEVIATIONS from MC, documented here once.
@@ -301,6 +314,10 @@ namespace Game {
             (void)kind; (void)x; (void)y; (void)z; (void)vx; (void)vy; (void)vz;
         }
 
+        // The client's Particles option. Only the client bridge answers with
+        // anything but All; the server never spawns visual particles.
+        virtual ParticleStatus GetParticleStatus() const { return ParticleStatus::All; }
+
         // MC ColorParticleOption.create(ENTITY_EFFECT, r, g, b) — the
         // colour-carrying variant SpellParticle's MobEffectProvider reads.
         // Default forwards without the colour so a server bridge stays a
@@ -368,8 +385,40 @@ namespace Game {
         // whole landing branch behind `!level.isClientSide()`.
         virtual ILevelWrite* MutableBlocks() { return nullptr; }
 
+        // Which dimension this level IS — MC Level.dimension(). The default
+        // is the Overworld; ServerLevelBridge answers from its World. Drop
+        // helpers need it because "spawn an item at (0, 70, 0)" cannot name a
+        // world from the numbers alone, and the shared drop functions used to
+        // assume the Overworld — which is how an item dropped in the End
+        // landed a dimension away.
+        virtual DimensionId Dimension() const { return DimensionId::Overworld; }
+
+        // MC ServerLevel.getDragonFight() — non-null only on the server-side
+        // End level. The dragon reads crystal counts and reports its health
+        // through this; the crystal reports its destruction. See
+        // common/entity/DragonFight.hpp for why the controller itself is
+        // server-side.
+        virtual IDragonFight* DragonFight() { return nullptr; }
+
         // MC GameRules.RULE_MOBGRIEFING. Default true, as in vanilla.
         virtual bool MobGriefing() const { return true; }
+
+        // MC GameRules.RULE_DOMOBSPAWNING — read by the ender pearl's 5%
+        // endermite roll (the natural spawner reads the World's copy
+        // directly). Default true, as in vanilla.
+        virtual bool DoMobSpawning() const { return true; }
+
+        // Teleport a PLAYER to `pos`, keeping their look direction. Player
+        // movement is client-authoritative in this engine, so the move must
+        // be SENT (ServerConnection::Teleport) rather than written to the
+        // mirror view, whose position would be overwritten by the next move
+        // packet. Server bridge only; false anywhere else, and false for an
+        // entity that is not actually a player. First user: the thrown ender
+        // pearl (MC ServerPlayer.teleport via TeleportTransition).
+        virtual bool TeleportPlayer(LivingEntity& player, const glm::dvec3& pos) {
+            (void)player; (void)pos;
+            return false;
+        }
 
         // MC Level.getMinY() / getMaxY() — the DIMENSION's build limits, which
         // are not the same as this engine's fixed chunk storage range. The

@@ -194,7 +194,7 @@ void ChunkDeltaBroadcaster::sendToAllWatchers(const std::vector<uint32_t>& watch
         if (!session) continue;
         auto* conn = session->GetConnection();
         if (!conn) continue;
-        conn->SendPacket(static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);
+        conn->SendPacketIn(m_dimension, static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);
         m_stats.totalBytesSent += data.size();
     }
 }

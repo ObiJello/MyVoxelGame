@@ -1,5 +1,6 @@
 // File: src/client/renderer/gui/HudRenderer.cpp
 #include "HudRenderer.hpp"
+#include "BossBarState.hpp"
 #include "common/entity/Inventory.hpp"
 #include "common/entity/Item.hpp"
 #include "common/data/DataComponents.hpp"
@@ -60,7 +61,9 @@ namespace Render {
             if (m_toolHighlightTimer < 0.0f) m_toolHighlightTimer = 0.0f;
         }
 
-        // MC render order: crosshair (separate) → hotbar → health/food/armor → XP bar
+        // MC render order: boss bar first (BossHealthOverlay renders before
+        // the hotbar layer), then crosshair → hotbar → health/food/armor → XP.
+        RenderBossBar(graphics);
         RenderAttackIndicator(graphics);
         RenderItemHotbar(graphics, inventory);
 
@@ -98,6 +101,53 @@ namespace Render {
     // ========================================================================
     // Hotbar (MC: Gui.renderItemHotbar)
     // ========================================================================
+
+    void HudRenderer::RenderBossBar(GuiGraphics& graphics) {
+        // MC BossHealthOverlay.render: a 182x5 bar centred at y=12 per event,
+        // the name centred 9px above it. One bar here (the dragon) — see
+        // BossBarState.hpp. The sprites are vanilla's own
+        // gui/sprites/boss_bar/*.png, auto-loaded by GuiAtlas.
+        const Client::BossBarState& bar = Client::g_bossBarState;
+        if (!bar.visible) return;
+
+        static const char* kColorNames[] = {
+            "pink", "blue", "red", "green", "yellow", "purple", "white",
+        };
+        const uint8_t colorIndex =
+            bar.color < 7 ? bar.color : 0;
+
+        const int x = graphics.GuiWidth() / 2 - 91;
+        const int y = 12;
+
+        const std::string background =
+            std::string("boss_bar/") + kColorNames[colorIndex] + "_background";
+        const std::string progress =
+            std::string("boss_bar/") + kColorNames[colorIndex] + "_progress";
+
+        graphics.BlitSprite(background, x, y, 182, 5);
+        const int fill = static_cast<int>(bar.progress * 183.0f);
+        if (fill > 0) {
+            graphics.BlitSprite(progress, 182, 5, 0, 0, x, y,
+                                std::min(fill, 182), 5);
+        }
+        if (bar.notches != 0) {
+            const std::string notchBg = "boss_bar/notched_" +
+                std::to_string(bar.notches) + "_background";
+            const std::string notchFg = "boss_bar/notched_" +
+                std::to_string(bar.notches) + "_progress";
+            graphics.BlitSprite(notchBg, x, y, 182, 5);
+            if (fill > 0) {
+                graphics.BlitSprite(notchFg, 182, 5, 0, 0, x, y,
+                                    std::min(fill, 182), 5);
+            }
+        }
+
+        // The name, white with the usual shadow, 9 px above the bar.
+        if (!bar.name.empty()) {
+            graphics.DrawCenteredString(bar.name, graphics.GuiWidth() / 2, y - 9,
+                                        0xFFFFFFFF);
+        }
+    }
 
     void HudRenderer::RenderAttackIndicator(GuiGraphics& graphics) {
         // MC Gui.renderCrosshair's AttackIndicatorStatus.CROSSHAIR branch,

@@ -78,6 +78,24 @@ namespace Game {
         // it include every glazed terracotta (template_glazed_terracotta.json
         // rotates its four sides 90/270/0/180 to make the pattern continuous).
         int uvRotation = 0;
+        // This face is an OVERLAY quad — its texture is meant to be composited
+        // over another face of the same block and has alpha-0 texels where the
+        // underlying face shows through (grass_block's second element: four
+        // side quads of `grass_block_side_overlay` drawn over `grass_block_side`
+        // so only the green fringe takes the biome tint).
+        //
+        // The mesher routes a flagged face of an OPAQUE-layer block into the
+        // cutout layer while the rest of the block stays opaque and occluding.
+        // That is what lets the opaque pass drop its alpha test entirely: MC
+        // gets the same result by putting GRASS_BLOCK whole into cutout
+        // (ItemBlockRenderTypes), which would cost the fill of every grass
+        // top and side in the alpha-tested pass for the sake of one overlay.
+        //
+        // Precomputed once at model resolution (BlockModelRegistry::
+        // AnnotateFaceLayers) from the RESOLVED texture name, so the mesher
+        // reads one bool per face rather than resolving and comparing strings
+        // on its hottest path.
+        bool cutoutOverlay = false;
 
         FaceDef() = default;
         FaceDef(const glm::vec4& uvCoords, const std::string& texture, int tint = -1,
@@ -344,6 +362,12 @@ namespace Game {
         static BlockModel ResolveModelRecursive(const std::string& name, int depth);
         static std::string CanonicalizeModelName(const std::string& modelRef);
         static Element ParseElement(const nlohmann::json& elemJson);
+
+        // Sets FaceDef::cutoutOverlay on every face whose resolved texture is
+        // an overlay sprite. Run on every model that enters s_models — the
+        // resolver's two cache stores and RegisterModel — so rotated and
+        // merged variants are covered as well as the files on disk. Idempotent.
+        static void AnnotateFaceLayers(BlockModel& model);
     };
 
 } // namespace Game

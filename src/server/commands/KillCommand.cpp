@@ -11,6 +11,7 @@
 #include "common/entity/ItemEntity.hpp"
 #include "../IntegratedServer.hpp"
 #include "../entity/ItemEntityManager.hpp"
+#include "../level/ServerLevel.hpp"
 
 #include <algorithm>
 
@@ -32,6 +33,12 @@ namespace Server {
         source.sender   = &sender;
         source.sessions = &sessionManager;
         source.position = sender.getPosition();
+        // The sender's DIMENSION — selectors are level-scoped (see
+        // CommandSource); without this `/kill @e` from the End acted on the
+        // Overworld's mobs.
+        if (auto session = sessionManager.GetSession(sender.getPlayerId())) {
+            source.dimension = Game::DimensionFromRaw(session->GetDimensionId());
+        }
 
         std::vector<SelectedEntity> targets;
         std::string error;
@@ -83,18 +90,23 @@ namespace Server {
                     // a removal.
                     target.mob->Hurt(Game::MobDamageSource::Generic, 1.0e6f, nullptr);
                     // A mob that refuses damage entirely (a projectile, primed
-                    // TNT) still has to go, or `/kill @e` leaves the things it
-                    // most obviously should clear.
-                    if (!target.mob->IsRemoved()) target.mob->Discard();
+                    // TNT, the dragon's players-and-explosions-only gate)
+                    // still has to go, or `/kill @e` leaves the things it most
+                    // obviously should clear. Through the virtual, because the
+                    // dragon must hand its fight the victory on the way out —
+                    // a plain Discard made EndDragonFight respawn a fresh one.
+                    if (!target.mob->IsRemoved()) target.mob->KillFromCommand();
                     ++killed;
                     break;
                 }
                 case SelectedEntity::Kind::Item: {
                     // Items are addressed by id — see the note in
                     // EntitySelector.hpp about why no pointer is carried.
-                    // Same route the selector took to find them.
-                    if (auto* items = g_integratedServer
-                            ? g_integratedServer->GetItemEntities() : nullptr) {
+                    // Same route the selector took to find them: the SENDER's
+                    // level, matching CollectItems' dimension scoping.
+                    ServerLevel* level = g_integratedServer
+                        ? g_integratedServer->GetLevel(source.dimension) : nullptr;
+                    if (auto* items = level ? level->Items() : nullptr) {
                         if (Game::ItemEntity* item = items->Find(target.id)) {
                             item->stack.Clear();   // emptied -> reaped next tick
                             ++killed;

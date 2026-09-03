@@ -73,13 +73,14 @@ namespace Game {
             return static_cast<size_t>(std::max(1u, hw - 1u));
         }
 
-        explicit BackgroundExecutor(size_t numThreads = DefaultThreadCount())
-            : m_running(true)
+        explicit BackgroundExecutor(size_t numThreads = DefaultThreadCount(), bool elevated = false)
+            : m_running(true), m_elevated(elevated)
         {
             for (size_t i = 0; i < numThreads; ++i) {
                 m_workers.emplace_back([this, i]() { workerLoop(i); });
             }
         }
+        bool m_elevated = false;
 
         ~BackgroundExecutor() { shutdown(); }
 
@@ -152,6 +153,7 @@ namespace Game {
             // with no zones — which is exactly why the most expensive work in the
             // program stayed invisible across several captures.
             TERRAIN_THREAD("TerrainWorker");
+            if (m_elevated) Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);   // decoration pool: performance cores
             // QoS stays DEFAULT on purpose. Elevated (tried 2026-08-30) put all
             // nine threads on the four performance cores in competition with
             // the render thread and the serial worldgen lane, and fresh
@@ -621,6 +623,7 @@ namespace Game {
         int                  m_noiseReleaseRescan = 0;
 
         std::unique_ptr<SharedExecutorLease> m_backgroundLease;
+        std::unique_ptr<BackgroundExecutor> m_decorationPool;   // OBEY_DECO_THREADS=n: elevated-QoS decoration threads
         std::unique_ptr<MainThreadExecutor> m_mainThreadExecutor;
         std::unique_ptr<minecraft::server::level::ServerChunkCache> m_chunkCache;
 

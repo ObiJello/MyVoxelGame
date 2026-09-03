@@ -192,6 +192,13 @@ namespace Game {
     using BlockEntityInsideFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
                                          BlockState state, Entity& entity);
 
+    // `BlockBehaviour.attack(state, level, pos, player)` — the block's
+    // reaction to a left-click PRESS, before any mining happens. Fired from
+    // the server's START_DESTROY handling in survival only, matching MC's
+    // ServerPlayerGameMode (creative instabreaks without ever attacking).
+    // One block cares today: the dragon egg teleports away.
+    using BlockAttackFn = void (*)(ILevelWrite& level, const glm::ivec3& pos);
+
     struct Block {
         std::string name;
         bool opaque;
@@ -238,6 +245,7 @@ namespace Game {
         // Lifecycle / contact callbacks. See the typedefs above.
         BlockOnPlaceFn               onPlace               = nullptr;
         BlockEntityInsideFn          entityInside          = nullptr;
+        BlockAttackFn                attack                = nullptr;
 
         // ── Mining data (MC parity) ────────────────────────────────────────
         // destroyTime: MC's `strength(destroyTime, ...)` first arg from

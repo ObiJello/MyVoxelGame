@@ -1,4 +1,6 @@
 // File: src/client/network/ClientConnection.cpp
+#include "client/world/ClientChunkManager.hpp"
+#include "client/world/ClientLevel.hpp"
 #include "ClientConnection.hpp"
 #include "common/network/packets/game/ChatMessageS2CPacket.hpp"
 #include "NetworkClient.hpp"
@@ -266,15 +268,19 @@ namespace Client {
         SendPacket(static_cast<uint8_t>(Network::PacketId::ChatMessageC2S), data);
     }
 
-    void ClientConnection::SendClientSettings(int renderDistance, bool vsync, float mouseSensitivity) {
-        Log::Info("[Client] SENDING ClientConfigC2S (ID: 0x%02X) - RenderDist: %d, VSync: %s",
-                  static_cast<uint8_t>(Network::PacketId::ClientConfigC2S), 
-                  renderDistance, vsync ? "true" : "false");
-        
+    void ClientConnection::SendClientSettings(int renderDistance, int simulationDistance,
+                                              bool vsync, float mouseSensitivity) {
+        Log::Info("[Client] SENDING ClientConfigC2S (ID: 0x%02X) - RenderDist: %d, SimDist: %d, VSync: %s",
+                  static_cast<uint8_t>(Network::PacketId::ClientConfigC2S),
+                  renderDistance, simulationDistance, vsync ? "true" : "false");
+
         Network::PacketBuffer buffer;
         buffer.WriteVarInt(renderDistance);
         buffer.WriteByte(vsync ? 1 : 0);
         buffer.WriteFloat(mouseSensitivity);
+        // Appended last so an older server (which stops reading after the
+        // float) still accepts the packet.
+        buffer.WriteVarInt(simulationDistance);
         SendPacket(static_cast<uint8_t>(Network::PacketId::ClientConfigC2S), buffer.GetData());
     }
 
@@ -318,6 +324,7 @@ namespace Client {
         // Send client settings with actual render distance from game settings
         SendClientSettings(
             Platform::g_gameSettings.GetRenderDistance(),
+            Platform::g_gameSettings.GetSimulationDistance(),
             Platform::g_gameSettings.GetVSync(),
             Platform::g_gameSettings.GetMouseSensitivity()
         );
@@ -526,12 +533,18 @@ namespace Client {
         switch (static_cast<PacketId>(packetId)) {
             case PacketId::ChunkDataS2C: {
                 auto data = Serialization::DeserializeChunkDataS2C(payload);
+                data.prebuilt = Client::ClientChunkManager::PrebuildChunk(data);   // I/O thread
                 return std::make_unique<ChunkDataS2CPacketImpl>(std::move(data));
             }
             
             case PacketId::UnloadChunkS2C: {
                 auto data = Serialization::DeserializeUnloadChunkS2C(payload);
                 return std::make_unique<UnloadChunkS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::ChunkUnchangedS2C: {
+                auto data = Serialization::DeserializeChunkUnchangedS2C(payload);
+                return std::make_unique<ChunkUnchangedS2CPacketImpl>(data);
             }
             
             case PacketId::BlockChangeS2C: {
@@ -644,6 +657,16 @@ namespace Client {
             case PacketId::ExplodeS2C: {
                 auto data = Serialization::DeserializeExplodeS2C(payload);
                 return std::make_unique<ExplodeS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::BossEventS2C: {
+                auto data = Serialization::DeserializeBossEventS2C(payload);
+                return std::make_unique<BossEventS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::EndCrystalBeamS2C: {
+                auto data = Serialization::DeserializeEndCrystalBeamS2C(payload);
+                return std::make_unique<EndCrystalBeamS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::Disconnect: {
@@ -770,6 +793,27 @@ namespace Client {
                 return std::make_unique<PlayerAbilitiesS2CPacketImpl>(data);
             }
 
+            case PacketId::DimensionScopeS2C: {
+                auto data = Serialization::DeserializeDimensionScopeS2C(payload);
+                return std::make_unique<DimensionScopeS2CPacketImpl>(data);
+            }
+
+#if ENABLE_IMMERSIVE_PORTALS
+            case PacketId::ImmersivePortalSyncS2C: {
+                auto data = Serialization::DeserializeImmersivePortalSyncS2C(payload);
+                return std::make_unique<ImmersivePortalSyncS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::ImmersivePortalRemoveS2C: {
+                auto data = Serialization::DeserializeImmersivePortalRemoveS2C(payload);
+                return std::make_unique<ImmersivePortalRemoveS2CPacketImpl>(data);
+            }
+#endif
+            case PacketId::AoRegionsS2C: {
+                auto data = Serialization::DeserializeAoRegionsS2C(payload);
+                return std::make_unique<AoRegionsS2CPacketImpl>(std::move(data));
+            }
+
 #if ENABLE_PORTAL_GUN
             case PacketId::PortalSetS2C: {
                 auto data = Serialization::DeserializePortalSetS2C(payload);
@@ -813,8 +857,24 @@ namespace Client {
         // No budget check needed: the client tick (20 TPS) naturally limits how many packets
         // accumulate per drain, and the server's ChunkBatchSizeCalculator + back-pressure
         // limits chunk data throughput to ~7ms per tick.
+        // Per-frame budget: a burst of chunk packets (a saved area arriving
+        // at ~1,300 chunks/s) used to be applied in whatever frame it landed,
+        // 20-30 ms hitches. Order is preserved: what is not applied now is
+        // still first in the queue next frame.
+        const auto drainStart = std::chrono::steady_clock::now();
+        constexpr auto kDrainBudget = std::chrono::milliseconds(6);
+        size_t applied = 0;
         Network::IncomingPacket packet;
-        while (TryPopIncoming(packet)) {
+        while (true) {
+            if (applied != 0 && (applied % 8) == 0 &&
+                std::chrono::steady_clock::now() - drainStart > kDrainBudget) break;
+            if (!TryPopIncoming(packet)) break;
+            ++applied;
+            // The globals follow the packet: a chunk for the Nether is
+            // applied with the Nether level bound, whatever level the
+            // player stands in. The scope packet's own handler changes the
+            // packet dimension, so this is re-evaluated per packet.
+            Client::ClientLevels::BindForPacket();
             try {
                 // Undecoded packet deferred off the I/O thread — run its legacy
                 // registry handler here, on the client main thread. Disappears
@@ -833,6 +893,8 @@ namespace Client {
                 Log::Error("[ClientConnection] Exception applying packet: %s", e.what());
             }
         }
+        // Gameplay and rendering read the ACTIVE level; leave the globals on it.
+        Client::ClientLevels::BindActive();
     }
 
 } // namespace Client

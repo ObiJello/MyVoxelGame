@@ -1116,6 +1116,27 @@ int32_t NoiseBasedChunkGenerator::getBaseHeight(
     Heightmap::Types heightmapType,
     RandomState* randomState
 ) const {
+    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32)
+                       ^ static_cast<uint64_t>(static_cast<uint32_t>(z))
+                       ^ (static_cast<uint64_t>(static_cast<int>(heightmapType)) << 60);
+    {
+        std::lock_guard<std::mutex> lock(m_baseHeightMutex);
+        auto it = m_baseHeightCache.find(key);
+        if (it != m_baseHeightCache.end()) return it->second;
+    }
+    const int32_t h = computeBaseHeight(x, z, heightmapType, randomState);
+    std::lock_guard<std::mutex> lock(m_baseHeightMutex);
+    if (m_baseHeightCache.size() > 262144) m_baseHeightCache.clear();
+    m_baseHeightCache.emplace(key, h);
+    return h;
+}
+
+int32_t NoiseBasedChunkGenerator::computeBaseHeight(
+    int32_t x,
+    int32_t z,
+    Heightmap::Types heightmapType,
+    RandomState* randomState
+) const {
     // Reference: NoiseBasedChunkGenerator.java getBaseHeight() lines 107-109
     // Reference: iterateNoiseColumn() lines 126-181
 

@@ -53,31 +53,47 @@ using Executor = std::function<void(std::function<void()>)>;
 // must not run at the same time.
 struct FeatureClaims {
     std::mutex mutex;
-    std::vector<std::pair<int, int>> running;
+    struct Running { int x, z; bool structural; };
+    std::vector<Running> running;
     // Tasks that found a conflict. They are re-submitted (through `submit`)
     // when a claim they conflicted with is released — never by spinning:
     // an immediate re-queue turned into a retry storm that ate the pool's
     // CPU whenever neighbours clustered in the queue (measured 2026-08-30:
     // per-stage times 2-3x, run-to-run bimodal generation speed).
-    struct Waiter { int x, z; std::function<void()> retry; };
+    struct Waiter { int x, z; bool structural; std::function<void()> retry; };
     std::vector<Waiter> waiters;
     std::atomic<size_t> retries{0};   // diagnostics
 
-    bool conflictsLocked(int x, int z) const {
-        for (const auto& [cx, cz] : running) {
-            if (std::abs(cx - x) <= 2 && std::abs(cz - z) <= 2) return true;
+    // Two chunks may decorate concurrently only if they are FURTHER apart
+    // than a decoration's write radius (1: the 3x3 it may place blocks in)
+    // plus a structure piece's read radius (8: jigsaw/mineshaft pieces read
+    // blocks anywhere in their WorldGenRegion). The first attempt used 2 and
+    // crashed in JigsawPieceBehavior reading a chunk another task was
+    // resizing a palette in (2026-08-30). A generation frontier is a ring, so
+    // chunks 10 apart on it are plentiful and the pool stays busy.
+    // Plain feature chunks only touch their 3x3 (write and read), so two of
+    // them conflict only within distance 2; the 9 applies when EITHER chunk
+    // carries structure references (measured 2026-08-30: 9 for everyone left
+    // 8,658 claim retries on 7,450 chunks and cut the far-teleport rate to
+    // 95-118 chunks/s).
+    static constexpr int kPlainDistance = 2;
+    static constexpr int kStructuralDistance = 9;
+    bool conflictsLocked(int x, int z, bool structural) const {
+        for (const Running& r : running) {
+            const int d = (structural || r.structural) ? kStructuralDistance : kPlainDistance;
+            if (std::abs(r.x - x) <= d && std::abs(r.z - z) <= d) return true;
         }
         return false;
     }
     // Acquire, or park `retry` to be re-submitted later. Returns true when acquired.
-    bool acquireOrWait(int x, int z, std::function<void()> retry) {
+    bool acquireOrWait(int x, int z, bool structural, std::function<void()> retry) {
         std::lock_guard<std::mutex> lock(mutex);
-        if (conflictsLocked(x, z)) {
-            waiters.push_back(Waiter{x, z, std::move(retry)});
+        if (conflictsLocked(x, z, structural)) {
+            waiters.push_back(Waiter{x, z, structural, std::move(retry)});
             retries.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        running.emplace_back(x, z);
+        running.push_back(Running{x, z, structural});
         return true;
     }
     void release(int x, int z, const std::function<void(std::function<void()>)>& submit) {
@@ -85,13 +101,13 @@ struct FeatureClaims {
         {
             std::lock_guard<std::mutex> lock(mutex);
             for (size_t i = 0; i < running.size(); ++i) {
-                if (running[i].first == x && running[i].second == z) {
+                if (running[i].x == x && running[i].z == z) {
                     running[i] = running.back(); running.pop_back(); break;
                 }
             }
             // Wake every waiter that no longer conflicts with what is running.
             for (size_t i = 0; i < waiters.size();) {
-                if (!conflictsLocked(waiters[i].x, waiters[i].z)) {
+                if (!conflictsLocked(waiters[i].x, waiters[i].z, waiters[i].structural)) {
                     wake.push_back(std::move(waiters[i].retry));
                     waiters[i] = std::move(waiters.back()); waiters.pop_back();
                 } else {
@@ -122,6 +138,7 @@ struct WorldGenContext {
     // Executors and callbacks
     Executor mainThreadExecutor;
     Executor backgroundExecutor;  // For async operations like noise generation
+    Executor decorationExecutor;  // optional: where parallel decoration runs (else backgroundExecutor)
     std::shared_ptr<FeatureClaims> featureClaims;   // null = run features on the lane
     std::function<void(int, int)> unsavedListener;  // Called with chunk x, z when unsaved
 

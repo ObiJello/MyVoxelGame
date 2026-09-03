@@ -43,6 +43,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include "common/world/level/DimensionId.hpp"
 #include <glm/glm.hpp>
 
 namespace Game {
@@ -106,6 +107,11 @@ namespace Game::Portal {
         glm::ivec3 wallA{0};
         glm::ivec3 wallB{0};
         bool       active = false;
+        // The level the portal is mounted in. The two portals of a pair may
+        // be in different dimensions; in immersive mode that is a working
+        // link (see the ImmersivePortals section in the .cpp), in vanilla
+        // mode the pair only works within one dimension.
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
     };
 
     struct PortalPair {
@@ -165,7 +171,19 @@ namespace Game::Portal {
         // matches — i.e. breaking (or replacing) either of the 2 wall
         // blocks behind a portal destroys it. Broadcasts the appropriate
         // PortalRemoveS2C and drops cached crossing state.
-        void OnBlockChanged(const glm::ivec3& pos);
+        void OnBlockChanged(Game::DimensionId dimension, const glm::ivec3& pos);
+
+        // Pairs survive a relog: <save>/data/portal_gun.json. Load runs at
+        // server start (after the immersive registry loaded) and, in
+        // immersive mode, re-mirrors every linked pair into it; Save runs
+        // with the other world data.
+        bool Load();
+        bool Save() const;
+        void RebuildImmersive();
+        // An entity went through an immersive surface with this tag. A
+        // gun's surface ("gun:<id>") lights both rims of that pair up —
+        // the teleport flash the pre-immersive tick used to send.
+        void OnImmersiveCrossing(const std::string& tag);
 
     private:
         uint64_t m_nextId = 1;

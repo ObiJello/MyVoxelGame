@@ -17,13 +17,13 @@ namespace Game {
                               llama.position.z + side * std::cos(yawRad));
     }
 
-    void LlamaSpit::OnHitEntity(LivingEntity& target) {
+    void LlamaSpit::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
         // MC: the spit only damages when its owner is a living entity.
         auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner());
         if (!livingOwner) return;
         livingOwner->SetLastHurtMob(&target);
-        target.Hurt(MobDamageSource::Projectile, 1.0f, livingOwner);
+        DealHitDamage(target, hit, MobDamageSource::Projectile, 1.0f, livingOwner);
     }
 
     void LlamaSpit::OnHitBlock(const HitResult& hit) {

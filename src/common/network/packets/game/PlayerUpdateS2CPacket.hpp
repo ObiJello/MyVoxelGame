@@ -28,6 +28,14 @@ namespace Network {
         // position broadcast is already going out.
         uint8_t   deathTime = 0;
         uint32_t  sequenceNumber;
+        // The dimension the player stands in. In the packet, not the stream
+        // scope, because this broadcast goes to everyone and a scope switch
+        // would make every client build a level for a dimension it may never
+        // look into.
+        int8_t    dimensionId = 0;
+        // The player's body size (/scale, scaled portals). Trailing: an
+        // older server sends none and the reader takes 1.
+        float     scale = 1.0f;
     };
 
     namespace Serialization {
@@ -44,6 +52,8 @@ namespace Network {
             buffer.WriteByte(packet.hurtTime);
             buffer.WriteByte(packet.deathTime);
             buffer.WriteVarInt(packet.sequenceNumber);
+            buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
+            buffer.WriteFloat(packet.scale);
             return buffer.GetData();
         }
 
@@ -60,6 +70,8 @@ namespace Network {
             packet.hurtTime = reader.ReadByte();
             packet.deathTime = reader.ReadByte();
             packet.sequenceNumber = reader.ReadVarInt();
+            packet.dimensionId = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte()) : 0;
+            packet.scale = reader.HasMore() ? reader.ReadFloat() : 1.0f;
             return packet;
         }
 

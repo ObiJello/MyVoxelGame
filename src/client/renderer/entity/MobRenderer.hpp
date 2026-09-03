@@ -53,6 +53,7 @@
 #pragma once
 
 #include "client/renderer/backend/RenderTypes.hpp"
+#include "client/renderer/entity/EntityFrame.hpp"
 #include "client/renderer/entity/model/EntityModels.hpp"
 #include "common/entity/EntityType.hpp"
 
@@ -64,6 +65,7 @@
 #include <unordered_map>
 #include <vector>
 
+struct Frustum;
 namespace Game { class Mob; }
 namespace Client { class ClientMobManager; }
 
@@ -77,8 +79,12 @@ namespace Render {
         bool Initialize();
         void Shutdown();
 
+        // `frustum` is the one the chunk pass of THIS view was culled with
+        // (the main frustum, or a portal recursion's) — MC
+        // extractVisibleEntities' shouldRender AABB test and the visible-
+        // section gate both key on it; see EntityCulling.hpp.
         void Render(const glm::mat4& projection, const glm::mat4& view,
-                    const glm::vec3& cameraPos,
+                    const glm::vec3& cameraPos, const Frustum& frustum,
                     const Client::ClientMobManager& mobs,
                     float partialTick);
 
@@ -185,12 +191,26 @@ namespace Render {
                                         std::vector<uint32_t>& idx);
 
         ShaderHandle m_shader = INVALID_SHADER;
-        BufferHandle m_vertexBuffer = INVALID_BUFFER;
-        BufferHandle m_indexBuffer = INVALID_BUFFER;
-        MeshHandle   m_mesh = INVALID_MESH;
 
-        // Streaming capacity. A mob is ~1.5k vertices posed; this holds a few
-        // hundred of them, well past what the tracking range can deliver.
+        // Two streaming sets alternated per FRAME, each call within a frame
+        // appending at a cursor — the scheme EntityCulling.hpp's frame-serial
+        // note lays out. One set rewritten every call was a Vulkan hazard
+        // twice over: the previous frame's commands could still be reading
+        // it, and the portal pass's second call overwrote the main pass's
+        // geometry before either had drawn.
+        struct FrameBuffers {
+            BufferHandle vb   = INVALID_BUFFER;
+            BufferHandle ib   = INVALID_BUFFER;
+            MeshHandle   mesh = INVALID_MESH;
+        };
+        FrameBuffers m_frames[2];
+        EntityFrame::Cursor m_frameCursor;
+        size_t m_vertCursor = 0;   // vertices already written this frame
+        size_t m_idxCursor  = 0;   // indices already written this frame
+
+        // Streaming capacity PER SET, shared by every call in a frame. A mob
+        // is ~1.5k vertices posed; this holds a few hundred of them, well
+        // past what the tracking range can deliver.
         static constexpr size_t kMaxVertices = 262144;
         static constexpr size_t kMaxIndices  = 393216;
 
@@ -222,6 +242,27 @@ namespace Render {
                                              const glm::vec3& cameraPos,
                                              std::vector<ModelVertex>& verts,
                                              std::vector<uint32_t>& idx);
+
+        // ── End dragon fight geometry ─────────────────────────────────────
+        //
+        // MC EnderDragonRenderer.submitCrystalBeams — the 8-segment textured
+        // tube between a crystal and its target (also the dragon-healing
+        // beam), in world space, batched on end_crystal_beam.png (wrapped
+        // REPEAT for the scroll). AppendDragonRays is the death cinematic's
+        // fan of magenta rays, batched blended on a 1x1 white texture.
+        TextureHandle BeamTexture();
+        void AppendCrystalBeam(const glm::dvec3& baseWorld,
+                               const glm::dvec3& tipWorld, float ageInTicks,
+                               const glm::vec3& cameraPos,
+                               std::vector<ModelVertex>& verts,
+                               std::vector<uint32_t>& idx);
+        void AppendDragonRays(const glm::dvec3& centerWorld, float deathTime01,
+                              const glm::vec3& cameraPos,
+                              std::vector<ModelVertex>& verts,
+                              std::vector<uint32_t>& idx);
+        TextureHandle m_whiteTexture = INVALID_TEXTURE;
+        TextureHandle m_beamTexture = INVALID_TEXTURE;
+        bool m_beamTextureTried = false;
 
         // Reused across frames so the per-frame rebuild does not allocate.
         std::vector<ModelVertex> m_verts;

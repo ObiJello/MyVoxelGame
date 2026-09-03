@@ -23,8 +23,10 @@ namespace Server {
     public:
         // Configuration
         struct Config {
-            // Default player settings
-            int defaultSimulationDistance = 8;
+            // Default player settings. The simulation distance is the
+            // placeholder between session creation and the client's
+            // ClientConfigC2S (MC server.properties simulation-distance=10).
+            int defaultSimulationDistance = 10;
             int defaultViewDistance = 8;
             int maxViewDistance = 32;
             
@@ -83,6 +85,10 @@ namespace Server {
         
         // Get all active sessions
         std::vector<std::shared_ptr<PlayerSession>> GetAllSessions() const;
+
+        // Is any session standing in, or looking into (through a portal),
+        // this dimension? What keeps a dimension ticking — ServerLevel::HasWork.
+        bool AnySessionLoadsDimension(Game::DimensionId dimension) const;
         
         // Get session count
         size_t GetSessionCount() const;

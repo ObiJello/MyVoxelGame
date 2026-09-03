@@ -35,7 +35,45 @@ namespace Game {
     // portal's nausea/warp; the End portal has none.
     enum class PortalLocalTransition : uint8_t { None, Confusion };
 
+    class ILevelWrite;
+
     namespace Portals {
+
+        // ── Immersive nether portals (Features.hpp ENABLE_IMMERSIVE_PORTALS) ──
+        // When ON, a lit obsidian frame becomes a see-through surface (an
+        // immersive portal) instead of purple portal blocks, and vanilla
+        // portal blocks left in the world are inert. The server sets this
+        // from its config (/gamerule immersive_portals); it is read by the
+        // fire block's onPlace, the portal block's entityInside and the
+        // server's portal tick. Defaults on.
+        inline bool g_immersiveNetherPortals = true;
+        inline bool ImmersiveNetherPortals()      { return g_immersiveNetherPortals; }
+        inline void SetImmersiveNetherPortals(bool on) { g_immersiveNetherPortals = on; }
+
+        // World options set at creation (default off), server-installed:
+        //   • World wrap: the world is `g_worldWrapSize` blocks across and
+        //     its borders are global portals onto the opposite border, so
+        //     it is a loop. 0 = off. The Nether wraps at an eighth.
+        //   • Dimension stack: the bottom of each dimension is a global
+        //     portal onto the top of the next — Overworld over Nether over
+        //     End over Overworld — and the bedrock at those seams is
+        //     generated as ordinary stone so the way through is open.
+        inline int  g_worldWrapSize = 0;
+        inline bool g_dimensionStack = false;
+        inline int  WorldWrapSize()            { return g_worldWrapSize; }
+        inline void SetWorldWrapSize(int size) { g_worldWrapSize = size; }
+        inline bool DimensionStackEnabled()    { return g_dimensionStack; }
+        inline void SetDimensionStack(bool on) { g_dimensionStack = on; }
+
+        // Server-installed: called by the fire block when it is placed in a
+        // dimension that allows nether portals and immersive mode is on.
+        // Returns true if a closed obsidian loop around `firePos` was found
+        // and the frame taken over (the fire is removed by the handler).
+        using ImmersiveFrameLitHandler = bool (*)(ILevelWrite& level, const glm::ivec3& firePos);
+        inline ImmersiveFrameLitHandler g_immersiveFrameLitHandler = nullptr;
+        inline void SetImmersiveFrameLitHandler(ImmersiveFrameLitHandler h) { g_immersiveFrameLitHandler = h; }
+        inline ImmersiveFrameLitHandler GetImmersiveFrameLitHandler()        { return g_immersiveFrameLitHandler; }
+
 
         // MC Entity.getDimensionChangingDelay (Entity.java:2628) and its
         // overrides. This is the post-travel cooldown, NOT the time spent
@@ -56,7 +94,8 @@ namespace Game {
 
         // Is this block one you can travel through?
         inline bool IsPortal(BlockID id) {
-            return id == BlockID::NetherPortal || id == BlockID::EndPortal;
+            return id == BlockID::NetherPortal || id == BlockID::EndPortal ||
+                   id == BlockID::EndGateway;
         }
 
         // MC NetherPortalBlock.getPortalTransitionTime (:99) and

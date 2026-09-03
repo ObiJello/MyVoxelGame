@@ -33,7 +33,15 @@ namespace Server {
     }
 
     // FoodData.tick — FoodData.java:32-73.
-    void FoodData::tick(ServerPlayer& player) {
+    void FoodData::tick(ServerPlayer& player, bool peaceful) {
+        // MC ServerPlayer.tick (:  if difficulty == PEACEFUL && naturalRegen):
+        // a hurt player heals one point a second, and an empty stomach
+        // refills one point every half second.
+        if (peaceful) {
+            ++m_peacefulTicks;
+            if (player.getHealth() < 20.0f && (m_peacefulTicks % 20) == 0) player.heal(1.0f);
+            if (m_foodLevel < 20 && (m_peacefulTicks % 10) == 0) m_foodLevel = std::min(m_foodLevel + 1, 20);
+        }
         // Difficulty pinned to NORMAL (no difficulty setting): the PEACEFUL
         // no-hunger-drain branch and the HARD starvation exception both
         // resolve to NORMAL behaviour below.
@@ -43,7 +51,7 @@ namespace Server {
             m_exhaustionLevel -= 4.0f;
             if (m_saturationLevel > 0.0f) {
                 m_saturationLevel = std::max(m_saturationLevel - 1.0f, 0.0f);
-            } else {  // difficulty != PEACEFUL (pinned)
+            } else if (!peaceful) {   // MC: difficulty != PEACEFUL
                 m_foodLevel = std::max(m_foodLevel - 1, 0);
             }
         }

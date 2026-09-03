@@ -70,12 +70,60 @@ namespace Render {
                              Game::Math::ChunkPos chunkPos,
                              int sectionY, SectionMesh& outMesh);
 
+        // Still-fluid greedy merging — the fluid half of the Mesher's greedy
+        // pass (see the Greedy namespace rationale in Mesher.cpp). Flat
+        // full-cell fluid TOP surfaces (and their flat underside quads) park
+        // in a thread-local per-plane grid instead of being emitted, and the
+        // flush merges maximal rectangles of cells whose surface height,
+        // sprite rect and packed color match exactly. Legal for the animated
+        // still sprites because their ATLAS RECT is constant — the animation
+        // updates texels in place, so a tiled rect keeps animating.
+        //
+        // BeginGreedySection is called by the Mesher at the start of every
+        // section build: it publishes the section base (grid coordinates are
+        // section-local) and whether merging is on (m_config.enableGreedyMeshing
+        // and OBEY_NO_GREEDY, both resolved by the Mesher so the two greedy
+        // passes cannot disagree about the switch). It also defensively drops
+        // any leftovers a previous build failed to flush, mirroring
+        // Greedy::ResetThreadState.
+        void BeginGreedySection(bool enabled, int baseWorldX, int baseWorldY, int baseWorldZ);
+
+        // Called from Mesher::FlushGreedyQuads, once per section after the
+        // block loop: emits one tiled plate per merged rectangle and every
+        // 1x1 survivor verbatim, into the same SectionMesh layer vectors the
+        // per-block path uses. The counters are the Mesher's own flush
+        // accumulators — fluid merges ride the same MeshStats fields,
+        // since-launch totals and Mesh/QuadsMerged plot as terrain merges.
+        void FlushGreedyFluidQuads(SectionMesh& mesh, int& mergedQuads,
+                                   int& cellsMerged, int& survivorQuads);
+
         // Update configuration
         void SetConfig(const FluidMeshConfig& config) { m_config = config; }
         const FluidMeshConfig& GetConfig() const { return m_config; }
 
     private:
         FluidMeshConfig m_config;
+
+        // Still-fluid greedy state for the CURRENT section build, published by
+        // BeginGreedySection. Instance members (not thread_local) because a
+        // FluidMeshBuilder is owned by one Mesher, which is used by one worker
+        // at a time; the merge grids themselves are thread_local in the .cpp,
+        // same pattern as the Mesher's Greedy namespace.
+        bool m_greedyEnabled = false;
+        int  m_greedyBaseX = 0;
+        int  m_greedyBaseY = 0;
+        int  m_greedyBaseZ = 0;
+
+        // Parks one flat full-cell fluid quad in the merge grid. `kind` is one
+        // of the kGreedyKind* plane families in the .cpp (up-facing top,
+        // down-facing top copy, volume bottom) — the three never merge with
+        // each other. Returns false when the quad was NOT stashed (merging
+        // off, cell outside the section, corner-color gradient, or the cell
+        // already holds a quad) and must be emitted directly.
+        bool TryStashGreedyFluidQuad(int kind, Game::BlockID fluidType,
+                                     const std::vector<Vertex>& verts,
+                                     const glm::vec4& uvRect,
+                                     int worldX, int worldY, int worldZ);
 
         // MC ItemBlockRenderTypes.LAYER_BY_FLUID registers WATER (and
         // FLOWING_WATER) as TRANSLUCENT and nothing else; getRenderLayer's
@@ -96,7 +144,12 @@ namespace Render {
         // back-face culls. MC does exactly this
         // (LiquidBlockRenderer.java:174 re-emits the four top vertices in
         // reverse order when FluidState.shouldRenderBackwardUpFace holds).
+        // `worldX/Y/Z` are the block's integer coordinates — the greedy stash
+        // needs them for grid indexing, and deriving them back out of the
+        // float blockPos would be an exactness argument nobody should have to
+        // re-verify.
         void CreateFluidTopSurface(Game::BlockID fluidType, glm::vec3 blockPos,
+                                  int worldX, int worldY, int worldZ,
                                   float height, FlowDirection flow,
                                   const glm::vec4& tint, SectionMesh& mesh,
                                   bool backwardUpFace);
@@ -118,6 +171,7 @@ namespace Render {
 
         // The underside of the fluid volume, still sprite, full UV rect.
         void CreateFluidBottomFace(Game::BlockID fluidType, glm::vec3 blockPos,
+                                   int worldX, int worldY, int worldZ,
                                    float bottomOffset, const glm::vec4& tint, SectionMesh& mesh);
 
         // Flow detection and surface calculation

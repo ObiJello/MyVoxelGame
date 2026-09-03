@@ -41,7 +41,7 @@ namespace Game {
     protected:
         float GetWaterInertia() const override { return 0.99f; }
         bool  FindsHitEntities() const override { return !m_dealtDamage; }
-        void  OnHitEntity(LivingEntity& target) override;
+        void  OnHitEntity(LivingEntity& target, const HitResult& hit) override;
 
     private:
         bool m_dealtDamage = false;

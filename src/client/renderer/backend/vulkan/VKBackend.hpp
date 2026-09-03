@@ -9,6 +9,8 @@
 #include <vector>
 #include <optional>
 #include <array>
+#include <string>
+#include <cstdint>
 
 namespace Render {
 
@@ -42,8 +44,19 @@ namespace Render {
                                  const void* data, BufferAccess access) override;
         void UpdateBuffer(BufferHandle handle, size_t offset,
                          size_t size, const void* data) override;
+        // Same memcpy as UpdateBuffer: host-visible buffers are persistently
+        // mapped, so neither path waits on the GPU. Callers that need a range
+        // to be stable while a frame is in flight must version it themselves
+        // (one region per frame in flight, as the GUI and indirect ring do).
+        void UpdateBufferUnsynchronized(BufferHandle handle, size_t offset,
+                                        size_t size, const void* data) override;
         void DestroyBuffer(BufferHandle handle) override;
         void DeferredDestroyBuffer(BufferHandle handle) override;
+        const void* DebugGetMappedBufferPtr(BufferHandle handle) const override;
+        void DebugSetMultiDrawIndirect(bool enable) override { m_multiDrawIndirect = enable; }
+        // See PipelineState::depthClampEnabled — a device feature we may lack.
+        bool m_depthClampSupported = false;
+        bool DebugGetMultiDrawIndirect() const override { return m_multiDrawIndirect; }
 
         // Textures
         TextureHandle CreateTexture2D(int width, int height, TextureFormat format,
@@ -190,9 +203,36 @@ namespace Render {
         // ====================================================================
         // SYNCHRONIZATION
         // ====================================================================
-        std::vector<VkSemaphore> m_imageAvailableSemaphores;
+        std::vector<VkSemaphore> m_imageAvailableSemaphores;   // one per frame in flight
+        // One per SWAPCHAIN IMAGE, not per frame in flight. The present engine
+        // holds an image's semaphore until that image is presented, which can
+        // outlive the frame slot (3 images, 2 slots), and re-signalling a
+        // semaphore the presentation engine still waits on is what validation
+        // flags. Sized in CreateSyncObjects / RecreateSwapchain.
         std::vector<VkSemaphore> m_renderFinishedSemaphores;
         std::vector<VkFence> m_inFlightFences;
+        bool CreateRenderFinishedSemaphores();
+        void DestroyRenderFinishedSemaphores();
+        // Monotonic frame number, advanced in BeginFrame once the frame is
+        // committed to (after the fence wait and image acquire). Ring
+        // resources that are written OUTSIDE the BeginFrame..EndFrame window
+        // (texture staging) key on this instead of m_currentFrame — see
+        // m_texStaging.
+        uint64_t m_frameNumber = 0;
+
+        // Indirect draw ring (one per frame in flight): MultiDrawIndexedBaseVertex
+        // writes VkDrawIndexedIndirectCommands here and issues ONE
+        // vkCmdDrawIndexedIndirect instead of ~1,600 vkCmdDrawIndexed per
+        // frame (measured 2026-08-30). Falls back to the loop when the device
+        // lacks multiDrawIndirect or the ring is full.
+        bool m_multiDrawIndirect = false;
+        static constexpr VkDeviceSize kIndirectRingBytes = 4u << 20;   // 4 MB = 209k commands
+        std::vector<VkBuffer> m_indirectBuffers;
+        std::vector<VkDeviceMemory> m_indirectMemory;
+        std::vector<void*> m_indirectMapped;
+        std::vector<VkDeviceSize> m_indirectOffset;
+        bool CreateIndirectRing();
+        void DestroyIndirectRing();
         uint32_t m_currentFrame = 0;
         uint32_t m_currentImageIndex = 0;
         bool m_framebufferResized = false;
@@ -208,24 +248,51 @@ namespace Render {
         // ====================================================================
         // BATCHED TEXTURE UPDATES
         // ====================================================================
-        // UpdateTexture2D queues updates here; BeginFrame flushes them into the
-        // frame command buffer before the render pass starts — zero vkQueueWaitIdle.
+        // UpdateTexture2D writes the pixels STRAIGHT into a persistently mapped
+        // staging buffer and queues a copy record; BeginFrame flushes the
+        // records into the frame command buffer before the render pass starts
+        // — zero vkQueueWaitIdle, one memcpy per update.
         struct PendingTextureUpdate {
             VkImage image;
             int x, y, width, height;
             uint32_t mipLevel = 0;
-            std::vector<unsigned char> data;
+            size_t stagingOffset = 0;   // byte offset into the staging ring slot
+            size_t byteSize = 0;
         };
         std::vector<PendingTextureUpdate> m_pendingTextureUpdates;
 
-        // Persistent staging buffer (reused across frames, persistently mapped)
-        VkBuffer m_texStagingBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory m_texStagingMemory = VK_NULL_HANDLE;
-        size_t m_texStagingCapacity = 0;
-        void* m_texStagingMapped = nullptr;
+        // Staging ring: MAX_FRAMES_IN_FLIGHT + 1 slots, indexed by the number
+        // of the frame that will flush them. Frame N's BeginFrame flushes slot
+        // N % slots; every update queued after that — during frame N's body or
+        // in the gap before BeginFrame(N+1) — goes to slot (N+1) % slots.
+        //
+        // Why +1 and not per frame slot: while frame N is being recorded,
+        // frames N and N-1 can both still be executing (two in flight), and
+        // each reads its own staging slot. A ring of exactly two would have
+        // the writer for N+1 racing frame N-1's reader. With three, slot
+        // (N+1) % 3 == (N-2) % 3 was last read by frame N-2, whose fence
+        // BeginFrame(N) already waited on.
+        struct TexStagingSlot {
+            VkBuffer       buffer   = VK_NULL_HANDLE;
+            VkDeviceMemory memory   = VK_NULL_HANDLE;
+            size_t         capacity = 0;
+            uint8_t*       mapped   = nullptr;
+            size_t         used     = 0;   // write cursor; reset after flush
+        };
+        static constexpr uint32_t kTexStagingSlots = MAX_FRAMES_IN_FLIGHT + 1;
+        std::array<TexStagingSlot, kTexStagingSlots> m_texStaging;
+        // The slot updates are written into = the one the NEXT BeginFrame flushes.
+        TexStagingSlot& PendingTexStaging() {
+            return m_texStaging[static_cast<size_t>((m_frameNumber + 1) % kTexStagingSlots)];
+        }
 
         void FlushPendingTextureUpdates(VkCommandBuffer cmd);
-        void EnsureTexStagingBuffer(size_t requiredSize);
+        // Returns the write pointer for `bytes` more staging data in the current
+        // slot (growing it, preserving what is already queued), or nullptr.
+        uint8_t* ReserveTexStaging(size_t bytes, size_t& outOffset);
+        void DestroyTexStaging();
+        void QueueTextureUpdate(VkImage image, uint32_t mipLevel, int x, int y,
+                                int width, int height, const void* data);
 
         // ====================================================================
         // DESCRIPTOR POOL & LAYOUTS
@@ -249,17 +316,26 @@ namespace Render {
         // the same 128-byte push-constant range.
         VkPipelineLayout m_portalPipelineLayout = VK_NULL_HANDLE;
         VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;
-        // We create pipelines per PipelineState
-        struct PipelineKey {
+        // The cache is persisted to disk (<obeycraft>/cache/vk_pipeline_cache.bin)
+        // so a second launch never compiles a pipeline it compiled before —
+        // pipeline creation is lazy and lands mid-frame, which is a visible
+        // hitch on MoltenVK where it means a Metal shader compile.
+        std::string m_pipelineCacheFile;
+        uint32_t m_pipelinesSinceSave = 0;      // new pipelines not yet on disk
+        uint64_t m_lastPipelineFrame  = 0;      // frame of the most recent creation
+        std::vector<char> LoadPipelineCacheBlob() const;
+        void SavePipelineCache();
+        // Every pipeline is remembered with the (state, shader) it was built
+        // from so RecreateSwapchain can rebuild the set EAGERLY (one hitch at
+        // resize) instead of dropping it and re-hitching lazily per draw.
+        struct PipelineRecord {
             PipelineState state;
-            ShaderHandle shader;
-            // Simplified hash/equals for now
-            bool operator==(const PipelineKey& other) const;
+            ShaderHandle  shader = INVALID_SHADER;
+            VkPipeline    pipeline = VK_NULL_HANDLE;
         };
-        struct PipelineKeyHash {
-            size_t operator()(const PipelineKey& key) const;
-        };
-        std::unordered_map<size_t, VkPipeline> m_pipelines; // hash -> pipeline
+        std::unordered_map<size_t, PipelineRecord> m_pipelines; // key -> record
+        void DestroyAllPipelines();
+        void RebuildAllPipelines();
 
         // ====================================================================
         // RESOURCE TRACKING
@@ -278,7 +354,12 @@ namespace Render {
             VkBuffer buffer = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
             size_t size = 0;
-            BufferUsage usage;
+            BufferUsage usage = BufferUsage::Vertex;
+            // Host-visible (Dynamic/Streaming) buffers stay mapped for their
+            // whole life: UpdateBuffer is then a memcpy instead of a
+            // vkMapMemory/vkUnmapMemory pair per call (MoltenVK makes each of
+            // those a Metal call). nullptr for device-local Static buffers.
+            uint8_t* mapped = nullptr;
         };
         std::unordered_map<uint32_t, VKBufferInfo> m_buffers;
 
@@ -467,6 +548,36 @@ namespace Render {
 
         // Currently bound state
         ShaderHandle m_boundShader = INVALID_SHADER;
+        // Resolved once in BindShader rather than looked up per draw: which
+        // pipeline layout the bound shader uses. m_shaders is an
+        // unordered_map, so the pointer stays valid until that shader is
+        // erased (DestroyShader clears it).
+        const VKShaderInfo* m_boundShaderInfo = nullptr;
+        VkPipelineLayout    m_boundLayout     = VK_NULL_HANDLE;
+        bool                m_boundIsPortal   = false;
+
+        // Last state recorded into the ACTIVE command buffer, so a draw that
+        // repeats the previous draw's bindings records nothing for them. All
+        // reset in BeginFrame (a fresh command buffer has nothing bound) and
+        // after ImGui records its own binds into the same buffer.
+        struct RecordedBindings {
+            VkBuffer        vertexBuffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            VkDeviceSize    vertexOffsets[2] = {0, 0};
+            uint32_t        vertexCount = 0;              // 0 = nothing bound
+            VkBuffer        indexBuffer = VK_NULL_HANDLE;
+            VkIndexType     indexType   = VK_INDEX_TYPE_UINT32;
+            VkDescriptorSet textureSet  = VK_NULL_HANDLE;  // block layout, set 0
+            VkPipelineLayout pushLayout = VK_NULL_HANDLE;  // layout the constants were pushed with
+            bool            pushValid   = false;
+        };
+        RecordedBindings m_recorded;
+        void ResetRecordedBindings();
+        // Shared front half of every draw path: pipeline bind, dynamic stencil,
+        // push constants, descriptor sets. False = the draw must be skipped.
+        bool PrepareDraw(VkCommandBuffer cmd);
+        void BindVertexBuffersCached(VkCommandBuffer cmd, uint32_t count,
+                                     const VkBuffer* buffers, const VkDeviceSize* offsets);
+        void BindIndexBufferCached(VkCommandBuffer cmd, VkBuffer buffer, VkIndexType type);
         // Slot 0 is the "primary" texture (used by every shader that
         // samples a texture and by the block pipeline layout). Higher
         // slots are for shaders that need multiple textures (portal
@@ -528,6 +639,7 @@ namespace Render {
             glm::vec4 uUVRange    = {0, 0, 1, 1};      // 96-111 (16) — (uvMin.xy, uvMax.xy)
             glm::vec4 uScalars    = {0, 0, 0, 0};      // 112-127(16) — per-shader scalar pack
         } m_pushConstants;                              // 128 bytes — Vulkan minimum guarantee
+        PushConstantBlock m_lastPushed;                 // what the command buffer last received
 
         // Clear color
         VkClearColorValue m_clearColor = {{0.5f, 0.7f, 1.0f, 1.0f}};
@@ -613,6 +725,10 @@ namespace Render {
         VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) const;
         VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& modes) const;
         VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& caps, GLFWwindow* window) const;
+        // Queried once in PickPhysicalDevice; FindMemoryType used to re-query
+        // the driver on every buffer and image allocation.
+        VkPhysicalDeviceMemoryProperties m_memProperties{};
+        VkPhysicalDeviceProperties       m_deviceProperties{};
         uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
         VkFormat FindDepthFormat() const;
         VkFormat FindSupportedFormat(const std::vector<VkFormat>& candidates,

@@ -610,6 +610,8 @@ namespace Render {
             GLenum glType = GL_FLOAT;
             if (attr.type == AttribType::UByte) {
                 glType = GL_UNSIGNED_BYTE;
+            } else if (attr.type == AttribType::UShort) {
+                glType = GL_UNSIGNED_SHORT;
             }
             glVertexAttribPointer(attr.location, attr.componentCount, glType,
                                 attr.normalized ? GL_TRUE : GL_FALSE,
@@ -813,6 +815,10 @@ namespace Render {
             state.stencilReadMask    = m_stencilOverride.readMask;
             state.stencilWriteMask   = m_stencilOverride.writeMask;
         }
+        if (m_cullInvert) {
+            if (state.cullMode == CullMode::Back)       state.cullMode = CullMode::Front;
+            else if (state.cullMode == CullMode::Front) state.cullMode = CullMode::Back;
+        }
 
         // Depth test
         if (!m_stateInitialized || state.depthTestEnabled != m_currentState.depthTestEnabled) {
@@ -901,6 +907,12 @@ namespace Render {
             glPolygonOffset(state.depthBiasSlope, state.depthBiasConstant);
         }
 
+        // Depth clamp (see PipelineState::depthClampEnabled).
+        if (!m_stateInitialized || state.depthClampEnabled != m_currentState.depthClampEnabled) {
+            if (state.depthClampEnabled) glEnable(GL_DEPTH_CLAMP);
+            else                         glDisable(GL_DEPTH_CLAMP);
+        }
+
         // Stencil — only do work when the test flips on/off OR the
         // reference / ops / masks change while it's enabled. Same shape as
         // the depth/blend branches above.
@@ -983,7 +995,9 @@ namespace Render {
         const auto bindAttribs = [](GLuint bufferId, const VertexLayout& layout) {
             glBindBuffer(GL_ARRAY_BUFFER, bufferId);
             for (const auto& attr : layout.attributes) {
-                GLenum glType = (attr.type == AttribType::UByte) ? GL_UNSIGNED_BYTE : GL_FLOAT;
+                GLenum glType = (attr.type == AttribType::UByte)  ? GL_UNSIGNED_BYTE
+                              : (attr.type == AttribType::UShort) ? GL_UNSIGNED_SHORT
+                                                                  : GL_FLOAT;
                 glVertexAttribPointer(attr.location, attr.componentCount, glType,
                                       attr.normalized ? GL_TRUE : GL_FALSE,
                                       layout.stride,
@@ -1039,7 +1053,9 @@ namespace Render {
             if (bufIt != m_buffers.end()) {
                 glBindBuffer(GL_ARRAY_BUFFER, bufIt->second.glId);
                 for (const auto& attr : it->second.instanceLayout.attributes) {
-                    GLenum glType = (attr.type == AttribType::UByte) ? GL_UNSIGNED_BYTE : GL_FLOAT;
+                    GLenum glType = (attr.type == AttribType::UByte)  ? GL_UNSIGNED_BYTE
+                              : (attr.type == AttribType::UShort) ? GL_UNSIGNED_SHORT
+                                                                  : GL_FLOAT;
                     glVertexAttribPointer(attr.location, attr.componentCount, glType,
                                           attr.normalized ? GL_TRUE : GL_FALSE,
                                           it->second.instanceLayout.stride,
@@ -1090,6 +1106,11 @@ namespace Render {
             glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE,
                                   static_cast<GLsizei>(stride),
                                   reinterpret_cast<void*>(static_cast<uintptr_t>(5 * sizeof(float))));
+            // Greedy-mesh tile rect (TerrainVertex, offset 24). Terrain is the
+            // only client of this shared VAO, so the attribute is always fed.
+            glVertexAttribPointer(3, 4, GL_UNSIGNED_SHORT, GL_TRUE,
+                                  static_cast<GLsizei>(stride),
+                                  reinterpret_cast<void*>(static_cast<uintptr_t>(5 * sizeof(float) + 4)));
         }
     }
 
@@ -1114,33 +1135,25 @@ namespace Render {
                                                 const int32_t* baseVertices,
                                                 uint32_t drawCount,
                                                 IndexType indexType) {
+        if (drawCount == 0) return;
         const GLenum glIndexType =
             indexType == IndexType::Uint16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
-        // Convert size_t byte offsets to const void* for GL
-        // Stack-allocate for typical draw counts, heap for large batches
-        if (drawCount <= 256) {
-            const void* offsets[256];
-            for (uint32_t i = 0; i < drawCount; i++)
-                offsets[i] = reinterpret_cast<const void*>(indexByteOffsets[i]);
-            glMultiDrawElementsBaseVertex(
-                GL_TRIANGLES,
-                reinterpret_cast<const GLsizei*>(indexCounts),
-                glIndexType,
-                offsets,
-                static_cast<GLsizei>(drawCount),
-                const_cast<GLint*>(reinterpret_cast<const GLint*>(baseVertices)));
-        } else {
-            std::vector<const void*> offsets(drawCount);
-            for (uint32_t i = 0; i < drawCount; i++)
-                offsets[i] = reinterpret_cast<const void*>(indexByteOffsets[i]);
-            glMultiDrawElementsBaseVertex(
-                GL_TRIANGLES,
-                reinterpret_cast<const GLsizei*>(indexCounts),
-                glIndexType,
-                offsets.data(),
-                static_cast<GLsizei>(drawCount),
-                const_cast<GLint*>(reinterpret_cast<const GLint*>(baseVertices)));
-        }
+        // Convert size_t byte offsets to const void* for GL. Persistent scratch:
+        // a slab of a wide view is thousands of sub-draws, and this used to
+        // heap-allocate a fresh vector for every one of those calls, every
+        // frame. GL is single-threaded by contract, so a function-local static
+        // is safe; it grows to the largest batch ever issued and stays there.
+        static std::vector<const void*> s_offsetScratch;
+        if (s_offsetScratch.size() < drawCount) s_offsetScratch.resize(drawCount);
+        for (uint32_t i = 0; i < drawCount; i++)
+            s_offsetScratch[i] = reinterpret_cast<const void*>(indexByteOffsets[i]);
+        glMultiDrawElementsBaseVertex(
+            GL_TRIANGLES,
+            reinterpret_cast<const GLsizei*>(indexCounts),
+            glIndexType,
+            s_offsetScratch.data(),
+            static_cast<GLsizei>(drawCount),
+            const_cast<GLint*>(reinterpret_cast<const GLint*>(baseVertices)));
     }
 
     // ========================================================================
@@ -1156,17 +1169,25 @@ namespace Render {
         if (m_hasVertexAttribBinding) {
             // Vertex format decoupled from buffer binding.
             // VBO switching uses glBindVertexBuffer — cheapest possible path.
+            //
+            // This shared VAO serves ONLY the chunk-terrain mega-buffers (bound
+            // via BindBlockVertexFormat from ClientMeshManager), so it carries
+            // the 32-byte TERRAIN format — block layout plus the unorm16 tile
+            // rect at offset 24 (Render::TerrainVertex / GetTerrainVertexLayout).
             glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, 0);
             glVertexAttribBinding(0, 0);
             glVertexAttribFormat(1, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float));
             glVertexAttribBinding(1, 0);
             glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 5 * sizeof(float));
             glVertexAttribBinding(2, 0);
+            glVertexAttribFormat(3, 4, GL_UNSIGNED_SHORT, GL_TRUE, 5 * sizeof(float) + 4);
+            glVertexAttribBinding(3, 0);
         }
 
         glEnableVertexAttribArray(0);
         glEnableVertexAttribArray(1);
         glEnableVertexAttribArray(2);
+        glEnableVertexAttribArray(3);
 
         glBindVertexArray(0);
     }

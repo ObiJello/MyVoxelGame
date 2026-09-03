@@ -7,42 +7,48 @@
 #include "common/world/block/Direction.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/entity/ItemEntityManager.hpp"
+#include "server/level/ServerLevel.hpp"
 
 namespace Game {
 
-    bool DropItemStackNear(const glm::ivec3& pos, const ItemStack& stack) {
+    namespace {
+        // The named dimension's item manager, or null with no server (a
+        // client-side call, a torn-down world) or before that level exists.
+        Server::ItemEntityManager* ItemsFor(DimensionId dimension) {
+            auto* server = Server::g_integratedServer.get();
+            if (!server) return nullptr;
+            Server::ServerLevel* level = server->GetLevel(dimension);
+            return level ? level->Items() : nullptr;
+        }
+    }
+
+    bool DropItemStackNear(DimensionId dimension, const glm::ivec3& pos,
+                           const ItemStack& stack) {
         if (stack.IsEmpty()) return true;   // nothing to deliver
 
-        auto* server = Server::g_integratedServer.get();
-        if (!server) return false;
-
-        auto* items = server->GetItemEntities();
+        auto* items = ItemsFor(dimension);
         if (!items) return false;
 
         items->PopResource(pos, stack);
         return true;
     }
 
-    bool DropItemStackAt(const glm::dvec3& pos, const ItemStack& stack) {
+    bool DropItemStackAt(DimensionId dimension, const glm::dvec3& pos,
+                         const ItemStack& stack) {
         if (stack.IsEmpty()) return true;
 
-        auto* server = Server::g_integratedServer.get();
-        if (!server) return false;
-
-        auto* items = server->GetItemEntities();
+        auto* items = ItemsFor(dimension);
         if (!items) return false;
 
         items->SpawnAtLocation(pos, stack);
         return true;
     }
 
-    bool DropItemStackFromFace(const glm::ivec3& pos, int face, const ItemStack& stack) {
+    bool DropItemStackFromFace(DimensionId dimension, const glm::ivec3& pos,
+                               int face, const ItemStack& stack) {
         if (stack.IsEmpty()) return true;
 
-        auto* server = Server::g_integratedServer.get();
-        if (!server) return false;
-
-        auto* items = server->GetItemEntities();
+        auto* items = ItemsFor(dimension);
         if (!items) return false;
 
         // Face ordinals match Game::Direction (0=down .. 5=east) by
@@ -75,7 +81,7 @@ namespace Game {
         ctx.blocks     = &level;
 
         for (const ItemStack& drop : LootTables::GetDrops(ctx)) {
-            DropItemStackNear(pos, drop);
+            DropItemStackNear(level.GetDimension(), pos, drop);
         }
         level.SetBlock(pos.x, pos.y, pos.z, BlockID::Air, World::UpdateFlags::All);
     }

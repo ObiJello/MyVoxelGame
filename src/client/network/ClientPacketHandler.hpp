@@ -42,6 +42,7 @@ namespace Client {
         // Visitor pattern packet handlers (called from packet apply())
         void onChunkDataS2C(const Network::ChunkDataS2CPacket& packet) override { handleChunkData(packet); }
         void onUnloadChunkS2C(const Network::UnloadChunkS2CPacket& packet) override { handleChunkUnload(packet); }
+        void onChunkUnchangedS2C(const Network::ChunkUnchangedS2CPacket& packet) override { handleChunkUnchanged(packet); }
         void onBlockChangeS2C(const Network::BlockChangeS2CPacket& packet) override { handleBlockChange(packet); }
         void onClientboundSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) override { handleSectionBlocksUpdate(packet); }
         void onMultiBlockChangeS2C(const Network::MultiBlockChangeS2CPacket& packet) override { handleMultiBlockChange(packet); }
@@ -59,6 +60,10 @@ namespace Client {
         void onEntityEventS2C(const Network::EntityEventS2CPacket& packet) override { handleEntityEvent(packet); }
         void onHurtAnimationS2C(const Network::HurtAnimationS2CPacket& packet) override { handleHurtAnimation(packet); }
 
+        // ── End dragon fight ───────────────────────────────────────────────
+        void onBossEventS2C(const Network::BossEventS2CPacket& packet) override { handleBossEvent(packet); }
+        void onEndCrystalBeamS2C(const Network::EndCrystalBeamS2CPacket& packet) override { handleEndCrystalBeam(packet); }
+
         // ── /tick state ────────────────────────────────────────────────────
         // Handled inline: both are two-field mirrors into the client's
         // TickRateManager with no other consequence, so routing them through a
@@ -74,6 +79,11 @@ namespace Client {
         void onChangeDimensionS2C(const Network::ChangeDimensionS2CPacket& packet) override {
             handleChangeDimension(packet);
         }
+
+        // Stream scope — the level the following packets are applied to.
+        // Handled inline: it is one store, read by ClientConnection before
+        // the next apply (see ClientLevels::BindForPacket).
+        void onDimensionScopeS2C(const Network::DimensionScopeS2CPacket& packet) override;
 
         void onExplodeS2C(const Network::ExplodeS2CPacket& packet) override {
             handleExplode(packet);
@@ -113,6 +123,11 @@ namespace Client {
         // no-op — no animated block entities ship yet — but the dispatch is in
         // place for when ChestLidController lands.
         void onBlockEntityActionS2C(const Network::BlockEntityActionS2CPacket& packet) override {}
+#if ENABLE_IMMERSIVE_PORTALS
+        void onImmersivePortalSyncS2C(const Network::ImmersivePortalSyncS2CPacket& packet) override { handleImmersivePortalSync(packet); }
+        void onImmersivePortalRemoveS2C(const Network::ImmersivePortalRemoveS2CPacket& packet) override { handleImmersivePortalRemove(packet); }
+#endif
+        void onAoRegionsS2C(const Network::AoRegionsS2CPacket& packet) override { handleAoRegions(packet); }
 #if ENABLE_PORTAL_GUN
         void onPortalSetS2C(const Network::PortalSetS2CPacket& packet) override    { handlePortalSet(packet); }
         void onPortalRemoveS2C(const Network::PortalRemoveS2CPacket& packet) override { handlePortalRemove(packet); }
@@ -128,6 +143,7 @@ namespace Client {
         
         // Chunk management
         void handleChunkData(const Network::ChunkDataS2CPacket& packet);
+        void handleChunkUnchanged(const Network::ChunkUnchangedS2CPacket& packet);
         void handleChunkUnload(const Network::UnloadChunkS2CPacket& packet);
         
         // Block updates
@@ -151,6 +167,8 @@ namespace Client {
         void handleSetEntityData(const Network::SetEntityDataS2CPacket& packet);
         void handleEntityEvent(const Network::EntityEventS2CPacket& packet);
         void handleHurtAnimation(const Network::HurtAnimationS2CPacket& packet);
+        void handleBossEvent(const Network::BossEventS2CPacket& packet);
+        void handleEndCrystalBeam(const Network::EndCrystalBeamS2CPacket& packet);
         void handleItemEntityMove(const Network::ItemEntityMoveS2CPacket& packet);
         void handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet);
         void handleXpOrbSpawn(const Network::XpOrbSpawnS2CPacket& packet);
@@ -194,6 +212,16 @@ namespace Client {
         void handleChangeDimension(const Network::ChangeDimensionS2CPacket& packet);
         void handleExplode(const Network::ExplodeS2CPacket& packet);
 
+#if ENABLE_IMMERSIVE_PORTALS
+        // Immersive portals — forwards into the client mirror, see
+        // client/portal/ClientImmersivePortals.hpp.
+        void handleImmersivePortalSync(const Network::ImmersivePortalSyncS2CPacket& packet);
+        void handleImmersivePortalRemove(const Network::ImmersivePortalRemoveS2CPacket& packet);
+#endif
+        // The occlusion wand's boxes: swap the mesher's list for that
+        // dimension and remesh what they touch.
+        void handleAoRegions(const Network::AoRegionsS2CPacket& packet);
+
 #if ENABLE_PORTAL_GUN
         // Portal gun (server-broadcast pair state). Forwards into
         // ClientPortalManager — see client/portal/ClientPortalManager.hpp.
@@ -234,8 +262,9 @@ namespace Client {
     private:
         HandlerStats m_stats;
 
-        // Cached references (set during initialization)
-        ClientChunkManager* m_chunkManager = nullptr;
+        // Cached references (set during initialization). The chunk manager is
+        // deliberately NOT cached: it is the bound level's, rebound per packet
+        // (see ClientLevel.hpp), so every handler reads g_clientChunkManager.
         Game::ClientPlayer* m_player = nullptr;
         ClientConnection* m_connection = nullptr;   // MC ClientPacketListener.connection
         // Note: NetworkClient is accessed via g_networkClient global
@@ -251,15 +280,22 @@ namespace Client {
             double aggregatedNanosPerChunk = 250000.0; // 0.25ms initial estimate
             int oldSamplesWeight = 1;
             std::chrono::steady_clock::time_point batchStartTime;
+            // Main-thread time actually spent applying this batch's chunks.
+            // Wall time between batch start/finish was the vanilla measure;
+            // with a per-frame drain budget a batch can straddle frames, and
+            // wall time would then count idle frames as chunk cost.
+            double applyNanos = 0.0;
 
             void onBatchStart() {
                 batchStartTime = std::chrono::steady_clock::now();
+                applyNanos = 0.0;
             }
+            void onChunkApplied(double nanos) { applyNanos += nanos; }
 
             void onBatchFinished(int batchSize) {
                 if (batchSize <= 0) return;
-                auto elapsed = std::chrono::steady_clock::now() - batchStartTime;
-                double batchNanos = std::chrono::duration<double, std::nano>(elapsed).count();
+                double batchNanos = applyNanos > 0.0 ? applyNanos
+                    : std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - batchStartTime).count();
                 double nanosPerChunk = batchNanos / batchSize;
 
                 // Clamp to 3x range of current average (reject outliers)

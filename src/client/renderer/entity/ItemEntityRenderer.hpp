@@ -33,6 +33,10 @@ namespace Render {
         void Render(const glm::mat4& projection, const glm::mat4& view,
                     const glm::vec3& cameraPos, float partialTick);
 
+        // Last Render's tally, for the portal diagnostics (OBEY_PORTAL_DIAG).
+        struct Tally { int entities = 0, drawn = 0, cullDistance = 0, cullFrustum = 0, cullSection = 0; };
+        const Tally& LastTally() const { return m_tally; }
+
         // Items draw out to a QUARTER of the render distance, in chunks:
         //   8 chunks  -> 2 chunks -> 32 blocks
         //   16 chunks -> 4 chunks -> 64 blocks
@@ -44,7 +48,7 @@ namespace Render {
         // client setting already clamped by the server's view distance) —
         // items the server never sent cannot be drawn at any range, so scaling
         // off the raw client setting would promise more than the wire gives.
-        void SetRenderDistanceChunks(int chunks);
+        void SetRenderDistanceChunks(int chunks, float entityDistanceScaling = 1.0f);
 
     private:
         // Draw one item at a world position with MC's bob + spin + ground
@@ -55,11 +59,21 @@ namespace Render {
         // `ageTicks` drives bob and spin; a pickup animation passes the frozen
         // age it was captured with, which is what keeps a collected item from
         // continuing to rotate as it flies.
+        //
+        // The state that does NOT change between items — shader, fog
+        // environment, camera, clip plane — is bound once by the first item
+        // drawn in a pass; `PassState` carries what the previous item left
+        // bound so the per-item cost is the MVP, and the pipeline/texture/
+        // alpha-test only when they actually differ (block vs sprite item).
+        struct PassState {
+            bool          begun     = false;
+            bool          lastBlock = false;
+            TextureHandle lastTex   = INVALID_TEXTURE;
+        };
         void DrawItem(const Game::ItemStack& stack, const glm::vec3& worldPos,
                       float ageTicks, float bobOffs,
                       const glm::mat4& viewProj, const glm::vec3& cameraPos,
-                      std::vector<ItemCubeVert>& verts,
-                      std::vector<uint32_t>& idx);
+                      PassState& pass, float scale = 1.0f);
 
         bool m_initialized = false;
 
@@ -96,11 +110,16 @@ namespace Render {
         //
         // Floored at one chunk so a very small view distance cannot cull items
         // out of arm's reach.
+        //
+        // The Entity Distance option (MC entityDistanceScaling) multiplies
+        // the result, so the slider still governs items the way it governs
+        // everything else; only the base rule diverges.
         static constexpr float kMinRenderDistance = 16.0f;
 
         // Default corresponds to an 8-chunk view, so the first frame before
         // SetRenderDistanceChunks lands is already sensible.
         float m_maxRenderDistance = 8.0f * 4.0f;
+        Tally m_tally;
     };
 
 } // namespace Render

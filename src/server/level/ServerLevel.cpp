@@ -8,6 +8,7 @@
 #include "server/entity/FallingBlockStore.hpp"
 #include "server/entity/ServerEntityTracker.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
+#include "server/level/EndDragonFight.hpp"
 #include "server/session/PlayerSessionManager.hpp"
 #include "server/world/ChunkProvider.hpp"
 #include "server/world/MyTerrainGenerator.hpp"
@@ -77,6 +78,8 @@ namespace Server {
         m_mobLevel = std::make_unique<ServerLevelBridge>(m_world.get(), m_sessions);
         m_mobs     = std::make_unique<MobManager>(m_mobLevel.get());
         m_mobLevel->SetMobManager(m_mobs.get());
+        // Drops and XP land in THIS dimension — see the setter's note.
+        m_mobLevel->SetItemAndOrbManagers(m_items.get(), m_orbs.get());
         m_fallingBlocks = std::make_unique<FallingBlockStore>(m_mobLevel.get(), m_mobs.get());
         m_mobTracker = std::make_unique<ServerEntityTracker>();
 
@@ -88,12 +91,25 @@ namespace Server {
                                                             m_sessions,
                                                             m_config.dimension);
 
+        // MC ServerLevel: `this.dragonFight = new EndDragonFight(...)` for the
+        // End only. After the managers — the fight reads all of them — and
+        // handed to the bridge so the dragon and the crystals reach it through
+        // EntityLevel::DragonFight().
+        if (m_config.dimension == Game::DimensionId::End) {
+            m_dragonFight = std::make_unique<EndDragonFight>(*this, m_sessions);
+            m_mobLevel->SetDragonFight(m_dragonFight.get());
+        }
+
         worldSpawn = glm::vec3(0.5f, 67.0f, 0.5f);
     }
 
     ServerLevel::~ServerLevel() {
         // Reverse construction order. The broadcaster reads the accumulator on
         // flush, and the mob manager reads the bridge, so both must go first.
+        // The fight before the managers it reads — and detached from the
+        // bridge first, so no dragon mid-destruction can reach a dead fight.
+        if (m_mobLevel) m_mobLevel->SetDragonFight(nullptr);
+        m_dragonFight.reset();
         m_deltas.reset();
         m_changes.reset();
         m_mobTracker.reset();
@@ -143,12 +159,10 @@ namespace Server {
         // A level with nobody in it still holds whatever forced tickets it was
         // given (the overworld's spawn chunks), but it costs no simulation.
         // That is what keeps an unvisited Nether free.
-        for (const auto& session : sessions.GetAllSessions()) {
-            if (session && Game::DimensionFromRaw(session->GetDimensionId())
-                               == m_config.dimension) {
-                return true;
-            }
-        }
+        //
+        // Standing in it OR looking into it: a dimension seen through a
+        // portal must keep simulating, or the far side is a frozen diorama.
+        if (sessions.AnySessionLoadsDimension(m_config.dimension)) return true;
         return m_config.dimension == Game::DimensionId::Overworld;
     }
 

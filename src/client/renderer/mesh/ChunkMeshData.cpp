@@ -48,14 +48,14 @@ namespace Render {
 
     size_t ChunkMeshData::CalculateMemoryUsage(const GPUSectionData& gpuData) {
         return (gpuData.opaqueIndexCount + gpuData.cutoutIndexCount + gpuData.translucentIndexCount) *
-               (sizeof(Vertex) + sizeof(uint32_t));
+               (sizeof(TerrainVertex) + sizeof(uint32_t));
     }
 
     size_t ChunkMeshData::CalculateMemoryUsage(const SectionMesh& mesh) {
         size_t total = 0;
-        total += mesh.opaqueVerts.size() * sizeof(Vertex) + mesh.opaqueIdxs.size() * sizeof(uint32_t);
-        total += mesh.cutoutVerts.size() * sizeof(Vertex) + mesh.cutoutIdxs.size() * sizeof(uint32_t);
-        total += mesh.translucentVerts.size() * sizeof(Vertex) + mesh.translucentIdxs.size() * sizeof(uint32_t);
+        total += mesh.opaqueVerts.size() * sizeof(TerrainVertex) + mesh.opaqueIdxs.size() * sizeof(uint32_t);
+        total += mesh.cutoutVerts.size() * sizeof(TerrainVertex) + mesh.cutoutIdxs.size() * sizeof(uint32_t);
+        total += mesh.translucentVerts.size() * sizeof(TerrainVertex) + mesh.translucentIdxs.size() * sizeof(uint32_t);
         return total;
     }
 

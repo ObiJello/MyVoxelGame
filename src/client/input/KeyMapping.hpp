@@ -115,6 +115,13 @@ namespace Input {
         extern KeyMapping* Hotbar[9];
 
         extern KeyMapping* TogglePerspective;
+        // The camera the way Roblox drives it: I/O zoom in and out (all the
+        // way in is first person), the arrow keys orbit the third-person
+        // camera around the player.
+        extern KeyMapping* ZoomIn;
+        extern KeyMapping* ZoomOut;
+        extern KeyMapping* CameraLeft;
+        extern KeyMapping* CameraRight;
         extern KeyMapping* Fullscreen;
         extern KeyMapping* ToggleCursor;
         extern KeyMapping* Noclip;

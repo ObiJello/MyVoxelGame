@@ -1,5 +1,6 @@
 // File: src/common/entity/projectile/ThrowableProjectile.cpp
 #include "common/entity/projectile/ThrowableProjectile.hpp"
+#include "common/entity/mobs/GenericMobs.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/core/JavaRandom.hpp"
@@ -37,16 +38,86 @@ namespace Game {
         if (hit.IsHit() && IsAlive()) OnHit(hit);
     }
 
+    // ── ThrownEnderpearl ───────────────────────────────────────────────────
+
+    void ThrownEnderpearl::OnHitEntity(LivingEntity& target, const HitResult& hit) {
+        // MC onHitEntity: hurt for ZERO — the hit registers (flash, kill
+        // credit chain) but deals nothing; the 5.0 lands on the THROWER.
+        DealHitDamage(target, hit, MobDamageSource::Projectile, 0.0f, GetOwner());
+    }
+
+    void ThrownEnderpearl::OnHit(const HitResult& hit) {
+        // MC ThrownEnderpearl.onHit, transcribed. (The 32 PORTAL particles
+        // are a client visual with no ParticleKind here — skipped like the
+        // eye of ender's shatter burst.)
+        Projectile::OnHit(hit);
+        if (!m_level) return;
+        if (m_level->IsClientSide()) {
+            // The client copy waits for the server's removal, like the TNT.
+            return;
+        }
+        if (IsRemoved()) return;
+
+        Entity* owner = GetOwner();
+        auto* livingOwner = dynamic_cast<LivingEntity*>(owner);
+        // MC isAllowedToTeleportOwner: alive (and not sleeping — no sleep
+        // system); the cross-dimension branch cannot arise, projectiles do
+        // not travel dimensions here.
+        const bool mayTeleport =
+            owner != nullptr && (livingOwner ? livingOwner->IsAlive()
+                                             : owner->IsAlive());
+        if (mayTeleport) {
+            // MC teleports to oldPosition() — the pearl's pre-impact spot,
+            // which is what keeps the thrower out of the wall it hit.
+            const glm::dvec3 teleportPos = oldPosition;
+
+            if (owner->IsPlayer()) {
+                // MC: 5% endermite at the position the player LEAVES, gated
+                // on doMobSpawning.
+                if (m_level->Random().NextFloat() < 0.05f &&
+                    m_level->DoMobSpawning()) {
+                    auto endermite =
+                        MakeGenericMob(EntityTypeId::Endermite, m_level);
+                    if (endermite) {
+                        endermite->position = owner->position;
+                        endermite->yRot = endermite->yBodyRot =
+                            endermite->yHeadRot = owner->yRot;
+                        endermite->FinalizeSpawn(SpawnReason::Triggered, nullptr);
+                        m_level->AddFreshEntity(std::move(endermite));
+                    }
+                }
+
+                // Player movement is client-authoritative, so the move is a
+                // packet — EntityLevel::TeleportPlayer, the server bridge's
+                // seam. MC: resetFallDistance + 5.0 ender_pearl damage after
+                // the teleport (the closest source here is FALL — feather
+                // falling reduces both in vanilla).
+                if (livingOwner && m_level->TeleportPlayer(*livingOwner, teleportPos)) {
+                    livingOwner->Hurt(MobDamageSource::Fall, 5.0f, nullptr);
+                }
+            } else {
+                // MC's non-player branch: move the entity, reset its fall.
+                owner->position = teleportPos;
+                owner->fallDistance = 0.0f;
+                owner->needsSync = true;
+            }
+            // MC playSound PLAYER_TELEPORT — sound system stub.
+        }
+
+        Discard();
+    }
+
     // ── Snowball ───────────────────────────────────────────────────────────
 
-    void Snowball::OnHitEntity(LivingEntity& target) {
+    void Snowball::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         // MC Snowball.onHitEntity: 3 vs blazes, 0 otherwise — the zero still
         // counts as a hit (hurt flash + knockback), which is MC's behaviour.
         const float damage = target.GetType() == EntityTypeId::Blaze ? 3.0f : 0.0f;
         if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
             livingOwner->SetLastHurtMob(&target);
         }
-        target.Hurt(MobDamageSource::Projectile, damage, GetOwner() ? GetOwner() : this);
+        DealHitDamage(target, hit, MobDamageSource::Projectile, damage,
+                      GetOwner() ? GetOwner() : this);
     }
 
     void Snowball::OnHit(const HitResult& hit) {
@@ -61,8 +132,9 @@ namespace Game {
 
     // ── ThrownEgg ──────────────────────────────────────────────────────────
 
-    void ThrownEgg::OnHitEntity(LivingEntity& target) {
-        target.Hurt(MobDamageSource::Projectile, 0.0f, GetOwner() ? GetOwner() : this);
+    void ThrownEgg::OnHitEntity(LivingEntity& target, const HitResult& hit) {
+        DealHitDamage(target, hit, MobDamageSource::Projectile, 0.0f,
+                      GetOwner() ? GetOwner() : this);
     }
 
     void ThrownEgg::OnHit(const HitResult& hit) {
