@@ -9,6 +9,7 @@
 // is a uniform updated per-draw. Texture is keyed by variant ("normal",
 // "trapped", "ender") and loaded on first request from
 // `assets/textures/entity/chest/{variant}.png`.
+#include "client/resource/ResourcePacks.hpp"
 #include "ChestRenderer.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include <functional>
@@ -240,6 +241,11 @@ void main() {
     }
 
     TextureHandle ChestRenderer::LoadVariantTexture(const std::string& variant) {
+        if (Resources::CacheStale(m_textureCacheGeneration)) {
+            // A resource pack change replaces every texture here.
+            if (g_renderBackend) for (auto& [key, tex] : m_textureCache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+            m_textureCache.clear();
+        }
         auto it = m_textureCache.find(variant);
         if (it != m_textureCache.end()) return it->second;
 

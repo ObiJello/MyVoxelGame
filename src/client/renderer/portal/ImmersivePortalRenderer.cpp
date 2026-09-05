@@ -9,7 +9,9 @@
 #include "../mesh/ChunkRenderer.hpp"
 #include "../mesh/ClientMeshManager.hpp"
 #include "../mesh/BlockHighlight.hpp"
+#include "../debug/FlickerDiag.hpp"
 #include "client/portal/ClientImmersivePortals.hpp"
+#include "platform/GameDirectory.hpp"
 #if ENABLE_PORTAL_GUN
 #include "client/portal/ClientPortalManager.hpp"
 #include <GLFW/glfw3.h>
@@ -27,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace Render {
@@ -111,8 +114,13 @@ namespace Render {
         unsigned char white[] = {255, 255, 255, 255};
         m_dummyTexture = g_renderBackend->CreateTexture2D(1, 1, TextureFormat::RGBA8, white);
         outlinesEnabled = std::getenv("OBEY_PORTAL_OUTLINES") != nullptr;
+        if (const char* b = std::getenv("OBEY_PORTAL_RENDER_LIMIT")) {
+            const int v = std::atoi(b);
+            if (v >= 1) m_portalRenderLimit = v;
+        }
         m_initialized = true;
-        Log::Info("[ImmersivePortalRenderer] initialised (max %d layers)", kMaxLayers);
+        Log::Info("[ImmersivePortalRenderer] initialised (max %d layers, %d portals per frame)",
+                  kMaxLayers, m_portalRenderLimit);
         return true;
     }
 
@@ -169,8 +177,15 @@ namespace Render {
         }
         if (verts.empty() || indices.empty()) return m;
 
-        m.vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, verts.size() * sizeof(SurfaceVertex), verts.data());
-        m.ib = g_renderBackend->CreateBuffer(BufferUsage::Index, indices.size() * sizeof(uint32_t), indices.data());
+        // Dynamic (host-visible), not Static: a Static buffer with initial
+        // data is a staging copy plus a full GPU drain on Vulkan, and these
+        // are built mid-game — a portal's mesh is evicted after ten seconds
+        // out of view and rebuilt when it returns, two drains each; a turn
+        // back toward a row of portals was a dozen drains in one frame.
+        m.vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, verts.size() * sizeof(SurfaceVertex), verts.data(),
+                                             BufferAccess::Dynamic);
+        m.ib = g_renderBackend->CreateBuffer(BufferUsage::Index, indices.size() * sizeof(uint32_t), indices.data(),
+                                             BufferAccess::Dynamic);
         m.mesh = g_renderBackend->CreateMesh(m.vb, m.ib, GetBlockVertexLayout());
         m.indexCount = static_cast<uint32_t>(indices.size());
         m.shapeKey = key;
@@ -269,15 +284,22 @@ namespace Render {
     }
 
     void ImmersivePortalRenderer::DrawSurface(const SurfaceMesh& mesh, const PipelineState& state,
-                                              const glm::mat4& mvp, const glm::vec3& color) {
+                                              const glm::mat4& mvp, const glm::vec3& color,
+                                              const glm::mat4& model, float outlineMode) {
         g_renderBackend->SetPipelineState(state);
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(m_dummyTexture, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+        g_renderBackend->SetUniformMat4(m_shader, "uModel", model);
+        // The enclosing view's clip plane (zero in the main view): a
+        // surface drawn inside a portal view is cut at that view's far
+        // surface, mark included, so a portal behind it — between the far
+        // surface and the far camera — gets no mask and is never seen.
+        g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
         g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", color);
         g_renderBackend->SetUniformFloat(m_shader, "uPulse", 1.0f);
         g_renderBackend->SetUniformFloat(m_shader, "uForceFarDepth", 0.0f);
-        g_renderBackend->SetUniformFloat(m_shader, "uOutlineMode", 0.0f);   // solid fill
+        g_renderBackend->SetUniformFloat(m_shader, "uOutlineMode", outlineMode);   // 0 = solid fill, 3 = fog overlay
         g_renderBackend->SetUniformFloat(m_shader, "uTime", 0.0f);
         g_renderBackend->SetUniformFloat(m_shader, "uTimeVS", 0.0f);
         g_renderBackend->SetUniformFloat(m_shader, "uFlashIntensity", 0.0f);
@@ -288,6 +310,70 @@ namespace Render {
         g_renderBackend->SetUniformInt(m_shader, "uUseTextures", 0);
         g_renderBackend->DrawIndexed(mesh.mesh, mesh.indexCount);
         g_renderBackend->UnbindMesh();
+    }
+
+    void ImmersivePortalRenderer::DrawFogOverlay(const SurfaceMesh& mesh, const glm::mat4& model,
+                                                 const glm::mat4& mvp, const Camera& camera,
+                                                 int innerLayer) {
+        // The frame override has been restored by the caller: Frame() is
+        // the world the viewer stands in for this layer.
+        const EnvironmentFrame& env = EnvironmentState::Get().Frame();
+        PipelineState s = BaseState();
+        s.depthTestEnabled  = false;     // the mask says where; depth was cleared inside it
+        s.depthWriteEnabled = false;
+        s.colorWriteEnabled = true;
+        s.blendEnabled      = true;
+        s.srcBlendFactor    = BlendFactor::SrcAlpha;
+        s.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
+        s.stencilCompareOp  = CompareOp::Equal;
+        s.stencilReference  = static_cast<uint32_t>(innerLayer);
+        s.stencilWriteMask  = 0u;
+        g_renderBackend->SetPipelineState(s);
+        g_renderBackend->BindShader(m_shader);
+        g_renderBackend->BindTexture(m_dummyTexture, 0);
+        // The fog uniforms are set here, not left over: on Vulkan every
+        // shader shares one uniform block, and the far view's terrain pass
+        // just wrote the FAR world's fog and camera into it.
+        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", camera.position);
+        g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
+        g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
+            glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
+        DrawSurface(mesh, s, mvp, env.fogColor, model, /*outlineMode=*/3.0f);
+    }
+
+    double ImmersivePortalRenderer::RenderRange(int layer, const Portal* through, int renderDistanceChunks) {
+        // PortalRenderer.getRenderRange. `layer` is the mod's
+        // PortalRendering.getPortalLayer(): 0 in the main view, 1 inside
+        // the first portal, and so on.
+        double range = static_cast<double>(renderDistanceChunks) * 16.0;
+        if (Platform::g_gameSettings.GetReducedPortalRendering()) range = 16.0;
+        if (layer > 1) {
+            // Do not render deep layers of a mirror far away.
+            range /= static_cast<double>(layer);
+        }
+        if (layer >= 1 && through) {
+            const double outerScale = through->IsMirror() ? 1.0 : through->scale;
+            if (outerScale > 2.0) {
+                range *= outerScale;
+                range = std::min(range, 32.0 * 16.0);
+            }
+        }
+        return range;
+    }
+
+    int ImmersivePortalRenderer::PortalRenderDistance(const Portal& portal, int renderDistanceChunks) {
+        // PortalRenderer.getPortalRenderDistance.
+        int distance = renderDistanceChunks;
+        const double scale = portal.IsMirror() ? 1.0 : portal.scale;
+        if (scale > 2.0) {
+            // Portal.getDestAreaRadiusEstimation = max(width, height) * scale.
+            double radiusBlocks = std::max(portal.width, portal.height) * scale * 1.4;
+            radiusBlocks = std::min(radiusBlocks, 32.0 * 16.0);
+            distance = std::max(static_cast<int>(radiusBlocks / 16.0), renderDistanceChunks);
+        } else if (Platform::g_gameSettings.GetReducedPortalRendering()) {
+            distance = renderDistanceChunks / 3;
+        }
+        return distance;
     }
 
     void ImmersivePortalRenderer::SetLayerOverride(int layer) {
@@ -303,21 +389,49 @@ namespace Render {
 
     void ImmersivePortalRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
                                          const Camera& camera, const Frustum& frustum,
-                                         float aspect, float farPlane, float partialTick,
+                                         float aspect, int renderDistanceChunks, float partialTick,
                                          const LevelRenderFn& renderLevel,
                                          const LevelRenderFn& renderCrossers) {
         if (!m_initialized || !g_renderBackend) return;
         ++m_frame;
         m_renderedThisFrame = 0;
+        m_drawnLastFrame.swap(m_drawnThisFrame);
+        m_drawnThisFrame.clear();
+        for (auto& f : m_farLevels) f.pending = false;
         m_renderCrossers = &renderCrossers;
+
+        if (FlickerDiag::Enabled()) {
+            // Why each portal of the active level is or is not drawn this
+            // frame, as a state (every change logs): 0 drawn, 1 not in
+            // front, 2 out of range, 3 frustum-culled, 4 not visible.
+            const glm::dvec3 eye(camera.position);
+            const double range = RenderRange(0, nullptr, renderDistanceChunks);
+            Client::GetClientImmersivePortals().ForEach([&](const Portal& p) {
+                int why = 0;
+                if (!p.Has(Game::Immersive::PortalFlag::Visible)) why = 4;
+                else if (!p.IsInFront(eye)) why = 1;
+                else {
+                    const double distance = DistanceToSurface(p, eye);
+                    if (distance > range) why = 2;
+                    else if (distance > kFrustumCullMinDistance) {
+                        glm::dvec3 mn, mx;
+                        p.BoundingBox(mn, mx, 0.05);
+                        if (!frustum.IsBoxVisible(glm::vec3(mn), glm::vec3(mx))) why = 3;
+                    }
+                }
+                FlickerDiag::RecordState("portal#" + std::to_string(p.id) + ".cull", why);
+            });
+            FlickerDiag::RecordState("portals.count", static_cast<int64_t>(Client::GetClientImmersivePortals().Count()));
+        }
 
         if (Client::GetClientImmersivePortals().Count() > 0) {
             PROFILE_ZONE_N("ImmersivePortals");
             // Far entities poking into THIS world first, while its depth is
             // still the plain world's: they must occlude the surfaces marked
             // next, as anything in front of a portal does.
-            RenderCrossers(0, nullptr, camera, view, projection, frustum, farPlane, partialTick);
-            RenderLayer(0, nullptr, camera, view, projection, frustum, aspect, farPlane, partialTick, renderLevel);
+            RenderCrossers(0, nullptr, nullptr, camera, view, projection, frustum, renderDistanceChunks, partialTick);
+            RenderLayer(0, nullptr, nullptr, camera, view, projection, frustum, aspect, renderDistanceChunks,
+                        partialTick, renderLevel);
 
             // Leave the pipeline where the HUD expects it.
             g_renderBackend->SetStencilOverride(false);
@@ -326,6 +440,18 @@ namespace Render {
             EnvironmentState::Get().SetFrameOverride(nullptr);
             PipelineState defaultState;
             g_renderBackend->SetPipelineState(defaultState);
+
+            // Mesh scheduling for every far level drawn this frame, once
+            // each: its renderer has the union of all its views' sections
+            // (GetPortalViewSections) and the last recorded view as main.
+            for (int slot = 0; slot < Game::kDimensionCount; ++slot) {
+                if (!m_farLevels[slot].pending) continue;
+                const glm::vec3 cam = m_farLevels[slot].camera;
+                Client::ClientLevels::WithLevel(Game::kAllDimensions[slot], [&]() {
+                    ScheduleClientMeshBuilds(cam);
+                    if (g_chunkRenderer) g_chunkRenderer->ClearPortalViewSections();
+                });
+            }
         }
         m_renderCrossers = nullptr;
 
@@ -347,29 +473,56 @@ namespace Render {
         }
 
         m_renderedLastFrame = m_renderedThisFrame;
+        FlickerDiag::RecordState("portals.rendered", m_renderedThisFrame);
         if ((m_frame % 60) == 0) EvictUnusedMeshes();
     }
 
     std::vector<ImmersivePortalRenderer::Candidate> ImmersivePortalRenderer::Candidates(
-            int layer, const Portal* through, const glm::dvec3& eye, const Frustum& frustum,
-            float farPlane) const {
+            int layer, const Portal* through, const Portal* outerThrough, const glm::dvec3& eye,
+            const Frustum& frustum, int renderDistanceChunks) const {
         std::vector<Candidate> candidates;
-        // The mod divides the range by the layer: deep reflections are not
-        // drawn far away.
-        const double range = static_cast<double>(farPlane) / static_cast<double>(std::max(1, layer + 1));
+        const double range = RenderRange(layer, through, renderDistanceChunks);
         Client::GetClientImmersivePortals().ForEach([&](const Portal& p) {
             if (!p.Has(Game::Immersive::PortalFlag::Visible)) return;
+            // The mod's portalRenderLimit: past it nothing more is drawn
+            // this frame, at any layer.
+            if (m_renderedThisFrame + static_cast<int>(candidates.size()) >= m_portalRenderLimit) return;
             // The portal we arrived through leads straight back to the
             // camera's own side: drawing it would show the outer world
             // inside itself (the mod's cannotRenderInMe).
             if (through && (p.id == through->reversePortalId || p.id == through->parallelPortalId)) return;
+            // isRoughlyVisibleTo: the camera on the front side.
             if (!p.IsInFront(eye)) return;
+            // Inside a portal view only what lies on the content side of
+            // the far surface exists; a portal wholly behind it (between
+            // the far surface and the far camera, where the far world is
+            // clipped away) is not there to be seen. The surface passes
+            // clip against the same plane for the straddling case; this
+            // saves them the work when nothing of the portal survives.
+            if (through) {
+                const Game::Immersive::HalfSpace inner = through->InnerClipPlane();
+                glm::dvec3 corners[4];
+                p.Corners(corners);
+                bool anyInFront = false;
+                for (const glm::dvec3& c : corners) {
+                    if (inner.SignedDistance(c) > 0.0) { anyInFront = true; break; }
+                }
+                if (!anyInFront) return;
+            }
             const double distance = DistanceToSurface(p, eye);
             if (distance > range) return;
+            // Frustum culling does not work when the portal is very close.
             if (distance > kFrustumCullMinDistance) {
                 glm::dvec3 mn, mx;
                 p.BoundingBox(mn, mx, 0.05);
                 if (!frustum.IsBoxVisible(glm::vec3(mn), glm::vec3(mx))) return;
+            }
+            // isInvalidRecursionRendering: two layers in, the portal the
+            // layer above looks through, when it is the reverse of the one
+            // this layer looks through — the A → B → A → … ping-pong.
+            if (through && outerThrough && p.id == outerThrough->id &&
+                (through->reversePortalId == p.id || p.reversePortalId == through->id)) {
+                return;
             }
             candidates.push_back({ &p, distance });
         });
@@ -378,13 +531,14 @@ namespace Render {
         return candidates;
     }
 
-    void ImmersivePortalRenderer::RenderCrossers(int layer, const Portal* through,
+    void ImmersivePortalRenderer::RenderCrossers(int layer, const Portal* through, const Portal* outerThrough,
                                                  const Camera& camera, const glm::mat4& view,
                                                  const glm::mat4& projection, const Frustum& frustum,
-                                                 float farPlane, float partialTick) {
+                                                 int renderDistanceChunks, float partialTick) {
         if (!m_renderCrossers) return;
         const glm::dvec3 eye(camera.position);
-        const std::vector<Candidate> candidates = Candidates(layer, through, eye, frustum, farPlane);
+        const std::vector<Candidate> candidates = Candidates(layer, through, outerThrough, eye, frustum,
+                                                             renderDistanceChunks);
         if (candidates.empty()) return;
         PROFILE_ZONE_N("ImmersivePortals.Crossers");
 
@@ -441,14 +595,15 @@ namespace Render {
         ChunkRenderer::SetPortalEntityClipMargin(outerMargin);
     }
 
-    void ImmersivePortalRenderer::RenderLayer(int layer, const Portal* through,
+    void ImmersivePortalRenderer::RenderLayer(int layer, const Portal* through, const Portal* outerThrough,
                                               const Camera& camera, const glm::mat4& view,
                                               const glm::mat4& projection, const Frustum& frustum,
-                                              float aspect, float farPlane, float partialTick,
+                                              float aspect, int renderDistanceChunks, float partialTick,
                                               const LevelRenderFn& renderLevel) {
         // ── Which portals of the BOUND level are worth drawing ──────────
         const glm::dvec3 eye(camera.position);
-        const std::vector<Candidate> candidates = Candidates(layer, through, eye, frustum, farPlane);
+        const std::vector<Candidate> candidates = Candidates(layer, through, outerThrough, eye, frustum,
+                                                             renderDistanceChunks);
         if (candidates.empty()) return;
 
         const int inner = layer + 1;
@@ -457,11 +612,17 @@ namespace Render {
         const float outerMargin = ChunkRenderer::PortalEntityClipMargin();
         const bool outerCullInvert = g_renderBackend->CullInverted();
 
-        for (const Candidate& c : candidates) {
+        for (size_t ci = 0; ci < candidates.size(); ++ci) {
+            const Candidate& c = candidates[ci];
             const Portal& portal = *c.portal;
             SurfaceMesh& mesh = MeshFor(portal);
             if (mesh.mesh == INVALID_MESH) continue;
+            // The candidates were counted against the limit, but nested
+            // views under an earlier candidate of this layer have rendered
+            // portals since: re-check, as the mod does per portal.
+            if (m_renderedThisFrame >= m_portalRenderLimit) break;
             ++m_renderedThisFrame;
+            if (layer == 0) m_drawnThisFrame.insert(portal.id);
 
             const glm::mat4 model = SurfaceModel(portal);
             const glm::mat4 mvp   = projection * view * model;
@@ -528,12 +689,17 @@ namespace Render {
                 s.stencilPassOp      = StencilOp::IncrClamp;
                 s.stencilFailOp      = StencilOp::Keep;
                 s.stencilDepthFailOp = StencilOp::Keep;
-                DrawSurface(mesh, s, projection * view * markModel, glm::vec3(0.0f));
+                DrawSurface(mesh, s, projection * view * markModel, glm::vec3(0.0f), model);
             }
 
-            // Far side: dimension, fog, camera.
+            // Far side: dimension, fog, camera. The far view's render
+            // distance is the mod's per-portal one (scaled up for an
+            // enlarging portal, down for reduced rendering or a slow
+            // client), and the far fog is composed for THAT distance so
+            // the view fades where its chunks end.
             const Game::DimensionId farDim = portal.IsMirror() ? portal.dimension : portal.destDimension;
-            const EnvironmentFrame farFrame = EnvironmentState::Get().FrameForDimension(farDim);
+            const int farRenderDistance = PortalRenderDistance(portal, renderDistanceChunks);
+            const EnvironmentFrame farFrame = EnvironmentState::Get().FrameForDimension(farDim, farRenderDistance);
 
             // 2. Depth to far inside the mark, colour = the far fog (what the
             //    far sky pass leaves untouched must read as "sky").
@@ -545,7 +711,7 @@ namespace Render {
                 s.stencilCompareOp   = CompareOp::Equal;
                 s.stencilReference   = static_cast<uint32_t>(inner);
                 s.stencilWriteMask   = 0u;
-                DrawSurface(mesh, s, FarPlaneProjection(projection) * view * model, farFrame.fogColor);
+                DrawSurface(mesh, s, FarPlaneProjection(projection) * view * model, farFrame.fogColor, model);
             }
 
             // 3. The far world. Camera through the portal: position mapped,
@@ -613,7 +779,17 @@ namespace Render {
                     // Occlusion culling for this view starts just in front
                     // of the far surface, in air — never at farCam, which
                     // is usually inside the rock behind it.
-                    if (g_chunkRenderer) {
+                    //
+                    // Not for a global surface (a wrap border, a stack seam):
+                    // there is no frame to keep the seed inside, so it would
+                    // follow the camera along the plane — every section it
+                    // crossed started a fresh BFS with a frustum-only frame
+                    // or two in between, which was the flicker along a wrap
+                    // border — and half the time it landed inside terrain
+                    // (the Nether's roof under a floor seam), where a BFS
+                    // sees nothing. Those views discover sections by
+                    // frustum alone, as the mod does for every portal.
+                    if (g_chunkRenderer && !portal.Has(Game::Immersive::PortalFlag::Global)) {
                         // The far camera dropped onto the far surface, kept
                         // inside its outline, half a block into the far
                         // world: the point the view actually looks out of.
@@ -630,25 +806,39 @@ namespace Render {
                         const glm::dvec3 seed = farPoint + farW * u + farH * v + content * 0.5;
                         g_chunkRenderer->SetPortalViewSeed(glm::vec3(seed));
                     }
+                    ChunkRenderer::SetRenderDistanceOverride(farRenderDistance);
                     renderLevel(ctx);
+                    ChunkRenderer::SetRenderDistanceOverride(0);
                     if (g_chunkRenderer) g_chunkRenderer->ClearPortalViewSeed();
+                    if (FlickerDiag::Enabled() && g_chunkRenderer) {
+                        const std::string k = "portal#" + std::to_string(portal.id);
+                        FlickerDiag::Record(k + ".farSections", g_chunkRenderer->GetStats().sectionsRendered);
+                        FlickerDiag::RecordState(k + ".farSource",
+                                                 static_cast<int64_t>(g_chunkRenderer->LastPrepareSource()));
+                        FlickerDiag::Record(k + ".layer", inner);
+                    }
 
                     // Entities of the levels beyond THIS level's portals that
                     // poke into it — the same crossing pass as layer 0, one
                     // level deeper, under this view's stencil.
-                    RenderCrossers(inner, &portal, farCam, farView, projection, farFrustum,
-                                   farPlane, partialTick);
+                    RenderCrossers(inner, &portal, through, farCam, farView, projection, farFrustum,
+                                   renderDistanceChunks, partialTick);
 
                     // Sections this view revealed as unmeshed get compiled:
                     // the far level's scheduler reads the visible set the
-                    // chunk pass just recorded for it.
+                    // chunk pass just recorded for it. A view into the
+                    // player's OWN level (a wrap border) needs no call: the
+                    // chunk pass recorded its sections as a portal view of
+                    // that level (ChunkRenderer::GetPortalViewSections), and
+                    // the per-frame scheduler walks those with the main view's.
                     if (farDim != Client::ClientLevels::ActiveDimension()) {
-                        ScheduleClientMeshBuilds(farCam.position);
+                        FarLevelPending& f = m_farLevels[Game::DimensionSlot(farDim)];
+                        if (!f.pending) { f.pending = true; f.camera = farCam.position; }
                     }
 
                     if (inner < kMaxLayers) {
-                        RenderLayer(inner, &portal, farCam, farView, projection, farFrustum,
-                                    aspect, farPlane, partialTick, renderLevel);
+                        RenderLayer(inner, &portal, through, farCam, farView, projection, farFrustum,
+                                    aspect, renderDistanceChunks, partialTick, renderLevel);
                     }
                 });
 
@@ -659,6 +849,18 @@ namespace Render {
                 g_renderBackend->SetStencilOverride(false);
             }
 
+            // 3b. THIS world's fog over the far view. The surface is a
+            //     window, and a window at a distance is fogged exactly like
+            //     the wall around it — otherwise a distant portal is a
+            //     hole in the fog, and a world-sized seam is the worst
+            //     case: the Overworld's floor seam, unoccluded below the
+            //     horizon past the loaded terrain, painted a band of
+            //     Nether fog where the sky should fade out. Alpha is the
+            //     terrain shader's own fog value at each pixel of the
+            //     surface, so up close (a hole dug to bedrock) it is
+            //     nothing and at the horizon it is the sky.
+            DrawFogOverlay(mesh, model, mvp, camera, inner);
+
             // 4. Restore the surface's depth so this world's translucents and
             //    later portals occlude correctly against it.
             {
@@ -668,7 +870,7 @@ namespace Render {
                 s.stencilCompareOp  = CompareOp::Equal;
                 s.stencilReference  = static_cast<uint32_t>(inner);
                 s.stencilWriteMask  = 0u;
-                DrawSurface(mesh, s, mvp, glm::vec3(0.0f));
+                DrawSurface(mesh, s, mvp, glm::vec3(0.0f), model);
             }
 
             // 5. Clamp: anything above `layer` (this portal and whatever was
@@ -681,7 +883,7 @@ namespace Render {
                 s.stencilPassOp     = StencilOp::Replace;
                 s.stencilFailOp     = StencilOp::Keep;
                 s.stencilDepthFailOp = StencilOp::Keep;
-                DrawSurface(mesh, s, mvp, glm::vec3(0.0f));
+                DrawSurface(mesh, s, mvp, glm::vec3(0.0f), model);
             }
         }
 

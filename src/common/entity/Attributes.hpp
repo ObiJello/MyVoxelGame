@@ -24,15 +24,25 @@
 namespace Game {
 
     enum class Attribute : uint8_t {
-        Armor = 0,
+        // MC 26.3 generic.air_drag_modifier — multiplies the "1 - drag" of
+        // travelInAir's 0.91 / 0.98 (LivingEntity.computeModifiedFriction).
+        // Only the sulfur cube's archetypes touch it.
+        AirDragModifier = 0,
+        Armor,
         ArmorToughness,
         AttackDamage,
         AttackKnockback,
         AttackSpeed,
+        // MC 26.3 generic.bounciness — the restitution Entity.move applies
+        // to a collision (restituteMovementAfterCollisions). 0 = none.
+        Bounciness,
         ExplosionKnockbackResistance,
         FallDamageMultiplier,
         FlyingSpeed,
         FollowRange,
+        // MC 26.3 generic.friction_modifier — same fold as air drag, over the
+        // block's slipperiness while on the ground.
+        FrictionModifier,
         Gravity,
         JumpStrength,
         KnockbackResistance,
@@ -57,16 +67,19 @@ namespace Game {
     // Attributes.java. Only the rows the mob system reads are carried; adding
     // one is a matter of appending here and to the enum.
     inline constexpr AttributeDef kAttributeTable[] = {
+        /* AirDragModifier      */ { "air_drag_modifier",      1.0,  0.0,  2048.0 },
         /* Armor                */ { "armor",                  0.0,  0.0,    30.0 },
         /* ArmorToughness       */ { "armor_toughness",        0.0,  0.0,    20.0 },
         /* AttackDamage         */ { "attack_damage",          2.0,  0.0,  2048.0 },
         /* AttackKnockback      */ { "attack_knockback",       0.0,  0.0,     5.0 },
         /* AttackSpeed          */ { "attack_speed",           4.0,  0.0,  1024.0 },
+        /* Bounciness           */ { "bounciness",             0.0,  0.0,     1.0 },
         /* ExplosionKnockbackResistance */
                                    { "explosion_knockback_resistance", 0.0, 0.0, 1.0 },
         /* FallDamageMultiplier */ { "fall_damage_multiplier", 1.0,  0.0,   100.0 },
         /* FlyingSpeed          */ { "flying_speed",           0.4,  0.0,  1024.0 },
         /* FollowRange          */ { "follow_range",          32.0,  0.0,  2048.0 },
+        /* FrictionModifier     */ { "friction_modifier",      1.0,  0.0,  2048.0 },
         /* Gravity              */ { "gravity",                0.08, -1.0,    1.0 },
         /* JumpStrength         */ { "jump_strength",          0.42, 0.0,    32.0 },
         /* KnockbackResistance  */ { "knockback_resistance",   0.0,  0.0,     1.0 },
@@ -125,6 +138,17 @@ namespace Game {
         // other.
         ZombieReinfCalleeCharge = 17,
         EndermanAttackingSpeed  = 18,  // EnderMan SPEED_MODIFIER_ATTACKING (+0.15)
+        // SulfurCubeArchetype.AttributeEntry — one id per attribute an
+        // archetype modifies (knockback resistance, explosion knockback
+        // resistance, bounciness, friction, air drag), swapped as a set when
+        // the cube swallows or ejects a block. MC names them
+        // "<archetype>_add_<attribute>"; the id is the same for every
+        // archetype here because a cube only ever carries one.
+        SulfurCubeKnockbackResistance = 19,
+        SulfurCubeExplosionKnockbackResistance = 20,
+        SulfurCubeBounciness = 21,
+        SulfurCubeFriction = 22,
+        SulfurCubeAirDrag = 23,
     };
 
     // One attribute on one entity: a base value plus its modifier stack.

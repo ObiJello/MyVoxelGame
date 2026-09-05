@@ -54,6 +54,7 @@ namespace Render {
                                   int width, int height, const void* data) override;
         void DestroyTexture(TextureHandle handle) override;
         void BindTexture(TextureHandle handle, uint32_t slot) override;
+        TextureHandle CreateBufferTexture(BufferHandle buffer, TextureFormat format) override;
         uintptr_t GetNativeTextureID(TextureHandle handle) const override;
 
         // Shaders
@@ -110,6 +111,7 @@ namespace Render {
         // Mega-buffer rendering
         void BindVertexBuffer(BufferHandle vbo, uint32_t stride) override;
         void BindIndexBuffer(BufferHandle ibo) override;
+        void BindUniformBuffer(BufferHandle handle, size_t offset, size_t size) override;
         void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex,
                                    IndexType indexType = IndexType::Uint32) override;
         void MultiDrawIndexedBaseVertex(const int32_t* indexCounts, const size_t* indexByteOffsets,
@@ -157,6 +159,10 @@ namespace Render {
             GLenum internalFormat = GL_RGBA8;
             GLenum dataFormat     = GL_RGBA;
             GLenum dataType       = GL_UNSIGNED_BYTE;
+            // GL_TEXTURE_2D, or GL_TEXTURE_BUFFER for CreateBufferTexture —
+            // BindTexture binds whichever the texture is. LAST on purpose:
+            // CreateTexture2D initialises this struct positionally.
+            GLenum target = GL_TEXTURE_2D;
         };
         std::unordered_map<uint32_t, GLTextureInfo> m_textures;
 

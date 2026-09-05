@@ -1,6 +1,7 @@
 // File: src/client/renderer/blockentity/EndPortalRenderer.cpp
 // See the header for scope and for why this is not a BlockEntityRenderer.
 
+#include "client/resource/ResourcePacks.hpp"
 #include "EndPortalRenderer.hpp"
 
 #include "../backend/RenderBackend.hpp"
@@ -268,6 +269,13 @@ void main() {
     void EndPortalRenderer::Render(Client::ClientChunkManager* chunkMgr,
                                    const glm::mat4& projection, const glm::mat4& view,
                                    const glm::vec3& cameraPos, float partialTick) {
+        // Resource pack reload: both sheets are read again.
+        if (m_initialized && g_renderBackend && Resources::CacheStale(m_packGeneration)) {
+            if (m_skyTexture    != INVALID_TEXTURE) g_renderBackend->DestroyTexture(m_skyTexture);
+            if (m_portalTexture != INVALID_TEXTURE) g_renderBackend->DestroyTexture(m_portalTexture);
+            m_skyTexture    = LoadPortalTexture("assets/textures/environment/end_sky.png");
+            m_portalTexture = LoadPortalTexture("assets/textures/entity/end_portal.png");
+        }
         if (!m_initialized || !g_renderBackend || !chunkMgr) return;
 
         PROFILE_ZONE_N("EndPortals");

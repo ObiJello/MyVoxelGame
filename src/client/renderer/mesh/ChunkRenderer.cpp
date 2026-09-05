@@ -7,6 +7,7 @@
 #include "ClientMeshManager.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/Vertex.hpp"
 #ifdef HAS_VULKAN
 #include "../backend/vulkan/VKBackend.hpp"
 #endif
@@ -24,6 +25,7 @@
 #include "common/world/math/ChunkViewDistance.hpp"
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
@@ -69,6 +71,7 @@ namespace Render {
     glm::vec4 ChunkRenderer::s_portalClipPlane{0.0f};
     float     ChunkRenderer::s_portalEntityClipMargin = 0.0f;
     float     ChunkRenderer::s_nearPlane = 0.05f;
+    int       ChunkRenderer::s_renderDistanceOverride = 0;
 
     // MC's "close" radius for translucency re-sorting — the 32 handed to
     // SectionTree.visitNodes in SectionOcclusionGraph.addSectionsInFrustum:89.
@@ -227,6 +230,25 @@ namespace Render {
         m_backendShader = m_opaqueShader;
         m_shadersLoaded = true;
         Log::Info("Block shaders created (opaque + cutout + solid)");
+        // OBEY_GAP_BRIDGE=<indices>: A/B for draw-run gap bridging (see
+        // SubmitMergedRuns). Fewer sub-draws for more vertex work; which side
+        // wins depends on the backend, so it is measured, not assumed.
+        // Default: ON for OpenGL, OFF for Vulkan. Measured on tour1
+        // (2026-09-04): Apple's GL charges ~0.9 us of CPU per sub-draw and
+        // had GPU headroom, so bridging (3.6x fewer sub-draws for ~15% more
+        // vertex work) took the open-world frame 6.1 -> 5.8 ms and the
+        // look-down 29 -> 25 ms; Vulkan is GPU-bound at 0.15 us per
+        // sub-draw, where the extra vertices would cost more than the draws.
+        if (g_renderBackend && std::strstr(g_renderBackend->GetName(), "OpenGL") != nullptr) {
+            m_gapBridgingEnabled = true;
+            m_gapBridgeIndices   = 8192;
+        }
+        if (const char* gb = std::getenv("OBEY_GAP_BRIDGE")) {
+            const int v = std::atoi(gb);
+            m_gapBridgingEnabled = v > 0;
+            if (v > 0) m_gapBridgeIndices = static_cast<uint32_t>(v);
+            Log::Info("[DevSkip] OBEY_GAP_BRIDGE=%d: draw-run gap bridging %s", v, v > 0 ? "on" : "off");
+        }
         if (std::getenv("OBEY_GREEDY_DEBUG")) {           // harness/screenshot use
             m_greedyMeshDebug = true;
             Mesher::SetGreedyDebugColors(true);           // before the first mesh builds
@@ -442,6 +464,7 @@ namespace Render {
             SetEnvironmentUniforms(cutoutPassShader, camera);
             ApplyDebugOverlayUniform(cutoutPassShader);
             g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
+            BindSpriteTable(cutoutPassShader);
         }
 
         {
@@ -468,6 +491,7 @@ namespace Render {
                 SetEnvironmentUniforms(solidPassShader, camera);
                 ApplyDebugOverlayUniform(solidPassShader);
                 g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
+                BindSpriteTable(solidPassShader);
             }
 
             GPUTimerHandle t = beginPassTimer(2, "translucent");
@@ -577,8 +601,11 @@ namespace Render {
     void ChunkRenderer::PrepareVisibleSectionsThroughPortal(const Camera& camera, const Frustum& frustum,
                                                             int renderDistanceChunks) {
         PROFILE_ZONE_N("PortalViewSections");
+        m_facingCameraPos = camera.position;
         m_visibleSections.clear();
-        m_visibleSectionKeys.clear();
+        m_visibleGrid.Reset(static_cast<int>(std::floor(camera.position.x / 16.0f)),
+                            static_cast<int>(std::floor(camera.position.z / 16.0f)),
+                            renderDistanceChunks + 4);
         m_visibleTranslucentSections = 0;
         const auto* ccm = m_chunks;
         if (!ccm) {
@@ -648,12 +675,20 @@ namespace Render {
                       return a.distanceToCamera < b.distanceToCamera;
                   });
 
-        for (const auto& rd : m_visibleSections) {
-            m_visibleSectionKeys.insert(VisibleSectionKey(rd.chunkPos, rd.sectionY));
-        }
+        { PROFILE_ZONE_N("PortalView.Keys");
+        for (const auto& rd : m_visibleSections) m_visibleGrid.Insert(rd.chunkPos, rd.sectionY);
         // A far level's main view (its mesh scheduler reads this) — see
-        // SetRecordMainView.
-        if (m_recordMainView) m_mainViewSections = m_visibleSections;
+        // SetRecordMainView. Otherwise a portal view of the player's own
+        // level, recorded for the scheduler alongside the main view.
+        if (m_recordMainView) {
+            m_mainViewSections = m_visibleSections;
+            m_mainViewGrid     = m_visibleGrid;
+        }
+        m_portalViewSections.insert(m_portalViewSections.end(),
+                                    m_visibleSections.begin(), m_visibleSections.end());
+        if (m_portalViewGrid.radius < 0) m_portalViewGrid.Reset(m_visibleGrid.originX, m_visibleGrid.originZ, m_visibleGrid.radius);
+        m_portalViewGrid.MergeFrom(m_visibleGrid);
+        }
 
         if (kDiag) {
             static auto lastLog = std::chrono::steady_clock::now() - std::chrono::seconds(2);
@@ -676,9 +711,44 @@ namespace Render {
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
     }
 
+    ChunkRenderer::ReachableCacheSlot* ChunkRenderer::PickEvictionSlot(bool forPortalView) {
+        // A free slot first. Then the least recently used — but a portal
+        // view's result takes a portal slot before it takes a main one:
+        // the main view's slots are what the player's own frames are drawn
+        // from while its BFS is in flight.
+        for (auto& s : m_reachableSlots) if (!s.valid) return &s;
+        ReachableCacheSlot* dst = nullptr;
+        if (forPortalView) {
+            for (auto& s : m_reachableSlots) {
+                if (s.portalView && (!dst || s.lastUsed < dst->lastUsed)) dst = &s;
+            }
+        }
+        if (!dst) {
+            for (auto& s : m_reachableSlots) {
+                if (!dst || s.lastUsed < dst->lastUsed) dst = &s;
+            }
+        }
+        return dst;
+    }
+
     void ChunkRenderer::PrepareVisibleSections(const Camera& camera, const Frustum& frustum) {
         PROFILE_ZONE;
         auto overallStartTime = std::chrono::high_resolution_clock::now();
+        m_facingCameraPos = camera.position;
+
+        // The main pass opens the frame: the portal views that follow it
+        // append to this (see GetPortalViewSections). A level seen only
+        // through portals has no main pass; every view of it appends (the
+        // recorded one too, so two portals into the Nether both count) and
+        // its once-per-frame scheduler clears it (ClearPortalViewSections).
+        if (!m_useProjectionOverride) {
+            ClearPortalViewSections();
+            // The portal views this frame accumulate into a grid around the
+            // main camera; anything a portal shows beyond it overflows.
+            m_portalViewGrid.Reset(static_cast<int>(std::floor(camera.position.x / 16.0f)),
+                                   static_cast<int>(std::floor(camera.position.z / 16.0f)),
+                                   Platform::g_gameSettings.GetRenderDistance() + 4);
+        }
 
         // --- Reachable-section caching (async BFS occlusion graph) ---
         // The BFS result depends only on the camera's SECTION and world state,
@@ -741,19 +811,15 @@ namespace Render {
                         break;
                     }
                 }
-                if (!dst) {
-                    dst = &m_reachableSlots[0];
-                    for (auto& s : m_reachableSlots) {
-                        if (!s.valid) { dst = &s; break; }
-                        if (s.lastUsed < dst->lastUsed) dst = &s;
-                    }
-                }
+                if (!dst) dst = PickEvictionSlot(job->portalView);
                 dst->cx = job->keyCx;
                 dst->cz = job->keyCz;
                 dst->sy = job->keySy;
                 dst->sections.swap(job->result);
                 dst->worldVersion = job->worldVersion;
-                    dst->valid = true;
+                dst->portalView = job->portalView;
+                dst->renderDistance = job->renderDistance;
+                dst->valid = true;
                 dst->lastUsed = m_prepareCounter;
                 m_bfsVisitedCount = job->visitedCount;
                 m_bfsOccludedCount = job->occludedCount;
@@ -784,6 +850,11 @@ namespace Render {
         if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
             renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
         }
+        // A view through a portal draws with the portal's own distance
+        // (SetRenderDistanceOverride); never past the graph's 32-chunk cap.
+        if (s_renderDistanceOverride > 0) {
+            renderDistanceChunks = std::clamp(s_renderDistanceOverride, 2, 32);
+        }
 
         // RENDER-DISTANCE CHANGE invalidation. The reachable-slot cache is
         // keyed by camera section + worldVersion but NOT by render distance,
@@ -797,7 +868,11 @@ namespace Render {
         // rendering in the meantime. The live graph needs no explicit drop:
         // HasGraphFor already compares renderDistance, so partial updates
         // pause on their own until a rebuild at the new radius is adopted.
-        if (renderDistanceChunks != m_lastRenderDistanceChunks) {
+        //
+        // Main view only: a portal view's distance is its own (the mod's
+        // per-portal distance) and is part of its slot key instead; bumping
+        // here for it would mark every slot stale on every view.
+        if (!m_useProjectionOverride && renderDistanceChunks != m_lastRenderDistanceChunks) {
             m_lastRenderDistanceChunks = renderDistanceChunks;
             m_worldVersion++;
         }
@@ -810,6 +885,7 @@ namespace Render {
         // main camera's. A portal view without a seed (the legacy gun pass)
         // discovers sections by frustum alone, as the mod does.
         if (m_useProjectionOverride && !portalView) {
+            m_lastPrepareSource = PrepareSource::FrustumOnly;
             PrepareVisibleSectionsThroughPortal(camera, frustum, renderDistanceChunks);
             auto overallEnd = std::chrono::high_resolution_clock::now();
             m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(overallEnd - overallStartTime).count();
@@ -821,24 +897,29 @@ namespace Render {
         // while the async rebuild for the new section is in flight).
         ReachableCacheSlot* exact = nullptr;
         for (auto& s : m_reachableSlots) {
-            if (s.valid && s.cx == currentChunkX && s.cz == currentChunkZ && s.sy == currentSectionY) {
+            if (s.valid && s.cx == currentChunkX && s.cz == currentChunkZ && s.sy == currentSectionY &&
+                s.renderDistance == renderDistanceChunks) {
                 exact = &s;
                 break;
             }
         }
         ReachableCacheSlot* usable = exact;
         if (!usable) {
+            // The main view's stand-in is the most recently used MAIN slot
+            // (the section it just left: nearly the same set). Never a
+            // portal view's — see ReachableCacheSlot::portalView.
             for (auto& s : m_reachableSlots) {
-                if (s.valid && (!usable || s.lastUsed > usable->lastUsed)) usable = &s;
+                if (s.valid && !s.portalView && (!usable || s.lastUsed > usable->lastUsed)) usable = &s;
             }
         }
+        if (!portalView) m_mainViewAwaitingBfs = (exact == nullptr);
 
         // A portal view with no reachable set of its own yet must not borrow
         // another view's (that was terrain vanishing through portals as the
         // view turned): it asks the worker for one and draws by frustum
         // alone until it lands, a frame or two later.
         if (portalView && !exact && usable) {
-            if (m_meshes && !m_occlusionGraph.Busy()) {
+            if (m_meshes && !m_occlusionGraph.Busy() && !m_mainViewAwaitingBfs) {
                 m_lastRebuildSubmit = std::chrono::steady_clock::now();
                 auto job = m_occlusionGraph.AcquireJob();
                 job->keyCx = currentChunkX;
@@ -850,6 +931,7 @@ namespace Render {
                 m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull, renderDistanceChunks);
                 m_occlusionGraph.SubmitAsync(std::move(job));
             }
+            m_lastPrepareSource = PrepareSource::FrustumOnly;
             PrepareVisibleSectionsThroughPortal(camera, frustum, renderDistanceChunks);
             auto overallEnd = std::chrono::high_resolution_clock::now();
             m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(overallEnd - overallStartTime).count();
@@ -864,11 +946,7 @@ namespace Render {
                 m_stats.buildDrawListsTimeMs = 0.0f;
                 return;
             }
-            ReachableCacheSlot* dst = &m_reachableSlots[0];
-            for (auto& s : m_reachableSlots) {
-                if (!s.valid) { dst = &s; break; }
-                if (s.lastUsed < dst->lastUsed) dst = &s;
-            }
+            ReachableCacheSlot* dst = PickEvictionSlot(portalView);
 
             auto job = m_occlusionGraph.AcquireJob();
             job->keyCx = currentChunkX;
@@ -888,6 +966,8 @@ namespace Render {
             dst->cx = currentChunkX;
             dst->cz = currentChunkZ;
             dst->sy = currentSectionY;
+            dst->portalView = portalView;
+            dst->renderDistance = job->renderDistance;
             dst->sections.swap(job->result);
             // A degenerate cold-start result (camera chunk not streamed in
             // yet) renders as empty this frame — that's honest, nothing
@@ -906,7 +986,9 @@ namespace Render {
 
             usable = dst;
             exact = dst;
+            m_lastPrepareSource = PrepareSource::ColdSync;
         } else {
+            m_lastPrepareSource = (usable == exact) ? PrepareSource::Exact : PrepareSource::Fallback;
             m_stats.chunkIterationTimeMs = 0.0f;
             m_stats.sortingTimeMs = 0.0f;
         }
@@ -977,7 +1059,10 @@ namespace Render {
         // removals wait, and a late removal is invisible over-draw.
         const bool urgentRebuild = exact == nullptr;
         const auto rebuildNow = std::chrono::steady_clock::now();
-        if (!haveExactFresh && m_meshes && !m_occlusionGraph.Busy() &&
+        // A portal view waits while the main view has no slot of its own:
+        // the one job in flight must be the player's world, not a far side.
+        const bool yieldToMain = portalView && m_mainViewAwaitingBfs;
+        if (!haveExactFresh && m_meshes && !m_occlusionGraph.Busy() && !yieldToMain &&
             (urgentRebuild ||
              rebuildNow - m_lastRebuildSubmit >= std::chrono::milliseconds(250))) {
             m_lastRebuildSubmit = rebuildNow;
@@ -1066,18 +1151,68 @@ namespace Render {
             };
 
             if (m_enableFrustumCulling) {
+                // Column first. The reachable set is ~24 sections per chunk
+                // column; the column's own box (full world height) is tested
+                // once and memoised for the frame, and only a column the
+                // frustum's edge passes through pays per-section tests. A
+                // column fully inside admits its sections untested, one fully
+                // outside rejects them untested. Grid is relative to the BFS
+                // origin's chunk, sized to the render distance plus the halo
+                // ring the reachable set may include; anything outside the
+                // grid (never, in practice) falls back to the per-section test.
+                const int   gridR = renderDistanceChunks + 2;
+                const int   gridW = 2 * gridR + 1;
+                const size_t gridCells = static_cast<size_t>(gridW) * gridW;
+                m_columnCull.assign(gridCells, 0);
+                if (m_columnRowLo.size() < gridCells) {
+                    m_columnRowLo.resize(gridCells);
+                    m_columnRowHi.resize(gridCells);
+                }
+                const float colMinY = static_cast<float>(Config::MinY);
+                const float colMaxY = colMinY + 16.0f * Game::Math::SECTIONS_PER_CHUNK;
                 for (auto& section : slot->sections) {
-                    float minX = static_cast<float>(section.chunkPos.x * 16);
-                    float minY = static_cast<float>(section.sectionY * 16 + Config::MinY);
-                    float minZ = static_cast<float>(section.chunkPos.z * 16);
-                    if (frustum.IsBoxVisible(glm::vec3(minX, minY, minZ),
-                                             glm::vec3(minX + 16.0f, minY + 16.0f, minZ + 16.0f))) {
-                        const GPUSectionData* gpu = resolveLive(section);
-                        m_visibleSections.push_back(section);
-                        SectionRenderData& vis = m_visibleSections.back();
-                        vis.resolved = gpu;
-                        tagNearby(vis, minX, minY, minZ);
+                    const float minX = static_cast<float>(section.chunkPos.x * 16);
+                    const float minY = static_cast<float>(section.sectionY * 16 + Config::MinY);
+                    const float minZ = static_cast<float>(section.chunkPos.z * 16);
+                    uint8_t col = 0;
+                    const int gx = section.chunkPos.x - currentChunkX + gridR;
+                    const int gz = section.chunkPos.z - currentChunkZ + gridR;
+                    if (gx >= 0 && gx < gridW && gz >= 0 && gz < gridW) {
+                        const size_t cellIndex = static_cast<size_t>(gz) * gridW + gx;
+                        uint8_t& cell = m_columnCull[cellIndex];
+                        if (cell == 0) {
+                            switch (frustum.TestAABB(glm::vec3(minX, colMinY, minZ),
+                                                     glm::vec3(minX + 16.0f, colMaxY, minZ + 16.0f))) {
+                                case FrustumResult::Outside:   cell = 1; break;
+                                case FrustumResult::Intersect: {
+                                    // The edge column: which rows pass, once,
+                                    // instead of a box test per row.
+                                    int lo = 0, hi = -1;
+                                    frustum.SectionRowRange(minX, minZ, colMinY,
+                                                            Game::Math::SECTIONS_PER_CHUNK, lo, hi);
+                                    m_columnRowLo[cellIndex] = static_cast<int8_t>(std::clamp(lo, -1, 127));
+                                    m_columnRowHi[cellIndex] = static_cast<int8_t>(std::clamp(hi, -1, 127));
+                                    cell = 2;
+                                    break;
+                                }
+                                case FrustumResult::Inside:    cell = 3; break;
+                            }
+                        }
+                        col = cell;
+                        if (col == 1) continue;
+                        if (col == 2 && (section.sectionY < m_columnRowLo[cellIndex] ||
+                                         section.sectionY > m_columnRowHi[cellIndex])) {
+                            continue;
+                        }
+                    } else if (!frustum.IsBoxVisible(glm::vec3(minX, minY, minZ),
+                                                     glm::vec3(minX + 16.0f, minY + 16.0f, minZ + 16.0f))) {
+                        continue;   // off the grid: the plain per-section test
                     }
+                    const GPUSectionData* gpu = resolveLive(section);
+                    m_visibleSections.push_back(section);
+                    SectionRenderData& vis = m_visibleSections.back();
+                    vis.resolved = gpu;
+                    tagNearby(vis, minX, minY, minZ);
                 }
             } else {
                 for (auto& section : slot->sections) {
@@ -1101,9 +1236,9 @@ namespace Render {
             // Identity mirror for IsSectionVisible — see the header. Rebuilt
             // on EVERY pass, portal recursions included, so the entity passes
             // that follow each chunk pass see that pass's view.
-            m_visibleSectionKeys.clear();
-            for (const auto& rd : m_visibleSections) {
-                m_visibleSectionKeys.insert(VisibleSectionKey(rd.chunkPos, rd.sectionY));
+            { PROFILE_ZONE_N("FrustumFilter.Keys");
+            m_visibleGrid.Reset(currentChunkX, currentChunkZ, renderDistanceChunks + 4);
+            for (const auto& rd : m_visibleSections) m_visibleGrid.Insert(rd.chunkPos, rd.sectionY);
             }
 
             // MAIN-VIEW SNAPSHOT for the mesh scheduler.
@@ -1119,6 +1254,26 @@ namespace Render {
             // is the exact discriminator for "this is the real view".
             if (!m_useProjectionOverride || m_recordMainView) {
                 m_mainViewSections = m_visibleSections;
+                m_mainViewGrid     = m_visibleGrid;
+            }
+            // OBEY_DUMP_VISIBLE=1: once a second, append the real view's
+            // camera and drawn section keys to logs/visible-dump.txt for
+            // tools/underground_share.py, which scores them against the
+            // world's heightmaps — the go/no-go measurement for section
+            // occlusion culling (2026-09-04). Off = one static bool test.
+            if (!m_useProjectionOverride) {
+                static const bool s_dump = std::getenv("OBEY_DUMP_VISIBLE") != nullptr;
+                if (s_dump) DumpVisibleSections(camera);
+            }
+            if (m_useProjectionOverride) {
+                // A portal view: of the player's own level, or one of a far
+                // level's several this frame. Unioned for the scheduler.
+                m_portalViewSections.insert(m_portalViewSections.end(),
+                                            m_visibleSections.begin(), m_visibleSections.end());
+                if (m_portalViewGrid.radius < 0) {
+                    m_portalViewGrid.Reset(m_visibleGrid.originX, m_visibleGrid.originZ, m_visibleGrid.radius);
+                }
+                m_portalViewGrid.MergeFrom(m_visibleGrid);
             }
         }
         auto cullEnd = std::chrono::high_resolution_clock::now();
@@ -1365,11 +1520,13 @@ namespace Render {
                     }
                     float vx = 0, vy = 0, vz = 0; bool haveV = false;
                     if (idxPtr && vtxPtr && iCnt > 0) {
+                        // Section-relative fixed point (TerrainVertex); the
+                        // origin table adds the rest on the GPU.
                         const uint32_t v0 = idxPtr[iOff];
-                        const size_t floatsPerVert = 32 / sizeof(float);
-                        vx = vtxPtr[v0 * floatsPerVert + 0];
-                        vy = vtxPtr[v0 * floatsPerVert + 1];
-                        vz = vtxPtr[v0 * floatsPerVert + 2];
+                        const auto* tv = reinterpret_cast<const TerrainVertex*>(vtxPtr) + v0;
+                        vx = TerrainVertex::DecodePos(tv->px);
+                        vy = TerrainVertex::DecodePos(tv->py);
+                        vz = TerrainVertex::DecodePos(tv->pz);
                         haveV = true;
                     }
                     // Was this section's index range inside any run the last
@@ -1524,6 +1681,50 @@ namespace Render {
         if (m_backendAtlasTexture != INVALID_TEXTURE) {
             g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
         }
+        BindSpriteTable(opaquePassShader);
+    }
+
+    // The atlas sprite table (AtlasBuilder), texture slot 1 for every terrain
+    // pass: a greedy-merged quad carries a sprite ID instead of its atlas
+    // rect (TerrainVertex), and the fragment shader fetches the rect from
+    // here. Slot 1 is shared with other renderers' secondary textures (portal
+    // colour ramps, the end portal), so it is rebound at every terrain shader
+    // switch, never assumed. The GL sampler uniform is set once per shader
+    // (unit 1 is not the default); Vulkan routes slot 1 to descriptor set 2
+    // and ignores the int uniform.
+    void ChunkRenderer::DumpVisibleSections(const Camera& camera) {
+        static auto s_last = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+        static const auto s_start = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - s_last < std::chrono::seconds(1)) return;
+        s_last = now;
+        static std::ofstream s_file(Platform::GameDirectory::GetDefaultGameDirectory() + "/logs/visible-dump.txt",
+                                    std::ios::trunc);
+        if (!s_file.is_open()) return;
+        const double t = std::chrono::duration<double>(now - s_start).count();
+        s_file << "t=" << t << " cam=" << camera.position.x << ' ' << camera.position.y << ' '
+               << camera.position.z << " n=" << m_visibleSections.size() << " |";
+        for (const auto& rd : m_visibleSections) {
+            s_file << ' ' << rd.chunkPos.x << ',' << rd.chunkPos.z << ',' << rd.sectionY;
+        }
+        s_file << '\n';
+        s_file.flush();
+    }
+
+    void ChunkRenderer::BindSpriteTable(ShaderHandle shader) {
+        if (!g_renderBackend || !g_atlasBuilder) return;
+        const TextureHandle table = g_atlasBuilder->GetSpriteTableHandle();
+        if (table == INVALID_TEXTURE) return;
+        g_renderBackend->BindTexture(table, 1);
+        if (shader != INVALID_SHADER) {
+            g_renderBackend->SetUniformInt(shader, "uSpriteTable", 1);
+            // The face map rides texture unit 2; ChunkMegaBuffer::BindSlab
+            // binds each slab's buffer texture there. Set here, before any
+            // draw with the shader: a samplerBuffer left on unit 0 would
+            // share the atlas's unit with a different sampler type, which GL
+            // rejects at draw time.
+            g_renderBackend->SetUniformInt(shader, "uFaceMap", 2);
+        }
     }
 
     void ChunkRenderer::RenderLayerPass(RenderLayer layer, bool backToFront) {
@@ -1548,11 +1749,39 @@ namespace Render {
         int layerCount = 0;
         uint32_t totalVerts = 0, totalIndices = 0;
 
+        // Face-direction skipping (SectionMesh.hpp): draw only the index
+        // groups whose facing can point at the eye, given the section's
+        // bounds. Exactly the triangles back-face culling would discard, so
+        // it is only taken when that culling is on for the layer (off = the
+        // player asked to see back faces). OBEY_NO_FACE_CULL=1 is the A/B
+        // kill switch. Translucent has no groups (re-sorted back to front).
+        static const bool s_faceCullDisabled = std::getenv("OBEY_NO_FACE_CULL") != nullptr;
+        // Smallest skipped group worth its own sub-draw, in indices (6 per
+        // quad). OBEY_SPLIT_MIN=<indices> overrides for tuning; 0 = split
+        // at every group as before.
+        static const uint32_t s_splitMinIndices = [] {
+            const char* v = std::getenv("OBEY_SPLIT_MIN");
+            return v ? static_cast<uint32_t>(std::atoi(v)) : 900u;
+        }();
+        const RenderPassConfig& passConfig = (layer == RenderLayer::Cutout) ? m_cutoutConfig : m_opaqueConfig;
+        const bool useFacing = layer != RenderLayer::Translucent && passConfig.enableBackFaceCulling &&
+                               !s_faceCullDisabled;
+        const glm::vec3 eye = m_facingCameraPos;
+
         // Collect this layer's draw entries from the visible list. Zone split:
         // "BuildDrawList" is OUR loop over visible sections; "SubmitMultiDraw"
         // is time spent inside driver calls. If a pass shows milliseconds,
         // this tells you which side owns them.
         m_drawEntries.clear();
+        // Sub-draw attribution (Tracy builds only): what the draw count would
+        // be if every section were ONE entry (no facing-group splits), with
+        // the same contiguity fusion as SubmitMergedRuns. Merged - this =
+        // the cost of the splits; this - slabs = the cost of sections not
+        // sitting next to each other in their slab (upload order).
+#ifdef TRACY_ENABLE
+        m_diagFullEntries.clear();
+        int64_t diagSections = 0;
+#endif
         {
             PROFILE_ZONE_N("BuildDrawList");
             auto processSection = [&](const SectionRenderData& section) {
@@ -1566,16 +1795,76 @@ namespace Render {
                                         (layer == RenderLayer::Cutout)       ? section.resolved->cutoutDrawCmd :
                                                                                section.resolved->translucentDrawCmd;
                 if (cachedCmd.valid && cachedCmd.indexCount > 0 && cachedCmd.slabIndex < slabCount) {
-                    m_drawEntries.push_back({cachedCmd.slabIndex, cachedCmd.indexOffset,
-                                             static_cast<uint32_t>(cachedCmd.indexCount), cachedCmd.ibo});
+#ifdef TRACY_ENABLE
+                    ++diagSections;
+                    m_diagFullEntries.push_back({cachedCmd.slabIndex, cachedCmd.indexOffset,
+                                                 static_cast<uint32_t>(cachedCmd.indexCount), cachedCmd.ibo});
+#endif
+                    uint32_t drawnIndices = 0;
+                    if (useFacing && cachedCmd.hasFacing) {
+                        // A +X face at plane x=p is front-facing iff eye.x > p;
+                        // every +X face of the section has p >= minX, so the
+                        // whole group is a back face unless eye.x > minX.
+                        const float minX = static_cast<float>(section.chunkPos.x * 16);
+                        const float minY = static_cast<float>(Config::MinY + section.sectionY * 16);
+                        const float minZ = static_cast<float>(section.chunkPos.z * 16);
+                        const bool visible[kFacingCount] = {
+                            eye.x < minX + 16.0f,   // -X
+                            eye.x > minX,           // +X
+                            eye.y < minY + 16.0f,   // -Y
+                            eye.y > minY,           // +Y
+                            eye.z < minZ + 16.0f,   // -Z
+                            eye.z > minZ,           // +Z
+                            true,                   // Any
+                        };
+                        // Contiguous runs of visible slots become one entry
+                        // each; exact-adjacent entries fuse again in
+                        // SubmitMergedRuns. A skipped group BETWEEN two
+                        // visible runs is drawn anyway when it is small:
+                        // the fixed-spot A/B of 2026-09-04 put a sub-draw
+                        // at ~0.2 µs of GPU time and ~0.2 µs of CPU, so a
+                        // back-facing group of fewer than ~150 quads costs
+                        // less to rasterise-and-cull than to skip (its
+                        // triangles are culled by the GPU exactly as before
+                        // face groups existed — pixel-identical either way).
+                        int slot = 0;
+                        bool haveRun = false;
+                        uint32_t runBegin = 0, runEnd = 0;
+                        while (slot < kFacingCount) {
+                            if (!visible[kFacingGroupOrder[slot]]) { ++slot; continue; }
+                            int end = slot;
+                            while (end < kFacingCount && visible[kFacingGroupOrder[end]]) ++end;
+                            const uint32_t begin = cachedCmd.facingRanges[slot];
+                            const uint32_t stop  = cachedCmd.facingRanges[end];
+                            if (stop > begin) {
+                                if (haveRun && begin - runEnd <= s_splitMinIndices) {
+                                    runEnd = stop;                       // bridge the small gap
+                                } else {
+                                    if (haveRun) {
+                                        m_drawEntries.push_back({cachedCmd.slabIndex, runBegin, runEnd - runBegin, cachedCmd.ibo});
+                                        drawnIndices += runEnd - runBegin;
+                                    }
+                                    runBegin = begin; runEnd = stop; haveRun = true;
+                                }
+                            }
+                            slot = end;
+                        }
+                        if (haveRun) {
+                            m_drawEntries.push_back({cachedCmd.slabIndex, runBegin, runEnd - runBegin, cachedCmd.ibo});
+                            drawnIndices += runEnd - runBegin;
+                        }
+                        if (drawnIndices == 0) return;
+                    } else {
+                        m_drawEntries.push_back({cachedCmd.slabIndex, cachedCmd.indexOffset,
+                                                 static_cast<uint32_t>(cachedCmd.indexCount), cachedCmd.ibo});
+                        drawnIndices = static_cast<uint32_t>(cachedCmd.indexCount);
+                    }
                     layerCount++;
 
-                    totalIndices += static_cast<uint32_t>(cachedCmd.indexCount);
-                    switch (layer) {
-                        case RenderLayer::Opaque:      totalVerts += section.resolved->opaqueVertexCount; break;
-                        case RenderLayer::Cutout:       totalVerts += section.resolved->cutoutVertexCount; break;
-                        case RenderLayer::Translucent:  totalVerts += section.resolved->translucentVertexCount; break;
-                    }
+                    // Geom/* plots count what is DRAWN: 6 indices = one quad
+                    // = 4 vertices, so skipped face groups show up here.
+                    totalIndices += drawnIndices;
+                    totalVerts   += drawnIndices / 6 * 4;
                 }
             };
 
@@ -1600,8 +1889,43 @@ namespace Render {
             }
         }
 
+#ifdef TRACY_ENABLE
+        if (!backToFront && !megaBuffer->UsesPerSectionIndexBuffers()) {
+            // Hypothetical draw count with one entry per section: sort by
+            // (slab, offset) and count runs that are not exactly contiguous.
+            std::sort(m_diagFullEntries.begin(), m_diagFullEntries.end(),
+                      [](const DrawEntry& a, const DrawEntry& b) {
+                          return a.slab != b.slab ? a.slab < b.slab : a.offset < b.offset; });
+            int64_t fused = 0, slabs = 0;
+            for (size_t i = 0; i < m_diagFullEntries.size();) {
+                const uint32_t slab = m_diagFullEntries[i].slab;
+                ++slabs;
+                size_t runEnd = static_cast<size_t>(m_diagFullEntries[i].offset) + m_diagFullEntries[i].count;
+                ++fused; ++i;
+                for (; i < m_diagFullEntries.size() && m_diagFullEntries[i].slab == slab; ++i) {
+                    const DrawEntry& e = m_diagFullEntries[i];
+                    if (e.offset > runEnd) ++fused;
+                    runEnd = std::max(runEnd, static_cast<size_t>(e.offset) + e.count);
+                }
+            }
+            PROFILE_PLOT("Draws/Sections",      diagSections);
+            PROFILE_PLOT("Draws/Entries",       static_cast<int64_t>(m_drawEntries.size()));
+            PROFILE_PLOT("Draws/FusedNoSplit",  fused);
+            PROFILE_PLOT("Draws/Slabs",         slabs);   // actual sub-draws: Draws/Merged
+        }
+#endif
         m_stats.totalVerticesRendered += totalVerts;
         m_stats.totalIndicesRendered += totalIndices;
+
+        // Geom/Vertices, Geom/Indices: what this layer pass handed the GPU.
+        // The Metal System Trace of 2026-09-04 put the GPU's vertex stage at
+        // ~1 us per visible section (r=0.94 against Sections/Visible); these
+        // are what tells whether that scales with vertex count (fetch- or
+        // shading-bound, fixed by a smaller vertex) or with section count
+        // (per-draw overhead, fixed by fewer draws). tools/gpu_report.py
+        // --tracy correlates them against the GPU timeline.
+        PROFILE_PLOT("Geom/Vertices", static_cast<int64_t>(totalVerts));
+        PROFILE_PLOT("Geom/Indices",  static_cast<int64_t>(totalIndices));
 
         // Draws/Chunk: sections with geometry in this layer (one sub-draw each
         // before merging). Draws/Merged: sub-draws actually issued. The second
@@ -1648,15 +1972,76 @@ namespace Render {
     // too: a frustum-culled neighbour (wasted vertex work, invisible) or
     // zeroed free space (degenerate triangles, nothing). One multi-draw per
     // slab, as before; what changed is the number of commands inside it.
+    void ChunkRenderer::RadixSortDrawEntries() {
+        const size_t n = m_drawEntries.size();
+        if (n < 2) return;
+        bool keyFits = true;
+        m_sortKeys.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            const DrawEntry& e = m_drawEntries[i];
+            if (e.offset >= (1u << 24) || e.slab >= 256u) { keyFits = false; break; }
+            m_sortKeys[i] = (e.slab << 24) | e.offset;
+        }
+        if (!keyFits) {
+            std::sort(m_drawEntries.begin(), m_drawEntries.end(),
+                      [](const DrawEntry& a, const DrawEntry& b) {
+                          return a.slab != b.slab ? a.slab < b.slab : a.offset < b.offset;
+                      });
+            return;
+        }
+        m_sortScratch.resize(n);
+        m_sortKeysScratch.resize(n);
+        DrawEntry* src = m_drawEntries.data();  DrawEntry* dst = m_sortScratch.data();
+        uint32_t*  ksrc = m_sortKeys.data();    uint32_t*  kdst = m_sortKeysScratch.data();
+        for (int shift = 0; shift < 32; shift += 8) {
+            uint32_t hist[256] = {};
+            for (size_t i = 0; i < n; ++i) ++hist[(ksrc[i] >> shift) & 0xFFu];
+            // Every key has the same byte here: this pass would be a copy.
+            bool trivial = false;
+            for (uint32_t c = 0; c < 256; ++c) if (hist[c] == n) { trivial = true; break; }
+            if (trivial) continue;
+            uint32_t sum = 0;
+            for (uint32_t c = 0; c < 256; ++c) { const uint32_t h = hist[c]; hist[c] = sum; sum += h; }
+            for (size_t i = 0; i < n; ++i) {
+                const uint32_t b = (ksrc[i] >> shift) & 0xFFu;
+                const uint32_t at = hist[b]++;
+                kdst[at] = ksrc[i];
+                dst[at]  = src[i];
+            }
+            std::swap(src, dst);
+            std::swap(ksrc, kdst);
+        }
+        if (src != m_drawEntries.data()) {
+            std::copy(src, src + n, m_drawEntries.data());
+        }
+    }
+
     int ChunkRenderer::SubmitMergedRuns(ChunkMegaBuffer& megaBuffer) {
+        // The sort below exists so that runs can fuse ACROSS gaps (gap
+        // bridging), which needs entries in offset order. With bridging off
+        // (the default) the only fusion left is exact adjacency, and that
+        // needs no sort: SubmitOrderedRuns groups entries per slab in list
+        // order and fuses neighbours that touch. Measured on tour1
+        // (2026-09-04): the sort cost 0.11 ms per frame in the open world
+        // and 0.76 ms at a 22k-entry look-down while fusing 15 of 4,377
+        // entries — sections are uploaded in streaming order, not in the
+        // order they are seen. List order is front-to-back besides, which
+        // is the order a depth-tested opaque pass wants.
         // Sections of one slab are visited in list (distance) order, so this
-        // is a genuine sort each frame — a few thousand 16-byte entries,
-        // measured in tens of microseconds, against the driver's per-command
-        // cost it removes.
-        std::sort(m_drawEntries.begin(), m_drawEntries.end(),
-                  [](const DrawEntry& a, const DrawEntry& b) {
-                      return a.slab != b.slab ? a.slab < b.slab : a.offset < b.offset;
-                  });
+        // is a genuine sort each frame. It pays: the 24 sections of a column
+        // are uploaded together and sit next to each other in the slab, so
+        // sorting fuses ~12% of the entries into their neighbours (tour1,
+        // 2026-09-04: 500 fewer sub-draws a frame, 0.1 ms of vkQueueSubmit).
+        // std::sort cost 0.11 ms a frame for that, 0.76 ms at a 22k-entry
+        // look-down; this is an LSD radix sort on (slab, offset) — four
+        // 8-bit passes over a 32-bit key, skipping passes whose byte is the
+        // same in every key — for the same order at a fraction of the cost.
+        // Offsets are in index units and stay far below 2^24 per slab; a
+        // slab that ever exceeds it falls back to std::sort.
+        {
+            PROFILE_ZONE_N("MergeRuns.Sort");
+            RadixSortDrawEntries();
+        }
 
         // Gap bridging draws whatever sits between two nearby visible runs —
         // usually a culled section — because one long draw beats two short
@@ -1678,6 +2063,7 @@ namespace Render {
 
         const size_t n = m_drawEntries.size();
         size_t i = 0;
+        PROFILE_ZONE_N("MergeRuns.Flush");
         while (i < n) {
             const uint32_t slab = m_drawEntries[i].slab;
             size_t runBegin = m_drawEntries[i].offset;
@@ -1689,7 +2075,7 @@ namespace Render {
                 // Live regions are disjoint and sorted, so e.offset >= runEnd
                 // and the gap is [runEnd, e.offset). A duplicate entry (offset
                 // below runEnd) has an empty gap and simply folds in.
-                const size_t gapTol = m_gapBridgingEnabled ? kDrawMergeGapIndices : 0;
+                const size_t gapTol = m_gapBridgingEnabled ? m_gapBridgeIndices : 0;
                 const bool fuse = merge &&
                                   e.offset <= runEnd + gapTol &&
                                   megaBuffer.IsIndexGapDrawable(slab, runEnd, e.offset);
@@ -1716,15 +2102,31 @@ namespace Render {
         // CONTENT is poisoned, which the byte sampler below looks for: any
         // bridged-gap index beyond the slab's vertex capacity is garbage that
         // was never zeroed (Vulkan only; slabs are persistently mapped).
+        //
+        // OFF unless OBEY_MERGE_VALIDATE=1. The loss check used to be
+        // entries × runs — at the 23k entries of a high look-down view that
+        // was 26 ms on the render thread every 128th call, i.e. one 39 ms
+        // frame every 64 (tour1 baseline, 2026-09-04). Entries and runs are
+        // both sorted by (slab, offset) here, so it is one merge walk now,
+        // and it still only runs when asked for.
+        static const bool s_validate = std::getenv("OBEY_MERGE_VALIDATE") != nullptr;
         static uint32_t s_validateCounter = 0;
-        if (merge && !m_callRuns.empty() && (++s_validateCounter & 127u) == 0) {
+        if (s_validate && merge && !m_callRuns.empty() && (++s_validateCounter & 127u) == 0) {
             int lost = 0;
+            size_t ri = 0;   // runs are emitted in entry order: same sort key
             for (const DrawEntry& e : m_drawEntries) {
-                bool covered = false;
-                for (const auto& r : m_callRuns) {
-                    if (r[0] == e.slab && r[1] <= e.offset &&
-                        static_cast<size_t>(e.offset) + e.count <= r[2]) { covered = true; break; }
+                // Advance to the first run that could hold e: same slab, and
+                // ends past e's start. Runs of an earlier slab, or ending
+                // before e begins, can never cover a later entry either.
+                while (ri < m_callRuns.size() &&
+                       (m_callRuns[ri][0] < e.slab ||
+                        (m_callRuns[ri][0] == e.slab && m_callRuns[ri][2] <= e.offset))) {
+                    ++ri;
                 }
+                const bool covered = ri < m_callRuns.size() &&
+                                     m_callRuns[ri][0] == e.slab &&
+                                     m_callRuns[ri][1] <= e.offset &&
+                                     static_cast<size_t>(e.offset) + e.count <= m_callRuns[ri][2];
                 if (!covered && ++lost <= 3) {
                     Log::Warning("[MergeLoss] entry slab=%u off=%u cnt=%u NOT covered by %zu runs",
                                  e.slab, e.offset, e.count, m_callRuns.size());
@@ -1794,6 +2196,8 @@ namespace Render {
             m_slabRunOffsets[s2].clear();
         }
 
+        PROFILE_ZONE_N("OrderedRuns");
+        m_callRuns.clear();   // for F8's submitted-coverage check, like SubmitMergedRuns
         uint32_t slab     = m_drawEntries[0].slab;
         size_t   runBegin = m_drawEntries[0].offset;
         size_t   runEnd   = runBegin + m_drawEntries[0].count;
@@ -1801,6 +2205,7 @@ namespace Render {
             if (slab < slabCount) {
                 m_slabRunCounts[slab].push_back(static_cast<int32_t>(runEnd - runBegin));
                 m_slabRunOffsets[slab].push_back(runBegin * ChunkMegaBuffer::INDEX_SIZE);
+                m_callRuns.push_back({static_cast<size_t>(slab), runBegin, runEnd});
             }
         };
 

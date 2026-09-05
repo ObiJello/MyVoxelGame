@@ -45,6 +45,23 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BLOCK_DIR = os.path.join(ROOT, "minecraft_code/decompiled_net/minecraft/world/level/block")
 BLOCKS_JAVA = os.path.join(BLOCK_DIR, "Blocks.java")
+# 26.3 gap fill: classes and registrations 26.1 lacks (poplar, sulfur, …).
+BLOCK_DIR2 = os.path.join(ROOT, "minecraft_code2/decompiled_net/minecraft/world/level/block")
+BLOCKS_JAVA2 = os.path.join(BLOCK_DIR2, "Blocks.java")
+
+
+def class_files():
+    """(class name, path) for every block class: 26.1's, plus 26.3's for the
+    classes 26.1 does not have."""
+    out = {}
+    for fn in os.listdir(BLOCK_DIR):
+        if fn.endswith(".java"):
+            out[fn[:-5]] = os.path.join(BLOCK_DIR, fn)
+    if os.path.isdir(BLOCK_DIR2):
+        for fn in os.listdir(BLOCK_DIR2):
+            if fn.endswith(".java"):
+                out.setdefault(fn[:-5], os.path.join(BLOCK_DIR2, fn))
+    return sorted(out.items())
 BLOCK_DEFS = os.path.join(ROOT, "src/common/world/block/BlockDefs.inc")
 OUT_HPP = os.path.join(ROOT, "src/common/world/block/GeneratedWaterlogged.hpp")
 OUT_CPP = os.path.join(ROOT, "src/common/world/block/GeneratedWaterlogged.cpp")
@@ -55,11 +72,8 @@ WATERLOGGED_IFACE = "SimpleWaterloggedBlock"
 def parse_hierarchy():
     """class name -> [direct supertypes], for every block class."""
     info = {}
-    for fn in os.listdir(BLOCK_DIR):
-        if not fn.endswith(".java"):
-            continue
-        cls = fn[:-5]
-        src = open(os.path.join(BLOCK_DIR, fn), errors="ignore").read()
+    for cls, path in class_files():
+        src = open(path, errors="ignore").read()
         m = re.search(
             r"\n(?:public |abstract |final |)*(?:class|interface)\s+"
             + re.escape(cls)
@@ -108,13 +122,11 @@ def closure(info, roots):
 def default_true_classes():
     """Classes whose registerDefaultState sets WATERLOGGED true."""
     out = set()
-    for fn in os.listdir(BLOCK_DIR):
-        if not fn.endswith(".java"):
-            continue
-        src = open(os.path.join(BLOCK_DIR, fn), errors="ignore").read()
+    for cls, path in class_files():
+        src = open(path, errors="ignore").read()
         for m in re.finditer(r"registerDefaultState\((.*?)\);", src, re.S):
             if re.search(r"setValue\(\s*WATERLOGGED\s*,\s*true\s*\)", m.group(1)):
-                out.add(fn[:-5])
+                out.add(cls)
                 break
     return out
 
@@ -155,6 +167,21 @@ def parse_registry():
         names[m.group(1)] = "BedBlock"
     for m in re.finditer(r'registerStainedGlass\(\s*"([a-z0-9_]+)"', src):
         names[m.group(1)] = "StainedGlassBlock"
+    # 26.3's registrations 26.1 lacks (keyed BlockItemIds.X / BlockIds.X,
+    # multi-line lambda factories, registerSlab/registerWall helpers).
+    if os.path.isfile(BLOCKS_JAVA2):
+        src2 = open(BLOCKS_JAVA2, errors="ignore").read()
+        for m in re.finditer(
+                r'register\(\s*Block\w*Ids\.([A-Z0-9_]+)\s*,\s*'
+                r"(?:\(\s*\w+\s*\)\s*->\s*\{?\s*(?:return\s+)?new\s+(\w+)|(\w+)::new)", src2):
+            names.setdefault(m.group(1).lower(), m.group(2) or m.group(3))
+        for m in re.finditer(r'register\(\s*Block\w*Ids\.([A-Z0-9_]+)\s*,\s*BlockBehaviour', src2):
+            names.setdefault(m.group(1).lower(), "Block")
+        for fn, cls in (("registerSlab", "SlabBlock"), ("registerWall", "WallBlock"),
+                        ("registerStair", "StairBlock"), ("registerLegacyStair", "StairBlock"),
+                        ("registerBed", "BedBlock")):
+            for m in re.finditer(fn + r'\(\s*Block\w*Ids\.([A-Z0-9_]+)', src2):
+                names.setdefault(m.group(1).lower(), cls)
     return names
 
 

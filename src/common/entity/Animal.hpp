@@ -29,6 +29,8 @@ namespace Game {
         bool IsBaby() const override { return m_age < 0; }
         int  GetAge() const { return m_age; }
         void SetAge(int age) { m_age = age; }
+        // MC AgeableMob.setBaby: BABY_START_AGE or adult.
+        void SetBaby(bool baby) override { SetAge(baby ? kBabyStartAge : 0); }
 
         // MC ageUp(seconds, forced) — advance toward adulthood by `seconds`
         // seconds of growth. The forced flag is the feeding path: forced

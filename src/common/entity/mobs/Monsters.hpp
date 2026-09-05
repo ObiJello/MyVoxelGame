@@ -36,7 +36,7 @@ namespace Game {
         explicit Zombie(EntityLevel* level);
 
         bool IsBaby() const override { return m_baby; }
-        void SetBaby(bool baby);
+        void SetBaby(bool baby) override;
 
         // MC Zombie.getBaseExperienceReward (Zombie.java:165-170): a baby is
         // worth xpReward * 2.5 — 12 for the 5 the type table carries. Husk,
@@ -852,14 +852,33 @@ namespace Game {
     // RangedAttackGoal(1.25, 20, 10) at any hostile, and melts — 1 fire
     // damage per tick — in any biome whose base temperature exceeds 1.0 (MC's
     // SNOW_GOLEM_MELTS environment attribute) and in water (isSensitiveTo-
-    // Water). Not modelled, each named at its site: the snow trail (no snow
-    // layer block), shearing the pumpkin off (mobInteract — no shears-on-mob
-    // flow), and the derpy no-pumpkin look that follows it.
+    // Water). Shears take the pumpkin off (mobInteract → shear: the
+    // carved-pumpkin drop at eye height, DATA_PUMPKIN_ID cleared, the
+    // renderer's SnowGolemHeadLayer stops drawing it). Not modelled, named
+    // at its site: the snow trail (no snow layer block).
     class SnowGolem : public PathfinderMob, public RangedAttackMob {
     public:
         explicit SnowGolem(EntityLevel* level);
 
         static void CreateAttributes(AttributeMap& out);
+
+        // MC SnowGolem.hasPumpkin / setPumpkin — DATA_PUMPKIN_ID's 0x10 bit,
+        // carried to the client in the wire's variant byte, saved as
+        // "Pumpkin". True from construction, as MC defines it (byte 16).
+        bool HasPumpkin() const { return m_hasPumpkin; }
+        void SetPumpkin(bool pumpkin) { m_hasPumpkin = pumpkin; }
+        uint8_t GetVariantByte() const override { return m_hasPumpkin ? 0x10 : 0x00; }
+        void    SetVariantByte(uint8_t v) override { m_hasPumpkin = (v & 0x10) != 0; }
+
+        // MC SnowGolem.readyForShearing: alive and still wearing it.
+        bool ReadyForShearing() const { return IsAlive() && HasPumpkin(); }
+        // MC SnowGolem.shear: SNOW_GOLEM_SHEAR, setPumpkin(false), the
+        // shearing/snow_golem loot table (one carved pumpkin) dropped at
+        // eye height.
+        void Shear();
+        // MC SnowGolem.mobInteract: shears + readyForShearing → shear, SUCCESS;
+        // anything else PASS.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
 
         // MC AbstractGolem: never despawns, animal ambient-sound cadence.
         bool RemoveWhenFarAway(double) const override { return false; }
@@ -875,6 +894,9 @@ namespace Game {
     protected:
         void RegisterGoals() override;
         bool IsSensitiveToWater() const override { return true; }
+
+    private:
+        bool m_hasPumpkin = true;
     };
 
     // MC monster/Witch. MAX_HEALTH 26, MOVEMENT_SPEED 0.25. Throws splash

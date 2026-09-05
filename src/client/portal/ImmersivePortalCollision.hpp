@@ -40,7 +40,9 @@ namespace Client {
     public:
         // Once per frame, before the player's physics, with the ACTIVE level
         // bound: collects the collision-carrying portals near the player.
-        void Update(const glm::dvec3& playerFeet, const Game::AABB& playerBox);
+        // `playerEye` decides which face of a two-faced portal engages
+        // (the one the eye is in front of); see the .cpp.
+        void Update(const glm::dvec3& playerEye, const Game::AABB& playerBox);
 
         bool IsBlockBehindPortal(int x, int y, int z, const Game::AABB& box) const;
         bool IsFarSideSolid(int x, int y, int z, const Game::AABB& box) const;

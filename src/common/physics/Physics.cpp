@@ -28,6 +28,9 @@ namespace Game {
     void SetPortalPassthroughFn(PortalPassthroughFn fn) {
         g_portalPassthrough = fn;
     }
+    namespace { bool g_portalCollisionActive = false; }
+    void SetPortalCollisionActive(bool active) { g_portalCollisionActive = active; }
+    bool PortalCollisionActive() { return g_portalCollisionActive; }
     namespace { PortalExtraSolidFn g_portalExtraSolid = nullptr; }
     void SetPortalExtraSolidFn(PortalExtraSolidFn fn) {
         g_portalExtraSolid = fn;
@@ -734,7 +737,12 @@ namespace Game {
 
         // Same open-sky early-out as CollectBlockColliders: an all-air box
         // cannot collide, and the section flags say so without a cell read.
-        if (context.blockAccess &&
+        // Not while a portal is engaged (see SetPortalCollisionActive): the
+        // far side of a floor seam is solid exactly where this side is air
+        // — the void below bedrock — and the early-out answered before the
+        // extra-solid hook could say so, which is how a player fell out of
+        // the Overworld into the Nether's roof instead of standing on it.
+        if (context.blockAccess && !(g_portalExtraSolid && g_portalCollisionActive) &&
             context.blockAccess->IsRegionAllAir(glm::ivec3(minX, minY, minZ),
                                                 glm::ivec3(maxX, maxY, maxZ),
                                                 /*absentIsAir=*/true)) {
@@ -874,6 +882,17 @@ namespace Game {
         float offsets[] = { -halfWidth + PlayerPhysics::OVERHANG_MARGIN * physics.scale,
                            halfWidth - PlayerPhysics::OVERHANG_MARGIN * physics.scale };
 
+        // The portal hooks below get the BODY's box at this position, not a
+        // point collapsed onto the probed corner. They decide by the body:
+        // whether it fits the opening, and whether it straddles the surface
+        // — a body sinking into a floor portal has its centre below the
+        // surface long before its eye crosses, and a point 0.1 under the
+        // feet read as "approached from behind" and made the ground solid
+        // again: the player stood in the surface, never entering.
+        const float bodyHeight = physics.GetCurrentHeight();
+        const AABB bodyBox(glm::vec3(position.x, position.y + bodyHeight * 0.5f, position.z),
+                           glm::vec3(physics.GetWidth(), bodyHeight, physics.GetWidth()));
+
         for (float xOffset : offsets) {
             for (float zOffset : offsets) {
                 glm::vec3 cornerPosition(
@@ -905,10 +924,7 @@ namespace Game {
                         // (see PortalExtraSolidFn) — a full cube, so the probe
                         // point is inside it whenever it is in the cell.
                         if (g_portalExtraSolid) {
-                            AABB pointAABB;
-                            pointAABB.min = cornerPosition;
-                            pointAABB.max = cornerPosition;
-                            if (g_portalExtraSolid(blockX, by, blockZ, pointAABB)) {
+                            if (g_portalExtraSolid(blockX, by, blockZ, bodyBox)) {
                                 inside = true;
                                 blockY = by;
                                 break;
@@ -936,17 +952,13 @@ namespace Game {
                 }
                 if (!inside) continue;
 
-                // Portal-passthrough at this corner — degenerate AABB
-                // collapsed to the corner point. If the corner falls
-                // inside the portal opening (no surrounding wall
-                // material at that position), the corner doesn't
-                // count as support — needed so floor/ceiling portals
-                // let the player fall through.
+                // Portal-passthrough at this corner, judged by the body's
+                // box (see bodyBox above). If the cell under the corner is
+                // inside a portal opening the body is going through, the
+                // corner doesn't count as support — needed so floor
+                // portals let the player fall through.
                 if (g_portalPassthrough) {
-                    AABB pointAABB;
-                    pointAABB.min = cornerPosition;
-                    pointAABB.max = cornerPosition;
-                    if (g_portalPassthrough(blockX, blockY, blockZ, pointAABB)) {
+                    if (g_portalPassthrough(blockX, blockY, blockZ, bodyBox)) {
                         continue;
                     }
                 }

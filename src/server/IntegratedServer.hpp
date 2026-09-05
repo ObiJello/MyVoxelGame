@@ -2,6 +2,7 @@
 #pragma once
 
 #include "server/world/storage/anvil/SessionLock.hpp"
+#include "server/world/storage/anvil/LevelDat.hpp"
 
 #include "common/network/PacketTypes.hpp"
 #include "common/world/math/WorldMath.hpp"
@@ -13,6 +14,8 @@
 #include "server/world/watch/ChunkLoader.hpp"
 #include "ServerTickRateManager.hpp"
 #include <memory>
+#include <functional>
+#include <optional>
 #include <vector>
 #include <atomic>
 #include <thread>
@@ -25,6 +28,7 @@
 #include "common/world/level/DimensionId.hpp"
 
 namespace Game {
+    class Mob;
     class ILevelWrite;
     class ClientPlayer;
     class MyTerrainGenerator;
@@ -323,6 +327,11 @@ namespace Server {
         // MC MinecraftServer.tickRateManager(). Owns the tick budget, the
         // freeze/step state and the sprint machinery that /tick drives.
         ServerTickRateManager& tickRateManager() { return m_tickRateManager; }
+        // Write the tick rate manager's frozen flag and rate to the world's
+        // sidecar (data/obeycraft.json) so they survive a relaunch — /tick's
+        // handlers call it after each change. No-op for a world that cannot
+        // be saved (no save path, or the session lock was lost).
+        void PersistTickState();
         
         // The OVERWORLD's change accumulator.
         //
@@ -340,6 +349,11 @@ namespace Server {
         // MC forceTimeSynchronization: called every 20 ticks and immediately
         // after /time or /gamerule doDaylightCycle changes.
         void ForceTimeSync();
+
+        // The level.dat this session started from, when the world had one.
+        // Its gamerules are the authority (MC PrimaryLevelData): applied to
+        // the overworld at Initialize and copied to every level built later.
+        const std::optional<Game::Anvil::LevelDatData>& SavedLevelDat() const { return m_savedLevelDat; }
 
         // MC MinecraftServer.autoSave: queue every dirty chunk and rewrite
         // level.dat. Non-blocking — the storage thread drains the queue.
@@ -685,6 +699,8 @@ namespace Server {
         // the final flush. Null for an imported read-only world, which we
         // never write and therefore need not lock.
         std::unique_ptr<Game::Anvil::SessionLock> m_sessionLock;
+        // level.dat as read at Initialize (see SavedLevelDat).
+        std::optional<Game::Anvil::LevelDatData> m_savedLevelDat;
         std::unordered_map<uint32_t, std::unique_ptr<ServerPlayer>> m_remotePlayers; // Remote players by ID
         // NOTE: PlayerSession is now managed by PlayerSessionManager, not stored here
 
@@ -750,6 +766,9 @@ namespace Server {
         // One tick of one level's mob system: sync the player views, tick the
         // mobs, run the natural spawner, then drain the tracker's packets.
         void TickMobs(ServerLevel& level, int64_t serverTick);
+        // The client-facing half of TickMobs (tracker, removals, knockback
+        // pushes): runs every tick, frozen or not — see the tick loop.
+        void SyncMobsToClients(ServerLevel& level, const std::vector<int32_t>& removed);
 
         // MC NaturalSpawner's per-tick pass over one level's spawnable chunks.
         void RunNaturalSpawner(ServerLevel& level, int64_t serverTick);
@@ -835,6 +854,15 @@ namespace Server {
         int SummonMobs(Game::EntityTypeId type, const glm::dvec3& pos, int count,
                        const SummonOptions& options = {});
 
+        // /spawnall — the debug line-up (see SpawnAllCommand.hpp): one adult
+        // of every mob type in a 12-wide grid in front of `origin`, `spacing`
+        // apart, each row's babies one spacing in front of it, index-aligned.
+        // Everything faces `origin` and is persistent, and lands within
+        // tracking range so a single tick shows the lot.
+        struct LineupResult { int types = 0, adults = 0, babies = 0; };
+        LineupResult SpawnMobLineup(const PlayerSession& session, const glm::dvec3& origin,
+                                    double spacing, bool adults, bool babies);
+
         // /shape: accept a build job (false while one is still streaming) and
         // the per-tick pump that places its blocks. See ShapeCommand.
         bool SubmitShapeJob(const ShapeJobRequest& job);
@@ -850,7 +878,8 @@ namespace Server {
         // it was clicked against.
         bool SpawnMobFromItemUse(Game::EntityTypeId type, const glm::ivec3& spawnPos,
                                  bool tryMoveDown, bool movedUp, Game::DimensionId dimension,
-                                 int portalCooldownTicks = 0);
+                                 int portalCooldownTicks = 0,
+                                 const std::function<void(Game::Mob&)>& configure = {});
 
         // MC EndCrystalItem.useOn — place a crystal entity on obsidian or
         // bedrock, and let the End's dragon fight test for the respawn

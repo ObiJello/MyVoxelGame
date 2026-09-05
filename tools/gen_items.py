@@ -22,6 +22,43 @@ from pathlib import Path
 
 REPO_ROOT      = Path(__file__).resolve().parent.parent
 ITEMS_JAVA     = REPO_ROOT / "minecraft_code" / "decompiled_net" / "minecraft" / "world" / "item" / "Items.java"
+# 26.3's Items.java (minecraft_code2). Read for an ALLOWLIST of items only:
+# every slug here is appended after the 26.1 set, in 26.3 declaration order,
+# the moment it is not already in the table. The whole tree is not merged
+# because each row is a wire/save id and most 26.3 additions (sulfur blocks,
+# the bucket) have nothing behind them in this engine yet.
+ITEMS_JAVA2    = REPO_ROOT / "minecraft_code2" / "decompiled_net" / "minecraft" / "world" / "item" / "Items.java"
+MC2_ITEMS      = {
+    "sulfur_cube_spawn_egg",
+    # 26.2/26.3 items imported 2026-09-05 (assets copied from the jar; the
+    # maps, boats, disc and bucket have no behaviour behind them yet).
+    "abandoned_camp_map", "buried_ancient_city_map", "buried_mineshaft_map",
+    "buried_treasure_map", "buried_trial_chambers_map", "desert_pyramid_map",
+    "desert_village_map", "jungle_pyramid_map", "music_disc_bounce",
+    "ocean_monument_map", "plains_village_map", "poplar_boat", "poplar_chest_boat",
+    "savanna_village_map", "snowy_village_map", "sulfur_cube_bucket",
+    "swamp_hut_map", "taiga_village_map", "warm_ocean_ruins_map",
+    "woodland_mansion_map",
+}
+# 26.3 registers eggs as `registerSpawnEgg(ItemIds.X_SPAWN_EGG, EntityTypes.X)`.
+RE_SPAWN_EGG2 = re.compile(
+    r"""^\s+
+        ([A-Z][A-Z0-9_]*)            # symbol name (group 1)
+        \s*=\s*
+        registerSpawnEgg\(
+        \s*ItemIds\.[A-Z0-9_]+\s*,\s*EntityTypes\.([A-Z][A-Z0-9_]*)   # entity (group 2)
+    """,
+    re.VERBOSE,
+)
+RE_PURE2 = re.compile(
+    r"""^\s+
+        ([A-Z][A-Z0-9_]*)            # symbol name (group 1)
+        \s*=\s*
+        (?:Items\.)?registerItem\(
+        \s*ItemIds\.([A-Z0-9_]+)     # ItemIds constant (group 2) — slug is its lower case
+    """,
+    re.VERBOSE,
+)
 MODELS_DIR     = REPO_ROOT / "assets" / "models" / "item"
 HPP_OUT        = REPO_ROOT / "src" / "common" / "entity" / "GeneratedItemList.hpp"
 CPP_OUT        = REPO_ROOT / "src" / "common" / "entity" / "GeneratedItemList.cpp"
@@ -171,7 +208,30 @@ def parse_items_java() -> tuple[list[tuple[str, str, str, int]], list[tuple[str,
                 size = max_stack_size(line)
                 if size != DEFAULT_MAX_STACK:
                     blocks.append((m.group(2).lower(), size))
+    out += parse_items_java2(seen)
     return out, blocks
+
+
+def parse_items_java2(seen: set[str]) -> list[tuple[str, str, str, int]]:
+    """The MC2_ITEMS allowlist out of 26.3's Items.java, in its order."""
+    out: list[tuple[str, str, str, int]] = []
+    if not ITEMS_JAVA2.exists():
+        return out
+    with ITEMS_JAVA2.open(encoding="utf-8") as f:
+        for line in f:
+            m = RE_SPAWN_EGG2.match(line)
+            if m:
+                symbol, slug = m.group(1), m.group(2).lower() + "_spawn_egg"
+            else:
+                m = RE_PURE2.match(line)
+                if not m:
+                    continue
+                symbol, slug = m.group(1), m.group(2).lower()
+            if slug not in MC2_ITEMS or symbol in seen:
+                continue
+            seen.add(symbol)
+            out.append((symbol, slug, detect_predicate(slug), max_stack_size(line)))
+    return out
 
 
 def known_block_slugs() -> set[str]:
@@ -236,8 +296,9 @@ def merge_append_only(parsed: list[tuple[str, str, str, int]]) -> list[tuple[str
             # so later IDs don't shift. Use the same slug + "none" hint; the JSON/
             # texture files for it may also be gone, in which case the item just
             # renders as missingno (no crash).
-            out.append((pascal_case_from_upper_snake(slug.upper()), slug, "none",
-                        DEFAULT_MAX_STACK))
+            # The symbol stays UPPER_SNAKE here: emit_hpp pascal-cases every
+            # symbol, and pascal-casing "MelonSeeds" again gives "Melonseeds".
+            out.append((slug.upper(), slug, "none", DEFAULT_MAX_STACK))
         else:
             out.append(entry)
         used.add(slug)

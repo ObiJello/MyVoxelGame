@@ -212,6 +212,55 @@ namespace Render {
         // One frame stale: PrepareVisibleSections runs in the Render phase,
         // after MeshSchedule. MC culls and compiles back-to-back in renderLevel.
         const std::vector<SectionRenderData>& GetMainViewSections() const { return m_mainViewSections; }
+        // Sections drawn by views through portals INTO THIS SAME LEVEL (a
+        // wrap border shows the level to itself) since the last main pass —
+        // every portal recursion's list, appended. The scheduler walks these
+        // after the main view's: without it the far side of a wrap border
+        // was never compiled (it lies a world's width from the player, so
+        // no main view ever reaches it) and showed as fog until crossed.
+        // Cleared by the main pass; one frame stale like the main list.
+        const std::vector<SectionRenderData>& GetPortalViewSections() const { return m_portalViewSections; }
+        // A level seen only through portals has no main pass to clear its
+        // list: whoever schedules its meshes (once per frame, after every
+        // view of it has been drawn) clears it.
+        void ClearPortalViewSections() {
+            m_portalViewSections.clear(); m_portalViewGrid.Clear();
+        }
+        // Membership in the main view's list / the same-level portal views'
+        // lists (one lookup each). The mesh scheduler asks these for every
+        // DIRTY section instead of walking the ~4,000-section visible list
+        // asking each "are you dirty?" — proportional to what changed, not
+        // to what is on screen.
+        bool IsMainViewSection(::Game::Math::ChunkPos chunkPos, int sectionY) const {
+            return m_mainViewGrid.HasSection(chunkPos, sectionY);
+        }
+        bool IsPortalViewSection(::Game::Math::ChunkPos chunkPos, int sectionY) const {
+            return m_portalViewGrid.HasSection(chunkPos, sectionY);
+        }
+        // Column-level pre-test for the same question: a streamed-in chunk
+        // holds 24 dirty sections, and while flying most of them are behind
+        // the player, where the scheduler asked both section questions for
+        // every one of them every frame (36% of its time, Instruments
+        // 2026-09-04). One lookup per column answers "no" for all 24.
+        bool IsMainViewColumn(::Game::Math::ChunkPos chunkPos) const {
+            return m_mainViewGrid.HasColumn(chunkPos);
+        }
+        bool IsPortalViewColumn(::Game::Math::ChunkPos chunkPos) const {
+            return m_portalViewGrid.HasColumn(chunkPos);
+        }
+
+        // The camera jumped — a same-level portal crossing (a wrap border)
+        // put it a world's width from where it was. The reachable-set slots
+        // are keyed by camera section and the render source falls back to
+        // the most recently used slot while the new section's BFS is in
+        // flight; after a jump that slot describes the far side of the
+        // world, and the frame or two it was drawn from were the flash on
+        // every crossing. Drop them all: the next pass rebuilds synchronously
+        // (the cold-start path) and draws right.
+        void OnCameraTeleport() {
+            for (auto& s : m_reachableSlots) s.valid = false;
+            m_visibleSectionsDirty = true;
+        }
         // The sections of the view being drawn RIGHT NOW — the main view's,
         // or a portal view's while one is rendering. Renderers that gather
         // per pass (block entities) read this, so what a portal shows is
@@ -232,8 +281,7 @@ namespace Render {
         // consult ClientChunkManager (see Render::EntityCulling).
         // MAIN THREAD ONLY, like the list it mirrors.
         bool IsSectionVisible(::Game::Math::ChunkPos chunkPos, int sectionY) const {
-            return m_visibleSectionKeys.find(VisibleSectionKey(chunkPos, sectionY))
-                != m_visibleSectionKeys.end();
+            return m_visibleGrid.HasSection(chunkPos, sectionY);
         }
 
         // ── Debug cull override (detached free camera, F+C) ─────────────
@@ -319,6 +367,14 @@ namespace Render {
         // reached from the (cull) camera, and how many survived the frustum.
         uint32_t GetLastReachableCount() const { return m_lastReachableCount; }
         uint32_t GetLastVisibleCount() const { return m_lastVisibleCount; }
+        // Where the most recent PrepareVisibleSections got its reachable
+        // set: the slot for the camera's own section, another (nearby)
+        // slot while that one's BFS is in flight, a synchronous cold-start
+        // rebuild, or no BFS at all (a portal view by frustum). For the
+        // flicker diagnostics: a view drawn from a fallback slot for a
+        // frame looks different from the frames around it.
+        enum class PrepareSource : uint8_t { Exact = 0, Fallback = 1, ColdSync = 2, FrustumOnly = 3 };
+        PrepareSource LastPrepareSource() const { return m_lastPrepareSource; }
         bool IsGreedyMeshDebug() const { return m_greedyMeshDebug; }
         void SetShowSectionBounds(bool enable) { m_showSectionBounds = enable; }
         void SetDebugLayer(int layer) { m_debugLayer = layer; } // -1 = all, 0 = opaque, 1 = cutout, 2 = translucent
@@ -360,6 +416,11 @@ namespace Render {
 
         bool    m_cullOverrideActive = false;
         Camera  m_cullCamera;
+        // Eye position the face-direction groups are tested against
+        // (SectionMesh.hpp): the view PrepareVisibleSections last ran for —
+        // the cull camera, so the F+C detached view shows the skipped faces
+        // like every other culling decision.
+        glm::vec3 m_facingCameraPos{0.0f};
         Frustum m_cullFrustum{};
 
         // World-space portal clip plane — set by PortalRenderer before the
@@ -389,6 +450,15 @@ namespace Render {
         // else: mobs drawn through cave walls, the portal mark failing its
         // depth test, the player's own body sinking into the ground. The
         // number scales with the body (see PlayerPhysics::scale).
+        // The render distance (chunks) the NEXT chunk pass discovers and
+        // draws with, in place of the effective setting; 0 = none. Set by
+        // the immersive portal renderer around a view through a portal —
+        // the mod draws a far side with its own per-portal distance
+        // (PortalRenderer.getPortalRenderDistance, scaled by the client's
+        // performance level). Portal-view results are cached per distance,
+        // so alternating distances between views do not thrash.
+        static void  SetRenderDistanceOverride(int chunks) { s_renderDistanceOverride = chunks; }
+        static int   RenderDistanceOverride() { return s_renderDistanceOverride; }
         static void  SetNearPlane(float nearPlane) { s_nearPlane = nearPlane; }
         static float NearPlane() { return s_nearPlane; }
         static glm::vec4 PortalEntityClipPlane() {
@@ -401,6 +471,7 @@ namespace Render {
         static glm::vec4 s_portalClipPlane;
         static float     s_portalEntityClipMargin;
         static float     s_nearPlane;
+        static int       s_renderDistanceOverride;
 
         // Render configuration
         bool m_enableFrustumCulling = true;
@@ -426,10 +497,14 @@ namespace Render {
         std::vector<std::array<size_t, 3>> m_callRuns;
         uint32_t m_lastReachableCount = 0;
         uint32_t m_lastVisibleCount = 0;
+        PrepareSource m_lastPrepareSource = PrepareSource::Exact;
         void ApplyDebugOverlayUniform(ShaderHandle shader);
         TextureHandle m_whiteDebugTexture = INVALID_TEXTURE;  // lazy, greedy debug view
         // Atlas normally; the lazy 1x1 white texture in greedy-debug view.
         TextureHandle ActiveTerrainTexture();
+        void BindSpriteTable(ShaderHandle shader);
+        // OBEY_DUMP_VISIBLE=1 diagnostics: see PrepareVisibleSections.
+        void DumpVisibleSections(const Camera& camera);
         bool m_enableSmartCull = true;  // Occlusion culling via VisibilitySet BFS
         bool m_wireframeMode = false;
         bool m_showSectionBounds = false;
@@ -461,11 +536,31 @@ namespace Render {
             // reclamation in ClientMeshManager: a GPUSectionData that died
             // at counter D can only be referenced by lists built at <= D.
             std::vector<SectionRenderData> sections;
+            // Built for a portal view (seeded at a far surface). The main
+            // view never falls back to one of these — drawn from a portal's
+            // far-side reachable set for a frame, the world around the
+            // player vanished; that was the flicker on every section
+            // crossing while flying in a world with many portals — and a
+            // portal result never evicts a main-view slot while a portal or
+            // free slot exists.
+            bool portalView = false;
+            // The render distance the list was built at. Part of the key:
+            // a portal view drawn at one distance must not serve a view at
+            // another (see SetRenderDistanceOverride).
+            int renderDistance = 0;
         };
         // Main camera + portal views: every distinct far surface in view
         // keys its own slot (a chain of views through one portal shares one).
-        static constexpr int kReachableSlots = 8;
+        // Enough for the main view and a screenful of portals at once; at 8,
+        // seventeen drawn portals cycled every slot every frame.
+        static constexpr int kReachableSlots = 32;
         std::array<ReachableCacheSlot, kReachableSlots> m_reachableSlots;
+        ReachableCacheSlot* PickEvictionSlot(bool forPortalView);
+        // The main view has no slot for its camera section and its BFS has
+        // not landed: portal views hold their own submissions until it has
+        // (one BFS is in flight at a time, and the player's own world comes
+        // first).
+        bool m_mainViewAwaitingBfs = false;
         uint32_t m_prepareCounter = 0;  // Monotonic, for LRU slot eviction
 
         // Async BFS bookkeeping. m_worldVersion advances on every dirty event
@@ -511,21 +606,113 @@ namespace Render {
         // scheduler is never handed a portal recursion's view. See the frustum
         // filter in PrepareVisibleSections and GetMainViewSections().
         std::vector<SectionRenderData> m_mainViewSections;
+        // See GetPortalViewSections.
+        std::vector<SectionRenderData> m_portalViewSections;
+        // Membership of a section list, answerable in one array read.
+        //
+        // A grid of chunk columns around an origin chunk, one 24-bit mask
+        // per column (bit = section index); a column is "in" when its mask
+        // is non-zero. Anything outside the grid (a portal view into a
+        // level a world away) goes to the overflow set, so the answer is
+        // exact everywhere and only the common case is fast. This replaced
+        // hash sets of packed keys: rebuilding those cost one node
+        // allocation per visible section per view (0.12 ms of a 3 ms frame
+        // and a quarter of the frustum filter, tour1 2026-09-04), and every
+        // scheduler and entity-gating query was a hash probe.
+        struct SectionGrid {
+            int originX = 0, originZ = 0, radius = -1, width = 0;
+            std::vector<uint32_t> masks;
+            std::unordered_set<uint64_t> overflow;   // section keys AND column keys
+
+            void Reset(int cx, int cz, int r) {
+                if (r != radius) {
+                    radius = r; width = 2 * r + 1;
+                    masks.assign(static_cast<size_t>(width) * width, 0u);
+                } else {
+                    std::fill(masks.begin(), masks.end(), 0u);
+                }
+                originX = cx; originZ = cz;
+                overflow.clear();
+            }
+            void Clear() {
+                std::fill(masks.begin(), masks.end(), 0u);
+                overflow.clear();
+            }
+            bool Cell(::Game::Math::ChunkPos p, size_t& idx) const {
+                const int gx = p.x - originX + radius;
+                const int gz = p.z - originZ + radius;
+                if (gx < 0 || gx >= width || gz < 0 || gz >= width) return false;
+                idx = static_cast<size_t>(gz) * width + gx;
+                return true;
+            }
+            void Insert(::Game::Math::ChunkPos p, int sectionY) {
+                size_t idx;
+                if (Cell(p, idx)) {
+                    masks[idx] |= 1u << (sectionY & 31);
+                } else {
+                    overflow.insert(VisibleSectionKey(p, sectionY));
+                    overflow.insert(ColumnKey(p));
+                }
+            }
+            bool HasSection(::Game::Math::ChunkPos p, int sectionY) const {
+                size_t idx;
+                if (Cell(p, idx)) return (masks[idx] >> (sectionY & 31)) & 1u;
+                return !overflow.empty() && overflow.count(VisibleSectionKey(p, sectionY)) != 0;
+            }
+            bool HasColumn(::Game::Math::ChunkPos p) const {
+                size_t idx;
+                if (Cell(p, idx)) return masks[idx] != 0;
+                return !overflow.empty() && overflow.count(ColumnKey(p)) != 0;
+            }
+            // Union with another grid, whatever its origin.
+            void MergeFrom(const SectionGrid& o) {
+                if (o.radius == radius && o.originX == originX && o.originZ == originZ) {
+                    for (size_t i = 0; i < masks.size(); ++i) masks[i] |= o.masks[i];
+                } else {
+                    for (int gz = 0; gz < o.width; ++gz) {
+                        for (int gx = 0; gx < o.width; ++gx) {
+                            uint32_t m = o.masks[static_cast<size_t>(gz) * o.width + gx];
+                            if (!m) continue;
+                            const ::Game::Math::ChunkPos p{gx - o.radius + o.originX, gz - o.radius + o.originZ};
+                            for (int y = 0; m; ++y, m >>= 1) if (m & 1u) Insert(p, y);
+                        }
+                    }
+                }
+                overflow.insert(o.overflow.begin(), o.overflow.end());
+            }
+        };
+        // The main view's list and the same-level portal views' lists (see
+        // IsMainViewSection / IsMainViewColumn).
+        SectionGrid m_mainViewGrid;
+        SectionGrid m_portalViewGrid;
+        // Per-frame column-visibility memo for the frustum filter: one byte
+        // per chunk column of the render-distance grid (0 untested, 1 out,
+        // 2 crosses the frustum, 3 fully inside), so a column's 24 sections
+        // cost one box test instead of 24.
+        std::vector<uint8_t> m_columnCull;
+        // For a column the frustum's edge passes through: the rows that
+        // pass, computed once per column per pass (Frustum::SectionRowRange).
+        // Valid where m_columnCull is 2.
+        std::vector<int8_t>  m_columnRowLo;
+        std::vector<int8_t>  m_columnRowHi;
 
         bool m_visibleSectionsDirty = true;
 
-        // Hash-set mirror of m_visibleSections' identities, rebuilt alongside
+        // Grid mirror of m_visibleSections' identities, rebuilt alongside
         // it in the per-frame frustum filter, so IsSectionVisible is one
-        // lookup instead of a scan of a few thousand entries per entity.
-        // Key packs chunk x/z (27 bits each — ±67M chunks, far past any world
-        // border) and the section index; a chunk beyond that range can only
-        // alias onto a false "visible", never a false cull.
-        std::unordered_set<uint64_t> m_visibleSectionKeys;
+        // array read instead of a scan of a few thousand entries per entity.
+        SectionGrid m_visibleGrid;
+        // Overflow keys pack chunk x/z (27 bits each — ±67M chunks, far past
+        // any world border) and the section index; a chunk beyond that range
+        // can only alias onto a false "visible", never a false cull.
         static uint64_t VisibleSectionKey(::Game::Math::ChunkPos pos, int sectionY) {
             return (static_cast<uint64_t>(static_cast<uint32_t>(pos.x) & 0x7FFFFFFu) << 37)
                  | (static_cast<uint64_t>(static_cast<uint32_t>(pos.z) & 0x7FFFFFFu) << 10)
                  | (static_cast<uint64_t>(static_cast<uint32_t>(sectionY) & 0x3FFu));
         }
+        // sectionY 0x3FF is outside SECTIONS_PER_CHUNK, so a column key never
+        // collides with a section key.
+        static uint64_t ColumnKey(::Game::Math::ChunkPos pos) { return VisibleSectionKey(pos, 0x3FF); }
 
         // --- Translucency re-sort scheduling (MC LevelRenderer:165, 953) ---
         // The cursor persists across frames and wraps modulo the visible count,
@@ -545,6 +732,14 @@ namespace Render {
             BufferHandle ibo;   // per-section-IBO layers only; INVALID_BUFFER otherwise
         };
         std::vector<DrawEntry> m_drawEntries;
+        // Radix-sort scratch for SubmitMergedRuns (see RadixSortDrawEntries).
+        std::vector<DrawEntry> m_sortScratch;
+        std::vector<uint32_t>  m_sortKeys;
+        std::vector<uint32_t>  m_sortKeysScratch;
+        void RadixSortDrawEntries();
+#ifdef TRACY_ENABLE
+        std::vector<DrawEntry> m_diagFullEntries;   // sub-draw attribution, RenderLayerPass
+#endif
         // The runs (merged sub-draws) for the slab currently being flushed —
         // exactly the arrays MultiDrawIndexedBaseVertex takes.
         std::vector<int32_t> m_runCounts;
@@ -564,7 +759,9 @@ namespace Render {
         // GPU is nothing next to a driver-side command) or space zeroed on
         // free (degenerate triangles). 8192 indices ≈ 1365 quads, the size of
         // a few small sections. Tune against Draws/Merged in Tracy.
-        static constexpr uint32_t kDrawMergeGapIndices = 8192;
+        // Gap tolerance in indices. OBEY_GAP_BRIDGE=<indices> turns bridging
+        // on with this tolerance from the command line (0 = off).
+        uint32_t m_gapBridgeIndices = 8192;
 
         // How many of this frame's visible sections carry translucent
         // geometry. Set by PrepareVisibleSections so RenderAll can skip the

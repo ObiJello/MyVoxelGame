@@ -71,6 +71,14 @@ namespace Render {
     bool IsBlockTranslucent(Game::BlockID blockId);
 
     // Core meshing class - turns block data into renderable geometry
+    // An atlas sprite as the mesher sees it: its uv rect (x,y = min, z,w =
+    // max) for building per-quad UVs, and its id in the atlas sprite table,
+    // which a greedy-merged quad carries instead of the rect (TerrainVertex).
+    struct SpriteRef {
+        glm::vec4 rect{0.0f, 0.0f, 1.0f, 1.0f};
+        uint16_t  id = 0;
+    };
+
     class Mesher {
     public:
         // An inclusive block box in one dimension whose faces bake no ambient
@@ -272,6 +280,13 @@ namespace Render {
         // different light gradient, a different tint).
         static bool SetMeshOptions(MeshOptions options);
 
+        // The block atlas was rebuilt (resource pack reload): every worker's
+        // cached sprite rects and ids — s_faceUVCache, s_ctmUVs — belong to
+        // the old atlas. Bumps the same generation SetMeshOptions does, so
+        // each worker re-derives them on its next job. Every section must
+        // remesh afterwards, as after SetMeshOptions.
+        static void InvalidateAtlasCaches();
+
         // ── "No ambient occlusion" boxes (the occlusion wand) ────────────
         // Inclusive block boxes per dimension inside which faces bake no AO
         // darkening. The list is small and replaced whole; workers take a
@@ -325,7 +340,7 @@ namespace Render {
         // Render::CTM::SlotFor(). One entry per participating block (see
         // CachedBlockProps::ctmSlot). Sized to CTM::kMaxVariants (64) so the
         // header need not pull in ConnectedTextures.hpp; 47 slots are used.
-        static thread_local std::vector<std::array<glm::vec4, 64>> s_ctmUVs;
+        static thread_local std::vector<std::array<SpriteRef, 64>> s_ctmUVs;
 
     private:
         MeshConfig m_config;
@@ -413,7 +428,7 @@ namespace Render {
         // UV cache: thread-local so it persists across Mesher instances on the same
         // worker thread, avoiding ResolveTexture string allocs + atlas hash lookups
         // on every mesh rebuild.
-        static thread_local std::unordered_map<const Game::FaceDef*, glm::vec4> s_faceUVCache;
+        static thread_local std::unordered_map<const Game::FaceDef*, SpriteRef> s_faceUVCache;
 
         // Core meshing functions
         void ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,
@@ -426,15 +441,40 @@ namespace Render {
         // BlockID are different colours. Reading it back out of `blocks` would
         // work but costs a world lookup per face for a value ProcessBlock
         // already has in hand.
+        // Two-sided quads (TerrainVertex::kTwoSidedFlag). A zero-thickness
+        // element with both faces on its thin axis (cross plants, seagrass
+        // planes) draws the same rectangle twice, once per side, and the
+        // second face's texture is the first's mirrored in u. ProcessBlock
+        // runs both faces through AddBlockFace in CAPTURE mode, and when
+        // the two agree (same corners, colours and sprite, uv mirrored
+        // exactly) emits ONE quad in the kFacingTwoSided group, which the
+        // renderer draws with back-face culling off while the fragment
+        // shader mirrors u on the geometric back — pixel-identical, half
+        // the vertices. Any disagreement emits both faces as before.
+        struct FaceCapture {
+            std::array<Vertex, 4> verts{};
+            SpriteRef sprite{};
+            glm::vec4 uvRect{};
+            RenderLayer layer = RenderLayer::Opaque;
+            Game::BlockID blockId = Game::BlockID::Air;
+            bool valid = false;
+        };
+        void EmitCaptured(const FaceCapture& c, SectionMesh& mesh);
+        bool EmitTwoSided(const FaceCapture& a, const FaceCapture& b, SectionMesh& mesh);
+
         void AddBlockFace(const Game::IBlockAccess& blocks,
                          const Game::BlockModel& model, const Game::Element& element,
                          Game::FaceDir faceDir, const Game::FaceDef& faceDef,
                          glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
                          Game::BlockStateIndex stateIndex,
-                         int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh);
+                         int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh,
+                         FaceCapture* capture = nullptr);
 
+        // outFacing: the layer's per-quad facing list (SectionMesh), or null
+        // for translucent, which keeps no groups.
         void GenerateQuad(const std::array<Vertex, 4>& quadVerts,
-                         std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices);
+                         std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices,
+                         std::vector<uint8_t>* outFacing);
 
         // Greedy face merging. AddBlockFace routes each opaque/cutout quad
         // through TryStashGreedyQuad; a quad that passes the (deliberately
@@ -446,12 +486,17 @@ namespace Render {
         // GenerateQuad exactly as before, so the rendered image only ever
         // changes by having fewer, larger quads for the same pixels.
         // Returns false when the quad was NOT stashed and must be emitted.
+        // baseColor: the four corners' tint * face shade WITHOUT ambient
+        // occlusion (RGBA8, as faceVerts would carry with AO = 1); aoCode: each
+        // corner's AO level 0..3 (1.0, 0.8, 0.6, 0.4) or 0xFF when the value is
+        // not one of MC's four levels (sub-element blend) — never mergeable.
         bool TryStashGreedyQuad(const std::array<Vertex, 4>& faceVerts,
-                                const glm::vec4& uvRect,
+                                const SpriteRef& sprite,
                                 const Game::Element& element,
                                 const Game::FaceDef& faceDef,
                                 BlockFace face, bool hasBlockOffset,
-                                RenderLayer layer,
+                                RenderLayer layer, Game::BlockID blockId,
+                                const uint32_t (&baseColor)[4], const uint8_t (&aoCode)[4],
                                 int worldX, int worldY, int worldZ);
         void FlushGreedyQuads(SectionMesh& outMesh);
 
@@ -463,7 +508,7 @@ namespace Render {
                                       BlockFace face);
 
         // Texture and material helpers
-        bool GetTextureUV(const std::string& texturePath, glm::vec4& uvRect);
+        bool GetTextureUV(const std::string& texturePath, SpriteRef& sprite);
 
         // **NEW**: Biome tinting methods for different tint indices
         // MC BiomeColors' four ColorResolvers.

@@ -131,6 +131,7 @@ namespace Game {
     "cod_bucket",
     "salmon_bucket",
     "tropical_fish_bucket",
+    "slime_ball",
     };
 
     const EntityTypeId kMobTargetTypes[] = {
@@ -523,6 +524,7 @@ namespace Game {
     { EntityTypeId::IronGolem, MobBase::PathfinderMob, "assets/textures/entity/iron_golem/iron_golem.png", 213, 5, 127, 0, 1, 2, 1, 6.0f, 1.0f, true, 4.0f, 1.0f, 0.4f, 3.0f, 0, 0, 59, 0, 19, 0, true, false, false, MobNav::Ground, false, 0, false, false, 0, 0, 0.0f, 0.0f, false, 0, false, 0, 0, 0, false },
     { EntityTypeId::SnowGolem, MobBase::PathfinderMob, "assets/textures/entity/snow_golem.png", 218, 2, 127, 0, 1, 2, 1, 6.0f, 1.0f, true, 4.0f, 1.0f, 0.4f, 3.0f, 0, 0, 59, 0, 19, 0, false, false, false, MobNav::Ground, false, 0, false, false, 0, 0, 0.0f, 0.0f, false, 0, false, 0, 0, 0, false },
     { EntityTypeId::Villager, MobBase::PathfinderMob, "assets/textures/entity/villager/villager.png", 220, 1, 127, 0, 1, 2, 1, 8.0f, 1.0f, true, 4.0f, 1.0f, 0.4f, 3.0f, 0, 0, 59, 0, 19, 0, false, false, false, MobNav::Ground, false, 0, false, false, 0, 0, 0.0f, 0.0f, false, 0, false, 0, 0, 0, false },
+    { EntityTypeId::SulfurCube, MobBase::Mob, "assets/textures/entity/sulfur_cube/sulfur_cube_outer.png", 221, 0, 127, 1, 0, 2, 1, 8.0f, 1.0f, true, 4.0f, 1.0f, 0.4f, 3.0f, 0, 0, 59, 0, 19, 0, false, false, false, MobNav::Ground, false, 0, false, false, 0, 0, 0.0f, 0.0f, false, 0, false, 0, 0, 0, false },
     };
 
     const MobDef* FindMobDef(EntityTypeId type) {

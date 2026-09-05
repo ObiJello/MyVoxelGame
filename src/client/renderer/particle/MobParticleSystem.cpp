@@ -21,6 +21,8 @@
 #include <cmath>
 #include <cstdio>
 
+namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
+
 namespace Render {
 
     MobParticleSystem g_mobParticleSystem;
@@ -113,6 +115,36 @@ void main() {
         }
     } // namespace
 
+    // Sprite sheets — one PNG per frame (assets/textures/particle/, MC's
+    // own particle textures, a resource pack's when one supplies them).
+    // Missing files are non-fatal: the frame simply doesn't draw.
+    void MobParticleSystem::LoadSprites() {
+        auto load = [](const std::string& rel) { return LoadParticleSprite(PlatformMain::GetAssetPath(rel).c_str()); };
+        char path[128];
+        m_textures[kTexHeart] = load("assets/textures/particle/heart.png");
+        m_textures[kTexAngry] = load("assets/textures/particle/angry.png");
+        for (int i = 0; i < 8; ++i) {
+            std::snprintf(path, sizeof(path), "assets/textures/particle/generic_%d.png", i);
+            m_textures[kTexGeneric0 + i] = load(path);
+        }
+        for (int i = 0; i < 16; ++i) {
+            std::snprintf(path, sizeof(path), "assets/textures/particle/explosion_%d.png", i);
+            m_textures[kTexExplosion0 + i] = load(path);
+        }
+        for (int i = 0; i < 8; ++i) {
+            std::snprintf(path, sizeof(path), "assets/textures/particle/spell_%d.png", i);
+            m_textures[kTexSpell0 + i] = load(path);
+        }
+    }
+
+    void MobParticleSystem::ReloadTextures() {
+        if (!g_renderBackend || m_shader == INVALID_SHADER) return;
+        for (TextureHandle& t : m_textures) {
+            if (t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(t); t = INVALID_TEXTURE; }
+        }
+        LoadSprites();
+    }
+
     bool MobParticleSystem::Initialize() {
         if (!g_renderBackend) return false;
 
@@ -131,27 +163,7 @@ void main() {
             return false;
         }
 
-        // Sprite sheets — one PNG per frame (assets/textures/particle/,
-        // MC's own particle textures). Missing files are non-fatal: the
-        // frame simply doesn't draw.
-        char path[128];
-        m_textures[kTexHeart] = LoadParticleSprite("assets/textures/particle/heart.png");
-        m_textures[kTexAngry] = LoadParticleSprite("assets/textures/particle/angry.png");
-        for (int i = 0; i < 8; ++i) {
-            std::snprintf(path, sizeof(path),
-                          "assets/textures/particle/generic_%d.png", i);
-            m_textures[kTexGeneric0 + i] = LoadParticleSprite(path);
-        }
-        for (int i = 0; i < 16; ++i) {
-            std::snprintf(path, sizeof(path),
-                          "assets/textures/particle/explosion_%d.png", i);
-            m_textures[kTexExplosion0 + i] = LoadParticleSprite(path);
-        }
-        for (int i = 0; i < 8; ++i) {
-            std::snprintf(path, sizeof(path),
-                          "assets/textures/particle/spell_%d.png", i);
-            m_textures[kTexSpell0 + i] = LoadParticleSprite(path);
-        }
+        LoadSprites();
 
         // The streaming buffers are made on first use (AcquireSlot).
         return true;

@@ -60,6 +60,8 @@ namespace Render {
 
         bool Initialize();
         void Shutdown();
+        // Resource pack reload: drop and reload the sprite textures.
+        void ReloadTextures();
 
         // Drain queued spawn requests from the mob manager and advance the
         // simulation. dt is real frame time; internally the particles step
@@ -206,6 +208,7 @@ namespace Render {
         // layout: pos3f + uv2f + rgba8 = 24 bytes) with a mesh each.
         ShaderHandle  m_shader = INVALID_SHADER;
         TextureHandle m_textures[kTextureCount];
+        void LoadSprites();
 
         // One streaming vertex buffer per Render CALL, not per frame. The
         // system draws once per view — the main one and every portal view —

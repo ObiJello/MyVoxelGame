@@ -114,6 +114,20 @@ namespace Game::DataComponents {
 
         // Field order mirrors FoodProperties.DIRECT_STREAM_CODEC
         // (FoodProperties.java:36-38): VarInt nutrition, float saturation, bool.
+        void SerSulfurCubeBucket(Network::PacketBuffer& b, const SulfurCubeBucketData& v) {
+            b.WriteString(v.bodyItem);
+            b.WriteInt(static_cast<uint32_t>(v.age));
+            b.WriteByte(v.ageLocked ? 1 : 0);
+            b.WriteByte(v.noAi ? 1 : 0);
+        }
+        SulfurCubeBucketData DeSulfurCubeBucket(Network::PacketReader& r) {
+            SulfurCubeBucketData v;
+            v.bodyItem  = r.ReadString();
+            v.age       = static_cast<int>(r.ReadInt());
+            v.ageLocked = r.ReadByte() != 0;
+            v.noAi      = r.ReadByte() != 0;
+            return v;
+        }
         void SerFood(Network::PacketBuffer& b, const FoodProperties& v) {
             b.WriteVarInt(static_cast<uint32_t>(v.nutrition));
             b.WriteFloat(v.saturation);
@@ -257,6 +271,7 @@ namespace Game::DataComponents {
     const DataComponentType<FoodProperties>   FOOD                      {"food",                       9, &SerFood,         &DeFood};
     const DataComponentType<UseRemainder>     USE_REMAINDER             {"use_remainder",             10, &SerUseRemainder, &DeUseRemainder};
     const DataComponentType<std::string>      CUSTOM_NAME               {"custom_name",                4, &SerString,       &DeString};
+    const DataComponentType<SulfurCubeBucketData> SULFUR_CUBE_BUCKET    {"sulfur_cube_bucket",        14, &SerSulfurCubeBucket, &DeSulfurCubeBucket};
     const DataComponentType<std::string>      ITEM_NAME                 {"item_name",                  5, &SerString,       &DeString};
     const DataComponentType<ItemLore>         LORE                      {"lore",                       6, &SerLore,         &DeLore};
     const DataComponentType<Rarity>           RARITY                    {"rarity",                     7, &SerRarity,       &DeRarity};

@@ -5,8 +5,7 @@
 
 namespace Game {
 
-    // 493 items in MC's Items.java declaration order, plus 2 hand-appended at
-    // the end (melon_seeds, pumpkin_seeds — see the note there). 495 total.
+    // 516 items, in MC's Items.java declaration order.
     const PureItemTableEntry kPureItemTable[] = {
         { "resin_clump", "none", 64 },
         { "redstone", "none", 64 },
@@ -501,21 +500,29 @@ namespace Game {
         { "enderman_spawn_egg", "none", 64 },
         { "endermite_spawn_egg", "none", 64 },
         { "shulker_spawn_egg", "none", 64 },
-        // ── Hand-appended (not from gen_items.py) ───────────────────────────
-        // MC registers these two through net.minecraft.references.Items rather
-        // than a string literal (Items.java:2718-2719), so the generator's
-        // `registerItem("<slug>"` regex never sees them. Appended by hand per
-        // CLAUDE.md's "a handful of new items" rule — at the END, so no
-        // existing numeric ID shifts. Re-running gen_items.py will not remove
-        // them (it is append-aware) but will not re-add them either; if the
-        // generator ever learns to read the references form, delete these two
-        // rows in the same change.
-        //
-        // Without them melon and pumpkin stems are unplantable and their loot
-        // tables — which drop "melon_seeds"/"pumpkin_seeds" — resolve to
-        // nothing.
         { "melon_seeds", "none", 64 },
         { "pumpkin_seeds", "none", 64 },
+        { "sulfur_cube_spawn_egg", "none", 64 },
+        { "poplar_boat", "none", 64 },
+        { "poplar_chest_boat", "none", 64 },
+        { "sulfur_cube_bucket", "none", 64 },
+        { "ocean_monument_map", "none", 64 },
+        { "woodland_mansion_map", "none", 64 },
+        { "buried_trial_chambers_map", "none", 64 },
+        { "jungle_pyramid_map", "none", 64 },
+        { "swamp_hut_map", "none", 64 },
+        { "desert_village_map", "none", 64 },
+        { "plains_village_map", "none", 64 },
+        { "savanna_village_map", "none", 64 },
+        { "snowy_village_map", "none", 64 },
+        { "taiga_village_map", "none", 64 },
+        { "buried_treasure_map", "none", 64 },
+        { "buried_ancient_city_map", "none", 64 },
+        { "buried_mineshaft_map", "none", 64 },
+        { "desert_pyramid_map", "none", 64 },
+        { "abandoned_camp_map", "none", 64 },
+        { "warm_ocean_ruins_map", "none", 64 },
+        { "music_disc_bounce", "none", 1 },
     };
     const size_t kPureItemTableSize = sizeof(kPureItemTable) / sizeof(kPureItemTable[0]);
 

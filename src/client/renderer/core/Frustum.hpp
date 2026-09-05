@@ -2,7 +2,9 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <array>
+#include <cmath>
 
 // A simple AABB
 struct AABB {
@@ -115,6 +117,48 @@ struct Frustum {
             }
         }
         return true; // Box intersects or is inside frustum
+    }
+
+    // The rows of a chunk column that pass IsBoxVisible, as a closed
+    // interval [lo, hi] of section indices (empty when hi < lo). The column
+    // is [minX, minX+16) x [minZ, minZ+16), row s is [minY0 + 16 s,
+    // minY0 + 16 s + 16), rows 0..rowCount-1.
+    //
+    // Same predicate as IsBoxVisible on every row's box: for each plane the
+    // positive vertex's x and z do not depend on the row, so the plane's
+    // x/z/w contribution is one number per column and the row enters only
+    // through ny * (top or bottom of the row). A plane with ny > 0 therefore
+    // bounds the rows from below, ny < 0 from above, ny == 0 admits all rows
+    // or none. Six planes, six bounds, one interval — where the per-row test
+    // did six plane tests for each of the 24 rows of every column on the
+    // frustum's edge, which was the main cost of the frustum filter
+    // (Instruments, 2026-09-04: TestAABB + IsBoxVisible + the vec3
+    // constructor = 58% of PrepareVisibleSections).
+    void SectionRowRange(float minX, float minZ, float minY0, int rowCount,
+                         int& lo, int& hi) const {
+        lo = 0;
+        hi = rowCount - 1;
+        for (int i = 0; i < 6 && lo <= hi; ++i) {
+            const glm::vec4& plane = planes[i];
+            const float px = (plane.x >= 0.0f) ? minX + 16.0f : minX;
+            const float pz = (plane.z >= 0.0f) ? minZ + 16.0f : minZ;
+            const float cxz = plane.x * px + plane.z * pz + plane.w;
+            if (plane.y > 0.0f) {
+                // Passes iff cxz + ny * (minY0 + 16 (s + 1)) >= -0.5
+                // Clamped before the cast: a near-horizontal plane (ny of
+                // 1e-7) divides to a value no int can hold.
+                const float sMin = std::clamp(((-0.5f - cxz) / plane.y - minY0) / 16.0f - 1.0f,
+                                              -1.0f, 4096.0f);
+                lo = std::max(lo, static_cast<int>(std::ceil(sMin)));
+            } else if (plane.y < 0.0f) {
+                // Passes iff cxz + ny * (minY0 + 16 s) >= -0.5; ny < 0 flips it
+                const float sMax = std::clamp(((-0.5f - cxz) / plane.y - minY0) / 16.0f,
+                                              -2.0f, 4096.0f);
+                hi = std::min(hi, static_cast<int>(std::floor(sMax)));
+            } else if (cxz < -0.5f) {
+                hi = lo - 1;   // the whole column is behind this plane
+            }
+        }
     }
 
     // Tri-state AABB test: Outside / Intersect / Inside.

@@ -52,7 +52,8 @@ namespace Render {
     namespace { const std::vector<CubeDefinition> kNoCubes; }
 
     void ModelPart::Build(const glm::mat4& parent, float texWidth, float texHeight,
-                          std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx) const {
+                          std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx,
+                          bool culled) const {
         if (!visible) return;
 
         const glm::mat4 world = parent * LocalMatrix();
@@ -61,7 +62,7 @@ namespace Render {
             // UVs are normalised here rather than in the shader so one shader
             // serves both 64x64 and 64x32 models — see the header note.
             const size_t firstVert = verts.size();
-            BuildCube(cube, world, verts, idx);
+            BuildCube(cube, world, verts, idx, culled);
             for (size_t i = firstVert; i < verts.size(); ++i) {
                 verts[i].u /= texWidth;
                 verts[i].v /= texHeight;
@@ -69,12 +70,13 @@ namespace Render {
         }
 
         for (const auto& child : children) {
-            child->Build(world, texWidth, texHeight, verts, idx);
+            child->Build(world, texWidth, texHeight, verts, idx, culled);
         }
     }
 
     void BuildCube(const CubeDefinition& cube, const glm::mat4& transform,
-                   std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx) {
+                   std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx,
+                   bool culled) {
         const float minX = cube.originX - cube.growX;
         const float minY = cube.originY - cube.growY;
         const float minZ = cube.originZ - cube.growZ;
@@ -140,12 +142,41 @@ namespace Render {
             idx.push_back(base + 3);
         };
 
-        { const glm::vec3 q[4] = { l1, l0, t0, t1 }; emit(q, u1, v0, u2,  v1, S_DOWN); }
-        { const glm::vec3 q[4] = { t2, t3, l3, l2 }; emit(q, u2, v1, u22, v0, S_UP);   }
-        { const glm::vec3 q[4] = { t0, l0, l3, t3 }; emit(q, u0, v1, u1,  v2, S_EW);   }
-        { const glm::vec3 q[4] = { t1, t0, t3, t2 }; emit(q, u1, v1, u2,  v2, S_NS);   }
-        { const glm::vec3 q[4] = { l1, t1, t2, l2 }; emit(q, u2, v1, u3,  v2, S_EW);   }
-        { const glm::vec3 q[4] = { l0, l1, l2, l3 }; emit(q, u3, v1, u4,  v2, S_NS);   }
+        // A zero-thickness box: the two faces on that axis lie in ONE plane
+        // (the bat's ears, the nautilus's shell and body, the axolotl's fins
+        // and gills). MC emits both. Under its no-cull entity types they are
+        // drawn back to back at equal depth, and LEQUAL makes the LATER one
+        // (UP / EAST / SOUTH) win wherever it is opaque while the earlier
+        // shows through its transparent texels — the nautilus is a pair of
+        // such planes and reads differently from each side that way. The
+        // quads here are cut into triangles by vertex ORDER, so an earlier
+        // face emitted in MC's order has the other diagonal and its depth
+        // differs from the later face's by rounding: z-fighting. So on a
+        // no-cull model the earlier twin is emitted with the LATER face's
+        // vertex order (its own texels, re-associated to the same corners):
+        // identical triangles, identical depth, the later one wins
+        // deterministically — vanilla's result, without the flicker. A
+        // culled model keeps MC's order: culling picks the visible twin per
+        // side, and the reorder would give both faces the same winding.
+        // The four zero-area side faces rasterise nothing and are dropped.
+        const bool flatX = (maxX - minX) == 0.0f;
+        const bool flatY = (maxY - minY) == 0.0f;
+        const bool flatZ = (maxZ - minZ) == 0.0f;
+        if (!(flatX || flatZ)) {
+            if (flatY && !culled) { const glm::vec3 q[4] = { t1, t0, l0, l1 }; emit(q, u1, v1, u2,  v0, S_DOWN); }
+            else                  { const glm::vec3 q[4] = { l1, l0, t0, t1 }; emit(q, u1, v0, u2,  v1, S_DOWN); }
+            { const glm::vec3 q[4] = { t2, t3, l3, l2 }; emit(q, u2, v1, u22, v0, S_UP); }
+        }
+        if (!(flatY || flatZ)) {
+            if (flatX && !culled) { const glm::vec3 q[4] = { l0, t0, t3, l3 }; emit(q, u1, v1, u0, v2, S_EW); }
+            else                  { const glm::vec3 q[4] = { t0, l0, l3, t3 }; emit(q, u0, v1, u1, v2, S_EW); }
+            { const glm::vec3 q[4] = { l1, t1, t2, l2 }; emit(q, u2, v1, u3, v2, S_EW); }
+        }
+        if (!(flatX || flatY)) {
+            if (flatZ && !culled) { const glm::vec3 q[4] = { t0, t1, t2, t3 }; emit(q, u2, v1, u1, v2, S_NS); }
+            else                  { const glm::vec3 q[4] = { t1, t0, t3, t2 }; emit(q, u1, v1, u2, v2, S_NS); }
+            { const glm::vec3 q[4] = { l0, l1, l2, l3 }; emit(q, u3, v1, u4, v2, S_NS); }
+        }
     }
 
 } // namespace Render

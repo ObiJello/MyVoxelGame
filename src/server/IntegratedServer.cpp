@@ -7,6 +7,7 @@
 #include "common/entity/EndCrystal.hpp"
 #include "common/core/SaveVersion.hpp"
 #include "server/world/storage/anvil/WorldFolder.hpp"
+#include "server/world/storage/anvil/WorldSidecar.hpp"
 #include "server/world/storage/anvil/PlayerDataStore.hpp"
 #include "common/entity/GeneratedItemAttributes.hpp"
 #include "commands/TeleportCommand.hpp"
@@ -19,8 +20,11 @@
 
 #include <deque>
 #include "commands/SummonCommand.hpp"
+#include "commands/SpawnAllCommand.hpp"
 #include "commands/SheepEatCommand.hpp"
 #include "commands/TimeCommand.hpp"
+#include "commands/DimensionCommand.hpp"
+#include "commands/LocateCommand.hpp"
 #include "commands/GameRuleCommand.hpp"
 #include "commands/SeedCommand.hpp"
 #include "commands/TickCommand.hpp"
@@ -47,6 +51,7 @@
 #include "entity/ServerEntityTracker.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Animals.hpp"
+#include "common/entity/SpawnEggs.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
 #include "common/entity/projectile/Arrow.hpp"
 #include "common/entity/projectile/ThrowableProjectile.hpp"
@@ -58,6 +63,7 @@
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/projectile/EyeOfEnder.hpp"
 #include "common/entity/mobs/Slime.hpp"
+#include "common/entity/mobs/SulfurCube.hpp"
 #include "common/entity/mobs/Fish.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/world/spawn/NaturalSpawner.hpp"
@@ -159,6 +165,35 @@ namespace Server {
             Game::DimensionSlot(Game::DimensionId::Overworld))];
     }
 
+    namespace {
+
+        // The gamerules a World carries, level.dat → World.
+        void ApplyLevelDatRules(Game::World& w, const Game::Anvil::LevelDatData& d) {
+            w.SetDoDaylightCycle(d.doDaylightCycle);
+            w.SetDoMobSpawning(d.doMobSpawning);
+            w.SetDoMobGriefing(d.mobGriefing);
+            w.SetRandomTickSpeed(d.randomTickSpeed);
+            w.SetTntExplodes(d.tntExplodes);
+            w.SetDoEntityDrops(d.doEntityDrops);
+            w.SetTntExplosionDropDecay(d.tntExplosionDropDecay);
+            w.SetBlockExplosionDropDecay(d.blockExplosionDropDecay);
+            w.SetMobExplosionDropDecay(d.mobExplosionDropDecay);
+        }
+        // ...and World → World, for a level built after the overworld.
+        void CopyGameRules(const Game::World& from, Game::World& to) {
+            to.SetDoDaylightCycle(from.GetDoDaylightCycle());
+            to.SetDoMobSpawning(from.GetDoMobSpawning());
+            to.SetDoMobGriefing(from.GetDoMobGriefing());
+            to.SetRandomTickSpeed(from.GetRandomTickSpeed());
+            to.SetTntExplodes(from.GetTntExplodes());
+            to.SetDoEntityDrops(from.GetDoEntityDrops());
+            to.SetTntExplosionDropDecay(from.GetTntExplosionDropDecay());
+            to.SetBlockExplosionDropDecay(from.GetBlockExplosionDropDecay());
+            to.SetMobExplosionDropDecay(from.GetMobExplosionDropDecay());
+        }
+
+    } // namespace
+
     ServerLevel* IntegratedServer::GetOrCreateLevel(Game::DimensionId dimension) {
         const size_t slot = static_cast<size_t>(Game::DimensionSlot(dimension));
         if (m_levels[slot]) return m_levels[slot].get();
@@ -203,7 +238,14 @@ namespace Server {
 
         Log::Info("[IntegratedServer] Dimension '%s' is now live",
                   std::string(Game::DimensionName(dimension)).c_str());
-        if (level->World()) level->World()->SetDifficulty(static_cast<Game::Difficulty>(m_config.difficulty));
+        if (level->World()) {
+            level->World()->SetDifficulty(static_cast<Game::Difficulty>(m_config.difficulty));
+            // Gamerules are server-wide in MC (one GameRules on the server);
+            // each World here keeps its own copy, so a new level takes the
+            // overworld's current values, including anything /gamerule
+            // changed this session.
+            CopyGameRules(*Overworld().World(), *level->World());
+        }
         m_levels[slot] = std::move(level);
 #if ENABLE_IMMERSIVE_PORTALS
         EnsureGlobalPortals(dimension);
@@ -321,7 +363,26 @@ namespace Server {
                     Log::Error("Playing without saving — close the other window and rejoin to keep changes.");
                     m_config.savePath.clear();
                 } else {
-                    Game::Anvil::LevelDatData meta;
+                    // An existing world's level.dat is the authority for its
+                    // gamerules (MC PrimaryLevelData): read it BEFORE the
+                    // rewrite below, which would otherwise replace them with
+                    // this launch's defaults. worlds.json only ever knew
+                    // advance_time, and only as of the last clean exit.
+                    {
+                        Game::Anvil::LevelDatData saved;
+                        std::string readError;
+                        std::error_code ec;
+                        if (std::filesystem::exists(root->LevelDat(), ec) &&
+                            Game::Anvil::ReadLevelDat(root->LevelDat(), saved, readError)) {
+                            m_savedLevelDat = saved;
+                            m_config.doDaylightCycle = saved.doDaylightCycle;
+                        } else if (!readError.empty()) {
+                            Log::Warning("[Anvil] %s — gamerules start from defaults", readError.c_str());
+                        }
+                    }
+                    // Start from what the file already says (rules, spawn) so
+                    // the rewrite keeps them; the launch settings go on top.
+                    Game::Anvil::LevelDatData meta = m_savedLevelDat.value_or(Game::Anvil::LevelDatData{});
                     meta.levelName       = m_config.worldDisplayName;
                     meta.gameType        = m_config.defaultGameMode;
                     meta.dayTime         = m_config.initialDayTime;
@@ -399,7 +460,13 @@ namespace Server {
         Game::Portals::SetWorldWrapSize(m_config.worldWrapSize);
         Game::Portals::SetDimensionStack(m_config.dimensionStack);
 #if ENABLE_IMMERSIVE_PORTALS
-        EnsureGlobalPortals(Game::DimensionId::Overworld);
+        // Every dimension's, not just the Overworld's: the registry is
+        // global and needs no level to hold a record, and the seams are
+        // two-way — the Overworld's CEILING is the reverse of the End's
+        // floor portal, so until the End's globals exist there is no way
+        // up out of the Overworld. Creating them lazily with the level
+        // meant the End was reachable only after it had been visited.
+        for (Game::DimensionId dim : Game::kAllDimensions) EnsureGlobalPortals(dim);
 #endif
         Game::Portals::SetImmersiveFrameLitHandler(&IntegratedServer::OnImmersiveFrameLit);
 #endif
@@ -418,6 +485,23 @@ namespace Server {
         // and the other two dimensions have no sky.
         Overworld().World()->SetDayTime(m_config.initialDayTime);
         Overworld().World()->SetDoDaylightCycle(m_config.doDaylightCycle);
+        // The rest of the gamerules, from level.dat when the world had one.
+        if (m_savedLevelDat) ApplyLevelDatRules(*Overworld().World(), *m_savedLevelDat);
+        // The tick state the player left this world in (/tick freeze, /tick
+        // rate) — an engine-only setting, so it lives in the sidecar. No
+        // client is connected yet; joining players get it through
+        // updateJoiningPlayer.
+        if (!m_config.savePath.empty()) {
+            std::string reason;
+            if (auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason)) {
+                const Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(root->Root().string());
+                if (sidecar.tickRate != m_tickRateManager.tickrate()) m_tickRateManager.setTickRate(sidecar.tickRate);
+                if (sidecar.tickFrozen) {
+                    m_tickRateManager.setFrozen(true);
+                    Log::Info("[Tick] World was left frozen — resuming frozen (/tick unfreeze to run)");
+                }
+            }
+        }
         Log::Info("Server world initialized successfully");
 
         // The ticket manager belongs to a level now, so the spawn tickets that
@@ -479,8 +563,11 @@ namespace Server {
         EntityStatsCommand::Register(m_commandDispatcher);
         ShapeCommand::Register(m_commandDispatcher);
         SummonCommand::Register(m_commandDispatcher);
+        SpawnAllCommand::Register(m_commandDispatcher);
         SheepEatCommand::Register(m_commandDispatcher);
         TimeCommand::Register(m_commandDispatcher);
+        DimensionCommand::Register(m_commandDispatcher);
+        LocateCommand::Register(m_commandDispatcher);
         GameRuleCommand::Register(m_commandDispatcher);
         SeedCommand::Register(m_commandDispatcher);
 #if ENABLE_IMMERSIVE_PORTALS
@@ -645,6 +732,23 @@ namespace Server {
         return true;
     }
 
+    void IntegratedServer::PersistTickState() {
+        if (m_config.savePath.empty() || m_config.readOnlyWorld) return;
+        std::string reason;
+        auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason);
+        if (!root) return;
+        const std::string dir = root->Root().string();
+        Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(dir);
+        const bool  frozen = m_tickRateManager.isFrozen();
+        const float rate   = m_tickRateManager.tickrate();
+        if (sidecar.tickFrozen == frozen && sidecar.tickRate == rate) return;
+        sidecar.tickFrozen = frozen;
+        sidecar.tickRate   = rate;
+        if (!Game::Anvil::WriteWorldSidecar(dir, sidecar)) {
+            Log::Warning("[Tick] Could not save the tick state to %s", dir.c_str());
+        }
+    }
+
     void IntegratedServer::SaveAllPlayers() {
         if (!m_sessionManager) return;
         for (const auto& session : m_sessionManager->GetAllSessions()) {
@@ -673,8 +777,20 @@ namespace Server {
         meta.levelName       = m_config.worldDisplayName;
         meta.gameType        = m_config.defaultGameMode;
         meta.seed            = m_levels[0]->World()->GetGenerationSeed();
-        meta.dayTime         = m_levels[0]->World()->GetDayTime();
-        meta.doDaylightCycle = m_config.doDaylightCycle;
+        // Gamerules from the LIVE overworld World, not the launch config:
+        // /gamerule writes the World, and this file is what brings the
+        // change back next session.
+        const Game::World& ow = *m_levels[0]->World();
+        meta.dayTime                 = ow.GetDayTime();
+        meta.doDaylightCycle         = ow.GetDoDaylightCycle();
+        meta.doMobSpawning           = ow.GetDoMobSpawning();
+        meta.mobGriefing             = ow.GetDoMobGriefing();
+        meta.randomTickSpeed         = ow.GetRandomTickSpeed();
+        meta.tntExplodes             = ow.GetTntExplodes();
+        meta.doEntityDrops           = ow.GetDoEntityDrops();
+        meta.tntExplosionDropDecay   = ow.GetTntExplosionDropDecay();
+        meta.blockExplosionDropDecay = ow.GetBlockExplosionDropDecay();
+        meta.mobExplosionDropDecay   = ow.GetMobExplosionDropDecay();
         meta.immersivePortals = m_config.immersivePortals;
         meta.worldWrapSize    = m_config.worldWrapSize;
         meta.dimensionStack   = m_config.dimensionStack;
@@ -1373,6 +1489,24 @@ namespace Server {
 #endif
             });
         }
+        else if (m_sessionManager) {
+            // /tick freeze — MC's TickRateManager.isEntityFrozen exempts
+            // PLAYERS, and the entity tracker keeps running: what a player
+            // does to a frozen world still happens and still shows. The
+            // player sessions ticked above (attacks, bow charge, item use);
+            // here the entities those created are absorbed (a spawn egg's
+            // baby, the arrows a bow releases — MC's addFreshEntity is
+            // immediate) and every mob's state is synced to the clients.
+            // The mobs themselves do not tick: a hit's hurt cooldown does
+            // not run down and an arrow does not fly until the thaw — the
+            // same as vanilla, where a volley loosed under a freeze all
+            // launches together on /tick unfreeze.
+            ForEachLevel([&](ServerLevel& level) {
+                if (!level.HasWork(*m_sessionManager)) return;
+                if (MobManager* mobs = level.Mobs()) mobs->AbsorbSpawned();
+                SyncMobsToClients(level, {});
+            });
+        }
 
         // === 4. SEND CHUNKS per player (Minecraft's PlayerChunkSender pattern) ===
         if (m_sessionManager) {
@@ -1638,6 +1772,8 @@ namespace Server {
                     return std::make_unique<Game::ZombifiedPiglin>(level);
                 case Game::EntityTypeId::Slime:
                     return Game::Slime::Make(level);
+                case Game::EntityTypeId::SulfurCube:
+                    return std::make_unique<Game::SulfurCube>(level);
                 case Game::EntityTypeId::MagmaCube:
                     return std::make_unique<Game::MagmaCube>(level);
                 case Game::EntityTypeId::Cod:
@@ -1820,8 +1956,27 @@ namespace Server {
         //     a dragon it spawns is tracked this same tick.
         if (auto* fight = level.DragonFightController()) fight->Tick();
 
-        // 4. Emit. The tracker owns who-knows-what, so removals go through it
-        //    rather than being broadcast blindly.
+        // 4. Emit — the client-facing half, shared with the frozen world.
+        SyncMobsToClients(level, removed);
+    }
+
+    void IntegratedServer::SyncMobsToClients(ServerLevel& level,
+                                             const std::vector<int32_t>& removed) {
+        // MC ChunkMap's entity tracking runs every server tick whether or not
+        // the world simulates (ServerLevel.tick: the tick-rate manager
+        // freezes entity TICKING, ChunkMap.tick(BooleanSupplier) still tracks)
+        // — which is what lets a frozen world show the arrows a player shoots
+        // and the mobs they spawn the moment they exist. Split out of
+        // TickMobs so the frozen path can run it alone.
+        MobManager*          mobs     = level.Mobs();
+        ServerLevelBridge*   mobLevel = level.MobLevel();
+        ServerEntityTracker* tracker  = level.MobTracker();
+        if (!mobs || !mobLevel || !tracker || !m_sessionManager) return;
+
+        PROFILE_ZONE_N("MobSync");
+
+        // The tracker owns who-knows-what, so removals go through it rather
+        // than being broadcast blindly.
         std::vector<EntityPacketOut> outgoing;
         // Entity events BEFORE removals: an event raised in the same tick as
         // the discard (creeper explosion, projectile impact burst) must be
@@ -2496,6 +2651,94 @@ namespace Server {
         return spawned;
     }
 
+    IntegratedServer::LineupResult IntegratedServer::SpawnMobLineup(
+            const PlayerSession& session, const glm::dvec3& origin,
+            double spacing, bool adults, bool babies) {
+        LineupResult result;
+        ServerLevel&       level    = LevelOf(session);
+        MobManager*        mobs     = level.Mobs();
+        ServerLevelBridge* mobLevel = level.MobLevel();
+        if (!mobs || !mobLevel) return result;
+
+        // Which types are MOBS: every non-Misc category, plus the four Misc
+        // mob classes (golems, villager). The rest of Misc is projectiles,
+        // block entities and the eye of ender — nothing to look at. The
+        // dragon is skipped too: it exists only inside the End fight.
+        const auto isLineupType = [](Game::EntityTypeId t) {
+            if (t == Game::EntityTypeId::EnderDragon) return false;
+            switch (t) {
+                case Game::EntityTypeId::Villager:
+                case Game::EntityTypeId::IronGolem:
+                case Game::EntityTypeId::SnowGolem:
+                case Game::EntityTypeId::CopperGolem:
+                    return true;
+                default:
+                    return Game::GetEntityTypeInfo(t).category != Game::MobCategory::Misc;
+            }
+        };
+
+        const auto place = [&](Game::EntityTypeId type, const glm::dvec3& at, bool baby) {
+            std::unique_ptr<Game::Mob> mob = MakeMobForLoad(type, mobLevel);
+            if (!mob) return false;
+            mob->position = at;
+            // Every one faces NORTH (-Z, yaw 180 in MC's +Z-clockwise
+            // convention) and stays put: NoAI, as /summon {NoAI:1b} would,
+            // so a tick step does not turn the heads to look around.
+            const float yaw = 180.0f;
+            mob->yRot = yaw;
+            mob->xRot = 0.0f;
+            mob->yHeadRot = yaw;
+            mob->yBodyRot = yaw;
+            mob->SetNoAi(true);
+            // The same finalize /summon runs (variants, colours), then the
+            // row's age is FORCED: an adult row must not roll a 5% baby
+            // zombie, and the baby row only keeps types that can be one.
+            mob->FinalizeSpawn(Game::SpawnReason::Command, nullptr);
+            mob->SetBaby(baby);
+            if (baby && !mob->IsBaby()) return false;
+            mob->SetPersistenceRequired(true);
+            return mobs->Add(std::move(mob)) != 0;
+        };
+
+        // A GRID, not one line: ~90 types in a row is 500+ blocks, which is
+        // past every entity's tracking range and past the chunks the client
+        // has, so a single row appears piecemeal as chunks stream and its
+        // far end never at all. Twelve per row, CENTRED on the sender in
+        // both axes: columns 2*spacing apart, each row's babies 1.5*spacing
+        // in front of it, the next pair 2*spacing beyond that. At the
+        // default 3 that is a 66 x ~75 block block, nothing farther than
+        // ~50 blocks from the sender — inside even the fish's 64.
+        constexpr int kPerRow = 12;
+        const double colStep   = 2.0 * spacing;
+        const double babyGap   = 1.5 * spacing;
+        const double pairPitch = babyGap + 2.0 * spacing;
+        int lineupTypes = 0;
+        for (int i = 0; i < Game::kEntityTypeCount; ++i) {
+            if (isLineupType(static_cast<Game::EntityTypeId>(i))) ++lineupTypes;
+        }
+        const int rows = (lineupTypes + kPerRow - 1) / kPerRow;
+        const double z0 = origin.z - (rows - 1) * pairPitch * 0.5 - babyGap * 0.5;
+        int column = 0;
+        for (int i = 0; i < Game::kEntityTypeCount; ++i) {
+            const auto type = static_cast<Game::EntityTypeId>(i);
+            if (!isLineupType(type)) continue;
+            const int col = column % kPerRow, row = column / kPerRow;
+            const double x = origin.x - (kPerRow - 1) * colStep * 0.5 + col * colStep;
+            const double zAdult = z0 + row * pairPitch;
+            ++column;
+            ++result.types;
+            const bool gotAdult = adults && place(type, glm::dvec3(x, origin.y, zAdult), false);
+            const bool gotBaby  = babies && place(type, glm::dvec3(x, origin.y, zAdult + babyGap), true);
+            if (gotAdult) ++result.adults;
+            if (gotBaby)  ++result.babies;
+            Log::Info("[SpawnAll] #%d %s at row %d col %d: adult=%s baby=%s",
+                      column - 1, std::string(Game::GetEntityTypeInfo(type).slug).c_str(),
+                      row, col, gotAdult ? "yes" : (adults ? "FAILED" : "-"),
+                      gotBaby ? "yes" : (babies ? "none" : "-"));
+        }
+        return result;
+    }
+
     bool IntegratedServer::PlaceEndCrystalFromUse(PlayerSession& session,
                                                   const glm::ivec3& clicked) {
         // MC EndCrystalItem.useOn, transcribed: only on obsidian or bedrock,
@@ -2543,7 +2786,8 @@ namespace Server {
                                                const glm::ivec3& spawnPos,
                                                bool tryMoveDown, bool movedUp,
                                                Game::DimensionId dimension,
-                                               int portalCooldownTicks) {
+                                               int portalCooldownTicks,
+                                               const std::function<void(Game::Mob&)>& configure) {
         // The level of the world that was clicked — the player's own, or
         // the one behind a portal they reached through. The caller chain
         // (ItemBehaviors -> Game::SpawnMobFromItem -> here) passes the
@@ -2603,6 +2847,8 @@ namespace Server {
         // is why a vanilla spawn egg can produce a grey, brown or (rarely) pink
         // sheep rather than always a white one.
         mob->FinalizeSpawn(Game::SpawnReason::SpawnItemUse, nullptr);
+        // MobBucketItem.spawn: loadFromBucketTag after finalizeSpawn, before add.
+        if (configure) configure(*mob);
 
         // MC does NOT mark egg-spawned mobs persistent — they despawn like any
         // natural spawn. /summon is the one that pins them (see SummonMobs).
@@ -2791,12 +3037,11 @@ namespace Server {
         wither->yRot = wither->yBodyRot = wither->yHeadRot = yaw;
         wither->xRot = 0.0f;
 
-        // MC calls wither.makeInvulnerable() explicitly. Our
-        // Wither::FinalizeSpawn already applies MakeInvulnerable for every
-        // non-Load reason (it was written as the ritual stand-in), so calling
-        // it here again would double-apply — FinalizeSpawn alone is the whole
-        // charge-up.
+        // MC: wither.makeInvulnerable() — the ritual is the ONE spawn that
+        // charges up (blue armour, 220 ticks, the spawn explosion at the
+        // end); /summon and the egg do not.
         wither->FinalizeSpawn(Game::SpawnReason::Triggered, nullptr);
+        if (auto* boss = dynamic_cast<Game::Wither*>(wither.get())) boss->MakeInvulnerable();
 
         // MC: CriteriaTriggers.SUMMONED_ENTITY for every player within 50
         // blocks — no advancement system here, skipped. (Vanilla's piglin
@@ -2815,6 +3060,53 @@ namespace Server {
             }
         }
     }
+
+    namespace {
+        // MC SpawnEggItem.spawnOffspringFromSpawnEgg, reached from
+        // Mob.checkAndHandleImportantInteractions: a spawn egg used ON a live
+        // mob of the egg's own type makes a BABY of it at the parent's feet.
+        // An ageable parent breeds it (getBreedOffspring — variants, colour
+        // and so on inherit); anything else is created fresh and flagged. A
+        // type with no baby form (creeper) stays adult, so nothing spawns and
+        // the click passes through to mobInteract. Consumes one egg on
+        // success (creative is restored by the caller's snapshot).
+        //
+        // Not ported: applyComponentsFromItemStack (no item components carry
+        // entity data here) and Fox.onOffspringSpawnedFromEgg's trust of the
+        // spawner (fox trust is not modelled).
+        Game::UseResult SpawnOffspringFromSpawnEgg(Game::Mob& parent, Game::ItemStack& held) {
+            if (held.IsEmpty()) return Game::UseResult::Pass;
+            const Game::EntityTypeId eggType = Game::SpawnEggEntityType(held.itemId);
+            if (eggType == Game::EntityTypeId::Count) return Game::UseResult::Pass;
+            // Mob.interact's own guard, then spawnsEntity(type).
+            if (!parent.IsAlive() || eggType != parent.GetType()) return Game::UseResult::Pass;
+            Game::EntityLevel* level = parent.Level();
+            if (!level) return Game::UseResult::Pass;
+
+            std::unique_ptr<Game::Mob> offspring;
+            if (auto* ageable = dynamic_cast<Game::Animal*>(&parent)) {
+                offspring = ageable->CreateBaby();
+            } else {
+                offspring = MakeMobForLoad(eggType, level);
+            }
+            if (!offspring) return Game::UseResult::Pass;
+
+            offspring->SetBaby(true);
+            if (!offspring->IsBaby()) return Game::UseResult::Pass;
+
+            // snapTo(pos, 0, 0) — the parent's position, facing +Z.
+            offspring->position = parent.position;
+            offspring->yRot = 0.0f;
+            offspring->xRot = 0.0f;
+            offspring->yHeadRot = 0.0f;
+            offspring->yBodyRot = 0.0f;
+            level->AddFreshEntity(std::move(offspring));
+
+            held.count -= 1;
+            if (held.count <= 0) held.Clear();
+            return Game::UseResult::Success;
+        }
+    } // namespace
 
     void IntegratedServer::HandleInteract(uint32_t connectionId, int32_t entityId,
                                           bool attack, bool sprinting,
@@ -3008,7 +3300,11 @@ namespace Server {
                 else                held.count = before.count;
             };
 
-            Game::UseResult r = mobTarget->MobInteract(*attacker, held);
+            // MC Mob.interact → checkAndHandleImportantInteractions: the
+            // spawn-egg branch runs BEFORE mobInteract, so an egg on its own
+            // adult always makes a baby rather than, say, feeding it.
+            Game::UseResult r = SpawnOffspringFromSpawnEgg(*mobTarget, held);
+            if (!Game::ConsumesAction(r)) r = mobTarget->MobInteract(*attacker, held);
 
             if (!Game::ConsumesAction(r) && !held.IsEmpty()) {
                 const Game::Item& item = Game::ItemRegistry::Get(held.itemId);
@@ -3650,22 +3946,39 @@ namespace Server {
         }
 
 #if ENABLE_IMMERSIVE_PORTALS
-        // 2. One loader per portal the player is near, at the portal's
-        //    destination, shrinking with distance — the mod's
-        //    ChunkVisibility.getGeneralDirectPortalLoader numbers:
-        //    full view distance within 5 blocks, two thirds within 15,
-        //    a third beyond. The mod caps these at 8 chunks; here the
-        //    direct loader is not capped — standing at a portal loads its
-        //    far side to the player's own view distance — and only the
-        //    indirect loaders (a portal seen through a portal) keep the cap.
-        // 3. One level of INDIRECT loaders: portals near each far side get a
-        //    quarter-radius loader at their own destination, so a portal seen
-        //    through a portal is not a hole.
+        // 2. The far side of every portal near the player, and 3. one level
+        //    deep, the far sides of the portals near THOSE far sides — the
+        //    Immersive Portals mod's ChunkVisibility.foreachBaseChunkLoaders,
+        //    number for number:
+        //
+        //    • Portals are looked for within 8 chunks; global surfaces
+        //      (wrap borders, stack seams) within 256 chunks. Over a
+        //      hundred hits keep only the nearest.
+        //    • A direct loader (getGeneralDirectPortalLoader) sits at the
+        //      portal's destination with the view distance within 15 blocks
+        //      of the surface (the mod: within 5, two thirds to 15) and a
+        //      third beyond. The
+        //      mod caps this at 8 chunks (IPGlobal.indirectLoadingRadiusCap,
+        //      16 for scale > 2); here it is UNCAPPED on purpose (user's
+        //      call, 2026-09-05): standing at a portal at render distance
+        //      32 shows 32 chunks of the far side, not a 128-block disc
+        //      with a hard edge in the far fog. A portal that enlarges the
+        //      far side (scale > 2) within 5 blocks asks for 1.4 × its far
+        //      area's radius instead. A global surface's loader follows the
+        //      player's IMAGE through it with the view distance less the
+        //      distance to the plane in chunks, at least 2, at most 16.
+        //    • Indirect loaders (getGeneralPortalIndirectLoader): portals
+        //      within 2 chunks of the player's image get a quarter of the
+        //      view distance, capped the same way; a global surface there
+        //      gets min(8, a third), around the image's image.
+        //
+        //    The mod scales these by measured client and server performance
+        //    levels; here they are the mod's "good" values, by choice.
         if (m_immersivePortals && session.GetPlayer()) {
-            constexpr double kVisiblePortalRangeBlocks  = 128.0;   // 8 chunks
-            constexpr double kIndirectPortalRangeBlocks = 32.0;    // 2 chunks
-            constexpr int    kIndirectLoadingRadiusCap  = 8;
-            const int viewDistance = session.GetViewDistance();
+            constexpr int kLoadingRadiusCap      = 8;   // IPGlobal.indirectLoadingRadiusCap (indirect + global loaders)
+            constexpr int kVisibleRangeChunks    = 8;   // PerformanceLevel.getVisiblePortalRangeChunks(good)
+            constexpr int kIndirectRangeChunks   = 2;   // getIndirectVisiblePortalRangeChunks(good)
+            const int viewDistance = session.GetViewDistance();   // McHelper.getPlayerLoadDistance
             const uint32_t playerId = session.GetPlayerId();
             const glm::dvec3 playerPos = session.GetPlayer()->getPosition();
 
@@ -3680,18 +3993,33 @@ namespace Server {
                 const glm::dvec3 c = glm::clamp(from, mn, mx);
                 return glm::length(c - from);
             };
-            auto directRadius = [&](double distance) {
-                int r = viewDistance;
-                if (distance >= 15.0)     r = viewDistance / 3;
-                else if (distance >= 5.0) r = viewDistance * 2 / 3;
-                return std::max(r, 1);
+            auto portalScale = [](const Game::Immersive::Portal& p) {
+                return p.IsMirror() ? 1.0 : p.scale;
+            };
+            auto farPosOf = [](const Game::Immersive::Portal& p) {
+                return p.IsMirror() ? p.origin : p.destination;
             };
             auto chunkOf = [](const glm::dvec3& p) {
                 return Game::Math::ChunkPos{ static_cast<int>(std::floor(p.x)) >> 4,
                                              static_cast<int>(std::floor(p.z)) >> 4 };
             };
+            // ChunkVisibility.getDirectLoadingDistance, with the mod's middle
+            // band (two thirds between 5 and 15 blocks) folded into the
+            // near one (user's call, 2026-09-05): the whole render distance
+            // out to 15 blocks, a third beyond.
+            auto directLoadingDistance = [](int renderDistance, double distanceToPortal) {
+                if (distanceToPortal < 15.0) return renderDistance;
+                return renderDistance / 3;
+            };
+            // ChunkVisibility.getCappedLoadingDistance.
+            auto cappedLoadingDistance = [&](const Game::Immersive::Portal& p, int target) {
+                int cap = kLoadingRadiusCap;
+                if (portalScale(p) > 2.0) cap *= 2;   // load more for a scaling portal
+                return std::min(target, cap);
+            };
             auto add = [&](Game::DimensionId dim, Game::Math::ChunkPos center, int radius,
                            ChunkLoader::Source source) {
+                radius = std::max(radius, 1);
                 // Same centre, same dimension: keep the larger — a set union
                 // does not care, and it keeps the ticket count down.
                 for (ChunkLoader& existing : loaders) {
@@ -3709,33 +4037,73 @@ namespace Server {
                 l.source    = source;
                 loaders.push_back(l);
             };
+            // ChunkVisibility.getNearbyPortals: ordinary portals within
+            // `radiusChunks` of `pos`, global ones within
+            // `radiusChunksForGlobals`; more than a hundred keeps the nearest.
+            auto nearbyPortals = [&](Game::DimensionId dim, const glm::dvec3& pos,
+                                     int radiusChunks, int radiusChunksForGlobals) {
+                std::vector<const Game::Immersive::Portal*> result;
+                for (const Game::Immersive::Portal* p :
+                     m_immersivePortals->CollectNear(dim, pos, static_cast<double>(radiusChunks) * 16.0)) {
+                    if (p->Has(Game::Immersive::PortalFlag::Global)) continue;   // below
+                    if (usable(*p)) result.push_back(p);
+                }
+                m_immersivePortals->ForEachInDimension(dim, [&](const Game::Immersive::Portal& p) {
+                    if (!p.Has(Game::Immersive::PortalFlag::Global) || !usable(p)) return;
+                    if (distanceTo(p, pos) < static_cast<double>(radiusChunksForGlobals) * 16.0) result.push_back(&p);
+                });
+                if (result.size() > 100) {
+                    Log::Warning("[ImmersivePortals] too many portals near (%.0f, %.0f, %.0f) in %s: %zu",
+                                 pos.x, pos.y, pos.z, std::string(Game::DimensionName(dim)).c_str(), result.size());
+                    const Game::Immersive::Portal* nearest = nullptr;
+                    double best = 1e300;
+                    for (const Game::Immersive::Portal* p : result) {
+                        const double d = distanceTo(*p, pos);
+                        if (d < best) { best = d; nearest = p; }
+                    }
+                    result.clear();
+                    if (nearest) result.push_back(nearest);
+                }
+                return result;
+            };
 
-            const auto near = m_immersivePortals->CollectNear(here, playerPos, kVisiblePortalRangeBlocks);
-            for (const Game::Immersive::Portal* portal : near) {
-                if (!usable(*portal)) continue;
-                const double distance = distanceTo(*portal, playerPos);
-                int radius = directRadius(distance);
-                // A portal that enlarges the far side needs proportionally
-                // more of it loaded to fill the view.
-                if (portal->scale > 2.0) radius = std::min(radius * 2, viewDistance);
-                // A global surface is kilometres wide: what its far side
-                // needs loaded is around the player's image through it, not
-                // its centre.
-                const glm::dvec3 farPos = portal->Has(Game::Immersive::PortalFlag::Global)
-                    ? portal->TransformPoint(playerPos)
-                    : (portal->IsMirror() ? portal->origin : portal->destination);
-                add(portal->destDimension, chunkOf(farPos), radius, ChunkLoader::Source::Portal);
-                if (portal->Has(Game::Immersive::PortalFlag::Global)) continue;
+            for (const Game::Immersive::Portal* portal : nearbyPortals(here, playerPos, kVisibleRangeChunks, 256)) {
+                const glm::dvec3 transformedPlayerPos = portal->TransformPoint(playerPos);
 
-                // Indirect: portals near the far side, seen through this one.
-                const auto beyond = m_immersivePortals->CollectNear(portal->destDimension, farPos,
-                                                                    kIndirectPortalRangeBlocks);
-                for (const Game::Immersive::Portal* second : beyond) {
-                    if (second == portal || !usable(*second)) continue;
-                    const glm::dvec3 farFar = second->IsMirror() ? second->origin : second->destination;
-                    add(second->destDimension, chunkOf(farFar),
-                        std::clamp(radius / 4, 1, kIndirectLoadingRadiusCap),
-                        ChunkLoader::Source::IndirectPortal);
+                // getGeneralDirectPortalLoader.
+                if (portal->Has(Game::Immersive::PortalFlag::Global)) {
+                    const double distance = distanceTo(*portal, playerPos);
+                    // Load a little more to make the dimension stack more
+                    // complete: at least 2, at most twice the global cap.
+                    const int radius = std::min(kLoadingRadiusCap * 2,
+                                                std::max(2, viewDistance - static_cast<int>(std::floor(distance / 16.0))));
+                    add(portal->destDimension, chunkOf(transformedPlayerPos), radius, ChunkLoader::Source::Portal);
+                } else {
+                    int loadDistance = viewDistance;
+                    const double distance = distanceTo(*portal, playerPos);
+                    if (portalScale(*portal) > 2.0 && distance < 5.0) {
+                        // Portal.getDestAreaRadiusEstimation = max(w, h) * scale.
+                        loadDistance = static_cast<int>(
+                            (std::max(portal->width, portal->height) * portalScale(*portal) * 1.4) / 16.0);
+                    }
+                    add(portal->destDimension, chunkOf(farPosOf(*portal)),
+                        directLoadingDistance(loadDistance, distance),
+                        ChunkLoader::Source::Portal);
+                }
+
+                // getGeneralPortalIndirectLoader, for the portals near the
+                // player's image on the far side.
+                for (const Game::Immersive::Portal* inner :
+                     nearbyPortals(portal->destDimension, transformedPlayerPos, kIndirectRangeChunks, 32)) {
+                    if (inner->Has(Game::Immersive::PortalFlag::Global)) {
+                        const int radius = std::min(kLoadingRadiusCap, viewDistance / 3);
+                        add(inner->destDimension, chunkOf(inner->TransformPoint(transformedPlayerPos)),
+                            radius, ChunkLoader::Source::IndirectPortal);
+                    } else {
+                        add(inner->destDimension, chunkOf(farPosOf(*inner)),
+                            cappedLoadingDistance(*inner, viewDistance / 4),
+                            ChunkLoader::Source::IndirectPortal);
+                    }
                 }
             }
         }
@@ -3763,8 +4131,14 @@ namespace Server {
         auto global = [&](const std::string& tag) {
             Portal p;
             p.dimension = dimension;
+            // Interactable matters for the stack: the way through a seam
+            // is DUG. Standing on the Overworld's floor you stand on the
+            // Nether's roof (cross-portal collision), and you mine that roof
+            // through the surface under your feet; without the flag the
+            // ray stopped at the seam and the roof could not be reached.
             p.flags = PortalFlag::Global | PortalFlag::Teleportable | PortalFlag::Visible |
-                      PortalFlag::CrossPortalCollision | PortalFlag::RenderPlayer;
+                      PortalFlag::Interactable | PortalFlag::CrossPortalCollision |
+                      PortalFlag::RenderPlayer;
             p.kind = Game::Immersive::PortalKind::Generic;
             p.tag  = tag;
             return p;
@@ -3832,7 +4206,34 @@ namespace Server {
                 p.height = extent;
                 p.destDimension = below;
                 p.destination   = { 0.0, belowTop, 0.0 };
-                m_immersivePortals->AddBiWay(p);
+                const auto frontId = m_immersivePortals->AddBiWay(p);
+                // The reverse is `below`'s CEILING seam. Under a dimension
+                // with a bedrock roof (the Nether) it is only ever seen
+                // through a hole dug in that roof, and it must be seen for
+                // the way up to be dug. Under an open sky it would replace
+                // the whole sky with the underside of the world above —
+                // the End's black void over the Overworld, the Nether's
+                // obsidian floor over the End — so it is not drawn there,
+                // and it does not collide either (an unseen surface must not
+                // be an invisible ceiling over the sky). The way up stays
+                // open only where the floor above is the End's void: flying
+                // up out of the Overworld lands in open air. Up out of the
+                // End would land inside the Nether's obsidian floor, so that
+                // ceiling is inert — the Nether is entered by digging down
+                // from the Overworld, the End by falling out of the Nether
+                // or flying up out of the Overworld.
+                if (frontId != Game::Immersive::kInvalidPortalId && !Game::DimensionHasCeiling(below)) {
+                    if (const Portal* front = m_immersivePortals->Get(frontId)) {
+                        if (const Portal* back = m_immersivePortals->Get(front->reversePortalId)) {
+                            Portal ceiling = *back;
+                            ceiling.flags &= ~(PortalFlag::Visible | PortalFlag::Interactable |
+                                               PortalFlag::CrossPortalCollision);
+                            const bool floorAboveIsVoid = (dimension == Game::DimensionId::End);
+                            if (!floorAboveIsVoid) ceiling.flags &= ~PortalFlag::Teleportable;
+                            m_immersivePortals->Update(ceiling);
+                        }
+                    }
+                }
             }
         }
         Log::Info("[ImmersivePortals] Global portals ensured for %s (wrap %d, stack %s)",

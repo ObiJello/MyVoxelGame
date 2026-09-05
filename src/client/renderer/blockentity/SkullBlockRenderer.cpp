@@ -22,6 +22,7 @@
 //
 // so the y-down mesh needs no hand-conversion and every translation/angle can
 // be checked against the Java line it came from.
+#include "client/resource/ResourcePacks.hpp"
 #include "SkullBlockRenderer.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
@@ -358,6 +359,14 @@ void main() {
 
     TextureHandle SkullBlockRenderer::LoadKindTexture(int kind) {
         if (kind < 0 || kind >= kKindCount) return INVALID_TEXTURE;
+        // Resource pack reload: every kind is read again on demand.
+        if (Resources::CacheStale(m_packGeneration)) {
+            for (int k = 0; k < kKindCount; ++k) {
+                if (m_tex[k] != INVALID_TEXTURE && g_renderBackend) g_renderBackend->DestroyTexture(m_tex[k]);
+                m_tex[k] = INVALID_TEXTURE;
+                m_texTried[k] = false;
+            }
+        }
         if (m_texTried[kind]) return m_tex[kind];
         m_texTried[kind] = true;
 

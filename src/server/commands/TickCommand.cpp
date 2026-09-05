@@ -188,6 +188,7 @@ namespace Server {
                 return;
             }
             manager.setTickRate(*rate);
+            server->PersistTickState();
             connection.SendChatMessage(
                 "Set the target tick rate to " + Format1f(*rate) + " per second", 1);
             return;
@@ -196,11 +197,24 @@ namespace Server {
         // ── /tick freeze | unfreeze ─────────────────────────────────────────
         if (sub == "freeze" || sub == "unfreeze") {
             const bool freeze = (sub == "freeze");
+            // Already in that state: say so. Vanilla repeats its success line
+            // here, which reads as if something changed; the state is
+            // persisted per world now, so the ambiguity would matter.
+            if (manager.isFrozen() == freeze && !manager.isSprinting() &&
+                !manager.isSteppingForward()) {
+                connection.SendChatMessage(
+                    freeze ? "The game is already frozen"
+                           : "The game is already running normally", 1);
+                return;
+            }
             // MC setFreeze cancels any sprint and any step FIRST, so the two
             // cannot outlive the state change that contradicts them.
             manager.stopSprinting();
             manager.stopStepping();
             manager.setFrozen(freeze);
+            // Kept across sessions (a deliberate departure from vanilla, whose
+            // tick state is not saved) — see WorldSidecar::tickFrozen.
+            server->PersistTickState();
             connection.SendChatMessage(
                 freeze ? "The game is frozen" : "The game is running normally", 1);
             return;

@@ -94,6 +94,17 @@ namespace Render {
         // ── Search ───────────────────────────────────────────────────────
         std::string m_searchText;
         int         m_searchCursorPos = 0;
+        // MC EditBox.highlightPos — the selection ANCHOR. The selection is
+        // [min(cursor, highlight), max(...)); equal = no selection. Picking a
+        // creative slot sets cursor = end, highlight = 0 (CreativeMode-
+        // InventoryScreen.slotClicked), so the next keystroke replaces the
+        // whole query — type a new search straight after grabbing an item.
+        int         m_searchHighlightPos = 0;
+        // MC EditBox: moveCursorTo / insertText / deleteChars, selection-aware.
+        void SearchMoveCursorTo(int pos, bool extendSelection);
+        void SearchInsertText(const std::string& text);
+        void SearchDeleteChars(int dir);
+        void SearchSelectAll();
         long long   m_searchFocusedAtMillis = 0;
         bool        m_searchFocused = false;
         bool        m_searchDirty = true;   // refilter on next render

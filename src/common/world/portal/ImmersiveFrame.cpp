@@ -219,7 +219,11 @@ namespace Game::Immersive {
         cells.reserve(area.size() * 2);
         for (const glm::ivec3& c : area) {
             cells.push_back(c + n);
-            if (axis != Axis::Y) cells.push_back(c - n);
+            if (axis != Axis::Y) {
+                cells.push_back(c - n);
+            } else {
+                for (int k = 1; k <= kFallClearance; ++k) cells.push_back(c - n * k);
+            }
         }
         return cells;
     }
@@ -244,6 +248,13 @@ namespace Game::Immersive {
             for (const glm::ivec3& c : t.frame) {
                 if (c.y != t.minCell.y - 1) continue;
                 if (!level.IsBlockSolid(c.x, c.y - 1, c.z)) return false;
+            }
+        }
+        if (requireGround && axis == Axis::Y) {
+            // A floor frame floats kFallClearance cells above its ground:
+            // something to land on under the reserved drop.
+            for (const glm::ivec3& c : t.area) {
+                if (!level.IsBlockSolid(c.x, c.y - kFallClearance - 1, c.z)) return false;
             }
         }
         return true;

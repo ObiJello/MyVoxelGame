@@ -1,4 +1,8 @@
 // File: src/server/session/PlayerSession.cpp
+#include "server/level/ServerLevel.hpp"
+#include "server/entity/MobManager.hpp"
+#include "common/world/level/WorldDrops.hpp"
+#include "common/entity/SpawnEggs.hpp"
 #include "PlayerSession.hpp"
 #include "common/world/block/TntBlock.hpp"
 #include "common/core/Mth.hpp"
@@ -844,7 +848,16 @@ namespace Server {
 
         // Send each chunk
         size_t sentCount = 0;
+        // A time budget on top of the count quota. The client may ask for up
+        // to 256 chunks a tick and serialising one costs ~90 µs, so a burst
+        // after a join or a portal crossing was 20-27 ms of a 50 ms tick
+        // (Tracy, 2026-09-04: every tick over 25 ms in the capture was this).
+        // Nearest-first order is kept: what does not fit stays pending for
+        // the next tick, a delay nobody can see, and the tick stays flat.
+        constexpr auto kSerializeBudget = std::chrono::milliseconds(12);
+        const auto sendStart = std::chrono::steady_clock::now();
         for (size_t i = 0; i < toSend; ++i) {
+            if (i > 0 && std::chrono::steady_clock::now() - sendStart > kSerializeBudget) break;
             const auto& cd = candidates[i];
             DimensionSendState& st = Dim(cd.dimension);
             PROFILE_ZONE_N("SerializeChunk");
@@ -1637,6 +1650,114 @@ namespace Server {
         }
     }
 
+    void PlayerSession::HandlePickItem(const Network::PickItemC2SPacket& packet) {
+        ASSERT_SERVER_THREAD();
+        if (!m_player || !m_connection) return;
+        // This game's rule: pick block is a creative tool. (MC also lets a
+        // survival player pick a stack they already carry.)
+        if (!m_player->isCreative()) return;
+        auto* server = g_integratedServer.get();
+        if (!server) return;
+        ServerLevel* level = server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+        if (!level || !level->World()) return;
+
+        // ── What was aimed at → the item (BlockState.getCloneItemStack /
+        //    Entity.getPickResult) ──────────────────────────────────────
+        Game::ItemID item = Game::Items::Air;
+        if (packet.kind == Network::PickItemC2SPacket::Kind::Block) {
+            // MC isWithinBlockInteractionRange(pos, 1.0): creative reach 5
+            // plus the one-block allowance, measured to the block's box.
+            const glm::dvec3 eye = m_player->getPosition() + glm::dvec3(0.0, 1.62, 0.0);
+            const glm::dvec3 nearest = glm::clamp(eye, glm::dvec3(packet.x, packet.y, packet.z),
+                                                  glm::dvec3(packet.x + 1, packet.y + 1, packet.z + 1));
+            if (glm::distance(eye, nearest) > 6.0) return;
+            const Game::BlockID block = level->World()->GetBlockState(packet.x, packet.y, packet.z).Block();
+            if (block == Game::BlockID::Air) return;
+            item = Game::ItemRegistry::FromBlock(block);
+        } else {
+            Game::Mob* mob = level->Mobs() ? level->Mobs()->Find(packet.entityId) : nullptr;
+            if (!mob) return;
+            if (glm::distance(m_player->getPosition(), mob->position) > 8.0) return;   // isWithinEntityInteractionRange(3) + slack
+            for (const Game::SpawnEggEntry& e : Game::kSpawnEggTable) {
+                if (e.type == mob->GetType()) { item = e.item; break; }
+            }
+        }
+        if (item == Game::Items::Air) return;
+        Game::ItemStack picked;
+        picked.itemId = item;
+        picked.count  = 1;
+
+        // ── tryPickItem, on MC's 36 player slots (hotbar first, then main) ─
+        Game::Inventory& inv = m_player->getInventory();
+        auto playerSlots = [&](auto&& fn) {   // MC Inventory.items order
+            for (int i = 0; i < Game::Inventory::HOTBAR_SIZE; ++i) if (fn(Game::Inventory::HotbarToIndex(i))) return;
+            for (int i = 0; i < Game::Inventory::MAIN_SIZE;   ++i) if (fn(Game::Inventory::MAIN_BEGIN + i)) return;
+        };
+        auto setSlot = [&](int index, const Game::ItemStack& stack) {
+            inv.SetSlotFull(index, stack);
+            m_player->markSlotDirty(index);
+        };
+        // Inventory.getSuitableHotbarSlot: the first empty hotbar slot from
+        // the selected one round, else the selected slot itself.
+        auto suitableHotbarSlot = [&]() {
+            const int selected = inv.GetSelectedSlot();
+            for (int i = 0; i < Game::Inventory::HOTBAR_SIZE; ++i) {
+                const int slot = (selected + i) % Game::Inventory::HOTBAR_SIZE;
+                if (inv.GetSlot(Game::Inventory::HotbarToIndex(slot)).IsEmpty()) return slot;
+            }
+            return selected;
+        };
+
+        // Inventory.findSlotMatchingItem — already carrying it: switch to it
+        // (hotbar) or swap it into the hotbar (pickSlot).
+        int matching = -1;
+        playerSlots([&](int index) {
+            const Game::ItemStack& s = inv.GetSlot(index);
+            if (!s.IsEmpty() && Game::IsSameItemSameComponents(s, picked)) { matching = index; return true; }
+            return false;
+        });
+        if (matching >= 0) {
+            if (Game::Inventory::IsHotbarSlot(matching)) {
+                m_player->selectHotbarSlot(Game::Inventory::IndexToHotbar(matching));
+            } else {
+                // Inventory.pickSlot: into a suitable hotbar slot, the held
+                // stack taking the picked one's place in the inventory.
+                m_player->selectHotbarSlot(suitableHotbarSlot());
+                const int hot = Game::Inventory::HotbarToIndex(inv.GetSelectedSlot());
+                const Game::ItemStack held = inv.GetSlot(hot);
+                const Game::ItemStack found = inv.GetSlot(matching);
+                setSlot(hot, found);
+                setSlot(matching, held);
+            }
+        } else {
+            // Inventory.addAndPickItem: into an empty hotbar slot (the
+            // selected one when empty); with the hotbar full, into the
+            // selected slot and the held stack moves to a free inventory
+            // slot — or, this game's addition, onto the ground when the
+            // inventory is full too (MC would overwrite it).
+            m_player->selectHotbarSlot(suitableHotbarSlot());
+            const int hot = Game::Inventory::HotbarToIndex(inv.GetSelectedSlot());
+            const Game::ItemStack held = inv.GetSlot(hot);
+            if (!held.IsEmpty()) {
+                int freeSlot = -1;
+                playerSlots([&](int index) { if (inv.GetSlot(index).IsEmpty()) { freeSlot = index; return true; } return false; });
+                if (freeSlot >= 0) {
+                    setSlot(freeSlot, held);
+                } else {
+                    Game::DropItemStackAt(Game::DimensionFromRaw(GetDimensionId()), m_player->getPosition(), held);
+                }
+            }
+            setSlot(hot, picked);
+        }
+
+        // ClientboundSetHeldSlotPacket; the slot writes ride the per-tick
+        // inventory diff (broadcastChanges).
+        Network::SetHeldSlotS2CPacket out;
+        out.slot = static_cast<uint8_t>(inv.GetSelectedSlot());
+        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::SetHeldSlotS2C),
+                                 Network::Serialization::Serialize(out));
+    }
+
     namespace {
         // MC compares with ItemStack.matches (item + count + components).
         // Game::ItemStacksMatch is exactly that; it used to be open-coded here
@@ -2106,6 +2227,13 @@ namespace Server {
         // campfire renderer would draw nothing until something else forced a
         // resync.
         BroadcastBlockEntity(pos, campfire);
+    }
+
+    void PlayerSession::FlushPendingDrops() {
+        if (!m_player) return;
+        for (const Game::ItemStack& stack : m_player->takePendingDrops()) {
+            DropItemFromPlayer(stack);
+        }
     }
 
     void PlayerSession::FlushPendingMenuOpen() {

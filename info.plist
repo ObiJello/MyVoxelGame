@@ -28,5 +28,15 @@
     <!-- This allows retina, transparency, etc. (optional) -->
     <key>NSHighResolutionCapable</key>
     <true/>
+
+    <!-- macOS Game Mode (macOS 14+): the system turns it on for an app in a
+         games category that is running full screen (a native full-screen
+         Space, which ToggleFullscreen uses on macOS). It gives the game
+         CPU/GPU scheduling priority over background work and doubles the
+         Bluetooth sampling rate for controllers and AirPods. -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.games</string>
+    <key>GCSupportsGameMode</key>
+    <true/>
   </dict>
 </plist>

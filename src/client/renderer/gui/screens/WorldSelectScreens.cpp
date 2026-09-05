@@ -73,6 +73,7 @@ namespace Render {
                 e.doDaylightCycle    = w.value("doDaylightCycle", false);
                 e.skybox             = w.value("skybox", std::string("vanilla"));
                 e.skyboxMode         = w.value("skyboxMode", 2);
+                e.babyModels         = w.value("babyModels", std::string("new"));
                 out.push_back(std::move(e));
             }
             // MC sorts by last-played, newest first.
@@ -109,6 +110,7 @@ namespace Render {
                     {"doDaylightCycle", e.doDaylightCycle},
                     {"skybox", e.skybox},
                     {"skyboxMode", e.skyboxMode},
+                    {"babyModels", e.babyModels},
                 });
             }
             std::ofstream f(FilePath());
@@ -237,6 +239,7 @@ namespace Render {
             a.dimensionStack  = e.dimensionStack;
             a.skybox          = e.skybox;
             a.skyboxMode      = e.skyboxMode;
+            a.babyModels      = e.babyModels;
             SetTitleAction(std::move(a));
         }
     } // namespace
@@ -439,6 +442,7 @@ namespace Render {
             e.doDaylightCycle   = w.doDaylightCycle;
             e.skybox         = sidecar.skybox;
             e.skyboxMode     = sidecar.skyboxMode;
+            e.babyModels     = sidecar.babyModels;
             e.worldType      = sidecar.worldType;
             e.flatPreset     = sidecar.flatPreset;
             e.flatLayers     = sidecar.flatLayers;
@@ -2479,6 +2483,7 @@ namespace Render {
             Game::Anvil::WorldSidecar sidecar;
             sidecar.skybox         = e.skybox;
             sidecar.skyboxMode     = e.skyboxMode;
+            sidecar.babyModels     = e.babyModels;
             sidecar.worldType      = e.worldType;
             sidecar.flatPreset     = e.flatPreset;
             sidecar.flatLayers     = e.flatLayers;

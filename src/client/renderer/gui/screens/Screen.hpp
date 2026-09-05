@@ -169,6 +169,10 @@ namespace Render {
             // Block-atlas mip chain rebuild (MC rebuilds the atlas when the
             // video screen closes; ours applies on the same event).
             APPLY_MIPMAPS             = 1u << 7,
+            // Resource pack selection changed (Options → Resource Packs →
+            // Done): MC's Minecraft.reloadResourcePacks. The host rebuilds
+            // the atlases, fonts, sky and remeshes (PlatformMain::ReloadResources).
+            APPLY_RESOURCE_PACKS      = 1u << 8,
         };
         void MarkSettingApplied(uint32_t bit) { m_appliedBits |= bit; }
         uint32_t ConsumeAppliedSettings() { uint32_t b = m_appliedBits; m_appliedBits = 0; return b; }
@@ -212,5 +216,8 @@ namespace Render {
     // standard InventoryScreen stb pattern: nearest filter, un-flipped.
     // Returns INVALID_TEXTURE and logs on failure.
     TextureHandle LoadStandaloneGuiTexture(const char* relPath, int& outW, int& outH);
+    // Drop the shared menu textures so the next frame reloads them (a
+    // resource pack may replace menu_background.png and the separators).
+    void ResetMenuTextures();
 
 } // namespace Render

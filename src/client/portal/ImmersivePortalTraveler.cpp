@@ -39,13 +39,18 @@ namespace Client {
         constexpr double kNudge             = 0.01;
         // An eye skimming the frame's edge still counts (mod leniency).
         constexpr double kEdgeLeniency      = 0.05;
-        // The crossing fires this far BEFORE the eye reaches the surface,
-        // and the arrival lands this far beyond the far one. The camera's
-        // near clip is 0.05: an eye closer than that to a wall-mounted
-        // surface has its near plane behind the wall face, and the wall
-        // around the portal is clipped away for a frame — the flash on the
-        // way through, and a see-through wall when standing in it.
-        constexpr double kEyeMargin         = 0.07;
+        // The mapped eye lands at least this far beyond the far surface —
+        // floating-point insurance only (the mod's 0.001), never a
+        // displacement anyone can see. The crossing is decided on the
+        // exact plane and the eye is mapped exactly, as the mod does: a
+        // crossing that fired a margin early and landed a margin late was
+        // a 0.14-block jump on every crossing, a visible nudge at walking
+        // pace and a lurch when sneaking. The near-plane worry that margin
+        // answered does not arise: the eye can only cross inside the
+        // surface's outline, and a surface centimetres from the eye fills
+        // the whole field of view, so the wall around it is never on
+        // screen when the near plane would clip it.
+        constexpr double kArrivalEpsilon    = 0.001;
     }
 
     bool ImmersivePortalTraveler::OnCooldown() const {
@@ -65,11 +70,7 @@ namespace Client {
         glm::dvec3 hitPoint{0.0};
         GetClientImmersivePortals().ForEach([&](const Portal& p) {
             if (!p.Has(PortalFlag::Teleportable)) return;
-            // The surface, moved kEyeMargin toward the viewer, is what the
-            // eye's segment is tested against.
-            Portal early = p;
-            early.origin += p.Normal() * kEyeMargin;
-            const auto hit = early.RaytraceSegment(lastEye, eye, std::max(kEdgeLeniency, p.CrossingLeniency()));
+            const auto hit = p.RaytraceSegment(lastEye, eye, std::max(kEdgeLeniency, p.CrossingLeniency()));
             if (!hit || hit->t >= bestT) return;
             best = &p;
             bestT = hit->t;
@@ -84,13 +85,14 @@ namespace Client {
         c.dimensionAfter  = portal.IsMirror() ? portal.dimension : portal.destDimension;
         c.eyeBefore       = eye;
         c.newEye          = portal.TransformPoint(eye);
-        // Land at least the margin beyond the far surface (the mapped eye
-        // sits on the near side of it when the crossing fired early).
+        // The exact image of the eye: it went `d` past this surface, so it
+        // is `d` past the far one. Only a rounding hair keeps it off the
+        // plane itself, where the far side's flipped twin begins.
         {
             const glm::dvec3 content  = portal.ContentDirection();
             const glm::dvec3 farPoint = portal.IsMirror() ? portal.origin : portal.destination;
             const double depth = glm::dot(c.newEye - farPoint, content);
-            if (depth < kEyeMargin) c.newEye += content * (kEyeMargin - depth);
+            if (depth < kArrivalEpsilon) c.newEye += content * (kArrivalEpsilon - depth);
             c.arrivalDirection = content;
         }
         // The body hangs below the mapped eye. The eye offset is not rotated:

@@ -145,16 +145,26 @@ void main() {
 
         // Decode clouds.png into the occupancy grid (CloudRenderer.prepare:
         // a cell is empty when its alpha < 10).
-        const std::string path = PlatformMain::GetAssetPath("assets/textures/environment/clouds.png");
+        const std::string path = m_overridePath.empty()
+            ? PlatformMain::GetAssetPath("assets/textures/environment/clouds.png")
+            : m_overridePath;
+        if (!LoadCellGrid(path)) return false;
+
+        m_initialized = true;
+        Log::Info("CloudRenderer initialized (%dx%d cell grid)", m_texWidth, m_texHeight);
+        return true;
+    }
+
+    bool CloudRenderer::LoadCellGrid(const std::string& path) {
         if (!std::filesystem::exists(path)) {
-            Log::Warning("CloudRenderer: missing clouds.png — clouds disabled");
+            Log::Warning("CloudRenderer: missing %s — clouds disabled", path.c_str());
             return false;
         }
         int w = 0, h = 0, ch = 0;
         stbi_set_flip_vertically_on_load(0);
         unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
         if (!pixels) {
-            Log::Warning("CloudRenderer: failed to decode clouds.png");
+            Log::Warning("CloudRenderer: failed to decode %s", path.c_str());
             return false;
         }
         m_texWidth = w;
@@ -167,10 +177,38 @@ void main() {
             }
         }
         stbi_image_free(pixels);
-
-        m_initialized = true;
-        Log::Info("CloudRenderer initialized (%dx%d cell grid)", w, h);
+        m_cellsPath = path;
+        // The mesh was cut from the old grid: rebuild on the next Render.
+        m_lastCellX = INT32_MIN;
+        m_lastCellZ = INT32_MIN;
         return true;
+    }
+
+    void CloudRenderer::ReloadTexture() {
+        if (!m_initialized) return;
+        const std::string path = m_overridePath.empty()
+            ? PlatformMain::GetAssetPath("assets/textures/environment/clouds.png")
+            : m_overridePath;
+        if (LoadCellGrid(path)) {
+            Log::Info("CloudRenderer: clouds reloaded from %s (%dx%d cell grid)", path.c_str(), m_texWidth, m_texHeight);
+        }
+    }
+
+    void CloudRenderer::SetCloudTexture(const std::string& absolutePath) {
+        if (absolutePath == m_overridePath) return;
+        m_overridePath = absolutePath;
+        if (!m_initialized) return;   // Initialize reads m_overridePath itself
+        const std::string path = m_overridePath.empty()
+            ? PlatformMain::GetAssetPath("assets/textures/environment/clouds.png")
+            : m_overridePath;
+        if (path == m_cellsPath) return;
+        if (!LoadCellGrid(path)) {
+            // Unreadable pack texture: keep the grid in use and forget the
+            // override so the next call can try again.
+            m_overridePath.clear();
+            return;
+        }
+        Log::Info("CloudRenderer: clouds from %s (%dx%d cell grid)", path.c_str(), m_texWidth, m_texHeight);
     }
 
     void CloudRenderer::DestroySlot(size_t slot, bool deferred) {

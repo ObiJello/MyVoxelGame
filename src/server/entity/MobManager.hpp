@@ -59,6 +59,10 @@ namespace Server {
 
         // Takes ownership and assigns an id. Returns the id, or 0 on failure.
         int32_t Add(std::unique_ptr<Game::Mob> mob);
+        // Move ServerLevelBridge::AddFreshEntity's deferred entities into the
+        // manager. Tick() does this at its end; the frozen world does it
+        // between ticks so nothing waits for the thaw to exist.
+        void AbsorbSpawned();
 
         // ── Moving a mob between levels (immersive portal travel) ────────
         // Take a live mob out of this manager WITHOUT destroying it. Every

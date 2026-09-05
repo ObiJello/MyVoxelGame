@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/Mesher.cpp
 #include "Mesher.hpp"
+#include "MeshCensus.hpp"
 #include <atomic>
 #include "MeshJobData.hpp"
 #include "../culling/VisGraph.hpp"
@@ -16,6 +17,7 @@
 #include <mutex>
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <string_view>
 
@@ -87,11 +89,11 @@ namespace Render {
         m_portalFaces.clear();
         for (const PortalFace& f : *faces) if (f.dimension == dimension) m_portalFaces.push_back(f);
     }
-    thread_local std::vector<std::array<glm::vec4, 64>> Mesher::s_ctmUVs{};
+    thread_local std::vector<std::array<SpriteRef, 64>> Mesher::s_ctmUVs{};
     static_assert(CTM::kMaxVariants == 64,
                   "s_ctmUVs is declared with a literal 64 in Mesher.hpp to keep "
                   "ConnectedTextures.hpp out of that header - keep them in step");
-    thread_local std::unordered_map<const Game::FaceDef*, glm::vec4> Mesher::s_faceUVCache;
+    thread_local std::unordered_map<const Game::FaceDef*, SpriteRef> Mesher::s_faceUVCache;
 
     // Face normal vectors for each block face
     static const glm::vec3 FACE_NORMALS[] = {
@@ -153,9 +155,43 @@ namespace Render {
             // to the non-greedy build.
             struct PendingQuad {
                 std::array<Vertex, 4> verts;
-                glm::vec4 uvRect;   // full sprite rect in atlas UV (x,y = min; z,w = max)
-                uint32_t  color;    // the shared corner color (all four equal)
+                uint16_t  spriteId; // atlas sprite table row this face tiles (face-map record)
+                uint32_t  color;    // tint * face shade WITHOUT AO (all four corners equal; face-map record)
+                Game::BlockID blockId;  // census only (a merged rectangle is counted under its first cell's block)
+                // The four AO corner levels, 2 bits each, in TILE-CORNER order:
+                // bits 0-1 = (u0,v0), 2-3 = (u1,v0), 4-5 = (u0,v1), 6-7 = (u1,v1),
+                // where (u,v) is the quad's tile-space uv (emitMerged's tileUV).
+                // NOT part of the merge test: every block of a merged
+                // rectangle keeps its own byte in the face map (emitMerged),
+                // so faces with different AO gradients merge and the fragment
+                // shader rebuilds each block's gradient from its record.
+                uint8_t   aoByte;
+                // Identity of the COPLANAR face the other layer holds in the
+                // same cell (a grass block's dirt side under its tinted
+                // overlay), or 0. Both partners carry each other's key and
+                // the merge test compares it, so the two layers' rectangles
+                // break at the same cells and stay depth-identical. Without
+                // this the overlay's biome tint split its rectangles where the
+                // base's did not, and the mismatched tessellations z-fought
+                // (seen 2026-09-04 on grass sides after the AO merge).
+                uint64_t  partnerKey;
+                // Set when the coplanar partner in the other layer was emitted
+                // UNMERGED (ineligible): this quad must then stay a 1x1 too,
+                // or the pair's tessellations differ and z-fight.
+                uint8_t   solo;
             };
+            // The merge test compares NOTHING about a quad's look any more:
+            // colour, AO and sprite all travel per block in the face map, so
+            // any two eligible faces on one plane merge (step 2 of the
+            // 2026-09-04 series). A partner key therefore only says "this
+            // cell has a coplanar face in the other layer": both layers'
+            // rectangles then break at exactly the same cells — where a
+            // partner appears, disappears, or is solo/blocked — which is what
+            // keeps the two tessellations depth-identical. Keep in step with
+            // FlushGreedyQuads' `matches`.
+            inline uint64_t QuadKey(const PendingQuad&) {
+                return 1ull;
+            }
 
             // [layer][face][plane][v][u]: layer 0 = opaque, 1 = cutout.
             thread_local int32_t t_grid[2][6][16][16][16];
@@ -177,6 +213,29 @@ namespace Render {
             // every section build purely defensively — a flush that somehow
             // did not run must not leak a previous section's quads into this
             // one's mesh.
+            // Grid coordinates of a section-local cell for a face: `plane`
+            // walks the face's normal axis, (u, v) span the two in-plane axes.
+            // Pure GRID coordinates — texture orientation is applied at
+            // emission, per face.
+            inline void CellOf(BlockFace face, int lx, int ly, int lz, int& plane, int& u, int& v) {
+                switch (face) {
+                    case BlockFace::PositiveY:
+                    case BlockFace::NegativeY: plane = ly; u = lx; v = lz; break;
+                    case BlockFace::PositiveZ:
+                    case BlockFace::NegativeZ: plane = lz; u = lx; v = ly; break;
+                    default:                   plane = lx; u = lz; v = ly; break;
+                }
+            }
+            // Mark a plane as holding data so the flush/reset clears it.
+            inline void Touch(int layerIdx, BlockFace face, int plane) {
+                if (!t_planeTouched[layerIdx][static_cast<int>(face)][plane]) {
+                    t_planeTouched[layerIdx][static_cast<int>(face)][plane] = true;
+                    t_touched.push_back({static_cast<uint8_t>(layerIdx),
+                                         static_cast<uint8_t>(face),
+                                         static_cast<uint8_t>(plane)});
+                }
+            }
+
             inline void ResetThreadState() {
                 if (t_touched.empty() && t_pending.empty()) return;
                 for (const PlaneRef& pr : t_touched) {
@@ -400,6 +459,10 @@ namespace Render {
         // gradients, translucent): dim blue-gray, visually distinct from the
         // heat scale so "couldn't merge by rule" never reads as "merged badly".
         const glm::vec4 kGreedyIneligibleColor(0.35f, 0.42f, 0.60f, 1.0f);
+        // Two-sided plant quads in the debug view: a distinct violet.
+        const uint32_t kGreedyTwoSidedColor = [] { Vertex v{}; v.SetColor(glm::vec4(0.75f, 0.35f, 0.85f, 1.0f)); return v.packedColor; }();
+        // OBEY_NO_TWO_SIDED=1: A/B kill switch for the two-sided plant quads.
+        const bool s_twoSidedDisabled = std::getenv("OBEY_NO_TWO_SIDED") != nullptr;
     }
 
     // Shared with FluidMeshBuilder's still-fluid merge pass so the greedy
@@ -429,6 +492,11 @@ namespace Render {
         return true;
     }
 
+    void Mesher::InvalidateAtlasCaches() {
+        s_meshOptionsGeneration.fetch_add(1, std::memory_order_release);
+        Log::Info("Mesher: atlas caches invalidated (all sections must remesh)");
+    }
+
     Mesher::MeshOptions Mesher::GetMeshOptions() {
         return UnpackMeshOptions(s_meshOptionsPacked.load(std::memory_order_acquire));
     }
@@ -453,8 +521,12 @@ namespace Render {
         s_activeMeshOptions = leafOptions;
 
         // Rebuilt alongside the props it is indexed from; stale slots would
-        // otherwise point at the previous atlas's rects after a reload.
+        // otherwise point at the previous atlas's rects after a reload. The
+        // per-FaceDef sprite cache is atlas data too: after a resource pack
+        // reload its rects and sprite ids belong to the old atlas, and a
+        // grass block would draw whatever sprite now sits at the old id.
         s_ctmUVs.clear();
+        s_faceUVCache.clear();
 
         for (size_t i = 0; i < BLOCK_ID_COUNT; ++i) {
             auto blockId = static_cast<Game::BlockID>(i);
@@ -549,7 +621,7 @@ namespace Render {
             s_blockPropsCache[i].ctmSlot = -1;
             if (CTM::IsConnected(block.modelName)) {
                 const std::string baseKey = "block/" + block.modelName;
-                std::array<glm::vec4, CTM::kMaxVariants> rects{};
+                std::array<SpriteRef, CTM::kMaxVariants> rects{};
                 bool allFound = true;
                 for (int slot = 0; slot < CTM::VariantCount(); ++slot) {
                     if (!GetTextureUV(CTM::VariantKey(baseKey, slot), rects[static_cast<size_t>(slot)])) {
@@ -967,6 +1039,9 @@ namespace Render {
         // Emit everything the greedy pass parked: merged rectangles where
         // neighbours matched, verbatim originals where they did not.
         FlushGreedyQuads(outMesh);
+        MeshCensus::FlushThread();
+        // Lay the opaque/cutout indices out by facing (SectionMesh.hpp).
+        outMesh.FinalizeFacingGroups();
 
         // Resolve visibility graph (which face pairs can see through this section)
         outMesh.visibilitySet = visGraph.resolve();
@@ -1041,6 +1116,21 @@ namespace Render {
         RenderLayer blockLayer = s_blockPropsCache[static_cast<uint16_t>(blockId)].renderLayer;
 
         for (const auto& element : model.elements) {
+            // Two-sided candidate: a zero-thickness element carrying both
+            // faces of its thin axis (see FaceCapture). Each such face is
+            // captured instead of emitted; the pair is resolved after the
+            // loop. Faces of a thin element that do not pair (a cull, or a
+            // thin element with one face) go through the normal path.
+            int thinAxis = -1;
+            if (element.from.x == element.to.x) thinAxis = 0;
+            else if (element.from.y == element.to.y) thinAxis = 1;
+            else if (element.from.z == element.to.z) thinAxis = 2;
+            const Game::FaceDir pairA = thinAxis == 0 ? Game::FaceDir::West : thinAxis == 1 ? Game::FaceDir::Down : Game::FaceDir::North;
+            const Game::FaceDir pairB = thinAxis == 0 ? Game::FaceDir::East : thinAxis == 1 ? Game::FaceDir::Up   : Game::FaceDir::South;
+            const bool twoSidedCandidate = thinAxis >= 0 && !s_twoSidedDisabled &&
+                                           element.faces.count(pairA) != 0 && element.faces.count(pairB) != 0 &&
+                                           blockLayer != RenderLayer::Translucent;
+            FaceCapture captureA, captureB;
             for (const auto& [faceDir, faceDef] : element.faces) {
                 BlockFace blockFace = FaceDirToBlockFace(faceDir);
 
@@ -1113,10 +1203,142 @@ namespace Render {
                         : blockLayer;
 
                 glm::vec3 faceNormal = GetFaceNormal(blockFace);
-                AddBlockFace(blocks, model, element, faceDir, faceDef, worldPos, faceNormal, blockId, stateIndex, worldX, worldY, worldZ, faceLayer, mesh);
+                FaceCapture* capture = nullptr;
+                if (twoSidedCandidate && faceLayer != RenderLayer::Translucent) {
+                    if (faceDir == pairA) capture = &captureA;
+                    else if (faceDir == pairB) capture = &captureB;
+                }
+                AddBlockFace(blocks, model, element, faceDir, faceDef, worldPos, faceNormal, blockId, stateIndex, worldX, worldY, worldZ, faceLayer, mesh, capture);
                 m_lastStats.facesGenerated++;
             }
+            if (captureA.valid || captureB.valid) {
+                if (!(captureA.valid && captureB.valid && EmitTwoSided(captureA, captureB, mesh))) {
+                    if (captureA.valid) EmitCaptured(captureA, mesh);
+                    if (captureB.valid) EmitCaptured(captureB, mesh);
+                }
+            }
         }
+    }
+
+    void Mesher::EmitCaptured(const FaceCapture& c, SectionMesh& mesh) {
+        std::array<Vertex, 4> verts = c.verts;
+        if (s_greedyDebugColors.load(std::memory_order_relaxed)) {
+            for (auto& fv : verts) fv.SetColor(kGreedyIneligibleColor);
+        }
+        if (c.layer == RenderLayer::Cutout) {
+            GenerateQuad(verts, mesh.cutoutVerts, mesh.cutoutIdxs, &mesh.cutoutFacing);
+        } else {
+            GenerateQuad(verts, mesh.opaqueVerts, mesh.opaqueIdxs, &mesh.opaqueFacing);
+        }
+        MeshCensus::Count(c.blockId, static_cast<int>(c.layer), false);
+    }
+
+    bool Mesher::EmitTwoSided(const FaceCapture& a, const FaceCapture& b, SectionMesh& mesh) {
+        // The pair must be the SAME rectangle seen from both sides: same
+        // sprite and layer, and for every corner of A a corner of B at the
+        // same position with the same colour and the u-mirrored uv. Every
+        // test is exact — both faces came from the same element box through
+        // the same arithmetic, so a genuine pair matches bit for bit.
+        if (a.layer != b.layer || a.sprite.id != b.sprite.id || a.uvRect != b.uvRect) return false;
+        const glm::vec4& r = a.uvRect;
+        if (!(r.z > r.x && r.w > r.y)) return false;
+        // How the back face's mapping relates to the front's at the same
+        // corner: side faces (north/south, east/west) run u the other way
+        // within the SAME extent (a sub-rect uv mirrors within itself, not
+        // within the sprite); top/bottom pairs run v the other way; a model
+        // that flips its own uv on the second face (leaf litter, flower
+        // beds) ends up with the identical mapping. Whichever holds for all
+        // four corners is what the shader applies on the back.
+        float au0 = a.verts[0].uv.x, au1 = a.verts[0].uv.x, av0 = a.verts[0].uv.y, av1 = a.verts[0].uv.y;
+        for (int i = 1; i < 4; ++i) {
+            au0 = std::min(au0, a.verts[static_cast<size_t>(i)].uv.x); au1 = std::max(au1, a.verts[static_cast<size_t>(i)].uv.x);
+            av0 = std::min(av0, a.verts[static_cast<size_t>(i)].uv.y); av1 = std::max(av1, a.verts[static_cast<size_t>(i)].uv.y);
+        }
+        int mirrorMode = -1;
+        for (int mode = 0; mode < 3 && mirrorMode < 0; ++mode) {
+            bool all = true;
+            for (int i = 0; i < 4 && all; ++i) {
+                const Vertex& va = a.verts[static_cast<size_t>(i)];
+                const glm::vec2 want = (mode == 0) ? glm::vec2(au0 + au1 - va.uv.x, va.uv.y)
+                                     : (mode == 1) ? glm::vec2(va.uv.x, av0 + av1 - va.uv.y)
+                                                   : va.uv;
+                bool found = false;
+                for (int j = 0; j < 4 && !found; ++j) {
+                    const Vertex& vb = b.verts[static_cast<size_t>(j)];
+                    if (vb.pos != va.pos || vb.packedColor != va.packedColor) continue;
+                    if (std::fabs(vb.uv.x - want.x) > 1e-6f || std::fabs(vb.uv.y - want.y) > 1e-6f) continue;
+                    found = true;
+                }
+                all = found;
+            }
+            if (all) mirrorMode = mode;
+        }
+        if (mirrorMode < 0) return false;
+        // The front face's uv within its sprite in sixteenths (a model
+        // face's uv is in sixteenths of the texture, so this is exact) and
+        // the u-extent sum the shader mirrors around.
+        std::vector<TerrainVertex>& outVerts = (a.layer == RenderLayer::Cutout) ? mesh.cutoutVerts : mesh.opaqueVerts;
+        std::vector<uint16_t>& outIdxs = (a.layer == RenderLayer::Cutout) ? mesh.cutoutIdxs : mesh.opaqueIdxs;
+        std::vector<uint8_t>& outFacing = (a.layer == RenderLayer::Cutout) ? mesh.cutoutFacing : mesh.opaqueFacing;
+        if (outVerts.size() + 4 > 65536) return false;
+        int tu[4], tv[4];
+        for (int i = 0; i < 4; ++i) {
+            const glm::vec2 t((a.verts[static_cast<size_t>(i)].uv.x - r.x) / (r.z - r.x) * 16.0f,
+                              (a.verts[static_cast<size_t>(i)].uv.y - r.y) / (r.w - r.y) * 16.0f);
+            const float ru = std::round(t.x), rv = std::round(t.y);
+            if (std::fabs(t.x - ru) > 1e-3f || std::fabs(t.y - rv) > 1e-3f) return false;   // not on the sixteenth grid
+            if (ru < 0.0f || ru > 16.0f || rv < 0.0f || rv > 16.0f) return false;
+            tu[i] = static_cast<int>(ru); tv[i] = static_cast<int>(rv);
+        }
+        const float sum16f = (mirrorMode == 0) ? ((au0 - r.x) + (au1 - r.x)) / (r.z - r.x) * 16.0f
+                           : (mirrorMode == 1) ? ((av0 - r.y) + (av1 - r.y)) / (r.w - r.y) * 16.0f : 0.0f;
+        const int mirrorSum16 = static_cast<int>(std::round(sum16f));
+        if (std::fabs(sum16f - static_cast<float>(mirrorSum16)) > 1e-3f || mirrorSum16 < 0 || mirrorSum16 > 32) return false;
+        // The front normal, quantised to a 6-bit code the shader can turn
+        // back into a direction whose sign against the camera is exact:
+        // that needs every non-zero component to share one magnitude, which
+        // axis-aligned planes and the 45-degree cross planes satisfy.
+        const glm::vec3 n = glm::cross(a.verts[1].pos - a.verts[0].pos, a.verts[2].pos - a.verts[0].pos);
+        const float mag = std::max(std::max(std::fabs(n.x), std::fabs(n.y)), std::fabs(n.z));
+        if (!(mag > 0.0f)) return false;
+        int normalCode = 0;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float c = n[axis] / mag;
+            int bits;
+            if (std::fabs(c) < 1e-4f) bits = 0;
+            else if (std::fabs(std::fabs(c) - 1.0f) < 1e-3f) bits = (c > 0.0f) ? 1 : 3;
+            else return false;                          // an oblique plane: two quads as before
+            normalCode |= bits << (2 * axis);
+        }
+        const bool debug = s_greedyDebugColors.load(std::memory_order_relaxed);
+        const uint16_t baseIndex = static_cast<uint16_t>(outVerts.size());
+        const glm::ivec3 base(m_sectionBaseWorldX, m_sectionBaseWorldY, m_sectionBaseWorldZ);
+        for (int i = 0; i < 4; ++i) {
+            const Vertex& v = a.verts[static_cast<size_t>(i)];
+            const glm::vec3 rel = v.pos - glm::vec3(base);
+            outVerts.push_back(TerrainVertex::TwoSided(rel, tu[i], tv[i], normalCode, mirrorMode, mirrorSum16, a.sprite.id,
+                                                       debug ? kGreedyTwoSidedColor : v.packedColor));
+        }
+        // Both windings over the same four vertices: two six-index quads in
+        // the group layout's terms (GroupIndicesByFacing counts a facing per
+        // six indices), both filed under Any so they are always drawn and
+        // culling keeps the one facing the camera.
+        outFacing.push_back(kFacingAny);
+        outFacing.push_back(kFacingAny);
+        outIdxs.insert(outIdxs.end(), {
+            static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 1),
+            static_cast<uint16_t>(baseIndex + 2),
+            static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
+            static_cast<uint16_t>(baseIndex + 3),
+            static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
+            static_cast<uint16_t>(baseIndex + 1),
+            static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 3),
+            static_cast<uint16_t>(baseIndex + 2)
+        });
+        MeshCensus::Count(a.blockId, static_cast<int>(a.layer), true, 2);
+        m_lastStats.quadsMerged++;
+        m_lastStats.quadsMergedAway++;
+        return true;
     }
 
     void Mesher::AddBlockFace(const Game::IBlockAccess& blocks,
@@ -1124,11 +1346,12 @@ namespace Render {
                              Game::FaceDir faceDir, const Game::FaceDef& faceDef,
                              glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
                              Game::BlockStateIndex stateIndex,
-                             int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh) {
+                             int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh,
+                             FaceCapture* capture) {
 
         // Lookup UV rect from thread-local cache (persists across Mesher instances,
         // so texture resolution only happens once per FaceDef per thread lifetime)
-        glm::vec4 uvRect;
+        SpriteRef sprite;
         const int16_t ctmSlot = s_blockPropsCache[static_cast<size_t>(blockId)].ctmSlot;
         if (ctmSlot >= 0) {
             // Connected textures pick a different tile per FACE POSITION, so
@@ -1136,17 +1359,18 @@ namespace Render {
             // on the model's face and is shared by every block in the world.
             const uint8_t mask = ConnectedTextureMask(blockId, FaceDirToBlockFace(faceDir),
                                                       worldX, worldY, worldZ);
-            uvRect = s_ctmUVs[static_cast<size_t>(ctmSlot)]
+            sprite = s_ctmUVs[static_cast<size_t>(ctmSlot)]
                              [static_cast<size_t>(CTM::SlotFor(mask))];
         } else if (auto cacheIt = s_faceUVCache.find(&faceDef); cacheIt != s_faceUVCache.end()) {
-            uvRect = cacheIt->second;
+            sprite = cacheIt->second;
         } else {
             std::string texturePath = model.ResolveTexture(faceDef.textureRef);
-            if (!GetTextureUV(texturePath, uvRect)) {
-                GetTextureUV("missingno", uvRect);
+            if (!GetTextureUV(texturePath, sprite)) {
+                GetTextureUV("missingno", sprite);
             }
-            s_faceUVCache[&faceDef] = uvRect;
+            s_faceUVCache[&faceDef] = sprite;
         }
+        const glm::vec4& uvRect = sprite.rect;
 
         // **FIXED**: Calculate biome tint based on tintIndex
         glm::vec4 tintColor(1.0f, 1.0f, 1.0f, 1.0f); // Default white (no tint)
@@ -1267,9 +1491,27 @@ namespace Render {
         if (useAO) {
             ComputeFaceAO(blocks, worldX, worldY, worldZ, blockFace, aoLocal, aoShades);
         }
+        // For the greedy merger: the colour WITHOUT AO, and AO as one of MC's
+        // four levels per corner. A merged rectangle carries these apart —
+        // the fragment shader re-applies the per-corner pattern inside every
+        // block (FlushGreedyQuads) — so faces whose only difference is an AO
+        // gradient merge, where comparing baked colours could never let them.
+        uint32_t baseColor[4];
+        uint8_t  aoCode[4];
         for (int v = 0; v < 4; ++v) {
-            float finalShade = aoShades[v] * directionalShade;
             glm::vec4 c = faceVerts[v].GetColor();
+            Vertex base;
+            base.SetColor(glm::vec4(c.r * directionalShade, c.g * directionalShade,
+                                    c.b * directionalShade, c.a));
+            baseColor[v] = base.packedColor;
+            // CalculateVertexAO yields (e1 + e2 + corner + 1) / 4 with each
+            // term 0.2 or 1.0: exactly 1.0, 0.8, 0.6, 0.4 for full-cube faces.
+            const float level = (1.0f - aoShades[v]) / 0.2f;
+            const int   code  = static_cast<int>(level + 0.5f);
+            aoCode[v] = (code >= 0 && code <= 3 && std::abs(level - static_cast<float>(code)) < 0.01f)
+                            ? static_cast<uint8_t>(code) : 0xFF;
+
+            float finalShade = aoShades[v] * directionalShade;
             c.r *= finalShade;
             c.g *= finalShade;
             c.b *= finalShade;
@@ -1283,11 +1525,51 @@ namespace Render {
         // out exactly as before.
         bool stashed = false;
         if (layer != RenderLayer::Translucent) {
-            stashed = TryStashGreedyQuad(faceVerts, uvRect, element, faceDef,
-                                         blockFace, hasBlockOffset, layer,
+            stashed = TryStashGreedyQuad(faceVerts, sprite, element, faceDef,
+                                         blockFace, hasBlockOffset, layer, blockId,
+                                         baseColor, aoCode,
                                          worldX, worldY, worldZ);
         }
+        if (!stashed && capture) {
+            // Two-sided candidate: hand the finished face back to ProcessBlock
+            // (see FaceCapture) instead of emitting it. Nothing below applies
+            // to it — a thin element is never a full cube.
+            capture->verts   = faceVerts;
+            capture->sprite  = sprite;
+            capture->uvRect  = uvRect;
+            capture->layer   = layer;
+            capture->blockId = blockId;
+            capture->valid   = true;
+            m_lastStats.quadsGenerated++;
+            return;
+        }
         if (!stashed) {
+            // A full-cube face going out UNMERGED may have a coplanar partner
+            // in the other layer (grass side under its overlay). The partner
+            // must not merge either, or the pair's tessellations differ and
+            // z-fight: an already-stashed partner is flagged solo, a partner
+            // still to come finds the cell blocked (-1). Same grid, same
+            // cell, so this is exact for every such pair.
+            if (layer != RenderLayer::Translucent && m_config.enableGreedyMeshing &&
+                !Greedy::Disabled() && GreedyEnabled() &&
+                element.from == glm::vec3(0.0f) && element.to == glm::vec3(16.0f)) {
+                const int lx = worldX - m_sectionBaseWorldX;
+                const int ly = worldY - m_sectionBaseWorldY;
+                const int lz = worldZ - m_sectionBaseWorldZ;
+                if (static_cast<unsigned>(lx) <= 15u && static_cast<unsigned>(ly) <= 15u &&
+                    static_cast<unsigned>(lz) <= 15u) {
+                    int plane, u, v;
+                    Greedy::CellOf(blockFace, lx, ly, lz, plane, u, v);
+                    const int otherLayer = (layer == RenderLayer::Cutout) ? 0 : 1;
+                    int32_t& otherCell = Greedy::t_grid[otherLayer][static_cast<int>(blockFace)][plane][v][u];
+                    if (otherCell > 0) {
+                        Greedy::t_pending[static_cast<size_t>(otherCell - 1)].solo = 1;
+                    } else if (otherCell == 0) {
+                        otherCell = -1;
+                        Greedy::Touch(otherLayer, blockFace, plane);
+                    }
+                }
+            }
             // Debug view: mark rule-ineligible quads (never entered the merge
             // grid) in the flat ineligible color. Translucent water included —
             // it is excluded from merging by design.
@@ -1296,15 +1578,16 @@ namespace Render {
             }
             switch (layer) {
                 case RenderLayer::Opaque:
-                    GenerateQuad(faceVerts, mesh.opaqueVerts, mesh.opaqueIdxs);
+                    GenerateQuad(faceVerts, mesh.opaqueVerts, mesh.opaqueIdxs, &mesh.opaqueFacing);
                     break;
                 case RenderLayer::Cutout:
-                    GenerateQuad(faceVerts, mesh.cutoutVerts, mesh.cutoutIdxs);
+                    GenerateQuad(faceVerts, mesh.cutoutVerts, mesh.cutoutIdxs, &mesh.cutoutFacing);
                     break;
                 case RenderLayer::Translucent:
-                    GenerateQuad(faceVerts, mesh.translucentVerts, mesh.translucentIdxs);
+                    GenerateQuad(faceVerts, mesh.translucentVerts, mesh.translucentIdxs, nullptr);
                     break;
             }
+            MeshCensus::Count(blockId, static_cast<int>(layer), false);
         }
 
         m_lastStats.quadsGenerated++;
@@ -1437,7 +1720,8 @@ namespace Render {
     }
 
     void Mesher::GenerateQuad(const std::array<Vertex, 4>& quadVerts,
-                             std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices) {
+                             std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices,
+                             std::vector<uint8_t>* outFacing) {
         // 16-bit index guard: a section layer cannot exceed 65,536 vertices.
         // Unreachable for real content (worst-case checkerboard is ~49k verts);
         // dropping the quad beats corrupting indices if it ever happens.
@@ -1446,8 +1730,12 @@ namespace Render {
         }
         uint16_t baseIndex = static_cast<uint16_t>(outVerts.size());
 
-        // Add vertices
-        outVerts.insert(outVerts.end(), quadVerts.begin(), quadVerts.end());
+        // Add vertices, made relative to this section's origin (TerrainVertex).
+        const glm::ivec3 base(m_sectionBaseWorldX, m_sectionBaseWorldY, m_sectionBaseWorldZ);
+        for (const Vertex& v : quadVerts) {
+            outVerts.push_back(TerrainVertex::FromWorld(v, base));
+        }
+        if (outFacing) outFacing->push_back(QuadFacing(quadVerts[0].pos, quadVerts[1].pos, quadVerts[2].pos));
 
         // **FIXED**: Correct triangle winding for counter-clockwise faces (viewed from outside)
         // Vertices are ordered: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
@@ -1460,11 +1748,12 @@ namespace Render {
     }
 
     bool Mesher::TryStashGreedyQuad(const std::array<Vertex, 4>& faceVerts,
-                                    const glm::vec4& uvRect,
+                                    const SpriteRef& sprite,
                                     const Game::Element& element,
                                     const Game::FaceDef& faceDef,
                                     BlockFace face, bool hasBlockOffset,
-                                    RenderLayer layer,
+                                    RenderLayer layer, Game::BlockID blockId,
+                                    const uint32_t (&baseColor)[4], const uint8_t (&aoCode)[4],
                                     int worldX, int worldY, int worldZ) {
         if (!m_config.enableGreedyMeshing || Greedy::Disabled() || !GreedyEnabled()) return false;
 
@@ -1479,20 +1768,49 @@ namespace Render {
         //   • Face UV must be the sprite's FULL tile ((0,0,16,16), rotation 0).
         //     A sub-rect or rotated mapping cannot be reproduced by the
         //     shader's `tileOrigin + fract(uv) * tileSize`.
-        //   • All four corner colors identical. Colors bake AO * tint * face
-        //     shade; a quad with any corner gradient (AO darkening, a biome
-        //     tint blend edge) would smear that gradient across the merged
-        //     rectangle instead of repeating it per block.
+        //   • All four corner BASE colours (tint * face shade, AO factored
+        //     out) identical WITHIN the face — a biome tint blend edge across
+        //     one quad cannot be expressed by a per-block record. Between
+        //     faces nothing has to match: each block's colour, sprite and
+        //     four AO corner levels go into the FACE MAP (one record per
+        //     covered block, emitMerged) and the fragment shader shades every
+        //     block from its own record, so a cave wall of mixed stone types
+        //     with a different gradient on every face is one rectangle. Only
+        //     faces whose AO is one of MC's four levels qualify (aoCode 0xFF =
+        //     sub-element blend). The 2026-09-04 census put stone at a 4%
+        //     merge rate under the old baked-colour test and 9% with
+        //     same-pattern AO merging; the face map took drawn vertices per
+        //     section from 1,301 to 913.
         if (hasBlockOffset) return false;
         if (element.from != glm::vec3(0.0f) || element.to != glm::vec3(16.0f)) return false;
         if (!element.rotation.IsIdentity()) return false;
         if (faceDef.uvRotation != 0) return false;
         if (faceDef.uv != glm::vec4(0.0f, 0.0f, 16.0f, 16.0f)) return false;
-        const uint32_t color = faceVerts[0].packedColor;
-        if (faceVerts[1].packedColor != color ||
-            faceVerts[2].packedColor != color ||
-            faceVerts[3].packedColor != color) {
-            return false;
+        const uint32_t color = baseColor[0];
+        if (baseColor[1] != color || baseColor[2] != color || baseColor[3] != color) return false;
+        if (aoCode[0] > 3 || aoCode[1] > 3 || aoCode[2] > 3 || aoCode[3] > 3) return false;
+        // Place each corner's AO level at its TILE corner, derived from the
+        // vertex's actual position inside the cell through the same per-face
+        // tile-uv mapping emitMerged applies (tileUV): u/v of a unit cell are
+        // the cell-local x/y/z or their 1-complement, per face. Reading the
+        // position rather than assuming a corner order keeps this exact even
+        // if CreateFaceVertices' order ever differs from emitMerged's.
+        uint8_t aoByte = 0;
+        for (int k = 0; k < 4; ++k) {
+            const glm::vec3 l = faceVerts[static_cast<size_t>(k)].pos -
+                                glm::vec3(static_cast<float>(worldX), static_cast<float>(worldY),
+                                          static_cast<float>(worldZ));
+            const int cx = l.x > 0.5f ? 1 : 0, cy = l.y > 0.5f ? 1 : 0, cz = l.z > 0.5f ? 1 : 0;
+            int tu, tv;
+            switch (face) {
+                case BlockFace::PositiveY: tu = cx;     tv = cz;     break;
+                case BlockFace::NegativeY: tu = cx;     tv = 1 - cz; break;
+                case BlockFace::PositiveZ: tu = cx;     tv = 1 - cy; break;
+                case BlockFace::NegativeZ: tu = 1 - cx; tv = 1 - cy; break;
+                case BlockFace::PositiveX: tu = 1 - cz; tv = 1 - cy; break;
+                default:                   tu = cz;     tv = 1 - cy; break;   // NegativeX
+            }
+            aoByte = static_cast<uint8_t>(aoByte | (aoCode[k] << (2 * (tu + 2 * tv))));
         }
 
         // Section-local cell coordinates. ProcessBlock only ever hands us
@@ -1506,33 +1824,29 @@ namespace Render {
             return false;
         }
 
-        // Grid coordinates: `plane` walks the face's normal axis, (u, v) span
-        // the two in-plane axes. These are pure GRID coordinates — the
-        // texture-space orientation is applied at emission, per face.
         int plane, u, v;
-        switch (face) {
-            case BlockFace::PositiveY:
-            case BlockFace::NegativeY: plane = ly; u = lx; v = lz; break;
-            case BlockFace::PositiveZ:
-            case BlockFace::NegativeZ: plane = lz; u = lx; v = ly; break;
-            default:                   plane = lx; u = lz; v = ly; break;
-        }
+        Greedy::CellOf(face, lx, ly, lz, plane, u, v);
 
         const int layerIdx = (layer == RenderLayer::Cutout) ? 1 : 0;
         int32_t& cell = Greedy::t_grid[layerIdx][static_cast<int>(face)][plane][v][u];
         // Two coplanar quads in one cell — e.g. stacked identical element
         // faces in a multi-element model. Keep the first, emit the second
         // directly; merging must never drop or reorder same-cell geometry.
+        // -1: the other layer already emitted an UNMERGED coplanar face here
+        // (AddBlockFace) — this one must stay 1x1 to match it.
         if (cell != 0) return false;
 
-        Greedy::t_pending.push_back({faceVerts, uvRect, color});
+        Greedy::t_pending.push_back({faceVerts, sprite.id, color, blockId, aoByte, 0ull, 0});
         cell = static_cast<int32_t>(Greedy::t_pending.size());
-        if (!Greedy::t_planeTouched[layerIdx][static_cast<int>(face)][plane]) {
-            Greedy::t_planeTouched[layerIdx][static_cast<int>(face)][plane] = true;
-            Greedy::t_touched.push_back({static_cast<uint8_t>(layerIdx),
-                                         static_cast<uint8_t>(face),
-                                         static_cast<uint8_t>(plane)});
+        // Link with a coplanar face of the other layer in this cell, either
+        // stash order (see PendingQuad::partnerKey).
+        if (const int32_t other = Greedy::t_grid[1 - layerIdx][static_cast<int>(face)][plane][v][u]; other > 0) {
+            Greedy::PendingQuad& mine    = Greedy::t_pending.back();
+            Greedy::PendingQuad& partner = Greedy::t_pending[static_cast<size_t>(other - 1)];
+            mine.partnerKey    = Greedy::QuadKey(partner);
+            partner.partnerKey = Greedy::QuadKey(mine);
         }
+        Greedy::Touch(layerIdx, face, plane);
         return true;
     }
 
@@ -1571,11 +1885,13 @@ namespace Render {
         // UVs are TILE-space (0..16 block repeats); the fragment shader folds
         // them back onto the sprite with fract().
         auto emitMerged = [&](int face, int plane, int u0, int v0, int w, int h,
-                              const PendingQuad& q,
+                              const int32_t (&grid)[16][16],
                               std::vector<TerrainVertex>& outVerts,
-                              std::vector<uint16_t>& outIdxs) {
+                              std::vector<uint16_t>& outIdxs,
+                              std::vector<uint32_t>& faceMap) {
             // Same 16-bit cap policy as GenerateQuad.
             if (outVerts.size() + 4 > 65536) return;
+            const PendingQuad& q = Greedy::t_pending[static_cast<size_t>(grid[v0][u0] - 1)];
 
             const float fu0 = static_cast<float>(u0);
             const float fu1 = static_cast<float>(u0 + w);
@@ -1631,31 +1947,66 @@ namespace Render {
                 }
             };
 
-            const uint16_t originU = TerrainVertex::EncodeUnorm16(q.uvRect.x);
-            const uint16_t originV = TerrainVertex::EncodeUnorm16(q.uvRect.y);
-            const uint16_t sizeU   = TerrainVertex::EncodeUnorm16(q.uvRect.z - q.uvRect.x);
-            const uint16_t sizeV   = TerrainVertex::EncodeUnorm16(q.uvRect.w - q.uvRect.y);
-
-            const glm::vec3 base(static_cast<float>(m_sectionBaseWorldX),
-                                 static_cast<float>(m_sectionBaseWorldY),
-                                 static_cast<float>(m_sectionBaseWorldZ));
-
             const uint16_t baseIndex = static_cast<uint16_t>(outVerts.size());
-            // Debug view: color the whole rectangle by its merged area.
-            const uint32_t quadColor =
-                s_greedyDebugColors.load(std::memory_order_relaxed)
-                    ? GreedyHeatColor(w * h) : q.color;
-            for (int k = 0; k < 4; ++k) {
-                TerrainVertex tv;
-                tv.pos = base + local[k];
-                tv.uv = tileUV(local[k]);
-                tv.packedColor = quadColor;
-                tv.tileOriginU = originU;
-                tv.tileOriginV = originV;
-                tv.tileSizeU = sizeU;
-                tv.tileSizeV = sizeV;
-                outVerts.push_back(tv);
+
+            // The rectangle's tile-space origin and each grid cell's tile
+            // coordinate, per face: the tile axes run WITH the grid axes on
+            // some faces and against them on others (the `16 - x` terms of
+            // tileUV above). Block (gu, gv) of the grid covers tile
+            // [tu, tu+1) x [tv, tv+1), so the record the fragment shader
+            // reads for it — floor(uv) - (tu0, tv0), row-major by w — is
+            // written at that position. Derived from tileUV so the two
+            // cannot disagree: tu = floor(tileUV(cell min corner + 0.5)).
+            auto cellTile = [face](int gu, int gv, int& tu, int& tv) {
+                switch (static_cast<BlockFace>(face)) {
+                    case BlockFace::PositiveY: tu = gu;      tv = gv;      break;
+                    case BlockFace::NegativeY: tu = gu;      tv = 15 - gv; break;
+                    case BlockFace::PositiveZ: tu = gu;      tv = 15 - gv; break;
+                    case BlockFace::NegativeZ: tu = 15 - gu; tv = 15 - gv; break;
+                    case BlockFace::PositiveX: tu = 15 - gu; tv = 15 - gv; break;
+                    default:                   tu = gu;      tv = 15 - gv; break;   // NegativeX
+                }
+            };
+            int tu0, tv0, tuEnd, tvEnd;
+            cellTile(u0, v0, tu0, tv0);
+            cellTile(u0 + w - 1, v0 + h - 1, tuEnd, tvEnd);
+            tu0 = std::min(tu0, tuEnd);
+            tv0 = std::min(tv0, tvEnd);
+
+            // One face-map record per covered block, in tile-space row-major
+            // order: its base colour (tint * shade), its own AO corner byte
+            // and its sprite. Debug view: the whole rectangle painted by its
+            // merged area, AO off.
+            const bool debug = s_greedyDebugColors.load(std::memory_order_relaxed);
+            const uint32_t heat = debug ? GreedyHeatColor(w * h) : 0u;
+            const uint32_t recordBase = static_cast<uint32_t>(faceMap.size() / TerrainVertex::kFaceMapWordsPerRecord);
+            faceMap.resize(faceMap.size() +
+                           static_cast<size_t>(w * h) * TerrainVertex::kFaceMapWordsPerRecord);
+            for (int dv = 0; dv < h; ++dv) {
+                for (int du = 0; du < w; ++du) {
+                    const PendingQuad& cq = Greedy::t_pending[static_cast<size_t>(grid[v0 + dv][u0 + du] - 1)];
+                    int tu, tv;
+                    cellTile(u0 + du, v0 + dv, tu, tv);
+                    const size_t rec = (recordBase + static_cast<size_t>((tu - tu0) + (tv - tv0) * w)) *
+                                       TerrainVertex::kFaceMapWordsPerRecord;
+                    faceMap[rec]     = debug ? TerrainVertex::FaceMapTexel0(heat, 0)
+                                             : TerrainVertex::FaceMapTexel0(cq.color, cq.aoByte);
+                    faceMap[rec + 1] = TerrainVertex::FaceMapTexel1(cq.spriteId);
+                }
             }
+
+            // local[] is already section-relative and on integer grid
+            // coordinates, as is the tile-space uv — both encode exactly.
+            for (int k = 0; k < 4; ++k) {
+                const glm::vec2 t = tileUV(local[k]);
+                outVerts.push_back(TerrainVertex::Mapped(local[k],
+                                                         static_cast<int>(t.x), static_cast<int>(t.y),
+                                                         tu0, tv0, w, h, recordBase));
+            }
+            MeshCensus::Count(q.blockId, &outVerts == &outMesh.opaqueVerts ? 0 : 1, true,
+                              static_cast<uint32_t>(w * h));
+            (&outVerts == &outMesh.opaqueVerts ? outMesh.opaqueFacing : outMesh.cutoutFacing)
+                .push_back(QuadFacing(local[0], local[1], local[2]));
             outIdxs.insert(outIdxs.end(), {
                 static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 1),
                 static_cast<uint16_t>(baseIndex + 2),
@@ -1672,21 +2023,24 @@ namespace Render {
                 (pr.layer == 0) ? outMesh.opaqueVerts : outMesh.cutoutVerts;
             std::vector<uint16_t>& outIdxs =
                 (pr.layer == 0) ? outMesh.opaqueIdxs : outMesh.cutoutIdxs;
+            std::vector<uint8_t>& outFacing =
+                (pr.layer == 0) ? outMesh.opaqueFacing : outMesh.cutoutFacing;
 
             // Classic 2D greedy scan: for each unconsumed cell, extend the run
             // along u, then grow whole rows along v while every cell matches.
-            // Cells are compared on (sprite rect, packed color) — the full
-            // visual identity of a stashed quad.
+            // Cells match on the coplanar-partner state alone: sprite, base
+            // colour and AO are per block in the face map (emitMerged), so a
+            // cave wall of stone, andesite and gravel is one rectangle.
             for (int v = 0; v < 16; ++v) {
                 for (int u = 0; u < 16; ++u) {
                     const int32_t cellIdx = grid[v][u];
-                    if (cellIdx == 0) continue;
+                    if (cellIdx <= 0) { grid[v][u] = 0; continue; }   // empty, or blocked (-1)
                     const PendingQuad& q = Greedy::t_pending[cellIdx - 1];
 
                     auto matches = [&](int32_t other) {
-                        if (other == 0) return false;
+                        if (other <= 0 || q.solo) return false;
                         const PendingQuad& o = Greedy::t_pending[other - 1];
-                        return o.color == q.color && o.uvRect == q.uvRect;
+                        return !o.solo && o.partnerKey == q.partnerKey;
                     };
 
                     int w = 1;
@@ -1713,18 +2067,21 @@ namespace Render {
                             std::array<Vertex, 4> dbg = q.verts;
                             const uint32_t red = GreedyHeatColor(1);
                             for (auto& dv2 : dbg) dv2.packedColor = red;
-                            GenerateQuad(dbg, outVerts, outIdxs);
+                            GenerateQuad(dbg, outVerts, outIdxs, &outFacing);
                         } else {
-                            GenerateQuad(q.verts, outVerts, outIdxs);
+                            GenerateQuad(q.verts, outVerts, outIdxs, &outFacing);
                         }
+                        MeshCensus::Count(q.blockId, pr.layer, false);
                         continue;
                     }
 
+                    // emitMerged reads every covered cell's quad for its
+                    // face-map record, so the cells are released after it.
+                    emitMerged(pr.face, pr.plane, u, v, w, h, grid, outVerts, outIdxs,
+                               pr.layer == 0 ? outMesh.opaqueFaceMap : outMesh.cutoutFaceMap);
                     for (int dv = 0; dv < h; ++dv)
                         for (int du = 0; du < w; ++du)
                             grid[v + dv][u + du] = 0;
-
-                    emitMerged(pr.face, pr.plane, u, v, w, h, q, outVerts, outIdxs);
                     ++mergedQuads;
                     cellsMerged += w * h;
                 }
@@ -1767,18 +2124,20 @@ namespace Render {
         return blocks.GetBlock(neighborX, neighborY, neighborZ);
     }
 
-    bool Mesher::GetTextureUV(const std::string& texturePath, glm::vec4& uvRect) {
+    bool Mesher::GetTextureUV(const std::string& texturePath, SpriteRef& sprite) {
         if (g_atlasBuilder) {
             AtlasUVRect atlasUV;
             if (g_atlasBuilder->GetUVRect(texturePath, atlasUV)) {
-                uvRect = glm::vec4(atlasUV.uvMin.x, atlasUV.uvMin.y,
-                                  atlasUV.uvMax.x, atlasUV.uvMax.y);
+                sprite.rect = glm::vec4(atlasUV.uvMin.x, atlasUV.uvMin.y,
+                                        atlasUV.uvMax.x, atlasUV.uvMax.y);
+                sprite.id = atlasUV.spriteId;
                 return true;
             }
         }
 
         // Fallback to error texture
-        uvRect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+        sprite.rect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+        sprite.id = 0;
         return false;
     }
 

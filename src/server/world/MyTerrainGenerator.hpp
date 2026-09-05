@@ -416,6 +416,20 @@ namespace Game {
         minecraft::levelgen::structure::ChunkGeneratorStructureState*
         GetStructureState() const { return m_structureState.get(); }
 
+        // The library generator, its RandomState (climate sampler) and biome
+        // source, for /locate: MC's findNearestMapStructure runs a structure's
+        // own findValidGenerationPoint at each candidate chunk, and
+        // findClosestBiome3d samples the biome source — both need these. Null
+        // before Initialize. Read-only in spirit, like GetStructureState.
+        minecraft::levelgen::ChunkGenerator* GetLibGenerator() const { return m_generator; }
+        // The generated terrain's surface height at a column (MC
+        // ChunkGenerator.getBaseHeight, WORLD_SURFACE_WG): the Y a player
+        // would stand at, computed from the noise with no chunk loaded.
+        // INT_MIN before Initialize.
+        int SurfaceHeightAt(int blockX, int blockZ) const;
+        minecraft::levelgen::RandomState*    GetRandomState()   const { return m_randomState; }
+        minecraft::world::biome::BiomeSource* GetBiomeSource()  const { return m_biomeSource.get(); }
+
         // MC MinecraftServer.setInitialSpawn(): climate SpawnFinder picks the
         // (x, z) region, then a spiral over the surrounding chunks finds the
         // first dry-land column (surface above sea level) via getBaseHeight.

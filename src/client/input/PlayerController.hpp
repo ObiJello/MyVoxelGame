@@ -1,6 +1,7 @@
 // File: src/client/input/PlayerController.hpp
 #pragma once
 
+#include "common/network/packets/game/PickItemC2SPacket.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "../entity/Player.hpp"
 #include "common/core/Features.hpp"
@@ -46,7 +47,6 @@ namespace Game {
 
         // Pick block on an ENTITY: the item (its spawn egg) into the hotbar,
         // creative style — MC Minecraft.pickBlock's entity branch.
-        void OnPickItem(Game::ItemID itemId);
         void ClearFillMark() { m_fill.armed = false; }
         // The box and block to preview this frame: the mark to the cell the
         // crosshair would place into (the mark alone when it would not).
@@ -171,7 +171,9 @@ namespace Game {
         // matches. Without the server round-trip the slot stays empty on the
         // server side and every subsequent placement / inventory-click on it
         // fails silently while the client's predictive count drifts.
-        void OnPickBlock(BlockID picked);
+        // Pick block / pick entity (P): the server resolves the item and
+        // rearranges the inventory (MC ServerboundPickItemFrom*Packet).
+        void SendPickItem(const Network::PickItemC2SPacket& packet);
         
         // Player commands
         void OnRespawnRequest();  // TODO: Implement for multiplayer

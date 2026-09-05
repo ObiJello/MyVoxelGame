@@ -62,6 +62,7 @@ namespace Server {
 
         // Held item change
         void onHeldItemChangeC2S(const Network::HeldItemChangeC2SPacket& packet) override;
+        void onPickItemC2S(const Network::PickItemC2SPacket& packet) override;
 
         // Inventory click + close
         void onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) override;

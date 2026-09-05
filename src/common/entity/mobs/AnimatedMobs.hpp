@@ -255,7 +255,7 @@ namespace Game {
         // MC Zoglin's DATA_BABY_ID. The wire's shared baby flag carries it.
         bool IsBaby() const override { return m_baby; }
         // MC Zoglin.setBaby — a baby zoglin's attack damage drops to 0.5.
-        void SetBaby(bool baby);
+        void SetBaby(bool baby) override;
 
         // MC Zoglin.finalizeSpawn — 20% of spawns are babies.
         std::shared_ptr<SpawnGroupData>
@@ -303,7 +303,7 @@ namespace Game {
         // MC Piglin's DATA_BABY_ID — the wire's shared baby flag carries it.
         bool IsBaby() const override { return m_baby; }
         // MC Piglin.setBaby — babies move 20% faster (SPEED_MODIFIER_BABY).
-        void SetBaby(bool baby);
+        void SetBaby(bool baby) override;
 
         // MC AbstractPiglin.isAdult.
         bool IsAdult() const { return !IsBaby(); }
@@ -425,6 +425,10 @@ namespace Game {
         int GetMaxAirSupply() const override { return kMaxAirSupply; }
 
         void BaseTick() override;
+        // MC 26.2 Axolotl.tickBabyAnimations (client): one of seven keyframe
+        // AnimationStates runs at a time for the remodeled baby — the adult
+        // keeps its four easing animators (TickAnimations).
+        void TickBabyAnimations();
         void UpdateBrainActivity() override;
 
         // MC Axolotl.hurtServer — the play-dead roll on a qualifying hit.

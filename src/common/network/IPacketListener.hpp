@@ -45,6 +45,7 @@ namespace Network {
     struct InventoryFullS2CPacket;
     struct InventorySetSlotS2CPacket;
     struct InventorySetCarriedS2CPacket;
+    struct SetHeldSlotS2CPacket;
     struct OpenScreenS2CPacket;
     struct ContainerSetDataS2CPacket;
     struct SetHealthS2CPacket;
@@ -82,6 +83,7 @@ namespace Network {
     struct PlayerMoveC2SPacket;
     struct ChatMessageC2SPacket;
     struct HeldItemChangeC2SPacket;
+    struct PickItemC2SPacket;
     struct InventoryClickC2SPacket;
     struct InventoryCloseC2SPacket;
     class LoginStartC2SPacket;
@@ -168,6 +170,7 @@ namespace Network {
         virtual void onInventoryFullS2C(const InventoryFullS2CPacket& packet) {}
         virtual void onInventorySetSlotS2C(const InventorySetSlotS2CPacket& packet) {}
         virtual void onInventorySetCarriedS2C(const InventorySetCarriedS2CPacket& packet) {}
+        virtual void onSetHeldSlotS2C(const SetHeldSlotS2CPacket& packet) {}
 
         // Block container opened (MC ClientboundOpenScreenPacket)
         virtual void onOpenScreenS2C(const OpenScreenS2CPacket& packet) {}
@@ -250,6 +253,8 @@ namespace Network {
 
         // Play phase - Held item change
         virtual void onHeldItemChangeC2S(const HeldItemChangeC2SPacket& packet) {}
+        // Play phase - Pick block / entity (P)
+        virtual void onPickItemC2S(const PickItemC2SPacket& packet) {}
 
         // Play phase - Inventory clicks
         virtual void onInventoryClickC2S(const InventoryClickC2SPacket& packet) {}

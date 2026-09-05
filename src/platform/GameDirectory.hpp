@@ -149,6 +149,13 @@ namespace Platform {
         void SetCutoutLeaves(bool cutout) { SetBool("cutoutLeaves", cutout); NoteGraphicsOptionChanged(); }
         bool IsFancyGraphics() const { return GetCutoutLeaves(); }
 
+        // The Immersive Portals mod's "reduced portal rendering"
+        // (IPGlobal.reducedPortalRendering): portals are drawn only within
+        // 16 blocks and a view through one at a third of the render
+        // distance. Off by default, as in the mod.
+        bool GetReducedPortalRendering() const { return GetBool("reducedPortalRendering", false); }
+        void SetReducedPortalRendering(bool reduced) { SetBool("reducedPortalRendering", reduced); }
+
         // macOS only: render at the display's native (Retina) pixel density.
         // GLFW_COCOA_RETINA_FRAMEBUFFER is a window-creation hint, so this
         // takes effect on the next launch. Default OFF on Intel Macs — the
@@ -161,6 +168,10 @@ namespace Platform {
         // normal path, so the window hint reads the saved value straight off
         // the disk. Same file, same key; the hardware default when absent.
         static bool PeekRetinaFramebufferFromDisk();
+        // The same early read for any key: the resource pack list is needed
+        // before the first asset is opened, which is long before options.txt
+        // is loaded through Initialize.
+        static std::string PeekStringFromDisk(const std::string& key, const std::string& fallback);
 
         // Engine-specific, no MC equivalent (it is the "Cull Leaves" mod's
         // behaviour): with Fancy graphics, drop a leaf face whose neighbour is
@@ -520,6 +531,14 @@ namespace Platform {
         std::string GetAssetsDirectory() const { return m_assetsDirectory; }
         std::string GetLogsDirectory() const { return m_logsDirectory; }
         std::string GetScreenshotsDirectory() const { return m_screenshotsDirectory; }
+        // <game dir>/skyboxes — the player's own 6-face skybox sets
+        // (skyboxes/<name>/panorama_0..5.png), picked up alongside the ones
+        // shipped in assets/textures/environment/skyboxes.
+        std::string GetSkyboxesDirectory() const { return m_skyboxesDirectory; }
+
+        // Reveal a folder in the platform's file browser (Finder, Explorer,
+        // xdg-open). Returns false if the platform has no way to do it.
+        static bool OpenInFileBrowser(const std::string& path);
 
         // Check if directories exist
         bool IsInitialized() const { return m_initialized; }
@@ -584,6 +603,7 @@ namespace Platform {
         std::string m_assetsDirectory;
         std::string m_logsDirectory;
         std::string m_screenshotsDirectory;
+        std::string m_skyboxesDirectory;
         bool m_initialized = false;
 
         // Create directory structure

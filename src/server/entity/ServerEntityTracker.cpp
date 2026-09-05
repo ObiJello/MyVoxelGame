@@ -79,6 +79,10 @@ namespace Server {
             p.blockStateRaw = falling->CarriedState().RawId();
         } else if (const auto* tnt = dynamic_cast<const Game::PrimedTnt*>(&mob)) {
             p.blockStateRaw = tnt->CarriedState().RawId();
+        } else {
+            // A mob whose carried block can change (the sulfur cube): the
+            // same field on first sight, then SetEntityData's copy on change.
+            p.blockStateRaw = mob.GetCarriedBlockRaw();
         }
         return p;
     }
@@ -373,9 +377,11 @@ namespace Server {
             // or dismount — MC's ClientboundSetPassengersPacket moment.
             const int32_t vehicleId =
                 mob.GetVehicle() ? mob.GetVehicle()->GetId() : -1;
+            const uint32_t carriedBlock = mob.GetCarriedBlockRaw();
 
             const bool dataChanged =
                 flags != tracked.lastFlags || variant != tracked.lastVariant ||
+                carriedBlock != tracked.lastCarriedBlock ||
                 hurtTime != tracked.lastHurtTime || deathTime != tracked.lastDeathTime ||
                 swell != tracked.lastSwell || pose != tracked.lastPose ||
                 (animState != tracked.lastAnimState && !mob.AnimStateTicksOnClient()) ||
@@ -599,6 +605,7 @@ namespace Server {
                 p.animState = animState;
                 p.vehicleId = vehicleId;
                 p.scale     = mob.scale;
+                p.blockStateRaw = carriedBlock;
 
                 const auto payload = Network::Serialization::Serialize(p);
                 for (uint32_t connId : tracked.watchers) {
@@ -614,6 +621,7 @@ namespace Server {
                 tracked.lastSwell = swell;
                 tracked.lastPose = pose;
                 tracked.lastAnimState = animState;
+                tracked.lastCarriedBlock = carriedBlock;
                 tracked.lastVehicleId = vehicleId;
                 tracked.lastScale     = mob.scale;
             }

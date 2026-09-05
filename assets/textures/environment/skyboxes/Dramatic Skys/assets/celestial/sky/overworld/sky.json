@@ -1,0 +1,27 @@
+{
+	"sky_objects": [
+		"sky1_stars",
+		"sky2_mask_moon",
+		"sky3_mask",
+		"sky4_day",
+		"sky5_night",
+		"sky6_sunset",
+		"sky7_sunrise",
+		"sky8_sunflare_sunset",
+		"sky9_sunflare_sunrise",
+		"sun",
+		"moon"
+		],
+	"environment": {
+		"fog": {
+			"has_thick_fog": false,
+			"fog_start": "fogStart",
+			"fog_end": "fogEnd"
+			},
+		"clouds": {
+			"height": -1000,
+			"color": "ffffff"
+			},
+		"void_culling_level": "-10000"
+		}
+}

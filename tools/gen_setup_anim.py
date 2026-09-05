@@ -34,6 +34,11 @@ import sys
 
 MC = "minecraft_code/decompiled_net/minecraft"
 MODEL_DIR = os.path.join(MC, "client/model")
+# The newer decompile the 26.1 baby remodel is read from — the meshes in
+# gen_entity_models.REMODEL_MESHES have their setupAnim compiled from THIS
+# tree's classes, under the same out slug.
+MC2 = "minecraft_code2/decompiled_net/minecraft"
+MODEL_DIR2 = os.path.join(MC2, "client/model")
 MODELS_CPP = "src/client/renderer/entity/model/GeneratedEntityModels.cpp"
 OUT_HPP = "src/client/renderer/entity/model/GeneratedSetupAnim.hpp"
 OUT_CPP = "src/client/renderer/entity/model/GeneratedSetupAnim.cpp"
@@ -47,6 +52,9 @@ STATE_FLOAT = {
     "xRot": "XRot",
     "yRot": "YRot",
     "attackTime": "AttackTime",
+    # 26.3 UndeadRenderState.swingAnimation — the same swing progress
+    # animateZombieArms used to take as `attackTime`.
+    "swingAnimation": "AttackTime",
     # IllagerRenderState.attackAnim = entity.getAttackAnim(partialTicks) —
     # the same 0..1 swing progress attackTime carries everywhere else.
     "attackAnim": "AttackTime",
@@ -89,6 +97,8 @@ STATE_FLOAT = {
     "attackAnimationRemainingTicks": "AttackAnimRemaining",  # hoglin
     "stunnedTicksRemaining": "StunnedTicks",       # ravager
     "jumpCompletion": "JumpCompletion",            # rabbit
+    "headEatPositionScale": "HeadEatPos",          # sheep graze
+    "headEatAngleScale": "HeadEatAngle",
     "holdingAnimationProgress": "HoldingProgress", # allay
     "tendrilAnimation": "TendrilAnim",             # warden
     "spikesAnimation": "SpikesAnim",               # guardian
@@ -126,6 +136,10 @@ STATE_FLOAT = {
 # port, each because the behaviour that would change it does not run yet:
 # getBodyRollAngle is the wolf's shake roll (never shakes -> 0), and bodyItem
 # is the happy ghast's harness slot (never equipped -> isEmpty() true).
+# `state.<field>.isStarted()` needs the slot ORDINAL (filled in by main from
+# Game::MobAnim through gen_entity_models.read_mob_anim_slots).
+ANIM_SLOT_INDEX = {}
+
 STATE_CONST_CALLS = {
     "getBodyRollAngle": 0.0,
 }
@@ -202,6 +216,11 @@ ARM_POSE = {n: i for i, n in enumerate([
 # per-mob ArmPose field (IllagerArmPose / PiglinArmPose — different enums, but
 # the same `state.armPose` field, populated per-mob by the renderer).
 ENUM_ORDINALS = {
+    # HumanoidModel.ArmPose — the same list in both decompiles and in
+    # Render::ArmPose (EntityModels.hpp), so the ordinal IS the runtime value.
+    "ArmPose": ["EMPTY", "ITEM", "BLOCK", "BOW_AND_ARROW", "THROW_TRIDENT",
+                "CROSSBOW_CHARGE", "CROSSBOW_HOLD", "SPYGLASS", "TOOT_HORN",
+                "BRUSH", "SPEAR"],
     # AbstractIllager.IllagerArmPose
     "IllagerArmPose": ["CROSSED", "ATTACKING", "SPELLCASTING", "BOW_AND_ARROW",
                        "CROSSBOW_HOLD", "CROSSBOW_CHARGE", "CELEBRATING",
@@ -508,6 +527,13 @@ class Parser:
         name = path[-1]
         owner = path[-2] if len(path) > 1 else ""
 
+        # `state.<x>AnimationState.isStarted()` — the clip timer's running
+        # bit (RabbitModel gates its head turn on the idle tilt not playing).
+        # The slot ordinal rides the node's arg; see SetupAnimRunner's
+        # AnimStarted.
+        if path[0] == "state" and name == "isStarted" and len(path) == 3 \
+                and path[1] in ANIM_SLOT_INDEX and not args:
+            return ("animstarted", ANIM_SLOT_INDEX[path[1]])
         # `state.<method>()` whose value is constant in this port — see
         # STATE_CONST_CALLS. `state.bodyItem.isEmpty()` and friends: no mob
         # here carries an item, so any state item-stack isEmpty() is true.
@@ -603,6 +629,11 @@ class Parser:
             src = self.ctx["bools"].get(n)
             if src:
                 return self.ctx["expand"](src)
+            # Boolean literals — what the item-stack tests below fold to.
+            if n == "true":
+                return ("const", 1.0)
+            if n == "false":
+                return ("const", 0.0)
             raise Unsupported("name %s" % n)
         # `this.<part>.<field>` read — a part's current value.
         if path[0] == "this" and len(path) == 3 and path[2] in PART_FIELDS:
@@ -788,6 +819,8 @@ class Compiler:
             self.nodes.append(("State", 0.0, 0, n[1]))
         elif kind == "bstate":
             self.nodes.append(("BState", 0.0, 0, n[1]))
+        elif kind == "animstarted":
+            self.nodes.append(("BState", 0.0, n[1], "AnimStarted"))
         elif kind == "local":
             self.nodes.append(("Local", 0.0, n[1], ""))
         elif kind == "part":
@@ -823,6 +856,11 @@ class Compiler:
             raise Unsupported(kind)
 
     def run(self, body, guard=None):
+        # 26.3 spellings folded to what this port can answer: no mob here
+        # holds an item, so a main/off-hand stack IS ItemStack.EMPTY
+        # (animateZombieArms' `raiseArms`).
+        body = re.sub(r"state\.get(?:MainHand|Offhand|OffHand)ItemStack\(\)\s*==\s*ItemStack\.EMPTY", "true", body)
+        body = re.sub(r"state\.get(?:MainHand|Offhand|OffHand)ItemStack\(\)\s*!=\s*ItemStack\.EMPTY", "false", body)
         for s in split_statements(body):
             try:
                 self.statement(s, guard)
@@ -851,6 +889,15 @@ class Compiler:
         m = BOOL_LOCAL_RE.match(s)
         if m:
             self.bools[m.group(1)] = m.group(2).strip()
+            return
+
+        # FernFlower's other aliasing shape (26.3's decompile): a bare
+        # `ModelPart var10000;` declaration, then `var10000 = this.rightArm;`
+        # assignments. Registering the name is what lets ALIAS_RE take the
+        # assignments; until one lands the alias points at nothing.
+        m = re.fullmatch(r"(?:final\s+)?ModelPart\s+(\w+)", s)
+        if m:
+            self.aliases.setdefault(m.group(1), None)
             return
 
         m = ALIAS_RE.match(s)
@@ -1031,11 +1078,11 @@ class Compiler:
         # `this.head.getChild("left_horn").visible = ...` — the goat's horns.
         # The child name is a mesh part name directly (they are unique), so it
         # bypasses the java-field map.
-        m = re.fullmatch(r"this\.\w+((?:\.getChild\(\s*\"[a-z_0-9]+\"\s*\))+)"
+        m = re.fullmatch(r"this\.\w+((?:\.getChild\(\s*\"[A-Za-z_0-9]+\"\s*\))+)"
                          r"\.(\w+)\s*(=|\+=|-=|\*=)\s*(.+)", s, re.S)
         if m:
             chain, field, op, rhs = m.groups()
-            child = re.findall(r'getChild\(\s*"([a-z_0-9]+)"\s*\)', chain)[-1]
+            child = re.findall(r'getChild\(\s*"([A-Za-z_0-9]+)"\s*\)', chain)[-1]
             if field not in PART_FIELDS:
                 raise Unsupported("field %s" % field)
             if child not in self.parts:
@@ -1333,31 +1380,40 @@ def cf(v):
 
 
 def main():
-    sources = {}
-    for r, _, fs in os.walk(MODEL_DIR):
-        for f in fs:
-            if f.endswith(".java"):
-                sources.setdefault(f[:-5], strip_comments(open(os.path.join(r, f), encoding="utf-8").read()))
-    # Non-model classes setupAnim calls into: Ease (the WHACK swing curve).
-    for extra in (os.path.join(MC, "util/Ease.java"),):
-        if os.path.exists(extra):
-            name = os.path.basename(extra)[:-5]
-            sources.setdefault(name, strip_comments(
-                open(extra, encoding="utf-8").read()))
+    def load_tree(mc, model_dir):
+        out = {}
+        for r, _, fs in os.walk(model_dir):
+            for f in fs:
+                if f.endswith(".java"):
+                    out.setdefault(f[:-5], strip_comments(open(os.path.join(r, f), encoding="utf-8").read()))
+        # Non-model classes setupAnim calls into: Ease (the WHACK swing curve).
+        for extra in (os.path.join(mc, "util/Ease.java"),):
+            if os.path.exists(extra):
+                name = os.path.basename(extra)[:-5]
+                out.setdefault(name, strip_comments(
+                    open(extra, encoding="utf-8").read()))
+        return out
+
+    sources_main = load_tree(MC, MODEL_DIR)
+    sources_remodel = load_tree(MC2, MODEL_DIR2) if os.path.isdir(MODEL_DIR2) else {}
+    sources = sources_main
 
     # Which model class each generated mob uses, and the parts its mesh has.
     sys.path.insert(0, "tools")
     import gen_entity_models as GM
+    global ANIM_SLOT_INDEX
+    ANIM_SLOT_INDEX = {field: GM.read_mob_anim_slots()[slot]
+                       for field, slot in GM.ANIM_SLOT.items()}
 
     cpp = open(MODELS_CPP, encoding="utf-8").read()
     mseg = cpp[cpp.index("kGenModels[kGenModelCount] = {"):]
     mseg = mseg[:mseg.index("\n    };")]
     rows = re.findall(
-        r'\{\s*"([a-z_0-9]+)",\s*[\d.]+f,\s*[\d.]+f,\s*"([a-z_0-9]*)",\s*AnimGuard::\w+,'
+        r'\{\s*"([A-Za-z_0-9]+)",\s*[\d.]+f,\s*[\d.]+f,\s*"([a-z_0-9]*)",\s*AnimGuard::\w+,'
         r'\s*(?:true|false),\s*(\d+),\s*(\d+),', mseg)
     pseg = cpp[cpp.index("kGenParts["):]
     pseg = pseg[:pseg.index("\n    };")]
-    pnames = re.findall(r'\{\s*"([a-z_0-9]+)",\s*-?\d+', pseg)
+    pnames = re.findall(r'\{\s*"([A-Za-z_0-9]+)",\s*-?\d+', pseg)
 
     def camel(s):
         return "".join(p.capitalize() for p in s.split("_"))
@@ -1367,7 +1423,15 @@ def main():
     report = []
 
     for slug, headpart, fp, pc in rows:
-        cls = GM.MODEL_ALIAS.get(slug, camel(slug) + "Model").split("#")[0]
+        # The 26.1 remodel rows come from the second decompile, with the
+        # class the table names; everything else resolves as before.
+        remodel = GM.remodel_meshes()
+        if slug in remodel:
+            sources = sources_remodel
+            cls = remodel[slug][1]
+        else:
+            sources = sources_main
+            cls = GM.MODEL_ALIAS.get(slug, camel(slug) + "Model").split("#")[0]
         if cls not in sources:
             continue
         parts = {pnames[i] for i in range(int(fp), int(fp) + int(pc))}
@@ -1382,7 +1446,7 @@ def main():
             # bound the sniffer's `head` to `bone`, its root-most part, so the
             # compiled look rotation swung the entire animal instead of its head.
             for m in re.finditer(
-                    r'this\.(\w+)\s*=\s*[\w.()"]*getChild\(\s*"([a-z_0-9]+)"\s*\)\s*;',
+                    r'this\.(\w+)\s*=\s*[\w.()"]*getChild\(\s*"([A-Za-z_0-9]+)"\s*\)\s*;',
                     sources[c]):
                 fields.setdefault(m.group(1), m.group(2))
             for m in re.finditer(r'this\.(\w+)\s*=\s*root\s*;', sources[c]):
@@ -1393,7 +1457,7 @@ def main():
             # `this.tailParts[0].getChild("tail1")` (guardian) still matches.
             for m in re.finditer(
                     r'this\.(\w+)\[\s*(\d+)\s*\]\s*=\s*[\w.\[\]()"+ ]*?getChild\('
-                    r'\s*"([a-z_0-9]+)"\s*\)', sources[c]):
+                    r'\s*"([A-Za-z_0-9]+)"\s*\)', sources[c]):
                 fields.setdefault("%s[%s]" % (m.group(1), m.group(2)), m.group(3))
             # Name-helper resolution shared by the two indexed-fill forms
             # below. The helper may be class-qualified — the ghast's
@@ -1439,7 +1503,7 @@ def main():
             for m in re.finditer(
                     r'this\.(\w+)\s*=\s*new ModelPart\[\]\s*\{([^}]*)\}', sources[c]):
                 for i, piece in enumerate(m.group(2).split(",")):
-                    g = re.search(r'getChild\(\s*"([a-z_0-9]+)"\s*\)', piece)
+                    g = re.search(r'getChild\(\s*"([A-Za-z_0-9]+)"\s*\)', piece)
                     if g:
                         fields.setdefault("%s[%d]" % (m.group(1), i), g.group(1))
             fields = {k: v for k, v in fields.items() if v in parts or v == "root"}
@@ -1635,6 +1699,12 @@ namespace Render {{
     open(OUT_HPP, "w", encoding="utf-8").write(hpp)
     open(OUT_CPP, "w", encoding="utf-8").write(cpp_out)
 
+    import os as _os
+    if _os.environ.get("SETUP_ANIM_DUMP"):
+        for slug, cls, n, sk, skipped in report:
+            if slug in _os.environ["SETUP_ANIM_DUMP"].split(","):
+                print(f"[dump] {slug} ({cls}): {n} ported, {sk} skipped")
+                for stmt, why in skipped: print("        -", why, "::", stmt)
     pct = 100.0 * total_stmts / max(1, total_stmts + total_skipped)
     print(f"{OUT_HPP}: {len(prog_rows)} programs, {len(stmt_rows)} statements, "
           f"{len(node_rows)} expression nodes")

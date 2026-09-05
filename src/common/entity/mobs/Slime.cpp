@@ -88,6 +88,10 @@ namespace Game {
         return m_level->Random().NextInt(20) + 10;
     }
 
+    int Slime::GetSplitCount() {
+        return 2 + m_level->Random().NextInt(3);
+    }
+
     void Slime::JumpFromGround() {
         velocity.y = GetJumpPower();
         needsSync = true;
@@ -159,7 +163,7 @@ namespace Game {
             JavaRandom& rng = m_level->Random();
             const float offset = GetBbWidth() / 4.0f;   // width/2 halved
             const int halfSize = m_size / 2;
-            const int count = 2 + rng.NextInt(3);
+            const int count = GetSplitCount();
 
             for (int i = 0; i < count; ++i) {
                 // MC's grid: i%2 alternates x, i/2 (INTEGER division, on

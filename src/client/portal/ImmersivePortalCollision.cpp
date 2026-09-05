@@ -54,15 +54,10 @@ namespace Client {
         // centre has just gone through must not find the wall behind a
         // gun portal solid again before the crossing fires.
         if (d < -1.0 || d > kEngageDepth) return false;
-        // A two-faced portal — each face of a nether portal is its own
-        // record, the flipped twin faces the other way — is never
-        // approached from BEHIND: its back is the twin's front, and the
-        // twin is the one that engages. Read from behind, the cells behind
-        // this face are the cells the player is standing in, and mapping
-        // THOSE through the portal turned them solid whenever the far frame
-        // had netherrack in front of it — the invisible wall a block before
-        // a nether portal.
-        if (d < 0.0 && portal.flippedPortalId != Game::Immersive::kInvalidPortalId) return false;
+        // Which face of a two-faced portal engages is decided once per
+        // frame in Update, by the player's EYE — see the note there. By
+        // the time a box reaches this test its record is one the eye is in
+        // front of, so no per-box side test is needed here.
         // The WHOLE box must fit inside the opening in the plane, like a
         // body fitting through a hole: a box hanging out past the opening's
         // side would walk into the wall block's side face, and one a block
@@ -93,10 +88,10 @@ namespace Client {
         return portal.IsInProjection(c, kCellLeniency);
     }
 
-    void ImmersivePortalCollision::Update(const glm::dvec3& playerFeet, const Game::AABB& playerBox) {
+    void ImmersivePortalCollision::Update(const glm::dvec3& playerEye, const Game::AABB& playerBox) {
         m_near.clear();
+        Game::SetPortalCollisionActive(false);
         if (!ClientLevels::HasSession()) return;
-        (void)playerFeet;
 
         const glm::dvec3 c = CenterOf(playerBox);
         GetClientImmersivePortals().ForEach([&](const Portal& p) {
@@ -104,8 +99,39 @@ namespace Client {
             glm::dvec3 mn, mx;
             p.BoundingBox(mn, mx, 0.0);
             if (glm::length(glm::clamp(c, mn, mx) - c) > kNearDistance) return;
+            // A two-faced portal — each face of a nether or wand portal is
+            // its own record, the flipped twin faces the other way — is
+            // only ever gone through from the front of ONE face, and only
+            // that face may engage this frame: the twin's "cells behind
+            // the plane" are the room the player is standing in, and
+            // mapping those through the portal makes the far WALL solid
+            // where the player's own air is and pass-through where their
+            // floor is. With the twin allowed in while the body straddled
+            // the plane, the floor vanished under the player for the last
+            // quarter block of every crossing and the arrival box landed
+            // inside a phantom cube — the dip on the way through and the
+            // lift out of it on arrival.
+            //
+            // The EYE picks the face, not the box's centre or its corners:
+            // the crossing is decided on the eye, which is always in front
+            // of the face being entered until the very moment of the
+            // teleport (the traveler fires a margin before the surface and
+            // lands a margin beyond the far one). The centre is the wrong
+            // judge for a floor portal — it passes the plane 0.7 blocks
+            // before the eye does, and the ground under the frame turned
+            // solid with the player standing in the surface. Decided from
+            // the frame's starting eye, so a fast step that carries the
+            // moved box's eye past the plane within one physics step keeps
+            // the face it entered.
+            if (p.flippedPortalId != Game::Immersive::kInvalidPortalId &&
+                p.SignedDistanceToPlane(playerEye) < 0.0) {
+                return;
+            }
             m_near.push_back(p);
         });
+        // The physics' all-air early-out must stand aside while a portal
+        // is this close — the cells the far side makes solid are air here.
+        Game::SetPortalCollisionActive(!m_near.empty());
     }
 
     bool ImmersivePortalCollision::IsBlockBehindPortal(int x, int y, int z, const Game::AABB& box) const {
@@ -135,6 +161,15 @@ namespace Client {
             const int fx = static_cast<int>(std::floor(far.x));
             const int fy = static_cast<int>(std::floor(far.y));
             const int fz = static_cast<int>(std::floor(far.z));
+            // A global seam's far side that has not streamed in yet counts
+            // as solid: an unloaded chunk reads as air, and air under the
+            // world's floor drops the player through the seam into whatever
+            // the chunk turns out to hold — the Nether's roof, from the
+            // inside. An invisible floor for the moment it takes the chunk
+            // to arrive is the lesser evil. Doorway portals keep the mod's
+            // rule (unloaded = open): their far side is loaded long before
+            // anyone can reach the surface.
+            if (p.Has(PortalFlag::Global) && !level->Blocks()->IsChunkLoaded(fx >> 4, fz >> 4)) return true;
             const Game::BlockID id = level->Blocks()->GetBlock(fx, fy, fz);
             if (Game::BlockRegistry::HasCollision(id)) return true;
         }

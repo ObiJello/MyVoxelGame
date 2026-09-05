@@ -177,6 +177,22 @@ namespace Client {
         
         // Legacy dirty section tracking (to be phased out)
         std::unordered_set<int> dirtySections;
+        // Bit s set <=> s in dirtySections (sections 0..23). Kept in step at
+        // every insert/erase so the scheduler's walk over ~1,100 dirty
+        // columns a frame reads one word per column instead of chasing the
+        // set's nodes (0.27 ms of the 3 ms frame, tour1 2026-09-04).
+        uint32_t dirtyMask = 0;
+        void AddDirty(int y)    { dirtySections.insert(y); if (y >= 0 && y < 32) dirtyMask |= 1u << y; }
+        void RemoveDirty(int y) { dirtySections.erase(y);  if (y >= 0 && y < 32) dirtyMask &= ~(1u << y); }
+
+        // HasAllNeighborChunks, memoised: -1 unknown, 0 no, 1 yes. The mesh
+        // scheduler asked it (eight hash lookups) for every never-built
+        // dirty column every frame — ~1,100 columns while streaming, the
+        // outer ring of the view among them, which can never answer yes
+        // until its neighbours arrive. Reset for the eight neighbours of any
+        // chunk that enters or leaves LOADED (TransitionChunkState), which
+        // is the only way the answer changes.
+        int8_t neighborsAllLoaded = -1;
 
         // WORLD-space positions of every BlockID::EndPortal in this chunk.
         //
@@ -380,6 +396,12 @@ namespace Client {
     private:
         // Chunk storage - main thread only, no mutex needed
         std::unordered_map<Game::Math::ChunkPos, std::unique_ptr<ClientChunk>, Game::Math::ChunkPosHash> m_chunks;
+        // Chunks in state LOADED, kept by TransitionChunkState (the only
+        // path into and out of LOADED) and the erase/clear sites below.
+        // GetLoadedChunkCount is asked several times per frame by the debug
+        // snapshots and used to walk all ~4,000 chunks each time — 2.8% of
+        // the main thread's running time (Instruments, 2026-09-04).
+        size_t m_loadedChunkCount = 0;
 
         // Index of chunks that (may) have dirty sections — lets the mesh
         // scheduler iterate only chunks with work instead of every loaded chunk
@@ -462,6 +484,10 @@ namespace Client {
         // MC RenderSection.hasAllNeighbors — are all 8 surrounding chunk columns
         // loaded? A never-compiled section waits for this before it is meshed.
         bool HasAllNeighborChunks(Game::Math::ChunkPos pos) const;
+        // ClientChunk::neighborsAllLoaded through the cache.
+        bool NeighborsAllLoadedCached(ClientChunk& chunk);
+        // Forget the cached answer of the eight chunks around `pos`.
+        void InvalidateNeighborLoadCache(Game::Math::ChunkPos pos);
         
         // Build the 3x3x3 region a section is meshed against, with version
         // checking (MC RenderSection.createCompileTask). `regionCache` is shared

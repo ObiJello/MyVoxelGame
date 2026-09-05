@@ -123,14 +123,23 @@ namespace Render {
 
         // Append this part's cubes (and its children's) to `verts`/`idx`,
         // already transformed into model space by `parent`.
+        //
+        // `culled` says the model draws back-face culled (EntityModel::
+        // CullBackFaces — MC's entityCutoutCull/entitySolid types). It decides
+        // how a ZERO-THICKNESS box's coplanar face pair is emitted — see
+        // BuildCube: a no-cull model gets both faces on ONE triangulation so
+        // the later one wins deterministically (vanilla's look, no
+        // z-fighting), a culled model keeps MC's windings.
         void Build(const glm::mat4& parent, float texWidth, float texHeight,
-                   std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx) const;
+                   std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx,
+                   bool culled = false) const;
     };
 
     // Emit the six faces of one cuboid. Lifted from ChestRenderer::AddCube —
     // including the vanilla UV quirk where vertex 0 takes the HIGH u, which
     // mirrors every face if written the intuitive way round.
     void BuildCube(const CubeDefinition& cube, const glm::mat4& transform,
-                   std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx);
+                   std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx,
+                   bool culled = false);
 
 } // namespace Render

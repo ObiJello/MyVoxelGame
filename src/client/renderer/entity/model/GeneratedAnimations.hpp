@@ -36,7 +36,7 @@ namespace Render {
         int   firstChannel, channelCount;
     };
 
-    inline constexpr int kGenAnimCount = 51;
+    inline constexpr int kGenAnimCount = 62;
     extern const GenAnim        kGenAnims[kGenAnimCount];
     extern const GenAnimChannel kGenAnimChannels[];
     extern const GenAnimKey     kGenAnimKeys[];

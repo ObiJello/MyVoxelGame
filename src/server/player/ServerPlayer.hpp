@@ -244,6 +244,17 @@ namespace Server {
             m_pendingCampfireFood.reset();
             return pending;
         }
+        // IUsePlayer::CreateFilledResult — MC ItemUtils.createFilledResult.
+        // Overflow that the inventory cannot take is queued here (MC
+        // player.drop) for PlayerSession::FlushPendingDrops, which owns the
+        // item-entity manager; the dispatch itself has no world.
+        void CreateFilledResult(Game::ItemStack& held, const Game::ItemStack& filled) override;
+        // Items to drop in front of the player once the dispatch returns.
+        std::vector<Game::ItemStack> takePendingDrops() {
+            std::vector<Game::ItemStack> out;
+            out.swap(m_pendingDrops);
+            return out;
+        }
 
         // === HAND SLOTS ===
         // hand 0 = main hand (hotbar 36 + selected), hand 1 = offhand (slot 45).
@@ -551,6 +562,7 @@ namespace Server {
         Game::AbstractContainerMenu* m_containerMenu = &m_inventoryMenu;
         std::optional<PendingMenuOpen>     m_pendingMenuOpen;
         std::optional<PendingCampfireFood> m_pendingCampfireFood;
+        std::vector<Game::ItemStack>       m_pendingDrops;
         // TODO: ItemStack m_mainHand;
         // TODO: ItemStack m_offHand;
         // TODO: std::array<ItemStack, 4> m_armor;

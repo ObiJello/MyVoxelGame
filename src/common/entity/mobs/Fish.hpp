@@ -200,12 +200,20 @@ namespace Game {
     // Not modelled, each named at its site (DolphinGoals.hpp): treasure
     // hunting (no structures; the fed-fish flag that arms it also rides
     // mobInteract feeding, skipped with items), swim-with-player (no swim
-    // pose / DOLPHINS_GRACE), item play, boat following, and the baby form
-    // (MC's AgeableWaterCreature half — dolphins do not breed even in MC;
-    // only /summon babies exist there).
-    class Dolphin : public PathfinderMob {
+    // pose / DOLPHINS_GRACE), item play, boat following.
+    //
+    // MC's AgeableWaterCreature half IS modelled: a dolphin is an AgeableMob
+    // (age, baby box, the 26.x baby mesh), 10% of a spawn pack past the first
+    // member spawns as a calf (Dolphin.finalizeSpawn), and a spawn egg on an
+    // adult makes one (getBreedOffspring). Dolphins still do not breed.
+    class Dolphin : public AgeableMob {
     public:
         explicit Dolphin(EntityLevel* level);
+
+        // MC Dolphin.finalizeSpawn: full air, level pitch, then the
+        // AgeableMobGroupData(0.1F) pack roll.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -217,7 +225,10 @@ namespace Game {
         // level random.
         int GetXpReward() const override;
 
-        // MC Dolphin.canAttack: never as a baby — no baby form here, so base.
+        // MC Dolphin.canAttack: never as a baby.
+        bool CanAttack(const LivingEntity& target) const override {
+            return !IsBaby() && AgeableMob::CanAttack(target);
+        }
 
         // ── Air (MC Dolphin's 4800-tick lungs) ────────────────────────────
         // A dolphin DROWNS underwater — it is not in the can-breathe tag, so
@@ -258,9 +269,15 @@ namespace Game {
     // to the chosen movement vector outright; between pumps the squid coasts
     // at 0.9 drag. Travel is overridden to raw movement — a squid takes no
     // block friction and no gravity while it swims.
-    class Squid : public Mob {
+    // Like the dolphin an AgeableWaterCreature in MC: 5% of a pack past the
+    // first member spawns as a baby (Squid.finalizeSpawn), the baby box is
+    // 0.5 x 0.5 (BABY_DIMENSIONS) and the ink burst shrinks with it.
+    class Squid : public AgeableMob {
     public:
         Squid(EntityTypeId type, EntityLevel* level);
+
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
         // MC Squid is a WaterAnimal: a beached squid suffocates on the same
         // clock as a beached fish (see HandleWaterAnimalAirSupply).

@@ -24,6 +24,13 @@ import sys
 
 MC = "minecraft_code/decompiled_net/minecraft"
 MODEL_DIR = os.path.join(MC, "client/model")
+# The NEWER decompile (26.3 Pre-Release 2) that the "Tiny Takeover" baby
+# remodel is read from — see remodel_meshes(). Everything else still comes from
+# the main tree above; the two are never mixed inside one mesh.
+MC2 = "minecraft_code2/decompiled_net/minecraft"
+# Mobs whose EVERY mesh comes from MC2 (remodel_meshes' explicit rows).
+MC2_ONLY_MESHES = {"sulfur_cube"}
+MODEL_DIR2 = os.path.join(MC2, "client/model")
 OUT_HPP = "src/client/renderer/entity/model/GeneratedEntityModels.hpp"
 OUT_CPP = "src/client/renderer/entity/model/GeneratedEntityModels.cpp"
 
@@ -113,6 +120,9 @@ HIDDEN_PARTS = {
 # real setupAnim implementations.
 HAND_WRITTEN = {"zombie", "skeleton", "creeper", "spider",
                 "cow", "pig", "sheep", "chicken"}
+# The hand-written mobs that CAN be babies (their classic baby is built by
+# EntityModel::BecomeBaby, not a generated row).
+HAND_WRITTEN_BABIES = {"zombie", "cow", "pig", "sheep", "chicken"}
 
 # Generated-model mobs that get a `<slug>_baby` mesh — MC AgeableMobRenderer's
 # babyModel, built from LayerDefinitions' `<LAYER>_BABY` rows. Only mobs that
@@ -140,7 +150,114 @@ BABY_MESH_SLUGS = {
     "rabbit", "skeleton_horse", "sniffer", "strider", "trader_llama",
     "turtle", "wolf", "zoglin", "zombie_horse", "zombie_villager",
     "zombified_piglin",
+    # MC's AgeableWaterCreatures and the villager are AgeableMobs in the
+    # port now (Fish.hpp, GenericAgeableMob) — their *_BABY rows apply.
+    "dolphin", "squid", "glow_squid", "villager",
 }
+
+# ── The 26.x baby remodel (read from MC2) ─────────────────────────────────
+#
+# MC 26.1 ("Tiny Takeover") started replacing the BabyModelTransform babies
+# with dedicated meshes on their own textures, and 26.2 finished the job: in
+# 26.3 EVERY `<LAYER>_BABY` row is a Baby*Model class (BabyCowModel,
+# BabyFoxModel, BabyHorseModel, SniffletModel, ...), and the adult rabbit was
+# remodeled alongside (AdultRabbitModel + two keyframe clips). The port keeps
+# BOTH looks: the `<slug>_baby` rows stay the CLASSIC babies, and the `_new`
+# rows below are the remodel, chosen per world by the Baby Models world
+# setting (MobRenderer::BabyModelLook).
+#
+# remodel_meshes() derives the rows rather than listing them: for every mob
+# that can be a baby in this port, MC2's `<LAYER>_BABY` row is evaluated
+# against MC2's own model classes and LayerDefinitions, and the class whose
+# createBodyLayer builds it (through LayerDefinitions' locals) is the one
+# gen_setup_anim.py compiles setupAnim from, under the SAME out slug — so a
+# GeneratedModel("fox_baby_new") finds both its mesh and its program. The
+# cow/pig/chicken biome variants and the mooshroom all share one baby mesh
+# per species (the rows differ only by texture), which is why there is no
+# cold_/warm_ entry.
+REMODEL_SUFFIX = "_baby_new"
+# Baby forms that exist ONLY under the remodel: the nautilus baby needs
+# nautilus_baby.png, which the 26.3 jar ships and the classic asset set
+# never had.
+REMODEL_ONLY_BABIES = {"nautilus"}
+_REMODEL_CACHE = None
+
+
+def camel_name(s):
+    return "".join(p.capitalize() for p in s.split("_"))
+
+
+def remodel_meshes():
+    """out slug -> (MC2 ModelLayers row, MC2 class whose setupAnim animates it)."""
+    global _REMODEL_CACHE
+    if _REMODEL_CACHE is not None:
+        return _REMODEL_CACHE
+    if not os.path.isdir(MODEL_DIR2):
+        _REMODEL_CACHE = {}
+        return _REMODEL_CACHE
+    sources2, _ = load_sources(MODEL_DIR2)
+    layers2, lvars2 = load_layer_defs(MODEL_DIR2)
+
+    def anim_class(expr, depth=0):
+        base, _ = split_applies(expr.strip())
+        if base in lvars2 and depth < 6:
+            return anim_class(lvars2[base], depth + 1)
+        m = (re.match(r"LayerDefinition\.create\(\s*(\w+)\.\w+\(", base)
+             or re.match(r"(\w+)\.\w+\(", base))
+        if m and m.group(1) in sources2:
+            return m.group(1)
+        return None
+
+    out = {}
+
+    def add(slug, layer, fallback_cls):
+        if layer not in layers2:
+            return
+        cls = anim_class(layers2[layer]) or fallback_cls
+        if cls in sources2:
+            out[slug] = (layer, cls)
+
+    baby_slugs = set(BABY_MESH_SLUGS) | HAND_WRITTEN_BABIES | REMODEL_ONLY_BABIES
+    # MC's CamelHuskRenderer is a plain MobRenderer on AdultCamelModel +
+    # camel_husk.png — there is no baby husk mesh or sheet, so CAMEL_BABY's
+    # new geometry would sample the husk sheet as garbage. The husk keeps
+    # the classic transform baby (its UVs are the adult's) in both looks.
+    baby_slugs.discard("camel_husk")
+    for slug in sorted(baby_slugs):
+        layer = SLUG_LAYER.get(slug, slug.upper()) + "_BABY"
+        adult = MODEL_ALIAS.get(slug, camel_name(slug) + "Model").split("#")[0]
+        add(slug + REMODEL_SUFFIX, layer, adult)
+    # The remodeled ADULT rabbit, the baby sheep's wool layer (MC
+    # SheepWoolLayer.babyModel — the same mesh again, drawn dyed on
+    # sheep_wool_baby.png) and the baby drowned's outer layer.
+    add("rabbit_new", "RABBIT", "RabbitModel")
+    add("sheep_wool_baby_new", "SHEEP_BABY_WOOL", "SheepModel")
+    add("drowned_outer_baby_new", "DROWNED_BABY_OUTER_LAYER", "DrownedModel")
+    # The sulfur cube (26.3-only mob, ported standalone): SulfurCubeRenderer
+    # draws the outer shell (SULFUR_CUBE, 128x128 sulfur_cube_outer.png)
+    # with SulfurCubeInnerLayer's inner cube (SULFUR_CUBE_INNER) at order
+    # -1 under it; the baby swaps both for SmallSulfurCubeModel's rows on
+    # 64x64 sheets. `_baby` (not `_baby_new`) so BOTH looks use it — the
+    # small model IS the mob's only baby model.
+    add("sulfur_cube", "SULFUR_CUBE", "SulfurCubeModel")
+    add("sulfur_cube_inner", "SULFUR_CUBE_INNER", "SulfurCubeModel")
+    add("sulfur_cube_baby", "SULFUR_CUBE_SMALL", "SmallSulfurCubeModel")
+    add("sulfur_cube_baby_inner", "SULFUR_CUBE_SMALL_INNER", "SmallSulfurCubeModel")
+    _REMODEL_CACHE = out
+    return out
+
+
+def load_sources(model_dir):
+    """Every *.java under a client/model tree, keyed by class name."""
+    sources, paths = {}, {}
+    for r, _, fs in os.walk(model_dir):
+        for f in fs:
+            if f.endswith(".java"):
+                p = os.path.join(r, f)
+                sources[f[:-5]] = strip_comments(open(p, encoding="utf-8").read())
+                paths[f[:-5]] = p
+    return sources, paths
+
 
 # Projectiles: the sprite-rendered ones (snowball, egg, potion, fireballs)
 # have no MC model class at all, and the modelled ones (trident, wind charge,
@@ -474,7 +591,7 @@ def eval_cond(cond):
         return None
 
 
-def unroll_loops(body, src, env, sources=None):
+def unroll_loops(body, src, env, sources=None, chain=()):
     """Symbolically execute a mesh-builder body into straight-line text.
 
     The scans that follow (addOrReplaceChild, PartPose, cubes) read literals,
@@ -504,6 +621,12 @@ def unroll_loops(body, src, env, sources=None):
     sources = sources or {}
     name_fns = {m.group(1): m.group(2)
                 for m in NAME_FN.finditer(sources.get("PartNames", ""))}
+    # The name helper may live UP the chain: 26.3's BabySquidModel builds
+    # its tentacles through SquidModel.createTentacleName(i). Base classes
+    # first so the class's own helper wins a collision.
+    for c in reversed(list(chain)):
+        if c in sources and sources[c] is not src:
+            name_fns.update({m.group(1): m.group(2) for m in NAME_FN.finditer(sources[c])})
     name_fns.update({m.group(1): m.group(2) for m in NAME_FN.finditer(src)})
     tables = parse_static_tables(src)
     numfns = numeric_return_fns(src)
@@ -887,7 +1010,7 @@ def run_mesh(body, src, sources, chain=(), env=None, denv=None, into=None):
     # (`getPartName(i)` -> `"part" + i`). Left folded, the whole loop collapses
     # to a single child called `part` — a blaze rendered with one rod instead of
     # twelve, and a squid with no tentacles at all.
-    body = unroll_loops(body, src, env, sources)
+    body = unroll_loops(body, src, env, sources, chain)
 
     # `PartDefinition head = addHead(g, mesh);` — a static helper that builds
     # parts INTO the mesh and returns one of them. AbstractPiglinModel.addHead
@@ -1016,6 +1139,60 @@ def run_mesh(body, src, sources, chain=(), env=None, denv=None, into=None):
                      if p.parent is parent and p.name == m.group(2)), None)
         if part is not None:
             part.cubes = []
+
+    # MC PartDefinition.retainPartsAndChildren / retainExactParts /
+    # clearRecursively — the part-FILTER family. BreezeModel builds its three
+    # LayerDefinitions from one base mesh with it (`mesh.getRoot()
+    # .retainPartsAndChildren(Set.of("head", "rods"))` for the body,
+    # {"wind_body"} for the 128x128 wind sheet, {"eyes"} for the eyes);
+    # CreakingModel / WardenModel / CopperGolemModel cut their emissive
+    # layers the same way and the villagers their no-hat meshes
+    # (`clearChild("head").clearRecursively()`). All three keep every PART —
+    # name, pose and children survive, so a bake-time getChild still
+    # resolves — and only empty its cubes:
+    #   retainPartsAndChildren(S): a child named in S is kept whole, subtree
+    #     included; any other child loses its cubes and recurses.
+    #   retainExactParts(S): a child named in S keeps its own cubes but its
+    #     subtree is cleared; any other child loses its cubes and recurses.
+    #   clearRecursively(): every descendant loses its cubes; the receiver
+    #     keeps its own.
+    # Before this pass existed the breeze's BODY row carried the wind rings
+    # at their 128x128 texOffs on the 32x32 sheet (garbage texels wrapped
+    # over the body) and the wind and eyes rows carried the head and rods on
+    # THEIR sheets — three complete meshes stacked on one another.
+    def _kids(p):
+        return [c for c in parts if c.parent is p]
+
+    def _clear_rec(p):
+        for c in _kids(p):
+            c.cubes = []
+            _clear_rec(c)
+
+    def _retain(p, names, exact):
+        for c in _kids(p):
+            if c.name in names:
+                if exact:
+                    _clear_rec(c)
+            else:
+                c.cubes = []
+                _retain(c, names, exact)
+
+    for m in re.finditer(
+            r"(\w+)((?:\s*\.\s*(?:getRoot\s*\(\s*\)"
+            r"|(?:getChild|clearChild)\s*\(\s*\"[A-Za-z_0-9]+\"\s*\)))*)"
+            r"\s*\.\s*(retainPartsAndChildren|retainExactParts|clearRecursively)"
+            r"\s*\(([^)]*)\)", body):
+        recv = vars_.get(m.group(1), root)
+        for name in re.findall(r'(?:getChild|clearChild)\s*\(\s*"([A-Za-z_0-9]+)"',
+                               m.group(2)):
+            recv = next((p for p in parts
+                         if p.parent is recv and p.name == name), recv)
+        op = m.group(3)
+        names = set(re.findall(r'"([A-Za-z_0-9]+)"', m.group(4)))
+        if op == "clearRecursively":
+            _clear_rec(recv)
+        else:
+            _retain(recv, names, op == "retainExactParts")
 
     return root, parts
 
@@ -1287,7 +1464,19 @@ ANIM_SLOT = {
     "emergeAnimationState":          "Emerge",
     "feelingHappyAnimationState":    "FeelingHappy",
     "flyAnimationState":             "Fly",
+    "hopAnimationState":             "Hop",
     "idleAnimationState":            "Idle",
+    "idleHeadTiltAnimationState":    "IdleHeadTilt",
+    # The 26.2 baby axolotl (AxolotlRenderState: `swimAnimation` is the one
+    # field without the -State suffix).
+    "swimAnimation":                 "Swim",
+    "swimAnimationState":            "Swim",
+    "walkAnimationState":            "Walk",
+    "walkUnderWaterAnimationState":  "WalkUnderWater",
+    "idleUnderWaterAnimationState":  "IdleUnderWater",
+    "idleUnderWaterOnGroundAnimationState": "IdleUnderWaterOnGround",
+    "idleOnGroundAnimationState":    "IdleOnGround",
+    "playDeadAnimationState":        "PlayDead",
     "idle":                          "Idle",
     "inhale":                        "Inhale",
     "interactionDropItem":           "InteractionDropItem",
@@ -1334,7 +1523,26 @@ CLIP_GUARD = {
 }
 
 GUARD_NAMES = ["None", "IsInWater", "IsSearching", "CanMove", "IsResting",
-               "IsHoldingItem"]
+               "IsHoldingItem",
+               # `state.<x>AnimationState.isStarted()` — the guard carries the
+               # MobAnim slot (GenClip.guardSlot); BabyAxolotlModel gates its
+               # walk clip on the walk state running.
+               "AnimStarted"]
+
+# `[!]state.<field>.isStarted()` as a clip guard -> (name, negate, slot).
+STARTED_GUARD = re.compile(r"^(!?)\s*state\.(\w+)\.isStarted\(\)$")
+
+
+def guard_of(cond):
+    """A clip-guard condition -> (name, negate, slot-or-None), or None."""
+    key = norm(cond)
+    if key in CLIP_GUARD:
+        name, negate = CLIP_GUARD[key]
+        return (name, negate, None)
+    m = STARTED_GUARD.match(key)
+    if m and m.group(2) in ANIM_SLOT:
+        return ("AnimStarted", m.group(1) == "!", ANIM_SLOT[m.group(2)])
+    return None
 
 
 ANIM_STATE_HPP = "src/common/entity/AnimationState.hpp"
@@ -1348,7 +1556,7 @@ def read_mob_anim_slots():
     turns a rename or an inserted slot into a generator error rather than every
     animation silently playing on the wrong timer.
     """
-    src = open(ANIM_STATE_HPP, encoding="utf-8").read()
+    src = strip_comments(open(ANIM_STATE_HPP, encoding="utf-8").read())
     m = re.search(r"enum class MobAnim\s*:\s*uint8_t\s*\{(.*?)\}", src, re.S)
     if not m:
         raise SystemExit("could not find MobAnim in " + ANIM_STATE_HPP)
@@ -1496,8 +1704,8 @@ def scan_clips(body, bake, guard, out, vis):
                 continue
             then_body, e2 = balanced(rest, 0, "{", "}")
             tail = rest[e2:].lstrip()
-            key = norm(cond)
-            if key not in CLIP_GUARD:
+            g = guard_of(cond)
+            if g is None:
                 # Not a clip guard — recurse anyway so a clip nested under an
                 # unrelated condition (the armadillo's scared branch) is still
                 # found, with the OUTER guard.
@@ -1507,13 +1715,13 @@ def scan_clips(body, bake, guard, out, vis):
                     if t2.startswith("{"):
                         scan_clips(balanced(t2, 0, "{", "}")[0], bake, guard, out, vis)
                 continue
-            name, negate = CLIP_GUARD[key]
-            scan_clips(then_body, bake, (name, negate), out, vis)
+            name, negate, slot = g
+            scan_clips(then_body, bake, (name, negate, slot), out, vis)
             if tail.startswith("else"):
                 t2 = tail[4:].lstrip()
                 if t2.startswith("{"):
                     scan_clips(balanced(t2, 0, "{", "}")[0], bake,
-                               (name, not negate), out, vis)
+                               (name, not negate, slot), out, vis)
             continue
 
         m = WALK_APPLY.fullmatch(s)
@@ -1544,6 +1752,84 @@ def scan_clips(body, bake, guard, out, vis):
             vis.append((snake(m.group(1)), ANIM_SLOT[field]))
 
 
+# `this.hopAnimation = hop.bake(root)` where `hop` is a CONSTRUCTOR PARAMETER
+# — 26.3's RabbitModel takes its two AnimationDefinitions from the subclass:
+# `AdultRabbitModel(root) { super(root, RabbitAnimation.HOP, RabbitAnimation.
+# IDLE_HEAD_TILT); }`. BAKE_FIELD only sees the `Xxx.NAME.bake(` spelling, so
+# the parameter names are matched positionally against the most-derived
+# class's super(...) call.
+BAKE_PARAM = re.compile(r"this\.(\w+)\s*=\s*(\w+)\.bake\(")
+
+
+def bake_fields(cls, chain, sources):
+    """field name -> 'XxxAnimation.NAME' for every baked clip on the chain."""
+    bake = {}
+    for c in chain:
+        bake.update(dict(BAKE_FIELD.findall(sources[c])))
+    # Parameter-passed definitions: find the class that bakes a parameter,
+    # read its constructor's parameter list, and bind each name to the
+    # argument the leaf class's `super(...)` passes at that position.
+    for c in chain:
+        params_used = BAKE_PARAM.findall(sources[c])
+        if not params_used:
+            continue
+        m = re.search(r"\b" + re.escape(c) + r"\s*\(([^)]*)\)\s*\{", sources[c])
+        if not m:
+            continue
+        pnames = [d.strip().replace("final ", "").split()[-1]
+                  for d in split_args(m.group(1)) if d.strip()]
+        sup = re.search(r"\bsuper\s*\(([^;]*)\)\s*;", sources[cls])
+        if not sup:
+            continue
+        sargs = [a.strip() for a in split_args(sup.group(1))]
+        for field, pname in params_used:
+            if pname in pnames:
+                k = pnames.index(pname)
+                if k < len(sargs) and re.fullmatch(r"\w+Animation\.\w+", sargs[k]):
+                    bake.setdefault(field, sargs[k])
+    return bake
+
+
+# MC Model.renderType: which RenderType a model class asks for, and whether
+# that type's pipeline culls back faces (RenderPipelines.java — `withCull
+# (false)` on the no-cull ones, the builder default otherwise). EntityModel
+# defaults to the NO-cull cutout type: entity models are not closed, and
+# vanilla shows the far side of a skeleton's ribs through the gaps. A few
+# classes opt into a culling type in their constructor (BatModel, ArrowModel,
+# BeeStingerModel, TridentModel + the solid objects; 26.3's BabyTurtleModel)
+# — exactly the ones whose zero-thickness planes would otherwise fight their
+# own back face. entityTranslucent (allay, vex, breeze, piglins, player) is
+# NOT culled in either tree.
+#
+# 26.3 renamed the family: entityCutoutNoCull became the default
+# `entityCutout`, and the culling one became `entityCutoutCull` — hence a
+# table per decompile rather than a name rule.
+RENDER_TYPE_PICK = re.compile(
+    r"(?:super|this)\s*\(\s*root(?:\.getChild\([^)]*\))?\s*,\s*RenderTypes::(\w+)")
+CULLS_MC1 = {   # 26.1 Snapshot 1
+    "entityCutout": True, "entityCutoutNoCull": False,
+    "entityCutoutNoCullZOffset": False, "entitySolid": True,
+    "entityTranslucent": False,
+}
+CULLS_MC2 = {   # 26.3 Pre-Release 2
+    "entityCutout": False, "entityCutoutCull": True,
+    "entityCutoutZOffset": False, "entitySolid": True,
+    "entityTranslucent": False,
+}
+
+
+def model_culls(cls, sources, culls=CULLS_MC1):
+    """Does MC draw this model class back-face culled? The nearest class in
+    the chain that names a RenderType decides; none named = the default."""
+    for c in class_chain(cls, sources):
+        m = RENDER_TYPE_PICK.search(sources[c])
+        if m:
+            if m.group(1) not in culls:
+                raise SystemExit("unknown RenderType %s in %s" % (m.group(1), c))
+            return culls[m.group(1)]
+    return False
+
+
 def setup_anim_info(cls, sources):
     """(head part, head guard, clips, visibility rules) for a model class."""
     head, head_guard = "", ("None", False)
@@ -1567,7 +1853,7 @@ def setup_anim_info(cls, sources):
         body = instance_method_body(sources[c], "setupAnim")
         if body is None:
             continue
-        bake = dict(BAKE_FIELD.findall(sources[c]))
+        bake = bake_fields(cls, chain, sources)
         got, gotvis = [], []
         scan_clips(body, bake, ("None", False), got, gotvis)
         if got or gotvis:
@@ -1584,9 +1870,9 @@ def setup_anim_info(cls, sources):
     return head, head_guard, clips, vis
 
 
-def load_layer_defs():
+def load_layer_defs(model_dir=MODEL_DIR):
     """(layer name -> expression, local name -> expression)."""
-    src = strip_comments(open(os.path.join(MODEL_DIR,
+    src = strip_comments(open(os.path.join(model_dir,
                                            "geom/LayerDefinitions.java"), encoding="utf-8").read())
     lvars = {}
     for m in re.finditer(r"\b(?:LayerDefinition|MeshTransformer)\s+(\w+)\s*=\s*([^;]+);",
@@ -1710,6 +1996,15 @@ def eval_transformer_in(expr, cls, ctx):
     # `(mesh) -> { modifyMesh(mesh.getRoot()); return mesh; }` — a lambda that
     # bolts extra parts on. DonkeyModel's is the only one reachable from a mob
     # layer, and it is what adds the chest packs and the long ears.
+    # `(mesh) -> { mesh.getRoot().retainExactParts(Set.of("head")); return
+    # mesh; }` — a lambda that only FILTERS parts (WardenModel's and
+    # CopperGolemModel's emissive layers, ZombieVillagerModel's no-hat
+    # layer). Its body runs through run_mesh, whose retain/clear pass
+    # applies it to the mesh already built.
+    m = re.match(r"\(?\s*\w+\s*\)?\s*->\s*\{(.*)\}\s*$", e, re.S)
+    if m and re.search(r"retainPartsAndChildren|retainExactParts|clearRecursively",
+                       m.group(1)):
+        return ("meshbody", m.group(1))
     m = re.search(r"(\w+)\s*\(\s*\w+\s*\.\s*getRoot\s*\(\s*\)\s*\)", e)
     if m and cls:
         return ("meshfn", cls, m.group(1))
@@ -1740,6 +2035,9 @@ def apply_transformer(model, tf, ctx):
             return
         _, body = got
         run_mesh(body, sources[cls], sources, class_chain(cls, sources),
+                 into=(model["root"], model["parts"]))
+    elif tf[0] == "meshbody":
+        run_mesh(tf[1], "", ctx["sources"], ctx.get("chain", ()),
                  into=(model["root"], model["parts"]))
 
 
@@ -1836,14 +2134,7 @@ def main():
     if not os.path.isdir(MODEL_DIR):
         sys.exit(f"missing {MODEL_DIR} — run from the repo root")
 
-    sources = {}
-    paths = {}
-    for r, _, fs in os.walk(MODEL_DIR):
-        for f in fs:
-            if f.endswith(".java"):
-                p = os.path.join(r, f)
-                sources[f[:-5]] = strip_comments(open(p, encoding="utf-8").read())
-                paths[f[:-5]] = p
+    sources, paths = load_sources(MODEL_DIR)
 
     # Which mobs need a model.
     from subprocess import run as _run
@@ -1859,6 +2150,10 @@ def main():
     models, missing = {}, []
     for slug in slugs:
         if slug in HAND_WRITTEN or slug in PROJECTILES:
+            continue
+        # A 26.3-only mob's meshes come from the MC2 rows below (the sulfur
+        # cube); 26.1 has nothing to look for.
+        if slug in MC2_ONLY_MESHES:
             continue
         # MC's own build description, transformers and all. Falling back to the
         # model class is only for the handful with no ModelLayers row.
@@ -1877,6 +2172,7 @@ def main():
         cls_for_anim = MODEL_ALIAS.get(slug, camel(slug) + "Model").split("#")[0]
         (got["head"], got["headguard"],
          got["clips"], got["vis"]) = setup_anim_info(cls_for_anim, sources)
+        got["cull"] = model_culls(cls_for_anim, sources)
         models[slug] = got
 
     # ── Baby meshes ────────────────────────────────────────────────────────
@@ -1900,7 +2196,29 @@ def main():
         cls_for_anim = MODEL_ALIAS.get(slug, camel(slug) + "Model").split("#")[0]
         (got["head"], got["headguard"],
          got["clips"], got["vis"]) = setup_anim_info(cls_for_anim, sources)
+        got["cull"] = model_culls(cls_for_anim, sources)
         models[slug + "_baby"] = got
+
+    # ── The 26.x baby remodel, from the second decompile ───────────────────
+    remodel = remodel_meshes()
+    if os.path.isdir(MODEL_DIR2):
+        sources2, _ = load_sources(MODEL_DIR2)
+        layers2, lvars2 = load_layer_defs(MODEL_DIR2)
+        ctx2 = {"sources": sources2, "lvars": lvars2}
+        for slug in sorted(remodel):
+            layer, cls = remodel[slug]
+            got = eval_layer(layers2[layer], dict(ctx2)) if layer in layers2 else None
+            if not got or not any(p.cubes for p in got["parts"]):
+                print(f"  WARNING: no remodel mesh for {slug} "
+                      f"(MC2 ModelLayers.{layer})")
+                continue
+            (got["head"], got["headguard"],
+             got["clips"], got["vis"]) = setup_anim_info(cls, sources2)
+            got["cull"] = model_culls(cls, sources2, CULLS_MC2)
+            models[slug] = got
+    else:
+        print(f"  WARNING: {MODEL_DIR2} missing — the baby remodel meshes "
+              f"were not generated")
 
     # ── Extra layer meshes ─────────────────────────────────────────────────
     #
@@ -1921,6 +2239,12 @@ def main():
         ("bogged_clothes",      "BOGGED_OUTER_LAYER",       "SkeletonModel"),
         ("pufferfish_mid",      "PUFFERFISH_MEDIUM",        "PufferfishMidModel"),
         ("pufferfish_big",      "PUFFERFISH_BIG",           "PufferfishBigModel"),
+        # MC BreezeWindLayer / BreezeEyesLayer: the breeze mesh again on its
+        # own sheets — the wind layer is the SAME parts at a 128x128 sheet
+        # (BreezeModel.createWindLayer), so a redraw of the body's vertices
+        # cannot serve it; the UVs differ.
+        ("breeze_wind",         "BREEZE_WIND",              "BreezeModel"),
+        ("breeze_eyes",         "BREEZE_EYES",              "BreezeModel"),
     )
     for slug, layer, cls in EXTRA_LAYER_MESHES:
         got = eval_layer(layers[layer], dict(ctx0)) if layer in layers else None
@@ -1930,6 +2254,7 @@ def main():
             continue
         (got["head"], got["headguard"],
          got["clips"], got["vis"]) = setup_anim_info(cls, sources)
+        got["cull"] = model_culls(cls, sources)
         models[slug] = got
 
     # ── Emit ───────────────────────────────────────────────────────────────
@@ -1993,6 +2318,9 @@ namespace Render {{
 
         AnimGuard guard;
         bool      guardNegate;
+        // AnimGuard::AnimStarted — the Game::MobAnim slot whose running bit
+        // is the guard.
+        uint8_t   guardSlot;
     }};
 
     // MC `this.<part>.visible = state.<X>AnimationState.isStarted()` — the
@@ -2017,6 +2345,13 @@ namespace Render {{
         int   firstPart, partCount;
         int   firstClip, clipCount;
         int   firstVis,  visCount;
+
+        // MC Model.renderType picked a culling RenderType (entityCutout /
+        // entitySolid / entityTranslucent) rather than the entityCutoutNoCull
+        // default — see the generator's model_culls. The renderer draws this
+        // mesh back-face culled, which is what keeps a bat's zero-thickness
+        // ears from fighting their own back faces.
+        bool  cull;
     }};
 
     inline constexpr int kGenModelCount = {len(models)};
@@ -2042,6 +2377,8 @@ namespace Render {{
         # llama's chest packs and the turtle's egg belly exist in the baby
         # rows too.
         base_slug = slug[:-5] if slug.endswith("_baby") else slug
+        if slug in remodel:
+            base_slug = slug[:-4].removesuffix("_baby").removesuffix("_wool")
         ordered = [p for p in md["parts"]]
         index = {id(p): i for i, p in enumerate(ordered)}
         first_part = len(parts_rows)
@@ -2066,22 +2403,25 @@ namespace Render {{
                     "true" if visible else "false"))
         first_clip = len(clip_rows)
         for kind, anim, slot, sf, sc, guard, age, bias in md["clips"]:
+            guard_slot = guard[2] if len(guard) > 2 and guard[2] else None
             clip_rows.append(
-                '    {{ "{}", {}, {}, {}, {}, {}, {}, AnimGuard::{}, {} }},'.format(
+                '    {{ "{}", {}, {}, {}, {}, {}, {}, AnimGuard::{}, {}, {} }},'.format(
                     anim, "true" if kind == "Walk" else "false",
                     cf(sf), cf(sc), cf(age), cf(bias), slot_index[slot],
-                    guard[0], "true" if guard[1] else "false"))
+                    guard[0], "true" if guard[1] else "false",
+                    slot_index[guard_slot] if guard_slot else 0))
         first_vis = len(vis_rows)
         for part, slot in md["vis"]:
             vis_rows.append('    {{ "{}", {} }},'.format(part, slot_index[slot]))
 
         hg = md["headguard"]
         model_rows.append(
-            '    {{ "{}", {}, {}, "{}", AnimGuard::{}, {}, {}, {}, {}, {}, {}, {} }},'.format(
+            '    {{ "{}", {}, {}, "{}", AnimGuard::{}, {}, {}, {}, {}, {}, {}, {}, {} }},'.format(
                 slug, cf(md["texw"]), cf(md["texh"]), md["head"],
                 hg[0], "true" if hg[1] else "false",
                 first_part, len(ordered),
-                first_clip, len(md["clips"]), first_vis, len(md["vis"])))
+                first_clip, len(md["clips"]), first_vis, len(md["vis"]),
+                "true" if md.get("cull") else "false"))
 
     cpp = "\n".join([
         "// GENERATED by tools/gen_entity_models.py — do not edit by hand.",
@@ -2122,7 +2462,7 @@ namespace Render {{
 
     open(OUT_HPP, "w", encoding="utf-8").write(hpp)
     open(OUT_CPP, "w", encoding="utf-8").write(cpp)
-    baby_count = sum(1 for s in models if s.endswith("_baby"))
+    baby_count = sum(1 for s in models if s.endswith("_baby") or s in remodel)
     print(f"{OUT_HPP}: {len(models)} meshes ({baby_count} baby), "
           f"{len(parts_rows)} parts, {len(cubes_rows)} cubes")
     if missing:

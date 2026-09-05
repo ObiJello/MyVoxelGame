@@ -125,7 +125,40 @@ ALIAS_EXACT = {
     "iron_chain":        "chain",
     "copper_torch":      "torch",
     "copper_wall_torch": "wall_torch",
+    # 26.2/26.3 blocks (2026-09-05) — the upstream data is 1.21.6, so every
+    # one of them copies the older block MC registers with the same class.
+    "cinnabar": "stone", "chiseled_cinnabar": "stone", "polished_cinnabar": "stone",
+    "cinnabar_bricks": "stone_bricks",
+    "sulfur": "stone", "chiseled_sulfur": "stone", "polished_sulfur": "stone",
+    "sulfur_bricks": "stone_bricks",
+    "golden_dandelion": "dandelion", "potted_golden_dandelion": "potted_dandelion",
+    "red_shrub": "dead_bush",
+    "straw_bed": "red_bed",                    # AbstractBedBlock: facing/part/occupied
+    "sulfur_spike": "pointed_dripstone",       # SpeleothemBlock: tip dir/thickness/waterlogged
+    "poplar_planks": "oak_planks", "poplar_log": "oak_log", "poplar_wood": "oak_wood",
+    "stripped_poplar_log": "stripped_oak_log", "stripped_poplar_wood": "stripped_oak_wood",
+    "poplar_sapling": "oak_sapling", "potted_poplar_sapling": "potted_oak_sapling",
+    "orange_poplar_leaves": "oak_leaves", "red_poplar_leaves": "oak_leaves",
+    "yellow_poplar_leaves": "oak_leaves",
 }
+# Generic family suffixes for the same additions: only consulted when the
+# upstream row is missing, so they never override a 1.21.6 block. Order
+# matters — the more specific sign/fence forms come first.
+ALIAS_SUFFIX += [
+    ("_wall_hanging_sign", "oak_wall_hanging_sign"),
+    ("_hanging_sign",      "oak_hanging_sign"),
+    ("_wall_sign",         "oak_wall_sign"),
+    ("_sign",              "oak_sign"),
+    ("_fence_gate",        "oak_fence_gate"),
+    ("_fence",             "oak_fence"),
+    ("_door",              "oak_door"),
+    ("_trapdoor",          "oak_trapdoor"),
+    ("_button",            "oak_button"),
+    ("_pressure_plate",    "oak_pressure_plate"),
+    ("_slab",              "oak_slab"),
+    ("_stairs",            "oak_stairs"),
+    ("_wall",              "cobblestone_wall"),
+]
 
 # Not blocks: artifacts of the block-list generator. No properties, on purpose.
 NOT_A_BLOCK = {"model_name", "set_spawn", "ominous_banner"}
@@ -142,6 +175,15 @@ EXPLICIT = {
         ("waterlogged", "bool", ["true", "false"],                             "false"),
     ],
     # CopperGolemStatueBlock.java:66 + :61
+    # 26.3 PotentSulfurBlock: BlockStateProperties.POTENT_SULFUR_STATE.
+    "potent_sulfur": [
+        ("state", "enum", ["dry", "wet", "dormant", "erupting", "continuous"], "dry"),
+    ],
+    # 26.3 ShelfMushroomBlock: builder.add(FACING, AGE) with AGE_1.
+    "shelf_mushroom": [
+        ("age",    "int",  ["0", "1"],                          "0"),
+        ("facing", "enum", ["north", "south", "west", "east"], "north"),
+    ],
     "*copper_golem_statue": [
         ("copper_golem_pose", "enum", ["standing", "sitting", "running", "star"], "standing"),
         ("facing",            "enum", ["north", "south", "west", "east"],         "north"),

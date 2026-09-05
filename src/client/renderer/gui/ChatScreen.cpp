@@ -9,6 +9,39 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <unordered_map>
+
+namespace {
+    // Ids under data/minecraft/worldgen/<kind>/*.json ("structure", "biome"),
+    // once per kind, for /locate's completion. The data root is the one the
+    // server uses (MC_DATA_ROOT, else ./data).
+    // The registry ids, then the tag names (data/minecraft/tags/worldgen/
+    // <kind>/*.json, top level only — has_structure/… is a hundred entries
+    // of noise). The server takes a bare tag name as the tag, so both are
+    // typed the same way; a tag result names the member it found.
+    std::vector<std::string> WorldgenIds(const std::string& kind) {
+        static std::unordered_map<std::string, std::vector<std::string>> cache;
+        auto it = cache.find(kind);
+        if (it != cache.end()) return it->second;
+        const char* env = std::getenv("MC_DATA_ROOT");
+        const std::filesystem::path root = std::filesystem::path(env ? env : "data") / "minecraft";
+        auto stems = [](const std::filesystem::path& dir) {
+            std::vector<std::string> out;
+            std::error_code ec;
+            for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+                if (e.is_regular_file(ec) && e.path().extension() == ".json") out.push_back(e.path().stem().string());
+            }
+            std::sort(out.begin(), out.end());
+            return out;
+        };
+        std::vector<std::string> ids = stems(root / "worldgen" / kind);
+        for (const std::string& tag : stems(root / "tags" / "worldgen" / kind)) ids.push_back(tag);
+        cache[kind] = ids;
+        return ids;
+    }
+}
 
 namespace {
     // Wall-clock millis since some fixed epoch, mirroring Java's System.currentTimeMillis() /
@@ -203,7 +236,9 @@ namespace {
             {"summon",      "/summon <entity> [count] [<x> <y> <z>] [fuse=n] [delay=n]"},
             {"sheepeat",    "/sheepeat [radius]"},
             {"seed",        "/seed"},
-            {"time",        "/time <set|add|query> <value>"},
+            {"time",        "/time <set|add|query> <time>  (time: <n>[t|s|d])"},
+            {"dimension",   "/dimension <overworld|nether|end>  (travels as the dimension's portal would from where you stand)"},
+            {"locate",      "/locate <structure|biome|poi> <id|#tag>"},
             {"gamerule",    "/gamerule <rule> [value]"},
             {"portal",      "/portal <make|make_biway|make_full> <w> <h> <dim> <x> <y> <z> | "
                             "make_loop <w> <h> <dx> <dy> <dz> [turn] | make_mirror <w> <h> | "
@@ -346,13 +381,38 @@ namespace {
                 if (argIndex == 1) candidates = {"all", "tnt"};
             } else if (cmd == "sheepeat") {
                 if (argIndex == 1) candidates = {"8", "16"};
+            } else if (cmd == "dimension" || cmd == "dim") {
+                if (argIndex == 1) candidates = {"end", "nether", "overworld"};
+            } else if (cmd == "locate") {
+                if (argIndex == 1) {
+                    candidates = {"biome", "poi", "structure"};
+                } else if (argIndex == 2) {
+                    // The registry names come from the data pack's files, the
+                    // same ones the server reads (MC suggests the registry).
+                    const std::string sub = tokens.size() > 1 ? ToLowerCopy(tokens[1]) : "";
+                    if (sub == "structure" || sub == "biome") candidates = WorldgenIds(sub);
+                    else if (sub == "poi") candidates = {"nether_portal"};
+                }
             } else if (cmd == "time") {
                 if (argIndex == 1) {
                     candidates = {"add", "query", "set"};
                 } else if (argIndex == 2) {
                     const std::string sub = tokens.size() > 1 ? ToLowerCopy(tokens[1]) : "";
-                    if (sub == "query")    candidates = {"day", "daytime", "gametime"};
-                    else if (sub == "set") candidates = {"day", "midnight", "night", "noon"};
+                    if (sub == "query") {
+                        candidates = {"day", "daytime", "gametime"};
+                    } else if (sub == "set" || sub == "add") {
+                        // MC TimeArgument.listSuggestions: once a number is
+                        // typed, offer it with each unit (d, s, t) appended.
+                        size_t n = 0;
+                        while (n < word.size() && ((word[n] >= '0' && word[n] <= '9') ||
+                                                   word[n] == '.' || word[n] == '-')) ++n;
+                        if (n > 0) {
+                            const std::string number = word.substr(0, n);
+                            candidates = {number + "d", number + "s", number + "t"};
+                        } else if (sub == "set") {
+                            candidates = {"day", "midnight", "night", "noon"};
+                        }
+                    }
                 }
             } else if (cmd == "gamerule") {
                 if (argIndex == 1) {
@@ -433,7 +493,7 @@ namespace Render {
         // It is deliberately NOT kept up to date — the whole point of the
         // packet is that this list stops mattering.
         std::vector<std::string> s_serverCommandNames = {
-            "difficulty", "entitystats", "gamemode", "gamerule", "kick", "kill", "portal", "scale", "seed",
+            "difficulty", "dimension", "entitystats", "gamemode", "gamerule", "kick", "kill", "locate", "portal", "scale", "seed",
             "shape", "sheepeat", "summon", "teleport", "tick", "time", "tp",
         };
     } // namespace

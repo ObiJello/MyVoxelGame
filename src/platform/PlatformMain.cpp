@@ -3,6 +3,7 @@
 #include "Time.hpp"
 #include "client/input/Input.hpp"
 #include "client/input/KeyMapping.hpp"
+#include "client/dev/SessionReplay.hpp"
 #include "common/core/Log.hpp"
 #include <sentry.h>
 #include "common/core/Config.hpp"
@@ -79,6 +80,7 @@
 #include "client/renderer/environment/SkyRenderer.hpp"
 #include "client/renderer/environment/CloudRenderer.hpp"
 #include "client/renderer/gui/screens/OptionsScreens.hpp"
+#include "client/renderer/gui/screens/SkyboxSelectScreen.hpp"
 #include "client/network/FriendsClient.hpp"
 #include "client/network/UPnPPortMapper.hpp"
 #include "common/core/FriendsServiceConfig.hpp"
@@ -110,7 +112,9 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 
 // Include mesh system headers
 #include "client/renderer/mesh/ChunkRenderer.hpp"
+#include "client/renderer/debug/FlickerDiag.hpp"
 #include "client/renderer/mesh/Mesher.hpp"
+#include "client/renderer/mesh/MeshCensus.hpp"
 #include "client/renderer/mesh/ClientMeshManager.hpp"
 #include "client/renderer/mesh/MeshUploadPermits.hpp"
 
@@ -121,6 +125,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "client/network/NetworkIOService.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/world/storage/anvil/WorldFolder.hpp"
+#include "server/world/storage/anvil/WorldSidecar.hpp"
 #include "server/network/NetworkServer.hpp"
 #include "client/world/ClientChunkManager.hpp"
 #ifdef __APPLE__
@@ -207,6 +212,10 @@ static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
 #include "common/core/Assert.hpp"   // Client::g_clientThreadId
 
 #include "platform/GameDirectory.hpp"
+#include "client/resource/ResourcePacks.hpp"
+#include "client/renderer/viewmodel/HeldItemSpriteMesh.hpp"
+#include "client/renderer/entity/ItemEntityRenderer.hpp"
+#include <thread>
 #include "platform/CrashHandler.hpp"
 #include "common/core/JobSystem.hpp"
 #include "common/core/TickParallel.hpp"
@@ -217,6 +226,8 @@ static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
 #include <objc/objc.h>
 #include <objc/message.h>
 #include <unistd.h>
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
 #endif
 
 namespace Game {
@@ -280,7 +291,8 @@ static bool s_debugSystemInitialized = false;
 static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
 
-    std::string GetAssetPath(const std::string& relativePath) {
+    // The engine's own copy of an asset (bundle Resources, or the tree).
+    std::string GetVanillaAssetPath(const std::string& relativePath) {
 #ifdef __APPLE__
         // On macOS, check if we're running from a bundle
         CFBundleRef mainBundle = CFBundleGetMainBundle();
@@ -308,6 +320,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // On other platforms, use relative path directly
         return relativePath;
 #endif
+    }
+
+    // MC's FallbackResourceManager in one line: an enabled resource pack
+    // that carries the asset wins over the engine's copy.
+    std::string GetAssetPath(const std::string& relativePath) {
+        if (std::string pack = Resources::FindOverride(relativePath); !pack.empty()) return pack;
+        return GetVanillaAssetPath(relativePath);
     }
 
     void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& proj,
@@ -710,6 +729,74 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         return true;
     }
 
+    // MC Minecraft.reloadResourcePacks, for the parts of this engine that
+    // can be rebuilt while it runs: the block atlas and colormaps, the GUI
+    // atlas, font and menu sheets, the sky and cloud textures, every
+    // renderer's texture cache (through Resources::CacheStale) and the
+    // chunk meshes (their UVs moved with the atlas). Block models,
+    // blockstates, item definitions and lang are startup-only — see
+    // ResourcePacks.hpp — and the pack screen says so.
+    void ReloadResources() {
+        if (!Resources::ApplySelection()) return;
+        Log::Info("[ResourcePacks] reloading resources...");
+
+        // The mesh workers read the atlas UV table while they build; let
+        // the ones in flight finish before the table is replaced.
+        if (Threading::g_clientWorkerPool) {
+            Threading::g_clientWorkerPool->CancelAllJobs();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (Threading::g_clientWorkerPool->GetActiveJobCount() > 0 &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+
+        if (Render::g_atlasBuilder) {
+            Render::g_atlasBuilder->ReleaseGpuResources();
+            if (!Render::g_atlasBuilder->BuildFromJSON(GetAssetPath("assets/atlases/blocks.json"),
+                                                        GetAssetPath("assets/textures"))) {
+                Log::Error("[ResourcePacks] block atlas rebuild failed");
+            }
+        }
+        Game::BiomeRegistry::LoadColormaps(GetAssetPath("assets/textures"));
+        // The workers cache sprite rects and ids per thread; the new atlas
+        // numbered its sprites afresh.
+        Render::Mesher::InvalidateAtlasCaches();
+        Render::g_blockBreakOverlay.InvalidateAtlas();
+
+        g_guiAtlas.Shutdown();
+        if (!g_guiAtlas.Initialize(GetAssetPath("assets/textures/gui/sprites"))) {
+            Log::Warning("[ResourcePacks] GUI atlas rebuild failed");
+        }
+        g_fontRenderer.Shutdown();
+        if (!g_fontRenderer.Initialize(GetAssetPath("assets/textures/font/ascii.png"))) {
+            Log::Warning("[ResourcePacks] font rebuild failed");
+        }
+        Render::g_crosshair.Shutdown();
+        Render::g_crosshair.Initialize(GetAssetPath("assets/textures/gui/sprites/hud/crosshair.png"));
+        Render::ResetMenuTextures();
+        Render::HeldItemSpriteMesh::ClearCache();
+        Render::ClearBlockItemMeshCacheForReload();
+        Render::g_mobParticleSystem.ReloadTextures();
+        Render::g_skyRenderer.ReloadResources();
+        Render::g_cloudRenderer.ReloadTexture();
+
+        // MC LevelRenderer.allChanged: every section is rebuilt with the new
+        // atlas (its UVs) and colormaps.
+        if (Render::g_clientMeshManager && Client::g_clientChunkManager) {
+            std::vector<Render::ClientMeshManager::SectionKey> keys;
+            Render::g_clientMeshManager->ForEachActiveSection(
+                [&keys](const Render::ClientMeshManager::SectionKey& key, const Render::GPUSectionData*) { keys.push_back(key); });
+            for (const auto& key : keys) {
+                Client::g_clientChunkManager->MarkSectionDirty(key.chunkPos, key.sectionY);
+            }
+            Log::Info("[ResourcePacks] %zu sections queued for remesh", keys.size());
+        }
+        if (Resources::AnyEnabledPackHasStartupOnlyContent()) {
+            Log::Info("[ResourcePacks] a selected pack carries models / blockstates / items / lang: those apply at the next launch");
+        }
+    }
+
     void HandlePlayerInput(Game::ClientPlayer& player, Game::ClientPlayerController& controller, Render::Camera& camera, bool cursorVisible, bool freeCamDetached) {
         // When the cursor is visible (Tab-toggle, inventory or chat
         // open) the player is interacting with UI, not the world —
@@ -797,27 +884,25 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
         }
 
-        // Pick block (P key) — server-authoritative. The previous flow only
-        // mutated the client's local inventory, so the server's view stayed
-        // empty and every subsequent placement / inventory-click silently
-        // failed (with the predictive HUD count drifting down to 0). The
-        // controller now both predicts the local change AND sends an
-        // InventoryClickC2S {CREATIVE_FILL_SLOT} so the server matches.
+        // Pick block (P key) — MC Minecraft.pickBlock: the client only says
+        // what it aimed at (an entity under the crosshair beats the block
+        // behind it); the server resolves the item and places it —
+        // PlayerSession::HandlePickItem. Creative only in this game, and the
+        // server enforces that too.
         if (Input::ConsumeClick(*Input::Binds::PickItem)) {
-            if (!freeCamDetached) {
-                // An entity under the crosshair (nearer than the block
-                // behind it) picks its spawn egg — MC Minecraft.pickBlock.
-                Game::ItemID egg = Game::Items::Air;
-                if (const int32_t entityId = controller.PickEntity(); entityId != 0 && Client::g_clientMobManager) {
-                    const Game::EntityTypeId type = Client::g_clientMobManager->EntityTypeOf(entityId);
-                    for (const auto& entry : Game::kSpawnEggTable) {
-                        if (entry.type == type) { egg = entry.item; break; }
-                    }
-                }
-                if (egg != Game::Items::Air) {
-                    controller.OnPickItem(egg);
+            const bool creative = player.gameModeKnown && player.gameMode == 1;
+            if (!freeCamDetached && creative) {
+                Network::PickItemC2SPacket pick;
+                if (const int32_t entityId = controller.PickEntity(); entityId != 0) {
+                    pick.kind = Network::PickItemC2SPacket::Kind::Entity;
+                    pick.entityId = entityId;
+                    controller.SendPickItem(pick);
                 } else if (player.lastBlockHit.has_value()) {
-                    controller.OnPickBlock(player.lastBlockHit->blockId);
+                    pick.kind = Network::PickItemC2SPacket::Kind::Block;
+                    pick.x = player.lastBlockHit->blockPos.x;
+                    pick.y = player.lastBlockHit->blockPos.y;
+                    pick.z = player.lastBlockHit->blockPos.z;
+                    controller.SendPickItem(pick);
                 }
             }
         }
@@ -925,10 +1010,90 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
     // Fullscreen toggle state
     static bool s_isFullscreen = false;
+    // Native full-screen transitions animate for ~1 s; the tracker below must
+    // not read the OLD state during that window and "correct" the setting.
+    static double s_fullscreenSettleUntil = 0.0;
     static int s_windowedX = 0, s_windowedY = 0;
     static int s_windowedWidth = Config::WindowWidth, s_windowedHeight = Config::WindowHeight;
 
+#ifdef __APPLE__
+    // macOS: the NATIVE full screen (the window's own Space, what the green
+    // button does), not GLFW's borderless window over the display. Game
+    // Mode only engages for a game in a full-screen Space; GLFW's
+    // monitor-mode window never qualified, so the game never got it. GLFW
+    // tracks the transition itself (it observes the window's full-screen
+    // notifications), so its size callbacks and swapchain recreation run as
+    // for any resize. Plain ObjC runtime calls, as the launcher does for
+    // its colour space — no Objective-C++ translation unit needed.
+    namespace {
+        bool MacIsNativeFullscreen(GLFWwindow* window) {
+            id ns = glfwGetCocoaWindow(window);
+            if (!ns) return false;
+            const unsigned long mask =
+                ((unsigned long (*)(id, SEL))objc_msgSend)(ns, sel_registerName("styleMask"));
+            return (mask & (1ul << 14)) != 0;   // NSWindowStyleMaskFullScreen
+        }
+        void MacToggleNativeFullscreen(GLFWwindow* window) {
+            id ns = glfwGetCocoaWindow(window);
+            if (!ns) return;
+            unsigned long behavior =
+                ((unsigned long (*)(id, SEL))objc_msgSend)(ns, sel_registerName("collectionBehavior"));
+            behavior |= (1ul << 7);             // NSWindowCollectionBehaviorFullScreenPrimary
+            ((void (*)(id, SEL, unsigned long))objc_msgSend)(ns, sel_registerName("setCollectionBehavior:"), behavior);
+            ((void (*)(id, SEL, id))objc_msgSend)(ns, sel_registerName("toggleFullScreen:"), nullptr);
+        }
+    }
+#endif
+
+#ifdef __APPLE__
+    // Logs native full-screen transitions however they happen — F11, the
+    // green button, Esc — so a session's log says whether the window was
+    // ever in the state Game Mode needs. Cheap: one ObjC call, every 30th
+    // frame.
+    void MacTrackNativeFullscreen(GLFWwindow* window) {
+        static int  s_counter = 0;
+        static int  s_known   = -1;   // -1 unknown, else 0/1
+        if ((++s_counter % 30) != 0) return;
+        const int now = MacIsNativeFullscreen(window) ? 1 : 0;
+        if (now == s_known) return;
+        if (s_known != -1 || now == 1) {
+            Log::Info("[GameMode] native full screen is now %s", now ? "ON (Game Mode eligible)" : "off");
+        }
+        s_known = now;
+        // The green button, the View menu and macOS's own Esc change the
+        // window behind ToggleFullscreen's back. Mirror them into the flag
+        // and the saved option: entered with the green button, the options
+        // screen showed "Fullscreen: OFF" and switching it on LEFT full
+        // screen (ToggleFullscreen toggles the real window), and the next
+        // launch came up windowed. Skipped while a ToggleFullscreen of our
+        // own is still animating, so the old state is not written back.
+        if (glfwGetTime() >= s_fullscreenSettleUntil && s_isFullscreen != (now == 1)) {
+            s_isFullscreen = (now == 1);
+            Platform::g_gameSettings.SetFullscreen(s_isFullscreen);
+            Platform::g_gameSettings.Save();
+        }
+    }
+#endif
+
     void ToggleFullscreen(GLFWwindow* window) {
+#ifdef __APPLE__
+        // The window's ACTUAL state, not the flag: the green button and Esc
+        // leave native full screen behind our back.
+        const bool actual = MacIsNativeFullscreen(window);
+        if (!actual) {
+            glfwGetWindowPos(window, &s_windowedX, &s_windowedY);
+            glfwGetWindowSize(window, &s_windowedWidth, &s_windowedHeight);
+        }
+        MacToggleNativeFullscreen(window);
+        s_isFullscreen = !actual;
+        s_fullscreenSettleUntil = glfwGetTime() + 2.0;
+        Log::Info(s_isFullscreen ? "Entering native full screen (Game Mode eligible)"
+                                 : "Leaving native full screen");
+        Platform::g_gameSettings.SetFullscreen(s_isFullscreen);
+        Input::SaveKeyBindings();
+        Platform::g_gameSettings.Save();
+        return;
+#endif
         if (s_isFullscreen) {
             glfwSetWindowMonitor(window, nullptr,
                 s_windowedX, s_windowedY,
@@ -986,6 +1151,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             a.difficulty      = e.difficulty;
             a.skybox          = e.skybox;
             a.skyboxMode      = e.skyboxMode;
+            a.babyModels      = e.babyModels;
             out = std::move(a);
             return true;
         }
@@ -1109,6 +1275,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                             ? GLFW_TRUE : GLFW_FALSE);
                 }
             }
+            if (applied & Render::ScreenManager::APPLY_RESOURCE_PACKS) {
+                ReloadResources();
+            }
             if (applied & Render::ScreenManager::APPLY_MIPMAPS) {
                 if (Render::g_atlasBuilder)
                     Render::g_atlasBuilder->SetMipmapLevels(Platform::g_gameSettings.GetMipmapLevels());
@@ -1216,6 +1385,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
     bool InitializeGameSystems(GLFWwindow* window) {
         Log::Info("Initializing game systems...");
+
+        // Resource packs first: everything below reads assets, and a pack
+        // has to be able to replace any of them. options.txt is loaded much
+        // later (InitializeGameDirectorySystem), so the two lists are read
+        // straight off the disk here, MC's Options.resourcePacks and
+        // incompatibleResourcePacks.
+        Resources::Initialize(
+            Platform::GameDirectory::GetDefaultGameDirectory() + "/resourcepacks",
+            GetVanillaAssetPath("assets"),
+            Resources::ParsePackList(Platform::GameSettings::PeekStringFromDisk("resourcePacks", "[]")),
+            Resources::ParsePackList(Platform::GameSettings::PeekStringFromDisk("incompatibleResourcePacks", "[]")));
 
         // Biome colour tables. Loads PNGs into CPU tables and precomputes from
         // the static biome table — depends on no registry, so it can come
@@ -1401,6 +1581,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Clipboard, for chat's copy-on-click segments. Installed here because
         // this is the only place that owns the GLFWwindow; the GUI layer has no
         // other reason to know about GLFW.
+        // MC Screen.handleComponentClicked: RunCommand sends the value the way
+        // a typed line goes (the server routes a leading '/' to its
+        // dispatcher); SuggestCommand opens the chat with the value in it.
+        Render::SetRunCommandHandler([](const std::string& command) {
+            if (Client::g_networkClient && Client::g_networkClient->IsConnected()) {
+                if (auto conn = Client::g_networkClient->GetConnection()) conn->SendChatMessage(command);
+            }
+        });
+        Render::SetSuggestCommandHandler([](const std::string& command) {
+            g_chatScreen.Open(false);
+            g_chatScreen.InsertText(command);
+        });
         Render::SetClipboardHandler([](const std::string& text) {
             if (GLFWwindow* w = glfwGetCurrentContext()) {
                 glfwSetClipboardString(w, text.c_str());
@@ -1418,9 +1610,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::ChatSegment seg;
                 seg.text  = s.text;
                 seg.color = s.color;
-                seg.click = (s.click == Network::ChatClickAction::CopyToClipboard)
-                          ? Render::ChatClickAction::CopyToClipboard
-                          : Render::ChatClickAction::None;
+                switch (s.click) {
+                    case Network::ChatClickAction::CopyToClipboard: seg.click = Render::ChatClickAction::CopyToClipboard; break;
+                    case Network::ChatClickAction::RunCommand:      seg.click = Render::ChatClickAction::RunCommand;      break;
+                    case Network::ChatClickAction::SuggestCommand:  seg.click = Render::ChatClickAction::SuggestCommand;  break;
+                    default:                                        seg.click = Render::ChatClickAction::None;            break;
+                }
                 seg.clickValue = s.clickValue;
                 seg.hoverText  = s.hoverText;
                 segments.push_back(std::move(seg));
@@ -1540,10 +1735,31 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         //                         lines are sent (default 8)
         //   --quit-after <sec>    close the game this many seconds after
         //                         session start (0 = never)
+        //   --env NAME=VALUE      set an environment variable at startup (the
+        //                         OBEY_* switches, through play.sh's launch)
+        //   --record <name>       record the player's pose every frame from
+        //                         the moment the level has loaded, saved to
+        //                         <obeycraft>/recordings/<name>.rec when the
+        //                         session ends (in-game: "/record <name>",
+        //                         "/record stop")
+        //   --replay <name>       drive the player along that recording by
+        //                         time — same views at the same seconds at
+        //                         any frame rate — and quit when it ends
+        //                         (unless --quit-after is set). In-game:
+        //                         "/replay <name>", "/replay stop".
+        //   --replay-hold <sec>   how long the player is parked on the
+        //                         recording's first pose before playback
+        //                         starts, so the chunks around it stream in
+        //                         the same way every run (default 8)
+        // See src/client/dev/SessionReplay.hpp for what a replay does and
+        // does not reproduce (portal crossings yes, block breaking no).
         // While active, a "[Harness]" line is logged every second with the
         // client and server entity counts, so time-to-done can be read from
         // the log without a profiler attached.
         std::string devWorldName;
+        std::string devRecordName;
+        std::string devReplayName;
+        double      devReplayHoldSec = 8.0;
         std::vector<std::string> devExecCommands;
         // --exec-late "<cmd>": sent 5 s before --quit-after fires.
         std::vector<std::string> devExecLateCommands;
@@ -1586,8 +1802,38 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 devQuitAfterSec = std::atof(argv[++i]);
                 continue;
             }
+            // --env NAME=VALUE: set an environment variable before any system
+            // reads it. The OBEY_* kill switches (OBEY_NO_FACE_CULL,
+            // OBEY_NO_TWO_SIDED, OBEY_MESH_CENSUS, ...) are read lazily, so
+            // this makes them usable from tools/play.sh, whose LaunchServices
+            // launch drops the caller's environment.
+            if (arg == "--env" && i + 1 < argc) {
+                const std::string kv = argv[++i];
+                const size_t eq = kv.find('=');
+                const std::string name = kv.substr(0, eq);
+                const std::string value = (eq == std::string::npos) ? "1" : kv.substr(eq + 1);
+#ifdef _WIN32
+                _putenv_s(name.c_str(), value.c_str());
+#else
+                setenv(name.c_str(), value.c_str(), 1);
+#endif
+                Log::Info("--env %s=%s", name.c_str(), value.c_str());
+                continue;
+            }
             if (arg == "--remesh-at" && i + 1 < argc) {
                 devRemeshAtSec = std::atof(argv[++i]);
+                continue;
+            }
+            if (arg == "--record" && i + 1 < argc) {
+                devRecordName = argv[++i];
+                continue;
+            }
+            if (arg == "--replay" && i + 1 < argc) {
+                devReplayName = argv[++i];
+                continue;
+            }
+            if (arg == "--replay-hold" && i + 1 < argc) {
+                devReplayHoldSec = std::atof(argv[++i]);
                 continue;
             }
             if (arg == "--vulkan") {
@@ -1787,6 +2033,34 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             glfwTerminate();
             return -2;
         }
+#ifdef __APPLE__
+        // What macOS Game Mode will see: the running bundle's category. It
+        // engages only for a games category in native full screen, and a
+        // process launched from a bundle without the key (an older
+        // installed copy, a bare executable) never gets it — this line is
+        // the first thing to check when the menu-bar icon says "off".
+        {
+            const char* category = "(none)";
+            std::string categoryStorage;
+            bool supportsGameMode = false;
+            if (CFBundleRef bundle = CFBundleGetMainBundle()) {
+                if (CFTypeRef v = CFBundleGetValueForInfoDictionaryKey(bundle, CFSTR("LSApplicationCategoryType"))) {
+                    char buf[128] = {0};
+                    if (CFGetTypeID(v) == CFStringGetTypeID() &&
+                        CFStringGetCString(static_cast<CFStringRef>(v), buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                        categoryStorage = buf;
+                        category = categoryStorage.c_str();
+                    }
+                }
+                if (CFTypeRef v = CFBundleGetValueForInfoDictionaryKey(bundle, CFSTR("GCSupportsGameMode"))) {
+                    supportsGameMode = CFGetTypeID(v) == CFBooleanGetTypeID() &&
+                                       CFBooleanGetValue(static_cast<CFBooleanRef>(v));
+                }
+            }
+            Log::Info("[GameMode] bundle category=%s GCSupportsGameMode=%d (needs a games category + native full screen)",
+                      category, supportsGameMode ? 1 : 0);
+        }
+#endif
 
         if (!useVulkan) {
             glfwMakeContextCurrent(window);
@@ -1862,6 +2136,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         if (!Platform::InitializeGameDirectorySystem()) {
             Log::Error("Failed to initialize game directory system");
             return -1;
+        }
+        // Options.loadSelectedResourcePacks dropped packs that no longer
+        // exist or are no longer compatible when the lists were read early;
+        // options.txt takes the cleaned lists.
+        {
+            const Resources::OptionLists lists = Resources::CurrentOptionLists();
+            Platform::g_gameSettings.SetResourcePacks(Resources::SerializePackList(lists.selected));
+            Platform::g_gameSettings.SetIncompatibleResourcePacks(Resources::SerializePackList(lists.incompatible));
         }
 
         // Apply the SAVED vsync setting through the backend — this must run
@@ -1982,6 +2264,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 #if ENABLE_IMMERSIVE_PORTALS
         Render::g_immersivePortalRenderer.Shutdown();
 #endif
+                Render::SkyboxThumbnails::Get().Shutdown();   // preview cards, before the backend goes
                 Render::g_skyRenderer.Shutdown();
                 Render::g_cloudRenderer.Shutdown();
                 if (Render::g_atlasBuilder)    Render::g_atlasBuilder.reset();
@@ -2080,6 +2363,23 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // apply this world's skybox (multiplayer joins default to vanilla).
         Render::EnvironmentState::Get().ResetSession();
         Render::g_skyRenderer.SetSkybox(titleAction.skybox, titleAction.skyboxMode);
+        // This world's baby look (multiplayer joins and Minecraft saves get
+        // the default, New, for the session).
+        Render::SetBabyModelLook(titleAction.babyModels == "classic"
+                                     ? Render::BabyModelLook::Classic
+                                     : Render::BabyModelLook::New);
+        // A resource pack selection saved with this world (Options → Resource
+        // Packs while in it) stands in for the global one for the session.
+        if (!isRemoteClient && !titleAction.useMinecraftSave && !titleAction.worldName.empty()) {
+            std::string reason;
+            if (auto root = Game::Anvil::RootForWorldName(titleAction.worldName, reason)) {
+                const Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(root->Root().string());
+                if (sidecar.hasResourcePacks) {
+                    Resources::SelectFromOptionLists(sidecar.resourcePacks, sidecar.incompatibleResourcePacks);
+                    ReloadResources();
+                }
+            }
+        }
         // Enable the in-game World Settings screen. Sky choices persist to
         // worlds.json only for locally-hosted created worlds; multiplayer
         // and Minecraft-save sessions get session-only changes.
@@ -2699,7 +2999,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Dev harness state (see the --exec / --quit-after flags in Run()).
         const auto harnessStart      = std::chrono::steady_clock::now();
         const bool harnessActive     = !devExecCommands.empty() || devQuitAfterSec > 0.0 ||
-                                       !devExecAtCommands.empty();
+                                       !devExecAtCommands.empty() || !devReplayName.empty();
+        // Pose recording / replay (src/client/dev/SessionReplay.hpp). The
+        // CLI names are consumed here so a later session (quit to title,
+        // load another world) starts clean; the chat commands can start
+        // either at any time.
+        Client::Dev::PoseRecorder poseRecorder;
+        Client::Dev::PoseReplayer poseReplayer;
+        std::string poseRecordPending = devRecordName;   // started once the level has loaded
+        devRecordName.clear();
+        // --replay quits the game when the recording ends (that is the
+        // profiling run); a --quit-after on the command line wins, and a
+        // "/replay" typed in chat never quits.
+        bool poseReplayQuitWhenDone = false;
+        if (!devReplayName.empty()) {
+            poseReplayQuitWhenDone = poseReplayer.Load(devReplayName, devReplayHoldSec) &&
+                                     devQuitAfterSec <= 0.0;
+            devReplayName.clear();
+        }
+        const std::string poseWorldName = titleAction.worldName.empty()
+            ? (isRemoteClient ? remoteServerAddress : std::string("world")) : titleAction.worldName;
         std::vector<bool> harnessAtSent(devExecAtCommands.size(), false);
         bool       harnessExecSent   = false;
         bool       harnessLateSent   = false;
@@ -2795,6 +3114,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                               "serverItems=%ld fps=%d worstFrameMs=%.0f",
                               sec, clientMobs, serverTnt, serverFalling, serverItems,
                               harnessFrames, harnessWorstFrame);
+                    poseReplayer.LogProgress();
                     // Chunk streaming health: where chunks are in the pipeline
                     // (server cache → sent to client → client cache → meshed).
                     {
@@ -2916,6 +3236,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Log::Info("[Harness] --quit-after reached; closing");
                     glfwSetWindowShouldClose(window, GLFW_TRUE);
                 }
+                if (poseReplayQuitWhenDone && poseReplayer.Finished()) {
+                    poseReplayQuitWhenDone = false;
+                    Log::Info("[Harness] t=%.2fs --replay finished; closing", elapsed);
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                }
             }
 
             // Server dropped us (kick, host quit, connection lost). Same exit
@@ -2940,6 +3265,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             { PROFILE_ZONE_N("PollEvents");
             glfwPollEvents();
             }
+#ifdef __APPLE__
+            MacTrackNativeFullscreen(window);
+#endif
             { PROFILE_ZONE_N("KeyStates");
             Input::UpdateKeyStates();
             }
@@ -2962,6 +3290,22 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             if (Input::ConsumeClick(*Input::Binds::Fullscreen)) {
                 ToggleFullscreen(window);
             }
+#ifdef __APPLE__
+            {
+                // macOS's own full-screen shortcut, Control-Command-F. On a
+                // Mac keyboard F11 without Fn is Show Desktop and never
+                // reaches the game, which is how a fullscreen test could run
+                // without the window ever leaving windowed mode.
+                static bool s_chordHeld = false;
+                const bool cmd  = glfwGetKey(window, GLFW_KEY_LEFT_SUPER) == GLFW_PRESS ||
+                                  glfwGetKey(window, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS;
+                const bool ctrl = glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                                  glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+                const bool chord = cmd && ctrl && glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
+                if (chord && !s_chordHeld) ToggleFullscreen(window);
+                s_chordHeld = chord;
+            }
+#endif
 
             // ESC edge-detection is SHARED across every branch below. The
             // chat and inventory branches consume ESC to close themselves via
@@ -3093,6 +3437,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         }
                         Log::Info("Mesh options changed: %zu sections queued for remesh", keys.size());
                     }
+                }
+                if (applied & Render::ScreenManager::APPLY_RESOURCE_PACKS) {
+                    ReloadResources();
                 }
                 if (applied & Render::ScreenManager::APPLY_MIPMAPS) {
                     if (Render::g_atlasBuilder)
@@ -3257,6 +3604,58 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         // left to scroll back to.
                         g_chatComponent.Clear();
                         g_chatScreen.ClearHistory();
+                        submitted.clear();   // never reaches the server
+                    } else if (cmd == "/record" || cmd == "/replay") {
+                        // Pose recording / replay, client-side (see
+                        // SessionReplay.hpp and the --record/--replay flags).
+                        //   /record <name>   start (t=0 is now); /record stop saves
+                        //   /replay <name> [holdSeconds]   /replay stop
+                        std::string arg1, arg2;
+                        {
+                            std::istringstream rest(sp == std::string::npos
+                                ? std::string() : submitted.substr(sp));
+                            rest >> arg1 >> arg2;
+                        }
+                        auto say = [&](const std::string& text, uint32_t color = 0xFFAAAAAA) {
+                            g_chatComponent.AddMessage(text, color);
+                        };
+                        if (cmd == "/record") {
+                            if (arg1.empty()) {
+                                say(poseRecorder.Active()
+                                    ? "Recording \"" + poseRecorder.Name() + "\" - /record stop to save"
+                                    : "Usage: /record <name> | /record stop");
+                            } else if (arg1 == "stop") {
+                                if (poseRecorder.Active()) {
+                                    say("Saved recording \"" + poseRecorder.Name() + "\" (" +
+                                        std::to_string(poseRecorder.SampleCount()) + " samples)");
+                                    poseRecorder.Stop();
+                                } else {
+                                    say("Not recording");
+                                }
+                            } else if (poseRecorder.Start(arg1, poseWorldName)) {
+                                say("Recording \"" + arg1 + "\" - /record stop to save", 0xFF55FF55);
+                            }
+                        } else {
+                            if (arg1.empty()) {
+                                say(poseReplayer.Active()
+                                    ? "Replaying \"" + poseReplayer.Name() + "\" - /replay stop to end"
+                                    : "Usage: /replay <name> [holdSeconds] | /replay stop");
+                            } else if (arg1 == "stop") {
+                                if (poseReplayer.Active()) { poseReplayer.Stop(); say("Replay stopped"); }
+                                else say("Not replaying");
+                            } else {
+                                const double hold = arg2.empty() ? devReplayHoldSec : std::atof(arg2.c_str());
+                                if (poseReplayer.Load(arg1, hold)) {
+                                    poseReplayQuitWhenDone = false;
+                                    say("Replaying \"" + arg1 + "\" (" +
+                                        std::to_string(static_cast<int>(poseReplayer.Duration())) +
+                                        " s, holding " + std::to_string(static_cast<int>(hold)) + " s first)",
+                                        0xFF55FF55);
+                                } else {
+                                    say("Cannot load recording \"" + arg1 + "\" - see the log", 0xFFFF5555);
+                                }
+                            }
+                        }
                         submitted.clear();   // never reaches the server
                     }
                 }
@@ -3661,7 +4060,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 #if ENABLE_IMMERSIVE_PORTALS
             // The portals the player's physics collides across this frame,
             // from the active level (bound again after the drain).
-            Client::g_immersivePortalCollision.Update(glm::dvec3(player.physics.position),
+            Client::g_immersivePortalCollision.Update(glm::dvec3(player.GetEyePosition()),
                                                      player.physics.GetAABB());
 #endif
             PROFILE_TIMER_END(network, metrics.networkProcessingTime);
@@ -3737,6 +4136,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Client::g_clientMobManager->SetTime(
                         Render::EnvironmentState::Get().GameTime(),
                         Render::EnvironmentState::Get().DayTime());
+                    if (entitiesFrozen) {
+                        // No tick, but aiming still works in vanilla's frozen
+                        // world: keep the picker's candidate list current so
+                        // P / attacks / interactions reach mobs, including
+                        // ones spawned during the freeze.
+                        Client::g_clientMobManager->SetPickOrigin(
+                            glm::dvec3(player.physics.position));
+                        Client::g_clientMobManager->RefreshPickCandidates();
+                    }
                     if (!entitiesFrozen) {
                         Client::g_clientMobManager->SetPickOrigin(
                             glm::dvec3(player.physics.position));
@@ -3968,6 +4376,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // up in front of me and flickers for a frame on teleport."
             bool justTeleportedThisFrame = false;
 #endif
+            // A portal crossing (gun prediction or immersive traveler) moved
+            // the player this frame. The pose recorder files the frame's
+            // sample as a crossing, and the replayer's crossing handshake
+            // reads it (see SessionReplay.hpp).
+            bool poseCrossedThisFrame = false;
             { PROFILE_ZONE_N("GameLogic");
             PROFILE_TIMER_START(gamelogic);
             Time::Tick();
@@ -4012,6 +4425,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // 30-second escape hatch, so this cannot strand the player.
             if (player.health <= 0 || !Client::g_levelLoadTracker.IsLoaded()) {
                 player.physics.velocity = glm::vec3(0.0f);
+            } else if (poseReplayer.Active()) {
+                // Replay owns the pose: the recorded path is written in
+                // place of the physics step. Everything downstream — the
+                // portal crossing checks, the move packet, culling, mesh
+                // scheduling — sees an ordinary moving player.
+                poseReplayer.Apply(player, camera, dt,
+                    static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension())));
             } else {
                 player.UpdatePhysics(dt, Client::g_clientBlockAccess);
             }
@@ -4039,6 +4459,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     player.serverPos        = glm::dvec3(pred.newFeet);
                     player.visualPos        = glm::dvec3(pred.newFeet);
                     justTeleportedThisFrame = true;
+                    poseCrossedThisFrame    = true;
+                    poseReplayer.OnCrossing();
                     Log::Info("[PortalPredict] Client predicted teleport "
                               "to (%.2f,%.2f,%.2f) yaw %.1f pitch %.1f",
                               pred.newFeet.x, pred.newFeet.y, pred.newFeet.z,
@@ -4076,74 +4498,109 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     if (auto crossing = Client::g_immersivePortalTraveler.Check(
                             immersiveLastEye, eyeNow, glm::dvec3(player.physics.position),
                             crossVel, camera.yaw, camera.pitch, player.physics.scale)) {
+                        // Read off the record before Commit rebinds the level.
+                        const bool crossedGlobal = [&] {
+                            const Game::Immersive::Portal* p =
+                                Client::GetClientImmersivePortals().Get(crossing->portalId);
+                            return p && p->Has(Game::Immersive::PortalFlag::Global);
+                        }();
                         player.physics.position = glm::vec3(crossing->newFeet);
                         player.physics.velocity = crossing->newVelocity;
                         player.physics.scale    = crossing->newScale;
                         camera.yaw              = crossing->newYaw;
                         camera.pitch            = crossing->newPitch;
                         Client::g_immersivePortalTraveler.Commit(*crossing);
+                        poseCrossedThisFrame = true;
+                        poseReplayer.OnCrossing();
+                        // A crossing within one level (a wrap border) moves
+                        // the camera a world's width in one frame; the chunk
+                        // renderer's cached reachable sets are for where it
+                        // was. See ChunkRenderer::OnCameraTeleport.
+                        if (crossing->dimensionAfter == crossing->dimensionBefore &&
+                            Render::g_chunkRenderer) {
+                            Render::g_chunkRenderer->OnCameraTeleport();
+                        }
                         // The arrival box against the far side's blocks.
                         // A player brushing a wall on the way in lands
                         // touching the far wall — or, through a frame not
-                        // quite on the block grid, or a stair top a float
-                        // rounding below its edge, a hair inside it — and
+                        // quite on the block grid, a hair inside it — and
                         // the physics refuses every horizontal move from
-                        // an overlapping box. The smallest nudge that
-                        // frees the box is taken before the position is
-                        // committed anywhere; the far portal's own
+                        // an overlapping box. The smallest SIDEWAYS nudge
+                        // that frees the box is taken before the position
+                        // is committed anywhere; the far portal's own
                         // pass-through cells count as open, so the hooks
                         // are refreshed for the new spot first.
+                        //
+                        // Never vertical for an ordinary portal. A lift here
+                        // is a visible step on arrival, and it was only ever
+                        // covering for a box that had no business
+                        // overlapping: the flipped twin's collision engaging
+                        // while the body straddled the surface (see
+                        // ImmersivePortalCollision::Update). A body whose
+                        // feet do not fit the far opening cannot enter the
+                        // near one either (the same fit test gates both), so
+                        // there is no stair case left for a lift to solve.
                         {
-                            Client::g_immersivePortalCollision.Update(glm::dvec3(player.physics.position),
+                            Client::g_immersivePortalCollision.Update(glm::dvec3(player.GetEyePosition()),
                                                                      player.physics.GetAABB());
                             Game::PhysicsContext ctx;
                             ctx.blockAccess = Client::g_clientBlockAccess;
                             if (ctx.blockAccess &&
                                 Game::CheckCollision(player.physics.position, player.physics, ctx)) {
-                                // The crossing fires on the eye, so a body
-                                // climbing stairs can go through with its
-                                // feet a step or more below a wall portal's
-                                // bottom edge — and the far floor is there.
-                                // Upward the search reaches the whole body
-                                // height (the gun's own wall-exit lift, made
-                                // general); sideways stays short, a wall
-                                // brush is a hair, not a block.
                                 const float bodyScale = std::max(player.physics.scale, 0.05f);
                                 const float step      = 0.05f * bodyScale;
-                                const float reachSide = 0.7f * bodyScale;
-                                const float reach     = player.physics.GetEyeHeight() + 0.1f * bodyScale;
+                                // A wall brush is a hair, not a block.
+                                const float reachSide = 0.3f * bodyScale;
                                 // Never back toward the surface just left:
                                 // an eye nudged behind it would cross straight
-                                // back next frame. Sideways and up are the
-                                // nudges that free a wall or a stair anyway.
+                                // back next frame.
                                 const glm::vec3 onward(crossing->arrivalDirection);
                                 bool freed = false;
                                 glm::vec3 best(0.0f);
-                                for (float r = step; r <= reach + 1e-4f && !freed; r += step) {
-                                    // Up first at each radius (the stair-top
-                                    // case), then the four sides, then the
-                                    // diagonals; the first free one wins.
-                                    const glm::vec3 tries[] = {
-                                        { 0.0f,  r,  0.0f}, { r, 0.0f,  0.0f}, {-r, 0.0f,  0.0f},
-                                        { 0.0f, 0.0f,  r }, { 0.0f, 0.0f, -r },
-                                        { r, 0.0f,  r }, { r, 0.0f, -r }, {-r, 0.0f,  r }, {-r, 0.0f, -r },
-                                        { r,  r,  0.0f}, {-r,  r,  0.0f}, { 0.0f,  r,  r }, { 0.0f,  r, -r },
-                                    };
-                                    for (const glm::vec3& t : tries) {
-                                        if (glm::dot(t, onward) < -1e-4f) continue;
-                                        if ((t.x != 0.0f || t.z != 0.0f) && r > reachSide) continue;
-                                        if (!Game::CheckCollision(player.physics.position + t, player.physics, ctx)) {
-                                            best = t; freed = true; break;
+                                auto search = [&](bool allowBack, bool allowVertical, float reach) {
+                                    for (float r = step; r <= reach + 1e-4f && !freed; r += step) {
+                                        // The four sides, then the diagonals;
+                                        // the first free one wins. Vertical
+                                        // tries only for the global net below.
+                                        const glm::vec3 tries[] = {
+                                            { r, 0.0f,  0.0f}, {-r, 0.0f,  0.0f},
+                                            { 0.0f, 0.0f,  r }, { 0.0f, 0.0f, -r },
+                                            { r, 0.0f,  r }, { r, 0.0f, -r }, {-r, 0.0f,  r }, {-r, 0.0f, -r },
+                                            { 0.0f,  r,  0.0f},
+                                            { r,  r,  0.0f}, {-r,  r,  0.0f}, { 0.0f,  r,  r }, { 0.0f,  r, -r },
+                                        };
+                                        for (const glm::vec3& t : tries) {
+                                            if (!allowVertical && t.y != 0.0f) continue;
+                                            if (!allowBack && glm::dot(t, onward) < -1e-4f) continue;
+                                            if ((t.x != 0.0f || t.z != 0.0f) && r > reachSide) continue;
+                                            if (!Game::CheckCollision(player.physics.position + t, player.physics, ctx)) {
+                                                best = t; freed = true; break;
+                                            }
                                         }
                                     }
+                                };
+                                search(/*allowBack=*/false, /*allowVertical=*/false, reachSide);
+                                // A global seam (a stack floor, a wrap border)
+                                // is one-faced and its reverse faces the far
+                                // side, so a nudge back past the plane cannot
+                                // re-cross it — and under a floor seam "back"
+                                // is UP, out of the roof the far world may
+                                // have where the crossing landed (the far
+                                // floor normally holds the player above it;
+                                // this is the net under that). Last resort
+                                // only, and the only case a vertical nudge
+                                // is allowed at all.
+                                if (!freed && crossedGlobal) {
+                                    search(/*allowBack=*/true, /*allowVertical=*/true,
+                                           player.physics.GetEyeHeight() + 0.1f * bodyScale);
                                 }
                                 if (freed) {
                                     player.physics.position += best;
                                     Log::Info("[ImmersivePortals] Arrival nudged out of a block by (%.2f, %.2f, %.2f)",
                                               best.x, best.y, best.z);
                                 } else {
-                                    Log::Warning("[ImmersivePortals] Arrived inside a block and no nudge within %.2f freed it",
-                                                 reach);
+                                    Log::Warning("[ImmersivePortals] Arrived inside a block and no sideways nudge within %.2f freed it",
+                                                 reachSide);
                                 }
                             }
                         }
@@ -4166,6 +4623,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 }
             }
 #endif
+
+            // Pose recording: the frame's final pose, after physics and any
+            // crossing. Started here (not at session start) so t=0 is the
+            // first frame with a world to stand in.
+            if (!poseRecordPending.empty() && Client::g_levelLoadTracker.IsLoaded()) {
+                poseRecorder.Start(poseRecordPending, poseWorldName);
+                poseRecordPending.clear();
+            }
+            if (poseRecorder.Active()) {
+                poseRecorder.Sample(player, camera,
+                    static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension())),
+                    poseCrossedThisFrame);
+            }
 
             camera.position = player.GetEyePosition();
             if (freeCamActive) {
@@ -4195,6 +4665,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     ? Game::PlayerPhysics::NOCLIP_SPRINT_HORIZONTAL_SPEED
                     : player.physics.noclipHorizontalSpeed;
                 freeCam.Update(dt);
+            } else if (poseReplayer.Active()) {
+                // The replay wrote yaw/pitch; the mouse must not add to it.
+                // Same save/restore as the free camera, for the same reason.
+                const bool savedMouseLook = camera.enableMouseLook;
+                camera.enableMouseLook = false;
+                camera.Update(dt);
+                camera.enableMouseLook = savedMouseLook;
             } else {
                 camera.Update(dt);
             }
@@ -4409,6 +4886,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Render::ScheduleClientMeshBuilds(player.physics.position);
             PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
             }
+            Render::MeshCensus::DumpIfDue();   // OBEY_MESH_CENSUS=1 only
 
             // 7. Perform GPU uploads
             // Frame phase. The cost you see here is only the CPU side of
@@ -4447,6 +4925,21 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Frustum frustum;
             { PROFILE_ZONE_N("Render");
             PROFILE_TIMER_START(render);
+
+            // Pipeline warm-up behind the world-load screen, once per
+            // process: every pipeline any earlier session built is built
+            // now, while the overlay is up and nothing the player sees
+            // depends on the frame time. Frame two, not one, so the overlay
+            // has been drawn before the main thread blocks for the compile.
+            // See RenderBackend::WarmPipelines.
+            if (Render::g_renderBackend && !Client::g_levelLoadTracker.IsLoaded()) {
+                static int  s_loadingFrames = 0;
+                static bool s_warmed = false;
+                if (++s_loadingFrames >= 2 && !s_warmed) {
+                    s_warmed = true;
+                    Render::g_renderBackend->WarmPipelines();
+                }
+            }
 
             // Begin render backend frame (acquires swapchain image for Vulkan)
             if (Render::g_renderBackend) {
@@ -4489,9 +4982,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
                 const float envPartialTick =
                     std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                { PROFILE_ZONE_N("EnvUpdate");
                 Render::EnvironmentState::Get().UpdateFrame(
                     envPartialTick, camera.GetForward(), camera.position.y,
                     effectiveRenderDist, Platform::g_gameSettings.GetFogEnabled());
+                }
+                // Where the viewer stands, for an OptiFine sky's biome and
+                // height rules (OptiFine: the camera entity's block position).
+                if (Client::g_clientChunkManager) {
+                    const glm::ivec3 block(static_cast<int>(std::floor(camera.position.x)),
+                                           static_cast<int>(std::floor(camera.position.y)),
+                                           static_cast<int>(std::floor(camera.position.z)));
+                    Render::g_skyRenderer.SetObserver(
+                        block, Client::g_clientChunkManager->BiomeAtWorld(block.x, block.y, block.z));
+                }
             }
             const glm::vec3 clearColor = Render::EnvironmentState::Get().Frame().fogColor;
 
@@ -4578,7 +5082,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
 
             // Main chunk rendering (includes frustum culling and all render passes)
+            { PROFILE_ZONE_N("ChunkPass.Main");
             Render::RenderChunksAll(camera, frustum);
+            }
+            // Flicker diagnostics: the MAIN pass's numbers, read here and not
+            // at frame end — a portal view into this same level re-enters
+            // the renderer later in the frame and overwrites them.
+            if (Render::FlickerDiag::Enabled() && Render::g_chunkRenderer) {
+                auto* r = Render::g_chunkRenderer;
+                Render::FlickerDiag::Record("main.visible", r->GetLastVisibleCount());
+                Render::FlickerDiag::Record("main.reachable", r->GetLastReachableCount());
+                Render::FlickerDiag::RecordState("main.bfsSource", static_cast<int64_t>(r->LastPrepareSource()));
+                Render::FlickerDiag::Record("main.drawCalls", r->GetStats().totalDrawCalls);
+            }
 
             // The cull override applies to the MAIN view only — clear it
             // before the portal see-through pass re-enters RenderChunksAll,
@@ -4716,6 +5232,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     if (Client::g_clientMobManager && !Render::DevSkip("mobs")) {
                         // The main frustum: MC extractVisibleEntities culls
                         // against the same frustum the chunk pass used.
+                        PROFILE_ZONE_N("Render.Mobs");
                         mobRenderer.Render(proj, view, camera.position, frustum,
                                            *Client::g_clientMobManager, partialTick);
                     }
@@ -4732,10 +5249,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // in it, clipped to its own front. A two-faced portal cuts
                 // with the face the entity's centre is in front of.
                 {
+                    PROFILE_ZONE_N("EntityCut");
                     std::vector<const Game::Immersive::Portal*> cutPortals;
                     const glm::dvec3 here(player.physics.position);
                     Client::ClientLevels::Active().Portals().ForEach([&](const Game::Immersive::Portal& p) {
                         if (!p.Has(Game::Immersive::PortalFlag::Visible)) return;
+                        // Only a portal whose far side was drawn last frame:
+                        // one culled, too small on screen or over the view
+                        // budget shows nothing of its far side, so nothing cut
+                        // at it is visible either. Each portal here costs an
+                        // entity pass or two, and a dozen within 64 blocks
+                        // were ~1.2 ms a frame of passes nobody could see.
+                        if (!Render::g_immersivePortalRenderer.DrewLastFrame(p.id)) return;
                         glm::dvec3 mn, mx;
                         p.BoundingBox(mn, mx, 0.0);
                         if (glm::length(glm::clamp(here, mn, mx) - here) < 64.0) cutPortals.push_back(&p);
@@ -4743,12 +5268,21 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     if (cutPortals.empty()) {
                         drawWorldEntities();
                     } else {
+                        // The first pass visits every entity box against every
+                        // cut portal anyway; remember which portals actually
+                        // had something in them, so the per-portal near-side
+                        // passes below run only for those.
+                        std::vector<char> hasStraddler(cutPortals.size(), 0);
                         Render::EntityCulling::g_crossingFilter =
-                            [&cutPortals](const glm::vec3& lo, const glm::vec3& hi) {
-                                for (const Game::Immersive::Portal* p : cutPortals) {
-                                    if (p->IntersectsBox(glm::dvec3(lo), glm::dvec3(hi), 0.25)) return false;
+                            [&cutPortals, &hasStraddler](const glm::vec3& lo, const glm::vec3& hi) {
+                                bool clear = true;
+                                for (size_t i = 0; i < cutPortals.size(); ++i) {
+                                    if (cutPortals[i]->IntersectsBox(glm::dvec3(lo), glm::dvec3(hi), 0.25)) {
+                                        hasStraddler[i] = 1;
+                                        clear = false;
+                                    }
                                 }
-                                return true;
+                                return clear;
                             };
                         drawWorldEntities();
                         // Each surface the VIEWER is in front of draws what
@@ -4759,7 +5293,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         // behind the surface (and covered by the portal
                         // view), its near half drawn by nobody, and the
                         // player vanished for the last step of a crossing.
-                        for (const Game::Immersive::Portal* p : cutPortals) {
+                        for (size_t i = 0; i < cutPortals.size(); ++i) {
+                            const Game::Immersive::Portal* p = cutPortals[i];
+                            if (!hasStraddler[i]) continue;
                             if (!p->IsInFront(glm::dvec3(camera.position))) continue;
                             Render::EntityCulling::g_crossingFilter =
                                 [p](const glm::vec3& lo, const glm::vec3& hi) {
@@ -5056,13 +5592,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     itemEntityRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
                                               ctx.partialTick);
                     {
-                        // Always on while a far store holds items (rare and
-                        // cheap); OBEY_PORTAL_DIAG=1 logs even when it is empty.
+                        // Only under OBEY_PORTAL_DIAG=1, like the other
+                        // [PortalDiag] lines. It used to fire on its own
+                        // whenever a far store held items, which after the
+                        // immersive-portal work is just every session with a
+                        // dropped item in another level.
                         static const bool kPortalDiag = std::getenv("OBEY_PORTAL_DIAG") != nullptr;
                         static auto lastItemDiag = std::chrono::steady_clock::now();
                         const auto nowDiag = std::chrono::steady_clock::now();
-                        const bool haveFarItems = itemEntityRenderer.LastTally().entities > 0;
-                        if ((kPortalDiag || haveFarItems) && nowDiag - lastItemDiag >= std::chrono::seconds(2)) {
+                        if (kPortalDiag && nowDiag - lastItemDiag >= std::chrono::seconds(2)) {
                             lastItemDiag = nowDiag;
                             const auto& t = itemEntityRenderer.LastTally();
                             std::string where;
@@ -5237,7 +5775,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Render::EntityCulling::g_crossingFilter = nullptr;
                 };
                 Render::g_immersivePortalRenderer.Render(proj, view, camera, frustum, aspect,
-                                                         farPlane, partialTickImm, renderLevelView,
+                                                         effectiveRenderDist, partialTickImm, renderLevelView,
                                                          renderCrossers);
                 // OBEY_PORTAL_DIAG=1: one line per frame for each remote
                 // player within a few blocks of a surface — where they are
@@ -5469,9 +6007,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // (frame time) so spawn rate is FPS-independent; render
             // happens AFTER the portal pass so sparks composite over the
             // see-through view (additive blending).
+            { PROFILE_ZONE_N("PortalParticles");
             Render::g_portalParticleSystem.Update(dt, Client::GetClientPortalManager());
             Render::g_portalParticleSystem.Render(proj, view, camera.position,
                                                   Client::ClientLevels::ActiveDimension());
+            }
 
 #endif
 
@@ -5479,8 +6019,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // this tick (ClientLevelBridge), step the 20 Hz simulation, and
             // draw. After the world pass (depth-tested, no depth write),
             // before the clouds — MC's particle pass sits the same way.
+            { PROFILE_ZONE_N("Particles.Update");
             Render::g_mobParticleSystem.Update(dt, camera.position);
+            }
             if (!Render::DevSkip("particles")) {
+                PROFILE_ZONE_N("Particles.Render");
                 Render::g_mobParticleSystem.Render(proj, view, camera.position,
                                                    Client::ClientLevels::ActiveDimension());
             }
@@ -5503,6 +6046,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
                 const float cloudPartialTick =
                     std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                // A chosen sky pack's own clouds.png (usually blank: the
+                // clouds are painted into its sky). Empty = vanilla.
+                Render::g_cloudRenderer.SetCloudTexture(Render::g_skyRenderer.PackCloudTexture());
                 Render::g_cloudRenderer.Render(proj, view, camera.position,
                                                effectiveRenderDist, cloudPartialTick);
             }
@@ -5528,6 +6074,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
                     : 16.0f / 9.0f;
+                PROFILE_ZONE_N("GunViewmodel");
                 Render::g_portalGunViewmodel.Render(fbAspect, dt);
             }
 #endif
@@ -6016,6 +6563,31 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             Debug::DebugSystem::EndFrame();
             PROFILE_TIMER_END(debugui, metrics.debugUITime);
+
+            // OBEY_FLICKER_DIAG=1: the main view's per-frame numbers, then
+            // one line for anything that went A -> B -> A this frame (the
+            // portal renderer recorded its own above). See FlickerDiag.hpp.
+            if (Render::FlickerDiag::Enabled() && Client::ClientLevels::HasSession()) {
+                Client::ClientLevel& active = Client::ClientLevels::Active();
+                if (auto* c = active.Chunks()) {
+                    Render::FlickerDiag::Record("main.chunks", static_cast<int64_t>(c->GetLoadedChunkCount()));
+                }
+                Render::FlickerDiag::RecordState("main.dim", static_cast<int64_t>(Game::DimensionToRaw(active.Dimension())));
+                Render::FlickerDiag::RecordState("levels", static_cast<int64_t>(Client::ClientLevels::Count()));
+                {
+                    const auto& env = Render::EnvironmentState::Get().Frame();
+                    const int64_t fog = (static_cast<int64_t>(env.fogColor.r * 255.0f) << 16) |
+                                        (static_cast<int64_t>(env.fogColor.g * 255.0f) << 8) |
+                                         static_cast<int64_t>(env.fogColor.b * 255.0f);
+                    Render::FlickerDiag::Record("env.fog", fog);
+                    Render::FlickerDiag::Record("env.sky", static_cast<int64_t>(env.skyBrightness * 1000.0f));
+                }
+                char cam[128];
+                std::snprintf(cam, sizeof(cam), "(%.1f,%.1f,%.1f) yaw=%.0f pitch=%.0f",
+                              camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch);
+                Render::FlickerDiag::Note("cam", cam);
+                Render::FlickerDiag::EndFrame();
+            }
             }
 
             // Handle render distance change from debug UI
@@ -6178,6 +6750,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Game::SetGlobalBlockAccess(nullptr);
         }
 
+        // A recording still running is written out now, while the session's
+        // player is still the one it sampled.
+        poseRecorder.Stop();
+
         // 1. Disconnect NetworkClient
         Log::Info("Disconnecting NetworkClient...");
         networkClient->Disconnect();
@@ -6215,6 +6791,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Server::StopIntegratedServer();
             Log::Info("✓ IntegratedServer stopped");
         }
+        // Back to the global resource pack selection (options.txt) now that
+        // the world's own, if it had one, is no longer in play.
+        Resources::SelectFromOptionLists(
+            Resources::ParsePackList(Platform::g_gameSettings.GetResourcePacks()),
+            Resources::ParsePackList(Platform::g_gameSettings.GetIncompatibleResourcePacks()));
+        ReloadResources();
 
         // 4. Stop worker pools (stops background threads)
         Log::Info("Stopping worker thread pools...");
@@ -6290,6 +6872,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 #if ENABLE_IMMERSIVE_PORTALS
         Render::g_immersivePortalRenderer.Shutdown();
 #endif
+        Render::SkyboxThumbnails::Get().Shutdown();   // preview cards, before the backend goes
         Render::g_skyRenderer.Shutdown();
         Render::g_cloudRenderer.Shutdown();
         if (Render::g_atlasBuilder) {

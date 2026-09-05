@@ -57,6 +57,7 @@ namespace Render {
         bool        dimensionStack = false;   // world option (WorldEntry::dimensionStack)
         std::string skybox = "vanilla";       // per-world sky (see WorldEntry::skybox)
         int         skyboxMode = 2;           // 0 static, 1 darken, 2 darken+celestials
+        std::string babyModels = "new";       // per-world baby look (see WorldEntry::babyModels)
 
         // Relayed join (friends service): host/port above point at the
         // friends service rather than the game host, and this ticket is

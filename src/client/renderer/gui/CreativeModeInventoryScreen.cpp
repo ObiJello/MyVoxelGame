@@ -82,6 +82,7 @@ namespace Render {
         m_currentTab = Tab::Survival;
         m_searchText.clear();
         m_searchCursorPos = 0;
+        m_searchHighlightPos = 0;
         m_searchFocused = false;
         m_scrollOffs = 0.0f;
         m_isScrolling = false;
@@ -110,6 +111,7 @@ namespace Render {
         m_scrollOffs = 0.0f;
         m_searchText.clear();
         m_searchCursorPos = 0;
+        m_searchHighlightPos = 0;
         m_searchFocused = (t == Tab::Search);
         m_searchFocusedAtMillis = NowMillis();
         m_searchDirty = true;
@@ -310,9 +312,13 @@ namespace Render {
         if (hit == HIT_TAB_SEARCH)   { SwitchTab(Tab::Search);   return true; }
 
         // Runs on EVERY press, so clicking anywhere else drops search focus.
-        m_searchFocused = (hit == HIT_SEARCH_BOX);
-        if (m_searchFocused) {
-            m_searchFocusedAtMillis = NowMillis();
+        // MC keeps the search box focused for the whole Search tab (selectTab
+        // → setFocused(true); nothing unfocuses it), which is what lets you
+        // grab an item and keep typing. A click IN the box collapses any
+        // selection onto the cursor (EditBox.onClick → moveCursorTo(…, shift)).
+        if (hit == HIT_SEARCH_BOX) {
+            m_searchFocused = true;
+            SearchMoveCursorTo(m_searchCursorPos, shift);
             return true;
         }
 
@@ -322,6 +328,10 @@ namespace Render {
         }
 
         if (hit == HIT_CREATIVE_GRID) {
+            // MC slotClicked on a creative slot: moveCursorToEnd(false) +
+            // setHighlightPos(0) — the query is selected, so backspace or a
+            // letter replaces it.
+            if (m_currentTab == Tab::Search) SearchSelectAll();
             // Empty cell + held cursor → DELETE the held item. Vanilla
             // CreativeModeInventoryScreen:254-257 calls setCarried(EMPTY) on
             // left click and carried.shrink(1) on right — the stack ceases to
@@ -382,57 +392,79 @@ namespace Render {
         m_isScrolling = false;
     }
 
-    bool CreativeModeInventoryScreen::HandleExtraKey(int glfwKey, int /*glfwMods*/) {
+    // ── Search box editing — MC EditBox, selection included ──────────────
+
+    void CreativeModeInventoryScreen::SearchMoveCursorTo(int pos, bool extendSelection) {
+        m_searchCursorPos = std::clamp(pos, 0, (int)m_searchText.size());
+        if (!extendSelection) m_searchHighlightPos = m_searchCursorPos;
+        m_searchFocusedAtMillis = NowMillis();
+    }
+
+    void CreativeModeInventoryScreen::SearchSelectAll() {
+        // moveCursorToEnd(false) then setHighlightPos(0).
+        SearchMoveCursorTo((int)m_searchText.size(), false);
+        m_searchHighlightPos = 0;
+    }
+
+    void CreativeModeInventoryScreen::SearchInsertText(const std::string& input) {
+        // MC insertText: the selection (or the empty span at the cursor) is
+        // replaced, the cursor lands after the text, the selection collapses.
+        const int start = std::min(m_searchCursorPos, m_searchHighlightPos);
+        const int end   = std::max(m_searchCursorPos, m_searchHighlightPos);
+        const int room  = SEARCH_MAX_LEN - (int)m_searchText.size() + (end - start);
+        if (room <= 0) return;
+        const std::string text = input.substr(0, (size_t)room);
+        m_searchText.replace((size_t)start, (size_t)(end - start), text);
+        SearchMoveCursorTo(start + (int)text.size(), false);
+        m_searchDirty = true;
+        RefreshSearchResults();
+    }
+
+    void CreativeModeInventoryScreen::SearchDeleteChars(int dir) {
+        // MC deleteChars → deleteCharsToPos: a selection is deleted whole,
+        // otherwise one character in `dir`.
+        if (m_searchText.empty()) return;
+        if (m_searchHighlightPos != m_searchCursorPos) {
+            SearchInsertText("");
+            return;
+        }
+        const int pos   = std::clamp(m_searchCursorPos + dir, 0, (int)m_searchText.size());
+        const int start = std::min(pos, m_searchCursorPos);
+        const int end   = std::max(pos, m_searchCursorPos);
+        if (start == end) return;
+        m_searchText.erase((size_t)start, (size_t)(end - start));
+        SearchMoveCursorTo(start, false);
+        m_searchDirty = true;
+        RefreshSearchResults();
+    }
+
+    bool CreativeModeInventoryScreen::HandleExtraKey(int glfwKey, int glfwMods) {
         if (m_currentTab != Tab::Search || !m_searchFocused) return false;
 
         // E must produce the letter rather than close the screen while typing;
         // consuming it here lets OnCharInput append the actual character.
         if (glfwKey == GLFW_KEY_E) return true;
 
-        if (glfwKey == GLFW_KEY_BACKSPACE) {
-            if (m_searchCursorPos > 0) {
-                m_searchText.erase(m_searchText.begin() + (m_searchCursorPos - 1));
-                m_searchCursorPos--;
-                m_searchDirty = true;
-                RefreshSearchResults();
-                m_searchFocusedAtMillis = NowMillis();
-            }
+        const bool shift = (glfwMods & GLFW_MOD_SHIFT) != 0;
+        // MC isSelectAll: Ctrl+A (Cmd+A on macOS).
+        if (glfwKey == GLFW_KEY_A && (glfwMods & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER)) != 0) {
+            SearchSelectAll();
             return true;
         }
-        if (glfwKey == GLFW_KEY_DELETE) {
-            if (m_searchCursorPos < (int)m_searchText.size()) {
-                m_searchText.erase(m_searchText.begin() + m_searchCursorPos);
-                m_searchDirty = true;
-                RefreshSearchResults();
-                m_searchFocusedAtMillis = NowMillis();
-            }
-            return true;
-        }
-        if (glfwKey == GLFW_KEY_LEFT) {
-            if (m_searchCursorPos > 0) m_searchCursorPos--;
-            m_searchFocusedAtMillis = NowMillis();
-            return true;
-        }
-        if (glfwKey == GLFW_KEY_RIGHT) {
-            if (m_searchCursorPos < (int)m_searchText.size()) m_searchCursorPos++;
-            m_searchFocusedAtMillis = NowMillis();
-            return true;
-        }
-        if (glfwKey == GLFW_KEY_HOME) { m_searchCursorPos = 0; m_searchFocusedAtMillis = NowMillis(); return true; }
-        if (glfwKey == GLFW_KEY_END)  { m_searchCursorPos = (int)m_searchText.size(); m_searchFocusedAtMillis = NowMillis(); return true; }
+        if (glfwKey == GLFW_KEY_BACKSPACE) { SearchDeleteChars(-1); return true; }
+        if (glfwKey == GLFW_KEY_DELETE)    { SearchDeleteChars(1);  return true; }
+        if (glfwKey == GLFW_KEY_LEFT)  { SearchMoveCursorTo(m_searchCursorPos - 1, shift); return true; }
+        if (glfwKey == GLFW_KEY_RIGHT) { SearchMoveCursorTo(m_searchCursorPos + 1, shift); return true; }
+        if (glfwKey == GLFW_KEY_HOME)  { SearchMoveCursorTo(0, shift); return true; }
+        if (glfwKey == GLFW_KEY_END)   { SearchMoveCursorTo((int)m_searchText.size(), shift); return true; }
 
         return false;
     }
 
     bool CreativeModeInventoryScreen::HandleExtraCharInput(unsigned int codepoint) {
         if (m_currentTab != Tab::Search || !m_searchFocused) return false;
-        if ((int)m_searchText.size() >= SEARCH_MAX_LEN) return true;
         if (codepoint < 32 || codepoint >= 127) return true;
-        m_searchText.insert(m_searchText.begin() + m_searchCursorPos, (char)codepoint);
-        m_searchCursorPos++;
-        m_searchFocusedAtMillis = NowMillis();
-        m_searchDirty = true;
-        RefreshSearchResults();
+        SearchInsertText(std::string(1, (char)codepoint));
         return true;
     }
 
@@ -623,6 +655,23 @@ namespace Render {
             g.DrawString(m_searchText, x, y, 0xFFFFFFFF, true);
         }
         // Caret blink (300ms on/off, MC EditBox.java line 408).
+        // MC EditBox.renderWidget → graphics.textHighlight(x0, y, x1, y + 9,
+        // invert): the creative box sets invertHighlightedTextColor(false),
+        // so it is only the GUI_TEXT_HIGHLIGHT quad — pure blue (0xFF0000FF)
+        // blended ADDITIVE over what is already drawn. The field's grey
+        // (139,139,139 in tab_item_search.png) becomes (139,139,255), white
+        // glyphs stay white, their dark shadow turns dark blue. No additive
+        // blend in GuiGraphics, so those results are painted directly.
+        if (m_searchFocused && m_searchHighlightPos != m_searchCursorPos) {
+            const int s0 = std::min(m_searchCursorPos, m_searchHighlightPos);
+            const int s1 = std::max(m_searchCursorPos, m_searchHighlightPos);
+            const int x0 = x + g.GetStringWidth(m_searchText.substr(0, (size_t)s0));
+            const int x1 = x + g.GetStringWidth(m_searchText.substr(0, (size_t)s1));
+            const std::string selected = m_searchText.substr((size_t)s0, (size_t)(s1 - s0));
+            g.Fill(x0, y - 1, x1, y + 9, 0xFF8B8BFF);
+            g.DrawString(selected, x0 + 1, y + 1, 0xFF3E3EFF, false);   // the shadow, +blue
+            g.DrawString(selected, x0, y, 0xFFFFFFFF, false);
+        }
         if (!m_searchFocused) return;
         long long elapsed = NowMillis() - m_searchFocusedAtMillis;
         if (elapsed < 0) elapsed = 0;

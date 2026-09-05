@@ -28,12 +28,22 @@ namespace Game::Anvil {
             f >> j;
             out.skybox         = j.value("skybox",         out.skybox);
             out.skyboxMode     = j.value("skyboxMode",     out.skyboxMode);
+            out.babyModels     = j.value("babyModels",     out.babyModels);
+            out.tickFrozen     = j.value("tickFrozen",     out.tickFrozen);
+            out.tickRate       = j.value("tickRate",       out.tickRate);
             out.worldType      = j.value("worldType",      out.worldType);
             out.flatPreset     = j.value("flatPreset",     out.flatPreset);
             out.flatLayers     = j.value("flatLayers",     out.flatLayers);
             out.singleBiome    = j.value("singleBiome",    out.singleBiome);
             out.worldgenTweaks = j.value("worldgenTweaks", out.worldgenTweaks);
             out.bonusChest     = j.value("bonusChest",     out.bonusChest);
+            if (const auto rp = j.find("resourcePacks"); rp != j.end() && rp->is_array()) {
+                out.hasResourcePacks = true;
+                for (const auto& e : *rp) if (e.is_string()) out.resourcePacks.push_back(e.get<std::string>());
+                if (const auto ip = j.find("incompatibleResourcePacks"); ip != j.end() && ip->is_array()) {
+                    for (const auto& e : *ip) if (e.is_string()) out.incompatibleResourcePacks.push_back(e.get<std::string>());
+                }
+            }
         } catch (const std::exception& e) {
             // Defaults are a working world, so a corrupt sidecar is a warning
             // rather than a reason to hide the world from the list.
@@ -51,12 +61,19 @@ namespace Game::Anvil {
             nlohmann::json j;
             j["skybox"]         = sidecar.skybox;
             j["skyboxMode"]     = sidecar.skyboxMode;
+            j["babyModels"]     = sidecar.babyModels;
+            j["tickFrozen"]     = sidecar.tickFrozen;
+            j["tickRate"]       = sidecar.tickRate;
             j["worldType"]      = sidecar.worldType;
             j["flatPreset"]     = sidecar.flatPreset;
             j["flatLayers"]     = sidecar.flatLayers;
             j["singleBiome"]    = sidecar.singleBiome;
             j["worldgenTweaks"] = sidecar.worldgenTweaks;
             j["bonusChest"]     = sidecar.bonusChest;
+            if (sidecar.hasResourcePacks) {
+                j["resourcePacks"]             = sidecar.resourcePacks;
+                j["incompatibleResourcePacks"] = sidecar.incompatibleResourcePacks;
+            }
 
             std::ofstream f(path);
             if (!f) return false;

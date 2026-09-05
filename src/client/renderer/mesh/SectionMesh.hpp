@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/SectionMesh.hpp
 #pragma once
+#include <algorithm>
 
 #include "../core/Vertex.hpp"
 #include "../backend/RenderTypes.hpp"
@@ -21,10 +22,88 @@ namespace Render {
     // absolute uint32 at upload (ChunkMegaBuffer::INDEX_SIZE), so nothing on
     // the GPU side ever sees these as-is.
     //
-    // Vertices are the 32-byte TERRAIN format (TerrainVertex: block vertex +
-    // sprite tile rect for greedy-merged quads). Everything downstream of the
-    // mesher — MeshBuildResult float blobs, ChunkMegaBuffer::VERTEX_STRIDE,
-    // the terrain shaders — assumes this stride.
+    // Vertices are the 16-byte packed TERRAIN format (TerrainVertex: section-
+    // relative fixed-point position, slot, uv/sprite, colour). Everything
+    // downstream of the mesher — MeshBuildResult float blobs,
+    // ChunkMegaBuffer::VERTEX_STRIDE, the terrain shaders — assumes this stride.
+    // --- Face-direction groups -------------------------------------------
+    // A quad facing +X can only be seen from x greater than its plane, so
+    // for a section wholly on the camera's -x side every +X quad is a
+    // back face the GPU would discard AFTER running its vertices through the
+    // tiler. The opaque and cutout index buffers are therefore laid out in
+    // seven contiguous groups by facing, and the renderer draws only the
+    // groups that can face the camera (ChunkRenderer::RenderLayerPass) —
+    // Sodium's chunk face culling. Pixel-identical to drawing everything, by
+    // construction: back-face culling removes exactly these triangles.
+    //
+    // Group ORDER in the index buffer is chosen so the common cases are one
+    // or two contiguous runs: a camera in the (+,+,+) octant of a section
+    // draws [Any, +Z, +Y, +X], in (-,-,-) draws [-X, -Y, -Z, Any].
+    // kFacingAny holds every quad that is not axis-aligned (cross plants,
+    // rotated elements, sloped fluid) — always drawn. The two-sided plant
+    // quads (TerrainVertex::kTwoSidedFlag) live there too: their four
+    // vertices are indexed twice, once per winding, so culling keeps
+    // whichever side faces the camera with no state change.
+    enum : uint8_t {
+        kFacingNegX = 0, kFacingPosX, kFacingNegY, kFacingPosY, kFacingNegZ, kFacingPosZ, kFacingAny,
+        kFacingCount = 7
+    };
+    // Slot i of the index layout holds facing kFacingGroupOrder[i].
+    constexpr uint8_t kFacingGroupOrder[kFacingCount] = {
+        kFacingNegX, kFacingNegY, kFacingNegZ, kFacingAny, kFacingPosZ, kFacingPosY, kFacingPosX
+    };
+
+    // Facing of a quad from three corners, using the mesher's winding (CCW
+    // seen from the front): the normal is (p1-p0) x (p2-p0). Axis-aligned
+    // within a hair, or Any.
+    inline uint8_t QuadFacing(const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2) {
+        const glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
+        const glm::vec3 a = glm::abs(n);
+        const float len = a.x + a.y + a.z;
+        if (len <= 0.0f) return kFacingAny;
+        constexpr float kAxisShare = 0.999f;   // |dominant| / (sum of |components|)
+        if (a.x >= kAxisShare * len) return n.x > 0.0f ? kFacingPosX : kFacingNegX;
+        if (a.y >= kAxisShare * len) return n.y > 0.0f ? kFacingPosY : kFacingNegY;
+        if (a.z >= kAxisShare * len) return n.z > 0.0f ? kFacingPosZ : kFacingNegZ;
+        return kFacingAny;
+    }
+
+    // Reorder a layer's indices (6 per quad, quad k = indices 6k..6k+5) into
+    // the group layout and fill ranges[0..7] with the group boundaries
+    // (ranges[i]..ranges[i+1] = slot i, ranges[7] = index count). A facing
+    // list that does not match the quad count (an emitter that forgot to
+    // record one) leaves the order untouched and files everything under
+    // Any, which draws exactly as before.
+    inline void GroupIndicesByFacing(std::vector<uint16_t>& idxs, const std::vector<uint8_t>& facing,
+                                     uint32_t ranges[kFacingCount + 1]) {
+        const size_t quads = idxs.size() / 6;
+        for (int i = 0; i <= kFacingCount; ++i) ranges[i] = 0;
+        if (facing.size() != quads || idxs.size() != quads * 6) {
+            // Everything in the Any slot (slot 3): ranges 0..3 = 0, 4..7 = count.
+            for (int i = 0; i < kFacingCount; ++i) {
+                ranges[i + 1] = (kFacingGroupOrder[i] == kFacingAny || ranges[i] > 0) ?
+                                static_cast<uint32_t>(idxs.size()) : 0;
+            }
+            return;
+        }
+        uint32_t slotOf[kFacingCount];
+        for (int slot = 0; slot < kFacingCount; ++slot) slotOf[kFacingGroupOrder[slot]] = static_cast<uint32_t>(slot);
+        uint32_t counts[kFacingCount] = {};
+        for (size_t q = 0; q < quads; ++q) counts[slotOf[facing[q] < kFacingCount ? facing[q] : kFacingAny]] += 6;
+        for (int slot = 0; slot < kFacingCount; ++slot) ranges[slot + 1] = ranges[slot] + counts[slot];
+        std::vector<uint16_t> sorted(idxs.size());
+        uint32_t cursor[kFacingCount];
+        for (int slot = 0; slot < kFacingCount; ++slot) cursor[slot] = ranges[slot];
+        for (size_t q = 0; q < quads; ++q) {
+            const uint32_t slot = slotOf[facing[q] < kFacingCount ? facing[q] : kFacingAny];
+            std::copy(idxs.begin() + static_cast<std::ptrdiff_t>(q * 6),
+                      idxs.begin() + static_cast<std::ptrdiff_t>(q * 6 + 6),
+                      sorted.begin() + cursor[slot]);
+            cursor[slot] += 6;
+        }
+        idxs.swap(sorted);
+    }
+
     struct SectionMesh {
         // Opaque geometry (solid blocks like stone, dirt)
         std::vector<TerrainVertex> opaqueVerts;
@@ -33,6 +112,28 @@ namespace Render {
         // Cutout geometry (alpha-test blocks like leaves, grass)
         std::vector<TerrainVertex> cutoutVerts;
         std::vector<uint16_t> cutoutIdxs;
+
+        // One facing per quad (see QuadFacing), recorded by every emitter for
+        // the opaque and cutout layers; FinalizeFacingGroups turns them into
+        // the grouped index layout + ranges. Translucent stays in draw order
+        // (it is re-sorted back to front and is ~1% of vertices).
+        std::vector<uint8_t> opaqueFacing;
+        std::vector<uint8_t> cutoutFacing;
+        uint32_t opaqueFacingRanges[kFacingCount + 1] = {};
+        uint32_t cutoutFacingRanges[kFacingCount + 1] = {};
+
+        void FinalizeFacingGroups() {
+            GroupIndicesByFacing(opaqueIdxs, opaqueFacing, opaqueFacingRanges);
+            GroupIndicesByFacing(cutoutIdxs, cutoutFacing, cutoutFacingRanges);
+        }
+
+        // Face map: the per-block records of this layer's greedy-merged
+        // rectangles (two RGBA8 texels per block face, see
+        // TerrainVertex::Mapped). Uploaded after the layer's vertices into
+        // the same mega-buffer region and read by the fragment shader
+        // through a buffer texture over the slab.
+        std::vector<uint32_t> opaqueFaceMap;
+        std::vector<uint32_t> cutoutFaceMap;
 
         // Translucent geometry (blended blocks like glass, water, ice)
         std::vector<TerrainVertex> translucentVerts;
@@ -56,6 +157,11 @@ namespace Render {
             cutoutIdxs.clear();
             translucentVerts.clear();
             translucentIdxs.clear();
+            opaqueFacing.clear();
+            cutoutFacing.clear();
+            opaqueFaceMap.clear();
+            cutoutFaceMap.clear();
+            for (int i = 0; i <= kFacingCount; ++i) { opaqueFacingRanges[i] = 0; cutoutFacingRanges[i] = 0; }
         }
 
         // Check if any layer has geometry
@@ -121,6 +227,12 @@ namespace Render {
             uint32_t indexOffset = 0;
             bool valid = false;
             uint32_t slabIndex = 0;
+            // Face-direction groups (see kFacingGroupOrder): ABSOLUTE slab
+            // index offsets, facingRanges[i]..[i+1] = slot i. hasFacing is
+            // false for translucent and for meshes built without groups; the
+            // renderer then draws the whole range.
+            uint32_t facingRanges[kFacingCount + 1] = {};
+            bool hasFacing = false;
             // Per-section index buffer, set only for layers whose pool uses
             // them (translucent). INVALID_BUFFER means indices live in the
             // shared slab IBO and the layer is drawn with one multi-draw.

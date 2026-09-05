@@ -1,6 +1,7 @@
 // File: src/client/renderer/texture/AtlasBuilder.cpp
 #include "AtlasBuilder.hpp"
 #include "TextureAnimator.hpp"
+#include "common/core/AssetLocator.hpp"
 #include "MipmapGenerator.hpp"
 #include "ConnectedTextures.hpp"
 #include "../backend/RenderBackend.hpp"
@@ -35,6 +36,8 @@ namespace Render {
         if (Render::g_renderBackend) {
             if (m_atlasTexture != Render::INVALID_TEXTURE)
                 Render::g_renderBackend->DestroyTexture(m_atlasTexture);
+            if (m_spriteTable != Render::INVALID_TEXTURE)
+                Render::g_renderBackend->DestroyTexture(m_spriteTable);
             if (m_grassColormap != Render::INVALID_TEXTURE)
                 Render::g_renderBackend->DestroyTexture(m_grassColormap);
             if (m_foliageColormap != Render::INVALID_TEXTURE)
@@ -55,8 +58,14 @@ namespace Render {
         Log::Info("Building texture atlas from: %s", atlasJsonPath.c_str());
         Log::Info("Textures root: %s", texturesRootPath.c_str());
 
-        // Step 1: Parse the JSON atlas descriptor
+        // Step 1: Parse the JSON atlas descriptor. Everything a previous
+        // build left behind goes first: this runs again on a resource pack
+        // reload.
         textureSources.clear();
+        textureKeyToUV.clear();
+        pendingAnimations.clear();
+        atlasData.clear();
+        originalAtlasData.clear();
         if (!ParseAtlasJSON(atlasJsonPath, texturesRootPath, textureSources)) {
             Log::Error("Failed to parse atlas JSON");
             return false;
@@ -167,14 +176,13 @@ namespace Render {
         Log::Debug("Processing directory: %s with prefix: %s",
                   fullDirPath.c_str(), prefix.c_str());
 
-        // Scan directory for PNG files
+        // Scan directory for PNG files (vanilla + enabled resource packs)
         auto pngFiles = ScanDirectoryForPNGs(fullDirPath);
 
-        for (const auto& pngFile : pngFiles) {
-            // Extract relative path from directory
-            std::filesystem::path filePath(pngFile);
-            std::filesystem::path relativePath =
-                std::filesystem::relative(filePath, fullDirPath);
+        for (const auto& [relative, pngFile] : pngFiles) {
+            // The key comes from the path below the source directory; the
+            // file may live in a pack, so the pair carries both.
+            std::filesystem::path relativePath(relative);
 
             // Remove .png extension
             std::string textureName = relativePath.stem().string();
@@ -217,8 +225,8 @@ namespace Render {
             sprite = sprite.substr(10); // Remove "minecraft:"
         }
 
-        // Build full path
-        std::string fullPath = texturesRoot + "/" + sprite + ".png";
+        // Build full path (a resource pack's copy when one is enabled)
+        std::string fullPath = Core::Assets::Locate(texturesRoot + "/" + sprite + ".png");
 
         // Create texture source
         TextureSource texSource;
@@ -231,31 +239,16 @@ namespace Render {
                   resource.c_str(), fullPath.c_str());
     }
 
-    std::vector<std::string> AtlasBuilder::ScanDirectoryForPNGs(const std::string& dirPath) {
-        std::vector<std::string> pngFiles;
-
+    std::vector<std::pair<std::string, std::string>> AtlasBuilder::ScanDirectoryForPNGs(const std::string& dirPath) {
+        std::vector<std::pair<std::string, std::string>> pngFiles;
         if (!std::filesystem::exists(dirPath)) {
             Log::Warning("Directory does not exist: %s", dirPath.c_str());
-            return pngFiles;
         }
-
-        try {
-            for (const auto& entry :
-                 std::filesystem::recursive_directory_iterator(dirPath)) {
-                if (entry.is_regular_file()) {
-                    auto path = entry.path();
-                    if (path.extension() == ".png") {
-                        pngFiles.push_back(path.string());
-                    }
-                }
-            }
-        } catch (const std::exception& e) {
-            Log::Error("Error scanning directory %s: %s", dirPath.c_str(), e.what());
+        // Sorted by relative path already — deterministic atlas packing
+        // across runs, whatever pack a file comes from.
+        for (const Core::Assets::Entry& e : Core::Assets::ListFiles(dirPath, ".png", true)) {
+            pngFiles.emplace_back(e.relative, e.absolute);
         }
-
-        // Sort for deterministic atlas packing across runs
-        std::sort(pngFiles.begin(), pngFiles.end());
-
         return pngFiles;
     }
 
@@ -263,7 +256,7 @@ namespace Render {
         Log::Info("Loading biome colormaps...");
 
         // Load grass colormap
-        std::string grassPath = texturesRoot + "/colormap/grass.png";
+        std::string grassPath = Core::Assets::Locate(texturesRoot + "/colormap/grass.png");
         int grassWidth, grassHeight;
         std::vector<unsigned char> grassData;
 
@@ -280,7 +273,7 @@ namespace Render {
         }
 
         // Load foliage colormap
-        std::string foliagePath = texturesRoot + "/colormap/foliage.png";
+        std::string foliagePath = Core::Assets::Locate(texturesRoot + "/colormap/foliage.png");
         int foliageWidth, foliageHeight;
         std::vector<unsigned char> foliageData;
 
@@ -528,6 +521,7 @@ namespace Render {
 
             textureKeyToUV[source.key] = uvRect;
         }
+        BuildSpriteTable();
         
         // Save original atlas data before any modifications
         originalAtlasData = atlasData;
@@ -667,6 +661,13 @@ namespace Render {
 
         Render::g_renderBackend->SetTextureWrap(m_atlasTexture,
             Render::TextureWrap::ClampToEdge, Render::TextureWrap::ClampToEdge);
+    }
+
+    void AtlasBuilder::ReleaseGpuResources() {
+        if (!Render::g_renderBackend) return;
+        for (Render::TextureHandle* t : {&m_atlasTexture, &m_spriteTable, &m_grassColormap, &m_foliageColormap}) {
+            if (*t != Render::INVALID_TEXTURE) { Render::g_renderBackend->DestroyTexture(*t); *t = Render::INVALID_TEXTURE; }
+        }
     }
 
     void AtlasBuilder::RebuildAtlas(bool useMinecraftStyle) {
@@ -1109,6 +1110,48 @@ namespace Render {
                 Render::TextureWrap::ClampToEdge, Render::TextureWrap::ClampToEdge);
         }
         return handle;
+    }
+
+    void AtlasBuilder::BuildSpriteTable() {
+        // Deterministic ids: sorted key order, so a rebuild with the same
+        // sprite set numbers them identically (meshes carry the ids).
+        std::vector<std::string> keys;
+        keys.reserve(textureKeyToUV.size());
+        for (const auto& kv : textureKeyToUV) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+        if (keys.size() > 65535) {
+            Log::Error("AtlasBuilder: %zu sprites exceed the 16-bit sprite id; tiled quads past 65535 will mis-sample",
+                       keys.size());
+        }
+
+        constexpr int kRowWidth = 256;
+        const int rows = std::max(1, static_cast<int>((keys.size() + kRowWidth - 1) / kRowWidth));
+        std::vector<float> texels(static_cast<size_t>(kRowWidth) * rows * 4, 0.0f);
+        uint16_t id = 0;
+        for (const std::string& key : keys) {
+            AtlasUVRect& r = textureKeyToUV[key];
+            r.spriteId = id;
+            float* t = &texels[static_cast<size_t>(id) * 4];
+            t[0] = r.uvMin.x;
+            t[1] = r.uvMin.y;
+            t[2] = r.uvMax.x - r.uvMin.x;
+            t[3] = r.uvMax.y - r.uvMin.y;
+            if (id == 65535) break;
+            ++id;
+        }
+
+        if (!Render::g_renderBackend) return;
+        if (m_spriteTable != Render::INVALID_TEXTURE) {
+            Render::g_renderBackend->DestroyTexture(m_spriteTable);
+            m_spriteTable = Render::INVALID_TEXTURE;
+        }
+        m_spriteTable = Render::g_renderBackend->CreateTexture2D(
+            kRowWidth, rows, Render::TextureFormat::RGBA32F, texels.data());
+        if (m_spriteTable == Render::INVALID_TEXTURE) {
+            Log::Error("AtlasBuilder: failed to create the sprite table texture");
+        } else {
+            Log::Info("Atlas sprite table: %zu sprites in %d row(s)", keys.size(), rows);
+        }
     }
 
     bool AtlasBuilder::GetUVRect(const std::string& textureKey, AtlasUVRect& uvRect) const {

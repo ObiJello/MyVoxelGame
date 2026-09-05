@@ -71,6 +71,23 @@ namespace Client { class ClientMobManager; }
 
 namespace Render {
 
+    // The per-world "Baby Models" look (Options → World Settings).
+    //
+    // MC 26.1 ("Tiny Takeover") gave nine mobs dedicated baby meshes and
+    // textures — cat, chicken, cow (+ mooshroom), ocelot, pig, rabbit, sheep,
+    // wolf — and remodeled the adult rabbit with them. `New` draws those
+    // (the generator's `<slug>_baby_new` / `rabbit_new` rows on the
+    // `*_baby` sheets); `Classic` draws the pre-26.1 BabyModelTransform
+    // babies. VISUAL ONLY: hitboxes, eye heights and the rabbit's 15-tick
+    // hop clock follow 26.1 either way (see GeneratedEntityTypes' baby
+    // columns and Rabbit::SetupAnimationStates).
+    enum class BabyModelLook : uint8_t { New = 0, Classic = 1 };
+    void SetBabyModelLook(BabyModelLook look);
+    BabyModelLook GetBabyModelLook();
+    // Bumped by SetBabyModelLook; the renderer drops its model cache when it
+    // sees a new value, so a change applies to the next frame.
+    int  BabyModelLookGeneration();
+
     class MobRenderer {
     public:
         MobRenderer() = default;
@@ -131,10 +148,32 @@ namespace Render {
             // swapped in per frame by the synced puff state.
             std::unique_ptr<EntityModel> pufferMid;
             std::unique_ptr<EntityModel> pufferBig;
+            // MC CowRenderer / PigRenderer / ChickenRenderer's per-ModelType
+            // AdultAndBabyModelPair: [variant byte] → mesh, adult and baby,
+            // built on first sight. Null where the variant draws with the
+            // NORMAL mesh (warm pig, warm chicken).
+            std::unique_ptr<EntityModel> variantModels[3];
+            std::unique_ptr<EntityModel> variantBabyModels[3];
+            bool variantTried[3] = {false, false, false};
+            // MC BreezeWindLayer / BreezeEyesLayer — the breeze mesh on its
+            // own sheets (the wind one is 128x128, so it is a separate
+            // generated row, not a redraw of the body's vertices).
+            std::unique_ptr<EntityModel> windModel;
+            std::unique_ptr<EntityModel> eyesModel;
+            bool layersTried = false;
+            // MC SulfurCubeInnerLayer — the inner cube (SULFUR_CUBE_INNER /
+            // SULFUR_CUBE_SMALL_INNER) drawn under the translucent shell
+            // while the cube holds no block.
+            std::unique_ptr<EntityModel> innerModel;
+            std::unique_ptr<EntityModel> innerBabyModel;
+            bool innerTried = false;
         };
 
         ModelEntry* GetModelFor(Game::EntityTypeId type);
-        TextureHandle LoadTexture(const std::string& relativePath);
+        // `repeatWrap` samples the sheet with REPEAT instead of the clamp
+        // entity sheets normally get — for a texture the shader scrolls
+        // across its edge (the breeze's wind). Cached separately.
+        TextureHandle LoadTexture(const std::string& relativePath, bool repeatWrap = false);
 
         // The entity's MC transform chain, mapping model-space PIXELS to
         // camera-relative world space. Shared by the body and by anything
@@ -155,7 +194,8 @@ namespace Render {
                                       float deathFlipDeg = 0.0f,
                                       const glm::vec3& modelScale = glm::vec3(1.0f),
                                       float swimPitchDeg = 0.0f,
-                                      float swimPivotY = 0.0f);
+                                      float swimPivotY = 0.0f,
+                                      const glm::vec3& modelOffset = glm::vec3(0.0f));
 
         // Build one mob's posed geometry into `verts`/`idx`, already in world
         // space. Returns the matrix it used.
@@ -216,6 +256,8 @@ namespace Render {
 
         std::unordered_map<uint16_t, ModelEntry> m_models;
         std::unordered_map<std::string, TextureHandle> m_textureCache;
+        int m_textureCacheGeneration = -1;   // Resources::CacheStale
+        int m_babyLookGeneration = -1;       // BabyModelLookGeneration
 
         enum class AssetState : uint8_t { Unloaded, Ready, Failed };
         // A TridentModel instance reused for every in-hand trident (the

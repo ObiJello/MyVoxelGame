@@ -60,6 +60,7 @@ namespace Render {
         BufferHandle m_ib[kPartCount]   = {INVALID_BUFFER, INVALID_BUFFER};
         uint32_t     m_indexCount[kPartCount] = {0, 0};
         std::unordered_map<std::string, TextureHandle> m_textureCache;
+        int m_textureCacheGeneration = -1;   // Resources::CacheStale
         bool         m_geomBuilt = false;
     };
 

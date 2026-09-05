@@ -110,9 +110,23 @@ namespace Game::Anvil {
         const std::optional<uint64_t> gunInstance;
 #endif
 
-        if (!customName.has_value() && !hasEnchants && !gunInstance.has_value()) return;
+        const auto sulfurBucket = stack.components.get(DataComponents::SULFUR_CUBE_BUCKET);
+
+        if (!customName.has_value() && !hasEnchants && !gunInstance.has_value() &&
+            !sulfurBucket.has_value()) return;
 
         w.BeginCompound("components");
+        if (sulfurBucket.has_value()) {
+            // MC: minecraft:sulfur_cube_content (item template) beside
+            // minecraft:bucket_entity_data {age, age_locked, NoAI}. One
+            // compound here, under this engine's namespace.
+            w.BeginCompound(std::string(kOwnNamespace) + "sulfur_cube_bucket");
+            if (!sulfurBucket->bodyItem.empty()) w.String("content", sulfurBucket->bodyItem);
+            w.Int("age", sulfurBucket->age);
+            w.Bool("age_locked", sulfurBucket->ageLocked);
+            w.Bool("NoAI", sulfurBucket->noAi);
+            w.EndCompound();
+        }
         if (gunInstance.has_value()) {
             w.Long(std::string(kOwnNamespace) + "portal_gun_instance_id",
                    static_cast<int64_t>(*gunInstance));
@@ -164,6 +178,16 @@ namespace Game::Anvil {
         if (auto name = std::dynamic_pointer_cast<::World::NBTTagString>(
                 components->GetTag("minecraft:custom_name"))) {
             stack.components.set(DataComponents::CUSTOM_NAME, name->value);
+        }
+
+        if (auto sb = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag(std::string(kOwnNamespace) + "sulfur_cube_bucket"))) {
+            SulfurCubeBucketData data;
+            data.bodyItem  = sb->GetValue<std::string>("content", "");
+            data.age       = sb->GetValue<int32_t>("age", 0);
+            data.ageLocked = sb->GetValue<int8_t>("age_locked", 0) != 0;
+            data.noAi      = sb->GetValue<int8_t>("NoAI", 0) != 0;
+            stack.components.set(DataComponents::SULFUR_CUBE_BUCKET, data);
         }
 
         if (auto ench = std::dynamic_pointer_cast<::World::NBTTagCompound>(

@@ -1,6 +1,7 @@
 // File: src/client/renderer/gui/AbstractContainerScreen.cpp
 #include "AbstractContainerScreen.hpp"
 #include "GuiGraphics.hpp"
+#include "common/world/crafting/RecipeManager.hpp"
 #include "FontRenderer.hpp"
 #include "common/world/enchantment/Enchantment.hpp"
 #include "common/world/enchantment/ItemEnchantments.hpp"
@@ -641,6 +642,19 @@ namespace Render {
 
         // Bundle contents — MC renders a slot grid (BundleTooltip); listed as
         // "Name xN" lines here until a grid tooltip exists. Gray, newest first.
+        // MC SulfurCubeContent.addToTooltip: "Contains: <block>" in grey
+        // italics (entity.minecraft.sulfur_cube.content) under a bucket of
+        // sulfur cube that holds a block.
+        if (auto sulfur = stack.get(Game::DataComponents::SULFUR_CUBE_BUCKET)) {
+            if (!sulfur->bodyItem.empty()) {
+                const Game::ItemID inner = Game::RecipeManager::ItemFromSlug(sulfur->bodyItem);
+                if (inner != Game::Items::Air) {
+                    lines.push_back({"Contains: " + Game::ItemRegistry::Get(inner).name,
+                                     0xFFAAAAAAu});   // GRAY
+                }
+            }
+        }
+
         if (auto bundle = stack.get(Game::DataComponents::BUNDLE_CONTENTS)) {
             for (const auto& inner : bundle->items) {
                 if (inner.IsEmpty()) continue;

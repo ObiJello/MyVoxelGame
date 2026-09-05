@@ -6,6 +6,7 @@
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "platform/GameDirectory.hpp"
+#include "common/core/Config.hpp"   // GAME_VERSION stamps the pipeline manifest
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -120,6 +121,12 @@ namespace Render {
         if (!CreatePortalDescriptorLayout()) {
             Log::Warning("VKBackend: portal descriptor layout create failed — portal-feature shaders will not render");
         }
+        if (m_portalDescriptorLayout != VK_NULL_HANDLE && !CreateUniformBlockLayout()) {
+            Log::Warning("VKBackend: uniform block layout create failed — terrain will not render");
+        }
+        if (m_uniformBlockLayout != VK_NULL_HANDLE && !CreateTexelBufferLayout()) {
+            Log::Warning("VKBackend: texel buffer layout create failed — merged terrain will not render");
+        }
         if (m_portalDescriptorLayout != VK_NULL_HANDLE && !CreatePortalPipelineLayout()) {
             Log::Warning("VKBackend: portal pipeline layout create failed");
         }
@@ -200,6 +207,14 @@ namespace Render {
             vkDestroyDescriptorSetLayout(m_device, m_portalDescriptorLayout, nullptr);
             m_portalDescriptorLayout = VK_NULL_HANDLE;
         }
+        if (m_uniformBlockLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(m_device, m_uniformBlockLayout, nullptr);
+            m_uniformBlockLayout = VK_NULL_HANDLE;
+        }
+        if (m_texelBufferLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(m_device, m_texelBufferLayout, nullptr);
+            m_texelBufferLayout = VK_NULL_HANDLE;
+        }
         if (m_pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
         if (m_textureDescriptorLayout != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(m_device, m_textureDescriptorLayout, nullptr);
@@ -263,6 +278,9 @@ namespace Render {
         // Flush deferred deletions for this frame slot — GPU is done with these resources
         { PROFILE_ZONE_N("Vk.DeferredDelete");
         for (auto& del : m_deletionQueues[m_currentFrame]) {
+            // Queued in dependency order by the caller (a buffer-texture
+            // view before its buffer); processed in that order.
+            if (del.texture != INVALID_TEXTURE) DestroyTexture(del.texture);
             if (del.buffer != INVALID_BUFFER) DestroyBuffer(del.buffer);
             if (del.mesh != INVALID_MESH) DestroyMesh(del.mesh);
         }
@@ -570,13 +588,20 @@ namespace Render {
                                         const void* data, BufferAccess access) {
         VkBufferUsageFlags vkUsage = 0;
         switch (usage) {
-            case BufferUsage::Vertex:  vkUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; break;
+            // Vertex buffers may also be viewed as texel buffers: the terrain
+            // mega buffer's face map (CreateBufferTexture) reads the records
+            // it stores behind each section's vertices.
+            case BufferUsage::Vertex:  vkUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                                 VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT; break;
             case BufferUsage::Index:   vkUsage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT; break;
             case BufferUsage::Uniform: vkUsage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT; break;
             case BufferUsage::Staging: vkUsage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT; break;
         }
 
         if (access == BufferAccess::Static && data != nullptr) {
+            // Staging copy + queue drain. Fine at load; a mid-game caller
+            // should be using Dynamic (this zone is how a capture finds it).
+            PROFILE_ZONE_N("Vk.CreateBuffer.StaticUpload");
             // Use staging buffer for static data
             vkUsage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
@@ -712,6 +737,7 @@ namespace Render {
     void VKBackend::DestroyBuffer(BufferHandle handle) {
         auto it = m_buffers.find(handle);
         if (it == m_buffers.end()) return;
+        if (m_boundUniformBuffer == handle) m_boundUniformBuffer = INVALID_BUFFER;
 
         // If this buffer is what the active command buffer last bound, forget
         // that: a new buffer could otherwise be handed the same VkBuffer value
@@ -740,16 +766,29 @@ namespace Render {
         m_deletionQueues[m_currentFrame].push_back({INVALID_BUFFER, handle});
     }
 
+    void VKBackend::DeferredDestroyTexture(TextureHandle handle) {
+        if (handle == INVALID_TEXTURE) return;
+        m_deletionQueues[m_currentFrame].push_back({INVALID_BUFFER, INVALID_MESH, handle});
+    }
+
     // ========================================================================
     // TEXTURES
     // ========================================================================
 
     TextureHandle VKBackend::CreateTexture2D(int width, int height,
                                             TextureFormat format, const void* data) {
+        // Mid-game callers exist (a mob type's texture the first time one
+        // is seen, an item icon the first time it is in the hotbar), and
+        // each is a GPU drain; the zone is how a capture names them.
+        PROFILE_ZONE_N("Vk.CreateTexture2D");
         VkFormat vkFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        VkDeviceSize bytesPerPixel = 4;
         if (format == TextureFormat::SRGB8_A8) vkFormat = VK_FORMAT_R8G8B8A8_SRGB;
+        // Float data textures (the atlas sprite table is RGBA32F).
+        if (format == TextureFormat::RGBA16F) { vkFormat = VK_FORMAT_R16G16B16A16_SFLOAT; bytesPerPixel = 8; }
+        if (format == TextureFormat::RGBA32F) { vkFormat = VK_FORMAT_R32G32B32A32_SFLOAT; bytesPerPixel = 16; }
 
-        VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;
+        VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * bytesPerPixel;
 
         // Create staging buffer
         VkBuffer stagingBuffer;
@@ -773,11 +812,17 @@ namespace Render {
                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, image, imageMemory);
 
         // Transition + copy
-        TransitionImageLayout(image, vkFormat, VK_IMAGE_LAYOUT_UNDEFINED,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-        CopyBufferToImage(stagingBuffer, image, width, height);
-        TransitionImageLayout(image, vkFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+        // Transition + copy + transition in ONE submit: three separate
+        // single-time submits were three full queue drains per texture.
+        {
+            VkCommandBuffer cmd = BeginSingleTimeCommands();
+            RecordImageLayoutTransition(cmd, image, vkFormat, VK_IMAGE_LAYOUT_UNDEFINED,
+                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+            RecordCopyBufferToImage(cmd, stagingBuffer, image, width, height);
+            RecordImageLayoutTransition(cmd, image, vkFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+            EndSingleTimeCommands(cmd);
+        }
 
         vkDestroyBuffer(m_device, stagingBuffer, nullptr);
         vkFreeMemory(m_device, stagingMemory, nullptr);
@@ -1268,10 +1313,13 @@ namespace Render {
             std::remove_if(m_pendingTextureUpdates.begin(), m_pendingTextureUpdates.end(),
                            [&](const PendingTextureUpdate& u) { return u.image == it->second.image; }),
             m_pendingTextureUpdates.end());
-        vkDestroySampler(m_device, it->second.sampler, nullptr);
-        vkDestroyImageView(m_device, it->second.imageView, nullptr);
-        vkDestroyImage(m_device, it->second.image, nullptr);
-        vkFreeMemory(m_device, it->second.memory, nullptr);
+        if (it->second.bufferView != VK_NULL_HANDLE) {
+            vkDestroyBufferView(m_device, it->second.bufferView, nullptr);
+        }
+        if (it->second.sampler != VK_NULL_HANDLE) vkDestroySampler(m_device, it->second.sampler, nullptr);
+        if (it->second.imageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, it->second.imageView, nullptr);
+        if (it->second.image != VK_NULL_HANDLE) vkDestroyImage(m_device, it->second.image, nullptr);
+        if (it->second.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, it->second.memory, nullptr);
 
         m_memStats.textureMemory -= it->second.memorySize;
         m_memStats.totalAllocated -= it->second.memorySize;
@@ -1348,6 +1396,8 @@ namespace Render {
 
         uint32_t handle = AllocHandle();
         m_shaders[handle] = {vertModule, fragModule};
+        m_shaders[handle].vertPath = vertexPath;
+        m_shaders[handle].fragPath = fragmentPath;
         m_memStats.shaderCount++;
         Log::Info("VKBackend: Loaded SPIR-V shaders: %s + %s", vertSpvPath.c_str(), fragSpvPath.c_str());
         return handle;
@@ -1678,9 +1728,15 @@ namespace Render {
             state.stencilReadMask    = m_stencilOverride.readMask;
             state.stencilWriteMask   = m_stencilOverride.writeMask;
         }
+        // A mirrored view flips every triangle's screen winding. Inverting
+        // by flipping the FRONT-FACE RULE (not by swapping the cull mode)
+        // culls the same triangles and, unlike the swap, keeps
+        // gl_FrontFacing meaning the geometric front — the two-sided plant
+        // quads (TerrainVertex::kTwoSidedFlag) mirror their texture on the
+        // geometric back and must see the same answer in a mirror.
         if (m_cullInvert) {
-            if (state.cullMode == CullMode::Back)       state.cullMode = CullMode::Front;
-            else if (state.cullMode == CullMode::Front) state.cullMode = CullMode::Back;
+            state.frontFace = (state.frontFace == FrontFace::CounterClockwise)
+                                  ? FrontFace::Clockwise : FrontFace::CounterClockwise;
         }
         m_currentPipelineState = state;
     }
@@ -2136,6 +2192,25 @@ namespace Render {
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #endif
 
+        // VK_EXT_swapchain_colorspace, when the loader has it: it is what
+        // lets the swapchain ask for PASS_THROUGH (no colour management),
+        // which on macOS is the difference between our frame and Minecraft's
+        // looking the same on a wide-gamut display. Optional — a driver
+        // without it just keeps the sRGB-tagged surface.
+        {
+            uint32_t count = 0;
+            vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+            std::vector<VkExtensionProperties> props(count);
+            vkEnumerateInstanceExtensionProperties(nullptr, &count, props.data());
+            for (const auto& e : props) {
+                if (std::strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
+                    extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+                    m_hasSwapchainColorSpaceExt = true;
+                    break;
+                }
+            }
+        }
+
         VkInstanceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         createInfo.pApplicationInfo = &appInfo;
@@ -2331,6 +2406,11 @@ namespace Render {
         vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &presentModeCount, presentModes.data());
 
         auto surfaceFormat = ChooseSwapSurfaceFormat(formats);
+        Log::Info("VKBackend: surface format %d, colour space %s",
+                  static_cast<int>(surfaceFormat.format),
+                  surfaceFormat.colorSpace == VK_COLOR_SPACE_PASS_THROUGH_EXT   ? "pass-through (no colour management, like Minecraft's GL window)"
+                : surfaceFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR ? "sRGB nonlinear (colour-managed by macOS)"
+                : "other");
         auto presentMode = ChooseSwapPresentMode(presentModes);
         auto extent = ChooseSwapExtent(capabilities, window);
 
@@ -2578,18 +2658,24 @@ namespace Render {
         // texture) + a handful of portal descriptor sets (one per
         // frame-in-flight × N portal pipeline layouts; just MAX_FRAMES
         // for now). UBO descriptors: 2 per portal set (Common + Bones).
-        VkDescriptorPoolSize poolSizes[2]{};
+        VkDescriptorPoolSize poolSizes[3]{};
         poolSizes[0].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         poolSizes[0].descriptorCount = 4096;
-        // CommonUBO + BonesUBO are dynamic — pool must size that type.
+        // CommonUBO + BonesUBO are dynamic — pool must size that type. Plus
+        // one per BufferUsage::Uniform buffer that gets bound as the user
+        // uniform block (three terrain mega buffers today).
         poolSizes[1].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        poolSizes[1].descriptorCount = 16;   // 2 × MAX_FRAMES + headroom
+        poolSizes[1].descriptorCount = 64;   // 2 × MAX_FRAMES + uniform blocks + headroom
+        // One per buffer texture (CreateBufferTexture): a terrain mega-buffer
+        // slab each, 128 slabs per pool at most.
+        poolSizes[2].type            = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        poolSizes[2].descriptorCount = 512;
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 2;
+        poolInfo.poolSizeCount = 3;
         poolInfo.pPoolSizes    = poolSizes;
-        poolInfo.maxSets       = 4096 + MAX_FRAMES_IN_FLIGHT;
+        poolInfo.maxSets       = 4096 + MAX_FRAMES_IN_FLIGHT + 32 + 512;
         return vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) == VK_SUCCESS;
     }
 
@@ -2662,6 +2748,149 @@ namespace Render {
                                            &m_portalDescriptorLayout) == VK_SUCCESS;
     }
 
+    bool VKBackend::CreateUniformBlockLayout() {
+        VkDescriptorSetLayoutBinding binding{};
+        binding.binding         = 0;
+        binding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        binding.descriptorCount = 1;
+        binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.bindingCount = 1;
+        info.pBindings    = &binding;
+        return vkCreateDescriptorSetLayout(m_device, &info, nullptr, &m_uniformBlockLayout) == VK_SUCCESS;
+    }
+
+    void VKBackend::BindUniformBuffer(BufferHandle handle, size_t offset, size_t size) {
+        auto it = m_buffers.find(handle);
+        if (it == m_buffers.end() || m_uniformBlockLayout == VK_NULL_HANDLE) {
+            m_boundUniformBuffer = INVALID_BUFFER;
+            return;
+        }
+        VKBufferInfo& info = it->second;
+        if (info.uniformSet == VK_NULL_HANDLE) {
+            // First bind: one descriptor set per buffer, written once with
+            // the window size; the per-bind offset is the dynamic offset.
+            // Freed with the pool (it has no FREE_DESCRIPTOR_SET flag), like
+            // texture sets — these buffers live as long as the world does.
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool     = m_descriptorPool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts        = &m_uniformBlockLayout;
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, &info.uniformSet) != VK_SUCCESS) {
+                Log::Error("VKBackend: descriptor pool exhausted — uniform block not bound");
+                info.uniformSet = VK_NULL_HANDLE;
+                m_boundUniformBuffer = INVALID_BUFFER;
+                return;
+            }
+            VkDescriptorBufferInfo bufInfo{info.buffer, 0, static_cast<VkDeviceSize>(size)};
+            VkWriteDescriptorSet write{};
+            write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet          = info.uniformSet;
+            write.dstBinding      = 0;
+            write.descriptorCount = 1;
+            write.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            write.pBufferInfo     = &bufInfo;
+            vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+            info.uniformRange = size;
+        } else if (info.uniformRange != size) {
+            static bool s_warned = false;
+            if (!s_warned) {
+                s_warned = true;
+                Log::Warning("VKBackend: BindUniformBuffer window size changed (%zu -> %zu); "
+                             "the descriptor keeps its first size", info.uniformRange, size);
+            }
+        }
+        m_boundUniformBuffer = handle;
+        m_boundUniformOffset = static_cast<uint32_t>(offset);
+    }
+
+    bool VKBackend::CreateTexelBufferLayout() {
+        VkDescriptorSetLayoutBinding binding{};
+        binding.binding         = 0;
+        binding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        binding.descriptorCount = 1;
+        binding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.bindingCount = 1;
+        info.pBindings    = &binding;
+        return vkCreateDescriptorSetLayout(m_device, &info, nullptr, &m_texelBufferLayout) == VK_SUCCESS;
+    }
+
+    TextureHandle VKBackend::CreateBufferTexture(BufferHandle buffer, TextureFormat format) {
+        auto bit = m_buffers.find(buffer);
+        if (bit == m_buffers.end() || m_texelBufferLayout == VK_NULL_HANDLE) return INVALID_TEXTURE;
+        if (bit->second.usage != BufferUsage::Vertex) {
+            // Only vertex buffers are created with the texel-buffer usage bit.
+            Log::Error("VKBackend::CreateBufferTexture: buffer was not created with texel-buffer usage");
+            return INVALID_TEXTURE;
+        }
+        VkFormat vkFormat;
+        size_t bytesPerTexel;
+        switch (format) {
+            case TextureFormat::RGBA8:   vkFormat = VK_FORMAT_R8G8B8A8_UNORM;      bytesPerTexel = 4;  break;
+            case TextureFormat::RGBA16:  vkFormat = VK_FORMAT_R16G16B16A16_UNORM;  bytesPerTexel = 8;  break;
+            case TextureFormat::RGBA16F: vkFormat = VK_FORMAT_R16G16B16A16_SFLOAT; bytesPerTexel = 8;  break;
+            case TextureFormat::RGBA32F: vkFormat = VK_FORMAT_R32G32B32A32_SFLOAT; bytesPerTexel = 16; break;
+            default:
+                Log::Error("VKBackend::CreateBufferTexture: unsupported format");
+                return INVALID_TEXTURE;
+        }
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+        const size_t texels = bit->second.size / bytesPerTexel;
+        if (texels > props.limits.maxTexelBufferElements) {
+            Log::Error("VKBackend::CreateBufferTexture: %zu texels exceeds maxTexelBufferElements (%u)",
+                       texels, props.limits.maxTexelBufferElements);
+            return INVALID_TEXTURE;
+        }
+
+        VkBufferViewCreateInfo viewInfo{};
+        viewInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+        viewInfo.buffer = bit->second.buffer;
+        viewInfo.format = vkFormat;
+        viewInfo.offset = 0;
+        viewInfo.range  = VK_WHOLE_SIZE;
+        VkBufferView view = VK_NULL_HANDLE;
+        if (vkCreateBufferView(m_device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
+            Log::Error("VKBackend::CreateBufferTexture: vkCreateBufferView failed");
+            return INVALID_TEXTURE;
+        }
+
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool     = m_descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts        = &m_texelBufferLayout;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(m_device, &allocInfo, &set) != VK_SUCCESS) {
+            Log::Error("VKBackend::CreateBufferTexture: descriptor pool exhausted");
+            vkDestroyBufferView(m_device, view, nullptr);
+            return INVALID_TEXTURE;
+        }
+        VkWriteDescriptorSet write{};
+        write.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet           = set;
+        write.dstBinding       = 0;
+        write.descriptorCount  = 1;
+        write.descriptorType   = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        write.pTexelBufferView = &view;
+        vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+        uint32_t handle = AllocHandle();
+        VKTextureInfo info{};
+        info.descriptorSet = set;
+        info.width         = static_cast<int>(texels);
+        info.height        = 1;
+        info.format        = vkFormat;
+        info.bufferView    = view;
+        m_textures[handle] = info;
+        m_memStats.textureCount++;
+        return handle;
+    }
+
     bool VKBackend::CreatePortalPipelineLayout() {
         VkPushConstantRange pushConstant{};
         pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -2674,13 +2903,22 @@ namespace Render {
         //         reused so portal renderer's noise + colour-ramp pair maps
         //         to (slot 0, slot 1). Pipelines using only one texture
         //         simply bind a dummy texture at set=2 to satisfy the layout.)
-        VkDescriptorSetLayout sets[3] = { m_textureDescriptorLayout,
+        // set=3 = the user uniform block (RenderBackend::BindUniformBuffer):
+        //         the terrain vertex shader's SectionOrigins. Present in the
+        //         layout for every portal-feature pipeline, bound only when a
+        //         buffer is bound; shaders that do not declare set 3 ignore it.
+        // set=4 = a uniform texel buffer (RenderBackend::CreateBufferTexture,
+        //         bound through texture slot 2): the terrain face map.
+        VkDescriptorSetLayout sets[5] = { m_textureDescriptorLayout,
                                           m_portalDescriptorLayout,
-                                          m_textureDescriptorLayout };
+                                          m_textureDescriptorLayout,
+                                          m_uniformBlockLayout,
+                                          m_texelBufferLayout };
 
         VkPipelineLayoutCreateInfo info{};
         info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        info.setLayoutCount         = 3;
+        info.setLayoutCount         = (m_uniformBlockLayout == VK_NULL_HANDLE) ? 3
+                                    : (m_texelBufferLayout == VK_NULL_HANDLE) ? 4 : 5;
         info.pSetLayouts            = sets;
         info.pushConstantRangeCount = 1;
         info.pPushConstantRanges    = &pushConstant;
@@ -2856,6 +3094,28 @@ namespace Render {
         const uint32_t dynOffsets[2] = { fb.lastCommonOffset, fb.lastBonesOffset };
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 m_portalPipelineLayout, 0, 3, sets, 2, dynOffsets);
+        // The user uniform block (set 3), when one is bound — the terrain
+        // mega buffer's section-origin table for the slab being drawn.
+        if (m_boundUniformBuffer != INVALID_BUFFER && m_uniformBlockLayout != VK_NULL_HANDLE) {
+            auto ubIt = m_buffers.find(m_boundUniformBuffer);
+            if (ubIt != m_buffers.end() && ubIt->second.uniformSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_portalPipelineLayout, 3, 1, &ubIt->second.uniformSet,
+                                        1, &m_boundUniformOffset);
+            }
+            // The face map (set 4): whatever buffer texture is in slot 2 —
+            // the terrain slab being drawn. Only buffer textures qualify;
+            // a 2D texture in slot 2 has the wrong descriptor layout.
+            if (m_texelBufferLayout != VK_NULL_HANDLE && m_boundTextures[2] != INVALID_TEXTURE) {
+                auto fmIt = m_textures.find(m_boundTextures[2]);
+                if (fmIt != m_textures.end() && fmIt->second.bufferView != VK_NULL_HANDLE &&
+                    fmIt->second.descriptorSet != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_portalPipelineLayout, 4, 1, &fmIt->second.descriptorSet,
+                                            0, nullptr);
+                }
+            }
+        }
         return true;
     }
 
@@ -2895,7 +3155,8 @@ namespace Render {
             std::string gameDir = Platform::g_gameDirectory.GetGameDirectory();
             if (gameDir.empty()) gameDir = Platform::GameDirectory::GetDefaultGameDirectory();
             if (!gameDir.empty()) {
-                m_pipelineCacheFile = gameDir + "/cache/vk_pipeline_cache.bin";
+                m_pipelineCacheFile    = gameDir + "/cache/vk_pipeline_cache.bin";
+                m_pipelineManifestFile = gameDir + "/cache/vk_pipeline_manifest.txt";
             }
         }
 
@@ -2986,6 +3247,136 @@ namespace Render {
             return;
         }
         Log::Info("VKBackend: pipeline cache saved (%zu bytes, %zu pipelines)", blob.size(), m_pipelines.size());
+        SavePipelineManifest();
+    }
+
+    // ── Pipeline manifest + warm-up ──────────────────────────────────────
+    // Two files, same format. Header `vkpm2 <sizeof(PipelineState)> <game
+    // version>`, then one line per pipeline: `<vert path>\t<frag path>\t<state
+    // bytes as hex>`. The state is written as raw bytes because that is
+    // exactly what keys the pipeline; the size in the header rejects a file
+    // from a build whose PipelineState differs.
+    //
+    //   SEED  <assets>/vk_pipeline_manifest.txt — ships with the game, a copy
+    //         of the developer's list (tools/refresh_pipeline_manifest.sh),
+    //         so a player's very first session is warm. Read whatever version
+    //         stamp it carries: it was built for this build by definition.
+    //   USER  <obeycraft>/cache/vk_pipeline_manifest.txt — what this machine
+    //         has built, unioned across sessions. Read only if its version
+    //         stamp is this game's: a new version starts the list over from
+    //         the seed, so entries for shaders and states a release retired
+    //         never pile up.
+    namespace {
+        std::string HexOf(const void* data, size_t n) {
+            static const char* d = "0123456789abcdef";
+            const auto* b = static_cast<const unsigned char*>(data);
+            std::string out; out.reserve(n * 2);
+            for (size_t i = 0; i < n; ++i) { out.push_back(d[b[i] >> 4]); out.push_back(d[b[i] & 15]); }
+            return out;
+        }
+        bool UnhexInto(const std::string& hex, void* data, size_t n) {
+            if (hex.size() != n * 2) return false;
+            auto nib = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            auto* b = static_cast<unsigned char*>(data);
+            for (size_t i = 0; i < n; ++i) {
+                const int hi = nib(hex[2 * i]), lo = nib(hex[2 * i + 1]);
+                if (hi < 0 || lo < 0) return false;
+                b[i] = static_cast<unsigned char>((hi << 4) | lo);
+            }
+            return true;
+        }
+        std::string ManifestHeader() {
+            return "vkpm2 " + std::to_string(sizeof(PipelineState)) + " " + GAME_VERSION;
+        }
+        // Lines of a manifest whose header is acceptable; empty otherwise.
+        // `requireVersion`: the game-version field must match too.
+        std::set<std::string> ReadManifest(const std::string& file, bool requireVersion) {
+            std::set<std::string> lines;
+            std::ifstream in(file);
+            std::string header;
+            if (!in.is_open() || !std::getline(in, header)) return lines;
+            const std::string sizePrefix = "vkpm2 " + std::to_string(sizeof(PipelineState)) + " ";
+            if (header.rfind(sizePrefix, 0) != 0) return lines;
+            if (requireVersion && header != ManifestHeader()) return lines;
+            std::string line;
+            while (std::getline(in, line)) if (!line.empty()) lines.insert(line);
+            return lines;
+        }
+        std::string SeedManifestPath() {
+            const std::string assets = Platform::g_gameDirectory.GetAssetsDirectory();
+            return assets.empty() ? std::string() : assets + "/vk_pipeline_manifest.txt";
+        }
+    }
+
+    void VKBackend::SavePipelineManifest() {
+        if (m_pipelineManifestFile.empty()) return;
+        // Union with what this version already wrote: a session that never
+        // visits the End must not forget the End's pipelines.
+        std::set<std::string> lines = ReadManifest(m_pipelineManifestFile, /*requireVersion=*/true);
+        for (const auto& [key, rec] : m_pipelines) {
+            auto it = m_shaders.find(rec.shader);
+            if (it == m_shaders.end() || it->second.vertPath.empty()) continue;
+            lines.insert(it->second.vertPath + "\t" + it->second.fragPath + "\t" +
+                         HexOf(&rec.state, sizeof(PipelineState)));
+        }
+        std::error_code ec;
+        const std::filesystem::path path(m_pipelineManifestFile);
+        std::filesystem::create_directories(path.parent_path(), ec);
+        const std::filesystem::path tmp = path.string() + ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::trunc);
+            if (!out.is_open()) return;
+            out << ManifestHeader() << "\n";
+            for (const auto& l : lines) out << l << "\n";
+        }
+        std::filesystem::rename(tmp, path, ec);
+    }
+
+    void VKBackend::WarmPipelines() {
+        if (m_pipelinesWarmed) return;
+        m_pipelinesWarmed = true;
+        if (m_device == VK_NULL_HANDLE) return;
+        PROFILE_ZONE_N("Vk.WarmPipelines");
+        const auto t0 = std::chrono::steady_clock::now();
+
+        const std::string seedFile = SeedManifestPath();
+        std::set<std::string> lines = seedFile.empty() ? std::set<std::string>{}
+                                                       : ReadManifest(seedFile, /*requireVersion=*/false);
+        const size_t fromSeed = lines.size();
+        if (!m_pipelineManifestFile.empty()) {
+            const auto mine = ReadManifest(m_pipelineManifestFile, /*requireVersion=*/true);
+            lines.insert(mine.begin(), mine.end());
+        }
+        if (lines.empty()) {
+            Log::Info("VKBackend: no pipeline manifest (seed or cached) — first frames will build pipelines lazily");
+            return;
+        }
+        // Shaders by the paths they were created from.
+        std::unordered_map<std::string, ShaderHandle> byPath;
+        for (const auto& [handle, info] : m_shaders) {
+            if (!info.vertPath.empty()) byPath[info.vertPath + "\t" + info.fragPath] = handle;
+        }
+        size_t built = 0, unknownShader = 0;
+        for (const std::string& line : lines) {
+            const size_t t1 = line.find('\t');
+            const size_t t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+            if (t2 == std::string::npos) continue;
+            auto sh = byPath.find(line.substr(0, t2));
+            if (sh == byPath.end()) { ++unknownShader; continue; }
+            PipelineState state;
+            if (!UnhexInto(line.substr(t2 + 1), &state, sizeof(PipelineState))) continue;
+            const size_t before = m_pipelines.size();
+            GetOrCreatePipeline(state, sh->second);
+            if (m_pipelines.size() > before) ++built;
+        }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        Log::Info("VKBackend: warmed %zu pipelines in %.0f ms from %zu manifest entries (%zu from the shipped seed; "
+                  "%zu for shaders not loaded)", built, ms, lines.size(), fromSeed, unknownShader);
     }
 
     void VKBackend::DestroyAllPipelines() {
@@ -3116,8 +3507,24 @@ namespace Render {
     }
 
     VkSurfaceFormatKHR VKBackend::ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) const {
-        // Use UNORM — all rendering is in gamma space like Minecraft.
-        // macOS color management is disabled separately via CAMetalLayer.colorspace = nil.
+        // UNORM: all rendering is in gamma space like Minecraft, nothing is
+        // linearised on the way in or encoded on the way out.
+        //
+        // Colour space: PASS_THROUGH when the surface offers it. With
+        // SRGB_NONLINEAR, MoltenVK tags the CAMetalLayer as sRGB and macOS
+        // colour-matches the frame into the panel's gamut, so on a Display
+        // P3 Mac every colour is pulled in towards sRGB. Minecraft's OpenGL
+        // window is untagged and is shown at the panel's native primaries —
+        // that is what made the same sky pack look more vibrant there.
+        // PASS_THROUGH leaves the layer's colorspace nil, which is exactly
+        // the untagged GL behaviour (and what the GL backend here gets from
+        // GLFW), so the two backends and Minecraft agree.
+        if (m_hasSwapchainColorSpaceExt) {
+            for (const auto& f : formats) {
+                if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_PASS_THROUGH_EXT)
+                    return f;
+            }
+        }
         for (const auto& f : formats) {
             if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
                 return f;
@@ -3327,6 +3734,14 @@ namespace Render {
     void VKBackend::TransitionImageLayout(VkImage image, VkFormat format,
                                          VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
         VkCommandBuffer cmd = BeginSingleTimeCommands();
+        RecordImageLayoutTransition(cmd, image, format, oldLayout, newLayout, mipLevels);
+        EndSingleTimeCommands(cmd);
+    }
+
+    void VKBackend::RecordImageLayoutTransition(VkCommandBuffer cmd, VkImage image, VkFormat format,
+                                                VkImageLayout oldLayout, VkImageLayout newLayout,
+                                                uint32_t mipLevels) {
+        (void)format;
 
         VkImageMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -3364,17 +3779,20 @@ namespace Render {
         }
 
         vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        EndSingleTimeCommands(cmd);
     }
 
     void VKBackend::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
         VkCommandBuffer cmd = BeginSingleTimeCommands();
+        RecordCopyBufferToImage(cmd, buffer, image, width, height);
+        EndSingleTimeCommands(cmd);
+    }
+    void VKBackend::RecordCopyBufferToImage(VkCommandBuffer cmd, VkBuffer buffer, VkImage image,
+                                            uint32_t width, uint32_t height) {
         VkBufferImageCopy region{};
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.layerCount = 1;
         region.imageExtent = {width, height, 1};
         vkCmdCopyBufferToImage(cmd, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        EndSingleTimeCommands(cmd);
     }
 
     void VKBackend::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {

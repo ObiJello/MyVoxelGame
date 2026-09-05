@@ -12,10 +12,12 @@
 #include "server/network/ServerConnection.hpp"
 #include "common/network/packets/game/MobEntityPackets.hpp"
 #include "common/core/Mth.hpp"
+#include "common/physics/Physics.hpp"
 #include "common/world/level/Explosion.hpp"
 #include "common/core/TickParallel.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "server/entity/ItemEntityManager.hpp"
+#include "common/entity/projectile/Projectile.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldDrops.hpp"
@@ -281,8 +283,16 @@ namespace Server {
         // when the hit actually opened a new hurt window. Damage taken inside
         // the invulnerability window re-flashes nothing in MC either.
         if (hit && attacker && hurtTime > hurtTimeBefore) {
-            IndicateDamage(attacker->position.x - position.x,
-                           attacker->position.z - position.z);
+            // MC indicateDamage(xd, zd) takes dealDefaultKnockback's vector:
+            // a projectile's flight, else the source position.
+            const Game::Entity* direct = HurtDirectEntity();
+            if (direct && direct != attacker && dynamic_cast<const Game::Projectile*>(direct)) {
+                IndicateDamage(-direct->velocity.x, -direct->velocity.z);
+            } else {
+                const Game::Entity* from = direct ? direct : attacker;
+                IndicateDamage(from->position.x - position.x,
+                               from->position.z - position.z);
+            }
         }
         return hit;
     }
@@ -762,6 +772,57 @@ namespace Server {
         return view->GetPlayer()->getItemInHand(0).itemId;
     }
 
+    void ServerLevelBridge::GetItemEntitiesInBox(const Game::AABBd& box,
+                                                 std::vector<NearbyItemEntity>& out) const {
+        if (!m_items) return;
+        for (const auto& [id, e] : m_items->All()) {
+            if (e.stack.IsEmpty()) continue;
+            // MC's entity box test: the item's 0.25 box against `box`.
+            constexpr double h = Game::ItemEntity::kWidth * 0.5;
+            if (e.pos.x + h <= box.min.x || e.pos.x - h >= box.max.x ||
+                e.pos.y + Game::ItemEntity::kHeight <= box.min.y || e.pos.y >= box.max.y ||
+                e.pos.z + h <= box.min.z || e.pos.z - h >= box.max.z) {
+                continue;
+            }
+            NearbyItemEntity n;
+            n.id = id;
+            n.pos = e.pos;
+            n.itemId = e.stack.itemId;
+            n.count = e.stack.count;
+            n.canPickUp = e.pickupDelay <= 0;
+            out.push_back(n);
+        }
+    }
+
+    int ServerLevelBridge::TakeFromItemEntity(int32_t id, int count) {
+        if (!m_items || count <= 0) return 0;
+        Game::ItemEntity* e = m_items->Find(id);
+        if (!e || e->stack.IsEmpty()) return 0;
+        const int taken = std::min(count, e->stack.count);
+        e->stack.count -= taken;
+        if (e->stack.count <= 0) e->stack.Clear();   // the manager's Tick erases it
+        return taken;
+    }
+
+    void ServerLevelBridge::CreateFilledResult(Game::LivingEntity& player, Game::ItemStack& held,
+                                               const Game::ItemStack& filled) {
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        ServerPlayer* sp = view ? view->GetPlayer() : nullptr;
+        if (!sp) { held = filled; return; }
+        sp->CreateFilledResult(held, filled);
+        // The overflow drops here and now (MC player.drop): this level owns
+        // the item entities, and no session flush follows a mob interaction.
+        if (m_items) {
+            const glm::dvec3 eye = sp->getPosition() +
+                                   glm::dvec3(0.0, Game::PlayerPhysics::EYE_HEIGHT_STANDING, 0.0);
+            const glm::dvec3 forward =
+                glm::dvec3(Game::Mth::ViewVector(sp->getPitch(), sp->getYaw()));
+            for (const Game::ItemStack& stack : sp->takePendingDrops()) {
+                m_items->DropFromPlayer(eye, forward, stack);
+            }
+        }
+    }
+
     void ServerLevelBridge::BroadcastEntityEvent(const Game::Entity& entity, uint8_t event) {
         m_pendingEvents.push_back({ entity.GetId(), event });
     }
@@ -1222,11 +1283,27 @@ namespace Server {
                 continue;
             }
 
+            PlayerEntityView* departing = it->second.get();
             if (m_mobs) {
-                PlayerEntityView* departing = it->second.get();
                 for (const auto& [mobId, mob] : m_mobs->All()) {
                     mob->ClearReferenceTo(departing);
                 }
+            }
+            // ...and every OTHER level's mobs. A mob can meet a view of a
+            // level it is not in — a player hitting it through a portal
+            // (IntegratedServer::HandleInteract's attacker image) hands it
+            // that player's view as the attacker, and what it alerts or
+            // remembers from that can outlive the image's own clearing.
+            // Clearing only this level's mobs left such a pointer to be
+            // cast on a freed view in GoalSelector::Tick, the tick after
+            // that player crossed back (two players and two mobs bouncing
+            // through one nether portal, 2026-09-03).
+            if (g_integratedServer) {
+                g_integratedServer->ForEachLevel([&](ServerLevel& level) {
+                    MobManager* others = level.Mobs();
+                    if (!others || others == m_mobs) return;
+                    for (const auto& [mobId, mob] : others->All()) mob->ClearReferenceTo(departing);
+                });
             }
             it = m_playerViews.erase(it);
         }

@@ -291,8 +291,13 @@ namespace Game {
         // applied on top of whatever they answer.
         float scale = 1.0f;
 
-        virtual float BaseBbWidth()   const { return TypeInfo().width; }
-        virtual float BaseBbHeight()  const { return TypeInfo().height; }
+        // MC LivingEntity.getDefaultDimensions: the type's box, or its baby
+        // box (MC 26.3's per-mob BABY_DIMENSIONS, else the adult's halved —
+        // GeneratedEntityTypes' baby columns) when IsBaby(). Read here on the
+        // base so the zombie/piglin family, whose baby is a synched flag
+        // rather than an age, gets it too.
+        virtual float BaseBbWidth()   const { return IsBaby() ? GetBabyWidth(GetType()) : TypeInfo().width; }
+        virtual float BaseBbHeight()  const { return IsBaby() ? GetBabyHeight(GetType()) : TypeInfo().height; }
         virtual float BaseEyeHeight() const { return TypeInfo().eyeHeight; }
         float GetBbWidth()   const { return BaseBbWidth()   * scale; }
         float GetBbHeight()  const { return BaseBbHeight()  * scale; }

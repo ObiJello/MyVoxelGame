@@ -19,7 +19,7 @@
 //    4  CUSTOM_NAME                   11  EQUIPPABLE
 //    5  ITEM_NAME                     12  BLOCKS_ATTACKS
 //    6  LORE                          13  BUNDLE_CONTENTS
-//    7  RARITY
+//    7  RARITY                        14  SULFUR_CUBE_BUCKET
 //  100  PORTAL_GUN_NEXT_COLOR        101  PORTAL_GUN_INSTANCE_ID
 #pragma once
 
@@ -83,6 +83,18 @@ namespace Game {
     // NOTE: `saturation` is the FINAL saturation value (MC's Builder converts
     // saturationModifier via FoodConstants.saturationByModifier at build time
     // — FoodProperties.java:60-62); our FoodDefs table does the same.
+    // MC DataComponents.SULFUR_CUBE_CONTENT (the swallowed block, an
+    // ItemStackTemplate) + the slice of BUCKET_ENTITY_DATA a sulfur cube
+    // writes (Bucketable.saveDefaultDataToBucketTag + SulfurCube.
+    // saveToBucketTag: age, age_locked; NoAI). One component here — the
+    // bucket of sulfur cube is the only item that carries either.
+    struct SulfurCubeBucketData {
+        std::string bodyItem;      // item slug of the swallowed block, "" = none
+        int         age = 0;
+        bool        ageLocked = false;
+        bool        noAi = false;
+    };
+
     struct FoodProperties {
         int   nutrition    = 0;
         float saturation   = 0.0f;
@@ -216,6 +228,7 @@ namespace Game::DataComponents {
     // Component in MC; plain string here — MC renders it italic, our font
     // has no italics). Wins over ITEM_NAME in the tooltip name line.
     extern const DataComponentType<std::string> CUSTOM_NAME;
+    extern const DataComponentType<SulfurCubeBucketData> SULFUR_CUBE_BUCKET;
 
     // Data-driven base name override (potion variants etc.). Mirrors
     // DataComponents.ITEM_NAME. Falls between CUSTOM_NAME and the registry

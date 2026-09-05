@@ -769,7 +769,39 @@ namespace Game {
         }
 
         if (m_level && m_level->IsClientSide()) {
+            // MC 26.2: `if (isBaby()) tickBabyAnimations(); else
+            // tickAdultAnimations();`. Both run here so the classic baby
+            // mesh (the adult's animators) and the remodel (the keyframe
+            // states) are each driven whichever look is drawn.
             TickAnimations();
+            if (IsBaby()) TickBabyAnimations();
+        }
+    }
+
+    void Axolotl::TickBabyAnimations() {
+        // MC Axolotl.tickBabyAnimations + soloAnimation, verbatim: the
+        // chosen state startIfStopped, every other one stopped.
+        const bool inWater = IsInWater();
+        const bool moving  = walkAnimation.IsMoving() || xRot != xRotO || yRot != yRotO;
+        MobAnim solo;
+        if (IsPlayingDead())          solo = MobAnim::PlayDead;
+        else if (moving) {
+            if (inWater && !onGround)      solo = MobAnim::Swim;
+            else if (!inWater && onGround) solo = MobAnim::Walk;
+            else                           solo = MobAnim::WalkUnderWater;
+        }
+        else if (inWater && !onGround) solo = MobAnim::IdleUnderWater;
+        else if (inWater && onGround)  solo = MobAnim::IdleUnderWaterOnGround;
+        else                           solo = MobAnim::IdleOnGround;
+
+        static constexpr MobAnim kAll[] = {
+            MobAnim::Swim, MobAnim::Walk, MobAnim::WalkUnderWater,
+            MobAnim::IdleUnderWater, MobAnim::IdleUnderWaterOnGround,
+            MobAnim::IdleOnGround, MobAnim::PlayDead,
+        };
+        for (MobAnim a : kAll) {
+            if (a == solo) Anim(a).StartIfStopped(tickCount);
+            else           Anim(a).Stop();
         }
     }
 

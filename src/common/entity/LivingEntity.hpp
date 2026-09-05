@@ -299,6 +299,18 @@ namespace Game {
         // rule: inside the window a NEW hit only lands if it exceeds the one
         // that opened the window, and then only for the difference.
         virtual bool Hurt(MobDamageSource source, float amount, Entity* attacker);
+        // MC DamageSource carries TWO entities: `causingEntity` (the shooter,
+        // who gets aggro and kill credit — this engine's `attacker`) and
+        // `directEntity` (the arrow that actually struck, which decides the
+        // knockback direction and what a shield faces). Hurt() takes the
+        // first; this takes both and exposes the second to every override
+        // through HurtDirectEntity() for the duration of the call. A melee
+        // hit has no separate direct entity (MC: both are the attacker).
+        bool HurtFrom(MobDamageSource source, float amount, Entity* causingEntity,
+                      Entity* directEntity);
+        // Valid inside Hurt() and its overrides: the direct entity of the
+        // HurtFrom in flight, null for a plain Hurt.
+        Entity* HurtDirectEntity() const { return m_hurtDirectEntity; }
 
         // MC LivingEntity.knockback. `dx`/`dz` point FROM the attacker TOWARD
         // this entity's push direction (MC passes attackerX - myX, which sends
@@ -319,6 +331,18 @@ namespace Game {
         // MC's FlyingAnimal marker interface (bee, parrot, allay). Travel uses
         // air friction for the vertical axis instead of the falling 0.98.
         virtual bool IsFlyingAnimal() const { return false; }
+
+        // MC 26.3 LivingEntity.omnidirectionalAirMover: true makes the vertical
+        // air drag the same 0.91-based friction as the horizontal axes (a
+        // sulfur cube carrying a block). Distinct from IsFlyingAnimal, which
+        // is MC's flying-mob clause of the same rule and is kept as is.
+        virtual bool OmnidirectionalAirMover() const { return false; }
+        // MC 26.3 Entity.getEntityBounciness → LivingEntity reads the
+        // BOUNCINESS attribute. 0 for everything but the sulfur cube's
+        // archetypes, and 0 keeps Travel's restitution pass a no-op.
+        virtual double GetEntityBounciness() const;
+        // MC 26.3 LivingEntity.computeModifiedFriction: clamp(1 - (1 - f) * m, 0, 1).
+        static float ComputeModifiedFriction(float friction, float modifier);
 
         // MC's helper is a hardcoded floor(allowed + 3.0F) — NOT the
         // SAFE_FALL_DISTANCE attribute, oddly enough.
@@ -574,6 +598,11 @@ namespace Game {
         float m_lastHurt = 0.0f;
         int   m_noJumpDelay = 0;
         bool  m_dead = false;
+        Entity* m_hurtDirectEntity = nullptr;   // see HurtFrom
+
+        // MC 26.3 Entity.restituteMovementAfterCollisions (entity bounciness).
+        void RestituteMovementAfterCollisions(const glm::dvec3& preMove,
+                                              const glm::dvec3& moved, float airDrag);
 
         EntityRef       m_lastHurtByMobRef;
         int64_t         m_lastHurtByMobTimestamp = 0;

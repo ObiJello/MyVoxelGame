@@ -102,6 +102,7 @@ namespace Client {
         void onInventoryFullS2C(const Network::InventoryFullS2CPacket& packet) override { handleInventoryFull(packet); }
         void onInventorySetSlotS2C(const Network::InventorySetSlotS2CPacket& packet) override { handleInventorySetSlot(packet); }
         void onInventorySetCarriedS2C(const Network::InventorySetCarriedS2CPacket& packet) override { handleInventorySetCarried(packet); }
+        void onSetHeldSlotS2C(const Network::SetHeldSlotS2CPacket& packet) override { handleSetHeldSlot(packet); }
         void onOpenScreenS2C(const Network::OpenScreenS2CPacket& packet) override { handleOpenScreen(packet); }
         void onContainerSetDataS2C(const Network::ContainerSetDataS2CPacket& packet) override { handleContainerSetData(packet); }
         void onSetHealthS2C(const Network::SetHealthS2CPacket& packet) override { handleSetHealth(packet); }
@@ -199,6 +200,7 @@ namespace Client {
         void handleInventoryFull(const Network::InventoryFullS2CPacket& packet);
         void handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet);
         void handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet);
+        void handleSetHeldSlot(const Network::SetHeldSlotS2CPacket& packet);
         void handleOpenScreen(const Network::OpenScreenS2CPacket& packet);
         void handleContainerSetData(const Network::ContainerSetDataS2CPacket& packet);
         void handleSetHealth(const Network::SetHealthS2CPacket& packet);

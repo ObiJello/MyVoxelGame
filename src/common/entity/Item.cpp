@@ -1,5 +1,7 @@
 // File: src/common/entity/Item.cpp
 #include "Item.hpp"
+#include "IUsePlayer.hpp"
+#include "EntityLevel.hpp"
 #include "GeneratedItemList.hpp"
 #include "ItemModelLoader.hpp"
 #include "ClientItemLoader.hpp"
@@ -660,6 +662,21 @@ namespace Game {
 
     size_t ItemRegistry::Size() {
         return g_blockItems.size() + g_pureItems.size();
+    }
+
+
+    // The fallbacks of IUsePlayer / EntityLevel::CreateFilledResult (MC
+    // ItemUtils.createFilledResult) for a player with no inventory behind
+    // it — the client's use predictor. ItemStack is only forward-declared
+    // in those headers, so the bodies live here.
+    void IUsePlayer::CreateFilledResult(ItemStack& held, const ItemStack& filled) {
+        held = filled;
+    }
+
+    void EntityLevel::CreateFilledResult(LivingEntity& player, ItemStack& held,
+                                         const ItemStack& filled) {
+        (void)player;
+        held = filled;
     }
 
 } // namespace Game

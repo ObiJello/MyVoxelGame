@@ -24,6 +24,14 @@ import sys
 
 MC = "minecraft_code/decompiled_net/minecraft"
 DEF_DIR = os.path.join(MC, "client/animation/definitions")
+# Definitions that only exist in the NEWER decompile (26.3), read for the
+# 26.1 baby remodel's meshes (gen_entity_models.py REMODEL_MESHES): the
+# remodeled rabbit's hop and idle head tilt, adult and baby. A name that
+# also exists in the main tree is taken from the main tree.
+MC2 = "minecraft_code2/decompiled_net/minecraft"
+DEF_DIR2 = os.path.join(MC2, "client/animation/definitions")
+EXTRA_DEFS = ("RabbitAnimation.java", "BabyRabbitAnimation.java",
+              "BabyAxolotlAnimation.java")
 OUT_HPP = "src/client/renderer/entity/model/GeneratedAnimations.hpp"
 OUT_CPP = "src/client/renderer/entity/model/GeneratedAnimations.cpp"
 
@@ -153,10 +161,15 @@ def main():
         sys.exit(f"missing {DEF_DIR} — run from the repo root")
 
     anims = []
-    for f in sorted(os.listdir(DEF_DIR)):
+    files = [(DEF_DIR, f) for f in sorted(os.listdir(DEF_DIR))]
+    present = {f for _, f in files}
+    for f in EXTRA_DEFS:
+        if f not in present and os.path.exists(os.path.join(DEF_DIR2, f)):
+            files.append((DEF_DIR2, f))
+    for def_dir, f in files:
         if not f.endswith("Animation.java"):
             continue
-        src = strip_comments(open(os.path.join(DEF_DIR, f), encoding="utf-8").read())
+        src = strip_comments(open(os.path.join(def_dir, f), encoding="utf-8").read())
         for name, length, looping, channels in parse_definitions(src):
             anims.append((f[:-5] + "." + name, length, looping, channels))
 

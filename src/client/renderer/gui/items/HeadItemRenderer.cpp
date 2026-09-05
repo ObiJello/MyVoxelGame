@@ -41,6 +41,7 @@
 // The inner T(-0.5,-0.5,-0.5) is the standard re-center MC bakes into ItemTransform
 // (decompiled net/minecraft/client/renderer/block/model/ItemTransform.java line 31-40).
 
+#include "client/resource/ResourcePacks.hpp"
 #include "HeadItemRenderer.hpp"
 #include "ItemLighting.hpp"
 #include "../GuiGraphics.hpp"
@@ -94,6 +95,14 @@ namespace Render {
 
         TextureHandle LoadHeadTexture(const std::string& kind) {
             auto& cache = HeadTextureCache();
+            {
+                // A resource pack change replaces every texture here.
+                static int s_packGeneration = -1;
+                if (Resources::CacheStale(s_packGeneration)) {
+                    if (g_renderBackend) for (auto& [key, tex] : cache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+                    cache.clear();
+                }
+            }
             auto it = cache.find(kind);
             if (it != cache.end()) return it->second;
             if (!g_renderBackend) return INVALID_TEXTURE;

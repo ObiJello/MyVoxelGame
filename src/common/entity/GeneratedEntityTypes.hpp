@@ -126,6 +126,7 @@ namespace Game {
         Tnt = 106,  // "tnt"
         EndCrystal = 107,  // "end_crystal"
         EnderPearl = 108,  // "ender_pearl"
+        SulfurCube = 109,  // "sulfur_cube"
         Count
     };
 
@@ -145,6 +146,11 @@ namespace Game {
         // (eyeHeight * 0.5); MC hardcodes an override for the mobs whose baby
         // model has a proportionally larger head.
         float       babyEyeHeight;
+        // MC 26.1 per-mob BABY_DIMENSIONS (Cow/Pig/Chicken/Rabbit/Sheep/Wolf/
+        // Cat/Ocelot/Fox.java's `getDefaultDimensions`): the baby's own box when
+        // it is NOT the adult's scaled by 0.5. 0 = derive (width * kBabyScale).
+        float       babyWidth;
+        float       babyHeight;
         // MC Mob.xpReward as seeded by the entity's constructor chain
         // (Monster.java:34 base 5, per-mob ctor overrides — see the
         // generator's XP_OVERRIDES). Mob::GetXpReward reads this; mobs whose
@@ -157,7 +163,7 @@ namespace Game {
     // LivingEntity.DEFAULT_BABY_SCALE — one value for every type.
     inline constexpr float kBabyScale = 0.5f;
 
-    inline constexpr int kEntityTypeCount = 109;
+    inline constexpr int kEntityTypeCount = 110;
     extern const EntityTypeInfo kEntityTypeTable[kEntityTypeCount];
 
     inline const EntityTypeInfo& GetEntityTypeInfo(EntityTypeId t) {
@@ -166,6 +172,17 @@ namespace Game {
 
     inline bool IsValidEntityType(uint16_t raw) {
         return raw < static_cast<uint16_t>(EntityTypeId::Count);
+    }
+
+    // Baby bounding box for a type — the explicit 26.1 dimensions where MC
+    // declares them, otherwise the adult's scaled by DEFAULT_BABY_SCALE.
+    inline float GetBabyWidth(EntityTypeId t) {
+        const EntityTypeInfo& info = GetEntityTypeInfo(t);
+        return info.babyWidth > 0.0f ? info.babyWidth : info.width * kBabyScale;
+    }
+    inline float GetBabyHeight(EntityTypeId t) {
+        const EntityTypeInfo& info = GetEntityTypeInfo(t);
+        return info.babyHeight > 0.0f ? info.babyHeight : info.height * kBabyScale;
     }
 
     // Eye height for an instance, honouring the baby override.

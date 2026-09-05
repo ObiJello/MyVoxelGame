@@ -1,9 +1,13 @@
 // File: src/client/renderer/mesh/ChunkMegaBuffer.cpp
 #include "ChunkMegaBuffer.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/Vertex.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include <algorithm>
+#include <cstring>
+#include <glm/glm.hpp>
 
 namespace Render {
 
@@ -26,6 +30,20 @@ namespace Render {
         m_slabIndexCapacity = slabIndexCapacity;
         m_perSectionIndexBuffers = perSectionIndexBuffers;
 
+        static_assert(VERTEX_STRIDE == sizeof(TerrainVertex), "VERTEX_STRIDE must match TerrainVertex");
+        static_assert(kSlotsPerSlab - 1 <= TerrainVertex::kSlotMask, "slot rows must fit TerrainVertex::slot");
+
+        // Section-origin tables for every slab this pool can ever own, in one
+        // host-visible buffer (see the header). Created before the first slab
+        // so BindSlab always has something to bind.
+        if (g_renderBackend) {
+            m_originsUbo = g_renderBackend->CreateBuffer(
+                BufferUsage::Uniform, kMaxSlabs * kSlotBytes, nullptr, BufferAccess::Dynamic);
+            if (m_originsUbo == INVALID_BUFFER) {
+                Log::Error("ChunkMegaBuffer: failed to create the section-origin table");
+            }
+        }
+
         // Allocate the first slab
         AllocateSlab();
 
@@ -47,10 +65,14 @@ namespace Render {
                 }
             }
             for (auto& slab : m_slabs) {
+                // The buffer texture views the VBO: it goes first.
+                if (slab.faceMapTex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(slab.faceMapTex);
                 if (slab.vbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.vbo);
                 if (slab.ibo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.ibo);
             }
+            if (m_originsUbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(m_originsUbo);
         }
+        m_originsUbo = INVALID_BUFFER;
         m_slabs.clear();
         m_regions.clear();
         m_pendingFrees.clear();
@@ -72,6 +94,13 @@ namespace Render {
             return 0;
         }
 
+        if (m_slabs.size() >= kMaxSlabs) {
+            // The origin-table buffer is sized for kMaxSlabs (2 GB of vertex
+            // data at the opaque slab size — never reached in practice).
+            Log::Error("ChunkMegaBuffer: slab limit (%u) reached; section not uploaded", kMaxSlabs);
+            return UINT32_MAX;
+        }
+
         Slab slab;
         slab.vboCapacity = m_slabVertexCapacity;
         slab.iboCapacity = m_slabIndexCapacity;
@@ -87,6 +116,15 @@ namespace Render {
             slab.iboCapacity * INDEX_SIZE,
             nullptr,
             BufferAccess::Dynamic);
+
+        // The face map: the same bytes as the VBO, seen by the fragment
+        // shader as RGBA16 texels (one record each). One view per slab,
+        // bound with the slab.
+        slab.faceMapTex = g_renderBackend->CreateBufferTexture(slab.vbo, TextureFormat::RGBA16);
+        if (slab.faceMapTex == INVALID_TEXTURE) {
+            Log::Error("ChunkMegaBuffer: no buffer texture for the face map — "
+                       "greedy-merged rectangles will read garbage records");
+        }
 
         uint32_t index = static_cast<uint32_t>(m_slabs.size());
         m_slabs.push_back(std::move(slab));
@@ -111,6 +149,16 @@ namespace Render {
         if (!m_perSectionIndexBuffers) {
             g_renderBackend->BindIndexBuffer(slab.ibo);
         }
+        // This slab's section-origin table, read by the terrain vertex shader.
+        if (m_originsUbo != INVALID_BUFFER) {
+            g_renderBackend->BindUniformBuffer(m_originsUbo, slabIndex * kSlotBytes, kSlotBytes);
+        }
+        // ... and its face map, read by the terrain fragment shaders
+        // (uFaceMap, texture unit 2 — ChunkRenderer::BindSpriteTable sets
+        // the sampler uniform).
+        if (slab.faceMapTex != INVALID_TEXTURE) {
+            g_renderBackend->BindTexture(slab.faceMapTex, 2);
+        }
     }
 
     // ========================================================================
@@ -132,10 +180,12 @@ namespace Render {
 
     bool ChunkMegaBuffer::UploadSection(const MegaBufferSectionKey& key,
                                          const float* vertexData, size_t vertexCount,
-                                         const uint16_t* indexData, size_t indexCount) {
+                                         const uint16_t* indexData, size_t indexCount,
+                                         const uint32_t* faceMap, size_t faceMapTexels) {
         PROFILE_ZONE;
         if (vertexCount == 0 || indexCount == 0) return false;
         if (!vertexData || !indexData) return false;
+        if (!faceMap) faceMapTexels = 0;
 
         // If section already exists, remove it first (re-upload)
         if (m_regions.count(key)) {
@@ -144,25 +194,56 @@ namespace Render {
 
         // Try to fit in an existing slab (last first — most likely to have space)
         for (int i = static_cast<int>(m_slabs.size()) - 1; i >= 0; i--) {
-            if (TryUploadToSlab(static_cast<uint32_t>(i), key, vertexData, vertexCount, indexData, indexCount))
+            if (TryUploadToSlab(static_cast<uint32_t>(i), key, vertexData, vertexCount, indexData, indexCount,
+                                faceMap, faceMapTexels))
                 return true;
         }
 
         // No slab has space — allocate a new one (<1ms, zero copy)
         uint32_t newSlab = AllocateSlab();
-        return TryUploadToSlab(newSlab, key, vertexData, vertexCount, indexData, indexCount);
+        if (newSlab == UINT32_MAX) return false;
+        return TryUploadToSlab(newSlab, key, vertexData, vertexCount, indexData, indexCount,
+                               faceMap, faceMapTexels);
+    }
+
+    bool ChunkMegaBuffer::AllocSlot(Slab& slab, uint16_t& outSlot) {
+        if (!slab.freeSlots.empty()) {
+            outSlot = slab.freeSlots.back();
+            slab.freeSlots.pop_back();
+            return true;
+        }
+        if (slab.slotHighWater < kSlotsPerSlab) {
+            outSlot = static_cast<uint16_t>(slab.slotHighWater++);
+            return true;
+        }
+        return false;   // every origin row taken — the caller tries the next slab
+    }
+
+    void ChunkMegaBuffer::FreeSlot(Slab& slab, uint16_t slot) {
+        slab.freeSlots.push_back(slot);
     }
 
     bool ChunkMegaBuffer::TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                                            const float* vertexData, size_t vertexCount,
-                                           const uint16_t* indexData, size_t indexCount) {
+                                           const uint16_t* indexData, size_t indexCount,
+                                           const uint32_t* faceMap, size_t faceMapTexels) {
         if (!g_renderBackend) return false;
         Slab& slab = m_slabs[slabIndex];
 
-        // Try vertex allocation
+        // Origin-table row first: it is the scarcer resource in a slab of
+        // small sections, and failing here costs nothing to undo.
+        uint16_t slot = 0;
+        if (!AllocSlot(slab, slot)) return false;
+
+        // Vertex allocation: the vertices plus the face-map records behind
+        // them, in whole vertex-stride units (see Region::allocUnits).
+        const size_t faceMapUnits = (faceMapTexels + kWordsPerUnit - 1) / kWordsPerUnit;   // faceMapTexels = uint32 words
+        const size_t allocUnits = vertexCount + faceMapUnits;
         size_t vertexOffset = 0;
-        if (!AllocRegion(slab.freeVertexBlocks, slab.vertexHighWater, slab.vboCapacity, vertexCount, vertexOffset))
+        if (!AllocRegion(slab.freeVertexBlocks, slab.vertexHighWater, slab.vboCapacity, allocUnits, vertexOffset)) {
+            FreeSlot(slab, slot);
             return false;
+        }
 
         // Index allocation. In per-section mode the slab IBO is untouched — the
         // section gets its own buffer below — so there is nothing to reserve and
@@ -171,16 +252,61 @@ namespace Render {
         if (!m_perSectionIndexBuffers) {
             if (!AllocRegion(slab.freeIndexBlocks, slab.indexHighWater, slab.iboCapacity, indexCount, indexOffset)) {
                 // Undo vertex allocation
-                FreeRegion(slab.freeVertexBlocks, vertexOffset, vertexCount);
+                FreeRegion(slab.freeVertexBlocks, vertexOffset, allocUnits);
+                FreeSlot(slab, slot);
                 return false;
             }
         }
 
-        // Upload vertex data
-        g_renderBackend->UpdateBuffer(slab.vbo,
+        // The section's origin, one vec4 row the vertex shader adds back to
+        // every vertex's section-relative position. Written before the
+        // vertices that reference it. The row is either brand new or was
+        // retired kFreeDelayFrames ago, so no in-flight frame reads it.
+        if (m_originsUbo != INVALID_BUFFER) {
+            const glm::vec4 origin(static_cast<float>(key.chunkPos.x * 16),
+                                   static_cast<float>(Config::MinY + key.sectionY * 16),
+                                   static_cast<float>(key.chunkPos.z * 16), 0.0f);
+            g_renderBackend->UpdateBufferUnsynchronized(m_originsUbo,
+                                          slabIndex * kSlotBytes + slot * kOriginEntryBytes,
+                                          kOriginEntryBytes, &origin);
+        }
+
+        // Patch the row number into every vertex (the mesher leaves it 0 and
+        // only the flags set) and, for face-mapped vertices, add the slab
+        // texel position of this section's records to their record index.
+        // Then one upload of vertices + records. A memcpy plus one or two
+        // stores per vertex, on the render thread, against the upload it
+        // precedes.
+        {
+            const size_t vertexWords = vertexCount * (VERTEX_STRIDE / sizeof(uint32_t));
+            const size_t words = (vertexCount + faceMapUnits) * (VERTEX_STRIDE / sizeof(uint32_t));
+            m_vertexScratch.resize(words);
+            std::memcpy(m_vertexScratch.data(), vertexData, vertexCount * VERTEX_STRIDE);
+            const uint32_t recordBase = static_cast<uint32_t>((vertexOffset + vertexCount) * kRecordsPerUnit);
+            auto* verts = reinterpret_cast<TerrainVertex*>(m_vertexScratch.data());
+            for (size_t i = 0; i < vertexCount; ++i) {
+                verts[i].slot = static_cast<uint16_t>((verts[i].slot & TerrainVertex::kFlagMask) | slot);
+                if (verts[i].slot & TerrainVertex::kMapFlag) verts[i].packedColor += recordBase;
+            }
+            if (faceMapTexels > 0) {
+                std::memcpy(m_vertexScratch.data() + vertexWords, faceMap, faceMapTexels * sizeof(uint32_t));
+                // Pad the last unit so no stale scratch reaches the GPU.
+                std::fill(m_vertexScratch.begin() + static_cast<std::ptrdiff_t>(vertexWords + faceMapTexels),
+                          m_vertexScratch.end(), 0u);
+            }
+        }
+        // Unsynchronised on purpose, on both backends. Every range written
+        // here is either past the high-water mark or was retired
+        // kFreeDelayFrames ago (RetireFreedRegions), so no in-flight frame
+        // reads it — and on OpenGL the synchronised glBufferSubData did not
+        // know that: Apple's driver serialised it against every pending draw
+        // of the slab, a GPU-length stall per upload (MeshUpload p99 6-12 ms
+        // on tour1, 2026-09-04). The one reader that could still reach a
+        // fresh range is a bridged gap (see m_recentIndexAllocs).
+        g_renderBackend->UpdateBufferUnsynchronized(slab.vbo,
                                        vertexOffset * VERTEX_STRIDE,
-                                       vertexCount * VERTEX_STRIDE,
-                                       vertexData);
+                                       allocUnits * VERTEX_STRIDE,
+                                       m_vertexScratch.data());
 
         // Upload index data, rebased to absolute so the draw needs no
         // baseVertex (see INDEX_SIZE). Both modes get the same layout so the
@@ -194,20 +320,32 @@ namespace Render {
                 m_indexScratch.data(),
                 BufferAccess::Dynamic);
             if (sectionIbo == INVALID_BUFFER) {
-                FreeRegion(slab.freeVertexBlocks, vertexOffset, vertexCount);
+                FreeRegion(slab.freeVertexBlocks, vertexOffset, allocUnits);
+                FreeSlot(slab, slot);
                 return false;
             }
         } else {
-            g_renderBackend->UpdateBuffer(slab.ibo,
+            g_renderBackend->UpdateBufferUnsynchronized(slab.ibo,
                                            indexOffset * INDEX_SIZE,
                                            indexCount * INDEX_SIZE,
                                            m_indexScratch.data());
+            m_recentIndexAllocs.push_back({slabIndex, indexOffset, indexCount, m_frameCounter});
+            slab.hotRangesDirty = true;
         }
 
-        m_uploadedBytes += vertexCount * VERTEX_STRIDE + indexCount * INDEX_SIZE;
+        m_uploadedBytes += allocUnits * VERTEX_STRIDE + indexCount * INDEX_SIZE;
 
         // Store region
-        m_regions[key] = {slabIndex, vertexOffset, vertexCount, indexOffset, indexCount, sectionIbo};
+        Region region{};
+        region.slabIndex    = slabIndex;
+        region.vertexOffset = vertexOffset;
+        region.vertexCount  = vertexCount;
+        region.indexOffset  = indexOffset;
+        region.indexCount   = indexCount;
+        region.slot         = slot;
+        region.allocUnits   = allocUnits;
+        region.sectionIbo   = sectionIbo;
+        m_regions[key] = region;
         slab.sectionCount++;
         return true;
     }
@@ -270,8 +408,9 @@ namespace Render {
             // be drawing this range, and handing it straight back would let the
             // very next UploadSection overwrite it. See RetireFreedRegions.
             m_pendingFrees.push_back({region.slabIndex,
-                                      region.vertexOffset, region.vertexCount,
+                                      region.vertexOffset, region.allocUnits,
                                       region.indexOffset, region.indexCount,
+                                      region.slot,
                                       !m_perSectionIndexBuffers,
                                       m_frameCounter});
             // The parked range still holds live-looking indices until retire
@@ -303,6 +442,19 @@ namespace Render {
 
     void ChunkMegaBuffer::RetireFreedRegions() {
         m_frameCounter++;
+        // Recent allocations stop being hot once every frame that could have
+        // bridged across them has retired.
+        if (!m_recentIndexAllocs.empty()) {
+            size_t keepA = 0;
+            for (const RecentAlloc& a : m_recentIndexAllocs) {
+                if (m_frameCounter - a.frameAllocated < kFreeDelayFrames) {
+                    m_recentIndexAllocs[keepA++] = a;
+                } else if (a.slabIndex < m_slabs.size()) {
+                    m_slabs[a.slabIndex].hotRangesDirty = true;
+                }
+            }
+            m_recentIndexAllocs.resize(keepA);
+        }
         if (m_pendingFrees.empty()) return;
 
         size_t keep = 0;
@@ -314,6 +466,7 @@ namespace Render {
             if (p.slabIndex < m_slabs.size()) {
                 Slab& slab = m_slabs[p.slabIndex];
                 FreeRegion(slab.freeVertexBlocks, p.vertexOffset, p.vertexCount);
+                FreeSlot(slab, p.slot);
                 if (p.freeIndices) {
                     // Zero the range before it becomes free space. Index 0 is
                     // always a valid vertex (slab vertex 0), so a run of zeros
@@ -330,7 +483,10 @@ namespace Render {
                         m_zeroScratch.resize(p.indexCount, 0u);
                     }
                     if (g_renderBackend && slab.ibo != INVALID_BUFFER) {
-                        g_renderBackend->UpdateBuffer(slab.ibo,
+                        // No draw has touched this range for kFreeDelayFrames
+                        // (a live section: freed; a bridged gap: refused
+                        // while hot), so the write needs no ordering.
+                        g_renderBackend->UpdateBufferUnsynchronized(slab.ibo,
                                                       p.indexOffset * INDEX_SIZE,
                                                       p.indexCount * INDEX_SIZE,
                                                       m_zeroScratch.data());
@@ -349,6 +505,11 @@ namespace Render {
         for (const PendingFree& p : m_pendingFrees) {
             if (p.slabIndex == slabIndex && p.freeIndices) {
                 slab.hotIndexRanges.push_back({p.indexOffset, p.indexCount});
+            }
+        }
+        for (const RecentAlloc& a : m_recentIndexAllocs) {
+            if (a.slabIndex == slabIndex) {
+                slab.hotIndexRanges.push_back({a.indexOffset, a.indexCount});
             }
         }
         std::sort(slab.hotIndexRanges.begin(), slab.hotIndexRanges.end(),
@@ -449,6 +610,7 @@ namespace Render {
                 // pending commands); Vulkan queues the handles on the
                 // current frame's deletion queue and frees them after its
                 // fence — destroying immediately there is use-after-free.
+                if (slab.faceMapTex != INVALID_TEXTURE) g_renderBackend->DeferredDestroyTexture(slab.faceMapTex);
                 if (slab.vbo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.vbo);
                 if (slab.ibo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.ibo);
             }

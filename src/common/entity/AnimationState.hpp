@@ -123,6 +123,20 @@ namespace Game {
         SonicBoom,
         SwimIdle,
         Tongue,
+        // 26.1 rabbit remodel (RabbitModel.hopAnimation / idleHeadTilt-
+        // Animation). Appended so the existing slot numbers stay put.
+        Hop,
+        IdleHeadTilt,
+        // 26.2 baby axolotl (Axolotl.tickBabyAnimations' seven exclusive
+        // AnimationStates — BabyAxolotlModel plays keyframe clips where the
+        // adult eases four animators).
+        Swim,
+        Walk,
+        WalkUnderWater,
+        IdleUnderWater,
+        IdleUnderWaterOnGround,
+        IdleOnGround,
+        PlayDead,
         Count,
     };
 

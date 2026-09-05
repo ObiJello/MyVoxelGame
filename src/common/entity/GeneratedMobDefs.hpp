@@ -96,7 +96,7 @@ namespace Game {
         bool fishCtrl;
     };
 
-    inline constexpr int kMobDefCount = 81;
+    inline constexpr int kMobDefCount = 82;
     extern const MobDef          kMobDefs[kMobDefCount];
     extern const MobAttrOverride kMobAttrs[];
 

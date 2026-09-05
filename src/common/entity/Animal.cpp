@@ -32,12 +32,15 @@ namespace Game {
         if (m_age == 0) m_age = m_forcedAge;
     }
 
+    // MC LivingEntity.getDefaultDimensions scaled by getAgeScale, or the
+    // per-mob BABY_DIMENSIONS override MC 26.1 gave the remodeled babies —
+    // the generated type table carries both (Game::GetBabyWidth/Height).
     float AgeableMob::BaseBbWidth() const {
-        return IsBaby() ? TypeInfo().width * kBabyScale : TypeInfo().width;
+        return IsBaby() ? Game::GetBabyWidth(GetType()) : TypeInfo().width;
     }
 
     float AgeableMob::BaseBbHeight() const {
-        return IsBaby() ? TypeInfo().height * kBabyScale : TypeInfo().height;
+        return IsBaby() ? Game::GetBabyHeight(GetType()) : TypeInfo().height;
     }
 
     float AgeableMob::BaseEyeHeight() const {

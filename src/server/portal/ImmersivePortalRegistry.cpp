@@ -320,14 +320,37 @@ namespace Server {
     std::vector<const ImmersivePortalRegistry::Portal*> ImmersivePortalRegistry::CollectNear(
             Game::DimensionId dimension, const glm::dvec3& pos, double radius) const {
         std::vector<const Portal*> out;
-        if (m_byChunk.empty()) return out;
+        // The surface's box padded by `radius` in EVERY axis —
+        // BoundingBox's own parameter pads along the normal only, which is
+        // right for a crossing test and wrong here: a frame block beside
+        // the surface, or a player standing off to its side, is "near" too.
+        auto within = [&](const Portal& p) {
+            glm::dvec3 mn, mx;
+            p.BoundingBox(mn, mx, 0.0);
+            mn -= glm::dvec3(radius);
+            mx += glm::dvec3(radius);
+            return pos.x >= mn.x && pos.x <= mx.x && pos.y >= mn.y && pos.y <= mx.y &&
+                   pos.z >= mn.z && pos.z <= mx.z;
+        };
+
         // A portal's origin chunk is where it is indexed, but its surface may
         // reach into neighbours; widen the chunk walk by the largest extent a
         // portal here has, plus the query radius.
+        //
+        // Global surfaces are chunkless (never indexed) and kilometres wide:
+        // they are answered by this linear pass instead, and they must NOT
+        // widen the chunk walk — a 200,000-block stack seam made `cr` twelve
+        // thousand chunks, and the walk below visited every one of the 625
+        // million keys per call, once per player per watch pass.
         double reach = radius;
         for (const auto& [id, portal] : m_portals) {
+            if (portal.Has(Game::Immersive::PortalFlag::Global)) {
+                if (portal.dimension == dimension && within(portal)) out.push_back(&portal);
+                continue;
+            }
             reach = std::max(reach, radius + std::max(portal.width, portal.height));
         }
+        if (m_byChunk.empty()) return out;
         const int cr = static_cast<int>(std::ceil(reach / 16.0));
         const int cx = static_cast<int>(std::floor(pos.x)) >> 4;
         const int cz = static_cast<int>(std::floor(pos.z)) >> 4;
@@ -338,19 +361,7 @@ namespace Server {
                 for (PortalId id : it->second) {
                     auto p = m_portals.find(id);
                     if (p == m_portals.end()) continue;
-                    // The surface's box padded by `radius` in EVERY axis —
-                    // BoundingBox's own parameter pads along the normal only,
-                    // which is right for a crossing test and wrong here: a
-                    // frame block beside the surface, or a player standing
-                    // off to its side, is "near" too.
-                    glm::dvec3 mn, mx;
-                    p->second.BoundingBox(mn, mx, 0.0);
-                    mn -= glm::dvec3(radius);
-                    mx += glm::dvec3(radius);
-                    if (pos.x >= mn.x && pos.x <= mx.x && pos.y >= mn.y && pos.y <= mx.y &&
-                        pos.z >= mn.z && pos.z <= mx.z) {
-                        out.push_back(&p->second);
-                    }
+                    if (within(p->second)) out.push_back(&p->second);
                 }
             }
         }

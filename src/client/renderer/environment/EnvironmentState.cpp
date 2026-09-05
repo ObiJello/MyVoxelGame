@@ -248,7 +248,7 @@ namespace Render {
         return static_cast<double>(m_gameTime) + static_cast<double>(partialTick);
     }
 
-    EnvironmentFrame EnvironmentState::FrameForDimension(Game::DimensionId dimension) {
+    EnvironmentFrame EnvironmentState::FrameForDimension(Game::DimensionId dimension, int renderDistChunks) {
         // Recompose with the dimension's rules in place of the current
         // ones, capture, and put everything back. The Nether and the End
         // values are the ones SkyRenderer::ApplyDimensionSky installs.
@@ -282,10 +282,12 @@ namespace Render {
                 m_skyboxActive = false;
                 break;
         }
+        const int savedRenderDist = m_lastRenderDistChunks;
         UpdateFrame(m_lastPartialTick, m_lastCameraForward, m_lastCameraY,
-                    m_lastRenderDistChunks, m_lastFogEnabled);
+                    renderDistChunks > 0 ? renderDistChunks : m_lastRenderDistChunks, m_lastFogEnabled);
         const EnvironmentFrame result = m_frame;
 
+        m_lastRenderDistChunks = savedRenderDist;
         m_constantAmbientLight = savedAmbient;
         m_skyboxActive = savedSkybox;
         m_skyboxFogBase = savedFogBase;

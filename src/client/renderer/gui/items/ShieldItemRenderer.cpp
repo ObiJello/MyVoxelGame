@@ -23,6 +23,7 @@
 // the GUI quad pipeline, sorted back-to-front by face-center Z (painter's
 // algorithm — GUI pipeline has depth test disabled).
 
+#include "client/resource/ResourcePacks.hpp"
 #include "ShieldItemRenderer.hpp"
 #include "ItemLighting.hpp"
 #include "../GuiGraphics.hpp"
@@ -55,6 +56,15 @@ namespace Render {
         TextureHandle LoadShieldTexture() {
             auto& tex = ShieldTexture();
             auto& tried = ShieldTextureTried();
+            {
+                // A resource pack change replaces the texture.
+                static int s_packGeneration = -1;
+                if (Resources::CacheStale(s_packGeneration)) {
+                    if (tex != INVALID_TEXTURE && g_renderBackend) g_renderBackend->DestroyTexture(tex);
+                    tex = INVALID_TEXTURE;
+                    tried = false;
+                }
+            }
             if (tried) return tex;
             tried = true;
             if (!g_renderBackend) return INVALID_TEXTURE;

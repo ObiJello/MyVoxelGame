@@ -4,11 +4,17 @@
 #include "common/core/Log.hpp"
 #include "common/core/SaveVersion.hpp"
 #include "common/nbt/NbtWrite.hpp"
+#include "server/world/storage/NBTParser.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <system_error>
+#include <vector>
 
 namespace Game::Anvil {
 
@@ -156,15 +162,30 @@ namespace Game::Anvil {
         w.EndCompound();
         w.EndCompound();
 
-        // Every gamerule is stored as a STRING, whatever its type.
+        // game_rules is MC's typed, namespaced map (PrimaryLevelData stores
+        // it through GameRules.codec = Codec.dispatchedMap over the
+        // GAME_RULE registry): keys are the rule ids as resource locations,
+        // booleans are bytes, integers are ints. Only the rules this engine
+        // models are written; vanilla defaults the rest.
         w.BeginCompound("game_rules");
-        w.String("doDaylightCycle", data.doDaylightCycle ? "true" : "false");
-        w.String("doMobSpawning",   data.doMobSpawning   ? "true" : "false");
-        w.String("immersivePortals", data.immersivePortals ? "true" : "false");
-        w.String("obeyWorldWrap",    std::to_string(data.worldWrapSize));
-        w.String("obeyDimensionStack", data.dimensionStack ? "true" : "false");
-        w.String("mobGriefing",     data.mobGriefing     ? "true" : "false");
-        w.String("randomTickSpeed", std::to_string(data.randomTickSpeed));
+        w.Bool("minecraft:advance_time",               data.doDaylightCycle);
+        w.Bool("minecraft:spawn_mobs",                 data.doMobSpawning);
+        w.Bool("minecraft:mob_griefing",               data.mobGriefing);
+        w.Int ("minecraft:random_tick_speed",          data.randomTickSpeed);
+        w.Bool("minecraft:tnt_explodes",               data.tntExplodes);
+        w.Bool("minecraft:entity_drops",               data.doEntityDrops);
+        w.Bool("minecraft:tnt_explosion_drop_decay",   data.tntExplosionDropDecay);
+        w.Bool("minecraft:block_explosion_drop_decay", data.blockExplosionDropDecay);
+        w.Bool("minecraft:mob_explosion_drop_decay",   data.mobExplosionDropDecay);
+        w.EndCompound();
+
+        // Engine-only world settings in their own compound. Minecraft
+        // ignores a tag it does not know under Data; a key it does not know
+        // INSIDE game_rules would fail the registry-keyed decode above.
+        w.BeginCompound("obeycraft");
+        w.Bool("immersive_portals", data.immersivePortals);
+        w.Int ("world_wrap",        data.worldWrapSize);
+        w.Bool("dimension_stack",   data.dimensionStack);
         w.EndCompound();
 
         w.BeginCompound("DataPacks");
@@ -187,6 +208,98 @@ namespace Game::Anvil {
         if (!SafeReplace(root.LevelDat(), root.LevelDatOld(), gz, error)) return false;
         Log::Info("[Anvil] wrote level.dat for \"%s\" (%zu bytes, DataVersion %d)",
                   data.levelName.c_str(), gz.size(), dataVersion);
+        return true;
+    }
+
+    namespace {
+
+        using ::World::NBTTagCompound;
+        using ::World::NBTTagPtr;
+
+        std::shared_ptr<NBTTagCompound> Compound(const NBTTagCompound& parent, const char* key) {
+            return std::dynamic_pointer_cast<NBTTagCompound>(parent.GetTag(key));
+        }
+
+        // A boolean rule under any of the names it may carry: typed byte or
+        // legacy "true"/"false" string.
+        bool RuleBool(const NBTTagCompound* rules, std::initializer_list<const char*> keys, bool def) {
+            if (!rules) return def;
+            for (const char* key : keys) {
+                const NBTTagPtr tag = rules->GetTag(key);
+                if (!tag) continue;
+                if (auto b = std::dynamic_pointer_cast<::World::NBTTagByte>(tag))   return b->value != 0;
+                if (auto s = std::dynamic_pointer_cast<::World::NBTTagString>(tag)) return s->value == "true";
+            }
+            return def;
+        }
+        int RuleInt(const NBTTagCompound* rules, std::initializer_list<const char*> keys, int def) {
+            if (!rules) return def;
+            for (const char* key : keys) {
+                const NBTTagPtr tag = rules->GetTag(key);
+                if (!tag) continue;
+                if (auto i = std::dynamic_pointer_cast<::World::NBTTagInt>(tag)) return i->value;
+                if (auto s = std::dynamic_pointer_cast<::World::NBTTagString>(tag)) {
+                    char* end = nullptr;
+                    const long v = std::strtol(s->value.c_str(), &end, 10);
+                    if (end != s->value.c_str() && *end == '\0') return static_cast<int>(v);
+                }
+            }
+            return def;
+        }
+
+    } // namespace
+
+    bool ReadLevelDat(const std::filesystem::path& levelDat, LevelDatData& out, std::string& error) {
+        std::ifstream f(levelDat, std::ios::binary);
+        if (!f) { error = "cannot open " + levelDat.string(); return false; }
+        const std::vector<uint8_t> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (raw.empty()) { error = levelDat.string() + " is empty"; return false; }
+
+        std::vector<uint8_t> nbt;
+        if (!Nbt::GzipDecompress(raw, nbt)) { error = "cannot inflate " + levelDat.string(); return false; }
+
+        const auto root = std::dynamic_pointer_cast<NBTTagCompound>(::World::NBTParser::Parse(nbt));
+        if (!root) { error = "level.dat is not an NBT compound"; return false; }
+        const auto data = Compound(*root, "Data");
+        if (!data) { error = "level.dat has no Data compound"; return false; }
+
+        const std::string name = data->GetValue<std::string>("LevelName", "");
+        if (!name.empty()) out.levelName = name;
+        out.gameType      = data->GetValue<int32_t>("GameType", out.gameType);
+        out.hardcore      = data->GetValue<int8_t>("hardcore", out.hardcore ? 1 : 0) != 0;
+        out.allowCommands = data->GetValue<int8_t>("allowCommands", out.allowCommands ? 1 : 0) != 0;
+        out.difficulty    = data->GetValue<int8_t>("Difficulty", static_cast<int8_t>(out.difficulty));
+        out.time          = data->GetValue<int64_t>("Time", out.time);
+        out.dayTime       = data->GetValue<int64_t>("DayTime", out.dayTime);
+        out.lastPlayed    = data->GetValue<int64_t>("LastPlayed", out.lastPlayed);
+        out.spawnX        = data->GetValue<int32_t>("SpawnX", out.spawnX);
+        out.spawnY        = data->GetValue<int32_t>("SpawnY", out.spawnY);
+        out.spawnZ        = data->GetValue<int32_t>("SpawnZ", out.spawnZ);
+        out.spawnYaw      = data->GetValue<float>("SpawnAngle", out.spawnYaw);
+
+        if (const auto gen = Compound(*data, "WorldGenSettings")) {
+            out.seed               = gen->GetValue<int64_t>("seed", out.seed);
+            out.generateStructures = gen->GetValue<int8_t>("generate_features", out.generateStructures ? 1 : 0) != 0;
+            out.bonusChest         = gen->GetValue<int8_t>("bonus_chest", out.bonusChest ? 1 : 0) != 0;
+        }
+
+        const auto rules = Compound(*data, "game_rules");
+        const NBTTagCompound* r = rules.get();
+        out.doDaylightCycle         = RuleBool(r, {"minecraft:advance_time", "advance_time", "doDaylightCycle"}, out.doDaylightCycle);
+        out.doMobSpawning           = RuleBool(r, {"minecraft:spawn_mobs", "spawn_mobs", "doMobSpawning"}, out.doMobSpawning);
+        out.mobGriefing             = RuleBool(r, {"minecraft:mob_griefing", "mob_griefing", "mobGriefing"}, out.mobGriefing);
+        out.randomTickSpeed         = RuleInt (r, {"minecraft:random_tick_speed", "random_tick_speed", "randomTickSpeed"}, out.randomTickSpeed);
+        out.tntExplodes             = RuleBool(r, {"minecraft:tnt_explodes", "tnt_explodes", "tntExplodes"}, out.tntExplodes);
+        out.doEntityDrops           = RuleBool(r, {"minecraft:entity_drops", "entity_drops", "doEntityDrops"}, out.doEntityDrops);
+        out.tntExplosionDropDecay   = RuleBool(r, {"minecraft:tnt_explosion_drop_decay", "tnt_explosion_drop_decay", "tntExplosionDropDecay"}, out.tntExplosionDropDecay);
+        out.blockExplosionDropDecay = RuleBool(r, {"minecraft:block_explosion_drop_decay", "block_explosion_drop_decay", "blockExplosionDropDecay"}, out.blockExplosionDropDecay);
+        out.mobExplosionDropDecay   = RuleBool(r, {"minecraft:mob_explosion_drop_decay", "mob_explosion_drop_decay", "mobExplosionDropDecay"}, out.mobExplosionDropDecay);
+
+        // Engine settings: their own compound now, game_rules strings before.
+        const auto obey = Compound(*data, "obeycraft");
+        out.immersivePortals = RuleBool(obey.get(), {"immersive_portals"}, RuleBool(r, {"immersivePortals"}, out.immersivePortals));
+        out.worldWrapSize    = RuleInt (obey.get(), {"world_wrap"},        RuleInt (r, {"obeyWorldWrap"}, out.worldWrapSize));
+        out.dimensionStack   = RuleBool(obey.get(), {"dimension_stack"},   RuleBool(r, {"obeyDimensionStack"}, out.dimensionStack));
         return true;
     }
 

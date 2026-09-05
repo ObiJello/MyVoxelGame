@@ -627,19 +627,16 @@ namespace Threading {
         queue.IncrementProcessed();
     }
 
-    // Bulk-copy a Vertex array into a flat float array using memcpy instead of
-    // individual push_back calls per vertex. The Vertex struct layout
-    // (vec3 pos, vec2 uv, uint32 packedColor) is 6 float-sized slots per vertex
-    // (3 float pos + 2 float UV + 1 uint32 packed color).
+    // Bulk-copy a TerrainVertex array into the result's float vector with one
+    // memcpy. The vector is an opaque byte blob here: a 16-byte TerrainVertex
+    // is four float-sized slots of packed uint16/uint8 data, nothing ever
+    // interprets them as floats, they ride to the GPU verbatim.
     static void CopyVertexLayer(const std::vector<Render::TerrainVertex>& verts,
                                 std::vector<float>& outFloats) {
-        // The float vector is an opaque byte blob here — the tail of each
-        // vertex is unorm16 tile-rect data, not floats, but nothing ever
-        // interprets these values as floats; they ride to the GPU verbatim.
-        static_assert(sizeof(Render::TerrainVertex) == 8 * sizeof(float),
+        static_assert(sizeof(Render::TerrainVertex) == 4 * sizeof(float),
                       "TerrainVertex layout changed — update CopyVertexLayer");
 
-        const size_t floatCount = verts.size() * 8;
+        const size_t floatCount = verts.size() * 4;
         outFloats.resize(floatCount);
         std::memcpy(outFloats.data(), verts.data(), floatCount * sizeof(float));
     }
@@ -654,6 +651,9 @@ namespace Threading {
             result.meshData.opaqueIndices = sectionMesh.opaqueIdxs;
             result.meshData.opaqueVertexCount = sectionMesh.opaqueVerts.size();
             result.meshData.opaqueIndexCount = sectionMesh.opaqueIdxs.size();
+            std::copy(std::begin(sectionMesh.opaqueFacingRanges), std::end(sectionMesh.opaqueFacingRanges),
+                      std::begin(result.meshData.opaqueFacingRanges));
+            result.meshData.opaqueFaceMap = sectionMesh.opaqueFaceMap;
         }
 
         // Cutout layer
@@ -662,6 +662,9 @@ namespace Threading {
             result.meshData.cutoutIndices = sectionMesh.cutoutIdxs;
             result.meshData.cutoutVertexCount = sectionMesh.cutoutVerts.size();
             result.meshData.cutoutIndexCount = sectionMesh.cutoutIdxs.size();
+            std::copy(std::begin(sectionMesh.cutoutFacingRanges), std::end(sectionMesh.cutoutFacingRanges),
+                      std::begin(result.meshData.cutoutFacingRanges));
+            result.meshData.cutoutFaceMap = sectionMesh.cutoutFaceMap;
         }
 
         // Translucent layer
@@ -679,8 +682,18 @@ namespace Threading {
             // world load. Now it uploads the sorted indices once and only
             // re-sorts when the point of view changes.
             const glm::vec3 cameraPos = GetPlayerPosition();
-            const float* v = result.meshData.translucentVertices.data();
-            constexpr size_t floatsPerVertex = sizeof(Render::TerrainVertex) / sizeof(float);
+            // Positions are section-relative fixed point (TerrainVertex);
+            // decode them back to world space against this section's origin.
+            const auto* tv = reinterpret_cast<const Render::TerrainVertex*>(
+                result.meshData.translucentVertices.data());
+            const glm::vec3 origin(static_cast<float>(chunkPos.x * 16),
+                                   static_cast<float>(Config::MinY + sectionY * 16),
+                                   static_cast<float>(chunkPos.z * 16));
+            auto worldPos = [&](const Render::TerrainVertex& t) {
+                return origin + glm::vec3(Render::TerrainVertex::DecodePos(t.px),
+                                          Render::TerrainVertex::DecodePos(t.py),
+                                          Render::TerrainVertex::DecodePos(t.pz));
+            };
             const size_t quads = result.meshData.translucentVertexCount / 4;
             auto& centroids = result.meshData.translucentCentroids;
             centroids.clear();
@@ -688,9 +701,7 @@ namespace Threading {
             std::vector<glm::vec3> centroidVec;
             centroidVec.reserve(quads);
             for (size_t q = 0; q < quads; ++q) {
-                const float* p0 = v + (q * 4 + 0) * floatsPerVertex;
-                const float* p2 = v + (q * 4 + 2) * floatsPerVertex;
-                const glm::vec3 c((p0[0] + p2[0]) * 0.5f, (p0[1] + p2[1]) * 0.5f, (p0[2] + p2[2]) * 0.5f);
+                const glm::vec3 c = (worldPos(tv[q * 4 + 0]) + worldPos(tv[q * 4 + 2])) * 0.5f;
                 centroidVec.push_back(c);
                 centroids.push_back(c.x); centroids.push_back(c.y); centroids.push_back(c.z);
             }

@@ -1130,41 +1130,14 @@ namespace Game {
         }
     }
 
-    void ClientPlayerController::OnPickBlock(BlockID picked) {
-        if (!player) return;
-        if (picked == BlockID::Air) return;
-        // Slabs need no normalisation: all three halves ARE one BlockID, so
-        // pick-block yields the right item without asking which half it
-        // landed on (placement re-derives the orientation from the click).
-        OnPickItem(Game::ItemRegistry::FromBlock(picked));
-    }
-
-    void ClientPlayerController::OnPickItem(Game::ItemID itemId) {
-        if (!player) return;
-        if (itemId == Game::Items::Air) return;
-
-        const int slot = player->inventory.GetSelectedSlot();
-        const int unifiedSlot = Game::Inventory::HotbarToIndex(slot);
-
-        // Predictive client-side fill so the HUD updates instantly. The server
-        // will echo back an InventorySetSlotS2C that either confirms or
-        // corrects this. (Without the predictive update the HUD would lag a
-        // round-trip behind every pick-block.)
-        const int maxStack = Game::ItemRegistry::Get(itemId).maxStackSize;
-        player->inventory.SetSlot(unifiedSlot, itemId, maxStack);
-
-        // Authoritative request — server will mutate its own inventory state.
-        if (networkClient && networkClient->IsConnected()) {
-            Network::InventoryClickC2SPacket pkt;
-            pkt.slotIndex      = static_cast<int16_t>(unifiedSlot);
-            pkt.button         = 0;
-            pkt.action         = static_cast<uint8_t>(Network::ContainerInput::CREATIVE_FILL_SLOT);
-            pkt.flags          = 0;
-            pkt.creativeItemId = static_cast<uint32_t>(itemId);
-            auto data = Network::Serialization::Serialize(pkt);
-            if (auto conn = networkClient->GetConnection()) {
-                conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryClickC2S), data);
-            }
+    void ClientPlayerController::SendPickItem(const Network::PickItemC2SPacket& packet) {
+        // No local prediction: the server decides which slot the item lands
+        // in (it may swap a stack out of the inventory), and its
+        // SetHeldSlotS2C plus the slot diff bring the hotbar up to date.
+        if (!networkClient || !networkClient->IsConnected()) return;
+        auto data = Network::Serialization::Serialize(packet);
+        if (auto conn = networkClient->GetConnection()) {
+            conn->SendPacket(static_cast<uint8_t>(Network::PacketId::PickItemC2S), data);
         }
     }
 

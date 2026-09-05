@@ -294,7 +294,14 @@ namespace Game::Anvil {
                 auto t = std::dynamic_pointer_cast<::World::NBTTagDouble>(pos->value[i]);
                 return t ? t->value : 0.0;
             };
-            player.setPosition(glm::dvec3(d(0), d(1), d(2)));
+            // MC Entity.load → setPos: the saved position is placed
+            // outright. NOT setPosition(): that is the move-packet setter
+            // with the "moved too fast" distance gate, measured from the
+            // spawn point the player object is born at — so a player who
+            // logged out more than 600 blocks from spawn was "rejected" on
+            // every rejoin and woke up at spawn (latest.log: "Player 1
+            // moved too fast (3474.2 blocks)" right after login).
+            player.teleport(glm::dvec3(d(0), d(1), d(2)));
         }
         if (auto rot = std::dynamic_pointer_cast<::World::NBTTagList>(data->GetTag("Rotation"));
             rot && rot->value.size() == 2) {

@@ -15,6 +15,7 @@
 #include "../backend/RenderTypes.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace Render {
@@ -26,6 +27,17 @@ namespace Render {
 
         bool Initialize();
         void Shutdown();
+
+        // Use another clouds.png (absolute path; empty = the game's own).
+        // A resource-pack sky that ships its own clouds.png — typically a
+        // 1×1 transparent pixel that turns the cloud layer off because the
+        // clouds are painted into its sky — is applied through this. A
+        // no-op when the path is the one in use; a change re-decodes the
+        // occupancy grid and forces the next Render to rebuild the mesh.
+        void SetCloudTexture(const std::string& absolutePath);
+        // Resource pack reload: read the cell grid again from whatever
+        // clouds.png now resolves to.
+        void ReloadTexture();
 
         void Render(const glm::mat4& proj, const glm::mat4& view,
                     const glm::vec3& cameraPos, int renderDistChunks,
@@ -43,6 +55,7 @@ namespace Render {
         static_assert(sizeof(Vertex) == 24, "must match GetBlockVertexLayout stride");
 
         static Mode CurrentMode();
+        bool LoadCellGrid(const std::string& path);
         bool CellOccupied(int cx, int cz) const;
         void EmitFace(std::vector<Vertex>& verts, std::vector<uint32_t>& indices,
                       int rx, int rz, int dir, bool inside, bool useTopColor) const;
@@ -63,6 +76,8 @@ namespace Render {
         std::vector<uint8_t> m_cells;
         int m_texWidth = 0;
         int m_texHeight = 0;
+        std::string m_cellsPath;        // the clouds.png the grid came from
+        std::string m_overridePath;     // SetCloudTexture's path, empty = vanilla
 
         // GPU mesh, double-buffered. A rebuild writes into host-visible
         // (Dynamic) buffers IN PLACE with UpdateBuffer — on Vulkan that is a

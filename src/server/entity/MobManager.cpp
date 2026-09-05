@@ -561,21 +561,7 @@ namespace Server {
         // Absorb anything created during the tick (breeding, reinforcements).
         // Deferred by ServerLevelBridge::AddFreshEntity precisely so the loop
         // above never mutates the container it is iterating.
-        if (m_level) {
-            auto& spawned = m_level->DrainSpawned();
-            for (auto& entity : spawned) {
-                // Only mobs are accepted here; a non-mob entity would have no
-                // manager to tick it, so dropping it is better than leaking it
-                // into a container that will never run its logic.
-                if (auto* mob = dynamic_cast<Game::Mob*>(entity.get())) {
-                    // Ownership moves from the generic Entity pointer to the
-                    // typed one; release() is the transfer, not a leak.
-                    (void)entity.release();
-                    Add(std::unique_ptr<Game::Mob>(mob));
-                }
-            }
-            spawned.clear();
-        }
+        AbsorbSpawned();
 
         // Death drops, AT DEATH — MC LivingEntity.die runs dropAllDeathLoot
         // at deathTime 0 (LivingEntity.java:1444,1478-1485), not when the
@@ -766,6 +752,27 @@ namespace Server {
         for (size_t i = 0; i < static_cast<size_t>(Game::EntityTypeId::Count); ++i) {
             m_typeCounts[i].store(typeCounts[i], std::memory_order_relaxed);
         }
+    }
+
+    void MobManager::AbsorbSpawned() {
+        // Also the frozen world's path (IntegratedServer::SyncMobsToClients):
+        // MC's addFreshEntity is immediate, so a spawn-egg baby or a shot
+        // arrow made under /tick freeze must exist — and reach the client —
+        // before the next simulated tick, not after it.
+        if (!m_level) return;
+        auto& spawned = m_level->DrainSpawned();
+        for (auto& entity : spawned) {
+            // Only mobs are accepted here; a non-mob entity would have no
+            // manager to tick it, so dropping it is better than leaking it
+            // into a container that will never run its logic.
+            if (auto* mob = dynamic_cast<Game::Mob*>(entity.get())) {
+                // Ownership moves from the generic Entity pointer to the
+                // typed one; release() is the transfer, not a leak.
+                (void)entity.release();
+                Add(std::unique_ptr<Game::Mob>(mob));
+            }
+        }
+        spawned.clear();
     }
 
     void MobManager::TickPassengerChain(Game::Entity& vehicle) {

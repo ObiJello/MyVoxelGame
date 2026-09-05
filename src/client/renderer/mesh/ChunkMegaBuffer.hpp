@@ -107,9 +107,17 @@ namespace Render {
         // SECTION MANAGEMENT
         // ========================================================================
 
+        // faceMap: the layer's face-map records (RGBA8 texels, see
+        // TerrainVertex::Mapped), stored right after the vertices in the same
+        // slab region and read by the fragment shader through the slab's
+        // buffer texture (BindSlab binds it at texture slot 2). The mega
+        // buffer adds the records' slab texel position to every face-mapped
+        // vertex's record index at upload, next to the origin-row patch.
+        // nullptr / 0 for a layer without merged rectangles.
         bool UploadSection(const MegaBufferSectionKey& key,
                            const float* vertexData, size_t vertexCount,
-                           const uint16_t* indexData, size_t indexCount);
+                           const uint16_t* indexData, size_t indexCount,
+                           const uint32_t* faceMap = nullptr, size_t faceMapTexels = 0);
 
         // Rewrites a section's indices in place, leaving its vertices alone.
         // Used by translucent re-sorting, which reorders quads without
@@ -219,6 +227,10 @@ namespace Render {
         struct Slab {
             BufferHandle vbo = INVALID_BUFFER;
             BufferHandle ibo = INVALID_BUFFER;
+            // RGBA16 buffer texture over `vbo` — how the fragment shader reads
+            // the face-map records (one 8-byte texel each) that sit behind
+            // each section's vertices.
+            TextureHandle faceMapTex = INVALID_TEXTURE;
             size_t vboCapacity = 0;
             size_t iboCapacity = 0;
             size_t vertexHighWater = 0;
@@ -240,6 +252,12 @@ namespace Render {
             // thousand times per pass.
             std::vector<FreeBlock> hotIndexRanges;
             bool hotRangesDirty = false;
+
+            // Rows of this slab's section-origin table (see kSlotsPerSlab):
+            // bump-allocated, recycled through freeSlots after the same
+            // retire delay as the vertex range they describe.
+            uint32_t slotHighWater = 0;
+            std::vector<uint16_t> freeSlots;
         };
 
         // mutable: IsIndexGapDrawable is logically const but refreshes the
@@ -257,9 +275,14 @@ namespace Render {
         struct Region {
             uint32_t slabIndex;
             size_t vertexOffset;
-            size_t vertexCount;
+            size_t vertexCount;     // real vertices (stats, debug readback)
             size_t indexOffset;
             size_t indexCount;
+            uint16_t slot;          // origin-table row, patched into every vertex
+            // Vertex-stride units the region actually occupies: the vertices
+            // plus the face-map records behind them (rounded up to whole
+            // 16-byte units). This, not vertexCount, is what gets freed.
+            size_t allocUnits = 0;
             // Per-section index buffer, MC-style (CompiledSectionMesh ->
             // SectionBuffers.getIndexBuffer()). Only used when the pool was
             // initialised with perSectionIndexBuffers; INVALID_BUFFER otherwise
@@ -273,13 +296,27 @@ namespace Render {
         struct PendingFree {
             uint32_t slabIndex;
             size_t   vertexOffset;
-            size_t   vertexCount;
+            size_t   vertexCount;   // allocation units (Region::allocUnits)
             size_t   indexOffset;
             size_t   indexCount;
+            uint16_t slot;          // origin row, reusable once the range is
             bool     freeIndices;   // false in per-section-IBO mode
             uint64_t frameFreed;
         };
         std::vector<PendingFree> m_pendingFrees;
+        // Index ranges handed out within the last kFreeDelayFrames. They are
+        // hot for IsIndexGapDrawable for the opposite reason to the pending
+        // frees: a bridged gap drawn by an in-flight frame may run across
+        // free space that THIS frame just allocated and is writing new
+        // indices into — with unsynchronised uploads (below) nothing else
+        // keeps that draw from reading a half-written section.
+        struct RecentAlloc {
+            uint32_t slabIndex;
+            size_t   indexOffset;
+            size_t   indexCount;
+            uint64_t frameAllocated;
+        };
+        std::vector<RecentAlloc> m_recentIndexAllocs;
         uint64_t m_frameCounter = 0;
         // MAX_FRAMES_IN_FLIGHT is 2, so frame N can still be reading what frame
         // N-1 drew. 3 covers that with a frame to spare, and the cost of being
@@ -291,6 +328,9 @@ namespace Render {
         // uint32 absolute. Reused across calls so the steady-state upload
         // path allocates nothing.
         std::vector<uint32_t> m_indexScratch;
+        // Upload scratch for TryUploadToSlab: the section's vertices with
+        // their origin-table slot patched into TerrainVertex::slot.
+        std::vector<uint32_t> m_vertexScratch;
         // Zero block written over retired index ranges. Grows to the largest
         // region ever retired and stays there (a few hundred KB at most —
         // a section layer is capped at 65,536 vertices / 98,304 indices).
@@ -300,10 +340,12 @@ namespace Render {
         void RefreshHotRanges(Slab& slab, uint32_t slabIndex) const;
 
         // Slab management
+        // Returns the new slab's index, or UINT32_MAX when kMaxSlabs is reached.
         uint32_t AllocateSlab();
         bool TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                              const float* vertexData, size_t vertexCount,
-                             const uint16_t* indexData, size_t indexCount);
+                             const uint16_t* indexData, size_t indexCount,
+                             const uint32_t* faceMap, size_t faceMapTexels);
 
         // Internal allocation (first-fit with bump fallback, per-slab)
         static bool AllocRegion(std::vector<Slab::FreeBlock>& freeList, size_t& highWater,
@@ -312,9 +354,37 @@ namespace Render {
                                size_t offset, size_t count);
 
         // Bytes per terrain vertex — must equal sizeof(Render::TerrainVertex)
-        // and GetTerrainVertexLayout().stride (32 = block vertex 24 + the
-        // greedy-mesh sprite tile rect, 4x unorm16).
-        static constexpr size_t VERTEX_STRIDE = 32;
+        // and GetTerrainVertexLayout().stride: the packed 16-byte vertex.
+        static constexpr size_t VERTEX_STRIDE = 16;
+        // Face-map records per vertex-stride unit: a record is one RGBA16
+        // texel (8 bytes) of the slab's buffer texture, so a 16-byte unit
+        // holds two; the mesher's record arrays are uint32 words, four per
+        // unit.
+        static constexpr size_t kRecordsPerUnit = VERTEX_STRIDE / 8;
+        static constexpr size_t kWordsPerUnit   = VERTEX_STRIDE / 4;
+
+        // --- Section-origin table ------------------------------------------
+        // TerrainVertex positions are relative to their section's origin and
+        // carry only a 15-bit row number; the origin itself lives here, one
+        // vec4 per row, in a uniform buffer the terrain vertex shader indexes
+        // (`SectionOrigins`). Merged multi-draws span many sections in one
+        // draw, so a per-draw uniform cannot carry it — a per-vertex row can.
+        //
+        // One table per SLAB, kSlotsPerSlab rows = 16 KB, the uniform-range
+        // size every Vulkan device guarantees, bound with BindSlab via the
+        // backend's single user uniform block. All slabs' tables sit in one
+        // buffer at slab * kSlotBytes, so binding is an offset, never a
+        // descriptor change. A slab therefore holds at most kSlotsPerSlab
+        // sections; TryUploadToSlab moves on to the next slab when the rows
+        // run out before the vertices do (cutout slabs, small sections).
+        static constexpr uint32_t kSlotsPerSlab    = 1024;
+        static constexpr size_t   kOriginEntryBytes = 16;                       // vec4
+        static constexpr size_t   kSlotBytes        = kSlotsPerSlab * kOriginEntryBytes;
+        static constexpr uint32_t kMaxSlabs         = 128;                      // 2 MB of tables
+        BufferHandle m_originsUbo = INVALID_BUFFER;
+
+        static bool AllocSlot(Slab& slab, uint16_t& outSlot);
+        static void FreeSlot(Slab& slab, uint16_t slot);
     };
 
 } // namespace Render

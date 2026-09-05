@@ -21,6 +21,8 @@
 #include <vector>
 #include <cmath>
 
+namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
+
 namespace Render {
 
     PortalRenderer g_portalRenderer;
@@ -731,13 +733,13 @@ void main() {
         //             Without this our colours come out ~2× over-bright,
         //             blow out into white, and over-drive the bloom chain.)
         //   mask    : ClampToEdge, linear (alpha-shape data — not colour)
-        m_noiseTexture    = LoadPortalPNG("assets/textures/portal/portal_noise.png",
+        m_noiseTexture    = LoadPortalPNG(PlatformMain::GetAssetPath("assets/textures/portal/portal_noise.png").c_str(),
                                           TextureWrap::Repeat, /*srgb=*/false);
-        m_maskTexture     = LoadPortalPNG("assets/textures/portal/portal_mask.png",
+        m_maskTexture     = LoadPortalPNG(PlatformMain::GetAssetPath("assets/textures/portal/portal_mask.png").c_str(),
                                           TextureWrap::ClampToEdge, /*srgb=*/false);
-        m_blueColorRamp   = LoadPortalPNG("assets/textures/portal/portal_blue_ramp.png",
+        m_blueColorRamp   = LoadPortalPNG(PlatformMain::GetAssetPath("assets/textures/portal/portal_blue_ramp.png").c_str(),
                                           TextureWrap::ClampToEdge, /*srgb=*/true);
-        m_orangeColorRamp = LoadPortalPNG("assets/textures/portal/portal_orange_ramp.png",
+        m_orangeColorRamp = LoadPortalPNG(PlatformMain::GetAssetPath("assets/textures/portal/portal_orange_ramp.png").c_str(),
                                           TextureWrap::ClampToEdge, /*srgb=*/true);
         if (m_noiseTexture == INVALID_TEXTURE ||
             m_blueColorRamp == INVALID_TEXTURE ||
@@ -854,6 +856,10 @@ void main() {
             const glm::mat4 model = PortalToWorldMat(p);
             const glm::mat4 mvp   = proj * view * model;
             g_renderBackend->SetUniformMat4(shader, "uMVP", mvp);
+            // The active portal-view clip plane (zero in the main view). Set on
+            // EVERY draw with the portal shader: on Vulkan the plane rides the
+            // shared uTint/uColor slot, which any renderer may have written since.
+            g_renderBackend->SetUniformVec4(shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
             g_renderBackend->SetUniformVec3(shader, "uPortalColor", color);
             g_renderBackend->SetUniformFloat(shader, "uPulse", pulse);
             g_renderBackend->DrawIndexed(mesh, indexCount);
@@ -1144,6 +1150,10 @@ void main() {
             g_renderBackend->BindShader(m_shader);
             g_renderBackend->BindTexture(m_dummyTexture, 0);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            // The active portal-view clip plane (zero in the main view). Set on
+            // EVERY draw with the portal shader: on Vulkan the plane rides the
+            // shared uTint/uColor slot, which any renderer may have written since.
+            g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
             g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", glm::vec3(0.0f));
             g_renderBackend->SetUniformFloat(m_shader, "uPulse", pulse);
             g_renderBackend->SetUniformFloat(m_shader, "uForceFarDepth", 0.0f);
@@ -1162,6 +1172,10 @@ void main() {
             g_renderBackend->BindShader(m_shader);
             g_renderBackend->BindTexture(m_dummyTexture, 0);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            // The active portal-view clip plane (zero in the main view). Set on
+            // EVERY draw with the portal shader: on Vulkan the plane rides the
+            // shared uTint/uColor slot, which any renderer may have written since.
+            g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
             g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", CurrentSkyColor());
             g_renderBackend->SetUniformFloat(m_shader, "uPulse", pulse);
             g_renderBackend->SetUniformFloat(m_shader, "uForceFarDepth", 1.0f);
@@ -1320,6 +1334,10 @@ void main() {
             g_renderBackend->BindShader(m_shader);
             g_renderBackend->BindTexture(m_dummyTexture, 0);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            // The active portal-view clip plane (zero in the main view). Set on
+            // EVERY draw with the portal shader: on Vulkan the plane rides the
+            // shared uTint/uColor slot, which any renderer may have written since.
+            g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
             g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", glm::vec3(0.0f));
             g_renderBackend->SetUniformFloat(m_shader, "uPulse", pulse);
             g_renderBackend->SetUniformFloat(m_shader, "uForceFarDepth", 0.0f);
@@ -1356,6 +1374,10 @@ void main() {
                 g_renderBackend->SetUniformInt(m_shader, "uUseTextures", 0);
             }
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            // The active portal-view clip plane (zero in the main view). Set on
+            // EVERY draw with the portal shader: on Vulkan the plane rides the
+            // shared uTint/uColor slot, which any renderer may have written since.
+            g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
             g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", palette.mid);
             g_renderBackend->SetUniformVec3(m_shader, "uColorDark",   palette.dark);
             g_renderBackend->SetUniformVec3(m_shader, "uColorHot",    palette.hot);
@@ -1415,6 +1437,10 @@ void main() {
                 g_renderBackend->SetUniformInt(m_shader, "uUseTextures", 0);
             }
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            // The active portal-view clip plane (zero in the main view). Set on
+            // EVERY draw with the portal shader: on Vulkan the plane rides the
+            // shared uTint/uColor slot, which any renderer may have written since.
+            g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
             g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", palette.mid);
             g_renderBackend->SetUniformVec3(m_shader, "uColorDark",   palette.dark);
             g_renderBackend->SetUniformVec3(m_shader, "uColorHot",    palette.hot);
@@ -1453,6 +1479,10 @@ void main() {
             }
             const glm::mat4 mvp = projectionMatrix * viewMatrix * PortalModel(p);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            // The active portal-view clip plane (zero in the main view). Set on
+            // EVERY draw with the portal shader: on Vulkan the plane rides the
+            // shared uTint/uColor slot, which any renderer may have written since.
+            g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
             g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", palette.mid);
             g_renderBackend->SetUniformVec3(m_shader, "uColorDark",   palette.dark);
             g_renderBackend->SetUniformVec3(m_shader, "uColorHot",    palette.hot);

@@ -77,7 +77,10 @@ namespace Render {
         // The frame this moment would have in another dimension (its own
         // fog, sky and ambient rules, this frame's time and camera). Used by
         // the immersive portal renderer for the far side of a portal.
-        EnvironmentFrame FrameForDimension(Game::DimensionId dimension);
+        // `renderDistChunks` composes the fog for that render distance
+        // (a view through a portal may draw less far than the main view);
+        // 0 keeps the main view's.
+        EnvironmentFrame FrameForDimension(Game::DimensionId dimension, int renderDistChunks = 0);
 
         // Interpolated times for renderers (clouds drift off gameTime).
         double DayTimeF(float partialTick) const;
@@ -113,6 +116,18 @@ namespace Render {
         // static skybox in the OVERWORLD should still get night.
         void SetConstantAmbientLight(bool on) { m_constantAmbientLight = on; }
 
+        // Weather strengths, MC Level.getRainLevel / getThunderLevel (0..1,
+        // thunder never above rain). The engine has no weather system yet
+        // (World::IsRainingAt is a constant false), so nothing sets these
+        // and they read 0; an OptiFine sky's `weather` rule is computed
+        // from them so it starts working the day weather does.
+        void SetWeather(float rainLevel, float thunderLevel) {
+            m_rainLevel    = glm::clamp(rainLevel, 0.0f, 1.0f);
+            m_thunderLevel = glm::clamp(thunderLevel, 0.0f, m_rainLevel);
+        }
+        float RainLevel() const    { return m_rainLevel; }
+        float ThunderLevel() const { return m_thunderLevel; }
+
     private:
         EnvironmentState() = default;
         void ApplyPendingSync();
@@ -132,6 +147,8 @@ namespace Render {
         // Skybox fog override (main thread only).
         bool m_skyboxActive = false;
         bool m_constantAmbientLight = false;
+        float m_rainLevel = 0.0f;
+        float m_thunderLevel = 0.0f;
         const EnvironmentFrame* m_frameOverride = nullptr;
         // Last UpdateFrame inputs, so FrameForDimension can recompose.
         float     m_lastPartialTick = 0.0f;

@@ -61,6 +61,7 @@ namespace Render {
         std::array<MeshHandle,    kKindCount> m_mesh{};
         std::array<uint32_t,      kKindCount> m_indexCount{};
         std::array<TextureHandle, kKindCount> m_tex{};
+        int m_packGeneration = -1;   // Resources::CacheStale
         std::array<bool,          kKindCount> m_texTried{};
     };
 

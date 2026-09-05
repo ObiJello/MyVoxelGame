@@ -25,6 +25,9 @@ namespace Render {
 
         bool Initialize();
         void Shutdown();
+        // Resource pack reload: the atlas handle and the destroy-stage rects
+        // are re-resolved on the next render.
+        void InvalidateAtlas() { m_uvsResolved = false; }
 
         // stage == -1 hides the overlay. stage in [0..9] selects the crack
         // texture (destroy_stage_<stage>.png) drawn over the given block.

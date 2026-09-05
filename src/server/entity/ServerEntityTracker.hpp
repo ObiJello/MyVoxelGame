@@ -150,6 +150,7 @@ namespace Server {
             uint8_t lastSwell = 0xFF;
             uint8_t lastPose = 0xFF;
             uint8_t lastAnimState = 0xFF;
+            uint32_t lastCarriedBlock = 0xFFFFFFFFu;   // Mob::GetCarriedBlockRaw
             // Sentinel distinct from every real value (-1 means "no vehicle"),
             // so the first data send always carries the riding link.
             int32_t lastVehicleId = INT32_MIN;

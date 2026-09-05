@@ -74,6 +74,12 @@ namespace Render {
             IsSheared, IsUnhappy, IsCharging, IsRidden, IsCreepy, IsDancing,
             IsFaceplanted, IsSwimming, IsSleeping, IsSpinning, IsSneezing,
             IsEating, IsScared, HasMainHandItem,
+            // Sheep graze (SheepModel.setupAnim) — the hand-written sheep read
+            // these directly; the 26.1 baby sheep is a compiled program.
+            HeadEatPos, HeadEatAngle,
+            // `state.<x>AnimationState.isStarted()` — the running bit of the
+            // Game::MobAnim slot carried in the node's arg (NodeBind::slot).
+            AnimStarted,
         };
 
         // What one tape node needs at run time, resolved at bake.
@@ -87,6 +93,7 @@ namespace Render {
             ModelPart* part = nullptr;          // Part nodes
             PartField  field = PartField::XRot; // Part nodes
             StateRef   ref = StateRef::None;    // State / BState nodes
+            int        slot = 0;                // AnimStarted: the MobAnim slot
         };
 
         static StateRef ResolveStateRef(std::string_view name);

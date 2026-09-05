@@ -65,6 +65,17 @@ namespace Game {
         }
 
         // hand: 0 = main, 1 = off.
+        // MC ItemUtils.createFilledResult(held, player, filled): the way a
+        // bucket (or any container item) turns into its filled form. In
+        // creative the held stack is untouched and the filled item is added
+        // to the inventory if it is not already there; otherwise ONE of the
+        // held stack is consumed, an emptied stack becomes the filled item,
+        // and a remaining stack sends the filled item to the inventory (or
+        // drops it when full). The old `held = filled` turned a stack of 16
+        // buckets into one filled bucket. Default keeps that fallback for
+        // players without an inventory behind them (the client's predictor).
+        virtual void CreateFilledResult(ItemStack& held, const ItemStack& filled);   // Item.cpp
+
         virtual ItemStack& getItemInHand(uint32_t hand) = 0;
         virtual int        handSlotIndex(uint32_t hand) const = 0;
 

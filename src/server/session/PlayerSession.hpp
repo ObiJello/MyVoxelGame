@@ -197,6 +197,7 @@ namespace Server {
         // Update simulation distance (server config)
         void SetSimulationDistance(int distance);
 
+
         // === CHUNK TRACKING (MC ChunkMap.updateChunkTracking) ===
 
         // Recompute this player's tracking view and emit the difference against
@@ -253,9 +254,15 @@ namespace Server {
         // when it is only being looked into through a portal.
         bool LoadsDimension(Game::DimensionId dimension) const;
         // True the first time it is asked for `dimension` since the client
-        // last held that level: the global portals go out then.
+        // last held that level: the global portals go out then. Also true
+        // whenever the chunk just sent is the ONLY one the client holds of
+        // the dimension: its level had emptied (every chunk unloaded — the
+        // client frees an empty level after a while, and the server is not
+        // told), so the surfaces go again. A client that still has them
+        // ignores the repeat.
         bool MarkGlobalPortalsSynced(Game::DimensionId dimension) {
-            return m_globalPortalsSynced.insert(dimension).second;
+            const bool first = m_globalPortalsSynced.insert(dimension).second;
+            return first || Dim(dimension).sent.size() <= 1;
         }
         const std::vector<ChunkLoader>& Loaders() const { return m_loaders; }
 
@@ -331,6 +338,9 @@ namespace Server {
         // (ServerGamePacketListenerImpl.java:1191-1248).
         void HandlePlayerAction(const Network::PlayerActionC2SPacket& packet);
         void HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet);
+        // Pick block / pick entity — MC ServerGamePacketListenerImpl
+        // .handlePickItemFromBlock/Entity + tryPickItem, creative only here.
+        void HandlePickItem(const Network::PickItemC2SPacket& packet);
         void HandleKeepAlive(const Network::KeepAliveC2SPacket& packet);
         void HandleInventoryClick(const Network::InventoryClickC2SPacket& packet);
         void HandleInventoryClose(const Network::InventoryCloseC2SPacket& packet);
@@ -399,6 +409,9 @@ namespace Server {
         // IUsePlayer::OpenMenu). Called right after the dispatch returns, so the
         // screen appears on the same packet round as the interaction ack.
         void FlushPendingMenuOpen();
+        // Drop what a CreateFilledResult could not fit in the inventory
+        // (MC player.drop inside ItemUtils.createFilledResult).
+        void FlushPendingDrops();
 
         // A block asked to lay food on a campfire during use dispatch
         // (IUsePlayer::PlaceCampfireFood). Drained right after the dispatch

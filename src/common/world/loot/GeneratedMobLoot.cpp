@@ -681,6 +681,7 @@ namespace Game {
         { EntityTypeId::Squid, k_squid, 1 },
         { EntityTypeId::Stray, k_stray, 2 },
         { EntityTypeId::Strider, k_strider, 1 },
+        { EntityTypeId::SulfurCube, nullptr, 0 },
         { EntityTypeId::Tadpole, nullptr, 0 },
         { EntityTypeId::TraderLlama, k_trader_llama, 1 },
         { EntityTypeId::TropicalFish, k_tropical_fish, 2 },
@@ -702,7 +703,7 @@ namespace Game {
         { EntityTypeId::ZombifiedPiglin, k_zombified_piglin, 3 },
     };
 
-    const int kMobLootTableCount = 89;
+    const int kMobLootTableCount = 90;
 
     const MobLootTable* FindMobLootTable(EntityTypeId type) {
         for (int i = 0; i < kMobLootTableCount; ++i) {

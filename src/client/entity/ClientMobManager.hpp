@@ -278,7 +278,7 @@ namespace Client {
         void SetEndCrystalBeam(int32_t id, bool hasTarget, const glm::ivec3& target);
         void SetData(int32_t id, float health, uint8_t flags, uint8_t variantData,
                      uint8_t hurtTime, uint8_t deathTime, uint8_t swellDir, uint8_t swell,
-                     uint8_t pose, uint8_t animState);
+                     uint8_t pose, uint8_t animState, uint32_t blockStateRaw = 0);
         void HandleEvent(int32_t id, uint8_t event);
         // The riding link for one mob (vehicleId -1 = dismount). Fed by the
         // appended field on AddEntityS2C / SetEntityDataS2C via
@@ -305,6 +305,12 @@ namespace Client {
         // See the pick-candidate note in Tick(): set before each Tick, read
         // by ClientPlayerController::PickEntity every frame.
         void SetPickOrigin(const glm::dvec3& origin) { m_pickOrigin = origin; }
+        // Rebuild PickCandidates() WITHOUT ticking — for a frozen world
+        // (/tick freeze, the pause screen), where Tick() does not run but
+        // the player can still aim at, hit and pick-block mobs, including
+        // ones spawned during the freeze (/spawnall) that no tick ever
+        // filed as candidates.
+        void RefreshPickCandidates();
         const std::vector<int32_t>& PickCandidates() const { return m_pickCandidates; }
         // Dense entry list for render-side walks (never mutate through it).
         const std::vector<ClientMob*>& MobList() const { return m_mobList; }

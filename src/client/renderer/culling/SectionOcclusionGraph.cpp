@@ -133,6 +133,24 @@ namespace Render {
                         // sections under the rim until the camera goes below
                         // it".
                         cell.visBits = VisibilitySet::kAllVisibleBits;
+                    } else if (job.portalView) {
+                        // A view THROUGH a portal: never-built terrain is
+                        // see-through, not a wall. The Immersive Portals
+                        // mod's VisibleSectionDiscovery is a neighbour walk
+                        // bounded only by the frustum and the distance, with
+                        // no mesh gating at all, so a far side lists — and
+                        // therefore meshes — everything the portal can see at
+                        // once. Blocking here was right for the main view,
+                        // which extends its set every frame as sections
+                        // finish (RunPartialUpdate), but a level seen only
+                        // through a portal has no partial updates: its set
+                        // grew one ring of solid terrain per full rebuild,
+                        // four a second at most, and a nether far side sat
+                        // at a few chunks for as long as the player stood
+                        // outside. Once a section is meshed its real
+                        // visibility bits take over above, so occlusion
+                        // still tightens the view as the far side fills in.
+                        cell.visBits = VisibilitySet::kAllVisibleBits;
                     }
                     // else: non-air and never built — visBits 0 blocks BFS,
                     // exactly like MC's CompiledSectionMesh.UNCOMPILED, whose

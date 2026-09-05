@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdlib>
 
+namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
+
 namespace Render {
 
     PortalParticleSystem g_portalParticleSystem;
@@ -302,8 +304,8 @@ void main() {
         // Portal-extracted sprites (see assets/textures/portal/). Failure
         // is non-fatal — the shader falls back to procedural soft-disc
         // rendering via uHasSprite=0.
-        m_blueSprite   = LoadPortalSprite("assets/textures/portal/portal_blue_particle.png");
-        m_orangeSprite = LoadPortalSprite("assets/textures/portal/portal_orange_particle.png");
+        m_blueSprite   = LoadPortalSprite(PlatformMain::GetAssetPath("assets/textures/portal/portal_blue_particle.png").c_str());
+        m_orangeSprite = LoadPortalSprite(PlatformMain::GetAssetPath("assets/textures/portal/portal_orange_particle.png").c_str());
         if (m_blueSprite == INVALID_TEXTURE || m_orangeSprite == INVALID_TEXTURE) {
             Log::Warning("[PortalParticleSystem] One or both portal sprite textures "
                          "failed to load — falling back to procedural soft-disc rendering.");

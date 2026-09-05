@@ -38,6 +38,30 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BLOCK_DIR = os.path.join(ROOT, "minecraft_code/decompiled_net/minecraft/world/level/block")
 BLOCKS_JAVA = os.path.join(BLOCK_DIR, "Blocks.java")
+# 26.3 (minecraft_code2) fills GAPS only: a block or class 26.1 lacks.
+BLOCK_DIR2 = os.path.join(ROOT, "minecraft_code2/decompiled_net/minecraft/world/level/block")
+BLOCKS_JAVA2 = os.path.join(BLOCK_DIR2, "Blocks.java")
+
+
+def mc2_registry(existing):
+    """slug -> class for 26.3 registrations absent from 26.1's map. 26.3 keys
+    on `BlockItemIds.X` / `BlockIds.X`, writes factories as `(p) -> {
+    return new X(...); }` or `X::new`, and has registerSlab/registerWall
+    helpers beside the stair ones."""
+    if not os.path.isfile(BLOCKS_JAVA2):
+        return {}
+    src = strip_comments(read(BLOCKS_JAVA2))
+    out = {}
+    for m in re.finditer(
+            r'register\(\s*Block\w*Ids\.([A-Z0-9_]+)\s*,\s*'
+            r'(?:\(\s*[a-z]+\s*\)\s*->\s*\{?\s*(?:return\s+)?new\s+([A-Za-z0-9_]+)|([A-Za-z0-9_]+)::new)',
+            src):
+        out.setdefault(m.group(1).lower(), m.group(2) or m.group(3))
+    for fn, cls in (("registerSlab", "SlabBlock"), ("registerWall", "WallBlock"),
+                    ("registerStair", "StairBlock"), ("registerLegacyStair", "StairBlock")):
+        for m in re.finditer(fn + r'\(\s*Block\w*Ids\.([A-Z0-9_]+)', src):
+            out.setdefault(m.group(1).lower(), cls)
+    return {k: v for k, v in out.items() if k not in existing}
 OUT_HPP = os.path.join(ROOT, "src/common/world/block/GeneratedBlockShapes.hpp")
 OUT_CPP = os.path.join(ROOT, "src/common/world/block/GeneratedBlockShapes.cpp")
 
@@ -251,6 +275,8 @@ def shape_for_class(cls, cache, depth=0):
         return None
     path = os.path.join(BLOCK_DIR, cls + ".java")
     if not os.path.isfile(path):
+        path = os.path.join(BLOCK_DIR2, cls + ".java")   # 26.3-only class
+    if not os.path.isfile(path):
         cache[cls] = None
         return None
     src = strip_comments(read(path))
@@ -301,6 +327,7 @@ def main():
             r'(?:\([a-z]+\)\s*->\s*new\s+([A-Za-z0-9_]+)|([A-Za-z0-9_]+)::new)',
             blocks_src):
         slug2cls[m.group(1)] = m.group(2) or m.group(3)
+    slug2cls.update(mc2_registry(slug2cls))
 
     cache, rows, skipped = {}, [], {}
     for slug, cls in sorted(slug2cls.items()):

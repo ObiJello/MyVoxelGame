@@ -1,11 +1,17 @@
 // File: src/client/renderer/entity/MobRenderer.cpp
+#include "client/resource/ResourcePacks.hpp"
 #include "client/renderer/entity/MobRenderer.hpp"
+#include "client/renderer/entity/GeneratedBabyTextures.hpp"
+#include "client/renderer/entity/model/GeneratedSetupAnim.hpp"
 #include "client/renderer/entity/EntityCulling.hpp"
 #include "client/renderer/backend/RenderBackend.hpp"
 #include "client/entity/ClientMobManager.hpp"
 #include "client/renderer/viewmodel/HeldItemSpriteMesh.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Slime.hpp"
+#include "common/entity/mobs/SulfurCube.hpp"
+#include "client/renderer/entity/BlockCubeEntityRenderer.hpp"
+#include "client/renderer/texture/AtlasBuilder.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Fish.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
@@ -27,6 +33,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <utility>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -126,6 +133,51 @@ namespace Render {
             return def ? def->texture : std::string_view{};
         }
 
+        BabyModelLook s_babyLook = BabyModelLook::New;
+        int           s_babyLookGeneration = 0;
+
+        bool NewBabies() { return s_babyLook == BabyModelLook::New; }
+
+        // A remodel mesh with its own compiled setupAnim when the generator
+        // produced one, else animated by `animSlug`'s program — the adult's,
+        // whose part names the 26.x baby meshes keep (BabySquidModel's
+        // tentacles, for one, where MC2's setupAnim did not compile).
+        std::unique_ptr<EntityModel> MakeRemodel(const std::string& slug,
+                                                 std::string_view animSlug) {
+            if (FindAnimProgram(slug)) return std::make_unique<GeneratedModel>(slug);
+            return std::make_unique<GeneratedModel>(slug, animSlug);
+        }
+
+        // Every cube of a model grown by a hair — the New-look baby sheep's
+        // wool rides the SAME mesh as its body (MC's SHEEP_BABY_WOOL row is
+        // the body row; SheepWoolLayer submits it with order 1 so it draws
+        // after the skin). Batches here draw in push order too, but a
+        // coplanar pair is one depth-precision wobble from flickering, so
+        // the wool gets MC's intent as geometry: 0.02 px outward.
+        void InflateCubes(ModelPart& part, float by) {
+            for (CubeDefinition& c : part.cubes) {
+                c.growX += by; c.growY += by; c.growZ += by;
+            }
+            for (auto& child : part.children) InflateCubes(*child, by);
+        }
+
+        // The farm animals' variant meshes (MC ModelLayers.WARM_COW, COLD_COW,
+        // COLD_PIG, COLD_CHICKEN). Null when the variant uses the normal mesh.
+        std::unique_ptr<EntityModel> CreateVariantModelFor(Game::EntityTypeId type, uint8_t variant) {
+            switch (type) {
+                case Game::EntityTypeId::Cow:
+                    if (variant == 1) return std::make_unique<CowModel>(CowModel::Kind::Warm);
+                    if (variant == 2) return std::make_unique<CowModel>(CowModel::Kind::Cold);
+                    return nullptr;
+                case Game::EntityTypeId::Pig:
+                    return variant == 2 ? std::make_unique<PigModel>(true) : nullptr;
+                case Game::EntityTypeId::Chicken:
+                    return variant == 2 ? std::make_unique<ChickenModel>(true) : nullptr;
+                default:
+                    return nullptr;
+            }
+        }
+
         std::unique_ptr<EntityModel> CreateModelFor(Game::EntityTypeId type) {
             switch (type) {
                 case Game::EntityTypeId::Zombie:   return std::make_unique<ZombieModel>();
@@ -160,6 +212,12 @@ namespace Render {
             // createBodyLayer. The eight above keep hand-written classes only
             // because each has a real setupAnim worth porting exactly.
             const std::string_view slug = Game::GetEntityTypeInfo(type).slug;
+            // MC 26.1's AdultRabbitModel (the remodel's one ADULT change),
+            // under the New look only.
+            if (type == Game::EntityTypeId::Rabbit && NewBabies() &&
+                FindGenModel("rabbit_new")) {
+                return MakeRemodel("rabbit_new", "rabbit");
+            }
             if (FindGenModel(slug)) return std::make_unique<GeneratedModel>(slug);
             return nullptr;
         }
@@ -172,6 +230,13 @@ namespace Render {
         // mesh — the caller keeps the adult model plus the uniform shrink.
         std::unique_ptr<EntityModel> CreateBabyModelFor(Game::EntityTypeId type) {
             const std::string_view slug = Game::GetEntityTypeInfo(type).slug;
+            // MC 26.1's dedicated baby meshes (BabyCowModel and friends —
+            // the generator's REMODEL_MESHES), New look only. Each row has
+            // its own compiled setupAnim under the same slug.
+            if (NewBabies()) {
+                const std::string remodel = std::string(slug) + "_baby_new";
+                if (FindGenModel(remodel)) return MakeRemodel(remodel, slug);
+            }
             const std::string babySlug = std::string(slug) + "_baby";
             if (FindGenModel(babySlug)) {
                 return std::make_unique<GeneratedModel>(babySlug);
@@ -291,7 +356,7 @@ namespace Render {
             const size_t vertFirst = verts.size();
             const size_t idxFirst = idx.size();
             model.Root().Build(entityMatrix, model.TexWidth(), model.TexHeight(),
-                               verts, idx);
+                               verts, idx, model.CullBackFaces());
             for (auto& [part, old] : saved) part->skipDraw = old;
             if (alpha < 1.0f) {
                 const auto a = static_cast<uint8_t>(
@@ -299,6 +364,43 @@ namespace Render {
                 for (size_t i = vertFirst; i < verts.size(); ++i) verts[i].a = a;
             }
             return idx.size() - idxFirst;
+        }
+
+        // MC RenderSetup.sortOnUpload for one translucent batch: the quads
+        // of [first, end) — six indices per quad, as ModelPart::Build emits
+        // them — reordered far to near by centroid distance. Vertices are
+        // camera-relative (EntityMatrix subtracts cameraPos), so the
+        // distance is the position's own length. Each quad's own vertices
+        // and winding are untouched; only the quad order in the index
+        // stream changes, which is what MC's BufferBuilder sort does.
+        void SortQuadsBackToFront(const std::vector<ModelVertex>& verts,
+                                  std::vector<uint32_t>& idx,
+                                  size_t first, size_t end) {
+            const size_t quadCount = (end - first) / 6;
+            if (quadCount < 2) return;
+            std::vector<std::pair<float, uint32_t>> order;
+            order.reserve(quadCount);
+            for (size_t q = 0; q < quadCount; ++q) {
+                const uint32_t* tri = &idx[first + q * 6];
+                // Corners 0,1,2 and 3 of the quad: indices 0,1,2 and 5.
+                float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+                for (const uint32_t k : { tri[0], tri[1], tri[2], tri[5] }) {
+                    sx += verts[k].x; sy += verts[k].y; sz += verts[k].z;
+                }
+                order.emplace_back(sx * sx + sy * sy + sz * sz,
+                                   static_cast<uint32_t>(q));
+            }
+            std::stable_sort(order.begin(), order.end(),
+                             [](const auto& a, const auto& b) { return a.first > b.first; });
+            std::vector<uint32_t> sorted;
+            sorted.reserve(quadCount * 6);
+            for (const auto& [dist, q] : order) {
+                const size_t at = first + static_cast<size_t>(q) * 6;
+                sorted.insert(sorted.end(), idx.begin() + static_cast<std::ptrdiff_t>(at),
+                              idx.begin() + static_cast<std::ptrdiff_t>(at + 6));
+            }
+            std::copy(sorted.begin(), sorted.end(),
+                      idx.begin() + static_cast<std::ptrdiff_t>(first));
         }
 
         // The posed transform chain from the model root down to `name` — MC
@@ -348,6 +450,41 @@ namespace Render {
                 idx.insert(idx.end(), { base, base + 1, base + 2,
                                         base, base + 2, base + 3 });
             }
+        }
+
+        // One face set of the UNIT block cell — for MC's block/orientable
+        // model (the snow golem's carved pumpkin): the caller appends one
+        // sheet's faces at a time so each lands in its own texture batch.
+        // Face UVs follow BlockModel's cube faces (u left→right as seen
+        // facing the face, v top→bottom), shade is the block model's
+        // directional shade. `m` maps the unit cell to world space.
+        enum BlockFace : int {
+            kFaceDown = 1, kFaceUp = 2, kFaceNorth = 4,
+            kFaceSouth = 8, kFaceWest = 16, kFaceEast = 32,
+        };
+        void AppendUnitBlockFaces(const glm::mat4& m, int faces,
+                                  std::vector<ModelVertex>& verts,
+                                  std::vector<uint32_t>& idx) {
+            const auto face = [&](const glm::vec3& a, const glm::vec3& b,
+                                  const glm::vec3& c, const glm::vec3& d, float shade) {
+                // a = (u0,v0), b = (u1,v0), c = (u1,v1), d = (u0,v1)
+                const auto base = static_cast<uint32_t>(verts.size());
+                const auto sh = static_cast<uint8_t>(shade * 255.0f);
+                const auto push = [&](const glm::vec3& p, float u, float v) {
+                    const glm::vec3 w = glm::vec3(m * glm::vec4(p, 1.0f));
+                    verts.push_back({ w.x, w.y, w.z, u, v, sh, sh, sh, 255 });
+                };
+                push(a, 0.0f, 0.0f); push(b, 1.0f, 0.0f);
+                push(c, 1.0f, 1.0f); push(d, 0.0f, 1.0f);
+                idx.insert(idx.end(), { base, base + 1, base + 2,
+                                        base, base + 2, base + 3 });
+            };
+            if (faces & kFaceDown)  face({0,0,0}, {1,0,0}, {1,0,1}, {0,0,1}, 0.5f);
+            if (faces & kFaceUp)    face({0,1,0}, {1,1,0}, {1,1,1}, {0,1,1}, 1.0f);
+            if (faces & kFaceNorth) face({1,1,0}, {0,1,0}, {0,0,0}, {1,0,0}, 0.8f);
+            if (faces & kFaceSouth) face({0,1,1}, {1,1,1}, {1,0,1}, {0,0,1}, 0.8f);
+            if (faces & kFaceWest)  face({0,1,0}, {0,1,1}, {0,0,1}, {0,0,0}, 0.6f);
+            if (faces & kFaceEast)  face({1,1,1}, {1,1,0}, {1,0,0}, {1,0,1}, 0.6f);
         }
 
         // MC FlameFeatureRenderer.renderFlame — the stack of camera-facing
@@ -609,8 +746,9 @@ namespace Render {
         m_initialized = false;
     }
 
-    TextureHandle MobRenderer::LoadTexture(const std::string& relativePath) {
-        const auto it = m_textureCache.find(relativePath);
+    TextureHandle MobRenderer::LoadTexture(const std::string& relativePath, bool repeatWrap) {
+        const std::string cacheKey = repeatWrap ? relativePath + "|repeat" : relativePath;
+        const auto it = m_textureCache.find(cacheKey);
         if (it != m_textureCache.end()) return it->second;
 
         // Same load as ChestRenderer::LoadVariantTexture — nearest filtering
@@ -619,7 +757,7 @@ namespace Render {
         const std::string full = PlatformMain::GetAssetPath(relativePath);
         if (!std::filesystem::exists(full)) {
             Log::Warning("[MobRenderer] missing texture %s", relativePath.c_str());
-            m_textureCache[relativePath] = INVALID_TEXTURE;
+            m_textureCache[cacheKey] = INVALID_TEXTURE;
             return INVALID_TEXTURE;
         }
 
@@ -628,7 +766,7 @@ namespace Render {
         unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
         if (!pixels) {
             Log::Warning("[MobRenderer] failed to decode %s", relativePath.c_str());
-            m_textureCache[relativePath] = INVALID_TEXTURE;
+            m_textureCache[cacheKey] = INVALID_TEXTURE;
             return INVALID_TEXTURE;
         }
 
@@ -636,11 +774,20 @@ namespace Render {
         stbi_image_free(pixels);
 
         g_renderBackend->SetTextureFilter(tex, TextureFilter::Nearest, TextureFilter::Nearest);
-        g_renderBackend->SetTextureWrap(tex, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+        const TextureWrap wrap = repeatWrap ? TextureWrap::Repeat : TextureWrap::ClampToEdge;
+        g_renderBackend->SetTextureWrap(tex, wrap, wrap);
 
-        m_textureCache[relativePath] = tex;
+        m_textureCache[cacheKey] = tex;
         return tex;
     }
+
+    void SetBabyModelLook(BabyModelLook look) {
+        if (s_babyLook == look) return;
+        s_babyLook = look;
+        ++s_babyLookGeneration;
+    }
+    BabyModelLook GetBabyModelLook() { return s_babyLook; }
+    int BabyModelLookGeneration() { return s_babyLookGeneration; }
 
     MobRenderer::ModelEntry* MobRenderer::GetModelFor(Game::EntityTypeId type) {
         const auto key = static_cast<uint16_t>(type);
@@ -715,7 +862,8 @@ namespace Render {
                                         float deathFlipDeg,
                                         const glm::vec3& modelScale,
                                         float swimPitchDeg,
-                                        float swimPivotY) {
+                                        float swimPivotY,
+                                        const glm::vec3& modelOffset) {
         // The MC transform chain — see the header. Camera-relative translation
         // keeps float precision usable far from the origin, which matters
         // because these vertices are baked in world space rather than being
@@ -757,7 +905,9 @@ namespace Render {
         // The Y offset is in blocks, so it is applied in the flipped, scaled
         // space: MC's translate(0, -1.501, 0) sits after scale(-1,-1,1), where
         // -Y is up. Pre-multiplying it in block units here is the same thing.
-        m = glm::translate(m, glm::vec3(0.0f, kModelYOffset * 16.0f, 0.0f));
+        // MC's poseStack.translate after scale() and the −1.501 fold into one
+        // pixel-space translate (both sit after every scale).
+        m = glm::translate(m, glm::vec3(0.0f, kModelYOffset * 16.0f, 0.0f) + modelOffset * 16.0f);
         return m;
     }
 
@@ -770,8 +920,10 @@ namespace Render {
 
         const glm::mat4 m = EntityMatrix(renderPos, cameraPos, bodyRot, state.scale,
                                          state.deathFlipDeg, state.modelScale,
-                                         state.swimPitchDeg, state.swimPivotY);
-        model.Root().Build(m, model.TexWidth(), model.TexHeight(), verts, idx);
+                                         state.swimPitchDeg, state.swimPivotY,
+                                         state.modelOffset);
+        model.Root().Build(m, model.TexWidth(), model.TexHeight(), verts, idx,
+                           model.CullBackFaces());
         return m;
     }
 
@@ -855,7 +1007,8 @@ namespace Render {
 
         for (const auto& child : orient->children) {
             child->Build(m, m_heldTridentModel->TexWidth(),
-                         m_heldTridentModel->TexHeight(), verts, idx);
+                         m_heldTridentModel->TexHeight(), verts, idx,
+                         m_heldTridentModel->CullBackFaces());
         }
         return LoadTexture("assets/textures/entity/trident.png");
     }
@@ -935,6 +1088,24 @@ namespace Render {
         PROFILE_ZONE_N("MobRender");
 
         if (!m_initialized || !g_renderBackend) return;
+        // Resource pack reload: the textures AND everything holding their
+        // handles — the model entries, the projectile sprites, the crystal
+        // beam — go together; the models come back lazily.
+        if (Resources::CacheStale(m_textureCacheGeneration)) {
+            for (auto& [path, tex] : m_textureCache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+            m_textureCache.clear();
+            m_models.clear();
+            m_spriteEntries.clear();
+            m_beamTexture = INVALID_TEXTURE;
+            m_beamTextureTried = false;
+        }
+        // World Settings → Baby Models: every cached model (adult rabbit
+        // included) is rebuilt for the other look; textures are re-picked
+        // per frame anyway.
+        if (m_babyLookGeneration != BabyModelLookGeneration()) {
+            m_babyLookGeneration = BabyModelLookGeneration();
+            m_models.clear();
+        }
         if (mobs.All().empty()) return;
 
         // Which streaming set this call writes, and where in it. A new frame
@@ -966,6 +1137,9 @@ namespace Render {
             // — only the warden's fading emissive layers set it; their
             // per-vertex alpha carries the fade.
             bool          blend = false;
+            // Back-face culled (MC's entityCutout / entitySolid /
+            // entityTranslucent models — EntityModel::CullBackFaces).
+            bool          cull = false;
         };
         std::vector<Batch> batches;
 
@@ -1160,18 +1334,40 @@ namespace Render {
                     modelEntry->babyModel = CreateBabyModelFor(type);
                     if (modelEntry->babyModel &&
                         type == Game::EntityTypeId::Sheep) {
-                        auto fur = std::make_unique<SheepModel>(true);
-                        fur->BecomeBaby();
-                        modelEntry->babyOverlayModel = std::move(fur);
+                        // MC 26.1 SheepWoolLayer.babyModel (SHEEP_BABY_WOOL)
+                        // under the New look; the classic wool transform
+                        // otherwise.
+                        if (NewBabies() && FindGenModel("sheep_wool_baby_new")) {
+                            auto wool = MakeRemodel("sheep_wool_baby_new", "sheep_baby_new");
+                            InflateCubes(wool->Root(), 0.02f);
+                            modelEntry->babyOverlayModel = std::move(wool);
+                        } else {
+                            auto fur = std::make_unique<SheepModel>(true);
+                            fur->BecomeBaby();
+                            modelEntry->babyOverlayModel = std::move(fur);
+                        }
                     }
                     // MC DrownedOuterLayer's babyModel — the outer-layer
                     // mesh through HumanoidModel.BABY_TRANSFORMER.
                     if (modelEntry->babyModel &&
-                        type == Game::EntityTypeId::Drowned &&
-                        FindGenModel("drowned_outer_baby")) {
-                        modelEntry->babyOverlayModel =
-                            std::make_unique<GeneratedModel>(
-                                "drowned_outer_baby", "drowned");
+                        type == Game::EntityTypeId::Drowned) {
+                        // 26.2's BabyDrownedModel outer layer (its own
+                        // program) under the New look; the classic
+                        // transform row otherwise.
+                        if (NewBabies() && FindGenModel("drowned_outer_baby_new")) {
+                            // BabyZombieModel's head and hat cubes take
+                            // literal deformations, so the outer layer's
+                            // head sits ON the body's; MC wins that by draw
+                            // order, this gets it as geometry (see the
+                            // sheep's wool).
+                            auto outer = MakeRemodel("drowned_outer_baby_new", "drowned");
+                            InflateCubes(outer->Root(), 0.02f);
+                            modelEntry->babyOverlayModel = std::move(outer);
+                        } else if (FindGenModel("drowned_outer_baby")) {
+                            modelEntry->babyOverlayModel =
+                                std::make_unique<GeneratedModel>(
+                                    "drowned_outer_baby", "drowned");
+                        }
                     }
                 }
                 if (modelEntry->babyModel) {
@@ -1179,6 +1375,30 @@ namespace Render {
                     overlayModel = modelEntry->babyOverlayModel.get();
                 } else {
                     state.scale = Game::kBabyScale;   // mini-adult fallback
+                }
+            }
+            // ── The variant MESH — MC CowRenderer/PigRenderer/ChickenRenderer
+            //    .submit picks the AdultAndBabyModelPair for the variant's
+            //    ModelType; the texture follows below.
+            if (type == Game::EntityTypeId::Cow || type == Game::EntityTypeId::Pig ||
+                type == Game::EntityTypeId::Chicken) {
+                const uint8_t variant = std::min<uint8_t>(mob.GetVariantByte(), 2);
+                if (variant != 0) {
+                    if (!modelEntry->variantTried[variant]) {
+                        modelEntry->variantTried[variant] = true;
+                        modelEntry->variantModels[variant] = CreateVariantModelFor(type, variant);
+                        if (modelEntry->variantModels[variant]) {
+                            auto baby = CreateVariantModelFor(type, variant);
+                            if (baby && baby->BecomeBaby()) modelEntry->variantBabyModels[variant] = std::move(baby);
+                        }
+                    }
+                    // 26.1's babies share ONE mesh per species (the warm/
+                    // cold rows all map to BabyCowModel & co.), so the New
+                    // look keeps the babyModel picked above.
+                    EntityModel* variantModel = state.isBaby
+                        ? (NewBabies() ? nullptr : modelEntry->variantBabyModels[variant].get())
+                        : modelEntry->variantModels[variant].get();
+                    if (variantModel) model = variantModel;
                 }
             }
             // The entity's own size (scaled portals, /scale) on top of the
@@ -1689,6 +1909,35 @@ namespace Render {
                     state.mobArmPose = 2.0f;
                 }
             }
+            if (const auto* cube = MobAs<Game::SulfurCube>(mob, type, Game::EntityTypeId::SulfurCube)) {
+                // MC SulfurCubeRenderer.scale, in order: downscaleSlightly
+                // (0.999), AbstractCubeMobRenderer's size × squish stretch
+                // (no squish while a block is inside — applySizeAndSquish's
+                // `ss = 0`), the TNT swell over the last 10 fuse ticks, then
+                // an extra 0.5 for the adult (its 18px shell is 1.125 blocks
+                // at scale 1) and the translate that seats the cube on the
+                // ground: vOffset 0.98 adult / 1.24 baby, minus one pixel.
+                const float size = static_cast<float>(cube->GetSize());
+                const float squish = cube->HasBodyItem() ? 0.0f : cube->GetSquish(partialTick);
+                state.squish = squish;
+                const float stretch = 1.0f / (squish / (size * 0.5f + 1.0f) + 1.0f);
+                glm::vec3 scale(size * stretch, size / stretch, size * stretch);
+                scale *= 0.999f;
+                if (cube->IsPrimed()) {
+                    const float fuse = static_cast<float>(cube->GetFuse()) - partialTick + 1.0f;
+                    if (fuse < 10.0f && fuse > 0.0f) {
+                        float g = std::clamp(1.0f - fuse / 10.0f, 0.0f, 1.0f);
+                        g *= g;
+                        g *= g;
+                        scale *= 1.0f + g * 0.3f;
+                    }
+                }
+                const float extraDownscale = state.isBaby ? 1.0f : 0.5f;
+                scale *= extraDownscale;
+                state.modelScale = scale;
+                const float vOffset = state.isBaby ? 1.24f : 0.98f;
+                state.modelOffset = glm::vec3(0.0f, vOffset - 1.0f / 16.0f, 0.0f);
+            }
             if (const auto* slime = MobAs<Game::Slime>(
                     mob, type, Game::EntityTypeId::Slime, Game::EntityTypeId::MagmaCube)) {
                 // MC SlimeRenderer.scale: 0.999 * size overall (the hair under
@@ -1766,24 +2015,46 @@ namespace Render {
             // Per-instance texture swaps: MC WitherSkullRenderer picks the
             // blue invulnerable sheet for a dangerous skull, and
             // GhastRenderer swaps to the shooting face while charging.
-            TextureHandle batchTexture = modelEntry->texture;
+            // MC 26.x sheets under the New baby look: a baby swaps to its
+            // `_baby` sheet and the remodeled adult rabbit to its 64x64 one
+            // (RemodelTexturePath, generated from the assets); every other path
+            // is loaded as given. Every texture pick below goes through this.
+            const bool remodelTex = NewBabies() &&
+                (state.isBaby || type == Game::EntityTypeId::Rabbit);
+            const auto MobTex = [&](std::string_view path) {
+                return LoadTexture(remodelTex ? RemodelTexturePath(path, state.isBaby)
+                                              : std::string(path));
+            };
+            // Every baby under the New look starts from its own `_baby`
+            // sheet (and the remodeled rabbit from its 64x64 one), so the
+            // type's default pick is remapped HERE, before the per-mob
+            // overrides below re-pick through the same MobTex.
+            TextureHandle batchTexture = remodelTex ? MobTex(TexturePathFor(type))
+                                                    : modelEntry->texture;
             // MC HappyGhastRenderer.getTextureLocation: babies have their own
             // sheet (the baby mesh's extra inner_body maps onto it).
             if (state.isBaby &&
                 type == Game::EntityTypeId::HappyGhast) {
-                batchTexture = LoadTexture(
+                batchTexture = MobTex(
                     "assets/textures/entity/ghast/happy_ghast_baby.png");
+            }
+            if (type == Game::EntityTypeId::SulfurCube) {
+                // SulfurCubeRenderer.getTextureLocation: the small sheet for
+                // the baby (SmallSulfurCubeModel's 64x64 layout).
+                batchTexture = MobTex(state.isBaby
+                    ? "assets/textures/entity/sulfur_cube/sulfur_cube_outer_small.png"
+                    : "assets/textures/entity/sulfur_cube/sulfur_cube_outer.png");
             }
             if (const auto* skull = MobAs<Game::WitherSkull>(mob, type, Game::EntityTypeId::WitherSkull)) {
                 if (skull->IsDangerous()) {
-                    batchTexture = LoadTexture(
+                    batchTexture = MobTex(
                         "assets/textures/entity/wither/wither_invulnerable.png");
                 }
             }
             // The happy ghast is a GenericAnimal, not a Ghast — Ghast alone.
             if (const auto* ghast = MobAs<Game::Ghast>(mob, type, Game::EntityTypeId::Ghast)) {
                 if (ghast->IsCharging()) {
-                    batchTexture = LoadTexture(
+                    batchTexture = MobTex(
                         "assets/textures/entity/ghast/ghast_shooting.png");
                 }
             }
@@ -1791,7 +2062,7 @@ namespace Render {
             // isCharging.
             if (const auto* chargingVex = MobAs<Game::Vex>(mob, type, Game::EntityTypeId::Vex)) {
                 if (chargingVex->IsCharging()) {
-                    batchTexture = LoadTexture(
+                    batchTexture = MobTex(
                         "assets/textures/entity/illager/vex_charging.png");
                 }
             }
@@ -1803,7 +2074,7 @@ namespace Render {
             // lands the bit reads 0, i.e. the no-nectar sheet.
             if (const auto* texBee = MobAs<Game::Bee>(mob, type, Game::EntityTypeId::Bee)) {
                 const bool nectar = (texBee->GetAnimStateByte() & 4) != 0;
-                batchTexture = LoadTexture(state.isAngry
+                batchTexture = MobTex(state.isAngry
                     ? (nectar ? "assets/textures/entity/bee/bee_angry_nectar.png"
                               : "assets/textures/entity/bee/bee_angry.png")
                     : (nectar ? "assets/textures/entity/bee/bee_nectar.png"
@@ -1813,7 +2084,7 @@ namespace Render {
             // suffocating (out of lava, shivering).
             if (const auto* strider = MobAs<Game::Strider>(mob, type, Game::EntityTypeId::Strider)) {
                 if (strider->IsSuffocating()) {
-                    batchTexture = LoadTexture(
+                    batchTexture = MobTex(
                         "assets/textures/entity/strider/strider_cold.png");
                 }
             }
@@ -1828,7 +2099,7 @@ namespace Render {
                 const int invTicks = wither->GetClientInvulnerableTicks();
                 if (wither->IsInvulnerablePhaseClient() &&
                     (invTicks > 80 || (invTicks / 5) % 2 != 1)) {
-                    batchTexture = LoadTexture(
+                    batchTexture = MobTex(
                         "assets/textures/entity/wither/wither_invulnerable.png");
                 }
                 // MC WitherBossRenderer.scale: 2.0 always, ramping up from
@@ -1852,13 +2123,39 @@ namespace Render {
                     // their assets on disk for when variant rolls land).
                     if (const auto* wolf = MobAs<Game::Wolf>(mob, type, Game::EntityTypeId::Wolf)) {
                         if (wolf->IsTame()) {
-                            batchTexture = LoadTexture(
+                            batchTexture = MobTex(
                                 "assets/textures/entity/wolf/wolf_tame.png");
                         } else if (state.isAggressive) {
-                            batchTexture = LoadTexture(
+                            batchTexture = MobTex(
                                 "assets/textures/entity/wolf/wolf_angry.png");
                         }
                     }
+                    break;
+                }
+                case Game::EntityTypeId::Cow: {
+                    // CowRenderer.getTextureLocation: the variant's asset
+                    // (CowVariants: temperate_cow / warm_cow / cold_cow).
+                    static const char* const kCow[3] = {
+                        "assets/textures/entity/cow/temperate_cow.png",
+                        "assets/textures/entity/cow/warm_cow.png",
+                        "assets/textures/entity/cow/cold_cow.png"};
+                    batchTexture = MobTex(kCow[std::min<uint8_t>(mob.GetVariantByte(), 2)]);
+                    break;
+                }
+                case Game::EntityTypeId::Pig: {
+                    static const char* const kPig[3] = {
+                        "assets/textures/entity/pig/temperate_pig.png",
+                        "assets/textures/entity/pig/warm_pig.png",
+                        "assets/textures/entity/pig/cold_pig.png"};
+                    batchTexture = MobTex(kPig[std::min<uint8_t>(mob.GetVariantByte(), 2)]);
+                    break;
+                }
+                case Game::EntityTypeId::Chicken: {
+                    static const char* const kChicken[3] = {
+                        "assets/textures/entity/chicken/temperate_chicken.png",
+                        "assets/textures/entity/chicken/warm_chicken.png",
+                        "assets/textures/entity/chicken/cold_chicken.png"};
+                    batchTexture = MobTex(kChicken[std::min<uint8_t>(mob.GetVariantByte(), 2)]);
                     break;
                 }
                 case Game::EntityTypeId::Fox: {
@@ -1871,7 +2168,7 @@ namespace Render {
                                 : "assets/textures/entity/fox/fox_sleep.png")
                         : (snow ? "assets/textures/entity/fox/snow_fox.png"
                                 : "assets/textures/entity/fox/fox.png");
-                    batchTexture = LoadTexture(path);
+                    batchTexture = MobTex(path);
                     break;
                 }
                 case Game::EntityTypeId::Panda: {
@@ -1888,7 +2185,7 @@ namespace Render {
                         "assets/textures/entity/panda/aggressive_panda.png",
                     };
                     const uint8_t gene = mob.GetVariantByte();
-                    if (gene < 7) batchTexture = LoadTexture(kPandaTextures[gene]);
+                    if (gene < 7) batchTexture = MobTex(kPandaTextures[gene]);
                     break;
                 }
                 case Game::EntityTypeId::Axolotl: {
@@ -1902,7 +2199,7 @@ namespace Render {
                         "assets/textures/entity/axolotl/axolotl_blue.png",
                     };
                     const uint8_t v = mob.GetAnimStateByte() & 0x7;
-                    if (v < 5) batchTexture = LoadTexture(kAxolotlTextures[v]);
+                    if (v < 5) batchTexture = MobTex(kAxolotlTextures[v]);
                     break;
                 }
                 case Game::EntityTypeId::Cat: {
@@ -1922,7 +2219,7 @@ namespace Render {
                         "assets/textures/entity/cat/all_black.png",
                     };
                     const uint8_t v = mob.GetVariantByte();
-                    if (v < 11) batchTexture = LoadTexture(kCatTextures[v]);
+                    if (v < 11) batchTexture = MobTex(kCatTextures[v]);
                     break;
                 }
                 default:
@@ -1954,7 +2251,8 @@ namespace Render {
                 m = glm::translate(m, glm::vec3(0.0f, kModelYOffset * 16.0f, 0.0f));
                 modelEntry->model->Root().Build(m, modelEntry->model->TexWidth(),
                                                 modelEntry->model->TexHeight(),
-                                                m_verts, m_indices);
+                                                m_verts, m_indices,
+                                                modelEntry->model->CullBackFaces());
                 entityMatrix = m;
             } else if (crystalMob) {
                 // MC EndCrystalRenderer.submit: scale(2,2,2), translate
@@ -1972,7 +2270,8 @@ namespace Render {
                 m = glm::scale(m, glm::vec3(1.0f / 16.0f));
                 modelEntry->model->Root().Build(m, modelEntry->model->TexWidth(),
                                                 modelEntry->model->TexHeight(),
-                                                m_verts, m_indices);
+                                                m_verts, m_indices,
+                                                modelEntry->model->CullBackFaces());
                 entityMatrix = m;
             } else {
                 entityMatrix =
@@ -1984,7 +2283,87 @@ namespace Render {
             const size_t bodyVertCount  = m_verts.size() - firstVert;
             if (bodyIndexCount > 0) {
                 batches.push_back({ batchTexture, overlay, firstIndex,
-                                    bodyIndexCount });
+                                    bodyIndexCount, false,
+                                    model->CullBackFaces() });
+            }
+
+            // ── Sulfur cube shell + inner cube — MC SulfurCubeRenderer /
+            //    SulfurCubeInnerLayer ──────────────────────────────────────
+            //
+            // The shell is entityTranslucent (sulfur_cube_outer.png is all
+            // partial alpha): blended, its quads sorted far to near as MC's
+            // sortOnUpload does. Under it, at order −1, either the swallowed
+            // block — its model under the cube's OWN pose, so it turns with
+            // the body while the look control settles it onto 0/180 — or the
+            // inner cube on its own sheet.
+            if (const auto* cube = MobAs<Game::SulfurCube>(mob, type, Game::EntityTypeId::SulfurCube)) {
+                if (bodyIndexCount > 0) {
+                    batches.back().blend = true;
+                    SortQuadsBackToFront(m_verts, m_indices, firstIndex, firstIndex + bodyIndexCount);
+                }
+                // A lit fuse strobes whatever sits inside white on the TNT's
+                // 5-tick cadence (OverlayTexture.pack(u(1), 10)).
+                glm::vec4 innerOverlay = overlay;
+                if (cube->IsPrimed()) {
+                    const float fuse = static_cast<float>(cube->GetFuse()) - partialTick + 1.0f;
+                    if (fuse >= 0.0f && (static_cast<int>(fuse) / 5) % 2 == 0) {
+                        innerOverlay = glm::vec4(1.0f, 1.0f, 1.0f, 0.753f);
+                    }
+                }
+                if (cube->HasBodyItem()) {
+                    // SulfurCubeInnerLayer.submit with a contained block:
+                    // rotateDegrees(XP, 180), scale 0.5 for the baby,
+                    // translate(-0.5, -0.518, -0.5), then the block model in
+                    // its unit cell — in BLOCK units on the pose the body was
+                    // drawn with (entityMatrix is that pose in pixels, so
+                    // scale by 16 first). The block atlas is the texture.
+                    const Game::BlockID block = cube->GetBodyBlock();
+                    if (block != Game::BlockID::Air && g_atlasBuilder) {
+                        std::vector<ItemCubeVert> bv;
+                        std::vector<uint32_t> bi;
+                        BlockCubeEntityRenderer::BuildStateMesh(Game::BlockStates::Default(block), bv, bi);
+                        if (!bv.empty()) {
+                            glm::mat4 m = glm::scale(entityMatrix, glm::vec3(16.0f));
+                            m = glm::rotate(m, glm::radians(180.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+                            if (state.isBaby) m = glm::scale(m, glm::vec3(0.5f));
+                            m = glm::translate(m, glm::vec3(-0.5f, -0.518f, -0.5f));
+                            const size_t f = m_indices.size();
+                            const auto base = static_cast<uint32_t>(m_verts.size());
+                            for (const ItemCubeVert& v : bv) {
+                                const glm::vec3 p = glm::vec3(m * glm::vec4(v.x, v.y, v.z, 1.0f));
+                                m_verts.push_back({ p.x, p.y, p.z, v.u, v.v, v.r, v.g, v.b, v.a });
+                            }
+                            for (const uint32_t i : bi) m_indices.push_back(base + i);
+                            batches.push_back({ g_atlasBuilder->GetBackendTextureHandle(), innerOverlay,
+                                                f, m_indices.size() - f });
+                            // order(-1): the block draws BEFORE the shell.
+                            std::swap(batches[batches.size() - 2], batches.back());
+                        }
+                    }
+                }
+                if (!cube->HasBodyItem()) {
+                    if (!modelEntry->innerTried) {
+                        modelEntry->innerTried = true;
+                        if (FindGenModel("sulfur_cube_inner"))
+                            modelEntry->innerModel = MakeRemodel("sulfur_cube_inner", "sulfur_cube");
+                        if (FindGenModel("sulfur_cube_baby_inner"))
+                            modelEntry->innerBabyModel = MakeRemodel("sulfur_cube_baby_inner", "sulfur_cube");
+                    }
+                    EntityModel* inner = state.isBaby ? modelEntry->innerBabyModel.get()
+                                                      : modelEntry->innerModel.get();
+                    const TextureHandle innerTex = LoadTexture(state.isBaby
+                        ? "assets/textures/entity/sulfur_cube/sulfur_cube_inner_small.png"
+                        : "assets/textures/entity/sulfur_cube/sulfur_cube_inner.png");
+                    if (inner && innerTex != INVALID_TEXTURE) {
+                        const size_t f = m_indices.size();
+                        AppendMob(*inner, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
+                        if (m_indices.size() > f) {
+                            batches.push_back({ innerTex, innerOverlay, f, m_indices.size() - f });
+                            // order(-1): the inner cube draws BEFORE the shell.
+                            std::swap(batches[batches.size() - 2], batches.back());
+                        }
+                    }
+                }
             }
 
             // ── End-fight beams (MC EnderDragonRenderer.submitCrystalBeams) ──
@@ -2082,6 +2461,76 @@ namespace Render {
                         // OverlayTexture.NO_OVERLAY — hurt eyes do not flash.
                         batches.push_back({ tex, glm::vec4(0.0f), firstIndex,
                                             bodyIndexCount });
+                    }
+                }
+            }
+
+            // ── Breeze wind + eyes — MC BreezeWindLayer / BreezeEyesLayer ─
+            //
+            // BreezeModel builds THREE LayerDefinitions from one base mesh
+            // with PartDefinition.retainPartsAndChildren: BREEZE keeps
+            // {"head", "rods"} (32x32 breeze.png), BREEZE_WIND keeps
+            // {"wind_body"} — the three stacked rings on the 128x128
+            // breeze_wind.png — and BREEZE_EYES keeps {"eyes"} (32x32
+            // breeze_eyes.png). The generator applies the same filter, so
+            // each row here is exactly MC's part set; the earlier version
+            // carried all twelve parts in every row, which put the rings'
+            // 128-scale texOffs onto the 32x32 body sheet and the head onto
+            // the wind sheet. Both layers submit at order 1, after the body.
+            //
+            // Wind: RenderPipelines.BREEZE_WIND — translucent blend, depth
+            // write ON, no cull, NO_OVERLAY, NO_CARDINAL_LIGHTING (the rings
+            // take no per-face shade: vertex colour flattened to white), and
+            // an OffsetTextureTransform that scrolls u by ageInTicks * 0.02
+            // mod 1 — applied here to the appended vertices on a REPEAT-
+            // wrapped sheet so the scroll wraps across its edge. The sheet
+            // is nothing but partial alpha (no opaque texel), so with depth
+            // write on the draw order of the nested rings decides what
+            // shows through: MC's breezeWind is sortOnUpload — quads sorted
+            // far to near before the draw — done here per quad.
+            //
+            // Eyes: RenderTypes.breezeEyes = entityTranslucentEmissive —
+            // translucent blend, no cull, depth write off. The eyes cubes
+            // are the head cubes' exact geometry drawn after the head; with
+            // the LessEqual depth test they win on equal depth as in MC.
+            if (type == Game::EntityTypeId::Breeze) {
+                if (!modelEntry->layersTried) {
+                    modelEntry->layersTried = true;
+                    if (FindGenModel("breeze_wind")) modelEntry->windModel = MakeRemodel("breeze_wind", "breeze");
+                    if (FindGenModel("breeze_eyes")) modelEntry->eyesModel = MakeRemodel("breeze_eyes", "breeze");
+                }
+                if (modelEntry->windModel) {
+                    const TextureHandle wind = LoadTexture(
+                        "assets/textures/entity/breeze/breeze_wind.png", /*repeatWrap=*/true);
+                    if (wind != INVALID_TEXTURE) {
+                        const size_t f = m_indices.size();
+                        const size_t vf = m_verts.size();
+                        AppendMob(*modelEntry->windModel, state, renderPos,
+                                  bodyRot, cameraPos, m_verts, m_indices);
+                        // BreezeWindLayer.xOffset(ageInTicks) = t * 0.02, mod 1.
+                        // ModelVertex uv is already normalised (ModelPart::
+                        // Build divides by the sheet size), so the offset is
+                        // a fraction of the sheet, as MC's texture matrix.
+                        const float uOffset = std::fmod(state.ageInTicks * 0.02f, 1.0f);
+                        for (size_t i = vf; i < m_verts.size(); ++i) {
+                            ModelVertex& v = m_verts[i];
+                            v.u += uOffset;
+                            v.r = v.g = v.b = 255;   // NO_CARDINAL_LIGHTING
+                        }
+                        SortQuadsBackToFront(m_verts, m_indices, f, m_indices.size());
+                        batches.push_back({ wind, glm::vec4(0.0f), f,
+                                            m_indices.size() - f, /*blend=*/true });
+                    }
+                }
+                if (modelEntry->eyesModel) {
+                    const TextureHandle eyes = LoadTexture(
+                        "assets/textures/entity/breeze/breeze_eyes.png");
+                    if (eyes != INVALID_TEXTURE) {
+                        const size_t f = m_indices.size();
+                        AppendMob(*modelEntry->eyesModel, state, renderPos,
+                                  bodyRot, cameraPos, m_verts, m_indices);
+                        batches.push_back({ eyes, glm::vec4(0.0f), f,
+                                            m_indices.size() - f, /*blend=*/true });
                     }
                 }
             }
@@ -2284,6 +2733,42 @@ namespace Render {
                 }
             }
 
+            // ── Snow golem pumpkin — MC SnowGolemHeadLayer ────────────────
+            //
+            // The carved-pumpkin BLOCK model seated by the head part's
+            // transform: MC translates 0.34375 up (its Y points down),
+            // turns it 180° so the carved face looks forward, scales by
+            // 0.625 with the model's Y/Z flip, and centres the unit cell.
+            // Only while it still wears one — shears take it off
+            // (SnowGolem::Shear; the flag rides the variant byte).
+            if (type == Game::EntityTypeId::SnowGolem &&
+                static_cast<const Game::SnowGolem&>(mob).HasPumpkin()) {
+                glm::mat4 head(1.0f);
+                if (PartChainMatrix(model->Root(), "head", head)) {
+                    glm::mat4 m = entityMatrix * head;
+                    m = glm::scale(m, glm::vec3(16.0f));   // pixels -> blocks
+                    m = glm::translate(m, glm::vec3(0.0f, -0.34375f, 0.0f));
+                    m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                    m = glm::scale(m, glm::vec3(0.625f, -0.625f, -0.625f));
+                    m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
+                    const auto put = [&](int faces, const char* texPath) {
+                        const TextureHandle tex = LoadTexture(texPath);
+                        if (tex == INVALID_TEXTURE) return;
+                        const size_t f = m_indices.size();
+                        AppendUnitBlockFaces(m, faces, m_verts, m_indices);
+                        // The pumpkin takes the entity's overlay coords —
+                        // a hurt golem flashes red, hat included.
+                        batches.push_back({ tex, overlay, f, m_indices.size() - f });
+                    };
+                    // block/orientable: top sheet above and below, the
+                    // carved front on north, the plain side elsewhere.
+                    put(kFaceUp | kFaceDown, "assets/textures/block/pumpkin_top.png");
+                    put(kFaceNorth,          "assets/textures/block/carved_pumpkin.png");
+                    put(kFaceSouth | kFaceWest | kFaceEast,
+                        "assets/textures/block/pumpkin_side.png");
+                }
+            }
+
             // ── Sheep wool undercoat — MC SheepWoolUndercoatLayer ─────────
             //
             // The sheep BODY mesh again (LayerDefinitions'
@@ -2294,8 +2779,11 @@ namespace Render {
             // own vertex range is the same geometry at the same pose, and
             // the later equal-depth draw wins under LessEqual. (The jeb
             // rainbow case is skipped with the rest of the jeb system.)
+            // MC 26.1 SheepWoolUndercoatLayer skips babies (`!state.isBaby`)
+            // — the baby sheet has no undercoat region — so the New look
+            // does too; the classic baby keeps drawing it as it always has.
             if (type == Game::EntityTypeId::Sheep &&
-                bodyIndexCount > 0) {
+                bodyIndexCount > 0 && !(state.isBaby && NewBabies())) {
                 const auto* sheep = static_cast<const Game::Sheep*>(&mob);
                 if ((sheep->GetColor() & 0x0F) != 0) {
                     const TextureHandle tex = LoadTexture(
@@ -2458,9 +2946,10 @@ namespace Render {
                         // The SAME overlay as the body. MC hands every render
                         // layer the entity's overlayCoords, so a hurt sheep
                         // flashes red all over rather than only on the skin.
-                        batches.push_back({ LoadTexture(overlayTexPath),
+                        batches.push_back({ MobTex(overlayTexPath),
                                             overlay, layerFirst,
-                                            m_indices.size() - layerFirst });
+                                            m_indices.size() - layerFirst,
+                                            false, overlayModel->CullBackFaces() });
                     }
                 }
             }
@@ -2495,9 +2984,10 @@ namespace Render {
                             type == Game::EntityTypeId::Wolf
                                 ? "assets/textures/entity/wolf/wolf_collar.png"
                                 : "assets/textures/entity/cat/cat_collar.png";
-                        batches.push_back({ LoadTexture(collarTex), overlay,
+                        batches.push_back({ MobTex(collarTex), overlay,
                                             collarFirst,
-                                            m_indices.size() - collarFirst });
+                                            m_indices.size() - collarFirst,
+                                            false, model->CullBackFaces() });
                     }
                 }
             }
@@ -2583,6 +3073,9 @@ namespace Render {
         // and the legs, and vanilla shows you the FAR side of the ribcage
         // through them. Culling back faces deletes exactly that geometry, so
         // the skeleton reads as a flat shell with its spine missing.
+        // ...except for the models MC itself draws culled (Batch::cull —
+        // the bat, arrow, trident, 26.3's baby turtle), whose batches flip
+        // the mode below.
         pipeline.cullMode = CullMode::None;
         pipeline.frontFace = FrontFace::CounterClockwise;
         pipeline.primitiveType = PrimitiveType::Triangles;
@@ -2607,15 +3100,19 @@ namespace Render {
         }
 
         bool blendOn = false;
+        bool cullOn = false;
         for (const Batch& batch : batches) {
             // The warden's fading emissive layers draw alpha-blended (MC
             // RenderTypes.entityTranslucentEmissive — SrcAlpha /
             // OneMinusSrcAlpha, the PipelineState defaults); everything else
             // stays cutout. Depth write stays on either way — the layers sit
             // ON the body surface and batches draw in mob order.
-            if (batch.blend != blendOn) {
+            // Culling follows the model's MC render type the same way.
+            if (batch.blend != blendOn || batch.cull != cullOn) {
                 blendOn = batch.blend;
+                cullOn = batch.cull;
                 pipeline.blendEnabled = blendOn;
+                pipeline.cullMode = cullOn ? CullMode::Back : CullMode::None;
                 g_renderBackend->SetPipelineState(pipeline);
             }
             g_renderBackend->BindTexture(batch.texture, 0);

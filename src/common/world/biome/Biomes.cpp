@@ -1,5 +1,6 @@
 // File: src/common/world/biome/Biomes.cpp
 #include "Biomes.hpp"
+#include "common/core/AssetLocator.hpp"
 #include "../../core/Log.hpp"
 
 #include "synth/PerlinSimplexNoise.h"   // terrain library: Biome.BIOME_INFO_NOISE
@@ -82,7 +83,9 @@ namespace Game {
             return id;
         }
 
-        bool LoadOne(const std::string& path, Colormap& out) {
+        bool LoadOne(const std::string& vanillaPath, Colormap& out) {
+            // A resource pack's colormap when one is enabled.
+            const std::string path = Core::Assets::Locate(vanillaPath);
             int w = 0, h = 0, channels = 0;
             unsigned char* data = stbi_load(path.c_str(), &w, &h, &channels, 3);
             if (!data) {

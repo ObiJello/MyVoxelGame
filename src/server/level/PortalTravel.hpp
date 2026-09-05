@@ -16,6 +16,7 @@
 #pragma once
 
 #include "common/world/block/Blocks.hpp"
+#include "common/world/level/DimensionId.hpp"
 
 #include <glm/glm.hpp>
 
@@ -40,6 +41,18 @@ namespace Server {
         // every tick). This function is free to fail.
         void Traverse(IntegratedServer& server, ServerLevel& from, Game::Entity& entity,
                       Game::BlockID portal, const glm::ivec3& entryPos);
+
+        // The same trip without a portal block (the /dimension command): the
+        // entity goes where a portal at its own position would have sent it.
+        // To or from the End that is the End-portal rule (the obsidian
+        // platform at END_SPAWN_POINT, or the world spawn coming home); the
+        // Nether and the Overworld use the nether-portal rule — coordinates
+        // scaled by 8, the nearest portal within range reused, else the spot
+        // a new one would take (PortalForcer's placement search) with NO
+        // portal built: you arrive where the crossing would have put you,
+        // and the world stays as it was. Arms the entity's portal cooldown.
+        void TravelToDimension(IntegratedServer& server, ServerLevel& from, Game::Entity& entity,
+                               Game::DimensionId toDim);
 
     } // namespace PortalTravel
 

@@ -18,16 +18,9 @@ namespace Server {
         , m_name(name) {
         m_lastUpdateTime = std::chrono::steady_clock::now();
 
-        // Default starter inventory (replaces the old m_hotbarBlocks defaults).
-        // Slot 0 (selected) stays empty; the rest mirror the old hardcoded set.
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(1), Game::BlockID::Dirt,      64);
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(2), Game::BlockID::Grass,     64);
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(3), Game::BlockID::Lava,      64);
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(4), Game::BlockID::Glass,     64);
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(5), Game::BlockID::Sand,      64);
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(6), Game::BlockID::OakLeaves, 64);
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(7), Game::BlockID::Water,     64);
-        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(8), Game::BlockID::Bedrock,   64);
+        // A new player starts with an empty inventory, as in MC (the old
+        // dev-time starter hotbar of dirt/grass/lava/... is gone); a
+        // returning player's inventory comes from their save.
 
         // m_inventoryMenu is built over m_inventory by its member initialiser;
         // only the game-mode-dependent flag needs setting here.
@@ -294,6 +287,25 @@ namespace Server {
     }
 
     // === MOVEMENT & PHYSICS ===
+
+    void ServerPlayer::CreateFilledResult(Game::ItemStack& held, const Game::ItemStack& filled) {
+        // MC ItemUtils.createFilledResult(itemStack, player, newItemStack,
+        // limitCreativeStackSize = true).
+        if (isCreative()) {
+            if (!m_inventory.HasItem(filled.itemId)) {
+                if (m_inventory.AddStack(filled) > 0) m_pendingDrops.push_back(filled);
+            }
+            return;
+        }
+        held.count -= 1;                       // itemStack.consume(1, player)
+        if (held.count <= 0) {
+            held = filled;
+            return;
+        }
+        Game::ItemStack rest = filled;
+        rest.count = m_inventory.AddStack(filled);   // what did not fit
+        if (rest.count > 0) m_pendingDrops.push_back(rest);   // player.drop(newItemStack)
+    }
 
     void ServerPlayer::applyMovementIntent(const glm::vec3& intent) {
         // TODO: Apply movement based on game mode and abilities

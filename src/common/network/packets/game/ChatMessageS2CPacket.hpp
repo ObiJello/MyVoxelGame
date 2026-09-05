@@ -22,6 +22,8 @@ namespace Network {
     enum class ChatClickAction : uint8_t {
         None = 0,
         CopyToClipboard = 1,
+        RunCommand      = 2,   // MC ClickEvent.RunCommand — the value is sent as a chat line
+        SuggestCommand  = 3,   // MC ClickEvent.SuggestCommand — the value fills the chat box
     };
 
     struct ChatSegmentData {
@@ -95,7 +97,8 @@ namespace Network {
                     s.text = reader.ReadString();
                     s.color = static_cast<uint32_t>(reader.ReadInt());
                     const uint8_t act = reader.ReadByte();
-                    s.click = act == 1 ? ChatClickAction::CopyToClipboard : ChatClickAction::None;
+                    s.click = act <= static_cast<uint8_t>(ChatClickAction::SuggestCommand)
+                                  ? static_cast<ChatClickAction>(act) : ChatClickAction::None;
                     s.clickValue = reader.ReadString();
                     s.hoverText = reader.ReadString();
                     packet.segments.push_back(std::move(s));

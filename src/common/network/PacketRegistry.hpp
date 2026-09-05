@@ -67,6 +67,7 @@
             InventoryFullS2C       = 0x29, // Full 46-slot inventory + carried + selected hotbar slot
             InventorySetSlotS2C    = 0x2A, // Single-slot delta (slot, blockId, count)
             InventorySetCarriedS2C = 0x2B, // Cursor item update
+            SetHeldSlotS2C         = 0x4E, // Server moved the selected hotbar slot (pick block) — MC ClientboundSetHeldSlotPacket
             BlockEntityDataS2C     = 0x30, // BE create / state update — mirrors MC ClientboundBlockEntityDataPacket
             BlockEntityRemoveS2C   = 0x31, // BE destroyed (block changed to non-BE) — explicit teardown signal
             BlockEntityActionS2C   = 0x32, // BE "block event" (chest lid open count, bell ring) — MC Level.blockEvent path
@@ -177,6 +178,7 @@
 #if ENABLE_IMMERSIVE_PORTALS
             PortalTeleportC2S   = 0x99,  // "my eye crossed immersive portal P" — see PortalTeleportC2SPacket.hpp
 #endif
+            PickItemC2S         = 0x9B,  // Pick block / pick entity (P) — MC ServerboundPickItemFromBlock/EntityPacket
             FillBlocksC2S       = 0x9A,  // The fill tool's box of held blocks — see FillBlocksC2SPacket.hpp
         };
 
@@ -238,6 +240,7 @@
                 case PacketId::InventoryFullS2C: return "InventoryFullS2C";
                 case PacketId::InventorySetSlotS2C: return "InventorySetSlotS2C";
                 case PacketId::InventorySetCarriedS2C: return "InventorySetCarriedS2C";
+                case PacketId::SetHeldSlotS2C: return "SetHeldSlotS2C";
                 case PacketId::OpenScreenS2C: return "OpenScreenS2C";
                 case PacketId::BlockEntityDataS2C: return "BlockEntityDataS2C";
                 case PacketId::BlockEntityRemoveS2C: return "BlockEntityRemoveS2C";
@@ -272,6 +275,7 @@
                 case PacketId::CloseWindow: return "CloseWindow";
                 case PacketId::ClickWindow: return "ClickWindow";
                 case PacketId::HeldItemChange: return "HeldItemChange";
+                case PacketId::PickItemC2S: return "PickItemC2S";
                 case PacketId::Animation: return "Animation";
                 case PacketId::EntityAction: return "EntityAction";
                 case PacketId::SteerVehicle: return "SteerVehicle";

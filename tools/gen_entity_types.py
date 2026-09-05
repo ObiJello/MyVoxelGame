@@ -20,6 +20,18 @@ import sys
 
 MC = "minecraft_code/decompiled_net/minecraft"
 SRC = os.path.join(MC, "world/entity/EntityType.java")
+# MC 26.3 (minecraft_code2): the registrations moved to EntityTypes.java and
+# key on EntityTypeIds.X instead of the string. Gameplay follows 26.3 here
+# (the baby remodel's boxes already do), so every type present in BOTH trees
+# takes its 26.3 box, eye height and peaceful flag from this file; the 26.1
+# row only supplies what 26.3 does not restate. The differences that matter
+# (2026-09-05): bee 0.7x0.6 -> 0.55x0.5, rabbit 0.4x0.5 -> 0.49x0.6 with an
+# explicit 0.59 eye line, hoglin notInPeaceful.
+SRC2 = "minecraft_code2/decompiled_net/minecraft/world/entity/EntityTypes.java"
+# 26.3-only mobs this engine implements (2026-09-05: the sulfur cube —
+# AbstractCubeMob sibling of the slime, ported as a standalone mob without
+# its sulfur-caves biome).
+MC2_ONLY = {"sulfur_cube"}
 OUT_HPP = "src/common/entity/GeneratedEntityTypes.hpp"
 OUT_CPP = "src/common/entity/GeneratedEntityTypes.cpp"
 
@@ -95,6 +107,12 @@ ROW_HEAD = re.compile(
     r'register\(\s*"([a-z_]+)"\s*,\s*EntityType\.Builder\.'
     r'(?:of|createNothing|<[^>]*>of)\([^,]*,\s*MobCategory\.([A-Z_]+)\)'
 )
+# 26.3's form: `register(EntityTypeIds.ZOMBIE_HORSE, EntityType.Builder.of(
+# ZombieHorse::new, MobCategory.MONSTER)...` — the slug is the lower-cased key.
+ROW_HEAD2 = re.compile(
+    r'register\(\s*EntityTypeIds\.([A-Z_0-9]+)\s*,\s*EntityType\.Builder\.'
+    r'(?:of|createNothing|<[^>]*>of)\([^,]*,\s*MobCategory\.([A-Z_]+)\)'
+)
 
 
 def builder_tail(text, start):
@@ -122,13 +140,35 @@ def parse():
     rows = []
     for m in ROW_HEAD.finditer(text):
         rows.append((m.group(1), m.group(2), builder_tail(text, m.end())))
+    # 26.3 overlay: a type registered in both trees is read from the 26.3
+    # builder chain instead (same fields, newer numbers). A type only 26.3
+    # has (the sulfur cube) is NOT added here — a new mob needs its class,
+    # model and data before a wire id is worth spending on it.
+    if os.path.exists(SRC2):
+        text2 = open(SRC2, encoding="utf-8").read()
+        rows2 = {}
+        for m in ROW_HEAD2.finditer(text2):
+            rows2[m.group(1).lower()] = (m.group(2), builder_tail(text2, m.end()))
+        rows = [(slug, rows2[slug][0], rows2[slug][1]) if slug in rows2
+                else (slug, cat, tail) for slug, cat, tail in rows]
+        # Types 26.3 registers that 26.1 never had. Opt-in, one by one: a
+        # row here is a wire id, and a new mob only earns one once its class,
+        # meshes and data are in place (each gets appended at the END of the
+        # enum by existing_order, so nothing already on the wire moves).
+        have = {slug for slug, _, _ in rows}
+        for slug in sorted(MC2_ONLY):
+            if slug in rows2 and slug not in have:
+                rows.append((slug, rows2[slug][0], rows2[slug][1]))
     for slug, cat, tail in rows:
         if cat == "MISC" and slug not in MISC_KEEP:
             continue
 
         def num(name, default):
-            # end_crystal passes Integer.MAX_VALUE for updateInterval.
+            # end_crystal passes Integer.MAX_VALUE for updateInterval; 26.3
+            # spells the same thing `noUpdateInterval()`.
             if re.search(name + r"\(Integer\.MAX_VALUE\)", tail):
+                return 2147483647
+            if name == "updateInterval" and "noUpdateInterval()" in tail:
                 return 2147483647
             m = re.search(name + r"\(([-0-9.]+)F?\)", tail)
             return float(m.group(1)) if m else default
@@ -213,6 +253,11 @@ def main():
     hpp.append("        // (eyeHeight * 0.5); MC hardcodes an override for the mobs whose baby")
     hpp.append("        // model has a proportionally larger head.")
     hpp.append("        float       babyEyeHeight;")
+    hpp.append("        // MC 26.1 per-mob BABY_DIMENSIONS (Cow/Pig/Chicken/Rabbit/Sheep/Wolf/")
+    hpp.append("        // Cat/Ocelot/Fox.java's `getDefaultDimensions`): the baby's own box when")
+    hpp.append("        // it is NOT the adult's scaled by 0.5. 0 = derive (width * kBabyScale).")
+    hpp.append("        float       babyWidth;")
+    hpp.append("        float       babyHeight;")
     hpp.append("        // MC Mob.xpReward as seeded by the entity's constructor chain")
     hpp.append("        // (Monster.java:34 base 5, per-mob ctor overrides — see the")
     hpp.append("        // generator's XP_OVERRIDES). Mob::GetXpReward reads this; mobs whose")
@@ -236,6 +281,17 @@ def main():
     hpp.append("        return raw < static_cast<uint16_t>(EntityTypeId::Count);")
     hpp.append("    }")
     hpp.append("")
+    hpp.append("    // Baby bounding box for a type — the explicit 26.1 dimensions where MC")
+    hpp.append("    // declares them, otherwise the adult's scaled by DEFAULT_BABY_SCALE.")
+    hpp.append("    inline float GetBabyWidth(EntityTypeId t) {")
+    hpp.append("        const EntityTypeInfo& info = GetEntityTypeInfo(t);")
+    hpp.append("        return info.babyWidth > 0.0f ? info.babyWidth : info.width * kBabyScale;")
+    hpp.append("    }")
+    hpp.append("    inline float GetBabyHeight(EntityTypeId t) {")
+    hpp.append("        const EntityTypeInfo& info = GetEntityTypeInfo(t);")
+    hpp.append("        return info.babyHeight > 0.0f ? info.babyHeight : info.height * kBabyScale;")
+    hpp.append("    }")
+    hpp.append("")
     hpp.append("    // Eye height for an instance, honouring the baby override.")
     hpp.append("    inline float GetEyeHeight(EntityTypeId t, bool baby) {")
     hpp.append("        const EntityTypeInfo& info = GetEntityTypeInfo(t);")
@@ -247,8 +303,74 @@ def main():
     hpp.append("} // namespace Game")
     hpp.append("")
 
-    # Baby eye heights MC hardcodes. Everything else derives.
-    BABY_EYE = {"zombie": 0.93, "cow": 0.665, "chicken": 0.2975}
+    # Baby eye heights and boxes — MC 26.3's BABY_DIMENSIONS (minecraft_code2,
+    # `<Mob>.java` static init: `EntityDimensions.scalable(w, h).withEyeHeight
+    # (e)` or `<TYPE>.getDimensions().scale(s)...`) and the getAgeScale
+    # overrides. The 26.x baby remodel gave nearly every baby its own box and
+    # eye line, gameplay-side, so these apply whichever look is drawn.
+    #
+    # Eye heights: explicit where MC declares one, else eye * scale for the
+    # mobs whose box is `getDimensions().scale(s)` with no eye of its own
+    # (camel 0.6, turtle 0.3). Everything absent derives as eye * 0.5.
+    BABY_EYE = {
+        "zombie":           0.775,    # Zombie.java:491 (was the old 0.93)
+        "husk":             0.825,    # Husk.java:128
+        "drowned":          0.775,    # Drowned.java:312
+        "zombie_villager":  0.67,     # ZombieVillager.java:363
+        "zombified_piglin": 0.78,     # ZombifiedPiglin.java:223
+        "piglin":           0.78,     # Piglin.java:404
+        "villager":         0.63,     # Villager.java:904
+        "cow":              0.69,     # Cow.java:138
+        "mooshroom":        0.69,     # MushroomCow.java:252
+        "chicken":          0.28125,  # Chicken.java:278
+        "pig":              0.40625,  # Pig.java:314
+        "rabbit":           0.39,     # Rabbit.java:86
+        "sheep":            0.65625,  # Sheep.java:285
+        "goat":             0.59375,  # Goat.java:336
+        "wolf":             0.34375,  # Wolf.java:665
+        "cat":              0.34375,  # Cat.java:503
+        "ocelot":           0.34375,  # Ocelot.java:266
+        "fox":              0.34375,  # Fox.java:717
+        "panda":            0.28125,  # Panda.java:699
+        "polar_bear":       0.34375,  # PolarBear.java:240
+        "hoglin":           0.625,    # Hoglin.java:328
+        "zoglin":           0.625,    # Zoglin.java:283
+        "strider":          0.4375,   # Strider.java:466
+        "axolotl":          0.09375,  # Axolotl.java:546
+        "armadillo":        0.21875,  # Armadillo.java:377
+        "happy_ghast":      0.46875,  # HappyGhast.java:557
+        "camel":            1.365,    # Camel: 2.275 * BABY_SCALE 0.6
+        "turtle":           0.102,    # Turtle: 0.34 * BABY_SCALE 0.3
+        "dolphin":          0.09375,  # Dolphin.java:343
+        "squid":            0.37,     # Squid.java:51
+        "glow_squid":       0.37,     # (GlowSquid extends Squid)
+    }
+
+    # Boxes that are NOT the adult's halved. Cow, pig, sheep, goat, wolf,
+    # cat, ocelot, polar bear, panda, strider, axolotl, nautilus and the
+    # equines declare boxes equal to the halved adult (attachments only), so
+    # they derive.
+    BABY_DIMS = {
+        "chicken":          (0.3, 0.4),      # was 0.2 x 0.35
+        "rabbit":           (0.24, 0.4),     # was 0.2 x 0.25
+        "fox":              (0.36, 0.42),    # FOX.scale(0.6)
+        "hoglin":           (0.75, 0.85),    # was 0.698 x 0.7
+        "zoglin":           (0.75, 0.85),
+        "zombie":           (0.49, 0.98),    # the zombie family: was 0.3 x 0.975
+        "husk":             (0.49, 0.98),
+        "drowned":          (0.49, 0.98),
+        "zombie_villager":  (0.49, 0.98),
+        "zombified_piglin": (0.49, 0.98),
+        "piglin":           (0.49, 0.98),
+        "villager":         (0.49, 0.98),
+        "camel":            (1.02, 1.425),   # CAMEL.scale(0.6) (was 0.45)
+        "armadillo":        (0.42, 0.39),    # ARMADILLO.scale(0.6)
+        "happy_ghast":      (0.95, 0.95),    # HAPPY_GHAST.scale(0.2375)
+        "turtle":           (0.36, 0.12),    # TURTLE.scale(0.3)
+        "dolphin":          (0.585, 0.39),   # DOLPHIN.scale(0.65)
+        "squid":            (0.5, 0.5),      # was 0.4 x 0.4
+        "glow_squid":       (0.5, 0.5),
+    }
 
     # MC seeds Mob.xpReward in constructors: Monster.java:34 sets 5 and these
     # ctors override it (values transcribed from the decompile, cited by
@@ -285,11 +407,11 @@ def main():
     cpp.append("namespace Game {")
     cpp.append("")
     cpp.append("    const EntityTypeInfo kEntityTypeTable[kEntityTypeCount] = {")
-    cpp.append("        // slug  w  h  eye  category  track  upd  babyEye  xp  notInPeaceful")
+    cpp.append("        // slug  w  h  eye  category  track  upd  babyEye  babyW  babyH  xp  notInPeaceful")
     for slug in order:
         t = types[slug]
         cpp.append(
-            '        {{ "{slug}", {w}f, {h}f, {e}f, {cat}, {tr}, {up}, {be}f, {xp}, {pf} }},'.format(
+            '        {{ "{slug}", {w}f, {h}f, {e}f, {cat}, {tr}, {up}, {be}f, {bw}f, {bh}f, {xp}, {pf} }},'.format(
                 slug=slug,
                 w=round(t["width"], 5),
                 h=round(t["height"], 5),
@@ -298,6 +420,8 @@ def main():
                 tr=t["track"],
                 up=t["update"],
                 be=BABY_EYE.get(slug, 0.0),
+                bw=BABY_DIMS.get(slug, (0.0, 0.0))[0],
+                bh=BABY_DIMS.get(slug, (0.0, 0.0))[1],
                 xp=xp(slug, t["category"]),
                 pf="true" if t["peaceful"] else "false",
             )

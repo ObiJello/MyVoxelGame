@@ -53,7 +53,24 @@ namespace Game {
     }
 
     std::unique_ptr<Animal> Cow::CreateBaby() {
-        return std::make_unique<Cow>(m_level);
+        auto baby = std::make_unique<Cow>(m_level);
+        // MC Cow.getBreedOffspring: random.nextBoolean() ? own variant :
+        // the partner's. A spawn-egg baby (no partner) copies this parent.
+        TemperatureVariant v = m_variant;
+        if (m_breedPartnerVariant >= 0 && m_level && m_level->Random().NextBool()) {
+            v = static_cast<TemperatureVariant>(m_breedPartnerVariant);
+        }
+        m_breedPartnerVariant = -1;
+        baby->SetVariant(v);
+        return baby;
+    }
+
+    void Cow::SpawnChildFromBreeding(Animal& partner) {
+        if (const auto* other = dynamic_cast<const Cow*>(&partner)) {
+            m_breedPartnerVariant = static_cast<int8_t>(other->GetVariant());
+        }
+        Animal::SpawnChildFromBreeding(partner);
+        m_breedPartnerVariant = -1;
     }
 
     void Cow::RegisterGoals() {
@@ -123,7 +140,24 @@ namespace Game {
     }
 
     std::unique_ptr<Animal> Pig::CreateBaby() {
-        return std::make_unique<Pig>(m_level);
+        auto baby = std::make_unique<Pig>(m_level);
+        // MC Pig.getBreedOffspring: random.nextBoolean() ? own variant :
+        // the partner's. A spawn-egg baby (no partner) copies this parent.
+        TemperatureVariant v = m_variant;
+        if (m_breedPartnerVariant >= 0 && m_level && m_level->Random().NextBool()) {
+            v = static_cast<TemperatureVariant>(m_breedPartnerVariant);
+        }
+        m_breedPartnerVariant = -1;
+        baby->SetVariant(v);
+        return baby;
+    }
+
+    void Pig::SpawnChildFromBreeding(Animal& partner) {
+        if (const auto* other = dynamic_cast<const Pig*>(&partner)) {
+            m_breedPartnerVariant = static_cast<int8_t>(other->GetVariant());
+        }
+        Animal::SpawnChildFromBreeding(partner);
+        m_breedPartnerVariant = -1;
     }
 
     void Pig::RegisterGoals() {
@@ -244,6 +278,47 @@ namespace Game {
         if (roll <  9000) return d;   // 3%
         // The remaining 82% splits 499:1 between the common colour and pink.
         return ((roll - 9000) % 500 == 0) ? kPink : common;
+    }
+
+    // ── Farm-animal temperature variants (MC 1.21.5) ──────────────────────
+
+    TemperatureVariant FarmAnimalVariantForBiome(std::string_view biome) {
+        if (BiomeIn(biome, kWarmBiomes, std::size(kWarmBiomes))) return TemperatureVariant::Warm;
+        if (BiomeIn(biome, kColdBiomes, std::size(kColdBiomes))) return TemperatureVariant::Cold;
+        return TemperatureVariant::Temperate;
+    }
+
+    namespace {
+        // MC Cow/Pig/Chicken.finalizeSpawn: VariantUtils.selectVariantToSpawn
+        // (SpawnContext.create(level, blockPosition())) — the biome under the
+        // mob at the moment it is finalized, for every spawn reason (natural,
+        // spawn egg, /summon), which is why an egg used in a snowy taiga gives
+        // a cold cow in vanilla.
+        TemperatureVariant SpawnVariantFor(const Mob& mob, EntityLevel* level) {
+            if (!level) return TemperatureVariant::Temperate;
+            const IBlockAccess* blocks = level->Blocks();
+            if (!blocks) return TemperatureVariant::Temperate;
+            const glm::ivec3 p = mob.BlockPosition();
+            return FarmAnimalVariantForBiome(BiomeRegistry::Get(blocks->GetBiome(p.x, p.y, p.z)).name);
+        }
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Cow::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        SetVariant(SpawnVariantFor(*this, m_level));
+        return Animal::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Pig::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        SetVariant(SpawnVariantFor(*this, m_level));
+        return Animal::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Chicken::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        SetVariant(SpawnVariantFor(*this, m_level));
+        return Animal::FinalizeSpawn(reason, std::move(groupData));
     }
 
     std::shared_ptr<SpawnGroupData>
@@ -437,7 +512,24 @@ namespace Game {
     }
 
     std::unique_ptr<Animal> Chicken::CreateBaby() {
-        return std::make_unique<Chicken>(m_level);
+        auto baby = std::make_unique<Chicken>(m_level);
+        // MC Chicken.getBreedOffspring: random.nextBoolean() ? own variant :
+        // the partner's. A spawn-egg baby (no partner) copies this parent.
+        TemperatureVariant v = m_variant;
+        if (m_breedPartnerVariant >= 0 && m_level && m_level->Random().NextBool()) {
+            v = static_cast<TemperatureVariant>(m_breedPartnerVariant);
+        }
+        m_breedPartnerVariant = -1;
+        baby->SetVariant(v);
+        return baby;
+    }
+
+    void Chicken::SpawnChildFromBreeding(Animal& partner) {
+        if (const auto* other = dynamic_cast<const Chicken*>(&partner)) {
+            m_breedPartnerVariant = static_cast<int8_t>(other->GetVariant());
+        }
+        Animal::SpawnChildFromBreeding(partner);
+        m_breedPartnerVariant = -1;
     }
 
     void Chicken::RegisterGoals() {
@@ -782,10 +874,14 @@ namespace Game {
         jumping = jump;
     }
 
+    // MC 26.1 Rabbit.JUMP_DURATION — 15 ticks (10 before the rabbit remodel;
+    // the hop clip is 0.75 s long, and the clock is what drives it).
+    static constexpr int kRabbitJumpDuration = 15;
+
     void Rabbit::StartJumping() {
         // MC Rabbit.startJumping, verbatim.
         SetJumping(true);
-        m_jumpDuration = 10;
+        m_jumpDuration = kRabbitJumpDuration;
         m_jumpTicks = 0;
     }
 
@@ -876,10 +972,25 @@ namespace Game {
         if (id == 1) {
             // MC Rabbit.handleEntityEvent(1): spawnSprintParticle (no
             // particle system yet) + start the jump animation.
-            m_jumpDuration = 10;
+            m_jumpDuration = kRabbitJumpDuration;
             m_jumpTicks = 0;
         } else {
             Animal::HandleEntityEvent(id);
+        }
+    }
+
+    void Rabbit::SetupAnimationStates() {
+        // MC 26.1 Rabbit.setupAnimationStates + shouldPlayIdleAnimation
+        // (leashes are not modelled, so that clause is always true).
+        if (m_idleAnimationTimeout <= 0 && !IsNoAi()) {
+            m_idleAnimationTimeout = m_level->Random().NextInt(40) + 180;
+            Anim(MobAnim::IdleHeadTilt).Start(tickCount);
+        } else if (m_jumpTicks > 0) {
+            Anim(MobAnim::Hop).StartIfStopped(tickCount);
+            Anim(MobAnim::IdleHeadTilt).Stop();
+        } else {
+            --m_idleAnimationTimeout;
+            Anim(MobAnim::Hop).Stop();
         }
     }
 

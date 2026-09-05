@@ -122,7 +122,7 @@ namespace Render {
         // already holds a quad) and must be emitted directly.
         bool TryStashGreedyFluidQuad(int kind, Game::BlockID fluidType,
                                      const std::vector<Vertex>& verts,
-                                     const glm::vec4& uvRect,
+                                     uint16_t spriteId,
                                      int worldX, int worldY, int worldZ);
 
         // MC ItemBlockRenderTypes.LAYER_BY_FLUID registers WATER (and
@@ -214,7 +214,10 @@ namespace Render {
                                            const glm::vec4& uvRect, const glm::vec4& tint);
 
         // Texture and UV helpers
-        bool GetFluidTextureUV(const std::string& texturePath, glm::vec4& uvRect);
+        // spriteId (optional) receives the sprite's row in the atlas sprite
+        // table — what a greedy-merged plate carries instead of the rect.
+        bool GetFluidTextureUV(const std::string& texturePath, glm::vec4& uvRect,
+                               uint16_t* spriteId = nullptr);
         glm::vec2 GetFlowTextureOffset(Game::BlockID fluidType) const;
     };
 

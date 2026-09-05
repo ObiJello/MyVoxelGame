@@ -18,6 +18,9 @@
 
 namespace Render {
 
+    // Resource pack reload: the block-item meshes carry atlas UVs.
+    void ClearBlockItemMeshCacheForReload();
+
     class ItemEntityRenderer {
     public:
         bool Initialize();

@@ -278,8 +278,52 @@ namespace Game {
         out.Register(Attribute::AttackDamage,  3.0);
     }
 
+    namespace {
+        // MC AgeableMob.AgeableMobGroupData for the water creatures — the
+        // first pack member spawns adult, later members roll babyChance
+        // (the animals keep their own copy of this token in Animals.cpp).
+        struct WaterAgeableGroupData : SpawnGroupData {
+            explicit WaterAgeableGroupData(float chance) : babyChance(chance) {}
+            float babyChance;
+            int   size = 0;
+        };
+
+        // MC AgeableMob.finalizeSpawn's roll, with the chance the concrete
+        // class seeds when no pack token exists yet.
+        void RollPackBaby(AgeableMob& mob, EntityLevel* level, float chance,
+                          std::shared_ptr<SpawnGroupData>& groupData) {
+            if (!level) return;
+            auto* data = dynamic_cast<WaterAgeableGroupData*>(groupData.get());
+            if (!data) {
+                groupData = std::make_shared<WaterAgeableGroupData>(chance);
+                data = static_cast<WaterAgeableGroupData*>(groupData.get());
+            }
+            if (data->size > 0 && level->Random().NextFloat() <= data->babyChance) {
+                mob.SetAge(AgeableMob::kBabyStartAge);
+            }
+            ++data->size;
+        }
+    } // namespace
+
+    std::shared_ptr<SpawnGroupData>
+    Dolphin::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        // MC Dolphin.finalizeSpawn: setAirSupply(max), xRot 0, then the
+        // AgeableMobGroupData(0.1F) roll.
+        SetAirSupply(GetMaxAirSupply());
+        xRot = 0.0f;
+        RollPackBaby(*this, m_level, 0.1f, groupData);
+        return AgeableMob::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Squid::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        // MC Squid.finalizeSpawn: AgeableMobGroupData(0.05F).
+        RollPackBaby(*this, m_level, 0.05f, groupData);
+        return AgeableMob::FinalizeSpawn(reason, std::move(groupData));
+    }
+
     Dolphin::Dolphin(EntityLevel* level)
-        : PathfinderMob(EntityTypeId::Dolphin, level) {
+        : AgeableMob(EntityTypeId::Dolphin, level) {
         CreateAttributes(m_attributes);
         m_health = GetMaxHealth();
         // MC's constructor: setAirSupply(getMaxAirSupply()) — the Entity
@@ -328,7 +372,7 @@ namespace Game {
     }
 
     void Dolphin::Tick() {
-        PathfinderMob::Tick();
+        AgeableMob::Tick();
 
         if (IsNoAi()) {
             // MC Dolphin.tick: a no-AI dolphin neither drowns nor dries.
@@ -380,7 +424,7 @@ namespace Game {
         HandleWaterAnimalAirSupply(*this, airSupply);
     }
 
-    Squid::Squid(EntityTypeId type, EntityLevel* level) : Mob(type, level) {
+    Squid::Squid(EntityTypeId type, EntityLevel* level) : AgeableMob(type, level) {
         m_attributes.Register(Attribute::MaxHealth, 10.0);
         m_health = GetMaxHealth();
         if (level) {
@@ -397,7 +441,7 @@ namespace Game {
     }
 
     void Squid::AiStep() {
-        Mob::AiStep();
+        AgeableMob::AiStep();
 
         const bool serverSide = m_level && !m_level->IsClientSide();
 
@@ -477,7 +521,7 @@ namespace Game {
             m_tentacleMovement = 0.0f;
             return;
         }
-        Mob::HandleEntityEvent(id);
+        AgeableMob::HandleEntityEvent(id);
     }
 
     bool Squid::Hurt(MobDamageSource source, float amount, Entity* attacker) {
@@ -487,7 +531,7 @@ namespace Game {
         // animated squid_ink sheet, water-drag tick) and the sprite is not
         // in assets/textures/particle/; add both to MobParticleSystem when
         // the ink visual is wanted.
-        return Mob::Hurt(source, amount, attacker);
+        return AgeableMob::Hurt(source, amount, attacker);
     }
 
     std::shared_ptr<SpawnGroupData>

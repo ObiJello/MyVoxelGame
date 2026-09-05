@@ -77,6 +77,8 @@ namespace Game {
         { Items::IronGolemSpawnEgg, EntityTypeId::IronGolem },
         { Items::LlamaSpawnEgg, EntityTypeId::Llama },
         { Items::MagmaCubeSpawnEgg, EntityTypeId::MagmaCube },
+        // 26.3 (gen_items MC2_ITEMS): the sulfur cube egg.
+        { Items::SulfurCubeSpawnEgg, EntityTypeId::SulfurCube },
         { Items::MooshroomSpawnEgg, EntityTypeId::Mooshroom },
         { Items::MuleSpawnEgg, EntityTypeId::Mule },
         { Items::NautilusSpawnEgg, EntityTypeId::Nautilus },

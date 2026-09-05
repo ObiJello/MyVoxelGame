@@ -15,6 +15,13 @@ namespace Render {
         g_clipboardHandler = std::move(handler);
     }
 
+    namespace {
+        std::function<void(const std::string&)> s_runCommandHandler;
+        std::function<void(const std::string&)> s_suggestCommandHandler;
+    }
+    void SetRunCommandHandler(std::function<void(const std::string&)> handler) { s_runCommandHandler = std::move(handler); }
+    void SetSuggestCommandHandler(std::function<void(const std::string&)> handler) { s_suggestCommandHandler = std::move(handler); }
+
     void CopyToClipboard(const std::string& text) {
         if (g_clipboardHandler) g_clipboardHandler(text);
     }
@@ -263,6 +270,14 @@ namespace Render {
             if (m_mouseY < r.y0 || m_mouseY >= r.y1) continue;
             if (r.action == ChatClickAction::CopyToClipboard) {
                 CopyToClipboard(r.value);
+                return true;
+            }
+            if (r.action == ChatClickAction::RunCommand) {
+                if (s_runCommandHandler) s_runCommandHandler(r.value);
+                return true;
+            }
+            if (r.action == ChatClickAction::SuggestCommand) {
+                if (s_suggestCommandHandler) s_suggestCommandHandler(r.value);
                 return true;
             }
         }

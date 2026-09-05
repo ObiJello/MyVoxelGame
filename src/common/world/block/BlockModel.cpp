@@ -1,5 +1,6 @@
 // File: src/common/world/block/BlockModel.cpp
 #include "BlockModel.hpp"
+#include "common/core/AssetLocator.hpp"
 #include "../../core/Log.hpp"
 #include <cmath>
 #include <filesystem>
@@ -49,13 +50,11 @@ namespace Game {
         try {
             // PHASE 1: Load all raw JSON files into memory
             Log::Debug("Phase 1: Loading raw JSON files...");
-            for (const auto& entry : std::filesystem::directory_iterator(modelsPath)) {
-                if (!entry.is_regular_file() || entry.path().extension() != ".json") {
-                    continue;
-                }
-
-                std::string filename = entry.path().stem().string();
-                std::string filepath = entry.path().string();
+            // The vanilla directory with the enabled resource packs overlaid
+            // (a pack's assets/minecraft/models/block/x.json replaces ours).
+            for (const Core::Assets::Entry& entry : Core::Assets::ListFiles(modelsPath, ".json", false)) {
+                std::string filename = std::filesystem::path(entry.relative).stem().string();
+                std::string filepath = entry.absolute;
 
                 try {
                     std::ifstream file(filepath);

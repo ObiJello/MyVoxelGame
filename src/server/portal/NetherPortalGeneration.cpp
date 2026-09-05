@@ -197,6 +197,12 @@ namespace Server {
         if (auto match = FindExistingFrame(*toLevel, p.fromShape, p.toPos, radius)) {
             Log::Info("[NetherPortal] Linked to an existing frame at (%d,%d,%d) scale %.2f",
                       match->shape.minCell.x, match->shape.minCell.y, match->shape.minCell.z, match->scale);
+            // The step through an existing frame is carved like a built
+            // one's: a floor frame found lying on the ground (one this
+            // generator built before it reserved a drop, or one laid by
+            // hand) is a window onto that ground, and every relight would
+            // find and link it again rather than build a new one.
+            CarveClearance(*toLevel->World(), match->shape);
             CreateCluster(p.from, p.fromShape, p.to, match->shape, match->scale);
             return;
         }
@@ -318,7 +324,14 @@ namespace Server {
         // spots and leaves you to dig out of the others; an immersive
         // portal flush against netherrack cannot even be entered — the
         // far wall is the near side's collision — so the step through is
-        // always carved.
+        // always carved. For a floor frame that is the drop beneath it
+        // (FrameShape::kFallClearance): without it the far side was a
+        // window onto the ground and the far floor held the player up in
+        // the surface, never entering.
+        CarveClearance(world, shape);
+    }
+
+    void NetherPortalGeneration::CarveClearance(Game::World& world, const FrameShape& shape) const {
         for (const glm::ivec3& c : shape.Clearance()) {
             if (!FrameShape::IsAirLike(world.GetBlock(c.x, c.y, c.z))) {
                 world.SetBlock(c.x, c.y, c.z, Game::BlockID::Air);

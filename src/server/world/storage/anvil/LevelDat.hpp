@@ -11,6 +11,7 @@
 #include "server/world/storage/anvil/SaveRoot.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 namespace Game::Anvil {
@@ -46,7 +47,21 @@ namespace Game::Anvil {
         bool dimensionStack  = false;   // engine world option
         bool mobGriefing      = true;
         int  randomTickSpeed  = 3;
+        bool tntExplodes             = true;
+        bool doEntityDrops           = true;
+        bool tntExplosionDropDecay   = false;   // vanilla's odd one out
+        bool blockExplosionDropDecay = true;
+        bool mobExplosionDropDecay   = true;
     };
+
+    // Reads <levelDat> (an existing world's) into `out`, leaving any field
+    // the file lacks at its default. Gamerules are accepted in every form
+    // this engine and Minecraft have written them: typed under the
+    // namespaced id ("minecraft:advance_time": 1b — MC's GameRules.codec
+    // and this writer), typed under the bare id, or the old string form
+    // under the camelCase name ("doDaylightCycle": "true"). False with
+    // `error` set when the file is missing or unreadable.
+    bool ReadLevelDat(const std::filesystem::path& levelDat, LevelDatData& out, std::string& error);
 
     // Writes <root>/level.dat, rotating the previous one to level.dat_old.
     // Takes a SaveRoot, so it cannot be aimed at a real Minecraft world.

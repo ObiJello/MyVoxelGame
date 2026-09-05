@@ -22,6 +22,7 @@
 #include "common/core/SoundEvents.hpp"
 #include "GeneratedItemList.hpp"
 #include "SpawnEggs.hpp"
+#include "mobs/SulfurCube.hpp"
 #include "../world/level/WorldMobSpawn.hpp"
 #include "mobs/Animals.hpp"
 #include "../data/DataComponents.hpp"
@@ -951,6 +952,37 @@ namespace Game {
             return std::nullopt;
         }
 
+        // Bucket of sulfur cube — MC MobBucketItem with Fluids.EMPTY: the POV
+        // clip runs with ClipContext.Fluid.NONE, the cube is spawned in the
+        // cell on the clicked face (BucketItem.use's `relative`), the bucket
+        // empties (getEmptySuccessItem), and MobBucketItem.spawn hands the
+        // new cube its bucket data (loadFromBucketTag + setFromBucket).
+        UseResult Use_SulfurCubeBucket(ILevelWrite* world, IUsePlayer* player,
+                                       uint32_t hand, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+            if (world->IsClientSide()) return UseResult::Success;
+            auto hit = BucketClip(world, *player, /*stopOnFluid=*/false);
+            if (!hit) return UseResult::Pass;
+
+            const auto data = stack.components.get(DataComponents::SULFUR_CUBE_BUCKET);
+            const auto configure = [data](Mob& mob) {
+                if (auto* cube = dynamic_cast<SulfurCube*>(&mob)) {
+                    cube->LoadFromBucket(data.value_or(SulfurCubeBucketData{}));
+                }
+            };
+            if (!SpawnMobFromItem(EntityTypeId::SulfurCube, hit->beforePos,
+                                  /*tryMoveDown=*/false, /*movedUp=*/false,
+                                  world->GetDimension(), 0, configure)) {
+                return UseResult::Fail;
+            }
+            GameEventEmit("entity_place", hit->beforePos);
+            if (!player->isCreative()) {
+                stack = ItemStack(Items::Bucket, 1);
+                player->markSlotDirty(player->handSlotIndex(hand));
+            }
+            return UseResult::Success;
+        }
+
         // Empty bucket — BucketItem.java:43-74 (fill path).
         // ── EnderEye.use — mirrors EnderEyeItem.java:76-108 ─────────────────
         //
@@ -1047,8 +1079,8 @@ namespace Game {
                                     BlockID::Air, World::UpdateFlags::All);
                 }
                 PlaySound("item.bucket.fill", hit->pos);
-                if (!player->isCreative()) {
-                    stack = ItemStack(Items::WaterBucket, 1);
+                {
+                    player->CreateFilledResult(stack, ItemStack(Items::WaterBucket, 1));
                     player->markSlotDirty(player->handSlotIndex(hand));
                 }
                 return UseResult::Success;
@@ -1068,11 +1100,12 @@ namespace Game {
             // ItemUtils.createFilledResult (:62): creative keeps the empty
             // bucket, survival transforms it. Component patch reset — a
             // fresh filled bucket carries no per-stack state.
-            if (!player->isCreative()) {
-                stack = ItemStack(hit->block == BlockID::Lava ? Items::LavaBucket
-                                                              : Items::WaterBucket, 1);
-                player->markSlotDirty(player->handSlotIndex(hand));
-            }
+            // ItemUtils.createFilledResult: one bucket of the stack fills,
+            // the rest stays (creative keeps the stack and gains the filled
+            // bucket once).
+            player->CreateFilledResult(stack, ItemStack(hit->block == BlockID::Lava ? Items::LavaBucket
+                                                                                      : Items::WaterBucket, 1));
+            player->markSlotDirty(player->handSlotIndex(hand));
             return UseResult::Success;
         }
 
@@ -1280,6 +1313,7 @@ namespace Game {
         wireUse(Items::EnderEye,    &Use_EnderEye);
         wireUse(Items::EnderPearl,  &Use_EnderPearl);
         wireUse(Items::Bucket,      &Use_EmptyBucket);
+        wireUse(Items::SulfurCubeBucket, &Use_SulfurCubeBucket);
         wireUse(Items::WaterBucket, &Use_FilledBucket);
         wireUse(Items::LavaBucket,  &Use_FilledBucket);
         // Filled buckets stack to 1 (Items.java `.stacksTo(1)` on all buckets;

@@ -150,6 +150,9 @@ namespace Render {
             { "IsEating",             StateRef::IsEating },
             { "IsScared",             StateRef::IsScared },
             { "HasMainHandItem",      StateRef::HasMainHandItem },
+            { "HeadEatPos",           StateRef::HeadEatPos },
+            { "HeadEatAngle",         StateRef::HeadEatAngle },
+            { "AnimStarted",          StateRef::AnimStarted },
         };
         for (const Entry& e : kTable) {
             if (e.name == n) return e.ref;
@@ -256,6 +259,10 @@ namespace Render {
             case StateRef::IsEating:             return b(s.isEating);
             case StateRef::IsScared:             return b(s.isScared);
             case StateRef::HasMainHandItem:      return b(s.hasMainHandItem);
+            case StateRef::HeadEatPos:           return s.headEatPositionScale;
+            case StateRef::HeadEatAngle:         return s.headEatAngleScale;
+            // Needs the slot — answered by the caller (see the tape loop).
+            case StateRef::AnimStarted:          return 0.0f;
         }
         return 0.0f;
     }
@@ -295,6 +302,7 @@ namespace Render {
                 NodeBind& bind = out.m_nodes[static_cast<size_t>(i - lo)];
                 if (n.op == AnimOp::State || n.op == AnimOp::BState) {
                     bind.ref = ResolveStateRef(n.name);
+                    if (bind.ref == StateRef::AnimStarted) bind.slot = n.arg;
                     continue;
                 }
                 if (n.op != AnimOp::Part) continue;
@@ -347,9 +355,16 @@ namespace Render {
                 switch (n.op) {
                     case AnimOp::Const:  push(n.value); break;
                     case AnimOp::State:
-                    case AnimOp::BState:
-                        push(ReadState(state, bindOf(first + i).ref));
+                    case AnimOp::BState: {
+                        const NodeBind& bnd = bindOf(first + i);
+                        if (bnd.ref == StateRef::AnimStarted) {
+                            push(bnd.slot >= 0 && bnd.slot < Game::kMobAnimCount &&
+                                 state.AnimRunning(bnd.slot) ? 1.0f : 0.0f);
+                        } else {
+                            push(ReadState(state, bnd.ref));
+                        }
                         break;
+                    }
                     case AnimOp::Local:
                         push(n.arg >= 0 && n.arg < static_cast<int>(locals.size())
                                  ? locals[static_cast<size_t>(n.arg)] : 0.0f);

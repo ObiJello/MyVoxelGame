@@ -16,6 +16,8 @@ namespace Render {
     enum class ChatClickAction : uint8_t {
         None = 0,
         CopyToClipboard,   // MC ClickEvent.CopyToClipboard
+        RunCommand,        // MC ClickEvent.RunCommand: the value is submitted as if typed
+        SuggestCommand,    // MC ClickEvent.SuggestCommand: the value is put in the chat box
     };
 
     // One styled run within a message — our stand-in for MC's Component tree.
@@ -38,6 +40,10 @@ namespace Render {
     // other reason to know about.
     void SetClipboardHandler(std::function<void(const std::string&)> handler);
     void CopyToClipboard(const std::string& text);
+    // RunCommand / SuggestCommand sinks — the host wires them to the network
+    // client and the chat input (MC Screen.handleComponentClicked).
+    void SetRunCommandHandler(std::function<void(const std::string&)> handler);
+    void SetSuggestCommandHandler(std::function<void(const std::string&)> handler);
 
     class ChatComponent {
     public:

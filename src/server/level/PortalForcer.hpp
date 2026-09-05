@@ -57,6 +57,13 @@ namespace Server {
         std::optional<Game::FoundRectangle> CreatePortal(
             ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis);
 
+        // Step 2 without the blocks: the opening CreatePortal WOULD place —
+        // the same spiral search and the same over-the-void fallback — with
+        // nothing written to the world. For "where would a portal take me"
+        // (the /dimension command).
+        std::optional<Game::FoundRectangle> FindPortalPlacement(
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis);
+
     } // namespace PortalForcer
 
 } // namespace Server

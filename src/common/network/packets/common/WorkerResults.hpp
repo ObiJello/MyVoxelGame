@@ -89,6 +89,18 @@ namespace Network {
             int8_t translucentPovX = 0, translucentPovY = 0, translucentPovZ = 0;
             bool   translucentPovValid = false;
 
+            // Face-direction group boundaries of the opaque/cutout index
+            // buffers (Render::kFacingGroupOrder; [7] = index count). All
+            // zero = no groups, the renderer draws the whole range.
+            uint32_t opaqueFacingRanges[8] = {};
+            uint32_t cutoutFacingRanges[8] = {};
+
+            // Face-map records of the layer's greedy-merged rectangles
+            // (Render::SectionMesh::opaqueFaceMap), uploaded behind the
+            // layer's vertices. Empty when nothing merged.
+            std::vector<uint32_t> opaqueFaceMap;
+            std::vector<uint32_t> cutoutFaceMap;
+
             // Layer counts for validation
             size_t opaqueVertexCount      = 0;
             size_t opaqueIndexCount       = 0;

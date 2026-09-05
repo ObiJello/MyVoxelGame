@@ -117,12 +117,10 @@ namespace Render {
     // pattern — the codebase has no floating dropdown widget, and a full
     // screen list scales to any number of sets). Selecting applies + pops
     // back to World Settings, whose button label refreshes on re-init.
-    class SkyboxSelectScreen : public OptionsSubScreen {
-    public:
-        SkyboxSelectScreen() : OptionsSubScreen("Select Skybox") {}
-    protected:
-        void AddOptions() override;
-    };
+    // SkyboxSelectScreen lives in SkyboxSelectScreen.hpp (a card grid, not
+    // an options list). Applying a sky for the active world — the sky
+    // renderer plus the world's saved choice — is shared with it here.
+    void ApplyWorldSkySelection(const std::string& skybox, int mode);
 
     class SoundOptionsScreen : public OptionsSubScreen {
     public:

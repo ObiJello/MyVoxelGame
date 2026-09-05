@@ -89,6 +89,9 @@ namespace Server {
         std::optional<glm::ivec3> FindPlacement(ServerLevel& level, const Game::Immersive::FrameShape& templ,
                                                 const glm::ivec3& around, int radius) const;
         void BuildFrame(Game::World& world, const Game::Immersive::FrameShape& shape) const;
+        // The air on either side of the surface (a floor frame: the drop
+        // beneath it) — carved for built AND linked frames.
+        void CarveClearance(Game::World& world, const Game::Immersive::FrameShape& shape) const;
         void CreateCluster(Game::DimensionId from, const Game::Immersive::FrameShape& fromShape,
                            Game::DimensionId to, const Game::Immersive::FrameShape& toShape, double scale);
         void CheckIntegrity(int64_t serverTick);

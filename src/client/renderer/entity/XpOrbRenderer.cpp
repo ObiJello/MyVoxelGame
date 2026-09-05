@@ -1,4 +1,5 @@
 // File: src/client/renderer/entity/XpOrbRenderer.cpp
+#include "client/resource/ResourcePacks.hpp"
 #include "../mesh/ChunkRenderer.hpp"
 #include "XpOrbRenderer.hpp"
 
@@ -23,6 +24,25 @@ namespace PlatformMain { std::string GetAssetPath(const std::string&); }
 
 namespace Render {
 
+    bool XpOrbRenderer::LoadTexture() {
+        if (m_texture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_texture); m_texture = INVALID_TEXTURE; }
+        const std::string path = PlatformMain::GetAssetPath("assets/textures/entity/experience_orb.png");
+        int w = 0, h = 0, ch = 0;
+        stbi_set_flip_vertically_on_load(0);
+        unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+        if (!pixels) {
+            Log::Warning("[XpOrbRenderer] failed to load %s", path.c_str());
+            return false;
+        }
+        m_texture = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+        stbi_image_free(pixels);
+        if (m_texture != INVALID_TEXTURE) {
+            g_renderBackend->SetTextureFilter(m_texture, TextureFilter::Nearest, TextureFilter::Nearest);
+            g_renderBackend->SetTextureWrap(m_texture, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+        }
+        return m_texture != INVALID_TEXTURE;
+    }
+
     bool XpOrbRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
@@ -46,28 +66,10 @@ namespace Render {
 
         // MC's textures/entity/experience_orb.png — a 64×64 sheet, 4×4 grid
         // of 16 px sprites.
-        {
-            const std::string path = PlatformMain::GetAssetPath(
-                "assets/textures/entity/experience_orb.png");
-            int w = 0, h = 0, ch = 0;
-            stbi_set_flip_vertically_on_load(0);
-            unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch,
-                                              STBI_rgb_alpha);
-            if (!pixels) {
-                Log::Warning("[XpOrbRenderer] failed to load %s", path.c_str());
-                g_renderBackend->DestroyShader(m_shader);
-                m_shader = INVALID_SHADER;
-                return false;
-            }
-            m_texture = g_renderBackend->CreateTexture2D(
-                w, h, TextureFormat::RGBA8, pixels);
-            stbi_image_free(pixels);
-            if (m_texture != INVALID_TEXTURE) {
-                g_renderBackend->SetTextureFilter(m_texture,
-                    TextureFilter::Nearest, TextureFilter::Nearest);
-                g_renderBackend->SetTextureWrap(m_texture,
-                    TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
-            }
+        if (!LoadTexture()) {
+            g_renderBackend->DestroyShader(m_shader);
+            m_shader = INVALID_SHADER;
+            return false;
         }
 
         // The static quad-pattern index buffer shared by both vertex sets.
@@ -110,6 +112,8 @@ namespace Render {
     void XpOrbRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
                                const glm::vec3& cameraPos, const Frustum& frustum,
                                float partialTick) {
+        // Resource pack reload: the sheet is read again.
+        if (m_initialized && g_renderBackend && Resources::CacheStale(m_packGeneration)) LoadTexture();
         PROFILE_ZONE_N("XpOrbRender");
         if (!m_initialized || !g_renderBackend) return;
         if (!Client::g_xpOrbManager) return;

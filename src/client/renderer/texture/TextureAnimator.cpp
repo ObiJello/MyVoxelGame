@@ -17,6 +17,10 @@ namespace Render {
 
     void TextureAnimator::Initialize(TextureHandle atlasTexture) {
         m_atlasTexture = atlasTexture;
+        // A rebuilt atlas (resource pack reload) registers its animations
+        // afresh; the previous atlas's entries would upload into freed
+        // memory at old offsets.
+        animatedTextures.clear();
         Log::Info("TextureAnimator initialized with atlas texture handle: %u", atlasTexture);
     }
 

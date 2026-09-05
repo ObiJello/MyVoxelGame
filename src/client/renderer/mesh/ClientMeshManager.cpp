@@ -553,13 +553,26 @@ namespace Render {
     }
     
     // Float-sized slots per terrain vertex in the MeshBuildResult blobs.
-    // 32-byte TerrainVertex = 8 slots (pos3f + uv2f + rgba8 + tile unorm16x4);
-    // the tail rides the float vector as opaque bytes (see CopyVertexLayer).
+    // 16-byte TerrainVertex = 4 slots of packed uint16/uint8 data that ride
+    // the float vector as opaque bytes (see CopyVertexLayer).
     // This was a literal 6 from the 24-byte era — the greedy-meshing stride
     // bump missed it, and every non-empty mesh failed validation, which
     // NoteMeshBuildFailed then re-dirtied: 10k rebuilds/s, zero uploads.
     static constexpr size_t kTerrainVertexFloatSlots =
         sizeof(Render::TerrainVertex) / sizeof(float);
+
+    // Face-direction group boundaries from the build, made absolute against
+    // the section's slab index offset. Accepted only when they partition the
+    // whole range exactly; anything else draws the full range as before.
+    static void SetFacingRanges(GPUSectionData::CachedDrawCmd& cmd, const uint32_t ranges[kFacingCount + 1]) {
+        cmd.hasFacing = false;
+        if (ranges[kFacingCount] != static_cast<uint32_t>(cmd.indexCount) || ranges[0] != 0) return;
+        for (int i = 0; i < kFacingCount; ++i) {
+            if (ranges[i + 1] < ranges[i]) return;
+        }
+        for (int i = 0; i <= kFacingCount; ++i) cmd.facingRanges[i] = cmd.indexOffset + ranges[i];
+        cmd.hasFacing = true;
+    }
 
     bool ClientMeshManager::ValidateMeshBuildResult(const Network::MeshBuildResult& result) {
         // Validate section index
@@ -822,13 +835,16 @@ namespace Render {
                 meshData.opaqueVertices.data(),
                 meshData.opaqueVertexCount,
                 meshData.opaqueIndices.data(),
-                meshData.opaqueIndexCount);
+                meshData.opaqueIndexCount,
+                meshData.opaqueFaceMap.data(),
+                meshData.opaqueFaceMap.size());
             gpuData.opaqueVertexCount = static_cast<uint32_t>(meshData.opaqueVertexCount);
             gpuData.opaqueIndexCount = static_cast<uint32_t>(meshData.opaqueIndexCount);
             // Cache draw command to avoid per-frame hash lookup in RenderLayerPass
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_opaqueMegaBuffer.GetDrawCommand(megaKey, cmd)) {
                 gpuData.opaqueDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
+                SetFacingRanges(gpuData.opaqueDrawCmd, meshData.opaqueFacingRanges);
             }
         }
         if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
@@ -836,12 +852,15 @@ namespace Render {
                 meshData.cutoutVertices.data(),
                 meshData.cutoutVertexCount,
                 meshData.cutoutIndices.data(),
-                meshData.cutoutIndexCount);
+                meshData.cutoutIndexCount,
+                meshData.cutoutFaceMap.data(),
+                meshData.cutoutFaceMap.size());
             gpuData.cutoutVertexCount = static_cast<uint32_t>(meshData.cutoutVertexCount);
             gpuData.cutoutIndexCount = static_cast<uint32_t>(meshData.cutoutIndexCount);
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_cutoutMegaBuffer.GetDrawCommand(megaKey, cmd)) {
                 gpuData.cutoutDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
+                SetFacingRanges(gpuData.cutoutDrawCmd, meshData.cutoutFacingRanges);
             }
         }
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
@@ -867,8 +886,8 @@ namespace Render {
             {
                 // Sorted on the worker (ClientWorkerPool::ConvertSectionMeshToResult);
                 // keep the centroids for later re-sorts and record the view.
-                static_assert(sizeof(Render::TerrainVertex) == 32,
-                              "translucent centroid extraction assumes the 32-byte terrain vertex");
+                static_assert(sizeof(Render::TerrainVertex) == 16,
+                              "translucent centroids are decoded on the worker from the 16-byte terrain vertex");
                 const size_t quads = meshData.translucentCentroids.size() / 3;
                 gpuData.translucentCentroids.resize(quads);
                 if (quads > 0) {

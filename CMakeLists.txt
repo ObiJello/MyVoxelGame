@@ -598,6 +598,9 @@ set(GAME_SOURCES
 
             # Client input
             src/client/input/Input.cpp
+            # Dev harness: pose recording/replay (tools for reproducible profiling runs)
+            src/client/dev/SessionReplay.cpp
+            src/client/dev/SessionReplay.hpp
             src/client/input/KeyMapping.cpp
             src/client/input/Input.hpp
             src/client/input/PlayerController.cpp
@@ -639,6 +642,8 @@ set(GAME_SOURCES
             src/client/renderer/entity/model/ModelPart.hpp
             src/client/renderer/entity/model/EntityModels.cpp
             src/client/renderer/entity/model/GeneratedEntityModels.cpp
+            src/client/renderer/entity/GeneratedBabyTextures.cpp
+            src/client/renderer/entity/GeneratedBabyTextures.hpp
             src/client/renderer/entity/model/GeneratedAnimations.cpp
             src/client/renderer/entity/model/KeyframeAnimation.cpp
             src/client/renderer/entity/model/GeneratedSetupAnim.cpp
@@ -679,6 +684,7 @@ set(GAME_SOURCES
             src/client/renderer/mesh/MeshManager.cpp
             src/client/renderer/mesh/MeshManager.hpp
             src/client/renderer/mesh/Mesher.cpp
+            src/client/renderer/mesh/MeshCensus.cpp
             src/client/renderer/mesh/Mesher.hpp
             src/client/renderer/mesh/SectionMesh.hpp
             src/client/renderer/mesh/MeshJobData.hpp
@@ -753,6 +759,17 @@ set(GAME_SOURCES
             src/client/renderer/gui/screens/TitleScreen.cpp
             src/client/renderer/gui/screens/OptionsScreens.hpp
             src/client/renderer/gui/screens/OptionsScreens.cpp
+            src/client/renderer/gui/screens/SkyboxSelectScreen.hpp
+            src/client/renderer/gui/screens/SkyboxSelectScreen.cpp
+            src/client/renderer/gui/screens/PackSelectionScreen.hpp
+            src/client/renderer/gui/screens/PackSelectionScreen.cpp
+            src/client/resource/ResourcePacks.hpp
+            src/client/resource/ResourcePacks.cpp
+            src/common/core/AssetLocator.hpp
+            src/common/core/AssetLocator.cpp
+            # minizip (vendored with zlib): .zip resource packs
+            ext/zlib/contrib/minizip/unzip.c
+            ext/zlib/contrib/minizip/ioapi.c
             src/client/renderer/gui/screens/PauseScreen.hpp
             src/client/renderer/gui/screens/PauseScreen.cpp
             src/client/renderer/gui/screens/DeathScreen.hpp
@@ -1085,6 +1102,10 @@ set(GAME_SOURCES
             src/common/entity/RangedAttackMob.hpp
             src/common/entity/mobs/Slime.cpp
             src/common/entity/mobs/Slime.hpp
+            src/common/entity/mobs/SulfurCube.cpp
+            src/common/entity/mobs/SulfurCube.hpp
+            src/common/entity/mobs/GeneratedSulfurCubeArchetypes.cpp
+            src/common/entity/mobs/GeneratedSulfurCubeArchetypes.hpp
             src/common/entity/mobs/Fish.cpp
             src/common/entity/mobs/Fish.hpp
             src/common/entity/projectile/Arrow.cpp
@@ -1187,6 +1208,12 @@ set(GAME_SOURCES
             src/server/commands/ShapeCommand.hpp
             src/server/commands/TimeCommand.hpp
             src/server/commands/TimeCommand.cpp
+            src/server/commands/DimensionCommand.hpp
+            src/server/commands/DimensionCommand.cpp
+            src/server/commands/LocateCommand.hpp
+            src/server/commands/LocateCommand.cpp
+            src/server/level/LocateFinder.hpp
+            src/server/level/LocateFinder.cpp
             src/server/commands/GameRuleCommand.hpp
             src/server/commands/GameRuleCommand.cpp
             src/server/commands/SeedCommand.cpp
@@ -1209,6 +1236,8 @@ set(GAME_SOURCES
             src/server/player/ServerPlayer.hpp
             src/server/commands/SummonCommand.cpp
             src/server/commands/SummonCommand.hpp
+            src/server/commands/SpawnAllCommand.cpp
+            src/server/commands/SpawnAllCommand.hpp
             src/server/entity/MobManager.cpp
             src/server/entity/MobManager.hpp
             src/server/entity/FallingBlockStore.cpp
@@ -1444,6 +1473,7 @@ set(GAME_SOURCES
             src/client/renderer/portal/ImmersivePortalRenderer.hpp
             src/client/portal/ImmersivePortalTraveler.cpp
             src/client/portal/ImmersivePortalCollision.cpp
+            src/client/renderer/debug/FlickerDiag.cpp
             src/client/portal/ImmersivePortalTraveler.hpp
             src/common/world/portal/ImmersiveFrame.cpp
             src/common/world/portal/ImmersiveFrame.hpp
@@ -1500,6 +1530,12 @@ endif()
 
 # 7) PCH
 target_precompile_headers(MyVoxelGame PRIVATE src/pch.hpp)
+# The vendored minizip is C: keep the C++ PCH off it (otherwise CMake builds
+# a C flavour of pch.hpp and fails on <cstdint>).
+set_source_files_properties(
+        ext/zlib/contrib/minizip/unzip.c
+        ext/zlib/contrib/minizip/ioapi.c
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 # Hide console window on Windows (distribution builds only, requires -DJALIN=ON)
 if(WIN32 AND JALIN)
@@ -1528,6 +1564,7 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/ext/glm
         ${PROJECT_SOURCE_DIR}/ext/stb_image
         ${PROJECT_SOURCE_DIR}/ext/zlib
+        ${PROJECT_SOURCE_DIR}/ext/zlib/contrib/minizip
         ${PROJECT_SOURCE_DIR}/ext/OpenAL/include
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends
@@ -1976,6 +2013,33 @@ if(APPLE)
         COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:MyVoxelGame>"
         COMMENT "Re-signing app bundle for Tracy (must be last post-build step)"
     )
+
+    # ── Game-Mode-eligible copy in ~/Applications (Tracy and plain Release) ──
+    # macOS Game Mode never engages for a bundle run from this build tree:
+    # gamepolicyd identifies a game by reading its Info.plist, has no Full
+    # Disk Access, and ~/Desktop is TCC-gated — so the daemon files the app
+    # as "not a game" (its log shows no `Found game` line). A copy under
+    # ~/Applications is identified fine. Kept fresh on every build so the
+    # "Play … (Game Mode)" run configurations and tools/play.sh always launch
+    # what was just built. Not for JALIN (that build is the launcher's
+    # release and is uploaded instead); see the Game Mode notes in CLAUDE.md.
+    if(TRACY_ENABLE)
+        set(PLAY_COPY_SUFFIX "tracy")
+    elseif(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT JALIN)
+        set(PLAY_COPY_SUFFIX "release")
+    else()
+        set(PLAY_COPY_SUFFIX "")
+    endif()
+    if(PLAY_COPY_SUFFIX)
+        set(PLAY_COPY_DEST "$ENV{HOME}/Applications/MyVoxelGame-${PLAY_COPY_SUFFIX}.app")
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$ENV{HOME}/Applications"
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "${PLAY_COPY_DEST}"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:MyVoxelGame>" "${PLAY_COPY_DEST}"
+            COMMAND /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "${PLAY_COPY_DEST}"
+            COMMENT "Refreshing Game-Mode-eligible copy at ${PLAY_COPY_DEST}"
+        )
+    endif()
 endif()
 
 # ── Optional: Install targets ──────────────────────────────────────────────

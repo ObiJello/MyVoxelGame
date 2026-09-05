@@ -351,20 +351,50 @@ namespace Render {
 
     // ── CowModel ───────────────────────────────────────────────────────────
 
-    CowModel::CowModel() {
+    CowModel::CowModel(Kind kind) {
         m_texWidth = 64.0f;
         m_texHeight = 64.0f;
 
         // MC CowModel.createBaseCowModel builds its own parts rather than
         // reusing createBodyMesh — the cow is wider than the generic quadruped.
+        // WarmCowModel and ColdCowModel replace the head (and the cold body)
+        // with addOrReplaceChild; the legs are shared.
         m_head = m_root.AddChild("head", PartPose::Offset(0.0f, 4.0f, -8.0f));
         AddBox(m_head, 0, 0, -4.0f, -4.0f, -6.0f, 8.0f, 8.0f, 6.0f);
-        AddBox(m_head, 1, 33, -3.0f, 1.0f, -7.0f, 6.0f, 3.0f, 1.0f);       // muzzle
-        AddBox(m_head, 22, 0, -5.0f, -5.0f, -5.0f, 1.0f, 3.0f, 1.0f);      // right horn
-        AddBox(m_head, 22, 0, 4.0f, -5.0f, -5.0f, 1.0f, 3.0f, 1.0f);       // left horn
+        switch (kind) {
+            case Kind::Normal:
+                AddBox(m_head, 1, 33, -3.0f, 1.0f, -7.0f, 6.0f, 3.0f, 1.0f);       // muzzle
+                AddBox(m_head, 22, 0, -5.0f, -5.0f, -5.0f, 1.0f, 3.0f, 1.0f);      // right horn
+                AddBox(m_head, 22, 0, 4.0f, -5.0f, -5.0f, 1.0f, 3.0f, 1.0f);       // left horn
+                break;
+            case Kind::Warm:
+                // WarmCowModel.createBodyLayer: the wide, two-segment horns.
+                AddBox(m_head, 1, 33, -3.0f, 1.0f, -7.0f, 6.0f, 3.0f, 1.0f);
+                AddBox(m_head, 27, 0, -8.0f, -3.0f, -5.0f, 4.0f, 2.0f, 2.0f);
+                AddBox(m_head, 39, 0, -8.0f, -5.0f, -5.0f, 2.0f, 2.0f, 2.0f);
+                AddBox(m_head, 27, 0, 4.0f, -3.0f, -5.0f, 4.0f, 2.0f, 2.0f, 0.0f, true);
+                AddBox(m_head, 39, 0, 6.0f, -5.0f, -5.0f, 2.0f, 2.0f, 2.0f, 0.0f, true);
+                break;
+            case Kind::Cold: {
+                // ColdCowModel.createBodyLayer: muzzle from a different sheet
+                // spot, horns as posed children (rotated 90° about X).
+                AddBox(m_head, 9, 33, -3.0f, 1.0f, -7.0f, 6.0f, 3.0f, 1.0f);
+                ModelPart* rightHorn = m_head->AddChild("right_horn",
+                    PartPose::OffsetAndRotation(-4.5f, -2.5f, -3.5f, 1.5708f, 0.0f, 0.0f));
+                AddBox(rightHorn, 0, 40, -1.5f, -4.5f, -0.5f, 2.0f, 6.0f, 2.0f);
+                ModelPart* leftHorn = m_head->AddChild("left_horn",
+                    PartPose::OffsetAndRotation(5.5f, -2.5f, -5.0f, 1.5708f, 0.0f, 0.0f));
+                AddBox(leftHorn, 0, 32, -1.5f, -3.0f, -0.5f, 2.0f, 6.0f, 2.0f);
+                break;
+            }
+        }
 
         m_body = m_root.AddChild("body",
             PartPose::OffsetAndRotation(0.0f, 5.0f, 2.0f, kPi / 2.0f, 0.0f, 0.0f));
+        if (kind == Kind::Cold) {
+            // The fluffy coat: the body again, inflated by 0.5, from (20,32).
+            AddBox(m_body, 20, 32, -6.0f, -10.0f, -7.0f, 12.0f, 18.0f, 10.0f, 0.5f);
+        }
         AddBox(m_body, 18, 4, -6.0f, -10.0f, -7.0f, 12.0f, 18.0f, 10.0f);
         AddBox(m_body, 52, 0, -2.0f, 2.0f, -8.0f, 4.0f, 6.0f, 1.0f);       // udder
 
@@ -393,13 +423,18 @@ namespace Render {
 
     // ── PigModel ───────────────────────────────────────────────────────────
 
-    PigModel::PigModel() {
+    PigModel::PigModel(bool cold) {
         m_texWidth = 64.0f;
         m_texHeight = 64.0f;
 
         // Legs and body from the generic quadruped at legSize 6, then the head
         // is replaced to add the snout.
         BuildBodyMesh(6, true, false, 0.0f);
+        if (cold) {
+            // ColdPigModel.createBodyLayer: the body once more, inflated by
+            // 0.5, from (28,32) — the fur.
+            AddBox(m_body, 28, 32, -5.0f, -10.0f, -7.0f, 10.0f, 16.0f, 8.0f, 0.5f);
+        }
 
         m_head->pose = PartPose::Offset(0.0f, 12.0f, -6.0f);
         m_head->cubes.clear();
@@ -581,12 +616,16 @@ namespace Render {
 
     // ── ChickenModel ───────────────────────────────────────────────────────
 
-    ChickenModel::ChickenModel() {
+    ChickenModel::ChickenModel(bool cold) {
         m_texWidth = 64.0f;
         m_texHeight = 32.0f;
 
         m_head = m_root.AddChild("head", PartPose::Offset(0.0f, 15.0f, -4.0f));
         AddBox(m_head, 0, 0, -2.0f, -6.0f, -2.0f, 4.0f, 6.0f, 3.0f);
+        if (cold) {
+            // ColdChickenModel.createBodyLayer: the head crest.
+            AddBox(m_head, 44, 0, -3.0f, -7.0f, -2.015f, 6.0f, 3.0f, 4.0f);
+        }
 
         ModelPart* beak = m_head->AddChild("beak", PartPose::Zero());
         AddBox(beak, 14, 0, -2.0f, -4.0f, -4.0f, 4.0f, 2.0f, 2.0f);
@@ -597,6 +636,10 @@ namespace Render {
         ModelPart* body = m_root.AddChild("body",
             PartPose::OffsetAndRotation(0.0f, 16.0f, 0.0f, kPi / 2.0f, 0.0f, 0.0f));
         AddBox(body, 0, 9, -3.0f, -4.0f, -3.0f, 6.0f, 8.0f, 6.0f);
+        if (cold) {
+            // ColdChickenModel: the tail, a zero-thickness plane at (38,9).
+            AddBox(body, 38, 9, 0.0f, 3.0f, -1.0f, 0.0f, 3.0f, 5.0f);
+        }
 
         m_rightLeg = m_root.AddChild("right_leg", PartPose::Offset(-2.0f, 19.0f, 1.0f));
         AddBox(m_rightLeg, 26, 0, -1.0f, 0.0f, -3.0f, 3.0f, 5.0f, 3.0f);
@@ -653,6 +696,7 @@ namespace Render {
 
         m_texWidth  = gm->texWidth;
         m_texHeight = gm->texHeight;
+        m_cull      = gm->cull;
 
         // Parts are emitted parent-before-child, so one pass suffices and a
         // child's parent pointer is always already built.
@@ -805,7 +849,8 @@ namespace Render {
 
     namespace {
         // A GenClip / GenModel guard against the render state.
-        bool GuardHolds(AnimGuard g, bool negate, const EntityRenderState& s) {
+        bool GuardHolds(AnimGuard g, bool negate, const EntityRenderState& s,
+                        int slot = 0) {
             bool v = true;
             switch (g) {
                 case AnimGuard::None:          return true;
@@ -814,6 +859,11 @@ namespace Render {
                 case AnimGuard::CanMove:       v = s.canMove; break;
                 case AnimGuard::IsResting:     v = s.isResting; break;
                 case AnimGuard::IsHoldingItem: v = s.isHoldingItem; break;
+                // `state.<x>AnimationState.isStarted()` — the slot's running
+                // bit (BabyAxolotlModel's walk clip).
+                case AnimGuard::AnimStarted:
+                    v = slot >= 0 && slot < Game::kMobAnimCount && s.AnimRunning(slot);
+                    break;
             }
             return negate ? !v : v;
         }
@@ -852,7 +902,7 @@ namespace Render {
         if (m_setup.Valid()) m_setup.Run(state);
 
         for (const Clip& c : m_clips) {
-            if (!GuardHolds(c.def->guard, c.def->guardNegate, state)) continue;
+            if (!GuardHolds(c.def->guard, c.def->guardNegate, state, c.def->guardSlot)) continue;
 
             if (c.def->isWalk) {
                 // NautilusModel is the only model that does not pass the walk

@@ -57,7 +57,9 @@ namespace Game {
 
         int  GetSize() const { return m_size; }
         // MC setSize: clamp 1..127, rewrite the size-derived attribute bases.
-        void SetSize(int size, bool resetHealth);
+        // Virtual since 26.3's AbstractCubeMob split: the sulfur cube's
+        // health is 4·size (setCubeMobHealth) and size 1 makes it a baby.
+        virtual void SetSize(int size, bool resetHealth);
 
         // MC Slime.setSize (Slime.java:100): xpReward = the size — a big
         // slime pays 4, and each split child pays its own size again when it
@@ -115,11 +117,15 @@ namespace Game {
         virtual std::unique_ptr<Slime> MakeSplitChild() {
             return std::make_unique<Slime>(GetType(), m_level);
         }
+        // MC 26.3 AbstractCubeMob.getSplitCount: 2 + rand(3) for the slime
+        // family, exactly 2 for the sulfur cube (0 while its fuse burns).
+        virtual int GetSplitCount();
 
-    private:
         void DealContactDamage();
 
         int   m_size = 1;
+
+    private:
         float m_squish = 0.0f, m_oSquish = 0.0f, m_targetSquish = 0.0f;
         bool  m_wasOnGround = false;
     };

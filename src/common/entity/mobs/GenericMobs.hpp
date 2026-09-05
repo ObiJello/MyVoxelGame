@@ -62,6 +62,20 @@ namespace Game {
         void RegisterGoals() override;
     };
 
+    // MC AgeableMob with PathfinderMob's default goals — the villager: an
+    // AgeableMob in MC (AbstractVillager), which is what gives it a baby
+    // (age, the 0.49 x 0.98 baby box, the baby villager mesh) without any of
+    // Animal's breeding/panic/tempt machinery, none of which a villager has.
+    class GenericAgeableMob : public AgeableMob {
+    public:
+        GenericAgeableMob(EntityTypeId type, EntityLevel* level);
+
+        bool IsFlyingAnimal() const override;
+
+    protected:
+        void RegisterGoals() override;
+    };
+
     // MC Monster's shape: melee the player, retaliate, wander otherwise.
     // Deliberately NOT ranged — nothing here can fire a projectile yet, so a
     // skeleton-alike that stood at range would simply never attack.

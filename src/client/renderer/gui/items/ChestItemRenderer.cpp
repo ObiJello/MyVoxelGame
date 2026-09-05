@@ -35,6 +35,7 @@
 // upright in screen space). Our renderer does the Y-flip in the projection step
 // (Project negates Y) so the iso matrix uses scale(0.625, 0.625, 0.625) directly.
 
+#include "client/resource/ResourcePacks.hpp"
 #include "ChestItemRenderer.hpp"
 #include "ItemLighting.hpp"
 #include "../GuiGraphics.hpp"
@@ -66,6 +67,14 @@ namespace Render {
 
         TextureHandle LoadChestTexture(const std::string& variant) {
             auto& cache = ChestTextureCache();
+            {
+                // A resource pack change replaces every texture here.
+                static int s_packGeneration = -1;
+                if (Resources::CacheStale(s_packGeneration)) {
+                    if (g_renderBackend) for (auto& [key, tex] : cache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+                    cache.clear();
+                }
+            }
             auto it = cache.find(variant);
             if (it != cache.end()) return it->second;
             if (!g_renderBackend) return INVALID_TEXTURE;

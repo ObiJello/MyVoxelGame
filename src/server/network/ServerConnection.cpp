@@ -1055,6 +1055,13 @@ namespace Server {
                 }
                 break;
 
+            case PacketId::PickItemC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializePickItemC2S(payload);
+                    return std::make_unique<Network::Packets::PickItemC2SPacketImpl>(data);
+                }
+                break;
+
             case PacketId::InventoryClickC2S:
                 if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
                     auto data = Network::Serialization::DeserializeInventoryClickC2S(payload);

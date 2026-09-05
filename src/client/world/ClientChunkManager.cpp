@@ -65,6 +65,7 @@ namespace Client {
         
         // Clear any existing data
         m_chunks.clear();
+        m_loadedChunkCount = 0;
         
         // Reset pending diffs
         if (m_pendingDiffs) {
@@ -101,6 +102,7 @@ namespace Client {
 
         // Clear all chunks
         m_chunks.clear();
+        m_loadedChunkCount = 0;
         
         // Clear pending diffs
         if (m_pendingDiffs) {
@@ -185,6 +187,7 @@ namespace Client {
         }
         if (it != m_chunks.end()) {
             PROFILE_ZONE_N("Unload.Erase");
+            if (it->second && it->second->state == ChunkState::LOADED && m_loadedChunkCount > 0) --m_loadedChunkCount;
             m_chunks.erase(it);
             Log::Debug("Unloaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
         }
@@ -204,7 +207,7 @@ namespace Client {
             // while an earlier compile is still in flight must not lose its
             // priority when the version bump re-dirties the section.
             if (fromPlayer) sectionInfo.dirtyFromPlayer = true;
-            it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
+            it->second->AddDirty(sectionY);
             m_chunksWithDirtySections.insert(chunkPos);
             m_schedulerSkip = 0;
             // Mass destruction: after enough section changes, force one
@@ -278,7 +281,7 @@ namespace Client {
                 auto& sectionInfo = it->second->sectionInfos[sectionY];
                 sectionInfo.version++;
                 sectionInfo.dirty = true;
-                it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
+                it->second->AddDirty(sectionY);
             }
             m_chunksWithDirtySections.insert(chunkPos);
             m_schedulerSkip = 0;
@@ -291,6 +294,7 @@ namespace Client {
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end()) {
             size_t removed = it->second->dirtySections.erase(sectionY);
+            if (sectionY >= 0 && sectionY < 32) it->second->dirtyMask &= ~(1u << sectionY);
             if (removed > 0) {
                 Log::Debug("Cleared dirty flag for chunk (%d, %d) section %d", 
                           chunkPos.x, chunkPos.z, sectionY);
@@ -333,7 +337,7 @@ namespace Client {
                         if (sourceChunk && sourceChunk->sectionInfos[sectionY].isAllAir) continue;
                         si.version++;
                         si.dirty = true;
-                        parked.dirtySections.insert(sectionY);
+                        parked.AddDirty(sectionY);
                     }
                 }
                 return;
@@ -351,7 +355,7 @@ namespace Client {
 
                 sectionInfo.version++;
                 sectionInfo.dirty = true;
-                neighborIt->second->dirtySections.insert(sectionY);
+                neighborIt->second->AddDirty(sectionY);
                 dirtyCount++;
             }
             if (dirtyCount > 0) {
@@ -453,13 +457,7 @@ namespace Client {
     // ========================================================================
     
     size_t ClientChunkManager::GetLoadedChunkCount() const {
-        size_t count = 0;
-        for (const auto& [pos, chunk] : m_chunks) {
-            if (chunk && chunk->state == ChunkState::LOADED) {
-                count++;
-            }
-        }
-        return count;
+        return m_loadedChunkCount;
     }
     
     void ClientChunkManager::GetSectionStats(size_t& totalSections, size_t& readySections, 
@@ -505,11 +503,33 @@ namespace Client {
         
         // Notify RenderGrid when chunk becomes loaded
         if (newState == ChunkState::LOADED && oldState != ChunkState::LOADED) {
+            ++m_loadedChunkCount;
             NotifyRenderGridChunkLoaded(chunk->position, chunk);
+            chunk->neighborsAllLoaded = -1;
+            InvalidateNeighborLoadCache(chunk->position);
         }
         // Notify RenderGrid when chunk becomes unloaded
         else if (oldState == ChunkState::LOADED && newState != ChunkState::LOADED) {
+            if (m_loadedChunkCount > 0) --m_loadedChunkCount;
             NotifyRenderGridChunkUnloaded(chunk->position);
+            chunk->neighborsAllLoaded = -1;
+            InvalidateNeighborLoadCache(chunk->position);
+        }
+    }
+
+    bool ClientChunkManager::NeighborsAllLoadedCached(ClientChunk& chunk) {
+        if (chunk.neighborsAllLoaded < 0) {
+            chunk.neighborsAllLoaded = HasAllNeighborChunks(chunk.position) ? 1 : 0;
+        }
+        return chunk.neighborsAllLoaded == 1;
+    }
+
+    void ClientChunkManager::InvalidateNeighborLoadCache(Game::Math::ChunkPos pos) {
+        static constexpr int kDX[8] = { -1, 0, 1, 0, -1, -1, 1, 1 };
+        static constexpr int kDZ[8] = { 0, -1, 0, 1, -1, 1, -1, 1 };
+        for (int i = 0; i < 8; ++i) {
+            auto it = m_chunks.find(Game::Math::ChunkPos{pos.x + kDX[i], pos.z + kDZ[i]});
+            if (it != m_chunks.end() && it->second) it->second->neighborsAllLoaded = -1;
         }
     }
 
@@ -784,7 +804,7 @@ namespace Client {
             sectionInfo.state = SectionState::LOADED;
             if (!sectionInfo.isAllAir) {
                 sectionInfo.dirty = true;
-                chunk->dirtySections.insert(y);
+                chunk->AddDirty(y);
                 m_chunksWithDirtySections.insert(chunkPos);
                 m_schedulerSkip = 0;
             } else {
@@ -938,7 +958,7 @@ namespace Client {
             if (update.generation >= chunk->generation) {
                 // TODO: Apply light update
                 int sectionY = (update.pos.y + 64) >> 4;
-                chunk->dirtySections.insert(sectionY);
+                chunk->AddDirty(sectionY);
                 m_chunksWithDirtySections.insert(chunkPos);
                 m_schedulerSkip = 0;
             }
@@ -1048,19 +1068,16 @@ namespace Client {
         // (which re-dirty neighbours), so skipping is exact.
         {
             size_t eligible = 0;
-            Game::Math::ChunkPos nbPos{INT32_MIN, INT32_MIN}; bool nbAll = false;
             for (const auto& chunkPos : m_chunksWithDirtySections) {
                 auto chunkIt = m_chunks.find(chunkPos);
                 if (chunkIt == m_chunks.end() || !chunkIt->second->chunkData) continue;
                 ClientChunk* chunk = chunkIt->second.get();
-                for (int sectionY : chunk->dirtySections) {
-                    if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
+                for (uint32_t bits = chunk->dirtyMask; bits; bits &= bits - 1) {
+                    const int sectionY = __builtin_ctz(bits);
+                    if (sectionY >= Game::Math::SECTIONS_PER_CHUNK) break;
                     const auto& si = chunk->sectionInfos[sectionY];
                     if (!si.dirty || si.meshingVersion == si.version) continue;
-                    if (!si.builtOnce) {
-                        if (chunkPos != nbPos) { nbPos = chunkPos; nbAll = HasAllNeighborChunks(chunkPos); }
-                        if (!nbAll) continue;
-                    }
+                    if (!si.builtOnce && !NeighborsAllLoadedCached(*chunk)) continue;
                     ++eligible;
                     break;
                 }
@@ -1110,68 +1127,32 @@ namespace Client {
         static constexpr bool kScheduleFromVisible = true;
 
         m_meshCandidates.clear();
-        bool usedVisibleList = false;
 
-        if (kScheduleFromVisible && m_renderer) {
-            const auto& visible = m_renderer->GetMainViewSections();
-            Game::Math::ChunkPos lastPos{INT32_MIN, INT32_MIN};
-            ClientChunk* lastChunk = nullptr;
-            for (const auto& vs : visible) {
-                // 24 sections share a chunk; a one-entry memo dodges most of
-                // the per-section hash lookups.
-                ClientChunk* chunk;
-                if (vs.chunkPos == lastPos) {
-                    chunk = lastChunk;
-                } else {
-                    auto vIt = m_chunks.find(vs.chunkPos);
-                    chunk = (vIt == m_chunks.end()) ? nullptr : vIt->second.get();
-                    lastPos = vs.chunkPos; lastChunk = chunk;
-                }
-                if (!chunk) continue;
-                if (!chunk || !chunk->chunkData) continue;
-                if (vs.sectionY < 0 || vs.sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
-
-                auto& si = chunk->sectionInfos[vs.sectionY];
-                if (!si.dirty) continue;
-                if (si.meshingVersion == si.version) continue;  // in flight
-
-                // MC compileSections' admission test:
-                //   isDirty() && (mesh != UNCOMPILED || hasAllNeighbors())
-                // A section that has never been compiled waits until all eight
-                // surrounding columns have arrived, so it is meshed once against
-                // real neighbours instead of once against air and again after.
-                // A section already compiled is always rescheduled.
-                if (!si.builtOnce && !HasAllNeighborChunks(vs.chunkPos)) continue;
-
-                const float dx = vs.chunkPos.x * 16.0f + 8.0f - playerPosition.x;
-                const float dz = vs.chunkPos.z * 16.0f + 8.0f - playerPosition.z;
-                const float dy = (-64.0f + vs.sectionY * 16.0f + 8.0f) - playerPosition.y;
-                m_meshCandidates.push_back(
-                    {vs.chunkPos, vs.sectionY, dx * dx + dz * dz + dy * dy * 0.01f, chunk});
-            }
-
-            usedVisibleList = true;
-        }
-
-        // The dirty walk. It is the whole candidate source when scheduling from
-        // the visible list is off, and in modes 1/2 it additionally runs
-        // alongside it to pick up the player's OWN edits.
+        // ONE walk, over the dirty set. MC compileSections walks its
+        // visibleSections and asks each "are you dirty?"; this used to do the
+        // same — ~4,000 sections at a 32-chunk view, nearly all answering no,
+        // 0.9 ms per run and the largest CPU item on the main thread after
+        // the GPU waits (Tracy, 2026-09-04). The question is symmetric:
+        // "needs a mesh" and "dirty" are the same flag, so walking the dirty
+        // sections (tens, usually) and asking the renderer "are you in view?"
+        // (one hash lookup against the main view's list, or a same-level
+        // portal view's) collects the identical candidate set for a cost
+        // proportional to what changed, not to what is on screen. The sort
+        // below gives the same nearest-first priority either way.
         //
-        // Sync compiles must not be gated on visibility: a block placed behind
-        // the player still has to compile immediately, which is the entire point
-        // of MC's rebuildSectionSync. Anything already collected above is
-        // filtered out by the dirty/meshingVersion checks in the submit loop, so
-        // the overlap costs nothing but a skipped iteration.
-        // ALWAYS also walk the dirty set. The visible list alone is a
-        // deadlock for mass destruction: a section the BFS culled with its
-        // pre-explosion mask is not in the list, so it never re-meshes, so
-        // its mask never updates, so it stays culled — until a camera move
-        // forces a full rebuild, which is exactly the "have to look around
-        // for it to render" symptom. Dirty sections are bounded and drain as
-        // they build; the sort below still prioritises by distance.
-        const bool needDirtyWalk = true;
+        // The dirty walk was always here as well, for what the visible list
+        // cannot see: a section culled with a stale pre-explosion mask is not
+        // in the list, so it never re-meshes, so its mask never updates, so
+        // it stays culled — the "have to look around for it to render"
+        // symptom. Dirty sections out of view are admitted only near the
+        // player (3 chunks) or when the player's own edit dirtied them: a
+        // block placed behind the player still compiles immediately (MC's
+        // rebuildSectionSync), while the rest of the loaded world waits to
+        // be looked at, MC-style.
+        const bool haveView = kScheduleFromVisible && m_renderer;
+        { PROFILE_ZONE_N("MeshSchedule.DirtyWalk");
         for (auto dirtyIt = m_chunksWithDirtySections.begin();
-             needDirtyWalk && dirtyIt != m_chunksWithDirtySections.end(); ) {
+             dirtyIt != m_chunksWithDirtySections.end(); ) {
             const Game::Math::ChunkPos chunkPos = *dirtyIt;
             auto chunkIt = m_chunks.find(chunkPos);
             ClientChunk* chunk = (chunkIt != m_chunks.end()) ? chunkIt->second.get() : nullptr;
@@ -1192,26 +1173,50 @@ namespace Client {
             const float dz = chunkPos.z * 16.0f + 8.0f - playerPosition.z;
             const float xzDistSq = dx * dx + dz * dz;
 
-            for (int sectionY : chunk->dirtySections) {
-                if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
+            // MC's hasAllNeighbors is a property of the COLUMN, but the
+            // admission test below asks it per section. A freshly streamed
+            // chunk arrives with all 24 sections dirty and none built, and
+            // while its neighbours are still in flight every one of those
+            // sections asked the same eight-hash-lookup question every frame
+            // — 27% of the main thread's running time while flying, the
+            // largest CPU item there (Instruments time profile, 2026-09-04).
+            // Ask once per column per pass, and only if a section needs it.
+            int neighborsLoaded = -1;   // -1 not asked yet, 0 no, 1 yes
+
+            // The view test below is per section, but "no section of this
+            // column is in any view" is one column lookup, and while flying
+            // it is the answer for most dirty columns (everything streamed
+            // in behind the player). Ask it once here; the per-section test
+            // then runs only for columns some view actually reaches.
+            const bool farColumn = haveView && xzDistSq > 48.0f * 48.0f;
+            const bool columnInView = !farColumn ||
+                                      m_renderer->IsMainViewColumn(chunkPos) ||
+                                      m_renderer->IsPortalViewColumn(chunkPos);
+
+            for (uint32_t bits = chunk->dirtyMask; bits; bits &= bits - 1) {
+                const int sectionY = __builtin_ctz(bits);
+                if (sectionY >= Game::Math::SECTIONS_PER_CHUNK) break;
                 auto& si = chunk->sectionInfos[sectionY];
                 if (!si.dirty) continue;
                 if (si.meshingVersion == si.version) continue; // in flight
 
-                // When the visible list already supplied candidates, this pass
-                // exists only for the player's own edits — everything else is
-                // visibility-gated, MC-style.
+                // MC compileSections' admission test:
+                //   isDirty() && (mesh != UNCOMPILED || hasAllNeighbors())
+                // A section that has never been compiled waits until all eight
+                // surrounding columns have arrived, so it is meshed once against
+                // real neighbours instead of once against air and again after.
+                // A section already compiled is always rescheduled.
+                if (!si.builtOnce) {
+                    if (neighborsLoaded < 0) neighborsLoaded = NeighborsAllLoadedCached(*chunk) ? 1 : 0;
+                    if (neighborsLoaded == 0) continue;
+                }
 
-                // Same admission test as above (MC applies it in one loop).
-                if (!si.builtOnce && !HasAllNeighborChunks(chunkPos)) continue;
-                // MC compiles only visibleSections plus the player's own edits
-                // (LevelRenderer.compileSections). This walk used to admit EVERY
-                // dirty section — the whole loaded world meshed before it was
-                // looked at, and turning around no longer got priority. Keep
-                // the walk for what it was added for (a section culled with a
-                // stale pre-explosion mask), but only near the player, where
-                // that case actually happens: 3 chunks.
-                if (usedVisibleList && !si.dirtyFromPlayer && xzDistSq > 48.0f * 48.0f) continue;
+                if (farColumn && !si.dirtyFromPlayer &&
+                    (!columnInView ||
+                     (!m_renderer->IsMainViewSection(chunkPos, sectionY) &&
+                      !m_renderer->IsPortalViewSection(chunkPos, sectionY)))) {
+                    continue;
+                }
 
                 const float dy = (-64.0f + sectionY * 16.0f + 8.0f) - playerPosition.y;
                 // Squared distance with Y attenuated (0.1 factor squared = 0.01)
@@ -1227,6 +1232,9 @@ namespace Client {
                 // gets a SNAPSHOT first when the budget below binds.
                 m_meshCandidates.push_back({chunkPos, sectionY, distSq, chunk});
             }
+        }
+
+        PROFILE_PLOT("MeshSchedule/DirtyChunks", static_cast<int64_t>(m_chunksWithDirtySections.size()));
         }
 
         // Sort by squared distance (monotonic, same order as sqrt)
@@ -1267,6 +1275,7 @@ namespace Client {
         size_t sectionsSubmitted = 0;
         static constexpr float kNearbySyncDistSq = 768.0f;  // MC LevelRenderer:1143
 
+        { PROFILE_ZONE_N("MeshSchedule.Snapshots");
         for (const auto& candidate : m_meshCandidates) {
             auto* chunk = candidate.chunk;
             auto& sectionInfo = chunk->sectionInfos[candidate.sectionY];
@@ -1324,7 +1333,7 @@ namespace Client {
                 sectionInfo.state = SectionState::MESHING;
                 sectionInfo.dirty = false;
                 sectionInfo.dirtyFromPlayer = false;
-                chunk->dirtySections.erase(candidate.sectionY);
+                chunk->RemoveDirty(candidate.sectionY);
                 if (chunk->dirtySections.empty()) {
                     m_chunksWithDirtySections.erase(candidate.chunkPos);
                 }
@@ -1351,7 +1360,7 @@ namespace Client {
                 sectionInfo.state = SectionState::MESHING;
                 sectionInfo.dirty = false;
                 sectionInfo.dirtyFromPlayer = false;
-                chunk->dirtySections.erase(candidate.sectionY);
+                chunk->RemoveDirty(candidate.sectionY);
                 if (chunk->dirtySections.empty()) {
                     m_chunksWithDirtySections.erase(candidate.chunkPos);
                 }
@@ -1364,6 +1373,7 @@ namespace Client {
             }
         }
 
+        }
         m_schedulerSkip = m_meshCandidates.empty() ? 3u : 0u;
         if (sectionsSubmitted > 0) {
             // DistinctSections is the sharing ratio: with 27 sections per region
@@ -1535,12 +1545,12 @@ namespace Client {
         if (sectionInfo.version != sectionInfo.meshingVersion) {
             sectionInfo.meshingVersion = 0; // Allow rescheduling
             sectionInfo.dirty = true;
-            chunk->dirtySections.insert(sectionY);
+            chunk->AddDirty(sectionY);
             m_chunksWithDirtySections.insert(chunkPos);
             m_schedulerSkip = 0;
         } else {
             sectionInfo.dirty = false;
-            chunk->dirtySections.erase(sectionY);
+            chunk->RemoveDirty(sectionY);
         }
         
         // ── Convergence safety net ───────────────────────────────────────────
@@ -1629,7 +1639,7 @@ namespace Client {
         if (si.meshingVersion == builtVersion && !si.dirty) {
             si.dirty = true;
             si.meshingVersion = 0;
-            chunk->dirtySections.insert(sectionY);
+            chunk->AddDirty(sectionY);
             m_chunksWithDirtySections.insert(chunkPos);
             m_schedulerSkip = 0;
         }
@@ -1763,6 +1773,7 @@ namespace Client {
             for (const auto& [pos, chunk] : m_chunks) m_meshes->RemoveChunkGPUData(pos);
         }
         m_chunks.clear();
+        m_loadedChunkCount = 0;
         m_chunksWithDirtySections.clear();
         // Predictions reference positions in chunks that no longer exist —
         // drop them rather than letting a late ack roll back into a chunk

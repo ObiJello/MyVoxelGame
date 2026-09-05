@@ -95,6 +95,11 @@ namespace Render {
         // hook a few mobs override to resize the whole model. Only the creeper
         // uses it here (CreeperRenderer.scale: the fuse swell and its wobble).
         glm::vec3 modelScale{1.0f};
+        // The translate a renderer's scale() hook adds AFTER its scales, in
+        // the scaled model frame, blocks (MC poseStack.translate inside
+        // SulfurCubeRenderer.scale: vOffset − 1/16 up). Zero for everyone
+        // else. Applied by EntityMatrix between modelScale and the −1.501.
+        glm::vec3 modelOffset{0.0f};
 
         // MC HumanoidRenderState. Everything in this port is right-handed and
         // never uses an item, so the poses are the only humanoid state the
@@ -310,6 +315,14 @@ namespace Render {
         // '<slug>_baby' mesh instead of this.
         virtual bool BecomeBaby() { return false; }
 
+        // MC Model.renderType: does this model draw back-face CULLED? The
+        // EntityModel default is the no-cull cutout type — models are not
+        // closed and vanilla shows the far side of a skeleton's ribs — and a
+        // few classes opt into a culling one (bat, arrow, trident, the bee
+        // stinger; 26.3's baby turtle). entityTranslucent (allay, vex,
+        // breeze, piglins) does NOT cull. Generated rows carry the choice.
+        virtual bool CullBackFaces() const { return false; }
+
         // MC ArmedModel.translateToHand — the transform of the MAIN (right)
         // hand, in this model's own pixel space, valid only after SetupAnim.
         // Returns false for models that hold nothing, which is all of them
@@ -384,15 +397,21 @@ namespace Render {
         ModelPart* m_leftFrontLeg = nullptr;
     };
 
+    // MC CowVariant.ModelType: NORMAL (CowModel), WARM (WarmCowModel — wide
+    // horns), COLD (ColdCowModel — fluffy body, long horns). Same skeleton
+    // and animation, different cubes.
     class CowModel : public QuadrupedModel {
     public:
-        CowModel();
+        enum class Kind { Normal, Warm, Cold };
+        explicit CowModel(Kind kind = Kind::Normal);
         bool BecomeBaby() override;
     };
 
+    // MC PigVariant.ModelType: NORMAL, COLD (ColdPigModel — the body wears
+    // an inflated fur layer).
     class PigModel : public QuadrupedModel {
     public:
-        PigModel();
+        explicit PigModel(bool cold = false);
         bool BecomeBaby() override;
     };
 
@@ -467,8 +486,10 @@ namespace Render {
         // outward first, exactly like the hand-written SkeletonModel does;
         // IllagerModel and the zombie family use the plain chain.
         bool RightHandMatrix(glm::mat4& out) const override;
+        bool CullBackFaces() const override { return m_cull; }
 
     private:
+        bool m_cull = false;   // GenModel::cull
         // Resolved once at construction so SetupAnim is a walk over pointers
         // rather than a string compare per part per frame.
         struct Animated {
@@ -528,9 +549,11 @@ namespace Render {
         ModelPart* m_rightBlueFin = nullptr;
     };
 
+    // MC ChickenVariant.ModelType: NORMAL, COLD (ColdChickenModel — a tail
+    // plane and a head crest).
     class ChickenModel : public EntityModel {
     public:
-        ChickenModel();
+        explicit ChickenModel(bool cold = false);
         void SetupAnim(const EntityRenderState& state) override;
         bool BecomeBaby() override;
 
@@ -554,6 +577,9 @@ namespace Render {
     public:
         ArrowModel();
         void SetupAnim(const EntityRenderState& state) override;
+        // MC ArrowModel: RenderTypes::entityCutout (the culling cutout in
+        // 26.1's naming) — culled.
+        bool CullBackFaces() const override { return true; }
 
     private:
         ModelPart* m_pivot = nullptr;
@@ -574,6 +600,8 @@ namespace Render {
     public:
         TridentModel();
         void SetupAnim(const EntityRenderState& state) override;
+        // MC TridentModel: RenderTypes::entitySolid — culled.
+        bool CullBackFaces() const override { return true; }
 
     private:
         ModelPart* m_pivot = nullptr;

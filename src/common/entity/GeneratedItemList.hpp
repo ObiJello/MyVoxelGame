@@ -501,10 +501,28 @@ namespace Game::Items {
     static constexpr ItemID EndermanSpawnEgg                 = PURE_ITEM_BASE +  490; // "enderman_spawn_egg"
     static constexpr ItemID EndermiteSpawnEgg                = PURE_ITEM_BASE +  491; // "endermite_spawn_egg"
     static constexpr ItemID ShulkerSpawnEgg                  = PURE_ITEM_BASE +  492; // "shulker_spawn_egg"
-    // Hand-appended — see the matching note in GeneratedItemList.cpp. MC
-    // registers these via net.minecraft.references.Items, which gen_items.py's
-    // string-literal regex does not match.
     static constexpr ItemID MelonSeeds                       = PURE_ITEM_BASE +  493; // "melon_seeds"
     static constexpr ItemID PumpkinSeeds                     = PURE_ITEM_BASE +  494; // "pumpkin_seeds"
+    static constexpr ItemID SulfurCubeSpawnEgg               = PURE_ITEM_BASE +  495; // "sulfur_cube_spawn_egg"
+    static constexpr ItemID PoplarBoat                       = PURE_ITEM_BASE +  496; // "poplar_boat"
+    static constexpr ItemID PoplarChestBoat                  = PURE_ITEM_BASE +  497; // "poplar_chest_boat"
+    static constexpr ItemID SulfurCubeBucket                 = PURE_ITEM_BASE +  498; // "sulfur_cube_bucket"
+    static constexpr ItemID OceanMonumentMap                 = PURE_ITEM_BASE +  499; // "ocean_monument_map"
+    static constexpr ItemID WoodlandMansionMap               = PURE_ITEM_BASE +  500; // "woodland_mansion_map"
+    static constexpr ItemID BuriedTrialChambersMap           = PURE_ITEM_BASE +  501; // "buried_trial_chambers_map"
+    static constexpr ItemID JunglePyramidMap                 = PURE_ITEM_BASE +  502; // "jungle_pyramid_map"
+    static constexpr ItemID SwampHutMap                      = PURE_ITEM_BASE +  503; // "swamp_hut_map"
+    static constexpr ItemID DesertVillageMap                 = PURE_ITEM_BASE +  504; // "desert_village_map"
+    static constexpr ItemID PlainsVillageMap                 = PURE_ITEM_BASE +  505; // "plains_village_map"
+    static constexpr ItemID SavannaVillageMap                = PURE_ITEM_BASE +  506; // "savanna_village_map"
+    static constexpr ItemID SnowyVillageMap                  = PURE_ITEM_BASE +  507; // "snowy_village_map"
+    static constexpr ItemID TaigaVillageMap                  = PURE_ITEM_BASE +  508; // "taiga_village_map"
+    static constexpr ItemID BuriedTreasureMap                = PURE_ITEM_BASE +  509; // "buried_treasure_map"
+    static constexpr ItemID BuriedAncientCityMap             = PURE_ITEM_BASE +  510; // "buried_ancient_city_map"
+    static constexpr ItemID BuriedMineshaftMap               = PURE_ITEM_BASE +  511; // "buried_mineshaft_map"
+    static constexpr ItemID DesertPyramidMap                 = PURE_ITEM_BASE +  512; // "desert_pyramid_map"
+    static constexpr ItemID AbandonedCampMap                 = PURE_ITEM_BASE +  513; // "abandoned_camp_map"
+    static constexpr ItemID WarmOceanRuinsMap                = PURE_ITEM_BASE +  514; // "warm_ocean_ruins_map"
+    static constexpr ItemID MusicDiscBounce                  = PURE_ITEM_BASE +  515; // "music_disc_bounce"
 
 } // namespace Game::Items

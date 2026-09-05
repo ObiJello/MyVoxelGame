@@ -32,6 +32,13 @@ namespace Render {
 
         virtual void BeginFrame() = 0;
         virtual void EndFrame(GLFWwindow* window) = 0;
+        // Build, now, every pipeline this backend built in earlier sessions
+        // (a manifest kept next to its on-disk cache), so the first frames
+        // of play do not stall on lazy pipeline creation — on MoltenVK a
+        // Metal pipeline compile, 300 ms of first-frame hitch in a capture.
+        // Called once per process behind the world-load screen; a no-op on
+        // backends that compile at link time (OpenGL).
+        virtual void WarmPipelines() {}
         virtual void SetClearColor(float r, float g, float b, float a) = 0;
         // The `stencil` flag (default false) clears the stencil buffer to 0.
         // Existing callers that pass only color+depth keep working unchanged.
@@ -57,6 +64,31 @@ namespace Render {
                                          const void* data, BufferAccess access = BufferAccess::Static) = 0;
         virtual void UpdateBuffer(BufferHandle handle, size_t offset,
                                  size_t size, const void* data) = 0;
+
+        // Bind [offset, offset+size) of a BufferUsage::Uniform buffer as the
+        // shader's user uniform block: GL block binding point 0 (a program's
+        // block named "SectionOrigins" is wired to it at link), Vulkan
+        // descriptor set 3 binding 0 of the portal pipeline layout, with
+        // `offset` as the dynamic offset. One slot — the terrain mega buffer
+        // is its only client (per-slab section-origin table; see
+        // ChunkMegaBuffer::BindSlab). Offset must respect the device's UBO
+        // offset alignment (256 covers every driver).
+        virtual void BindUniformBuffer(BufferHandle /*handle*/, size_t /*offset*/, size_t /*size*/) {}
+
+        // A BUFFER TEXTURE: `buffer`'s bytes seen by fragment shaders as
+        // texels of `format`, sampled with texelFetch on a samplerBuffer
+        // (GL: glTexBuffer over the buffer object; Vulkan: a VkBufferView in
+        // a uniform-texel-buffer descriptor, set 4 of the portal pipeline
+        // layout). The texture owns no storage — destroy it before the
+        // buffer. Bound like any texture (BindTexture slot). Used for the
+        // terrain face map (ChunkMegaBuffer). INVALID_TEXTURE when the
+        // backend cannot make one.
+        virtual TextureHandle CreateBufferTexture(BufferHandle /*buffer*/, TextureFormat /*format*/) {
+            return INVALID_TEXTURE;
+        }
+        // Destroy a texture once no in-flight frame can still read it (see
+        // DeferredDestroyBuffer). Default: immediate.
+        virtual void DeferredDestroyTexture(TextureHandle handle) { DestroyTexture(handle); }
 
         // Overwrite a range WITHOUT waiting for in-flight draws that read it.
         //

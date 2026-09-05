@@ -51,7 +51,7 @@ namespace Render {
         bool writesHead;
     };
 
-    inline constexpr int kAnimProgramCount = 79;
+    inline constexpr int kAnimProgramCount = 124;
     extern const AnimProgram   kAnimPrograms[kAnimProgramCount];
     extern const AnimStatement kAnimStatements[];
     extern const AnimNode      kAnimNodes[];

@@ -68,3 +68,8 @@ tools/quickbook/
 # Prebuilt Tracy CLI tools (tracy-capture, tracy-csvexport) — 15 MB of
 # binaries, rebuildable from cmake-build-tracy/_deps/tracy-src/{capture,csvexport}
 tools/tracy/
+
+# Instruments recordings from tools/play.sh --gpu-trace (hundreds of MB) and
+# the XML tables tools/gpu_report.py exports next to them
+*.trace/
+*.trace.export/

@@ -439,6 +439,22 @@ namespace Platform {
         return fallback;
     }
 
+    std::string GameSettings::PeekStringFromDisk(const std::string& key, const std::string& fallback) {
+        const std::string path = GameDirectory::GetDefaultGameDirectory() + "/options.txt";
+        std::ifstream file(path);
+        if (!file.is_open()) return fallback;
+        const std::string prefix = key + ":";
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.rfind(prefix, 0) != 0) continue;
+            std::string value = line.substr(prefix.size());
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t\r") + 1);
+            return value;
+        }
+        return fallback;
+    }
+
     bool GameSettings::ParseLine(const std::string& line) {
         size_t colonPos = line.find(':');
         if (colonPos == std::string::npos) {
@@ -573,6 +589,7 @@ namespace Platform {
         m_assetsDirectory = m_gameDirectory + "/assets";
         m_logsDirectory = m_gameDirectory + "/logs";
         m_screenshotsDirectory = m_gameDirectory + "/screenshots";
+        m_skyboxesDirectory = m_gameDirectory + "/skyboxes";
 
         // Create the directory structure
         if (!CreateDirectories()) {
@@ -592,7 +609,8 @@ namespace Platform {
             m_resourcePacksDirectory,
             m_assetsDirectory,
             m_logsDirectory,
-            m_screenshotsDirectory
+            m_screenshotsDirectory,
+            m_skyboxesDirectory
         };
 
         for (const auto& dir : directories) {
@@ -776,8 +794,15 @@ namespace Platform {
         }
 
         if (auto rules = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("game_rules"))) {
-            // Every gamerule is stored as a string, whatever its type.
-            info.doDaylightCycle = rules->GetValue<std::string>("doDaylightCycle", "false") == "true";
+            // MC's typed, namespaced form first ("minecraft:advance_time": 1b),
+            // then the string form older files of ours wrote.
+            if (rules->HasTag("minecraft:advance_time")) {
+                info.doDaylightCycle = rules->GetValue<int8_t>("minecraft:advance_time", 0) != 0;
+            } else if (rules->HasTag("advance_time")) {
+                info.doDaylightCycle = rules->GetValue<int8_t>("advance_time", 0) != 0;
+            } else {
+                info.doDaylightCycle = rules->GetValue<std::string>("doDaylightCycle", "false") == "true";
+            }
         }
     }
 
@@ -954,6 +979,29 @@ namespace Platform {
         }
 
         Log::Info("Game directory system shutdown complete");
+    }
+
+} // namespace Platform
+namespace Platform {
+
+    bool GameDirectory::OpenInFileBrowser(const std::string& path) {
+        if (path.empty()) return false;
+        // Quote defensively: the game directory lives under a path with a
+        // space on macOS ("Application Support").
+        std::string quoted = "\"";
+        for (char c : path) {
+            if (c == '"') continue;
+            quoted += c;
+        }
+        quoted += "\"";
+#if defined(_WIN32)
+        const std::string cmd = "explorer " + quoted;
+#elif defined(__APPLE__)
+        const std::string cmd = "open " + quoted;
+#else
+        const std::string cmd = "xdg-open " + quoted;
+#endif
+        return std::system(cmd.c_str()) == 0;
     }
 
 } // namespace Platform

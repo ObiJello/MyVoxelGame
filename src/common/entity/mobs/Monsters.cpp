@@ -2097,6 +2097,31 @@ namespace Game {
         RegisterGoals();
     }
 
+    void SnowGolem::Shear() {
+        if (!m_level) return;
+        // MC: level.playSound(SNOW_GOLEM_SHEAR) — sound system pending.
+        SetPumpkin(false);
+        // MC dropFromShearingLootTable(SHEAR_SNOW_GOLEM): loot_table/shearing/
+        // snow_golem.json is one pool, one carved pumpkin; spawnAtLocation at
+        // getEyeHeight(), so it pops off the head rather than the feet.
+        const glm::dvec3 dropPos = position + glm::dvec3(0.0, GetEyeHeight(), 0.0);
+        m_level->SpawnItemDrop(dropPos, ItemRegistry::FromBlock(BlockID::CarvedPumpkin), 1);
+    }
+
+    UseResult SnowGolem::MobInteract(LivingEntity& player, ItemStack& held) {
+        // MC SnowGolem.mobInteract, in its order: shears on a ready golem
+        // shear it (server side) and SUCCESS; everything else PASSes so the
+        // held item gets its turn.
+        if (held.itemId != Items::Shears || !ReadyForShearing()) {
+            return PathfinderMob::MobInteract(player, held);
+        }
+        if (m_level && m_level->IsClientSide()) return UseResult::Success;
+        Shear();
+        // MC itemStack.hurtAndBreak(1, player, hand) — no durability yet
+        // (see the sheep's note); the shears survive.
+        return UseResult::Success;
+    }
+
     void SnowGolem::RegisterGoals() {
         m_goalSelector.AddGoal(1, std::make_unique<RangedAttackGoal>(
                                       this, this, 1.25, 20, 10.0f));
@@ -2894,8 +2919,9 @@ namespace Game {
     }
 
     void Wither::MakeInvulnerable() {
-        // MC makeInvulnerable — called by the soul-sand ritual; here by
-        // FinalizeSpawn (the /summon-and-egg stand-in for the ritual).
+        // MC makeInvulnerable — the soul-sand ritual's call, and only that
+        // (CheckWitherSpawn): 220 ticks of the blue armoured charge-up, the
+        // spawn explosion and heal at its end.
         SetInvulnerableTicks(220);
         SetHealth(GetMaxHealth() / 3.0f);
     }
@@ -2904,12 +2930,10 @@ namespace Game {
     Wither::FinalizeSpawn(SpawnReason reason,
                               std::shared_ptr<SpawnGroupData> groupData) {
         groupData = Monster::FinalizeSpawn(reason, std::move(groupData));
-        // MC's WitherSkullBlock ritual calls makeInvulnerable() on the wither
-        // it builds; the egg//summon path is this port's only spawn ritual,
-        // so it charges up the same way. (MC's bare /summon skips this.)
-        if (reason != SpawnReason::Load) {
-            MakeInvulnerable();
-        }
+        // No charge-up here: MC's makeInvulnerable() is the soul-sand
+        // ritual's (WitherSkullBlock.checkSpawn → IntegratedServer::
+        // CheckWitherSpawn), and a /summon'd or egg-spawned wither arrives at
+        // full health, already fighting, exactly as in vanilla.
         return groupData;
     }
 

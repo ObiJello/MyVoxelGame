@@ -39,7 +39,7 @@ namespace Render {
     // A boolean on the render state that gates a clip. Only five conditions
     // appear across all of MC's animated models, so this is a closed enum
     // rather than a compiled expression — an unrecognised one fails the build.
-    enum class AnimGuard : uint8_t { None, IsInWater, IsSearching, CanMove, IsResting, IsHoldingItem };
+    enum class AnimGuard : uint8_t { None, IsInWater, IsSearching, CanMove, IsResting, IsHoldingItem, AnimStarted };
 
     // One KeyframeAnimation application from a model's setupAnim.
     struct GenClip {
@@ -57,6 +57,9 @@ namespace Render {
 
         AnimGuard guard;
         bool      guardNegate;
+        // AnimGuard::AnimStarted — the Game::MobAnim slot whose running bit
+        // is the guard.
+        uint8_t   guardSlot;
     };
 
     // MC `this.<part>.visible = state.<X>AnimationState.isStarted()` — the
@@ -81,9 +84,16 @@ namespace Render {
         int   firstPart, partCount;
         int   firstClip, clipCount;
         int   firstVis,  visCount;
+
+        // MC Model.renderType picked a culling RenderType (entityCutout /
+        // entitySolid / entityTranslucent) rather than the entityCutoutNoCull
+        // default — see the generator's model_culls. The renderer draws this
+        // mesh back-face culled, which is what keeps a bat's zero-thickness
+        // ears from fighting their own back faces.
+        bool  cull;
     };
 
-    inline constexpr int kGenModelCount = 120;
+    inline constexpr int kGenModelCount = 175;
     extern const GenModel kGenModels[kGenModelCount];
     extern const GenPart  kGenParts[];
     extern const GenCube  kGenCubes[];
@@ -91,7 +101,7 @@ namespace Render {
     extern const GenClipVisibility kGenClipVis[];
 
     // Mesh for a mob slug, or nullptr when it has a hand-written model class
-    // (or none at all). Linear over ~120 entries, called once per type.
+    // (or none at all). Linear over ~175 entries, called once per type.
     const GenModel* FindGenModel(std::string_view slug);
 
 } // namespace Render

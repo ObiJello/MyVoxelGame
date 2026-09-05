@@ -38,6 +38,7 @@
 // 16x16x6 mattress is the headboard. Without this, the foot/head ends are swapped
 // AND the textures on side faces are mirrored.
 
+#include "client/resource/ResourcePacks.hpp"
 #include "BedItemRenderer.hpp"
 #include "ItemLighting.hpp"
 #include "../GuiGraphics.hpp"
@@ -71,6 +72,14 @@ namespace Render {
 
         TextureHandle LoadBedTexture(const std::string& color) {
             auto& cache = BedTextureCache();
+            {
+                // A resource pack change replaces every texture here.
+                static int s_packGeneration = -1;
+                if (Resources::CacheStale(s_packGeneration)) {
+                    if (g_renderBackend) for (auto& [key, tex] : cache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+                    cache.clear();
+                }
+            }
             auto it = cache.find(color);
             if (it != cache.end()) return it->second;
             if (!g_renderBackend) return INVALID_TEXTURE;

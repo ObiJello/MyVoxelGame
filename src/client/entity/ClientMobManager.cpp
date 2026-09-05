@@ -22,6 +22,7 @@
 #include "common/entity/projectile/EvokerFangs.hpp"
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/mobs/Slime.hpp"
+#include "common/entity/mobs/SulfurCube.hpp"
 #include "common/entity/mobs/Fish.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/core/Mth.hpp"
@@ -77,6 +78,8 @@ namespace Client {
                     return std::make_unique<Game::ZombifiedPiglin>(level);
                 case Game::EntityTypeId::Slime:
                     return Game::Slime::Make(level);
+                case Game::EntityTypeId::SulfurCube:
+                    return std::make_unique<Game::SulfurCube>(level);
                 case Game::EntityTypeId::MagmaCube:
                     return std::make_unique<Game::MagmaCube>(level);
                 case Game::EntityTypeId::Cod:
@@ -222,13 +225,13 @@ namespace Client {
 
             // Baby state changes the hitbox and the model scale, so it is
             // carried on the wire rather than inferred.
-            if (auto* zombie = dynamic_cast<Game::Zombie*>(&mob)) {
-                zombie->SetBaby((flags & kFlagBaby) != 0);
-            } else if (auto* ageable = dynamic_cast<Game::AgeableMob*>(&mob)) {
+            // Mob::SetBaby is virtual: an AgeableMob takes an age, the
+            // zombie/piglin/zoglin family its flag. (This used to reach only
+            // Zombie and AgeableMob, so a baby piglin or zoglin arrived
+            // adult-sized on the client.)
+            {
                 const bool wantBaby = (flags & kFlagBaby) != 0;
-                if (wantBaby != ageable->IsBaby()) {
-                    ageable->SetAge(wantBaby ? Game::AgeableMob::kBabyStartAge : 0);
-                }
+                if (wantBaby != mob.IsBaby()) mob.SetBaby(wantBaby);
             }
         }
 
@@ -329,6 +332,8 @@ namespace Client {
                 falling->SetStartPos(mob.BlockPosition());
             } else if (mob.GetType() == Game::EntityTypeId::Tnt) {
                 static_cast<Game::PrimedTnt*>(&mob)->SetCarriedState(carried);
+            } else {
+                mob.SetCarriedBlockRaw(blockStateRaw);
             }
         }
 
@@ -444,13 +449,22 @@ namespace Client {
 
     void ClientMobManager::SetData(int32_t id, float health, uint8_t flags, uint8_t variantData,
                                    uint8_t hurtTime, uint8_t deathTime, uint8_t swellDir,
-                                   uint8_t swell, uint8_t pose, uint8_t animState) {
+                                   uint8_t swell, uint8_t pose, uint8_t animState,
+                                   uint32_t blockStateRaw) {
         ClientMob* entry = Find(id);
         if (!entry) return;
 
         Game::Mob& mob = *entry->mob;
         mob.SetHealth(health);
         ApplyFlags(mob, flags);
+
+        // The carried block (the sulfur cube's swallowed block) — a mirrored
+        // value, applied every data packet; the falling block and TNT keep
+        // their spawn-time block (their override is the base no-op).
+        if (mob.GetType() != Game::EntityTypeId::FallingBlock &&
+            mob.GetType() != Game::EntityTypeId::Tnt) {
+            mob.SetCarriedBlockRaw(blockStateRaw);
+        }
 
         // hurtTime and deathTime are SET rather than max'd: the server owns
         // them, and letting the client keep a longer local value would leave a
@@ -639,6 +653,17 @@ namespace Client {
         // Otherwise a leaving-world clear leaves ids from the old level for the
         // next one's first sweep to look up.
         m_removedThisTick.clear();
+    }
+
+    void ClientMobManager::RefreshPickCandidates() {
+        m_pickCandidates.clear();
+        for (const ClientMob* entry : m_mobList) {
+            if (!entry || !entry->mob) continue;
+            const Game::Mob& mob = *entry->mob;
+            if (mob.GetType() == Game::EntityTypeId::Tnt) continue;
+            const glm::dvec3 dp = mob.position - m_pickOrigin;
+            if (glm::dot(dp, dp) < 48.0 * 48.0) m_pickCandidates.push_back(mob.GetId());
+        }
     }
 
     void ClientMobManager::Tick() {

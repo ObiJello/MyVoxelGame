@@ -40,8 +40,9 @@ namespace Game {
         "3", "4", "5", "6", "7", "8", "save", "load",
         "corner", "data", "start", "log", "fail", "accept", "inactive", "waiting_for_players",
         "active", "waiting_for_reward_ejection", "ejecting_reward", "cooldown", "inactive", "active", "unlocking", "ejecting",
+        "dry", "wet", "dormant", "erupting", "continuous",
     };
-    const size_t kPropertyValueCount = 288;
+    const size_t kPropertyValueCount = 293;
 
     const GeneratedPropertyRow kProperties[] = {
         { "face", 2, 0, 3 },  // Enum floor,wall,ceiling
@@ -164,8 +165,9 @@ namespace Game {
         { "disarmed", 0, 7, 2 },  // Bool true,false
         { "eggs", 1, 93, 4 },  // Int  1,2,3,4
         { "vault_state", 2, 284, 4 },  // Enum inactive,active,unlocking,ejecting
+        { "state", 2, 288, 5 },  // Enum dry,wet,dormant,erupting…
     };
-    const size_t kPropertyCount = 120;
+    const size_t kPropertyCount = 121;
 
     const uint16_t kBlockPropertyRefs[] = {
         0, 1, 2, 1, 3, 4, 5, 2, 6, 7, 8, 9, 10, 1, 11, 5,
@@ -291,9 +293,17 @@ namespace Game {
         9, 1, 20, 21, 9, 23, 2, 9, 50, 49, 13, 1, 35, 36, 37, 38,
         9, 38, 1, 23, 6, 7, 8, 9, 10, 1, 90, 2, 13, 1, 2, 13,
         1, 35, 36, 37, 38, 9, 38, 1, 23, 6, 7, 8, 9, 10, 2, 13,
-        1, 2,
+        1, 2, 19, 9, 1, 20, 21, 9, 24, 25, 26, 27, 9, 28, 19, 9,
+        1, 20, 21, 9, 24, 25, 26, 27, 9, 28, 14, 15, 9, 19, 9, 1,
+        20, 21, 9, 24, 25, 26, 27, 9, 28, 19, 9, 1, 20, 21, 9, 24,
+        25, 26, 27, 9, 28, 0, 1, 2, 1, 3, 4, 5, 2, 6, 7, 8,
+        9, 10, 1, 11, 5, 2, 12, 13, 9, 16, 2, 17, 1, 2, 18, 9,
+        13, 9, 19, 9, 1, 20, 21, 9, 1, 20, 5, 2, 9, 1, 9, 1,
+        9, 16, 120, 14, 15, 9, 29, 1, 1, 35, 36, 16, 16, 19, 9, 1,
+        20, 21, 9, 24, 25, 26, 27, 9, 28, 19, 9, 93, 94, 9, 1, 20,
+        21, 9, 24, 25, 26, 27, 9, 28, 14, 15, 9,
     };
-    const size_t kBlockPropertyRefCount = 1970;
+    const size_t kBlockPropertyRefCount = 2107;
 
     const GeneratedBlockStateRow kBlockStates[] = {
         { "acacia_button", 0, 3, 9, 24 },
@@ -1058,7 +1068,50 @@ namespace Game {
         { "yellow_stained_glass_pane", 1961, 5, 31, 32 },
         { "zombie_head", 1966, 2, 16, 32 },
         { "zombie_wall_head", 1968, 2, 1, 8 },
+        { "cinnabar_brick_slab", 1970, 2, 3, 6 },
+        { "cinnabar_brick_stairs", 1972, 4, 11, 80 },
+        { "cinnabar_brick_wall", 1976, 6, 3, 324 },
+        { "cinnabar_slab", 1982, 2, 3, 6 },
+        { "cinnabar_stairs", 1984, 4, 11, 80 },
+        { "cinnabar_wall", 1988, 6, 3, 324 },
+        { "orange_poplar_leaves", 1994, 3, 27, 28 },
+        { "polished_cinnabar_slab", 1997, 2, 3, 6 },
+        { "polished_cinnabar_stairs", 1999, 4, 11, 80 },
+        { "polished_cinnabar_wall", 2003, 6, 3, 324 },
+        { "polished_sulfur_slab", 2009, 2, 3, 6 },
+        { "polished_sulfur_stairs", 2011, 4, 11, 80 },
+        { "polished_sulfur_wall", 2015, 6, 3, 324 },
+        { "poplar_button", 2021, 3, 9, 24 },
+        { "poplar_door", 2024, 5, 11, 64 },
+        { "poplar_fence", 2029, 5, 31, 32 },
+        { "poplar_fence_gate", 2034, 4, 7, 32 },
+        { "poplar_hanging_sign", 2038, 3, 33, 64 },
+        { "poplar_log", 2041, 1, 1, 3 },
+        { "poplar_pressure_plate", 2042, 1, 1, 2 },
+        { "poplar_sapling", 2043, 1, 0, 2 },
+        { "poplar_shelf", 2044, 4, 9, 64 },
+        { "poplar_sign", 2048, 2, 1, 32 },
+        { "poplar_slab", 2050, 2, 3, 6 },
+        { "poplar_stairs", 2052, 4, 11, 80 },
+        { "poplar_trapdoor", 2056, 5, 15, 64 },
+        { "poplar_wall_hanging_sign", 2061, 2, 1, 8 },
+        { "poplar_wall_sign", 2063, 2, 1, 8 },
+        { "poplar_wood", 2065, 1, 1, 3 },
+        { "potent_sulfur", 2066, 1, 0, 5 },
+        { "red_poplar_leaves", 2067, 3, 27, 28 },
+        { "shelf_mushroom", 2070, 2, 0, 8 },
+        { "straw_bed", 2072, 3, 3, 16 },
+        { "stripped_poplar_log", 2075, 1, 1, 3 },
+        { "stripped_poplar_wood", 2076, 1, 1, 3 },
+        { "sulfur_brick_slab", 2077, 2, 3, 6 },
+        { "sulfur_brick_stairs", 2079, 4, 11, 80 },
+        { "sulfur_brick_wall", 2083, 6, 3, 324 },
+        { "sulfur_slab", 2089, 2, 3, 6 },
+        { "sulfur_spike", 2091, 3, 5, 20 },
+        { "sulfur_stairs", 2094, 4, 11, 80 },
+        { "sulfur_wall", 2098, 6, 3, 324 },
+        { "yellow_poplar_leaves", 2104, 3, 27, 28 },
     };
-    const size_t kBlockStateRowCount = 762;
+    const size_t kBlockStateRowCount = 805;
 
 } // namespace Game

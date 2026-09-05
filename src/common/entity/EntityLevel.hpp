@@ -31,6 +31,7 @@ namespace Game {
     struct CollisionGrid;
 
     struct ExplosionParams;
+    struct ItemStack;
 
     class ILevelWrite;
 
@@ -332,6 +333,35 @@ namespace Game {
         // Drop an item stack in the world. Server-only; the client
         // implementation is a no-op.
         virtual void SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) {}
+
+        // MC Level.getEntitiesOfClass(ItemEntity.class, box, ...) for a mob
+        // that picks items up (the sulfur cube swallowing a dropped block).
+        // Item entities are not Entities here (they live in the level's
+        // ItemEntityManager), so the query is its own hook and hands back a
+        // snapshot per item; `canPickUp` is MC's !hasPickUpDelay.
+        struct NearbyItemEntity {
+            int32_t    id = 0;
+            glm::dvec3 pos{0.0};
+            uint32_t   itemId = 0;
+            int        count = 0;
+            bool       canPickUp = false;
+        };
+        virtual void GetItemEntitiesInBox(const AABBd& box,
+                                          std::vector<NearbyItemEntity>& out) const {
+            (void)box; (void)out;
+        }
+        // MC Mob.take(entity, n) + ItemStack.split: remove `count` from that
+        // item entity's stack (an emptied one despawns on its next tick).
+        // Returns how many were taken — 0 when the id is gone.
+        virtual int TakeFromItemEntity(int32_t id, int count) { (void)id; (void)count; return 0; }
+
+        // MC ItemUtils.createFilledResult for a mob interaction (Bucketable.
+        // bucketMobPickup): the player's held stack gives up one item for
+        // `filled`, which lands in the hand, the inventory or on the floor —
+        // see IUsePlayer::CreateFilledResult. Default: replace, for levels
+        // with no inventory behind the player.
+        virtual void CreateFilledResult(LivingEntity& player, ItemStack& held,
+                                        const ItemStack& filled);   // Item.cpp
 
         // MC ExperienceOrb.award(level, pos, amount): spawns real orb
         // entities at `pos` (Server::ExperienceOrbManager via

@@ -262,7 +262,9 @@ namespace Game {
             const bool headHit = hit.dragonPart == EnderDragon::kDragonPartHead;
             return dragon->HurtPart(source, amount, attacker, headHit, this);
         }
-        return target.Hurt(source, amount, attacker);
+        // MC: DamageSource(type, directEntity = this projectile, causing = the
+        // owner) — the shooter is credited, the ARROW sets the knockback.
+        return target.HurtFrom(source, amount, attacker, this);
     }
 
     void Projectile::OnHit(const HitResult& hit) {

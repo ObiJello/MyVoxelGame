@@ -72,7 +72,9 @@ namespace Render {
         void UpdateTexture2DLevel(TextureHandle handle, int level, int x, int y,
                                   int width, int height, const void* data) override;
         void DestroyTexture(TextureHandle handle) override;
+        void DeferredDestroyTexture(TextureHandle handle) override;
         void BindTexture(TextureHandle handle, uint32_t slot) override;
+        TextureHandle CreateBufferTexture(BufferHandle buffer, TextureFormat format) override;
         uintptr_t GetNativeTextureID(TextureHandle handle) const override;
 
         // Shaders
@@ -133,6 +135,7 @@ namespace Render {
         // Mega-buffer rendering
         void BindVertexBuffer(BufferHandle vbo, uint32_t stride) override;
         void BindIndexBuffer(BufferHandle ibo) override;
+        void BindUniformBuffer(BufferHandle handle, size_t offset, size_t size) override;
         void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex,
                                    IndexType indexType = IndexType::Uint32) override;
         void MultiDrawIndexedBaseVertex(const int32_t* indexCounts, const size_t* indexByteOffsets,
@@ -242,6 +245,7 @@ namespace Render {
         struct DeferredDeletion {
             BufferHandle buffer = INVALID_BUFFER;
             MeshHandle mesh = INVALID_MESH;
+            TextureHandle texture = INVALID_TEXTURE;   // buffer-texture views, freed before their buffer
         };
         std::array<std::vector<DeferredDeletion>, MAX_FRAMES_IN_FLIGHT> m_deletionQueues;
 
@@ -299,6 +303,7 @@ namespace Render {
         // ====================================================================
         VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
         VkDescriptorSetLayout m_textureDescriptorLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout m_texelBufferLayout = VK_NULL_HANDLE;
         // Second descriptor set layout used by portal-feature shaders that
         // need richer uniforms (portal renderer, viewmodel skinning, etc.).
         // Slot 0 = sampler2D (matches block shaders for texture reuse),
@@ -306,6 +311,11 @@ namespace Render {
         // Slot 2 = BonesUBO (viewmodel only — bound to a 1-mat4 dummy for
         //                    other portal shaders).
         VkDescriptorSetLayout m_portalDescriptorLayout = VK_NULL_HANDLE;
+        // Set 3 of the portal pipeline layout: one dynamic uniform buffer,
+        // vertex + fragment — the backend's single user uniform block
+        // (RenderBackend::BindUniformBuffer). Only shaders that declare
+        // set 3 read it; nothing else needs to bind it.
+        VkDescriptorSetLayout m_uniformBlockLayout = VK_NULL_HANDLE;
 
         // ====================================================================
         // PIPELINE
@@ -321,6 +331,19 @@ namespace Render {
         // pipeline creation is lazy and lands mid-frame, which is a visible
         // hitch on MoltenVK where it means a Metal shader compile.
         std::string m_pipelineCacheFile;
+        // The VkPipelineCache spares the SPIR-V→MSL work, not the Metal
+        // pipeline-state build, and creation is still lazy: the first frame
+        // of play built every pipeline it touched at once (328 ms in a
+        // capture). The manifest is the list of (shader paths, state) every
+        // session has built; WarmPipelines rebuilds it behind the loading
+        // screen. Grows over sessions, so a dimension first visited later
+        // is covered from then on.
+        std::string m_pipelineManifestFile;
+        bool        m_pipelinesWarmed = false;
+        void SavePipelineManifest();
+    public:
+        void WarmPipelines() override;
+    private:
         uint32_t m_pipelinesSinceSave = 0;      // new pipelines not yet on disk
         uint64_t m_lastPipelineFrame  = 0;      // frame of the most recent creation
         std::vector<char> LoadPipelineCacheBlob() const;
@@ -360,8 +383,17 @@ namespace Render {
             // vkMapMemory/vkUnmapMemory pair per call (MoltenVK makes each of
             // those a Metal call). nullptr for device-local Static buffers.
             uint8_t* mapped = nullptr;
+            // BufferUsage::Uniform only: the set-3 descriptor (one dynamic
+            // UBO binding) created on first BindUniformBuffer, with the
+            // window size it was written for. See m_uniformBlockLayout.
+            VkDescriptorSet uniformSet = VK_NULL_HANDLE;
+            size_t uniformRange = 0;
         };
         std::unordered_map<uint32_t, VKBufferInfo> m_buffers;
+        // RenderBackend::BindUniformBuffer state, applied at draw time by
+        // BindPortalDescriptorForDraw (set 3 of the portal pipeline layout).
+        BufferHandle m_boundUniformBuffer = INVALID_BUFFER;
+        uint32_t     m_boundUniformOffset = 0;
 
         struct VKTextureInfo {
             VkImage image = VK_NULL_HANDLE;
@@ -386,6 +418,10 @@ namespace Render {
             // Needed to reallocate the image in ReserveTextureMipLevels; an
             // image's mip count is fixed at creation in Vulkan.
             VkFormat             format = VK_FORMAT_R8G8B8A8_UNORM;
+            // CreateBufferTexture: a texel-buffer view over another handle's
+            // VkBuffer (image/sampler/memory stay null); descriptorSet is
+            // then a m_texelBufferLayout set (portal pipeline layout set 4).
+            VkBufferView         bufferView = VK_NULL_HANDLE;
         };
         std::unordered_map<uint32_t, VKTextureInfo> m_textures;
 
@@ -404,6 +440,10 @@ namespace Render {
             VertexLayout vertexLayout;
             // Per-instance attributes (binding 1). Empty = not instanced.
             VertexLayout instanceLayout;
+            // The paths the caller asked for — the shader's identity across
+            // sessions, which is how the pipeline manifest names it.
+            std::string vertPath;
+            std::string fragPath;
         };
         std::unordered_map<uint32_t, VKShaderInfo> m_shaders;
 
@@ -701,6 +741,10 @@ namespace Render {
         bool CreatePipelineCache();
         // Portal-feature uniform infrastructure
         bool CreatePortalDescriptorLayout();
+        bool CreateUniformBlockLayout();
+        // Set 4 of the portal pipeline layout: one uniform texel buffer
+        // (fragment stage) — the terrain face map (CreateBufferTexture).
+        bool CreateTexelBufferLayout();
         bool CreatePortalPipelineLayout();
         bool CreateFrameUBOs();           // allocate per-frame UBO buffers + descriptor sets
         void DestroyFrameUBOs();          // counterpart called from Shutdown
@@ -723,6 +767,10 @@ namespace Render {
         QueueFamilyIndices FindQueueFamilies(VkPhysicalDevice device) const;
         bool CheckDeviceExtensionSupport(VkPhysicalDevice device) const;
         VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) const;
+        // VK_EXT_swapchain_colorspace was enabled on the instance, so the
+        // surface offers VK_COLOR_SPACE_PASS_THROUGH_EXT (see
+        // ChooseSwapSurfaceFormat for why that is the one we want).
+        bool m_hasSwapchainColorSpaceExt = false;
         VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& modes) const;
         VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& caps, GLFWwindow* window) const;
         // Queried once in PickPhysicalDevice; FindMemoryType used to re-query
@@ -748,6 +796,12 @@ namespace Render {
         void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
         void TransitionImageLayout(VkImage image, VkFormat format,
                                   VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels);
+        // The same two, recorded into a caller's command buffer: one submit
+        // (one GPU drain) for a whole texture upload instead of three.
+        void RecordImageLayoutTransition(VkCommandBuffer cmd, VkImage image, VkFormat format,
+                                         VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels);
+        void RecordCopyBufferToImage(VkCommandBuffer cmd, VkBuffer buffer, VkImage image,
+                                     uint32_t width, uint32_t height);
         void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
         void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 

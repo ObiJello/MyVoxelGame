@@ -54,6 +54,11 @@ public:
 
     int32_t salt() const { return m_salt; }
     float frequency() const { return m_frequency; }
+    // Reference: StructurePlacement.getLocatePos(chunkPos) = chunk min block
+    // + locateOffset (the point /locate reports).
+    int32_t locateOffsetX() const { return m_locateOffsetX; }
+    int32_t locateOffsetY() const { return m_locateOffsetY; }
+    int32_t locateOffsetZ() const { return m_locateOffsetZ; }
     FrequencyReductionMethod frequencyReductionMethod() const { return m_frequencyReductionMethod; }
     const std::optional<ExclusionZone>& exclusionZone() const { return m_exclusionZone; }
 

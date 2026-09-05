@@ -36,6 +36,10 @@
 namespace Server {
     namespace PortalTravel {
 
+        void TravelResolved(IntegratedServer& server, ServerLevel& from, Game::Entity& entity,
+                            Game::BlockID portal, const glm::ivec3& entryPos,
+                            Game::DimensionId toDim, bool buildPortal);
+
         namespace {
 
             // MC ServerLevel.END_SPAWN_POINT (ServerLevel.java:188).
@@ -515,7 +519,33 @@ namespace Server {
                 toDim = (fromDim == Game::DimensionId::End) ? Game::DimensionId::Overworld
                                                             : Game::DimensionId::End;
             }
+            TravelResolved(server, from, entity, portal, entryPos, toDim, /*buildPortal=*/true);
+        }
 
+        void TravelToDimension(IntegratedServer& server, ServerLevel& from, Game::Entity& entity,
+                               Game::DimensionId toDim) {
+            const Game::DimensionId fromDim = from.Dimension();
+            if (toDim == fromDim) return;
+            // Which portal's rule applies: anything touching the End is the
+            // End portal's; the other pair is the nether portal's.
+            const Game::BlockID portal =
+                (toDim == Game::DimensionId::End || fromDim == Game::DimensionId::End)
+                    ? Game::BlockID::EndPortal : Game::BlockID::NetherPortal;
+            // MC arms the cooldown before resolving (PortalState.HandleTick
+            // does it for a real crossing) so the exit portal does not fire
+            // on arrival.
+            entity.SetPortalCooldown();
+            // No entry portal: the entity's own block is the "entry cell",
+            // which the nether branch reads as "not a portal" and uses the
+            // centre of an X-axis portal for the exit alignment.
+            TravelResolved(server, from, entity, portal, entity.BlockPosition(), toDim,
+                           /*buildPortal=*/false);
+        }
+
+        void TravelResolved(IntegratedServer& server, ServerLevel& from, Game::Entity& entity,
+                            Game::BlockID portal, const glm::ivec3& entryPos,
+                            Game::DimensionId toDim, bool buildPortal) {
+            const Game::DimensionId fromDim = from.Dimension();
             ServerLevel* toLevel = server.GetOrCreateLevel(toDim);
             if (!toLevel) {
                 Log::Error("[PortalTravel] '%s' could not be created; entity %d stays put",
@@ -598,9 +628,11 @@ namespace Server {
                     exitRect = OpeningAround(*toLevel->World(), *existing, exitAxis);
                 } else {
                     // MC keeps the SOURCE portal's axis for a portal it builds,
-                    // so a linked pair faces the same way.
-                    auto created = PortalForcer::CreatePortal(*toLevel, approximateExit,
-                                                              entryAxis);
+                    // so a linked pair faces the same way. The command asks for
+                    // the placement only: the same spot, nothing written.
+                    auto created = buildPortal
+                        ? PortalForcer::CreatePortal(*toLevel, approximateExit, entryAxis)
+                        : PortalForcer::FindPortalPlacement(*toLevel, approximateExit, entryAxis);
                     if (!created) {
                         Log::Error("[PortalTravel] Could not place an exit portal in '%s'",
                                    std::string(Game::DimensionName(toDim)).c_str());

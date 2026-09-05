@@ -131,6 +131,8 @@ namespace Server {
             const Portal* best = nullptr;
             double bestDist = 0.0;
             for (const Portal* p : registry.CollectNear(here, sender.getPosition(), kInfoRadius)) {
+                // World-option surfaces are not edited by hand.
+                if (p->Has(Game::Immersive::PortalFlag::Global)) continue;
                 const double d = glm::length(p->origin - sender.getPosition());
                 if (!best || d < bestDist) { best = p; bestDist = d; }
             }

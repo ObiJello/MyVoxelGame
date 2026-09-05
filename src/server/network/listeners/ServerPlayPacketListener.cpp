@@ -58,6 +58,9 @@ namespace Server {
         // (IUsePlayer::PlaceCampfireFood) — the block entity lookup needs the
         // world, which the dispatch doesn't carry.
         m_session.FlushPendingCampfireFood();
+        // And the overflow of a bucket that filled while a stack was held
+        // (IUsePlayer::CreateFilledResult → player.drop).
+        m_session.FlushPendingDrops();
     }
     
     void ServerPlayPacketListener::handleUseItem(const Network::UseItemC2SPacket& packet) {
@@ -75,6 +78,7 @@ namespace Server {
                    packet.hand, packet.sequence, packet.yRot, packet.xRot);
 
         m_session.HandleUseItem(packet);
+        m_session.FlushPendingDrops();
     }
 
     void ServerPlayPacketListener::handlePlayerAction(const Network::PlayerActionC2SPacket& packet) {
@@ -116,6 +120,12 @@ namespace Server {
 
     void ServerPlayPacketListener::onHeldItemChangeC2S(const Network::HeldItemChangeC2SPacket& packet) {
         m_session.HandleHeldItemChange(packet);
+    }
+
+    void ServerPlayPacketListener::onPickItemC2S(const Network::PickItemC2SPacket& packet) {
+        // MC handlePickItemFromBlock / FromEntity sit behind hasClientLoaded.
+        if (!m_session.HasClientLoaded()) return;
+        m_session.HandlePickItem(packet);
     }
 
     void ServerPlayPacketListener::onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) {

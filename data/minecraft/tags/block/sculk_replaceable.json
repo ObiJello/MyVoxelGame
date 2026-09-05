@@ -16,6 +16,9 @@
     "minecraft:dripstone_block",
     "minecraft:end_stone",
     "minecraft:red_sandstone",
-    "minecraft:sandstone"
+    "minecraft:sandstone",
+    "#minecraft:substrate_overworld",
+    "minecraft:sulfur",
+    "minecraft:cinnabar"
   ]
 }

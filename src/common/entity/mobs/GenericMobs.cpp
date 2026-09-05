@@ -234,6 +234,35 @@ namespace Game {
         AddAvoidGoal(this, m_goalSelector, def);
     }
 
+    // ── AgeableMob (villager) ──────────────────────────────────────────────
+
+    GenericAgeableMob::GenericAgeableMob(EntityTypeId type, EntityLevel* level)
+        : AgeableMob(type, level) {
+        CreateMobAttributes(m_attributes);
+        ApplyDef(m_attributes, DefFor(type));
+        SetLandSpeedFactor(DefFor(type).landSpeedFactor);
+        SetWalkAnimParams(DefFor(type).walkAnimScale, DefFor(type).walkAnimCap,
+                          DefFor(type).walkAnimFactor, DefFor(type).walkAnimBabyScale);
+        ApplyLocomotion(*this, level, DefFor(type));
+        m_health = GetMaxHealth();
+        RegisterGoals();
+    }
+
+    bool GenericAgeableMob::IsFlyingAnimal() const {
+        return DefFor(GetType()).flyingAnimal;
+    }
+
+    void GenericAgeableMob::RegisterGoals() {
+        // The same set as GenericPathfinderMob — MC PathfinderMob's default.
+        const MobDef& def = DefFor(GetType());
+        m_goalSelector.AddGoal(0, std::make_unique<FloatGoal>(this));
+        AddStroll(*this, m_goalSelector, def, 5);
+        m_goalSelector.AddGoal(6, MakeLookAtPlayer(this, def));
+        m_goalSelector.AddGoal(7, std::make_unique<RandomLookAroundGoal>(this));
+        AddTargetGoals(this, m_targetSelector, def);
+        AddAvoidGoal(this, m_goalSelector, def);
+    }
+
     // ── Monster ────────────────────────────────────────────────────────────
 
     GenericMonster::GenericMonster(EntityTypeId type, EntityLevel* level)
@@ -389,6 +418,10 @@ namespace Game {
             case EntityTypeId::Sniffer:   return std::make_unique<Sniffer>(level);
             case EntityTypeId::CopperGolem:
                 return std::make_unique<CopperGolem>(level);
+            // MC Villager extends AbstractVillager extends AgeableMob: the
+            // age is what a baby villager IS. Goal set unchanged.
+            case EntityTypeId::Villager:
+                return std::make_unique<GenericAgeableMob>(type, level);
             // Silverfish stays generic: both of its bespoke goals need
             // infested blocks, which this engine does not have —
             // SilverfishWakeUpFriendsGoal bursts hidden silverfish OUT of

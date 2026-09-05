@@ -241,7 +241,12 @@ void main() {
         // behind. CullMode::Back hides whichever side the camera isn't on.
         if (!m_triVerts.empty() && fb.triMesh != INVALID_MESH &&
             m_triCursor + m_triVerts.size() <= MAX_VERTICES) {
-            g_renderBackend->UpdateBuffer(fb.triVB, m_triCursor * sizeof(StickVertex),
+            // Unsynchronised: the ring is per frame parity and the cursor only
+            // advances, so no draw of this frame or the one in flight reads
+            // the range. The synchronised update made Apple's GL driver wait
+            // for the previous draw of the buffer — 0.7 ms per body, 0.6 ms of
+            // every frame with a portal in view (tour1, 2026-09-04).
+            g_renderBackend->UpdateBufferUnsynchronized(fb.triVB, m_triCursor * sizeof(StickVertex),
                 m_triVerts.size() * sizeof(StickVertex), m_triVerts.data());
 
             PipelineState triState;
@@ -282,7 +287,7 @@ void main() {
             EmitThickWorldStripFromLines(m_lineVerts, cameraPos, kStripHalfWidth, m_stripVerts);
 
             if (!m_stripVerts.empty() && m_lineCursor + m_stripVerts.size() <= MAX_VERTICES) {
-                g_renderBackend->UpdateBuffer(fb.lineVB, m_lineCursor * sizeof(StickVertex),
+                g_renderBackend->UpdateBufferUnsynchronized(fb.lineVB, m_lineCursor * sizeof(StickVertex),
                     m_stripVerts.size() * sizeof(StickVertex), m_stripVerts.data());
 
                 PipelineState stripState;

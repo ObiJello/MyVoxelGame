@@ -55,6 +55,8 @@ namespace Render {
 
         ShaderHandle  m_shader  = INVALID_SHADER;
         TextureHandle m_texture = INVALID_TEXTURE;
+        int  m_packGeneration = -1;   // Resources::CacheStale
+        bool LoadTexture();
 
         // Two streaming vertex sets alternated per FRAME, each call in a
         // frame (main pass, portal recursions) appending at a cursor — see

@@ -29,13 +29,30 @@ layout(std140, set = 1, binding = 0) uniform Common {
 #define uPulse          c.uPortalColor_.w
 #define uTimeVS         c.uScalarsA_.y
 #define uOpenAmountVS   c.uColorHot_.w
+// The world-space clip plane rides the uTint slot (VKBackend::SetUniformVec4
+// aliases uPortalClipPlane onto it); the portal shaders use no tint. See
+// portal.vert for what it cuts.
+#define uPortalClipPlane c.uTint_
+
+// Explicit gl_PerVertex redeclaration so gl_ClipDistance[0] actually lands —
+// see the long note in block_vk.vert.
+out gl_PerVertex {
+    vec4  gl_Position;
+    float gl_PointSize;
+    float gl_ClipDistance[1];
+};
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vNoiseUV;
+layout(location = 2) out vec3 vWorldPos;   // for the fog overlay (uOutlineMode 3)
 
 void main() {
     vec3 pos = vec3(aPos.x * uPulse, aPos.y * uPulse, aPos.z);
     gl_Position = uMVP * vec4(pos, 1.0);
+    vWorldPos = (c.uModel_ * vec4(pos, 1.0)).xyz;
+    gl_ClipDistance[0] = (any(notEqual(uPortalClipPlane.xyz, vec3(0.0))))
+        ? dot(uPortalClipPlane.xyz, vWorldPos) + uPortalClipPlane.w
+        : 1.0;
 
     const float kOuterBorder = 0.075;
     vUV = aUV * (1.0 + kOuterBorder) - vec2(kOuterBorder * 0.5);

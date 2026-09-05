@@ -397,6 +397,7 @@ namespace Game {
             // bounce on the spot every tick. That is what a sheep in a savanna
             // was doing — short_dry_grass is ground cover there.
             "short_dry_grass", "tall_dry_grass",
+            "red_shrub",                // 26.3 BushBlock, .noCollision()
             "_pressure_plate",          // MC pressurePlateProperties() is .noCollision()
             "blue_orchid",              // a flower whose name has no "_flower"
             "small_dripleaf", "big_dripleaf_stem", "mangrove_propagule",
@@ -420,6 +421,7 @@ namespace Game {
             "poppy", "wither_rose", "torchflower", "open_eyeblossom",
             "closed_eyeblossom", "pitcher_plant",
             "short_grass", "tall_grass", "fern", "large_fern", "dead_bush",
+            "red_shrub",                // 26.3 BushBlock — same rule as dead_bush
             "leaf_litter", "wildflowers", "pink_petals",
             "warped_roots", "crimson_roots", "warped_fungus", "crimson_fungus",
             "sugar_cane",

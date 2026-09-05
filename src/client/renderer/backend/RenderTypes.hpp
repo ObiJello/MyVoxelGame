@@ -68,6 +68,9 @@ namespace Render {
         // the memory of 32F, full HDR range).
         RGBA16F,
         RGBA32F,
+        // 16-bit unorm per channel. Buffer textures only today: the terrain
+        // face map reads one 8-byte record per texelFetch.
+        RGBA16,
         R11G11B10F
     };
 
@@ -307,22 +310,24 @@ namespace Render {
     }
 
     // ========================================================================
-    // TERRAIN VERTEX LAYOUT (32 bytes per vertex)
+    // TERRAIN VERTEX LAYOUT (16 bytes per vertex)
     // ========================================================================
 
-    // Chunk-TERRAIN layout: the block layout plus the greedy-meshing sprite
-    // tile rect (see Render::TerrainVertex in core/Vertex.hpp). Kept separate
-    // from GetBlockVertexLayout on purpose — a dozen non-terrain renderers
-    // (entities, block entities, portals, GUI) build 24-byte buffers against
-    // the block layout and must stay untouched.
+    // Chunk-TERRAIN layout: the packed 16-byte TerrainVertex (see
+    // core/Vertex.hpp). Kept separate from GetBlockVertexLayout on purpose —
+    // a dozen non-terrain renderers (entities, block entities, portals, GUI)
+    // build 24-byte buffers against the block layout and must stay untouched.
+    //
+    // Every attribute is normalized: the shader turns the unorm floats back
+    // into integers (value * 65535, exact in fp32), so neither backend needs
+    // an integer attribute path.
     inline VertexLayout GetTerrainVertexLayout() {
         VertexLayout layout;
-        layout.stride = 32;
+        layout.stride = 16;
         layout.attributes = {
-            {0, 3, 0, false, AttribType::Float},   // Position: 3 floats at offset 0
-            {1, 2, 12, false, AttribType::Float},  // UV (atlas or tile space): 2 floats at offset 12
-            {2, 4, 20, true, AttribType::UByte},   // Color: 4 ubytes normalized at offset 20
-            {3, 4, 24, true, AttribType::UShort},  // Tile rect: origin.xy + size.zw, 4 unorm16 at offset 24
+            {0, 4, 0,  true, AttribType::UShort},  // px py pz slot: 4 unorm16 at offset 0
+            {1, 2, 8,  true, AttribType::UShort},  // u v (atlas uv, or tile corner + sprite id): 2 unorm16 at offset 8
+            {2, 4, 12, true, AttribType::UByte},   // Color: 4 ubytes normalized at offset 12
         };
         return layout;
     }

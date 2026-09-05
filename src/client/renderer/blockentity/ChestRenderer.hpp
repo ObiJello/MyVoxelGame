@@ -49,6 +49,7 @@ namespace Render {
         BufferHandle  m_vb[kVariantCount]   = {INVALID_BUFFER, INVALID_BUFFER, INVALID_BUFFER};
         BufferHandle  m_ib[kVariantCount]   = {INVALID_BUFFER, INVALID_BUFFER, INVALID_BUFFER};
         std::unordered_map<std::string, TextureHandle> m_textureCache;
+        int m_textureCacheGeneration = -1;   // Resources::CacheStale
 
         bool          m_geomBuilt    = false;
         uint32_t      m_indexCount[kVariantCount] = {0, 0, 0};

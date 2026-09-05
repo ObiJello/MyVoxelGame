@@ -1,0 +1,9 @@
+{
+    "pack": {
+        "description": "Dramatic Skys Demo/Alpha 1.5.3.36.5 by thebaum64",
+        "pack_format": 15,
+	"min_format": [15, 0],
+        "max_format": [1000, 0],
+        "supported_formats": [15, 1000]
+    }
+}

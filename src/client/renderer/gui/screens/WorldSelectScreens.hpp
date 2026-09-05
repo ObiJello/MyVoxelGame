@@ -94,6 +94,9 @@ namespace Render {
         // stars drawn on top. Editable in-game via Options → World Settings.
         std::string skybox     = "vanilla";
         int         skyboxMode = 2;
+        // Per-world baby look: "new" (MC 26.1 remodel) or "classic". Visual
+        // only; editable in-game via Options → World Settings.
+        std::string babyModels = "new";
     };
 
     namespace WorldList {

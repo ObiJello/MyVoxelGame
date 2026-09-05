@@ -1,5 +1,6 @@
 // File: src/common/world/block/BlockStateModels.cpp
 #include "BlockStateModels.hpp"
+#include "common/core/AssetLocator.hpp"
 #include "BlockRegistry.hpp"
 #include "BlockModel.hpp"
 #include "../../core/Log.hpp"
@@ -250,17 +251,16 @@ namespace Game {
         size_t filesRead = 0, blocksMatched = 0, rotatedModels = 0;
         size_t mergedModels = 0, multipartBlocks = 0, multipartUnjudgeable = 0;
 
-        for (const auto& entry : std::filesystem::directory_iterator(blockstatesPath)) {
-            if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
-
-            const std::string blockName = entry.path().stem().string();
+        // Vanilla blockstates with the enabled resource packs overlaid.
+        for (const Core::Assets::Entry& entry : Core::Assets::ListFiles(blockstatesPath, ".json", false)) {
+            const std::string blockName = std::filesystem::path(entry.relative).stem().string();
             auto targetsIt = fileTargets.find(blockName);
             if (targetsIt == fileTargets.end()) continue;   // block we don't implement
             filesRead++;
 
             json j;
             try {
-                std::ifstream f(entry.path());
+                std::ifstream f(entry.absolute);
                 if (!f.is_open()) continue;
                 f >> j;
             } catch (const std::exception& e) {

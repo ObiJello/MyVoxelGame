@@ -50,12 +50,16 @@ namespace Render {
         // further would promise more than the wire delivers.
         void SetRenderDistanceChunks(int chunks, float entityDistanceScaling = 1.0f);
 
-    private:
-        // The geometry for ONE block state. Called once per distinct state per
-        // frame, not once per entity — a thousand primed TNT share one mesh.
+        // The geometry for ONE block state, in the unit block cell with atlas
+        // UVs. Called once per distinct state per frame here, not once per
+        // entity — a thousand primed TNT share one mesh. Public for the mob
+        // renderer: a sulfur cube draws its swallowed block through this
+        // under its own pose (MC SulfurCubeInnerLayer's block submit).
         static void BuildStateMesh(Game::BlockState state,
                                    std::vector<ItemCubeVert>& verts,
                                    std::vector<uint32_t>& idx);
+
+    private:
 
         bool m_initialized = false;
 

@@ -244,6 +244,11 @@ namespace Server {
         Game::Entity*       ResolveEntity(const Game::Uuid& uuid) const override;
         Game::LivingEntity* ResolvePlayer(const Game::Uuid& uuid) const override;
         uint32_t GetHeldItemId(const Game::LivingEntity& player) const override;
+        void GetItemEntitiesInBox(const Game::AABBd& box,
+                                  std::vector<NearbyItemEntity>& out) const override;
+        int  TakeFromItemEntity(int32_t id, int count) override;
+        void CreateFilledResult(Game::LivingEntity& player, Game::ItemStack& held,
+                                const Game::ItemStack& filled) override;
 
         void BroadcastEntityEvent(const Game::Entity& entity, uint8_t event) override;
 

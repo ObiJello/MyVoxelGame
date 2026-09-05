@@ -21,6 +21,7 @@
 #include "common/core/Features.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../IntegratedServer.hpp"
+#include "../level/ServerLevel.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
 #include <cctype>
@@ -263,7 +264,16 @@ namespace Server {
             }
         }
 
-        rule->set(*world, serialized);
+        // Gamerules are server-wide in MC (one GameRules on the server that
+        // every level reads); each level's World here keeps its own copy, so
+        // all of them are written.
+        g_integratedServer->ForEachLevel([&](ServerLevel& level) {
+            if (level.World()) rule->set(*level.World(), serialized);
+        });
+        // level.dat is what carries the rule to the next session. MC rewrites
+        // it on the autosave; doing it now as well means a crash between
+        // autosaves cannot lose the change.
+        g_integratedServer->WriteLevelDat();
 
         // Time-related rules affect client prediction — resync immediately.
         if (std::string(rule->id) == "advance_time") {

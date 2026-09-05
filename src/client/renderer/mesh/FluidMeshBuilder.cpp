@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/FluidMeshBuilder.cpp
 #include "FluidMeshBuilder.hpp"
+#include "MeshCensus.hpp"
 #include "Mesher.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "common/core/Log.hpp"
@@ -78,10 +79,11 @@ namespace Render {
             // bit-identical to the non-greedy build.
             struct PendingQuad {
                 std::array<Vertex, 4> verts;
-                glm::vec4 uvRect;    // full still-sprite rect in atlas UV
+                uint16_t  spriteId;  // still sprite's row in the atlas sprite table
                 uint32_t  color;     // shared corner color (tint * shade, all four equal)
                 float     y;         // the quad's world-space Y (all four corners equal)
                 bool      translucent; // routing: water -> translucent, lava -> opaque
+                Game::BlockID fluidType; // census only
             };
 
             // [kind][plane(local y)][z][x]: index+1 into t_pending, 0 = empty.
@@ -164,7 +166,7 @@ namespace Render {
 
     bool FluidMeshBuilder::TryStashGreedyFluidQuad(int kind, Game::BlockID fluidType,
                                                    const std::vector<Vertex>& verts,
-                                                   const glm::vec4& uvRect,
+                                                   uint16_t spriteId,
                                                    int worldX, int worldY, int worldZ) {
         if (!m_greedyEnabled || verts.size() != 4) return false;
 
@@ -194,8 +196,8 @@ namespace Render {
         if (cell != 0) return false;  // one fluid quad per cell per kind; defensive
 
         FluidGreedy::t_pending.push_back({{verts[0], verts[1], verts[2], verts[3]},
-                                          uvRect, color, verts[0].pos.y,
-                                          IsTranslucentFluid(fluidType)});
+                                          spriteId, color, verts[0].pos.y,
+                                          IsTranslucentFluid(fluidType), fluidType});
         cell = static_cast<int32_t>(FluidGreedy::t_pending.size());
         if (!FluidGreedy::t_planeTouched[kind][ly]) {
             FluidGreedy::t_planeTouched[kind][ly] = true;
@@ -230,15 +232,17 @@ namespace Render {
             // Same 16-bit cap policy as GenerateQuad / EmitFluidQuad.
             if (outVerts.size() + 4 > 65536) return;
 
-            const float x0 = static_cast<float>(m_greedyBaseX + u0);
-            const float x1 = static_cast<float>(m_greedyBaseX + u0 + w);
-            const float z0 = static_cast<float>(m_greedyBaseZ + v0);
-            const float z1 = static_cast<float>(m_greedyBaseZ + v0 + h);
+            // Section-relative, as TerrainVertex stores it: integer grid
+            // corners in x/z, the quad's own height in y.
+            const float x0 = static_cast<float>(u0);
+            const float x1 = static_cast<float>(u0 + w);
+            const float z0 = static_cast<float>(v0);
+            const float z1 = static_cast<float>(v0 + h);
             const float tu0 = static_cast<float>(u0);
             const float tu1 = static_cast<float>(u0 + w);
             const float tv0 = static_cast<float>(v0);
             const float tv1 = static_cast<float>(v0 + h);
-            const float y = q.y;
+            const float y = q.y - static_cast<float>(m_greedyBaseY);
 
             // Winding per kind, matching the single-quad emitters corner by
             // corner (a 1x1 plate here is vertex-identical to the original
@@ -270,28 +274,17 @@ namespace Render {
                     break;
             }
 
-            // Sprite tile rect, unorm16-quantized exactly as the terrain
-            // emitMerged does (~0.03 texel worst case in a 4096px atlas).
-            const uint16_t originU = TerrainVertex::EncodeUnorm16(q.uvRect.x);
-            const uint16_t originV = TerrainVertex::EncodeUnorm16(q.uvRect.y);
-            const uint16_t sizeU   = TerrainVertex::EncodeUnorm16(q.uvRect.z - q.uvRect.x);
-            const uint16_t sizeV   = TerrainVertex::EncodeUnorm16(q.uvRect.w - q.uvRect.y);
-
             const uint32_t quadColor =
                 debugColors ? Mesher::GreedyDebugHeatColor(w * h) : q.color;
 
             const uint16_t base = static_cast<uint16_t>(outVerts.size());
             for (int k = 0; k < 4; ++k) {
-                TerrainVertex tv;
-                tv.pos = pos[k];
-                tv.uv = uv[k];
-                tv.packedColor = quadColor;
-                tv.tileOriginU = originU;
-                tv.tileOriginV = originV;
-                tv.tileSizeU = sizeU;
-                tv.tileSizeV = sizeV;
-                outVerts.push_back(tv);
+                outVerts.push_back(TerrainVertex::Tiled(pos[k],
+                                                        static_cast<int>(uv[k].x), static_cast<int>(uv[k].y),
+                                                        q.spriteId, quadColor));
             }
+            MeshCensus::Count(q.fluidType, q.translucent ? 2 : 0, true, static_cast<uint32_t>(w * h));
+            if (!q.translucent) mesh.opaqueFacing.push_back(QuadFacing(pos[0], pos[1], pos[2]));
             outIdxs.insert(outIdxs.end(), {
                 static_cast<uint16_t>(base + 0), static_cast<uint16_t>(base + 1),
                 static_cast<uint16_t>(base + 2),
@@ -312,11 +305,14 @@ namespace Render {
                 q.translucent ? mesh.translucentIdxs : mesh.opaqueIdxs;
             if (outVerts.size() + 4 > 65536) return;
             const uint16_t base = static_cast<uint16_t>(outVerts.size());
+            const glm::ivec3 origin(m_greedyBaseX, m_greedyBaseY, m_greedyBaseZ);
             for (int k = 0; k < 4; ++k) {
-                TerrainVertex tv(q.verts[static_cast<size_t>(k)]);
+                TerrainVertex tv = TerrainVertex::FromWorld(q.verts[static_cast<size_t>(k)], origin);
                 if (debugColors) tv.packedColor = Mesher::GreedyDebugHeatColor(1);
                 outVerts.push_back(tv);
             }
+            MeshCensus::Count(q.fluidType, q.translucent ? 2 : 0, false);
+            if (!q.translucent) mesh.opaqueFacing.push_back(QuadFacing(q.verts[0].pos, q.verts[1].pos, q.verts[2].pos));
             outIdxs.insert(outIdxs.end(), {
                 static_cast<uint16_t>(base + 0), static_cast<uint16_t>(base + 1),
                 static_cast<uint16_t>(base + 2),
@@ -342,7 +338,7 @@ namespace Render {
                     auto matches = [&](int32_t other) {
                         if (other == 0) return false;
                         const PendingQuad& o = FluidGreedy::t_pending[other - 1];
-                        return o.color == q.color && o.uvRect == q.uvRect &&
+                        return o.color == q.color && o.spriteId == q.spriteId &&
                                o.y == q.y && o.translucent == q.translucent;
                     };
 
@@ -407,9 +403,10 @@ namespace Render {
         if (verts.size() != 4) return false;
 
         const bool translucent = IsTranslucentFluid(fluidType);
-        // Terrain buffers hold 32-byte TerrainVertex; the fluid builder's
-        // 24-byte Vertex quads convert on insert (tile rect = 0, i.e. plain
-        // atlas sampling). Only flat full-cell STILL tops/bottoms are greedy-
+        // Terrain buffers hold the 16-byte TerrainVertex; the fluid builder's
+        // 24-byte world-space Vertex quads are encoded relative to the section
+        // origin on insert (untiled, i.e. plain atlas sampling). Only flat
+        // full-cell STILL tops/bottoms are greedy-
         // merged, and those are stashed before reaching here (see
         // BeginGreedySection / FlushGreedyFluidQuads); everything on this
         // direct path — side faces, and any surface whose corner heights
@@ -421,7 +418,14 @@ namespace Render {
         if (outVerts.size() + 4 > 65536) return false;
 
         const uint16_t base = static_cast<uint16_t>(outVerts.size());
-        outVerts.insert(outVerts.end(), verts.begin(), verts.end());
+        // m_greedyBase* is the section origin: the Mesher sets it through
+        // BeginGreedySection for every section, merging on or off.
+        const glm::ivec3 origin(m_greedyBaseX, m_greedyBaseY, m_greedyBaseZ);
+        for (const Vertex& v : verts) {
+            outVerts.push_back(TerrainVertex::FromWorld(v, origin));
+        }
+        MeshCensus::Count(fluidType, translucent ? 2 : 0, false);
+        if (!translucent) mesh.opaqueFacing.push_back(QuadFacing(verts[0].pos, verts[1].pos, verts[2].pos));
 
         // Debug view: a fluid quad on this path never entered a merge grid —
         // it is rule-ineligible (or merging is off), so it takes the same dim
@@ -571,7 +575,8 @@ namespace Render {
         std::string texturePath = GetFluidTextureForFace(fluidType, BlockFace::PositiveY);
 
         glm::vec4 uvRect;
-        if (!GetFluidTextureUV(texturePath, uvRect)) {
+        uint16_t spriteId = 0;
+        if (!GetFluidTextureUV(texturePath, uvRect, &spriteId)) {
             Log::Warning("Failed to get fluid texture UV for: %s", texturePath.c_str());
             return;
         }
@@ -604,11 +609,11 @@ namespace Render {
         // plane family by the same rules.
         if (m_greedyEnabled && IsCanonicalStillTopQuad(surfaceVerts, blockPos, uvRect) &&
             TryStashGreedyFluidQuad(FluidGreedy::kKindTopUp, fluidType, surfaceVerts,
-                                    uvRect, worldX, worldY, worldZ)) {
+                                    spriteId, worldX, worldY, worldZ)) {
             if (backwardUpFace) {
                 const std::vector<Vertex> backVerts(surfaceVerts.rbegin(), surfaceVerts.rend());
                 if (!TryStashGreedyFluidQuad(FluidGreedy::kKindTopDown, fluidType, backVerts,
-                                             uvRect, worldX, worldY, worldZ)) {
+                                             spriteId, worldX, worldY, worldZ)) {
                     EmitFluidQuad(fluidType, backVerts, mesh);
                 }
             }
@@ -725,7 +730,8 @@ namespace Render {
 
         std::string texturePath = GetFluidTextureForFace(fluidType, BlockFace::NegativeY);
         glm::vec4 uvRect;
-        if (!GetFluidTextureUV(texturePath, uvRect)) {
+        uint16_t bottomSpriteId = 0;
+        if (!GetFluidTextureUV(texturePath, uvRect, &bottomSpriteId)) {
             Log::Warning("Failed to get fluid texture UV for bottom face: %s", texturePath.c_str());
             return;
         }
@@ -745,7 +751,7 @@ namespace Render {
         // rules as the top surface — its own plane family, its own winding.
         if (m_greedyEnabled && IsCanonicalStillBottomQuad(faceVerts, blockPos, uvRect) &&
             TryStashGreedyFluidQuad(FluidGreedy::kKindBottom, fluidType, faceVerts,
-                                    uvRect, worldX, worldY, worldZ)) {
+                                    bottomSpriteId, worldX, worldY, worldZ)) {
             return;
         }
         EmitFluidQuad(fluidType, faceVerts, mesh);
@@ -997,12 +1003,14 @@ namespace Render {
         return vertices;
     }
 
-    bool FluidMeshBuilder::GetFluidTextureUV(const std::string& texturePath, glm::vec4& uvRect) {
+    bool FluidMeshBuilder::GetFluidTextureUV(const std::string& texturePath, glm::vec4& uvRect,
+                                             uint16_t* spriteId) {
         if (g_atlasBuilder) {
             AtlasUVRect atlasUV;
             if (g_atlasBuilder->GetUVRect(texturePath, atlasUV)) {
                 uvRect = glm::vec4(atlasUV.uvMin.x, atlasUV.uvMin.y,
                                   atlasUV.uvMax.x, atlasUV.uvMax.y);
+                if (spriteId) *spriteId = atlasUV.spriteId;
                 return true;
             } else {
                 Log::Warning("Failed to find texture '%s' in atlas", texturePath.c_str());

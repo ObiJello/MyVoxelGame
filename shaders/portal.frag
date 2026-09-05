@@ -51,9 +51,31 @@ uniform float uFlashIntensity;
 uniform float uOpenAmount;
 uniform float uStaticAmount;
 
+// 3 = FOG OVERLAY (immersive portals): the surface is a window, and a
+//     window at a distance is fogged like the wall around it. Outputs
+//     the near world's fog colour with the terrain shader's fog value
+//     (shaders/block.frag) as alpha, blended over the far view.
+uniform vec4 uFogColor;       // rgb = fog colour, a = strength
+uniform vec4 uFogEnv;         // (envStart, envEnd, rdStart, rdEnd); 1e9 = off
+uniform vec3 uCameraPos;      // the NEAR view's eye
+
 in  vec2 vUV;
 in  vec4 vNoiseUV;            // dual scrolling UVs from VS
+in  vec3 vWorldPos;
 out vec4 FragColor;
+
+float fogLinearstep(float d, float s, float e) {
+    return clamp((d - s) / max(e - s, 1e-3), 0.0, 1.0);
+}
+// Same shape as block.frag: environmental fog on the spherical distance,
+// render-distance fog on the cylindrical one, the larger wins.
+float surfaceFogValue() {
+    vec3 delta = vWorldPos - uCameraPos;
+    float sph = length(delta);
+    float cyl = max(length(delta.xz), abs(delta.y));
+    return max(fogLinearstep(sph, uFogEnv.x, uFogEnv.y),
+               fogLinearstep(cyl, uFogEnv.z, uFogEnv.w));
+}
 
 // linearstep — Valve's clamp((v-a)/(b-a), 0, 1). GLSL's smoothstep adds
 // a cubic ease which we don't want here; linearstep stays linear.
@@ -386,6 +408,11 @@ void main() {
         gl_FragDepth = 1.0;
     } else {
         gl_FragDepth = gl_FragCoord.z;
+    }
+
+    if (uOutlineMode > 2.5) {
+        FragColor = vec4(uFogColor.rgb, surfaceFogValue() * uFogColor.a);
+        return;
     }
 
     // Texture-driven path (Portal-extracted mask + ramp) preferred.

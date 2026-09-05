@@ -769,6 +769,11 @@ namespace Client {
                 return std::make_unique<InventorySetCarriedS2CPacketImpl>(data);
             }
 
+            case PacketId::SetHeldSlotS2C: {
+                auto data = Serialization::DeserializeSetHeldSlotS2C(payload);
+                return std::make_unique<SetHeldSlotS2CPacketImpl>(data);
+            }
+
             case PacketId::ContainerSetDataS2C: {
                 auto data = Serialization::DeserializeContainerSetDataS2C(payload);
                 return std::make_unique<ContainerSetDataS2CPacketImpl>(std::move(data));

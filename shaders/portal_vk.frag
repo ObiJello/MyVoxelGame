@@ -29,6 +29,11 @@ layout(std140, set = 1, binding = 0) uniform Common {
     vec4  uScalarsD_;       // (uHasSprite, uUseSkin, uUseTextures, _pad)
     vec2  uScreenSize_;
     vec2  _pad_;
+    // The environment block VKBackend::CommonUBO appends (see its layout
+    // comment): the fog overlay mode reads it.
+    vec4  uFogColor_;       // 304 — rgb = fog colour, w = strength
+    vec4  uFogEnv_;         // 320 — (envStart, envEnd, rdStart, rdEnd); 1e9 = off
+    vec4  uCamPosBright_;   // 336 — xyz = uCameraPos, w = uSkyBrightness
 } U;
 
 #define uPortalColor    U.uPortalColor_.rgb
@@ -46,6 +51,26 @@ layout(std140, set = 1, binding = 0) uniform Common {
 #define uOutlineMode    U.uScalarsB_.z
 #define uFlashIntensity U.uScalarsB_.w
 #define uUseTextures    U.uScalarsD_.z
+#define uFogColor       U.uFogColor_
+#define uFogEnv         U.uFogEnv_
+#define uCameraPos      U.uCamPosBright_.xyz
+
+layout(location = 2) in vec3 vWorldPos;
+
+// uOutlineMode 3 — FOG OVERLAY (immersive portals): the surface is a
+// window, and a window at a distance is fogged like the wall around it.
+// Same fog shape as block.frag: spherical for the environment, cylindrical
+// for the render distance, the larger wins.
+float fogLinearstep(float d, float s, float e) {
+    return clamp((d - s) / max(e - s, 1e-3), 0.0, 1.0);
+}
+float surfaceFogValue() {
+    vec3 delta = vWorldPos - uCameraPos;
+    float sph = length(delta);
+    float cyl = max(length(delta.xz), abs(delta.y));
+    return max(fogLinearstep(sph, uFogEnv.x, uFogEnv.y),
+               fogLinearstep(cyl, uFogEnv.z, uFogEnv.w));
+}
 
 layout(location = 0) in vec2 vUV;
 layout(location = 1) in vec4 vNoiseUV;
@@ -227,6 +252,10 @@ void main() {
         gl_FragDepth = gl_FragCoord.z;
     }
     // Match portal.frag exactly so OpenGL and Vulkan are pixel-identical.
+    if (uOutlineMode > 2.5) {
+        FragColor = vec4(uFogColor.rgb, surfaceFogValue() * uFogColor.a);
+        return;
+    }
     if (uOutlineMode > 1.5) {
         FragColor = (uUseTextures > 0.5) ? PortalRefract(false) : PortalFlame(false);
     } else if (uOutlineMode > 0.5) {

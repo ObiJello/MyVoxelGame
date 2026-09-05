@@ -1,4 +1,5 @@
 // File: src/client/renderer/blockentity/ShulkerBoxRenderer.cpp
+#include "client/resource/ResourcePacks.hpp"
 #include "ShulkerBoxRenderer.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
@@ -251,6 +252,11 @@ void main() {
     }
 
     TextureHandle ShulkerBoxRenderer::LoadColourTexture(const std::string& stem) {
+        if (Resources::CacheStale(m_textureCacheGeneration)) {
+            // A resource pack change replaces every texture here.
+            if (g_renderBackend) for (auto& [key, tex] : m_textureCache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+            m_textureCache.clear();
+        }
         auto it = m_textureCache.find(stem);
         if (it != m_textureCache.end()) return it->second;
 

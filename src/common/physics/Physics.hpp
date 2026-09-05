@@ -235,6 +235,15 @@ namespace Game {
     // consulted for cells that would otherwise be walked through.
     using PortalExtraSolidFn = bool(*)(int x, int y, int z, const AABB& playerAABB);
     void SetPortalExtraSolidFn(PortalExtraSolidFn fn);
+    // Is any portal close enough to the local player for the extra-solid
+    // hook to have something to say? The box collision test has an
+    // "all-air region" early-out that answers before any cell is visited —
+    // and the cells the hook makes solid ARE all air on this side (the
+    // void under the world's floor, the space beyond a wrap border), so
+    // with a portal engaged the early-out must be skipped. Set once per
+    // frame by whoever refreshes the hook's portal list.
+    void SetPortalCollisionActive(bool active);
+    bool PortalCollisionActive();
 
     // **UPDATED**: Main physics update function now takes PhysicsContext
     void UpdatePlayerPhysics(PlayerPhysics& physics,

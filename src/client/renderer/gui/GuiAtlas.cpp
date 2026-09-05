@@ -1,5 +1,6 @@
 // File: src/client/renderer/gui/GuiAtlas.cpp
 #include "GuiAtlas.hpp"
+#include "common/core/AssetLocator.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include <filesystem>
@@ -78,22 +79,13 @@ namespace Render {
 
     void GuiAtlas::CollectSprites(const std::string& rootDir, const std::string& prefix,
                                   std::vector<RawSprite>& outSprites) {
-        for (const auto& entry : fs::recursive_directory_iterator(rootDir)) {
-            if (!entry.is_regular_file()) continue;
-
-            std::string ext = entry.path().extension().string();
-            if (ext != ".png") continue;
-
-            // Skip .mcmeta files (they're parsed alongside their PNG)
-            std::string filename = entry.path().filename().string();
-            if (filename.find(".mcmeta") != std::string::npos) continue;
-
-            // Convert path to sprite ID: remove root dir prefix and .png extension
-            std::string relativePath = fs::relative(entry.path(), rootDir).string();
-            // Remove .png extension
-            std::string spriteId = relativePath.substr(0, relativePath.length() - 4);
-            // Normalize path separators to forward slash
-            std::replace(spriteId.begin(), spriteId.end(), '\\', '/');
+        (void)prefix;
+        // The vanilla sprites directory with every enabled resource pack
+        // overlaid (Core::Assets): one entry per sprite id, the highest
+        // pack's file.
+        for (const Core::Assets::Entry& entry : Core::Assets::ListFiles(rootDir, ".png", true)) {
+            // Sprite id: the path below the root without .png.
+            std::string spriteId = entry.relative.substr(0, entry.relative.length() - 4);
 
             // Load PNG — do NOT flip vertically for GUI sprites.
             // The ortho projection has Y top-to-bottom, so textures are loaded as-is.
@@ -101,10 +93,9 @@ namespace Render {
             stbi_set_flip_vertically_on_load(0);
 
             int width = 0, height = 0, channels = 0;
-            unsigned char* pixels = stbi_load(entry.path().string().c_str(),
-                                              &width, &height, &channels, STBI_rgb_alpha);
+            unsigned char* pixels = stbi_load(entry.absolute.c_str(), &width, &height, &channels, STBI_rgb_alpha);
             if (!pixels) {
-                Log::Warning("[GuiAtlas] Failed to load sprite: %s", entry.path().string().c_str());
+                Log::Warning("[GuiAtlas] Failed to load sprite: %s", entry.absolute.c_str());
                 continue;
             }
 
@@ -114,9 +105,11 @@ namespace Render {
             sprite.width = width;
             sprite.height = height;
 
-            // Check for .mcmeta file
-            std::string mcmetaPath = entry.path().string() + ".mcmeta";
-            if (fs::exists(mcmetaPath)) {
+            // The .mcmeta comes from the pack that supplied the sprite or a
+            // higher one, never a lower one (MC's metadata lookup rule).
+            const std::string mcmetaPath = Core::Assets::LocateFromLayer(
+                (fs::path(rootDir) / (entry.relative + ".mcmeta")).string(), entry.layer);
+            if (!mcmetaPath.empty()) {
                 ParseMcMeta(mcmetaPath, sprite);
             }
 

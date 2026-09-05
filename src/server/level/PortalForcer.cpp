@@ -136,8 +136,24 @@ namespace Server {
         }
 
         // PortalForcer.java:52
+        namespace {
+            std::optional<Game::FoundRectangle> PlaceOrFindPortal(
+                ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis, bool build);
+        }
+
         std::optional<Game::FoundRectangle> CreatePortal(
-            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis)
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis) {
+            return PlaceOrFindPortal(level, origin, portalAxis, /*build=*/true);
+        }
+
+        std::optional<Game::FoundRectangle> FindPortalPlacement(
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis) {
+            return PlaceOrFindPortal(level, origin, portalAxis, /*build=*/false);
+        }
+
+        namespace {
+        std::optional<Game::FoundRectangle> PlaceOrFindPortal(
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis, bool build)
         {
             Game::World& world = *level.World();
             const Game::Direction direction = PositiveOn(portalAxis);
@@ -239,6 +255,7 @@ namespace Server {
                     origin.x - Game::StepX(direction),
                     std::clamp(origin.y, minStartY, maxStartY),
                     origin.z - Game::StepZ(direction));
+                if (!build) return Game::FoundRectangle{ closestFullPosition, 2, 3 };
 
                 const Game::Direction clockWise = Game::ClockWise(direction);
                 for (int box = kFrameBoxStart; box < kFrameBoxEnd; ++box) {
@@ -259,6 +276,8 @@ namespace Server {
                     }
                 }
             }
+
+            if (!build) return Game::FoundRectangle{ closestFullPosition, 2, 3 };
 
             // The frame. Only the RING — MC's `width == -1 || width == 2 ||
             // height == -1 || height == 3` — one block thick, in the portal
@@ -311,6 +330,7 @@ namespace Server {
 
             return Game::FoundRectangle{ closestFullPosition, 2, 3 };
         }
+        } // namespace
 
     } // namespace PortalForcer
 } // namespace Server

@@ -7,11 +7,16 @@
 #include "../../../world/ClientChunkManager.hpp"
 #include <GLFW/glfw3.h>
 #include "PanoramaRenderer.hpp"
+#include "SkyboxSelectScreen.hpp"
+#include "PackSelectionScreen.hpp"
 #include "WorldSelectScreens.hpp"
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
 #include "../../environment/SkyRenderer.hpp"
+#include "../../entity/MobRenderer.hpp"
 #include "platform/GameDirectory.hpp"
+#include "server/world/storage/anvil/WorldFolder.hpp"
+#include "server/world/storage/anvil/WorldSidecar.hpp"
 #include "common/core/HardwareProfile.hpp"
 #include "common/core/Log.hpp"
 #include <algorithm>
@@ -104,7 +109,7 @@ namespace Render {
             {"Controls...",               [] { return std::make_unique<ControlsScreen>(); },           nullptr},
             {"Language...",               [] { return std::make_unique<LanguageSelectScreen>(); },     nullptr},
             {"Chat Settings...",          [] { return std::make_unique<ChatOptionsScreen>(); },        nullptr},
-            {"Resource Packs...",         nullptr,                                                     "Not available."},
+            {"Resource Packs...",         [] { return std::make_unique<PackSelectionScreen>(); },      nullptr},
             {"Accessibility Settings...", [] { return std::make_unique<AccessibilityOptionsScreen>(); }, nullptr},
             {"Telemetry Data...",         nullptr,                                                     "Telemetry is not collected."},
             {"Credits & Attribution...",  [] { return std::make_unique<CreditsScreen>(); },            nullptr},
@@ -446,6 +451,17 @@ namespace Render {
             m_list->AddSmall(mipmaps, entityDist);
         }
 
+        {
+            // The Immersive Portals mod's option of the same name.
+            auto* reducedPortals = OnOff("Reduced Portals", s.GetReducedPortalRendering(),
+                                         [](bool on) { Settings().SetReducedPortalRendering(on); });
+            reducedPortals->SetTooltip({"ON: see-through portals are drawn",
+                                        "only within 16 blocks, and the",
+                                        "world seen through one at a third",
+                                        "of the render distance."});
+            m_list->AddSmall(reducedPortals, nullptr);
+        }
+
         m_list->AddSmall(
             Cycle("Chunk Builder", {"Threaded", "Semi Blocking", "Fully Blocking"},
                   [&s] { int p = s.GetPrioritizeChunkUpdates(); return (p >= 0 && p <= 2) ? p : 0; }(),
@@ -498,14 +514,22 @@ namespace Render {
     }
 
     namespace {
-        // Write the active world's sky choice back to worlds.json (no-op for
-        // multiplayer sessions / worlds not tracked there).
+        // Write the active world's sky choice back to where the next launch
+        // reads it (no-op for multiplayer sessions and imported saves).
+        //
+        // Two homes, because the Select World screen lists a world with a
+        // folder from that folder's data/obeycraft.json and only a world
+        // without one from worlds.json: writing worlds.json alone — which is
+        // all this did — kept the choice for exactly one session, after
+        // which the sidecar written at creation put the old sky back.
         void PersistWorldSky(const std::string& skybox, int mode) {
             if (!WorldSettingsContext::CanPersist()) return;
+            const std::string& worldName = WorldSettingsContext::WorldName();
+
             auto worlds = WorldList::Load();
             bool found = false;
             for (auto& entry : worlds) {
-                if (entry.name == WorldSettingsContext::WorldName()) {
+                if (entry.name == worldName) {
                     entry.skybox = skybox;
                     entry.skyboxMode = mode;
                     found = true;
@@ -513,6 +537,23 @@ namespace Render {
                 }
             }
             if (found) WorldList::Save(worlds);
+
+            // The world folder is saves/<sanitised name>, the same rule the
+            // session used to open it.
+            std::string reason;
+            if (auto root = Game::Anvil::RootForWorldName(worldName, reason)) {
+                if (Game::Anvil::LooksLikeWorld(*root)) {
+                    const std::string dir = root->Root().string();
+                    Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(dir);
+                    if (sidecar.skybox != skybox || sidecar.skyboxMode != mode) {
+                        sidecar.skybox     = skybox;
+                        sidecar.skyboxMode = mode;
+                        if (!Game::Anvil::WriteWorldSidecar(dir, sidecar)) {
+                            Log::Warning("Could not save the skybox choice for '%s'", worldName.c_str());
+                        }
+                    }
+                }
+            }
         }
 
         void ApplyWorldSky(const std::string& skybox, int mode) {
@@ -521,7 +562,45 @@ namespace Render {
             // persist what actually stuck.
             PersistWorldSky(g_skyRenderer.CurrentSkybox(), mode);
         }
+
+        // The Baby Models look: applied to the renderer now and written to
+        // the same two homes as the sky (worlds.json + the world sidecar).
+        void ApplyWorldBabyModels(BabyModelLook look) {
+            SetBabyModelLook(look);
+            if (!WorldSettingsContext::CanPersist()) return;
+            const std::string value = look == BabyModelLook::Classic ? "classic" : "new";
+            const std::string& worldName = WorldSettingsContext::WorldName();
+
+            auto worlds = WorldList::Load();
+            bool found = false;
+            for (auto& entry : worlds) {
+                if (entry.name == worldName) {
+                    entry.babyModels = value;
+                    found = true;
+                    break;
+                }
+            }
+            if (found) WorldList::Save(worlds);
+
+            std::string reason;
+            if (auto root = Game::Anvil::RootForWorldName(worldName, reason)) {
+                if (Game::Anvil::LooksLikeWorld(*root)) {
+                    const std::string dir = root->Root().string();
+                    Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(dir);
+                    if (sidecar.babyModels != value) {
+                        sidecar.babyModels = value;
+                        if (!Game::Anvil::WriteWorldSidecar(dir, sidecar)) {
+                            Log::Warning("Could not save the baby-model choice for '%s'", worldName.c_str());
+                        }
+                    }
+                }
+            }
+        }
     } // namespace
+
+    void ApplyWorldSkySelection(const std::string& skybox, int mode) {
+        ApplyWorldSky(skybox, mode);
+    }
 
     void WorldSettingsScreen::AddOptions() {
         m_list->AddHeader("Sky");
@@ -537,9 +616,11 @@ namespace Render {
 
         auto* skyboxPick = new Button(0, 0, 150, 20, "Skybox: " + currentLabel,
             [this] { m_manager->Push(std::make_unique<SkyboxSelectScreen>()); });
-        skyboxPick->SetTooltip({"Custom skyboxes: drop 6 faces named",
-                                "panorama_0..5.png into assets/textures/",
-                                "environment/skyboxes/<name>/"});
+        skyboxPick->SetTooltip({"Pick from the shipped skies, or your own:",
+                                "a folder of six faces named panorama_0..5",
+                                "or an unzipped resource pack with an",
+                                "OptiFine sky, in your skyboxes folder",
+                                "(the picker has a button that opens it)."});
 
         auto* modeCycle = Cycle("Sky Behavior",
             {"Static", "Darken at Night", "Darken + Sun & Moon"},
@@ -547,36 +628,41 @@ namespace Render {
             [](int i) {
                 ApplyWorldSky(g_skyRenderer.CurrentSkybox(), i);
             });
-        modeCycle->SetTooltip({"How a skybox reacts to the day/night",
-                               "cycle. The Vanilla sky always uses the",
-                               "full cycle."});
+        if (g_skyRenderer.CurrentSkyboxIsOptiFine()) {
+            // A resource-pack sky is layered over the vanilla cycle and
+            // fades on its own schedule; there is no mode to pick.
+            modeCycle->active = false;
+            modeCycle->SetTooltip({"Not used by a resource-pack sky:",
+                                   "it is drawn over the full vanilla",
+                                   "day/night cycle and fades on the",
+                                   "pack's own schedule."});
+        } else {
+            modeCycle->SetTooltip({"How a skybox reacts to the day/night",
+                                   "cycle. The Vanilla sky always uses the",
+                                   "full cycle."});
+        }
 
         m_list->AddSmall(skyboxPick, modeCycle);
-    }
 
-    void SkyboxSelectScreen::AddOptions() {
-        const auto skyboxes = DiscoverSkyboxes();
-        const std::string current = g_skyRenderer.CurrentSkybox();
-
-        std::vector<AbstractWidget*> row;
-        for (const auto& info : skyboxes) {
-            const bool selected = info.id == current;
-            const std::string label =
-                selected ? "> " + info.label + " <" : info.label;
-            const std::string id = info.id;
-            auto* button = new Button(0, 0, 150, 20, label, [this, id] {
-                ApplyWorldSky(id, g_skyRenderer.CurrentSkyboxMode());
-                m_manager->Pop();
+        m_list->AddHeader("Mobs");
+        // MC 26.1 "Tiny Takeover" gave cats, chickens, cows, mooshrooms,
+        // ocelots, pigs, rabbits, sheep and wolves dedicated baby models
+        // and textures (and remodeled the rabbit). Purely a look: hitboxes,
+        // eye heights and the rabbit's hop timing follow 26.1 either way.
+        auto* babyCycle = Cycle("Baby Models",
+            {"New (26.1)", "Classic"},
+            GetBabyModelLook() == BabyModelLook::Classic ? 1 : 0,
+            [](int i) {
+                ApplyWorldBabyModels(i == 1 ? BabyModelLook::Classic
+                                            : BabyModelLook::New);
             });
-            row.push_back(button);
-            if (row.size() == 2) {
-                m_list->AddSmall(row[0], row[1]);
-                row.clear();
-            }
-        }
-        if (!row.empty()) {
-            m_list->AddSmall(row[0], nullptr);
-        }
+        babyCycle->SetTooltip({"New: Minecraft 26.1's dedicated baby",
+                               "models and textures for cats, chickens,",
+                               "cows, ocelots, pigs, rabbits, sheep and",
+                               "wolves (plus the rabbit remodel).",
+                               "Classic: the older shrunken-adult babies.",
+                               "Looks only - hitboxes are 26.1's either way."});
+        m_list->AddBig(babyCycle);
     }
 
     // ═══════════════════════════ SoundOptionsScreen ═════════════════════════

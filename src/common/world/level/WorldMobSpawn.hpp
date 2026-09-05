@@ -12,6 +12,7 @@
 #include "common/entity/EntityType.hpp"
 
 #include <glm/glm.hpp>
+#include <functional>
 
 namespace Game {
 
@@ -31,9 +32,13 @@ namespace Game {
     // in the Nether (and one used through a portal spawns on the far side).
     // `portalCooldownTicks` > 0 keeps the new mob out of any portal for that
     // long (a mob spawned inside one).
+    class Mob;
+    // `configure` runs on the new mob after finalizeSpawn and before it joins
+    // the level — MC MobBucketItem.spawn's loadFromBucketTag slot.
     bool SpawnMobFromItem(EntityTypeId type, const glm::ivec3& spawnPos,
                           bool tryMoveDown, bool movedUp, DimensionId dimension,
-                          int portalCooldownTicks = 0);
+                          int portalCooldownTicks = 0,
+                          const std::function<void(Mob&)>& configure = {});
 
     struct ItemStack;
 

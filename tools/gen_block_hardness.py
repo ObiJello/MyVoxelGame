@@ -35,6 +35,10 @@ import sys
 
 MC       = "minecraft_code/decompiled_net/minecraft"
 BLOCKS   = os.path.join(MC, "world/level/block/Blocks.java")
+# 26.3's Blocks.java (minecraft_code2): parsed the same way, keyed on
+# `BlockItemIds.X` / `BlockIds.X`, and merged setdefault-style so only the
+# blocks 26.1 lacks (poplar, cinnabar, sulfur, …) come from it.
+BLOCKS2  = "minecraft_code2/decompiled_net/minecraft/world/level/block/Blocks.java"
 REFKEYS  = os.path.join(MC, "references/Blocks.java")
 MAPCOLOR = os.path.join(MC, "world/level/material/MapColor.java")
 DYECOLOR = os.path.join(MC, "world/item/DyeColor.java")
@@ -354,9 +358,10 @@ def wrapper_props(fn, args, fields, where):
         dye = re.fullmatch(r'DyeColor\.([A-Z_]+)', args[1].strip())
         p.map_color = DYE_TO_MAP.get(dye.group(1), "NONE") if dye else "NONE"
         return p
-    if fn in ("registerStair", "registerLegacyStair"):
+    if fn in ("registerStair", "registerLegacyStair", "registerSlab", "registerWall"):
         # Properties.ofFullCopy(base) / ofLegacyCopy(base) — both copy every
-        # column we consume, so a stair simply IS its base block.
+        # column we consume, so a stair (and 26.3's slab and wall helpers)
+        # simply IS its base block.
         base = fields.get(args[1].strip())
         if base is None:
             raise SystemExit("%s: stair base %s unresolved" % (where, args[1]))
@@ -374,6 +379,10 @@ def slug_of(arg):
     m = re.fullmatch(r'(?:net\.minecraft\.references\.)?Blocks\.([A-Z_0-9]+)', arg)
     if m:
         return REF_KEYS.get(m.group(1))
+    # 26.3: the key constant IS the slug, upper-cased.
+    m = re.fullmatch(r'Block(?:Item)?Ids\.([A-Z_0-9]+)', arg)
+    if m:
+        return m.group(1).lower()
     return None
 
 
@@ -423,11 +432,12 @@ def parse_weathering(src, fields, by_slug, order):
 
 
 CALL_RE = re.compile(
-    r'\b(register|registerBed|registerStainedGlass|registerStair|registerLegacyStair)\s*\(')
+    r'\b(register|registerBed|registerStainedGlass|registerStair|registerLegacyStair'
+    r'|registerSlab|registerWall)\s*\(')
 
 
-def parse_blocks():
-    src = open(BLOCKS).read()
+def parse_blocks(path=None):
+    src = open(path or BLOCKS).read()
     fields = {}     # Java field name -> Props
     by_slug = {}    # registry slug   -> Props
     order = []
@@ -546,6 +556,14 @@ def main():
 
     by_slug, _order = parse_blocks()
     print("parsed %d block registrations from Blocks.java" % len(by_slug))
+    if os.path.exists(BLOCKS2):
+        by_slug2, _ = parse_blocks(BLOCKS2)
+        added = 0
+        for slug, props in by_slug2.items():
+            if slug not in by_slug:
+                by_slug[slug] = props
+                added += 1
+        print("  + %d from 26.3's Blocks.java (gap fill)" % added)
 
     tools = {tag: load_tag("mineable/" + tag) for tag, _ in TOOL_TAGS}
     tiers = {tag: load_tag(tag) for tag, _ in TIER_TAGS}

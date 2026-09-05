@@ -27,6 +27,9 @@
 #include "common/world/block/BlockState.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Slime.hpp"
+#include "common/entity/mobs/SulfurCube.hpp"
+
+#include <algorithm>
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/projectile/Arrow.hpp"
 #include "common/entity/projectile/EvokerFangs.hpp"
@@ -532,6 +535,9 @@ namespace Game::Anvil {
         // vanilla's declaration order in each case.
 
         constexpr const char* kFoxVariantNames[] = { "red", "snow" };
+        // MC TemperatureVariants, in TemperatureVariant order. Written the
+        // way VariantUtils.writeVariant does: "variant" = "minecraft:<name>".
+        constexpr const char* kTemperatureVariantNames[] = { "temperate", "warm", "cold" };
         constexpr const char* kPandaGeneNames[] = {
             "normal", "lazy", "worried", "playful", "brown", "weak", "aggressive"
         };
@@ -557,6 +563,16 @@ namespace Game::Anvil {
             const std::string_view bare = StripNamespace(name);
             for (size_t i = 0; i < N; ++i) if (bare == table[i]) return i;
             return 0;
+        }
+
+        // "variant" = "minecraft:<name>" (VariantUtils.writeVariant); EnumName
+        // adds the namespace and EnumIndex strips it, so a bare "cold" reads
+        // too and anything unknown falls back to temperate.
+        std::string TemperatureVariantId(uint8_t v) {
+            return EnumName(kTemperatureVariantNames, static_cast<size_t>(v));
+        }
+        uint8_t TemperatureVariantFromId(const std::string& id) {
+            return static_cast<uint8_t>(EnumIndex(kTemperatureVariantNames, id));
         }
 
         // ── Projectile ──────────────────────────────────────────────────────
@@ -693,9 +709,26 @@ namespace Game::Anvil {
                     w.Bool("Sheared", s->IsSheared());
                 }
                 break;
+            // MC SnowGolem.addAdditionalSaveData: "Pumpkin".
+            case EntityTypeId::SnowGolem:
+                if (const auto* g = dynamic_cast<const SnowGolem*>(&mob)) {
+                    w.Bool("Pumpkin", g->HasPumpkin());
+                }
+                break;
             case EntityTypeId::Chicken:
                 if (const auto* c = dynamic_cast<const Chicken*>(&mob)) {
                     w.Bool("IsChickenJockey", c->IsChickenJockey());
+                    w.String("variant", TemperatureVariantId(c->GetVariantByte()));
+                }
+                break;
+            case EntityTypeId::Cow:
+                if (const auto* c = dynamic_cast<const Cow*>(&mob)) {
+                    w.String("variant", TemperatureVariantId(c->GetVariantByte()));
+                }
+                break;
+            case EntityTypeId::Pig:
+                if (const auto* p = dynamic_cast<const Pig*>(&mob)) {
+                    w.String("variant", TemperatureVariantId(p->GetVariantByte()));
                 }
                 break;
             case EntityTypeId::Slime:
@@ -703,6 +736,23 @@ namespace Game::Anvil {
                 if (const auto* s = dynamic_cast<const Slime*>(&mob)) {
                     // Vanilla stores size - 1.
                     w.Int("Size", s->GetSize() - 1);
+                }
+                break;
+            // MC 26.3 SulfurCube.addAdditionalSaveData over AbstractCubeMob's
+            // Size and AgeableMob's Age/ForcedAge/AgeLocked. The swallowed
+            // block is MC's BODY equipment slot; here it is the item's slug.
+            case EntityTypeId::SulfurCube:
+                if (const auto* c = dynamic_cast<const SulfurCube*>(&mob)) {
+                    w.Int("Size", c->GetSize() - 1);
+                    w.Int("Age", c->GetAge());
+                    w.Int("ForcedAge", c->GetForcedAge());
+                    w.Bool("AgeLocked", c->IsAgeLocked());
+                    w.Int("pickup_timer", c->GetPickupTimer());
+                    w.Bool("from_bucket", c->FromBucket());
+                    w.Int("fuse", c->GetFuse());
+                    if (c->HasBodyItem()) {
+                        w.String("BodyItem", ItemName(c->GetBodyItem()));
+                    }
                 }
                 break;
             case EntityTypeId::Zombie:
@@ -1077,7 +1127,8 @@ namespace Game::Anvil {
         // Slime is the one class that reads its own field BEFORE super, because
         // SetSize rewrites MaxHealth and would otherwise heal a damaged slime
         // back to full on every load.
-        if (mob.GetType() == EntityTypeId::Slime || mob.GetType() == EntityTypeId::MagmaCube) {
+        if (mob.GetType() == EntityTypeId::Slime || mob.GetType() == EntityTypeId::MagmaCube ||
+            mob.GetType() == EntityTypeId::SulfurCube) {
             if (auto* s = dynamic_cast<Slime*>(&mob)) {
                 if (tag.HasTag("Size")) {
                     const int size = tag.GetValue<int32_t>("Size", 0) + 1;
@@ -1113,15 +1164,50 @@ namespace Game::Anvil {
         }
 
         switch (mob.GetType()) {
+            case EntityTypeId::SulfurCube:
+                if (auto* c = dynamic_cast<SulfurCube*>(&mob)) {
+                    c->SetAge(tag.GetValue<int32_t>("Age", 0));
+                    c->SetForcedAge(tag.GetValue<int32_t>("ForcedAge", 0));
+                    c->SetAgeLocked(tag.GetValue<int8_t>("AgeLocked", 0) != 0);
+                    c->SetPickupTimer(tag.GetValue<int32_t>("pickup_timer", 0));
+                    c->SetFromBucket(tag.GetValue<int8_t>("from_bucket", 0) != 0);
+                    if (tag.HasTag("BodyItem")) {
+                        const ItemID item = ItemFromName(
+                            tag.GetValue<std::string>("BodyItem", ""));
+                        if (item != Items::Air) c->SetBodyItem(item);
+                    }
+                    // The fuse rides MAX_FUSE's byte on the wire; a saved lit
+                    // cube resumes its countdown (MC: fuse then MAX_FUSE = fuse).
+                    const int fuse = tag.GetValue<int32_t>("fuse", -1);
+                    if (fuse >= 0) c->SetAnimStateByte(static_cast<uint8_t>(std::min(254, fuse) + 1));
+                }
+                break;
             case EntityTypeId::Sheep:
                 if (auto* s = dynamic_cast<Sheep*>(&mob)) {
                     s->SetColor(static_cast<uint8_t>(tag.GetValue<int8_t>("Color", 0)));
                     s->SetSheared(tag.GetValue<int8_t>("Sheared", 0) != 0);
                 }
                 break;
+            // MC SnowGolem.readAdditionalSaveData: getBooleanOr("Pumpkin", true).
+            case EntityTypeId::SnowGolem:
+                if (auto* g = dynamic_cast<SnowGolem*>(&mob)) {
+                    g->SetPumpkin(tag.GetValue<int8_t>("Pumpkin", 1) != 0);
+                }
+                break;
             case EntityTypeId::Chicken:
                 if (auto* c = dynamic_cast<Chicken*>(&mob)) {
                     c->SetChickenJockey(tag.GetValue<int8_t>("IsChickenJockey", 0) != 0);
+                    if (tag.HasTag("variant")) c->SetVariantByte(TemperatureVariantFromId(tag.GetValue<std::string>("variant", "")));
+                }
+                break;
+            case EntityTypeId::Cow:
+                if (auto* c = dynamic_cast<Cow*>(&mob)) {
+                    if (tag.HasTag("variant")) c->SetVariantByte(TemperatureVariantFromId(tag.GetValue<std::string>("variant", "")));
+                }
+                break;
+            case EntityTypeId::Pig:
+                if (auto* p = dynamic_cast<Pig*>(&mob)) {
+                    if (tag.HasTag("variant")) p->SetVariantByte(TemperatureVariantFromId(tag.GetValue<std::string>("variant", "")));
                 }
                 break;
             case EntityTypeId::Zombie:

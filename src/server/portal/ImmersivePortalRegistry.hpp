@@ -95,6 +95,7 @@ namespace Server {
         // Portals in `dimension` whose surface bounding box comes within
         // `radius` of `pos`. Cheap enough for per-tick use by the teleport
         // and collision checks: it walks the chunks the radius covers.
+        // Global surfaces (chunkless) are included, from a linear pass.
         std::vector<const Portal*> CollectNear(Game::DimensionId dimension,
                                                const glm::dvec3& pos, double radius) const;
 

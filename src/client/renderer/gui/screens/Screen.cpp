@@ -61,6 +61,15 @@ namespace Render {
         MenuTextures s_menuTextures;
     } // namespace
 
+    void ResetMenuTextures() {
+        if (g_renderBackend) {
+            for (TextureHandle* t : {&s_menuTextures.background, &s_menuTextures.headerSep, &s_menuTextures.footerSep}) {
+                if (*t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(*t); *t = INVALID_TEXTURE; }
+            }
+        }
+        s_menuTextures.loaded = false;
+    }
+
     void RenderMenuBackgroundTexture(GuiGraphics& g, int x0, int y0, int x1, int y1) {
         s_menuTextures.EnsureLoaded();
         if (s_menuTextures.background == INVALID_TEXTURE) {

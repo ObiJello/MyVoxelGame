@@ -172,6 +172,15 @@ namespace Game {
         // ── Target ─────────────────────────────────────────────────────────
         LivingEntity* GetTarget() const { return m_target; }
         virtual void  SetTarget(LivingEntity* target) {
+            // Never an entity of another level. The reference-clearing
+            // sweeps that keep m_target from dangling (a mob dying, a
+            // player's view leaving with them) run per level, over that
+            // level's mobs; a target across a portal — the player who hit
+            // this mob through one, say, whose view belongs to the level
+            // they stood in — would outlive its clearing and be cast on a
+            // freed object in the next goal tick. Chasing across a portal
+            // is EntityPortalTravel's, by id.
+            if (target && m_level && target->Level() && target->Level() != m_level) return;
             if (target) MarkHoldsEntityRefs();   // see Entity::HoldsEntityRefs
             m_target = target;
         }
@@ -279,6 +288,13 @@ namespace Game {
             (void)player; (void)held;
             return UseResult::Pass;
         }
+
+        // MC Mob.setBaby — a no-op on the base; AgeableMob turns it into an
+        // age, the zombie/piglin/zoglin family into their synched flag. The
+        // spawn-egg-on-parent path (SpawnEggItem.spawnOffspringFromSpawnEgg)
+        // calls it and then checks IsBaby(): a mob with no baby form stays an
+        // adult and the egg is not spent.
+        virtual void SetBaby(bool baby) { (void)baby; }
 
         // The chunk-column bucket Server::MobManager last filed this mob under.
         // Written by the manager only, read back when the mob is removed so the
@@ -427,6 +443,15 @@ namespace Game {
         // value; the client hands it back here.
         virtual uint8_t GetVariantByte() const { return 0; }
         virtual void    SetVariantByte(uint8_t v) { (void)v; }
+
+        // The block state a block-carrying mob shows (raw id, 0 = none):
+        // the sulfur cube's swallowed block. MC syncs it as the BODY
+        // equipment slot; here it rides AddEntityS2C's per-type data int
+        // (which the falling block and primed TNT already use, read-only)
+        // and, because a cube's block CHANGES, an appended SetEntityData
+        // field. The tracker resends on change; the client applies it here.
+        virtual uint32_t GetCarriedBlockRaw() const { return 0; }
+        virtual void     SetCarriedBlockRaw(uint32_t raw) { (void)raw; }
 
         void SetZza(float v) { zza = v; }
         void SetXxa(float v) { xxa = v; }

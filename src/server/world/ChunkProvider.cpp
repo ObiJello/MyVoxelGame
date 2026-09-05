@@ -1387,20 +1387,24 @@ namespace Game {
             return nullptr;
         }
 
-        // Dimension stack: the bedrock at a seam becomes ordinary stone so
-        // the way down (or up) into the next dimension is open. Applied to
-        // every chunk that comes through, generated or loaded, so a world
-        // that gained the option later opens up as its chunks are touched.
+        // Dimension stack: the bedrock at a seam becomes OBSIDIAN — the
+        // Immersive Portals mod's bedrock replacement — so the way down (or
+        // up) into the next dimension can be mined open, and so the seam is
+        // recognisable as one. Applied to every chunk that comes through,
+        // generated or loaded, so a world that gained the option later opens
+        // up as its chunks are touched. The bands are where MC generates
+        // bedrock: the bottom five layers of the Overworld, and the Nether's
+        // floor and roof. The End has none (its floor is the void).
         if (Game::Portals::DimensionStackEnabled()) {
             struct Band { int y0, y1; BlockID replacement; };
             Band bands[2]; int nBands = 0;
             switch (m_config.dimensionId) {
                 case DimensionId::Overworld:
-                    bands[nBands++] = { -64, -59, BlockID::Deepslate };
+                    bands[nBands++] = { -64, -59, BlockID::Obsidian };
                     break;
                 case DimensionId::Nether:
-                    bands[nBands++] = { 0, 5, BlockID::Netherrack };
-                    bands[nBands++] = { 123, 128, BlockID::Netherrack };
+                    bands[nBands++] = { 0, 5, BlockID::Obsidian };
+                    bands[nBands++] = { 123, 128, BlockID::Obsidian };
                     break;
                 default: break;
             }

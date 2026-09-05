@@ -27,6 +27,7 @@
 // scale 0.625 — same as the chest. ItemTransform.apply contributes the trailing
 // translate(-0.5, -0.5, -0.5).
 
+#include "client/resource/ResourcePacks.hpp"
 #include "ShulkerBoxItemRenderer.hpp"
 #include "ItemLighting.hpp"
 #include "../GuiGraphics.hpp"
@@ -58,6 +59,14 @@ namespace Render {
 
         TextureHandle LoadShulkerTexture(const std::string& texName) {
             auto& cache = ShulkerTextureCache();
+            {
+                // A resource pack change replaces every texture here.
+                static int s_packGeneration = -1;
+                if (Resources::CacheStale(s_packGeneration)) {
+                    if (g_renderBackend) for (auto& [key, tex] : cache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+                    cache.clear();
+                }
+            }
             auto it = cache.find(texName);
             if (it != cache.end()) return it->second;
             if (!g_renderBackend) return INVALID_TEXTURE;

@@ -22,6 +22,15 @@
 
 namespace Game {
 
+    // MC TemperatureVariants — the three farm-animal variants of 1.21.5
+    // (cow, pig, chicken), in the order the variant byte carries them.
+    enum class TemperatureVariant : uint8_t { Temperate = 0, Warm = 1, Cold = 2 };
+    // The variant a farm animal spawning in `biome` (slug, no namespace)
+    // gets: MC's CowVariants/PigVariants/ChickenVariants bootstraps all
+    // resolve to warm-tag → warm (priority 1), cold-tag → cold (priority 1),
+    // else the temperate fallback (priority 0).
+    TemperatureVariant FarmAnimalVariantForBiome(std::string_view biome);
+
     // MC Cow. MAX_HEALTH 10, MOVEMENT_SPEED 0.2.
     class Cow : public Animal {
     public:
@@ -32,7 +41,28 @@ namespace Game {
 
         static void CreateAttributes(AttributeMap& out);
 
+        // MC 1.21.5 CowVariants: temperate / warm / cold, chosen by biome in
+        // FinalizeSpawn (BiomeTags.SPAWNS_WARM_VARIANT_FARM_ANIMALS and
+        // SPAWNS_COLD_VARIANT_FARM_ANIMALS beat the temperate fallback),
+        // inherited from a random parent when bred, saved as "variant"
+        // (minecraft:temperate|warm|cold) and carried by the wire's variant
+        // byte (DATA_VARIANT_ID).
+        TemperatureVariant GetVariant() const { return m_variant; }
+        void SetVariant(TemperatureVariant v) { m_variant = v; }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override {
+            m_variant = v <= 2 ? static_cast<TemperatureVariant>(v) : TemperatureVariant::Temperate;
+        }
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC getBreedOffspring: the baby takes THIS parent's or the partner's
+        // variant at random. The partner is only known here, so it is noted
+        // for the CreateBaby that follows.
+        void SpawnChildFromBreeding(Animal& partner) override;
+
     protected:
+        TemperatureVariant m_variant = TemperatureVariant::Temperate;
+        int8_t m_breedPartnerVariant = -1;   // -1 = no partner known
         void RegisterGoals() override;
     };
 
@@ -77,7 +107,28 @@ namespace Game {
 
         static void CreateAttributes(AttributeMap& out);
 
+        // MC 1.21.5 PigVariants: temperate / warm / cold, chosen by biome in
+        // FinalizeSpawn (BiomeTags.SPAWNS_WARM_VARIANT_FARM_ANIMALS and
+        // SPAWNS_COLD_VARIANT_FARM_ANIMALS beat the temperate fallback),
+        // inherited from a random parent when bred, saved as "variant"
+        // (minecraft:temperate|warm|cold) and carried by the wire's variant
+        // byte (DATA_VARIANT_ID).
+        TemperatureVariant GetVariant() const { return m_variant; }
+        void SetVariant(TemperatureVariant v) { m_variant = v; }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override {
+            m_variant = v <= 2 ? static_cast<TemperatureVariant>(v) : TemperatureVariant::Temperate;
+        }
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC getBreedOffspring: the baby takes THIS parent's or the partner's
+        // variant at random. The partner is only known here, so it is noted
+        // for the CreateBaby that follows.
+        void SpawnChildFromBreeding(Animal& partner) override;
+
     protected:
+        TemperatureVariant m_variant = TemperatureVariant::Temperate;
+        int8_t m_breedPartnerVariant = -1;   // -1 = no partner known
         void RegisterGoals() override;
     };
 
@@ -162,6 +213,30 @@ namespace Game {
 
         bool IsFood(uint32_t itemId) const override;
         std::unique_ptr<Animal> CreateBaby() override;
+
+        // MC 1.21.5 ChickenVariants: temperate / warm / cold, chosen by biome in
+        // FinalizeSpawn (BiomeTags.SPAWNS_WARM_VARIANT_FARM_ANIMALS and
+        // SPAWNS_COLD_VARIANT_FARM_ANIMALS beat the temperate fallback),
+        // inherited from a random parent when bred, saved as "variant"
+        // (minecraft:temperate|warm|cold) and carried by the wire's variant
+        // byte (DATA_VARIANT_ID).
+        TemperatureVariant GetVariant() const { return m_variant; }
+        void SetVariant(TemperatureVariant v) { m_variant = v; }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override {
+            m_variant = v <= 2 ? static_cast<TemperatureVariant>(v) : TemperatureVariant::Temperate;
+        }
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC getBreedOffspring: the baby takes THIS parent's or the partner's
+        // variant at random. The partner is only known here, so it is noted
+        // for the CreateBaby that follows.
+        void SpawnChildFromBreeding(Animal& partner) override;
+
+    protected:
+        TemperatureVariant m_variant = TemperatureVariant::Temperate;
+        int8_t m_breedPartnerVariant = -1;   // -1 = no partner known
+    public:
 
         // MC Chicken.aiStep — the wing flap, which is both the animation and
         // the slow-fall: descending motion is scaled by 0.6 every tick, so a
@@ -329,6 +404,12 @@ namespace Game {
         // MC Rabbit.handleEntityEvent(1) — start the jump animation.
         void HandleEntityEvent(uint8_t id) override;
 
+        // MC 26.1 Rabbit.setupAnimationStates (client side, from baseTick):
+        // the remodeled rabbit's hop clip runs while a jump is in flight and
+        // the idle head tilt fires every 180..220 ticks of standing still.
+        // The classic mesh reads jumpCompletion instead and ignores both.
+        void SetupAnimationStates() override;
+
         // MC Rabbit.wantsMoreFood / moreCarrotTicks — RaidGardenGoal's
         // appetite gate: 40 ticks of satiety per raided carrot, decayed by
         // rand(3) per server tick in CustomServerAiStep.
@@ -357,6 +438,7 @@ namespace Game {
         bool m_wasOnGround = false;
         int  m_jumpDelayTicks = 0;
         int  m_moreCarrotTicks = 0;   // MC Rabbit.moreCarrotTicks
+        int  m_idleAnimationTimeout = 0;   // MC 26.1 Rabbit.idleAnimationTimeout (client)
     };
 
     // MC animal/polarbear/PolarBear. MAX_HEALTH 30, FOLLOW_RANGE 20,

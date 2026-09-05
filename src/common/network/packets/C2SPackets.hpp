@@ -315,6 +315,20 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    class PickItemC2SPacketImpl : public IC2SPacket {
+    private:
+        PickItemC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PickItemC2SPacketImpl(PickItemC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPickItemC2S(m_data); }
+        const PickItemC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PickItemC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class InventoryClickC2SPacketImpl : public IC2SPacket {
     private:
         InventoryClickC2SPacket m_data;

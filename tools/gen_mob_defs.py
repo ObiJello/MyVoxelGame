@@ -22,6 +22,12 @@ import sys
 MC = "minecraft_code/decompiled_net/minecraft"
 ENT_DIR = os.path.join(MC, "world/entity")
 REN_DIR = os.path.join(MC, "client/renderer/entity")
+# The 26.3 decompile fills GAPS only: a class, renderer or default-attribute
+# row that 26.1 lacks is read from here (the sulfur cube); anything both trees
+# have keeps its 26.1 reading, like every other generator.
+MC2 = "minecraft_code2/decompiled_net/minecraft"
+ENT_DIR2 = os.path.join(MC2, "world/entity")
+REN_DIR2 = os.path.join(MC2, "client/renderer/entity")
 TYPES_HPP = "src/common/entity/GeneratedEntityTypes.hpp"
 OUT_HPP = "src/common/entity/GeneratedMobDefs.hpp"
 OUT_CPP = "src/common/entity/GeneratedMobDefs.cpp"
@@ -36,6 +42,11 @@ PROJECTILES = {
     "small_fireball", "fireball", "dragon_fireball", "wither_skull",
     "shulker_bullet", "llama_spit", "trident",
     "wind_charge", "breeze_wind_charge",
+    # Plain entities with hand-written classes (2026-09-05): they reached the
+    # type enum without a def row, and a row would only hand MobRenderer's
+    # FindMobDef an empty texture for a renderer that never asks.
+    "evoker_fangs", "area_effect_cloud", "eye_of_ender", "falling_block",
+    "tnt", "end_crystal", "ender_pearl",
 }
 
 # MC attribute -> our Attribute enum. Anything not listed has no effect in this
@@ -618,17 +629,33 @@ def walk_anim(cls, files):
 def entity_classes():
     """slug -> the entity's Java class, from `Class::new` in EntityType.java."""
     src = strip_comments(open(os.path.join(ENT_DIR, "EntityType.java"), encoding="utf-8").read())
-    return {m.group(1): m.group(2) for m in re.finditer(
+    out = {m.group(1): m.group(2) for m in re.finditer(
         r'register\(\s*"([a-z_0-9]+)"\s*,\s*EntityType\.Builder\.'
         r'(?:<[^>]*>)?of\(\s*(\w+)::new', src)}
+    # 26.3: EntityTypes.java, keyed `register(EntityTypeIds.X, ...)`.
+    p2 = os.path.join(ENT_DIR2, "EntityTypes.java")
+    if os.path.exists(p2):
+        src2 = strip_comments(open(p2, encoding="utf-8").read())
+        for m in re.finditer(
+                r'register\(\s*EntityTypeIds\.([A-Z_0-9]+)\s*,\s*EntityType\.Builder\.'
+                r'(?:<[^>]*>)?of\(\s*(\w+)::new', src2):
+            out.setdefault(m.group(1).lower(), m.group(2))
+    return out
 
 
 def default_attribute_sources():
     """slug -> (Class, method) from DefaultAttributes.java's SUPPLIERS map."""
     src = strip_comments(open(os.path.join(
         ENT_DIR, "ai/attributes/DefaultAttributes.java"), encoding="utf-8").read())
-    return {const.lower(): (cls, meth) for const, cls, meth in re.findall(
+    out = {const.lower(): (cls, meth) for const, cls, meth in re.findall(
         r"put\(\s*EntityType\.([A-Z_0-9]+)\s*,\s*(\w+)\.(\w+)\(\)", src)}
+    p2 = os.path.join(ENT_DIR2, "ai/attributes/DefaultAttributes.java")
+    if os.path.exists(p2):
+        src2 = strip_comments(open(p2, encoding="utf-8").read())
+        for const, cls, meth in re.findall(
+                r"put\(\s*EntityTypes\.([A-Z_0-9]+)\s*,\s*(\w+)\.(\w+)\(\)", src2):
+            out.setdefault(const.lower(), (cls, meth))
+    return out
 
 
 def base_builder_reached(cls, files, method, seen=None):
@@ -700,6 +727,12 @@ def main():
 
     ent_files = index_sources(ENT_DIR)
     ren_files = index_sources(REN_DIR)
+    # 26.3 gap fill — setdefault, so a class both trees have stays 26.1's.
+    if os.path.isdir(ENT_DIR2):
+        for k, v in index_sources(ENT_DIR2).items():
+            ent_files.setdefault(k, v)
+        for k, v in index_sources(REN_DIR2).items():
+            ren_files.setdefault(k, v)
 
     slugs = re.findall(r'//\s*"([a-z_]+)"', open(TYPES_HPP, encoding="utf-8").read())
 

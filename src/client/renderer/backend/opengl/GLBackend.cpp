@@ -247,6 +247,13 @@ namespace Render {
                                                size_t size, const void* data) {
         auto it = m_buffers.find(handle);
         if (it == m_buffers.end() || size == 0) return;
+        // OBEY_SYNC_UPLOADS=1: A/B switch back to the synchronised path
+        // (glBufferSubData, which Apple's driver serialises against pending
+        // draws of the buffer) — for measuring what the unsynchronised map
+        // saves, and as the fallback if a caller ever writes a range a
+        // queued draw still reads.
+        static const bool s_forceSync = std::getenv("OBEY_SYNC_UPLOADS") != nullptr;
+        if (s_forceSync) { UpdateBuffer(handle, offset, size, data); return; }
 
         glBindBuffer(it->second.target, it->second.glId);
 
@@ -450,10 +457,59 @@ namespace Render {
         glActiveTexture(GL_TEXTURE0 + slot);
         auto it = m_textures.find(handle);
         if (it != m_textures.end()) {
-            glBindTexture(GL_TEXTURE_2D, it->second.glId);
+            glBindTexture(it->second.target, it->second.glId);
         } else {
             glBindTexture(GL_TEXTURE_2D, 0);
         }
+    }
+
+    TextureHandle GLBackend::CreateBufferTexture(BufferHandle buffer, TextureFormat format) {
+        auto bit = m_buffers.find(buffer);
+        if (bit == m_buffers.end()) return INVALID_TEXTURE;
+        // Core since GL 3.1 (this context is 3.3). Only the formats the face
+        // map needs are mapped; add to the switch when another caller wants
+        // more.
+        GLenum internalFormat = 0;
+        switch (format) {
+            case TextureFormat::RGBA8:   internalFormat = GL_RGBA8;   break;
+            case TextureFormat::RGBA16:  internalFormat = GL_RGBA16;  break;
+            case TextureFormat::RGBA16F: internalFormat = GL_RGBA16F; break;
+            case TextureFormat::RGBA32F: internalFormat = GL_RGBA32F; break;
+            default:
+                Log::Error("GLBackend::CreateBufferTexture: unsupported format");
+                return INVALID_TEXTURE;
+        }
+        // The implementation's texel limit — the whole buffer must fit or
+        // texelFetch beyond it returns undefined data (an 8 MB slab is 2 M
+        // RGBA8 texels; the limit is typically 128 M).
+        GLint maxTexels = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+        const size_t bytesPerTexel = (format == TextureFormat::RGBA8) ? 4
+                                   : (format == TextureFormat::RGBA16F || format == TextureFormat::RGBA16) ? 8 : 16;
+        if (maxTexels > 0 && bit->second.size / bytesPerTexel > static_cast<size_t>(maxTexels)) {
+            Log::Error("GLBackend::CreateBufferTexture: buffer of %zu bytes exceeds GL_MAX_TEXTURE_BUFFER_SIZE (%d texels)",
+                       bit->second.size, maxTexels);
+            return INVALID_TEXTURE;
+        }
+
+        GLuint glId = 0;
+        glGenTextures(1, &glId);
+        if (glId == 0) return INVALID_TEXTURE;
+        glBindTexture(GL_TEXTURE_BUFFER, glId);
+        glTexBuffer(GL_TEXTURE_BUFFER, internalFormat, bit->second.glId);
+        glBindTexture(GL_TEXTURE_BUFFER, 0);
+
+        uint32_t handle = AllocHandle();
+        GLTextureInfo info{};
+        info.glId = glId;
+        info.width = static_cast<int>(bit->second.size / bytesPerTexel);
+        info.height = 1;
+        info.memorySize = 0;   // the buffer owns the bytes
+        info.target = GL_TEXTURE_BUFFER;
+        info.internalFormat = internalFormat;
+        m_textures[handle] = info;
+        m_memStats.textureCount++;
+        return handle;
     }
 
     uintptr_t GLBackend::GetNativeTextureID(TextureHandle handle) const {
@@ -495,6 +551,14 @@ namespace Render {
             Log::Error("GLBackend: Shader link failed: %s", infoLog);
             glDeleteProgram(program);
             return INVALID_SHADER;
+        }
+
+        // The one user uniform block (RenderBackend::BindUniformBuffer):
+        // programs that declare it read binding point 0. Everything else
+        // (glGetUniformBlockIndex returns GL_INVALID_INDEX) is untouched.
+        {
+            const GLuint blockIndex = glGetUniformBlockIndex(program, "SectionOrigins");
+            if (blockIndex != GL_INVALID_INDEX) glUniformBlockBinding(program, blockIndex, 0);
         }
 
         uint32_t handle = AllocHandle();
@@ -815,9 +879,15 @@ namespace Render {
             state.stencilReadMask    = m_stencilOverride.readMask;
             state.stencilWriteMask   = m_stencilOverride.writeMask;
         }
+        // A mirrored view flips every triangle's screen winding. Inverting
+        // by flipping the FRONT-FACE RULE (not by swapping the cull mode)
+        // culls the same triangles and, unlike the swap, keeps
+        // gl_FrontFacing meaning the geometric front — the two-sided plant
+        // quads (TerrainVertex::kTwoSidedFlag) mirror their texture on the
+        // geometric back and must see the same answer in a mirror.
         if (m_cullInvert) {
-            if (state.cullMode == CullMode::Back)       state.cullMode = CullMode::Front;
-            else if (state.cullMode == CullMode::Front) state.cullMode = CullMode::Back;
+            state.frontFace = (state.frontFace == FrontFace::CounterClockwise)
+                                  ? FrontFace::Clockwise : FrontFace::CounterClockwise;
         }
 
         // Depth test
@@ -1096,22 +1166,30 @@ namespace Render {
         if (m_hasVertexAttribBinding) {
             glBindVertexBuffer(0, it->second.glId, 0, static_cast<GLsizei>(stride));
         } else {
+            // Packed 16-byte TerrainVertex — keep in step with
+            // SetupBlockVertexFormat and GetTerrainVertexLayout.
             glBindBuffer(GL_ARRAY_BUFFER, it->second.glId);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+            glVertexAttribPointer(0, 4, GL_UNSIGNED_SHORT, GL_TRUE,
                                   static_cast<GLsizei>(stride),
                                   reinterpret_cast<void*>(static_cast<uintptr_t>(0)));
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+            glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE,
                                   static_cast<GLsizei>(stride),
-                                  reinterpret_cast<void*>(static_cast<uintptr_t>(3 * sizeof(float))));
+                                  reinterpret_cast<void*>(static_cast<uintptr_t>(8)));
             glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE,
                                   static_cast<GLsizei>(stride),
-                                  reinterpret_cast<void*>(static_cast<uintptr_t>(5 * sizeof(float))));
-            // Greedy-mesh tile rect (TerrainVertex, offset 24). Terrain is the
-            // only client of this shared VAO, so the attribute is always fed.
-            glVertexAttribPointer(3, 4, GL_UNSIGNED_SHORT, GL_TRUE,
-                                  static_cast<GLsizei>(stride),
-                                  reinterpret_cast<void*>(static_cast<uintptr_t>(5 * sizeof(float) + 4)));
+                                  reinterpret_cast<void*>(static_cast<uintptr_t>(12)));
         }
+    }
+
+    void GLBackend::BindUniformBuffer(BufferHandle handle, size_t offset, size_t size) {
+        auto it = m_buffers.find(handle);
+        if (it == m_buffers.end()) return;
+        // Binding point 0 — every program's "SectionOrigins" block is wired to
+        // it at link (CreateShader). glBindBufferRange offsets must be
+        // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT-aligned; callers pass multiples
+        // of 16 KB.
+        glBindBufferRange(GL_UNIFORM_BUFFER, 0, it->second.glId,
+                          static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(size));
     }
 
     void GLBackend::BindIndexBuffer(BufferHandle ibo) {
@@ -1172,22 +1250,21 @@ namespace Render {
             //
             // This shared VAO serves ONLY the chunk-terrain mega-buffers (bound
             // via BindBlockVertexFormat from ClientMeshManager), so it carries
-            // the 32-byte TERRAIN format — block layout plus the unorm16 tile
-            // rect at offset 24 (Render::TerrainVertex / GetTerrainVertexLayout).
-            glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, 0);
+            // the packed 16-byte TERRAIN format (Render::TerrainVertex /
+            // GetTerrainVertexLayout): px py pz slot as 4 unorm16, u v as 2
+            // unorm16, rgba8. All normalized — the shader recovers the
+            // integers (value * 65535), so no I-format attributes are needed.
+            glVertexAttribFormat(0, 4, GL_UNSIGNED_SHORT, GL_TRUE, 0);
             glVertexAttribBinding(0, 0);
-            glVertexAttribFormat(1, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float));
+            glVertexAttribFormat(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, 8);
             glVertexAttribBinding(1, 0);
-            glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 5 * sizeof(float));
+            glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 12);
             glVertexAttribBinding(2, 0);
-            glVertexAttribFormat(3, 4, GL_UNSIGNED_SHORT, GL_TRUE, 5 * sizeof(float) + 4);
-            glVertexAttribBinding(3, 0);
         }
 
         glEnableVertexAttribArray(0);
         glEnableVertexAttribArray(1);
         glEnableVertexAttribArray(2);
-        glEnableVertexAttribArray(3);
 
         glBindVertexArray(0);
     }

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 #include <unordered_map>
 #include <memory>
@@ -53,6 +54,10 @@ namespace Render {
     struct AtlasUVRect {
         glm::vec2 uvMin;
         glm::vec2 uvMax;
+        // Row in the sprite table (GetSpriteTableHandle): what a greedy-merged
+        // terrain quad carries instead of this rect. Assigned by
+        // BuildSpriteTable in key order, stable for the atlas's lifetime.
+        uint16_t  spriteId = 0;
 
         AtlasUVRect() = default;
         AtlasUVRect(float u0, float v0, float u1, float v1)
@@ -97,6 +102,13 @@ namespace Render {
         // Get backend texture handle (works with both GL and Vulkan)
         Render::TextureHandle GetBackendTextureHandle() const { return m_atlasTexture; }
 
+        // The sprite table: an RGBA32F texture, 256 sprites per row, texel
+        // (id & 255, id >> 8) = (u0, v0, width, height) of sprite `id` in
+        // atlas UV. The terrain fragment shaders texelFetch it for tiled
+        // (greedy-merged) quads, whose TerrainVertex carries the id. Rebuilt
+        // with the atlas; INVALID_TEXTURE before the first build.
+        Render::TextureHandle GetSpriteTableHandle() const { return m_spriteTable; }
+
         // Get the native texture ID (for ImGui display / legacy code)
         uintptr_t GetAtlasTextureID() const;
 
@@ -133,6 +145,9 @@ namespace Render {
         
         // Rebuild atlas with different rendering mode
         void RebuildAtlas(bool useMinecraftStyle);
+        // Free the atlas, sprite table and colormap textures ahead of a
+        // BuildFromJSON that replaces them (resource pack reload).
+        void ReleaseGpuResources();
 
         // Debug: Save atlas to file
         bool SaveAtlasDebugImage(const std::string& outputPath) const;
@@ -144,6 +159,9 @@ namespace Render {
     private:
         // Backend texture handles
         Render::TextureHandle m_atlasTexture = Render::INVALID_TEXTURE;
+        Render::TextureHandle m_spriteTable  = Render::INVALID_TEXTURE;
+        // Number sprites and (re)create m_spriteTable from textureKeyToUV.
+        void BuildSpriteTable();
         Render::TextureHandle m_grassColormap = Render::INVALID_TEXTURE;
         Render::TextureHandle m_foliageColormap = Render::INVALID_TEXTURE;
 
@@ -218,7 +236,9 @@ namespace Render {
                                 std::vector<TextureSource>& sources);
 
         // Helper: Scan directory for PNG files
-        std::vector<std::string> ScanDirectoryForPNGs(const std::string& dirPath);
+        // (relative path below dirPath, file to open), every enabled
+        // resource pack overlaid on the vanilla directory (Core::Assets).
+        std::vector<std::pair<std::string, std::string>> ScanDirectoryForPNGs(const std::string& dirPath);
 
         // Helper: Load a single PNG file
         bool LoadPNG(const std::string& filePath,

@@ -24,6 +24,7 @@
 #include "../renderer/gui/ChatScreen.hpp"   // SetServerCommandNames
 #include "../world/LevelLoadTracker.hpp"    // dimension change re-enters the load wait
 #include "../renderer/environment/SkyRenderer.hpp"  // per-dimension sky
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #if ENABLE_PORTAL_GUN
@@ -550,7 +551,8 @@ namespace Client {
             g_clientMobManager->SetData(packet.entityId, packet.health, packet.flags,
                                         packet.variantData, packet.hurtTime, packet.deathTime,
                                         packet.swellDir, packet.swell,
-                                        packet.pose, packet.animState);
+                                        packet.pose, packet.animState,
+                                        packet.blockStateRaw);
             g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
         }
         m_stats.packetsProcessed++;
@@ -930,6 +932,13 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::handleSetHeldSlot(const Network::SetHeldSlotS2CPacket& packet) {
+        // MC ClientPacketListener.handleSetHeldSlot: the server picked the
+        // slot (pick block); the hotbar follows.
+        if (m_player && packet.slot < 9) m_player->inventory.SetSelectedSlot(packet.slot);
+        m_stats.packetsProcessed++;
+    }
+
     void ClientPacketHandler::handleSetHealth(const Network::SetHealthS2CPacket& packet) {
         // Mirrors ClientPacketListener.handleSetHealth — write the
         // authoritative stat triple onto the local player; the HUD reads it
@@ -1099,15 +1108,31 @@ namespace Client {
             }
             ::Render::Mesher::SetPortalFaces(dim, after);
 
+            // Walk the LOADED chunks against each face's box, never the box
+            // itself: a global surface (a wrap border, a stack seam) is up
+            // to 200,000 blocks across, and walking its box was twelve
+            // thousand chunks squared. The section range is clamped to the
+            // column — a seam at y = 320 or y = -64 reaches one section
+            // past either end, and MarkSectionDirty indexes by it unchecked
+            // (that write past the array was the SIGBUS on receiving the
+            // first stack seam).
             auto remesh = [&](const std::vector<::Render::Mesher::PortalFace>& faces) {
+                if (faces.empty()) return;
                 ClientLevels::ForEach([&](ClientLevel& level) {
                     if (level.Dimension() != dim || !level.Chunks()) return;
+                    std::vector<std::pair<Game::Math::ChunkPos, ClientChunk*>> loaded;
+                    level.Chunks()->SnapshotLoadedChunks(loaded);
                     for (const auto& f : faces) {
                         const glm::ivec3 lo = f.min - glm::ivec3(1), hi = f.max + glm::ivec3(1);
-                        for (int cx = lo.x >> 4; cx <= (hi.x >> 4); ++cx)
-                            for (int cz = lo.z >> 4; cz <= (hi.z >> 4); ++cz)
-                                for (int sy = (lo.y - Config::MinY) >> 4; sy <= ((hi.y - Config::MinY) >> 4); ++sy)
-                                    level.Chunks()->MarkSectionDirty(Game::Math::ChunkPos{cx, cz}, sy);
+                        const int cx0 = lo.x >> 4, cx1 = hi.x >> 4;
+                        const int cz0 = lo.z >> 4, cz1 = hi.z >> 4;
+                        const int sy0 = std::max((lo.y - Config::MinY) >> 4, 0);
+                        const int sy1 = std::min((hi.y - Config::MinY) >> 4, Game::Math::SECTIONS_PER_CHUNK - 1);
+                        if (sy1 < sy0) continue;
+                        for (const auto& [pos, chunk] : loaded) {
+                            if (pos.x < cx0 || pos.x > cx1 || pos.z < cz0 || pos.z > cz1) continue;
+                            for (int sy = sy0; sy <= sy1; ++sy) level.Chunks()->MarkSectionDirty(pos, sy);
+                        }
                     }
                 });
             };

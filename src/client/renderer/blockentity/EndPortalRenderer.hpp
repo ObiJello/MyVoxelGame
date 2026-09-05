@@ -79,6 +79,7 @@ namespace Render {
         ShaderHandle  m_shader     = INVALID_SHADER;
         TextureHandle m_skyTexture = INVALID_TEXTURE;   // MC Sampler0
         TextureHandle m_portalTexture = INVALID_TEXTURE; // MC Sampler1
+        int m_packGeneration = -1;   // Resources::CacheStale
 
         // Two streaming sets alternated per frame — see EntityFrame.hpp.
         // Grown on demand; the old set is deferred-destroyed so the frame

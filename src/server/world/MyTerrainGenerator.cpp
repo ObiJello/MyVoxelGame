@@ -1,3 +1,4 @@
+#include <climits>
 #include <map>
 // File: src/server/world/MyTerrainGenerator.cpp
 #include "MyTerrainGenerator.hpp"
@@ -1483,6 +1484,12 @@ namespace Game {
 
     std::vector<int> MyTerrainGenerator::GenerateHeightMap(Math::ChunkPos) {
         return std::vector<int>(16 * 16, 64);
+    }
+
+    int MyTerrainGenerator::SurfaceHeightAt(int blockX, int blockZ) const {
+        if (!m_generator || !m_randomState) return INT_MIN;
+        return m_generator->getBaseHeight(blockX, blockZ,
+            minecraft::levelgen::Heightmap::Types::WORLD_SURFACE_WG, m_randomState);
     }
 
     std::string MyTerrainGenerator::GenerateBiome(Math::ChunkPos) { return "plains"; }

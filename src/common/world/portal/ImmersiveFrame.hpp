@@ -97,8 +97,17 @@ namespace Game::Immersive {
         // wall behind its far face IS the collision on the near side.
         bool CanBuildAt(const IBlockAccess& level, const glm::ivec3& newMin, bool requireGround,
                         bool requireClearance = false) const;
-        // The cells one block in front of and behind every interior cell
-        // (above only, for a floor frame).
+        // The cells one block in front of and behind every interior cell.
+        // A FLOOR frame (axis Y) instead reserves kFallClearance cells
+        // BELOW every interior cell, so the far side of a horizontal portal
+        // is a hole and not a window: the crossing fires when the EYE goes
+        // through, 1.62 blocks after the feet, and a frame lying flat on
+        // the ground holds the body up on the far ground long before that
+        // (the mod reserves vertical space the same way). Two cells is the
+        // pair that works both ways — a body drops in far enough for the
+        // eye to cross, and a jump from the ground beneath still lifts the
+        // eye back up through the surface (three would not).
+        static constexpr int kFallClearance = 2;
         std::vector<glm::ivec3> Clearance() const;
 
         static bool IsObsidian(BlockID id);

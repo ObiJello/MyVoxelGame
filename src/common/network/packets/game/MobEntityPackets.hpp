@@ -161,6 +161,11 @@ namespace Network {
         uint8_t animState = 0;      // per-type animation state — see AddEntity
         int32_t vehicleId = -1;     // id ridden, -1 none — see AddEntity's note
         float   scale = 1.0f;       // appended: Entity::scale
+        // APPENDED (2026-09-05): the block a block-carrying mob shows,
+        // Mob::GetCarriedBlockRaw — the sulfur cube's swallowed block, which
+        // unlike the falling block's or the TNT's CHANGES (swallow, shear).
+        // 0 = none. AddEntity carries the same value in its data int.
+        uint32_t blockStateRaw = 0;
     };
 
     // MC ClientboundEntityEventPacket. One byte: 3 death, 60 poof, 10 eat,
@@ -422,6 +427,7 @@ namespace Network {
             // Appended (riding) — see AddEntity's serializer.
             b.WriteInt(static_cast<uint32_t>(p.vehicleId));
             b.WriteFloat(p.scale);
+            b.WriteInt(p.blockStateRaw);
             return b.GetData();
         }
 
@@ -442,6 +448,7 @@ namespace Network {
             // Appended field — absent on old streams, default -1 (not riding).
             if (r.Remaining() >= 4) p.vehicleId = static_cast<int32_t>(r.ReadInt());
             if (r.Remaining() >= 4) p.scale = r.ReadFloat();
+            if (r.Remaining() >= 4) p.blockStateRaw = r.ReadInt();
             return p;
         }
 

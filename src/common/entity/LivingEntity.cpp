@@ -1,5 +1,6 @@
 // File: src/common/entity/LivingEntity.cpp
 #include "common/entity/LivingEntity.hpp"
+#include "common/entity/projectile/Projectile.hpp"
 #include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/Mth.hpp"
@@ -334,6 +335,11 @@ namespace Game {
         float blockFriction = 1.0f;
         if (onGround && m_level && m_level->Blocks()) {
             blockFriction = GetBlockFriction(m_level->Blocks()->GetBlock(belowX, belowY, belowZ));
+            // MC 26.3: computeModifiedFriction(friction, FRICTION_MODIFIER) —
+            // the modifier scales how far the block is from frictionless,
+            // 1.0 (every mob but the sulfur cube's archetypes) is identity.
+            blockFriction = ComputeModifiedFriction(
+                blockFriction, static_cast<float>(GetAttributeValue(Attribute::FrictionModifier)));
         }
 
         if (inFluid) {
@@ -401,14 +407,24 @@ namespace Game {
             return;
         }
 
-        const float friction = blockFriction * kFrictionBase;
+        // MC 26.3 travelInAir: airDrag = computeModifiedFriction(0.91,
+        // AIR_DRAG_MODIFIER), the vertical drag the same fold over 0.98 — or
+        // airDrag itself for an omnidirectional air mover (and, as before,
+        // for a flying animal). Modifier 1.0 reproduces the old constants.
+        const float airDragModifier =
+            static_cast<float>(GetAttributeValue(Attribute::AirDragModifier));
+        const float airDrag  = ComputeModifiedFriction(kFrictionBase, airDragModifier);
+        const float friction = blockFriction * airDrag;
 
         // MC handleRelativeFrictionAndCalculateMovement.
         const float accel = onGround
             ? m_speed * (kGroundAccel / (blockFriction * blockFriction * blockFriction))
             : kFlyingSpeed;
         MoveRelative(accel, input);
+        const glm::dvec3 preMove = velocity;
+        const glm::dvec3 prePos  = position;
         Move(velocity);
+        RestituteMovementAfterCollisions(preMove, position - prePos, airDrag);
 
         // MC travelInAir's vertical term: LEVITATION replaces gravity outright,
         // easing the motion toward 0.05 * (amp + 1) at 20% per tick — which is
@@ -435,11 +451,61 @@ namespace Game {
             // MC: a FlyingAnimal's vertical drag is the same air friction as
             // the horizontal axes (0.91-based), not the falling body's 0.98 —
             // it is what lets a bee hold altitude instead of slowly sinking.
-            const float verticalFriction = IsFlyingAnimal() ? friction : kVerticalDrag;
+            const float verticalFriction = (IsFlyingAnimal() || OmnidirectionalAirMover())
+                ? friction
+                : ComputeModifiedFriction(kVerticalDrag, airDragModifier);
             velocity.x *= friction;
             velocity.y  = movementY * verticalFriction;
             velocity.z *= friction;
         }
+    }
+
+    float LivingEntity::ComputeModifiedFriction(float friction, float modifier) {
+        // MC 26.3 LivingEntity.computeModifiedFriction.
+        return std::clamp(1.0f - (1.0f - friction) * modifier, 0.0f, 1.0f);
+    }
+
+    double LivingEntity::GetEntityBounciness() const {
+        return GetAttributeValue(Attribute::Bounciness);
+    }
+
+    void LivingEntity::RestituteMovementAfterCollisions(const glm::dvec3& preMove,
+                                                        const glm::dvec3& moved,
+                                                        float airDrag) {
+        // MC 26.3 Entity.restituteMovementAfterCollisions, the ENTITY-bounciness
+        // half: a collided axis keeps -v * restitution instead of the zero
+        // Move() left there. (MC's other half, the block's own restitution —
+        // the slime block — lives with the block code here, as before.)
+        // `preMove` is MC's currentMovement (deltaMovement before the move),
+        // `moved` the movement that actually happened. Nothing to do for the
+        // whole world but a sulfur cube wearing a block: bounciness is 0.
+        const double restitution = GetEntityBounciness();
+        if (restitution <= 0.0) return;
+        const bool xCollision = preMove.x != 0.0 && velocity.x == 0.0;
+        const bool zCollision = preMove.z != 0.0 && velocity.z == 0.0;
+        if (!verticalCollision && !xCollision && !zCollision) return;
+
+        glm::dvec3 after = velocity;
+        if (xCollision) after.x = -preMove.x * restitution;
+        if (zCollision) after.z = -preMove.z * restitution;
+
+        if (verticalCollision) {
+            // verticalCollisionBelow: a landing keeps its bounce only when it
+            // came in faster than one tick of gravity — a resting cube does
+            // not vibrate on the floor.
+            double r = restitution;
+            if (preMove.y < 0.0 && !(-preMove.y > GetEffectiveGravity())) r = 0.0;
+            double gravityCompensation = 0.0;
+            double effectiveDrag = 1.0;
+            if (r > 0.0 && preMove.y != 0.0) {
+                const double portionWithMovement = moved.y / preMove.y;
+                gravityCompensation = portionWithMovement * GetEffectiveGravity();
+                effectiveDrag = 1.0 + (static_cast<double>(airDrag) - 1.0) * portionWithMovement;
+            }
+            after.y = (gravityCompensation - preMove.y) * effectiveDrag * r;
+        }
+        velocity = after;
+        needsSync = true;
     }
 
     int LivingEntity::CalculateFallDamage(double fallDist, float damageMultiplier) const {
@@ -798,6 +864,15 @@ namespace Game {
         SetHealth(m_health - amount);
     }
 
+    bool LivingEntity::HurtFrom(MobDamageSource source, float amount, Entity* causingEntity,
+                                Entity* directEntity) {
+        Entity* const previous = m_hurtDirectEntity;
+        m_hurtDirectEntity = directEntity;
+        const bool hit = Hurt(source, amount, causingEntity);
+        m_hurtDirectEntity = previous;
+        return hit;
+    }
+
     bool LivingEntity::Hurt(MobDamageSource source, float amount, Entity* attacker) {
         if (IsRemoved() || IsDeadOrDying()) return false;
         if (amount < 0.0f) amount = 0.0f;
@@ -858,8 +933,21 @@ namespace Game {
             // all, so leaving it on meant a blast on the far side of an
             // obsidian wall still threw you across the room.
             if (attacker && !DamageSourceHasNoKnockback(source)) {
-                const double dx = attacker->position.x - position.x;
-                const double dz = attacker->position.z - position.z;
+                // MC dealDefaultKnockback: a PROJECTILE pushes along its own
+                // flight (calculateHorizontalHurtKnockbackDirection = its
+                // delta movement, negated into the away-from vector); any
+                // other blow pushes away from the source position — the
+                // direct entity's when there is one, else the attacker's.
+                double dx, dz;
+                if (const Entity* direct = m_hurtDirectEntity;
+                    direct && direct != attacker && dynamic_cast<const Projectile*>(direct)) {
+                    dx = -direct->velocity.x;
+                    dz = -direct->velocity.z;
+                } else {
+                    const Entity* from = m_hurtDirectEntity ? m_hurtDirectEntity : attacker;
+                    dx = from->position.x - position.x;
+                    dz = from->position.z - position.z;
+                }
                 Knockback(kDefaultKnockback, dx, dz);
             }
         }

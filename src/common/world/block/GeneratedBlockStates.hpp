@@ -188,16 +188,17 @@ namespace Game {
         DISARMED = 117,                   // "disarmed" = true,false
         EGGS = 118,                       // "eggs" = 1,2,3…
         VAULT_STATE = 119,                // "vault_state" = inactive,active,unlocking…
-        Count = 120
+        STATE = 120,                      // "state" = dry,wet,dormant…
+        Count = 121
     };
 
     // Total distinct block states across every block this engine defines —
     // the size of the global state id space, and MC's
     // Block.BLOCK_STATE_REGISTRY.size(). Generated, never a literal: the
     // palette width is derived from it and must move when it does.
-    inline constexpr uint32_t kBlockStateCount = 29613;
+    inline constexpr uint32_t kBlockStateCount = 32713;
     inline constexpr int      kBlockStateBits  = 15;
-    inline constexpr size_t   kStatefulBlockCount = 762;
+    inline constexpr size_t   kStatefulBlockCount = 805;
 
     static_assert(kBlockStateCount <= (1u << kBlockStateBits),
                   "state id space does not fit the generated palette width");

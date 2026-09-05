@@ -31,6 +31,23 @@ documented. The headline items, each verified against its MC source:
   37 mobs baby-exact, hand-written five included. Bonus: the adult rabbit's
   dropped ADULT_TRANSFORMER scaling(0.6) — rabbits rendered 67% too large.
   Skipped: nautilus baby (texture not in assets).
+- **26.3 audit + sulfur cube (2026-09-05)** — every non-MISC type 26.3
+  registers has a wire id, a server class and a mesh; the one 26.3-only
+  mob, the sulfur cube, is ported standalone (see CLAUDE.md), and the
+  26.3 adult boxes (bee, rabbit) and hoglin's notInPeaceful are applied.
+  The audit script reads 26.1 only, so it lists the cube as "no mesh /
+  attributes not parsed" — a limitation of the tool, not the port.
+- **26.1–26.2 baby remodel (2026-09-05)** — MC's dedicated baby meshes for
+  EVERY baby this port has (41 rows: the farm animals, pets, equines,
+  llamas, camels, hoglin/zoglin, the zombie/piglin family, panda, polar
+  bear, fox, goat, bee, turtle, axolotl, armadillo, strider, snifflet,
+  happy ghast, nautilus, plus the adult rabbit remodel with its hop /
+  idle-head-tilt clips and the baby axolotl's seven keyframe states)
+  generated from `minecraft_code2/` as `<slug>_baby_new` rows with their own
+  compiled setupAnim, on the `_baby` sheets (GeneratedBabyTextures);
+  selectable per world (World Settings → Baby Models, New / Classic).
+  Hitboxes and eye heights are 26.3's in both looks. Baby sounds wait on a
+  sound system.
 - **The melee swing now exists client-side** — Swing() broadcasts entity
   event 103 (the Animate-packet stand-in), the renderer lerps getAttackAnim,
   and the restart threshold is duration/2. Every melee mob's whack animates
@@ -278,6 +295,21 @@ zeroed), TamableAnimalPanicGoal, OwnerHurtByTargetGoal / OwnerHurtTargetGoal
 (a lastHurtMob timestamp was added to LivingEntity for the latter).
 `GoalSelector::RemoveGoal` landed for MC's reassess pattern. Per mob:
 
+- *Snow golem shearing* — `SnowGolem::MobInteract`/`Shear`: shears drop the
+  carved pumpkin at eye height and clear DATA_PUMPKIN_ID (wire variant byte,
+  NBT "Pumpkin"); the head layer stops drawing it. Shears keep durability.
+- *Wither spawn* — only the soul-sand ritual calls makeInvulnerable (blue
+  charge-up + spawn explosion); /summon and the egg spawn it fighting, as
+  vanilla. *Breeze* wind + eyes layers, *snow golem* pumpkin head layer.
+- *Debug line-up* `/spawnall [adults|babies|both] [spacing]`
+  (`IntegratedServer::SpawnMobLineup`): one adult of every mob type in a
+  12-wide grid in front of the sender, each row's babies one spacing in
+  front (index-aligned, no-baby types leave a gap), all persistent, facing
+  the sender, within tracking range; the log names each type's row/column.
+- *Spawn egg on its own adult* (`SpawnOffspringFromSpawnEgg`, IntegratedServer):
+  MC Mob.checkAndHandleImportantInteractions — a baby of the egg's type at the
+  parent's feet (bred from an ageable parent, freshly made + `SetBaby` for the
+  zombie/piglin/zoglin family), one egg spent; no baby form = click passes.
 - *Animal base feeding* (`Animal::MobInteract`): food ages a baby up 10%
   (ageUp forced — forcedAge quirk ported verbatim) and courts an adult
   (SetInLove). Covers chicken/rabbit/turtle/fox/pig/cow/sheep and every

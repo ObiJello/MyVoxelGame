@@ -1,4 +1,5 @@
 // File: src/client/renderer/gui/GuiGraphics.cpp
+#include "client/resource/ResourcePacks.hpp"
 #include "GuiGraphics.hpp"
 #include "FontRenderer.hpp"
 #include "items/ItemLighting.hpp"
@@ -575,6 +576,14 @@ namespace Render {
         TextureHandle LoadItemTexture(const std::string& itemName) {
             if (!g_renderBackend) return INVALID_TEXTURE;
             auto& cache = ItemTextureCache();
+            {
+                // A resource pack change replaces every texture here.
+                static int s_packGeneration = -1;
+                if (Resources::CacheStale(s_packGeneration)) {
+                    if (g_renderBackend) for (auto& [key, tex] : cache) if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+                    cache.clear();
+                }
+            }
             auto it = cache.find(itemName);
             if (it != cache.end()) return it->second;
 
@@ -682,6 +691,12 @@ namespace Render {
         TextureHandle LoadGlintTexture() {
             static TextureHandle s_tex = INVALID_TEXTURE;
             static bool          s_tried = false;
+            static int           s_packGeneration = -1;
+            if (Resources::CacheStale(s_packGeneration)) {
+                if (s_tex != INVALID_TEXTURE && g_renderBackend) g_renderBackend->DestroyTexture(s_tex);
+                s_tex = INVALID_TEXTURE;
+                s_tried = false;
+            }
             if (s_tried) return s_tex;
             s_tried = true;
             if (!g_renderBackend) return INVALID_TEXTURE;
