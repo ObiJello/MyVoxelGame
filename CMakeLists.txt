@@ -1826,15 +1826,36 @@ if(APPLE AND TARGET crashpad_handler)
     )
 endif()
 
+# ── The game's runtime payload, declared ONCE ─────────────────────────────────
+#
+# THE one list of directories that must sit beside the executable. It drives the
+# staging below on every platform AND, through the generated package manifest,
+# what the Windows release zip contains — so staging and packaging cannot
+# disagree.
+#
+# They did disagree once. The Windows package was a second, hand-written list in
+# tools/auto_release.ps1 that never mentioned data/, so every published Windows
+# build shipped without it: the terrain library could not resolve MC_DATA_ROOT,
+# the ChunkProvider was torn down, and players spawned into an empty world with
+# nothing but "No chunk provider available" in the log. The build tree worked
+# fine the whole time, because CMake staged data/ there.
+#
+# macOS never had the bug because its package IS the bundle CMake assembled.
+# This list gives Windows the same property. Add a new runtime directory here
+# and it ships everywhere; there is no second place to remember.
+set(GAME_PAYLOAD_DIRS shaders assets data)
+
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────
 if(APPLE)
-    # Step 1: copy the source shaders dir (gets the .vert/.frag GLSL text and
-    # any pre-committed .spv fallbacks from when glslc isn't available).
-    add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
-            "${PROJECT_SOURCE_DIR}/shaders"
-            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
-    )
+    # Step 1: stage the payload. For shaders this gets the .vert/.frag GLSL text
+    # and any pre-committed .spv fallbacks from when glslc isn't available.
+    foreach(payload IN LISTS GAME_PAYLOAD_DIRS)
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
+                "${PROJECT_SOURCE_DIR}/${payload}"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/${payload}"
+        )
+    endforeach()
     # Step 2: when glslc is available, the build's compile_shaders target
     # produces fresh .spv files in ${CMAKE_BINARY_DIR}/shaders. Overwrite the
     # bundle's stale .spv (and the source dir's stale .spv, so CLion debug
@@ -1856,41 +1877,45 @@ if(APPLE)
                 COMMENT "Copying freshly-compiled SPIR-V back into source shaders/ for dev runs"
         )
     endif()
-    # Copy assets directory for texture atlas and block models
-    add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
-            "${PROJECT_SOURCE_DIR}/assets"
-            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/assets"
-    )
-    # Copy data/ too. This is NOT optional: the terrain library reads block
-    # tags (BlockPredicate) and structure NBTs (FossilTemplate) from it at
-    # generation time. Without it in the bundle those lookups fall back to
-    # walking up from the working directory — which finds the repo when run
-    # from an IDE and finds nothing when launched via `open` (cwd "/"), so
-    # every chunk fails to generate and the world comes up empty.
-    add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
-            "${PROJECT_SOURCE_DIR}/data"
-            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/data"
-    )
 else()
-    add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
-            "${PROJECT_SOURCE_DIR}/shaders"
-            "$<TARGET_FILE_DIR:MyVoxelGame>/shaders"
-    )
-    # Copy assets directory for texture atlas and block models
-    add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
-            "${PROJECT_SOURCE_DIR}/assets"
-            "$<TARGET_FILE_DIR:MyVoxelGame>/assets"
-    )
-    # See the macOS branch above — the terrain library needs data/ at runtime.
-    add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
-            "${PROJECT_SOURCE_DIR}/data"
-            "$<TARGET_FILE_DIR:MyVoxelGame>/data"
-    )
+    foreach(payload IN LISTS GAME_PAYLOAD_DIRS)
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
+                "${PROJECT_SOURCE_DIR}/${payload}"
+                "$<TARGET_FILE_DIR:MyVoxelGame>/${payload}"
+        )
+    endforeach()
+endif()
+
+# ── The Windows package manifest ──────────────────────────────────────────────
+#
+# tools/auto_release.ps1 zips exactly what this names, so the release contents
+# are derived from the build rather than maintained by hand. Sentry's crashpad
+# helpers are runtime dependencies too — sentry_init uses the crashpad backend
+# (SENTRY_BACKEND above) and looks for the handler next to the executable — and
+# they were missing from every Windows release for the same reason data/ was.
+# They land in bin/ only because every target shares the output directory, so
+# copy them deliberately rather than relying on that.
+if(WIN32)
+    set(_game_package_manifest "")
+    foreach(payload IN LISTS GAME_PAYLOAD_DIRS)
+        string(APPEND _game_package_manifest "${payload}
+")
+    endforeach()
+    foreach(helper crashpad_handler crashpad_wer)
+        if(TARGET ${helper})
+            add_custom_command(TARGET MyVoxelGame POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:${helper}>"
+                    "$<TARGET_FILE_DIR:MyVoxelGame>/$<TARGET_FILE_NAME:${helper}>"
+            )
+            string(APPEND _game_package_manifest "$<TARGET_FILE_NAME:${helper}>
+")
+        endif()
+    endforeach()
+    file(GENERATE
+            OUTPUT "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/package_manifest.txt"
+            CONTENT "${_game_package_manifest}")
 endif()
 # ────────────────────────────────────────────────────────────────────────────
 
