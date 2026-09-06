@@ -33,7 +33,7 @@
 
 namespace Game {
     class Mob;
-    class EntityLevel;
+    struct EntityLevel;
 }
 
 namespace Game::Anvil {

@@ -699,4 +699,12 @@ namespace Game {
         }
     }
 
+    // Out of line so the by-value unique_ptr parameter is destroyed where
+    // Entity is complete (see EntityLevel.hpp). The base level takes no
+    // ownership: the client has no entity list, the server overrides.
+    void EntityLevel::AddFreshEntity(std::unique_ptr<Entity> entity) {
+        (void)entity;
+    }
+
 } // namespace Game
+

@@ -7,6 +7,9 @@
 #include "common/core/Log.hpp"
 #include <unordered_map>
 #include <cstdlib>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 // Terrain library includes
 #include "levelgen/NoiseRegistry.h"
@@ -135,9 +138,20 @@ namespace Game {
         std::array<std::atomic<int64_t>, kMaxProbe> m_cpuNs{};
         std::array<std::atomic<int64_t>, kMaxProbe> m_wallNs{};
         static int64_t ThreadCpuNs() {
+#if defined(_WIN32)
+            // Windows has no CLOCK_THREAD_CPUTIME_ID; GetThreadTimes reports
+            // kernel+user time in 100 ns units.
+            FILETIME creation{}, exit{}, kernel{}, user{};
+            if (!::GetThreadTimes(::GetCurrentThread(), &creation, &exit, &kernel, &user)) return 0;
+            const auto toNs = [](const FILETIME& ft) {
+                return (int64_t(uint64_t(ft.dwHighDateTime) << 32 | ft.dwLowDateTime)) * 100LL;
+            };
+            return toNs(kernel) + toNs(user);
+#else
             timespec ts{};
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
             return int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+#endif
         }
         static int64_t RunProbe() {
             const auto t0 = std::chrono::steady_clock::now();

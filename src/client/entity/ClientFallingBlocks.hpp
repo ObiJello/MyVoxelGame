@@ -27,7 +27,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace Game { class IBlockAccess; }
+namespace Game { struct IBlockAccess; }
 
 namespace Client {
 

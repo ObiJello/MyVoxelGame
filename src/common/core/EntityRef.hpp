@@ -28,7 +28,7 @@ namespace Game {
 
     class Entity;
     class LivingEntity;
-    class EntityLevel;
+    struct EntityLevel;
 
     class EntityRef {
     public:

@@ -157,10 +157,10 @@ namespace Client {
             ClientLevel* level = ClientLevels::Get(dest);
             if (!level || !level->Blocks()) continue;
 
-            const glm::dvec3 far = p.TransformPoint(glm::dvec3(x + 0.5, y + 0.5, z + 0.5));
-            const int fx = static_cast<int>(std::floor(far.x));
-            const int fy = static_cast<int>(std::floor(far.y));
-            const int fz = static_cast<int>(std::floor(far.z));
+            const glm::dvec3 farPos = p.TransformPoint(glm::dvec3(x + 0.5, y + 0.5, z + 0.5));
+            const int fx = static_cast<int>(std::floor(farPos.x));
+            const int fy = static_cast<int>(std::floor(farPos.y));
+            const int fz = static_cast<int>(std::floor(farPos.z));
             // A global seam's far side that has not streamed in yet counts
             // as solid: an unloaded chunk reads as air, and air under the
             // world's floor drops the player through the seam into whatever

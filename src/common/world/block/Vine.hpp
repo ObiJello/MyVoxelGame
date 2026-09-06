@@ -19,7 +19,7 @@
 
 namespace Game {
 
-    class IBlockAccess;
+    struct IBlockAccess;
 
     // The `vine` block only. weeping_vines / twisting_vines / cave_vines are
     // different MC classes with different properties, and matching them on the

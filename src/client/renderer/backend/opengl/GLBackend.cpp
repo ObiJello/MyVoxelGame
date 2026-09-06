@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <cstdlib>
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -204,6 +205,43 @@ namespace Render {
     // BUFFERS
     // ========================================================================
 
+
+    // ========================================================================
+    // ELEMENT-ARRAY BINDING SAFETY
+    // ========================================================================
+    //
+    // GL_ELEMENT_ARRAY_BUFFER is per-VAO state, NOT global. DrawIndexed
+    // deliberately leaves its VAO bound ("next DrawIndexed will rebind"), so
+    // any glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ...) done afterwards edits
+    // THAT vao's index binding — and glDeleteBuffers resets it in whatever VAO
+    // is current.
+    //
+    // That is how a dropped item crashed the NVIDIA driver: drawing item A left
+    // VAO_A bound, building item B's mesh called CreateBuffer(Index, ...) which
+    // bound the new EBO and then bound 0, clearing VAO_A's index buffer. The
+    // next glDrawElements on VAO_A took the offset as a CLIENT pointer and
+    // dereferenced it inside the driver — an access violation, not a GL error,
+    // so the debug callback never saw it either.
+    //
+    // Detach the VAO for the duration and put it back, so a buffer operation
+    // can never be seen by an unrelated VAO and every caller's binding survives.
+    namespace {
+        struct DetachedVertexArray {
+            GLint prev = 0;
+            bool  active = false;
+            explicit DetachedVertexArray(GLenum target) {
+                if (target != GL_ELEMENT_ARRAY_BUFFER) return;
+                glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev);
+                if (prev == 0) return;          // nothing bound: nothing to protect
+                glBindVertexArray(0);
+                active = true;
+            }
+            ~DetachedVertexArray() { if (active) glBindVertexArray(static_cast<GLuint>(prev)); }
+            DetachedVertexArray(const DetachedVertexArray&) = delete;
+            DetachedVertexArray& operator=(const DetachedVertexArray&) = delete;
+        };
+    } // namespace
+
     BufferHandle GLBackend::CreateBuffer(BufferUsage usage, size_t size,
                                         const void* data, BufferAccess access) {
         GLuint glId = 0;
@@ -213,9 +251,21 @@ namespace Render {
         GLenum target = ToGLBufferTarget(usage);
         GLenum glUsage = ToGLBufferUsage(access);
 
+        const DetachedVertexArray noVao(target);   // see DetachedVertexArray
         glBindBuffer(target, glId);
+        while (glGetError() != GL_NO_ERROR) {}          // clear anything stale
         glBufferData(target, static_cast<GLsizeiptr>(size), data, glUsage);
+        const GLenum bufErr = glGetError();
         glBindBuffer(target, 0);
+        if (bufErr != GL_NO_ERROR) {
+            // Most often GL_OUT_OF_MEMORY. The name stays valid but has no
+            // storage, and drawing from it faults inside the driver rather
+            // than raising a GL error — so refuse the buffer here.
+            Log::Error("[GLBackend] CreateBuffer: %zu bytes failed (GL error 0x%04X)",
+                       size, static_cast<unsigned>(bufErr));
+            glDeleteBuffers(1, &glId);
+            return INVALID_BUFFER;
+        }
 
         uint32_t handle = AllocHandle();
         m_buffers[handle] = {glId, target, size};
@@ -238,6 +288,7 @@ namespace Render {
         // so restoring binding 0 here was pure driver churn (2+ redundant calls
         // per mesh upload). Note ELEMENT_ARRAY binding is per-VAO state either
         // way — BindSlab rebinds the IBO before every terrain draw.
+        const DetachedVertexArray noVao(it->second.target);   // see DetachedVertexArray
         glBindBuffer(it->second.target, it->second.glId);
         glBufferSubData(it->second.target, static_cast<GLintptr>(offset),
                        static_cast<GLsizeiptr>(size), data);
@@ -255,6 +306,7 @@ namespace Render {
         static const bool s_forceSync = std::getenv("OBEY_SYNC_UPLOADS") != nullptr;
         if (s_forceSync) { UpdateBuffer(handle, offset, size, data); return; }
 
+        const DetachedVertexArray noVao(it->second.target);   // see DetachedVertexArray
         glBindBuffer(it->second.target, it->second.glId);
 
         // GL_MAP_UNSYNCHRONIZED_BIT is the whole point: glBufferSubData on a
@@ -285,7 +337,10 @@ namespace Render {
         auto it = m_buffers.find(handle);
         if (it == m_buffers.end()) return;
 
-        glDeleteBuffers(1, &it->second.glId);
+        {
+            const DetachedVertexArray noVao(it->second.target);   // see DetachedVertexArray
+            glDeleteBuffers(1, &it->second.glId);
+        }
         m_memStats.bufferMemory -= it->second.size;
         m_memStats.totalAllocated -= it->second.size;
         m_memStats.bufferCount--;
@@ -683,12 +738,19 @@ namespace Render {
             glEnableVertexAttribArray(attr.location);
         }
 
-        // Bind index buffer if provided
+        // Bind index buffer if provided. A handle that was asked for but does
+        // not resolve is a FAILURE, not something to shrug off: the mesh would
+        // come back looking usable and take DrawIndexed into the driver with no
+        // index buffer bound.
         if (indexBuffer != INVALID_BUFFER) {
             auto ibIt = m_buffers.find(indexBuffer);
-            if (ibIt != m_buffers.end()) {
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibIt->second.glId);
+            if (ibIt == m_buffers.end()) {
+                glBindVertexArray(0);
+                glDeleteVertexArrays(1, &vao);
+                Log::Error("[GLBackend] CreateMesh: index buffer %u does not exist", indexBuffer);
+                return INVALID_MESH;
             }
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibIt->second.glId);
         }
 
         glBindVertexArray(0);
@@ -1037,6 +1099,13 @@ namespace Render {
     void GLBackend::DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) {
         auto it = m_meshes.find(mesh);
         if (it == m_meshes.end()) return;
+
+        // With no ELEMENT_ARRAY_BUFFER in the VAO, glDrawElements treats the
+        // offset as a CLIENT pointer and dereferences address 0 inside the
+        // driver — an access violation in nvoglv64/atio6axx, not a GL error we
+        // could ever see. A zero count is merely pointless. Neither is worth a
+        // draw, and both are cheap to rule out here.
+        if (indexCount == 0 || it->second.indexBuffer == INVALID_BUFFER) return;
 
         glBindVertexArray(it->second.vao);
         glDrawElements(ToGLPrimitive(m_currentState.primitiveType), indexCount, GL_UNSIGNED_INT,

@@ -95,7 +95,18 @@ namespace {
             entry.mesh = Render::g_renderBackend->CreateMesh(
                 entry.vertexBuffer, entry.indexBuffer, Render::GetBlockVertexLayout());
             entry.indexCount = static_cast<uint32_t>(idx.size());
-            entry.valid = true;
+            // Only a fully built entry is `valid`. This used to be set
+            // unconditionally, so a failed buffer or mesh creation was cached
+            // as good and every later frame drew from it — the sprite path
+            // beside this one has always checked, and this one now matches it.
+            entry.valid = entry.mesh != Render::INVALID_MESH &&
+                          entry.vertexBuffer != Render::INVALID_BUFFER &&
+                          entry.indexBuffer  != Render::INVALID_BUFFER &&
+                          entry.indexCount > 0;
+            if (!entry.valid) {
+                Log::Error("[ItemEntityRenderer] block item mesh for id %u failed to upload",
+                           static_cast<uint32_t>(blockId));
+            }
         }
 
         auto [pos, ok] = g_blockItemMeshes.emplace(std::move(key), entry);
@@ -400,7 +411,8 @@ namespace Render {
                     item.layerTints.empty() ? 0u : item.layerTints[0];
                 const auto* entry =
                     HeldItemSpriteMesh::GetOrBuild(item.spriteName, spriteTint);
-                if (!entry || entry->indexCount == 0) return;  // sprite failed to load
+                if (!entry || entry->indexCount == 0 ||
+                    entry->mesh == INVALID_MESH) return;  // sprite failed to load
                 mesh        = entry->mesh;
                 indexCount  = entry->indexCount;
                 tex         = entry->texture;

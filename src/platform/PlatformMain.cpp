@@ -173,7 +173,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 // is (inLevel, drawn, cullDistance, cullFrustum, cullCrossing) summed over
 // the pass's calls this frame.
 struct PlayerDrawDiag {
-    int main[5]{}, crossers[5]{}, reverse[5]{}, far[5]{};
+    int main[5]{}, crossers[5]{}, reverse[5]{}, farView[5]{};
     void Add(int* slot, const Render::PlayerRenderer::Tally& t) {
         slot[0] += t.inLevel; slot[1] += t.drawn; slot[2] += t.cullDistance;
         slot[3] += t.cullFrustum; slot[4] += t.cullCrossing;
@@ -5682,7 +5682,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                               ctx.frustum, *Client::g_remotePlayerManager,
                                               ctx.partialTick, nullptr,
                                               Render::ChunkRenderer::PortalEntityClipPlane());
-                        g_playerDrawDiag.Add(g_playerDrawDiag.far, playerRenderer.LastTally());
+                        g_playerDrawDiag.Add(g_playerDrawDiag.farView, playerRenderer.LastTally());
                     }
                     // The viewer's own body, when the view shows the level
                     // they stand in (a portal looking back, or a same-
@@ -5801,7 +5801,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                   d.main[0], d.main[1], d.main[2], d.main[3], d.main[4],
                                   d.crossers[0], d.crossers[1], d.crossers[2], d.crossers[3], d.crossers[4],
                                   d.reverse[0], d.reverse[1], d.reverse[2], d.reverse[3], d.reverse[4],
-                                  d.far[0], d.far[1], d.far[2], d.far[3], d.far[4]);
+                                  d.farView[0], d.farView[1], d.farView[2], d.farView[3], d.farView[4]);
                     }
                 }
             }

@@ -24,7 +24,7 @@
 
 namespace Game {
     class Mob;
-    class EntityLevel;
+    struct EntityLevel;
     struct ItemEntity;
     struct ExperienceOrb;
     enum class EntityTypeId : uint16_t;

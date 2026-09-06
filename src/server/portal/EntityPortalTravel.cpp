@@ -308,15 +308,15 @@ namespace Server {
                 if (glm::length(glm::clamp(eye, mn, mx) - eye) > kNoticeRadius) continue;
 
                 const Game::DimensionId dest = portal->IsMirror() ? level.Dimension() : portal->destDimension;
-                ServerLevel* far = m_server.GetLevel(dest);
-                if (!far || !far->MobLevel()) continue;
+                ServerLevel* farLevel = m_server.GetLevel(dest);
+                if (!farLevel || !farLevel->MobLevel()) continue;
 
                 for (const auto& session : allSessions) {
                     if (!session) continue;
-                    const PlayerEntityView* view = far->MobLevel()->GetPlayerView(session->GetConnectionId());
+                    const PlayerEntityView* view = farLevel->MobLevel()->GetPlayerView(session->GetConnectionId());
                     if (!view) continue;
                     // An animal wants the food in that player's hand.
-                    if (animal && !animal->IsFood(far->MobLevel()->GetHeldItemId(*view))) continue;
+                    if (animal && !animal->IsFood(farLevel->MobLevel()->GetHeldItemId(*view))) continue;
                     // The player's image on this side.
                     const glm::dvec3 image = portal->InverseTransformPoint(view->position);
                     if (glm::length(image - mob->position) > followRange) continue;
@@ -559,11 +559,11 @@ namespace Server {
             if (chase.tempt) {
                 // Still worth the walk only while the food is out.
                 const Game::DimensionId dest = portal->IsMirror() ? level.Dimension() : portal->destDimension;
-                ServerLevel* far = m_server.GetLevel(dest);
-                const PlayerEntityView* view = (far && far->MobLevel())
-                    ? far->MobLevel()->GetPlayerView(chase.connectionId) : nullptr;
+                ServerLevel* farLevel = m_server.GetLevel(dest);
+                const PlayerEntityView* view = (farLevel && farLevel->MobLevel())
+                    ? farLevel->MobLevel()->GetPlayerView(chase.connectionId) : nullptr;
                 const Game::Animal* animal = dynamic_cast<const Game::Animal*>(mob);
-                if (!view || !animal || !animal->IsFood(far->MobLevel()->GetHeldItemId(*view))) {
+                if (!view || !animal || !animal->IsFood(farLevel->MobLevel()->GetHeldItemId(*view))) {
                     if (mob->HasAiControls()) mob->GetNavigation().Stop();
                     it = m_chases.erase(it);
                     continue;

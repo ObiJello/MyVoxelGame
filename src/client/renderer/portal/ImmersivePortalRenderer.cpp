@@ -75,9 +75,9 @@ namespace Render {
         // z row becomes the w row, so z/w == 1 (GL) and, after the Vulkan
         // backend's z' = 0.5z + 0.5w remap, still 1.
         glm::mat4 FarPlaneProjection(const glm::mat4& proj) {
-            glm::mat4 far = proj;
-            for (int c = 0; c < 4; ++c) far[c][2] = far[c][3];
-            return far;
+            glm::mat4 out = proj;
+            for (int c = 0; c < 4; ++c) out[c][2] = out[c][3];
+            return out;
         }
 
         double DistanceToSurface(const Portal& p, const glm::dvec3& from) {

@@ -13,6 +13,7 @@
 
 #if defined(_WIN32)
   #include <io.h>
+  #include <share.h>
   #define OBEY_FSYNC(fd)      _commit(fd)
   #define OBEY_FILENO(f)      _fileno(f)
   #define OBEY_FSEEK(f, o, w) _fseeki64((f), (o), (w))
@@ -50,9 +51,13 @@ namespace Game::Anvil {
         std::FILE* OpenFile(const std::filesystem::path& p, const char* mode) {
 #if defined(_WIN32)
             const std::wstring wmode(mode, mode + std::strlen(mode));
-            std::FILE* f = nullptr;
-            if (_wfopen_s(&f, p.c_str(), wmode.c_str()) != 0) return nullptr;
-            return f;
+            // _wfopen_s opens with EXCLUSIVE sharing (_SH_DENYRW) — a second
+            // open of the same path, even from this same process, fails with
+            // EACCES ("Permission denied"). POSIX fopen, which the rest of
+            // this code is written against, shares freely. _wfsopen with
+            // _SH_DENYNO restores that behaviour; concurrent world access is
+            // guarded by session.lock (SessionLock), not by the file mode.
+            return _wfsopen(p.c_str(), wmode.c_str(), _SH_DENYNO);
 #else
             return std::fopen(p.c_str(), mode);
 #endif
@@ -150,7 +155,14 @@ namespace Game::Anvil {
             // and only then do we create one. Opening "w+b" unconditionally
             // would truncate every region file on load.
             r->m_file = OpenFile(file, "r+b");
-            if (!r->m_file) r->m_file = OpenFile(file, "w+b");
+            if (!r->m_file) {
+                // Only ABSENCE may fall through to "w+b" — that mode truncates,
+                // so creating on any other failure (a sharing violation, a
+                // scanner holding the file) would blank a region of the
+                // player's world instead of reporting the error.
+                std::error_code ec;
+                if (!std::filesystem::exists(file, ec)) r->m_file = OpenFile(file, "w+b");
+            }
         } else {
             r->m_file = OpenFile(file, "rb");
         }

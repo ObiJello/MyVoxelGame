@@ -13,6 +13,12 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#if defined(_MSC_VER)
+#define MC_RESTRICT __restrict
+#else
+#define MC_RESTRICT __restrict__
+#endif
+
 namespace minecraft {
 namespace levelgen {
 
@@ -1007,7 +1013,7 @@ density::DensityFunction::FunctionContext* NoiseChunk::forIndex(int cellIndex) {
 
 // Java lines 248-263
 // OPTIMIZATION: Use local variables and restrict pointer
-void NoiseChunk::fillAllDirectly(double* __restrict__ output, int count, density::DensityFunction* function) {
+void NoiseChunk::fillAllDirectly(double* MC_RESTRICT output, int count, density::DensityFunction* function) {
     (void)count;  // Unused - we iterate based on cell dimensions
 
     // Cache dimensions in local variables for faster access

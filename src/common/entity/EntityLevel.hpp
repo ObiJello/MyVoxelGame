@@ -378,7 +378,10 @@ namespace Game {
 
         // Add a freshly created entity to the level, taking ownership.
         // Server-only (the spawner, zombie reinforcements, breeding, arrows).
-        virtual void AddFreshEntity(std::unique_ptr<Entity> entity) {}
+        // Defined out of line (Entity.cpp): destroying a
+        // std::unique_ptr<Entity> by value needs Entity complete, and
+        // MSVC instantiates the parameter's destructor right here.
+        virtual void AddFreshEntity(std::unique_ptr<Entity> entity);
 
         // ── Block edits made BY mobs ────────────────────────────────────────
         //

@@ -296,15 +296,15 @@ namespace Server {
         }
 
         if (sub == "info") {
-            const auto near = registry.CollectNear(here, sender.getPosition(), kInfoRadius);
-            if (near.empty()) {
+            const auto nearby = registry.CollectNear(here, sender.getPosition(), kInfoRadius);
+            if (nearby.empty()) {
                 connection.SendChatMessage("No portal within " +
                                            std::to_string(static_cast<int>(kInfoRadius)) + " blocks", 1);
                 return;
             }
             const Portal* best = nullptr;
             double bestDist = 0.0;
-            for (const Portal* p : near) {
+            for (const Portal* p : nearby) {
                 const double d = glm::length(p->origin - sender.getPosition());
                 if (!best || d < bestDist) { best = p; bestDist = d; }
             }

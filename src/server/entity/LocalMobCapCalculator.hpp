@@ -63,17 +63,17 @@ namespace Server {
             const auto it = m_playersNearChunk.find(key);
             if (it != m_playersNearChunk.end()) return it->second;
 
-            std::vector<size_t>& near = m_playersNearChunk[key];
+            std::vector<size_t>& nearby = m_playersNearChunk[key];
             if (m_players) {
                 const double centerX = chunkX * 16.0 + 8.0;
                 const double centerZ = chunkZ * 16.0 + 8.0;
                 for (size_t i = 0; i < m_players->size(); ++i) {
                     const double dx = (*m_players)[i].x - centerX;
                     const double dz = (*m_players)[i].z - centerZ;
-                    if (dx * dx + dz * dz < 128.0 * 128.0) near.push_back(i);
+                    if (dx * dx + dz * dz < 128.0 * 128.0) nearby.push_back(i);
                 }
             }
-            return near;
+            return nearby;
         }
 
         const std::vector<glm::dvec3>* m_players = nullptr;

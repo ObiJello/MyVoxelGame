@@ -47,7 +47,7 @@
 #include <functional>
 #include <memory>
 
-namespace Game { class IBlockAccess; }
+namespace Game { struct IBlockAccess; }
 
 namespace Render {
     class ClientMeshManager;

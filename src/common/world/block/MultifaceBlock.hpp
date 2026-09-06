@@ -25,7 +25,7 @@
 
 namespace Game {
 
-    class IBlockAccess;
+    struct IBlockAccess;
 
     // Matched by BlockID, the way MC matches `instanceof MultifaceBlock`.
     //

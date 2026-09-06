@@ -1,5 +1,9 @@
 #include "data/worldgen/features/AquaticFeatures.h"
 #include "levelgen/placement/PlacedFeature.h"
+#include <deque>
+#include <memory>
+#include <string>
+#include <vector>
 
 // Reference: net/minecraft/data/worldgen/features/AquaticFeatures.java
 

@@ -5,6 +5,7 @@
 #include <vector>
 #include <functional>
 #include <stdexcept>
+#include <string>
 #include <memory>
 
 namespace minecraft {

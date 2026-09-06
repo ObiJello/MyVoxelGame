@@ -26,7 +26,7 @@
 
 namespace Game {
 
-    class IBlockAccess;
+    struct IBlockAccess;
 
     // MC AABB.clip reduced to the boolean the callers actually need: does the
     // segment a + t*d, t in [0,1], touch this box at all? The slab method,

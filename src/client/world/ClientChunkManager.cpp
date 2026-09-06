@@ -1,5 +1,6 @@
 // File: src/client/world/ClientChunkManager.cpp
 #include <cstdint>
+#include <bit>
 #include "ClientChunkManager.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/core/Log.hpp"
@@ -1073,7 +1074,7 @@ namespace Client {
                 if (chunkIt == m_chunks.end() || !chunkIt->second->chunkData) continue;
                 ClientChunk* chunk = chunkIt->second.get();
                 for (uint32_t bits = chunk->dirtyMask; bits; bits &= bits - 1) {
-                    const int sectionY = __builtin_ctz(bits);
+                    const int sectionY = std::countr_zero(bits);
                     if (sectionY >= Game::Math::SECTIONS_PER_CHUNK) break;
                     const auto& si = chunk->sectionInfos[sectionY];
                     if (!si.dirty || si.meshingVersion == si.version) continue;
@@ -1194,7 +1195,7 @@ namespace Client {
                                       m_renderer->IsPortalViewColumn(chunkPos);
 
             for (uint32_t bits = chunk->dirtyMask; bits; bits &= bits - 1) {
-                const int sectionY = __builtin_ctz(bits);
+                const int sectionY = std::countr_zero(bits);
                 if (sectionY >= Game::Math::SECTIONS_PER_CHUNK) break;
                 auto& si = chunk->sectionInfos[sectionY];
                 if (!si.dirty) continue;

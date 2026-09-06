@@ -9,6 +9,9 @@
 #include "server/world/storage/NBTParser.hpp"
 
 #include <cstdio>
+#if defined(_WIN32)
+#include <share.h>
+#endif
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -21,9 +24,13 @@ namespace Game::Anvil {
         std::FILE* OpenFile(const std::filesystem::path& p, const char* mode) {
 #if defined(_WIN32)
             const std::wstring wmode(mode, mode + std::char_traits<char>::length(mode));
-            std::FILE* f = nullptr;
-            if (_wfopen_s(&f, p.c_str(), wmode.c_str()) != 0) return nullptr;
-            return f;
+            // _wfopen_s opens with EXCLUSIVE sharing (_SH_DENYRW) — a second
+            // open of the same path, even from this same process, fails with
+            // EACCES ("Permission denied"). POSIX fopen, which the rest of
+            // this code is written against, shares freely. _wfsopen with
+            // _SH_DENYNO restores that behaviour; concurrent world access is
+            // guarded by session.lock (SessionLock), not by the file mode.
+            return _wfsopen(p.c_str(), wmode.c_str(), _SH_DENYNO);
 #else
             return std::fopen(p.c_str(), mode);
 #endif
