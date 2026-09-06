@@ -1,0 +1,54 @@
+# Line endings, settled once, for both machines.
+#
+# This repo is developed on macOS and Windows. Without this file the only thing
+# deciding line endings is each machine's core.autocrlf — a per-clone setting —
+# so whether a file enters a commit as LF or CRLF depends on who committed it.
+# That is how 176 files came to be stored with CRLF while everything else is LF.
+#
+# text=auto has Git normalise text to LF in the repository and convert back to
+# the platform's convention on checkout. The repository becomes LF-only no
+# matter who commits. On Windows the "LF will be replaced by CRLF" warnings are
+# just Git narrating that checkout conversion; they are not a problem.
+#
+# Deliberately NOT listing vendored trees (ext/, node_modules/) as -text. That
+# looks right — "don't touch what isn't ours" — but with core.autocrlf=true the
+# working copy has ALREADY been converted to CRLF on checkout, so -text means
+# "store these CRLFs", and the next commit touching one would write CRLF into
+# the repo. It also makes every such file read as modified the moment this file
+# lands. Letting text=auto cover everything is both simpler and stable.
+* text=auto
+
+# ── Binaries ─────────────────────────────────────────────────────────────────
+#
+# text=auto already detects these by their NUL bytes; listing them is belt and
+# braces and documents what is binary for anyone reading a diff. A mistake here
+# would corrupt a texture or a model, not just produce a noisy diff.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.icns  binary
+*.ttf   binary
+*.otf   binary
+*.gz    binary
+*.zip   binary
+*.jar   binary
+*.dmg   binary
+*.nbt   binary
+*.mca   binary
+*.mcc   binary
+*.spv   binary
+*.lib   binary
+*.a     binary
+*.dll   binary
+*.dylib binary
+*.exe   binary
+*.pdb   binary
+*.ogg   binary
+*.wav   binary
+
+# ── Shell scripts must stay LF ───────────────────────────────────────────────
+#
+# tools/*.sh runs on macOS. A CRLF shebang makes the kernel look for an
+# interpreter literally named "/bin/sh\r", which fails as "bad interpreter".
+*.sh    text eol=lf
