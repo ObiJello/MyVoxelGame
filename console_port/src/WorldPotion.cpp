@@ -38,6 +38,7 @@ int World::playerFoodLevel()const{return state->playerFood.getFoodLevel();}
 float World::playerSaturation()const{return state->playerFood.getSaturationLevel();}
 int World::playerExperienceLevel()const{return state->playerExperience.getLevel();}
 int World::playerTotalExperience()const{return state->playerExperience.getTotal();}
+float World::playerExperienceProgress()const{return state->playerExperience.getProgress();}
 void World::tickPlayerEffects(){
     const bool invulnerable=state->metadata->getGameType()==GameType::CREATIVE;
     tickSourcePlayerHurt(state->playerHurt);

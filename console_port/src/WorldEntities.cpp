@@ -267,6 +267,7 @@ void World::tickEntities(){
     if(state->pending || !state->hasPlayerPosition)return;
     const auto player=state->playerPosition;
     tickExperienceOrbs();
+    tickDroppedItems();
     // Level::getNearestAttackablePlayer excludes invulnerable creative players.
     const bool playerAttackable=state->metadata->getGameType()!=GameType::CREATIVE &&
         state->playerHurt.health>0;
@@ -722,6 +723,29 @@ void World::saveEntities(ChunkRecord& record,bool remove){
         }
         ++it;
     }
+    // ItemEntity::addAdditonalSaveData: Health, Age and the Item compound.
+    for(auto it=state->droppedItems.begin();it!=state->droppedItems.end();){
+        const int x=int(std::floor(it->position.x-64)),z=int(std::floor(it->position.z-64));
+        if(x>=record.x*16 && x<record.x*16+16 && z>=record.z*16 && z<record.z*16+16){
+            if(it->health>0 && it->count>0 && it->stack){
+                auto tag=std::make_unique<CompoundTag>();
+                tag->putString(L"id",L"Item");
+                tag->putBoolean(L"console_port.simulated",true);
+                tag->putShort(L"Health",it->health);
+                tag->putShort(L"Age",it->age);
+                tag->putShort(L"console_port.throwTime",it->throwTime);
+                std::unique_ptr<Tag> item(it->stack->copy());
+                tag->put(L"Item",item.get());item.release();
+                auto pos=triple(it->position.x-64,it->position.y+.125,it->position.z-64);
+                auto motion=triple(it->velocity.x,it->velocity.y,it->velocity.z);
+                tag->put(L"Pos",pos.get());pos.release();
+                tag->put(L"Motion",motion.get());motion.release();
+                list->add(tag.get());tag.release();
+            }
+            if(remove){it=state->droppedItems.erase(it);continue;}
+        }
+        ++it;
+    }
     record.extra->put(L"Entities",list.get());list.release();
     if(remove)state->hangingDecorations.erase(std::remove_if(state->hangingDecorations.begin(),state->hangingDecorations.end(),
         [&](const HangingDecoration& decoration){return decoration.nativeChunkX==record.x && decoration.nativeChunkZ==record.z;}),state->hangingDecorations.end());
@@ -759,6 +783,27 @@ void World::loadEntities(ChunkRecord& record){
                 if(!orb.native)tag->putBoolean(L"console_port.active",true);
                 state->experienceOrbs.push_back(orb);
             }
+            continue;
+        }
+        if(id==L"Item"){
+            // Only items this port simulated; imported ItemEntity records stay
+            // opaque until the full entity loader is ported.
+            if(!tag->getBoolean(L"console_port.simulated"))continue;
+            auto* stack=dynamic_cast<CompoundTag*>(tag->get(L"Item"));
+            DroppedItem item;
+            if(!stack || !readTriple(*tag,L"Pos",item.position) || !readTriple(*tag,L"Motion",item.velocity))continue;
+            item.id=stack->getShort(L"id");item.count=static_cast<unsigned char>(stack->getByte(L"Count"));
+            item.damage=stack->getShort(L"Damage");
+            item.health=tag->contains(L"Health")?int(static_cast<unsigned char>(tag->getShort(L"Health"))):5;
+            item.age=std::max(0,int(tag->getShort(L"Age")));
+            item.throwTime=std::max(0,int(tag->getShort(L"console_port.throwTime")));
+            if(item.id<=0 || item.count<=0 || item.count>64 || item.health<=0 || item.age>=6000)continue;
+            item.position.x+=64;item.position.z+=64;item.position.y-=.125;
+            if(!inside(int(std::floor(item.position.x)),int(std::floor(item.position.y)),
+                       int(std::floor(item.position.z))))continue;
+            item.stack=std::shared_ptr<CompoundTag>(static_cast<CompoundTag*>(stack->copy()));
+            tag->putBoolean(L"console_port.active",true);
+            state->droppedItems.push_back(std::move(item));
             continue;
         }
         if(id==L"Painting" || id==L"ItemFrame"){

@@ -49,6 +49,16 @@ struct HangingDecoration {
     int itemId=0,itemDamage=0,itemRotation=0;
 };
 struct SkullInfo {int type=0,rotation=0;};
+// ItemEntity: a dropped stack. `stack` is the complete item compound (id,
+// Count, Damage and any tag) so enchantments survive being dropped.
+struct DroppedItem {
+    Vec3 position,velocity;
+    int id=0,count=1,damage=0;
+    int age=0,throwTime=0,health=5;
+    float bobOffset=0;
+    std::shared_ptr<class CompoundTag> stack;
+};
+struct CraftingRecipe;
 
 // Bounded resident window over the original finite console world.
 // Generation uses the original biome, density, surface, cave and canyon stages.
@@ -73,6 +83,13 @@ class World {
     void spawnExperienceOrbs(Vec3 position,int reward);
     void tickPlayerEffects();
     void saveEntities(class ChunkRecord& record,bool remove);
+    void tickDroppedItems();
+    void tickPlayerSurvival();
+    void handlePlayerDeath();
+    void spawnDroppedItem(Vec3 position,Vec3 velocity,std::unique_ptr<class CompoundTag> stack,int throwTime);
+    int addCarriedStack(class CompoundTag& stack);
+    bool playerEyeInWater()const;
+    bool playerTouches(int tileA,int tileB,double shrinkX,double shrinkY)const;
     // Capture a chunk for the archive. A chunk already archived by the current
     // eviction pass is re-captured from that archived record, which holds the
     // entities and fluid ticks the first pass removed from live state.
@@ -129,6 +146,7 @@ public:
     float playerSaturation()const;
     int playerExperienceLevel()const;
     int playerTotalExperience()const;
+    float playerExperienceProgress()const;
     bool giveCreativeItem(int id,int damage=0);
     bool transferChestItem(int x,int y,int z,int slot,bool take,int amount=-1);
     bool transferEnderChestItem(int x,int y,int z,int slot,bool take,int amount=-1);
@@ -161,6 +179,42 @@ public:
     const std::vector<HangingDecoration>& hangingDecorations()const;
     std::optional<SkullInfo> skullInfo(int x,int y,int z)const;
     void setName(const std::string& name);
+    // ---- Survival (GameType SURVIVAL) ----
+    bool survival()const;
+    void setSurvival(bool enabled);
+    // Tile::getDestroyProgress for the block and the carried slot (per tick).
+    float destroyProgress(int x,int y,int z,int slot)const;
+    // Player destroys a block: survival drops (only if the tool can harvest
+    // it), tool wear and mining exhaustion; creative simply removes it.
+    bool destroyBlock(int x,int y,int z,int slot);
+    // Survival placement and eating use up the carried item.
+    bool consumeCarried(int slot,int amount=1);
+    // Inventory::add; returns how many items did not fit.
+    int addCarriedItem(int id,int count,int damage=0);
+    // Player::drop(item,false) from the carried slot (one item or the stack).
+    bool dropCarried(int slot,bool wholeStack,Vec3 eye,double yaw,double pitch);
+    const std::vector<DroppedItem>& droppedItems()const;
+    // Player::causeFallDamage after landing, in blocks fallen.
+    void playerLanded(double fallDistance);
+    // Direct damage for effects and tests (Mob::hurt window, unscaled).
+    bool hurtPlayer(int damage);
+    // Player::checkMovementStatistics / jumpFromGround / attack exhaustion,
+    // plus the held tool's hurtEnemy wear after a successful hit.
+    void playerWalked(double meters,bool sprinting,bool swimming);
+    void playerJumped(bool sprinting);
+    void playerAttacked(int slot);
+    bool playerInWater()const;
+    int playerAir()const;
+    int playerFireTicks()const;
+    bool playerDead()const;
+    void respawnPlayer();
+    // FoodItem: may this slot be eaten now, and eat it (after 32 use ticks).
+    bool canEatCarried(int slot)const;
+    bool eatCarried(int slot);
+    bool canCraft(const CraftingRecipe& recipe)const;
+    bool craft(const CraftingRecipe& recipe);
+    // Feet position saved with the player, if the save had one.
+    std::optional<Vec3> savedPlayerPosition()const;
     int surface(int x,int z) const;
     Vec3 spawn() const;
     bool collides(Vec3 feet) const;

@@ -59,6 +59,11 @@ struct World::State {
     PlayerHurtState playerHurt;
     FoodData playerFood;
     PlayerExperience playerExperience;
+    std::vector<DroppedItem> droppedItems;
+    int playerAir=300,playerFire=0,playerPickupDelay=0;
+    bool playerDeathHandled=false;
+    std::optional<Vec3> savedPlayerPosition;
+    Random survivalRandom{0x5eed5eed};
     void decorateNatural(int x,int z,std::map<std::pair<int,int>,std::unique_ptr<ChunkStorage>>* incoming=nullptr);
     std::unique_ptr<CompoundTag> inventory=std::make_unique<CompoundTag>();
     std::unique_ptr<CompoundTag> enderInventory=std::make_unique<CompoundTag>();

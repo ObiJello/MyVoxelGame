@@ -14,5 +14,8 @@ struct PlayerHurtState {
 int sourceMobMeleeDamage(std::wstring_view id,int slimeSize=1);
 // Player::hurt difficulty scaling followed by Mob::hurt's 20-tick damage window.
 bool applySourcePlayerHurt(PlayerHurtState& player,int damage,int difficulty,bool invulnerable);
+// Mob::hurt's damage window alone, for sources that do not scale with
+// difficulty (falling, drowning, lava, fire, suffocation, the void).
+bool applySourceMobHurt(PlayerHurtState& player,int damage,bool invulnerable);
 void tickSourcePlayerHurt(PlayerHurtState& player);
 }

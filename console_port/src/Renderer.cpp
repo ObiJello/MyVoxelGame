@@ -4,6 +4,7 @@
 #include "SkyColour.h"
 #include "MobMesh.h"
 #include "ExperienceOrbMesh.h"
+#include "DroppedItemMesh.h"
 #include "HangingMesh.h"
 #include <bit>
 #include <glm/gtc/matrix_transform.hpp>
@@ -354,6 +355,14 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
         const int light=source.inside(x,y,z)?source.renderLight(x,y,z,false):0;
         draw(buildExperienceOrbMesh(orb,yaw,pitch,light),textures_.at("xporb").id);
     }
+    for(const auto& item:source.droppedItems()){
+        const double dx=item.position.x-eye.x,dy=item.position.y-eye.y,dz=item.position.z-eye.z;
+        if(dx*dx+dy*dy+dz*dz>distance*distance)continue;
+        const int x=int(std::floor(item.position.x)),y=int(std::floor(item.position.y)),z=int(std::floor(item.position.z));
+        const auto mesh=buildDroppedItemMesh(item,yaw,pitch,source.inside(x,y,z)?source.renderLight(x,y,z,false):0);
+        if(!mesh.terrain.empty())draw(mesh.terrain,textures_.at("terrain").id);
+        if(!mesh.items.empty())draw(mesh.items,textures_.at("items").id);
+    }
     for(const auto& decoration:source.hangingDecorations()){
         const double dx=decoration.tileX+.5-eye.x,dy=decoration.tileY+.5-eye.y,dz=decoration.tileZ+.5-eye.z;
         if(dx*dx+dy*dy+dz*dz>(distance+4)*(distance+4))continue;
@@ -390,6 +399,12 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
         for(int a=0;a<3;++a)for(int b=0;b<2;++b)for(int c=0;c<2;++c){glm::vec3 q=p;q[(a+1)%3]+=b*1.004f;q[(a+2)%3]+=c*1.004f;
             lines.push_back({q.x,q.y,q.z,0,0,0,0,0,.8f});q[a]+=1.004f;lines.push_back({q.x,q.y,q.z,0,0,0,0,0,.8f});}
         draw(lines,white_,GL_LINES);
+        if(destroyStage_>=0 && source.inside(hit.x,hit.y,hit.z)){
+            const int light=source.inside(hit.px,hit.py,hit.pz)?source.renderLight(hit.px,hit.py,hit.pz,false):0;
+            glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(-1.f,-1.f);
+            draw(buildDestroyStageMesh(hit.x,hit.y,hit.z,destroyStage_,light),textures_.at("terrain").id);
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
     }
 }
 void Renderer::beginUI() {

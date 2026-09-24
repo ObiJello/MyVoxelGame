@@ -262,6 +262,7 @@ void World::tickTime(){
     tickFurnaces();
     tickBrewingStands();
     tickPlayerEffects();
+    tickPlayerSurvival();
     tickEntities();
 }
 std::array<float,3> World::skyColour(int x,int z)const{
@@ -496,6 +497,16 @@ void World::save(const std::filesystem::path& path){
     playerItems->putShort(L"Health",state->playerHurt.health);
     playerItems->putShort(L"HurtTime",state->playerHurt.hurtTicks);
     playerItems->putShort(L"DeathTime",state->playerHurt.deathTicks);
+    // Entity/Mob save fields for the survival player.
+    playerItems->putShort(L"Air",state->playerAir);
+    playerItems->putShort(L"Fire",state->playerFire);
+    if(state->hasPlayerPosition){
+        auto pos=std::make_unique<TagList>();
+        for(double value:{state->playerPosition.x-64,state->playerPosition.y,state->playerPosition.z-64}){
+            auto tag=std::make_unique<DoubleTag>(L"",value);pos->add(tag.get());tag.release();
+        }
+        playerItems->put(L"Pos",pos.get());pos.release();
+    }
     state->playerFood.addAdditonalSaveData(playerItems.get());
     state->playerExperience.addAdditionalSaveData(playerItems.get());
     if(!state->playerEffects.empty()){
@@ -564,6 +575,18 @@ bool World::load(const std::filesystem::path& path){
             next->playerHurt.hurtTicks=std::max(0,int(next->inventory->getShort(L"HurtTime")));
             next->playerHurt.deathTicks=std::max(0,int(next->inventory->getShort(L"DeathTime")));
             next->playerFood.readAdditionalSaveData(next->inventory.get());
+            if(next->inventory->contains(L"Air"))
+                next->playerAir=std::clamp(int(next->inventory->getShort(L"Air")),-19,300);
+            next->playerFire=std::clamp(int(next->inventory->getShort(L"Fire")),0,32767);
+            if(auto* pos=dynamic_cast<TagList*>(next->inventory->get(L"Pos"));pos && pos->size()==3){
+                double values[3];bool valid=true;
+                for(int i=0;i<3;++i){
+                    auto* value=dynamic_cast<DoubleTag*>(pos->get(i));
+                    valid&=value && std::isfinite(value->data) && std::abs(value->data)<30000000;
+                    values[i]=valid?value->data:0;
+                }
+                if(valid)next->savedPlayerPosition=Vec3{values[0]+64,values[1],values[2]+64};
+            }
             if(next->inventory->contains(L"XpP") || next->inventory->contains(L"XpLevel") ||
                next->inventory->contains(L"XpTotal"))
                 next->playerExperience.readAdditionalSaveData(next->inventory.get());
@@ -591,7 +614,8 @@ bool World::load(const std::filesystem::path& path){
             }
         }
         if(!next->metadata)throw IoError("Save has no level metadata");
-        if(next->metadata->getGameType()!=GameType::CREATIVE)throw IoError("This client's survival/adventure simulation has not been ported yet");
+        if(next->metadata->getGameType()!=GameType::CREATIVE && next->metadata->getGameType()!=GameType::SURVIVAL)
+            throw IoError("Adventure mode has not been ported yet");
         if(next->metadata->getXZSize()!=54)throw IoError("This client currently supports the original 54-chunk world size");
         loadedSeed=next->metadata->getSeed();next->terrain=true;bool repair=false;
         if(next->archive->containsEntry(L"console_port.tutorial.base")){

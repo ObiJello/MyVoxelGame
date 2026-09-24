@@ -9,6 +9,8 @@
 #include "ItemNames.h"
 #include "ItemPlacement.h"
 #include "SpawnEggColors.h"
+#include "SurvivalRules.h"
+#include "CraftingRecipes.h"
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -81,7 +83,7 @@ void drawSlotFrame(Renderer& r,float x,float y,float size,bool selected,bool hol
   r.rect(x+1,y+1,size-2,size-2,{.48f,.72f,.48f,.52f});
  }
 }
-enum class Screen { Main, Worlds, CreateWorld, FindingSeed, Loading, Playing, Pause, Inventory, Chest, Furnace, Brewing, Options, Controls, Notice };
+enum class Screen { Main, Worlds, CreateWorld, FindingSeed, Loading, Playing, Pause, Inventory, Chest, Furnace, Brewing, Crafting, Dead, Options, Controls, Notice };
 struct App {
     enum class LoadKind { Create, Tutorial, ArchivedTutorial, Existing };
     struct LoadResult {
@@ -105,6 +107,17 @@ struct App {
     int inventoryCategory=0,brewingBottleTarget=0;
     std::array<int,8> creativePage{};
     bool flatWorld=false;
+    // Survival: CreateWorldMenu game mode, fall tracking, mining progress
+    // (MultiPlayerGameMode destroyProgress/destroyDelay) and item use timers.
+    bool survivalWorld=true,craftingTable=false;
+    double fallDistance=0;
+    float mineProgress=0;
+    int mineX=0,mineY=-1,mineZ=0,mineDelay=0,eatUseTicks=0,craftScroll=0;
+    std::vector<const CraftingRecipe*> craftingList()const{
+        std::vector<const CraftingRecipe*> list;
+        for(const auto& recipe:consoleCraftingRecipes())if(craftingTable || !recipe.needsTable)list.push_back(&recipe);
+        return list;
+    }
     std::string worldName="New World";
     std::filesystem::path activeSave;
     std::vector<SavedWorld> savedWorlds;
@@ -165,14 +178,14 @@ struct App {
         const bool previousLoaded=loaded;
         const auto previousPath=savePath(),destinationDir=dataDir;
         const auto name=worldName;
-        const bool flat=flatWorld;
+        const bool flat=flatWorld,survivalMode=survivalWorld;
         std::shared_ptr<World> previous;
         if(previousLoaded){previous=std::make_shared<World>();previous->swapWith(world);}
         loaded=false;loadReturnScreen=screen==Screen::FindingSeed?Screen::CreateWorld:screen;
         change(Screen::Loading);
         loadPhase=std::make_shared<std::atomic<int>>(previousLoaded?0:1);
         auto phase=loadPhase;
-        try{loadJob=std::async(std::launch::async,[kind,selected,value,destinationDir,name,flat,previousPath,previousLoaded,
+        try{loadJob=std::async(std::launch::async,[kind,selected,value,destinationDir,name,flat,survivalMode,previousPath,previousLoaded,
                                                    previous,phase]() mutable -> LoadResult {
             LoadResult result;result.previous=previous;result.previousLoaded=previousLoaded;result.previousPath=previousPath;
             try{
@@ -186,7 +199,7 @@ struct App {
                     result.path=allocateWorldSave(destinationDir);
                     if(kind==LoadKind::Tutorial)result.next->generateTutorial(std::filesystem::path(CONSOLE_ASSET_DIR)/"tutorial");
                     else if(kind==LoadKind::ArchivedTutorial)result.next->generateArchivedTutorial(std::filesystem::path(CONSOLE_ASSET_DIR)/"tutorial");
-                    else {result.next->generate(value,flat);result.next->setName(name);}
+                    else {result.next->generate(value,flat);result.next->setName(name);result.next->setSurvival(survivalMode);}
                 }
                 phase->store(2);
                 phase->store(3);
@@ -217,10 +230,15 @@ struct App {
             if(!renderer->rebuilding())renderer->beginRebuild(world);
             if(wait){while(!renderer->stepRebuild(world,64)) {}}
             else if(!renderer->stepRebuild(world))return;
-            position=world.spawn();verticalSpeed=0;grounded=false;flying=false;worldTickSeconds=0;
+            // Resume at the saved player position when the save has one.
+            const auto saved=world.savedPlayerPosition();
+            position=saved?*saved:world.spawn();verticalSpeed=0;grounded=false;flying=false;worldTickSeconds=0;
+            fallDistance=0;mineProgress=0;mineY=-1;eatUseTicks=0;
+            world.setPlayerPosition(position);
             if(world.isTutorial()){yaw=(81.59-180)*3.14159265358979323846/180;pitch=0;}
             lastSave=glfwGetTime();change(Screen::Playing);
-            message(world.isTutorial()?"Tutorial world - creative exploration":"Creative mode - press E for blocks, F to fly");
+            message(world.isTutorial()?"Tutorial world - creative exploration":
+                    world.survival()?"Survival mode - E inventory, C crafting, Q drop":"Creative mode - press E for blocks, F to fly");
             loadReady.reset();loadPhase.reset();
         }catch(const std::exception& error){
             if(loadReady && loadReady->previous){world.swapWith(*loadReady->previous);activeSave=loadReady->previousPath;}
@@ -258,7 +276,8 @@ struct App {
                 entries.push_back(savedWorlds[i].name.substr(0,25));
             entries.push_back("Previous Page");entries.push_back("Next Page");entries.push_back("Back");return entries;
         }
-        case Screen::CreateWorld:return {"World Name: "+worldName+(nameEditing?"_":""),"Seed: "+(seedText.empty() && !seedEditing?std::string("Random"):seedText)+(seedEditing?"_":""),"World Type: "+std::string(flatWorld?"Superflat":"Default"),"Create New World","Back"};
+        case Screen::CreateWorld:return {"World Name: "+worldName+(nameEditing?"_":""),"Seed: "+(seedText.empty() && !seedEditing?std::string("Random"):seedText)+(seedEditing?"_":""),"World Type: "+std::string(flatWorld?"Superflat":"Default"),"Game Mode: "+std::string(survivalWorld?"Survival":"Creative"),"Create New World","Back"};
+        case Screen::Dead:return {"Respawn","Exit to Title"};
         case Screen::FindingSeed:return {"Cancel"};
         case Screen::Loading:return {};
         case Screen::Pause:return {"Resume Game","Help & Options","Save Game","Save and Exit"};
@@ -268,8 +287,9 @@ struct App {
         }
     }
     void back(){
-        if(screen==Screen::Loading)return;
+        if(screen==Screen::Loading || screen==Screen::Dead)return;
         if(screen==Screen::Playing)change(Screen::Pause);
+        else if(screen==Screen::Crafting)change(Screen::Playing);
         else if(screen==Screen::Pause || screen==Screen::Inventory || screen==Screen::Chest || screen==Screen::Furnace || screen==Screen::Brewing)change(Screen::Playing);
         else if(screen==Screen::Options)change(returnScreen);
         else if(screen==Screen::Controls)change(Screen::Options);
@@ -356,7 +376,20 @@ struct App {
         }
         case Screen::CreateWorld:
             if(selection==0){nameEditing=true;seedEditing=false;}else if(selection==1){seedEditing=true;nameEditing=false;}
-            else if(selection==2)flatWorld=!flatWorld;else if(selection==3)start(true);else change(Screen::Worlds);break;
+            else if(selection==2)flatWorld=!flatWorld;else if(selection==3)survivalWorld=!survivalWorld;
+            else if(selection==4)start(true);else change(Screen::Worlds);break;
+        case Screen::Dead:
+            if(selection==0){world.respawnPlayer();position=world.spawn();verticalSpeed=0;fallDistance=0;world.setPlayerPosition(position);change(Screen::Playing);}
+            else try{save();loaded=false;change(Screen::Main);}catch(const std::exception& e){message(e.what());}
+            break;
+        case Screen::Crafting:{
+            const auto list=craftingList();
+            if(selection>=0 && selection<int(list.size())){
+                if(world.craft(*list[selection]))message("Crafted "+itemDisplayName(list[selection]->id,list[selection]->damage));
+                else message("Missing ingredients");
+            }
+            break;
+        }
         case Screen::FindingSeed:change(Screen::CreateWorld);break;
         case Screen::Pause:
             if(selection==0)change(Screen::Playing);
@@ -393,12 +426,32 @@ struct App {
         if(key==GLFW_KEY_ESCAPE){if(seedEditing || nameEditing){seedEditing=nameEditing=false;return;}back();return;}
         if(screen==Screen::Playing){
             if(key>=GLFW_KEY_1 && key<=GLFW_KEY_9)slot=key-GLFW_KEY_1;
-            if(key==GLFW_KEY_E){change(Screen::Inventory);}
-            if(key==GLFW_KEY_F){flying=!flying;verticalSpeed=0;message(flying?"Flying enabled":"Flying disabled");}
-            if(key==GLFW_KEY_SPACE && grounded){verticalSpeed=8.4;grounded=false;}
+            if(key==GLFW_KEY_E){change(Screen::Inventory);if(world.survival())inventoryCategory=creativeTabCount();}
+            if(key==GLFW_KEY_C && world.survival()){craftingTable=false;craftScroll=0;change(Screen::Crafting);}
+            // Abilities::mayfly is creative-only.
+            if(key==GLFW_KEY_F && !world.survival()){flying=!flying;verticalSpeed=0;message(flying?"Flying enabled":"Flying disabled");}
+            if(key==GLFW_KEY_Q){
+                const bool stack=glfwGetKey(window,GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS;
+                try{world.dropCarried(slot,stack,eye(),yaw,pitch);}catch(const std::exception& e){message(e.what());}
+            }
+            if(key==GLFW_KEY_SPACE && grounded && !world.playerInWater()){
+                verticalSpeed=8.4;grounded=false;
+                world.playerJumped(glfwGetKey(window,GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS);
+            }
             return;
         }
         if(screen==Screen::Inventory && key==GLFW_KEY_E){back();return;}
+        if(screen==Screen::Crafting){
+            const int count=int(craftingList().size());
+            if(key==GLFW_KEY_C){back();return;}
+            if(count==0)return;
+            if(key==GLFW_KEY_UP)selection=(selection+count-1)%count;
+            if(key==GLFW_KEY_DOWN)selection=(selection+1)%count;
+            if(key==GLFW_KEY_PAGE_UP || key==GLFW_KEY_LEFT)selection=std::max(0,selection-8);
+            if(key==GLFW_KEY_PAGE_DOWN || key==GLFW_KEY_RIGHT)selection=std::min(count-1,selection+8);
+            if(key==GLFW_KEY_ENTER || key==GLFW_KEY_SPACE)activate();
+            return;
+        }
         if(seedEditing || nameEditing){auto& value=seedEditing?seedText:worldName;if(key==GLFW_KEY_BACKSPACE && !value.empty())value.pop_back();if(key==GLFW_KEY_ENTER)seedEditing=nameEditing=false;return;}
         if(screen==Screen::Chest){
             if(key==GLFW_KEY_H){moveChestSelection(0);return;}
@@ -433,6 +486,8 @@ struct App {
             return;
         }
         if(screen==Screen::Inventory){
+            if(world.survival() && (key==GLFW_KEY_TAB || key==GLFW_KEY_PAGE_UP || key==GLFW_KEY_PAGE_DOWN ||
+                                    key==GLFW_KEY_LEFT_BRACKET || key==GLFW_KEY_RIGHT_BRACKET))return;
             if(key==GLFW_KEY_TAB){inventoryCategory=(inventoryCategory+1)%(creativeTabCount()+1);selection=0;return;}
             if(key==GLFW_KEY_PAGE_UP || key==GLFW_KEY_LEFT_BRACKET){turnCreativePage(-1);return;}
             if(key==GLFW_KEY_PAGE_DOWN || key==GLFW_KEY_RIGHT_BRACKET){turnCreativePage(1);return;}
@@ -460,9 +515,13 @@ struct App {
     void edit(bool place){
         if(glfwGetTime()-lastEdit<.16)return;lastEdit=glfwGetTime();
         const auto heldItem=selectedItem();
-        if(!place && world.attackEntity(eye(),direction(),heldItem.id))return;
+        if(!place && world.attackEntity(eye(),direction(),heldItem.id)){world.playerAttacked(slot);return;}
         auto h=world.raycast(eye(),direction());if(!h.hit)return;
         bool changed=false;
+        if(place && world.get(h.x,h.y,h.z)==58){
+            // WorkbenchTile::use opens the 3x3 crafting menu.
+            craftingTable=true;craftScroll=0;change(Screen::Crafting);return;
+        }
         if(place && world.get(h.x,h.y,h.z)==54){
             if(!world.canOpenChest(h.x,h.y,h.z)){message("The chest lid is blocked");return;}
             try{chestSlots=int(world.chestItems(h.x,h.y,h.z).size());world.carriedItems();}
@@ -505,6 +564,7 @@ struct App {
             const double fenceOffset=h.py==h.y+1 && (support==Fence || support==NetherFence)?0.5:0.0;
             if(!world.spawnCreativeEgg(heldItem.damage,{h.px+.5,h.py+fenceOffset,h.pz+.5}))
                 message("Could not spawn this mob here");
+            else world.consumeCarried(slot); // MonsterPlacerItem::useOn uses one egg in survival.
             return;
         }
         if(place){
@@ -512,11 +572,41 @@ struct App {
             if(tileId>0 && tileId<256)
                 changed=world.placeBlock(h.px,h.py,h.pz,static_cast<Block>(tileId),
                                          heldItem.id<256?heldItem.damage:0,position,yaw);
-        }else if(world.get(h.x,h.y,h.z)!=Bedrock)changed=world.breakBlock(h.x,h.y,h.z);
+            // TileItem/TilePlanterItem::useOn uses one item in survival.
+            if(changed)world.consumeCarried(slot);
+        }else if(world.get(h.x,h.y,h.z)!=Bedrock)changed=world.destroyBlock(h.x,h.y,h.z,slot);
         if(changed){
             world.updateLiquidNeighbors(place?h.px:h.x,place?h.py:h.y,place?h.pz:h.z);
             if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
         }
+    }
+    // MultiPlayerGameMode::startDestroyBlock/continueDestroyBlock: progress
+    // accumulates per game tick on one block and resets when the target
+    // changes; a finished block starts a five-tick destroyDelay.
+    void mine(int ticks){
+        const auto heldItem=selectedItem();
+        if(glfwGetTime()-lastEdit>=.16 && world.attackEntity(eye(),direction(),heldItem.id)){
+            lastEdit=glfwGetTime();world.playerAttacked(slot);mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;
+        }
+        const auto h=world.raycast(eye(),direction());
+        if(!h.hit){mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;}
+        const auto finish=[&]{
+            if(world.destroyBlock(h.x,h.y,h.z,slot)){
+                world.updateLiquidNeighbors(h.x,h.y,h.z);
+                if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
+            }
+            mineProgress=0;mineY=-1;mineDelay=5;renderer->setDestroyStage(-1);
+        };
+        if(h.x!=mineX || h.y!=mineY || h.z!=mineZ){
+            mineX=h.x;mineY=h.y;mineZ=h.z;mineProgress=0;
+            if(mineDelay==0 && world.destroyProgress(h.x,h.y,h.z,slot)>=1){finish();return;}
+        }
+        for(int tick=0;tick<ticks;++tick){
+            if(mineDelay>0){--mineDelay;continue;}
+            mineProgress+=world.destroyProgress(h.x,h.y,h.z,slot);
+            if(mineProgress>=1){finish();return;}
+        }
+        renderer->setDestroyStage(mineProgress>0?std::min(9,int(mineProgress*10)):-1);
     }
     void moveAxis(int axis,double amount){
         const int steps=std::max(1,int(std::ceil(std::abs(amount)/.15)));
@@ -541,6 +631,8 @@ struct App {
             if(screen==Screen::Brewing && pressed(GLFW_GAMEPAD_BUTTON_X))moveBrewingSelection(0);
             if(screen==Screen::Brewing && pressed(GLFW_GAMEPAD_BUTTON_Y))moveBrewingSelection(1);
             if(pressed(GLFW_GAMEPAD_BUTTON_A))key(screen==Screen::Playing?GLFW_KEY_SPACE:GLFW_KEY_ENTER,GLFW_PRESS);
+            if(pressed(GLFW_GAMEPAD_BUTTON_X) && loaded && world.survival() && (screen==Screen::Playing || screen==Screen::Crafting))
+                key(GLFW_KEY_C,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_Y) && (screen==Screen::Playing || screen==Screen::Inventory))key(GLFW_KEY_E,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Playing)key(GLFW_KEY_F,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Furnace)key(GLFW_KEY_F,GLFW_PRESS);
@@ -558,7 +650,8 @@ struct App {
             catch(const std::exception& error){change(Screen::CreateWorld);message(error.what());}
             return;
         }
-        if(screen!=Screen::Playing && screen!=Screen::Furnace && screen!=Screen::Brewing && screen!=Screen::Chest && screen!=Screen::Inventory)return;
+        if(screen!=Screen::Playing && screen!=Screen::Furnace && screen!=Screen::Brewing && screen!=Screen::Chest &&
+           screen!=Screen::Inventory && screen!=Screen::Crafting && screen!=Screen::Dead)return;
         try{if(world.streamAround(position))renderer->beginRebuild(world);
             if(!world.streaming())renderer->stepRebuild(world);}
         catch(const std::exception& error){change(Screen::Pause);message(error.what());return;}
@@ -569,7 +662,10 @@ struct App {
         int elapsedWorldTicks=0;
         while(worldTickSeconds>=.05){world.tickTime();worldTickSeconds-=.05;++elapsedWorldTicks;}
         if(world.revision!=beforeWorldTick && !world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
-        if(screen!=Screen::Playing){potionUseTicks=0;return;}
+        if(world.playerDead() && screen!=Screen::Dead){change(Screen::Dead);return;}
+        if(screen!=Screen::Playing){potionUseTicks=0;eatUseTicks=0;mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;}
+        const bool survival=world.survival();
+        if(survival)flying=false;
         auto held=[&](int k){return glfwGetKey(window,k)==GLFW_PRESS;};
         double forward=held(GLFW_KEY_W)-held(GLFW_KEY_S),right=held(GLFW_KEY_D)-held(GLFW_KEY_A);
         auto dead=[](float x){return std::abs(x)<.18f?0.f:(x-std::copysign(.18f,x))/.82f;};
@@ -577,43 +673,72 @@ struct App {
             yaw+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_X])*dt*sensitivity*1100;
             pitch+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y])*dt*sensitivity*900*(invert?1:-1);pitch=std::clamp(pitch,-1.55,1.55);}
         double length=std::sqrt(forward*forward+right*right);if(length>1){forward/=length;right/=length;}
-        const double speed=(flying?10:4.3*world.potionSpeedMultiplier())*(held(GLFW_KEY_LEFT_CONTROL)?1.6:1);
-        horizontalCollision=false;
+        // Player::canSprint: survival players need more than six food.
+        const bool sprinting=held(GLFW_KEY_LEFT_CONTROL) && forward>0 && (!survival || world.playerFoodLevel()>6);
         const int feetTile=world.get(int(std::floor(position.x)),int(std::floor(position.y)),int(std::floor(position.z)));
+        const bool inWater=world.playerInWater(),inLiquid=inWater || feetTile==10 || feetTile==11;
+        const double speed=(flying?10:4.3*world.potionSpeedMultiplier())*(sprinting?(flying?1.6:1.3):1)*(inLiquid && !flying?.45:1);
+        horizontalCollision=false;
         const bool climbing=!flying && (feetTile==65 || feetTile==106);
         Vec3 velocity{(std::sin(yaw)*forward+std::cos(yaw)*right)*speed,climbing?verticalSpeed-24*dt:verticalSpeed,(-std::cos(yaw)*forward+std::sin(yaw)*right)*speed};
         if(climbing)velocity=consoleLadderVelocity(velocity,held(GLFW_KEY_LEFT_SHIFT));
+        const Vec3 before=position;
         moveAxis(0,velocity.x*dt);moveAxis(2,velocity.z*dt);
         if(climbing)verticalSpeed=horizontalCollision?4:velocity.y;
-        if(flying){verticalSpeed=0;moveAxis(1,((held(GLFW_KEY_SPACE)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_A]))-
-            (held(GLFW_KEY_LEFT_SHIFT)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_X])))*speed*dt);}
+        const bool up=held(GLFW_KEY_SPACE)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_A]);
+        if(flying){verticalSpeed=0;moveAxis(1,(up-(held(GLFW_KEY_LEFT_SHIFT)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_X])))*speed*dt);}
+        else if(inLiquid && !climbing){
+            // Mob::travel in liquids: slow sinking, jump swims upward.
+            grounded=false;
+            verticalSpeed=up?std::min(verticalSpeed+20*dt,2.6):std::max(verticalSpeed-8*dt,-2.4);
+            moveAxis(1,verticalSpeed*dt);
+        }
         else {grounded=false;if(!climbing)verticalSpeed=std::max(verticalSpeed-24*dt,-35.0);moveAxis(1,verticalSpeed*dt);}
-        if(leftMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]>.1))edit(false);
+        // Entity::move fall distance; water, ladders and flight reset it.
+        if(position.y<before.y)fallDistance+=before.y-position.y;
+        if(flying || climbing || inLiquid)fallDistance=0;
+        if(grounded){if(fallDistance>0)world.playerLanded(fallDistance);fallDistance=0;}
+        world.playerWalked(std::hypot(position.x-before.x,position.z-before.z),sprinting,inWater);
+        const bool mining=leftMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]>.1);
+        if(!survival){if(mining)edit(false);renderer->setDestroyStage(-1);}
+        else if(mining)mine(elapsedWorldTicks);
+        else{mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);}
         const bool usingRight=rightMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]>.1);
         const auto selected=selectedItem();
+        const bool drinkable=selected.id==373 && !(selected.damage&0x4000);
+        const bool edible=world.canEatCarried(slot);
         bool blockUse=false;
-        if(usingRight && selected.id==373){
+        if(usingRight && (drinkable || edible)){
             const auto target=world.raycast(eye(),direction());
             if(target.hit){const int block=world.get(target.x,target.y,target.z);
-                blockUse=block==54 || block==130 || world.canOpenFurnace(target.x,target.y,target.z) ||
+                blockUse=block==54 || block==58 || block==130 || world.canOpenFurnace(target.x,target.y,target.z) ||
                          world.canOpenBrewingStand(target.x,target.y,target.z) ||
                          block==64 || block==71 || block==107;
             }
         }
-        if(usingRight && selected.id==373 && !(selected.damage&0x4000) && !blockUse){
+        if(usingRight && drinkable && !blockUse){
             if(potionUseSlot!=slot){potionUseSlot=slot;potionUseTicks=0;}
             potionUseTicks+=elapsedWorldTicks;
             if(potionUseTicks>=32){
                 potionUseTicks=0;
                 if(world.drinkPotion(selected.damage))message("Potion used");
             }
+        }else if(usingRight && edible && !blockUse){
+            // FoodItem::use -> startUsingItem for EAT_DURATION ticks.
+            if(potionUseSlot!=slot){potionUseSlot=slot;eatUseTicks=0;}
+            eatUseTicks+=elapsedWorldTicks;
+            if(eatUseTicks>=consoleEatDuration){
+                eatUseTicks=0;
+                const auto name=itemDisplayName(selected.id,selected.damage);
+                if(world.eatCarried(slot))message("Ate "+name);
+            }
         }else{
-            potionUseTicks=0;potionUseSlot=-1;
+            potionUseTicks=0;potionUseSlot=-1;eatUseTicks=0;
             if(usingRight)edit(true);else usedBlockHeld=false;
         }
         if(!world.streaming() && glfwGetTime()-lastSave>30)try{save();}catch(const std::exception& e){message(e.what());lastSave=glfwGetTime();}
     }
-    float buttonY()const{return screen==Screen::Main?125:screen==Screen::Worlds?100:screen==Screen::Controls || screen==Screen::Notice?286:screen==Screen::Pause?135:139;}
+    float buttonY()const{return screen==Screen::Dead?160:screen==Screen::Main?125:screen==Screen::Worlds?100:screen==Screen::Controls || screen==Screen::Notice?286:screen==Screen::Pause?135:139;}
     float buttonWidth()const{return screen==Screen::Main?225.f:200.f;}
     void click(int amount=-1){
         int w,h;glfwGetWindowSize(window,&w,&h);double x,y;glfwGetCursorPos(window,&x,&y);x=x*renderer->uiWidth()/w;y=y*360/h;
@@ -643,6 +768,16 @@ struct App {
             const auto slots=brewingSlotPositions(cx);
             for(int i=0;i<4;++i)if(x>=slots[i][0] && x<slots[i][0]+26 && y>=slots[i][1] && y<slots[i][1]+26){selection=i;moveBrewingSelection(amount);return;}
             if(int carried=carriedClickSlot(x,y,cx,168,237);carried>=0){selection=4+carried;moveBrewingSelection(amount);}return;
+        }
+        if(screen==Screen::Crafting){
+            const auto list=craftingList();
+            const int first=std::clamp(selection-4,0,std::max(0,int(list.size())-9));
+            const float cx=renderer->uiWidth()/2;
+            if(x>=cx-140 && x<cx+140 && y>=50){
+                const int row=int((y-50)/28);
+                if(row<9 && first+row<int(list.size())){selection=first+row;activate();}
+            }
+            return;
         }
         if(screen==Screen::Inventory){
             const bool playerInventory=inventoryCategory==creativeTabCount();
@@ -679,10 +814,39 @@ struct App {
                     if(carried[i].count>1)r.text(std::to_string(carried[i].count),x+8,341,.65f);
                 }
             }
-            if(carried[slot].id)r.centered(itemDisplayName(carried[slot].id,carried[slot].damage),312,1);
+            const bool survival=world.survival();
+            if(survival){
+                // Gui::render survival bars from icons.png: hearts left and
+                // food right above the hotbar, air above food, XP bar below.
+                const auto icon=[&](float x,float y,int u,int v){
+                    r.sprite("icons",x,y,9,9,{u/256.f,v/256.f,(u+9)/256.f,(v+9)/256.f});};
+                const int health=world.playerHealth(),food=world.playerFoodLevel();
+                bool poisoned=false,hunger=false;
+                for(const auto& effect:world.activePotionEffects()){poisoned|=effect.id==19;hunger|=effect.id==17;}
+                for(int i=0;i<10;++i){
+                    const float hx=cw/2-91+i*8,fx=cw/2+91-i*8-9;
+                    icon(hx,311,16,0);
+                    if(i*2+1<health)icon(hx,311,poisoned?88:52,0);else if(i*2+1==health)icon(hx,311,poisoned?97:61,0);
+                    icon(fx,311,hunger?133:16,27);
+                    if(i*2+1<food)icon(fx,311,hunger?88:52,27);else if(i*2+1==food)icon(fx,311,hunger?97:61,27);
+                }
+                const int air=world.playerAir();
+                if(air<300){
+                    const int full=int(std::ceil((air-2)*10.0/300)),popping=int(std::ceil(air*10.0/300))-full;
+                    for(int i=0;i<full+popping;++i)icon(cw/2+91-i*8-9,301,i<full?16:25,18);
+                }
+                r.sprite("icons",cw/2-91,322,182,5,{0,64/256.f,182/256.f,69/256.f});
+                const float fill=std::clamp(world.playerExperienceProgress(),0.f,1.f);
+                if(fill>0)r.sprite("icons",cw/2-91,322,182*fill,5,{0,69/256.f,182*fill/256.f,74/256.f});
+                if(const int level=world.playerExperienceLevel();level>0)
+                    r.centered(std::to_string(level),314,.8f,{.5f,1,.125f,1});
+            }
+            if(carried[slot].id)r.centered(itemDisplayName(carried[slot].id,carried[slot].damage),survival?290:312,1);
             r.text("Position: "+std::to_string(int(position.x))+", "+std::to_string(int(position.y))+", "+std::to_string(int(position.z)),16,16);
-            r.text(carried[slot].id==373 && !(carried[slot].damage&0x4000)?"L2  Drink":"L2  Place",16,325);r.text("R2  Mine / Attack",16,338);
+            r.text(carried[slot].id==373 && !(carried[slot].damage&0x4000)?"L2  Drink":
+                   consoleFood(carried[slot].id) && survival?"L2  Eat":"L2  Place",16,325);r.text("R2  Mine / Attack",16,338);
             r.prompt('T',"Inventory",cw-96,325);r.prompt('X',"Jump",cw-96,338);
+            if(survival)r.prompt('S',"Crafting",cw-96,312);
             if(flying)r.text("Flying",16,29);
             if(world.streaming() || r.rebuilding())r.text("Loading terrain...",16,flying?42:29);
         }else if(screen==Screen::Chest){
@@ -771,6 +935,46 @@ struct App {
             r.centered("F / L3: Bottle position "+std::to_string(brewingBottleTarget+1),324,.8f);
             r.centered("Enter/Cross: All   H/Square: Half   R/Triangle: One",336,.7f);
             r.centered("Esc / Circle: Close",348,.7f);
+        }else if(screen==Screen::Crafting){
+            const float cx=cw/2;
+            r.rect(0,0,cw,360,{0,0,0,.55});r.panel(cx-150,28,300,296);
+            r.text(craftingTable?"Crafting Table":"Crafting",cx-137,36,1,{.275f,.275f,.275f,1});
+            const auto list=craftingList();
+            const auto carried=world.carriedItems();
+            constexpr int rows=9;
+            const int first=std::clamp(selection-rows/2,0,std::max(0,int(list.size())-rows));
+            for(int row=0;row<rows && first+row<int(list.size());++row){
+                const auto& recipe=*list[first+row];
+                const float y=52+row*28.f;
+                const bool chosen=first+row==selection,craftable=world.canCraft(recipe);
+                if(chosen)r.rect(cx-140,y-2,280,27,{.48f,.72f,.48f,.55f});
+                drawSlotFrame(r,cx-138,y,23,false);
+                drawItemIcon(r,recipe.id,recipe.damage,cx-135.5f,y+2.5f,18);
+                const glm::vec4 ink=craftable?glm::vec4(.15,.15,.15,1):glm::vec4(.5,.5,.5,1);
+                std::string name=itemDisplayName(recipe.id,recipe.damage);
+                if(recipe.count>1)name+=" x"+std::to_string(recipe.count);
+                r.text(name,cx-108,y+2,.85f,ink,false);
+                std::string needs;
+                for(const auto& ingredient:recipe.ingredients){
+                    int have=0;for(const auto& item:carried)
+                        if(item.id==ingredient.id && (ingredient.damage<0 || item.damage==ingredient.damage))have+=item.count;
+                    if(!needs.empty())needs+="  ";
+                    needs+=std::to_string(ingredient.count)+" "+itemDisplayName(ingredient.id,std::max(0,ingredient.damage))+
+                           " ("+std::to_string(have)+")";
+                }
+                r.text(needs,cx-108,y+13,.6f,ink,false);
+                r.text(recipe.group,cx+140-r.textWidth(recipe.group,.6f),y+2,.6f,{.35,.35,.35,1},false);
+            }
+            r.centered(std::to_string(list.empty()?0:selection+1)+" / "+std::to_string(list.size()),308,.7f,{.2,.2,.2,1});
+            r.centered("Enter/Cross: Craft   Up/Down: Select   Esc / Circle: Close",336,.7f);
+        }else if(screen==Screen::Dead){
+            // DeathScreen: red wash, title and the two source buttons.
+            r.rect(0,0,cw,360,{.45f,.05f,.05f,.55f});
+            r.centered("You died!",90,2);
+            r.centered("Score: "+std::to_string(world.playerTotalExperience()),125,1);
+            auto entries=buttons();
+            for(int i=0;i<int(entries.size());++i){float y=160+i*25.f,width=200;r.sprite(i==selection?"button_focus":"button",cw/2-width/2,y,width,20);
+                r.text(entries[i],(cw-r.textWidth(entries[i]))/2,y+6,1,i==selection?glm::vec4(1,1,.65,1):glm::vec4(1));}
         }else if(screen==Screen::Inventory){
             const bool playerInventory=inventoryCategory==creativeTabCount();
             r.rect(0,0,cw,360,{0,0,0,.55});
@@ -780,7 +984,7 @@ struct App {
                    playerInventory?240.f:260.f,playerInventory?204.f:248.f,{.77,.77,.77,1});
             r.centered(playerInventory?"Inventory":creativeTab(inventoryCategory).name,
                        playerInventory?111.f:63.f,1,{.2,.2,.2,1});
-            r.centered("Tab / L1 R1: Switch Category",playerInventory?127.f:82.f,.75f,{.2,.2,.2,1});
+            r.centered(world.survival()?"C / Square: Crafting":"Tab / L1 R1: Switch Category",playerInventory?127.f:82.f,.75f,{.2,.2,.2,1});
             if(playerInventory){
                 const auto carried=world.carriedItems();
                 for(int i=0;i<36;++i){
@@ -825,12 +1029,12 @@ struct App {
                 const int stage=loadPhase?std::clamp(loadPhase->load(),0,4):0;
                 r.centered(stages[stage],146,1);
             }
-            if(screen==Screen::CreateWorld)r.centered("Game Mode: Creative     Offline Game",108,.85f);
+            if(screen==Screen::CreateWorld)r.centered("Offline Game",108,.85f);
             if(screen==Screen::Controls){
-                const char* lines[]={"W A S D / Left Stick - Move","Mouse / Right Stick - Look","Space / Cross - Jump / Fly Up","Shift / Square - Fly Down","F / L3 - Toggle Flight","Left Mouse / R2 - Mine","Right Mouse / L2 - Place","1-9 / Wheel / L1 R1 - Select Block","E / Triangle - Building Blocks","Esc / Start - Pause   F2 - Screenshot"};
-                for(int i=0;i<10;++i)r.centered(lines[i],109+i*15,.9f);
+                const char* lines[]={"W A S D / Left Stick - Move   Ctrl - Sprint","Mouse / Right Stick - Look","Space / Cross - Jump / Swim / Fly Up","Shift / Square - Fly Down (creative)","F / L3 - Toggle Flight (creative)","Left Mouse / R2 - Mine / Attack","Right Mouse / L2 - Place / Use / Eat","1-9 / Wheel / L1 R1 - Select Item","E / Triangle - Inventory   C / Square - Crafting","Q - Drop Item (Ctrl+Q: Stack)","Esc / Start - Pause   F2 - Screenshot"};
+                for(int i=0;i<11;++i)r.centered(lines[i],104+i*14,.85f);
             }
-            if(screen==Screen::Notice){r.centered(notice,158,.9f);r.centered("This build supports local creative play.",180,.9f);}
+            if(screen==Screen::Notice){r.centered(notice,158,.9f);r.centered("This build supports local survival and creative play.",180,.9f);}
             auto entries=buttons();
             for(int i=0;i<int(entries.size());++i){float y=buttonY()+i*25,width=buttonWidth();r.sprite(i==selection?"button_focus":"button",cw/2-width/2,y,width,20);
                 auto color=i==selection?glm::vec4(1,1,.65,1):glm::vec4(1);
@@ -874,6 +1078,8 @@ int main(int argc,char** argv){
         glfwSetScrollCallback(window,[](GLFWwindow* w,double,double y){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
             if(a->screen==Screen::Playing && y!=0)a->slot=(a->slot+(y>0?8:1))%9;
             else if(a->screen==Screen::Inventory && y!=0)a->turnCreativePage(y>0?-1:1);
+            else if(a->screen==Screen::Crafting && y!=0){const int count=int(a->craftingList().size());
+                if(count)a->selection=std::clamp(a->selection+(y>0?-1:1),0,count-1);}
         });
         glfwSetMouseButtonCallback(window,[](GLFWwindow* w,int button,int action,int){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
             if(button==GLFW_MOUSE_BUTTON_LEFT)a->leftMouse=action==GLFW_PRESS;
@@ -899,7 +1105,7 @@ int main(int argc,char** argv){
                 catch(const std::exception& e){app.message(e.what());}}
             if(!smokeDir.empty()){
                 if(frame==3)app.renderer->screenshot(smokeDir/"menu.png");
-                if(frame==4){app.seedText="1";app.change(Screen::Worlds);app.selection=0;app.activate();app.selection=3;app.activate();if(!app.loaded)throw std::runtime_error("Smoke world failed to start");app.flying=true;app.position.y+=9;app.pitch=-.35;}
+                if(frame==4){app.seedText="1";app.survivalWorld=false;app.change(Screen::Worlds);app.selection=0;app.activate();app.selection=4;app.activate();if(!app.loaded)throw std::runtime_error("Smoke world failed to start");app.flying=true;app.position.y+=9;app.pitch=-.35;}
                 if(frame==9){app.change(Screen::Playing);app.renderer->screenshot(smokeDir/"world.png");
                     auto h=app.world.raycast({64.5,95,64.5},{0,-1,0},96);if(!h.hit)throw std::runtime_error("Smoke raycast missed world");
                     auto camera=app.position;double cameraPitch=app.pitch;
@@ -936,8 +1142,19 @@ int main(int argc,char** argv){
                     app.change(Screen::Furnace);}
                 if(frame==13)app.change(Screen::Brewing);
                 if(frame==14)app.change(Screen::Chest);
-                if(frame==15){glFinish();auto error=glGetError();if(error!=GL_NO_ERROR)throw std::runtime_error("OpenGL error: "+std::to_string(error));
-                    std::cout<<"Smoke test passed: menu, world, inventory, furnace, brewing, chest, edit/save/reload; "<<app.renderer->triangleCount()<<" world triangles\n";break;}
+                if(frame==15){
+                    // Survival rendering: HUD bars, a dropped item and the crack overlay.
+                    app.world.setSurvival(true);app.change(Screen::Playing);
+                    if(!app.world.setCreativeHotbarItem(0,270))throw std::runtime_error("Smoke survival tool failed");
+                    app.slot=0;app.world.dropCarried(0,false,app.eye(),app.yaw,app.pitch);
+                    if(app.world.droppedItems().empty())throw std::runtime_error("Smoke survival drop failed");
+                    app.renderer->setDestroyStage(5);
+                }
+                if(frame==16){app.renderer->setDestroyStage(-1);app.craftingTable=true;app.change(Screen::Crafting);
+                    if(app.craftingList().empty())throw std::runtime_error("Smoke crafting list empty");}
+                if(frame==17)app.change(Screen::Dead);
+                if(frame==18){glFinish();auto error=glGetError();if(error!=GL_NO_ERROR)throw std::runtime_error("OpenGL error: "+std::to_string(error));
+                    std::cout<<"Smoke test passed: menu, world, inventory, furnace, brewing, chest, survival HUD/crafting/death, edit/save/reload; "<<app.renderer->triangleCount()<<" world triangles\n";break;}
             }
             glfwSwapBuffers(window);++frame;
         }

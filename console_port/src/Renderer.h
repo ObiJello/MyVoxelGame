@@ -29,6 +29,8 @@ public:
     void uploadMesh(TerrainMesh mesh);
     void world(const World& source,Vec3 eye,double yaw,double pitch,double distance,const Hit& hit);
     void tickLighting(double seconds);
+    // Survival mining crack on the selected block; -1 hides it.
+    void setDestroyStage(int stage){destroyStage_=stage;}
     void beginUI();
     void rect(float x,float y,float w,float h,glm::vec4 color);
     void panel(float x,float y,float w,float h);
@@ -64,6 +66,7 @@ private:
     double lightTickSeconds_=0;
     std::int32_t cloudTicks_=0;
     int width_=1280,height_=720;
+    int destroyStage_=-1;
     std::map<std::string,Texture> textures_;
     std::array<int,256> glyphWidths_{};
     std::vector<Vertex> opaque_,water_,chests_,chestLids_,largeChests_,largeChestLids_,enderChests_,enderChestLids_;
