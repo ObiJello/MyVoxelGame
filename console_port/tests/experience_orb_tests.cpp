@@ -99,7 +99,7 @@ int main(){try{
             imported.playerTotalExperience()==reward+7,
             "Imported orb pickup grants its saved value");
     imported.save(path);archive=PS3WorldStorage::readFile(path);
-    entities=archive->chunk(0,1,1)->extra->getList(L"Entities");
+    chunk=archive->chunk(0,1,1);entities=chunk->extra->getList(L"Entities");
     bool returned=false;
     for(int i=0;i<entities->size();++i)
         if(auto* tag=dynamic_cast<CompoundTag*>(entities->get(i)))

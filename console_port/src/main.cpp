@@ -211,6 +211,7 @@ struct App {
             }
             world.swapWith(*loadReady->next);
             activeSave=loadReady->path;loaded=true;
+            try{renderer->beginRebuild(world);}catch(const std::exception&){}
         }
         try{
             if(!renderer->rebuilding())renderer->beginRebuild(world);
@@ -387,6 +388,8 @@ struct App {
     void key(int key,int action){
         if(action!=GLFW_PRESS && action!=GLFW_REPEAT)return;
         if(key==GLFW_KEY_F2){screenshotRequested=true;return;}
+        if(action==GLFW_REPEAT && (key==GLFW_KEY_E || key==GLFW_KEY_F || key==GLFW_KEY_ESCAPE ||
+                                   key==GLFW_KEY_TAB))return;
         if(key==GLFW_KEY_ESCAPE){if(seedEditing || nameEditing){seedEditing=nameEditing=false;return;}back();return;}
         if(screen==Screen::Playing){
             if(key>=GLFW_KEY_1 && key<=GLFW_KEY_9)slot=key-GLFW_KEY_1;
@@ -655,7 +658,7 @@ struct App {
     }
     void draw(){
         int w,h;glfwGetFramebufferSize(window,&w,&h);renderer->resize(w,h);auto& r=*renderer;float cw=r.uiWidth();
-        bool inWorld=loaded && screen!=Screen::Main && screen!=Screen::Worlds && screen!=Screen::CreateWorld && screen!=Screen::FindingSeed && screen!=Screen::Notice;
+        bool inWorld=loaded && screen!=Screen::Loading && screen!=Screen::Main && screen!=Screen::Worlds && screen!=Screen::CreateWorld && screen!=Screen::FindingSeed && screen!=Screen::Notice;
         if(inWorld)r.world(world,eye(),yaw,pitch,viewDistance,screen==Screen::Playing?world.raycast(eye(),direction()):Hit{});
         else {glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);}
         r.beginUI();
@@ -869,7 +872,7 @@ int main(int argc,char** argv){
         glfwSetCharCallback(window,[](GLFWwindow* w,unsigned c){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));if(a->seedEditing && a->seedText.size()<60 && c>=32 && c<127)a->seedText+=char(c);if(a->nameEditing && a->worldName.size()<25 && c>=32 && c<127)a->worldName+=char(c);});
         glfwSetCursorPosCallback(window,[](GLFWwindow* w,double x,double y){static_cast<App*>(glfwGetWindowUserPointer(w))->look(x,y);});
         glfwSetScrollCallback(window,[](GLFWwindow* w,double,double y){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
-            if(a->screen==Screen::Playing)a->slot=(a->slot+(y>0?8:1))%9;
+            if(a->screen==Screen::Playing && y!=0)a->slot=(a->slot+(y>0?8:1))%9;
             else if(a->screen==Screen::Inventory && y!=0)a->turnCreativePage(y>0?-1:1);
         });
         glfwSetMouseButtonCallback(window,[](GLFWwindow* w,int button,int action,int){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
@@ -884,7 +887,13 @@ int main(int argc,char** argv){
             if(glfwWindowShouldClose(window)){
                 try{app.save();break;}catch(const std::exception& e){app.message(e.what());glfwSetWindowShouldClose(window,0);app.change(Screen::Pause);}
             }
-            app.update(dt);app.draw();
+            try{app.update(dt);app.draw();}
+            catch(const std::exception& e){
+                if(!smokeDir.empty())throw;
+                std::cerr<<"Console port frame error: "<<e.what()<<'\n';
+                if(app.screen==Screen::Playing)app.change(Screen::Pause);
+                app.message(e.what());
+            }
             if(app.screenshotRequested){app.screenshotRequested=false;
                 try{app.renderer->screenshot(app.dataDir/"screenshots"/("capture-"+std::to_string(std::chrono::system_clock::now().time_since_epoch().count())+".png"));app.message("Screenshot saved");}
                 catch(const std::exception& e){app.message(e.what());}}

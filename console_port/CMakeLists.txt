@@ -860,3 +860,8 @@ add_executable(console_stack_transfer_tests tests/stack_transfer_tests.cpp)
 target_link_libraries(console_stack_transfer_tests PRIVATE console_world)
 add_test(NAME console_stack_transfer_core COMMAND console_stack_transfer_tests)
 set_tests_properties(console_stack_transfer_core PROPERTIES TIMEOUT 60 ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+
+add_executable(console_world_regression_tests tests/world_regression_tests.cpp)
+target_link_libraries(console_world_regression_tests PRIVATE console_world)
+add_test(NAME console_world_regression COMMAND console_world_regression_tests)
+set_tests_properties(console_world_regression PROPERTIES TIMEOUT 180)

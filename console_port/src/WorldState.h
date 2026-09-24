@@ -30,6 +30,7 @@ struct World::State {
         bool restartLighting=false;
         std::uint64_t captureRevision=0;
         std::size_t outgoingIndex=0;
+        std::set<std::pair<int,int>> archivedOutgoing;
         std::vector<std::pair<int,int>> outgoing;
         int x=0,z=0;
         std::vector<std::pair<int,int>> missing;

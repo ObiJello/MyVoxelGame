@@ -114,7 +114,8 @@ HangingMesh buildHangingMesh(const HangingDecoration& d,int light,
     // ItemFrameRenderer::drawFrame: 12x12 wood rim and ten-pixel inset back.
     constexpr float outer=6.f/16,inner=5.f/16,depth=1.f/16;
     box(result.frame,p,d.dir,light,-inner,-inner,0,inner,inner,depth*.5f,9+11*16);
-    const int birchTop=textureTile(Log,1,2);
+    // Console Tile::wood is the planks tile: birch planks (data 2), side 1.
+    const int birchTop=textureTile(Planks,1,2);
     box(result.frame,p,d.dir,light,-outer,-outer,0,outer,-inner,depth,birchTop);
     box(result.frame,p,d.dir,light,-outer,inner,0,outer,outer,depth,birchTop);
     box(result.frame,p,d.dir,light,-outer,-inner,0,-inner,inner,depth,birchTop);

@@ -66,14 +66,18 @@ class World {
     void activateFluidChunks();
     void activateFluidChunk(int chunkX,int chunkZ);
     void tickFluids();
-    void saveFluidTicks(class ChunkRecord& record,bool remove);
+    void saveFluidTicks(class ChunkRecord& record,bool remove,bool keepSavedFluids=false);
     void loadFluidTicks(const class ChunkRecord& record);
     void tickEntities();
     void tickExperienceOrbs();
     void spawnExperienceOrbs(Vec3 position,int reward);
     void tickPlayerEffects();
     void saveEntities(class ChunkRecord& record,bool remove);
-    void loadEntities(const class ChunkRecord& record);
+    // Capture a chunk for the archive. A chunk already archived by the current
+    // eviction pass is re-captured from that archived record, which holds the
+    // entities and fluid ticks the first pass removed from live state.
+    std::unique_ptr<class ChunkRecord> captureChunk(std::pair<int,int> key,bool remove);
+    void loadEntities(class ChunkRecord& record);
 public:
     static constexpr int width=128, height=256, depth=128, sea=63;
     std::int64_t seed=0;

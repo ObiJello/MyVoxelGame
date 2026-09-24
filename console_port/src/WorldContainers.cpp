@@ -210,7 +210,8 @@ void World::tickFurnaces(){
    if(!tickFurnace(*tile))continue;
    state->chunk(x,z).unsaved=true;
    const bool lit=tile->getShort(L"BurnTime")>0;
-   if(lit!=wasLit)set(x,y,z,static_cast<Block>(lit?62:61));
+   // FurnaceTile::setLit swaps the tile and restores its facing data.
+   if(lit!=wasLit){const int facing=getData(x,y,z);set(x,y,z,static_cast<Block>(lit?62:61));setData(x,y,z,facing);}
   }
  }
 }

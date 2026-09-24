@@ -166,7 +166,9 @@ std::vector<Vec3> World::updateLiquidNeighbors(int x,int y,int z) {
         if(!inside(xx,yy,zz))continue;
         const int id=get(xx,yy,zz);
         if(id==9 || id==11){
-            set(xx,yy,zz,static_cast<Block>(id-1));
+            // LiquidTileStatic::setDynamic keeps the depth metadata.
+            const int depthData=getData(xx,yy,zz);
+            set(xx,yy,zz,static_cast<Block>(id-1));setData(xx,yy,zz,depthData);
             scheduleFluid(xx,yy,zz,id==9?5:30);
         }else if(id==8 || id==10)scheduleFluid(xx,yy,zz,id==8?5:30);
     }

@@ -2,7 +2,11 @@
 from pathlib import Path
 import re,sys,json
 r=Path(__file__).resolve().parents[1];ref=r/'original/reference-only'
-atlas={name:int(x)+16*int(y) for name,x,y in re.findall(r'new SimpleIcon\(L"([^"]+)",slotSize\*(\d+),slotSize\*(\d+),',(ref/'PreStitchedTextureMap.cpp').read_text())}
+# Only the item-atlas branch of loadUVs: the terrain branch reuses names such as
+# brick, clay and reeds for different cells of terrain.png.
+stitched=(ref/'PreStitchedTextureMap.cpp').read_text()
+item_start=stitched.index('if(iconType != Icon::TYPE_TERRAIN)');item_end=stitched.index('L"grass_top"',item_start)
+atlas={name:int(x)+16*int(y) for name,x,y in re.findall(r'new SimpleIcon\(L"([^"]+)",slotSize\*(\d+),slotSize\*(\d+),',stitched[item_start:item_end])}
 source=(ref/'Item.cpp').read_text();rows={}
 for statement in source.split(';'):
  id=re.search(r'new \w+\((\d+)',statement);icon=re.search(r'setTextureName\(L"([^"]+)"',statement);label=re.search(r'setDescriptionId\(IDS_ITEM_([A-Z0-9_]+)\)',statement)

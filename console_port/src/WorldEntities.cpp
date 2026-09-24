@@ -388,6 +388,10 @@ void World::tickEntities(){
         }
     }
     for(auto& entity:state->entities){
+        // Entities in the resident halo keep their state but do not tick,
+        // like mobs in loaded chunks outside the original ticking range.
+        if(!inside(int(std::floor(entity.position.x)),int(std::floor(entity.position.y)),
+                   int(std::floor(entity.position.z))))continue;
         ++entity.age;
         if(entity.attackTicks>0)--entity.attackTicks;
         if(entity.hurtTicks>0)--entity.hurtTicks;
@@ -595,11 +599,14 @@ void World::tickEntities(){
             }
         }
     }
+    // Living entities are only dropped with their chunk: eviction serializes
+    // them first (saveEntities). Dropping them earlier lost spawned mobs.
     state->entities.erase(std::remove_if(state->entities.begin(),state->entities.end(),[&](const auto& entity){
+        const int chunkX=entity.native?entity.nativeChunkX:Mth::intFloorDiv(int(std::floor(entity.position.x))-64,16);
+        const int chunkZ=entity.native?entity.nativeChunkZ:Mth::intFloorDiv(int(std::floor(entity.position.z))-64,16);
         const double dx=entity.position.x-player.x,dz=entity.position.z-player.z;
-        return entity.deathTicks>=20 ||
-               !inside(int(std::floor(entity.position.x)),int(std::floor(entity.position.y)),
-                       int(std::floor(entity.position.z))) || dx*dx+dz*dz>128*128;
+        // Mob::checkDespawn removes mobs more than 128 blocks from the player.
+        return entity.deathTicks>=20 || !state->region.hasChunk(chunkX,chunkZ) || dx*dx+dz*dz>128*128;
     }),state->entities.end());
 }
 void World::saveEntities(ChunkRecord& record,bool remove){
@@ -607,7 +614,9 @@ void World::saveEntities(ChunkRecord& record,bool remove){
     auto list=std::make_unique<TagList>();
     if(auto* existing=dynamic_cast<TagList*>(record.extra->get(L"Entities")))
         for(int i=0;i<existing->size();++i)if(auto* tag=dynamic_cast<CompoundTag*>(existing->get(i)))
-            if(!tag->getBoolean(L"console_port.simulated") &&
+            if(tag->getBoolean(L"console_port.simulated") && !tag->getBoolean(L"console_port.active")){
+                std::unique_ptr<Tag> copy(tag->copy());list->add(copy.get());copy.release();
+            }else if(!tag->getBoolean(L"console_port.simulated") &&
                !tag->getBoolean(L"console_port.defeated") &&
                !tag->getBoolean(L"console_port.pickedUp")){
                 std::unique_ptr<Tag> copy(tag->copy());
@@ -717,7 +726,7 @@ void World::saveEntities(ChunkRecord& record,bool remove){
     if(remove)state->hangingDecorations.erase(std::remove_if(state->hangingDecorations.begin(),state->hangingDecorations.end(),
         [&](const HangingDecoration& decoration){return decoration.nativeChunkX==record.x && decoration.nativeChunkZ==record.z;}),state->hangingDecorations.end());
 }
-void World::loadEntities(const ChunkRecord& record){
+void World::loadEntities(ChunkRecord& record){
     if(!record.extra)return;
     auto* list=dynamic_cast<TagList*>(record.extra->get(L"Entities"));if(!list)return;
     for(int i=0;i<list->size();++i){
@@ -725,6 +734,9 @@ void World::loadEntities(const ChunkRecord& record){
         if(!tag)continue;
         if(tag->getBoolean(L"console_port.defeated"))continue;
         if(tag->getBoolean(L"console_port.pickedUp"))continue;
+        // An activated simulated entry now lives in World state; its record
+        // copy is stale and must not be spawned again.
+        if(tag->getBoolean(L"console_port.active"))continue;
         const auto id=tag->getString(L"id");
         if(id==L"XPOrb"){
             ExperienceOrbState orb;orb.native=!tag->getBoolean(L"console_port.simulated");
@@ -743,8 +755,10 @@ void World::loadEntities(const ChunkRecord& record){
                 });
             if(!loaded && inside(int(std::floor(orb.position.x)),
                                   int(std::floor(orb.position.y)),
-                                  int(std::floor(orb.position.z))))
+                                  int(std::floor(orb.position.z)))){
+                if(!orb.native)tag->putBoolean(L"console_port.active",true);
                 state->experienceOrbs.push_back(orb);
+            }
             continue;
         }
         if(id==L"Painting" || id==L"ItemFrame"){
@@ -814,8 +828,10 @@ void World::loadEntities(const ChunkRecord& record){
             [&](const SimulatedEntity& existing){return existing.nativeChunkX==record.x &&
                 existing.nativeChunkZ==record.z && existing.recordIndex==i && existing.id==entity.id;});
         if(!loaded && inside(int(std::floor(entity.position.x)),int(std::floor(entity.position.y)),
-                  int(std::floor(entity.position.z))) && owned(entity,record))
+                  int(std::floor(entity.position.z))) && owned(entity,record)){
+            if(!entity.native)tag->putBoolean(L"console_port.active",true);
             state->entities.push_back(std::move(entity));
+        }
     }
 }
 }

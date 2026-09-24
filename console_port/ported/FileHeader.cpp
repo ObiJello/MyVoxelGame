@@ -59,7 +59,7 @@ void FileHeader::ReadHeader(std::span<const unsigned char> bytes,ESavePlatform p
     if(bytes.size()>PS3_MAX_SAVE_BYTES)throw IoError("Save exceeds PS3 archive capacity");
     auto endian=getEndian(platform);const auto offset=SaveWire::read(bytes,0,4,endian),tableSize=SaveWire::read(bytes,4,4,endian);
     const auto original=SaveWire::read(bytes,8,2,endian),version=SaveWire::read(bytes,10,2,endian);
-    if(version<1 || version>SAVE_FILE_VERSION_NUMBER || original<1 || original>version)throw IoError("Unsupported save-table version");
+    if(version<1 || version>SAVE_FILE_VERSION_NUMBER || original>version)throw IoError("Unsupported save-table version");
     unsigned stride=version==1?SAVE_FILE_ENTRY_V1_SIZE:SAVE_FILE_ENTRY_V2_SIZE;
     if(version==1 && tableSize%stride)throw IoError("Misaligned legacy save-table size");
     const auto count=version==1?tableSize/stride:tableSize;

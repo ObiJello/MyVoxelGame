@@ -3,6 +3,7 @@
 #else
 #include "ConsoleCompression.h"
 #endif
+#include <cstdint>
 #include <vector>
 #include <iostream>
 int main(){

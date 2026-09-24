@@ -38,7 +38,9 @@ std::unique_ptr<CompoundTag> PS3WorldStorage::metadataRoot()const{
     if(!archive->contains(L"level.dat"))return nullptr;
     BorrowedInput input(archive->get(L"level.dat"));std::unique_ptr<CompoundTag> root(NbtIo::read(&input.data));
     if(!root || !dynamic_cast<CompoundTag*>(root->get(L"Data")))throw IoError("Missing level.dat Data compound");
-    input.requireEnd();return root;
+    // ConsoleSaveFileOriginal only grows an entry, so a rewritten shorter
+    // level.dat keeps stale bytes after its root; NbtIo::read ignores them.
+    return root;
 }
 std::unique_ptr<LevelData> PS3WorldStorage::metadata()const{
     auto root=metadataRoot();return root?std::make_unique<LevelData>(root->getCompound(L"Data")):nullptr;

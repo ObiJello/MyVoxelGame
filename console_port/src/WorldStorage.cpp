@@ -429,14 +429,9 @@ bool World::streamAround(Vec3 player,int chunkBudget){
         if(revision!=pending.captureRevision){pending.captureRevision=revision;pending.outgoingIndex=0;}
         for(int i=0;i<chunkBudget*4 && pending.outgoingIndex<pending.outgoing.size();++i){
             const auto key=pending.outgoing[pending.outgoingIndex];
-            const auto& chunk=*state->region.chunks.at(key);
-            ChunkRecord fresh;fresh.x=key.first;fresh.z=key.second;
-            auto it=state->records.find(key);
-            auto record=ChunkStorageCodec::capture(chunk,it==state->records.end()?fresh:*it->second);
-            saveFluidTicks(*record,true);
-            saveEntities(*record,true);
-            markDecoration(*record,state->undecorated.contains(key));
-            record->lastUpdate=time();state->archive->putChunk(0,*record);
+            auto record=captureChunk(key,true);
+            state->archive->putChunk(0,*record);
+            pending.archivedOutgoing.insert(key);
             ++pending.outgoingIndex;
         }
         if(pending.outgoingIndex<pending.outgoing.size())return false;
@@ -492,12 +487,8 @@ void World::save(const std::filesystem::path& path){
     auto candidate=PS3WorldStorage::read(state->archive->serialize());
     auto metadata=std::make_unique<LevelData>(state->metadata.get());metadata->setSeed(seed);candidate->putMetadata(*metadata);
     for(const auto& [position,chunk]:state->region.chunks){
-        ChunkRecord fresh;fresh.x=position.first;fresh.z=position.second;
-        auto it=state->records.find(position);const auto& context=it==state->records.end()?fresh:*it->second;
-        auto record=ChunkStorageCodec::capture(*chunk,context);record->lastUpdate=metadata->getTime();
-        saveFluidTicks(*record,false);
-        saveEntities(*record,false);
-        markDecoration(*record,state->undecorated.contains(position));candidate->putChunk(0,*record);
+        auto record=captureChunk(position,false);record->lastUpdate=metadata->getTime();
+        candidate->putChunk(0,*record);
     }
     // Player::addAdditionalSaveData stores the personal 27-slot chest under
     // EnderItems, separate from the carried Items and every block entity.
@@ -528,6 +519,21 @@ void World::save(const std::filesystem::path& path){
     candidate->writeFile(path);
     state->archive.swap(candidate);state->metadata.swap(metadata);
     for(auto& [position,chunk]:state->region.chunks)chunk->unsaved=false;
+}
+std::unique_ptr<ChunkRecord> World::captureChunk(std::pair<int,int> key,bool remove){
+    const auto& chunk=*state->region.chunks.at(key);
+    const bool archived=state->pending && state->pending->archivedOutgoing.contains(key);
+    std::unique_ptr<ChunkRecord> previous;
+    if(archived)previous=state->archive->chunk(0,key.first,key.second);
+    ChunkRecord fresh;fresh.x=key.first;fresh.z=key.second;
+    auto it=state->records.find(key);
+    const ChunkRecord& context=previous?*previous:it==state->records.end()?fresh:*it->second;
+    auto record=ChunkStorageCodec::capture(chunk,context);
+    saveFluidTicks(*record,remove,bool(previous));
+    saveEntities(*record,remove);
+    markDecoration(*record,state->undecorated.contains(key));
+    record->lastUpdate=time();
+    return record;
 }
 bool World::load(const std::filesystem::path& path){
     if(!std::filesystem::exists(path))return false;

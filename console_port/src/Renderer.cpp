@@ -36,7 +36,7 @@ Renderer::Renderer(const std::filesystem::path& assets) {
     glGenTextures(1,&white_);glBindTexture(GL_TEXTURE_2D,white_);unsigned char white[]={255,255,255,255};
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,white);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-    for(auto name:{"terrain","items","xporb","art_kz","book","chest","largechest","enderchest","font","icons","gui","logo","panorama_n","panorama_s","button","button_focus","button_down","sun","moon_phases","clouds","mob_zombie","mob_skeleton","mob_skeleton_wither","mob_char","mob_spider","mob_cavespider","mob_silverfish","mob_pigzombie","mob_villager","mob_villager_farmer","mob_villager_priest","mob_villager_smith","mob_villager_butcher","mob_ozelot","mob_cat_black","mob_cat_red","mob_cat_siamese","mob_wolf","mob_wolf_angry","mob_wolf_tame","mob_wolf_collar","mob_creeper","mob_cow","mob_redcow","mob_pig","mob_sheep","mob_sheep_fur","mob_chicken","mob_slime","mob_lava","mob_ghast","mob_blaze","mob_squid","mob_enderman","mob_enderman_eyes","panel_tl","panel_tm","panel_tr","panel_ml","panel_mm","panel_mr","panel_bl","panel_bm","panel_br","icon_holder","brewing_stand","brewing_arrow_on","brewing_arrow_off","brewing_bubbles_on","brewing_bubbles_off","flame_on","flame_off","arrow_on","arrow_off"})
+    for(auto name:{"terrain","items","xporb","art_kz","book","chest","largechest","enderchest","font","icons","gui","logo","panorama_n","panorama_s","button","button_focus","button_down","sun","moon_phases","clouds","mob_zombie","mob_skeleton","mob_skeleton_wither","mob_char","mob_spider","mob_cavespider","mob_silverfish","mob_pigzombie","mob_villager","mob_villager_farmer","mob_villager_librarian","mob_villager_priest","mob_villager_smith","mob_villager_butcher","mob_ozelot","mob_cat_black","mob_cat_red","mob_cat_siamese","mob_wolf","mob_wolf_angry","mob_wolf_tame","mob_wolf_collar","mob_creeper","mob_cow","mob_redcow","mob_pig","mob_sheep","mob_sheep_fur","mob_chicken","mob_slime","mob_lava","mob_ghast","mob_blaze","mob_squid","mob_enderman","mob_enderman_eyes","panel_tl","panel_tm","panel_tr","panel_ml","panel_mm","panel_mr","panel_bl","panel_bm","panel_br","icon_holder","brewing_stand","brewing_arrow_on","brewing_arrow_off","brewing_bubbles_on","brewing_bubbles_off","flame_on","flame_off","arrow_on","arrow_off"})
         textures_[name]=load(assets/(std::string(name)+".png"),std::string(name).starts_with("panorama"));
     int w,h,n;unsigned char* font=stbi_load((assets/"font.png").string().c_str(),&w,&h,&n,4);
     if(!font)throw std::runtime_error("Cannot read font metrics");
@@ -268,6 +268,9 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
         const int x=table[0],y=table[1],z=table[2];
         const double dx=x+.5-eye.x,dy=y+.85-eye.y,dz=z+.5-eye.z;
         if(dx*dx+dy*dy+dz*dz>(distance+1)*(distance+1))continue;
+        // The table list belongs to the last finished mesh; after the window
+        // moves it can name cells the current world no longer holds.
+        if(!source.inside(x,y,z) || source.get(x,y,z)!=static_cast<Block>(116))continue;
         const auto key=std::tuple{x,y,z};
         const auto bits=std::uint64_t(source.seed)+std::uint64_t(std::uint32_t(x))*341873128712ull+
                         std::uint64_t(std::uint32_t(z))*132897987541ull;
@@ -354,6 +357,9 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
     for(const auto& decoration:source.hangingDecorations()){
         const double dx=decoration.tileX+.5-eye.x,dy=decoration.tileY+.5-eye.y,dz=decoration.tileZ+.5-eye.z;
         if(dx*dx+dy*dy+dz*dz>(distance+4)*(distance+4))continue;
+        // Decorations stay listed while their chunk is in the streaming halo,
+        // outside the rendered window where renderLight has no samples.
+        if(!source.inside(decoration.tileX,decoration.tileY,decoration.tileZ))continue;
         const int packedLight=source.renderLight(decoration.tileX,decoration.tileY,decoration.tileZ,false);
         const auto mesh=buildHangingMesh(decoration,packedLight,[&](int x,int y,int z){
             return source.inside(x,y,z)?source.renderLight(x,y,z,false):packedLight;

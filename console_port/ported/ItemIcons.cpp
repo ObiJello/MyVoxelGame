@@ -83,9 +83,9 @@ ItemIcon consoleItemIcon(int id,int damage){
  case 333:return {136,"Boat"};
  case 334:return {103,"Leather"};
  case 335:return {77,"Bucket Milk"};
- case 336:return {7,"Brick"};
- case 337:return {72,"Clay"};
- case 338:return {73,"Reeds"};
+ case 336:return {22,"Brick"};
+ case 337:return {57,"Clay"};
+ case 338:return {27,"Reeds"};
  case 339:return {58,"Paper"};
  case 340:return {59,"Book"};
  case 341:return {30,"Slimeball"};
@@ -125,7 +125,7 @@ ItemIcon consoleItemIcon(int id,int damage){
  case 376:return {138,"Fermented Spider Eye"};
  case 377:return {157,"Blaze Powder"};
  case 378:return {173,"Magma Cream"};
- case 379:return {157,"Brewing Stand"};
+ case 379:return {172,"Brewing Stand"};
  case 380:return {156,"Cauldron"};
  case 381:return {155,"Eye Of Ender"};
  case 382:return {137,"Speckled Melon"};
@@ -134,7 +134,7 @@ ItemIcon consoleItemIcon(int id,int damage){
  case 385:return {46,"Fireball"};
  case 388:return {186,"Emerald"};
  case 389:return {206,"Itemframe"};
- case 390:return {186,"Flower Pot"};
+ case 390:return {189,"Flower Pot"};
  case 391:return {120,"Carrots"};
  case 392:return {119,"Potato"};
  case 393:return {118,"Potato Baked"};
@@ -144,7 +144,7 @@ ItemIcon consoleItemIcon(int id,int damage){
  case 400:return {152,"Pumpkin Pie"};
  case 403:return {207,"Enchanted Book"};
  case 405:return {165,"Netherbrick"};
- case 406:return {191,"Nether Quartz"};
+ case 406:return {204,"Nether Quartz"};
  case 2256:return {240,"Music Disc - 13"};
  case 2257:return {241,"Music Disc - cat"};
  case 2258:return {242,"Music Disc - blocks"};

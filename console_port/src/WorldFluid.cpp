@@ -63,13 +63,13 @@ void World::tickFluids(){
         if(inside(x,y,z))tickFlowingFluid(access,state->fluidRandom,x,y,z);
     }
 }
-void World::saveFluidTicks(ChunkRecord& record,bool remove){
+void World::saveFluidTicks(ChunkRecord& record,bool remove,bool keepSavedFluids){
     if(!record.extra)record.extra=std::make_unique<CompoundTag>();
     auto list=std::make_unique<TagList>();
     // Keep saved ticks for still-unported tile behaviors opaque and intact.
     if(auto* existing=dynamic_cast<TagList*>(record.extra->get(L"TileTicks")))
         for(int i=0;i<existing->size();++i)if(auto* tag=dynamic_cast<CompoundTag*>(existing->get(i)))
-            if(tag->getInt(L"i")!=8 && tag->getInt(L"i")!=10){
+            if(keepSavedFluids || (tag->getInt(L"i")!=8 && tag->getInt(L"i")!=10)){
                 std::unique_ptr<Tag> copy(tag->copy());list->add(copy.get());copy.release();
             }
     for(auto it=state->fluidTicks.begin();it!=state->fluidTicks.end();){
