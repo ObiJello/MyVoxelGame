@@ -886,3 +886,10 @@ add_test(NAME console_dimension_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGE
 add_test(NAME console_biome_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_biome_samples> -DEXPECTED=4b79e6c3f1b9f79827a5b3328954d245bbbfec2638bd77377feb97285dc1b32b -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
 add_test(NAME console_noise_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_noise_samples> -DEXPECTED=8624ffeccc98812fdf48d0112023084329baab10b16b7e2322e59f5401794f4b -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
 set_tests_properties(console_chunk_golden console_feature_golden console_plant_golden console_lake_golden console_dimension_golden console_biome_golden console_noise_golden PROPERTIES TIMEOUT 60)
+
+# The committed recipe table must equal what the original Recipes.cpp registers.
+if(NOT MSVC)
+  add_test(NAME console_recipe_extraction COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_recipes.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/CraftingRecipes.cpp --cxx ${CMAKE_CXX_COMPILER} --check)
+  set_tests_properties(console_recipe_extraction PROPERTIES TIMEOUT 120)
+endif()

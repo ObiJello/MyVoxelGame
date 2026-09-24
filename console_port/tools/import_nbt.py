@@ -6,6 +6,8 @@ root = Path(__file__).resolve().parents[1]
 manifest_path = root / 'docs/source_manifest.json'
 manifest = json.loads(manifest_path.read_text())
 source = Path(manifest['source_root'])
+if not source.exists():
+    source = root / 'source_full'  # committed copy of the archive's sources
 names = ['Tag.h', 'Tag.cpp', 'NbtIo.h', 'NbtIo.cpp'] + [n+'Tag.h' for n in ['End','Byte','Short','Int','Long','Float','Double','ByteArray','IntArray','String','List','Compound']]
 for name in names:
     relative = 'Minecraft.World/'+name

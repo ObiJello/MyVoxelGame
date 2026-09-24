@@ -1394,7 +1394,7 @@ original NBT/LevelData code), which the port already documents fixing.
 | Dropped items | ItemEntity pop/throw velocities, bob, pickup box, lifetime and NBT schema; physics constants follow Java (`ItemEntity.cpp` absent). Saved with chunks. |
 | Damage and death | `Mob::hurt` window, `causeFallDamage`, air supply/drowning, suffocation, void, `Player::die` inventory/XP drops; lava/fire ticks follow Java `Entity` (absent). Death screen and respawn. |
 | Food | All `FoodItem`/`BowlFoodItem`/`GoldenAppleItem` registrations, eat duration, effects and probabilities; walk/sprint/swim/jump/attack/mine exhaustion. |
-| Crafting | **Reconstructed**: `Recipes.cpp` and its sub-tables are not in the supplied archive. `src/CraftingRecipes.cpp` holds ~110 same-era recipes in the console's ingredient-list UI (2×2 from the inventory, 3×3 at a crafting table) and must be replaced by an extraction when the sources are imported. |
+| Crafting | Superseded, see "Full source imported" below: all 222 original recipes are now extracted. |
 | Persistence | Game type (survival/creative; adventure still rejected), player position, air and fire now save and restore. |
 
 `tests/survival_tests.cpp` covers destroy rates for every tier/material path,
@@ -1431,3 +1431,45 @@ Silicon world are expected to be rare.
 `console_*_golden` tests pin SHA-256 hashes of the noise, biome, terrain,
 feature, plant, lake and dimension samples, so any compiler or platform that
 would build a different world for the same seed fails the suite.
+
+### Full source imported (`source_full/`)
+
+The complete archive sources are now committed under `source_full/`
+(`Minecraft.World` 1,560 files, `Minecraft.Client` 2,020). All 603 previously
+imported files are byte-identical to it. Everything the survival batch had to
+reconstruct is now taken from the source:
+
+- **Crafting:** `tools/extract_recipes.py` compiles the untouched `Recipes.cpp`
+  registration code and all seven recipe tables against generated ID stubs and
+  dumps `Recipes::getRecipeIngredientsArray()`, the data the console crafting menu
+  uses. `src/CraftingRecipes.cpp` now holds all **222** original recipes in menu
+  order with their `Recipy::eGroupType` tabs, 2×2/3×3 type and 3×3 layout;
+  `console_recipe_extraction` re-runs the extraction and fails if they drift.
+  Crafting follows `IUIScene_CraftingMenu`: ingredients are removed one at a
+  time from the first matching slot, water/lava/milk buckets leave an empty
+  bucket, and the result is added afterwards (dropped when there is no room).
+  The menu has the console's seven group tabs (Tab / L1 R1). The original reads
+  varargs characters with `va_arg(vl,wchar_t)`, which is undefined behaviour that
+  GCC turns into a trap; the extractor reads the promoted `int` instead.
+- **Tile materials:** all 147 tile classes now resolve from source; the fallback
+  table is gone and every previously reconstructed material was confirmed.
+- **Drops:** checked against StoneTile, OreTile, RedStoneOreTile, GravelTile,
+  ClayTile, LightGemTile, GlassTile, IceTile, BookshelfTile, MobSpawnerTile,
+  WebTile, SnowTile, HugeMushroomTile, MycelTile, SignTile, CakeTile and
+  WoodSlabTile. Fixed: ores, redstone ore and spawners now drop experience
+  (`popExperience`); redstone ore and glowstone make the extra
+  `getResourceCountForLootBonus` random draw (glowstone clamps to 1–4); the XP
+  draw happens whether or not the caller wants the amount; locked chests drop
+  themselves; ice melts into flowing water.
+- **Game modes:** `ServerPlayerGameMode::destroyBlock` wears the tool before
+  `playerDestroy` (a tool that breaks no longer gets its special drop).
+  `MultiPlayerGameMode` timing: instant tiles break on the first tick without a
+  delay, the 5-tick delay follows only completed timed breaks, and the crack is
+  stage `(int)(progress*10)-1`. Reach follows `getPickRange`/`GameRenderer::pick`:
+  blocks 4.5 (creative 5), entities 3 (creative 6).
+- **Dropped items:** `ItemEntity` stacks now merge with matching neighbours, and
+  the lava fling runs only on a block crossing or every 25 ticks, as in the source.
+- **HUD:** `Gui.cpp` layout (XP bar 8px, hearts/food 18px and air 28px above the
+  hotbar), heart shake at low health, Regeneration ripple, damage blink with
+  `lastHealth`, food shake without saturation, and the outlined level number,
+  which also shows in creative.

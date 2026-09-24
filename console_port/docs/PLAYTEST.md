@@ -2,8 +2,7 @@
 
 The current build supports local survival and creative play. It is still an
 incomplete port: scripted tutorial lessons, full mob AI, armour, redstone and the
-Nether portal trip are not playable yet. Crafting uses a reconstructed recipe
-table because the original Recipes.cpp is not in the supplied archive.
+Nether portal trip are not playable yet. Crafting has all 222 original recipes.
 
 ## Start
 
@@ -95,8 +94,9 @@ file is needed unless the failure only appears after reload.
 2. Punch a tree: the crack overlay should grow over about 3 seconds, then an oak
    log pops out and is collected when you walk over it. Grass/dirt drop dirt;
    stone takes about 7.5 s by hand and drops nothing.
-3. Press **C**: craft planks, sticks and a crafting table. Place the table and
-   right-click it to see the 3×3 recipes; make a wooden pickaxe. Stone should now
+3. Press **C**: craft planks, sticks and a crafting table (Tab / L1 R1 switch
+   between the seven recipe groups). Place the table and right-click it to see the
+   3×3 recipes; make a wooden pickaxe from the Tools group. Stone should now
    break in about a second and drop cobblestone; the pickaxe wears down.
 4. Jump off a 6+ block drop (damage), stand under water until the bubbles run out
    (drowning), and step next to lava (burning). Eat by holding right mouse with

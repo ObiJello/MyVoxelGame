@@ -84,6 +84,7 @@ class World {
     void tickPlayerEffects();
     void saveEntities(class ChunkRecord& record,bool remove);
     void tickDroppedItems();
+    void mergeDroppedItem(DroppedItem& item);
     void tickPlayerSurvival();
     void handlePlayerDeath();
     void spawnDroppedItem(Vec3 position,Vec3 velocity,std::unique_ptr<class CompoundTag> stack,int throwTime);
@@ -205,6 +206,9 @@ public:
     void playerAttacked(int slot);
     bool playerInWater()const;
     int playerAir()const;
+    // Gui heart blink inputs: Mob::invulnerableTime and Mob::lastHealth.
+    int playerInvulnerableTicks()const;
+    int playerLastHealth()const;
     int playerFireTicks()const;
     bool playerDead()const;
     void respawnPlayer();

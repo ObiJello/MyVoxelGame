@@ -25,7 +25,8 @@ float consoleDestroyProgress(int tileId,int heldItemId,bool underWater,
 // Tile::playerDestroy -> spawnResources/getResource/getResourceCount and the
 // shears/snow/leaf overrides. Callers must only request drops when
 // consolePlayerCanDestroy was true before the block was removed.
-std::vector<SurvivalDrop> consoleTileDrops(int tileId,int data,int heldItemId,Random& random);
+// `experience` receives the popExperience amount (ores, redstone ore, spawners).
+std::vector<SurvivalDrop> consoleTileDrops(int tileId,int data,int heldItemId,Random& random,int* experience=nullptr);
 // DiggerItem/WeaponItem/ShearsItem::mineBlock durability cost for one block.
 int consoleToolMineDamage(int itemId,int tileId);
 // DiggerItem/WeaponItem/HoeItem::hurtEnemy durability cost for one hit.

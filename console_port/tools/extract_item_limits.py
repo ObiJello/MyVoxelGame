@@ -3,6 +3,7 @@
 from pathlib import Path
 import re,json,hashlib,sys
 r=Path(__file__).resolve().parents[1];manifest=r/'docs/source_manifest.json';m=json.loads(manifest.read_text());src=Path(m['source_root'])/'Minecraft.World'
+if not src.exists():src=r/'source_full/Minecraft.World' # committed copy of the archive's sources
 def read(name):
  p=src/name
  if not p.exists():return ''

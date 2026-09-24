@@ -14,6 +14,8 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <array>
+#include <string_view>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -113,9 +115,14 @@ struct App {
     double fallDistance=0;
     float mineProgress=0;
     int mineX=0,mineY=-1,mineZ=0,mineDelay=0,eatUseTicks=0,craftScroll=0;
+    // Recipy::eGroupType tabs in IUIScene_CraftingMenu order.
+    static constexpr std::array<const char*,7> craftingGroups{"Structure","Tool","Food","Armour","Mechanism","Transport","Decoration"};
+    int craftingGroup=0;
     std::vector<const CraftingRecipe*> craftingList()const{
         std::vector<const CraftingRecipe*> list;
-        for(const auto& recipe:consoleCraftingRecipes())if(craftingTable || !recipe.needsTable)list.push_back(&recipe);
+        for(const auto& recipe:consoleCraftingRecipes())
+            if((craftingTable || !recipe.needsTable) && std::string_view(recipe.group)==craftingGroups[craftingGroup])
+                list.push_back(&recipe);
         return list;
     }
     std::string worldName="New World";
@@ -444,6 +451,7 @@ struct App {
         if(screen==Screen::Crafting){
             const int count=int(craftingList().size());
             if(key==GLFW_KEY_C){back();return;}
+            if(key==GLFW_KEY_TAB){craftingGroup=(craftingGroup+1)%int(craftingGroups.size());selection=0;return;}
             if(count==0)return;
             if(key==GLFW_KEY_UP)selection=(selection+count-1)%count;
             if(key==GLFW_KEY_DOWN)selection=(selection+1)%count;
@@ -511,12 +519,16 @@ struct App {
         lastX=x;lastY=y;mouseReady=true;
     }
     Vec3 eye()const{return {position.x,position.y+1.62,position.z};}
+    // MultiPlayerGameMode::getPickRange and GameRenderer::pick: blocks 4.5
+    // (creative 5), entities 3 (creative's far pick range 6).
+    double blockReach()const{return loaded && world.survival()?4.5:5.0;}
+    double entityReach()const{return loaded && world.survival()?3.0:6.0;}
     Vec3 direction()const{return {std::sin(yaw)*std::cos(pitch),std::sin(pitch),-std::cos(yaw)*std::cos(pitch)};}
     void edit(bool place){
         if(glfwGetTime()-lastEdit<.16)return;lastEdit=glfwGetTime();
         const auto heldItem=selectedItem();
-        if(!place && world.attackEntity(eye(),direction(),heldItem.id)){world.playerAttacked(slot);return;}
-        auto h=world.raycast(eye(),direction());if(!h.hit)return;
+        if(!place && world.attackEntity(eye(),direction(),heldItem.id,entityReach())){world.playerAttacked(slot);return;}
+        auto h=world.raycast(eye(),direction(),blockReach());if(!h.hit)return;
         bool changed=false;
         if(place && world.get(h.x,h.y,h.z)==58){
             // WorkbenchTile::use opens the 3x3 crafting menu.
@@ -580,33 +592,33 @@ struct App {
             if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
         }
     }
-    // MultiPlayerGameMode::startDestroyBlock/continueDestroyBlock: progress
-    // accumulates per game tick on one block and resets when the target
-    // changes; a finished block starts a five-tick destroyDelay.
+    // MultiPlayerGameMode: continueDestroyBlock runs once per game tick while
+    // the button is held. A new target goes through startDestroyBlock, which
+    // breaks instant tiles at once; a finished timed break sets destroyDelay 5.
+    // The crack shown is destroy stage (int)(progress*10)-1.
     void mine(int ticks){
         const auto heldItem=selectedItem();
-        if(glfwGetTime()-lastEdit>=.16 && world.attackEntity(eye(),direction(),heldItem.id)){
+        if(glfwGetTime()-lastEdit>=.16 && world.attackEntity(eye(),direction(),heldItem.id,entityReach())){
             lastEdit=glfwGetTime();world.playerAttacked(slot);mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;
         }
-        const auto h=world.raycast(eye(),direction());
+        const auto h=world.raycast(eye(),direction(),blockReach());
         if(!h.hit){mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;}
-        const auto finish=[&]{
+        const auto destroy=[&]{
             if(world.destroyBlock(h.x,h.y,h.z,slot)){
                 world.updateLiquidNeighbors(h.x,h.y,h.z);
                 if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
             }
-            mineProgress=0;mineY=-1;mineDelay=5;renderer->setDestroyStage(-1);
         };
-        if(h.x!=mineX || h.y!=mineY || h.z!=mineZ){
-            mineX=h.x;mineY=h.y;mineZ=h.z;mineProgress=0;
-            if(mineDelay==0 && world.destroyProgress(h.x,h.y,h.z,slot)>=1){finish();return;}
-        }
         for(int tick=0;tick<ticks;++tick){
             if(mineDelay>0){--mineDelay;continue;}
+            if(mineY<0 || h.x!=mineX || h.y!=mineY || h.z!=mineZ){
+                if(world.destroyProgress(h.x,h.y,h.z,slot)>=1){destroy();mineY=-1;break;}
+                mineX=h.x;mineY=h.y;mineZ=h.z;mineProgress=0;continue;
+            }
             mineProgress+=world.destroyProgress(h.x,h.y,h.z,slot);
-            if(mineProgress>=1){finish();return;}
+            if(mineProgress>=1){destroy();mineProgress=0;mineY=-1;mineDelay=5;break;}
         }
-        renderer->setDestroyStage(mineProgress>0?std::min(9,int(mineProgress*10)):-1);
+        renderer->setDestroyStage(mineY>=0?std::min(9,int(mineProgress*10)-1):-1);
     }
     void moveAxis(int axis,double amount){
         const int steps=std::max(1,int(std::ceil(std::abs(amount)/.15)));
@@ -637,7 +649,7 @@ struct App {
             if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Playing)key(GLFW_KEY_F,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Furnace)key(GLFW_KEY_F,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Brewing)key(GLFW_KEY_F,GLFW_PRESS);
-            if((pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER) || pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER)) && screen==Screen::Inventory)key(GLFW_KEY_TAB,GLFW_PRESS);
+            if((pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER) || pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER)) && (screen==Screen::Inventory || screen==Screen::Crafting))key(GLFW_KEY_TAB,GLFW_PRESS);
             else{
                 if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER))slot=(slot+8)%9;
                 if(pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER))slot=(slot+1)%9;
@@ -709,7 +721,7 @@ struct App {
         const bool edible=world.canEatCarried(slot);
         bool blockUse=false;
         if(usingRight && (drinkable || edible)){
-            const auto target=world.raycast(eye(),direction());
+            const auto target=world.raycast(eye(),direction(),blockReach());
             if(target.hit){const int block=world.get(target.x,target.y,target.z);
                 blockUse=block==54 || block==58 || block==130 || world.canOpenFurnace(target.x,target.y,target.z) ||
                          world.canOpenBrewingStand(target.x,target.y,target.z) ||
@@ -794,7 +806,7 @@ struct App {
     void draw(){
         int w,h;glfwGetFramebufferSize(window,&w,&h);renderer->resize(w,h);auto& r=*renderer;float cw=r.uiWidth();
         bool inWorld=loaded && screen!=Screen::Loading && screen!=Screen::Main && screen!=Screen::Worlds && screen!=Screen::CreateWorld && screen!=Screen::FindingSeed && screen!=Screen::Notice;
-        if(inWorld)r.world(world,eye(),yaw,pitch,viewDistance,screen==Screen::Playing?world.raycast(eye(),direction()):Hit{});
+        if(inWorld)r.world(world,eye(),yaw,pitch,viewDistance,screen==Screen::Playing?world.raycast(eye(),direction(),blockReach()):Hit{});
         else {glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);}
         r.beginUI();
         if(!inWorld){
@@ -815,31 +827,55 @@ struct App {
                 }
             }
             const bool survival=world.survival();
+            // Gui::render from icons.png, relative to the hotbar top (328): XP bar
+            // -8, hearts/food -18 (yLine1), air/armour -28 (yLine2). Hearts shake
+            // at 4 health or less, ripple under Regeneration and blink white
+            // while invulnerable; food shakes when saturation is exhausted.
+            const int tickCount=int(world.time()&0x7fffffff);
             if(survival){
-                // Gui::render survival bars from icons.png: hearts left and
-                // food right above the hotbar, air above food, XP bar below.
                 const auto icon=[&](float x,float y,int u,int v){
                     r.sprite("icons",x,y,9,9,{u/256.f,v/256.f,(u+9)/256.f,(v+9)/256.f});};
-                const int health=world.playerHealth(),food=world.playerFoodLevel();
-                bool poisoned=false,hunger=false;
-                for(const auto& effect:world.activePotionEffects()){poisoned|=effect.id==19;hunger|=effect.id==17;}
+                const float xLeft=cw/2-91,xRight=cw/2+91,yLine1=310,yLine2=300;
+                const int progress=int(world.playerExperienceProgress()*183);
+                r.sprite("icons",xLeft,320,182,5,{0,64/256.f,182/256.f,69/256.f});
+                if(progress>0)r.sprite("icons",xLeft,320,float(progress),5,{0,69/256.f,progress/256.f,74/256.f});
+                const int health=world.playerHealth(),food=world.playerFoodLevel(),invulnerable=world.playerInvulnerableTicks();
+                const bool blink=invulnerable>=10 && invulnerable/3%2==1;
+                const int lastHealth=world.playerLastHealth();
+                bool poison=false,hunger=false,regeneration=false;
+                for(const auto& effect:world.activePotionEffects()){poison|=effect.id==19;hunger|=effect.id==17;regeneration|=effect.id==10;}
+                const int wave=regeneration?tickCount%25:-1;
+                Random shake(std::int64_t(tickCount)*312871);
                 for(int i=0;i<10;++i){
-                    const float hx=cw/2-91+i*8,fx=cw/2+91-i*8-9;
-                    icon(hx,311,16,0);
-                    if(i*2+1<health)icon(hx,311,poisoned?88:52,0);else if(i*2+1==health)icon(hx,311,poisoned?97:61,0);
-                    icon(fx,311,hunger?133:16,27);
-                    if(i*2+1<food)icon(fx,311,hunger?88:52,27);else if(i*2+1==food)icon(fx,311,hunger?97:61,27);
+                    const int base=16+(poison?36:0);
+                    float y=yLine1;
+                    if(health<=4)y+=shake.nextInt(2);
+                    if(i==wave)y-=2;
+                    const float x=xLeft+i*8;
+                    icon(x,y,16+(blink?9:0),0);
+                    if(blink){if(i*2+1<lastHealth)icon(x,y,base+54,0);else if(i*2+1==lastHealth)icon(x,y,base+63,0);}
+                    if(i*2+1<health)icon(x,y,base+36,0);else if(i*2+1==health)icon(x,y,base+45,0);
+                }
+                for(int i=0;i<10;++i){
+                    const int base=16+(hunger?36:0),background=hunger?13:0;
+                    float y=yLine1;
+                    if(world.playerSaturation()<=0 && tickCount%(food*3+1)==0)y+=shake.nextInt(3)-1;
+                    const float x=xRight-i*8-9;
+                    icon(x,y,16+background*9,27);
+                    if(i*2+1<food)icon(x,y,base+36,27);else if(i*2+1==food)icon(x,y,base+45,27);
                 }
                 const int air=world.playerAir();
                 if(air<300){
-                    const int full=int(std::ceil((air-2)*10.0/300)),popping=int(std::ceil(air*10.0/300))-full;
-                    for(int i=0;i<full+popping;++i)icon(cw/2+91-i*8-9,301,i<full?16:25,18);
+                    const int count=int(std::ceil((air-2)*10.0/300)),extra=int(std::ceil(air*10.0/300))-count;
+                    for(int i=0;i<count+extra;++i)icon(xRight-i*8-9,yLine2,i<count?16:25,18);
                 }
-                r.sprite("icons",cw/2-91,322,182,5,{0,64/256.f,182/256.f,69/256.f});
-                const float fill=std::clamp(world.playerExperienceProgress(),0.f,1.f);
-                if(fill>0)r.sprite("icons",cw/2-91,322,182*fill,5,{0,69/256.f,182*fill/256.f,74/256.f});
-                if(const int level=world.playerExperienceLevel();level>0)
-                    r.centered(std::to_string(level),314,.8f,{.5f,1,.125f,1});
+            }
+            if(const int level=world.playerExperienceLevel();level>0){
+                const std::string text=std::to_string(level);
+                const float x=(cw-r.textWidth(text,1))/2,y=survival?310.f:315.f;
+                for(const auto& [dx,dy]:{std::pair{1.f,0.f},{-1.f,0.f},{0.f,1.f},{0.f,-1.f}})
+                    r.text(text,x+dx,y+dy,1,{0,0,0,1},false);
+                r.text(text,x,y,1,{.5f,1,.125f,1},false); // 0x80ff20
             }
             if(carried[slot].id)r.centered(itemDisplayName(carried[slot].id,carried[slot].damage),survival?290:312,1);
             r.text("Position: "+std::to_string(int(position.x))+", "+std::to_string(int(position.y))+", "+std::to_string(int(position.z)),16,16);
@@ -939,6 +975,9 @@ struct App {
             const float cx=cw/2;
             r.rect(0,0,cw,360,{0,0,0,.55});r.panel(cx-150,28,300,296);
             r.text(craftingTable?"Crafting Table":"Crafting",cx-137,36,1,{.275f,.275f,.275f,1});
+            static constexpr std::array<const char*,7> tabNames{"Structures","Tools","Food","Armour","Mechanisms","Transport","Decoration"};
+            const std::string tab=std::string("< ")+tabNames[craftingGroup]+" >";
+            r.text(tab,cx+137-r.textWidth(tab,.8f),37,.8f,{.2f,.2f,.2f,1},false);
             const auto list=craftingList();
             const auto carried=world.carriedItems();
             constexpr int rows=9;
@@ -963,10 +1002,9 @@ struct App {
                            " ("+std::to_string(have)+")";
                 }
                 r.text(needs,cx-108,y+13,.6f,ink,false);
-                r.text(recipe.group,cx+140-r.textWidth(recipe.group,.6f),y+2,.6f,{.35,.35,.35,1},false);
             }
             r.centered(std::to_string(list.empty()?0:selection+1)+" / "+std::to_string(list.size()),308,.7f,{.2,.2,.2,1});
-            r.centered("Enter/Cross: Craft   Up/Down: Select   Esc / Circle: Close",336,.7f);
+            r.centered("Enter/Cross: Craft   Tab / L1 R1: Group   Esc / Circle: Close",336,.7f);
         }else if(screen==Screen::Dead){
             // DeathScreen: red wash, title and the two source buttons.
             r.rect(0,0,cw,360,{.45f,.05f,.05f,.55f});

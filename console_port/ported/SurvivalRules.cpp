@@ -7,12 +7,11 @@
 // getResource/getResourceCount/getSpawnResourcesAuxValue overrides of the tile
 // classes in original/reference-only.
 //
-// RECONSTRUCTED (source not in the supplied subset, marked below): StoneTile,
-// OreTile, RedStoneOreTile, GravelTile, ClayTile, LightGemTile, GlassTile,
-// IceTile, BookshelfTile, MobSpawnerTile, WebTile, SnowTile, HugeMushroomTile,
-// MycelTile, SignTile, CakeTile and WoodSlabTile drops, which follow the
-// equivalent Java-edition classes the console code was translated from. The
-// "drop only if canDestroy" gate lives in ServerPlayerGameMode (also absent).
+// Also StoneTile, OreTile, RedStoneOreTile, GravelTile, ClayTile, LightGemTile,
+// GlassTile, IceTile, BookshelfTile, MobSpawnerTile, WebTile, SnowTile,
+// HugeMushroomTile, MycelTile, SignTile, CakeTile and WoodSlabTile from the full
+// source, including popExperience amounts and the extra random draw in
+// getResourceCountForLootBonus. The drop gate is ServerPlayerGameMode::destroyBlock.
 #include "SurvivalRules.h"
 #include "TileSurvival.h"
 #include "Material.h"
@@ -142,7 +141,10 @@ float consoleDestroyProgress(int tileId,int heldItemId,bool underWater,int digSp
     return (consolePlayerDestroySpeed(tileId,heldItemId,underWater,digSpeed,digSlow)/destroySpeed)/30;
 }
 
-std::vector<SurvivalDrop> consoleTileDrops(int tileId,int data,int heldItemId,Random& random){
+std::vector<SurvivalDrop> consoleTileDrops(int tileId,int data,int heldItemId,Random& random,int* experience){
+    if(experience)*experience=0;
+    // Mth::nextInt(random,min,max).
+    const auto between=[&](int low,int high){return low>=high?low:random.nextInt(high-low+1)+low;};
     registered(tileId);
     if(data<0 || data>15)throw std::invalid_argument("Invalid tile data");
     std::vector<SurvivalDrop> drops;
@@ -234,16 +236,33 @@ std::vector<SurvivalDrop> consoleTileDrops(int tileId,int data,int heldItemId,Ra
     case 5:case 24:case 35:case 98:case 139:case 171:simple(tileId,1,data);break; // aux = data
     case 155:simple(155,1,(data==3 || data==4)?2:data);break;         // QuartzBlockTile
     case 145:simple(145,1,data>>2);break;                              // AnvilTile
-    // ---- RECONSTRUCTED (tile class source not supplied) ----
     case 1:simple(4);break;                                            // StoneTile -> cobblestone
-    case 16:simple(263);break;case 56:simple(264);break;              // OreTile coal, diamond
-    case 129:simple(388);break;case 153:simple(406);break;            // OreTile emerald, quartz
-    case 21:simple(351,4+random.nextInt(5),4);break;                  // OreTile lapis
-    case 73:case 74:simple(331,4+random.nextInt(2));break;            // RedStoneOreTile
+    case 14:case 15:case 16:case 56:case 129:case 153:case 21:{      // OreTile
+        const int item=tileId==16?263:tileId==56?264:tileId==21?351:tileId==129?388:tileId==153?406:tileId;
+        const int count=tileId==21?4+random.nextInt(5):1;             // getResourceCount
+        simple(item,count,tileId==21?4:0);                             // lapis aux DyePowderItem::BLUE
+        if(item!=tileId){                                              // OreTile::spawnResources
+            const int xp=tileId==16?between(0,2):tileId==56 || tileId==129?between(3,7):between(2,5);
+            if(experience)*experience=xp;
+        }
+        break;
+    }
+    case 73:case 74:{                                                  // RedStoneOreTile
+        int count=4+random.nextInt(2);count+=random.nextInt(1);      // getResourceCountForLootBonus(0)
+        simple(331,count);
+        const int xp=1+random.nextInt(5);
+        if(experience)*experience=xp;
+        break;
+    }
     case 13:spawn(1,[&]{return random.nextInt(10)==0?318:13;},0);break; // GravelTile
     case 82:simple(337,4);break;                                       // ClayTile
-    case 89:simple(348,2+random.nextInt(3));break;                    // LightGemTile
-    case 20:case 79:case 52:case 92:case 95:break;                    // Glass/Ice/Spawner/Cake/LockedChest count 0
+    case 89:{                                                          // LightGemTile
+        int count=2+random.nextInt(3);count+=random.nextInt(1);
+        simple(348,std::clamp(count,1,4));
+        break;
+    }
+    case 20:case 79:case 92:break;                                     // Glass/Ice/Cake count 0
+    case 52:{const int a=random.nextInt(15);const int xp=15+a+random.nextInt(15);if(experience)*experience=xp;break;} // MobSpawnerTile
     case 47:simple(340,3);break;                                       // BookshelfTile
     case 30:simple(287);break;                                         // WebTile
     case 80:simple(332,4);break;                                       // SnowTile

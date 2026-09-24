@@ -8,6 +8,7 @@ struct PlayerHurtState {
     int hurtTicks=0;
     int deathTicks=0;
     int lastHurt=0;
+    int lastHealth=20; // Mob::lastHealth, shown by Gui while hearts blink
 };
 
 // Monster::doHurtTarget, Silverfish::checkHurtTarget and Slime::playerTouch.

@@ -28,6 +28,7 @@ bool applySourceMobHurt(PlayerHurtState& player,int damage,bool invulnerable){
         if(damage<=player.lastHurt)return false;
         player.health=std::max(0,player.health-(damage-player.lastHurt));
     }else{
+        player.lastHealth=player.health;
         player.health=std::max(0,player.health-damage);
         player.invulnerableTicks=20;
         player.hurtTicks=10;

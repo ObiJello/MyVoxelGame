@@ -9,8 +9,8 @@ enum class SurvivalMaterial {
 };
 // One registered tile from Tile::staticCtor (ported/TileSurvival.cpp is generated
 // by tools/extract_survival_tiles.py). destroyTime is Tile::destroySpeed; -1 is
-// setIndestructible. `reconstructed` marks a material whose tile class source is
-// not part of the supplied archive subset.
+// setIndestructible. `reconstructed` is always false now that every tile class
+// source is available; the extractor fails rather than guess a material.
 struct SurvivalTile {
     int id;
     float destroyTime;

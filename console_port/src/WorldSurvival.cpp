@@ -5,11 +5,11 @@
 // Player::drop/die/canEat/causeFallDamage/hurt, Mob::baseTick/hurt/
 // causeFallDamage/outOfWorld, Inventory::add/dropAll, ItemInstance::hurt,
 // FoodItem/BowlFoodItem/GoldenAppleItem::useTimeDepleted.
-// ItemEntity.cpp and Entity.cpp are not part of the supplied subset; their
-// movement constants (gravity .04, drag .98, ground friction .6*.98, bounce
-// -.5, 6000-tick lifetime, lava fling, pickup box grow(1,0,1)) and the
-// Entity lava/fire rules (lava: 4 damage and 15 s of fire; burning: 1 damage
-// every 20 ticks; water extinguishes) follow the equivalent Java classes.
+// ItemEntity::tick/merge/playerTouch (gravity .04, drag .98, ground friction
+// .6*.98, bounce -.5, five-minute lifetime, lava fling, stack merging) and
+// Player::aiStep's pickup box bb.grow(1,0,1); Entity::baseTick/lavaHurt/
+// setOnFire/move (lava: 4 damage and 15 s of fire; burning: 1 damage every
+// 20 ticks; water extinguishes; fire contact burns 1 and lights for 8 s).
 #include "WorldState.h"
 #include "SurvivalRules.h"
 #include "TileSurvival.h"
@@ -70,6 +70,8 @@ void World::setSurvival(bool enabled){
 const std::vector<DroppedItem>& World::droppedItems()const{return state->droppedItems;}
 std::optional<Vec3> World::savedPlayerPosition()const{return state->savedPlayerPosition;}
 int World::playerAir()const{return state->playerAir;}
+int World::playerInvulnerableTicks()const{return state->playerHurt.invulnerableTicks;}
+int World::playerLastHealth()const{return state->playerHurt.lastHealth;}
 int World::playerFireTicks()const{return state->playerFire;}
 bool World::playerDead()const{return state->playerHurt.health<=0;}
 
@@ -123,31 +125,35 @@ bool World::destroyBlock(int x,int y,int z,int slot){
             }
     }
     if(!breakBlock(x,y,z))return false;
-    state->playerFood.addExhaustion(consoleMineExhaustion());
-    if(harvest){
-        // A door's upper half removes the lower half, which drops the item.
-        const int dropData=(id==64 || id==71) && (data&8)?0:data;
-        auto& random=state->survivalRandom;
-        for(const auto& drop:consoleTileDrops(id,dropData,held,random)){
-            const double xo=random.nextFloat()*.7+.15,yo=random.nextFloat()*.7+.15,zo=random.nextFloat()*.7+.15;
-            const Vec3 velocity{random.nextFloat()*.2-.1,.2,random.nextFloat()*.2-.1};
-            spawnDroppedItem({x+xo,y+yo,z+zo},velocity,stackTag(drop.id,drop.count,drop.damage),10);
-        }
-    }
-    // IceTile::playerDestroy (reconstructed): melts into water above support.
-    if(id==79 && y>0){
-        const int below=get(x,y-1,z);
-        if(solid(static_cast<Block>(below)) || below==8 || below==9 || below==10 || below==11){
-            set(x,y,z,Water);updateLiquidNeighbors(x,y,z);
-        }
-    }
-    // DiggerItem/WeaponItem/ShearsItem::mineBlock -> ItemInstance::hurt.
+    // ServerPlayerGameMode::destroyBlock: ItemInstance::mineBlock wears the
+    // tool first (a broken tool is removed), then Tile::playerDestroy runs
+    // with whatever is still selected.
+    int selected=held;
     if(held>0){
         const int wear=consoleToolMineDamage(held,id),maximum=consoleItemMaxDamage(held);
         if(wear>0 && maximum>0)if(auto* tool=carriedAt(*state->inventory,slot)){
             const int damage=tool->getShort(L"Damage")+wear;
-            if(damage>maximum)removeCarried(*state->inventory,slot);
+            if(damage>maximum){removeCarried(*state->inventory,slot);selected=0;}
             else tool->putShort(L"Damage",damage);
+        }
+    }
+    if(!harvest)return true;
+    state->playerFood.addExhaustion(consoleMineExhaustion());
+    // A door's upper half removes the lower half, which drops the item.
+    const int dropData=(id==64 || id==71) && (data&8)?0:data;
+    auto& random=state->survivalRandom;
+    int experience=0;
+    for(const auto& drop:consoleTileDrops(id,dropData,selected,random,&experience)){
+        const double xo=random.nextFloat()*.7+.15,yo=random.nextFloat()*.7+.15,zo=random.nextFloat()*.7+.15;
+        const Vec3 velocity{random.nextFloat()*.2-.1,.2,random.nextFloat()*.2-.1};
+        spawnDroppedItem({x+xo,y+yo,z+zo},velocity,stackTag(drop.id,drop.count,drop.damage),10);
+    }
+    if(experience>0)spawnExperienceOrbs({x+.5,y+.5,z+.5},experience); // Tile::popExperience
+    // IceTile::playerDestroy: melts into flowing water over a solid or liquid tile.
+    if(id==79 && y>0){
+        const int below=get(x,y-1,z);
+        if(solid(static_cast<Block>(below)) || below==8 || below==9 || below==10 || below==11){
+            set(x,y,z,static_cast<Block>(8));updateLiquidNeighbors(x,y,z);
         }
     }
     return true;
@@ -319,6 +325,25 @@ void World::respawnPlayer(){
     state->playerEffects.clear();
     state->playerDeathHandled=false;
 }
+void World::mergeDroppedItem(DroppedItem& self){
+    // ItemEntity::mergeWithNeighbours over bb.grow(.5,0,.5) and ::merge.
+    for(auto& other:state->droppedItems){
+        if(&other==&self || other.health<=0 || other.count<=0 || self.health<=0 || self.count<=0)continue;
+        if(std::abs(other.position.x-self.position.x)>=.75 || std::abs(other.position.z-self.position.z)>=.75 ||
+           std::abs(other.position.y-self.position.y)>=.25)continue;
+        if(other.id!=self.id || other.damage!=self.damage)continue;
+        const auto* selfTag=self.stack->get(L"tag");const auto* otherTag=other.stack->get(L"tag");
+        if(bool(selfTag)!=bool(otherTag) || (selfTag && !const_cast<Tag*>(selfTag)->equals(const_cast<Tag*>(otherTag))))continue;
+        DroppedItem& target=other.count<self.count?self:other;
+        DroppedItem& source=&target==&self?other:self;
+        if(target.count+source.count>std::max(1,std::min(64,consoleItemStackLimit(target.id))))continue;
+        target.count+=source.count;target.stack->putByte(L"Count",target.count);
+        target.throwTime=std::max(target.throwTime,source.throwTime);
+        target.age=std::min(target.age,source.age);
+        source.count=0;source.health=0;
+        if(&source==&self)return;
+    }
+}
 void World::tickDroppedItems(){
     auto& random=state->survivalRandom;
     const auto player=state->playerPosition;
@@ -327,13 +352,11 @@ void World::tickDroppedItems(){
         const auto& p=item.position;
         if(!inside(int(std::floor(p.x)),int(std::floor(p.y)),int(std::floor(p.z))))continue;
         if(item.throwTime>0)--item.throwTime;
+        const Vec3 old=item.position;
         item.velocity.y-=.04;
-        const int bx=int(std::floor(p.x)),by=int(std::floor(p.y)),bz=int(std::floor(p.z));
-        const int here=get(bx,by,bz);
-        if(here==10 || here==11){
-            item.velocity={(random.nextFloat()-random.nextFloat())*.2,.2,(random.nextFloat()-random.nextFloat())*.2};
-            item.health-=4; // Entity::lavaHurt on ItemEntity::hurt
-        }
+        // Entity::baseTick: lavaHurt on ItemEntity::hurt.
+        const int lava=get(int(std::floor(p.x)),int(std::floor(p.y)),int(std::floor(p.z)));
+        if(lava==10 || lava==11)item.health-=4;
         // Entity::checkInTile: an item inside a block is pushed upward.
         if(collides(item.position,.25,.25))item.position.y+=.1;
         const bool wasGrounded=collides({p.x,p.y-.01,p.z},.25,.25);
@@ -352,6 +375,18 @@ void World::tickDroppedItems(){
         }
         item.velocity.x*=friction;item.velocity.y*=.98;item.velocity.z*=friction;
         if(onGround)item.velocity.y*=-.5;
+        // ItemEntity::tick: after crossing a block boundary (or every 25
+        // ticks) lava flings the item and it merges with nearby stacks.
+        const bool crossed=int(old.x)!=int(item.position.x) || int(old.y)!=int(item.position.y) || int(old.z)!=int(item.position.z);
+        if(crossed || item.age%25==0){
+            const int here=get(int(std::floor(item.position.x)),int(std::floor(item.position.y)),int(std::floor(item.position.z)));
+            if(here==10 || here==11){
+                const float a=random.nextFloat(),b=random.nextFloat();
+                const float c=random.nextFloat(),d=random.nextFloat();
+                item.velocity={(a-b)*.2,.2,(c-d)*.2};
+            }
+            mergeDroppedItem(item);
+        }
         ++item.age;
         // Player::aiStep touches entities in bb.grow(1,0,1); ItemEntity::
         // playerTouch adds what fits once the throw delay has elapsed.
@@ -414,17 +449,22 @@ bool World::canCraft(const CraftingRecipe& recipe)const{
 }
 bool World::craft(const CraftingRecipe& recipe){
     if(!canCraft(recipe))return false;
-    for(const auto& need:recipe.ingredients){
-        int left=need.count;
+    // IUIScene_CraftingMenu: remove each required item one at a time with
+    // Inventory::removeResource (the first matching slot), return crafting
+    // remainders, then add the result (dropping it when there is no room).
+    for(const auto& need:recipe.ingredients)for(int n=0;n<need.count;++n){
         const auto carried=carriedItems();
-        for(int slot=35;slot>=0 && left>0;--slot){
+        for(int slot=0;slot<36;++slot){
             const auto& item=carried[slot];
             if(item.id!=need.id || (need.damage>=0 && item.damage!=need.damage))continue;
-            const int used=std::min(left,item.count);
             auto* tag=carriedAt(*state->inventory,slot);
-            if(used==item.count)removeCarried(*state->inventory,slot);
-            else tag->putByte(L"Count",item.count-used);
-            left-=used;
+            if(item.count<=1)removeCarried(*state->inventory,slot);
+            else tag->putByte(L"Count",item.count-1);
+            if(const int remainder=consoleCraftingRemainingItem(item.id);remainder && addCarriedItem(remainder,1)){
+                const auto p=state->playerPosition;
+                spawnDroppedItem({p.x,p.y+1.32,p.z},{0,.1,0},stackTag(remainder,1,0),40);
+            }
+            break;
         }
     }
     if(const int left=addCarriedItem(recipe.id,recipe.count,recipe.damage)){

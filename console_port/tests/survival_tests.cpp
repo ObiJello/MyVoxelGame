@@ -58,6 +58,22 @@ int main(){try{
   require(lapis.size()>=4 && lapis.size()<=8 && lapis[0].id==351 && lapis[0].damage==4,"Lapis drops 4-8 blue dye");}
  int saplings=0;for(int i=0;i<4000;++i)for(const auto& drop:consoleTileDrops(18,0,0,random))saplings+=drop.id==6;
  require(saplings>100 && saplings<320,"Leaves drop saplings about one time in twenty");
+ // OreTile/RedStoneOreTile/MobSpawnerTile popExperience amounts.
+ for(int i=0;i<40;++i){
+  int xp=-1;consoleTileDrops(56,0,257,random,&xp);require(xp>=3 && xp<=7,"Diamond ore gives 3-7 XP");
+  consoleTileDrops(16,0,270,random,&xp);require(xp>=0 && xp<=2,"Coal ore gives 0-2 XP");
+  consoleTileDrops(15,0,274,random,&xp);require(xp==0,"Iron ore drops itself and no XP");
+  consoleTileDrops(52,0,270,random,&xp);require(xp>=15 && xp<=43,"Spawners give 15-43 XP");
+  const auto redstone=consoleTileDrops(73,0,257,random,&xp);
+  require(redstone.size()>=4 && redstone.size()<=5 && xp>=1 && xp<=5,"Redstone ore drops 4-5 dust and 1-5 XP");
+  const auto dust=consoleTileDrops(89,0,0,random);require(dust.size()>=2 && dust.size()<=4,"Glowstone drops 2-4 dust");
+ }
+ { // RedStoneOreTile: count 4+nextInt(2), getResourceCountForLootBonus's nextInt(1),
+   // one nextFloat per item, then popExperience's nextInt(5), even with no XP requested.
+  Random a(7),b(7);const auto drops=consoleTileDrops(73,0,257,a);
+  const int count=4+b.nextInt(2);b.nextInt(1);for(int i=0;i<count;++i)b.nextFloat();b.nextInt(5);
+  require(int(drops.size())==count && a.nextLong()==b.nextLong(),"Redstone ore consumes the source random sequence");
+ }
  require(consoleToolMineDamage(270,1)==1 && consoleToolMineDamage(270,37)==0 &&
          consoleToolMineDamage(267,1)==2 && consoleItemMaxDamage(270)==59 && consoleItemMaxDamage(359)==238,
          "Tool wear and durability");
@@ -133,8 +149,29 @@ int main(){try{
  require(planks && table && world.canCraft(*planks) && !world.canCraft(*table),"Recipe availability");
  require(world.craft(*planks) && world.craft(*planks),"Craft planks twice");
  require(world.canCraft(*table) && world.craft(*table),"Craft a crafting table");
+ require(recipes.size()==222,"All 222 original recipes are registered");
  int tables=0,plankCount=0;for(const auto& item:world.carriedItems()){tables+=item.id==58?item.count:0;plankCount+=item.id==5?item.count:0;}
  require(tables==1 && plankCount==4,"Crafting consumed and produced the right counts");
+ // Crafting remainders: a cake's milk buckets come back empty.
+ {
+  const CraftingRecipe* cake=nullptr;for(const auto& recipe:recipes)if(recipe.id==354)cake=&recipe;
+  require(cake,"Cake recipe exists");
+  for(int s=9;s<36;++s)world.consumeCarried(s,world.carriedItems()[s].count>0?world.carriedItems()[s].count:1);
+  for(const auto& need:cake->ingredients)require(world.addCarriedItem(need.id,need.count,std::max(0,need.damage))==0,"Stock cake ingredients");
+  require(world.craft(*cake),"Craft a cake");
+  int buckets=0,cakes=0;for(const auto& item:world.carriedItems()){buckets+=item.id==325?item.count:0;cakes+=item.id==354;}
+  require(buckets==3 && cakes==1,"Milk buckets leave empty buckets");
+ }
+ // Dropped stacks merge (ItemEntity::mergeWithNeighbours).
+ {
+  World drops;drops.generate(3,true);drops.setSurvival(true);
+  const int g=drops.surface(20,20);
+  drops.setPlayerPosition({60.5,double(drops.surface(60,60)+1),60.5});
+  require(drops.setCreativeHotbarItem(0,4,0,10) && drops.setCreativeHotbarItem(1,4,0,20),"Two cobblestone stacks");
+  drops.dropCarried(0,true,{20.5,g+2.62,20.5},0,-1.55);drops.dropCarried(1,true,{20.5,g+2.62,20.5},0,-1.55);
+  for(int i=0;i<30;++i)drops.tickTime();
+  require(drops.droppedItems().size()==1 && drops.droppedItems()[0].count==30,"Nearby identical drops merge into one stack");
+ }
  // Death drops the inventory and respawn resets vitals.
  const int carried=[&]{int n=0;for(const auto& item:world.carriedItems())n+=item.id!=0;return n;}();
  for(int i=0;i<40 && !world.playerDead();++i){world.hurtPlayer(20);world.tickTime();}
