@@ -2,6 +2,9 @@
 #include "ContainerScreen.hpp"
 #include "GuiGraphics.hpp"
 #include "screens/Screen.hpp"          // LoadStandaloneGuiTexture
+#include "common/inventory/SystemMenus.hpp"   // BrewingStandMenu
+
+#include <algorithm>
 
 namespace Render {
 
@@ -93,6 +96,9 @@ namespace Render {
         if (!generic) {
             g.Blit(bg, leftPos, topPos, leftPos + iw, topPos + ih,
                    0.0f, 0.0f, (float)iw / 256.0f, (float)ih / 256.0f);
+            if (auto* stand = dynamic_cast<Game::BrewingStandMenu*>(PlayerContainerMenu())) {
+                RenderBrewingStandProgress(g, *stand, leftPos, topPos);
+            }
             return;
         }
 
@@ -109,10 +115,49 @@ namespace Render {
                (float)iw / 256.0f, (126.0f + (float)(ih - containerH)) / 256.0f);
     }
 
+    void ContainerScreen::RenderBrewingStandProgress(GuiGraphics& g,
+                                                     const Game::BrewingStandMenu& menu,
+                                                     int leftPos, int topPos) {
+        // MC BrewingStandScreen.extractBackground, after the panel blit.
+        // Fuel bar: Mth.positiveCeilDiv(18 * fuel, totalFuel), clamped 0..18.
+        const int fuel = menu.GetFuel();
+        const int totalFuel = menu.GetTotalFuel();
+        int fuelLength = 0;
+        if (totalFuel > 0 && fuel > 0) {
+            fuelLength = std::clamp((18 * fuel + totalFuel - 1) / totalFuel, 0, 18);
+        }
+        if (fuelLength > 0) {
+            g.BlitSprite("container/brewing_stand/fuel_length", 18, 4, 0, 0,
+                         leftPos + 60, topPos + 44, fuelLength, 4);
+        }
+
+        const int tickCount = menu.GetBrewingTicks();
+        const int totalTickCount = menu.GetTotalBrewingTicks();
+        if (tickCount > 0 && totalTickCount > 0) {
+            int length = static_cast<int>(
+                28.0f * (1.0f - static_cast<float>(tickCount) / static_cast<float>(totalTickCount)));
+            if (length > 0) {
+                g.BlitSprite("container/brewing_stand/brew_progress", 9, 28, 0, 0,
+                             leftPos + 97, topPos + 16, 9, length);
+            }
+            static constexpr int kBubbleLengths[7] = {29, 24, 20, 16, 11, 6, 0};
+            length = kBubbleLengths[tickCount / 2 % 7];
+            if (length > 0) {
+                g.BlitSprite("container/brewing_stand/bubbles", 12, 29, 0, 29 - length,
+                             leftPos + 63, topPos + 14 + 29 - length, 12, length);
+            }
+        }
+    }
+
     void ContainerScreen::RenderLabels(GuiGraphics& g, int leftPos, int topPos) {
         // MC AbstractContainerScreen.renderLabels: title then the player's
-        // inventory title, dark grey, no drop shadow.
-        g.DrawString(m_title, leftPos + m_layout.titleX, topPos + m_layout.titleY,
+        // inventory title, dark grey, no drop shadow. BrewingStandScreen.init
+        // centres its title (titleLabelX = (imageWidth - width) / 2).
+        int titleX = m_layout.titleX;
+        if (dynamic_cast<Game::BrewingStandMenu*>(PlayerContainerMenu())) {
+            titleX = (m_layout.imageWidth - g.GetStringWidth(m_title)) / 2;
+        }
+        g.DrawString(m_title, leftPos + titleX, topPos + m_layout.titleY,
                      LABEL_COLOR, false);
         g.DrawString("Inventory", leftPos + m_layout.invLabelX,
                      topPos + m_layout.invLabelY, LABEL_COLOR, false);

@@ -8,6 +8,7 @@
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/ai/brain/PiglinAi.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
 
@@ -288,9 +289,14 @@ namespace Game {
     void PiglinBruteAi::UpdateActivity(PiglinBrute& brute) {
         Brain* brain = brute.GetBrain();
         if (!brain) return;
-        // MC's FIGHT/IDLE switch; the activity-change and ambient angry
-        // sounds are skipped.
+        // MC's FIGHT/IDLE switch; a change into FIGHT snorts
+        // (playActivitySound → playAngrySound).
+        const std::optional<Activity> oldActivity = brain->GetActiveNonCoreActivity();
         brain->SetActiveActivityToFirstValid({ Activity::Fight, Activity::Idle });
+        if (brain->GetActiveNonCoreActivity() != oldActivity
+            && brain->GetActiveNonCoreActivity() == Activity::Fight) {
+            brute.MakeSound(SoundEvents::PIGLIN_BRUTE_ANGRY);
+        }
         brute.SetAggressive(brain->HasMemoryValue(MemoryModule::AttackTarget));
     }
 

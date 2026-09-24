@@ -3,12 +3,17 @@
 // The mob/world particle system — MC's client particle engine reduced to the
 // particle TYPES the ported entity code actually spawns (see
 // Game::ParticleKind in EntityLevel.hpp): hearts, taming/ambient smoke, poof,
-// the explosion flash + emitter, and the entity-effect/witch spell swirl.
+// the explosion flash + emitter, the entity-effect/witch spell swirl, the
+// block marker a creative player sees while holding a barrier or light, and
+// the potent sulfur geyser's bubbles, noxious gas and plume.
 //
 // Simulation is a port of $MC/client/particle/Particle.java +
 // SingleQuadParticle.java and the concrete types (HeartParticle,
 // SmokeParticle/BaseAshSmokeParticle, LargeSmokeParticle, ExplodeParticle,
-// HugeExplosionParticle, HugeExplosionSeedParticle, SpellParticle) — all
+// HugeExplosionParticle, HugeExplosionSeedParticle, SpellParticle,
+// PortalParticle — the Hush portal's motes, recoloured — and 26.3's
+// SulfurBubbleParticle, NoxiousGasParticle, NoxiousGasCloudParticle,
+// GeyserEruptionParticle, GeyserBaseParticle and GeyserPlumeParticle) — all
 // constants verbatim, integrated at MC's fixed 20 Hz with sub-tick render
 // interpolation (xo→x lerp by partial tick), including MC's per-particle
 // block collision for the types with hasPhysics.
@@ -17,21 +22,18 @@
 // billboards, one streaming VB rebuilt per frame, batched into one draw per
 // bound sprite texture, in MC's two layer passes (SingleQuadParticle.Layer):
 // OPAQUE first — depth-write on, no blending, shaped by the shader's 0.1
-// alpha cutout — then TRANSLUCENT (the spell sheet alone) blended with depth
-// write off. Everything else this engine spawns is OPAQUE in MC too.
+// alpha cutout — then TRANSLUCENT (the spell and noxious gas sheets) blended
+// with depth write off. Everything else this engine spawns is OPAQUE in MC too.
 //
 // REMAINING DEVIATIONS from MC's renderer:
-//   * NO per-particle world lighting. MC multiplies in the lightmap from
-//     Particle.getLightCoords (HugeExplosionParticle overrides it to
-//     fullbright, 15728880, and is the one type that should be bright). This
-//     engine keeps no per-cell light data on the client at all — IBlockAccess
-//     ::GetRawBrightness walks the column with GetBlock and answers SKY
-//     exposure only, which is both wrong for block light and far too
-//     expensive to call per particle per frame. So every particle renders
-//     fullbright, and dust in a dark cave glows. This is the one thing here
-//     that is blocked on a subsystem rather than on effort: it becomes a
-//     couple of lines in the vertex build the day a client light engine
-//     lands.
+//   * NO per-cell world lighting. MC multiplies in the lightmap from
+//     Particle.getLightCoords; this engine keeps no per-cell light data on
+//     the client, so a particle takes the one global light knob the terrain
+//     takes (EntityEnvironment.hpp): the sky dim — night, night vision and
+//     the Darkness pulse — or full block light for the types MC lights fully
+//     (the huge explosion, the portal motes). They fog like the terrain. A
+//     dust mote in a dark cave is as bright as the sky above it; that is
+//     blocked on a client light engine, not on effort.
 //   * no camera-distance sort within a frame among the translucent pass.
 //
 // Spawn requests arrive through ClientLevelBridge's queue (the client half
@@ -92,6 +94,10 @@ namespace Render {
         // shows its fireball but not the debris cloud around it.
         static constexpr double kParticleCutoffSq = 1024.0;   // 32 blocks
         static bool OverridesParticleLimiter(Game::ParticleKind kind);
+        // MC addAlwaysVisibleParticle's `alwaysShow` — the kinds only ever
+        // spawned that way (the explosion emitter, the sulfur bubbles, the
+        // noxious gas): the Minimal particle setting spares one in ten.
+        static bool AlwaysShown(Game::ParticleKind kind);
 
         // MC ClientLevel.doAddParticle, all three gates in MC's order:
         //
@@ -105,7 +111,7 @@ namespace Render {
         // Particles option and randomly downgrades it — DECREASED drops one
         // in three, and an always-show particle under MINIMAL gets a one-in-
         // ten reprieve to DECREASED. `alwaysShow` is the addAlwaysVisible-
-        // Particle flag; the emitter is the only kind spawned that way.
+        // Particle flag (AlwaysShown).
         bool ShouldSpawn(const Client::ClientLevelBridge::QueuedParticle& q,
                          const glm::vec3& cameraPos);
 
@@ -115,19 +121,44 @@ namespace Render {
         //   [2..9]   generic_0..7   (smoke / large smoke / poof)
         //   [10..25] explosion_0..15
         //   [26..33] spell_0..7     (entity effect / witch)
+        //   [34]     glint            (pause / reset mob growth)
+        //   [36]     flame            (FlameParticle — the spawner's cage fire)
+        //   [37]     bubble_white     (SulfurBubbleParticle)
+        //   [38..45] noxious_gas_01..08  (NoxiousGasParticle)
+        //   [46..53] geyser_base_01..08  (GeyserBaseParticle, GEYSER_BASE)
+        //   [54..61] geyser_poof_01..08  (GeyserBaseParticle, GEYSER_POOF)
+        //   [62..69] geyser_plume_01..08 (GeyserPlumeParticle)
+        //   [35]     the block atlas — BORROWED from AtlasBuilder for the
+        //            block marker (MC Layer.OPAQUE_TERRAIN: the marker's
+        //            sprite is the block's `particle` texture, which lives
+        //            on the blocks atlas). Re-fetched every Render, never
+        //            destroyed here.
         static constexpr int kTexHeart     = 0;
         static constexpr int kTexAngry     = 1;
         static constexpr int kTexGeneric0  = 2;   // 8 frames
         static constexpr int kTexExplosion0 = 10; // 16 frames
         static constexpr int kTexSpell0    = 26;  // 8 frames
-        static constexpr int kTextureCount = 34;
+        static constexpr int kTexGlint     = 34;
+        static constexpr int kTexAtlas     = 35;
+        static constexpr int kTexFlame     = 36;  // flame (FlameParticle)
+        static constexpr int kTexBubbleWhite  = 37;  // bubble_white (SulfurBubbleParticle)
+        static constexpr int kTexNoxiousGas0  = 38;  // 8 frames
+        static constexpr int kTexGeyserBase0  = 46;  // 8 frames
+        static constexpr int kTexGeyserPoof0  = 54;  // 8 frames
+        static constexpr int kTexGeyserPlume0 = 62;  // 8 frames
+        static constexpr int kTextureCount = 70;
+        static constexpr bool IsOwnedTexture(int texIndex) { return texIndex != kTexAtlas; }
 
-        // MC SingleQuadParticle.Layer.TRANSLUCENT — the spell sheet alone.
-        // Every other particle this engine spawns is OPAQUE (heart, poof,
-        // smoke, explode, huge explosion, falling dust), so the layer split
-        // is exactly the spell/not-spell split of the texture buckets.
+        // MC SingleQuadParticle.Layer.TRANSLUCENT — the spell sheet and the
+        // noxious gas (NoxiousGasParticle.getLayer). Every other particle
+        // this engine spawns is OPAQUE (heart, poof, smoke, explode, huge
+        // explosion, falling dust, block marker, the sulfur bubble, the
+        // geyser's base, poof and plume), and each of those two sheets is
+        // used by translucent kinds only, so the layer split is a split of
+        // the texture buckets.
         static constexpr bool IsTranslucentTexture(int texIndex) {
-            return texIndex >= kTexSpell0;
+            return (texIndex >= kTexSpell0 && texIndex < kTexSpell0 + 8) ||
+                   (texIndex >= kTexNoxiousGas0 && texIndex < kTexNoxiousGas0 + 8);
         }
 
         // MC ParticleEngine.MAX_PARTICLES_PER_TYPE is 16384 per type; a
@@ -155,6 +186,9 @@ namespace Render {
             float friction = 0.98f;
             bool  speedUpWhenYMotionIsBlocked = false;
             bool  hasPhysics = true;
+            // MC Particle.setSize — the collision box MoveParticle sweeps:
+            // 0.2 × 0.2 for every type but the sulfur bubble (0.02).
+            float bbWidth = 0.2f, bbHeight = 0.2f;
             bool  onGround = false;
             bool  stoppedByCollision = false;
             bool  removed = false;
@@ -167,6 +201,41 @@ namespace Render {
             // builder one branch and nothing else.
             float roll = 0.0f, oRoll = 0.0f;
             float rollSpeed = 0.0f;
+
+            // MC PortalParticle.xStart/yStart/zStart — where the mote was
+            // spawned. Its tick is a closed curve from here (out along the
+            // velocity, back home, rising a block), not an integration, so
+            // the start point has to be kept. The portal motes read all three;
+            // yStart is also the sulfur bubble's yStart and the geyser
+            // plume's startY.
+            double xStart = 0, yStart = 0, zStart = 0;
+
+            // The 26.3 geyser family's own state (see SpawnFromRequest):
+            //   yEnd       SulfurBubbleParticle.yEnd / GeyserPlumeParticle.maxY
+            //   yPrev      SulfurBubbleParticle.yPrev
+            //   sizeMin    SulfurBubbleParticle.sizeStart / GeyserPlume.minSize
+            //   sizeMax    GeyserPlumeParticle.maxSize
+            //   propulsion GeyserPlumeParticle.initialPropulsion
+            //   sprayX/Z   GeyserPlumeParticle.horizontalSprayX/Z
+            //   done       GeyserPlumeParticle.done
+            //   fadeStart  NoxiousGasParticle.fadeOutStartingPoint
+            //   waterBlocks  GeyserParticleOptions.waterBlocks (the GEYSER seed)
+            double yEnd = 0, yPrev = 0;
+            float  sizeMin = 0.0f, sizeMax = 0.0f;
+            float  propulsion = 0.0f;
+            float  sprayX = 0.0f, sprayZ = 0.0f;
+            bool   done = false;
+            float  fadeStart = 0.0f;
+            int    waterBlocks = 0;
+            // MC SpriteSet.get(RandomSource): the frame a type picks ONCE at
+            // spawn and keeps (PortalParticle's Provider), as opposed to the
+            // age walk of setSpriteFromAge. Index into the type's sheet.
+            uint8_t spriteFrame = 0;
+
+            // The sprite's rectangle within its texture (MC TextureAtlasSprite
+            // u0/u1/v0/v1). Whole texture for the one-file sprites; the
+            // block marker's atlas cell otherwise.
+            float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
         };
 
         void SpawnFromRequest(

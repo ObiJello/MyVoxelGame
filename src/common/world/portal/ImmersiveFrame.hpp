@@ -1,14 +1,20 @@
 // File: src/common/world/portal/ImmersiveFrame.hpp
 //
-// An obsidian frame as the Immersive Portals mod sees it: ANY closed loop
-// of obsidian around a flat pocket of air, in any of the three planes —
+// A portal frame as the Immersive Portals mod sees it: ANY closed loop of
+// frame blocks around a flat pocket of air, in any of the three planes —
 // not vanilla's rectangle (PortalShape.hpp). The mod's BlockPortalShape.
 //
+// Which block closes the loop is the frame's PortalFamily (PortalFamily
+// .hpp): obsidian for a nether frame, reinforced deepslate for a Hush
+// frame. A shape carries its family from the flood fill on, so everything
+// downstream — matching a far frame, building one, the integrity sweep —
+// asks the same predicate the fill did.
+//
 // Found by flood-filling from the ignition cell in the two in-plane
-// directions: air spreads, obsidian stops, anything else means the loop is
-// not closed. The `area` (air cells) becomes the portal surface, one block
-// each; the `frame` (the area's obsidian 4-neighbours in the plane) is what
-// integrity checks watch.
+// directions: air spreads, frame blocks stop, anything else means the loop
+// is not closed. The `area` (air cells) becomes the portal surface, one
+// block each; the `frame` (the area's frame-block 4-neighbours in the
+// plane) is what integrity checks watch.
 //
 // Plane conventions (the portal's own axes, see ImmersivePortal.hpp):
 //   axis X (plane YZ): axisW = +Z, axisH = +Y   → normal −X
@@ -24,6 +30,7 @@
 #include "common/portal/ImmersivePortal.hpp"
 #include "common/world/block/Direction.hpp"
 #include "common/world/block/Blocks.hpp"
+#include "common/world/portal/PortalFamily.hpp"
 
 #include <glm/glm.hpp>
 
@@ -42,10 +49,17 @@ namespace Game::Immersive {
         static constexpr int kDefaultAreaLimit   = 1024;
 
         Axis axis = Axis::Z;
+        // Which frame material closed the loop, and so which portal block,
+        // build block and immersive kind belong to it.
+        PortalFamilyId family = PortalFamilyId::Nether;
         std::vector<glm::ivec3> area;    // air cells inside the loop
-        std::vector<glm::ivec3> frame;   // obsidian cells bounding them (no corners)
+        std::vector<glm::ivec3> frame;   // frame cells bounding them (no corners)
         glm::ivec3 minCell{0};           // bounds of `area`
         glm::ivec3 maxCell{0};
+
+        const PortalFamily& Family() const { return Game::Family(family); }
+        // The family's immersive frame predicate — what the fill stopped on.
+        bool IsFrameBlock(BlockID id) const { return Family().isImmersiveFrame(id); }
 
         bool  Empty() const { return area.empty(); }
         // Every cell of the bounding rectangle is in `area`.
@@ -74,18 +88,21 @@ namespace Game::Immersive {
         FrameShape Translated(const glm::ivec3& delta) const;
 
         // ── Against a world ─────────────────────────────────────────────
-        // Flood-fill from an air (or fire) cell. Tries X, then Y, then Z —
-        // the mod's order — and returns the first closed loop.
+        // Flood-fill from an air (or fire) cell, closed by `family`'s frame
+        // block. Tries X, then Y, then Z — the mod's order — and returns
+        // the first closed loop.
         static std::optional<FrameShape> Find(const IBlockAccess& level, const glm::ivec3& start,
+                                              PortalFamilyId family,
                                               int lengthLimit = kDefaultLengthLimit,
                                               int areaLimit = kDefaultAreaLimit);
         static std::optional<FrameShape> FindOnAxis(const IBlockAccess& level, const glm::ivec3& start,
-                                                    Axis axis, int lengthLimit, int areaLimit);
+                                                    PortalFamilyId family, Axis axis,
+                                                    int lengthLimit, int areaLimit);
 
-        // Frame all obsidian and area all air (fire counts as air)?
+        // Frame all frame blocks and area all air (fire counts as air)?
         bool IsIntact(const IBlockAccess& level) const;
         // Would the frame be intact if translated so that minCell lands on
-        // `newMin`? (Frame obsidian and area air at the moved cells.)
+        // `newMin`? (Frame blocks and area air at the moved cells.)
         bool MatchesAt(const IBlockAccess& level, const glm::ivec3& newMin) const;
         // Room to BUILD it here: frame-with-corners and area are all air
         // (or replaceable), the row under the bottom frame is solid, and —
@@ -110,14 +127,17 @@ namespace Game::Immersive {
         static constexpr int kFallClearance = 2;
         std::vector<glm::ivec3> Clearance() const;
 
+        // The two families' frame blocks by name, for callers that know
+        // which one they mean; IsFrameBlock is the family-agnostic form.
         static bool IsObsidian(BlockID id);
-        static bool IsAirLike(BlockID id);   // air or fire
+        static bool IsReinforcedDeepslate(BlockID id);
+        static bool IsAirLike(BlockID id);   // air, fire, or a family portal block
     };
 
-    // Recover the frame a nether portal record was made from (its cells are
-    // the shape's quads, its plane the axes), so an integrity check after a
-    // reload needs no separate save. Empty when the record is not a
-    // nether-portal-shaped surface.
+    // Recover the frame a nether/hush portal record was made from (its cells
+    // are the shape's quads, its plane the axes, its family the kind), so an
+    // integrity check after a reload needs no separate save. Empty when the
+    // record is not a frame-shaped surface.
     std::optional<FrameShape> FrameFromPortal(const Portal& portal);
 
 } // namespace Game::Immersive

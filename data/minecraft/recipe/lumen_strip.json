@@ -1,0 +1,15 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "key": {
+    "R": "minecraft:resonite_ingot",
+    "C": "minecraft:resonant_crystal"
+  },
+  "pattern": [
+    "RCR"
+  ],
+  "result": {
+    "count": 6,
+    "id": "minecraft:lumen_strip"
+  }
+}

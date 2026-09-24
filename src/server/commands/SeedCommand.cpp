@@ -14,7 +14,7 @@ namespace Server {
         dispatcher.RegisterCommand("seed", SeedCommand::Execute);
     }
 
-    void SeedCommand::Execute(ServerPlayer& /*sender*/,
+    void SeedCommand::Execute(const CommandSourceStack& source,
                               const std::vector<std::string>& /*args*/,
                               ServerConnection& connection,
                               PlayerSessionManager& /*sessionManager*/) {

@@ -1,6 +1,7 @@
 // File: src/common/inventory/AbstractContainerMenu.cpp
 // Mirrors net.minecraft.world.inventory.AbstractContainerMenu.doClick().
 #include "AbstractContainerMenu.hpp"
+#include <limits>
 #include "common/core/Log.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/EquipmentSlot.hpp"
@@ -196,7 +197,9 @@ namespace Game {
             if (!s.MayPickup()) return result;
             // Left = whole stack, right = ceil(count/2)
             const int amount = (button == 0) ? slot.count : (slot.count + 1) / 2;
-            m_carried = s.SafeTake(amount, amount);
+            // MC: slot.tryRemove(amount, Integer.MAX_VALUE, player).
+            m_carried = s.SafeTake(amount, std::numeric_limits<int>::max());
+            if (m_carried.IsEmpty()) return result;
             result.carriedChanged = true;
             MarkChanged(result, slotIndex);
             // MC doClick: `slot.onTake(player, taken)` right after the pickup.
@@ -208,8 +211,22 @@ namespace Game {
         // Both non-empty. MC branches on isSameItemSameComponents, NOT on item
         // id: two stacks of the same item with different components (a
         // Sharpness book vs a Protection book) must SWAP, not merge.
+        if (!s.MayPlace(m_carried)) {
+            // MC doClick's `else if (isSameItemSameComponents(carried,
+            // slotStack))` branch: a slot that refuses the cursor (a result
+            // square) still tops the cursor up with its contents — the whole
+            // stack, when it fits (tryRemove's allowModification rule).
+            if (!IsSameItemSameComponents(slot, m_carried)) return result;
+            const int room = ItemRegistry::Get(m_carried.itemId).maxStackSize - m_carried.count;
+            const ItemStack taken = s.SafeTake(slot.count, room);
+            if (taken.IsEmpty()) return result;
+            m_carried.count += taken.count;
+            result.carriedChanged = true;
+            MarkChanged(result, slotIndex);
+            s.OnTake(taken, result);
+            return result;
+        }
         if (IsSameItemSameComponents(slot, m_carried)) {
-            if (!s.MayPlace(m_carried)) return result;
             const int maxStack = s.GetMaxStackSize(m_carried);
             const int amount = (button == 0) ? m_carried.count : 1;
             const int moved = std::min(amount, maxStack - slot.count);
@@ -364,7 +381,7 @@ namespace Game {
         if (s.GetItem().IsEmpty()) return result;
 
         const int amount = (button == 0) ? 1 : s.GetItem().count;
-        result.droppedItem = s.SafeTake(amount, amount);
+        result.droppedItem = s.SafeTake(amount, std::numeric_limits<int>::max());
         if (result.droppedItem.IsEmpty()) return result;
         MarkChanged(result, slotIndex);
         s.OnTake(result.droppedItem, result);

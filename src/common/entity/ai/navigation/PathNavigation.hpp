@@ -55,6 +55,12 @@ namespace Game {
         std::optional<Path> CreatePath(const glm::ivec3& target, int reachRange,
                                        float maxVisitedNodesMultiplier);
         std::optional<Path> CreatePath(const Entity& target, int reachRange);
+        // MC createPath(Set<BlockPos>, int) — ONE search toward several
+        // targets; the pathfinder ends at whichever it reaches first (the
+        // shortest reached, else the closest miss). AcquirePoi and the
+        // villager's bed search path to a batch of candidate POIs this way.
+        // No surface projection — MC's set form skips it too.
+        std::optional<Path> CreatePath(const std::vector<glm::ivec3>& targets, int reachRange);
         std::optional<Path> CreatePath(double x, double y, double z, int reachRange);
 
         // ── Path following ─────────────────────────────────────────────────

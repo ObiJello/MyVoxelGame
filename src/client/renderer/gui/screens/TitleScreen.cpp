@@ -79,8 +79,8 @@ namespace Render {
 
     // ── TitleScreen ─────────────────────────────────────────────────────────
 
-    TitleScreen::TitleScreen(bool fadeIn)
-        : Screen("Title Screen"), m_fading(fadeIn) {
+    TitleScreen::TitleScreen(bool fadeIn, bool fadeFromBlack)
+        : Screen("Title Screen"), m_fading(fadeIn), m_fadeFromBlack(fadeFromBlack) {
         // MC LogoRenderer: 1-in-10,000 chance of the scrambled logo.
         static std::mt19937 rng(std::random_device{}());
         m_easterEggLogo = std::uniform_real_distribution<float>(0.0f, 1.0f)(rng) < 1.0e-4f;
@@ -159,7 +159,7 @@ namespace Render {
         // Skybox is drawn by the host loop (needs the 3D pass before GUI);
         // here we only add the vignette overlay + fade-from-black.
         g_panoramaRenderer.RenderOverlay(g, m_width, m_height, 1.0f);
-        if (m_fading) {
+        if (m_fading && m_fadeFromBlack) {
             float fade = m_fadeStartSeconds < 0.0
                 ? 0.0f
                 : static_cast<float>((glfwGetTime() - m_fadeStartSeconds) / 2.0);

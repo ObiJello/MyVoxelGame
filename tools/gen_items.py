@@ -3,7 +3,7 @@
 #
 # One-shot generator that mirrors MC's `Items.java` registration order into
 # C++ tables. Run by hand whenever new items are added to the upstream
-# `minecraft_code/.../Items.java`.
+# `minecraft_code_26.1-snapshot-1/.../Items.java`.
 #
 # Outputs (overwritten):
 #   src/common/entity/GeneratedItemList.hpp  -- `Game::Items::Foo` constants
@@ -21,13 +21,13 @@ import sys
 from pathlib import Path
 
 REPO_ROOT      = Path(__file__).resolve().parent.parent
-ITEMS_JAVA     = REPO_ROOT / "minecraft_code" / "decompiled_net" / "minecraft" / "world" / "item" / "Items.java"
-# 26.3's Items.java (minecraft_code2). Read for an ALLOWLIST of items only:
+ITEMS_JAVA     = REPO_ROOT / "minecraft_code_26.1-snapshot-1" / "decompiled_net" / "minecraft" / "world" / "item" / "Items.java"
+# 26.3's Items.java (minecraft_code_26.3-pre-2). Read for an ALLOWLIST of items only:
 # every slug here is appended after the 26.1 set, in 26.3 declaration order,
 # the moment it is not already in the table. The whole tree is not merged
 # because each row is a wire/save id and most 26.3 additions (sulfur blocks,
 # the bucket) have nothing behind them in this engine yet.
-ITEMS_JAVA2    = REPO_ROOT / "minecraft_code2" / "decompiled_net" / "minecraft" / "world" / "item" / "Items.java"
+ITEMS_JAVA2    = REPO_ROOT / "minecraft_code_26.3-pre-2" / "decompiled_net" / "minecraft" / "world" / "item" / "Items.java"
 MC2_ITEMS      = {
     "sulfur_cube_spawn_egg",
     # 26.2/26.3 items imported 2026-09-05 (assets copied from the jar; the
@@ -40,6 +40,218 @@ MC2_ITEMS      = {
     "swamp_hut_map", "taiga_village_map", "warm_ocean_ruins_map",
     "woodland_mansion_map",
 }
+# ── Engine-only items ───────────────────────────────────────────────────────
+# Items this engine has that no Items.java does (The Hush, docs/the-hush.md).
+# They are appended AFTER every MC row, in this order, and become wire/save
+# ids like any other row — so this list is append-only too. Each carries its
+# own max stack size: merge_append_only keeps an unknown slug's slot but
+# resets it to 64, which would make every resonite tool stack. Listing them
+# here is what lets a regeneration keep the rows exact.
+#
+# Rarity, tool tiers and attack attributes are NOT here: they are wired in
+# ItemBehaviors.cpp / GeneratedItemAttributes.cpp like every vanilla item's.
+ENGINE_ONLY_ITEMS: list[tuple[str, int]] = [
+    ("raw_resonite",      64),
+    ("resonite_ingot",    64),
+    ("resonite_sword",     1),
+    ("resonite_pickaxe",   1),
+    ("resonite_axe",       1),
+    ("resonite_shovel",    1),
+    ("resonite_hoe",       1),
+    ("resonant_heart",     1),
+    ("echo_blade",         1),
+    # Twilight Forest + The Aether, pass one (docs/mod-ports.md): the drops
+    # of the pass-one blocks. TFItems / AetherItems register all five with
+    # the default stack of 64.
+    ("torchberries",      64),   # TF torchberry_plant's drop
+    ("liveroot",          64),   # TF liveroot_block's drop
+    ("ambrosium_shard",   64),   # Aether ambrosium_ore's drop
+    ("zanite_gemstone",   64),   # Aether zanite_ore's drop
+    ("blue_berry",        64),   # Aether berry_bush's drop (AetherFoods.BLUE_BERRY)
+    # ── The Aether, pass two (docs/mod-ports.md). Stack sizes from
+    # AetherItems: 64 by default, stacksTo(16) on the empty skyroot bucket,
+    # stacksTo(1) on the filled ones and the dungeon keys, 1 for every tool
+    # and armour piece (durability implies stacksTo(1)).
+    ("skyroot_stick",     64),
+    ("golden_amber",      64),
+    ("swet_ball",         64),
+    ("aechor_petal",      64),
+    ("enchanted_berry",   64),
+    ("white_apple",       64),
+    ("blue_gummy_swet",   64),
+    ("golden_gummy_swet", 64),
+    ("skyroot_bucket",    16),
+    ("skyroot_water_bucket", 1),
+    ("skyroot_milk_bucket", 1),
+    ("bronze_dungeon_key", 1),
+    ("silver_dungeon_key", 1),
+    ("gold_dungeon_key",  1),
+    ("skyroot_sword",     1),
+    ("skyroot_pickaxe",   1),
+    ("skyroot_axe",       1),
+    ("skyroot_shovel",    1),
+    ("skyroot_hoe",       1),
+    ("holystone_sword",   1),
+    ("holystone_pickaxe", 1),
+    ("holystone_axe",     1),
+    ("holystone_shovel",  1),
+    ("holystone_hoe",     1),
+    ("zanite_sword",      1),
+    ("zanite_pickaxe",    1),
+    ("zanite_axe",        1),
+    ("zanite_shovel",     1),
+    ("zanite_hoe",        1),
+    ("gravitite_sword",   1),
+    ("gravitite_pickaxe", 1),
+    ("gravitite_axe",     1),
+    ("gravitite_shovel",  1),
+    ("gravitite_hoe",     1),
+    ("zanite_helmet",     1),
+    ("zanite_chestplate", 1),
+    ("zanite_leggings",   1),
+    ("zanite_boots",      1),
+    ("gravitite_helmet",  1),
+    ("gravitite_chestplate", 1),
+    ("gravitite_leggings", 1),
+    ("gravitite_boots",   1),
+    # ── Twilight Forest, pass two: the four material sets (TFItems; tools
+    # and armour stack to 1), naga scale + armour, venison and meef.
+    ("raw_ironwood",      64),
+    ("ironwood_ingot",    64),
+    ("ironwood_helmet",   1),
+    ("ironwood_chestplate", 1),
+    ("ironwood_leggings", 1),
+    ("ironwood_boots",    1),
+    ("ironwood_sword",    1),
+    ("ironwood_shovel",   1),
+    ("ironwood_pickaxe",  1),
+    ("ironwood_axe",      1),
+    ("ironwood_hoe",      1),
+    ("steeleaf_ingot",    64),
+    ("steeleaf_helmet",   1),
+    ("steeleaf_chestplate", 1),
+    ("steeleaf_leggings", 1),
+    ("steeleaf_boots",    1),
+    ("steeleaf_sword",    1),
+    ("steeleaf_shovel",   1),
+    ("steeleaf_pickaxe",  1),
+    ("steeleaf_axe",      1),
+    ("steeleaf_hoe",      1),
+    ("armor_shard",       64),
+    ("armor_shard_cluster", 64),
+    ("knightmetal_ingot", 64),
+    ("knightmetal_helmet", 1),
+    ("knightmetal_chestplate", 1),
+    ("knightmetal_leggings", 1),
+    ("knightmetal_boots", 1),
+    ("knightmetal_sword", 1),
+    ("knightmetal_pickaxe", 1),
+    ("knightmetal_axe",   1),
+    ("fiery_blood",       64),
+    ("fiery_tears",       64),
+    ("fiery_ingot",       64),
+    ("fiery_helmet",      1),
+    ("fiery_chestplate",  1),
+    ("fiery_leggings",    1),
+    ("fiery_boots",       1),
+    ("fiery_sword",       1),
+    ("fiery_pickaxe",     1),
+    ("naga_scale",        64),
+    ("naga_chestplate",   1),
+    ("naga_leggings",     1),
+    ("raw_venison",       64),
+    ("cooked_venison",    64),
+    ("raw_meef",          64),
+    ("cooked_meef",       64),
+    # ── The Hush, the Choir Mother's drop (2026-09-22, docs/the-hush.md).
+    # A boss trophy: stack 1, EPIC (ItemBehaviors.cpp).
+    ("choir_heart",        1),
+    # ── The Hush, the tools of the deep (2026-09-22, docs/the-hush.md;
+    # behaviour in ItemBehaviors.cpp + server/items/HushItems). Every tool
+    # stacks to 1 (the bow and the cloak are durable in MC terms); the fruit
+    # is a food and stacks like sweet berries.
+    ("tuning_fork",        1),
+    ("echo_compass",       1),
+    ("cloak_of_silence",   1),
+    ("resonance_bow",      1),
+    ("recall_chime",       1),
+    ("whisperfruit",      64),
+    # ── Spawn eggs for every engine-only mob (2026-09-22): The Hush, then
+    # the Twilight Forest, then the Aether — tools/gen_engine_spawn_eggs.py
+    # holds the same list with each egg's colours. Stack 64 like MC's eggs.
+    ("echo_wraith_spawn_egg", 64),
+    ("hushling_spawn_egg", 64),
+    ("silent_warden_spawn_egg", 64),
+    ("choir_mother_spawn_egg", 64),
+    ("crystal_golem_spawn_egg", 64),
+    ("echo_mimic_spawn_egg", 64),
+    ("hush_leviathan_spawn_egg", 64),
+    ("lumen_moth_spawn_egg", 64),
+    ("bighorn_sheep_spawn_egg", 64),
+    ("boar_spawn_egg", 64),
+    ("deer_spawn_egg", 64),
+    ("kobold_spawn_egg", 64),
+    ("redcap_spawn_egg", 64),
+    ("tiny_bird_spawn_egg", 64),
+    ("block_and_chain_goblin_spawn_egg", 64),
+    ("dwarf_rabbit_spawn_egg", 64),
+    ("fire_beetle_spawn_egg", 64),
+    ("hedge_spider_spawn_egg", 64),
+    ("helmet_crab_spawn_egg", 64),
+    ("hostile_wolf_spawn_egg", 64),
+    ("king_spider_spawn_egg", 64),
+    ("lower_goblin_knight_spawn_egg", 64),
+    ("maze_slime_spawn_egg", 64),
+    ("minotaur_spawn_egg", 64),
+    ("mist_wolf_spawn_egg", 64),
+    ("mosquito_swarm_spawn_egg", 64),
+    ("penguin_spawn_egg", 64),
+    ("pinch_beetle_spawn_egg", 64),
+    ("raven_spawn_egg", 64),
+    ("redcap_sapper_spawn_egg", 64),
+    ("skeleton_druid_spawn_egg", 64),
+    ("slime_beetle_spawn_egg", 64),
+    ("squirrel_spawn_egg", 64),
+    ("swarm_spider_spawn_egg", 64),
+    ("towerwood_borer_spawn_egg", 64),
+    ("troll_spawn_egg", 64),
+    ("upper_goblin_knight_spawn_egg", 64),
+    ("winter_wolf_spawn_egg", 64),
+    ("wraith_spawn_egg", 64),
+    ("yeti_spawn_egg", 64),
+    ("aechor_plant_spawn_egg", 64),
+    ("aerbunny_spawn_egg", 64),
+    ("aerwhale_spawn_egg", 64),
+    ("cockatrice_spawn_egg", 64),
+    ("fire_minion_spawn_egg", 64),
+    ("flying_cow_spawn_egg", 64),
+    ("mimic_spawn_egg", 64),
+    ("moa_spawn_egg", 64),
+    ("phyg_spawn_egg", 64),
+    ("sentry_spawn_egg", 64),
+    ("sheepuff_spawn_egg", 64),
+    ("blue_swet_spawn_egg", 64),
+    ("golden_swet_spawn_egg", 64),
+    ("whirlwind_spawn_egg", 64),
+    ("evil_whirlwind_spawn_egg", 64),
+    ("valkyrie_spawn_egg", 64),
+    ("zephyr_spawn_egg", 64),
+    # Aurelith's boss, The Unsung (2026-09-22, docs/the-hush.md) — its egg,
+    # for testing the fight away from the city (gen_engine_spawn_eggs.py).
+    ("the_unsung_spawn_egg", 64),
+    # ── Aurelith, reawakening the Heart (2026-09-22, docs/the-hush.md;
+    # world/block/AurelithQuestBlocks, server/level/AurelithCities). The four
+    # voice keys a city hides (one per voice: the Archive, the Hall of
+    # Instruments, the Tuners' Works, the Vault) and the Podium takes; the
+    # Held Note, the reward for singing the Heart awake (a hold-to-sound
+    # item, ItemBehaviors.cpp + server/items/AurelithItems). All stack to 1.
+    ("soprano_voice_key",  1),
+    ("alto_voice_key",     1),
+    ("tenor_voice_key",    1),
+    ("bass_voice_key",     1),
+    ("held_note",          1),
+]
+
 # 26.3 registers eggs as `registerSpawnEgg(ItemIds.X_SPAWN_EGG, EntityTypes.X)`.
 RE_SPAWN_EGG2 = re.compile(
     r"""^\s+
@@ -209,7 +421,22 @@ def parse_items_java() -> tuple[list[tuple[str, str, str, int]], list[tuple[str,
                 if size != DEFAULT_MAX_STACK:
                     blocks.append((m.group(2).lower(), size))
     out += parse_items_java2(seen)
+    out += engine_only_items(seen)
     return out, blocks
+
+
+def engine_only_items(seen: set[str]) -> list[tuple[str, str, str, int]]:
+    """ENGINE_ONLY_ITEMS as table rows. The symbol is the slug upper-cased so
+    emit_hpp pascal-cases it the same way it does an MC symbol
+    (RAW_RESONITE -> RawResonite)."""
+    out: list[tuple[str, str, str, int]] = []
+    for slug, max_stack in ENGINE_ONLY_ITEMS:
+        symbol = slug.upper()
+        if symbol in seen:
+            raise SystemExit(f"error: engine-only item '{slug}' collides with an MC item")
+        seen.add(symbol)
+        out.append((symbol, slug, detect_predicate(slug), max_stack))
+    return out
 
 
 def parse_items_java2(seen: set[str]) -> list[tuple[str, str, str, int]]:

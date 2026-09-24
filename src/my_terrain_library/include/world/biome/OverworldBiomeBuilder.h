@@ -1,8 +1,8 @@
 #pragma once
+#include <string>
 
 #include "world/biome/Climate.h"
 #include "world/biome/Biomes.h"
-#include "levelgen/DensityFunction.h"
 #include <vector>
 #include <utility>
 #include <functional>
@@ -36,7 +36,17 @@ public:
     static constexpr float EROSION_DEEP_DARK_DRYNESS_THRESHOLD = -0.225F;
     static constexpr float DEPTH_DEEP_DARK_DRYNESS_THRESHOLD = 0.9F;
 
+    // The F3 screen's "Biome builder PV: … C: … E: … T: … H: …" pieces.
+    // Reference: OverworldBiomeBuilder.java getDebugStringFor* (26.3).
+    static std::string getDebugStringForPeaksAndValleys(double peaksAndValleys);
+    std::string getDebugStringForContinentalness(double continentalness) const;
+    std::string getDebugStringForErosion(double erosion) const;
+    std::string getDebugStringForTemperature(double temperature) const;
+    std::string getDebugStringForHumidity(double humidity) const;
+
 private:
+    static std::string getDebugStringForNoiseValue(double noiseValue, const Climate::Parameter* array, size_t count);
+
     // Parameter ranges - Reference: OverworldBiomeBuilder.java lines 38-51
     Climate::Parameter m_fullRange;
     Climate::Parameter m_temperatures[5];
@@ -81,16 +91,6 @@ public:
      * Reference: OverworldBiomeBuilder.java lines 84-92
      */
     void addBiomes(std::function<void(const std::pair<Climate::ParameterPoint, BiomeKey>&)> consumer) const;
-
-    /**
-     * Check if a position is in the deep dark region
-     * Reference: OverworldBiomeBuilder.java lines 411-413
-     */
-    static bool isDeepDarkRegion(
-        const density::DensityFunction* erosion,
-        const density::DensityFunction* depth,
-        const density::DensityFunction::FunctionContext& context
-    );
 
 private:
     // Biome addition methods

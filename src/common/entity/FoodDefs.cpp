@@ -13,8 +13,11 @@
 // (FoodProperties.java:60-62, FoodConstants.java:30-32) — the Food() helper
 // below does the same conversion so the table reads like Foods.java.
 //
-// Status-effect payloads are carried as data (logged on consume) — the
-// effect system doesn't exist yet, but the food definitions are complete.
+// Status-effect payloads ("name Nt ampM [chanceP]; …") are parsed and applied
+// on consume by ConsumableBehavior (ApplyStatusEffects / RemoveStatusEffects /
+// ClearAllStatusEffects ConsumeEffect). The suspicious stew's per-stack
+// SUSPICIOUS_STEW_EFFECTS component (default set in alchemy/PotionItems.cpp)
+// is applied by ConsumableBehavior::OnConsume as its ConsumableListener.
 #include "Item.hpp"
 #include "GeneratedItemList.hpp"
 #include "../data/DataComponents.hpp"
@@ -118,11 +121,58 @@ namespace Game {
             auto f = Food(1, 0.3f);                    // Foods.java:22
             Set(Items::DriedKelp, &f, c);
         }
+        {   // The Aether's BLUE_BERRY (engine-only item, docs/mod-ports.md) —
+            // AetherFoods.java:8: nutrition(2).saturationModifier(0.3F).fast().
+            // It targets 1.21.1, where `fast()` is the 16-tick eat, i.e. the
+            // 0.8 s Consumable dried kelp uses above.
+            auto c = DefaultFood(); c.consumeSeconds = 0.8f;
+            auto f = Food(2, 0.3f);
+            Set(Items::BlueBerry, &f, c);
+        }
+        // ── Mod foods, pass two (docs/mod-ports.md) ─────────────────────────
+        // The Aether (AetherFoods, 1.21.1: `fast()` = the 0.8 s eat).
+        {   // ENCHANTED_BERRY: fast, nutrition 6, saturation 0.8.
+            auto c = DefaultFood(); c.consumeSeconds = 0.8f;
+            auto f = Food(6, 0.8f);
+            Set(Items::EnchantedBerry, &f, c);
+        }
+        {   // WHITE_APPLE: alwaysEdible, fast, nutrition 0. Its cure (it removes
+            // the Aether's inebriation effect) has no effect to cure here.
+            auto c = DefaultFood(); c.consumeSeconds = 0.8f;
+            auto f = Food(0, 0.0f, /*alwaysEdible=*/true);
+            Set(Items::WhiteApple, &f, c);
+        }
+        {   // GUMMY_SWET (blue and golden): fast, nutrition 20, saturation 0.9 —
+            // the healing_gummy_swets=false config, the mod's default.
+            auto c = DefaultFood(); c.consumeSeconds = 0.8f;
+            auto f = Food(20, 0.9f);
+            Set(Items::BlueGummySwet, &f, c);
+            Set(Items::GoldenGummySwet, &f, c);
+        }
+        {   // SKYROOT_MILK_BUCKET: drinks like milk (SkyrootMilkBucketItem clears
+            // every effect) and hands back the skyroot bucket.
+            auto c = WithEffect(DefaultDrink(), ET::ClearAllStatusEffects, "");
+            Set(Items::SkyrootMilkBucket, nullptr, c, Items::SkyrootBucket, 1);
+        }
+        // Twilight Forest (TFFoods).
+        SetF(Items::RawVenison,    Food(3, 0.3f));   // RAW_VENISON
+        SetF(Items::CookedVenison, Food(8, 0.8f));   // VENISON_STEAK
+        SetF(Items::RawMeef,       Food(2, 0.3f));   // RAW_MEEF
+        SetF(Items::CookedMeef,    Food(6, 0.6f));   // MEEF_STEAK
+
         {   // CHICKEN — 30% hunger 0:30 (:41)
             auto f = Food(2, 0.3f);                    // Foods.java:11
             Set(Items::Chicken, &f,
                 WithEffect(DefaultFood(), ET::ApplyStatusEffects,
                            "hunger 600t amp0 chance0.3"));
+        }
+        {   // The Hush's WHISPERFRUIT (engine-only, docs/the-hush.md): 4
+            // hunger at saturation modifier 0.3 (MC's Food(nutrition, mod)
+            // convention — 2.4 saturation), and a minute of Night Vision:
+            // the fruit that lets you see in the dark it grows in.
+            auto f = Food(4, 0.3f);
+            Set(Items::Whisperfruit, &f,
+                WithEffect(DefaultFood(), ET::ApplyStatusEffects, "night_vision 1200t amp0"));
         }
         {   // GOLDEN_APPLE — regen II 0:05 + absorption 2:00 (:43)
             auto f = Food(4, 1.2f, /*alwaysEdible=*/true);  // Foods.java:24
@@ -181,7 +231,7 @@ namespace Game {
             Set(Items::RabbitStew, &f, DefaultFood(), Items::Bowl, 1);
         }
         {   // SUSPICIOUS_STEW — alwaysEdible; per-stack effects come from the
-            // SUSPICIOUS_STEW_EFFECTS component in MC (not modelled).
+            // SUSPICIOUS_STEW_EFFECTS component (alchemy/PotionItems.cpp).
             auto f = Food(6, 0.6f, /*alwaysEdible=*/true);  // Foods.java:40
             Set(Items::SuspiciousStew, &f, DefaultFood(), Items::Bowl, 1);
         }
@@ -202,7 +252,7 @@ namespace Game {
             Set(Items::MilkBucket, nullptr, c, Items::Bucket, 1);
         }
 
-        Log::Info("[ItemRegistry] Registered FOOD/CONSUMABLE defaults on 42 food items");
+        Log::Info("[ItemRegistry] Registered FOOD/CONSUMABLE defaults on 51 food items");
     }
 
 } // namespace Game

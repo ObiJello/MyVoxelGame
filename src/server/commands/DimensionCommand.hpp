@@ -16,6 +16,10 @@
 #pragma once
 
 #include "CommandDispatcher.hpp"
+#include "common/world/level/DimensionId.hpp"
+
+#include <optional>
+#include <string>
 
 namespace Server {
 
@@ -23,10 +27,15 @@ namespace Server {
     public:
         static void Register(CommandDispatcher& dispatcher);
 
-        static void Execute(ServerPlayer& sender,
+        static void Execute(const CommandSourceStack& source,
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);
+
+        // MC DimensionArgument: "minecraft:overworld" / "the_nether" /
+        // "the_end", plus this game's short "nether" / "end". Shared with
+        // `/execute in` and `/execute if dimension`.
+        static std::optional<Game::DimensionId> ParseDimension(std::string name);
     };
 
 } // namespace Server

@@ -14,7 +14,7 @@ namespace Game {
     enum class SpawnReason : uint8_t {
         Natural,
         ChunkGeneration,
-        Spawner,          // monster-spawner block (none exist yet; the rules honour it already)
+        Spawner,          // monster-spawner block (BaseSpawner)
         Breeding,
         MobSummoned,      // one mob creating another (zombie reinforcements)
         Jockey,
@@ -24,6 +24,11 @@ namespace Game {
         Command,          // /summon
         Load,
         Triggered,        // block-pattern completion (wither ritual, golems)
+        // MC EntitySpawnReason.STRUCTURE — mobs placed by world generation
+        // (template entities, swamp-hut witch, monument elders, mansion
+        // illagers). Piglins skip their baby/weapon roll for it, and raiders
+        // never become patrol leaders from it.
+        Structure,
     };
 
     // MC EntitySpawnReason.isSpawner — SPAWNER || TRIAL_SPAWNER.

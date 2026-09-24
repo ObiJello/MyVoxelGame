@@ -21,9 +21,11 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace Game {
     class Mob;
+    struct MobEffectInstance;
     struct EntityLevel;
     struct ItemEntity;
     struct ExperienceOrb;
@@ -59,5 +61,12 @@ namespace Game::Anvil {
     // What kind of entity a compound describes, so the caller can route it.
     enum class EntityKind : uint8_t { Mob, Item, Orb, Unknown };
     EntityKind ClassifyEntity(const ::World::NBTTagCompound& tag, EntityTypeId& outType);
+
+    // MC LivingEntity's "active_effects" list (MobEffectInstance.CODEC), for
+    // the player file: ServerPlayer holds its own list and writes it itself.
+    // Write omits the key for an empty list, as MC does; Read drops unknown
+    // effect ids.
+    void WriteActiveEffects(Nbt::Writer& w, const std::vector<MobEffectInstance>& effects);
+    std::vector<MobEffectInstance> ReadActiveEffects(const ::World::NBTTagCompound& tag);
 
 } // namespace Game::Anvil

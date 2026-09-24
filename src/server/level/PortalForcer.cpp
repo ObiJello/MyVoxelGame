@@ -1,6 +1,6 @@
 // File: src/server/level/PortalForcer.cpp
 //
-// Line references are to minecraft_code/decompiled_net/minecraft/world/level/
+// Line references are to minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/
 // portal/PortalForcer.java.
 
 #include "PortalForcer.hpp"
@@ -31,7 +31,8 @@ namespace Server {
             constexpr int kFrameHeightEnd   =  4;
             constexpr int kFrameBoxStart    = -1;
             constexpr int kFrameBoxEnd      =  2;
-            constexpr int kSpiralRadius     = 16;
+            // The spiral radius is the family's (PortalFamily::forcerSpiral-
+            // Radius): vanilla's 16, AetherPortalForcer.createPortal's 64.
 
             inline glm::ivec3 Offset(const glm::ivec3& p, Game::Direction d, int n) {
                 return { p.x + Game::StepX(d) * n,
@@ -129,31 +130,36 @@ namespace Server {
 
         // PortalForcer.java:43
         std::optional<glm::ivec3> FindClosestPortalPosition(
-            ServerLevel& level, const glm::ivec3& approximateExitPos, bool toNether)
+            ServerLevel& level, const glm::ivec3& approximateExitPos,
+            const Game::PortalFamily& family)
         {
-            const int radius = toNether ? kNetherSearchRadius : kOverworldSearchRadius;
-            return level.Portals().FindClosest(*level.World(), approximateExitPos, radius);
+            const int radius = family.SearchRadiusToward(level.Dimension());
+            return level.Portals(family.id).FindClosest(*level.World(), approximateExitPos, radius);
         }
 
         // PortalForcer.java:52
         namespace {
             std::optional<Game::FoundRectangle> PlaceOrFindPortal(
-                ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis, bool build);
+                ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis,
+                const Game::PortalFamily& family, bool build);
         }
 
         std::optional<Game::FoundRectangle> CreatePortal(
-            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis) {
-            return PlaceOrFindPortal(level, origin, portalAxis, /*build=*/true);
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis,
+            const Game::PortalFamily& family) {
+            return PlaceOrFindPortal(level, origin, portalAxis, family, /*build=*/true);
         }
 
         std::optional<Game::FoundRectangle> FindPortalPlacement(
-            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis) {
-            return PlaceOrFindPortal(level, origin, portalAxis, /*build=*/false);
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis,
+            const Game::PortalFamily& family) {
+            return PlaceOrFindPortal(level, origin, portalAxis, family, /*build=*/false);
         }
 
         namespace {
         std::optional<Game::FoundRectangle> PlaceOrFindPortal(
-            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis, bool build)
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis,
+            const Game::PortalFamily& family, bool build)
         {
             Game::World& world = *level.World();
             const Game::Direction direction = PositiveOn(portalAxis);
@@ -171,9 +177,16 @@ namespace Server {
             double     closestPartialDistSqr = -1.0;
             glm::ivec3 closestPartialPosition{0, 0, 0};
 
-            SpiralAround(origin, kSpiralRadius, Game::Direction::East,
+            SpiralAround(origin, family.forcerSpiralRadius, Game::Direction::East,
                          Game::Direction::South,
                          [&](const glm::ivec3& spiralPos) {
+                // A column in a chunk that is not resident reads as air all
+                // the way down and can never host a frame (no floor), so it
+                // is skipped rather than walked. Changes no answer; it is
+                // what keeps the Aether's 64-block spiral (16,641 columns)
+                // from walking 256 cells of "air" per column outside the
+                // loaded area.
+                if (!world.IsChunkLoaded(spiralPos.x >> 4, spiralPos.z >> 4)) return;
                 // MC moves one step along `direction` for the border test and
                 // then straight back. With no world border both tests pass, so
                 // the move is a no-op here — but the column the loop actually
@@ -251,17 +264,24 @@ namespace Server {
                     return std::nullopt;
                 }
 
+                // Vanilla steps one block back along `direction` first;
+                // AetherPortalForcer.createPortal (built on the older
+                // PortalForcer) builds at `pos` itself. Either way Y is
+                // clamped to [max(minY + 1, 70), top − 9] and the frame
+                // stands on a platform of the family's build block (glowstone
+                // for the Aether).
+                const int backStep = (family.id == Game::PortalFamilyId::Aether) ? 0 : 1;
                 closestFullPosition = glm::ivec3(
-                    origin.x - Game::StepX(direction),
+                    origin.x - Game::StepX(direction) * backStep,
                     std::clamp(origin.y, minStartY, maxStartY),
-                    origin.z - Game::StepZ(direction));
+                    origin.z - Game::StepZ(direction) * backStep);
                 if (!build) return Game::FoundRectangle{ closestFullPosition, 2, 3 };
 
                 const Game::Direction clockWise = Game::ClockWise(direction);
                 for (int box = kFrameBoxStart; box < kFrameBoxEnd; ++box) {
                     for (int width = 0; width < 2; ++width) {
                         for (int height = kFrameHeightStart; height < 3; ++height) {
-                            const Game::BlockID fill = (height < 0) ? Game::BlockID::Obsidian
+                            const Game::BlockID fill = (height < 0) ? family.buildBlock
                                                                     : Game::BlockID::Air;
                             const glm::ivec3 p{
                                 closestFullPosition.x + width * Game::StepX(direction)
@@ -282,7 +302,7 @@ namespace Server {
             // The frame. Only the RING — MC's `width == -1 || width == 2 ||
             // height == -1 || height == 3` — one block thick, in the portal
             // plane. Writing the interior too would fill the portal with
-            // obsidian.
+            // frame blocks.
             for (int width = kFrameWidthStart; width < kFrameWidthEnd; ++width) {
                 for (int height = kFrameHeightStart; height < kFrameHeightEnd; ++height) {
                     if (width != kFrameWidthStart && width != 2 &&
@@ -294,7 +314,7 @@ namespace Server {
                         closestFullPosition.y + height,
                         closestFullPosition.z + width * Game::StepZ(direction),
                     };
-                    world.SetBlock(p.x, p.y, p.z, Game::BlockID::Obsidian,
+                    world.SetBlock(p.x, p.y, p.z, family.buildBlock,
                                    Game::World::UpdateFlags::All);
                 }
             }
@@ -302,9 +322,11 @@ namespace Server {
             // The opening. MC passes flag 18 — clients told, neighbours NOT
             // re-shaped — for the same reason PortalShape::CreatePortalBlocks
             // does: each portal block written would otherwise look at a
-            // half-built portal and delete itself.
+            // half-built portal and delete itself. hush_portal and
+            // aether_portal carry nether_portal's horizontal axis, so
+            // HORIZONTAL_AXIS fits all three.
             const Game::BlockState portalState =
-                Game::BlockStates::Default(Game::BlockID::NetherPortal)
+                Game::BlockStates::Default(family.portalBlock)
                     .SetName(Game::PropertyId::HORIZONTAL_AXIS, Game::NameOf(portalAxis));
 
             for (int width = 0; width < 2; ++width) {
@@ -319,12 +341,12 @@ namespace Server {
                     // Index it immediately rather than waiting for a chunk
                     // scan: the return trip will look for this portal, and the
                     // chunk it sits in may never be re-scanned.
-                    level.Portals().Add(p);
+                    level.Portals(family.id).Add(p);
                 }
             }
 
-            Log::Info("[PortalForcer] Built a portal in '%s' at (%d, %d, %d) axis %s",
-                      std::string(Game::DimensionName(level.Dimension())).c_str(),
+            Log::Info("[PortalForcer] Built a %s portal in '%s' at (%d, %d, %d) axis %s",
+                      family.tag, std::string(Game::DimensionName(level.Dimension())).c_str(),
                       closestFullPosition.x, closestFullPosition.y, closestFullPosition.z,
                       std::string(Game::NameOf(portalAxis)).c_str());
 

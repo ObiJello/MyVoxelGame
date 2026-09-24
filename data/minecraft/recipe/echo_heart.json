@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "C": "minecraft:resonant_crystal",
+    "E": "minecraft:echo_shard",
+    "H": "minecraft:choir_heart"
+  },
+  "pattern": [
+    "CCC",
+    "CHC",
+    "EEE"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:echo_heart"
+  }
+}

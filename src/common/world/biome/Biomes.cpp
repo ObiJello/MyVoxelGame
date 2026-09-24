@@ -147,6 +147,9 @@ namespace Game {
 
         BiomeId Fallback() { return FallbackId(); }
 
+        // Vanilla biomes are keyed by their bare path ("plains"); a ported
+        // mod's keep the namespace ("twilightforest:forest"), so only the
+        // minecraft prefix is stripped.
         BiomeId FromName(std::string_view name) {
             if (name.rfind("minecraft:", 0) == 0) name.remove_prefix(10);
             auto it = NameIndex().find(name);

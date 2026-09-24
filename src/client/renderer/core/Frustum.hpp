@@ -76,6 +76,21 @@ struct Frustum {
     static Frustum ThroughQuad(const glm::vec3& eye, const glm::vec3 corners[4], const Frustum& base) {
         Frustum f = base;
         const glm::vec3 center = (corners[0] + corners[1] + corners[2] + corners[3]) * 0.25f;
+        // A quad seen nearly edge-on is a sliver on screen: its centre lies
+        // within rounding of the very planes being built, so the inward
+        // test below picks a side at random, a flipped plane culls the
+        // whole far view, and the portal shows its wall instead of the
+        // far world (seen from the side, at one exact angle). The base
+        // frustum is the safe answer there — a sliver costs nothing extra.
+        {
+            const glm::vec3 toCenter = center - eye;
+            const float dist = glm::length(toCenter);
+            const glm::vec3 quadNormal = glm::cross(corners[1] - corners[0], corners[3] - corners[0]);
+            const float quadLen = glm::length(quadNormal);
+            if (dist < 1e-6f || quadLen < 1e-9f) return base;
+            constexpr float kMinCosine = 0.02f;   // about one degree off edge-on
+            if (std::abs(glm::dot(quadNormal / quadLen, toCenter / dist)) < kMinCosine) return base;
+        }
         for (int i = 0; i < 4; ++i) {
             const glm::vec3 a = corners[i] - eye;
             const glm::vec3 b = corners[(i + 1) % 4] - eye;
@@ -83,8 +98,14 @@ struct Frustum {
             const float len = glm::length(n);
             if (len < 1e-9f) continue;          // degenerate edge: keep the base plane
             n /= len;
-            // Inward: the quad's centre must be on the positive side.
-            if (glm::dot(n, center - eye) < 0.0f) n = -n;
+            // Inward: the two corners NOT on this edge must be on the
+            // positive side. Judged by the one farther from the plane —
+            // the centre (a quarter of the way to the plane) was too close
+            // a call at grazing angles.
+            const float d2 = glm::dot(n, corners[(i + 2) % 4] - eye);
+            const float d3 = glm::dot(n, corners[(i + 3) % 4] - eye);
+            const float sideSign = std::abs(d2) >= std::abs(d3) ? d2 : d3;
+            if (sideSign < 0.0f) n = -n;
             f.planes[i] = glm::vec4(n, -glm::dot(n, eye));
         }
         return f;

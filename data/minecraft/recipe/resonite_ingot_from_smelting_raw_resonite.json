@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:smelting",
+  "category": "misc",
+  "cookingtime": 200,
+  "experience": 0.7,
+  "group": "resonite_ingot",
+  "ingredient": "minecraft:raw_resonite",
+  "result": {
+    "id": "minecraft:resonite_ingot"
+  }
+}

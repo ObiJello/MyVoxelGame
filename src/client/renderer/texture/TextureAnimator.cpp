@@ -5,6 +5,8 @@
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
+#include <algorithm>
+
 namespace Render {
 
     std::unique_ptr<TextureAnimator> g_textureAnimator = nullptr;
@@ -73,15 +75,29 @@ namespace Render {
 
     void TextureAnimator::UpdateSingleAnimation(AnimatedTexture& animTex, float deltaTime) {
         const TextureAnimation& anim = animTex.animation;
+        if (anim.frames.empty()) return;
         animTex.timer += deltaTime;
 
-        if (animTex.timer >= anim.frametime) {
-            animTex.timer -= anim.frametime;
-
-            int sequenceIndex = (animTex.currentFrame + 1) % static_cast<int>(anim.frames.size());
-            animTex.currentFrame = sequenceIndex;
-
-            int actualFrame = anim.frames[sequenceIndex];
+        // MC SpriteContents.AnimatedTexture ticker: the current entry runs
+        // for its own time (AnimationFrame.time, else frametime), then the
+        // sequence steps on. A long hitch may pass several entries; only
+        // the one it lands on is uploaded (bounded to one lap of the list).
+        const int count = static_cast<int>(anim.frames.size());
+        auto duration = [&](int entry) {
+            const int t = entry < static_cast<int>(anim.frameTimes.size()) ? anim.frameTimes[entry] : 0;
+            return static_cast<float>(t > 0 ? t : std::max(1, anim.frametime));
+        };
+        bool advanced = false;
+        for (int step = 0; step < count && animTex.timer >= duration(animTex.currentFrame); ++step) {
+            animTex.timer -= duration(animTex.currentFrame);
+            animTex.currentFrame = (animTex.currentFrame + 1) % count;
+            advanced = true;
+        }
+        if (animTex.timer >= duration(animTex.currentFrame)) {
+            animTex.timer = 0.0f;                  // more than a lap behind: drop the rest
+        }
+        if (advanced) {
+            const int actualFrame = anim.frames[animTex.currentFrame];
             if (actualFrame >= 0 && actualFrame < static_cast<int>(animTex.frameData.size())) {
                 UploadFrameToAtlas(animTex, actualFrame);
             }

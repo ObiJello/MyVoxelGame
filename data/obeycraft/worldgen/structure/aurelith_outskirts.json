@@ -1,0 +1,1152 @@
+{
+ "type": "obeycraft:aurelith_outskirts",
+ "biomes": "#minecraft:has_structure/aurelith",
+ "step": "surface_structures",
+ "terrain_adaptation": "beard_thin",
+ "spawn_overrides": {},
+ "anchor_set": "minecraft:aurelith",
+ "anchor_structure": "minecraft:aurelith",
+ "anchor_origin": [
+  16,
+  6,
+  16
+ ],
+ "processors": "minecraft:aurelith_outskirts_weathering",
+ "slots": [
+  {
+   "at": [
+    0,
+    -140
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      -108
+     ],
+     "b": [
+      0,
+      -438
+     ],
+     "t": [
+      0,
+      64
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 29154,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/procession_arch",
+     "origin": [
+      -8,
+      -146
+     ],
+     "rotation": 0,
+     "chance": 1.0,
+     "dry": false
+    }
+   ]
+  },
+  {
+   "at": [
+    -1,
+    -204
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      -108
+     ],
+     "b": [
+      0,
+      -438
+     ],
+     "t": [
+      64,
+      128
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 29154,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_soprano_2",
+     "origin": [
+      3,
+      -203
+     ],
+     "rotation": 0,
+     "chance": 1.0,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/roadside_shrine",
+     "origin": [
+      -9,
+      -222
+     ],
+     "rotation": 2,
+     "chance": 0.85,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    2,
+    -268
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      -108
+     ],
+     "b": [
+      0,
+      -438
+     ],
+     "t": [
+      128,
+      192
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 29154,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": []
+  },
+  {
+   "at": [
+    2,
+    -332
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      -108
+     ],
+     "b": [
+      0,
+      -438
+     ],
+     "t": [
+      192,
+      256
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 29154,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_soprano_3",
+     "origin": [
+      7,
+      -303
+     ],
+     "rotation": 0,
+     "chance": 1.0,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/watchpost",
+     "origin": [
+      14,
+      -317
+     ],
+     "rotation": 0,
+     "chance": 0.75,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -3,
+    -396
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      -108
+     ],
+     "b": [
+      0,
+      -438
+     ],
+     "t": [
+      256,
+      320
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 29154,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_soprano_4",
+     "origin": [
+      1,
+      -403
+     ],
+     "rotation": 0,
+     "chance": 1.0,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/farmstead",
+     "origin": [
+      -13,
+      -365
+     ],
+     "rotation": 2,
+     "chance": 0.75,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/colonnade",
+     "origin": [
+      4,
+      -416
+     ],
+     "rotation": 0,
+     "chance": 0.7,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -3,
+    -433
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      -108
+     ],
+     "b": [
+      0,
+      -438
+     ],
+     "t": [
+      320,
+      330
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 29154,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": []
+  },
+  {
+   "at": [
+    140,
+    0
+   ],
+   "roads": [
+    {
+     "a": [
+      108,
+      0
+     ],
+     "b": [
+      398,
+      0
+     ],
+     "t": [
+      0,
+      64
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 11421,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": []
+  },
+  {
+   "at": [
+    204,
+    -1
+   ],
+   "roads": [
+    {
+     "a": [
+      108,
+      0
+     ],
+     "b": [
+      398,
+      0
+     ],
+     "t": [
+      64,
+      128
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 11421,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_alto_2",
+     "origin": [
+      203,
+      3
+     ],
+     "rotation": 1,
+     "chance": 1.0,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/farmstead",
+     "origin": [
+      183,
+      10
+     ],
+     "rotation": 1,
+     "chance": 0.75,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    268,
+    -2
+   ],
+   "roads": [
+    {
+     "a": [
+      108,
+      0
+     ],
+     "b": [
+      398,
+      0
+     ],
+     "t": [
+      128,
+      192
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 11421,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": []
+  },
+  {
+   "at": [
+    332,
+    2
+   ],
+   "roads": [
+    {
+     "a": [
+      108,
+      0
+     ],
+     "b": [
+      398,
+      0
+     ],
+     "t": [
+      192,
+      256
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 11421,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_alto_3",
+     "origin": [
+      303,
+      4
+     ],
+     "rotation": 1,
+     "chance": 1.0,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/roadside_shrine",
+     "origin": [
+      344,
+      11
+     ],
+     "rotation": 1,
+     "chance": 0.85,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    381,
+    2
+   ],
+   "roads": [
+    {
+     "a": [
+      108,
+      0
+     ],
+     "b": [
+      398,
+      0
+     ],
+     "t": [
+      256,
+      290
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 11421,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/cistern",
+     "origin": [
+      371,
+      -6
+     ],
+     "rotation": 3,
+     "chance": 0.7,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    273,
+    -29
+   ],
+   "roads": [
+    {
+     "a": [
+      273.0,
+      -4.82
+     ],
+     "b": [
+      273.0,
+      -13.82
+     ],
+     "t": [
+      0,
+      9.999999999999998
+     ],
+     "half": 1.0,
+     "keep": [
+      0.85,
+      0.7
+     ],
+     "wobble": 0.0,
+     "seed": 30407
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/waystation",
+     "origin": [
+      261,
+      -15
+     ],
+     "rotation": 3,
+     "chance": 1.0,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    0,
+    140
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      108
+     ],
+     "b": [
+      0,
+      418
+     ],
+     "t": [
+      0,
+      64
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 26518,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/watchpost",
+     "origin": [
+      9,
+      162
+     ],
+     "rotation": 0,
+     "chance": 0.75,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    1,
+    204
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      108
+     ],
+     "b": [
+      0,
+      418
+     ],
+     "t": [
+      64,
+      128
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 26518,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_tenor_2",
+     "origin": [
+      -3,
+      203
+     ],
+     "rotation": 2,
+     "chance": 1.0,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    2,
+    268
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      108
+     ],
+     "b": [
+      0,
+      418
+     ],
+     "t": [
+      128,
+      192
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 26518,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/colonnade",
+     "origin": [
+      -4,
+      249
+     ],
+     "rotation": 2,
+     "chance": 0.7,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -3,
+    332
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      108
+     ],
+     "b": [
+      0,
+      418
+     ],
+     "t": [
+      192,
+      256
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 26518,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_tenor_3",
+     "origin": [
+      -5,
+      303
+     ],
+     "rotation": 2,
+     "chance": 1.0,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/farmstead",
+     "origin": [
+      9,
+      308
+     ],
+     "rotation": 0,
+     "chance": 0.75,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -1,
+    391
+   ],
+   "roads": [
+    {
+     "a": [
+      0,
+      108
+     ],
+     "b": [
+      0,
+      418
+     ],
+     "t": [
+      256,
+      310
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 26518,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/roadside_shrine",
+     "origin": [
+      -9,
+      388
+     ],
+     "rotation": 2,
+     "chance": 0.85,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -140,
+    0
+   ],
+   "roads": [
+    {
+     "a": [
+      -108,
+      0
+     ],
+     "b": [
+      -378,
+      0
+     ],
+     "t": [
+      0,
+      64
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 55976,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/roadside_shrine",
+     "origin": [
+      -160,
+      -7
+     ],
+     "rotation": 3,
+     "chance": 0.85,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -204,
+    0
+   ],
+   "roads": [
+    {
+     "a": [
+      -108,
+      0
+     ],
+     "b": [
+      -378,
+      0
+     ],
+     "t": [
+      64,
+      128
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 55976,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_bass_2",
+     "origin": [
+      -203,
+      -4
+     ],
+     "rotation": 3,
+     "chance": 1.0,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -268,
+    3
+   ],
+   "roads": [
+    {
+     "a": [
+      -108,
+      0
+     ],
+     "b": [
+      -378,
+      0
+     ],
+     "t": [
+      128,
+      192
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 55976,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": []
+  },
+  {
+   "at": [
+    -332,
+    -2
+   ],
+   "roads": [
+    {
+     "a": [
+      -108,
+      0
+     ],
+     "b": [
+      -378,
+      0
+     ],
+     "t": [
+      192,
+      256
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 55976,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/milestone_bass_3",
+     "origin": [
+      -303,
+      -3
+     ],
+     "rotation": 3,
+     "chance": 1.0,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/farmstead",
+     "origin": [
+      -325,
+      8
+     ],
+     "rotation": 1,
+     "chance": 0.75,
+     "dry": true
+    },
+    {
+     "template": "minecraft:aurelith_outskirts/cistern",
+     "origin": [
+      -363,
+      -11
+     ],
+     "rotation": 3,
+     "chance": 0.6,
+     "dry": true
+    }
+   ]
+  },
+  {
+   "at": [
+    -371,
+    -3
+   ],
+   "roads": [
+    {
+     "a": [
+      -108,
+      0
+     ],
+     "b": [
+      -378,
+      0
+     ],
+     "t": [
+      256,
+      270
+     ],
+     "half": 3.0,
+     "apron": [
+      24.0,
+      5.0
+     ],
+     "keep": [
+      0.92,
+      0.2
+     ],
+     "wobble": 3.0,
+     "seed": 55976,
+     "lamps": [
+      24.0,
+      150.0
+     ]
+    }
+   ],
+   "pieces": []
+  },
+  {
+   "at": [
+    -258,
+    -38
+   ],
+   "roads": [
+    {
+     "a": [
+      -258.0,
+      -0.05
+     ],
+     "b": [
+      -258.0,
+      -14.05
+     ],
+     "t": [
+      0,
+      14.999999999999996
+     ],
+     "half": 1.0,
+     "keep": [
+      0.85,
+      0.7
+     ],
+     "wobble": 0.0,
+     "seed": 33010
+    }
+   ],
+   "pieces": [
+    {
+     "template": "minecraft:aurelith_outskirts/garden_of_stones",
+     "origin": [
+      -281,
+      -15
+     ],
+     "rotation": 3,
+     "chance": 1.0,
+     "dry": true
+    }
+   ]
+  }
+ ]
+}

@@ -2,7 +2,9 @@
 #include "Input.hpp"
 #include "KeyMapping.hpp"
 #include "common/core/Log.hpp"
+#include "platform/GameDirectory.hpp"
 #include <GLFW/glfw3.h>
+#include <cmath>
 #include <unordered_map>
 #include <queue>
 #include <deque>
@@ -46,9 +48,27 @@ namespace Input {
     // Key presses captured for the UI while a screen is up (see PopUiKeyPress).
     struct UiKeyPress { int key; int mods; };
     static std::deque<UiKeyPress> uiKeyPresses;
+    static std::deque<RawKeyEvent> rawKeyEvents;
+    static constexpr size_t kMaxRawKeyEvents = 128;
     // A screen that stops draining (or a stuck uiActive) must not grow this
     // without bound; 64 is far more than any frame can produce.
     static constexpr size_t kMaxUiKeyPresses = 64;
+
+    // ── Remote input (/control) ─────────────────────────────────────────────
+    static bool remoteMode = false;
+    static bool remoteKeys[GLFW_KEY_LAST + 1] = {};
+    static bool remoteButtons[GLFW_MOUSE_BUTTON_LAST + 1] = {};
+    static bool cursorOverride = false;
+    static double cursorOverrideX = 0.0, cursorOverrideY = 0.0;
+    static bool captureEvents = false;
+    static std::deque<CapturedEvent> capturedEvents;
+    static constexpr size_t kMaxCapturedEvents = 512;
+
+    static void Capture(CapturedEvent ev) {
+        if (!captureEvents) return;
+        if (capturedEvents.size() >= kMaxCapturedEvents) capturedEvents.pop_front();
+        capturedEvents.push_back(ev);
+    }
 
     // GLFW code -> our Key, for the callbacks. The forward direction already
     // exists in IsKeyDown/IsMouseButtonDown as a switch; this is its inverse
@@ -122,7 +142,7 @@ namespace Input {
         }
     }
 
-    static void MouseButtonCallback(GLFWwindow* /*window*/, int button, int action, int /*mods*/) {
+    static void HandleMouseButton(int button, int action) {
         const bool pressed = (action == GLFW_PRESS);
         if (!pressed && action != GLFW_RELEASE) return;
 
@@ -137,13 +157,25 @@ namespace Input {
         RecordAction(key, pressed);
     }
 
+    static void MouseButtonCallback(GLFWwindow* /*window*/, int button, int action, int mods) {
+        if (remoteMode) return;   // /control: this window's mouse is not the player's (IsLocalMouseButtonDown polls it)
+        Capture({CapturedEvent::Kind::MouseButton, button, action, mods, 0.0, 0.0});
+        HandleMouseButton(button, action);
+    }
+
     static int escapePresses = 0;
 
-    static void KeyCallback(GLFWwindow* /*window*/, int glfwKey, int /*scancode*/,
-                            int action, int mods) {
+    static void HandleKey(int glfwKey, int action, int mods) {
         // Escape is edge-detected from here, screen or no screen: a press
         // is a press even if it was released before the next frame polled.
         if (glfwKey == GLFW_KEY_ESCAPE && action == GLFW_PRESS) ++escapePresses;
+        // The raw event stream the debug chords read, recorded BEFORE the
+        // screen gate: F3+F6 must close the debug options screen it opened,
+        // and the F3 release has to reach the game-mode switcher.
+        if ((action == GLFW_PRESS || action == GLFW_RELEASE) &&
+            rawKeyEvents.size() < kMaxRawKeyEvents) {
+            rawKeyEvents.push_back({glfwKey, action, mods});
+        }
         // While a screen is up the press belongs to the UI, not the world.
         if (uiActive) {
             // Arrows honour auto-repeat, so holding one keeps nudging a
@@ -174,6 +206,48 @@ namespace Input {
         RecordAction(key, pressed);
     }
 
+    static int localEscapePresses = 0;
+
+    static void KeyCallback(GLFWwindow* /*window*/, int glfwKey, int /*scancode*/,
+                            int action, int mods) {
+        if (remoteMode) {
+            // /control: the controlled player's own keys are not the
+            // player's — except Escape (their pause menu) and the cursor
+            // toggle, which are theirs to keep.
+            if (action != GLFW_PRESS) return;
+            if (glfwKey == GLFW_KEY_ESCAPE) { ++localEscapePresses; return; }
+            if (Binds::ToggleCursor && Binds::ToggleCursor->key == BoundKey::Keyboard(glfwKey)) {
+                ++Binds::ToggleCursor->clickCount;
+            }
+            return;
+        }
+        Capture({CapturedEvent::Kind::Key, glfwKey, action, mods, 0.0, 0.0});
+        HandleKey(glfwKey, action, mods);
+    }
+
+    bool PopRawKeyEvent(RawKeyEvent& out) {
+        if (rawKeyEvents.empty()) return false;
+        out = rawKeyEvents.front();
+        rawKeyEvents.pop_front();
+        return true;
+    }
+
+    void ClearRawKeyEvents() { rawKeyEvents.clear(); }
+
+    bool IsGlfwKeyDown(int glfwKey) {
+        if (glfwKey < 0) return false;
+        if (remoteMode) return glfwKey <= GLFW_KEY_LAST && remoteKeys[glfwKey];
+        if (!gWindow) return false;
+        return glfwGetKey(gWindow, glfwKey) == GLFW_PRESS;
+    }
+
+    bool IsGlfwMouseButtonDown(int glfwButton) {
+        if (glfwButton < 0) return false;
+        if (remoteMode) return glfwButton <= GLFW_MOUSE_BUTTON_LAST && remoteButtons[glfwButton];
+        if (!gWindow) return false;
+        return glfwGetMouseButton(gWindow, glfwButton) == GLFW_PRESS;
+    }
+
     std::string GetClipboardText() {
         if (!gWindow) return {};
         const char* clip = glfwGetClipboardString(gWindow);
@@ -186,17 +260,37 @@ namespace Input {
 
     // Character callback: queues typed characters
     static void CharCallback(GLFWwindow* /*window*/, unsigned int codepoint) {
+        if (remoteMode) return;
+        Capture({CapturedEvent::Kind::Char, static_cast<int>(codepoint), 0, 0, 0.0, 0.0});
         charInputQueue.push(codepoint);
     }
 
-    // Scroll callback: accumulates scroll deltas
+    // Scroll callback: accumulates scroll deltas.
+    //
+    // MC MouseHandler.onScroll (:164-167): the raw offsets are scaled ONCE,
+    // here at the source, by the two Mouse Settings options — Discrete
+    // Scrolling collapses each event to ±1, Scroll Sensitivity multiplies —
+    // and every consumer (screens, the hotbar, the inventory) sees the scaled
+    // value. Both options were written by the settings screen and read by
+    // nothing before this.
+    static void HandleScroll(double xoffset, double yoffset) {
+        const auto& settings = Platform::g_gameSettings;
+        const bool   discrete    = settings.GetDiscreteMouseScroll();
+        const double sensitivity = settings.GetMouseWheelSensitivity();
+        auto sign = [](double v) { return v > 0.0 ? 1.0 : (v < 0.0 ? -1.0 : 0.0); };
+        scrollX += (discrete ? sign(xoffset) : xoffset) * sensitivity;
+        scrollY += (discrete ? sign(yoffset) : yoffset) * sensitivity;
+    }
+
     static void ScrollCallback(GLFWwindow* /*window*/, double xoffset, double yoffset) {
-        scrollX += xoffset;
-        scrollY += yoffset;
+        if (remoteMode) return;
+        Capture({CapturedEvent::Kind::Scroll, 0, 0, 0, xoffset, yoffset});
+        HandleScroll(xoffset, yoffset);
     }
 
     // Mouse-motion callback: calculates deltaX/deltaY
     static void MouseCallback(GLFWwindow* /*window*/, double xpos, double ypos) {
+        if (remoteMode) return;
         // Skip the first mouse callback to avoid a large jump
         if (firstMouse) {
             lastX = xpos;
@@ -269,6 +363,24 @@ namespace Input {
         return pressed;
     }
 
+    bool ConsumeLocalEscapePress() {
+        const bool pressed = localEscapePresses > 0;
+        localEscapePresses = 0;
+        return pressed;
+    }
+
+    std::pair<double, double> GetLocalMousePosition() {
+        if (!gWindow) return {0.0, 0.0};
+        double xpos, ypos;
+        glfwGetCursorPos(gWindow, &xpos, &ypos);
+        return { xpos, ypos };
+    }
+
+    bool IsLocalMouseButtonDown(int glfwButton) {
+        if (!gWindow || glfwButton < 0) return false;
+        return glfwGetMouseButton(gWindow, glfwButton) == GLFW_PRESS;
+    }
+
     bool PopUiKeyPress(int& glfwKey, int& glfwMods) {
         if (uiKeyPresses.empty()) return false;
         glfwKey  = uiKeyPresses.front().key;
@@ -322,7 +434,7 @@ namespace Input {
         }
         for (KeyMapping* m : AllKeyMappings()) {
             if (m->key.type != BoundKey::Type::Keyboard) continue;   // mouse stays up
-            m->down = gWindow && glfwGetKey(gWindow, m->key.code) == GLFW_PRESS;
+            m->down = IsGlfwKeyDown(m->key.code);
         }
 #endif
         // Re-sync the polled edge maps either way so closing a screen never
@@ -332,7 +444,6 @@ namespace Input {
     }
 
     bool IsKeyDown(Key key) {
-        if (!gWindow) return false;
         int glfwKey;
         switch (key) {
             case Key::W:           glfwKey = GLFW_KEY_W; break;
@@ -372,25 +483,119 @@ namespace Input {
             case Key::Tilde:       glfwKey = GLFW_KEY_GRAVE_ACCENT; break;
             default: return false;
         }
-        return glfwGetKey(gWindow, glfwKey) == GLFW_PRESS;
+        return IsGlfwKeyDown(glfwKey);
     }
 
     bool IsMouseButtonDown(Key mouseButton) {
-        if (!gWindow) return false;
         int glfwButton;
         switch (mouseButton) {
             case Key::LeftMouse:  glfwButton = GLFW_MOUSE_BUTTON_LEFT;  break;
             case Key::RightMouse: glfwButton = GLFW_MOUSE_BUTTON_RIGHT; break;
             default: return false;
         }
-        return glfwGetMouseButton(gWindow, glfwButton) == GLFW_PRESS;
+        return IsGlfwMouseButtonDown(glfwButton);
     }
 
     std::pair<double, double> GetMousePosition() {
+        if (cursorOverride) return { cursorOverrideX, cursorOverrideY };
         if (!gWindow) return {0.0, 0.0};
         double xpos, ypos;
         glfwGetCursorPos(gWindow, &xpos, &ypos);
         return { xpos, ypos };
+    }
+
+    // ── Remote input (/control) ─────────────────────────────────────────────
+
+    static void ClearRemoteShadow() {
+        for (bool& k : remoteKeys) k = false;
+        for (bool& b : remoteButtons) b = false;
+    }
+
+    void SetRemoteMode(bool remote) {
+        if (remoteMode == remote) return;
+        remoteMode = remote;
+        // Nothing from before the switch survives it: no held key from the
+        // other source, no queued click, no half-measured mouse delta.
+        ClearRemoteShadow();
+        ReleaseAll();
+        ClearRawKeyEvents();
+        while (!charInputQueue.empty()) charInputQueue.pop();
+        escapePresses = 0;
+        localEscapePresses = 0;
+        ResetMouseTracking();
+        ResetScrollOffset();
+        UpdateKeyStates();
+        previousKeyStates = currentKeyStates;
+    }
+
+    bool IsRemoteMode() { return remoteMode; }
+
+    void RemoteKey(int glfwKey, int action, int mods) {
+        if (!remoteMode) return;
+        if (glfwKey >= 0 && glfwKey <= GLFW_KEY_LAST) {
+            if (action == GLFW_PRESS || action == GLFW_REPEAT) remoteKeys[glfwKey] = true;
+            else if (action == GLFW_RELEASE)                    remoteKeys[glfwKey] = false;
+        }
+        HandleKey(glfwKey, action, mods);
+    }
+
+    void RemoteMouseButton(int glfwButton, int action, int /*mods*/) {
+        if (!remoteMode) return;
+        if (glfwButton >= 0 && glfwButton <= GLFW_MOUSE_BUTTON_LAST) {
+            if (action == GLFW_PRESS)        remoteButtons[glfwButton] = true;
+            else if (action == GLFW_RELEASE) remoteButtons[glfwButton] = false;
+        }
+        HandleMouseButton(glfwButton, action);
+    }
+
+    void RemoteChar(unsigned int codepoint) {
+        if (!remoteMode) return;
+        charInputQueue.push(codepoint);
+    }
+
+    void RemoteScroll(double xoffset, double yoffset) {
+        if (!remoteMode) return;
+        HandleScroll(xoffset, yoffset);
+    }
+
+    void RemoteMotion(double dx, double dy) {
+        if (!remoteMode) return;
+        deltaX += dx;
+        deltaY += dy;
+    }
+
+    void RemoteReleaseAll() {
+        if (!remoteMode) return;
+        // Releases go through the handler so every binding on the key
+        // records the release, exactly as a physical release would.
+        for (int k = 0; k <= GLFW_KEY_LAST; ++k) {
+            if (remoteKeys[k]) { remoteKeys[k] = false; HandleKey(k, GLFW_RELEASE, 0); }
+        }
+        for (int b = 0; b <= GLFW_MOUSE_BUTTON_LAST; ++b) {
+            if (remoteButtons[b]) { remoteButtons[b] = false; HandleMouseButton(b, GLFW_RELEASE); }
+        }
+        ReleaseAll();
+    }
+
+    void SetCursorOverride(bool enabled, double x, double y) {
+        cursorOverride  = enabled;
+        cursorOverrideX = x;
+        cursorOverrideY = y;
+    }
+
+    bool HasCursorOverride() { return cursorOverride; }
+
+    void SetCaptureEvents(bool enabled) {
+        if (captureEvents == enabled) return;
+        captureEvents = enabled;
+        capturedEvents.clear();
+    }
+
+    bool PopCapturedEvent(CapturedEvent& out) {
+        if (capturedEvents.empty()) return false;
+        out = capturedEvents.front();
+        capturedEvents.pop_front();
+        return true;
     }
 
     std::pair<double, double> GetMouseDelta() {

@@ -15,7 +15,9 @@
 namespace Network {
 
     struct PlayerMoveC2SPacket {
-        glm::vec3 position;
+        // Double, as on the wire and in MC's ServerboundMovePlayerPacket:
+        // a float position at x = 300,000 sits on a 3 cm grid.
+        glm::dvec3 position{0.0};
         glm::vec2 rotation;          // yaw, pitch
         bool      onGround    = false;
         bool      isCrouching = false;
@@ -32,10 +34,13 @@ namespace Network {
         // dimension change, and its coordinates belong to the other world.
         static constexpr int8_t kDimensionUnknown = 127;
         int8_t    dimensionId = kDimensionUnknown;
+        // /morph: the body's own animation clock the server relays to the
+        // others — a creeper morph's swell (0..30). Trailing, optional.
+        uint8_t   morphAnim = 0;
         std::chrono::steady_clock::time_point timestamp;
 
         PlayerMoveC2SPacket() = default;
-        PlayerMoveC2SPacket(const glm::vec3& pos, const glm::vec2& rot)
+        PlayerMoveC2SPacket(const glm::dvec3& pos, const glm::vec2& rot)
             : position(pos), rotation(rot), timestamp(std::chrono::steady_clock::now()) {}
     };
 
@@ -57,6 +62,7 @@ namespace Network {
             buffer.WriteFloat(packet.fallDistance);
             buffer.WriteVarInt(packet.sequenceNumber);
             buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
+            buffer.WriteByte(packet.morphAnim);
             return buffer.GetData();
         }
 
@@ -77,6 +83,7 @@ namespace Network {
             packet.sequenceNumber = reader.ReadVarInt();
             packet.dimensionId = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte())
                                                   : PlayerMoveC2SPacket::kDimensionUnknown;
+            packet.morphAnim = reader.HasMore() ? reader.ReadByte() : 0;
             packet.timestamp = std::chrono::steady_clock::now();
             return packet;
         }

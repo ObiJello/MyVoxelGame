@@ -79,67 +79,18 @@ static bool canBeReplaced(BlockState* state) {
     return state->canBeReplaced();
 }
 
+// BlockTags.SCULK_REPLACEABLE / SCULK_REPLACEABLE_WORLD_GEN, resolved from
+// data/minecraft/tags/block (26.3 adds sulfur and cinnabar).
 static bool isSculkReplaceable(const std::string& id) {
-    return id == "minecraft:stone" ||
-           id == "minecraft:granite" ||
-           id == "minecraft:diorite" ||
-           id == "minecraft:andesite" ||
-           id == "minecraft:tuff" ||
-           id == "minecraft:deepslate" ||
-           id == "minecraft:dirt" ||
-           id == "minecraft:grass_block" ||
-           id == "minecraft:podzol" ||
-           id == "minecraft:coarse_dirt" ||
-           id == "minecraft:mycelium" ||
-           id == "minecraft:rooted_dirt" ||
-           id == "minecraft:moss_block" ||
-           id == "minecraft:pale_moss_block" ||
-           id == "minecraft:mud" ||
-           id == "minecraft:muddy_mangrove_roots" ||
-           id == "minecraft:terracotta" ||
-           id == "minecraft:white_terracotta" ||
-           id == "minecraft:orange_terracotta" ||
-           id == "minecraft:magenta_terracotta" ||
-           id == "minecraft:light_blue_terracotta" ||
-           id == "minecraft:yellow_terracotta" ||
-           id == "minecraft:lime_terracotta" ||
-           id == "minecraft:pink_terracotta" ||
-           id == "minecraft:gray_terracotta" ||
-           id == "minecraft:light_gray_terracotta" ||
-           id == "minecraft:cyan_terracotta" ||
-           id == "minecraft:purple_terracotta" ||
-           id == "minecraft:blue_terracotta" ||
-           id == "minecraft:brown_terracotta" ||
-           id == "minecraft:green_terracotta" ||
-           id == "minecraft:red_terracotta" ||
-           id == "minecraft:black_terracotta" ||
-           id == "minecraft:crimson_nylium" ||
-           id == "minecraft:warped_nylium" ||
-           id == "minecraft:netherrack" ||
-           id == "minecraft:basalt" ||
-           id == "minecraft:blackstone" ||
-           id == "minecraft:sand" ||
-           id == "minecraft:red_sand" ||
-           id == "minecraft:gravel" ||
-           id == "minecraft:soul_sand" ||
-           id == "minecraft:soul_soil" ||
-           id == "minecraft:calcite" ||
-           id == "minecraft:smooth_basalt" ||
-           id == "minecraft:clay" ||
-           id == "minecraft:dripstone_block" ||
-           id == "minecraft:end_stone" ||
-           id == "minecraft:red_sandstone" ||
-           id == "minecraft:sandstone";
+    static const std::unordered_set<std::string>& values =
+        ::minecraft::levelgen::blockpredicates::blockTagValues("minecraft:sculk_replaceable");
+    return values.count(id) != 0;
 }
 
 static bool isSculkReplaceableWorldGen(const std::string& id) {
-    return isSculkReplaceable(id) ||
-           id == "minecraft:deepslate_bricks" ||
-           id == "minecraft:deepslate_tiles" ||
-           id == "minecraft:cobbled_deepslate" ||
-           id == "minecraft:cracked_deepslate_bricks" ||
-           id == "minecraft:cracked_deepslate_tiles" ||
-           id == "minecraft:polished_deepslate";
+    static const std::unordered_set<std::string>& values =
+        ::minecraft::levelgen::blockpredicates::blockTagValues("minecraft:sculk_replaceable_world_gen");
+    return values.count(id) != 0;
 }
 
 static bool isReplaceableForSpreader(const SculkSpreader& spreader, const std::string& id) {
@@ -598,12 +549,27 @@ bool ChargeCursor::isMovementUnobstructed(WorldGenLevel* level, const BlockPos& 
     return isUnobstructed(level, from, directionX) || isUnobstructed(level, from, directionY);
 }
 
-BlockPos* ChargeCursor::getValidMovementPos(WorldGenLevel* level, const BlockPos& pos, WorldgenRandom& random) {
+// 26.3 ChargeCursor.canMoveToPos: a worldgen cursor stays within 12 blocks
+// (horizontally) of the patch origin (MAX_WORLDGEN_SPREAD).
+static bool canMoveToPos(const BlockPos& origin, const BlockPos& target, const SculkSpreader& spreader) {
+    if (!spreader.isWorldGeneration()) {
+        return true;
+    }
+    const int dx = origin.getX() - target.getX();
+    const int dz = origin.getZ() - target.getZ();
+    return dx * dx + dz * dz <= 144;
+}
+
+BlockPos* ChargeCursor::getValidMovementPos(WorldGenLevel* level, const BlockPos& pos, WorldgenRandom& random,
+                                            const BlockPos& originPos, const SculkSpreader& spreader) {
     static thread_local BlockPos resultPos;
     resultPos = pos;
 
     for (const Vec3i& offset : getRandomizedNonCornerNeighbourOffsets(random)) {
         BlockPos neighbour = pos.offset(offset.getX(), offset.getY(), offset.getZ());
+        if (!canMoveToPos(originPos, neighbour, spreader)) {
+            continue;
+        }
         BlockState* transferee = level->getBlockState(neighbour);
         if (transferee && isSculkBehaviourState(transferee) && isMovementUnobstructed(level, pos, neighbour)) {
             resultPos = neighbour;
@@ -643,12 +609,10 @@ void ChargeCursor::update(
     }
 
     const SculkBehaviour* sculkBehaviour = &getBlockBehaviour(currentState);
-    BlockState* behaviourState = currentState;
 
     if (spreadVeins && sculkBehaviour->attemptSpreadVein(level, m_pos, currentState, getFacingData(), spreader.isWorldGeneration())) {
         if (sculkBehaviour->canChangeBlockStateOnSpread()) {
             currentState = level->getBlockState(m_pos);
-            behaviourState = currentState;
             sculkBehaviour = &getBlockBehaviour(currentState);
         }
     }
@@ -659,22 +623,17 @@ void ChargeCursor::update(
         return;
     }
 
-    BlockPos* transferPos = getValidMovementPos(level, m_pos, random);
+    // 26.3 ChargeCursor.update: movement is confined by canMoveToPos; a
+    // worldgen cursor with nowhere to go discharges in place and stops.
+    BlockPos* transferPos = getValidMovementPos(level, m_pos, random, originPos, spreader);
     if (transferPos != nullptr) {
         sculkBehaviour->onDischarged(level, currentState, m_pos, random);
         m_pos = *transferPos;
-
-        if (spreader.isWorldGeneration()) {
-            int dx = m_pos.getX() - originPos.getX();
-            int dz = m_pos.getZ() - originPos.getZ();
-            double distance = std::sqrt(static_cast<double>(dx * dx + dz * dz));
-            if (distance >= 15.0) {
-                m_charge = 0;
-                return;
-            }
-        }
-
         currentState = level->getBlockState(m_pos);
+    } else if (spreader.isWorldGeneration()) {
+        sculkBehaviour->onDischarged(level, currentState, m_pos, random);
+        m_charge = 0;
+        return;
     }
 
     if (currentState && isSculkBehaviourState(currentState)) {

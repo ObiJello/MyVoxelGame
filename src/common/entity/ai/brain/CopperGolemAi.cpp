@@ -13,6 +13,7 @@
 #include "common/world/block/entity/ChestBlockEntity.hpp"
 #include "common/world/block/entity/DoubleChest.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/level/ILevelWrite.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 namespace Game {
@@ -867,6 +869,32 @@ namespace Game {
 
         // ── CopperGolemAi's wiring (MC's static half) ──────────────────────
 
+        // The chest block entities behind a transport target — the chest
+        // itself and, when it stands in a pair, its partner (MC's
+        // CompoundContainer). Calls `fn` on each (skipped when null) and
+        // returns how many there are. Server only: the client has no
+        // writable level and no container block entities.
+        template <typename Fn>
+        int ForEachTargetChest(PathfinderMob& body, const TransportItemTarget& target, Fn&& fn) {
+            EntityLevel* level = body.Level();
+            ILevelWrite* writable = level ? level->MutableBlocks() : nullptr;
+            if (!level || !writable) return 0;
+            std::vector<glm::ivec3> cells{target.pos};
+            if (const IBlockAccess* blocks = level->Blocks()) {
+                if (auto pairing = FindChestPartner(*blocks, target.pos)) {
+                    cells.push_back(pairing->partnerPos);
+                }
+            }
+            int found = 0;
+            for (const glm::ivec3& cell : cells) {
+                auto* chest = dynamic_cast<ChestBlockEntity*>(level->GetContainerBlockEntity(cell));
+                if (!chest) continue;
+                ++found;
+                if constexpr (!std::is_same_v<std::decay_t<Fn>, std::nullptr_t>) fn(*chest, *writable);
+            }
+            return found;
+        }
+
         // MC CopperGolemAi.onReachedTargetInteraction(state, sound) — each
         // state's sound (COPPER_GOLEM_ITEM_GET / NO_GET / DROP / NO_DROP, at
         // TICK_TO_PLAY_ON_REACHED_SOUND = 9) waits on a sound system.
@@ -877,17 +905,29 @@ namespace Game {
                 auto* copperGolem = dynamic_cast<CopperGolem*>(&body);
                 if (!copperGolem) return;
                 if (ticksSinceReachingTarget == kTickToStartOnReachedInteraction) {
-                    // MC container.startOpen(copperGolem) — the chest lid
-                    // counter (ContainerOpenersCounter) does not exist yet;
-                    // ChestRenderer draws the lid closed, so there is nothing
-                    // to animate open.
+                    // MC container.startOpen(copperGolem): the lid rises —
+                    // both halves when the container is a double chest's
+                    // CompoundContainer.
+                    ForEachTargetChest(body, target, [](ChestBlockEntity& chest, ILevelWrite& level) {
+                        chest.StartOpen(level);
+                    });
                     copperGolem->SetOpenedChestPos(target.pos);
                     copperGolem->SetState(state);
                 }
                 if (ticksSinceReachingTarget
                     == TransportItemsBetweenContainers::kTargetInteractionTime) {
-                    // MC container.stopOpen(copperGolem) — the same missing
-                    // lid counter.
+                    // MC: stopOpen only if container.getEntitiesWithContainer
+                    // Open() still lists the golem. A single chest does (its
+                    // opened pos is this chest); a CompoundContainer's list is
+                    // always empty, so a double chest is left to the lid's
+                    // 5-tick recheck, which stops counting the golem once the
+                    // pos is cleared just below.
+                    const bool single = ForEachTargetChest(body, target, nullptr) == 1;
+                    if (single && copperGolem->OpenedChestPos() == target.pos) {
+                        ForEachTargetChest(body, target, [](ChestBlockEntity& chest, ILevelWrite& level) {
+                            chest.StopOpen(level);
+                        });
+                    }
                     copperGolem->ClearOpenedChestPos();
                 }
             };

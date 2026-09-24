@@ -92,6 +92,12 @@ namespace Input {
     bool IsDown(const KeyMapping& mapping);
     bool ConsumeClick(KeyMapping& mapping);
 
+    // MC KeyMapping.set(key, false) after a debug chord: the key that just
+    // fired F3+<key> must not also act as its plain gameplay binding (F3+P
+    // is not a pick-block, F3+T does not open chat). Clears the held state
+    // and any queued clicks of every non-debug mapping on that key.
+    void CancelBoundKey(BoundKey key);
+
     // Named handles for the actions the game consumes, mirroring MC's
     // Options.keyUp / keyAttack / … fields. Valid after InitKeyMappings().
     namespace Binds {
@@ -108,6 +114,12 @@ namespace Input {
         extern KeyMapping* PickItem;
         extern KeyMapping* Drop;
         extern KeyMapping* SwapOffhand;
+        // Engine-specific: held together with Sneak while a block breaks,
+        // every touching block of the same kind breaks with it (the
+        // "vein miner" convention). A held modifier, never clicked — its
+        // clicks are drained each frame (PlatformMain) so a rebinding onto
+        // a clicked key does not queue up stale presses.
+        extern KeyMapping* VeinMine;
 
         extern KeyMapping* Inventory;
         extern KeyMapping* Chat;
@@ -126,6 +138,43 @@ namespace Input {
         extern KeyMapping* ToggleCursor;
         extern KeyMapping* Noclip;
         extern KeyMapping* LogConsole;
+
+        // MC Options.keyDebug* — the F3 family. `DebugModifier` is F3 held;
+        // every other one is the key pressed WHILE it is held, and
+        // `DebugOverlay` (also F3) toggles the overlay on RELEASE when no
+        // chord fired in between (KeyboardHandler.keyPress). Consumed by
+        // Render::DebugKeyHandler from the raw event stream, never through
+        // IsDown/ConsumeClick.
+        extern KeyMapping* DebugOverlay;
+        extern KeyMapping* DebugModifier;
+        extern KeyMapping* DebugCrash;
+        extern KeyMapping* DebugReloadChunk;
+        extern KeyMapping* DebugShowHitboxes;
+        extern KeyMapping* DebugClearChat;
+        extern KeyMapping* DebugShowChunkBorders;
+        extern KeyMapping* DebugShowAdvancedTooltips;
+        extern KeyMapping* DebugCopyRecreateCommand;
+        extern KeyMapping* DebugSpectate;
+        extern KeyMapping* DebugSwitchGameMode;
+        extern KeyMapping* DebugDebugOptions;
+        extern KeyMapping* DebugFocusPause;
+        extern KeyMapping* DebugDumpDynamicTextures;
+        extern KeyMapping* DebugReloadResourcePacks;
+        extern KeyMapping* DebugProfiling;
+        extern KeyMapping* DebugCopyLocation;
+        extern KeyMapping* DebugDumpVersion;
+        extern KeyMapping* DebugProfilingChart;
+        extern KeyMapping* DebugFpsCharts;
+        extern KeyMapping* DebugNetworkCharts;
+        extern KeyMapping* DebugLightmapTexture;
+        extern KeyMapping* DebugSwitchTranslucencyMode;
+        // Engine-specific: the ImGui debug panels (no vanilla counterpart).
+        extern KeyMapping* DebugImGuiPanels;
     }
+
+    // True for the F3-chorded mappings above. They share physical keys with
+    // gameplay actions by design (P is both Pick Block and F3+P), so the
+    // conflict check and the input dispatch both leave them out.
+    bool IsDebugMapping(const KeyMapping& mapping);
 
 } // namespace Input

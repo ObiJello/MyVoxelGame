@@ -1,5 +1,6 @@
 // File: src/server/session/PlayerSessionManager.cpp
 #include "PlayerSessionManager.hpp"
+#include "server/items/HushItems.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/level/ServerLevel.hpp"   // TicketsForDimension / CleanupSession
 #include "server/entity/ServerLevelBridge.hpp"
@@ -10,7 +11,14 @@
 #include "common/core/Log.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "platform/GameDirectory.hpp"
+#include "server/level/PlayerSpawnFinder.hpp"
+#include "common/world/level/GameRules.hpp"
+#include "common/world/level/DimensionId.hpp"
+#include "common/world/level/World.hpp"
+#include "common/world/block/BedBlock.hpp"
 #include <algorithm>
+#include <cmath>
+#include <optional>
 
 namespace Server {
 
@@ -71,7 +79,6 @@ namespace Server {
             m_sessions.clear();
             m_connectionToPlayer.clear();
             m_playerNames.clear();
-            m_playerSpawns.clear();
         }
         
         m_initialized = false;
@@ -150,6 +157,10 @@ namespace Server {
         
         // Clean up resources
         CleanupSession(playerId);
+        // The Hush's per-player item state (cooldowns, the compass cache and
+        // what the client was last told): a returning player starts clean,
+        // so their fresh client is sent the compass target again.
+        HushItems::ForgetPlayer(playerId);
         
         // Get connection ID for cleanup
         uint32_t connectionId = it->second->GetConnectionId();
@@ -206,7 +217,7 @@ namespace Server {
         }
         
         // Get spawn position
-        glm::vec3 spawnPos = GetPlayerSpawn(playerId);
+        glm::vec3 spawnPos = GetWorldSpawn();
         
         // Initialize at minimum view distance (2), like Minecraft's ServerPlayer default.
         // The client sends its actual render distance via ClientConfigC2S right after login,
@@ -282,14 +293,179 @@ namespace Server {
             return;
         }
         
-        glm::vec3 spawnPos = GetPlayerSpawn(playerId);
-        session->Respawn(spawnPos);
+        ServerPlayer* player = session->GetPlayer();
+        auto* server = Server::g_integratedServer.get();
+
+        // MC PlayerList.respawn → ServerPlayer.findRespawnAndUseSpawnBlock:
+        // the bed the player last slept in, when it still stands, is where
+        // they get up (AbstractBedBlock.findStandUpPosition); otherwise the
+        // point is forgotten, the player is told, and it is the Overworld
+        // spawn — whichever dimension they died in.
+        std::optional<glm::vec3> spawnPos;
+        int spawnDimension = Game::DimensionToRaw(Game::DimensionId::Overworld);
+        if (player && player->getRespawnConfig() && server) {
+            const ServerPlayer::RespawnConfig config = *player->getRespawnConfig();
+            // GetOrCreateLevel: a bed in a Nether this session has not yet
+            // built is still a bed.
+            ServerLevel* level = server->GetOrCreateLevel(Game::DimensionFromRaw(config.dimensionId));
+            Game::World* world = level ? level->World() : nullptr;
+            if (world) {
+                // MC ServerPlayer.findRespawnAndUseSpawnBlock reads the bed
+                // through ServerLevel.getBlockState, which LOADS the chunk
+                // (ServerChunkCache.getChunk with load = true). Same here:
+                // every chunk the stand-up search can touch — the bed cell
+                // and the 3-block ring around it — is brought to FULL,
+                // blocking, before a single block is read. Usually one
+                // chunk, at most four, and cache hits unless the death was
+                // far away.
+                const auto lo = Game::Math::WorldCoordinates::WorldToChunkPos(config.pos.x - 3, config.pos.z - 3);
+                const auto hi = Game::Math::WorldCoordinates::WorldToChunkPos(config.pos.x + 3, config.pos.z + 3);
+                bool loaded = true;
+                for (int cx = lo.x; cx <= hi.x; ++cx) {
+                    for (int cz = lo.z; cz <= hi.z; ++cz) {
+                        if (!level->GetChunkBlocking(Game::Math::ChunkPos(cx, cz))) loaded = false;
+                    }
+                }
+                if (loaded) {
+                    const Game::BlockState state =
+                        world->GetBlockState(config.pos.x, config.pos.y, config.pos.z);
+                    if (Game::IsBedBlock(state.Block())) {
+                        if (auto p = Game::FindBedStandUpPosition(*world, config.pos,
+                                                                  Game::BedFacing(state), config.yaw)) {
+                            spawnPos = glm::vec3(*p);
+                            spawnDimension = config.dimensionId;
+                        }
+                    }
+                }
+                // A load that failed (shutdown) leaves spawnPos empty: the
+                // world spawn below, the same answer as a missing bed.
+            }
+            if (!spawnPos) {
+                // ClientboundGameEventPacket NO_RESPAWN_BLOCK_AVAILABLE →
+                // block.minecraft.spawn.not_valid, and setRespawnPosition(null).
+                player->setRespawnConfig(std::nullopt);
+                session->SendSystemMessage(
+                    "You have no home bed or charged respawn anchor, or it was obstructed");
+            }
+        }
+
+        if (!spawnPos) {
+            glm::vec3 worldSpawn = GetWorldSpawn();
+            // MC PlayerList.respawn with no respawn point: PlayerSpawnFinder
+            // .findSpawn scatters the arrival within respawn_radius of the
+            // world spawn (validated standable columns; the suggestion itself
+            // as the fallback). The finder reads Overworld terrain, which is
+            // where a spawn-point-less respawn always lands.
+            Game::World* overworld = server ? server->Overworld().World() : nullptr;
+            if (overworld) {
+                const glm::ivec3 suggestion(static_cast<int>(std::floor(worldSpawn.x)),
+                                            static_cast<int>(std::floor(worldSpawn.y)),
+                                            static_cast<int>(std::floor(worldSpawn.z)));
+                worldSpawn = PlayerSpawnFinder::FindSpawn(*overworld, suggestion,
+                                                          Game::Rules::GetInt(Game::Rules::Id::RespawnRadius));
+            }
+            spawnPos = worldSpawn;
+        }
+
+        // A death in another dimension comes back through a dimension change
+        // (MC respawn always builds the player in the respawn level).
+        if (player && player->getDimensionId() != spawnDimension) {
+            session->ChangeDimension(spawnDimension, *spawnPos);
+        }
+        session->Respawn(*spawnPos);
         
         Log::Info("PlayerSessionManager: Player %u respawned at (%.1f, %.1f, %.1f)",
-                 playerId, spawnPos.x, spawnPos.y, spawnPos.z);
+                 playerId, spawnPos->x, spawnPos->y, spawnPos->z);
     }
 
     // === TICK PROCESSING ===
+
+    void PlayerSessionManager::ResetSharedVitals() {
+        m_vitalsSnapshot.clear();
+        m_sharedPool = Vitals{};
+    }
+
+    void PlayerSessionManager::ShareVitals(const std::vector<std::shared_ptr<PlayerSession>>& sessions) {
+        struct Participant { ServerPlayer* player; uint32_t id; };
+        std::vector<Participant> participants;
+        float dHealth = 0.0f, dSaturation = 0.0f, dExhaustion = 0.0f;
+        int   dFood = 0;
+        bool  anyPrevious = false;
+        bool  someoneDied = false;
+        DamageSource deathSource = DamageSource::GENERIC;
+        std::string  deathAttacker;
+
+        for (const auto& session : sessions) {
+            ServerPlayer* player = session ? session->GetPlayer() : nullptr;
+            if (!player) continue;
+            const uint32_t id = player->getPlayerId();
+            const bool participates = !player->isDead() &&
+                                      player->getGameMode() != GameMode::CREATIVE &&
+                                      player->getGameMode() != GameMode::SPECTATOR;
+            if (const auto it = m_vitalsSnapshot.find(id); it != m_vitalsSnapshot.end() && it->second.alive) {
+                anyPrevious = true;
+                const Vitals& was = it->second;
+                if (participates) {
+                    dHealth     += player->getHealth() - was.health;
+                    dFood       += player->getFoodData().getFoodLevel() - was.food;
+                    dSaturation += player->getFoodData().getSaturationLevel() - was.saturation;
+                    dExhaustion += player->getFoodData().getExhaustionLevel() - was.exhaustion;
+                } else if (player->isDead()) {
+                    // Died since the last pass: their whole health left the
+                    // pool, and their killer is everyone's.
+                    dHealth      -= was.health;
+                    someoneDied   = true;
+                    deathSource   = player->getLastDamageSource();
+                    deathAttacker = player->getLastAttackerName();
+                }
+            }
+            if (participates) participants.push_back({ player, id });
+        }
+
+        if (participants.empty()) {
+            // Nobody to share between (all dead, or all creative): the next
+            // living player seeds a fresh pool.
+            m_vitalsSnapshot.clear();
+            m_sharedPool = Vitals{};
+            return;
+        }
+
+        if (!m_sharedPool.alive || !anyPrevious) {
+            const ServerPlayer& seed = *participants.front().player;
+            m_sharedPool.health     = seed.getHealth();
+            m_sharedPool.food       = seed.getFoodData().getFoodLevel();
+            m_sharedPool.saturation = seed.getFoodData().getSaturationLevel();
+            m_sharedPool.exhaustion = seed.getFoodData().getExhaustionLevel();
+            m_sharedPool.alive      = true;
+        } else {
+            m_sharedPool.health     = std::clamp(m_sharedPool.health + dHealth, 0.0f, 20.0f);
+            m_sharedPool.food       = std::clamp(m_sharedPool.food + dFood, 0, 20);
+            m_sharedPool.saturation = std::clamp(m_sharedPool.saturation + dSaturation, 0.0f,
+                                                 static_cast<float>(m_sharedPool.food));
+            m_sharedPool.exhaustion = std::max(m_sharedPool.exhaustion + dExhaustion, 0.0f);
+            if (someoneDied) m_sharedPool.health = 0.0f;
+        }
+
+        for (const Participant& p : participants) {
+            p.player->applySharedVitals(m_sharedPool.health, m_sharedPool.food, m_sharedPool.saturation,
+                                        m_sharedPool.exhaustion, deathSource, deathAttacker);
+        }
+
+        m_vitalsSnapshot.clear();
+        for (const auto& session : sessions) {
+            ServerPlayer* player = session ? session->GetPlayer() : nullptr;
+            if (!player) continue;
+            const bool participates = !player->isDead() &&
+                                      player->getGameMode() != GameMode::CREATIVE &&
+                                      player->getGameMode() != GameMode::SPECTATOR;
+            m_vitalsSnapshot[player->getPlayerId()] = Vitals{
+                player->getHealth(), player->getFoodData().getFoodLevel(),
+                player->getFoodData().getSaturationLevel(), player->getFoodData().getExhaustionLevel(),
+                participates };
+        }
+        // Everyone died together: the pool is spent until someone respawns.
+        if (m_sharedPool.health <= 0.0f) m_sharedPool = Vitals{};
+    }
 
     void PlayerSessionManager::Tick(int64_t serverTick) {
         m_currentTick = serverTick;
@@ -306,6 +482,14 @@ namespace Server {
         }
         
         // Process sessions (limited by max per tick)
+        // /gamerule shared_vitals — before the sessions tick, so the pool
+        // every session then sends (SetHealthS2C) is this tick's truth.
+        if (Server::g_integratedServer && Server::g_integratedServer->SharedVitalsEnabled()) {
+            ShareVitals(sessionsToProcess);
+        } else if (!m_vitalsSnapshot.empty() || m_sharedPool.alive) {
+            ResetSharedVitals();
+        }
+
         size_t processed = 0;
         for (const auto& session : sessionsToProcess) {
             if (processed >= static_cast<size_t>(m_config.maxPlayersPerTick)) {
@@ -422,7 +606,7 @@ namespace Server {
 
             Network::PlayerUpdateS2CPacket packet;
             packet.playerId = srcPlayer->getPlayerId();
-            packet.position = glm::vec3(srcPlayer->getPosition());
+            packet.position = srcPlayer->getPosition();
             packet.rotation = srcPlayer->getRotation();
             packet.isCrouching = srcPlayer->IsSneaking();
             // The hurt flash. LivingEntity::Hurt already set this on the
@@ -437,6 +621,11 @@ namespace Server {
                     // TickCombatState, which is what counts it.
                     packet.deathTime = static_cast<uint8_t>(
                         std::clamp(view->deathTime, 0, 255));
+                    // MC DATA_EFFECT_PARTICLES / the invisible and glowing
+                    // shared flags, as every watcher of this player sees them.
+                    const Game::EffectVisuals& visuals = view->GetEffectVisuals();
+                    packet.effectFlags     = visuals.flags;
+                    packet.effectParticles = visuals.particles;
                 }
             }
             packet.sequenceNumber = 0;
@@ -447,6 +636,12 @@ namespace Server {
             // The body size, so /scale and a scaled portal show on every
             // other client's copy of this player.
             packet.scale = srcPlayer->getScale();
+            // /invisible, or MC Entity.isInvisible via the INVISIBILITY effect
+            // (LivingEntity.updateInvisibilityStatus).
+            packet.invisible = srcPlayer->isInvisible() ||
+                               srcPlayer->hasEffect(Game::MobEffectId::Invisibility);
+            packet.morph = srcPlayer->getMorph();   // /morph: drawn as that body
+            packet.morphAnim = srcPlayer->getMorphAnim();
 
             auto data = Network::Serialization::Serialize(packet);
 
@@ -473,17 +668,6 @@ namespace Server {
         return m_config.worldSpawn;
     }
 
-    void PlayerSessionManager::SetPlayerSpawn(uint32_t playerId, const glm::vec3& spawnPos) {
-        m_playerSpawns[playerId] = spawnPos;
-    }
-
-    glm::vec3 PlayerSessionManager::GetPlayerSpawn(uint32_t playerId) const {
-        auto it = m_playerSpawns.find(playerId);
-        if (it != m_playerSpawns.end()) {
-            return it->second;
-        }
-        return m_config.worldSpawn;
-    }
 
     // === CONFIGURATION ===
 
@@ -582,25 +766,11 @@ namespace Server {
             tickets->SetSimulationDistance(simulationDistance);
             tickets->AddPlayer(chunk, playerId);
 
-            // The one invariant worth asserting at runtime: a player's OWN
-            // chunk is always entity-ticking. We placed a ticket on it one line
-            // ago at level PlayerTicketLevel(simDist) <= 31, so this can only
-            // fail if propagation is broken.
-            //
-            // It is cheap and it never fires in a healthy world, which is
-            // exactly what makes it worth keeping — the bug it guards against
-            // (the player standing outside their own simulation range) froze
-            // every entity around them for a whole session and was invisible
-            // from every other vantage point: the server reported a healthy
-            // TPS, chunks streamed, commands answered, and damage still landed.
-            if (!tickets->IsEntityTicking(chunk)) {
-                Log::Warning("[Tickets] player %u at chunk (%d,%d) is NOT in its own "
-                             "entity-ticking range (level=%d, needs <= %d) — chunk "
-                             "level propagation is broken",
-                             playerId, chunk.x, chunk.z,
-                             tickets->GetChunkLevel(chunk),
-                             ChunkTicketManager::ENTITY_TICKING_LEVEL);
-            }
+            // No level query here. Levels move only in RunAllUpdates (MC
+            // DistanceManager.runAllUpdates, once a tick from the server),
+            // which also asserts that every player stands in their own
+            // entity-ticking range. Asking here forced a propagation per
+            // chunk border crossed — per player, several times a tick.
         }
     }
 
@@ -696,6 +866,7 @@ namespace Server {
         if ((m_currentTick % kLoaderTicketRefreshTicks) == (session->GetPlayerId() % kLoaderTicketRefreshTicks)) {
             for (const ChunkLoader& loader : session->Loaders()) {
                 if (loader.source == ChunkLoader::Source::Player) continue;
+                if (loader.IsSimulation()) continue;   // its levels come from the player's own ticket
                 ChunkTicketManager* tickets = TicketsForDimension(Game::DimensionToRaw(loader.dimension));
                 if (!tickets) continue;
                 const int level = std::min(ChunkTicketManager::FULL_LEVEL - loader.Radius(),

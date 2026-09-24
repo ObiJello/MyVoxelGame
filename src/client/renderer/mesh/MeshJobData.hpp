@@ -8,6 +8,7 @@
 #include "common/world/biome/Biomes.hpp"
 #include "common/world/chunk/PalettedContainer.hpp"
 #include "common/world/block/BlockState.hpp"
+#include "common/world/lighting/DataLayer.hpp"
 #include <array>
 #include <vector>
 #include <atomic>
@@ -53,6 +54,15 @@ namespace Render {
         // concurrently.
         bool hasBiomes = false;
         Game::PalettedContainer biomes;
+
+        // The section's light layers (MC RenderSectionRegion reads the live
+        // level's light; ours are shared copy-on-write DataLayers, as cheap to
+        // copy as a pointer). Present for the light sections one past each
+        // end of the world too, which carry no blocks (allAir) but whose
+        // light the halo of the top and bottom sections reads.
+        bool hasLight = false;
+        Game::Lighting::DataLayer skyLight;
+        Game::Lighting::DataLayer blockLight;
 
         Game::BlockID GetBlock(int lx, int ly, int lz) const {
             if (allAir) return Game::BlockID::Air;
@@ -127,6 +137,16 @@ namespace Render {
             if (!sec) return Game::BlockState{}.RawId();
             return sec->GetStateId(
                 static_cast<size_t>(Game::Math::LocalIndex(lx & 15, ly & 15, lz & 15)));
+        }
+
+        // Raw light at a cell, packed sky << 4 | block. A section with no copy
+        // (a chunk not loaded) reads MC's answer for a missing column: sky 15,
+        // block 0.
+        uint8_t LightAtLocal(int lx, int ly, int lz) const {
+            const SectionCopy* sec = SectionForLocal(lx, ly, lz);
+            if (!sec || !sec->hasLight) return 0xF0;
+            const int x = lx & 15, y = ly & 15, z = lz & 15;
+            return static_cast<uint8_t>((sec->skyLight.Get(x, y, z) << 4) | sec->blockLight.Get(x, y, z));
         }
 
         uint16_t BiomeAtLocal(int lx, int ly, int lz) const {

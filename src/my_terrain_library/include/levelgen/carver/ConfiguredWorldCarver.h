@@ -4,7 +4,7 @@
 #include "levelgen/carver/CarverConfiguration.h"
 #include "levelgen/carver/CarvingContext.h"
 #include "levelgen/carver/CarvingMask.h"
-#include "levelgen/Aquifer.h"
+#include "levelgen/density/terrain/Aquifer.h"
 #include "world/ChunkPos.h"
 #include "world/IChunk.h"
 #include "random/XoroshiroRandomSource.h"
@@ -43,7 +43,7 @@ public:
         ::world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         LegacyRandomSource& random,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         const ::world::ChunkPos& sourceChunkPos,
         CarvingMask& mask
     ) = 0;
@@ -103,7 +103,7 @@ public:
         ::world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         LegacyRandomSource& random,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         const ::world::ChunkPos& sourceChunkPos,
         CarvingMask& mask
     ) override {
@@ -128,7 +128,7 @@ public:
         ::world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         XoroshiroRandomSource& random,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         const ::world::ChunkPos& sourceChunkPos,
         CarvingMask& mask
     ) {

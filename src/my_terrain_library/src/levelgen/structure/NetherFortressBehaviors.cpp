@@ -1,4 +1,5 @@
 #include "levelgen/structure/PieceBehaviors.h"
+#include "nbt/AllTags.h"
 
 #include "levelgen/structure/OrientedPieceBehavior.h"
 #include "levelgen/WorldGenLevel.h"
@@ -304,6 +305,12 @@ public:
         }
         columnsDown(level, bb, 0, 6, 0, 6);
     }
+public:
+    // Reference: MonsterThronePiece.addAdditionalSaveData "Mob".
+    void saveState(nbt::CompoundTag& tag) const override { tag.putBoolean("Mob", m_hasPlacedSpawner); }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_hasPlacedSpawner = tag.getBooleanOr("Mob", m_hasPlacedSpawner);
+    }
 private:
     bool m_hasPlacedSpawner = false;
 };
@@ -526,6 +533,12 @@ public:
         brickBox(level, bb, 0, 6, 0, 4, 6, 4);
         columnsDown(level, bb, 0, 4, 0, 4);
     }
+public:
+    // Reference: CastleSmallCorridor{Right,Left}TurnPiece "Chest".
+    void saveState(nbt::CompoundTag& tag) const override { tag.putBoolean("Chest", m_isNeedingChest); }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_isNeedingChest = tag.getBooleanOr("Chest", m_isNeedingChest);
+    }
 private:
     bool m_isNeedingChest;
 };
@@ -558,6 +571,12 @@ public:
         }
         brickBox(level, bb, 0, 6, 0, 4, 6, 4);
         columnsDown(level, bb, 0, 4, 0, 4);
+    }
+public:
+    // Reference: CastleSmallCorridor{Right,Left}TurnPiece "Chest".
+    void saveState(nbt::CompoundTag& tag) const override { tag.putBoolean("Chest", m_isNeedingChest); }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_isNeedingChest = tag.getBooleanOr("Chest", m_isNeedingChest);
     }
 private:
     bool m_isNeedingChest;

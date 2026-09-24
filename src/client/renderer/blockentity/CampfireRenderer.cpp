@@ -2,7 +2,9 @@
 #include "CampfireRenderer.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
 #include "../viewmodel/HeldItemSpriteMesh.hpp"
+#include "BlockEntityShader.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/CampfireBlockEntity.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -17,38 +19,6 @@
 namespace Render {
 
     namespace {
-
-        // Plain textured pass. Unlike ChestRenderer's shader this takes UVs
-        // already normalised — HeldItemSpriteMesh emits 0..1 UVs against the
-        // item's own sprite texture rather than coordinates into a fixed-size
-        // atlas, so there is no divisor to fold in.
-        constexpr const char* kVS = R"GLSL(
-#version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec2 aUV;
-layout(location=2) in vec4 aColor;
-uniform mat4 uMVP;
-out vec2 vUV;
-out vec4 vColor;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV;
-    vColor = aColor;
-}
-)GLSL";
-
-        constexpr const char* kFS = R"GLSL(
-#version 330 core
-in vec2 vUV;
-in vec4 vColor;
-out vec4 FragColor;
-uniform sampler2D uTex;
-void main() {
-    vec4 t = texture(uTex, vUV);
-    if (t.a < 0.5) discard;
-    FragColor = t * vColor;
-}
-)GLSL";
 
         // MC Direction.get2DDataValue(): the horizontal ring indexed
         // south, west, north, east. NOT the same order as this engine's
@@ -78,13 +48,9 @@ void main() {
 
     bool CampfireRenderer::Initialize() {
         if (!g_renderBackend) return false;
-        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
-            // VKBackend cannot compile GLSL source; it loads the shared
-            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
-            // rewrites the .vert/.frag names). GL keeps the inline source.
-            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
-                                                     "shaders/blockentity.frag")
-            : g_renderBackend->CreateShader(kVS, kFS);
+        // The shared block-entity shader (BlockEntityShader.hpp): lit and
+        // fogged like the terrain, on both backends.
+        m_shader = BlockEntityShader::Create();
         if (m_shader == INVALID_SHADER) {
             Log::Error("[CampfireRenderer] shader compile failed");
             return false;
@@ -106,7 +72,7 @@ void main() {
                                   float /*partialTick*/,
                                   const glm::mat4& proj,
                                   const glm::mat4& view,
-                                  const glm::vec3& /*cameraPos*/) {
+                                  const glm::vec3& cameraPos) {
         PROFILE_ZONE_N("BE.Campfire");
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
 
@@ -179,8 +145,10 @@ void main() {
             // k*90 degrees. Same sign convention ChestRenderer already uses.
             const float yRot = glm::radians(-90.0f * static_cast<float>(dirIndex));
 
+            // Render-space translation (the block minus the view's origin,
+            // subtracted in double) — see RenderOrigin.hpp.
             glm::mat4 model = glm::translate(glm::mat4(1.0f),
-                glm::vec3(pos) + glm::vec3(0.5f, 0.44921875f, 0.5f));
+                Render::ToRender(glm::dvec3(pos)) + glm::vec3(0.5f, 0.44921875f, 0.5f));
             model = glm::rotate(model, yRot, glm::vec3(0.0f, 1.0f, 0.0f));
             model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
             model = glm::translate(model, glm::vec3(-0.3125f, -0.3125f, 0.0f));
@@ -192,13 +160,16 @@ void main() {
             if (!stateSet) {
                 g_renderBackend->SetPipelineState(s);
                 g_renderBackend->BindShader(m_shader);
-                // Food sprites cut at 0.5 (MC cutout) — VK push constant;
-                // GL's inline FS hardcodes it and ignores this.
+                // Food sprites cut at 0.5 (MC cutout).
                 g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.5f);
                 stateSet = true;
             }
             g_renderBackend->BindTexture(entry->texture, 0);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", proj * view * model);
+            // The frame's fog at this item's place; the light is the
+            // campfire cell's (MC LevelRenderer.getLightCoords raises its
+            // block light to the lit fire's emission, 15).
+            BlockEntityShader::ApplyWorld(m_shader, model, cameraPos, pos);
             g_renderBackend->DrawIndexed(entry->mesh, entry->indexCount);
         }
 

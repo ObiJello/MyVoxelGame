@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "key": {
+    "S": "minecraft:polished_choirstone_slab",
+    "P": "minecraft:polished_choirstone"
+  },
+  "pattern": [
+    "SSS",
+    " P ",
+    "PPP"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:voice_pedestal"
+  }
+}

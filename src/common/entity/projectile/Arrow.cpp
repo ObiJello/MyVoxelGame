@@ -57,6 +57,11 @@ namespace Game {
         if (m_life >= kDespawnLife) Discard();
     }
 
+    void Arrow::SetPotionFromPickupStack(const ItemStack& pickup) {
+        m_potion = Game::GetPotionContents(pickup);
+        m_potionDurationScale = Game::GetPotionDurationScale(pickup);
+    }
+
     void Arrow::OnHitBlockArrow(const glm::dvec3& hitPos, const glm::ivec3& blockPos) {
         m_lastBlock = m_level->Blocks()->GetBlock(blockPos.x, blockPos.y, blockPos.z);
 
@@ -70,6 +75,8 @@ namespace Game {
         m_inGround = true;
         m_shakeTime = kShakeTime;
         needsSync = true;
+        // MC onHitBlock: the thunk, 1.2 / (0.9..1.1).
+        PlaySound(GetHitGroundSound(), 1.0f, 1.2f / (m_level->Random().NextFloat() * 0.2f + 0.9f));
     }
 
     void Arrow::OnHitEntity(LivingEntity& target, const HitResult& hit) {
@@ -94,11 +101,17 @@ namespace Game {
                           static_cast<float>(damage),
                           GetOwner() ? GetOwner() : this)) {
             // MC AbstractArrow.doPostHurtEffects → Arrow.doPostHurtEffects:
-            // the tip's effects land after a successful hit, attributed to the
-            // shooter (getEffectSource).
-            for (const MobEffectInstance& effect : m_effects) {
-                target.AddEffect(effect, GetOwner() ? GetOwner() : this);
-            }
+            // potionContents.forEachEffect(mob.addEffect(effect, source),
+            // durationScale) — every effect, instant ones included, scaled
+            // by the pickup stack's POTION_DURATION_SCALE (1/8 for a tipped
+            // arrow), attributed to the shooter (getEffectSource).
+            Entity* effectSource = GetOwner() ? GetOwner() : this;
+            m_potion.ForEachEffect([&](MobEffectInstance effect) {
+                target.AddEffect(std::move(effect), effectSource);
+            }, m_potionDurationScale);
+            // MC: this.soundEvent (ARROW_HIT). The shooter's ARROW_HIT_PLAYER
+            // ding is a game-event packet to that one player — no such packet.
+            PlaySound(SoundEvents::ARROW_HIT, 1.0f, 1.2f / (m_level->Random().NextFloat() * 0.2f + 0.9f));
             Discard();
         } else {
             // MC ProjectileDeflection.REVERSE on an invulnerable target.
@@ -136,6 +149,15 @@ namespace Game {
                 }
             }
             ++m_inGroundTime;
+            // MC Arrow.tick's server tail: EXPOSED_POTION_DECAY_TIME — after
+            // 600 ticks in the ground the pickup becomes a plain arrow and
+            // the tip is gone. (The entity event 0 puff is a particle burst
+            // with no system here.)
+            if (serverSide && m_inGroundTime != 0 && !m_potion.IsEmpty() &&
+                m_inGroundTime >= 600) {
+                m_potion = PotionContents{};
+                m_potionDurationScale = 1.0f;
+            }
             return;   // MC's inGround branch never reaches super.tick()
         }
 

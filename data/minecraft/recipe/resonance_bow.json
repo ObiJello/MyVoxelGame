@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "E": "minecraft:echo_shard",
+    "R": "minecraft:resonite_ingot",
+    "S": "minecraft:stick"
+  },
+  "pattern": [
+    " SE",
+    "R E",
+    " SE"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:resonance_bow"
+  }
+}

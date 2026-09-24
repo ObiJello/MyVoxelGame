@@ -50,6 +50,9 @@ add_executable(async_chunk_test tests/parity/cpp/CppChunkGeneratorTest.cpp)
 target_link_libraries(async_chunk_test minecraft_terrain)
 
 # Biome region finder (drives golden region selection).
+add_executable(density_parity_test tests/parity/cpp/DensityParityTest.cpp)
+target_link_libraries(density_parity_test minecraft_terrain)
+
 add_executable(biome_search tests/parity/cpp/BiomeSearchTool.cpp)
 target_link_libraries(biome_search minecraft_terrain)
 

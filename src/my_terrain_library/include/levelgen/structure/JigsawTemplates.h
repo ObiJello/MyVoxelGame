@@ -46,6 +46,9 @@ struct PlacedJigsaw {
     int32_t x, y, z;
     int front, top;
     std::string name, pool, target;
+    // 26.3 JigsawBlockInfo.name() == null (FeaturePoolElement's synthetic
+    // jigsaw): JigsawBlock.canAttach accepts any source target.
+    bool nameIsNull = false;
     bool rollable;
     int placementPriority = 0;
     int selectionPriority = 0;

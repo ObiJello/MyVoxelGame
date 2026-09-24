@@ -5,41 +5,168 @@
 #include "../../entity/RemotePlayerManager.hpp"
 #include "common/entity/GeneratedEntityTypes.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/biome/Biomes.hpp"
+#include "common/entity/Morph.hpp"
+#include "common/entity/effect/MobEffects.hpp"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include "client/world/ClientLevel.hpp"
 #include <cstdlib>
 #include <filesystem>
 #include <unordered_map>
 
 namespace {
-    // Ids under data/minecraft/worldgen/<kind>/*.json ("structure", "biome"),
-    // once per kind, for /locate's completion. The data root is the one the
-    // server uses (MC_DATA_ROOT, else ./data).
-    // The registry ids, then the tag names (data/minecraft/tags/worldgen/
-    // <kind>/*.json, top level only — has_structure/… is a hundred entries
-    // of noise). The server takes a bare tag name as the tag, so both are
-    // typed the same way; a tag result names the member it found.
-    std::vector<std::string> WorldgenIds(const std::string& kind) {
-        static std::unordered_map<std::string, std::vector<std::string>> cache;
+    // /locate's registries, as MC's ResourceOrTagArgument / ResourceOrTag-
+    // KeyArgument suggest them (SharedSuggestionProvider.suggestResource):
+    // every element as a full id ("minecraft:plains", "twilightforest:
+    // lich_tower") and every tag as "#<namespace>:<path>".
+    //   biome     — the engine biome table (BiomeRegistry: vanilla, the
+    //               Hush, the Twilight Forest, the Aether), the same list the
+    //               server's biome sources draw from
+    //   structure — data/<ns>/worldgen/structure/*.json for every data
+    //               namespace, which is exactly what the terrain library's
+    //               StructureSets registry loads (minecraft, aether,
+    //               twilightforest), so structures added or removed there
+    //               need no change here
+    //   tags      — data/<ns>/tags/worldgen/<kind>/**.json
+    // Read once per kind. The data root is the server's (MC_DATA_ROOT, else
+    // ./data); client and server ship together.
+    struct WorldgenRegistry {
+        std::vector<std::string> elements;   // sorted full ids
+        std::vector<std::string> tags;       // sorted "#ns:path"
+        std::vector<std::string> topTags;    // the tags without a '/' in their path
+    };
+
+    std::filesystem::path WorldgenDataRoot() {
+        const char* env = std::getenv("MC_DATA_ROOT");
+        return std::filesystem::path(env ? env : "data");
+    }
+
+    const WorldgenRegistry& WorldgenIds(const std::string& kind) {
+        static std::unordered_map<std::string, WorldgenRegistry> cache;
         auto it = cache.find(kind);
         if (it != cache.end()) return it->second;
-        const char* env = std::getenv("MC_DATA_ROOT");
-        const std::filesystem::path root = std::filesystem::path(env ? env : "data") / "minecraft";
-        auto stems = [](const std::filesystem::path& dir) {
-            std::vector<std::string> out;
-            std::error_code ec;
-            for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-                if (e.is_regular_file(ec) && e.path().extension() == ".json") out.push_back(e.path().stem().string());
+        WorldgenRegistry reg;
+        std::error_code ec;
+        const std::filesystem::path root = WorldgenDataRoot();
+        for (const auto& nsDir : std::filesystem::directory_iterator(root, ec)) {
+            if (!nsDir.is_directory(ec)) continue;
+            const std::string ns = nsDir.path().filename().string();
+            if (kind == "structure") {
+                for (const auto& e : std::filesystem::directory_iterator(nsDir.path() / "worldgen" / kind, ec)) {
+                    if (e.is_regular_file(ec) && e.path().extension() == ".json") {
+                        reg.elements.push_back(ns + ":" + e.path().stem().string());
+                    }
+                }
             }
-            std::sort(out.begin(), out.end());
-            return out;
+            const std::filesystem::path tagDir = nsDir.path() / "tags" / "worldgen" / kind;
+            for (auto e = std::filesystem::recursive_directory_iterator(tagDir, ec);
+                 !ec && e != std::filesystem::recursive_directory_iterator(); e.increment(ec)) {
+                if (!e->is_regular_file(ec) || e->path().extension() != ".json") continue;
+                std::string path = std::filesystem::relative(e->path(), tagDir, ec).replace_extension().generic_string();
+                reg.tags.push_back("#" + ns + ":" + path);
+                if (path.find('/') == std::string::npos) reg.topTags.push_back(reg.tags.back());
+            }
+            ec.clear();
+        }
+        if (kind == "biome") {
+            for (Game::BiomeId id = 0; id < Game::BiomeRegistry::Count(); ++id) {
+                std::string name(Game::BiomeRegistry::Get(id).name);
+                reg.elements.push_back(name.find(':') == std::string::npos ? "minecraft:" + name : name);
+            }
+        }
+        for (auto* v : {&reg.elements, &reg.tags, &reg.topTags}) {
+            std::sort(v->begin(), v->end());
+            v->erase(std::unique(v->begin(), v->end()), v->end());
+        }
+        return cache.emplace(kind, std::move(reg)).first->second;
+    }
+
+    // SharedSuggestionProvider.matchesSubStr: `pattern` starts `input` at
+    // its beginning or right after a '.', '_' or '/'.
+    bool MatchesSubStr(const std::string& pattern, const std::string& input) {
+        for (size_t index = 0;;) {
+            if (input.compare(index, pattern.size(), pattern) == 0) return true;
+            const size_t next = input.find_first_of("._/", index);
+            if (next == std::string::npos) return false;
+            index = next + 1;
+        }
+    }
+
+    // SharedSuggestionProvider.filterResources: with a ':' typed the whole id
+    // must match, else the namespace or the path may — so "meadow" offers
+    // minecraft:hush_meadows and minecraft:meadow, "twilight" every
+    // twilightforest: id, "#is" the is_* tags.
+    void SuggestResources(const std::vector<std::string>& ids, const std::string& typedRaw,
+                          const std::string& prefix, std::vector<std::string>& out) {
+        std::string typed = typedRaw;
+        for (char& c : typed) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!typed.empty()) {
+            if (!prefix.empty()) {
+                if (typed.compare(0, prefix.size(), prefix) != 0) return;
+                typed.erase(0, prefix.size());
+            }
+        }
+        const bool hasNamespace = typed.find(':') != std::string::npos;
+        for (const std::string& full : ids) {
+            const std::string id = full.substr(prefix.size());
+            const size_t colon = id.find(':');
+            const bool match = typed.empty() ||
+                (hasNamespace ? MatchesSubStr(typed, id)
+                              : (MatchesSubStr(typed, id.substr(0, colon)) || MatchesSubStr(typed, id.substr(colon + 1))));
+            if (match) out.push_back(full);
+        }
+    }
+
+    // ── The current dimension's ids (WorldgenIdsS2C) ───────────────────
+    // What /locate offers once the server has said where the player is:
+    // only this dimension's biomes and structures (and the tags with a member
+    // here), shown WITHOUT their namespace — "hush_meadows", not
+    // "minecraft:hush_meadows". The server resolves a bare name against the
+    // player's dimension first (LocateFinder CanonicalWorldgenId), so what is
+    // offered is exactly what runs. Before the packet lands (or from a server
+    // that never sends it) the global registries above are the fallback.
+    struct DimensionIds {
+        bool received = false;
+        std::vector<std::string> biomes, structures;         // display names
+        std::vector<std::string> biomeTags, structureTags;   // "#name"
+    };
+    DimensionIds s_dimensionIds;
+
+    // The bare path of each full id; the full id only where two namespaces
+    // share a path within the one dimension (so the choice stays exact).
+    std::vector<std::string> DisplayNames(const std::vector<std::string>& ids, bool tags) {
+        auto path = [&](const std::string& id) {
+            const std::string body = tags ? id.substr(1) : id;
+            const size_t colon = body.find(':');
+            return colon == std::string::npos ? body : body.substr(colon + 1);
         };
-        std::vector<std::string> ids = stems(root / "worldgen" / kind);
-        for (const std::string& tag : stems(root / "tags" / "worldgen" / kind)) ids.push_back(tag);
-        cache[kind] = ids;
-        return ids;
+        std::unordered_map<std::string, int> uses;
+        for (const std::string& id : ids) ++uses[path(id)];
+        std::vector<std::string> out;
+        out.reserve(ids.size());
+        for (const std::string& id : ids) {
+            const std::string p = path(id);
+            out.push_back(uses[p] > 1 ? id : (tags ? "#" + p : p));
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    // MC's substring rule (MatchesSubStr) against the shown name: "mead"
+    // offers hush_meadows, "#in" the in_* tags.
+    void SuggestNames(const std::vector<std::string>& names, const std::string& typedRaw,
+                      std::vector<std::string>& out) {
+        std::string typed = typedRaw;
+        for (char& c : typed) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (const std::string& name : names) {
+            if (typed.empty() || MatchesSubStr(typed, name) ||
+                (typed[0] == '#' && name[0] == '#' && MatchesSubStr(typed.substr(1), name.substr(1)))) {
+                out.push_back(name);
+            }
+        }
     }
 }
 
@@ -233,11 +360,16 @@ namespace {
             {"gamemode",    "/gamemode <survival|creative|adventure|spectator> [player]"},
             {"difficulty",  "/difficulty [peaceful|easy|normal|hard]"},
             {"kill",        "/kill [<player>|@e[type=...]|@a|@p|@r|@s]"},
+            {"heal",        "/heal [<player>|@e[type=...]|@a|@p|@r|@s]"},
+            {"effect",      "/effect give <targets> <effect> [<seconds>|infinite] [<amplifier>] [<hideParticles>] | "
+                            "/effect clear [<targets>] [<effect>]"},
             {"summon",      "/summon <entity> [count] [<x> <y> <z>] [fuse=n] [delay=n]"},
+            {"morph",       "/morph [baby] <entity> | item <item> | block <block> | xp | herobrine | off"},
+            {"control",     "/control <player> | off"},
             {"sheepeat",    "/sheepeat [radius]"},
             {"seed",        "/seed"},
             {"time",        "/time <set|add|query> <time>  (time: <n>[t|s|d])"},
-            {"dimension",   "/dimension <overworld|nether|end>  (travels as the dimension's portal would from where you stand)"},
+            {"dimension",   "/dimension <overworld|nether|end|hush|twilight|aether>  (travels as the dimension's portal would from where you stand)"},
             {"locate",      "/locate <structure|biome|poi> <id|#tag>"},
             {"gamerule",    "/gamerule <rule> [value]"},
             {"portal",      "/portal <make|make_biway|make_full> <w> <h> <dim> <x> <y> <z> | "
@@ -289,6 +421,8 @@ namespace {
         }
 
         std::vector<std::string> candidates;
+        // Set by a branch that already filtered MC's resource way.
+        bool resourceFiltered = false;
         if (argIndex == 0) {
             // BARE command names (no '/'), from the server's CommandsS2C so
             // the popup can never drift from what is actually registered.
@@ -303,7 +437,8 @@ namespace {
             cmd = ToLowerCopy(cmd);
 
             const bool takesSelectors =
-                cmd == "kill" || cmd == "tp" || cmd == "teleport";
+                cmd == "kill" || cmd == "heal" || cmd == "tp" || cmd == "teleport" ||
+                cmd == "effect";
 
             // An @-token completes as a selector wherever selectors parse,
             // whatever the argument position — this is the "@e[type=<TAB>"
@@ -330,8 +465,43 @@ namespace {
                 } else if (argIndex >= 4) {
                     candidates = {"~", "facing"};
                 }
+            } else if (cmd == "effect") {
+                // MC EffectCommands' tree: give|clear, EntityArgument
+                // targets, a ResourceArgument over the mob_effect registry,
+                // then `infinite` (the only literal among the numbers) and
+                // hideParticles' bool.
+                const std::string sub = tokens.size() >= 2 ? ToLowerCopy(tokens[1]) : "";
+                if (argIndex == 1) {
+                    candidates = {"clear", "give"};
+                } else if (argIndex == 2) {
+                    candidates = CollectPlayerNames();
+                    candidates.push_back("@a"); candidates.push_back("@e");
+                    candidates.push_back("@n"); candidates.push_back("@p");
+                    candidates.push_back("@r"); candidates.push_back("@s");
+                } else if (argIndex == 3) {
+                    // SharedSuggestionProvider.suggestResource matches the
+                    // full id or its path: bare paths unless a namespace is
+                    // being typed.
+                    const bool namespaced = word.rfind("minecraft:", 0) == 0 ||
+                                            (!word.empty() && std::string("minecraft:").rfind(word, 0) == 0 &&
+                                             word.size() > 1);
+                    for (int i = 0; i < Game::kMobEffectCount; ++i) {
+                        const std::string name = Game::GetEffectName(static_cast<Game::MobEffectId>(i));
+                        candidates.push_back(namespaced ? "minecraft:" + name : name);
+                    }
+                    std::sort(candidates.begin(), candidates.end());
+                } else if (sub == "give" && argIndex == 4) {
+                    candidates = {"infinite"};
+                } else if (sub == "give" && argIndex == 6) {
+                    candidates = {"false", "true"};
+                }
             } else if (cmd == "kick") {
                 if (argIndex == 1) candidates = CollectPlayerNames();
+            } else if (cmd == "control") {
+                if (argIndex == 1) {
+                    candidates = CollectPlayerNames();
+                    candidates.push_back("off");
+                }
             } else if (cmd == "difficulty") {
                 if (argIndex == 1) candidates = {"easy", "hard", "normal", "peaceful"};
             } else if (cmd == "gamemode") {
@@ -354,6 +524,82 @@ namespace {
                     candidates = {"1", "10", "100", "1000", "10000", "100000"};
                 } else {
                     candidates = {"~", "fuse=80", "delay=1"};
+                }
+            } else if (cmd == "morph") {
+                // /morph [baby] <entity|item <item>|block <block>|xp|off>
+                const std::string sub = tokens.size() >= 2 ? ToLowerCopy(tokens[1]) : "";
+                if (argIndex == 1) {
+                    candidates = CollectEntitySlugs();
+                    candidates.push_back("baby");
+                    candidates.push_back("block");
+                    candidates.push_back("herobrine");
+                    candidates.push_back("item");
+                    candidates.push_back("off");
+                    candidates.push_back("xp");
+                } else if (argIndex == 2 && sub == "item") {
+                    candidates = Game::Morph::ItemSlugs();
+                } else if (argIndex == 2 && sub == "block") {
+                    candidates = CollectBlockNames();
+                } else if (argIndex == 2 && sub == "baby") {
+                    candidates = CollectEntitySlugs();
+                } else if (argIndex == 2) {
+                    candidates = {"baby"};
+                }
+            } else if (cmd == "setblock") {
+                // /setblock <x> <y> <z> <block>[state] [destroy|keep|replace]
+                if (argIndex >= 1 && argIndex <= 3) {
+                    candidates = {"~"};
+                } else if (argIndex == 4) {
+                    candidates = CollectBlockNames();
+                } else if (argIndex == 5) {
+                    candidates = {"destroy", "keep", "replace"};
+                }
+            } else if (cmd == "replaceall") {
+                // /replaceall <block> <radius> <newblock>
+                if (argIndex == 1 || argIndex == 3) {
+                    candidates = CollectBlockNames();
+                } else if (argIndex == 2) {
+                    candidates = {"4", "8", "16", "32", "64"};
+                }
+            } else if (cmd == "execute") {
+                // The subcommand chain: what can follow depends on the word
+                // before the one being completed.
+                const std::string prev = tokens.size() >= 2
+                    ? ToLowerCopy(tokens[tokens.size() - (word.empty() ? 1 : 2)]) : "";
+                if (prev == "as" || prev == "at") {
+                    candidates = CollectPlayerNames();
+                    candidates.push_back("@a"); candidates.push_back("@e");
+                    candidates.push_back("@p"); candidates.push_back("@r");
+                    candidates.push_back("@s");
+                } else if (prev == "run") {
+                    candidates = Render::GetServerCommandNames();
+                    std::sort(candidates.begin(), candidates.end());
+                } else if (prev == "in") {
+                    candidates = {"aether", "end", "hush", "nether", "overworld", "twilight"};
+                } else if (prev == "positioned" || prev == "rotated") {
+                    candidates = {"~", "as", "over"};
+                } else if (prev == "facing") {
+                    candidates = {"~", "entity"};
+                } else if (prev == "anchored") {
+                    candidates = {"eyes", "feet"};
+                } else if (prev == "if" || prev == "unless") {
+                    candidates = {"block", "blocks", "entity"};
+                } else if (prev == "block") {
+                    candidates = {"~"};
+                } else {
+                    candidates = {"align", "anchored", "as", "at", "facing", "if", "in",
+                                  "positioned", "rotated", "run", "unless"};
+                }
+            } else if (cmd == "defaultgamemode") {
+                if (argIndex == 1) candidates = {"adventure", "creative", "spectator", "survival"};
+            } else if (cmd == "spawnall") {
+                if (argIndex == 1) candidates = {"adults", "babies", "both"};
+                else if (argIndex == 2) candidates = {"2", "4", "8"};
+            } else if (cmd == "worldoptions") {
+                if (argIndex == 1) {
+                    candidates = {"allow_commands", "force_game_mode", "guest_command_access", "joinable"};
+                } else if (argIndex == 2) {
+                    candidates = {"off", "on"};
                 }
             } else if (cmd == "shape") {
                 // /shape <block> <form> <sizes...> [quirks] [at x y z]
@@ -382,16 +628,44 @@ namespace {
             } else if (cmd == "sheepeat") {
                 if (argIndex == 1) candidates = {"8", "16"};
             } else if (cmd == "dimension" || cmd == "dim") {
-                if (argIndex == 1) candidates = {"end", "nether", "overworld"};
+                if (argIndex == 1) candidates = {"aether", "end", "hush", "nether", "overworld", "twilight"};
             } else if (cmd == "locate") {
                 if (argIndex == 1) {
                     candidates = {"biome", "poi", "structure"};
                 } else if (argIndex == 2) {
-                    // The registry names come from the data pack's files, the
-                    // same ones the server reads (MC suggests the registry).
+                    // MC's registry suggestions (WorldgenIds): full ids, then
+                    // tags. With nothing typed the list is every element plus
+                    // the top-level tags (MC also lists the ~100 nested
+                    // has_structure/* biome tags there; they appear once a
+                    // '#' is typed). Pre-filtered MC's way, not by prefix.
                     const std::string sub = tokens.size() > 1 ? ToLowerCopy(tokens[1]) : "";
-                    if (sub == "structure" || sub == "biome") candidates = WorldgenIds(sub);
-                    else if (sub == "poi") candidates = {"nether_portal"};
+                    if ((sub == "structure" || sub == "biome") && s_dimensionIds.received) {
+                        // Only what this dimension generates, bare names; tags
+                        // once a '#' is typed.
+                        const bool biome = sub == "biome";
+                        const bool tag = !word.empty() && word[0] == '#';
+                        SuggestNames(tag ? (biome ? s_dimensionIds.biomeTags : s_dimensionIds.structureTags)
+                                         : (biome ? s_dimensionIds.biomes : s_dimensionIds.structures),
+                                     word, candidates);
+                    } else if (sub == "structure" || sub == "biome") {
+                        const WorldgenRegistry& reg = WorldgenIds(sub);
+                        SuggestResources(reg.elements, word, "", candidates);
+                        SuggestResources(word.empty() ? reg.topTags : reg.tags, word, "#", candidates);
+                    } else if (sub == "poi") {
+                        // The portal kinds that can exist where the player
+                        // stands: nether portals in the Overworld and the
+                        // Nether, hush portals in the Overworld and the Hush.
+                        const Game::DimensionId dim = Client::ClientLevels::ActiveDimension();
+                        std::vector<std::string> portals;
+                        if (dim == Game::DimensionId::Overworld || dim == Game::DimensionId::Hush) {
+                            portals.push_back("hush_portal");
+                        }
+                        if (dim == Game::DimensionId::Overworld || dim == Game::DimensionId::Nether) {
+                            portals.push_back("nether_portal");
+                        }
+                        SuggestNames(portals, word, candidates);
+                    }
+                    resourceFiltered = true;
                 }
             } else if (cmd == "time") {
                 if (argIndex == 1) {
@@ -436,7 +710,7 @@ namespace {
                 } else if (sub == "make" || sub == "make_biway" || sub == "make_full") {
                     // <w> <h> <dim> <x> <y> <z>
                     if (argIndex == 2 || argIndex == 3) candidates = {"1", "2", "3", "4"};
-                    else if (argIndex == 4)             candidates = {"end", "nether", "overworld"};
+                    else if (argIndex == 4)             candidates = {"aether", "end", "hush", "nether", "overworld", "twilight"};
                     else if (argIndex <= 7)             candidates = {"~"};
                 } else if (sub == "make_loop") {
                     // <w> <h> <dx> <dy> <dz> [turn]
@@ -473,6 +747,7 @@ namespace {
 
         // Filter by the partial at the FINAL anchor (a selector path may have
         // moved it inside the token), case-insensitive.
+        if (resourceFiltered) return candidates;
         const std::string partial = text.substr(anchorOut, cursor - anchorOut);
         std::vector<std::string> filtered;
         for (const auto& c : candidates) {
@@ -504,6 +779,17 @@ namespace Render {
 
     const std::vector<std::string>& GetServerCommandNames() {
         return s_serverCommandNames;
+    }
+
+    void SetDimensionWorldgenIds(const std::vector<std::string>& biomes,
+                                 const std::vector<std::string>& structures,
+                                 const std::vector<std::string>& biomeTags,
+                                 const std::vector<std::string>& structureTags) {
+        s_dimensionIds.received      = true;
+        s_dimensionIds.biomes        = DisplayNames(biomes, false);
+        s_dimensionIds.structures    = DisplayNames(structures, false);
+        s_dimensionIds.biomeTags     = DisplayNames(biomeTags, true);
+        s_dimensionIds.structureTags = DisplayNames(structureTags, true);
     }
 
     void ChatScreen::Open(bool withSlash) {
@@ -669,7 +955,15 @@ namespace Render {
                     m_history.erase(m_history.begin());
                 }
             }
-            Close();
+            if (m_closeOnSubmit) {
+                Close();
+            } else {
+                // MC ChatScreen.keyPressed with closeOnSubmit = false: the
+                // line is sent, the box is emptied and stays up (the bed).
+                m_inputText.clear();
+                m_cursorPos = 0;
+                CloseSuggestions();
+            }
             return true;
         }
 

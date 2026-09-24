@@ -60,9 +60,17 @@ namespace Game::Immersive {
         EndPortal    = 2,
         PortalGun    = 3,   // the Valve-style pair (phase 8)
         Mirror       = 4,
+        HushPortal   = 5,   // a reinforced-deepslate frame (PortalFamily::Hush)
+        AetherPortal = 6,   // a glowstone frame (PortalFamily::Aether)
     };
 
     // Behaviour bits. Named after the mod's fields so its docs apply.
+    // How much a body may overhang an opening and still count as fitting
+    // through it (Portal::BoxFitsOpening). The collision's slack, and by
+    // extension the crossing's: a body that fits through the hole always
+    // crosses (see Portal::CrossingLeniency).
+    inline constexpr double kFitSlack = 0.08;
+
     namespace PortalFlag {
         inline constexpr uint32_t Teleportable         = 1u << 0;  // entities may cross
         inline constexpr uint32_t Visible              = 1u << 1;  // rendered at all
@@ -129,8 +137,11 @@ namespace Game::Immersive {
         double SignedDistance(const glm::dvec3& p) const { return glm::dot(p - point, normal); }
         bool   Contains(const glm::dvec3& p) const { return SignedDistance(p) > 0.0; }
         // As the vec4 the shaders take: (n.xyz, −n·point), positive = kept.
-        glm::vec4 AsClipPlane() const {
-            return glm::vec4(glm::vec3(normal), static_cast<float>(-glm::dot(normal, point)));
+        // DOUBLE: w is world-sized, and the renderer re-expresses the
+        // plane relative to its render origin before it meets a float
+        // (Render::PlaneToRender), so hand it over unrounded.
+        glm::dvec4 AsClipPlane() const {
+            return glm::dvec4(normal, -glm::dot(normal, point));
         }
     };
 
@@ -176,11 +187,33 @@ namespace Game::Immersive {
         // still count. A gun portal's oval narrows toward the top, where a
         // standing player's eye passes; the walkable opening in the wall is
         // the whole 1×2, so the crossing must accept the whole 1×2 too.
-        double CrossingLeniency() const { return kind == PortalKind::PortalGun ? 0.5 : 0.05; }
+        // How far outside the outline an eye may cross the plane and still
+        // count. For the gun the outline is its 1×2 OPENING, not the oval
+        // (see RaytraceSegment), and the slack is the collision's own
+        // kFitSlack: a body that fits through the hole always crosses. It
+        // used to be 0.5 around the oval — more than the oval's half-width
+        // — so a floor portal on a two-high stack teleported a player who
+        // jumped BESIDE it: their eye rose above the plane and came back
+        // down through the plane's extension a block to the side.
+        double CrossingLeniency() const { return kind == PortalKind::PortalGun ? 0.08 : 0.05; }
         bool IsMirror() const { return Has(PortalFlag::Mirror); }
 
         double HalfWidth()  const { return width  * 0.5; }
         double HalfHeight() const { return height * 0.5; }
+        // The hole a body goes through, in the plane's (u, v): the gun's
+        // full 1×2 (its oval is the picture, the two wall cells are the
+        // hole), the outline's rectangle for anything else. Shared by the
+        // player's collision, the mobs' collision and the mobs' crossing
+        // test so all three agree on what fits.
+        double OpeningHalfWidth()  const { return kind == PortalKind::PortalGun ? 0.5 : HalfWidth(); }
+        double OpeningHalfHeight() const { return kind == PortalKind::PortalGun ? 1.0 : HalfHeight(); }
+        // Does the WHOLE box, projected onto the plane, fit inside the
+        // opening grown by `slack` — like a body fitting through a hole? A
+        // box hanging out past the opening's side would walk into the wall
+        // block's side face, and one a block too tall would slip through a
+        // hole it cannot fit. Depth is ignored: the box may be anywhere
+        // along the normal.
+        bool BoxFitsOpening(const glm::dvec3& boxMin, const glm::dvec3& boxMax, double slack) const;
 
         // Unit normal of the surface. The viewer on its positive side sees
         // through; an entity crosses from positive to negative.

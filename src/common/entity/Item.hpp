@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include "ClientItemLoader.hpp"   // CompositeChild
 #include <unordered_map>
 #include <vector>
 
@@ -91,6 +92,11 @@ namespace Game {
         float playerYaw = 0.0f;
         // Compass target (lodestone OR world spawn). Default: world spawn at origin.
         float compassTargetX = 0.0f, compassTargetZ = 0.0f;
+        // The Hush's echo compass: the nearest Echo Vault the server gave
+        // (HushSignalS2C), or no target — then the needle spins, as MC's
+        // compass does with nothing to point at.
+        bool  echoCompassHasTarget = false;
+        float echoCompassTargetX = 0.0f, echoCompassTargetZ = 0.0f;
         // Wall-clock time in seconds since session start — used for animation that ticks
         // on its own (the compass needle has overshoot/wobble behavior in MC).
         float timeSeconds = 0.0f;
@@ -140,6 +146,18 @@ namespace Game {
     // Server-only by construction: it mutates an entity the client does not
     // own. Returning Pass falls through to the entity's own interaction.
     using ItemInteractEntityFn = UseResult (*)(ItemStack& stack, LivingEntity& target);
+
+    // MC Item.getUseDuration / getUseAnimation / finishUsingItem /
+    // releaseUsing, for the items whose hold-to-use is the ITEM's own rather
+    // than a component's — MC's BowItem (72000 ticks, BOW, fires on release)
+    // is the model. CONSUMABLE and BLOCKS_ATTACKS keep answering first
+    // (GetUseDuration); these are the fallback an item with neither sets.
+    //
+    // Both callbacks run on the SERVER only (ServerPlayer::finishUsingItem /
+    // releaseUsingItem): the player is always the server's ServerPlayer.
+    // `remainingTicks` is MC's timeLeft (releaseUsing's third argument).
+    using ItemFinishUsingFn  = void (*)(IUsePlayer& player, ItemStack& stack);
+    using ItemReleaseUsingFn = void (*)(IUsePlayer& player, ItemStack& stack, int remainingTicks);
 
     // Base `Item.use` — mirrors Item.java:196-219. Dispatches on the held
     // stack's DataComponents:
@@ -209,6 +227,7 @@ namespace Game {
         std::string                   spriteName;                  // single static sprite (layer0 or non-layered)
         std::vector<std::string>      spriteLayers;                // all layerN textures (multi-layer items: leather armor, spawn egg, potion, …)
         std::vector<uint32_t>         layerTints;                  // ARGB tint per layer index (0 = untinted/white). From the items/{slug}.json `tints` array.
+        std::vector<ItemTintKind>     layerTintKinds;              // parallel to layerTints — Potion entries resolve per stack (ResolveItemLayerTint)
         std::vector<std::string>      spriteFrames;                // animated sprite frames
         ItemFrameSelector             selectFrame = nullptr;        // picks index into spriteFrames
         int                           maxStackSize = 64;
@@ -223,6 +242,10 @@ namespace Game {
         // `oak_trapdoor_bottom`, not the block's stateful root. Items.java
         // line 467 (`registerSimpleItemModel(trapdoor, bottom)`).
         std::string                   blockModelOverride;
+        // A 26.x composite item model (the straw bed): the children whose
+        // union BakeCompositeItemModels registers under blockModelOverride
+        // once the block models are loaded. Empty for everything else.
+        std::vector<CompositeChild>   compositeChildren;
         // BEWLR (BlockEntityWithoutLevelRenderer) hooks — set when the
         // items/{slug}.json uses {"type":"minecraft:special", "model":{"type":"chest","texture":"trapped"}}.
         // specialKind picks the C++ renderer (chest, shulker_box, …);
@@ -230,6 +253,11 @@ namespace Game {
         // Each renderer reads these from the Item to pick its assets.
         std::string                   specialKind;
         std::string                   specialTexture;
+        // MC JUKEBOX_PLAYABLE's song description ("C418 - 13"), resolved at
+        // registration from the disc's slug (music_disc_<song> ->
+        // jukebox_song.minecraft.<song>). Empty for anything but a disc. The
+        // tooltip prints it in grey, as JukeboxPlayable.addToTooltip does.
+        std::string                   jukeboxSongDescription;
         // Default DataComponents for this item — mirrors MC's
         // `Item.Properties.component(...)` accumulation. ItemStack lookups
         // (ItemStack::get<T>) fall back to these when the stack itself doesn't
@@ -247,6 +275,13 @@ namespace Game {
         ItemUseOnFn                   useOn = nullptr;
         ItemInteractEntityFn          interactLivingEntity = nullptr;
         ItemUseFn                     use   = nullptr;
+        // The item's own hold-to-use (see ItemFinishUsingFn above). A zero
+        // duration means "no hold" — the default for every vanilla item
+        // except the bow.
+        int                           useDuration  = 0;
+        ItemUseAnimation              useAnimation = ItemUseAnimation::NONE;
+        ItemFinishUsingFn             finishUsing  = nullptr;
+        ItemReleaseUsingFn            releaseUsing = nullptr;
         // Inventory click-behaviour overrides (bundle). See the fn typedefs
         // above; consulted by AbstractContainerMenu::TryItemClickBehaviourOverride
         // (mirrors AbstractContainerMenu.tryItemClickBehaviourOverride).
@@ -292,6 +327,13 @@ namespace Game {
         // copy display names from blocks. Idempotent.
         static void Initialize();
 
+        // Build and register the synthetic block model of every composite
+        // item (Item::compositeChildren) — MC CompositeModel, folded into
+        // one BlockModel the existing GUI / held / dropped item paths draw.
+        // Call after BlockModelRegistry::LoadModels (it rotates and merges
+        // loaded models); idempotent, and re-run on a resource reload.
+        static void BakeCompositeItemModels();
+
         // Lookup by ID. Returns a sentinel "Air" item if id is unknown.
         static const Item& Get(ItemID id);
 
@@ -304,6 +346,12 @@ namespace Game {
                                                               : BlockID::Air;
         }
         static bool IsBlockItem(ItemID id);
+        // Registry slug ("oak_planks", "echo_shard"), namespace-free; empty for
+        // an unknown id. Block items answer with their block's registrySlug,
+        // pure items with the table's slug — the same rule the Anvil writer
+        // (ItemName) applies, exposed here so common code (loot, enchanting)
+        // can ask "which item tags does this id carry" through DataTags.
+        static std::string_view Slug(ItemID id);
         static bool IsAir(ItemID id) { return id == Items::Air; }
 
         // For diagnostics / iteration.
@@ -400,6 +448,23 @@ namespace Game {
         // DataComponents.hpp (and the enchantment headers) into Item.hpp.
         bool HasFoil() const;
     };
+
+    // The ARGB tint for one sprite layer of THIS stack — MC ItemTintSource.
+    // calculate. A fixed tint answers Item::layerTints[layer] (0 = untinted);
+    // a "minecraft:potion" tint answers the stack's PotionContents colour
+    // (getColorOr(default), made opaque), so a Potion of Swiftness is blue
+    // and a Potion of Fire Resistance orange from the same item.
+    uint32_t ResolveItemLayerTint(const ItemStack& stack, size_t layer);
+
+    // MC ItemStack.getItemName → Item.getName(stack): the ITEM_NAME component
+    // or the registry name — except PotionItem / TippedArrowItem, whose name
+    // is PotionContents.getName("item.minecraft.<slug>.effect.") whenever the
+    // stack carries POTION_CONTENTS ("Potion of Swiftness", "Splash Potion of
+    // Healing", "Uncraftable Potion", "Water Bottle").
+    std::string GetItemStackItemName(const ItemStack& stack);
+
+    // MC ItemStack.getHoverName: CUSTOM_NAME, else getItemName.
+    std::string GetItemStackHoverName(const ItemStack& stack);
 
     // Mirrors MC `ItemStack.isSameItemSameComponents` (ItemStack.java) — same
     // item AND identical per-stack components, ignoring count. This is the

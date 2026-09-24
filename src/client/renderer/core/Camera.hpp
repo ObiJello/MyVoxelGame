@@ -8,6 +8,7 @@
 #include "../../input/Input.hpp"
 #include "../../input/KeyMapping.hpp"
 #include "common/core/Mth.hpp"
+#include "RenderOrigin.hpp"
 
 namespace Render {
 
@@ -22,7 +23,27 @@ namespace Render {
     class Camera {
     public:
         // Camera parameters
-        glm::vec3 position{ 0.0f, 64.0f, 0.0f }; // This will be set by PlayerController
+        // DOUBLE, like MC's Camera (Vec3). Every float handed to the GPU is
+        // measured from `renderOrigin`, see RenderOrigin.hpp.
+        glm::dvec3 position{ 0.0, 64.0, 0.0 }; // This will be set by PlayerController
+        // The origin this camera's render-space matrices are relative to:
+        // its own block position, refreshed by PrepareRender() once the
+        // position is final for the frame (or, for a portal's far camera,
+        // set by the portal renderer). A viewOverride is stored RELATIVE
+        // to it.
+        glm::dvec3 renderOrigin{ 0.0 };
+
+        // Final position for this view: pick the origin and publish it as
+        // the render origin every renderer reads (Render::ToRender).
+        void PrepareRender() {
+            renderOrigin = Render::RenderOriginFor(position);
+            Render::SetRenderOrigin(renderOrigin);
+        }
+        // Re-publish this camera's origin (a nested view restores the
+        // enclosing camera's).
+        void ActivateRenderOrigin() const { Render::SetRenderOrigin(renderOrigin); }
+        // The camera's position in its own render space — small.
+        glm::vec3 RenderPosition() const { return glm::vec3(position - renderOrigin); }
 
         // MINECRAFT'S CONVENTION — see the long note on Game::Mth::ViewVector.
         //   yaw   0 = facing +Z (south), increasing clockwise from above.
@@ -135,7 +156,18 @@ namespace Render {
                 up    = newUp;
                 right = newRight;
             }
-            return viewTilt * glm::lookAt(position, position + dir, up);
+            // RENDER space: the eye is its sub-block offset from
+            // renderOrigin, so this matrix never carries a large translation.
+            const glm::vec3 eye = RenderPosition();
+            return viewTilt * glm::lookAt(eye, eye + dir, up);
+        }
+
+        // WORLD-space view, for frustum planes and anything that culls in
+        // world coordinates. Float translation = the world position, which
+        // is imprecise far out; culling tolerates that, drawing must not use
+        // it (see RenderOrigin.hpp).
+        glm::mat4 GetWorldViewMatrix() const {
+            return GetViewMatrix() * glm::translate(glm::mat4(1.0f), -glm::vec3(renderOrigin));
         }
 
         // Get the camera's forward direction vector — MC Entity.getLookAngle().

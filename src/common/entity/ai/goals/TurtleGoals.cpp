@@ -8,6 +8,7 @@
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 
 #include <cmath>
@@ -156,10 +157,12 @@ namespace Game {
                 // MC: place the turtle_egg one above the dug sand. (MC rolls
                 // 1-4 eggs into the block's EGGS state; block-state
                 // properties do not reach the mob seam, so one egg block
-                // stands for the clutch. The lay sound and the BLOCK_PLACE
-                // game event wait on their systems.)
+                // stands for the clutch. The BLOCK_PLACE game event waits on
+                // game events.)
                 EntityLevel* level = m_turtle->Level();
                 if (level) {
+                    level->PlaySound(nullptr, m_turtle->BlockPosition(), SoundEvents::TURTLE_LAY_EGG,
+                                     SoundSource::Blocks, 0.3f, 0.9f + level->Random().NextFloat() * 0.2f);
                     const glm::ivec3 eggPos(m_blockPos.x, m_blockPos.y + 1,
                                             m_blockPos.z);
                     level->SetBlock(eggPos, BlockID::TurtleEgg);

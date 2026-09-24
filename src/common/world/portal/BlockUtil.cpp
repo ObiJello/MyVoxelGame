@@ -1,7 +1,7 @@
 // File: src/common/world/portal/BlockUtil.cpp
 //
 // Line references are to
-// minecraft_code/decompiled_net/minecraft/util/BlockUtil.java.
+// minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/util/BlockUtil.java.
 
 #include "BlockUtil.hpp"
 

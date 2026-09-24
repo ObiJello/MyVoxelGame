@@ -12,6 +12,8 @@
     "minecraft:mangrove_fence",
     "minecraft:bamboo_fence",
     "minecraft:cherry_fence",
-    "minecraft:poplar_fence"
+    "minecraft:poplar_fence",
+    "minecraft:whisperwood_fence",
+    "minecraft:skyroot_fence"
   ]
 }

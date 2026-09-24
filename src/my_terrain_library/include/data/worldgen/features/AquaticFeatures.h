@@ -22,32 +22,26 @@ using namespace ::world;
  */
 class AquaticFeatures {
 private:
-    // Static feature instances
-    static levelgen::SeagrassFeature s_seagrassFeature;
-    static levelgen::KelpFeature s_kelpFeature;
-    static levelgen::SeaPickleFeature s_seaPickleFeature;
-    static levelgen::SimpleRandomSelectorFeature s_simpleRandomSelectorFeature;
-
     static bool s_initialized;
 
 public:
     // =========================================================================
     // SEAGRASS - Reference: AquaticFeatures.java lines 15-18
     // =========================================================================
-    static levelgen::ConfiguredFeature* SEAGRASS_SHORT;             // probability 0.3
-    static levelgen::ConfiguredFeature* SEAGRASS_SLIGHTLY_LESS_SHORT; // probability 0.4
-    static levelgen::ConfiguredFeature* SEAGRASS_MID;               // probability 0.6
-    static levelgen::ConfiguredFeature* SEAGRASS_TALL;              // probability 0.8
+    static levelgen::ConfiguredFeature* SEAGRASS_SHORT;             // 30% tall
+    static levelgen::ConfiguredFeature* SEAGRASS_SLIGHTLY_LESS_SHORT; // 40% tall
+    static levelgen::ConfiguredFeature* SEAGRASS_MID;               // 60% tall
+    static levelgen::ConfiguredFeature* SEAGRASS_TALL;              // 80% tall
 
     // =========================================================================
     // SEA PICKLE - Reference: AquaticFeatures.java line 19
     // =========================================================================
-    static levelgen::ConfiguredFeature* SEA_PICKLE;                 // CountConfiguration(20)
+    static levelgen::ConfiguredFeature* SEA_PICKLE;                 // one pickle, 1-4
 
     // =========================================================================
     // KELP - Reference: AquaticFeatures.java line 20
     // =========================================================================
-    static levelgen::ConfiguredFeature* KELP;                       // no config
+    static levelgen::ConfiguredFeature* KELP;                       // block column
 
     // =========================================================================
     // WARM OCEAN - Reference: AquaticFeatures.java line 21

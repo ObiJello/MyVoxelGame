@@ -14,6 +14,9 @@
 #include "common/entity/IUsePlayer.hpp"
 #include "common/entity/Item.hpp"
 #include "../entity/Player.hpp"
+#include "common/data/DataComponents.hpp"
+
+namespace Render { void OpenBookEditScreen(const Game::ItemStack& book, uint32_t hand); }   // BookScreens.cpp
 
 namespace Client {
 
@@ -59,6 +62,13 @@ namespace Client {
         // Server-only concept (queues a re-broadcast). The client's slot state
         // is already local, so there is nothing to mark.
         void markSlotDirty(int /*slotIndex*/) override {}
+
+        // MC LocalPlayer.openItemGui: a book and quill opens its editor right
+        // here on the client (a written book waits for the server's
+        // OpenBookS2C instead).
+        void OpenItemGui(Game::ItemStack& stack, uint32_t hand) override {
+            if (stack.get(Game::DataComponents::WRITABLE_BOOK_CONTENT)) ::Render::OpenBookEditScreen(stack, hand);
+        }
 
     private:
         Game::ClientPlayer* m_player = nullptr;

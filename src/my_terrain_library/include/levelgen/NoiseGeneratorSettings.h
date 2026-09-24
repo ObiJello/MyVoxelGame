@@ -1,73 +1,69 @@
 #pragma once
 
-#include "levelgen/NoiseSettings.h"
-#include "levelgen/NoiseRouter.h"
+#include "levelgen/density/terrain/TerrainSettings.h"
 #include "world/level/block/state/BlockState.h"
-#include <vector>
+
+#include <memory>
+#include <string>
+#include <utility>
+
+// Reference: levelgen.NoiseGeneratorSettings (26.3). The record itself is
+// density::TerrainSettings, decoded from worldgen/noise_settings (vanilla) or
+// built in code (the engine's own dimensions, ModTerrainSettings); this class
+// adds the engine's dimension tag and Java's derived accessors.
 
 namespace minecraft {
 namespace levelgen {
 
 using BlockState = ::minecraft::world::level::block::state::BlockState;
 
-// Forward declarations for dependencies we'll implement later
-class SurfaceRuleSource; // For surface block generation
-class ClimateParameterPoint; // For biome spawn points
-
-// Random source algorithm enum
+// WorldgenRandom.Algorithm.
 enum class RandomAlgorithm {
-    LEGACY,     // Java's LCG (for Nether/End)
-    XOROSHIRO   // Xoroshiro128++ (for Overworld)
+    LEGACY,     // Java's LCG (nether, end)
+    XOROSHIRO   // Xoroshiro128++ (overworld)
 };
 
 class NoiseGeneratorSettings {
 public:
-    // Default constructor for overworld settings
-    NoiseGeneratorSettings();
+    explicit NoiseGeneratorSettings(std::shared_ptr<const density::TerrainSettings> terrain,
+                                    std::string dimensionTag = std::string())
+        : m_terrain(std::move(terrain)), m_dimensionTag(std::move(dimensionTag)) {}
 
-    // Constructor with all fields
-    NoiseGeneratorSettings(
-        const NoiseSettings& noiseSettings,
-        BlockState* defaultBlock,
-        BlockState* defaultFluid,
-        const NoiseRouter& noiseRouter,
-        SurfaceRuleSource* surfaceRule,
-        const std::vector<ClimateParameterPoint*>& spawnTarget,
-        int seaLevel,
-        bool disableMobGeneration,
-        bool aquifersEnabled,
-        bool oreVeinsEnabled,
-        bool useLegacyRandomSource
-    );
+    // Registries.NOISE_SETTINGS entry ("minecraft:overworld", "minecraft:nether", ...).
+    static std::shared_ptr<NoiseGeneratorSettings> load(const std::string& key);
 
-    // Getters
-    const NoiseSettings& noiseSettings() const { return m_noiseSettings; }
-    BlockState* defaultBlock() const { return m_defaultBlock; }
-    BlockState* defaultFluid() const { return m_defaultFluid; }
-    NoiseRouter* noiseRouter() { return &m_noiseRouter; }
-    const NoiseRouter* noiseRouter() const { return &m_noiseRouter; }
-    SurfaceRuleSource* surfaceRule() const { return m_surfaceRule; }
-    const std::vector<ClimateParameterPoint*>& spawnTarget() const { return m_spawnTarget; }
-    int seaLevel() const { return m_seaLevel; }
-    bool disableMobGeneration() const { return m_disableMobGeneration; }
+    const density::TerrainSettings& terrain() const { return *m_terrain; }
+    const std::shared_ptr<const density::TerrainSettings>& terrainPtr() const { return m_terrain; }
 
-    // Special getters with debug checks
-    bool isAquifersEnabled() const;
-    bool oreVeinsEnabled() const;
-    RandomAlgorithm getRandomSource() const;
+    const density::NoiseSettings& noiseSettings() const { return m_terrain->noiseSettings; }
+    BlockState* defaultBlock() const { return m_terrain->defaultBlock; }
+    BlockState* defaultFluid() const { return m_terrain->defaultFluid; }
+    const density::NoiseRouter& noiseRouter() const { return m_terrain->noiseRouter; }
+    const std::string& materialRule() const { return m_terrain->materialRule; }
+    int seaLevel() const { return m_terrain->seaLevel; }
+    bool disableMobGeneration() const { return m_terrain->disableMobGeneration; }
+    bool isAquifersEnabled() const { return m_terrain->aquifers.has_value(); }
+    bool useLegacyRandomSource() const { return m_terrain->useLegacyRandomSource; }
+    RandomAlgorithm getRandomSource() const {
+        return m_terrain->useLegacyRandomSource ? RandomAlgorithm::LEGACY : RandomAlgorithm::XOROSHIRO;
+    }
+
+    // Engine dimension tag (the DimensionGeneratorKey, e.g. "twilight_forest").
+    // Empty for every dimension whose default block already identifies it
+    // (Overworld stone, nether netherrack, end end_stone, Hush hushstone,
+    // Aether holystone). The Twilight Forest's default block is vanilla stone
+    // like the Overworld's, so the library's dimension sniff sites
+    // (ChunkStatusTasks featuresPerStep, the
+    // NoiseBasedChunkGenerator carvers and surface) key on this tag instead.
+    // Not part of Java's NoiseGeneratorSettings: MC gets the same answer from
+    // the generator's BiomeSource. Set once, before the generator is shared.
+    const std::string& dimensionTag() const { return m_dimensionTag; }
+    void setDimensionTag(std::string tag) { m_dimensionTag = std::move(tag); }
+    bool isTwilightForest() const { return m_dimensionTag == "twilight_forest"; }
 
 private:
-    NoiseSettings m_noiseSettings;
-    BlockState* m_defaultBlock;
-    BlockState* m_defaultFluid;
-    NoiseRouter m_noiseRouter;
-    SurfaceRuleSource* m_surfaceRule;
-    std::vector<ClimateParameterPoint*> m_spawnTarget;
-    int m_seaLevel;
-    bool m_disableMobGeneration;
-    bool m_aquifersEnabled;
-    bool m_oreVeinsEnabled;
-    bool m_useLegacyRandomSource;
+    std::shared_ptr<const density::TerrainSettings> m_terrain;
+    std::string m_dimensionTag;
 };
 
 } // namespace levelgen

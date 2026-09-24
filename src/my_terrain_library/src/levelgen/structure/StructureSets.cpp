@@ -1,4 +1,6 @@
 #include "levelgen/structure/StructureSet.h"
+#include "levelgen/structure/TwilightStructurePlacements.h"
+#include "levelgen/structure/AurelithOutskirts.h"
 
 #include "external/json.hpp"
 
@@ -10,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_set>
 
 // Reference: net/minecraft/world/level/levelgen/structure/StructureSet.java,
 // StructurePlacement codecs, and RegistryDataLoader (alphabetical Identifier
@@ -86,6 +89,20 @@ RandomSpreadType parseSpreadType(const std::string& name) {
 }
 
 std::unique_ptr<StructurePlacement> parsePlacement(const json& p, const std::string& setName) {
+    {
+        // Twilight Forest landmark grid: no common placement fields in its
+        // codec (no salt), so it is parsed before them.
+        const std::string gridType = normalizeId(p.at("type").get<std::string>());
+        if (gridType == "twilightforest:landmark_grid") {
+            // LandmarkGridPlacement.CODEC: structure_grid_lock only; the base
+            // fields are fixed by its constructor.
+            std::optional<std::string> gridLock;
+            if (p.contains("structure_grid_lock")) {
+                gridLock = normalizeId(p["structure_grid_lock"].get<std::string>());
+            }
+            return std::make_unique<TwilightLandmarkGridPlacement>(std::move(gridLock));
+        }
+    }
     // Common placement fields (StructurePlacement.placementCodec).
     int32_t lox = 0, loy = 0, loz = 0;
     if (p.contains("locate_offset")) {
@@ -121,6 +138,38 @@ std::unique_ptr<StructurePlacement> parsePlacement(const json& p, const std::str
             p.at("distance").get<int32_t>(), p.at("spread").get<int32_t>(),
             p.at("count").get<int32_t>(), p.at("preferred_biomes").get<std::string>());
     }
+    if (type == "obeycraft:anchored") {
+        // Engine extension (AurelithOutskirts.h): companion starts at fixed
+        // design-frame offsets round an anchor set's starts.
+        std::vector<std::pair<int32_t, int32_t>> slots;
+        for (const auto& slot : p.at("slots")) {
+            slots.emplace_back(slot.at(0).get<int32_t>(), slot.at(1).get<int32_t>());
+        }
+        const auto& origin = p.at("anchor_origin");
+        return std::make_unique<AnchoredStructurePlacement>(
+            salt, normalizeId(p.at("anchor_set").get<std::string>()),
+            origin.at(0).get<int32_t>(), origin.at(1).get<int32_t>(), std::move(slots));
+    }
+    if (type == "twilightforest:avoid_landmark_grid") {
+        // AvoidLandmarkGridPlacement.CODEC: the random_spread fields plus
+        // avoid_additional_structures {set id: chunk range}.
+        int32_t spacing = p.at("spacing").get<int32_t>();
+        int32_t separation = p.at("separation").get<int32_t>();
+        RandomSpreadType spreadType = parseSpreadType(p.value("spread_type", std::string("linear")));
+        if (spacing <= separation) {
+            throw std::runtime_error("Spacing has to be larger than separation in " + setName);
+        }
+        std::vector<std::pair<std::string, int32_t>> avoidAdditional;
+        if (p.contains("avoid_additional_structures")) {
+            for (auto it = p["avoid_additional_structures"].begin();
+                 it != p["avoid_additional_structures"].end(); ++it) {
+                avoidAdditional.emplace_back(normalizeId(it.key()), it.value().get<int32_t>());
+            }
+        }
+        return std::make_unique<TwilightAvoidLandmarkGridPlacement>(
+            lox, loy, loz, method, frequency, salt, std::move(exclusion),
+            spacing, separation, spreadType, std::move(avoidAdditional));
+    }
     throw std::runtime_error("Unknown structure placement type '" + type + "' in " + setName);
 }
 
@@ -152,6 +201,9 @@ private:
             info->biomesTag = parsed.at("biomes").get<std::string>();
             info->step = parsed.at("step").get<std::string>();
             info->terrainAdaptation = parsed.value("terrain_adaptation", std::string("none"));
+            info->hasSpawnOverrides = parsed.contains("spawn_overrides")
+                                   && parsed["spawn_overrides"].is_object()
+                                   && !parsed["spawn_overrides"].empty();
             info->mineshaftType = parsed.value("mineshaft_type", std::string());
             if (info->type == "minecraft:jigsaw") {
                 info->jigsawStartPool = normalizeId(parsed.at("start_pool").get<std::string>());
@@ -195,6 +247,14 @@ private:
                         info->jigsawPaddingTop = dp.value("top", 0);
                     }
                 }
+                if (parsed.contains("level_site")) {
+                    // Engine extension — see StructureInfo::jigsawSiteRadius.
+                    const auto& site = parsed["level_site"];
+                    info->jigsawSiteRadius = site.at("radius").get<int>();
+                    info->jigsawSiteMaxSpread = site.at("max_spread").get<int>();
+                }
+                // Engine extension — see StructureInfo::jigsawBiomeAtSurface.
+                info->jigsawBiomeAtSurface = parsed.value("biome_at_surface", false);
                 info->jigsawHasAliases = parsed.contains("pool_aliases");
                 if (info->jigsawHasAliases) {
                     std::function<StructureInfo::PoolAlias(const json&)> parseAlias =
@@ -245,6 +305,25 @@ private:
             }
             structuresByName.emplace(info->name, std::move(info));
         }
+        // The Aether (mods_reference/aether generated data, copied to
+        // data/aether/worldgen/{structure,structure_set}/): mod structure
+        // types keep their JSON for their own ports (AetherStructures.cpp).
+        // "aether:" sorts before "minecraft:", as in the mod's registry.
+        loadModNamespaceStructures(root, "aether");
+        // The Twilight Forest (data/twilightforest/worldgen/{structure,
+        // structure_set}/, copied from the mod's generated data): its
+        // landmark_grid / avoid_landmark_grid placements are parsed above and
+        // its structure types dispatch to TwilightStructures.cpp.
+        // "twilightforest:" sorts after "minecraft:", so vanilla registry
+        // indices (the per-step structure feature seeds) are unchanged.
+        loadModNamespaceStructures(root, "twilightforest");
+        // The engine's own companion structures (AurelithOutskirts.h), in
+        // data/obeycraft/worldgen/{structure,structure_set}/. Their place in
+        // the decoration order is after everything else in their step
+        // (ChunkGenerator::applyBiomeDecoration), so they shift no vanilla or
+        // mod feature seed.
+        loadModNamespaceStructures(root, "obeycraft");
+
         for (const auto& [name, info] : structuresByName) {
             structures.push_back(info.get());
         }
@@ -267,8 +346,57 @@ private:
             }
             setsByName.emplace(set->name, std::move(set));
         }
+        loadModNamespaceSets(root, "aether");
+        loadModNamespaceSets(root, "twilightforest");
+        loadModNamespaceSets(root, "obeycraft");
+
         for (const auto& [name, set] : setsByName) {
             sets.push_back(set.get());
+        }
+    }
+
+    // A mod namespace's worldgen/structure/*.json: the settings fields every
+    // Structure has (biomes, step, terrain_adaptation) plus the whole JSON.
+    // A missing directory loads nothing (the mod's data is optional).
+    void loadModNamespaceStructures(const fs::path& root, const std::string& ns) {
+        fs::path dir = root / ns / "worldgen" / "structure";
+        if (!fs::exists(dir) || !fs::is_directory(dir)) return;
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (entry.path().extension() != ".json") continue;
+            json parsed = loadJsonFile(entry.path());
+            auto info = std::make_unique<StructureInfo>();
+            info->name = ns + ":" + entry.path().stem().string();
+            info->type = normalizeId(parsed.at("type").get<std::string>());
+            info->biomesTag = parsed.at("biomes").get<std::string>();
+            info->step = parsed.at("step").get<std::string>();
+            info->terrainAdaptation = parsed.value("terrain_adaptation", std::string("none"));
+            info->hasSpawnOverrides = parsed.contains("spawn_overrides")
+                                   && parsed["spawn_overrides"].is_object()
+                                   && !parsed["spawn_overrides"].empty();
+            info->modJson = parsed.dump();
+            structuresByName.emplace(info->name, std::move(info));
+        }
+    }
+
+    void loadModNamespaceSets(const fs::path& root, const std::string& ns) {
+        fs::path dir = root / ns / "worldgen" / "structure_set";
+        if (!fs::exists(dir) || !fs::is_directory(dir)) return;
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (entry.path().extension() != ".json") continue;
+            json parsed = loadJsonFile(entry.path());
+            auto set = std::make_unique<StructureSet>();
+            set->name = ns + ":" + entry.path().stem().string();
+            set->placement = parsePlacement(parsed.at("placement"), set->name);
+            for (const auto& structureEntry : parsed.at("structures")) {
+                std::string structureName = normalizeId(structureEntry.at("structure").get<std::string>());
+                auto it = structuresByName.find(structureName);
+                if (it == structuresByName.end()) {
+                    throw std::runtime_error("structure_set " + set->name +
+                                             " references unknown structure " + structureName);
+                }
+                set->structures.push_back({it->second.get(), structureEntry.value("weight", 1)});
+            }
+            setsByName.emplace(set->name, std::move(set));
         }
     }
 };
@@ -283,6 +411,19 @@ public:
     }
 
     const std::unordered_set<std::string>& resolve(const std::string& rawTag) {
+        // A structure's "biomes" is a HolderSet: "#ns:tag" is a tag, a bare
+        // "ns:biome" is that single biome (the Twilight Forest's
+        // swamp_hollow_tree uses "twilightforest:swamp"). Only mod
+        // namespaces take this path: "minecraft:" strings keep resolving as
+        // tags, as every vanilla caller always has. Direct ids are cached
+        // under a '=' key so they never collide with a tag of the same name.
+        if (!rawTag.empty() && rawTag[0] != '#' && rawTag.rfind("minecraft:", 0) != 0) {
+            const std::string biome = normalizeId(rawTag);
+            std::lock_guard<std::mutex> lock(m_mutex);
+            auto it = m_cache.find("=" + biome);
+            if (it != m_cache.end()) return it->second;
+            return m_cache.emplace("=" + biome, std::unordered_set<std::string>{biome}).first->second;
+        }
         std::string tag = rawTag;
         if (!tag.empty() && tag[0] == '#') tag = tag.substr(1);
         tag = normalizeId(tag);
@@ -335,6 +476,33 @@ const std::vector<const StructureSet*>& all() {
 
 const std::vector<const StructureInfo*>& allStructures() {
     return Registry::instance().structures;
+}
+
+bool isVanillaStructure(const std::string& name) {
+    // Minecraft 26.3-pre-2 data/minecraft/worldgen/structure (52 entries).
+    static const std::unordered_set<std::string> kVanilla = {
+        "minecraft:abandoned_camp_bamboo_jungle", "minecraft:abandoned_camp_birch_forest",
+        "minecraft:abandoned_camp_cherry_grove", "minecraft:abandoned_camp_dappled_forest",
+        "minecraft:abandoned_camp_flower_forest", "minecraft:abandoned_camp_forest",
+        "minecraft:abandoned_camp_meadow", "minecraft:abandoned_camp_old_growth_birch_forest",
+        "minecraft:abandoned_camp_old_growth_pine_taiga", "minecraft:abandoned_camp_old_growth_spruce_taiga",
+        "minecraft:abandoned_camp_pale_garden", "minecraft:abandoned_camp_savanna",
+        "minecraft:abandoned_camp_snowy_taiga", "minecraft:abandoned_camp_sparse_jungle",
+        "minecraft:abandoned_camp_swamp", "minecraft:abandoned_camp_taiga",
+        "minecraft:abandoned_camp_windswept_forest", "minecraft:abandoned_camp_wooded_badlands",
+        "minecraft:ancient_city", "minecraft:bastion_remnant", "minecraft:buried_treasure",
+        "minecraft:desert_pyramid", "minecraft:end_city", "minecraft:fortress", "minecraft:igloo",
+        "minecraft:jungle_pyramid", "minecraft:mansion", "minecraft:mineshaft", "minecraft:mineshaft_mesa",
+        "minecraft:monument", "minecraft:nether_fossil", "minecraft:ocean_ruin_cold",
+        "minecraft:ocean_ruin_warm", "minecraft:pillager_outpost", "minecraft:ruined_portal",
+        "minecraft:ruined_portal_desert", "minecraft:ruined_portal_jungle", "minecraft:ruined_portal_mountain",
+        "minecraft:ruined_portal_nether", "minecraft:ruined_portal_ocean", "minecraft:ruined_portal_swamp",
+        "minecraft:shipwreck", "minecraft:shipwreck_beached", "minecraft:stronghold", "minecraft:swamp_hut",
+        "minecraft:trail_ruins", "minecraft:trial_chambers", "minecraft:village_desert",
+        "minecraft:village_plains", "minecraft:village_savanna", "minecraft:village_snowy",
+        "minecraft:village_taiga",
+    };
+    return kVanilla.count(name) != 0;
 }
 
 const StructureSet& byName(const std::string& name) {

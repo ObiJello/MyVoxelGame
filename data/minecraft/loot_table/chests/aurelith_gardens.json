@@ -1,0 +1,193 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "bonus_rolls": 0.0,
+      "rolls": {
+        "type": "minecraft:uniform",
+        "min": 3.0,
+        "max": 6.0
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:whisperwood_sapling",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonance_bloom",
+          "weight": 8,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 6.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:whisperfruit",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 5.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:hush_moss",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 6.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:bone_meal",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 3.0,
+                "max": 8.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:glow_berries",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 5.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:honey_bottle",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bonus_rolls": 0.0,
+      "rolls": 1.0,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "Canticle of the Vesper"
+              },
+              "author": "Unknown",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "CANTICLE OF\nTHE VESPER\n\nsung at the Quays\nat the lamp-hour",
+                "Vesper, slow water,\nviolet under\ncyan,\nyou carry the note\nwe cannot hold,\ndown through the\ncity and on.",
+                "Fishers say your\ndepth is light.\nChildren say your\nlight is deep.\nBoth drink from\nyou; neither\nsleeps the worse.",
+                "When the Heart\nsings, you shine.\nWhen the Heart\nrests, you will\nshine a while,\nthe way a bell\nkeeps ringing\nafter the hand\nlets go.",
+                "Vesper, remember\nus. You were here\nbefore the first\nChord. You will be\nhere after the\nlast.",
+                "What is sung\ninto water\nis never lost.\nIt only goes\ndownstream."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "Starward Observations"
+              },
+              "author": "Tamsin of the Starward",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "STARWARD\nOBSERVATIONS\nof the aurora\nand the cyan stars\n\nTamsin, observer",
+                "The Hush has no\nsun and no moon.\nIts stars do not\nmove. Only the\naurora moves, so\nthe aurora is what\nwe watch.",
+                "Thesis: the aurora\nis the Chord's\nafterimage. The\nHeart sings; the\nsky remembers it\nin colour.",
+                "Evidence: it runs\ncyan to violet,\nthe same as the\nlanterns and the\nriver. It is\nbrightest over the\nsteppe, where the\nChoir Hall stands.",
+                "C.1145. The aurora\nflickered in time\nwith the Stillhouse\nlamps. A beat\nlater. Like an\necho of an echo.",
+                "C.1147, after the\nRest. The aurora\ndid not go out.\nFainter, but there.\n\nThe sky is still\nremembering us.",
+                "If that is true\nthen nothing we\nsang is gone.\n\nI will take that\nwith me through\nthe gate."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:empty",
+          "weight": 2
+        }
+      ]
+    }
+  ],
+  "random_sequence": "minecraft:chests/aurelith_gardens"
+}

@@ -19,6 +19,15 @@ namespace Server {
                                            ServerPlayer& sender,
                                            ServerConnection& connection,
                                            PlayerSessionManager& sessionManager) {
+        return ExecuteCommand(commandLine, CommandSourceStack::ForPlayer(sender, sessionManager),
+                              connection, sessionManager);
+    }
+
+    bool CommandDispatcher::ExecuteCommand(const std::string& commandLine,
+                                           const CommandSourceStack& source,
+                                           ServerConnection& connection,
+                                           PlayerSessionManager& sessionManager) {
+        ServerPlayer& sender = *source.sender;
         auto tokens = Tokenize(commandLine);
         if (tokens.empty()) return false;
 
@@ -40,7 +49,7 @@ namespace Server {
 
         // Execute
         try {
-            it->second(sender, args, connection, sessionManager);
+            it->second(source, args, connection, sessionManager);
         } catch (const std::exception& e) {
             connection.SendChatMessage("Error executing command: " + std::string(e.what()), 1);
             Log::Error("[CommandDispatcher] Exception in command '/%s': %s",

@@ -42,6 +42,20 @@ namespace Server {
         
         // Get server port
         uint16_t GetPort() const { return m_port; }
+
+        // MC ServerConnectionListener.stopTcpServerListener / startTcpServerListener
+        // by another name: while false, every new socket (accepted or handed
+        // over by the friends relay) is closed at once; existing connections
+        // are untouched. World Options' "Joinable" switch.
+        void SetAcceptingConnections(bool accepting) { m_accepting.store(accepting); }
+        bool IsAcceptingConnections() const { return m_accepting.load(); }
+
+        // Move the listener to another port without touching the live
+        // connections (the host's own loopback connection included — a full
+        // Stop() would kick the host out of their own world). Returns false
+        // and keeps listening on the old port when the new one cannot be
+        // bound.
+        bool Rebind(uint16_t port);
         
         // Get bind address
         const std::string& GetBindAddress() const { return m_bindAddress; }
@@ -126,7 +140,7 @@ namespace Server {
 
         // Shared tail of HandleAccept / AdoptConnection: configure the
         // socket, wrap it in a ServerConnection, register and start it.
-        void SetupConnection(tcp::socket socket, const char* origin);
+        void SetupConnection(tcp::socket socket, const char* origin, bool relayed = false);
         
         // Handle accept completion
         void HandleAccept(const error_code& error, tcp::socket socket);
@@ -154,6 +168,7 @@ namespace Server {
         
         // Server configuration
         uint16_t m_port;
+        std::atomic<bool> m_accepting{true};
         std::string m_bindAddress;
         size_t m_maxConnections = 100;
         

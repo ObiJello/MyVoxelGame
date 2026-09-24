@@ -9,8 +9,11 @@ namespace Render {
 
     SectionCopyPtr RenderRegionCache::GetOrCreate(ClientChunkManager& chunks,
                                                   int sectionX, int sectionY, int sectionZ) {
-        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
-            return nullptr;   // outside build height — reads as air
+        // Outside the build height there are no blocks, but there is light:
+        // the chunk stores one light section past each end of the world
+        // (Chunk::light), and the halo of the top and bottom sections reads it.
+        if (sectionY < -1 || sectionY > Game::Math::SECTIONS_PER_CHUNK) {
+            return nullptr;
         }
 
         const uint64_t key = Key(sectionX, sectionY, sectionZ);
@@ -29,6 +32,15 @@ namespace Render {
         }
 
         auto copy = std::make_shared<SectionCopy>();
+        // Light index = section index + 1 (Lighting/ChunkLight.hpp).
+        copy->hasLight = true;
+        copy->skyLight = chunk->chunkData->light.sky[static_cast<size_t>(sectionY + 1)];
+        copy->blockLight = chunk->chunkData->light.block[static_cast<size_t>(sectionY + 1)];
+        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
+            auto lightOnly = SectionCopyPtr(std::move(copy));   // allAir, no biomes
+            m_sections.emplace(key, lightOnly);
+            return lightOnly;
+        }
         const Game::ChunkSection* section = chunk->chunkData->GetSection(sectionY);
 
         // MC: `this.section = levelChunkSection.hasOnlyAir() ? null : states.copy()`.

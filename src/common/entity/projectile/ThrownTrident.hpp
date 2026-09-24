@@ -25,6 +25,9 @@ namespace Game {
 
         static constexpr float kTridentDamage = 8.0f;
 
+        // MC ThrownTrident.getDefaultHitGroundSoundEvent.
+        const char* GetHitGroundSound() const override { return SoundEvents::TRIDENT_HIT_GROUND; }
+
         void Tick() override {
             // MC ThrownTrident.tick head: 4 ticks in the ground marks the
             // damage dealt (so a picked-loose trident no longer hits).

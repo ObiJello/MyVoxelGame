@@ -117,4 +117,8 @@ namespace Render {
         return r;
     }
 
+    void RequestImmediateRespawn() {
+        s_respawnRequested = true;
+    }
+
 } // namespace Render

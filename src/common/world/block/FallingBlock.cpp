@@ -2,7 +2,7 @@
 #include "common/world/block/FallingBlock.hpp"
 
 #include "common/core/JavaRandom.hpp"
-#include "common/core/SoundEvents.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/world/block/BlockPlacement.hpp"
@@ -142,11 +142,14 @@ namespace Game {
     // ── The three hooks ────────────────────────────────────────────────────
 
     void FallingBlockOnPlace(ILevelWrite& level, const glm::ivec3& pos,
-                             BlockState newState, BlockState /*oldState*/) {
+                             BlockState newState, BlockState /*oldState*/,
+                             bool /*movedByPiston*/) {
+        // MC FallingBlock.onPlace has no `!oldState.is(block)` guard: any
+        // write, a piston re-placing the block included, books the fall.
         ScheduleFall(TicksOf(level), pos, newState);
     }
 
-    bool FallingBlockNeighborChanged(const IBlockAccess& /*level*/, const glm::ivec3& pos,
+    bool FallingBlockUpdateShape(const IBlockAccess& /*level*/, const glm::ivec3& pos,
                                      BlockState state,
                                      Direction /*toNeighbour*/, BlockID /*neighbourId*/,
                                      BlockState& /*outState*/,
@@ -267,7 +270,7 @@ namespace Game {
         return fallback;
     }
 
-    bool ConcretePowderNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+    bool ConcretePowderUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                        BlockState state,
                                        Direction toNeighbour, BlockID neighbourId,
                                        BlockState& outState,
@@ -280,7 +283,7 @@ namespace Game {
             outState = BlockStates::Default(ConcreteFor(state.Block()));
             return true;
         }
-        return FallingBlockNeighborChanged(level, pos, state, toNeighbour, neighbourId,
+        return FallingBlockUpdateShape(level, pos, state, toNeighbour, neighbourId,
                                            outState, ticks);
     }
 
@@ -300,23 +303,32 @@ namespace Game {
             return;
         }
 
-        // MC AnvilBlock.onLand -> levelEvent 1031 (ANVIL_LAND, volume 0.3).
+        // MC AnvilBlock.onLand -> levelEvent 1031 (ANVIL_LAND, volume 0.3,
+        // pitch 0.9..1.0) — its sound half.
         if (IsAnvil(id)) {
-            PlaySound("block.anvil.land", pos);
+            PlayLevelEventSound(level, nullptr, LevelEvent::SOUND_ANVIL_LAND, pos, 0, level.Random());
         }
     }
 
-    void FallingBlockOnBrokenAfterFall(ILevelWrite& /*level*/, const glm::ivec3& pos,
+    void FallingBlockOnBrokenAfterFall(ILevelWrite& level, const glm::ivec3& pos,
                                        BlockState state) {
         const BlockID id = state.Block();
         // MC AnvilBlock.onBrokenAfterFall -> levelEvent 1029 (ANVIL_DESTROY).
         if (IsAnvil(id)) {
-            PlaySound("block.anvil.destroy", pos);
+            PlayLevelEventSound(level, nullptr, LevelEvent::SOUND_ANVIL_BROKEN, pos, 0, level.Random());
             return;
         }
         // MC PointedDripstoneBlock.onBrokenAfterFall -> levelEvent 1045.
         if (id == BlockID::PointedDripstone) {
-            PlaySound("block.pointed_dripstone.land", pos);
+            PlayLevelEventSound(level, nullptr, LevelEvent::SOUND_POINTED_DRIPSTONE_LAND, pos, 0,
+                                level.Random());
+            return;
+        }
+        // MC BrushableBlock.onBrokenAfterFall:67 -> levelEvent 2001 with the
+        // falling state: a suspicious block that lands on nothing shatters.
+        if (id == BlockID::SuspiciousSand || id == BlockID::SuspiciousGravel) {
+            PlayLevelEventSound(level, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, pos,
+                                static_cast<int>(state.RawId()), level.Random());
         }
     }
 
@@ -424,14 +436,15 @@ namespace Game {
     }
 
     void ScaffoldingOnPlace(ILevelWrite& level, const glm::ivec3& pos,
-                            BlockState newState, BlockState /*oldState*/) {
+                            BlockState newState, BlockState /*oldState*/,
+                            bool /*movedByPiston*/) {
         if (level.IsClientSide()) return;      // MC guards this one explicitly
         if (auto* ticks = level.Ticks()) {
             ticks->ScheduleTick(pos, newState.Block(), 1);
         }
     }
 
-    bool ScaffoldingNeighborChanged(const IBlockAccess& /*level*/, const glm::ivec3& pos,
+    bool ScaffoldingUpdateShape(const IBlockAccess& /*level*/, const glm::ivec3& pos,
                                     BlockState state,
                                     Direction /*toNeighbour*/, BlockID /*neighbourId*/,
                                     BlockState& /*outState*/,
@@ -607,7 +620,7 @@ namespace Game {
         return DripstoneStateWith(fallback, tipDown, thickness);
     }
 
-    bool PointedDripstoneNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+    bool PointedDripstoneUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                          BlockState state,
                                          Direction toNeighbour, BlockID /*neighbourId*/,
                                          BlockState& outState,

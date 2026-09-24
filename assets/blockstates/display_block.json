@@ -1,0 +1,28 @@
+{
+  "variants": {
+    "blue=false,green=false,red=false": {
+      "model": "minecraft:block/display_block_0"
+    },
+    "blue=false,green=false,red=true": {
+      "model": "minecraft:block/display_block_1"
+    },
+    "blue=false,green=true,red=false": {
+      "model": "minecraft:block/display_block_2"
+    },
+    "blue=false,green=true,red=true": {
+      "model": "minecraft:block/display_block_3"
+    },
+    "blue=true,green=false,red=false": {
+      "model": "minecraft:block/display_block_4"
+    },
+    "blue=true,green=false,red=true": {
+      "model": "minecraft:block/display_block_5"
+    },
+    "blue=true,green=true,red=false": {
+      "model": "minecraft:block/display_block_6"
+    },
+    "blue=true,green=true,red=true": {
+      "model": "minecraft:block/display_block_7"
+    }
+  }
+}

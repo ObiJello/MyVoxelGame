@@ -36,9 +36,13 @@
 #include "common/entity/ai/navigation/WaterBoundPathNavigation.hpp"
 #include "common/world/spawn/SpawnPlacements.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/sound/EntitySounds.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -124,6 +128,7 @@ namespace Game {
         trident->Shoot(xd, yd + horiz * 0.2, zd, 1.6f,
                        static_cast<float>(14 - difficultyId * 4));
 
+        PlaySound(SoundEvents::DROWNED_SHOOT, 1.0f, 1.0f / (m_level->Random().NextFloat() * 0.4f + 0.8f));
         m_level->AddFreshEntity(std::move(trident));
     }
 
@@ -184,9 +189,13 @@ namespace Game {
     }
 
     void Zombie::DoUnderWaterConversion() {
-        // MC Zombie.doUnderWaterConversion: → DROWNED. Level event 1040 (the
-        // conversion gurgle) waits on the sound system.
+        // MC Zombie.doUnderWaterConversion: → DROWNED, then level event 1040
+        // (the conversion gurgle) unless silent.
+        EntityLevel* level = m_level;
+        const glm::ivec3 at = BlockPosition();
+        const bool silent = IsSilent();
         ConvertToZombieType(std::make_unique<Drowned>(m_level));
+        if (level && !silent) PlayEntityLevelEventSound(*level, EntityLevelEvent::ZOMBIE_TO_DROWNED, at);
     }
 
     void Zombie::ConvertToZombieType(std::unique_ptr<Zombie> replacement) {
@@ -209,8 +218,12 @@ namespace Game {
 
     void Husk::DoUnderWaterConversion() {
         // MC Husk.doUnderWaterConversion: → ZOMBIE (which then runs its own
-        // clock into a drowned). Level event 1041 waits on the sound system.
+        // clock into a drowned), then level event 1041 unless silent.
+        EntityLevel* level = m_level;
+        const glm::ivec3 at = BlockPosition();
+        const bool silent = IsSilent();
         ConvertToZombieType(std::make_unique<Zombie>(m_level));
+        if (level && !silent) PlayEntityLevelEventSound(*level, EntityLevelEvent::HUSK_TO_ZOMBIE, at);
     }
 
     // ── ZombifiedPiglin ────────────────────────────────────────────────────
@@ -246,12 +259,18 @@ namespace Game {
 
     void ZombifiedPiglin::SetTarget(LivingEntity* target) {
         // MC ZombifiedPiglin.setTarget: a target where there was none arms
-        // the alert clock. (FIRST_ANGER_SOUND_DELAY and the angry sound wait
-        // on the sound system.)
+        // the first-anger-sound delay (FIRST_ANGER_SOUND_DELAY, 0..1 s) and
+        // the alert clock.
         if (GetTarget() == nullptr && target != nullptr && m_level) {
+            m_playFirstAngerSoundIn = m_level->Random().NextInt(21);
             m_ticksUntilNextAlert = 80 + m_level->Random().NextInt(41);  // ALERT_INTERVAL 4..6 s
         }
         Zombie::SetTarget(target);
+    }
+
+    const char* ZombifiedPiglin::GetAmbientSound() const {
+        // MC ZombifiedPiglin.getAmbientSound.
+        return IsAngry() ? SoundEvents::ZOMBIFIED_PIGLIN_ANGRY : SoundEvents::ZOMBIFIED_PIGLIN_AMBIENT;
     }
 
     void ZombifiedPiglin::StartPersistentAngerTimer() {
@@ -272,7 +291,10 @@ namespace Game {
                         static_cast<uint32_t>(ModifierId::PiglinAttackingSpeed),
                         0.05, AttributeOperation::AddValue });
             }
-            // maybePlayFirstAngerSound() — sounds wait on the sound system.
+            // MC maybePlayFirstAngerSound → playAngerSound.
+            if (m_playFirstAngerSoundIn > 0 && --m_playFirstAngerSoundIn == 0) {
+                PlaySound(SoundEvents::ZOMBIFIED_PIGLIN_ANGRY, GetSoundVolume() * 2.0f, GetVoicePitch() * 1.8f);
+            }
         } else if (m_attributes.HasModifier(Attribute::MovementSpeed,
                                             ModifierId::PiglinAttackingSpeed)) {
             m_attributes.RemoveModifier(Attribute::MovementSpeed,
@@ -715,6 +737,24 @@ namespace Game {
         arrow.AddEffect(MobEffectInstance(MobEffectId::Poison, 100));
     }
 
+    // ── Parched ────────────────────────────────────────────────────────────
+
+    void Parched::CreateAttributes(AttributeMap& out) {
+        Skeleton::CreateAttributes(out);
+        out.Register(Attribute::MaxHealth, 16.0);
+    }
+
+    Parched::Parched(EntityLevel* level) : Skeleton(EntityTypeId::Parched, level) {
+        CreateAttributes(m_attributes);
+        m_health = GetMaxHealth();
+        RegisterGoals();
+    }
+
+    void Parched::CustomizeArrow(Arrow& arrow) {
+        // MC Parched.getArrow.
+        arrow.AddEffect(MobEffectInstance(MobEffectId::Weakness, 600));
+    }
+
     void Skeleton::PerformRangedAttack(LivingEntity& target, float power) {
         if (!m_level) return;
 
@@ -737,6 +777,7 @@ namespace Game {
         arrow->Shoot(xd, yd + horiz * 0.2, zd, 1.6f,
                      static_cast<float>(14 - difficultyId * 4));
 
+        PlaySound(SoundEvents::SKELETON_SHOOT, 1.0f, 1.0f / (m_level->Random().NextFloat() * 0.4f + 0.8f));
         m_level->AddFreshEntity(std::move(arrow));
     }
 
@@ -841,6 +882,9 @@ namespace Game {
 
             if (m_ignited) SetSwellDir(1);
 
+            // MC: the hiss as the fuse starts.
+            if (m_swellDir > 0 && m_swell == 0) PlaySound(SoundEvents::CREEPER_PRIMED, 1.0f, 0.5f);
+
             m_swell += m_swellDir;
             if (m_swell < 0) m_swell = 0;
 
@@ -878,6 +922,10 @@ namespace Game {
         // AreaEffectCloud. A plain effect-free creeper leaves nothing, which
         // is the common case and MC's too.
         SpawnLingeringCloud();
+        // MC then triggerOnDeathMobEffects(level, KILLED): a creeper that goes
+        // off carrying WIND_CHARGED bursts, WEAVING webs, OOZING slimes —
+        // exactly as if it had been killed.
+        TriggerOnDeathMobEffects(RemovalReason::Killed);
         Discard();
     }
 
@@ -1053,10 +1101,16 @@ namespace Game {
         PhysicsContext phys = m_level->Physics();
         if (CollidesAt(box, phys)) return false;
 
+        // MC Enderman.teleport: the whoosh at the old spot and the new one.
+        const glm::dvec3 from = position;
         position = destination;
         velocity = glm::dvec3(0.0);
         ResetFallDistance();
         needsSync = true;
+        if (!IsSilent()) {
+            m_level->PlaySound(nullptr, from, SoundEvents::ENDERMAN_TELEPORT, GetSoundSource(), 1.0f, 1.0f);
+            PlaySound(SoundEvents::ENDERMAN_TELEPORT, 1.0f, 1.0f);
+        }
         return true;
     }
 
@@ -1287,9 +1341,18 @@ namespace Game {
                 m_tailAnimationO = m_tailAnimation;
                 if (!IsInWater()) {
                     m_tailAnimationSpeed = 2.0f;
-                    // MC plays the flop sound here when bouncing off the
-                    // ground (the clientSideTouchedGround latch); that and the
-                    // latch wait on the sound system.
+                    // MC: the flop on the bounce off the ground, latched by
+                    // clientSideTouchedGround (falling onto a standable block).
+                    if (velocity.y > 0.0 && m_clientSideTouchedGround && !IsSilent()) {
+                        m_level->PlayLocalSound(position,
+                                                GetType() == EntityTypeId::ElderGuardian
+                                                    ? SoundEvents::ELDER_GUARDIAN_FLOP : SoundEvents::GUARDIAN_FLOP,
+                                                GetSoundSource(), 1.0f, 1.0f, false);
+                    }
+                    const glm::ivec3 below = BlockPosition() - glm::ivec3(0, 1, 0);
+                    const IBlockAccess* blocks = m_level->Blocks();
+                    m_clientSideTouchedGround = velocity.y < 0.0 && blocks
+                        && BlockRegistry::HasCollision(blocks->GetBlock(below.x, below.y, below.z));
                 } else if (IsMoving()) {
                     if (m_tailAnimationSpeed < 0.5f) {
                         m_tailAnimationSpeed = 4.0f;
@@ -1555,7 +1618,7 @@ namespace Game {
             static const std::vector<EntityTypeId> kList = [] {
                 std::vector<EntityTypeId> list;
                 for (int i = 0; i < kEntityTypeCount; ++i) {
-                    if (kEntityTypeTable[i].category != MobCategory::Monster) continue;
+                    if (!IsMonsterCategory(kEntityTypeTable[i].category)) continue;
                     const auto type = static_cast<EntityTypeId>(i);
                     if (type == EntityTypeId::Creeper) continue;
                     list.push_back(type);
@@ -1577,6 +1640,29 @@ namespace Game {
         out.Register(Attribute::KnockbackResistance,  1.0);
         out.Register(Attribute::AttackDamage,        15.0);
         out.Register(Attribute::StepHeight,           1.0);
+    }
+
+    bool IronGolem::CheckSpawnObstruction(EntityLevel& level) const {
+        const IBlockAccess* blocks = level.Blocks();
+        if (!blocks) return false;
+        const glm::ivec3 pos = BlockPosition();
+        // below.entityCanStandOn: the collision shape's top face is full.
+        const BlockState below = blocks->GetBlockState(pos.x, pos.y - 1, pos.z);
+        if (!BlockRegistry::HasCollision(below.Block()) ||
+            !BlockRegistry::GetBlockShapeSet(below).IsFaceSturdyUp()) {
+            return false;
+        }
+        // pos.above(1) and above(2): isValidEmptySpawnBlock with their own
+        // fluid.
+        for (int i = 1; i < 3; ++i) {
+            if (!IsValidEmptySpawnBlock(EntityTypeId::IronGolem, *blocks, pos.x, pos.y + i, pos.z)) {
+                return false;
+            }
+        }
+        // The feet cell with Fluids.EMPTY — a golem may stand in water.
+        return IsValidEmptySpawnBlock(EntityTypeId::IronGolem, *blocks, pos.x, pos.y, pos.z,
+                                      /*checkFluid=*/false) &&
+               IsUnobstructed(level);
     }
 
     IronGolem::IronGolem(EntityLevel* level)
@@ -1688,13 +1774,13 @@ namespace Game {
             // MC: EnchantmentHelper.doPostAttackEffects — no enchantments.
             SetLastHurtMob(&target);
         }
-        // MC plays IRON_GOLEM_ATTACK here — no sound system yet.
+        PlaySound(SoundEvents::IRON_GOLEM_ATTACK, 1.0f, 1.0f);
         return hurt;
     }
 
     void IronGolem::HandleEntityEvent(uint8_t id) {
-        // MC IronGolem.handleEntityEvent, verbatim (the attack sound at 4
-        // waits on the sound system; the offer-flower BEHAVIOUR needs
+        // MC IronGolem.handleEntityEvent, verbatim (its client-side attack
+        // sound at 4 is MC's silent null-except playSound; the offer-flower BEHAVIOUR needs
         // villagers, but the animation clock is the client's half and works).
         if (id == 4) {
             m_attackAnimationTick = 10;
@@ -1827,7 +1913,7 @@ namespace Game {
             // MC stunEffect: the grey entity-effect particle — no particle
             // system yet.
             if (m_stunnedTick == 0) {
-                // MC plays RAVAGER_ROAR here — no sound system yet.
+                PlaySound(SoundEvents::RAVAGER_ROAR, 1.0f, 1.0f);
                 m_roarTick = 20;
             }
         }
@@ -1902,11 +1988,11 @@ namespace Game {
     bool Ravager::DoHurtTarget(Entity& target) {
         // MC Ravager.doHurtTarget: arm the clock, broadcast, then the normal
         // hit (the base applies ATTACK_KNOCKBACK 1.5 as extra knockback).
-        // MC plays RAVAGER_ATTACK here — no sound system yet.
         // MC getAttackBoundingBox deflates the reach box by 0.05 horizontally;
         // IsWithinMeleeAttackRange has no per-mob hook for a 5 cm trim.
         m_attackTick = 10;
         if (m_level) m_level->BroadcastEntityEvent(*this, 4);
+        PlaySound(SoundEvents::RAVAGER_ATTACK, 1.0f, 1.0f);
         return Monster::DoHurtTarget(target);
     }
 
@@ -1965,10 +2051,19 @@ namespace Game {
 
     void Blaze::AiStep() {
         // MC Blaze.aiStep head, BOTH sides: every falling tick is damped to
-        // 60% — the hover. (The client-side burn sound and smoke particles
-        // have no sound/particle system to land in.)
+        // 60% — the hover; then the client's 1-in-24 burn crackle. (The smoke
+        // particles wait on particles.)
         if (!onGround && velocity.y < 0.0) {
             velocity.y *= 0.6;
+        }
+        if (m_level && m_level->IsClientSide()) {
+            JavaRandom& rng = m_level->Random();
+            if (rng.NextInt(24) == 0 && !IsSilent()) {
+                const float volume = 1.0f + rng.NextFloat();
+                const float pitch = rng.NextFloat() * 0.7f + 0.3f;
+                m_level->PlayLocalSound(position + glm::dvec3(0.5), SoundEvents::BLAZE_BURN,
+                                        GetSoundSource(), volume, pitch, false);
+            }
         }
         Monster::AiStep();
     }
@@ -2075,7 +2170,7 @@ namespace Game {
             static const std::vector<EntityTypeId> kList = [] {
                 std::vector<EntityTypeId> list;
                 for (int i = 0; i < kEntityTypeCount; ++i) {
-                    if (kEntityTypeTable[i].category != MobCategory::Monster) continue;
+                    if (!IsMonsterCategory(kEntityTypeTable[i].category)) continue;
                     list.push_back(static_cast<EntityTypeId>(i));
                 }
                 return list;
@@ -2099,7 +2194,8 @@ namespace Game {
 
     void SnowGolem::Shear() {
         if (!m_level) return;
-        // MC: level.playSound(SNOW_GOLEM_SHEAR) — sound system pending.
+        // MC: level.playSound(null, this, SNOW_GOLEM_SHEAR, source, 1, 1).
+        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::SNOW_GOLEM_SHEAR, SoundSource::Players, 1.0f, 1.0f);
         SetPumpkin(false);
         // MC dropFromShearingLootTable(SHEAR_SNOW_GOLEM): loot_table/shearing/
         // snow_golem.json is one pool, one carved pumpkin; spawnAtLocation at
@@ -2153,6 +2249,7 @@ namespace Game {
         const double yo = std::sqrt(xd * xd + zd * zd) * 0.2;
 
         snowball->Shoot(xd, yd + yo - snowball->position.y, zd, 1.6f, 12.0f);
+        PlaySound(SoundEvents::SNOW_GOLEM_SHOOT, 1.0f, 0.4f / (m_level->Random().NextFloat() * 0.4f + 0.8f));
         m_level->AddFreshEntity(std::move(snowball));
     }
 
@@ -2261,6 +2358,10 @@ namespace Game {
                     // DATA_USING_ITEM sync wait on mob equipment/client sync.
                     m_usingTime = 32;
                     m_isDrinking = true;
+                    if (!IsSilent()) {
+                        m_level->PlaySound(nullptr, position, SoundEvents::WITCH_DRINK, GetSoundSource(),
+                                           1.0f, 0.8f + m_level->Random().NextFloat() * 0.4f);
+                    }
                     // MC SPEED_MODIFIER_DRINKING: −0.25 ADD_VALUE while the
                     // bottle is up (remove-then-add, as MC does).
                     m_attributes.RemoveModifier(Attribute::MovementSpeed,
@@ -2334,24 +2435,26 @@ namespace Game {
 
         // MC's potion pick, in order. HARMING is the default; the Raider
         // branch (healing/regeneration for hurt raiders, which also clears
-        // the target) waits on raids. Payloads are Potions.java verbatim:
-        // slowness 1800, poison 900, weakness 1800, harming instant.
-        std::vector<MobEffectInstance> effects;
+        // the target) waits on raids. The throw carries
+        // PotionContents.createItemStack(SPLASH_POTION, potion).
+        PotionId pick = PotionId::Harming;
         if (dist >= 8.0 && !target.HasEffect(MobEffectId::Slowness)) {
-            effects.emplace_back(MobEffectId::Slowness, 1800);
+            pick = PotionId::Slowness;
         } else if (target.GetHealth() >= 8.0f &&
                    !target.HasEffect(MobEffectId::Poison)) {
-            effects.emplace_back(MobEffectId::Poison, 900);
+            pick = PotionId::Poison;
         } else if (dist <= 3.0 && !target.HasEffect(MobEffectId::Weakness) &&
                    m_level->Random().NextFloat() < 0.25f) {
-            effects.emplace_back(MobEffectId::Weakness, 1800);
-        } else {
-            effects.emplace_back(MobEffectId::InstantDamage, 1);
+            pick = PotionId::Weakness;
         }
-        potion->SetEffects(std::move(effects));
+        potion->SetItem(CreatePotionItemStack(Items::SplashPotion, pick));
 
         potion->Shoot(xd, yd + dist * 0.2, zd, 0.75f, 8.0f);
         m_level->AddFreshEntity(std::move(potion));
+        if (!IsSilent()) {
+            m_level->PlaySound(nullptr, position, SoundEvents::WITCH_THROW, GetSoundSource(),
+                               1.0f, 0.8f + m_level->Random().NextFloat() * 0.4f);
+        }
     }
 
     // ── Shulker ────────────────────────────────────────────────────────────
@@ -2403,6 +2506,10 @@ namespace Game {
     }
 
     void Shulker::SetRawPeekAmount(int amount) {
+        // MC setRawPeekAmount: the server voices the lid.
+        if (m_level && !m_level->IsClientSide()) {
+            PlaySound(amount == 0 ? SoundEvents::SHULKER_CLOSE : SoundEvents::SHULKER_OPEN, 1.0f, 1.0f);
+        }
         m_peekAmount = std::clamp(amount, 0, 100);
         UpdateCoveredArmor();
     }
@@ -2461,6 +2568,8 @@ namespace Game {
             if (face == -1) continue;
 
             m_attachFace = face;
+            // MC: SHULKER_TELEPORT as it leaves.
+            PlaySound(SoundEvents::SHULKER_TELEPORT, 1.0f, 1.0f);
             position = glm::dvec3(target.x + 0.5, target.y, target.z + 0.5);
             SetRawPeekAmount(0);
             SetTarget(nullptr);
@@ -2821,6 +2930,7 @@ namespace Game {
         arrow->Shoot(xd, yd + horiz * 0.2, zd, 1.6f,
                      static_cast<float>(14 - difficultyId * 4));
 
+        PlaySound(SoundEvents::SKELETON_SHOOT, 1.0f, 1.0f / (m_level->Random().NextFloat() * 0.4f + 0.8f));
         m_level->AddFreshEntity(std::move(arrow));
     }
 
@@ -2834,7 +2944,7 @@ namespace Game {
         out.Register(Attribute::AttackDamage,  4.0);
     }
 
-    Vex::Vex(EntityLevel* level) : Monster(EntityTypeId::Vex, level) {
+    Vex::Vex(EntityLevel* level, EntityTypeId type) : Monster(type, level) {
         CreateAttributes(m_attributes);
         m_health = GetMaxHealth();
         // MC's constructor: the impulse move control; xpReward 3 (ours comes
@@ -3032,10 +3142,12 @@ namespace Game {
             if (newCount <= 0) {
                 // MC: level.explode(this, x, eyeY, z, 7.0F, false, MOB) —
                 // entity-damage-only here per project policy (creeper
-                // precedent: no explosion system, terrain untouched), and
-                // global level event 1023 (the spawn sound) — no sound
-                // system.
+                // precedent: no explosion system, terrain untouched), then
+                // global level event 1023, the world-wide spawn scream.
                 SpawnBurstExplosion();
+                if (m_level && !IsSilent()) {
+                    PlayGlobalLevelEventSound(*m_level, LevelEvent::SOUND_WITHER_BOSS_SPAWN, BlockPosition());
+                }
             }
             SetInvulnerableTicks(newCount);
             if (tickCount % 10 == 0) {
@@ -3169,7 +3281,8 @@ namespace Game {
     void Wither::PerformRangedAttack(int head, double tx, double ty,
                                          double tz, bool dangerous) {
         if (!m_level) return;
-        // MC level event 1024 (wither shoot sound) — no sound system.
+        // MC: level event 1024, the shoot sound, unless silent.
+        if (!IsSilent()) PlayEntityLevelEventSound(*m_level, EntityLevelEvent::WITHER_SHOOT, BlockPosition());
 
         const double hx = GetHeadX(head);
         const double hy = GetHeadY(head);
@@ -3359,8 +3472,12 @@ namespace Game {
     }
 
     void Strider::Tick() {
-        // MC Strider.tick: the happy/retreat sound rolls need the sound
-        // system; then the warm-block check drives the shiver.
+        // MC Strider.tick: the happy/retreat sound rolls (the tempted half
+        // needs a tempt-goal handle; the panic half is live), then the
+        // warm-block check drives the shiver.
+        if (m_level && IsPanicking() && m_level->Random().NextInt(60) == 0) {
+            MakeSound(SoundEvents::STRIDER_RETREAT);
+        }
         if (!IsNoAi()) {
             // MC STRIDER_WARM_BLOCKS is lava (+ magma in datapacks); with no
             // block tags the check reduces to lava contact — feet cell,
@@ -3877,8 +3994,8 @@ namespace Game {
             void Begin() override { m_attackingTicks = 0; }
 
             void DoServerTick() override {
-                // MC: 40 ticks of roar (the sound is doClientTick's — no
-                // sound system), then the flame breath.
+                // MC: 40 ticks of roar (the growl is doClientTick's, played
+                // from EnderDragon::AiStep on the client), then the flame breath.
                 if (m_attackingTicks++ >= kRoarDuration) {
                     m_dragon->SetPhase(DragonPhase::SittingFlaming);
                 }
@@ -4147,7 +4264,10 @@ namespace Game {
                     if (m_fireballCharge >= kFireballChargeAmount &&
                         angleDegs >= 0.0f && angleDegs < 10.0f) {
                         // MC: the fireball leaves from just behind the head.
-                        // Level event 1017 (the fireball roar) — no sounds.
+                        if (!m_dragon->IsSilent()) {
+                            PlayEntityLevelEventSound(*m_dragon->Level(), EntityLevelEvent::DRAGON_SHOOT,
+                                                      m_dragon->BlockPosition());
+                        }
                         const glm::dvec3 viewVector =
                             m_dragon->GetHeadLookVector();
                         const glm::dvec3 head = m_dragon->GetHeadPosition();
@@ -4964,9 +5084,29 @@ namespace Game {
     void EnderDragon::AiStep() {
         // MC EnderDragon.aiStep — REPLACES Mob::AiStep wholesale, exactly as
         // MC's override replaces Mob's (no goals, no travel; the flight below
-        // IS the locomotion). processFlappingMovement (the flap sound) and
-        // the client growl timer are sound-system work, skipped.
+        // IS the locomotion). First processFlappingMovement (the flap sound
+        // on the wing's down-stroke crossing) and the client's growl timer
+        // — plus the sitting-attacking phase's client-tick growl.
         const bool clientSide = m_level && m_level->IsClientSide();
+
+        if (clientSide && !IsSilent()) {
+            JavaRandom& rng = m_level->Random();
+            const float flap = std::cos(flapTime * static_cast<float>(Mth::kPi) * 2.0f);
+            const float oldFlap = std::cos(oFlapTime * static_cast<float>(Mth::kPi) * 2.0f);
+            if (oldFlap <= -0.3f && flap >= -0.3f) {
+                m_level->PlayLocalSound(position, SoundEvents::ENDER_DRAGON_FLAP, GetSoundSource(),
+                                        5.0f, 0.8f + rng.NextFloat() * 0.3f, false);
+            }
+            if (!IsPhaseSitting() && --m_growlTime < 0) {
+                m_level->PlayLocalSound(position, SoundEvents::ENDER_DRAGON_GROWL, GetSoundSource(),
+                                        2.5f, 0.8f + rng.NextFloat() * 0.3f, false);
+                m_growlTime = 200 + rng.NextInt(200);
+            }
+            if (GetPhase() == DragonPhase::SittingAttacking && !IsDeadOrDying()) {
+                m_level->PlayLocalSound(position, SoundEvents::ENDER_DRAGON_GROWL, GetSoundSource(),
+                                        2.5f, 0.8f + rng.NextFloat() * 0.3f, false);
+            }
+        }
 
         oFlapTime = flapTime;
         if (IsDeadOrDying()) {
@@ -5236,7 +5376,10 @@ namespace Game {
                     LastHurtByPlayerId());
             }
             // MC deathTime == 1: globalLevelEvent 1028, the world-wide death
-            // roar — sound system pending (Game::PlaySound is a stub).
+            // roar, unless silent.
+            if (deathTime == 1 && !IsSilent()) {
+                PlayGlobalLevelEventSound(*m_level, LevelEvent::SOUND_DRAGON_DEATH, BlockPosition());
+            }
         }
 
         // MC: move(SELF, (0, 0.1, 0)) — the corpse floats up as it burns out.
@@ -5492,6 +5635,42 @@ namespace Game {
         for (auto& phase : m_phases) {
             if (phase) phase->ClearReferenceTo(entity);
         }
+    }
+
+    // ── ZombieVillager's VillagerData (MC VillagerDataHolder) ──────────────
+
+    ZombieVillager::ZombieVillager(EntityLevel* level)
+        : Zombie(EntityTypeId::ZombieVillager, level) {
+        RegisterGoals();
+        RerollVillagerData();
+    }
+
+    void ZombieVillager::RerollVillagerData() {
+        // MC initializeZombieVillagerData: createDefaultVillagerData (plains,
+        // none, level 1) with BuiltInRegistries.VILLAGER_PROFESSION
+        // .getRandom — nextInt over the registry, whose order the enum keeps.
+        VillagerData data;
+        data.type  = VillagerType::Plains;
+        data.level = 1;
+        data.profession = m_level ? static_cast<VillagerProfession>(m_level->Random().NextInt(kVillagerProfessionCount))
+                                  : VillagerProfession::None;
+        m_villagerData = data;
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    ZombieVillager::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        if (!m_villagerDataFinalized) {
+            VillagerType type = VillagerType::Plains;
+            if (m_level) {
+                if (const IBlockAccess* blocks = m_level->Blocks()) {
+                    const glm::ivec3 p = BlockPosition();
+                    type = VillagerTypeByBiome(BiomeRegistry::Get(blocks->GetBiome(p.x, p.y, p.z)).name);
+                }
+            }
+            m_villagerData = m_villagerData.WithType(type);
+            m_villagerDataFinalized = true;
+        }
+        return Zombie::FinalizeSpawn(reason, std::move(groupData));
     }
 
 } // namespace Game

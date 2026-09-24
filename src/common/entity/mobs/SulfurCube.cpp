@@ -18,9 +18,11 @@
 #include "common/world/level/Explosion.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -411,6 +413,39 @@ namespace Game {
         return false;
     }
 
+    const char* SulfurCube::GetHurtSound(MobDamageSource) const {
+        return IsTiny() ? SoundEvents::SULFUR_CUBE_SMALL_HURT : SoundEvents::SULFUR_CUBE_HURT;
+    }
+
+    const char* SulfurCube::GetDeathSound() const {
+        return IsTiny() ? SoundEvents::SULFUR_CUBE_SMALL_DEATH : SoundEvents::SULFUR_CUBE_DEATH;
+    }
+
+    const char* SulfurCube::GetSquishSound() const {
+        if (IsTiny()) return SoundEvents::SULFUR_CUBE_SMALL_SQUISH;
+        return HasBodyItem() ? SoundEvents::SULFUR_CUBE_BOUNCE : SoundEvents::SULFUR_CUBE_SQUISH;
+    }
+
+    const char* SulfurCube::GetJumpSound() const {
+        return IsTiny() ? SoundEvents::SULFUR_CUBE_SMALL_JUMP : SoundEvents::SULFUR_CUBE_JUMP;
+    }
+
+    void SulfurCube::PlayStepSound(const glm::ivec3& pos, BlockState state) {
+        if (!HasBodyItem()) Slime::PlayStepSound(pos, state);
+    }
+
+    namespace {
+        // MC SulfurCubeArchetype.SoundSettings hit/push: one event pair per
+        // archetype, "entity.sulfur_cube.<archetype>.hit|push".
+        std::string ArchetypeSound(const SulfurCubeArchetypeDef* archetype, const char* suffix) {
+            if (!archetype) return {};
+            std::string id = "entity.sulfur_cube.";
+            id.append(archetype->name);
+            id.append(suffix);
+            return id;
+        }
+    }
+
     bool SulfurCube::EquipItem(ItemID item) {
         if (IsBaby()) return false;
         if (HasBodyItem()) {
@@ -423,6 +458,8 @@ namespace Game {
             }
         }
         SetBodyItem(item);
+        // MC mobInteract's swallow: the absorb gulp.
+        PlaySound(SoundEvents::SULFUR_CUBE_ABSORB, 1.0f, 1.0f);
         return true;
     }
 
@@ -499,6 +536,7 @@ namespace Game {
         if (m_level && !m_level->IsClientSide()) {
             m_level->SpawnItemDrop(position + glm::dvec3(0.0, GetBbHeight(), 0.0), held, 1);
         }
+        PlaySound(SoundEvents::SULFUR_CUBE_EJECT, 1.0f, 1.0f);
         m_pickupTimer = kPickupTimerDuration;
     }
 
@@ -554,6 +592,7 @@ namespace Game {
         m_fuse = fuseTime;
         m_maxFuse = fuseTime;                   // MAX_FUSE, synched
         needsSync = true;
+        MakeSound(SoundEvents::TNT_PRIMED);
         return true;
     }
 
@@ -634,6 +673,7 @@ namespace Game {
             if (!it.canPickUp || !IsSwallowable(it.itemId)) continue;
             if (m_level->TakeFromItemEntity(it.id, 1) == 1) {
                 SetBodyItem(it.itemId);
+                PlaySound(SoundEvents::SULFUR_CUBE_ABSORB, 1.0f, 1.0f);
                 break;
             }
         }
@@ -683,7 +723,7 @@ namespace Game {
             const double thr = static_cast<double>(m_pushSoundThreshold);
             if (glm::dot(pushVelocity, pushVelocity) > thr * thr && m_pushSoundCooldown <= 0) {
                 m_pushSoundCooldown = static_cast<int>(m_pushSoundCooldownSeconds * 20.0f);
-                // (push sound — no mob sounds here)
+                PlaySound(ArchetypeSound(m_archetype, ".push"), 1.0f, 1.0f);
             }
             velocity += pushVelocity;
             ApplyContactDamage(*player);
@@ -818,6 +858,7 @@ namespace Game {
         velocity = glm::dvec3(velocity.x - horizontal.x,
                               velocity.y + static_cast<double>(verticalPower) * 1.2,
                               velocity.z - horizontal.z);
+        PlaySound(ArchetypeSound(m_archetype, ".hit"), 1.0f, 1.0f);
     }
 
     // ── Interaction ────────────────────────────────────────────────────────

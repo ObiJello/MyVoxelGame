@@ -18,6 +18,7 @@ const TicketType TicketType::FORCED{0L, FLAG_PERSIST | FLAG_LOADING | FLAG_SIMUL
 const TicketType TicketType::PORTAL{300L, FLAG_PERSIST | FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE, "portal"};
 const TicketType TicketType::ENDER_PEARL{40L, FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE, "ender_pearl"};
 const TicketType TicketType::UNKNOWN{1L, FLAG_LOADING | FLAG_CAN_EXPIRE_IF_UNLOADED, "unknown"};
+const TicketType TicketType::GENERATION_REQUEST{NO_TIMEOUT, FLAG_LOADING, "obeycraft:generation_request"};
 
 } // namespace level
 } // namespace server

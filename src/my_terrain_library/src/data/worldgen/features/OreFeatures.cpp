@@ -13,8 +13,8 @@ using namespace levelgen::structure::templatesystem;
 // Static members
 OreFeature OreFeatures::s_oreFeature;
 ScatteredOreFeature OreFeatures::s_scatteredOreFeature;
-std::shared_ptr<TagMatchTest> OreFeatures::s_stoneOreReplaceables;
-std::shared_ptr<TagMatchTest> OreFeatures::s_deepslateOreReplaceables;
+std::shared_ptr<RuleTest> OreFeatures::s_stoneOreReplaceables;
+std::shared_ptr<RuleTest> OreFeatures::s_deepslateOreReplaceables;
 std::shared_ptr<TagMatchTest> OreFeatures::s_naturalStone;
 std::shared_ptr<RuleTest> OreFeatures::s_netherrack;
 std::shared_ptr<TagMatchTest> OreFeatures::s_netherOreReplaceables;
@@ -86,9 +86,14 @@ void OreFeatures::bootstrap() {
     if (s_initialized) return;
 
     // Initialize RuleTests
-    // Reference: OreFeatures.java lines 50-54
-    s_stoneOreReplaceables = std::make_shared<TagMatchTest>("minecraft:stone_ore_replaceables");
-    s_deepslateOreReplaceables = std::make_shared<TagMatchTest>("minecraft:deepslate_ore_replaceables");
+    // Reference: OreFeatures.java lines 52-56 (26.3)
+    // 26.3: tuff (height_specific_ore_replaceables) takes the stone ore at
+    // y >= 0 and the deepslate ore at y <= 8 — the band 0..8 accepts both.
+    auto heightSpecific = std::make_shared<TagMatchTest>("minecraft:height_specific_ore_replaceables");
+    s_stoneOreReplaceables = eitherRuleTest(heightSpecific, HeightMatchTest::min(0),
+        std::make_shared<TagMatchTest>("minecraft:stone_ore_replaceables"));
+    s_deepslateOreReplaceables = eitherRuleTest(heightSpecific, HeightMatchTest::max(8),
+        std::make_shared<TagMatchTest>("minecraft:deepslate_ore_replaceables"));
     s_naturalStone = std::make_shared<TagMatchTest>("minecraft:base_stone_overworld");
     // Java: new BlockMatchTest(Blocks.NETHERRACK) - a block match, not a tag
     s_netherrack = std::make_shared<BlockMatchTest>("minecraft:netherrack");

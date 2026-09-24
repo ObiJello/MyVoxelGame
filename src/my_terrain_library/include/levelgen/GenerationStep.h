@@ -40,6 +40,8 @@ public:
     // Convenience constants for common steps
     static constexpr int32_t UNDERGROUND_ORES = static_cast<int32_t>(Decoration::UNDERGROUND_ORES);
     static constexpr int32_t VEGETAL_DECORATION = static_cast<int32_t>(Decoration::VEGETAL_DECORATION);
+    static constexpr int32_t LAKES = static_cast<int32_t>(Decoration::LAKES);
+    static constexpr int32_t UNDERGROUND_DECORATION = static_cast<int32_t>(Decoration::UNDERGROUND_DECORATION);
 
     /**
      * Get the name of a decoration step

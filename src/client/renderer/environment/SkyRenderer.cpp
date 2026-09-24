@@ -1,7 +1,7 @@
 // File: src/client/renderer/environment/SkyRenderer.cpp
 //
 // Geometry and constants are verbatim from the vendored MC decompile
-// (minecraft_code/.../client/renderer/SkyRenderer.java):
+// (minecraft_code_26.1-snapshot-1/.../client/renderer/SkyRenderer.java):
 //   SKY_DISC_RADIUS 512, disc fan of 10 verts at y=±16, sunrise fan of 18
 //   verts (center (0,100,0), ring r=120 with z=-cos*40), sun 30×(0,100,0),
 //   moon 20×(0,100,0), 1500 star attempts from RandomSource.create(10842L).
@@ -12,12 +12,15 @@
 #include "platform/GameDirectory.hpp"
 #include "client/resource/ResourcePacks.hpp"
 #include "EnvironmentState.hpp"
+#include "AuroraRenderer.hpp"
+#include "HushAtmosphere.hpp"
 #include "JavaRandom.hpp"
 #include "../backend/RenderBackend.hpp"
 #ifdef HAS_VULKAN
 #include "../backend/vulkan/VKBackend.hpp"
 #endif
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "stb_image.h"
 #include <nlohmann/json.hpp>
@@ -31,7 +34,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
@@ -101,6 +106,7 @@ void main() {
         constexpr float kMoonSize = 20.0f;
         constexpr float kCelestialHeight = 100.0f;
         constexpr int kStarAttempts = 1500;
+        constexpr int kTwilightStarAttempts = 3000;   // TFSkyRenderer.buildStars
         constexpr int64_t kStarSeed = 10842;
 
         TextureHandle LoadTextureFile(const std::string& full) {
@@ -413,27 +419,40 @@ void main() {
             return {};
         }
 
-        // Loads one skybox face from an absolute path; optionally
-        // accumulates the average color of the texture's middle row (the
-        // horizon band on side faces) so the fog color can match the skybox.
-        TextureHandle LoadSkyboxFace(const std::string& full,
-                                     glm::vec3* horizonAccum, int* horizonSamples) {
-            if (full.empty() || !std::filesystem::exists(full)) return INVALID_TEXTURE;
+        // One skybox face decoded from an absolute path (any thread), and
+        // optionally the average colour of the texture's middle row (the
+        // horizon band on side faces) so the fog colour can match the skybox.
+        struct DecodedFace {
+            std::vector<unsigned char> pixels;
+            int w = 0, h = 0;
+            glm::vec3 horizonAccum{0.0f};
+            int horizonSamples = 0;
+        };
+        DecodedFace DecodeSkyboxFace(const std::string& full, bool horizon) {
+            DecodedFace out;
+            if (full.empty() || !std::filesystem::exists(full)) return out;
+            stbi_set_flip_vertically_on_load_thread(0);
             int w = 0, h = 0, ch = 0;
-            stbi_set_flip_vertically_on_load(0);
             unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
-            if (!pixels) return INVALID_TEXTURE;
-            if (horizonAccum && w > 0 && h > 0) {
+            if (!pixels) return out;
+            if (horizon && w > 0 && h > 0) {
                 const unsigned char* row = pixels + static_cast<size_t>(h / 2) * w * 4;
                 for (int x = 0; x < w; ++x) {
-                    horizonAccum->r += row[x * 4 + 0] / 255.0f;
-                    horizonAccum->g += row[x * 4 + 1] / 255.0f;
-                    horizonAccum->b += row[x * 4 + 2] / 255.0f;
+                    out.horizonAccum.r += row[x * 4 + 0] / 255.0f;
+                    out.horizonAccum.g += row[x * 4 + 1] / 255.0f;
+                    out.horizonAccum.b += row[x * 4 + 2] / 255.0f;
                 }
-                *horizonSamples += w;
+                out.horizonSamples = w;
             }
-            TextureHandle t = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+            out.w = w;
+            out.h = h;
+            out.pixels.assign(pixels, pixels + static_cast<size_t>(w) * h * 4);
             stbi_image_free(pixels);
+            return out;
+        }
+        TextureHandle UploadSkyboxFace(const DecodedFace& face) {
+            if (face.pixels.empty()) return INVALID_TEXTURE;
+            TextureHandle t = g_renderBackend->CreateTexture2D(face.w, face.h, TextureFormat::RGBA8, face.pixels.data());
             if (t != INVALID_TEXTURE) {
                 g_renderBackend->SetTextureFilter(t, TextureFilter::Linear, TextureFilter::Linear);
                 g_renderBackend->SetTextureWrap(t, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
@@ -623,11 +642,18 @@ void main() {
     }
 
     void SkyRenderer::BuildStars() {
-        // buildStars: 1500 attempts; RNG consumed even for rejected stars.
+        m_stars = BuildStarMesh(kStarAttempts);
+        // TFSkyRenderer.buildStars: "[VanillaCopy] … but with double the
+        // number of them" — 1500 → 3000 attempts, same seed.
+        m_twilightStars = BuildStarMesh(kTwilightStarAttempts);
+    }
+
+    SkyRenderer::Mesh SkyRenderer::BuildStarMesh(int attempts) {
+        // buildStars: `attempts` tries; RNG consumed even for rejected stars.
         JavaRandom random(kStarSeed);
         std::vector<Vertex> verts;
         std::vector<uint32_t> indices;
-        for (int i = 0; i < kStarAttempts; ++i) {
+        for (int i = 0; i < attempts; ++i) {
             const float x = random.NextFloat() * 2.0f - 1.0f;
             const float y = random.NextFloat() * 2.0f - 1.0f;
             const float z = random.NextFloat() * 2.0f - 1.0f;
@@ -661,10 +687,10 @@ void main() {
             indices.insert(indices.end(),
                            {base, base + 1, base + 2, base, base + 2, base + 3});
         }
-        m_stars = CreateMesh(verts.data(), verts.size() * sizeof(Vertex),
-                             indices.data(), indices.size());
-        Log::Info("SkyRenderer: built %zu stars (seed %lld)",
-                  verts.size() / 4, static_cast<long long>(kStarSeed));
+        Log::Info("SkyRenderer: built %zu stars from %d attempts (seed %lld)",
+                  verts.size() / 4, attempts, static_cast<long long>(kStarSeed));
+        return CreateMesh(verts.data(), verts.size() * sizeof(Vertex),
+                          indices.data(), indices.size());
     }
 
     void SkyRenderer::BuildSkyboxCubes() {
@@ -722,32 +748,74 @@ void main() {
     }
 
     bool SkyRenderer::LoadOptiFinePack(const std::string& id, const std::string& setDir) {
+        PROFILE_ZONE_N("Sky.LoadOptiFinePack");
         DestroyOptiFinePack();
-        const char* worlds[2] = {"world0", "world1"};
+        std::shared_ptr<DecodedPack> pack;
+        if (PrefetchMatches(id, setDir)) {
+            // The title screen saw this coming: the layers are decoded (or
+            // nearly — the rest of the decode is waited for here) and some
+            // may be on the GPU already.
+            pack = m_prefetch.pack;
+            if (m_prefetch.decode.valid()) m_prefetch.decode.get();
+            m_prefetch = Prefetch{};
+        } else {
+            DiscardPrefetch();
+            pack = std::make_shared<DecodedPack>();
+            pack->id  = id;
+            pack->dir = setDir;
+            // Cold: every core decodes — nine 3072×2048 PNGs one after
+            // another were the 300 ms this call used to cost.
+            const int cores = static_cast<int>(std::thread::hardware_concurrency());
+            DecodeOptiFinePack(*pack, std::clamp(cores, 1, 8));
+        }
+        return InstallDecodedPack(*pack);
+    }
+
+    bool SkyRenderer::InstallDecodedPack(DecodedPack& pack) {
+        PROFILE_ZONE_N("Sky.InstallPack");
+        // The decode is complete (LoadOptiFinePack waited; the pump checked),
+        // so the slots are ours without the lock.
+        DestroyOptiFinePack();
         for (int d = 0; d < 2; ++d) {
-            const std::string skyDir = FindOptiFineSkyDir(setDir, worlds[d]);
-            if (skyDir.empty()) continue;
-            LoadOptiFineWorldLayers(setDir, skyDir, m_pack.layers[d]);
+            for (DecodedLayer& slot : pack.layers[d]) {
+                if (!slot.uploaded) UploadDecodedLayer(slot);
+                if (slot.faceSize > 0 && slot.layer.faces[0] != INVALID_TEXTURE) {
+                    m_pack.layers[d].push_back(std::move(slot.layer));
+                }
+            }
+            pack.layers[d].clear();
+            pack.ready[d].clear();
         }
         if (m_pack.layers[0].empty() && m_pack.layers[1].empty()) return false;
-        m_pack.id     = id;
-        m_pack.dir    = setDir;
+        m_pack.id     = pack.id;
+        m_pack.dir    = pack.dir;
         m_pack.loaded = true;
-        ReadPackDecorations(setDir);
+        ReadPackDecorations(pack.dir);
 
         // A resource pack may replace the vanilla environment textures as
         // well; a sky pack usually brings a matching sun and moon, and a
         // blank clouds.png when its clouds are painted into the sky.
+        auto uploadBody = [&](DecodedImage& img) {
+            if (img.pixels.empty()) return INVALID_TEXTURE;
+            TextureHandle t = g_renderBackend->CreateTexture2D(img.w, img.h, TextureFormat::RGBA8, img.pixels.data());
+            img = DecodedImage{};
+            if (t != INVALID_TEXTURE) {
+                // Vanilla binds sun/moon with default (nearest) sampling.
+                g_renderBackend->SetTextureFilter(t, TextureFilter::Nearest, TextureFilter::Nearest);
+                g_renderBackend->SetTextureWrap(t, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+            }
+            return t;
+        };
+        m_pack.sunTexture  = uploadBody(pack.sun);
+        m_pack.moonTexture = uploadBody(pack.moon);
         {
-            const std::string env = setDir + "assets/minecraft/textures/environment/";
+            const std::string env = pack.dir + "assets/minecraft/textures/environment/";
             std::error_code ec;
-            if (std::filesystem::exists(env + "sun.png", ec))         m_pack.sunTexture  = LoadTextureFile(env + "sun.png");
-            if (std::filesystem::exists(env + "moon_phases.png", ec)) m_pack.moonTexture = LoadTextureFile(env + "moon_phases.png");
-            if (std::filesystem::exists(env + "clouds.png", ec))      m_pack.cloudTexturePath = env + "clouds.png";
+            if (std::filesystem::exists(env + "clouds.png", ec)) m_pack.cloudTexturePath = env + "clouds.png";
         }
 
         Log::Info("SkyRenderer: OptiFine sky '%s': %zu overworld layer(s), %zu End layer(s)%s%s%s%s%s%s",
-                  id.c_str(), m_pack.layers[0].size(), m_pack.layers[1].size(),
+                  m_pack.id.c_str(), m_pack.layers[0].size(), m_pack.layers[1].size(),
                   m_pack.showSun[0]   ? "" : ", sun hidden",
                   m_pack.showMoon[0]  ? "" : ", moon hidden",
                   m_pack.showStars[0] ? "" : ", stars hidden",
@@ -755,6 +823,113 @@ void main() {
                   m_pack.moonTexture != INVALID_TEXTURE ? ", own moon" : "",
                   m_pack.cloudTexturePath.empty() ? "" : ", own clouds");
         return true;
+    }
+
+    std::string SkyRenderer::PackDirFor(const std::string& id) {
+        // "Vanilla" is the vanilla sky with the top enabled resource pack's
+        // custom sky over it (ApplySkybox); anything else is a skybox
+        // folder, an OptiFine pack only when it has no six faces.
+        if (id == "vanilla") return ResourcePackSkyRoot();
+        const std::string dir = ResolveSkyboxDir(id);
+        if (dir.empty() || !SkyboxFacePath(dir, 0).empty()) return {};
+        return dir;
+    }
+
+    void SkyRenderer::PrefetchSkybox(const std::string& id) {
+        if (!m_initialized || !g_renderBackend) return;
+        PROFILE_ZONE_N("Sky.Prefetch");
+        const std::string skyId = id.empty() ? "vanilla" : id;
+        const std::string dir   = PackDirFor(skyId);
+        if (dir.empty()) return;                                             // nothing to decode
+        if (m_pack.loaded && m_pack.id == skyId && m_pack.dir == dir) return; // resident
+        if (PrefetchMatches(skyId, dir)) return;                             // in flight
+        DiscardPrefetch();
+        auto pack = std::make_shared<DecodedPack>();
+        pack->id  = skyId;
+        pack->dir = dir;
+        m_prefetch.pack   = pack;
+        // Two workers: the title's own frame and the panorama's mip jobs
+        // share the machine with this.
+        m_prefetch.decode = std::async(std::launch::async, [pack] { DecodeOptiFinePack(*pack, 2); });
+        Log::Info("SkyRenderer: prefetching sky pack '%s'", skyId.c_str());
+    }
+
+    void SkyRenderer::PumpPrefetch() {
+        ReapAbandonedDecodes();
+        if (!m_prefetch.pack || !g_renderBackend) return;
+        DecodedPack& pack = *m_prefetch.pack;
+        bool complete = false;
+        {
+            std::lock_guard<std::mutex> lock(pack.mutex);
+            // One layer a frame: six 1024² uploads is a frame's worth.
+            bool uploadedOne = false;
+            bool allUploaded = true;
+            for (int d = 0; d < 2 && !uploadedOne; ++d) {
+                for (size_t i = 0; i < pack.layers[d].size(); ++i) {
+                    if (!pack.ready[d][i]) { allUploaded = false; continue; }
+                    DecodedLayer& slot = pack.layers[d][i];
+                    if (slot.uploaded) continue;
+                    { PROFILE_ZONE_N("Sky.PrefetchUploadLayer"); UploadDecodedLayer(slot); }
+                    uploadedOne = true;
+                    break;
+                }
+            }
+            if (!uploadedOne && pack.decoded) {
+                for (int d = 0; d < 2; ++d) {
+                    for (const DecodedLayer& slot : pack.layers[d]) {
+                        if (!slot.uploaded) allUploaded = false;
+                    }
+                }
+                complete = allUploaded;
+            }
+        }
+        if (!complete) return;
+        // Everything is on the GPU: make it the resident pack now, so the
+        // join finds it as SetSkybox keeps a pack whose id matches.
+        if (m_prefetch.decode.valid()) m_prefetch.decode.get();
+        std::shared_ptr<DecodedPack> done = std::move(m_prefetch.pack);
+        m_prefetch = Prefetch{};
+        if (InstallDecodedPack(*done)) {
+            Log::Info("SkyRenderer: sky pack '%s' resident ahead of the join", done->id.c_str());
+        }
+    }
+
+    void SkyRenderer::DiscardPrefetch() {
+        if (m_prefetch.pack) {
+            DecodedPack& pack = *m_prefetch.pack;
+            pack.cancel.store(true);
+            if (m_prefetch.decode.valid()) {
+                if (m_prefetch.decode.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                    m_prefetch.decode.get();
+                } else {
+                    m_abandonedDecodes.push_back(std::move(m_prefetch.decode));
+                }
+            }
+            // The textures the pump uploaded. Under the pack's lock: a
+            // worker may still be finishing a layer into another slot.
+            if (g_renderBackend) {
+                std::lock_guard<std::mutex> lock(pack.mutex);
+                for (auto& world : pack.layers) {
+                    for (DecodedLayer& slot : world) {
+                        for (TextureHandle& t : slot.layer.faces) {
+                            if (t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(t); t = INVALID_TEXTURE; }
+                        }
+                    }
+                }
+            }
+        }
+        m_prefetch = Prefetch{};
+    }
+
+    void SkyRenderer::ReapAbandonedDecodes() {
+        for (size_t i = 0; i < m_abandonedDecodes.size();) {
+            if (m_abandonedDecodes[i].wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                m_abandonedDecodes[i].get();
+                m_abandonedDecodes.erase(m_abandonedDecodes.begin() + static_cast<std::ptrdiff_t>(i));
+            } else {
+                ++i;
+            }
+        }
     }
 
     // The pack's Nuit (assets/nuit/sky/*.json) or FabricSkyBoxes
@@ -835,113 +1010,180 @@ void main() {
         }
     }
 
-    bool SkyRenderer::LoadOptiFineWorldLayers(const std::string& setDir, const std::string& skyDir,
-                                              std::vector<OptiFineLayer>& out) {
-        const std::vector<std::string> files = OptiFineLayerFiles(skyDir);
-        if (files.empty()) return false;
-
-        for (const std::string& file : files) {
-            OptiFineLayer layer;
-            std::string source, startIn, endIn, startOut, endOut, weather;
-            for (const auto& [key, value] : ReadProperties(file)) {
-                if      (key == "source")       source   = value;
-                else if (key == "startFadeIn")  startIn  = value;
-                else if (key == "endFadeIn")    endIn    = value;
-                else if (key == "startFadeOut") startOut = value;
-                else if (key == "endFadeOut")   endOut   = value;
-                else if (key == "blend")        layer.blend = value;
-                else if (key == "rotate")       layer.rotate = (value == "true" || value == "1");
-                else if (key == "speed")        layer.speed = static_cast<float>(std::atof(value.c_str()));
-                else if (key == "weather")      weather = value;
-                else if (key == "biomes")       ParseBiomeList(value, layer.biomes, layer.biomesNegated);
-                else if (key == "heights")      layer.heights = ParseIntRanges(value);
-                else if (key == "days")         layer.days = ParseIntRanges(value);
-                else if (key == "daysLoop")     { int v = 0; if (ParseInt(value, v) && v > 0) layer.daysLoop = v; }
-                else if (key == "transition")   layer.transitionSec = static_cast<float>(std::atof(value.c_str()));
-                else if (key == "axis") {
-                    float x = 0.0f, y = 0.0f, z = 0.0f;
-                    if (std::sscanf(value.c_str(), "%f %f %f", &x, &y, &z) == 3 &&
-                        x * x + y * y + z * z > 1e-5f) {
-                        layer.axis = glm::vec3(x, y, z);
-                    }
+    void SkyRenderer::DecodeOptiFineLayer(const std::string& file, const std::string& setDir,
+                                          const std::string& skyDir, DecodedLayer& out) {
+        OptiFineLayer& layer = out.layer;
+        std::string source, startIn, endIn, startOut, endOut, weather;
+        for (const auto& [key, value] : ReadProperties(file)) {
+            if      (key == "source")       source   = value;
+            else if (key == "startFadeIn")  startIn  = value;
+            else if (key == "endFadeIn")    endIn    = value;
+            else if (key == "startFadeOut") startOut = value;
+            else if (key == "endFadeOut")   endOut   = value;
+            else if (key == "blend")        layer.blend = value;
+            else if (key == "rotate")       layer.rotate = (value == "true" || value == "1");
+            else if (key == "speed")        layer.speed = static_cast<float>(std::atof(value.c_str()));
+            else if (key == "weather")      weather = value;
+            else if (key == "biomes")       ParseBiomeList(value, layer.biomes, layer.biomesNegated);
+            else if (key == "heights")      layer.heights = ParseIntRanges(value);
+            else if (key == "days")         layer.days = ParseIntRanges(value);
+            else if (key == "daysLoop")     { int v = 0; if (ParseInt(value, v) && v > 0) layer.daysLoop = v; }
+            else if (key == "transition")   layer.transitionSec = static_cast<float>(std::atof(value.c_str()));
+            else if (key == "axis") {
+                float x = 0.0f, y = 0.0f, z = 0.0f;
+                if (std::sscanf(value.c_str(), "%f %f %f", &x, &y, &z) == 3 &&
+                    x * x + y * y + z * z > 1e-5f) {
+                    layer.axis = glm::vec3(x, y, z);
                 }
             }
-            // Weather: which of clear / rain / thunder the layer shows in
-            // (CustomSkyLayer.weather; default clear only).
-            if (!weather.empty()) {
-                layer.weatherClear = layer.weatherRain = layer.weatherThunder = false;
-                for (const std::string& w : SplitWords(weather)) {
-                    if      (w == "clear")   layer.weatherClear   = true;
-                    else if (w == "rain")    layer.weatherRain    = true;
-                    else if (w == "thunder") layer.weatherThunder = true;
-                }
-            }
-
-            // Fade (CommonUtils.convertOptiFineSkyProperties): all three of
-            // startFadeIn/endFadeIn/endFadeOut make a fade; startFadeOut is
-            // derived when missing.
-            if (!startIn.empty() && !endIn.empty() && !endOut.empty()) {
-                const int a = OptiFineTimeToTicks(startIn), b = OptiFineTimeToTicks(endIn),
-                          d = OptiFineTimeToTicks(endOut);
-                if (a >= 0 && b >= 0 && d >= 0) {
-                    int c = startOut.empty() ? -1 : OptiFineTimeToTicks(startOut);
-                    if (c < 0) {
-                        c = d - (b - a);
-                        if (a <= c && b >= c) c = d;
-                    }
-                    layer.fadeAlwaysOn = false;
-                    layer.startFadeIn  = NormalizeTick(a);
-                    layer.endFadeIn    = NormalizeTick(b);
-                    layer.startFadeOut = NormalizeTick(c);
-                    layer.endFadeOut   = NormalizeTick(d);
-                }
-            }
-
-            // The 3×2 image, cut into the six cube faces.
-            const std::string stem = std::filesystem::path(file).stem().string();
-            const std::string texPath = ResolveOptiFineSource(source, setDir, skyDir, stem + ".png");
-            int w = 0, h = 0, ch = 0;
-            stbi_set_flip_vertically_on_load(0);
-            unsigned char* px = stbi_load(texPath.c_str(), &w, &h, &ch, STBI_rgb_alpha);
-            if (!px) {
-                Log::Warning("SkyRenderer: OptiFine sky layer %s: cannot read %s",
-                             std::filesystem::path(file).filename().string().c_str(), texPath.c_str());
-                continue;
-            }
-            const int cellW = w / 3, cellH = h / 2;
-            if (cellW <= 0 || cellH <= 0 || cellW != cellH) {
-                Log::Warning("SkyRenderer: OptiFine sky texture %s is %dx%d, not a 3x2 grid of squares",
-                             texPath.c_str(), w, h);
-                stbi_image_free(px);
-                continue;
-            }
-            // MC's SimpleTexture: nearest unless the .mcmeta asks for blur;
-            // no mipmaps either way.
-            const TextureFilter filter = TextureBlur(texPath) ? TextureFilter::Linear : TextureFilter::Nearest;
-            const int n = cellW;
-            std::vector<unsigned char> face(static_cast<size_t>(n) * n * 4);
-            bool ok = true;
-            for (int f = 0; f < 6 && ok; ++f) {
-                const int cell = kOptiFineFaceCells[f];
-                const int cx0 = (cell % 3) * n, cy0 = (cell / 3) * n;
-                for (int oy = 0; oy < n; ++oy) {
-                    std::memcpy(face.data() + static_cast<size_t>(oy) * n * 4,
-                                px + (static_cast<size_t>(cy0 + oy) * w + cx0) * 4,
-                                static_cast<size_t>(n) * 4);
-                }
-                layer.faces[f] = g_renderBackend->CreateTexture2D(n, n, TextureFormat::RGBA8, face.data());
-                if (layer.faces[f] == INVALID_TEXTURE) { ok = false; break; }
-                g_renderBackend->SetTextureFilter(layer.faces[f], filter, filter);
-                g_renderBackend->SetTextureWrap(layer.faces[f], TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
-            }
-            stbi_image_free(px);
-            if (!ok) {
-                for (auto& t : layer.faces) if (t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(t); t = INVALID_TEXTURE; }
-                continue;
-            }
-            out.push_back(std::move(layer));
         }
-        return !out.empty();
+        // Weather: which of clear / rain / thunder the layer shows in
+        // (CustomSkyLayer.weather; default clear only).
+        if (!weather.empty()) {
+            layer.weatherClear = layer.weatherRain = layer.weatherThunder = false;
+            for (const std::string& w : SplitWords(weather)) {
+                if      (w == "clear")   layer.weatherClear   = true;
+                else if (w == "rain")    layer.weatherRain    = true;
+                else if (w == "thunder") layer.weatherThunder = true;
+            }
+        }
+
+        // Fade (CommonUtils.convertOptiFineSkyProperties): all three of
+        // startFadeIn/endFadeIn/endFadeOut make a fade; startFadeOut is
+        // derived when missing.
+        if (!startIn.empty() && !endIn.empty() && !endOut.empty()) {
+            const int a = OptiFineTimeToTicks(startIn), b = OptiFineTimeToTicks(endIn),
+                      d = OptiFineTimeToTicks(endOut);
+            if (a >= 0 && b >= 0 && d >= 0) {
+                int c = startOut.empty() ? -1 : OptiFineTimeToTicks(startOut);
+                if (c < 0) {
+                    c = d - (b - a);
+                    if (a <= c && b >= c) c = d;
+                }
+                layer.fadeAlwaysOn = false;
+                layer.startFadeIn  = NormalizeTick(a);
+                layer.endFadeIn    = NormalizeTick(b);
+                layer.startFadeOut = NormalizeTick(c);
+                layer.endFadeOut   = NormalizeTick(d);
+            }
+        }
+
+        // The 3×2 image, cut into the six cube faces.
+        const std::string stem = std::filesystem::path(file).stem().string();
+        const std::string texPath = ResolveOptiFineSource(source, setDir, skyDir, stem + ".png");
+        int w = 0, h = 0, ch = 0;
+        unsigned char* px = stbi_load(texPath.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+        if (!px) {
+            Log::Warning("SkyRenderer: OptiFine sky layer %s: cannot read %s",
+                         std::filesystem::path(file).filename().string().c_str(), texPath.c_str());
+            return;
+        }
+        const int cellW = w / 3, cellH = h / 2;
+        if (cellW <= 0 || cellH <= 0 || cellW != cellH) {
+            Log::Warning("SkyRenderer: OptiFine sky texture %s is %dx%d, not a 3x2 grid of squares",
+                         texPath.c_str(), w, h);
+            stbi_image_free(px);
+            return;
+        }
+        // MC's SimpleTexture: nearest unless the .mcmeta asks for blur;
+        // no mipmaps either way.
+        out.blur = TextureBlur(texPath);
+        const int n = cellW;
+        for (int f = 0; f < 6; ++f) {
+            const int cell = kOptiFineFaceCells[f];
+            const int cx0 = (cell % 3) * n, cy0 = (cell / 3) * n;
+            std::vector<unsigned char>& face = out.pixels[static_cast<size_t>(f)];
+            face.resize(static_cast<size_t>(n) * n * 4);
+            for (int oy = 0; oy < n; ++oy) {
+                std::memcpy(face.data() + static_cast<size_t>(oy) * n * 4,
+                            px + (static_cast<size_t>(cy0 + oy) * w + cx0) * 4,
+                            static_cast<size_t>(n) * 4);
+            }
+        }
+        stbi_image_free(px);
+        out.faceSize = n;
+    }
+
+    void SkyRenderer::DecodeOptiFinePack(DecodedPack& pack, int parallelism) {
+        // The slots first, in file order, so an upload can start on any
+        // finished layer while the others are still decoding.
+        struct Job { int world; size_t index; std::string file, skyDir; };
+        std::vector<Job> jobs;
+        const char* worlds[2] = {"world0", "world1"};
+        {
+            std::lock_guard<std::mutex> lock(pack.mutex);
+            for (int d = 0; d < 2; ++d) {
+                const std::string skyDir = FindOptiFineSkyDir(pack.dir, worlds[d]);
+                if (skyDir.empty()) continue;
+                const std::vector<std::string> files = OptiFineLayerFiles(skyDir);
+                pack.layers[d].resize(files.size());
+                pack.ready[d].assign(files.size(), 0);
+                for (size_t i = 0; i < files.size(); ++i) jobs.push_back({d, i, files[i], skyDir});
+            }
+        }
+
+        std::atomic<size_t> next{0};
+        auto worker = [&] {
+            // stb's flip flag is per thread here; the game never flips, and
+            // a worker must not inherit whatever the main thread last set.
+            stbi_set_flip_vertically_on_load_thread(0);
+            PROFILE_THREAD("SkyDecode");
+            for (;;) {
+                if (pack.cancel.load()) return;
+                const size_t j = next.fetch_add(1);
+                if (j >= jobs.size()) return;
+                DecodedLayer decoded;
+                { PROFILE_ZONE_N("Sky.DecodeLayer"); DecodeOptiFineLayer(jobs[j].file, pack.dir, jobs[j].skyDir, decoded); }
+                std::lock_guard<std::mutex> lock(pack.mutex);
+                pack.layers[jobs[j].world][jobs[j].index] = std::move(decoded);
+                pack.ready[jobs[j].world][jobs[j].index]  = 1;
+            }
+        };
+        std::vector<std::future<void>> workers;
+        const int count = std::clamp(parallelism, 1, static_cast<int>(std::max<size_t>(jobs.size(), 1)));
+        for (int i = 0; i < count; ++i) workers.push_back(std::async(std::launch::async, worker));
+        for (auto& w : workers) w.get();
+
+        if (!pack.cancel.load()) {
+            auto decodeBody = [](const std::string& path, DecodedImage& out) {
+                std::error_code ec;
+                if (!std::filesystem::exists(path, ec)) return;
+                int w = 0, h = 0, ch = 0;
+                unsigned char* px = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+                if (!px) return;
+                out.w = w;
+                out.h = h;
+                out.pixels.assign(px, px + static_cast<size_t>(w) * h * 4);
+                stbi_image_free(px);
+            };
+            const std::string env = pack.dir + "assets/minecraft/textures/environment/";
+            decodeBody(env + "sun.png",         pack.sun);
+            decodeBody(env + "moon_phases.png", pack.moon);
+        }
+        std::lock_guard<std::mutex> lock(pack.mutex);
+        pack.decoded = true;
+    }
+
+    bool SkyRenderer::UploadDecodedLayer(DecodedLayer& slot) {
+        slot.uploaded = true;
+        if (slot.faceSize <= 0) return false;
+        const TextureFilter filter = slot.blur ? TextureFilter::Linear : TextureFilter::Nearest;
+        const int n = slot.faceSize;
+        bool ok = true;
+        for (int f = 0; f < 6 && ok; ++f) {
+            std::vector<unsigned char>& face = slot.pixels[static_cast<size_t>(f)];
+            TextureHandle& t = slot.layer.faces[f];
+            t = g_renderBackend->CreateTexture2D(n, n, TextureFormat::RGBA8, face.data());
+            if (t == INVALID_TEXTURE) { ok = false; break; }
+            g_renderBackend->SetTextureFilter(t, filter, filter);
+            g_renderBackend->SetTextureWrap(t, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+        }
+        for (auto& face : slot.pixels) { face.clear(); face.shrink_to_fit(); }
+        if (!ok) {
+            for (auto& t : slot.layer.faces) if (t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(t); t = INVALID_TEXTURE; }
+            slot.faceSize = 0;
+        }
+        return ok;
     }
 
     void SkyRenderer::DestroySkyboxTextures() {
@@ -988,16 +1230,21 @@ void main() {
             return true;
         }
 
+        // The six faces decode together (one PNG per core), then upload.
+        // Horizon color from the 4 side faces only (up/down don't touch
+        // the horizon).
+        std::future<DecodedFace> decodes[6];
+        for (int i = 0; i < 6; ++i) {
+            decodes[i] = std::async(std::launch::async, DecodeSkyboxFace, SkyboxFacePath(dir, i), i < 4);
+        }
         glm::vec3 horizonAccum{0.0f};
         int horizonSamples = 0;
         bool allValid = true;
         for (int i = 0; i < 6; ++i) {
-            // Horizon color from the 4 side faces only (up/down don't touch
-            // the horizon).
-            const bool sideFace = i < 4;
-            m_skyboxFaces[i] = LoadSkyboxFace(SkyboxFacePath(dir, i),
-                                              sideFace ? &horizonAccum : nullptr,
-                                              &horizonSamples);
+            const DecodedFace face = decodes[i].get();
+            horizonAccum   += face.horizonAccum;
+            horizonSamples += face.horizonSamples;
+            m_skyboxFaces[i] = UploadSkyboxFace(face);
             if (m_skyboxFaces[i] == INVALID_TEXTURE) allValid = false;
         }
         if (!allValid) {
@@ -1031,13 +1278,63 @@ void main() {
         // all, the world is just fog), END is SkyType.END (the static starfield
         // cube), OVERWORLD is NORMAL.
         m_noSky = (m_dimension == -1);
-        // Neither the Nether nor the End has a day/night cycle.
-        EnvironmentState::Get().SetConstantAmbientLight(m_dimension != 0);
+        // The Hush is the fourth kind: a NORMAL sky whose clock never runs
+        // (DimensionFixedTime) — vanilla has no such dimension.
+        m_fixedNight = (m_dimension == 2);
+        // The two ported mods' dimensions (TwilightForest raw 3, Aether raw
+        // 4) are open skies with their own renderers and compositions.
+        m_twilightSky = (m_dimension == 3);
+        m_aetherSky   = (m_dimension == 4);
+        // Only the Overworld and the Aether run a day/night cycle. The
+        // Twilight Forest's fixed dusk is its own composition (Atmosphere),
+        // not the constant noon of the Nether and the End.
+        EnvironmentState::Get().SetConstantAmbientLight(
+            m_dimension != 0 && !m_twilightSky && !m_aetherSky);
+        // ...and the Hush's "no cycle" is midnight, not noon.
+        EnvironmentState::Get().SetFixedNight(m_fixedNight);
+        // The lightmap's dimension attributes (ambient and sky light colour).
+        EnvironmentState::Get().SetLightDimension(Game::DimensionFromRaw(m_dimension));
+        // The Hush's local atmosphere (auroras, cavern fog, stillness) is
+        // the camera's only while the camera's level is the Hush.
+        HushAtmosphere::Get().SetInHush(m_fixedNight);
+        EnvironmentState::Get().SetAtmosphere(
+            m_twilightSky ? Atmosphere::TwilightForest
+          : m_aetherSky   ? Atmosphere::Aether
+                          : Atmosphere::Vanilla);
         if (m_noSky) {
             DestroySkyboxTextures();
             EnvironmentState::Get().SetSkyboxOverride(
                 true, glm::vec3(kNetherFog[0], kNetherFog[1], kNetherFog[2]),
                 /*mode 0 = constant, no night curve*/ 0);
+            return;
+        }
+        if (m_fixedNight) {
+            // The Hush forces its own sky exactly as the End does: the
+            // player's skybox pick is an Overworld cosmetic and does not
+            // follow them through the frame. Nothing is loaded for it —
+            // the fixed night is drawn from the vanilla disc and star
+            // meshes (RenderFixedNight) — so the cube-set state is only
+            // cleared (DestroySkyboxTextures resets valid/isEnd/isOptiFine)
+            // and the fog pinned to the Hush's constant teal, the way the
+            // Nether's is pinned above.
+            DestroySkyboxTextures();
+            m_skyboxId   = "vanilla";
+            m_skyboxMode = 0;
+            EnvironmentState::Get().SetSkyboxOverride(
+                true, glm::vec3(kHushFog[0], kHushFog[1], kHushFog[2]),
+                /*mode 0 = constant, no night curve*/ 0);
+            return;
+        }
+        if (m_twilightSky || m_aetherSky) {
+            // Both mods replace the sky outright (TwilightForestRenderInfo
+            // .renderSky, AetherSkyRenderEffects.renderSky), so the player's
+            // skybox or pack — an Overworld cosmetic — stays behind, as it
+            // does for the Hush. Nothing to load: both draw from the vanilla
+            // meshes, with the frame EnvironmentState composes for them.
+            DestroySkyboxTextures();
+            m_skyboxId   = "vanilla";
+            m_skyboxMode = 2;
+            EnvironmentState::Get().SetSkyboxOverride(false, glm::vec3(0.5f), m_skyboxMode);
             return;
         }
         // The End forces its own sky; everywhere else honours the player.
@@ -1110,6 +1407,10 @@ void main() {
         BuildCelestialQuads();
         BuildStars();
         BuildSkyboxCubes();
+        // The Hush's auroras draw with this shader and texture.
+        if (!g_auroraRenderer.Initialize(m_shader, m_whiteTexture)) {
+            Log::Warning("SkyRenderer: aurora buffers unavailable — the Hush draws no auroras");
+        }
 
         m_initialized = true;
         Log::Info("SkyRenderer initialized");
@@ -1124,6 +1425,9 @@ void main() {
 
     void SkyRenderer::Shutdown() {
         if (!g_renderBackend) return;
+        DiscardPrefetch();
+        for (auto& decode : m_abandonedDecodes) decode.wait();
+        m_abandonedDecodes.clear();
         DestroySkyboxTextures();
         DestroyOptiFinePack();
         DestroyMesh(m_skyboxCube);
@@ -1134,6 +1438,8 @@ void main() {
         DestroyMesh(m_sunQuad);
         DestroyMesh(m_moonQuads);
         DestroyMesh(m_stars);
+        DestroyMesh(m_twilightStars);
+        g_auroraRenderer.Shutdown();   // before the shader and texture it borrows
         if (m_whiteTexture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_whiteTexture); m_whiteTexture = INVALID_TEXTURE; }
         if (m_sunTexture != INVALID_TEXTURE)   { g_renderBackend->DestroyTexture(m_sunTexture);   m_sunTexture = INVALID_TEXTURE; }
         if (m_moonTexture != INVALID_TEXTURE)  { g_renderBackend->DestroyTexture(m_moonTexture);  m_moonTexture = INVALID_TEXTURE; }
@@ -1147,6 +1453,10 @@ void main() {
         // stars. The frame is already cleared to the fog colour, which is
         // exactly what vanilla shows there.
         if (m_noSky) return;
+        // The Hush: its own, much shorter, pass.
+        if (m_fixedNight) { RenderFixedNight(proj, viewRotation); return; }
+        // The Twilight Forest: TFSkyRenderer's pass.
+        if (m_twilightSky) { RenderTwilight(proj, viewRotation); return; }
 
         const EnvironmentState& envState = EnvironmentState::Get();
         const EnvironmentFrame& env = envState.Frame();
@@ -1239,21 +1549,24 @@ void main() {
         const glm::mat4 celestialBase =
             glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(0, 1, 0));
 
-        // Sun.
-        if (showSun && sunTex != INVALID_TEXTURE) {
+        // Sun. The frame's alpha is 1 but in the Aether, whose sun fades
+        // out at dusk and in at dawn (AetherSkyRenderEffects
+        // .drawCelestialBodies: setShaderColor(1, 1, 1, sunOpacity)).
+        if (showSun && sunTex != INVALID_TEXTURE && env.sunAlpha > 0.0f) {
             glm::mat4 model = glm::rotate(celestialBase, sunAngleRad, glm::vec3(1, 0, 0));
             model = glm::translate(model, glm::vec3(0, kCelestialHeight, 0));
             model = glm::scale(model, glm::vec3(kSunSize, 1.0f, kSunSize));
-            draw(m_sunQuad, model, glm::vec4(1.0f), sunTex, kFogOff);
+            draw(m_sunQuad, model, glm::vec4(1.0f, 1.0f, 1.0f, env.sunAlpha), sunTex, kFogOff);
         }
 
-        // Moon (phase quad selected by index offset).
-        if (showMoon && moonTex != INVALID_TEXTURE) {
+        // Moon (phase quad selected by index offset); the Aether's fades the
+        // other way round.
+        if (showMoon && moonTex != INVALID_TEXTURE && env.moonAlpha > 0.0f) {
             glm::mat4 model =
                 glm::rotate(celestialBase, glm::radians(env.moonAngleDeg), glm::vec3(1, 0, 0));
             model = glm::translate(model, glm::vec3(0, kCelestialHeight, 0));
             model = glm::scale(model, glm::vec3(kMoonSize, 1.0f, kMoonSize));
-            draw(m_moonQuads, model, glm::vec4(1.0f), moonTex, kFogOff,
+            draw(m_moonQuads, model, glm::vec4(1.0f, 1.0f, 1.0f, env.moonAlpha), moonTex, kFogOff,
                  6, static_cast<uint32_t>(env.moonPhase) * 6);
         }
 
@@ -1272,6 +1585,156 @@ void main() {
             g_renderBackend->SetPipelineState(state);
             const glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0, 12, 0));
             draw(m_bottomDisc, model, glm::vec4(0, 0, 0, 1), m_whiteTexture, skyFog);
+        }
+
+        g_renderBackend->UnbindMesh();
+
+        // Restore default pipeline state for the terrain pass.
+        PipelineState defaultState;
+        defaultState.depthTestEnabled = true;
+        defaultState.depthWriteEnabled = true;
+        defaultState.blendEnabled = false;
+        defaultState.cullMode = CullMode::Back;
+        g_renderBackend->SetPipelineState(defaultState);
+    }
+
+    void SkyRenderer::RenderFixedNight(const glm::mat4& proj, const glm::mat4& viewRotation) {
+        // The vanilla path's first and fourth steps only — the sky disc and
+        // the stars — with the same pipeline state and the same shader. The
+        // frame is the Hush's: for the main view EnvironmentState pins the
+        // star brightness (and the sky colour, for shader packs) under
+        // SetFixedNight; for a portal view the caller installed the frame
+        // FrameForDimension composed the same way. The fog is the constant
+        // kHushFog via the skybox override in both.
+        const EnvironmentFrame& env = EnvironmentState::Get().Frame();
+        const glm::mat4 vp = proj * viewRotation;
+
+        PipelineState state;
+        state.depthTestEnabled = false;
+        state.depthWriteEnabled = false;
+        state.blendEnabled = false;
+        state.cullMode = CullMode::None;
+        state.primitiveType = PrimitiveType::Triangles;
+        g_renderBackend->SetPipelineState(state);
+        g_renderBackend->BindShader(m_shader);
+
+        auto draw = [&](const Mesh& m, const glm::mat4& model, const glm::vec4& color,
+                        const glm::vec4& fogEnv) {
+            g_renderBackend->BindTexture(m_whiteTexture, 0);
+            g_renderBackend->SetUniformMat4(m_shader, "uMVP", vp * model);
+            g_renderBackend->SetUniformVec4(m_shader, "uColor", color);
+            g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
+            g_renderBackend->SetUniformVec4(m_shader, "uFogEnv", fogEnv);
+            g_renderBackend->DrawIndexed(m.mesh, m.indexCount, 0);
+        };
+
+        // 1. Sky disc (opaque), fogged to the horizon like the vanilla one
+        //    (MC sky fog: apply_fog(..., 0, FogSkyEnd, FogSkyEnd, FogSkyEnd)).
+        //    The frame's sky colour: kHushSky, as the fixed night pins it,
+        //    until HushAtmosphere flattens it toward the fog in a stillness.
+        const glm::vec4 skyFog{0.0f, env.fogSkyEnd, env.fogSkyEnd, env.fogSkyEnd};
+        draw(m_topDisc, glm::mat4(1.0f), glm::vec4(env.skyColor, 1.0f), skyFog);
+
+        // 2. Stars — the vanilla star sphere with MC's "overlay" additive
+        //    blend (SRC_ALPHA, ONE), tinted cyan, at the rotation the
+        //    Overworld's sky has at the fixed time: 18000 is the sun's
+        //    half-turn (SUN_ANGLE's eased alpha is 0.5 at midnight →
+        //    180°), so the Hush shows the star field MC shows at midnight,
+        //    only never turning. The brightness is the frame's, which the
+        //    fixed night pins to the STAR_BRIGHTNESS ceiling of 0.5.
+        if (env.starBrightness > 0.0f && m_stars.indexCount > 0) {
+            state.blendEnabled = true;
+            state.srcBlendFactor = BlendFactor::SrcAlpha;
+            state.dstBlendFactor = BlendFactor::One;
+            g_renderBackend->SetPipelineState(state);
+
+            constexpr float kFixedStarAngleDeg = 180.0f;
+            const glm::mat4 celestialBase =
+                glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(0, 1, 0));
+            const glm::mat4 model =
+                glm::rotate(celestialBase, glm::radians(kFixedStarAngleDeg), glm::vec3(1, 0, 0));
+            const float b = env.starBrightness;
+            draw(m_stars, model,
+                 glm::vec4(kHushStarTint[0] * b, kHushStarTint[1] * b, kHushStarTint[2] * b, b),
+                 kFogOff);
+        }
+
+        // 3. Auroras (AuroraRenderer): additive ribbons over the stars, at
+        //    the strength the frame carries (HushAtmosphere).
+        g_auroraRenderer.Render(vp, env.auroraStrength, env.fogColor);
+
+        // No sunrise fan (no sun to rise), no sun, no moon, no OptiFine
+        // layers (the pack is an Overworld sky), and no dark disc (the
+        // frame never asks for one under constant ambient light).
+        g_renderBackend->UnbindMesh();
+
+        // Restore default pipeline state for the terrain pass.
+        PipelineState defaultState;
+        defaultState.depthTestEnabled = true;
+        defaultState.depthWriteEnabled = true;
+        defaultState.blendEnabled = false;
+        defaultState.cullMode = CullMode::Back;
+        g_renderBackend->SetPipelineState(defaultState);
+    }
+
+    void SkyRenderer::RenderTwilight(const glm::mat4& proj, const glm::mat4& viewRotation) {
+        // TF TFSkyRenderer.renderSky — "[VanillaCopy] LevelRenderer.addSkyPass's
+        // overworld branch, without sun/moon/sunrise/sunset, using our own
+        // stars at full brightness, and lowering void horizon threshold
+        // height from getHorizonHeight (63) to 0". The frame is the Twilight
+        // Forest's (EnvironmentState's TwilightForest composition, or the
+        // FrameForDimension override for a portal view): the biome sky
+        // colour, the dimension's fog, and the dark disc decided against the
+        // dimension's floor.
+        const EnvironmentState& envState = EnvironmentState::Get();
+        const EnvironmentFrame& env = envState.Frame();
+        const glm::mat4 vp = proj * viewRotation;
+
+        PipelineState state;
+        state.depthTestEnabled = false;
+        state.depthWriteEnabled = false;
+        state.blendEnabled = false;
+        state.cullMode = CullMode::None;
+        state.primitiveType = PrimitiveType::Triangles;
+        g_renderBackend->SetPipelineState(state);
+        g_renderBackend->BindShader(m_shader);
+
+        auto draw = [&](const Mesh& m, const glm::mat4& model, const glm::vec4& color,
+                        const glm::vec4& fogEnv) {
+            g_renderBackend->BindTexture(m_whiteTexture, 0);
+            g_renderBackend->SetUniformMat4(m_shader, "uMVP", vp * model);
+            g_renderBackend->SetUniformVec4(m_shader, "uColor", color);
+            g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
+            g_renderBackend->SetUniformVec4(m_shader, "uFogEnv", fogEnv);
+            g_renderBackend->DrawIndexed(m.mesh, m.indexCount, 0);
+        };
+
+        // 1. levelRenderer.skyRenderer.renderSkyDisc(sky.skyColor), fogged
+        //    to the horizon like the vanilla disc.
+        const glm::vec4 skyFog{0.0f, env.fogSkyEnd, env.fogSkyEnd, env.fogSkyEnd};
+        draw(m_topDisc, glm::mat4(1.0f), glm::vec4(env.skyColor, 1.0f), skyFog);
+
+        // 2. renderStars: the STARS pipeline (additive "overlay" blend) with
+        //    the colour modulator at (1, 1, 1, 1) — "Coloring was also
+        //    removed as the stars are always fully bright" — under the
+        //    pose's Axis.YP −90° alone: no time rotation, the TF sky is still.
+        if (m_twilightStars.indexCount > 0) {
+            state.blendEnabled = true;
+            state.srcBlendFactor = BlendFactor::SrcAlpha;
+            state.dstBlendFactor = BlendFactor::One;
+            g_renderBackend->SetPipelineState(state);
+            const glm::mat4 model =
+                glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(0, 1, 0));
+            draw(m_twilightStars, model, glm::vec4(1.0f), kFogOff);
+        }
+
+        // 3. The dark disc when the eye is below the dimension's floor
+        //    (TFSkyRenderer.shouldDarkenSky → RENDER_DARK_DISC).
+        if (envState.ShouldRenderDarkDisc()) {
+            state.blendEnabled = false;
+            g_renderBackend->SetPipelineState(state);
+            const glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0, 12, 0));
+            draw(m_bottomDisc, model, glm::vec4(0, 0, 0, 1), skyFog);
         }
 
         g_renderBackend->UnbindMesh();
@@ -1458,7 +1921,9 @@ void main() {
         if (m_moonTexture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_moonTexture); m_moonTexture = INVALID_TEXTURE; }
         m_sunTexture  = LoadEnvTexture("assets/textures/environment/sun.png");
         m_moonTexture = LoadEnvTexture("assets/textures/environment/moon_phases.png");
-        // The End texture and the pack are rebuilt by re-resolving the sky.
+        // The End texture and the pack are rebuilt by re-resolving the sky;
+        // a prefetch in flight read the old files.
+        DiscardPrefetch();
         DestroySkyboxTextures();
         DestroyOptiFinePack();
         ApplyDimensionSky();
@@ -1471,6 +1936,9 @@ void main() {
         if (rawDimensionId == -1) return;   // MC SkyType.NONE — fog only
 
         const bool        savedNoSky   = m_noSky;
+        const bool        savedNight   = m_fixedNight;
+        const bool        savedTwilight = m_twilightSky;
+        const bool        savedAether  = m_aetherSky;
         const bool        savedValid   = m_skyboxValid;
         const bool        savedIsEnd   = m_skyboxIsEnd;
         const bool        savedIsPack  = m_skyboxIsOptiFine;
@@ -1478,12 +1946,32 @@ void main() {
         const int         savedMode    = m_skyboxMode;
 
         m_noSky = false;
+        // The Hush's frozen night through a portal from anywhere else; the
+        // End and Overworld branches below run with it cleared. The far
+        // frame's star brightness and sky colour come from the caller's
+        // EnvironmentState override (FrameForDimension's Hush case).
+        m_fixedNight = (rawDimensionId == 2);
+        // The mod dimensions likewise: their frames come from the caller's
+        // override (FrameForDimension's TwilightForest / Aether atmosphere).
+        m_twilightSky = (rawDimensionId == 3);
+        m_aetherSky   = (rawDimensionId == 4);
         if (rawDimensionId == 1) {
             if (!EnsureEndTexture()) return;
             m_skyboxValid      = true;
             m_skyboxIsEnd      = true;
             m_skyboxIsOptiFine = false;
             m_skyboxId         = "end";
+            m_skyboxMode       = 0;
+        } else if (m_fixedNight || m_twilightSky || m_aetherSky) {
+            // Nothing to load: the fixed night, the Twilight Forest and the
+            // Aether all draw from the vanilla meshes. Render() takes the
+            // first two's branches before it looks at the cube-set flags,
+            // which are cleared here all the same (the Aether's sky is the
+            // vanilla pass with no skybox and no pack).
+            m_skyboxValid      = false;
+            m_skyboxIsEnd      = false;
+            m_skyboxIsOptiFine = false;
+            m_skyboxId         = "vanilla";
             m_skyboxMode       = 0;
         } else {
             // The overworld's sky is the vanilla one, with the chosen
@@ -1496,6 +1984,9 @@ void main() {
         Render(proj, viewRotation);
 
         m_noSky            = savedNoSky;
+        m_fixedNight       = savedNight;
+        m_twilightSky      = savedTwilight;
+        m_aetherSky        = savedAether;
         m_skyboxValid      = savedValid;
         m_skyboxIsEnd      = savedIsEnd;
         m_skyboxIsOptiFine = savedIsPack;

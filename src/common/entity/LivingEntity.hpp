@@ -80,6 +80,7 @@ namespace Game {
         Projectile,
         Fall,
         Fire,
+        Lava,     // MC DamageTypes.LAVA — Entity.lavaHurt, "tried to swim in lava"
         Drown,
         Explosion,
         Void,
@@ -142,6 +143,7 @@ namespace Game {
         switch (source) {
             case MobDamageSource::Explosion:
             case MobDamageSource::Fire:
+            case MobDamageSource::Lava:
             case MobDamageSource::Drown:
             case MobDamageSource::Cramming:
             case MobDamageSource::Fall:
@@ -209,28 +211,38 @@ namespace Game {
 
         // ── Status effects (MC LivingEntity.activeEffects) ─────────────────
         //
-        // SERVER-SIDE this wave: nothing syncs an effect to the client (there
-        // is no particle system to render the swirls anyway); the documented
-        // follow-up is a per-entity effect byte alongside the anim byte. All
-        // gameplay consequences — damage ticks, attribute modifiers, the
-        // travel/jump/fall hooks — run on the server's copy, which is the
-        // authoritative one for every one of them.
+        // The server's copy is authoritative for every gameplay consequence —
+        // damage ticks, attribute modifiers, the travel/jump/fall hooks. Other
+        // clients see an entity's effects only through the synched VISUALS
+        // (MC DATA_EFFECT_PARTICLES + the invisible / glowing flags, below);
+        // a player's own client additionally receives its full effect list
+        // (UpdateMobEffectS2C / RemoveMobEffectS2C, see PlayerEntityView).
+        //
+        // Storage is reached through EffectStorage(), which the player view
+        // redirects to its ServerPlayer: the player's effects must survive the
+        // per-level view being rebuilt on a dimension change, and be saved.
 
         // MC LivingEntity.addEffect(effect, source). Returns whether the
         // effect landed or upgraded an existing instance (MobEffectInstance
-        // .update rules). `source` is MC's attribution entity; nothing here
-        // consumes it yet, but every call site passes what MC passes so the
-        // wiring is already right when something does.
+        // .update rules). `source` is MC's attribution entity.
         bool AddEffect(MobEffectInstance effect, Entity* source = nullptr);
+        // MC LivingEntity.forceAddEffect — replaces outright, no upgrade rules
+        // (the client's packet handler path; kept for parity).
+        void ForceAddEffect(MobEffectInstance effect, Entity* source = nullptr);
         bool RemoveEffect(MobEffectId effect);
         bool RemoveAllEffects();
         bool HasEffect(MobEffectId effect) const { return GetEffect(effect) != nullptr; }
         const MobEffectInstance* GetEffect(MobEffectId effect) const;
+        // MC LivingEntity.getEffectBlendFactor (client BlendState).
+        float GetEffectBlendFactor(MobEffectId effect, float partialTick) const {
+            const MobEffectInstance* e = GetEffect(effect);
+            return e ? e->GetBlendFactor(partialTick) : 0.0f;
+        }
         // Loading installs saved instances DIRECTLY. AddEffect applies MC's
         // update/upgrade rules (a stronger effect replaces a weaker one, an
         // equal one extends it), which is right for gameplay and wrong for
         // restoring a state that was already resolved when it was saved.
-        std::vector<MobEffectInstance>& MutableActiveEffects() { return m_activeEffects; }
+        std::vector<MobEffectInstance>& MutableActiveEffects() { return EffectStorage(); }
 
         // The load path. Replaces the active set with `effects` verbatim —
         // durations, amplifiers and hidden chains exactly as they were saved
@@ -245,12 +257,66 @@ namespace Game {
         void RestoreEffects(std::vector<MobEffectInstance> effects);
 
         const std::vector<MobEffectInstance>& ActiveEffects() const {
-            return m_activeEffects;
+            return EffectStorage();
         }
+
+        // MC LivingEntity.triggerOnDeathMobEffects: every effect's
+        // onMobRemoved (WIND_CHARGED / WEAVING / OOZING on a KILLED removal),
+        // then the map is cleared. Run from TickDeath before the removal, and
+        // by the player view when its corpse clock runs out.
+        void TriggerOnDeathMobEffects(RemovalReason reason);
+
+        // ── Synched effect visuals (MC updateDirtyEffects →
+        //    DATA_EFFECT_PARTICLES / DATA_EFFECT_AMBIENCE_ID / shared flags
+        //    5 and 6) ────────────────────────────────────────────────────────
+        // Server: what the tracker sends, recomputed lazily after an effect
+        // change. Client: what the last AddEntity / SetEntityData carried,
+        // read by TickEffects' particle roll and by the renderer.
+        const EffectVisuals& GetEffectVisuals() const;
+        void SetSyncedEffectVisuals(EffectVisuals visuals) {
+            m_effectVisuals = std::move(visuals);
+            m_effectsDirty = false;
+        }
+        // MC Entity.isInvisible with the INVISIBILITY effect as its source.
+        bool IsEffectInvisible() const { return GetEffectVisuals().Invisible(); }
+        // MC LivingEntity.isCurrentlyGlowing: the GLOWING effect on the
+        // server, the synched shared flag on the client.
+        bool IsCurrentlyGlowing() const;
 
         // MC LivingEntity.canBeAffected: undead ignore POISON and REGENERATION
         // (EntityTypeTags.IGNORES_POISON_AND_REGEN — the #undead tag).
         virtual bool CanBeAffected(const MobEffectInstance& effect) const;
+
+        // MC LivingEntity.isAffectedByPotions — splash potions and effect
+        // clouds skip the dead (and the armor stand, which overrides it).
+        virtual bool IsAffectedByPotions() const { return !IsDeadOrDying(); }
+
+        // MC LivingEntity.getVisibilityPercent(targetingEntity): how far a
+        // targeting mob's detection range reaches for this entity
+        // (TargetingConditions scales its range by it when testInvisible).
+        //   isDiscrete (sneaking)          x0.8
+        //   isInvisible (the INVISIBILITY effect)
+        //                                  x0.7 * max(armor cover, 0.1)
+        //   each worn MOB_VISIBILITY item whose targeting types include the
+        //   targeter (a skeleton skull vs skeletons, ...)  x its visibility
+        // clamped to [0, 10]. The three inputs are the virtuals below.
+        double GetVisibilityPercent(const Entity* targetingEntity) const;
+        // MC Entity.isDiscrete = isShiftKeyDown. No mob sneaks; the player
+        // view answers from its ServerPlayer.
+        virtual bool IsDiscrete() const { return false; }
+        // MC LivingEntity.getArmorCoverPercentage — the share of the four
+        // HUMANOID_ARMOR slots that hold anything. Mobs carry no equipment
+        // in this engine, so 0 (which the invisibility term floors at 0.1).
+        virtual float GetArmorCoverPercentage() const { return 0.0f; }
+        // The MOB_VISIBILITY product over worn equipment, for `targetingEntity`.
+        virtual double GetEquipmentVisibilityFactor(const Entity* targetingEntity) const {
+            (void)targetingEntity;
+            return 1.0;
+        }
+        // MC Entity.isSwimming (shared flag 4, set by updateSwimming from a
+        // sprint under water). Only the player's is read here — the dolphin
+        // escorts a swimming player — so mobs answer false.
+        virtual bool IsSwimming() const { return false; }
 
         // MC LivingEntity.isInvertedHealAndHarm — harming heals the undead,
         // healing harms them (EntityTypeTags.INVERTED_HEALING_AND_HARM, also
@@ -299,6 +365,17 @@ namespace Game {
         // rule: inside the window a NEW hit only lands if it exceeds the one
         // that opened the window, and then only for the difference.
         virtual bool Hurt(MobDamageSource source, float amount, Entity* attacker);
+
+        // MC Entity.lavaHurt on a LivingEntity: 4 damage from the LAVA
+        // source, and the GENERIC_BURN sizzle when it lands.
+        void LavaHurt() override;
+
+        // MC LivingEntity.isAffectedByFluids — true for every living thing;
+        // the player's override is `!abilities.flying`.
+        virtual bool IsAffectedByFluids() const { return true; }
+        // MC LivingEntity.canStandOnFluid — false for all but the strider,
+        // which stands on lava.
+        virtual bool CanStandOnFluid(const FluidState& fluid) const { (void)fluid; return false; }
         // MC DamageSource carries TWO entities: `causingEntity` (the shooter,
         // who gets aggro and kill credit — this engine's `attacker`) and
         // `directEntity` (the arrow that actually struck, which decides the
@@ -311,6 +388,10 @@ namespace Game {
         // Valid inside Hurt() and its overrides: the direct entity of the
         // HurtFrom in flight, null for a plain Hurt.
         Entity* HurtDirectEntity() const { return m_hurtDirectEntity; }
+        // MC DamageTypeTags.IS_FIRE for `source` as it arrives in Hurt (the
+        // fireball impacts are Projectile hits from a fireball — read off
+        // HurtDirectEntity). What FIRE_RESISTANCE and fireImmune() refuse.
+        bool IsFireDamage(MobDamageSource source) const;
 
         // MC LivingEntity.knockback. `dx`/`dz` point FROM the attacker TOWARD
         // this entity's push direction (MC passes attackerX - myX, which sends
@@ -353,6 +434,34 @@ namespace Game {
         virtual void Die(MobDamageSource source, Entity* attacker);
         virtual void TickDeath();
 
+        // ── Sound (MC LivingEntity) ────────────────────────────────────────
+        //
+        // The voice events default to the type's generated row
+        // (common/sound/EntitySounds.hpp — MC's per-class getHurtSound etc.),
+        // GENERIC_HURT / GENERIC_DEATH where MC's class says nothing. A class
+        // whose choice depends on state it alone knows overrides these.
+        // "" / nullptr is MC's null: no sound.
+        virtual const char* GetHurtSound(MobDamageSource source) const;
+        virtual const char* GetDeathSound() const;
+        // MC getSoundVolume (1.0; a ghast 5.0, a slime 0.4 × size ...).
+        virtual float GetSoundVolume() const;
+        // MC getVoicePitch: 1 ± 0.2, a baby's 1.5 ± 0.2.
+        virtual float GetVoicePitch() const;
+        // MC makeSound: play `event` at the voice's volume and pitch.
+        void MakeSound(const char* event);
+        // MC playHurtSound.
+        virtual void PlayHurtSound(MobDamageSource source) { MakeSound(GetHurtSound(source)); }
+        // MC getFallSounds (GENERIC_SMALL_FALL / GENERIC_BIG_FALL) and
+        // getFallDamageSound: big above 4 damage.
+        struct FallSounds { const char* small; const char* big; };
+        virtual FallSounds GetFallSounds() const;
+        // MC playBlockFallSound: the landed-on block's fall sound, 0.5 × its
+        // volume, 0.75 × its pitch.
+        void PlayBlockFallSound();
+        // MC breakItem's sound half: the item's BREAK_SOUND (ITEM_BREAK for
+        // tools and armour), played client-locally at 0.8, 0.8 + rand × 0.4.
+        void PlayItemBreakSound(const char* breakSound);
+
         // ── Damage bookkeeping (read by HurtByTargetGoal) ──────────────────
         // Persisted, so it is an EntityRef rather than a raw pointer: the
         // attacker may be offline or in an unloaded chunk when this loads, and
@@ -366,8 +475,17 @@ namespace Game {
 
         // MC LivingEntity.AbsorptionAmount — a base NBT key with no field here
         // until now.
-        float GetAbsorptionAmount() const { return m_absorptionAmount; }
-        void  SetAbsorptionAmount(float v) { m_absorptionAmount = v < 0.0f ? 0.0f : v; }
+        // Virtual because a player's hearts live on ServerPlayer (the view
+        // forwards). SetAbsorptionAmount is MC's internalSetAbsorptionAmount
+        // (the unclamped load path); SetAbsorptionAmountClamped is MC's
+        // setAbsorptionAmount, clamped to [0, MAX_ABSORPTION].
+        virtual float GetAbsorptionAmount() const { return m_absorptionAmount; }
+        virtual void  SetAbsorptionAmount(float v) { m_absorptionAmount = v < 0.0f ? 0.0f : v; }
+        void  SetAbsorptionAmountClamped(float v) {
+            const float maxAbsorption = GetMaxAbsorption();
+            SetAbsorptionAmount(v < 0.0f ? 0.0f : (v > maxAbsorption ? maxAbsorption : v));
+        }
+        float GetMaxAbsorption() const { return static_cast<float>(GetAttributeValue(Attribute::MaxAbsorption)); }
         MobDamageSource GetLastDamageSource() const { return m_lastDamageSource; }
         // MC LivingEntity.getLastDamageSource nulls itself 40 ticks after the
         // hit (lastDamageStamp) — the memory the witch's fire-resistance drink
@@ -547,11 +665,23 @@ namespace Game {
         bool ShouldTakeDrowningDamage() const { return GetAirSupply() <= -20; }
 
         // MC onEffectAdded / onEffectUpdated / onEffectsRemoved — the
-        // attribute-modifier bookkeeping. (The passenger/packet halves wait on
-        // client sync.)
-        void OnEffectAdded(const MobEffectInstance& effect);
-        void OnEffectUpdated(const MobEffectInstance& effect, bool refreshAttributes);
-        void OnEffectRemoved(const MobEffectInstance& effect);
+        // attribute-modifier bookkeeping and the visuals' dirty mark. Virtual
+        // for the player view, which adds MC ServerPlayer's halves (the
+        // UpdateMobEffect / RemoveMobEffect packets to its own client).
+        // (MC's passenger packets have no consumer: no LivingEntity here is
+        // ridden by a player.)
+        virtual void OnEffectAdded(const MobEffectInstance& effect, Entity* source);
+        virtual void OnEffectUpdated(const MobEffectInstance& effect, bool refreshAttributes,
+                                     Entity* source);
+        virtual void OnEffectRemoved(const MobEffectInstance& effect);
+        // MC refreshDirtyAttributes → onAttributeUpdated for MAX_HEALTH and
+        // MAX_ABSORPTION: clamp health and absorption to their new maxima.
+        void RefreshEffectAttributes();
+
+        // Where the active effects live. The player view overrides both to
+        // its ServerPlayer's list.
+        virtual std::vector<MobEffectInstance>&       EffectStorage()       { return m_activeEffects; }
+        virtual const std::vector<MobEffectInstance>& EffectStorage() const { return m_activeEffects; }
 
         // MC LivingEntity.tickHeadTurn — Mob overrides this to run the body
         // rotation control instead.
@@ -590,6 +720,9 @@ namespace Game {
         // a map node per poison tick is the wrong trade.
         std::vector<MobEffectInstance> m_activeEffects;
         MobEffectInstance* FindEffect(MobEffectId effect);
+        // MC effectsDirty + the synched values it refreshes.
+        mutable bool          m_effectsDirty = true;
+        mutable EffectVisuals m_effectVisuals;
 
         float m_health = 20.0f;
         float m_speed  = 0.0f;
@@ -613,9 +746,5 @@ namespace Game {
         bool            m_hasLastDamageSource = false;
         int             m_lastDamageStamp = 0;   // MC lastDamageStamp (tickCount)
     };
-
-    // MC Block.getFriction. Exposed because the pathfinder and the mob mover
-    // both need it and neither owns the table.
-    float GetBlockFriction(BlockID id);
 
 } // namespace Game

@@ -57,6 +57,12 @@ namespace Render {
         virtual bool CharTyped(unsigned int codepoint);
 
         virtual bool ShouldCloseOnEsc() const { return true; }
+        // Whether hover tooltips draw this frame. The title screen answers
+        // false while it is still fading in.
+        virtual bool ShowsTooltips() const { return true; }
+        // Scales the tint/tile Screen::RenderBackground draws. The pause
+        // menu fades it out with its buttons on the way to the title.
+        void SetBackgroundAlpha(float alpha) { m_backgroundAlpha = alpha; }
 
         // MC Screen.isPauseScreen (Screen.java:502) — does having this screen
         // up stop the world?
@@ -96,6 +102,8 @@ namespace Render {
         void SetFocus(AbstractWidget* w);
 
         std::string m_title;
+
+        float       m_backgroundAlpha = 1.0f;   // SetBackgroundAlpha
         int m_width  = 0;
         int m_height = 0;
         ScreenManager* m_manager = nullptr;

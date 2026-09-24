@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <string>
 #include <cstdint>
 
 // Reference: net/minecraft/world/level/chunk/ChunkGenerator.java
@@ -39,16 +40,20 @@ namespace levelgen {
 
 // Forward declarations
 class RandomState;
-class NoiseChunk;
-class SurfaceSystem;
-class RuleSource;
-class Beardifier;
-class FluidPicker;
 class NoiseGeneratorSettings;
+namespace density {
+class DensitySampler;
+class NoiseChunk;
 class Aquifer;
+class SamplerContext;
+}
+namespace material {
+class MaterialRule;
+}
 
 namespace carver {
     class WorldCarverBase;
+    class CarvingContext;
 }
 
 /**
@@ -59,42 +64,24 @@ class ChunkGenerator {
 public:
     virtual ~ChunkGenerator() = default;
 
-    /**
-     * Fill chunk with base terrain from noise
-     * Reference: NoiseBasedChunkGenerator.java fillFromNoise() lines 233-337
-     */
-    virtual void fillFromNoise(
-        RandomState* randomState,
-        Blender* blender,
-        ::world::IChunk* chunk
-    ) = 0;
+    // What 26.3's ChunkGenerator.buildTerrain reads from its WorldGenRegion
+    // and StructureManager, gathered by the TERRAIN status task.
+    struct TerrainContext {
+        int64_t seed = 0;
+        // WorldGenRegion.getBiomeManager().getBiome: the fuzzed lookup over
+        // the biomes stored in the region's chunks (the material rules).
+        std::function<world::biome::BiomeHolder(const core::BlockPos&)> biomeGetter;
+        // Beardifier.forStructuresInChunk(structureManager, chunk.getPos());
+        // null = Beardifier.EMPTY.
+        std::shared_ptr<const density::DensitySampler> beardifier;
+    };
 
     /**
-     * Apply carvers (caves, canyons) to a chunk
-     * Reference: ChunkGenerator.java line 120
+     * Reference: ChunkGenerator.buildTerrain (26.3) - the TERRAIN step: the
+     * noise fill, the material (surface) rules and the carvers, on one
+     * NoiseChunk.
      */
-    virtual void applyCarvers(
-        int64_t seed,
-        RandomState* randomState,
-        std::function<world::biome::BiomeHolder(const core::BlockPos&)> biomeGetter,
-        ::world::IChunk* chunk,
-        GenerationStep::Decoration step
-    ) = 0;
-
-    /**
-     * Build surface blocks for a chunk
-     * Reference: ChunkGenerator.java line 387
-     * Reference: NoiseBasedChunkGenerator.java buildSurface() lines 192-196
-     *
-     * @param randomState - The random state for noise generation
-     * @param biomeGetter - Function to get biome at a position (used for frozen ocean, eroded badlands)
-     * @param chunk - The chunk to build surface on
-     */
-    virtual void buildSurface(
-        RandomState* randomState,
-        std::function<world::biome::BiomeHolder(const core::BlockPos&)> biomeGetter,
-        ::world::IChunk* chunk
-    ) = 0;
+    virtual void buildTerrain(RandomState* randomState, const TerrainContext& context, ::world::IChunk* chunk) = 0;
 
     /**
      * Apply biome decoration (features) to a chunk
@@ -252,8 +239,8 @@ public:
      * Reference: Java ChunkGenerator.featuresPerStep - built per GENERATOR
      * from Suppliers.memoize(FeatureSorter.buildFeaturesPerStep(
      * List.copyOf(biomeSource.possibleBiomes()), ...)). The default (nullptr)
-     * keeps the historical per-dimension static builds in ChunkStatusTasks /
-     * ChunkGenerationRunner (whose key ORDER is parity-proven). Generators
+     * keeps the historical per-dimension static builds in ChunkStatusTasks
+     * (whose key ORDER is parity-proven). Generators
      * whose possibleBiomes differ from a full dimension (FixedBiomeSource
      * single-biome worlds, FlatLevelSource) MUST override, or feature
      * indices for setFeatureSeed diverge from Java.
@@ -300,173 +287,102 @@ protected:
 
 /**
  * NoiseBasedChunkGenerator - Noise-based terrain generation
- * Reference: NoiseBasedChunkGenerator.java
+ * Reference: NoiseBasedChunkGenerator.java (26.3)
  */
 class NoiseBasedChunkGenerator : public ChunkGenerator {
-private:
-    int32_t m_seaLevel;
-    int32_t m_minY;
-    int32_t m_height;
-    int32_t m_cellWidth;          // Horizontal cell size (default 4)
-    int32_t m_cellHeight;         // Vertical cell size (default 8)
-    SurfaceSystem* m_surfaceSystem;
-    RuleSource* m_surfaceRules;
-    BlockState* m_defaultBlock;  // Stone
-    BlockState* m_airBlock;      // Air
-    FluidPicker* m_fluidPicker;
-    Beardifier* m_beardifier;
-    NoiseGeneratorSettings* m_settings;   // Store settings for NoiseChunk creation
-    world::biome::BiomeSource* m_biomeSource;  // Biome source for createBiomes
-
-    // Memoized featuresPerStep for single-biome (FixedBiomeSource) worlds -
-    // Java builds featuresPerStep from possibleBiomes(), which is one biome
-    // there, NOT the whole dimension. Empty until first use.
-    std::vector<StepFeatureData> m_singleBiomeFeaturesPerStep;
-    bool m_singleBiomeFeaturesBuilt = false;
-
-    /**
-     * Internal terrain fill implementation
-     * Reference: NoiseBasedChunkGenerator.java doFill() lines 263-337
-     */
-    void doFill(
-        Blender* blender,
-        RandomState* randomState,
-        ::world::IChunk* chunk,
-        int32_t cellMinY,
-        int32_t cellCountY
-    );
-
 public:
-    /**
-     * Constructor with NoiseGeneratorSettings
-     */
-    NoiseBasedChunkGenerator(
-        NoiseGeneratorSettings* settings,
-        SurfaceSystem* surfaceSystem,
-        RuleSource* surfaceRules,
-        BlockState* defaultBlock,
-        BlockState* airBlock,
-        FluidPicker* fluidPicker,
-        Beardifier* beardifier
-    );
+    explicit NoiseBasedChunkGenerator(std::shared_ptr<const NoiseGeneratorSettings> settings);
+    ~NoiseBasedChunkGenerator() override;
 
-    /**
-     * Legacy constructor (creates empty settings - not recommended)
-     */
-    NoiseBasedChunkGenerator(
-        int32_t seaLevel,
-        int32_t minY,
-        int32_t height,
-        int32_t cellWidth,
-        int32_t cellHeight,
-        SurfaceSystem* surfaceSystem,
-        RuleSource* surfaceRules,
-        BlockState* defaultBlock,
-        BlockState* airBlock,
-        FluidPicker* fluidPicker,
-        Beardifier* beardifier
-    );
+    void buildTerrain(RandomState* randomState, const TerrainContext& context, ::world::IChunk* chunk) override;
 
-    /**
-     * Minimal constructor for compatibility
-     */
-    NoiseBasedChunkGenerator(
-        int32_t seaLevel,
-        int32_t minY,
-        int32_t height,
-        SurfaceSystem* surfaceSystem,
-        RuleSource* surfaceRules
-    );
-
-    /**
-     * Fill chunk with base terrain from noise
-     * Reference: NoiseBasedChunkGenerator.java fillFromNoise() lines 233-261
-     */
-    void fillFromNoise(
-        RandomState* randomState,
-        Blender* blender,
-        ::world::IChunk* chunk
-    ) override;
-
-    /**
-     * Apply carvers
-     */
-    void applyCarvers(
-        int64_t seed,
-        RandomState* randomState,
-        std::function<world::biome::BiomeHolder(const core::BlockPos&)> biomeGetter,
-        ::world::IChunk* chunk,
-        GenerationStep::Decoration step
-    ) override;
-
-    /**
-     * Build surface
-     * Reference: NoiseBasedChunkGenerator.java buildSurface() lines 192-196
-     */
-    void buildSurface(
-        RandomState* randomState,
-        std::function<world::biome::BiomeHolder(const core::BlockPos&)> biomeGetter,
-        ::world::IChunk* chunk
-    ) override;
-
-    // Setters for late binding
-    void setDefaultBlock(BlockState* block) { m_defaultBlock = block; }
-    void setAirBlock(BlockState* block) { m_airBlock = block; }
-    void setFluidPicker(FluidPicker* picker) { m_fluidPicker = picker; }
-    void setBeardifier(Beardifier* beardifier) { m_beardifier = beardifier; }
     void setBiomeSource(world::biome::BiomeSource* biomeSource) { m_biomeSource = biomeSource; }
 
-    // Accessors
-    int32_t getSeaLevel() const override { return m_seaLevel; }
-    int32_t getMinY() const override { return m_minY; }
-    int32_t getGenDepth() const override { return m_height; }
-    int32_t getCellWidth() const { return m_cellWidth; }
-    int32_t getCellHeight() const { return m_cellHeight; }
+    int32_t getSeaLevel() const override;
+    int32_t getMinY() const override;
+    int32_t getGenDepth() const override;
     world::biome::BiomeSource* getBiomeSource() const { return m_biomeSource; }
-    const NoiseGeneratorSettings* getSettings() const { return m_settings; }
+    const NoiseGeneratorSettings* getSettings() const { return m_settings.get(); }
 
     // Single-biome (FixedBiomeSource) worlds build featuresPerStep from their
     // one biome, matching Java's per-generator possibleBiomes() build.
     const std::vector<StepFeatureData>* customFeaturesPerStep() override;
 
     /**
-     * Get base height at the given position
-     * Reference: NoiseBasedChunkGenerator.java getBaseHeight()
+     * Reference: NoiseBasedChunkGenerator.getBaseHeight (iterateNoiseColumn).
+     * Memoized: a pure function of (x, z, type) for a given generator, and
+     * structure layout asks the same columns repeatedly. Bounded.
      */
-    int32_t getBaseHeight(
-        int32_t x,
-        int32_t z,
-        Heightmap::Types heightmapType,
-        RandomState* randomState
-    ) const override;
-    // Memo of getBaseHeight: a pure function of (x, z, type) for a given
-    // generator, and structure layout asks the same columns repeatedly
-    // (a village start = 273 calls x ~0.9 ms, 2026-08-30). Bounded.
+    int32_t getBaseHeight(int32_t x, int32_t z, Heightmap::Types heightmapType,
+                          RandomState* randomState) const override;
+
+    /**
+     * Reference: NoiseBasedChunkGenerator.getBaseColumn (iterateNoiseColumn).
+     * outColumn[i] is the block at y = getMinY() + i.
+     */
+    void getBaseColumn(int32_t x, int32_t z, RandomState* randomState,
+                       std::vector<BlockState*>& outColumn) const override;
+
+    /**
+     * Reference: ChunkGenerator.createBiomes / doCreateBiomes (26.3).
+     */
+    void createBiomes(RandomState* randomState, Blender* blender, ::world::IChunk* chunk) override;
+
+    /**
+     * Reference: NoiseBasedChunkGenerator.getOrigin (26.3): the spawn search
+     * over the settings' spawn target (NoiseSpawnFinder); ChunkPos(0, 0) when
+     * the settings have none.
+     */
+    ::world::ChunkPos getOrigin(RandomState* randomState) const;
+
+    /**
+     * Reference: NoiseBasedChunkGenerator.addDebugScreenInfo (26.3): the F3
+     * "Density" line - each of the settings' debug_functions at the feet
+     * block, "0.000" formatted.
+     */
+    void addDebugScreenInfo(std::vector<std::string>& result, RandomState* randomState, const core::BlockPos& feetPos,
+                            density::SamplerContext& samplerContext) const;
+
+    // The chunk's volume (NoiseBasedChunkGenerator.chunkVolume).
+    std::unique_ptr<density::NoiseChunk> createNoiseChunk(::world::IChunk* chunk, RandomState& randomState,
+                                                          std::shared_ptr<const density::DensitySampler> beardifier) const;
+
+private:
+    // NoiseBasedChunkGenerator.iterateNoiseColumn: fills `writeTo` (when not
+    // null) and returns the top block matching `tester` + 1, or INT32_MIN.
+    int32_t iterateNoiseColumn(int32_t blockX, int32_t blockZ, RandomState* randomState,
+                               std::vector<BlockState*>* writeTo,
+                               const std::function<bool(const BlockState*)>* tester) const;
     int32_t computeBaseHeight(int32_t x, int32_t z, Heightmap::Types heightmapType,
                               RandomState* randomState) const;
+
+    void doFill(density::NoiseChunk& noiseChunk, ::world::IChunk* chunk) const;
+    void buildSurface(RandomState& randomState, const TerrainContext& context, ::world::IChunk* chunk,
+                      density::NoiseChunk& noiseChunk);
+    void generateCarvers(RandomState& randomState, const TerrainContext& context, ::world::IChunk* chunk,
+                         density::NoiseChunk& noiseChunk);
+    void applyCarvingMask(::world::IChunk* chunk, const carver::CarvingMask& mask, RandomState& randomState,
+                          carver::CarvingContext& context, density::NoiseChunk& noiseChunk,
+                          const std::function<world::biome::BiomeHolder(const core::BlockPos&)>& biomeGetter);
+    // The engine's post-surface passes for the Twilight Forest (the mod's
+    // chunk blanket processors: dark-forest canopy, glacier).
+    void twilightChunkBlanketing(const TerrainContext& context, ::world::IChunk* chunk);
+
+    const material::MaterialRule* materialRule();
+
+    std::shared_ptr<const NoiseGeneratorSettings> m_settings;
+    world::biome::BiomeSource* m_biomeSource = nullptr;
+    std::shared_ptr<const material::MaterialRule> m_materialRule;
+    std::once_flag m_materialRuleOnce;
+
     mutable std::mutex m_baseHeightMutex;
     mutable std::unordered_map<uint64_t, int32_t> m_baseHeightCache;
 
-    /**
-     * Get a column of blocks at the given position
-     * Reference: NoiseBasedChunkGenerator.java getBaseColumn()
-     */
-    void getBaseColumn(
-        int32_t x,
-        int32_t z,
-        RandomState* randomState,
-        std::vector<BlockState*>& outColumn
-    ) const override;
-
-    /**
-     * Create biomes for a chunk
-     * Reference: NoiseBasedChunkGenerator.java createBiomes()
-     */
-    void createBiomes(
-        RandomState* randomState,
-        Blender* blender,
-        ::world::IChunk* chunk
-    ) override;
+    // Memoized featuresPerStep for single-biome (FixedBiomeSource) worlds -
+    // Java builds featuresPerStep from possibleBiomes(), which is one biome
+    // there, NOT the whole dimension. Empty until first use.
+    std::vector<StepFeatureData> m_singleBiomeFeaturesPerStep;
+    bool m_singleBiomeFeaturesBuilt = false;
 };
 
 } // namespace levelgen

@@ -3,8 +3,11 @@
 
 #include "ChunkRenderer.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
 #include "../backend/vulkan/VKBackend.hpp"
 #include "../environment/EnvironmentState.hpp"
+#include "../environment/EntityEnvironment.hpp"
+#include "common/world/lighting/LightCoords.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "../viewmodel/ItemMeshBuilder.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -85,18 +88,74 @@ namespace Render {
         m_initialized = false;
     }
 
+    namespace {
+        // A unit cube textured with the fluid's still sprite on every face,
+        // MC's default water colour (BiomeColors' 0x3F76E4 fallback) on
+        // water and white on lava, with the directional shade the terrain
+        // uses. Same winding as BuildBlockCubeMesh (CCW from outside).
+        void BuildFluidPreviewCube(Game::BlockID fluid,
+                                   std::vector<ItemCubeVert>& verts,
+                                   std::vector<uint32_t>& idx) {
+            verts.clear();
+            idx.clear();
+            glm::vec4 rect(0.0f, 0.0f, 1.0f, 1.0f);
+            if (g_atlasBuilder) {
+                AtlasUVRect r;
+                if (g_atlasBuilder->GetUVRect(fluid == Game::BlockID::Lava ? "block/lava_still"
+                                                                            : "block/water_still", r)) {
+                    rect = glm::vec4(r.uvMin.x, r.uvMin.y, r.uvMax.x, r.uvMax.y);
+                }
+            }
+            const uint8_t tr = fluid == Game::BlockID::Lava ? 255 : 0x3F;
+            const uint8_t tg = fluid == Game::BlockID::Lava ? 255 : 0x76;
+            const uint8_t tb = fluid == Game::BlockID::Lava ? 255 : 0xE4;
+
+            const glm::vec3 v000{0,0,0}, v100{1,0,0}, v110{1,1,0}, v010{0,1,0};
+            const glm::vec3 v001{0,0,1}, v101{1,0,1}, v111{1,1,1}, v011{0,1,1};
+            auto face = [&](const glm::vec3 (&q)[4], const glm::vec2 (&uv)[4], float shade) {
+                const uint32_t base = static_cast<uint32_t>(verts.size());
+                for (int i = 0; i < 4; ++i) {
+                    ItemCubeVert v;
+                    v.x = q[i].x; v.y = q[i].y; v.z = q[i].z;
+                    v.u = rect.x + uv[i].x * (rect.z - rect.x);
+                    v.v = rect.y + uv[i].y * (rect.w - rect.y);
+                    v.r = static_cast<uint8_t>(tr * shade);
+                    v.g = static_cast<uint8_t>(tg * shade);
+                    v.b = static_cast<uint8_t>(tb * shade);
+                    v.a = 255;
+                    verts.push_back(v);
+                }
+                idx.insert(idx.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+            };
+            { glm::vec3 q[4] = {v010, v011, v111, v110}; glm::vec2 uv[4] = {{0,0},{0,1},{1,1},{1,0}}; face(q, uv, 1.0f); }
+            { glm::vec3 q[4] = {v000, v100, v101, v001}; glm::vec2 uv[4] = {{0,0},{1,0},{1,1},{0,1}}; face(q, uv, 0.5f); }
+            { glm::vec3 q[4] = {v001, v101, v111, v011}; glm::vec2 uv[4] = {{0,1},{1,1},{1,0},{0,0}}; face(q, uv, 0.8f); }
+            { glm::vec3 q[4] = {v000, v010, v110, v100}; glm::vec2 uv[4] = {{1,1},{1,0},{0,0},{0,1}}; face(q, uv, 0.8f); }
+            { glm::vec3 q[4] = {v100, v110, v111, v101}; glm::vec2 uv[4] = {{1,1},{1,0},{0,0},{0,1}}; face(q, uv, 0.6f); }
+            { glm::vec3 q[4] = {v000, v001, v011, v010}; glm::vec2 uv[4] = {{0,1},{1,1},{1,0},{0,0}}; face(q, uv, 0.6f); }
+        }
+    } // namespace
+
     void FillPreviewRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
                                      const glm::vec3& cameraPos, Game::BlockState state,
                                      const glm::ivec3& lo, const glm::ivec3& hi) {
         if (!m_initialized || !g_renderBackend) return;
         PROFILE_ZONE_N("FillPreview");
 
-        // The block's model, once.
+        // The block's model, once. Water and lava have no model at all
+        // (LiquidBlock renders INVISIBLE; block/water.json is a bare
+        // particle texture), and the cube fallback resolved their
+        // "water_still" model name to the registry's default — a stone
+        // cube. They get a cube of their own still sprite instead.
         std::vector<ItemCubeVert> modelVerts;
         std::vector<uint32_t>     modelIdx;
-        const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(state);
-        if (!BuildBlockModelMeshFrom(model, modelVerts, modelIdx)) {
-            BuildBlockCubeMesh(state.Block(), modelVerts, modelIdx);
+        if (state.Block() == Game::BlockID::Water || state.Block() == Game::BlockID::Lava) {
+            BuildFluidPreviewCube(state.Block(), modelVerts, modelIdx);
+        } else {
+            const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(state);
+            if (!BuildBlockModelMeshFrom(model, modelVerts, modelIdx)) {
+                BuildBlockCubeMesh(state.Block(), modelVerts, modelIdx);
+            }
         }
         if (modelIdx.size() < 3) return;
         const size_t quadCount = modelIdx.size() / 6;
@@ -104,6 +163,9 @@ namespace Render {
         for (size_t q = 0; q < quadCount; ++q) FaceOf(modelVerts.data(), &modelIdx[q * 6], faceAxis[q], faceSign[q]);
 
         // Every cell on the box's shell; the inside is never seen.
+        // The view's render origin (RenderOrigin.hpp): the cells are baked
+        // relative to it below.
+        const glm::dvec3 origin = Render::RenderOrigin();
         std::vector<ItemCubeVert> verts;
         std::vector<uint32_t>     idx;
         verts.reserve(std::min<size_t>(kMaxVerts, 4096));
@@ -130,9 +192,13 @@ namespace Render {
                             const uint32_t src = modelIdx[q * 6 + k];
                             if (remap[src] == UINT32_MAX) {
                                 ItemCubeVert v = modelVerts[src];
-                                v.x += static_cast<float>(x);
-                                v.y += static_cast<float>(y);
-                                v.z += static_cast<float>(z);
+                                // Cells are baked in RENDER space (camera-
+                                // relative, see RenderOrigin.hpp): the
+                                // integer cell minus the view's integer
+                                // origin, exact, then the model's offset.
+                                v.x += static_cast<float>(static_cast<double>(x) - origin.x);
+                                v.y += static_cast<float>(static_cast<double>(y) - origin.y);
+                                v.z += static_cast<float>(static_cast<double>(z) - origin.z);
                                 v.a = kAlpha;
                                 remap[src] = static_cast<uint32_t>(verts.size());
                                 verts.push_back(v);
@@ -166,14 +232,18 @@ namespace Render {
         g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.01f);
         g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", glm::vec4(0.0f));
         const auto& env = EnvironmentState::Get().Frame();
-        g_renderBackend->SetUniformFloat(m_shader, "uSkyBrightness", env.skyBrightness);
+        // A ghost of the fill, lit as open sky (the sky texel of the frame's
+        // lightmap) — it has no one cell to take a light from.
+        EntityEnvironment::SetDrawLight(m_shader,
+            EntityEnvironment::LightColor(Game::Lighting::LightCoords::kFullSky));
         g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
         g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
             glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
-        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", cameraPos);
+        // Render-space vertices, so the fog's camera is the render-space eye.
+        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", Render::ToRender(cameraPos));
         g_renderBackend->SetUniformVec4(m_shader, "uOverlayColor", kTint);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", projection * view);
-        g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));   // world-space cells
+        g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));   // render-space cells
         g_renderBackend->DrawIndexed(fb.mesh, static_cast<uint32_t>(idx.size()), 0);
         g_renderBackend->SetUniformVec4(m_shader, "uOverlayColor", glm::vec4(0.0f));
         g_renderBackend->UnbindMesh();

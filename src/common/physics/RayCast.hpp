@@ -16,7 +16,7 @@ namespace Game {
     struct RaycastHit {
         glm::ivec3 blockPos;        // World position of the hit block
         glm::ivec3 adjacentPos;     // Position where a new block could be placed
-        glm::vec3 hitPoint;         // Exact world-space hit point
+        glm::dvec3 hitPoint;        // Exact world-space hit point (double, like MC's HitResult location)
         glm::vec3 normal;           // Face normal at hit point
         glm::vec3 cursorPos;        // Hit position within block, in block-local coordinates [0,1)
         BlockID blockId;            // ID of the hit block
@@ -34,10 +34,15 @@ namespace Game {
     public:
         // Cast a ray and find the first solid block hit
         // Returns std::nullopt if no block was hit within maxDistance
+        // The origin is DOUBLE (the eye position); the march runs in double.
+        // `collisionOnly`: only blocks with a collision box stop the ray
+        // (MC ClipContext.Block.VISUAL for the third-person camera: grass,
+        // flowers and the like are passed through).
         static std::optional<RaycastHit> CastRay(
-            const glm::vec3& origin,
+            const glm::dvec3& origin,
             const glm::vec3& direction,
-            float maxDistance = 5.0f
+            float maxDistance = 5.0f,
+            bool collisionOnly = false
         );
 
         // State index at an integer block position, through the same global
@@ -49,7 +54,7 @@ namespace Game {
 
     private:
         // Helper to get block at world position (thread-safe)
-        static BlockID GetBlockAtWorldPos(const glm::vec3& pos);
+        static BlockID GetBlockAtWorldPos(const glm::dvec3& pos);
 
         // Check if a block is solid (can be hit by raycast)
         static bool IsBlockSolid(BlockID id);

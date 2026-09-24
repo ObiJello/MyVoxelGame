@@ -23,8 +23,16 @@ namespace Game {
         glm::vec3 max;
 
         AABB() = default;
+        // (centre, size) — NOT (min, max). Brace-initialising an AABB from
+        // two corners silently picks this constructor: `AABB{lo, hi}` is a
+        // box centred on `lo` and `hi` blocks wide, which for an entity far
+        // from the origin is a box spanning most of the way back to it.
+        // Build from corners with FromMinMax.
         AABB(const glm::vec3& center, const glm::vec3& size)
             : min(center - size * 0.5f), max(center + size * 0.5f) {}
+        static AABB FromMinMax(const glm::vec3& lo, const glm::vec3& hi) {
+            AABB b; b.min = lo; b.max = hi; return b;
+        }
 
         bool Intersects(const AABB& other) const {
             return (min.x < other.max.x && max.x > other.min.x) &&
@@ -46,16 +54,15 @@ namespace Game {
         static constexpr float JUMP_VELOCITY = 9.04f;      // Velocity for a 1.25-block jump
         static constexpr float GRAVITY = -32.656f;         // Gravity acceleration
         static constexpr float TERMINAL_VELOCITY = -78.4f; // Terminal velocity
+        // MC LivingEntity.handleOnClimbable / travelInAir, per second: the
+        // ladder slide and horizontal cap of 0.15 a tick, the climb of 0.2.
+        static constexpr float CLIMB_SLIDE_SPEED = 3.0f;
+        static constexpr float CLIMB_UP_SPEED    = 4.0f;
 
-        // Water physics — derived from MC steady-state values, runs per-frame (no tick accumulator)
-        // MC steady states: walk=2.0 b/s, sink=-0.5 b/s, bob=+3.5 b/s, sprint=4.0 b/s
-        // Decay rate k = -20*ln(0.8) = 4.463 (continuous equivalent of MC's 0.8/tick friction)
-        static constexpr float WATER_DECAY = 4.463f;                // Continuous friction decay rate
-        static constexpr float WATER_WALK_ACCEL = 8.926f;           // 2.0 * 4.463 — gives 2.0 b/s steady state
-        static constexpr float WATER_SPRINT_ACCEL = 8.926f;         // Same accel, different friction for sprint
-        static constexpr float WATER_SPRINT_DECAY = 2.107f;         // -20*ln(0.9) — sprint friction (0.9/tick)
-        static constexpr float WATER_GRAVITY_ACCEL = 2.232f;        // 0.5 * 4.463 — gives -0.5 b/s steady state
-        static constexpr float WATER_BOB_ACCEL = 15.621f;           // 3.5 * 4.463 — gives +3.5 b/s steady state
+        // Fluid physics — MC LivingEntity.travelInWater / travelInLava run as
+        // their own per-tick maps, v' = d·(v + a) − g, evaluated at
+        // fractional ticks (exact at every tick boundary, smooth between;
+        // see HandleMovement). Only the jump-out impulse is a constant here.
         static constexpr float WATER_JUMP_OUT = 6.0f;               // 0.3 blocks/tick * 20 = 6.0 b/s
 
         static constexpr float OVERHANG_MARGIN = 0.125f; // Allowable overhang distance
@@ -90,15 +97,38 @@ namespace Game {
         static constexpr float MAX_SPEED_MULTIPLIER = 2.0f; // Max speed multiplier
 
         // Current player state
-        glm::vec3 position{0.0f, 97.0f, 0.0f};
+        // DOUBLE, like MC's Entity position: a float loses 3 cm at a
+        // coordinate of 300,000, and the local player is where the camera
+        // comes from (see renderer/core/RenderOrigin.hpp).
+        glm::dvec3 position{0.0, 97.0, 0.0};
         glm::vec3 velocity{0.0f};
         bool isOnGround = false;
         bool isSneaking = false;
         bool isSprinting = false;
+        // MC Entity.getFluidHeight(WATER/LAVA) and isEyeInFluid, refreshed
+        // per step by UpdateWaterState from every cell the body overlaps
+        // (a flowing cell's surface is at amount/9, a source's at 8/9, and
+        // a column continues to the cell top where the same fluid is above).
         bool isInWater = false;
-        float waterDepth = 0.0f;       // How deep the player is submerged (0 = not in water)
-        bool isEyeInWater = false;     // True when eyes are submerged
-        glm::vec3 waterVelocity{0.0f};     // Water velocity in blocks/sec
+        float waterDepth = 0.0f;       // fluid surface above the feet, clamped to the body
+        bool isEyeInWater = false;     // eye point under the water's camera surface
+        bool isInLava = false;
+        float lavaDepth = 0.0f;
+        bool isEyeInLava = false;
+        glm::vec3 waterVelocity{0.0f};     // fluid-model velocity in blocks/sec (water AND lava)
+        // MC EntityFluidInteraction.CurrentAccumulator's impulse for this
+        // step, in blocks per TICK (already scaled by 0.014 / the lava
+        // scale, averaged over the cells as it is for a player).
+        glm::vec3 fluidCurrent{0.0f};
+        // MC Player.travel's swim steering reads the look vector's Y; the
+        // client sets it from the camera before each step.
+        float lookDirY = 0.0f;
+        // MC `!level.getBlockState(containing(x, y + 0.9, z)).getFluidState()
+        // .isEmpty()` — fluid at head height, the swim-steering gate.
+        bool  fluidAboveHead = false;
+        // MC LivingEntity.noJumpDelay: ten ticks between ground jumps while
+        // the key is held (wading in shallow water re-jumps at that rate).
+        float noJumpDelayTicks = 0.0f;
         bool noclip = false;
 
         // Creative flight state — MC Abilities.flying / Abilities.mayfly.
@@ -113,6 +143,12 @@ namespace Game {
         // per-tick move packet for the server's jump-exhaustion accounting.
         bool didJumpThisStep = false;
 
+        // MC LivingEntity.onClimbable / horizontalCollision, for the ladder
+        // rules in HandleMovement: the feet are in a climbable block, and the
+        // last horizontal move was stopped by a block.
+        bool onClimbable         = false;
+        bool horizontalCollision = false;
+
         // Fall tracking — done HERE (per physics step) because the client is
         // the only one that knows exact ground contact. The server's 20 Hz
         // position snapshots miss bunny-hop landings entirely (land + jump
@@ -123,6 +159,47 @@ namespace Game {
         // and creative flight break falls (MC resetFallDistance sites).
         float fallDistance       = 0.0f;
         float landedFallDistance = 0.0f;   // consumed by ClientPlayer::UpdatePhysics
+        // The block landed on this step (MC Block.fallOn's fallDistanceReduction
+        // — a bed halves the fall) and whether it threw the player back up
+        // (Entity.restituteMovementAfterCollisions with the block's
+        // bounceRestitution). Both set in HandleMovement's landing and
+        // consumed by the fall-tracking block at the end of the step: the
+        // reduction scales the flushed distance, the bounce then clears
+        // isOnGround so the next step's jump check cannot overwrite the
+        // rebound with a jump impulse.
+        float landingFallReduction = 0.0f;
+        bool  bouncedThisStep      = false;
+        // The body overlaps an Aether aercloud cell this step (MC
+        // Entity.checkInsideBlocks reaching AercloudBlock.entityInside):
+        // `inAercloud` for any of the three, `inBlueAercloud` for the blue
+        // one. Refreshed by UpdatePlayerPhysics; read by nothing else yet
+        // (the blue cloud's bounce sound and splash are client cosmetics
+        // still to come).
+        bool  inAercloud           = false;
+        bool  inBlueAercloud       = false;
+
+        // ── The local player's status effects, as the physics reads them ──
+        // Written by ClientPlayer from its synced effect list (UpdateMobEffect
+        // S2C) before each step; defaults are "no effect".
+        //   effectSpeedFactor   MOVEMENT_SPEED's SPEED (+20 %/lvl) × SLOWNESS
+        //                       (-15 %/lvl) ADD_MULTIPLIED_TOTAL factor —
+        //                       multiplies the walk/sprint speed like MC's
+        //                       attribute (not flight, not swimming, which MC
+        //                       drives from fixed speeds).
+        //   effectJumpBoost     LivingEntity.getJumpBoostPower: +0.1/level on
+        //                       the 0.42 jump power.
+        //   effectLevitation    LEVITATION's amplifier, -1 when absent:
+        //                       travelInAir's (0.05·(amp+1) − vy)·0.2 in place
+        //                       of gravity.
+        //   effectSlowFalling   getEffectiveGravity: 0.01 while falling.
+        //   effectDolphinsGrace travelInWater's slow-down 0.96.
+        // SLOW_FALLING and LEVITATION also reset the fall distance
+        // (LivingEntity.aiStep's resetFallDistance).
+        float effectSpeedFactor   = 1.0f;
+        float effectJumpBoost     = 0.0f;
+        int   effectLevitation    = -1;
+        bool  effectSlowFalling   = false;
+        bool  effectDolphinsGrace = false;
         
         // Mutable flight speeds for noclip mode
         float noclipHorizontalSpeed = NOCLIP_HORIZONTAL_SPEED;
@@ -150,13 +227,44 @@ namespace Game {
         // so a world twice as large feels like the one you left.
         float scale = 1.0f;
 
-        float GetWidth() const { return WIDTH * scale; }
+        // /morph: the body is a mob's. Its box and eye replace the player's
+        // (a mob has no sneak pose, so sneaking changes neither), and the
+        // walk speed is the mob's — see UpdateBaseSpeed for the factor.
+        bool  morphed         = false;
+        float morphWidth      = WIDTH;
+        float morphHeight     = HEIGHT_STANDING;
+        float morphEyeHeight  = EYE_HEIGHT_STANDING;
+        float morphWalkFactor = 1.0f;   // × WALK_SPEED
+        // A spider morph: MC Spider.onClimbable is horizontalCollision, so a
+        // wall walked into is climbed like a ladder.
+        bool  morphClimbsWalls = false;
+        void SetMorph(float width, float height, float eyeHeight, float movementSpeed) {
+            morphed        = true;
+            morphWidth     = width;
+            morphHeight    = height;
+            morphEyeHeight = eyeHeight;
+            // MC: a mob's ground acceleration is speed × zza, and Mob.setSpeed
+            // sets zza = speed too, so it is speed²; the player's is
+            // MOVEMENT_SPEED (0.1) × a full input. Same friction after that,
+            // so the mob walks at speed² / 0.1 of the player's walk: a
+            // zombie (0.23) at 0.53×, a spider (0.3) at 0.9×.
+            morphWalkFactor = movementSpeed > 0.0f ? (movementSpeed * movementSpeed) / 0.1f : 1.0f;
+        }
+        void ClearMorph() {
+            morphed = false;
+            morphWidth = WIDTH; morphHeight = HEIGHT_STANDING; morphEyeHeight = EYE_HEIGHT_STANDING;
+            morphWalkFactor = 1.0f;
+            morphClimbsWalls = false;
+        }
+
+        float GetWidth() const { return (morphed ? morphWidth : WIDTH) * scale; }
         float GetEyeHeight() const {
+            if (morphed) return morphEyeHeight * scale;
             return (isSneaking ? EYE_HEIGHT_SNEAKING : EYE_HEIGHT_STANDING) * scale;
         }
 
-        glm::vec3 GetEyePosition() const {
-            return position + glm::vec3(0.0f, GetEyeHeight() + stepVisualOffset, 0.0f);
+        glm::dvec3 GetEyePosition() const {
+            return position + glm::dvec3(0.0, static_cast<double>(GetEyeHeight() + stepVisualOffset), 0.0);
         }
 
         // Visual-only Y offset applied on top of the physical position. When
@@ -171,6 +279,7 @@ namespace Game {
 
         // Get current height
         float GetCurrentHeight() const {
+            if (morphed) return morphHeight * scale;
             return (isSneaking ? HEIGHT_SNEAKING : HEIGHT_STANDING) * scale;
         }
 
@@ -178,15 +287,42 @@ namespace Game {
         AABB GetAABB() const {
             float height = GetCurrentHeight();
             return AABB(
-                glm::vec3(position.x, position.y + height * 0.5f, position.z),
+                glm::vec3(static_cast<float>(position.x), static_cast<float>(position.y) + height * 0.5f,
+                          static_cast<float>(position.z)),
                 glm::vec3(GetWidth(), height, GetWidth())
             );
         }
     };
 
+    // Cross-portal collision for ONE mover, carried on its PhysicsContext.
+    //
+    // The two global hooks below (SetPortalPassthroughFn / SetPortalExtra-
+    // SolidFn) are the local player's: one process-wide pointer, refreshed
+    // once a frame around the player's own box. A server level's mobs need
+    // the same two answers for their OWN boxes, from their own level's
+    // portals, on the server thread — so a context may carry a provider,
+    // and when it does, that provider answers instead of the globals. (The
+    // integrated server used to fall through to the client's hooks from
+    // the server thread: a data race, and the wrong portal list.)
+    class PortalCollisionProvider {
+    public:
+        virtual ~PortalCollisionProvider() = default;
+        // May IsFarSideSolid ever answer true right now? The all-air region
+        // early-out in the box test stands aside only while it may.
+        virtual bool HasFarSideSolidity() const = 0;
+        // A solid cell of this world behind a portal the box is going
+        // through: not solid for this box.
+        virtual bool IsBlockBehindPortal(int x, int y, int z, const AABB& box) const = 0;
+        // An empty cell that is solid on the far side of a portal the box
+        // is going through: a full cube for this box.
+        virtual bool IsFarSideSolid(int x, int y, int z, const AABB& box) const = 0;
+    };
+
     // **NEW**: Physics context that holds the world reference
     struct PhysicsContext {
         const IBlockAccess* blockAccess = nullptr;
+        // Cross-portal collision for this mover; null = the global hooks.
+        const PortalCollisionProvider* portalCollision = nullptr;
 
         // Helper methods that use the block access
         BlockID GetBlock(int x, int y, int z) const;
@@ -201,6 +337,22 @@ namespace Game {
         // MC `getFluidState(pos).is(FluidTags.WATER)` — true for water AND for
         // waterlogged blocks. Delegates to IBlockAccess::ContainsWater.
         bool ContainsWater(int x, int y, int z) const;
+
+        // MC EnvironmentAttributes.FAST_LAVA — true in the nether, where lava
+        // currents push at 0.007 a tick instead of 0.0023. Set by the caller
+        // that knows the dimension (the client's player).
+        bool fastLava = false;
+
+        // MC EntityCollisionContext — the entity the collision is being
+        // resolved FOR. Left at `collisionEntity = false` it is
+        // CollisionContext.empty() (spawn tests, placement, particles). Only
+        // the Aether's aerclouds read it (AercloudBlock.hpp): their shape
+        // depends on how far the mover has fallen. Set by the movers that
+        // have an entity behind them — the local player (UpdatePlayerPhysics)
+        // and Entity::Move / MoveApproximate.
+        bool  collisionEntity       = false;
+        float collisionFallDistance = 0.0f;
+        bool  collisionFallFlying   = false;
     };
 
     // Function to check if a block is solid for collision
@@ -284,14 +436,12 @@ namespace Game {
 
     // How high fluid stands above `box.min.y` (the entity's feet), scanning
     // every cell the box overlaps — MC Entity.getFluidHeight(FluidTags.WATER /
-    // LAVA), reduced to this engine's source-only fluids. A fluid cell's
-    // surface sits at 8/9 of the cell (FlowingFluid.getOwnHeight for a source)
-    // unless the cell above also holds the same fluid, in which case the column
-    // is continuous and the surface extends past the cell top. Returns 0 when
-    // the box touches no fluid of the requested kind.
+    // LAVA). A cell's surface is FluidState.getHeight: amount/9 (8/9 for a
+    // source), or the full cell when the same fluid continues above it.
+    // Returns 0 when the box touches no fluid of the requested kind.
     //
-    // `lava` selects lava (plain Lava blocks) instead of water (water blocks
-    // plus everything waterlogged).
+    // `lava` selects lava instead of water (water blocks plus everything
+    // waterlogged).
     double FluidHeightAbove(const AABB& box, bool lava, const PhysicsContext& context);
 
     // MC Entity.moveTowardsClosestSpace, verbatim: an entity stuck inside a
@@ -354,6 +504,7 @@ namespace Game {
     struct AABBd {
         glm::dvec3 min{0.0};
         glm::dvec3 max{0.0};
+        static AABBd FromMinMax(const glm::dvec3& lo, const glm::dvec3& hi) { AABBd b; b.min = lo; b.max = hi; return b; }
 
         // MC AABB.distanceToSqr: squared distance from `p` to the nearest point
         // ON the box, zero when inside. Used for interaction reach, which MC
@@ -373,6 +524,12 @@ namespace Game {
         }
     };
 
+    // The collision test in DOUBLE: the box is measured against the blocks
+    // in a local integer frame, so a player at a coordinate of 300,000
+    // collides to the same precision as one at spawn (a float box there is
+    // quantised to 3 cm). The float overload forwards here.
+    bool CollidesAt(const AABBd& box, const PhysicsContext& context);
+
     // Widen a float AABB. Lossless — every float is representable as a double.
     inline AABBd ToAABBd(const AABB& b) {
         return AABBd{ glm::dvec3(b.min), glm::dvec3(b.max) };
@@ -383,8 +540,17 @@ namespace Game {
     // Split out from the collide math because the step-up branch needs to
     // reuse ONE collider set across several candidate heights; re-walking the
     // block grid per candidate is the same query up to four times over.
+    //
+    // `mover`, when given, is the box of the entity the colliders are for:
+    // a cell behind a portal that box is going through is left out
+    // (PortalCollisionProvider::IsBlockBehindPortal, the context's own
+    // provider only — never the global player hook). The one box stands
+    // for every step-up candidate: the provider's answer is about the body
+    // fitting the opening and standing near the surface, which a
+    // half-block lift does not change. Null = no portal passthrough (the
+    // block-only callers: shape scans, leash checks, particles).
     void CollectBlockColliders(const AABBd& region, const PhysicsContext& context,
-                               std::vector<AABBd>& out);
+                               std::vector<AABBd>& out, const AABBd* mover = nullptr);
 
     // MC Shapes.collide: how far can `box` travel along `axis` (0=X, 1=Y,
     // 2=Z) before it touches something? Returns a displacement with the same
@@ -436,10 +602,10 @@ namespace Game {
                                 const PhysicsContext& context);
 
     // **UPDATED**: Collision detection functions now take PhysicsContext
-    bool CheckCollision(const glm::vec3& position, const PlayerPhysics& physics,
+    bool CheckCollision(const glm::dvec3& position, const PlayerPhysics& physics,
                        const PhysicsContext& context);
 
-    bool HasSupportBelow(const glm::vec3& position, const PlayerPhysics& physics,
+    bool HasSupportBelow(const glm::dvec3& position, const PlayerPhysics& physics,
                         const PhysicsContext& context);
 
     void UpdateWaterState(PlayerPhysics& physics, const PhysicsContext& context);
@@ -451,6 +617,10 @@ namespace Game {
     void UpdateBaseSpeed(PlayerPhysics& physics);
 
     void ApplyGravity(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context);
+    // MC LivingEntity.onClimbable for the player: the feet are in a
+    // climbable block (ladder, vines, scaffolding) or an open trapdoor over
+    // a ladder facing the same way.
+    bool OnClimbable(const PlayerPhysics& physics, const PhysicsContext& context);
 
     void HandleMovement(PlayerPhysics& physics, const glm::vec3& movementInput,
                        bool jumpPressed, float deltaTime, const PhysicsContext& context);

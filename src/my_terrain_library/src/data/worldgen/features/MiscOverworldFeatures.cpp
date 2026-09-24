@@ -2,6 +2,10 @@
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "levelgen/blockpredicates/BlockPredicate.h"
 #include "util/IntProvider.h"
+#include "levelgen/feature/TemplateFeature.h"
+#include "levelgen/placement/PlacedFeature.h"
+#include "levelgen/placement/PlacementModifiers.h"
+#include <deque>
 
 // Reference: net/minecraft/data/worldgen/features/MiscOverworldFeatures.java
 
@@ -24,7 +28,6 @@ IcebergFeature MiscOverworldFeatures::s_icebergFeature;
 BlueIceFeature MiscOverworldFeatures::s_blueIceFeature;
 LakeFeature MiscOverworldFeatures::s_lakeFeature;
 SpringFeature MiscOverworldFeatures::s_springFeature;
-DesertWellFeature MiscOverworldFeatures::s_desertWellFeature;
 VoidStartPlatformFeature MiscOverworldFeatures::s_voidStartPlatformFeature;
 BonusChestFeature MiscOverworldFeatures::s_bonusChestFeature;
 bool MiscOverworldFeatures::s_initialized = false;
@@ -39,6 +42,8 @@ ConfiguredFeature* MiscOverworldFeatures::BLUE_ICE = nullptr;
 // ConfiguredFeature pointers - Misc features
 ConfiguredFeature* MiscOverworldFeatures::FOREST_ROCK = nullptr;
 ConfiguredFeature* MiscOverworldFeatures::LAKE_LAVA = nullptr;
+ConfiguredFeature* MiscOverworldFeatures::SULFUR_SPRING = nullptr;
+ConfiguredFeature* MiscOverworldFeatures::SULFUR_POOL = nullptr;
 
 // ConfiguredFeature pointers - Disk features
 ConfiguredFeature* MiscOverworldFeatures::DISK_CLAY = nullptr;
@@ -195,6 +200,146 @@ void MiscOverworldFeatures::bootstrap() {
         LAKE_LAVA = feature.get();
         s_lakeConfigs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
+    }
+
+    // =========================================================================
+    // SULFUR_POOL (26.3 MiscOverworldFeatures.java): a SequenceFeature of
+    //   LakeFeature(water, sulfur, not(matchesBlocks(sulfur_spike)),
+    //               not(#features_cannot_replace), not(#lava_pool_stone_cannot_replace))
+    //   SimpleBlockFeature(potent_sulfur[wet]) at
+    //       EnvironmentScan(DOWN, allOf(solid, matchesFluids(UP, water)), 4)
+    // SULFUR_SPRING: WeightedRandomSelector over sequences of a tuff cover
+    // and a sulfur spring template 7 blocks down (small 200, medium 90,
+    // large 20, extra large 5).
+    // =========================================================================
+    {
+        using namespace levelgen::placement;
+        using levelgen::blockpredicates::BlockPredicate;
+        static SequenceFeature s_sequenceFeature;
+        static WeightedRandomSelectorFeature s_weightedSelectorFeature;
+        static SimpleBlockFeature s_simpleBlockFeature;
+        static TemplateFeature s_templateFeature;
+        static std::deque<PlacedFeature> s_inlinePlaced;
+        static std::deque<CountPlacement> s_counts;
+        static std::deque<levelgen::carver::ConstantInt> s_constantInts;
+        static std::deque<levelgen::carver::TrapezoidInt> s_trapezoidInts;
+        static std::deque<RandomOffsetPlacement> s_offsets;
+        static std::deque<EnvironmentScanPlacement> s_scans;
+        static std::deque<BlockPredicateFilter> s_filters;
+        static std::vector<std::unique_ptr<SimpleBlockConfiguration>> s_simpleConfigs;
+        static std::vector<std::unique_ptr<SequenceFeatureConfiguration>> s_sequenceConfigs;
+        static std::vector<std::unique_ptr<WeightedRandomFeatureConfiguration>> s_weightedConfigs;
+        static std::vector<std::unique_ptr<TemplateFeatureConfiguration>> s_templateConfigs;
+        static std::vector<std::shared_ptr<BlockStateProvider>> s_providers;
+
+        auto inlinePlaced = [](ConfiguredFeature* feature, std::vector<PlacementModifier*> modifiers,
+                               const std::string& name) -> PlacedFeature* {
+            s_inlinePlaced.emplace_back(feature, modifiers, name);
+            return &s_inlinePlaced.back();
+        };
+        auto simpleBlock = [&](BlockState* state) -> ConfiguredFeature* {
+            s_providers.push_back(std::make_shared<SimpleStateProvider>(state));
+            s_simpleConfigs.push_back(std::make_unique<SimpleBlockConfiguration>(s_providers.back().get()));
+            auto feature = std::make_unique<ConfiguredFeatureImpl<SimpleBlockConfiguration, SimpleBlockFeature>>(
+                &s_simpleBlockFeature, *s_simpleConfigs.back());
+            ConfiguredFeature* raw = feature.get();
+            s_features.push_back(std::move(feature));
+            return raw;
+        };
+        auto sequence = [&](std::vector<PlacedFeature*> list) -> ConfiguredFeature* {
+            s_sequenceConfigs.push_back(std::make_unique<SequenceFeatureConfiguration>(std::move(list)));
+            auto feature = std::make_unique<ConfiguredFeatureImpl<SequenceFeatureConfiguration, SequenceFeature>>(
+                &s_sequenceFeature, *s_sequenceConfigs.back());
+            ConfiguredFeature* raw = feature.get();
+            s_features.push_back(std::move(feature));
+            return raw;
+        };
+
+        // ---- SULFUR_POOL
+        {
+            auto lakeConfig = std::make_unique<LakeConfiguration>(
+                std::make_shared<SimpleStateProvider>("minecraft:water"),
+                std::make_shared<SimpleStateProvider>("minecraft:sulfur"),
+                BlockPredicate::not_(BlockPredicate::matchesBlocks(std::vector<std::string>{"minecraft:sulfur_spike"})),
+                BlockPredicate::not_(BlockPredicate::matchesTag("minecraft:features_cannot_replace")),
+                BlockPredicate::not_(BlockPredicate::matchesTag("minecraft:lava_pool_stone_cannot_replace")));
+            auto lake = std::make_unique<ConfiguredFeatureImpl<LakeConfiguration, LakeFeature>>(
+                &s_lakeFeature, *lakeConfig);
+            ConfiguredFeature* lakeRaw = lake.get();
+            s_lakeConfigs.push_back(std::move(lakeConfig));
+            s_features.push_back(std::move(lake));
+
+            using world::level::block::state::properties::BlockStateProperties;
+            using world::level::block::state::properties::PotentSulfurState;
+            BlockState* wetPotentSulfur = Blocks::POTENT_SULFUR->defaultBlockState()->setValue(
+                *BlockStateProperties::POTENT_SULFUR_STATE, PotentSulfurState(PotentSulfurState::WET));
+            s_scans.push_back(EnvironmentScanPlacement::scanningFor(
+                EnvironmentScanPlacement::Direction::DOWN,
+                BlockPredicate::allOf(BlockPredicate::solid(),
+                                      BlockPredicate::matchesFluids(core::Vec3i(0, 1, 0),
+                                                                    std::vector<std::string>{"minecraft:water"})),
+                4));
+            SULFUR_POOL = sequence({
+                inlinePlaced(lakeRaw, {}, "SULFUR_POOL_LAKE_INLINE"),
+                inlinePlaced(simpleBlock(wetPotentSulfur), {&s_scans.back()}, "SULFUR_POOL_POTENT_SULFUR_INLINE"),
+            });
+        }
+
+        // ---- SULFUR_SPRING
+        {
+            // tuffCover(count, spread): SimpleBlock(tuff) with Count(count),
+            // OffsetPlacement.ofTriangle(spread, 3),
+            // EnvironmentScan(DOWN, solid, 4), BlockPredicateFilter(solid)
+            ConfiguredFeature* tuff = simpleBlock(Blocks::TUFF->defaultBlockState());
+            auto tuffCover = [&](int count, int spread) -> PlacedFeature* {
+                s_constantInts.emplace_back(count);
+                s_counts.push_back(CountPlacement::of(&s_constantInts.back()));
+                CountPlacement* countPlacement = &s_counts.back();
+                s_trapezoidInts.push_back(levelgen::carver::TrapezoidInt::triangle(spread));
+                levelgen::carver::TrapezoidInt* xz = &s_trapezoidInts.back();
+                s_trapezoidInts.push_back(levelgen::carver::TrapezoidInt::triangle(3));
+                levelgen::carver::TrapezoidInt* y = &s_trapezoidInts.back();
+                s_offsets.push_back(RandomOffsetPlacement::of(xz, y));
+                RandomOffsetPlacement* offset = &s_offsets.back();
+                s_scans.push_back(EnvironmentScanPlacement::scanningFor(
+                    EnvironmentScanPlacement::Direction::DOWN, BlockPredicate::solid(), 4));
+                EnvironmentScanPlacement* scan = &s_scans.back();
+                s_filters.push_back(BlockPredicateFilter::forPredicate(BlockPredicate::solid()));
+                return inlinePlaced(tuff, {countPlacement, offset, scan, &s_filters.back()}, "SULFUR_TUFF_COVER_INLINE");
+            };
+            // sulfurSprings(templates): TemplateFeature with Offset.vertical(-7)
+            auto springs = [&](std::vector<std::string> ids) -> PlacedFeature* {
+                std::vector<TemplateFeatureConfiguration::Entry> entries;
+                for (const std::string& id : ids) {
+                    entries.push_back(TemplateFeatureConfiguration::Entry{id, 1, {0, 1, 2, 3}});
+                }
+                s_templateConfigs.push_back(std::make_unique<TemplateFeatureConfiguration>(std::move(entries)));
+                auto feature = std::make_unique<ConfiguredFeatureImpl<TemplateFeatureConfiguration, TemplateFeature>>(
+                    &s_templateFeature, *s_templateConfigs.back());
+                ConfiguredFeature* raw = feature.get();
+                s_features.push_back(std::move(feature));
+                s_constantInts.emplace_back(-7);
+                s_offsets.push_back(RandomOffsetPlacement::vertical(&s_constantInts.back()));
+                return inlinePlaced(raw, {&s_offsets.back()}, "SULFUR_SPRING_TEMPLATE_INLINE");
+            };
+            auto variant = [&](int count, int spread, std::vector<std::string> ids) -> PlacedFeature* {
+                return inlinePlaced(sequence({tuffCover(count, spread), springs(std::move(ids))}), {},
+                                    "SULFUR_SPRING_VARIANT_INLINE");
+            };
+            s_weightedConfigs.push_back(std::make_unique<WeightedRandomFeatureConfiguration>(
+                std::vector<WeightedRandomFeatureConfiguration::Entry>{
+                    {variant(64, 7, {"minecraft:spring/sulfur_spring_small_1", "minecraft:spring/sulfur_spring_small_2",
+                                     "minecraft:spring/sulfur_spring_small_3", "minecraft:spring/sulfur_spring_small_4"}), 200},
+                    {variant(80, 8, {"minecraft:spring/sulfur_spring_medium_1", "minecraft:spring/sulfur_spring_medium_2",
+                                     "minecraft:spring/sulfur_spring_medium_3"}), 90},
+                    {variant(96, 9, {"minecraft:spring/sulfur_spring_large_1", "minecraft:spring/sulfur_spring_large_2"}), 20},
+                    {variant(128, 10, {"minecraft:spring/sulfur_spring_extra_large_1"}), 5},
+                }));
+            auto feature = std::make_unique<ConfiguredFeatureImpl<WeightedRandomFeatureConfiguration, WeightedRandomSelectorFeature>>(
+                &s_weightedSelectorFeature, *s_weightedConfigs.back());
+            SULFUR_SPRING = feature.get();
+            s_features.push_back(std::move(feature));
+        }
     }
 
     // =========================================================================
@@ -376,15 +521,66 @@ void MiscOverworldFeatures::bootstrap() {
 
     // =========================================================================
     // DESERT_WELL
-    // Reference: MiscOverworldFeatures.java line 57
-    // Feature.DESERT_WELL with NoneFeatureConfiguration
+    // Reference: 26.3 MiscOverworldFeatures.java - Overlay[
+    //   Template(desert_well/well) at Offset(0, -2, 0),
+    //   Template(desert_well/suspicious_sand, RuleProcessor suspicious_sand ->
+    //     suspicious_sand + AppendLoot(archaeology/desert_well)) at one of
+    //     Offset (0,-1,0), (-1,-1,0), (0,-1,1), (1,-1,0), (0,-1,-1),
+    //   the same at one of the y = -2 offsets ]
     // =========================================================================
     {
-        auto config = std::make_unique<NoneFeatureConfiguration>();
-        auto feature = std::make_unique<ConfiguredFeatureImpl<NoneFeatureConfiguration, DesertWellFeature>>(
-            &s_desertWellFeature, *config);
+        using namespace levelgen::placement;
+        static TemplateFeature s_wellTemplateFeature;
+        static OverlayFeature s_wellOverlayFeature;
+        static std::deque<PlacedFeature> s_wellPlaced;
+        static std::deque<levelgen::carver::ConstantInt> s_wellInts;
+        static std::deque<OffsetPlacement> s_wellOffsets;
+        static std::deque<RandomlySelectedPlacement> s_wellSelections;
+        static std::vector<std::unique_ptr<TemplateFeatureConfiguration>> s_wellTemplateConfigs;
+        static std::vector<std::unique_ptr<OverlayFeatureConfiguration>> s_wellOverlayConfigs;
+
+        auto offset = [](int x, int y, int z) -> OffsetPlacement* {
+            s_wellInts.emplace_back(x);
+            const levelgen::carver::IntProvider* px = &s_wellInts.back();
+            s_wellInts.emplace_back(y);
+            const levelgen::carver::IntProvider* py = &s_wellInts.back();
+            s_wellInts.emplace_back(z);
+            s_wellOffsets.emplace_back(px, py, &s_wellInts.back());
+            return &s_wellOffsets.back();
+        };
+        auto templateFeature = [&](const std::string& id, bool suspiciousSandLoot) -> ConfiguredFeature* {
+            auto config = std::make_unique<TemplateFeatureConfiguration>(
+                std::vector<TemplateFeatureConfiguration::Entry>{{id, 1, {0, 1, 2, 3}}});
+            if (suspiciousSandLoot) {
+                config->appendLootRules.push_back(
+                    {"minecraft:suspicious_sand", "minecraft:archaeology/desert_well", "minecraft:brushable_block"});
+            }
+            s_wellTemplateConfigs.push_back(std::move(config));
+            auto feature = std::make_unique<ConfiguredFeatureImpl<TemplateFeatureConfiguration, TemplateFeature>>(
+                &s_wellTemplateFeature, *s_wellTemplateConfigs.back());
+            ConfiguredFeature* raw = feature.get();
+            s_features.push_back(std::move(feature));
+            return raw;
+        };
+        auto suspiciousSand = [&](int y) -> PlacedFeature* {
+            s_wellSelections.emplace_back(std::vector<PlacementModifier*>{
+                offset(0, y, 0), offset(-1, y, 0), offset(0, y, 1), offset(1, y, 0), offset(0, y, -1)});
+            s_wellPlaced.emplace_back(templateFeature("minecraft:desert_well/suspicious_sand", true),
+                                      std::vector<PlacementModifier*>{&s_wellSelections.back()},
+                                      "DESERT_WELL_SUSPICIOUS_SAND_INLINE");
+            return &s_wellPlaced.back();
+        };
+        s_wellPlaced.emplace_back(templateFeature("minecraft:desert_well/well", false),
+                                  std::vector<PlacementModifier*>{offset(0, -2, 0)}, "DESERT_WELL_WELL_INLINE");
+        PlacedFeature* well = &s_wellPlaced.back();
+        PlacedFeature* sandUpper = suspiciousSand(-1);
+        PlacedFeature* sandLower = suspiciousSand(-2);
+
+        s_wellOverlayConfigs.push_back(std::make_unique<OverlayFeatureConfiguration>(
+            std::vector<PlacedFeature*>{well, sandUpper, sandLower}));
+        auto feature = std::make_unique<ConfiguredFeatureImpl<OverlayFeatureConfiguration, OverlayFeature>>(
+            &s_wellOverlayFeature, *s_wellOverlayConfigs.back());
         DESERT_WELL = feature.get();
-        s_noneConfigs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 

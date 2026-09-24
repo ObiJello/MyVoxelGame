@@ -1,5 +1,6 @@
 // File: src/common/entity/NeutralMob.cpp
 #include "common/entity/NeutralMob.hpp"
+#include "common/world/level/GameRules.hpp"
 
 #include "common/entity/Mob.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -34,6 +35,15 @@ namespace Game {
         return level ? m_angryAtRef.GetLiving(*level) : nullptr;
     }
 
+
+    bool NeutralMob::IsAngryAtAllPlayers() const {
+        return Rules::GetBool(Rules::Id::UniversalAnger) && IsAngry() && m_angryAtRef.Empty();
+    }
+
+    void NeutralMob::PlayerDied(const LivingEntity& player) {
+        if (!Rules::GetBool(Rules::Id::ForgiveDeadPlayers)) return;
+        if (m_angryAtRef.Matches(player)) StopBeingAngry();
+    }
 
     bool NeutralMob::IsAngryAt(const LivingEntity& entity) const {
         // MC isAngryAt(entity, level), condition for condition.

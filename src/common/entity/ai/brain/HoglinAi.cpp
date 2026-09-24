@@ -114,8 +114,14 @@ namespace Game {
 
     void HoglinAi::UpdateActivity(Hoglin& hoglin) {
         if (Brain* brain = hoglin.GetBrain()) {
+            // MC: a changed activity voices the new one
+            // (getSoundForCurrentActivity → makeSound).
+            const std::optional<Activity> oldActivity = brain->GetActiveNonCoreActivity();
             brain->SetActiveActivityToFirstValid(
                 { Activity::Fight, Activity::Idle });
+            if (brain->GetActiveNonCoreActivity() != oldActivity) {
+                hoglin.MakeSound(hoglin.GetAmbientSound());
+            }
         }
     }
 

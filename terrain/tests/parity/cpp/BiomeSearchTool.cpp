@@ -12,7 +12,7 @@
  *       Y levels (surface + cave depths) and print the first N hits per
  *       requested biome:  HIT,<biome>,<seed>,<chunkX>,<chunkZ>,<qx>,<qy>,<qz>
  *
- * Setup mirrors BiomeDumpTest.cpp (direct sampler, no NoiseChunk caching).
+ * Point sampling through the RandomState's uncached climate sampler.
  */
 #include <cstdint>
 #include <cstdlib>
@@ -26,10 +26,6 @@
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/NoiseGeneratorSettings.h"
-#include "levelgen/NoiseRouterData.h"
-#include "levelgen/NoiseRegistry.h"
-#include "levelgen/NoiseSettings.h"
-#include "levelgen/DensityFunctionRegistry.h"
 #include "world/level/block/Blocks.h"
 #include "world/biome/MultiNoiseBiomeSource.h"
 #include "world/biome/Biomes.h"
@@ -45,14 +41,7 @@ struct Sampling {
 };
 
 Sampling makeSampler(int64_t seed) {
-    mc::levelgen::DensityFunctionRegistry::bootstrap(seed);
-    auto* stoneBlock = mc::world::level::block::Blocks::STONE->defaultBlockState();
-    auto* router = mc::levelgen::NoiseRouterData::overworld(false, false);
-    auto noiseSettings = mc::levelgen::NoiseSettings::OVERWORLD_NOISE_SETTINGS;
-    auto* settings = new mc::levelgen::NoiseGeneratorSettings(
-        noiseSettings, stoneBlock,
-        mc::world::level::block::Blocks::WATER->defaultBlockState(),
-        *router, nullptr, {}, 63, false, true, true, false);
+    auto settings = mc::levelgen::NoiseGeneratorSettings::load("minecraft:overworld");
     Sampling s;
     s.randomState = mc::levelgen::RandomState::create(settings, seed);
     s.biomeSource = mc::world::biome::MultiNoiseBiomeSource::createOverworld();
@@ -90,7 +79,6 @@ int main(int argc, char* argv[]) {
     }
 
     mc::world::level::block::Blocks::bootstrap();
-    mc::levelgen::NoiseRegistry::bootstrap();
 
     if (listPossible) {
         auto source = mc::world::biome::MultiNoiseBiomeSource::createOverworld();

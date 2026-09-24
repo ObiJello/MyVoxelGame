@@ -118,6 +118,20 @@ namespace Game {
         // hands it back here so nothing is stranded.
         virtual void Removed(ContainerClickResult& result) { (void)result; }
 
+        // MC AbstractContainerMenu.clickMenuButton(player, buttonId) — a
+        // menu-specific button the client pressed (ServerboundContainer-
+        // ButtonClickPacket): a lectern's page turn / Take Book, an enchanting
+        // offer, a stonecutter recipe. Server-side only. Returns whether the
+        // click did anything (the session then broadcasts the changes).
+        // `mayBuild` is MC Player.mayBuild() (false for adventure and
+        // spectator). Items a button hands the player go through the menu's
+        // player inventory; whatever does not fit is left on
+        // `result.droppedItem` / `result.extraDrops` for the session to drop.
+        virtual bool ClickMenuButton(int buttonId, bool mayBuild, ContainerClickResult& result) {
+            (void)buttonId; (void)mayBuild; (void)result;
+            return false;
+        }
+
         // Menu index of a player-inventory slot, or -1 when this menu does not
         // show it. The identity for InventoryMenu; offset for menus that put
         // their own container first. Used by anything holding an inventory

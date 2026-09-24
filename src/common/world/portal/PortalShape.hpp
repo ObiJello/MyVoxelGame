@@ -17,10 +17,14 @@
 // shape rather than splitting it into two functions that would drift.
 //
 // WHAT COUNTS AS WHAT (PortalShape.java:31, :162)
-//   FRAME   — obsidian, and only obsidian.
-//   "empty" — air, fire (either kind), or an existing nether_portal block.
-//             Fire is in the set because the frame is lit BY placing fire in
-//             it: the fire block is already there when the search runs.
+//   FRAME   — the family's frame block: obsidian, and only obsidian, for
+//             the nether; reinforced deepslate for the Hush (PortalFamily
+//             .hpp). MC hard-codes Blocks.OBSIDIAN; the family is the one
+//             indirection this port adds.
+//   "empty" — air, fire (either kind), or an existing portal block of the
+//             same family. Fire is in the set because the frame is lit BY
+//             placing fire in it: the fire block is already there when the
+//             search runs.
 //
 // The 2/21 width and 3/21 height bounds are vanilla's and are what make a
 // 4x5 frame the smallest portal and a 23x23 frame the largest.
@@ -31,6 +35,7 @@
 #pragma once
 
 #include "BlockUtil.hpp"
+#include "PortalFamily.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/world/block/Direction.hpp"
@@ -53,10 +58,14 @@ namespace Game {
         static constexpr int kMinHeight = 3;
         static constexpr int kMaxHeight = 21;
 
+        // Every search takes the family whose frame it walks; the nether is
+        // the default so vanilla call sites read as they did.
+
         // PortalShape.java:50 — a complete frame with nothing in it yet. This
-        // is the flint-and-steel path.
+        // is the flint-and-steel (and echo-shard) path.
         static std::optional<PortalShape> FindEmptyPortalShape(
-            const IBlockAccess& level, const glm::ivec3& pos, Axis preferredAxis);
+            const IBlockAccess& level, const glm::ivec3& pos, Axis preferredAxis,
+            const PortalFamily& family = NetherFamily());
 
         // PortalShape.java:54 — try `preferredAxis` first, then the other one,
         // returning the first shape the predicate accepts. Both axes are
@@ -65,13 +74,14 @@ namespace Game {
         static std::optional<PortalShape> FindPortalShape(
             const IBlockAccess& level, const glm::ivec3& pos,
             const std::function<bool(const PortalShape&)>& isValid,
-            Axis preferredAxis);
+            Axis preferredAxis, const PortalFamily& family = NetherFamily());
 
         // PortalShape.java:64 — the raw walk on one axis. Always returns a
         // shape; an invalid one has width or height 0. Callers ask IsValid()
         // or IsComplete() rather than checking for a null.
         static PortalShape FindAnyShape(const IBlockAccess& level,
-                                        const glm::ivec3& pos, Axis axis);
+                                        const glm::ivec3& pos, Axis axis,
+                                        const PortalFamily& family = NetherFamily());
 
         // PortalShape.java:166 — the frame is whole and the interior is within
         // bounds. Says nothing about what is IN the interior.
@@ -80,14 +90,14 @@ namespace Game {
                 && m_height >= kMinHeight && m_height <= kMaxHeight;
         }
 
-        // PortalShape.java:175 — valid AND every interior cell already holds a
-        // nether_portal block. This is the "may I keep existing" test.
+        // PortalShape.java:175 — valid AND every interior cell already holds
+        // the family's portal block. This is the "may I keep existing" test.
         bool IsComplete() const {
             return IsValid() && m_numPortalBlocks == m_width * m_height;
         }
 
-        // PortalShape.java:170 — fill the interior with nether_portal blocks
-        // oriented along this shape's axis.
+        // PortalShape.java:170 — fill the interior with the family's portal
+        // blocks oriented along this shape's axis.
         //
         // MC passes flag 18 = UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE. The second
         // bit is load-bearing and not cosmetic: without it, writing the first
@@ -102,16 +112,18 @@ namespace Game {
         glm::ivec3 BottomLeft() const { return m_bottomLeft; }
         int        Width()      const { return m_width; }
         int        Height()     const { return m_height; }
+        const PortalFamily& Family() const { return *m_family; }
 
-        // PortalShape.java:162 — air, fire, soul fire, or nether portal.
-        // Public because BaseFireBlock's placement test needs the same notion
-        // of "inside a frame" and NetherPortalBlock reuses it.
-        static bool IsEmptyForPortal(BlockState state);
+        // PortalShape.java:162 — air, fire, soul fire, or the family's
+        // portal block. Public because BaseFireBlock's placement test needs
+        // the same notion of "inside a frame" and NetherPortalBlock reuses it.
+        static bool IsEmptyForPortal(BlockState state, const PortalFamily& family);
 
-        // PortalShape.java:31 — FRAME. Obsidian only; crying obsidian does
-        // NOT work in vanilla and must not work here.
-        static bool IsFrame(BlockState state) {
-            return state.Is(BlockID::Obsidian);
+        // PortalShape.java:31 — FRAME, the family's strict predicate.
+        // Obsidian only for the nether; crying obsidian does NOT work in
+        // vanilla and must not work here.
+        static bool IsFrame(BlockState state, const PortalFamily& family) {
+            return family.isFrame(state.Block());
         }
 
         // PortalShape.java:179 getRelativePosition — where inside a portal an
@@ -155,33 +167,39 @@ namespace Game {
 
     private:
         PortalShape() = default;
-        PortalShape(Axis axis, int portalBlockCount, Direction rightDir,
-                    const glm::ivec3& bottomLeft, int width, int height)
-            : m_axis(axis), m_rightDir(rightDir), m_numPortalBlocks(portalBlockCount),
-              m_bottomLeft(bottomLeft), m_height(height), m_width(width) {}
+        PortalShape(const PortalFamily& family, Axis axis, int portalBlockCount,
+                    Direction rightDir, const glm::ivec3& bottomLeft, int width, int height)
+            : m_family(&family), m_axis(axis), m_rightDir(rightDir),
+              m_numPortalBlocks(portalBlockCount), m_bottomLeft(bottomLeft),
+              m_height(height), m_width(width) {}
 
         // PortalShape.java:81 — drop to the floor of the cavity, then walk
         // left along the bottom row to the frame. Returns false when there is
         // no frame corner to anchor on.
-        static bool CalculateBottomLeft(const IBlockAccess& level, Direction rightDir,
-                                        glm::ivec3 pos, glm::ivec3& out);
+        static bool CalculateBottomLeft(const IBlockAccess& level, const PortalFamily& family,
+                                        Direction rightDir, glm::ivec3 pos, glm::ivec3& out);
 
         // PortalShape.java:95 — how far you can travel in `direction` while
         // staying in the cavity with frame underneath, stopping ON the frame
         // block that closes it. 0 means "no closing frame within 21".
-        static int DistanceUntilEdgeAboveFrame(const IBlockAccess& level,
+        static int DistanceUntilEdgeAboveFrame(const IBlockAccess& level, const PortalFamily& family,
                                                const glm::ivec3& pos,
                                                Direction direction);
 
-        static int CalculateWidth(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                  Direction rightDir);
-        static int CalculateHeight(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                   Direction rightDir, int width, int& portalBlockCount);
-        static int DistanceUntilTop(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                    Direction rightDir, int width, int& portalBlockCount);
-        static bool HasTopFrame(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                Direction rightDir, int width, int height);
+        static int CalculateWidth(const IBlockAccess& level, const PortalFamily& family,
+                                  const glm::ivec3& bottomLeft, Direction rightDir);
+        static int CalculateHeight(const IBlockAccess& level, const PortalFamily& family,
+                                   const glm::ivec3& bottomLeft, Direction rightDir,
+                                   int width, int& portalBlockCount);
+        static int DistanceUntilTop(const IBlockAccess& level, const PortalFamily& family,
+                                    const glm::ivec3& bottomLeft, Direction rightDir,
+                                    int width, int& portalBlockCount);
+        static bool HasTopFrame(const IBlockAccess& level, const PortalFamily& family,
+                                const glm::ivec3& bottomLeft, Direction rightDir,
+                                int width, int height);
 
+        // Into PortalFamily's static table, so the pointer is always valid.
+        const PortalFamily* m_family         = &NetherFamily();
         Axis       m_axis            = Axis::X;
         Direction  m_rightDir        = Direction::West;
         int        m_numPortalBlocks = 0;

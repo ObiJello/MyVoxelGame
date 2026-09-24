@@ -7,6 +7,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/loot/GeneratedMobLoot.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -277,6 +278,15 @@ namespace Server {
         //       taken when there are enough of them to pay for the fork/join;
         //       otherwise the serial loop treats it exactly as class 2.
         const size_t mobCount = m_mobList.size();
+        PROFILE_PLOT("Mobs/Server", static_cast<int64_t>(mobCount));
+        {
+            double minY = 1e9, maxAbsXZ = 0.0;
+            for (const Game::Mob* m : m_mobList) {
+                minY = std::min(minY, m->position.y);
+                maxAbsXZ = std::max(maxAbsXZ, std::max(std::abs(m->position.x), std::abs(m->position.z)));
+            }
+            if (mobCount) { PROFILE_PLOT("Mobs/ServerMinY", minY); PROFILE_PLOT("Mobs/ServerMaxAbsXZ", maxAbsXZ); }
+        }
         m_mobClass.resize(mobCount);
         m_mobTypeIdx.resize(mobCount);
         m_parallelTickBatch.resize(mobCount);
@@ -807,8 +817,11 @@ namespace Server {
         // MC LivingEntity.shouldDropLoot: babies drop nothing, except that
         // Monster overrides this and drops regardless of age (Monster.java:
         // 114) — baby zombies do drop in vanilla.
-        const bool isMonster = mob.TypeInfo().category == Game::MobCategory::Monster;
-        if (!mob.IsBaby() || isMonster) {
+        const bool isMonster = Game::IsMonsterCategory(mob.TypeInfo().category);
+        // MC dropAllDeathLoot (:1480): the loot-table half AND dropExperience
+        // (:1557) both sit behind the mob_drops rule.
+        const bool mobDrops = Game::Rules::GetBool(Game::Rules::Id::MobDrops);
+        if ((!mob.IsBaby() || isMonster) && mobDrops) {
             EvaluateLootTable(mob, killedByPlayer, rng);
 
             // Sheep wool is not in the generated table: MC expresses it as an
@@ -834,7 +847,7 @@ namespace Server {
         // isAlwaysExperienceDropper is player/dragon-fight machinery and
         // never reaches this manager. The award spawns real orb entities —
         // ServerLevelBridge::AwardExperience → ExperienceOrbManager::Award.
-        if (killedByPlayer && (isMonster || !mob.IsBaby())) {
+        if (killedByPlayer && mobDrops && (isMonster || !mob.IsBaby())) {
             const int xp = mob.GetXpReward();
             if (xp > 0) {
                 m_level->AwardExperience(mob.position, xp, mob.LastHurtByPlayerId());

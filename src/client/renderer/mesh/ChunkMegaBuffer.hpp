@@ -1,9 +1,12 @@
 // File: src/client/renderer/mesh/ChunkMegaBuffer.hpp
 #pragma once
 
+#include <chrono>
+
 #include "common/world/math/WorldMath.hpp"
 #include "../backend/RenderTypes.hpp"
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include <cstdint>
 #include <cstddef>
@@ -114,10 +117,13 @@ namespace Render {
         // buffer adds the records' slab texel position to every face-mapped
         // vertex's record index at upload, next to the origin-row patch.
         // nullptr / 0 for a layer without merged rectangles.
+        // `fadeStartMs`: the section's first-upload time (SectionFade.hpp),
+        // written to its origin row's .w so the vertex shader can fade it in.
         bool UploadSection(const MegaBufferSectionKey& key,
                            const float* vertexData, size_t vertexCount,
                            const uint16_t* indexData, size_t indexCount,
-                           const uint32_t* faceMap = nullptr, size_t faceMapTexels = 0);
+                           const uint32_t* faceMap = nullptr, size_t faceMapTexels = 0,
+                           int32_t fadeStartMs = 0);
 
         // Rewrites a section's indices in place, leaving its vertices alone.
         // Used by translucent re-sorting, which reorders quads without
@@ -173,13 +179,43 @@ namespace Render {
         // Whether a draw may run straight across the index range
         // [gapBegin, gapEnd) of `slabIndex` without any section's command
         // covering it. Everything below a slab's high-water mark is one of:
-        // a live section (drawing it uninvited is harmless), a range zeroed on
-        // retire (degenerate triangles, draws nothing), or a range freed
-        // within the last kFreeDelayFrames that STILL HOLDS its old indices.
-        // Only the last kind is a problem — bridging it would keep drawing a
-        // mesh the player just replaced (a broken block lingering for three
-        // frames) — so this says no exactly when the gap touches one of them.
+        // a live section of a loaded chunk (drawing it uninvited is harmless:
+        // it is outside the frustum or behind terrain, exactly where it
+        // belongs), a range zeroed on retire (degenerate triangles, draws
+        // nothing), a range freed within the last kFreeDelayFrames that STILL
+        // HOLDS its old indices, or a FENCED section (SetSectionNoBridge) — a
+        // chunk the client has unloaded and keeps only for an instant
+        // revisit, or a loaded one outside the rendered view.
+        // The last two are problems: a freed range would keep drawing a mesh
+        // the player just replaced (a broken block lingering for three
+        // frames), and a parked one draws terrain that is no longer there —
+        // stray sections of chunks the player left, coming and going with the
+        // view angle as the visible runs around them change (2026-09-24). So
+        // this says no exactly when the gap touches one of them.
         bool IsIndexGapDrawable(uint32_t slabIndex, size_t gapBegin, size_t gapEnd) const;
+
+        // Sections a bridged gap must never cross although their ranges are
+        // live, by reason (a mask: a section stays fenced while any is set):
+        //  - kNoBridgeParked: its chunk is unloaded and kept only in the
+        //    retention cache (revival is a pointer swap), so it must never
+        //    be drawn;
+        //  - kNoBridgeOutsideView: its chunk is loaded but outside what the
+        //    client renders — the halo ring the server sends so edge chunks
+        //    have neighbours (MC isInViewDistance buffer 1 vs 2), which MC
+        //    never draws.
+        static constexpr uint8_t kNoBridgeParked      = 1;
+        static constexpr uint8_t kNoBridgeOutsideView = 2;
+        void SetSectionNoBridge(const MegaBufferSectionKey& key, uint8_t reason, bool on);
+
+        // Diagnostics (OBEY_STRAY_AUDIT): every live region, per slab, sorted
+        // by index offset — what a bridged gap actually contains. O(regions);
+        // built once per sampled frame, never on the normal path.
+        struct DebugRegionRef {
+            size_t indexOffset;
+            size_t indexCount;
+            MegaBufferSectionKey key;
+        };
+        std::vector<std::vector<DebugRegionRef>> DebugRegionsBySlab() const;
 
         // ========================================================================
         // SLAB BINDING
@@ -189,6 +225,26 @@ namespace Render {
         void BindSlab(uint32_t slabIndex) const;
 
         uint32_t GetSlabCount() const { return static_cast<uint32_t>(m_slabs.size()); }
+
+        // ── Capacity pressure ──────────────────────────────────────────────
+        // The pool can grow to kMaxSlabs and no further. Past three quarters
+        // of that ceiling (vertices, indices or origin rows), or after an
+        // upload found no room at all, the chunk manager drops parked meshes
+        // (the retention cache) so live sections keep fitting — see
+        // ClientChunkManager::RelieveMeshBufferPressure.
+        bool NearCapacity() const {
+            const size_t maxUnits = size_t(kMaxSlabs) * m_slabVertexCapacity;
+            const size_t maxIndices = size_t(kMaxSlabs) * m_slabIndexCapacity;
+            const size_t maxRows = size_t(kMaxSlabs) * kSlotsPerSlab;
+            return m_usedVertexUnits * 4 > maxUnits * 3 ||
+                   (!m_perSectionIndexBuffers && m_usedIndices * 4 > maxIndices * 3) ||
+                   m_regions.size() * 4 > maxRows * 3;
+        }
+        bool ConsumeUploadFailed() {
+            const bool failed = m_uploadFailed;
+            m_uploadFailed = false;
+            return failed;
+        }
 
         // ========================================================================
         // STATISTICS
@@ -253,6 +309,11 @@ namespace Render {
             std::vector<FreeBlock> hotIndexRanges;
             bool hotRangesDirty = false;
 
+            // Index ranges of fenced sections (SetSectionNoBridge), keyed by
+            // offset. Regions are disjoint, so the only one that can reach
+            // into a gap is the last one starting before the gap's end.
+            std::map<size_t, size_t> parkedIndexRanges;
+
             // Rows of this slab's section-origin table (see kSlotsPerSlab):
             // bump-allocated, recycled through freeSlots after the same
             // retire delay as the vertex range they describe.
@@ -270,6 +331,15 @@ namespace Render {
         // Accumulated by every slab write; drained once a frame by
         // ConsumeUploadedBytes. Render-thread only, so no atomic needed.
         size_t m_uploadedBytes = 0;
+        // Live allocations (regions in m_regions), for NearCapacity. A
+        // removed region stops counting at RemoveSection, though its range
+        // is only reusable kFreeDelayFrames later.
+        size_t m_usedVertexUnits = 0;
+        size_t m_usedIndices = 0;
+        bool   m_uploadFailed = false;
+        // Throttle for the slab-limit error (one line per interval, with a count).
+        std::chrono::steady_clock::time_point m_lastLimitLog{};
+        uint32_t m_suppressedLimitLogs = 0;
 
         // Per-section region tracking (which slab + offset)
         struct Region {
@@ -288,6 +358,7 @@ namespace Render {
             // initialised with perSectionIndexBuffers; INVALID_BUFFER otherwise
             // and indices live in the slab IBO at indexOffset as before.
             BufferHandle sectionIbo = INVALID_BUFFER;
+            uint8_t noBridge = 0;   // reason mask, see SetSectionNoBridge
         };
         std::unordered_map<MegaBufferSectionKey, Region, MegaBufferSectionKeyHash> m_regions;
 
@@ -345,7 +416,8 @@ namespace Render {
         bool TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                              const float* vertexData, size_t vertexCount,
                              const uint16_t* indexData, size_t indexCount,
-                             const uint32_t* faceMap, size_t faceMapTexels);
+                             const uint32_t* faceMap, size_t faceMapTexels,
+                             int32_t fadeStartMs);
 
         // Internal allocation (first-fit with bump fallback, per-slab)
         static bool AllocRegion(std::vector<Slab::FreeBlock>& freeList, size_t& highWater,
@@ -354,14 +426,16 @@ namespace Render {
                                size_t offset, size_t count);
 
         // Bytes per terrain vertex — must equal sizeof(Render::TerrainVertex)
-        // and GetTerrainVertexLayout().stride: the packed 16-byte vertex.
-        static constexpr size_t VERTEX_STRIDE = 16;
-        // Face-map records per vertex-stride unit: a record is one RGBA16
-        // texel (8 bytes) of the slab's buffer texture, so a 16-byte unit
-        // holds two; the mesher's record arrays are uint32 words, four per
-        // unit.
-        static constexpr size_t kRecordsPerUnit = VERTEX_STRIDE / 8;
-        static constexpr size_t kWordsPerUnit   = VERTEX_STRIDE / 4;
+        // and GetTerrainVertexLayout().stride: the packed 20-byte vertex.
+        static constexpr size_t VERTEX_STRIDE = 20;
+        // Face-map records are RGBA16 texels (8 bytes) of the slab's buffer
+        // texture; the mesher's record arrays are uint32 words. A vertex unit
+        // is 20 bytes, so a region's record array starts at the next 8-byte
+        // boundary after its vertices — at most 4 bytes of padding, which one
+        // spare unit per face-mapped region always covers.
+        static constexpr size_t kRecordBytes  = 8;
+        static constexpr size_t kWordsPerUnit = VERTEX_STRIDE / 4;
+        static_assert(VERTEX_STRIDE % 4 == 0, "a vertex unit must hold whole record words");
 
         // --- Section-origin table ------------------------------------------
         // TerrainVertex positions are relative to their section's origin and
@@ -378,7 +452,7 @@ namespace Render {
         // sections; TryUploadToSlab moves on to the next slab when the rows
         // run out before the vertices do (cutout slabs, small sections).
         static constexpr uint32_t kSlotsPerSlab    = 1024;
-        static constexpr size_t   kOriginEntryBytes = 16;                       // vec4
+        static constexpr size_t   kOriginEntryBytes = 16;                       // ivec4
         static constexpr size_t   kSlotBytes        = kSlotsPerSlab * kOriginEntryBytes;
         static constexpr uint32_t kMaxSlabs         = 128;                      // 2 MB of tables
         BufferHandle m_originsUbo = INVALID_BUFFER;

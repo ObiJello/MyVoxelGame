@@ -1,10 +1,14 @@
 // File: src/server/IntegratedServer.cpp
+#include "common/world/level/ModDimensions.hpp"
 #include "IntegratedServer.hpp"
+#include "server/items/HushItems.hpp"
 #include "server/entity/FallingBlockStore.hpp"
 #include <cctype>
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/EndCrystal.hpp"
+#include "common/entity/ArmorStand.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/core/SaveVersion.hpp"
 #include "server/world/storage/anvil/WorldFolder.hpp"
 #include "server/world/storage/anvil/WorldSidecar.hpp"
@@ -15,11 +19,31 @@
 #include "commands/GameModeCommand.hpp"
 #include "commands/DifficultyCommand.hpp"
 #include "commands/KillCommand.hpp"
+#include "commands/HealCommand.hpp"
+#include "commands/LootCommand.hpp"
+#include "commands/EffectCommand.hpp"
+#include "level/LevelEntityStore.hpp"   // MakeMobForLoad (the effect mob factory)
+#include "common/world/spawn/StructureSpawnOverrides.hpp"
+#include "server/world/storage/anvil/SpawnerNbt.hpp"
 #include "commands/EntityStatsCommand.hpp"
 #include "commands/ShapeCommand.hpp"
 
 #include <deque>
+#include <array>
+#include <cmath>
 #include "commands/SummonCommand.hpp"
+#include "commands/ForceLoadCommand.hpp"
+#include "commands/SetBlockCommand.hpp"
+#include "level/ChunkKeeper.hpp"
+#include "level/LighthouseGuide.hpp"
+#include "commands/ReplaceAllCommand.hpp"
+#include "commands/ExecuteCommand.hpp"
+#include "commands/WorldOptionsCommand.hpp"
+#include "common/world/block/Direction.hpp"
+#include "common/world/portal/PortalShape.hpp"
+#include "common/world/block/RedstoneFamilies.hpp"
+#include "common/world/block/RedstonePlus.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "commands/SpawnAllCommand.hpp"
 #include "commands/SheepEatCommand.hpp"
 #include "commands/TimeCommand.hpp"
@@ -27,7 +51,21 @@
 #include "commands/LocateCommand.hpp"
 #include "commands/GameRuleCommand.hpp"
 #include "commands/SeedCommand.hpp"
+#include "commands/UpdateBlocksCommand.hpp"
+#include "commands/InvisibleCommand.hpp"
+#include "commands/MorphCommand.hpp"
+#include "commands/ControlCommand.hpp"
+#include "control/RemoteControlManager.hpp"
+#include "entity/MorphCarry.hpp"
+#include "entity/MorphBlockAnchor.hpp"
+#include "sound/ServerSoundBroadcaster.hpp"
+#include "common/sound/SoundEvents.hpp"   // player attack sounds (Player.attack)
+#include "common/entity/Morph.hpp"
+#include "common/world/block/BlockPlacement.hpp"
 #include "commands/TickCommand.hpp"
+#include "commands/StillnessCommand.hpp"
+#include "commands/AurelithCommand.hpp"
+#include "level/AurelithCities.hpp"
 #include "network/NetworkServer.hpp"
 #include "network/ServerConnection.hpp"
 #include "network/SendScheduler.hpp"
@@ -39,6 +77,8 @@
 #include "common/core/Assert.hpp"   // ASSERT_SERVER_THREAD in GetOrCreateLevel
 #include "level/ServerLevel.hpp"
 #include "level/EndDragonFight.hpp"
+#include "level/SilentWardenBossBars.hpp"
+#include "level/HushStillness.hpp"
 #include "level/PortalTravel.hpp"
 #include "world/status/ChunkStatusManager.hpp"
 #include "world/tracking/SectionChangeAccumulator.hpp"
@@ -62,10 +102,12 @@
 #include "common/entity/projectile/EvokerFangs.hpp"
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/projectile/EyeOfEnder.hpp"
+#include "common/entity/LightningBolt.hpp"
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/mobs/SulfurCube.hpp"
 #include "common/entity/mobs/Fish.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/world/block/entity/ChestBlockEntity.hpp"
 #include "common/world/spawn/NaturalSpawner.hpp"
 #include "common/world/spawn/GeneratedMobSpawns.hpp"
 #include "common/world/spawn/SpawnPlacements.hpp"
@@ -87,6 +129,7 @@
 #include "common/core/TickParallel.hpp"
 #include <future>
 #include "common/world/level/World.hpp"
+#include "common/world/lighting/LevelLightManager.hpp"
 #include "client/entity/Player.hpp"
 #include "world/ServerWorkerPool.hpp"
 #include "world/MyTerrainGenerator.hpp"
@@ -125,10 +168,49 @@ namespace Server {
             }
             return true;
         }
+
+        // ChestBlockEntity's user counter — MC ContainerOpenersCounter
+        // .getEntitiesWithContainerOpen, which the lid's 5-tick recheck
+        // recounts from: every player whose chest menu covers `pos` (either
+        // half of a double) and every copper golem working that chest. Runs
+        // on the server thread inside the level's scheduled-tick drain.
+        int CountChestUsers(Game::ILevelWrite& level, const glm::ivec3& pos);
     } // namespace
 
     // Global instance
     std::unique_ptr<IntegratedServer> g_integratedServer = nullptr;
+
+    namespace {
+        int CountChestUsers(Game::ILevelWrite& level, const glm::ivec3& pos) {
+            IntegratedServer* server = g_integratedServer.get();
+            if (!server) return 0;
+            const auto* world = dynamic_cast<const Game::World*>(&level);
+            if (!world) return 0;
+
+            int count = 0;
+            if (PlayerSessionManager* sessions = server->GetSessionManager()) {
+                for (const auto& session : sessions->GetAllSessions()) {
+                    if (session && session->HasChestOpenAt(world, pos)) ++count;
+                }
+            }
+
+            // Golems: MC searches maxInteractionRange + 4 around the chest; a
+            // golem works a chest from beside it, so 8 blocks covers it.
+            ServerLevel* serverLevel = server->GetLevel(level.GetDimension());
+            if (serverLevel && serverLevel->World() == world && serverLevel->MobLevel()) {
+                const glm::vec3 centre = glm::vec3(pos) + glm::vec3(0.5f);
+                const auto box = Game::AABB::FromMinMax(centre - glm::vec3(8.0f),
+                                                        centre + glm::vec3(8.0f));
+                std::vector<Game::Entity*> nearby;
+                serverLevel->MobLevel()->GetEntitiesInBox(box, nullptr, nearby);
+                for (Game::Entity* entity : nearby) {
+                    auto* golem = dynamic_cast<Game::CopperGolem*>(entity);
+                    if (golem && golem->IsAlive() && golem->OpenedChestPos() == pos) ++count;
+                }
+            }
+            return count;
+        }
+    } // namespace
     
     // Server thread ID for assertions
     std::thread::id g_serverThreadId;
@@ -143,8 +225,25 @@ namespace Server {
 #if ENABLE_IMMERSIVE_PORTALS
         Game::Portals::SetImmersiveFrameLitHandler(nullptr);
 #endif
+        Game::ChestBlockEntity::SetUserCounter(nullptr);
         if (m_running.load()) {
             Stop();
+        }
+        // The levels before any member they point into. Members die in
+        // reverse declaration order, and m_levels is declared BEFORE the
+        // session manager, sound sink and send scheduler — so left to the
+        // implicit order, every ~ServerLevel would run after the session
+        // manager it holds a pointer to is gone. Shutdown() has normally
+        // emptied the array already; this covers a server that is destroyed
+        // without it (one whose Start failed, or a failed Initialize).
+        for (auto& level : m_levels) {
+            level.reset();
+        }
+        // The sink is a process global; never leave it naming a dead
+        // broadcaster (it is cleared in CleanupSessionSystem, which a server
+        // that never started does not reach).
+        if (m_soundBroadcaster && Game::Sound::GetServerSink() == m_soundBroadcaster.get()) {
+            Game::Sound::SetServerSink(nullptr);
         }
         Log::Info("IntegratedServer destroyed");
     }
@@ -163,6 +262,13 @@ namespace Server {
         // server should never have started, which Start() already refuses.
         return *m_levels[static_cast<size_t>(
             Game::DimensionSlot(Game::DimensionId::Overworld))];
+    }
+
+    NetherPortalIndex& IntegratedServer::TwilightPortalIndex(Game::DimensionId dimension) {
+        std::unique_ptr<NetherPortalIndex>& slot =
+            m_twilightPortalIndexes[static_cast<size_t>(Game::DimensionSlot(dimension))];
+        if (!slot) slot = std::make_unique<NetherPortalIndex>(Game::BlockID::TwilightPortal);
+        return *slot;
     }
 
     namespace {
@@ -191,6 +297,22 @@ namespace Server {
             to.SetBlockExplosionDropDecay(from.GetBlockExplosionDropDecay());
             to.SetMobExplosionDropDecay(from.GetMobExplosionDropDecay());
         }
+        // ...and World → the game-rule registry (Game::Rules), so the nine
+        // World-field rules read the same from both. The World is the
+        // authority for them (worlds.json can override advance_time at open,
+        // for one), hence this direction.
+        void SyncRegistryFromWorld(const Game::World& w) {
+            using Game::Rules::Id;
+            Game::Rules::SetBool(Id::AdvanceTime,             w.GetDoDaylightCycle());
+            Game::Rules::SetBool(Id::SpawnMobs,               w.GetDoMobSpawning());
+            Game::Rules::SetBool(Id::MobGriefing,             w.GetDoMobGriefing());
+            Game::Rules::Set    (Id::RandomTickSpeed,         w.GetRandomTickSpeed());
+            Game::Rules::SetBool(Id::TntExplodes,             w.GetTntExplodes());
+            Game::Rules::SetBool(Id::EntityDrops,             w.GetDoEntityDrops());
+            Game::Rules::SetBool(Id::TntExplosionDropDecay,   w.GetTntExplosionDropDecay());
+            Game::Rules::SetBool(Id::BlockExplosionDropDecay, w.GetBlockExplosionDropDecay());
+            Game::Rules::SetBool(Id::MobExplosionDropDecay,   w.GetMobExplosionDropDecay());
+        }
 
     } // namespace
 
@@ -206,11 +328,12 @@ namespace Server {
         cfg.seed               = Overworld().World()->GetGenerationSeed();
         cfg.generateStructures = true;
 
-        // MC's save layout: the overworld at the world root, the others in a
-        // sub-folder beside it. An empty root means this world has no Anvil
-        // storage at all, in which case the sub-folder would be meaningless —
-        // keep it empty so the level is generate-only rather than writing to a
-        // stray relative path.
+        // The imported Minecraft world is read by MinecraftChunkLoaderImpl,
+        // which knows only one folder and reads <folder>/region — so it gets
+        // the dimension's own folder (DIM-1 / DIM1 beside the overworld). An
+        // empty path means this world has no Anvil storage at all, in which
+        // case the sub-folder would be meaningless — keep it empty so the
+        // level is generate-only rather than reading a stray relative path.
         const auto withSubdir = [dimension](std::string base) {
             const std::string_view subdir = Game::DimensionSaveSubdir(dimension);
             if (base.empty() || subdir.empty()) return base;
@@ -220,7 +343,13 @@ namespace Server {
         };
 
         cfg.worldPath = withSubdir(m_config.minecraftWorldPath);   // imported, read-only
-        cfg.savePath  = withSubdir(m_config.savePath);             // ours, writable
+
+        // Our own save is addressed through SaveRoot, whose Dimension(dim)
+        // adds DIM-1 / DIM1 itself — the config carries the world root, the
+        // same value the overworld gets. Appending the sub-folder here as well
+        // used to put the nether at DIM-1/DIM-1/region, which Minecraft never
+        // looks at (EnsureDirectories lifts such folders back on open).
+        cfg.savePath = m_config.savePath;                          // ours, writable
 
         // A dimension nobody is standing in still holds a resident chunk cache.
         // Sizing the Nether and the End like the Overworld would triple the
@@ -245,6 +374,12 @@ namespace Server {
             // overworld's current values, including anything /gamerule
             // changed this session.
             CopyGameRules(*Overworld().World(), *level->World());
+            // MC DimensionType.fixedTime: a pinned clock. The Hush is a
+            // perpetual midnight — its sky, its surface spawning and its
+            // monsters' burn check all read this.
+            if (const auto fixedTime = Game::DimensionFixedTime(dimension)) {
+                level->World()->SetFixedDayTime(*fixedTime);
+            }
         }
         m_levels[slot] = std::move(level);
 #if ENABLE_IMMERSIVE_PORTALS
@@ -265,6 +400,11 @@ namespace Server {
     Game::World* IntegratedServer::GetWorld() const {
         ServerLevel* level = GetLevel(Game::DimensionId::Overworld);
         return level ? level->World() : nullptr;
+    }
+
+    int64_t IntegratedServer::GetBiomeZoomSeed() const {
+        const Game::World* world = GetWorld();
+        return world ? world->GetBiomeZoomSeed() : 0;
     }
 
     SectionChangeAccumulator* IntegratedServer::GetChangeAccumulator() const {
@@ -313,18 +453,22 @@ namespace Server {
     }
 
     bool IntegratedServer::Initialize() {
+        PROFILE_ZONE_N("Server.Initialize");
         Log::Info("IntegratedServer::Initialize - Creating world on server thread");
 
         // serverViewDistance stays at default (32) for integrated server — no cap on client.
         // A dedicated server would set this from its config file.
-        Log::Info("Server view distance cap: %d chunks", m_config.serverViewDistance);
+        Log::Info("Server view distance cap: %d chunks, simulation distance cap: %d chunks",
+                  m_config.serverViewDistance, m_config.maxSimulationDistance);
 
         // The session system comes FIRST now, because a ServerLevel needs the
         // PlayerSessionManager to build its ServerLevelBridge. Nothing in
         // InitializeSessionSystem touches a level any more — the pieces that
         // did (ticket manager, accumulator, mob system) moved into
         // ServerLevel, which is exactly why the order could be flipped.
+        { PROFILE_ZONE_N("Server.Init.Sessions");
         InitializeSessionSystem();
+        }
 
         // The overworld. The Nether and the End are built on first visit; see
         // GetOrCreateLevel.
@@ -369,13 +513,41 @@ namespace Server {
                     // this launch's defaults. worlds.json only ever knew
                     // advance_time, and only as of the last clean exit.
                     {
+                        // The registry is process-wide and the previous
+                        // world of this session may have changed it: every
+                        // rule back to its default, then the file's values.
+                        Game::Rules::ResetAll();
                         Game::Anvil::LevelDatData saved;
                         std::string readError;
                         std::error_code ec;
                         if (std::filesystem::exists(root->LevelDat(), ec) &&
                             Game::Anvil::ReadLevelDat(root->LevelDat(), saved, readError)) {
                             m_savedLevelDat = saved;
+                            // The immersive_portals rule is per world and
+                            // level.dat carries it (obeycraft.immersive_portals);
+                            // it used to be written but never read back, so a
+                            // world left with vanilla portals reopened
+                            // immersive — with the purple blocks still in
+                            // the frames. A --vanilla-portals launch keeps
+                            // its say.
+                            if (m_config.immersivePortals) m_config.immersivePortals = saved.immersivePortals;
+                            m_config.redstonePlus = saved.redstonePlus;
+                            m_config.redstoneChunks = saved.redstoneChunks;
+                            m_config.veinMineMaxBlocks = saved.veinMineMaxBlocks;
+                            m_config.sharedVitals = saved.sharedVitals;
+                            m_config.twilightForestEnabled = saved.twilightForestEnabled;
+                            m_config.aetherEnabled = saved.aetherEnabled;
+                            m_guestCommandAccess.store(saved.guestCommandAccess);
+                            for (const auto& [key, value] : saved.gameRules) {
+                                if (const Game::Rules::Def* def = Game::Rules::Find(key)) Game::Rules::Set(def->id, value);
+                            }
                             m_config.doDaylightCycle = saved.doDaylightCycle;
+                            // World Options state the file owns (MC
+                            // PrimaryLevelData): cheats, hardcore, the
+                            // difficulty lock.
+                            m_allowCommands.store(saved.allowCommands);
+                            m_hardcore.store(saved.hardcore);
+                            m_difficultyLocked.store(saved.difficultyLocked);
                         } else if (!readError.empty()) {
                             Log::Warning("[Anvil] %s — gamerules start from defaults", readError.c_str());
                         }
@@ -383,6 +555,14 @@ namespace Server {
                     // Start from what the file already says (rules, spawn) so
                     // the rewrite keeps them; the launch settings go on top.
                     Game::Anvil::LevelDatData meta = m_savedLevelDat.value_or(Game::Anvil::LevelDatData{});
+                    if (!m_savedLevelDat) {
+                        // A brand-new world: hardcore comes from the create
+                        // screen; cheats default on (LevelDatData).
+                        m_hardcore.store(m_config.hardcore);
+                        meta.hardcore = m_config.hardcore;
+                    }
+                    meta.allowCommands    = m_allowCommands.load();
+                    meta.difficultyLocked = m_difficultyLocked.load();
                     meta.levelName       = m_config.worldDisplayName;
                     meta.gameType        = m_config.defaultGameMode;
                     meta.dayTime         = m_config.initialDayTime;
@@ -390,9 +570,23 @@ namespace Server {
                     meta.immersivePortals = m_config.immersivePortals;
                     meta.worldWrapSize    = m_config.worldWrapSize;
                     meta.dimensionStack   = m_config.dimensionStack;
+                    meta.redstonePlus     = m_config.redstonePlus;
+                    meta.redstoneChunks   = m_config.redstoneChunks;
+                    meta.veinMineMaxBlocks = m_config.veinMineMaxBlocks;
+                    meta.sharedVitals     = m_config.sharedVitals;
+                    meta.twilightForestEnabled = m_config.twilightForestEnabled;
+                    meta.aetherEnabled    = m_config.aetherEnabled;
+        meta.guestCommandAccess = m_guestCommandAccess.load();
         meta.immersivePortals = m_config.immersivePortals;
         meta.worldWrapSize    = m_config.worldWrapSize;
         meta.dimensionStack   = m_config.dimensionStack;
+        meta.redstonePlus     = m_config.redstonePlus;
+        meta.redstoneChunks   = m_config.redstoneChunks;
+        meta.veinMineMaxBlocks = m_config.veinMineMaxBlocks;
+        meta.sharedVitals     = m_config.sharedVitals;
+        meta.twilightForestEnabled = m_config.twilightForestEnabled;
+        meta.aetherEnabled    = m_config.aetherEnabled;
+        meta.guestCommandAccess = m_guestCommandAccess.load();
         meta.difficulty       = m_config.difficulty;
                     // The SEED matters more than anything else here:
                     // Minecraft generates the chunks beyond ours with it, so a
@@ -413,6 +607,7 @@ namespace Server {
         }
 
         {
+            PROFILE_ZONE_N("Server.Init.Overworld");
             ServerLevelConfig cfg;
             cfg.dimension          = Game::DimensionId::Overworld;
             cfg.readOnly           = m_config.readOnlyWorld;
@@ -436,9 +631,11 @@ namespace Server {
         // After the overworld exists (the registry reads its save root) and
         // before any session can be created, so the first chunk a client
         // gets already carries its portals.
+        { PROFILE_ZONE_N("Server.Init.Portals");
         m_immersivePortals = std::make_unique<ImmersivePortalRegistry>(*this);
         m_immersivePortals->Load();
         LoadAoRegions();
+        }
 #if ENABLE_PORTAL_GUN
         // Portal-gun surfaces are mirrored from the gun registry, which is
         // not persisted: any saved with the file are orphans from the last
@@ -457,6 +654,25 @@ namespace Server {
         m_netherPortalGeneration = std::make_unique<NetherPortalGeneration>(*this);
         m_entityTravel           = std::make_unique<EntityPortalTravel>(*this);
         Game::Portals::SetImmersiveNetherPortals(m_config.immersivePortals);
+        Game::RedstonePlus::SetEnabled(m_config.redstonePlus);
+        if (m_config.redstonePlus) Log::Info("[RedstonePlus] enabled for this world");
+        // A world whose immersive portals were parked by the rule and whose
+        // setting is back on (the rule, or the world's portal option) gets
+        // them back at open. With the rule still off, only the Hush and
+        // Aether records come back — an older build parked them with the
+        // nether's — and ConvertVanillaFamilyPortals turns them into vanilla
+        // portal blocks before the first tick (those two families are always
+        // vanilla).
+        if (m_immersivePortals->HasStash()) {
+            if (m_config.immersivePortals) {
+                m_immersivePortals->RestoreStashed();
+#if ENABLE_PORTAL_GUN
+                Game::Portal::ServerRegistry().RebuildImmersive();
+#endif
+            } else {
+                m_immersivePortals->RestoreStashed(/*ruleExemptOnly=*/true);
+            }
+        }
         Game::Portals::SetWorldWrapSize(m_config.worldWrapSize);
         Game::Portals::SetDimensionStack(m_config.dimensionStack);
 #if ENABLE_IMMERSIVE_PORTALS
@@ -470,6 +686,7 @@ namespace Server {
 #endif
         Game::Portals::SetImmersiveFrameLitHandler(&IntegratedServer::OnImmersiveFrameLit);
 #endif
+        Game::ChestBlockEntity::SetUserCounter(&CountChestUsers);
 
         if (!m_config.minecraftWorldPath.empty()) {
             Log::Info("Server world configured with Minecraft world: %s%s",
@@ -484,9 +701,15 @@ namespace Server {
         // Overworld only: MC's day/night cycle is a property of the overworld
         // and the other two dimensions have no sky.
         Overworld().World()->SetDayTime(m_config.initialDayTime);
+        // The mod-dimension switches are process-wide atomics (common code
+        // reads them); seed them from THIS world so a previous world's
+        // setting does not carry over.
+        Game::ModDimensions::SetEnabled(Game::DimensionId::TwilightForest, m_config.twilightForestEnabled);
+        Game::ModDimensions::SetEnabled(Game::DimensionId::Aether, m_config.aetherEnabled);
         Overworld().World()->SetDoDaylightCycle(m_config.doDaylightCycle);
         // The rest of the gamerules, from level.dat when the world had one.
         if (m_savedLevelDat) ApplyLevelDatRules(*Overworld().World(), *m_savedLevelDat);
+        SyncRegistryFromWorld(*Overworld().World());
         // The tick state the player left this world in (/tick freeze, /tick
         // rate) — an engine-only setting, so it lives in the sidecar. No
         // client is connected yet; joining players get it through
@@ -500,6 +723,12 @@ namespace Server {
                     m_tickRateManager.setFrozen(true);
                     Log::Info("[Tick] World was left frozen — resuming frozen (/tick unfreeze to run)");
                 }
+                // World Options → Joinable, per world. Applied to the
+                // listener too in case it is already up.
+                m_joinable.store(sidecar.joinable);
+                if (m_networkServer) m_networkServer->SetAcceptingConnections(sidecar.joinable);
+                Game::Portals::SetPortalGunAllowed(sidecar.portalGun);
+                if (!sidecar.joinable) Log::Info("[WorldOptions] World was left not joinable — other players cannot join until Joinable is turned on");
             }
         }
         Log::Info("Server world initialized successfully");
@@ -544,15 +773,31 @@ namespace Server {
 
         // Create io_context and NetworkServer
         m_ioContext = std::make_unique<net::io_context>();
-        m_networkServer = std::make_unique<NetworkServer>(*m_ioContext, 25565);
+        // OBEY_HOST_PORT: listen elsewhere than 25565, so a dev-harness
+        // instance (tools/redstone_computer/harness.py) can run beside a
+        // game that already holds the default port. The local client
+        // follows GetPort(), so nothing else needs to know.
+        uint16_t port = 25565;
+        if (const char* e = std::getenv("OBEY_HOST_PORT")) {
+            const int p = std::atoi(e);
+            if (p > 0 && p < 65536) port = static_cast<uint16_t>(p);
+        }
+        m_networkServer = std::make_unique<NetworkServer>(*m_ioContext, port);
 
         // Start NetworkServer on all interfaces so remote clients can connect
         if (!m_networkServer->Start("0.0.0.0")) {
-            Log::Error("Failed to start NetworkServer on 0.0.0.0:25565");
+            Log::Error("Failed to start NetworkServer on 0.0.0.0:%u", static_cast<unsigned>(port));
+            // Nothing runs on the io_context yet; release the half-built
+            // listener now (acceptor before its context) so the failed server
+            // holds no socket while its session is torn down.
+            m_networkServer.reset();
+            m_ioContext.reset();
             return false;
         }
 
         Log::Info("NetworkServer listening on 0.0.0.0:%d", m_networkServer->GetPort());
+        // The world's saved Joinable choice (read before the listener existed).
+        m_networkServer->SetAcceptingConnections(m_joinable.load());
 
         // Register server commands (MC: Commands.java constructor)
         TeleportCommand::Register(m_commandDispatcher);
@@ -560,9 +805,24 @@ namespace Server {
         GameModeCommand::Register(m_commandDispatcher);
         DifficultyCommand::Register(m_commandDispatcher);
         KillCommand::Register(m_commandDispatcher);
+        HealCommand::Register(m_commandDispatcher);
+        LootCommand::Register(m_commandDispatcher);
+        EffectCommand::Register(m_commandDispatcher);
+        // OOZING's slimes and INFESTED's silverfish are built by the same
+        // factory the spawner and /summon use (MobEffects.cpp cannot see it).
+        Game::SetEffectMobFactory(&MakeMobForLoad);
+        // The monster spawner's server half (building its mobs from their
+        // SpawnData compounds, the spawn egg's id rewrite, the type spawn
+        // predicate) — SpawnerBlockEntity lives in common code.
+        Game::Anvil::InstallSpawnerServerHooks();
         EntityStatsCommand::Register(m_commandDispatcher);
         ShapeCommand::Register(m_commandDispatcher);
         SummonCommand::Register(m_commandDispatcher);
+        SetBlockCommand::Register(m_commandDispatcher);
+        ForceLoadCommand::Register(m_commandDispatcher);
+        ReplaceAllCommand::Register(m_commandDispatcher);
+        ExecuteCommand::Register(m_commandDispatcher);
+        WorldOptionsCommand::Register(m_commandDispatcher);
         SpawnAllCommand::Register(m_commandDispatcher);
         SheepEatCommand::Register(m_commandDispatcher);
         TimeCommand::Register(m_commandDispatcher);
@@ -570,14 +830,35 @@ namespace Server {
         LocateCommand::Register(m_commandDispatcher);
         GameRuleCommand::Register(m_commandDispatcher);
         SeedCommand::Register(m_commandDispatcher);
+        UpdateBlocksCommand::Register(m_commandDispatcher);
+        InvisibleCommand::Register(m_commandDispatcher);
+        MorphCommand::Register(m_commandDispatcher);
+        ControlCommand::Register(m_commandDispatcher);
 #if ENABLE_IMMERSIVE_PORTALS
         PortalCommand::Register(m_commandDispatcher);
 #endif
         TickCommand::Register(m_commandDispatcher);
+        StillnessCommand::Register(m_commandDispatcher);
+        AurelithCommand::Register(m_commandDispatcher);
         Log::Info("Server commands registered");
 
         // Wire disconnect callback so we broadcast entity removal to other clients
+        // MC handles a disconnect on the SERVER thread (the play listener's
+        // onDisconnect is scheduled there). This callback fires on whichever
+        // thread noticed the close — usually the network I/O thread — and
+        // OnPlayerDisconnected rewrites session, player and level state the
+        // server thread is using at that moment. A mass disconnect ran it
+        // concurrently with the tick for 40 sessions at once; copying a
+        // session's watch sets while the tick rehashed them looped until the
+        // machine ran out of memory (stress test, 2026-09-23). So: queue it,
+        // and let the next tick handle it. Once the server thread has
+        // stopped (shutdown), it runs directly — Stop() drains the queue.
         m_networkServer->SetOnDisconnection([this](std::shared_ptr<ServerConnection> conn) {
+            if (m_serverThreadActive.load() && std::this_thread::get_id() != g_serverThreadId) {
+                std::lock_guard<std::mutex> lock(m_closedMutex);
+                m_closedConnections.push_back(std::move(conn));
+                return;
+            }
             OnPlayerDisconnected(conn);
         });
 
@@ -600,7 +881,8 @@ namespace Server {
 
         m_shouldStop.store(false);
         m_running.store(true);
-        
+        m_everStarted = true;
+
         // Start server thread
         m_serverThread = std::make_unique<std::thread>([this]() { ServerLoop(); });
 
@@ -623,12 +905,18 @@ namespace Server {
         // of holding up the join below as one parked in the Overworld's.
         ForEachLevel([](ServerLevel& level) {
             if (level.World()) level.World()->RequestStop();
+            // The tick loop parks on a generator's pipeline queue until its
+            // next deadline; without this the join below waits out that
+            // sleep — up to a whole tick — on every world exit.
+            if (auto* gen = level.TerrainGenerator()) gen->WakePipeline();
         });
 
         // IMPORTANT: Wait for server thread to finish BEFORE destroying resources.
         // World::RequestStop() signals the terrain library's abort flag, so blocking
         // getChunk() loops will exit promptly.
         if (m_serverThread && m_serverThread->joinable()) {
+            // Waits out whatever tick is running (up to a whole 50 ms one).
+            PROFILE_ZONE_N("Server.Stop.JoinThread");
             Log::Debug("Waiting for server thread to finish...");
             m_serverThread->join();
             Log::Debug("Server thread finished");
@@ -637,6 +925,7 @@ namespace Server {
 
         // Stop the network I/O thread
         if (m_ioContext && m_networkThread) {
+            PROFILE_ZONE_N("Server.Stop.NetIO");
             Log::Info("Stopping server network I/O thread...");
             
             // Reset work guard to allow io_context to exit
@@ -654,14 +943,21 @@ namespace Server {
             Log::Info("✓ Server network I/O thread stopped");
         }
         
+        // Disconnects queued after the server thread's last tick: both
+        // threads are stopped, so they are handled here, on this one.
+        DrainClosedConnections();
+
         // Cleanup session system BEFORE destroying network resources.
         // Sessions and SendScheduler hold ServerConnection shared_ptrs with
         // Asio strands — these must be destroyed while io_context is still alive.
+        { PROFILE_ZONE_N("Server.Stop.Sessions");
         CleanupSessionSystem();
+        }
 
         // Now it's safe to destroy NetworkServer and io_context
         // since both the server thread and I/O thread are no longer running
         if (m_networkServer) {
+            PROFILE_ZONE_N("Server.Stop.NetworkServer");
             m_networkServer->Stop();
             m_networkServer.reset();
         }
@@ -685,12 +981,15 @@ namespace Server {
         // per-chunk cooldown inside AnvilChunkStorage caps how often any one
         // chunk can be rewritten.
         ForEachLevel([](ServerLevel& level) {
-            if (level.World()) level.World()->SaveAllChunks();
+            // Background: snapshot here, compress + write on the IO thread.
+            if (level.World()) level.World()->SaveAllChunks(/*wait=*/false);
             // Entities are NOT dirty-tracked: a mob walking changes a chunk's
             // entity list without touching a block, so every occupied chunk is
             // reconsidered. O(entities), not O(loaded chunks).
             if (level.Entities()) level.Entities()->SaveAllLoaded();
             if (level.DragonFightController()) level.DragonFightController()->Save();
+            if (level.Keeper()) level.Keeper()->Save();
+            if (level.Aurelith()) level.Aurelith()->Save();
         });
 
         SaveAllPlayers();
@@ -756,6 +1055,101 @@ namespace Server {
         }
     }
 
+    void IntegratedServer::SetWorldAllowCommands(bool allow) {
+        if (m_allowCommands.exchange(allow) == allow) return;
+        WriteLevelDat();
+    }
+
+    void IntegratedServer::SetGuestCommandAccess(bool access) {
+        if (m_guestCommandAccess.exchange(access) == access) return;
+        WriteLevelDat();
+    }
+
+    void IntegratedServer::SetDifficultyLocked(bool locked) {
+        if (m_difficultyLocked.exchange(locked) == locked) return;
+        WriteLevelDat();
+    }
+
+    // MC IntegratedServer.updateGameModeBasedOnPermission (via
+    // setWorldGameType / setForceGameMode): with Force Game Mode on, every
+    // GUEST online is moved to the world's default game mode right away; the
+    // host keeps theirs.
+    void IntegratedServer::EnforceGameModeForGuests() {
+        if (!m_forceGameMode.load() || !m_sessionManager) return;
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            if (!session || !session->GetPlayer() || !session->GetConnection()) continue;
+            if (session->GetConnection()->IsSingleplayerOwner()) continue;
+            ServerPlayer& player = *session->GetPlayer();
+            const auto wanted = static_cast<GameMode>(m_config.defaultGameMode);
+            if (player.getGameMode() == wanted) continue;
+            player.setGameMode(wanted);
+            session->GetConnection()->SendPlayerAbilities(player);
+        }
+    }
+
+    void IntegratedServer::SetWorldGameType(int gameMode) {
+        gameMode = std::clamp(gameMode, 0, 3);
+        if (m_config.defaultGameMode != gameMode) {
+            m_config.defaultGameMode = gameMode;
+            WriteLevelDat();
+        }
+        EnforceGameModeForGuests();
+    }
+
+    void IntegratedServer::SetForceGameMode(bool force) {
+        m_forceGameMode.store(force);
+        EnforceGameModeForGuests();
+    }
+
+    uint16_t IntegratedServer::GetPort() const {
+        return m_networkServer ? m_networkServer->GetPort() : 0;
+    }
+
+    void IntegratedServer::DisconnectGuests(const std::string& reason) {
+        if (!m_networkServer) return;
+        for (const auto& conn : m_networkServer->GetConnections()) {
+            if (!conn || conn->IsSingleplayerOwner()) continue;
+            conn->SendDisconnect(reason);
+        }
+    }
+
+    void IntegratedServer::PersistJoinable() {
+        if (m_config.savePath.empty() || m_config.readOnlyWorld) return;
+        std::string reason;
+        auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason);
+        if (!root) return;
+        const std::string dir = root->Root().string();
+        Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(dir);
+        if (sidecar.joinable == m_joinable.load()) return;
+        sidecar.joinable = m_joinable.load();
+        if (!Game::Anvil::WriteWorldSidecar(dir, sidecar)) {
+            Log::Warning("[WorldOptions] Could not save the Joinable setting to %s", dir.c_str());
+        }
+    }
+
+    bool IntegratedServer::SetJoinable(bool joinable) {
+        if (!m_networkServer) return false;
+        m_joinable.store(joinable);
+        m_networkServer->SetAcceptingConnections(joinable);
+        PersistJoinable();
+        if (!joinable) {
+            // MC IntegratedServer.unpublishServer: "multiplayer.disconnect.server_shutdown".
+            DisconnectGuests("Server closed");
+            Log::Info("[IntegratedServer] World closed to other players (was on port %d)", m_networkServer->GetPort());
+        } else {
+            Log::Info("[IntegratedServer] World open to other players on port %d", m_networkServer->GetPort());
+        }
+        return true;
+    }
+
+    bool IntegratedServer::ChangePort(uint16_t port) {
+        if (!m_networkServer) return false;
+        if (port == m_networkServer->GetPort()) return true;
+        if (!m_networkServer->Rebind(port)) return false;
+        DisconnectGuests("Server closed");
+        return true;
+    }
+
     void IntegratedServer::SetDifficulty(int difficulty) {
         ASSERT_SERVER_THREAD();
         m_config.difficulty = std::clamp(difficulty, 0, 3);
@@ -776,6 +1170,9 @@ namespace Server {
         Game::Anvil::LevelDatData meta;
         meta.levelName       = m_config.worldDisplayName;
         meta.gameType        = m_config.defaultGameMode;
+        meta.hardcore        = m_hardcore.load();
+        meta.allowCommands   = m_allowCommands.load();
+        meta.difficultyLocked = m_difficultyLocked.load();
         meta.seed            = m_levels[0]->World()->GetGenerationSeed();
         // Gamerules from the LIVE overworld World, not the launch config:
         // /gamerule writes the World, and this file is what brings the
@@ -791,9 +1188,24 @@ namespace Server {
         meta.tntExplosionDropDecay   = ow.GetTntExplosionDropDecay();
         meta.blockExplosionDropDecay = ow.GetBlockExplosionDropDecay();
         meta.mobExplosionDropDecay   = ow.GetMobExplosionDropDecay();
+        // The rest of the registry — every vanilla rule, so the file is one
+        // Minecraft reads back whole.
+        SyncRegistryFromWorld(ow);
+        meta.gameRules.clear();
+        for (size_t i = 0; i < Game::Rules::kCount; ++i) {
+            const Game::Rules::Def& def = Game::Rules::AllDefs()[i];
+            meta.gameRules[def.key] = Game::Rules::GetInt(def.id);
+        }
         meta.immersivePortals = m_config.immersivePortals;
         meta.worldWrapSize    = m_config.worldWrapSize;
         meta.dimensionStack   = m_config.dimensionStack;
+        meta.redstonePlus     = m_config.redstonePlus;
+        meta.redstoneChunks   = m_config.redstoneChunks;
+        meta.veinMineMaxBlocks = m_config.veinMineMaxBlocks;
+        meta.sharedVitals     = m_config.sharedVitals;
+        meta.twilightForestEnabled = m_config.twilightForestEnabled;
+        meta.aetherEnabled    = m_config.aetherEnabled;
+        meta.guestCommandAccess = m_guestCommandAccess.load();
         meta.difficulty       = m_config.difficulty;
         meta.spawnX          = static_cast<int>(std::floor(m_worldSpawn.x));
         meta.spawnY          = static_cast<int>(std::floor(m_worldSpawn.y));
@@ -828,28 +1240,51 @@ namespace Server {
         // Only the SAVE is done here: ~ServerLevel already stops and shuts down
         // its world (and tears the rest of the bundle down in reverse
         // construction order), so calling Shutdown here as well would double it.
+        //
+        // A server that never started (Start failed — its port was taken) has
+        // nothing to save, and its spawn is still the constructor's
+        // placeholder: rewriting level.dat would move an existing world's
+        // spawn to (0, 67, 0).
+        if (m_everStarted) {
         ForEachLevel([](ServerLevel& level) {
             if (!level.World()) return;
             Log::Info("Saving server-owned world '%s'...",
                       std::string(Game::DimensionName(level.Dimension())).c_str());
-            level.World()->SaveAllChunks();
-            if (level.Entities()) level.Entities()->SaveAllLoaded();
+            { PROFILE_ZONE_N("Server.Shutdown.SaveChunks");   level.World()->SaveAllChunks(); }
+            { PROFILE_ZONE_N("Server.Shutdown.SaveEntities");
+              // Flush: entity writes go through a background I/O worker; at
+              // shutdown every one of them must be on disk before the region
+              // files close.
+              // Every entity read still outstanding lands first (MC saveAll):
+              // a chunk whose read is Pending cannot be saved.
+              if (level.Entities()) {
+                  level.Entities()->CompleteLoads();
+                  level.Entities()->SaveAllLoaded();
+                  level.Entities()->Flush();
+              } }
             if (level.DragonFightController()) level.DragonFightController()->Save();
+            if (level.Keeper()) level.Keeper()->Save();
+            if (level.Aurelith()) level.Aurelith()->Save();
         });
         // Rewrite level.dat now that the values it describes are settled. At
         // Initialize the seed had not been pushed in yet and the world spawn
         // had not been searched for, so the file written then carries
         // placeholders. Vanilla rewrites it on every autosave and on shutdown
         // for the same reason.
+        { PROFILE_ZONE_N("Server.Shutdown.LevelDat");
         WriteLevelDat();
         SaveImmersivePortals();
+        }
+        }
 
         // Release the session lock LAST, once everything is durable — while it
         // is held, no other process can be writing this world.
         m_sessionLock.reset();
 
+        { PROFILE_ZONE_N("Server.Shutdown.DestroyLevels");
         for (auto& level : m_levels) {
             level.reset();
+        }
         }
 
         Log::Info("IntegratedServer shutdown complete");
@@ -872,6 +1307,137 @@ namespace Server {
         auto session = GetPlayerSession();
         if (session) return session->GetChunkPosition();
         return {0, 0};
+    }
+
+    // ── F3 debug sample ──────────────────────────────────────────────────
+
+    IntegratedServer::DebugSample IntegratedServer::GetDebugSample() const {
+        std::lock_guard<std::mutex> lock(m_debugSampleMutex);
+        return m_debugSample;
+    }
+
+    void IntegratedServer::DrainTickTimeSamples(std::vector<std::array<int64_t, 4>>& out) {
+        std::lock_guard<std::mutex> lock(m_debugSampleMutex);
+        out.insert(out.end(), m_tickTimeSamples.begin(), m_tickTimeSamples.end());
+        m_tickTimeSamples.clear();
+    }
+
+    void IntegratedServer::SampleDebugInfo(int64_t tickExecNanos, int64_t timeBetweenTicksNanos) {
+        DebugSample d;
+        d.valid = true;
+        d.smoothedTickMs = static_cast<float>(m_tickRateManager.averageTickTimeNanos()) / 1.0e6f;
+        d.msPerTick = m_tickRateManager.millisecondsPerTick();
+        d.frozen = m_tickRateManager.isFrozen();
+        d.stepping = m_tickRateManager.isSteppingForward();
+        d.sprinting = m_tickRateManager.isSprinting();
+
+        auto session = GetPlayerSession();
+        ServerLevel* level = nullptr;
+        glm::vec3 pos(0.0f);
+        if (session) {
+            d.dimension = Game::DimensionFromRaw(session->GetDimensionId());
+            pos = session->GetPosition();
+            level = GetLevel(d.dimension);
+        }
+        if (level) {
+            if (Game::World* world = level->World()) {
+                d.loadedChunks = world->GetLoadedChunkCount();
+                d.difficulty = static_cast<int>(world->GetDifficulty());
+                d.dayTime = world->GetDayTime();
+                d.gameTime = world->GetGameTime();
+                const int bx = static_cast<int>(std::floor(pos.x));
+                const int by = static_cast<int>(std::floor(pos.y));
+                const int bz = static_cast<int>(std::floor(pos.z));
+                const auto cpos = Game::Math::WorldCoordinates::WorldToChunkPos(bx, bz);
+                if (auto chunk = world->GetChunk(cpos.x, cpos.z)) {
+                    d.chunkLoaded = true;
+                    d.heightmapsPrimed = chunk->AreHeightmapsPrimed();
+                    if (d.heightmapsPrimed) {
+                        const int lx = bx - cpos.x * Game::Math::CHUNK_SIZE_X;
+                        const int lz = bz - cpos.z * Game::Math::CHUNK_SIZE_Z;
+                        d.heightWorldSurface = chunk->GetSurfaceHeight(lx, lz, Game::HeightmapType::WorldSurface);
+                        d.heightOceanFloor = chunk->GetSurfaceHeight(lx, lz, Game::HeightmapType::OceanFloor);
+                        d.heightMotionBlocking = chunk->GetSurfaceHeight(lx, lz, Game::HeightmapType::MotionBlocking);
+                        d.heightMotionBlockingNoLeaves = chunk->GetSurfaceHeight(lx, lz, Game::HeightmapType::MotionBlockingNoLeaves);
+                    }
+                    d.biome = world->GetBiome(bx, by, bz);
+                    d.skyLight = world->GetBrightness(Game::Lighting::LightLayer::Sky, bx, by, bz);
+                    d.blockLight = world->GetBrightness(Game::Lighting::LightLayer::Block, bx, by, bz);
+                    d.inhabitedTime = chunk->InhabitedTime();
+                }
+                if (m_debugWantsChunkGen.load(std::memory_order_relaxed)) {
+                    // Re-sampled only when the feet block moves (MC caches on
+                    // lastPos too): the debug density functions and a climate sample.
+                    const glm::ivec3 feet(bx, by, bz);
+                    if (feet != m_debugGenPos || d.dimension != m_debugGenDimension) {
+                        m_debugGenPos = feet;
+                        m_debugGenDimension = d.dimension;
+                        m_debugGenLines.clear();
+                        Game::MyTerrainGenerator* gen = level->TerrainGenerator();
+                        minecraft::levelgen::RandomState* rs = gen ? gen->GetRandomState() : nullptr;
+                        if (rs != nullptr && gen != nullptr) {
+                            // MC DebugEntryChunkGeneration.update: one caching
+                            // context for the density line and the climate.
+                            minecraft::levelgen::density::SamplerContext samplerContext =
+                                minecraft::levelgen::density::SamplerContext::builder().enableCaches().build();
+                            if (auto* noiseGenerator = dynamic_cast<const minecraft::levelgen::NoiseBasedChunkGenerator*>(
+                                    gen->GetChunkGenerator())) {
+                                noiseGenerator->addDebugScreenInfo(m_debugGenLines, rs,
+                                                                   minecraft::core::BlockPos(bx, by, bz), samplerContext);
+                            }
+                            if (gen->GetBiomeSource() != nullptr) {
+                                const minecraft::world::biome::Climate::Sampler sampler =
+                                    rs->createClimateSampler(samplerContext);
+                                gen->GetBiomeSource()->addDebugInfo(m_debugGenLines, bx, by, bz, sampler);
+                            }
+                        }
+                    }
+                    d.chunkGenLines = m_debugGenLines;
+                }
+                if (m_debugWantsChunkMap.load(std::memory_order_relaxed)) {
+                    // MC IntegratedServer.createChunkLoadStatusView(16 + RADIUS_AROUND_FULL_CHUNK).
+                    d.statusRadius = 16 + 3;
+                    const int diameter = d.statusRadius * 2 + 1;
+                    d.chunkStatus.resize(static_cast<size_t>(diameter) * diameter, 0);
+                    ChunkStatusManager* status = level->Status();
+                    for (int z = 0; z < diameter; ++z) {
+                        for (int x = 0; x < diameter; ++x) {
+                            const Game::Math::ChunkPos cp{ cpos.x - d.statusRadius + x, cpos.z - d.statusRadius + z };
+                            ChunkStatus st = status ? status->GetChunkStatus(cp) : ChunkStatus::EMPTY;
+                            if (st == ChunkStatus::EMPTY && world->IsChunkLoaded(cp.x, cp.z)) st = ChunkStatus::FULL;
+                            d.chunkStatus[static_cast<size_t>(z) * diameter + x] = static_cast<uint8_t>(st);
+                        }
+                    }
+                }
+            }
+            if (ChunkTicketManager* tickets = level->Tickets()) {
+                const auto st = tickets->GetStats();
+                d.tickets = st.totalTickets;
+                d.playerTickets = st.playerTickets;
+                d.blockTickingChunks = st.blockTickingChunks;
+                d.entityTickingChunks = st.entityTickingChunks;
+            }
+            if (ChunkKeeper* keeper = level->Keeper()) d.forceLoadedChunks = static_cast<int>(keeper->SourceCount());
+            if (MobManager* mobs = level->Mobs()) {
+                d.spawnableChunks = mobs->GetSpawnableChunkCount();
+                for (int i = 0; i < 8; ++i) {
+                    d.categoryCounts[i] = mobs->CountForCategory(i);
+                    d.mobCount += d.categoryCounts[i];
+                }
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(m_debugSampleMutex);
+        m_debugSample = std::move(d);
+        // MC TpsDebugDimensions for the tick that just ENDED THE WAIT: the
+        // full tick is the distance between this tick's start and the last
+        // one's, the method time is the previous tick's ServerTick, and idle
+        // is the remainder. This engine has no scheduled-task phase.
+        if (m_prevTickExecNanos > 0 && timeBetweenTicksNanos > 0 && m_tickTimeSamples.size() < 4096) {
+            const int64_t idle = std::max<int64_t>(0, timeBetweenTicksNanos - m_prevTickExecNanos);
+            m_tickTimeSamples.push_back({ timeBetweenTicksNanos, m_prevTickExecNanos, 0, idle });
+        }
+        m_prevTickExecNanos = tickExecNanos;
     }
 
     glm::vec3 IntegratedServer::GetPlayerPosition() const {
@@ -921,6 +1487,7 @@ namespace Server {
 
         // Store server thread ID for assertions
         g_serverThreadId = std::this_thread::get_id();
+        m_serverThreadActive.store(true);
         
         Log::Info("IntegratedServer main loop started (Target: %d TPS, ThreadId: %zu)",
                   m_config.tickRate, std::hash<std::thread::id>{}(g_serverThreadId));
@@ -952,18 +1519,30 @@ namespace Server {
         }
 
         // ── World spawn selection (MC MinecraftServer.setInitialSpawn) ─────
-        // Generated worlds ask the generator: climate SpawnFinder picks the
-        // region, a chunk spiral finds dry land, getBaseHeight supplies the
-        // surface Y. Anvil worlds keep the legacy fixed spawn for now (MC
-        // reads theirs from level.dat, which we don't parse yet). Runs before
-        // any client can join, so every player — host and remote — spawns
-        // (and is teleported on join) to this position.
+        // A world whose level.dat already names a spawn keeps it — MC runs
+        // setInitialSpawn only for a level that is not yet initialized, so an
+        // existing world (this engine's own saves after their first run, a
+        // generated one like the redstone machines) always reopens at the
+        // spawn it was saved with. A new world asks the generator: climate
+        // SpawnFinder picks the region, a chunk spiral finds dry land,
+        // getBaseHeight supplies the surface Y. Runs before any client can
+        // join, so every player — host and remote — spawns (and is teleported
+        // on join) to this position.
         //
         // OVERWORLD ONLY, as in MC: setInitialSpawn is a property of the
         // overworld, and the other two dimensions place arrivals from a portal
         // exit or the End platform instead.
         Game::World* spawnWorld = overworld ? overworld->World() : nullptr;
-        if (m_config.minecraftWorldPath.empty() && spawnWorld && spawnWorld->GetChunkProvider()) {
+        if (m_savedLevelDat && m_savedLevelDat->hasSpawn && spawnWorld) {
+            m_worldSpawn = glm::vec3(static_cast<float>(m_savedLevelDat->spawnX) + 0.5f,
+                                     static_cast<float>(m_savedLevelDat->spawnY),
+                                     static_cast<float>(m_savedLevelDat->spawnZ) + 0.5f);
+            Log::Info("[IntegratedServer] World spawn from level.dat: (%.1f, %.1f, %.1f)",
+                      m_worldSpawn.x, m_worldSpawn.y, m_worldSpawn.z);
+            overworld->worldSpawn = m_worldSpawn;
+            if (m_serverPlayer) m_serverPlayer->setPosition(glm::dvec3(m_worldSpawn));
+            if (m_sessionManager) m_sessionManager->SetWorldSpawn(m_worldSpawn);
+        } else if (m_config.minecraftWorldPath.empty() && spawnWorld && spawnWorld->GetChunkProvider()) {
             if (auto* generator = spawnWorld->GetChunkProvider()->GetGenerator()) {
                 const glm::ivec3 spawnBlock = generator->FindSpawnPosition();
                 m_worldSpawn = glm::vec3(static_cast<float>(spawnBlock.x) + 0.5f,
@@ -1036,11 +1615,22 @@ namespace Server {
             }
         }
 
+#if ENABLE_IMMERSIVE_PORTALS
+        // After the spawn search, for the same reason it runs here: the
+        // conversion loads the portals' chunks, and only this thread pumps
+        // the generator.
+        ConvertVanillaFamilyPortals();
+#endif
+
         m_lastTickTime = clock::now();
         m_lastTickStartTime = m_lastTickTime;
         
         // Absolute scheduling - next tick time
         auto nextTickTime = clock::now() + nanoseconds(m_tickRateManager.nanosecondsPerTick());
+
+        // MC MinecraftServer.delayedTasksMaxNextTickTimeNanos: set after every
+        // tick to max(now + tick budget, nextTickTime) — see the pump below.
+        clock::time_point delayedTasksUntil = clock::now();
 
         while (!m_shouldStop.load()) {
             // MC MinecraftServer.runServer: a sprinting tick gets a budget of
@@ -1140,14 +1730,46 @@ namespace Server {
             // getChunk. Cap the park in that case and come back round to pump
             // the others; a 2 ms revisit is far cheaper than a wedged worker.
             static constexpr auto MULTI_LEVEL_PARK_CAP = 2ms;
+            // MC haveTime():
+            //
+            //     now < (mayHaveDelayedTasks ? delayedTasksMaxNextTickTimeNanos
+            //                                : nextTickTimeNanos)
+            //
+            // with delayedTasksMaxNextTickTimeNanos = max(tickEnd + tick
+            // budget, nextTickTime), set after every tick. While chunk work is
+            // pending, the window after a tick is at least ONE WHOLE TICK long
+            // — even when the server is behind and nextTickTime is already in
+            // the past. An overloaded MC server therefore trades tick rate for
+            // chunk loading; it never starves the chunk pipeline.
+            //
+            // Stopping at nextTickTime alone (as this loop did) gave a server
+            // that was behind NO pipeline time at all: measured 2026-09-23 with
+            // 100 bots, generation fell from ~245 to ~9 chunks a second as soon
+            // as ticks ran long, with 29k chunks waiting.
+            //
+            // Once every generator is idle (MC: pollTask() found nothing,
+            // mayHaveDelayedTasks = false) the deadline falls back to
+            // nextTickTime, so an idle pipeline never delays a tick; work that
+            // lands during the park re-opens the extended window, as a task
+            // arriving during MC's waitForTasks does.
             const auto pumpUntil = nextTickTime - SPIN_CUSHION;
-            while (!m_shouldStop.load() && clock::now() < pumpUntil) {
-                PumpChunkPipeline(pumpUntil);
+            const auto delayedUntil = std::max(pumpUntil, delayedTasksUntil - SPIN_CUSHION);
+            bool mayHaveDelayedTasks = true;
+            for (;;) {
+                if (m_shouldStop.load()) break;
+                const auto deadline = mayHaveDelayedTasks ? delayedUntil : pumpUntil;
+                if (clock::now() >= deadline) break;
+                PumpChunkPipeline(deadline);
 
                 // PumpChunkPipeline only returns before the deadline when EVERY
                 // generator is idle, so there is genuinely nothing to do until
                 // something lands on one of the queues.
+                if (clock::now() >= deadline) break;
+                mayHaveDelayedTasks = false;
                 if (clock::now() < pumpUntil) {
+                    // Zoned so a shutdown that catches the thread here shows
+                    // as "parked", not as a blank in the trace.
+                    PROFILE_ZONE_N("Server.Park");
                     Game::MyTerrainGenerator* parkOn = nullptr;
                     int liveGenerators = 0;
                     ForEachLevel([&](ServerLevel& level) {
@@ -1158,21 +1780,33 @@ namespace Server {
                     });
 
                     if (!parkOn) {
-                        std::this_thread::sleep_until(pumpUntil);
+                        // No queue to be woken through: sleep in short slices
+                        // so a stop request is seen within a couple of ms.
+                        std::this_thread::sleep_until(std::min<clock::time_point>(
+                            pumpUntil, clock::now() + MULTI_LEVEL_PARK_CAP));
                     } else if (liveGenerators == 1) {
                         parkOn->WaitForPipelineWork(pumpUntil);
                     } else {
                         parkOn->WaitForPipelineWork(std::min<clock::time_point>(
                             pumpUntil, clock::now() + MULTI_LEVEL_PARK_CAP));
                     }
+                    // Woken (or a slice ended): pump again, with the extended
+                    // window back in force should work have arrived.
+                    mayHaveDelayedTasks = true;
+                } else {
+                    break;   // idle and past nextTickTime: tick now
                 }
             }
 
-            // Micro-spin for the final stretch to land exactly on time
-            while (clock::now() < nextTickTime) {
+            // Micro-spin for the final stretch to land exactly on time.
+            // A stop request skips it and the tick: the park above already
+            // wakes on it, and this spin was what still held Stop's join
+            // for the rest of the 50 ms (30-45 ms on every world exit).
+            while (!m_shouldStop.load() && clock::now() < nextTickTime) {
                 std::this_thread::yield();
             }
-            
+            if (m_shouldStop.load()) break;
+
             auto tickStart = clock::now();
 
             // MC MinecraftServer.haveTime() is `getNanos() < nextTickTimeNanos`
@@ -1197,11 +1831,15 @@ namespace Server {
             float timeBetweenTicks = duration<float, std::milli>(tickStart - m_lastTickStartTime).count();
             UpdateStatistics(tickExecutionTime, timeBetweenTicks);
             m_lastTickStartTime = tickStart;
+            SampleDebugInfo(duration_cast<nanoseconds>(tickEnd - tickStart).count(),
+                            static_cast<int64_t>(timeBetweenTicks * 1.0e6f));
 
 
             // Feeds /tick query's P50/P95/P99, and its "lagging" test.
             m_tickRateManager.recordTickTime(
                 duration_cast<nanoseconds>(tickEnd - tickStart).count());
+            m_stress.EndTick(duration_cast<nanoseconds>(tickEnd - tickStart).count());
+            m_stress.MaybeReport(*this);
             if (sprinting) {
                 m_tickRateManager.endTickWork();
             }
@@ -1212,8 +1850,12 @@ namespace Server {
             // sprinting tick adds nothing, so the next iteration starts
             // immediately.
             nextTickTime += tickBudget;
+            // MC: delayedTasksMaxNextTickTimeNanos = max(now + thisTickNanos,
+            // nextTickTimeNanos) — the pump window above.
+            delayedTasksUntil = std::max(clock::now() + tickBudget, nextTickTime);
         }
 
+        m_serverThreadActive.store(false);
         Log::Info("IntegratedServer main loop ended");
     }
 
@@ -1231,6 +1873,11 @@ namespace Server {
 
         // Network I/O is now handled by dedicated thread (no need to poll)
         // The I/O thread runs continuously and processes all async operations
+        m_stress.BeginTick();   // phase marks below: ServerStressStats
+
+        // Players whose connections closed since the last tick (queued by the
+        // disconnect callback — see there).
+        DrainClosedConnections();
         
         // === 1. DRAIN C2S QUEUES ===
         // CRITICAL: Tick all connections to drain their packet queues
@@ -1264,6 +1911,7 @@ namespace Server {
             
             // activeConnections will be destroyed here, releasing any disconnected connections
         }
+        m_stress.Mark(ServerStressStats::Phase::Packets);
         
         // Process the new session management system FIRST
         // This updates watch sets before broadcasting block changes
@@ -1271,12 +1919,25 @@ namespace Server {
             // Tick all player sessions (updates watch sets)
             m_sessionManager->Tick(serverTick);
 
+            // The night skip (MC ServerLevel.tick's sleep block). Gated like
+            // the world itself: nobody sleeps through a paused game.
+            if (SimulationRuns()) TickSleep();
+
             // Process expired tickets, per dimension. Tickets are per level
             // because they pin chunks, and a chunk only exists inside one
             // world.
+            //
+            // Then propagate this tick's ticket changes — the sessions above
+            // just moved their players' tickets. MC ServerChunkCache.tick ->
+            // runDistanceManagerUpdates, once per level per tick: this is the
+            // one point where chunk levels change (ChunkTicketManager.hpp).
+            // Every level, not only the ones with work: a level everybody
+            // just left still has to drop its levels.
             ForEachLevel([&](ServerLevel& level) {
-                if (!level.HasWork(*m_sessionManager)) return;
-                if (level.Tickets()) level.Tickets()->ProcessExpiredTickets(serverTick);
+                ChunkTicketManager* tickets = level.Tickets();
+                if (!tickets) return;
+                if (level.HasWork(*m_sessionManager)) tickets->ProcessExpiredTickets(serverTick);
+                tickets->RunAllUpdates();
             });
 
             // Process send queues
@@ -1284,6 +1945,7 @@ namespace Server {
                 m_sendScheduler->ProcessSendQueues();
             }
         }
+        m_stress.Mark(ServerStressStats::Phase::Sessions);
 
         // === 2b. PAUSE STATE ===
         //
@@ -1306,16 +1968,32 @@ namespace Server {
 
             if (paused != wasPaused) {
                 m_paused.store(paused, std::memory_order_relaxed);
+                // Every client mirrors the flag (ServerPausedS2C): a player
+                // whose menu is open freezes their own body only while the
+                // WORLD is paused — vanilla's singleplayer pause — and keeps
+                // moving while somebody else is still playing.
+                for (const auto& session : m_sessionManager->GetAllSessions()) {
+                    if (session && session->GetConnection()) session->GetConnection()->SendServerPaused(paused);
+                }
 
-                if (paused) {
+                if (paused && m_shouldStop.load()) {
+                    // The pause that shutdown produces: the owner's disconnect
+                    // empties the session list one tick before the loop is
+                    // asked to stop, and "no players" reads as paused. Saving
+                    // here doubled every exit's save — Shutdown() flushes the
+                    // same chunks, entities, level.dat and portals moments
+                    // later, on a world nothing has touched since.
+                } else if (paused) {
                     // MC saves on the way IN, not out: "Saving and pausing
                     // game..." at IntegratedServer.java:107. Pausing is when
                     // the player walked away from the keyboard, which is
                     // exactly when an unexpected power cut costs the most.
                     Log::Info("Saving and pausing game...");
+                    PROFILE_ZONE_N("Server.PauseSave");
                     SaveAllPlayers();
                     ForEachLevel([](ServerLevel& level) {
-                        if (level.World()) level.World()->SaveAllChunks();
+                        // Background, as the autosave (see there).
+                        if (level.World()) level.World()->SaveAllChunks(/*wait=*/false);
                         if (level.Entities()) level.Entities()->SaveAllLoaded();
                     });
                     WriteLevelDat();
@@ -1339,6 +2017,12 @@ namespace Server {
         // standing on the Overworld chunk with the same x/z.
         if (m_sessionManager) {
             ForEachLevel([&](ServerLevel& level) {
+                // Light first (MC ChunkHolder.broadcastChanges): drain the
+                // level light engine — every block change since the last tick
+                // — and send what it changed, so each client holds this
+                // tick's light before it applies this tick's blocks and
+                // re-meshes once.
+                FlushLightUpdates(level);
                 if (!level.HasWork(*m_sessionManager)) return;
                 if (level.Deltas()) level.Deltas()->flush();
             });
@@ -1380,6 +2064,7 @@ namespace Server {
             m_netherPortalGeneration->Tick(serverTick);
         }
 #endif
+        m_stress.Mark(ServerStressStats::Phase::BlocksLight);
 
         // === 2. SESSION-DRIVEN CHUNK LOADING (Minecraft-style) ===
         //
@@ -1391,9 +2076,22 @@ namespace Server {
 
         // Process watch set changes: request loading for new chunks entering view
         ProcessWatchSetChanges();
+        m_stress.Mark(ServerStressStats::Phase::WatchSet);
+
+        // Force-loaded and redstone-indexed chunks: the loads their tickets
+        // would have caused in MC (ChunkKeeper.hpp).
+        ServiceKeptChunks();
 
         // Process async chunk load results from ServerWorkerPool
         ProcessAsyncChunkResults();
+
+        // Entities whose entities/*.mca read finished since last tick join
+        // their level (MC PersistentEntitySectionManager.tick ->
+        // processPendingLoads). Every level, before the simulation below.
+        ForEachLevel([](ServerLevel& level) {
+            if (level.Entities()) level.Entities()->ProcessPendingLoads();
+        });
+        m_stress.Mark(ServerStressStats::Phase::ChunkResults);
 
         // === 3. RUN WORLD SIMULATION (no chunk loading — session system handles that) ===
         //
@@ -1425,7 +2123,35 @@ namespace Server {
                 // for other reasons — not a fresh distance computation per
                 // chunk.
                 if (level.Tickets()) {
-                    world->SetBlockTickingChunks(level.Tickets()->GetBlockTickingChunks());
+                    // The lists are cached in the ticket manager and rebuilt
+                    // only when a level solve changes them; the world keys its
+                    // own set to the same version. With a simulation ring far
+                    // beyond the view distance the block-ticking list is tens
+                    // of thousands of chunks, and rebuilding a set of them
+                    // every tick was part of a 121 ms tick.
+                    const uint64_t version = level.Tickets()->LevelsVersion();
+                    std::vector<Game::Math::ChunkPos> randomTicking = level.Tickets()->GetRandomTickingChunks();
+                    // MC ServerChunkCache.tickChunks: every ticking chunk is a
+                    // chunk a player inhabits — bump its InhabitedTime by the
+                    // game-time delta (one tick here; frozen ticks never reach
+                    // this loop). Over the random-ticking list, i.e. vanilla's
+                    // reach: inhabited time feeds local difficulty and mob
+                    // spawning, both of which happen near players.
+                    //
+                    // LOADED chunks only. World::GetChunk loads — and
+                    // GENERATES — on a miss, synchronously, dependency
+                    // pyramid included; right after a far teleport the
+                    // ticking set is a thousand chunks around the new
+                    // position that the async loader has not delivered yet,
+                    // and this loop generated them one by one inside the
+                    // tick: 8.6 s for the first, then 4 s stalls every tick
+                    // until the streamer caught up (hang-2026-09-06_21-59-32).
+                    // A chunk not resident yet has nobody in it to count.
+                    for (const Game::Math::ChunkPos& cp : randomTicking) {
+                        if (auto chunk = world->GetLoadedChunk(cp.x, cp.z)) chunk->IncrementInhabitedTime(1);
+                    }
+                    world->SetBlockTickingChunks(level.Tickets()->GetBlockTickingChunks(),
+                                                 std::move(randomTicking), version);
                 }
                 world->WorldLoop(deltaTime);
 
@@ -1507,6 +2233,7 @@ namespace Server {
                 SyncMobsToClients(level, {});
             });
         }
+        m_stress.Mark(ServerStressStats::Phase::World);
 
         // === 4. SEND CHUNKS per player (Minecraft's PlayerChunkSender pattern) ===
         if (m_sessionManager) {
@@ -1538,6 +2265,7 @@ namespace Server {
                 }
             }
         }
+        m_stress.Mark(ServerStressStats::Phase::ChunkSend);
 
         // === 5. BROADCAST PLAYER POSITIONS to other players (every tick) ===
         // MC sends entity movement every tick and the client interpolates
@@ -1547,48 +2275,103 @@ namespace Server {
         if (m_sessionManager) {
             m_sessionManager->BroadcastPlayerPositions();
         }
+        // /morph item: who touched whom this tick.
+        if (m_morphCarry) m_morphCarry->Tick();
+        // /morph block: locks whose block or player is gone.
+        if (m_morphBlockAnchor) m_morphBlockAnchor->Tick();
+        // /morph snow_golem, Alt held (the move packet's anim byte): snow
+        // under the feet — MC SnowGolem.aiStep, the four cells a quarter
+        // block out, air that a snow layer can stand on.
+        if (m_sessionManager) {
+            for (const auto& s : m_sessionManager->GetAllSessions()) {
+                if (!s || !s->GetPlayer()) continue;
+                const ServerPlayer& p = *s->GetPlayer();
+                if (!Game::Morph::IsMob(p.getMorph(), Game::EntityTypeId::SnowGolem)) continue;
+                if (serverTick % 20 == 0) {
+                    Log::Info("[Morph] golem trail: %s anim=%u", p.getName().c_str(),
+                              static_cast<unsigned>(p.getMorphAnim()));
+                }
+                if (p.getMorphAnim() == 0) continue;
+                ServerLevel* level = GetLevel(Game::DimensionFromRaw(static_cast<int8_t>(s->GetDimensionId())));
+                Game::World* world = level ? level->World() : nullptr;
+                ServerLevelBridge* mobLevel = level ? level->MobLevel() : nullptr;
+                if (!world || !mobLevel || !mobLevel->Blocks()) continue;
+                // Not behind mobGriefing, unlike the real golem's: this is a
+                // player's own act, done on purpose with the key held.
+                const glm::dvec3 pos = p.getPosition();
+                for (int i = 0; i < 4; ++i) {
+                    const int xx = static_cast<int>(std::floor(pos.x + static_cast<double>((i % 2 * 2 - 1) * 0.25f)));
+                    const int yy = static_cast<int>(std::floor(pos.y + 1.0e-4));
+                    const int zz = static_cast<int>(std::floor(pos.z + static_cast<double>((i / 2 % 2 * 2 - 1) * 0.25f)));
+                    const glm::ivec3 snowPos(xx, yy, zz);
+                    if (!world->IsChunkLoaded(xx >> 4, zz >> 4)) continue;
+                    const Game::BlockID at = world->GetBlock(xx, yy, zz);
+                    const bool canStand = Game::CanSurviveAt(*mobLevel->Blocks(), snowPos, Game::BlockID::SnowLayer);
+                    if (serverTick % 20 == 0 && i == 0) {
+                        Log::Info("[Morph] golem trail: cell (%d,%d,%d) block=%u canStand=%d",
+                                  xx, yy, zz, static_cast<unsigned>(at), canStand ? 1 : 0);
+                    }
+                    if (at != Game::BlockID::Air || !canStand) continue;
+                    const bool placed = world->SetBlock(xx, yy, zz, Game::BlockID::SnowLayer, Game::World::UpdateFlags::All);
+                    if (!placed && serverTick % 20 == 0) Log::Info("[Morph] golem trail: SetBlock refused");
+                }
+            }
+        }
 
         // === 5b. TIME SYNC every 20 ticks (MC MinecraftServer.tickChildren) ===
         if (serverTick % 20 == 0) {
             ForceTimeSync();
         }
+        m_stress.Mark(ServerStressStats::Phase::Broadcast);
 
-        // === 6. PERIODIC CLEANUP: unload chunks with no watchers ===
-        if (serverTick % 60 == 0) { // Every ~3 seconds at 20 TPS
-            UnloadUnwatchedChunks();
-        }
+        // === 6. CLEANUP: unload chunks with no watchers ===
+        // Every tick, in slices (MC ChunkMap.processUnloads) — see there.
+        UnloadUnwatchedChunks();
 
-        // Terrain library memory: release idle per-chunk generation caches
-        // (MyTerrainGenerator::ReleaseIdleNoiseChunks explains). Every 5 s;
-        // the sweep is a walk over the holder map, ~13k entries.
+        // Terrain library holder unloading — MC ServerChunkCache.tick:
+        // purgeStaleTickets, the distance-manager pass that turns removed
+        // tickets into unload candidates, then ChunkMap.processUnloads while
+        // there is time, forced only past 2,000 ready to unload (MC).
+        // Every tick, as MC. Without it every chunk the library ever touched
+        // stayed resident: 35 GB after three minutes of 40 players scattering
+        // (profile 2026-09-23), and the paging it caused slowed the whole
+        // server. It was held off for weeks by generation tasks that never
+        // ran after a revisit — ChunkMap dropped tasks scheduled from the
+        // worldgen lane (see ChunkMap::m_pendingTasksMutex) — and by the
+        // one-tick UNKNOWN tickets the requests used, which would have
+        // cancelled every request after a tick (GENERATION_REQUEST now).
         {
-            PROFILE_ZONE_N("ReleaseIdleNoiseChunks");
-            // Budget: a slice of what is left of this tick (the generator
-            // also applies a small floor), so the sweep never becomes the
-            // tick's biggest cost again.
-            const auto budget = std::min(m_tickDeadline - std::chrono::milliseconds(2),
-                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(2));
-            size_t released = 0;
-            ForEachLevel([&](ServerLevel& level) {
-                if (auto* gen = level.TerrainGenerator()) released += gen->ReleaseIdleNoiseChunks(budget);
-            });
-            m_stats.noiseChunksReleased += released;
-        }
-        // Library holder unloading (MyTerrainGenerator::TickLibrary) is
-        // implemented but DISABLED (kLibraryUnloadEnabled): with it on, a
-        // return to a previously visited area intermittently leaves a few
-        // hundred chunks whose generation task never runs (holder shows
-        // `task scheduled=none`, refcounts in the hundreds). Root cause not
-        // yet isolated — see project memory 2026-08-30. Memory is bounded by
-        // ReleaseIdleNoiseChunks instead; holders themselves stay resident.
-        static constexpr bool kLibraryUnloadEnabled = false;
-        if (kLibraryUnloadEnabled && serverTick % 20 == 0) {
             PROFILE_ZONE_N("Lib.Tick");
-            const auto budget = std::min(m_tickDeadline - std::chrono::milliseconds(2),
-                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(3));
+            const auto budget = std::max(m_tickDeadline - std::chrono::milliseconds(2),
+                                         std::chrono::steady_clock::now());
             size_t unloaded = 0;
             ForEachLevel([&](ServerLevel& level) {
-                if (auto* gen = level.TerrainGenerator()) unloaded += gen->TickLibrary(budget);
+                auto* gen = level.TerrainGenerator();
+                if (!gen) return;
+                // Request tickets whose chunk no player's view holds any more
+                // (MC: a PLAYER_LOADING ticket exists exactly while the chunk
+                // is in a player's range). CancelLoadIfUnwanted releases them
+                // as chunks leave a view; this catches the rest — a loader
+                // that went away without a leave (a portal far side), a load
+                // with no watcher (portal and dragon scans) once it is done.
+                // A few hundred checks a tick: a full pass over the held
+                // tickets every few seconds.
+                {
+                    const Game::DimensionId dimension = level.Dimension();
+                    ChunkKeeper* keeper = level.Keeper();
+                    const auto sessions = m_sessionManager ? m_sessionManager->GetAllSessions()
+                                                           : std::vector<std::shared_ptr<PlayerSession>>{};
+                    gen->SweepRequestTickets([&](Game::Math::ChunkPos pos) {
+                        if (level.pendingChunkLoads.count(pos) != 0 ||
+                            level.generationIssued.count(pos) != 0) return true;
+                        if (keeper && keeper->Kept(pos)) return true;
+                        for (const auto& session : sessions) {
+                            if (session && session->KeepsLoaded(dimension, pos)) return true;
+                        }
+                        return false;
+                    }, 256);
+                }
+                unloaded += gen->TickLibrary(budget);
             });
             m_stats.libraryHoldersUnloaded += unloaded;
         }
@@ -1602,6 +2385,11 @@ namespace Server {
         if (serverTick > 0 && serverTick % 6000 == 0) {
             AutoSave();
         }
+
+        // Sounds played this tick off the server thread (the parallel
+        // falling-block and explosion passes) go out now — see
+        // ServerSoundBroadcaster.
+        if (m_soundBroadcaster) m_soundBroadcaster->Flush();
 
         // Increment tick counter
         m_stats.ticksProcessed.fetch_add(1, std::memory_order_relaxed);
@@ -1758,6 +2546,8 @@ namespace Server {
                     return std::make_unique<Game::WitherSkeleton>(level);
                 case Game::EntityTypeId::Bogged:
                     return std::make_unique<Game::Bogged>(level);
+                case Game::EntityTypeId::Parched:
+                    return std::make_unique<Game::Parched>(level);
                 case Game::EntityTypeId::Cow:      return std::make_unique<Game::Cow>(level);
                 case Game::EntityTypeId::Pig:      return std::make_unique<Game::Pig>(level);
                 case Game::EntityTypeId::Sheep:    return std::make_unique<Game::Sheep>(level);
@@ -1892,6 +2682,10 @@ namespace Server {
                 // the concrete class is gone and its NBT applies to nothing.
                 case Game::EntityTypeId::EyeOfEnder:
                     return std::make_unique<Game::EyeOfEnder>(level);
+                // MC LightningBolt (/summon lightning_bolt resolves here). Never
+                // saved (noSave), so this is the summon/spawn path only.
+                case Game::EntityTypeId::LightningBolt:
+                    return std::make_unique<Game::LightningBolt>(level);
                 // ── Block-shaped entities — MUST mirror the client factory ──
                 // Neither is a Mob in MC; both ride this pipeline for the same
                 // reason the projectiles do (see FallingBlockEntity.hpp).
@@ -1903,6 +2697,10 @@ namespace Server {
                     return std::make_unique<Game::EndCrystal>(level);
                 case Game::EntityTypeId::EnderPearl:
                     return std::make_unique<Game::ThrownEnderpearl>(level);
+                // MC's ArmorStand is a LivingEntity, not a Mob — see
+                // ArmorStand.hpp for why it rides this pipeline.
+                case Game::EntityTypeId::ArmorStand:
+                    return std::make_unique<Game::ArmorStand>(level);
                 default: break;
             }
             // Everything else is built from its generated def. Promoting one to
@@ -1920,9 +2718,11 @@ namespace Server {
 
         PROFILE_ZONE_N("MobSystemTick");
 
-        // 0. MC DistanceManager.runAllUpdates — solve chunk levels ONCE, here,
-        //    so every per-entity gate below is a lock-free hash lookup instead
-        //    of a mutex acquisition plus a possible solve on the read path.
+        // 0. MC DistanceManager.runAllUpdates. The tick's pass ran after the
+        //    sessions; this one picks up tickets added since (a portal's far
+        //    side, an ender pearl), so every per-entity gate below — a
+        //    lock-free hash lookup — reads them this tick. Nothing queued:
+        //    one check and out.
         if (level.Tickets()) level.Tickets()->RunAllUpdates();
 
         //    Reset this tick's detonation budget. See
@@ -1935,6 +2735,13 @@ namespace Server {
         //    stale view is a dangling ServerPlayer pointer.
         mobLevel->SyncPlayerViews();
 
+#if ENABLE_IMMERSIVE_PORTALS
+        // 1b. The gun surfaces this level's mobs may walk through — collected
+        //     here, before any mob moves, and read-only while they tick
+        //     (see MobPortalCollision).
+        mobLevel->PortalCollisionState().Refresh(ImmersivePortals(), level.Dimension());
+#endif
+
         // 2. Tick, scoped to the block-ticking chunk set (mobs outside it are
         //    still despawn-checked; see MobManager::Tick).
         std::vector<int32_t> removed;
@@ -1942,6 +2749,10 @@ namespace Server {
         // No set is built. MobManager reads entity-ticking range live from each
         // mob's own chunk, exactly as MC's ServerLevel.tick does — see the note
         // on MobManager::Tick.
+        // 2a. The Hush's stillness: its timer steps and raises the bridge's
+        //     flag BEFORE the mobs tick, so a stillness that begins this tick
+        //     already holds them this tick (HushStillness.hpp).
+        if (auto* stillness = level.Stillness()) stillness->Tick();
         mobs->Tick(level.Tickets(), removed);
         // The compact falling blocks, right after the mobs (where the Mob-
         // shaped falling batch runs too) and before the spawner.
@@ -1955,6 +2766,15 @@ namespace Server {
         //     After the mobs so it sees this tick's deaths, before the emit so
         //     a dragon it spawns is tracked this same tick.
         if (auto* fight = level.DragonFightController()) fight->Tick();
+        // 3c. The Silent Warden's boss bar (The Hush) — same slot, same
+        //     reasons: after the mobs so a death this tick pulls the bar.
+        if (auto* bars = level.WardenBossBars()) bars->Tick();
+        // 3d. Lighthouses that guide: at most one lamp's Aurelith lookup.
+        LighthouseGuide::Tick(level);
+        // 3e. Aurelith's cities (AurelithCities.hpp): the awakening's
+        //     timeline and light wave, the fight, the clients' records.
+        //     After the mobs, so the Unsung's death this tick is seen.
+        if (auto* cities = level.Aurelith()) cities->Tick();
 
         // 4. Emit — the client-facing half, shared with the frozen world.
         SyncMobsToClients(level, removed);
@@ -1982,8 +2802,9 @@ namespace Server {
         // the discard (creeper explosion, projectile impact burst) must be
         // emitted while the entity is still tracked here and still exists on
         // the client — RemoveEntity erases the watcher set, and the client
-        // ignores events for ids it no longer knows.
-        tracker->FlushEntityEvents(*mobLevel, outgoing);
+        // ignores events for ids it no longer knows. Events for mobs not
+        // tracked yet (added this tick) wait for Tick's closing flush.
+        tracker->FlushEntityEvents(*mobLevel, outgoing, /*keepUntracked=*/true);
         tracker->RemoveEntities(removed, outgoing);
 
         // Only the players standing in THIS level. A player in the Overworld
@@ -1999,6 +2820,7 @@ namespace Server {
             // within tracking range of its loader" rule.
             for (const ChunkLoader& loader : session->Loaders()) {
                 if (loader.dimension != level.Dimension()) continue;
+                if (loader.IsSimulation()) continue;     // loaded for ticking only: the client sees none of it
                 ServerEntityTracker::TrackedPlayer tp;
                 tp.connectionId = session->GetConnectionId();
                 if (loader.source == ChunkLoader::Source::Player) {
@@ -2057,6 +2879,23 @@ namespace Server {
 
         PROFILE_ZONE_N("PortalTick");
 
+        // Aether EntityMixin (the entity tick hook): a player at or below the
+        // Aether's floor who is not riding anything falls into the
+        // Overworld's sky (PortalTravel::FallOutOfAether, entityFell).
+        // Collected first: the move hands the player's view to another
+        // level, and the list must not change under the walk.
+        if (level.Dimension() == Game::DimensionId::Aether) {
+            const double floorY = static_cast<double>(Game::DimensionMinY(Game::DimensionId::Aether));
+            std::vector<Server::PlayerEntityView*> fallen;
+            for (Server::PlayerEntityView* view : mobLevel->PlayerViews()) {
+                if (!view || view->IsPassenger()) continue;
+                if (view->position.y <= floorY) fallen.push_back(view);
+            }
+            for (Server::PlayerEntityView* view : fallen) {
+                PortalTravel::FallOutOfAether(*this, level, *view);
+            }
+        }
+
         // MC Entity.canUsePortal is asked twice per tick for a reason: once by
         // entityInside to decide whether to START accumulating, and once by
         // handlePortal to decide whether the accumulated time may FIRE. An
@@ -2073,11 +2912,12 @@ namespace Server {
             entity.CheckInsideBlocks(*world);
 
 #if ENABLE_IMMERSIVE_PORTALS
-            // Immersive mode: a vanilla nether portal block is scenery; the
-            // see-through surface handles crossing (End portals are still
-            // vanilla).
-            if (Game::Portals::ImmersiveNetherPortals() && entity.portal.IsInPortal() &&
-                entity.portal.CurrentPortal() == Game::BlockID::NetherPortal) {
+            // A frame-portal block of an immersive family is scenery; the
+            // see-through surface handles crossing (End and Twilight portals
+            // are always blocks). Per family: the nether follows /gamerule
+            // immersive_portals, the Hush and Aether are always blocks.
+            if (entity.portal.IsInPortal() &&
+                Game::Portals::IsInertPortalBlock(entity.portal.CurrentPortal())) {
                 entity.portal.Reset();
                 return;
             }
@@ -2092,9 +2932,21 @@ namespace Server {
                 active, entity.IsPlayer(),
                 entity.IsCreative() || entity.IsSpectator());
 
+            // MC ServerPlayer.processPortalCooldown: a player whose
+            // cross-dimension teleport the client has not acked yet keeps
+            // the whole arrival cooldown for when it can actually move.
+            bool processCooldown = true;
+            if (entity.IsPlayer()) {
+                if (const auto* view = dynamic_cast<const Server::PlayerEntityView*>(&entity)) {
+                    if (const Server::ServerPlayer* p = view->GetPlayer()) {
+                        processCooldown = !p->isChangingDimension();
+                    }
+                }
+            }
+
             const auto trigger = entity.portal.HandleTick(
                 transitionTime, entity.CanUsePortal(false),
-                entity.GetDimensionChangingDelay());
+                entity.GetDimensionChangingDelay(), processCooldown);
             if (!trigger) return;
 
             HandlePortalTraversal(level, entity, trigger->portal, trigger->entryPos);
@@ -2228,32 +3080,43 @@ namespace Server {
         // the denominator's whole meaning: one player far from another always
         // contributes 289, so the global cap scales with players, not with how
         // many chunks happen to be resident.
-        const auto chunkKey = [](int cx, int cz) {
-            return (static_cast<uint64_t>(static_cast<uint32_t>(cx)) << 32) |
-                    static_cast<uint32_t>(cz);
-        };
-        std::unordered_set<uint64_t> spawnSquares;
+        //
+        // Only the union's SIZE is needed: every chunk that gets spawn
+        // attempts passes the 128-block test below, which already puts it in
+        // that player's square (a chunk centre within 128 blocks of a player
+        // is at most 8 chunks from the player's chunk on each axis). Counted
+        // by sort + unique — a hash set of 289 keys per player was the
+        // spawner's largest fixed per-tick cost with a few dozen players.
+        std::vector<uint64_t> spawnSquares;
+        spawnSquares.reserve(playerPositions.size() * Game::kMagicNumber);
         for (const glm::dvec3& p : playerPositions) {
             const int pcx = static_cast<int>(std::floor(p.x)) >> 4;
             const int pcz = static_cast<int>(std::floor(p.z)) >> 4;
             for (int dx = -Game::kSpawnDistanceChunk; dx <= Game::kSpawnDistanceChunk; ++dx) {
                 for (int dz = -Game::kSpawnDistanceChunk; dz <= Game::kSpawnDistanceChunk; ++dz) {
-                    spawnSquares.insert(chunkKey(pcx + dx, pcz + dz));
+                    spawnSquares.push_back(
+                        (static_cast<uint64_t>(static_cast<uint32_t>(pcx + dx)) << 32) |
+                         static_cast<uint32_t>(pcz + dz));
                 }
             }
         }
+        std::sort(spawnSquares.begin(), spawnSquares.end());
+        const size_t spawnableChunkCount = static_cast<size_t>(
+            std::unique(spawnSquares.begin(), spawnSquares.end()) - spawnSquares.begin());
 
         Game::SpawnContext ctx;
         ctx.level = mobLevel;
-        ctx.spawnableChunkCount = static_cast<int>(spawnSquares.size());
+        ctx.spawnableChunkCount = static_cast<int>(spawnableChunkCount);
         mobs->SetSpawnableChunkCount(ctx.spawnableChunkCount);
         ctx.playerPositions = &playerPositions;
 
         // The chunks that actually RECEIVE spawn attempts are narrower — MC
         // ChunkMap.collectSpawningChunks: in a spawn square, holding a ticking
         // (here: block-ticking AND loaded) chunk, and with the chunk CENTER
-        // within 128 blocks of a non-spectator player, XZ only.
-        auto tickingChunks = level.Tickets()->GetBlockTickingChunks();
+        // within 128 blocks of a non-spectator player, XZ only. The random-
+        // ticking list is the block-ticking list within vanilla's reach of a
+        // player — every chunk the 128-block test can pass is in it.
+        auto tickingChunks = level.Tickets()->GetRandomTickingChunks();
         tickingChunks.erase(
             std::remove_if(tickingChunks.begin(), tickingChunks.end(),
                            [world](const Game::Math::ChunkPos& cp) {
@@ -2275,10 +3138,7 @@ namespace Server {
         std::vector<Game::Math::ChunkPos> chunks;
         chunks.reserve(tickingChunks.size());
         for (const auto& cp : tickingChunks) {
-            if (spawnSquares.count(chunkKey(cp.x, cp.z)) &&
-                playerCloseToChunk(cp.x, cp.z)) {
-                chunks.push_back(cp);
-            }
+            if (playerCloseToChunk(cp.x, cp.z)) chunks.push_back(cp);
         }
 
         ctx.biomeAt = [world](int x, int y, int z) -> std::string_view {
@@ -2286,6 +3146,22 @@ namespace Server {
             // exactly the key GeneratedMobSpawns is built on — so no
             // translation table is needed between the two.
             return Game::BiomeRegistry::Get(world->GetBiome(x, y, z)).name;
+        };
+        ctx.biomeIdAt = [world](int x, int y, int z) -> Game::BiomeId {
+            return world->GetBiome(x, y, z);
+        };
+
+        // MC NaturalSpawner.mobsAt's structure half: the fortress rule and
+        // every structure's spawn_overrides, answered from the boxes the
+        // chunk recorded at generation (Chunk::structureSpawnAreas). The
+        // block-below read only happens inside a chunk that has any.
+        ctx.structureSpawnsAt = [world](Game::MobCategory category, int x, int y, int z)
+                -> const Game::BiomeSpawnList* {
+            const auto chunk = world->GetLoadedChunk(x >> 4, z >> 4);
+            if (!chunk || !Game::StructureSpawns::ChunkHasOverrides(*chunk)) return nullptr;
+            return Game::StructureSpawns::MobsAt(
+                *chunk, category, x, y, z, world->GetBlock(x, y - 1, z),
+                Game::SpawnListForBiome(world->GetBiome(x, y, z)));
         };
 
         // ── Census (MC NaturalSpawner.createState) ─────────────────────────
@@ -2296,15 +3172,16 @@ namespace Server {
         // choke a farm. MISC never counts either.
         Server::LocalMobCapCalculator localCap(&playerPositions);
         Game::PotentialCalculator spawnPotential;
-        int categoryCounts[8] = {};
+        int categoryCounts[Game::kMobCategoryCount] = {};
         for (const auto& [id, mob] : mobs->All()) {
+            PROFILE_ZONE_DETAIL("Spawn.CensusMob");
             if (mob->IsRemoved()) continue;
             if (mob->IsPersistenceRequired() || mob->RequiresCustomPersistence()) continue;
             const Game::MobCategory category = mob->TypeInfo().category;
             if (category == Game::MobCategory::Misc) continue;
 
             const glm::ivec3 bp = mob->BlockPosition();
-            const auto* biomeList = Game::FindBiomeSpawnList(ctx.biomeAt(bp.x, bp.y, bp.z));
+            const auto* biomeList = Game::SpawnListForBiome(world->GetBiome(bp.x, bp.y, bp.z));
             if (const auto* cost = Game::FindMobSpawnCost(biomeList, mob->GetType())) {
                 spawnPotential.AddCharge(bp, cost->charge);
             }
@@ -2313,7 +3190,13 @@ namespace Server {
         }
         ctx.categoryCounts = categoryCounts;
         ctx.spawnPotential = &spawnPotential;
-        ctx.canSpawnLocal = [&localCap](Game::MobCategory category, int cx, int cz) {
+        // MC NaturalSpawner.getFilteredSpawningCategories: with
+        // spawn_monsters off the MONSTER category is left out entirely
+        // (ServerLevel.canSpawnMonsters = spawn_mobs && spawn_monsters).
+        const bool spawnMonsters = Game::Rules::GetBool(Game::Rules::Id::SpawnMonsters);
+        ctx.canSpawnLocal = [&localCap, spawnMonsters](Game::MobCategory category, int cx, int cz) {
+            // The Aether's monster categories are MONSTER for this rule.
+            if (Game::IsMonsterCategory(category) && !spawnMonsters) return false;
             return localCap.CanSpawn(category, cx, cz);
         };
         ctx.afterSpawn = [&localCap](Game::MobCategory category, const glm::ivec3& pos) {
@@ -2578,12 +3461,14 @@ namespace Server {
     }
 
     int IntegratedServer::SummonMobs(Game::EntityTypeId type, const glm::dvec3& pos,
-                                     int count, const SummonOptions& options) {
-        // OVERWORLD. /summon reaches here from CommandDispatcher with a
-        // position and nothing else — no session, no dimension — so there is
-        // genuinely no player in scope to resolve a level from. Summoning into
-        // the Nether needs the command to carry its sender's dimension first.
-        ServerLevel&       level    = Overworld();
+                                     int count, const SummonOptions& options,
+                                     Game::DimensionId dimension, std::vector<int32_t>* outIds) {
+        // The command source's level (CommandSourceStack.dimension) — a
+        // /summon typed in the Nether, or run there by `/execute in`, lands
+        // in the Nether. This used to be hard-wired to the Overworld.
+        ServerLevel*       levelPtr = GetLevel(dimension);
+        if (!levelPtr) return 0;
+        ServerLevel&       level    = *levelPtr;
         MobManager*        mobs     = level.Mobs();
         ServerLevelBridge* mobLevel = level.MobLevel();
         if (!mobs || !mobLevel) return 0;
@@ -2646,7 +3531,10 @@ namespace Server {
             // it is what makes the command usable for testing at all.
             mob->SetPersistenceRequired(true);
 
-            if (mobs->Add(std::move(mob)) != 0) ++spawned;
+            if (const int32_t id = mobs->Add(std::move(mob)); id != 0) {
+                ++spawned;
+                if (outIds) outIds->push_back(id);
+            }
         }
         return spawned;
     }
@@ -2779,6 +3667,69 @@ namespace Server {
 
         // MC: `if (dragonFight != null) dragonFight.tryRespawn()`.
         if (auto* fight = level.DragonFightController()) fight->TryRespawn();
+        return true;
+    }
+
+    bool IntegratedServer::PlaceArmorStandFromUse(PlayerSession& session,
+                                                  const Game::BlockHitResult& hit,
+                                                  float playerYaw) {
+        // MC ArmorStandItem.useOn, transcribed.
+        if (hit.face == 0) return false;   // Direction.DOWN
+        ServerLevel& level = LevelOf(session);
+        Game::World* world = level.World();
+        ServerLevelBridge* bridge = level.MobLevel();
+        MobManager* mobs = level.Mobs();
+        if (!world || !bridge || !mobs) return false;
+
+        // BlockPlaceContext.getClickedPos: the clicked cell itself when its
+        // block is replaceable (air, grass — no collision), else the cell
+        // past the clicked face.
+        const glm::ivec3 clicked = hit.blockPos;
+        const Game::BlockID clickedId = world->GetBlock(clicked.x, clicked.y, clicked.z);
+        glm::ivec3 pos = clicked;
+        if (Game::BlockRegistry::HasCollision(clickedId)) {
+            static constexpr glm::ivec3 kOffsets[6] = {
+                {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0}};
+            if (hit.face >= 0 && hit.face < 6) pos = clicked + kOffsets[hit.face];
+        }
+
+        // The stand's box at the bottom centre of that cell: no block in it
+        // (level.noCollision) and no entity in it (getEntities).
+        const Game::EntityTypeInfo& info = Game::GetEntityTypeInfo(Game::EntityTypeId::ArmorStand);
+        const glm::dvec3 feet(pos.x + 0.5, pos.y, pos.z + 0.5);
+        Game::AABB box;
+        box.min = glm::vec3(feet) - glm::vec3(info.width * 0.5f, 0.0f, info.width * 0.5f);
+        box.max = glm::vec3(feet) + glm::vec3(info.width * 0.5f, info.height, info.width * 0.5f);
+        {
+            Game::PhysicsContext phys;
+            phys.blockAccess = world;
+            if (Game::CollidesAt(box, phys)) return false;
+        }
+        std::vector<Game::Entity*> occupants;
+        bridge->GetEntitiesInBox(box, nullptr, occupants);
+        if (!occupants.empty()) return false;
+        std::vector<Game::LivingEntity*> players;
+        bridge->GetPlayers(players);
+        for (Game::LivingEntity* p : players) {
+            if (p && p->GetAABB().Intersects(box)) return false;
+        }
+
+        auto stand = std::make_unique<Game::ArmorStand>(bridge);
+        stand->position = feet;
+        stand->oldPosition = feet;
+        // snapTo(x, y, z, yRot, 0): the yaw snapped to the nearest 45°,
+        // facing the player (rotation - 180).
+        const float yRot = static_cast<float>(std::floor(
+            (Game::Mth::WrapDegrees(playerYaw - 180.0f) + 22.5f) / 45.0f)) * 45.0f;
+        stand->yRot = stand->yRotO = yRot;
+        stand->yBodyRot = stand->yBodyRotO = yRot;
+        stand->yHeadRot = stand->yHeadRotO = yRot;
+        stand->xRot = stand->xRotO = 0.0f;
+        const glm::dvec3 at = stand->position;
+        if (mobs->Add(std::move(stand)) == 0) return false;
+        // MC ArmorStandItem.useOn: level.playSound(null, x, y, z,
+        // ARMOR_STAND_PLACE, BLOCKS, 0.75F, 0.8F).
+        bridge->PlaySound(nullptr, at, Game::SoundEvents::ARMOR_STAND_PLACE, Game::SoundSource::Blocks, 0.75f, 0.8f);
         return true;
     }
 
@@ -3013,8 +3964,9 @@ namespace Server {
         // CarvedPumpkinBlock.clearPatternBlocks: every pattern cell — the two
         // air corners included — becomes air with MC flag 2 (send to clients,
         // NO neighbour updates yet; those come after the boss exists, below).
-        // MC also fires levelEvent 2001 per cell (break particles + sound);
-        // this engine has no level-event channel yet, so that part is skipped.
+        // MC also fires levelEvent 2001 per cell (break particles + sound):
+        // the sound half plays here (Game::PlayLevelEventSound); the particles
+        // have no level-event channel yet.
         constexpr uint32_t kClearFlags = Game::World::UpdateFlags::UpdateShapes |
                                          Game::World::UpdateFlags::RecomputeLight |
                                          Game::World::UpdateFlags::UpdateHeightmap |
@@ -3022,7 +3974,10 @@ namespace Server {
         for (int x = 0; x < 3; ++x) {
             for (int y = 0; y < 3; ++y) {
                 const glm::ivec3 cell = PatternCell(frontTopLeft, forwards, up, x, y, 0);
+                const Game::BlockState was = world->GetBlockState(cell.x, cell.y, cell.z);
                 world->SetBlock(cell.x, cell.y, cell.z, Game::BlockID::Air, kClearFlags);
+                Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::PARTICLES_DESTROY_BLOCK, cell,
+                                          static_cast<int>(was.RawId()), world->Random());
             }
         }
 
@@ -3110,7 +4065,7 @@ namespace Server {
 
     void IntegratedServer::HandleInteract(uint32_t connectionId, int32_t entityId,
                                           bool attack, bool sprinting,
-                                          int dragonPart) {
+                                          int dragonPart, const glm::vec3* location) {
         if (!m_sessionManager) return;
 
         // Everything below — the attacker's view, the target's id, the mob
@@ -3280,7 +4235,55 @@ namespace Server {
         // own mobInteract while dye — which the sheep passes on — reaches the
         // item hook underneath.
         if (!attack) {
-            if (!mobTarget) return;   // only mobs have a mobInteract
+            if (!mobTarget) {
+                // A player is no mob, but a SHEEP MORPH takes shears like
+                // one (Sheep.mobInteract → shear): wool drops, the morph is
+                // sheared until it grazes.
+                auto* view = dynamic_cast<PlayerEntityView*>(target);
+                ServerPlayer* victim = view ? view->GetPlayer() : nullptr;
+                ServerPlayer* player = attacker->GetPlayer();
+                if (!victim || !player) return;
+                const uint32_t code = victim->getMorph();
+                // A DOOR morph swings on a right-click, as a door does
+                // (DoorBlock.useWithoutItem: open toggles).
+                if (Game::Morph::IsValid(code) && Game::Morph::KindOf(code) == Game::Morph::Kind::Block &&
+                    Game::IsDoorBlock(static_cast<Game::BlockID>(Game::Morph::BlockOf(code)))) {
+                    victim->setMorph(Game::Morph::WithBlockOpen(code, !Game::Morph::IsBlockOpen(code)),
+                                     victim->getMorphSpeed());
+                    if (auto victimSession = m_sessionManager->GetSession(victim->getPlayerId())) {
+                        if (auto* vc = victimSession->GetConnection()) vc->SendPlayerAbilities(*victim);
+                    }
+                    return;
+                }
+                // A SNOW GOLEM morph loses its pumpkin to shears
+                // (SnowGolem.shear: the carved pumpkin drops).
+                if (Game::Morph::IsMob(code, Game::EntityTypeId::SnowGolem) && !Game::Morph::IsSheared(code)) {
+                    const int slot = player->getInventory().GetSelectedSlot();
+                    const Game::ItemStack& held = player->getInventory().GetSlot(Game::Inventory::HotbarToIndex(slot));
+                    if (held.itemId != Game::Items::Shears) return;
+                    victim->setMorph(Game::Morph::WithSheared(code, true), victim->getMorphSpeed());
+                    mobLevel->SpawnItemDrop(victim->getPosition() + glm::dvec3(0.0, 1.0, 0.0),
+                                            Game::ItemRegistry::FromBlock(Game::BlockID::CarvedPumpkin), 1);
+                    if (auto victimSession = m_sessionManager->GetSession(victim->getPlayerId())) {
+                        if (auto* vc = victimSession->GetConnection()) vc->SendPlayerAbilities(*victim);
+                    }
+                    return;
+                }
+                if (!Game::Morph::IsMob(code, Game::EntityTypeId::Sheep) || Game::Morph::IsSheared(code)) return;
+                const int slot = player->getInventory().GetSelectedSlot();
+                const Game::ItemStack& held = player->getInventory().GetSlot(Game::Inventory::HotbarToIndex(slot));
+                if (held.itemId != Game::Items::Shears) return;
+                victim->setMorph(Game::Morph::WithSheared(code, true), victim->getMorphSpeed());
+                const int rolls = 1 + mobLevel->Random().NextInt(3);
+                for (int i = 0; i < rolls; ++i) {
+                    mobLevel->SpawnItemDrop(victim->getPosition() + glm::dvec3(0.0, 1.0, 0.0),
+                                            Game::Sheep::WoolItemForColor(0), 1);
+                }
+                if (auto victimSession = m_sessionManager->GetSession(victim->getPlayerId())) {
+                    if (auto* vc = victimSession->GetConnection()) vc->SendPlayerAbilities(*victim);
+                }
+                return;
+            }
             ServerPlayer* player = attacker->GetPlayer();
             if (!player) return;
 
@@ -3289,6 +4292,20 @@ namespace Server {
                 Game::Inventory::HotbarToIndex(slot));
 
             const bool creative = (player->getGameMode() == GameMode::CREATIVE);
+
+            // An armor stand's own interact (MC ArmorStand.interact): the
+            // swap writes the hand itself — in creative too, where a piece
+            // taken off the stand must land in the empty hand rather than
+            // be "restored" away by the generic creative restore below.
+            if (auto* stand = dynamic_cast<Game::ArmorStand*>(mobTarget)) {
+                const Game::UseResult r = stand->Interact(*attacker, held,
+                                                          location ? *location : glm::vec3(0.0f));
+                if (Game::ConsumesAction(r) || r == Game::UseResult::Fail) {
+                    session->SendInventoryFull();
+                    return;
+                }
+            }
+
             const Game::ItemStack before = held;
 
             // MC restores only the COUNT in creative — see the same note on
@@ -3305,6 +4322,10 @@ namespace Server {
             // adult always makes a baby rather than, say, feeding it.
             Game::UseResult r = SpawnOffspringFromSpawnEgg(*mobTarget, held);
             if (!Game::ConsumesAction(r)) r = mobTarget->MobInteract(*attacker, held);
+            // A villager's trading screen (Merchant.openTradingScreen) is a
+            // request the mob recorded on the player — open it now, on the
+            // same round as the interaction.
+            session->FlushPendingMenuOpen();
 
             if (!Game::ConsumesAction(r) && !held.IsEmpty()) {
                 const Game::Item& item = Game::ItemRegistry::Get(held.itemId);
@@ -3328,6 +4349,12 @@ namespace Server {
         ServerPlayer* player = attacker->GetPlayer();
         if (!player) return;
 
+        // The swing MC's client sends right after the attack
+        // (ServerboundSwingPacket -> Player.swing): there is no swing packet
+        // here, so the attack is where the server learns of it. Landed or
+        // not. See PlayerEntityView::SetDigging.
+        attacker->Swing();
+
         const Game::ItemStack& held = player->getInventory().GetSlot(
             Game::Inventory::HotbarToIndex(player->getInventory().GetSelectedSlot()));
 
@@ -3335,8 +4362,9 @@ namespace Server {
         Game::GetItemAttackAttributes(held.itemId, itemDamage, itemSpeed);
 
         // MC reads ATTACK_DAMAGE, which is the player's base plus the held
-        // item's main-hand modifier. A bare hand is 1.0.
-        float damage = Game::kPlayerBaseAttackDamage + itemDamage;
+        // item's main-hand modifier (a bare hand is 1.0), then STRENGTH's
+        // +3 and WEAKNESS's -4 per level.
+        float damage = player->getAttackDamage(itemDamage);
 
         // MC getAttackStrengthScale(0.5F) — the half tick is MC's, and it is
         // why a hit that lands exactly on the boundary counts as full strength.
@@ -3355,6 +4383,17 @@ namespace Server {
 
         const bool fullStrength = strengthScale > 0.9f;
 
+        // MC Player.playServerSideSound: level.playSound(null, player x/y/z,
+        // sound, PLAYERS, 1, 1) — everyone nearby hears the swing, the
+        // attacker included (the client does not predict attacks).
+        const auto playServerSideSound = [attacker](const char* event) {
+            if (Game::EntityLevel* lvl = attacker->Level()) {
+                lvl->PlaySound(nullptr, attacker->position, event, Game::SoundSource::Players, 1.0f, 1.0f);
+            }
+        };
+        // MC: a sprinting full-strength hit is the knockback attack.
+        if (sprinting && fullStrength) playServerSideSound(Game::SoundEvents::PLAYER_ATTACK_KNOCKBACK);
+
         // MC Player.canCriticalAttack — every term of it:
         //   fallDistance > 0, !onGround, !onClimbable, !isInWater,
         //   !isMobilityRestricted, !isPassenger, target is a LivingEntity,
@@ -3362,15 +4401,15 @@ namespace Server {
         //
         // fallDistance > 0 && !onGround is why a crit is a hit taken on the way
         // DOWN — the accumulator only grows while descending (see
-        // PlayerSession::UpdateMovementStats). isMobilityRestricted and
-        // isPassenger have no analogue here: BLINDNESS (the one effect the
-        // mobility test reads) is outside the ported effect set — nothing in
-        // the mob system applies it — and no vehicles exist.
+        // PlayerSession::UpdateMovementStats). isMobilityRestricted is
+        // BLINDNESS (Player.isMobilityRestricted); isPassenger has no analogue
+        // — no vehicles exist.
         const bool crit = fullStrength
                        && player->getFallDistance() > 0.0f
                        && !player->isOnGround()
                        && !IsOnClimbable(*player)
                        && !attacker->IsInWater()
+                       && !player->isMobilityRestricted()
                        && !sprinting;
         if (crit) damage *= 1.5f;
 
@@ -3395,6 +4434,27 @@ namespace Server {
             : target->Hurt(Game::MobDamageSource::PlayerAttack, damage, attacker);
         if (hit) {
             attacker->SetLastHurtMob(target);
+
+            // The Hush's echo blade (docs/the-hush.md): a landed hit "silences"
+            // the target — Slowness II for 3 s (60 ticks). Any living target:
+            // a player is reached through its PlayerEntityView, whose effect
+            // list IS the ServerPlayer's (ticked, synced, saved). Stacks
+            // through LivingEntity::AddEffect's MC update rules, so a second
+            // hit refreshes the 3 s rather than doubling it.
+            if (target && held.itemId == Game::Items::EchoBlade) {
+                constexpr int kSilenceTicks = 60;
+                target->AddEffect(Game::MobEffectInstance(Game::MobEffectId::Slowness,
+                                                          kSilenceTicks, /*amp=*/1),
+                                  attacker);
+            }
+
+            // Twilight Forest's fiery sword (FierySwordItem.hurtEnemy): a
+            // landed hit sets a non-fire-immune target alight for 15 s.
+            // Mob targets only, for the reason the echo blade gives above.
+            if (mobTarget && held.itemId == Game::Items::FierySword && !mobTarget->FireImmune()) {
+                mobTarget->IgniteForSeconds(15);
+            }
+
             // MC's sprint hit adds 0.5 extra knockback on top of the base the
             // damage already applied (Player.causeExtraKnockback).
             //
@@ -3408,7 +4468,18 @@ namespace Server {
                 const float yaw = attacker->yRot * Game::Mth::kDegToRad;
                 target->Knockback(0.5, std::sin(yaw), -std::cos(yaw));
             }
-            if (sweep) DoSweepAttack(*attacker, *target, strengthScale);
+            if (sweep) {
+                // MC Player.doSweepAttack opens with PLAYER_ATTACK_SWEEP.
+                playServerSideSound(Game::SoundEvents::PLAYER_ATTACK_SWEEP);
+                DoSweepAttack(*attacker, *target, strengthScale);
+            }
+            // MC attackVisualEffects: the crit sound, or — for a plain hit —
+            // the strong / weak swing.
+            if (crit) playServerSideSound(Game::SoundEvents::PLAYER_ATTACK_CRIT);
+            if (!crit && !sweep) {
+                playServerSideSound(fullStrength ? Game::SoundEvents::PLAYER_ATTACK_STRONG
+                                                 : Game::SoundEvents::PLAYER_ATTACK_WEAK);
+            }
             BroadcastAttackEffects(level.Dimension(), *target, crit);
 
             // MC Player.attack's last line: 0.1 exhaustion per landed hit.
@@ -3419,6 +4490,9 @@ namespace Server {
             if (mode == GameMode::SURVIVAL || mode == GameMode::ADVENTURE) {
                 player->getFoodData().addExhaustion(0.1f);
             }
+        } else {
+            // MC: the target shrugged it off.
+            playServerSideSound(Game::SoundEvents::PLAYER_ATTACK_NODAMAGE);
         }
     }
 
@@ -3779,26 +4853,315 @@ namespace Server {
 #endif
     }
 
-    void IntegratedServer::OnObsidianRemoved(Game::DimensionId dimension, const glm::ivec3& pos) {
+    void IntegratedServer::OnFrameBlockRemoved(Game::DimensionId dimension, const glm::ivec3& pos,
+                                               Game::BlockID removed) {
 #if ENABLE_IMMERSIVE_PORTALS
-        if (m_netherPortalGeneration) m_netherPortalGeneration->OnObsidianRemoved(dimension, pos);
+        if (m_netherPortalGeneration) m_netherPortalGeneration->OnFrameBlockRemoved(dimension, pos, removed);
 #else
-        (void)dimension; (void)pos;
+        (void)dimension; (void)pos; (void)removed;
 #endif
     }
 
 #if ENABLE_IMMERSIVE_PORTALS
-    void IntegratedServer::SetImmersivePortals(bool on) {
-        m_config.immersivePortals = on;
-        Game::Portals::SetImmersiveNetherPortals(on);
-        Log::Info("[ImmersivePortals] nether portals are now %s", on ? "immersive" : "vanilla");
+    void IntegratedServer::SetRedstoneChunks(bool on) {
+        m_config.redstoneChunks = on;
+        Log::Info("[ChunkKeeper] redstone chunks %s", on ? "on" : "off");
+        // The keepers pick the flag up in ServiceKeptChunks.
     }
 
-    bool IntegratedServer::OnImmersiveFrameLit(Game::ILevelWrite& level, const glm::ivec3& firePos) {
+    void IntegratedServer::ServiceKeptChunks() {
+        PROFILE_ZONE;
+        ForEachLevel([&](ServerLevel& level) {
+            ChunkKeeper* keeper = level.Keeper();
+            Game::World* world = level.World();
+            if (!keeper || !world) return;
+            keeper->SetRedstoneEnabled(m_config.redstoneChunks);
+            const Game::DimensionId dim = level.Dimension();
+            keeper->Service(m_currentServerTick,
+                [&](Game::Math::ChunkPos pos) {
+                    return world->IsChunkLoaded(pos.x, pos.z) || level.pendingChunkLoads.count(pos) != 0;
+                },
+                [&](Game::Math::ChunkPos pos) { RequestChunkLoad(dim, pos, 0); });
+            // Redstone warm-up (ServerLevel::redstoneWarmup): freeze redstone
+            // while kept chunks are still arriving; when the last one is in,
+            // settle every border that arrived meanwhile, then let it run.
+            if (!Game::RedstonePlus::Enabled()) {
+                if (level.redstoneWarmup) { level.redstoneWarmup = false; level.redstoneSettleLater.clear(); }
+                world->SetRedstoneFrozen(false);
+                return;
+            }
+            if (!level.redstoneWarmup && !level.redstoneWarmupDone && keeper->KeptCount() > 0) {
+                level.redstoneWarmup = true;
+                world->SetRedstoneFrozen(true);
+                Log::Info("[RedstonePlus] warm-up: %zu kept chunk(s) to load before redstone runs", keeper->KeptCount());
+            }
+            if (level.redstoneWarmup && m_currentServerTick % 5 == 0 && !keeper->ScanRunning()) {
+                bool allResident = true;
+                keeper->ForEachKept([&](Game::Math::ChunkPos pos) {
+                    if (allResident && !world->IsChunkLoaded(pos.x, pos.z)) allResident = false;
+                });
+                if (allResident) {
+                    for (const Game::Math::ChunkPos& pos : level.redstoneSettleLater) SettleRedstoneBorders(level, pos);
+                    const size_t settled = level.redstoneSettleLater.size();
+                    level.redstoneSettleLater.clear();
+                    level.redstoneWarmup = false;
+                    level.redstoneWarmupDone = true;
+                    world->SetRedstoneFrozen(false);
+                    Log::Info("[RedstonePlus] warm-up done: %zu kept chunk(s) resident, %zu border settle(s) run",
+                              keeper->KeptCount(), settled);
+                }
+            }
+        });
+    }
+
+    void IntegratedServer::SetRedstonePlus(bool on) {
+        m_config.redstonePlus = on;
+        Game::RedstonePlus::SetEnabled(on);
+        BroadcastWorldRules();
+        Log::Info("[RedstonePlus] %s — networks re-evaluate as they next update", on ? "on" : "off");
+    }
+
+    void IntegratedServer::SetModDimensionEnabled(Game::DimensionId dimension, bool on) {
+        if (dimension == Game::DimensionId::TwilightForest) m_config.twilightForestEnabled = on;
+        else if (dimension == Game::DimensionId::Aether)    m_config.aetherEnabled = on;
+        else return;
+        Game::ModDimensions::SetEnabled(dimension, on);
+        Log::Info("[ModDimensions] %s %s — its portals %s", std::string(Game::DimensionName(dimension)).c_str(),
+                  on ? "on" : "off", on ? "work again" : "no longer send anyone in");
+    }
+
+    void IntegratedServer::SetSharedVitals(bool on) {
+        m_config.sharedVitals = on;
+        if (m_sessionManager) m_sessionManager->ResetSharedVitals();
+        Log::Info("[SharedVitals] %s — every player now %s", on ? "on" : "off",
+                  on ? "shares one health and hunger" : "keeps their own");
+    }
+
+    void IntegratedServer::SetVeinMineMaxBlocks(int count) {
+        m_config.veinMineMaxBlocks = std::clamp(count, 0, kMaxVeinMineMaxBlocks);
+        Log::Info("[VeinMine] limit is now %d extra block(s)", m_config.veinMineMaxBlocks);
+    }
+
+    void IntegratedServer::SetImmersivePortals(bool on) {
+        const bool was = m_config.immersivePortals;
+        m_config.immersivePortals = on;
+        Game::Portals::SetImmersiveNetherPortals(on);
+        BroadcastWorldRules();
+        Log::Info("[ImmersivePortals] nether portals are now %s", on ? "immersive" : "vanilla");
+        if (was && !on && m_immersivePortals) {
+            // Turning the rule off used to flip only the flag: the portals
+            // already standing stayed see-through and walk-through, so the
+            // rule looked dead. Every portal the rule governs goes now
+            // (removal is broadcast): nether portals, command portals and
+            // mirrors are PARKED in the world's data folder so `true` brings
+            // them back; gun surfaces are rebuilt from the gun pairs then.
+            // Each nether frame gets purple portal blocks FIRST, on both ends
+            // of every pair, so the frames keep working and vanilla's
+            // nearest-portal link (PortalForcer, the 8:1 scaling) lands on
+            // the same counterpart the immersive pair had. Hush and Aether
+            // portals are not the rule's: they are always vanilla blocks
+            // (Portals::FamilyIsImmersive) and nothing here touches them.
+            FillNetherFramesWithPortalBlocks();
+            m_immersivePortals->StashAll();
+            if (m_netherPortalGeneration) m_netherPortalGeneration->ClearPending(Game::PortalFamilyId::Nether);
+        } else if (!was && on && m_immersivePortals) {
+            m_immersivePortals->RestoreStashed();
+            // The surfaces are back; the purple blocks inside their frames
+            // would be inert AND drawn, so they go.
+            ClearPortalBlocksInImmersiveFrames();
+#if ENABLE_PORTAL_GUN
+            Game::Portal::ServerRegistry().RebuildImmersive();
+#endif
+        }
+        // level.dat carries the flag (meta.immersivePortals).
+        if (was != on) WriteLevelDat();
+    }
+
+    void IntegratedServer::BroadcastWorldRules() {
+        if (!m_sessionManager) return;
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            if (session && session->GetConnection()) session->GetConnection()->SendWorldRules();
+        }
+    }
+
+    // The frames of every immersive frame portal the rule governs (the
+    // nether's; hush and aether portals are always vanilla blocks), once each (a bi-way bi-faced cluster is four portal records
+    // over two frames).
+    namespace {
+        struct FrameKey {
+            Game::DimensionId dim; glm::ivec3 minCell;
+            bool operator==(const FrameKey& o) const { return dim == o.dim && minCell == o.minCell; }
+        };
+    }
+
+    void IntegratedServer::FillNetherFramesWithPortalBlocks() {
+        if (!m_immersivePortals) return;
+        std::vector<FrameKey> seen;
+        size_t filled = 0;
+        m_immersivePortals->ForEach([&](const Game::Immersive::Portal& p) {
+            const Game::PortalFamily* fam = Game::FamilyOfKind(p.kind);
+            if (!fam || !Game::Portals::FamilyFollowsImmersiveRule(fam->id)) return;
+            const auto frame = Game::Immersive::FrameFromPortal(p);
+            if (!frame || frame->area.empty()) return;
+            const FrameKey key{p.dimension, frame->minCell};
+            if (std::find(seen.begin(), seen.end(), key) != seen.end()) return;
+            seen.push_back(key);
+            ServerLevel* level = GetLevel(p.dimension);
+            Game::World* world = level ? level->World() : nullptr;
+            if (!world) return;
+            // Vanilla's own frame walk from an interior cell (the flint-and-
+            // steel path), so the result is exactly a lit vanilla portal of
+            // the family.
+            const Game::Axis preferred = frame->axis == Game::Axis::X ? Game::Axis::X : Game::Axis::Z;
+            // Already lit (blocks left from an earlier off period): nothing
+            // to do, and not a shape complaint.
+            bool alreadyLit = false;
+            for (const glm::ivec3& c : frame->area) {
+                if (world->GetBlock(c.x, c.y, c.z) == fam->portalBlock) { alreadyLit = true; break; }
+            }
+            if (alreadyLit) { ++filled; return; }
+            if (auto shape = Game::PortalShape::FindEmptyPortalShape(*world, frame->area.front(), preferred, *fam)) {
+                shape->CreatePortalBlocks(*world);
+                ++filled;
+            } else {
+                Log::Warning("[ImmersivePortals] %s frame at (%d,%d,%d) is not a vanilla-shaped frame; left dark",
+                             fam->tag, frame->minCell.x, frame->minCell.y, frame->minCell.z);
+            }
+        });
+        Log::Info("[ImmersivePortals] lit %zu frame(s) as vanilla portals", filled);
+    }
+
+    void IntegratedServer::ClearPortalBlocksInImmersiveFrames() {
+        if (!m_immersivePortals) return;
+        std::vector<FrameKey> seen;
+        size_t cleared = 0;
+        m_immersivePortals->ForEach([&](const Game::Immersive::Portal& p) {
+            const Game::PortalFamily* fam = Game::FamilyOfKind(p.kind);
+            if (!fam || !Game::Portals::FamilyFollowsImmersiveRule(fam->id)) return;
+            const auto frame = Game::Immersive::FrameFromPortal(p);
+            if (!frame) return;
+            const FrameKey key{p.dimension, frame->minCell};
+            if (std::find(seen.begin(), seen.end(), key) != seen.end()) return;
+            seen.push_back(key);
+            ServerLevel* level = GetLevel(p.dimension);
+            Game::World* world = level ? level->World() : nullptr;
+            if (!world) return;
+            for (const glm::ivec3& c : frame->area) {
+                if (world->GetBlock(c.x, c.y, c.z) != fam->portalBlock) continue;
+                world->SetBlock(c.x, c.y, c.z, Game::BlockID::Air, Game::World::UpdateFlags::All);
+                ++cleared;
+            }
+        });
+        if (cleared) Log::Info("[ImmersivePortals] cleared %zu vanilla portal block(s) from restored frames", cleared);
+    }
+
+    void IntegratedServer::ConvertVanillaFamilyPortals() {
+        if (!m_immersivePortals) return;
+        // Every record of a family that is vanilla now (Portals::
+        // FamilyIsImmersive: the Hush and the Aether, always). A pair is one
+        // cluster over two frames and goes as one, so BOTH frames are lit:
+        // a far frame left dark would make vanilla's nearest-portal search
+        // (PortalForcer) build a second portal beside it on the first
+        // crossing.
+        struct Target {
+            Game::DimensionId dimension;
+            Game::Immersive::FrameShape frame;
+            const Game::PortalFamily* family;
+        };
+        std::vector<Target> targets;
+        std::vector<Game::Immersive::PortalId> records;
+        std::vector<FrameKey> seen;
+        m_immersivePortals->ForEach([&](const Game::Immersive::Portal& p) {
+            const Game::PortalFamily* fam = Game::FamilyOfKind(p.kind);
+            if (!fam || Game::Portals::FamilyIsImmersive(fam->id)) return;
+            records.push_back(p.id);
+            const auto frame = Game::Immersive::FrameFromPortal(p);
+            if (!frame || frame->area.empty()) return;
+            const FrameKey key{p.dimension, frame->minCell};
+            if (std::find(seen.begin(), seen.end(), key) != seen.end()) return;
+            seen.push_back(key);
+            targets.push_back({p.dimension, *frame, fam});
+        });
+        if (records.empty()) return;
+
+        size_t lit = 0;
+        for (const Target& t : targets) {
+            ServerLevel* level = GetOrCreateLevel(t.dimension);
+            Game::World* world = level ? level->World() : nullptr;
+            Game::ChunkProvider* provider = world ? world->GetChunkProvider() : nullptr;
+            if (!provider) continue;
+            // Resident first — an unloaded chunk reads as air, and the shape
+            // walk would run straight out of the frame. Blocking, as the
+            // spawn search's probes are; this thread is the one that pumps
+            // generation.
+            for (int cx = (t.frame.minCell.x - 1) >> 4; cx <= (t.frame.maxCell.x + 1) >> 4; ++cx) {
+                for (int cz = (t.frame.minCell.z - 1) >> 4; cz <= (t.frame.maxCell.z + 1) >> 4; ++cz) {
+                    provider->GetChunk(Game::Math::ChunkPos(cx, cz));
+                }
+            }
+            bool alreadyLit = false;
+            for (const glm::ivec3& c : t.frame.area) {
+                if (world->GetBlock(c.x, c.y, c.z) == t.family->portalBlock) { alreadyLit = true; break; }
+            }
+            if (alreadyLit) { ++lit; continue; }
+            // Vanilla's own frame walk from an interior cell (the ignition
+            // path), so the result is exactly a lit vanilla portal.
+            const Game::Axis preferred = t.frame.axis == Game::Axis::X ? Game::Axis::X : Game::Axis::Z;
+            if (auto shape = Game::PortalShape::FindEmptyPortalShape(*world, t.frame.area.front(), preferred,
+                                                                     *t.family)) {
+                shape->CreatePortalBlocks(*world);
+                ++lit;
+            } else {
+                Log::Warning("[Portals] %s frame at (%d,%d,%d) in %s is not a vanilla-shaped frame; left dark",
+                             t.family->tag, t.frame.minCell.x, t.frame.minCell.y, t.frame.minCell.z,
+                             std::string(Game::DimensionName(t.dimension)).c_str());
+            }
+        }
+        size_t removed = 0;
+        for (Game::Immersive::PortalId id : records) {
+            if (m_immersivePortals->Get(id)) removed += m_immersivePortals->RemoveCluster(id);
+        }
+        Log::Info("[Portals] converted %zu hush/aether frame(s) to vanilla portals (%zu immersive record(s) removed)",
+                  lit, removed);
+    }
+
+    void IntegratedServer::SetPortalGunAllowed(bool on) {
+        const bool was = Game::Portals::PortalGunAllowed();
+        Game::Portals::SetPortalGunAllowed(on);
+        BroadcastWorldRules();
+#if ENABLE_PORTAL_GUN
+        if (was && !on) {
+            // Close every pair (fizzle burst + immersive surface removal are
+            // broadcast by ClearPair).
+            std::vector<uint64_t> guns;
+            for (const auto& [gunId, pair] : Game::Portal::ServerRegistry().All()) guns.push_back(gunId);
+            for (uint64_t gunId : guns) Game::Portal::ServerRegistry().ClearPair(gunId);
+            Log::Info("[PortalGun] disabled by gamerule — closed %zu portal pairs", guns.size());
+        }
+#endif
+        if (was != on) PersistPortalGunAllowed();
+    }
+
+    void IntegratedServer::PersistPortalGunAllowed() {
+        if (m_config.savePath.empty() || m_config.readOnlyWorld) return;
+        std::string reason;
+        auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason);
+        if (!root) return;
+        const std::string dir = root->Root().string();
+        Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(dir);
+        if (sidecar.portalGun == Game::Portals::PortalGunAllowed()) return;
+        sidecar.portalGun = Game::Portals::PortalGunAllowed();
+        if (!Game::Anvil::WriteWorldSidecar(dir, sidecar)) {
+            Log::Warning("[PortalGun] Could not save the portal_gun rule to %s", dir.c_str());
+        }
+    }
+
+    bool IntegratedServer::OnImmersiveFrameLit(Game::ILevelWrite& level, const glm::ivec3& seedPos,
+                                               Game::PortalFamilyId family) {
         IntegratedServer* server = g_integratedServer.get();
         if (!server || !server->m_netherPortalGeneration) return false;
         const Game::DimensionId dimension = level.GetDimension();
-        const auto shape = Game::Immersive::FrameShape::Find(level, firePos);
+        const auto shape = Game::Immersive::FrameShape::Find(level, seedPos, family);
         if (!shape) return false;
         return server->m_netherPortalGeneration->OnFrameLit(dimension, *shape);
     }
@@ -3873,6 +5236,13 @@ namespace Server {
         const glm::dvec3 newEye  = portal.TransformPoint(eyeBefore);
         const glm::dvec3 newFeet = newEye - glm::dvec3(0.0, eyeHeight * portalScale, 0.0);
         const Game::DimensionId dest = portal.IsMirror() ? here : portal.destDimension;
+        // MC ServerLevel.isAllowedToEnterPortal: the Nether is closed while
+        // allow_entering_nether_using_portals is off — the crossing is
+        // refused before anything about the player changes.
+        if (dest == Game::DimensionId::Nether && dest != here &&
+            !Game::Rules::GetBool(Game::Rules::Id::AllowEnteringNetherUsingPortals)) {
+            return false;
+        }
         player->setScale(static_cast<float>(player->getScale() * portalScale));
 
         // The mobs hunting this player follow them to the portal (and
@@ -3923,6 +5293,12 @@ namespace Server {
         }
         // A gun pair flashes when something goes through it.
         Game::Portal::ServerRegistry().OnImmersiveCrossing(portal.tag);
+        // The Hush's recall chime remembers the last hush gate crossed: the
+        // far-side arrival (server/items/HushItems), as PortalTravel records
+        // it for a vanilla-mode crossing.
+        if (portal.kind == Game::Immersive::PortalKind::HushPortal && dest != here) {
+            HushItems::RecordGateCrossing(*player, dest, newFeet, yaw);
+        }
 
         Log::Info("[ImmersivePortals] '%s' crossed #%u into %s at (%.1f, %.1f, %.1f)%s",
                   player->getName().c_str(), portal.id,
@@ -3943,6 +5319,19 @@ namespace Server {
             own.view      = ChunkTrackingView::Of(session.GetAnchorChunk(), session.GetViewDistance());
             own.source    = ChunkLoader::Source::Player;
             loaders.push_back(own);
+        }
+
+        // 1b. The simulation ring beyond the view. Block ticking reaches one
+        //     chunk further than entity ticking (ChunkLevel::BLOCK_TICKING),
+        //     so the loader is one wider than the simulation distance; the
+        //     chunks it adds are loaded and ticked but never sent. Nothing to
+        //     add when the view already covers it (MC's only case).
+        if (session.GetSimulationDistance() + 1 > session.GetViewDistance()) {
+            ChunkLoader sim;
+            sim.dimension = here;
+            sim.view      = ChunkTrackingView::Of(session.GetAnchorChunk(), session.GetSimulationDistance() + 1);
+            sim.source    = ChunkLoader::Source::Simulation;
+            loaders.push_back(sim);
         }
 
 #if ENABLE_IMMERSIVE_PORTALS
@@ -4023,6 +5412,7 @@ namespace Server {
                 // Same centre, same dimension: keep the larger — a set union
                 // does not care, and it keeps the ticket count down.
                 for (ChunkLoader& existing : loaders) {
+                    if (existing.IsSimulation()) continue;     // never sent: a portal loader must not fold into it
                     if (existing.dimension == dim && existing.view.center == center) {
                         if (radius > existing.view.viewDistance) {
                             existing.view = ChunkTrackingView::Of(center, radius);
@@ -4117,7 +5507,12 @@ namespace Server {
         using Game::Immersive::Portal;
         namespace PortalFlag = Game::Immersive::PortalFlag;
         const int  wrap  = m_config.worldWrapSize;
-        const bool stack = m_config.dimensionStack;
+        // The Hush stays out of the Overworld→Nether→End ring: it is a
+        // destination behind its own portal, not a floor of the stack.
+        const bool stack = m_config.dimensionStack
+                        && dimension != Game::DimensionId::Hush
+                        && dimension != Game::DimensionId::TwilightForest
+                        && dimension != Game::DimensionId::Aether;
         if (wrap <= 0 && !stack) return;
 
         const std::string dimName(Game::DimensionName(dimension));
@@ -4192,7 +5587,10 @@ namespace Server {
             switch (dimension) {
                 case Game::DimensionId::Overworld: below = Game::DimensionId::Nether;    break;
                 case Game::DimensionId::Nether:    below = Game::DimensionId::End;       break;
-                default:                           below = Game::DimensionId::Overworld; break;
+                case Game::DimensionId::End:       below = Game::DimensionId::Overworld; break;
+                case Game::DimensionId::Hush:
+                case Game::DimensionId::TwilightForest:
+                case Game::DimensionId::Aether:    return;   // excluded above; never reached
             }
             const std::string tag = "global:stack:" + dimName;
             if (!exists(tag)) {
@@ -4346,6 +5744,48 @@ namespace Server {
 #endif
     }
 
+    // redstone_plus: settle the redstone that crosses this chunk's borders now
+    // that it is resident. Neither vanilla nor this engine re-evaluates
+    // redstone on load, and normally nothing needs it — but a dust network
+    // that spans a chunk border can be evaluated while the far chunk is still
+    // streaming in (the evaluator stops at unloaded chunks), and without
+    // decay the far half then keeps its saved strength for good: measured
+    // 2026-09-11, the Snake clock's return row half on and half off at x =
+    // -368/-369, the oscillator latched after one step. Every component or
+    // wire on a border whose neighbour chunk is loaded gets vanilla's
+    // neighbour update, on both sides of the border, once. Redstone only:
+    // sand, water and everything else stay exactly as loaded.
+    void IntegratedServer::SettleRedstoneBorders(ServerLevel& level, Game::Math::ChunkPos cp) {
+        Game::World* world = level.World();
+        if (!world) return;
+        auto chunk = world->GetLoadedChunk(cp.x, cp.z);
+        if (!chunk) return;
+        const bool west  = world->IsChunkLoaded(cp.x - 1, cp.z), east  = world->IsChunkLoaded(cp.x + 1, cp.z);
+        const bool north = world->IsChunkLoaded(cp.x, cp.z - 1), south = world->IsChunkLoaded(cp.x, cp.z + 1);
+        if (!west && !east && !north && !south) return;
+        const int x0 = cp.x * 16, z0 = cp.z * 16;
+        const auto consider = [&](int x, int y, int z, int qx, int qy, int qz) {
+            const Game::BlockState s = world->GetBlockState(x, y, z);
+            const Game::BlockID id = s.Block();
+            if (id != Game::BlockID::RedstoneWire && !Game::IsRedstoneComponent(id)) return;
+            world->UpdateNeighborsAt(glm::ivec3{x, y, z}, Game::BlockID::Air);       // the cell across hears it
+            world->UpdateNeighborsAt(glm::ivec3{qx, qy, qz}, Game::BlockID::Air);    // ...and this cell re-evaluates
+        };
+        for (size_t si = 0; si < chunk->sections.size(); ++si) {
+            const auto& sec = chunk->sections[si];
+            if (!sec || sec->IsAllAir()) continue;
+            const int y0 = Game::World::MIN_Y + static_cast<int>(si) * 16;
+            for (int y = y0; y < y0 + 16; ++y) {
+                for (int i = 0; i < 16; ++i) {
+                    if (west)  consider(x0, y, z0 + i, x0 - 1, y, z0 + i);
+                    if (east)  consider(x0 + 15, y, z0 + i, x0 + 16, y, z0 + i);
+                    if (north) consider(x0 + i, y, z0, x0 + i, y, z0 - 1);
+                    if (south) consider(x0 + i, y, z0 + 15, x0 + i, y, z0 + 16);
+                }
+            }
+        }
+    }
+
     void IntegratedServer::ProcessAsyncChunkResults() {
         PROFILE_ZONE;
         // Only process if async chunk loading is enabled
@@ -4376,10 +5816,19 @@ namespace Server {
         // deadline still stops a burst from producing the 2,475 ms tick this
         // bound exists to prevent.
         //
-        // 8 x ~2.3 ms measured per result = ~18 ms worst case for the floor.
-        constexpr int kMinResultsPerTick = 8;
+        // ~2.3 ms measured per result on a real world (portal scan + entity
+        // file): 16 is ~37 ms worst case for the floor. Raised from 8 for the
+        // simulation ring beyond the view distance — 20k+ chunks that stream
+        // in at whatever this floor allows once the tick is busy (measured
+        // 2026-09-10: ~500 chunks/s at 8, a 128-chunk ring took two minutes).
+        constexpr int kMinResultsPerTick = 16;
         int resultsProcessed = 0;
         const bool haveDeadline = m_tickDeadline.time_since_epoch().count() != 0;
+
+        // Chunks registered with their level's light engine this call: their
+        // borders are reconciled with the neighbours below, before any of them
+        // is sent (the packet then carries final light).
+        std::vector<std::pair<ServerLevel*, Game::Math::ChunkPos>> newlyLit;
 
         Network::ChunkGenResult result;
         while (resultQueue.try_pop(result)) {
@@ -4406,11 +5855,11 @@ namespace Server {
                     }
                 }
 
-                // Record any nether portals this chunk holds. This is the only
-                // moment they can be found cheaply: the scan rejects almost
-                // every section on a palette-membership test, it runs once per
-                // chunk per session, and after this the chunk may unload and
-                // never be walked again.
+                // Record any portal blocks this chunk holds, one index per
+                // family. This is the only moment they can be found cheaply:
+                // the scan rejects almost every section on a palette-
+                // membership test, it runs once per chunk per session, and
+                // after this the chunk may unload and never be walked again.
                 //
                 // It is also what makes the RETURN trip work. A portal you
                 // built is remembered even after its chunk unloads behind you,
@@ -4418,7 +5867,42 @@ namespace Server {
                 // a few blocks away — see NetherPortalIndex.hpp.
                 {
                     PROFILE_ZONE_N("ChunkResult.PortalScan");
-                    level->Portals().NoteChunkLoaded(result.position, *result.chunk);
+                    for (const Game::PortalFamilyId family : Game::kAllPortalFamilies) {
+                        level->Portals(family).NoteChunkLoaded(result.position, *result.chunk);
+                    }
+                    // Villages' points of interest (beds, job sites, bells):
+                    // MC's checkConsistencyWithBlocks, once per chunk.
+                    level->Poi().NoteChunkLoaded(result.position, *result.chunk);
+                    // The Twilight Forest pools, which are not a family.
+                    TwilightPortalIndex(level->Dimension())
+                        .NoteChunkLoaded(result.position, *result.chunk);
+                    // Hush lighthouse lamps not yet told where the nearest
+                    // Aurelith is: queued for LighthouseGuide::Tick.
+                    LighthouseGuide::NoteChunkLoaded(*level, result.position, *result.chunk);
+                    // Aurelith (AurelithCities.hpp): a Heart registers its
+                    // city; an awakened city's dim lights come on as its
+                    // chunks arrive; an awakening's wave takes them in.
+                    if (auto* cities = level->Aurelith()) cities->OnChunkLoaded(result.position, *result.chunk);
+#if ENABLE_IMMERSIVE_PORTALS
+                    // Immersive portals: clear vanilla blocks out of recorded
+                    // frames, adopt vanilla portals that lost their records.
+                    if (m_netherPortalGeneration) m_netherPortalGeneration->OnChunkLoaded(*level, result.position);
+#endif
+                }
+                if (Game::RedstonePlus::Enabled()) {
+                    if (level->redstoneWarmup) level->redstoneSettleLater.push_back(result.position);
+                    else SettleRedstoneBorders(*level, result.position);
+                }
+
+                // The level light engine takes the chunk (its own light came
+                // from the worker, ChunkProvider::CompleteChunkLoad); the
+                // border pass runs after this loop.
+                if (Game::World* world = level->World()) {
+                    if (auto* light = world->Light()) {
+                        PROFILE_ZONE_N("ChunkResult.LightRegister");
+                        light->AddChunk(result.chunk);
+                        newlyLit.emplace_back(level, result.position);
+                    }
                 }
 
                 // The chunk's entities come back with it. Before the chunk is
@@ -4468,6 +5952,8 @@ namespace Server {
 
             // Remove from pending list
             level->pendingChunkLoads.erase(result.position);
+            level->generationDelivered.erase(result.position);   // its conversion has landed
+            level->generationWaiting.erase(result.position);
             resultsProcessed++;
 
             // MC haveTime(): stop once this tick's deadline has passed and let
@@ -4479,8 +5965,70 @@ namespace Server {
             }
         }
 
+        // Border reconciliation for the chunks just registered: one light
+        // run per level. The new chunks have not been sent yet, so their own
+        // affected sections need no update packet (their ChunkDataS2C, built
+        // later this tick, carries the result) — only the neighbours' do, and
+        // those go out with the next FlushLightUpdates. A new chunk whose
+        // light the pass moved still gets a new stamp and a save mark.
+        if (!newlyLit.empty()) {
+            PROFILE_ZONE_N("ChunkResult.LightBorders");
+            std::unordered_set<ServerLevel*> levelsRun;
+            for (const auto& [lvl, pos] : newlyLit) {
+                if (!levelsRun.insert(lvl).second) continue;
+                if (Game::World* world = lvl->World()) {
+                    if (auto* light = world->Light()) light->RunUpdates();
+                }
+            }
+            for (const auto& [lvl, pos] : newlyLit) {
+                Game::World* world = lvl->World();
+                auto* light = world ? world->Light() : nullptr;
+                if (!light) continue;
+                if (light->DropAffectedSectionsOf(pos)) {
+                    if (auto chunk = world->GetLoadedChunk(pos.x, pos.z)) chunk->BumpModStamp();
+                    if (auto* provider = world->GetChunkProvider()) provider->MarkChunkForSave(pos);
+                }
+            }
+        }
+
+        m_stress.AddChunkResults(resultsProcessed);
         if (resultsProcessed > 0) {
             Log::Debug("Processed %d async chunk results this tick", resultsProcessed);
+        }
+    }
+
+    void IntegratedServer::FlushLightUpdates(ServerLevel& level) {
+        Game::World* world = level.World();
+        Game::Lighting::LevelLightManager* light = world ? world->Light() : nullptr;
+        if (!light) return;
+        {
+            PROFILE_ZONE_N("Light.Tick");
+            light->RunUpdates();
+        }
+        const std::vector<int64_t> affected = light->TakeAffectedSections();
+        if (affected.empty()) return;
+        PROFILE_ZONE_N("Light.Broadcast");
+
+        // Per chunk: which light sections to send (MC's per-layer BitSets,
+        // reduced to one mask — both layers ride for each section).
+        std::unordered_map<Game::Math::ChunkPos, uint32_t, Game::Math::ChunkPosHash> masks;
+        for (int64_t key : affected) {
+            const int li = Game::Lighting::SectionKey::Y(key) - Game::Lighting::kMinLightSectionY;
+            if (li < 0 || li >= Game::Lighting::kLightSectionCount) continue;
+            masks[Game::Math::ChunkPos{Game::Lighting::SectionKey::X(key), Game::Lighting::SectionKey::Z(key)}] |= 1u << li;
+        }
+        const Game::DimensionId dimension = level.Dimension();
+        const bool hasSky = Game::DimensionHasSkyLight(dimension);
+        auto* provider = world->GetChunkProvider();
+        for (const auto& [pos, mask] : masks) {
+            auto chunk = world->GetLoadedChunk(pos.x, pos.z);
+            if (!chunk) continue;
+            // Light is chunk content: a revisit must not revive a client's
+            // retained copy from before this change, and the save must carry it.
+            chunk->BumpModStamp();
+            if (provider) provider->MarkChunkForSave(pos);
+            const auto data = Network::Serialization::SerializeLightUpdate(pos.x, pos.z, chunk->light, mask, hasSky);
+            SendToChunkWatchersAt(dimension, pos, Network::PacketId::LightUpdateS2C, data);
         }
     }
 
@@ -4492,60 +6040,304 @@ namespace Server {
         return level ? level->TerrainGenerator() : nullptr;
     }
 
+    namespace {
+        // Where each level's queued chunk work should be nearest to: every
+        // session's own view centre in the level it stands in, plus every
+        // portal far side, filed under the dimension that far side is in.
+        // The simulation ring shares the player's centre, so it adds nothing.
+        Threading::ChunkLoadAnchors CollectChunkLoadAnchors(
+                const std::vector<std::shared_ptr<PlayerSession>>& sessions) {
+            Threading::ChunkLoadAnchors anchors;
+            for (const auto& session : sessions) {
+                if (!session) continue;
+                const Game::DimensionId here = Game::DimensionFromRaw(session->GetDimensionId());
+                anchors[Game::DimensionSlot(here)].push_back(session->GetAnchorChunk());
+                for (const ChunkLoader& loader : session->Loaders()) {
+                    if (loader.source != ChunkLoader::Source::Player && !loader.IsSimulation()) {
+                        anchors[Game::DimensionSlot(loader.dimension)].push_back(loader.Center());
+                    }
+                }
+            }
+            return anchors;
+        }
+    } // namespace
+
     void IntegratedServer::ServiceGenerationQueues(ServerLevel& level, Game::MyTerrainGenerator& gen) {
         PROFILE_ZONE_N("ServiceGenerationQueues");
         const Game::DimensionId dimension = level.Dimension();
 
-        // Requests are held here and handed to the library a bounded number
-        // at a time, nearest to the player first. Measured 2026-08-30: giving
-        // the library all ~3,700 chunks of a view at once was SLOWER than the
-        // old 12-blocking-workers design (2,785 vs 3,144 chunks in 30 s) —
-        // the port's dispatcher advances one task hop at a time on a serial
-        // lane, so thousands of half-started pyramids just dilute it, while a
-        // couple of dozen nearest pyramids share a compact frontier. The view
-        // ticket still gives the library its level gradient for the ring.
+        // MC DistanceManager.ticketDispatcher = ThrottlingChunkTaskDispatcher(
+        // ..., 4): player loading tickets are added nearest-first, and at most
+        // FOUR chunk positions per level are "in execution" — ticketed and not
+        // yet ENTITY_TICKING. Each request's ticket is at the player ticket
+        // level (31), so its whole 5x5 generates together; a slot frees when
+        // that 5x5 is FULL (the library's release, TakeReleases) or the
+        // request is dropped. A chunk already generated — most of a view once
+        // its first clusters are done — passes through a slot at once.
+        // This replaced 24 requests at level 33, each an isolated FULL chunk
+        // with a pyramid of its own: 50 players flying apart generated ~14
+        // chunks a second (stress test 2026-09-24). Giving the library every
+        // chunk of a view at once was measured slower still (2026-08-30).
         static const size_t kMaxInFlight = [] {   // OBEY_INFLIGHT env overrides for tuning runs
-            const char* e = std::getenv("OBEY_INFLIGHT"); return e ? (size_t)std::atoi(e) : (size_t)24; }();
+            const char* e = std::getenv("OBEY_INFLIGHT"); return e ? (size_t)std::atoi(e) : (size_t)4; }();
+        const auto now = std::chrono::steady_clock::now();
+
+        // Nothing to do: no request or completion waiting, nothing the
+        // backlog could issue, and the stall watchdog not due. This is called
+        // on every pump of the pipeline — ~83,000 times a second under load
+        // (profile, 2026-09-23: 17% of the server thread) — and almost every
+        // call used to walk the full service path for nothing.
+        const bool canIssue = !level.generationBacklog.empty() && level.generationInFlight < kMaxInFlight;
+        const bool stallCheckDue = level.generationInFlight > 0 &&
+                                   now - level.generationLastStallCheck >= std::chrono::seconds(1);
+        if (!canIssue && !stallCheckDue && !gen.HasQueuedWork()) return;
+        if (stallCheckDue) level.generationLastStallCheck = now;
         {
             std::vector<Game::Math::ChunkPos> fresh;
             gen.TakeRequests(fresh);
-            level.generationBacklog.insert(level.generationBacklog.end(), fresh.begin(), fresh.end());
+            level.generationWaiting.insert(fresh.begin(), fresh.end());
+            if (!fresh.empty()) {
+                // At the FRONT (the back is served first): until this tick's
+                // or the next tick's sort places them, new requests queue
+                // behind the ones already ordered nearest-first.
+                level.generationBacklog.insert(level.generationBacklog.begin(), fresh.begin(), fresh.end());
+                level.generationBacklogSorted = false;
+            }
         }
+
+        // Stall watchdog. A request the library has held for kStuckAfter with
+        // nothing at all completing meanwhile is not slow, it is lost — a
+        // task the port once dropped between scheduling and running kept its
+        // request forever (fixed: ChunkMap::m_pendingTasksMutex); the
+        // watchdog stays for whatever else can strand one. Give the request up (unpin, free its
+        // in-flight slot, put it back on the backlog) so the pipeline keeps
+        // moving, and say so, with the library's own state, so a log tells
+        // the two apart. Before this, 24 lost requests froze a 50k-chunk
+        // simulation ring for good (2026-09-10).
+        constexpr auto kStuckAfter = std::chrono::seconds(8);
+        if (stallCheckDue && !level.generationIssued.empty() &&
+            now - level.generationLastCompletion > kStuckAfter) {
+            std::vector<Game::Math::ChunkPos> stuck;
+            for (const auto& [pos, issued] : level.generationIssued) {
+                if (now - issued > kStuckAfter) stuck.push_back(pos);
+            }
+            if (!stuck.empty()) {
+                const auto diag = gen.GetUnloadDiag();
+                Log::Warning("[Generation] %zu request(s) held by the terrain library for >%llds with no "
+                             "completion — reissuing (in flight %zu, backlog %zu, library holders %zu, "
+                             "refHeld %zu, pinned %zu, aboveMax %zu, pendingUnload %zu)",
+                             stuck.size(), static_cast<long long>(kStuckAfter.count()),
+                             level.generationInFlight, level.generationBacklog.size(), gen.LibraryChunkCount(),
+                             diag.refHeld, diag.pinned, diag.aboveMax, diag.pendingUnload);
+                constexpr auto kQuarantine = std::chrono::seconds(120);
+                for (const auto& pos : stuck) {
+                    gen.UnpinConversion(pos);
+                    gen.ReleaseGenerationRequest(pos);   // re-issued below with a fresh ticket
+                    level.generationIssued.erase(pos);
+                    if (level.generationInFlight > 0) --level.generationInFlight;
+                    ++level.genStuck;
+                    level.generationQuarantine[pos] = now + kQuarantine;
+                    if (level.pendingChunkLoads.count(pos)) {
+                        level.generationBacklog.push_back(pos);
+                        level.generationBacklogSorted = false;
+                    }
+                }
+                level.generationLastCompletion = now;    // one warning per stall, not one per tick
+            }
+        }
+
         if (!level.generationBacklog.empty() && level.generationInFlight < kMaxInFlight) {
-            Game::Math::ChunkPos anchor{0, 0};
-            if (auto session = GetPlayerSession()) anchor = session->GetAnchorChunk();
-            // Drop entries nobody wants any more, then take the nearest.
+            // Nearest to every player position IN THIS LEVEL — each session's
+            // own view centre and any portal far side that lands here. This
+            // used to be GetPlayerSession()'s anchor — session id 1 — whatever
+            // level was being served. Player ids are connection ids from a
+            // process-wide counter (ServerConnection::s_nextConnectionId), so
+            // after a second world load in one run, or any connection ahead
+            // of the local one, there was no session 1 and the anchor fell
+            // back to chunk (0,0): after a /tp, a /dim or a portal the new
+            // area generated in order of distance from the world ORIGIN — a
+            // sweep across the view by chunk coordinates. Spawn, being near
+            // (0,0), hid it. With a session 1, a portal far side (and every
+            // other player's area) swept from wherever that player stood, in
+            // the wrong level's coordinates.
+            std::vector<Game::Math::ChunkPos> anchors;
+            if (m_sessionManager) {
+                anchors = std::move(CollectChunkLoadAnchors(m_sessionManager->GetAllSessions())
+                                        [Game::DimensionSlot(dimension)]);
+            }
             auto& bl = level.generationBacklog;
-            bl.erase(std::remove_if(bl.begin(), bl.end(), [&](const Game::Math::ChunkPos& p) {
-                return level.pendingChunkLoads.count(p) == 0; }), bl.end());
-            const size_t want = std::min(bl.size(), kMaxInFlight - level.generationInFlight);
-            std::partial_sort(bl.begin(), bl.begin() + want, bl.end(),
-                [&](const Game::Math::ChunkPos& a, const Game::Math::ChunkPos& b) {
-                    const long da = (long)(a.x - anchor.x) * (a.x - anchor.x) + (long)(a.z - anchor.z) * (a.z - anchor.z);
-                    const long db = (long)(b.x - anchor.x) * (b.x - anchor.x) + (long)(b.z - anchor.z) * (b.z - anchor.z);
-                    return da < db;
-                });
-            for (size_t i = 0; i < want; ++i) {
-                const auto pos = bl[i];
+            // Nearest-first, consumed from the BACK: sort descending by
+            // distance once, and again only when entries arrive or an
+            // anchor has moved a few chunks. Entries nobody wants any more
+            // (their load was cancelled) are skipped as they surface.
+            bool moved = anchors.size() != level.generationBacklogAnchors.size();
+            for (size_t i = 0; !moved && i < anchors.size(); ++i) {
+                moved = std::max(std::abs(anchors[i].x - level.generationBacklogAnchors[i].x),
+                                 std::abs(anchors[i].z - level.generationBacklogAnchors[i].z)) >= 4;
+            }
+            // At most once a tick: requests arrive all the time, and this ran
+            // again on every PumpChunkPipeline call that saw one (several per
+            // tick) — over the whole backlog, cancelled entries included.
+            // Fresh entries wait unsorted at the front of the vector (served
+            // last) until the next tick's sort.
+            const bool sortDue = (!level.generationBacklogSorted || moved) &&
+                                 level.generationBacklogSortTick != m_currentServerTick;
+            if (sortDue) {
+                // Cancelled requests leave the backlog here, physically —
+                // skipping them only as they reached the front meant the dead
+                // ones, which are far from everyone, sorted to the back and
+                // were never reached: the backlog only ever grew.
+                bl.erase(std::remove_if(bl.begin(), bl.end(), [&](const Game::Math::ChunkPos& p) {
+                             return level.pendingChunkLoads.count(p) == 0;
+                         }), bl.end());
+                level.generationBacklogSortTick = m_currentServerTick;
+                // One key per entry, then one sort: O(n·anchors + n log n).
+                std::vector<std::pair<int64_t, Game::Math::ChunkPos>> keyed;
+                keyed.reserve(bl.size());
+                for (const auto& p : bl) {
+                    int64_t best = anchors.empty() ? 0 : std::numeric_limits<int64_t>::max();
+                    for (const auto& a : anchors) {
+                        const int64_t dx = p.x - a.x, dz = p.z - a.z;
+                        best = std::min(best, dx * dx + dz * dz);
+                    }
+                    keyed.emplace_back(best, p);
+                }
+                std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                for (size_t i = 0; i < keyed.size(); ++i) bl[i] = keyed[i].second;
+                level.generationBacklogSorted = true;
+                level.generationBacklogAnchors = std::move(anchors);
+            }
+            std::vector<Game::Math::ChunkPos> held;                       // quarantined: skip, keep
+            while (!bl.empty() && level.generationInFlight < kMaxInFlight) {
+                const auto pos = bl.back();
+                bl.pop_back();
+                if (level.pendingChunkLoads.count(pos) == 0) {             // cancelled meanwhile
+                    level.generationDelivered.erase(pos);
+                    continue;
+                }
+                if (level.generationDelivered.erase(pos)) continue;        // already on its way (ready)
+                auto q = level.generationQuarantine.find(pos);
+                if (q != level.generationQuarantine.end()) {
+                    if (now < q->second) { held.push_back(pos); continue; }
+                    level.generationQuarantine.erase(q);
+                }
                 if (gen.RequestChunkGeneration(pos)) {
                     ++level.generationInFlight;
+                    level.generationIssued[pos] = now;
                 } else {
+                    ++level.genRefused;
                     level.pendingChunkLoads.erase(pos);
                     level.failedChunkLoads.insert(pos);
                 }
             }
-            bl.erase(bl.begin(), bl.begin() + want);
+            // Quarantined entries go back under everything else (the back is
+            // the front of the queue), so they surface again only once the
+            // rest has been handed out.
+            bl.insert(bl.begin(), held.begin(), held.end());
+        }
+
+        // Throttle slots let go (MC ticketsToRelease): the request's 5x5 is
+        // FULL, or its ticket went. Only a request still on the books frees
+        // one — a request the watchdog already gave up on must not free a
+        // second.
+        {
+            std::vector<Game::Math::ChunkPos> released;
+            gen.TakeReleases(released);
+            if (!released.empty()) level.generationLastCompletion = now;
+            for (const auto& pos : released) {
+                if (level.generationIssued.erase(pos) && level.generationInFlight > 0) --level.generationInFlight;
+            }
+        }
+
+        Game::World* world = level.World();
+        Game::ChunkProvider* provider = world ? world->GetChunkProvider() : nullptr;
+        Threading::ServerWorkerPool* pool = Threading::g_serverWorkerPool.get();
+        // Conversion (~0.5 ms) on a worker, then into the game's cache and
+        // the ordinary ChunkGenResult queue. The caller's pin keeps
+        // processUnloads off the holder until `unpin` runs.
+        const auto convert = [&](Game::Math::ChunkPos pos, minecraft::world::IChunk* lib,
+                                 std::function<void()> unpin) {
+            Game::MyTerrainGenerator* genp = &gen;
+            pool->SubmitWorldIOJob([genp, provider, pool, dimension, pos, lib, unpin]() {
+                std::shared_ptr<Game::Chunk> chunk = genp->ConvertCompletedChunk(lib, pos);
+                if (chunk) chunk = provider->StoreChunkInCache(chunk);
+                // The game owns it now (StoreChunkInCache marks it for saving,
+                // and every later load reads that save first): the library's
+                // copy of its blocks may go. Before the unpin, so the release
+                // can never see this holder unpinned yet not handed off.
+                if (chunk) genp->NoteHandedOff(pos);
+                unpin();
+                pool->SendChunkGenResult(dimension, pos, chunk, chunk != nullptr,
+                                         chunk ? "" : "conversion failed");
+            }, /*priority=*/1);
+        };
+
+        // MC ChunkMap.onChunkReadyToSend: a chunk someone is waiting for is
+        // theirs as soon as its 3x3 is FULL, whichever request's ticket got it
+        // there — the throttle paces tickets, never delivery. Without this a
+        // request's 5x5 turned into one chunk for the game; the other 24 sat
+        // FULL until their own requests came round, by which time a moving
+        // player had often left them behind.
+        {
+            std::vector<Game::MyTerrainGenerator::Completion> ready;
+            gen.TakeReady(ready);
+            static const bool kNoReadyDelivery = std::getenv("OBEY_NO_READY_DELIVERY") != nullptr;   // A/B kill switch
+            for (const auto& r : ready) {
+                if (kNoReadyDelivery) { gen.UnpinReady(r.position); continue; }
+                // Waiting for GENERATION (the disk had nothing) — never a chunk
+                // being read from the game's own save, whatever the library
+                // holds for it.
+                const bool wanted = level.pendingChunkLoads.count(r.position) != 0 &&
+                                    level.generationWaiting.count(r.position) != 0 &&
+                                    level.generationIssued.count(r.position) == 0 &&
+                                    level.generationDelivered.count(r.position) == 0;
+                if (!wanted || !r.chunk || !provider || !pool) {
+                    gen.UnpinReady(r.position);
+                    continue;
+                }
+                level.generationDelivered.insert(r.position);
+                ++level.genDeliveredReady;
+                Game::MyTerrainGenerator* genp = &gen;
+                const Game::Math::ChunkPos pos = r.position;
+                convert(pos, r.chunk, [genp, pos]() { genp->UnpinReady(pos); });
+            }
+            // Entries whose load is over leave (they also leave when the load
+            // result lands or the load is cancelled); this catches the rest.
+            for (auto* set : {&level.generationDelivered, &level.generationWaiting}) {
+                if (set->size() <= 4096 || set->size() <= 2 * level.pendingChunkLoads.size()) continue;
+                for (auto it = set->begin(); it != set->end();) {
+                    it = level.pendingChunkLoads.count(*it) ? std::next(it) : set->erase(it);
+                }
+            }
         }
 
         std::vector<Game::MyTerrainGenerator::Completion> done;
         gen.TakeCompletions(done);
         if (done.empty()) return;
-        level.generationInFlight = done.size() > level.generationInFlight ? 0 : level.generationInFlight - done.size();
-        Game::World* world = level.World();
-        Game::ChunkProvider* provider = world ? world->GetChunkProvider() : nullptr;
-        Threading::ServerWorkerPool* pool = Threading::g_serverWorkerPool.get();
+        level.genCompleted += done.size();
+        level.generationLastCompletion = now;
         for (const auto& c : done) {
-            if (level.pendingChunkLoads.count(c.position) == 0) {   // nobody wants it any more
+            if (!c.chunk) ++level.genCompletedEmpty;
+            // A failed or unwanted request lets go of its ticket now. A good
+            // result keeps it while the chunk is in a player's view — MC's
+            // PLAYER_LOADING ticket — and loses it when the chunk leaves every
+            // view (CancelLoadIfUnwanted; MyTerrainGenerator::
+            // SweepRequestTickets catches the rest). Releasing it here
+            // freed each request's generation neighbourhood the moment it
+            // finished, only for the next request next door to regenerate
+            // most of it: ~9k holders a second freed and rebuilt, generation
+            // down from ~430 to ~250 chunks a second (2026-09-23).
+            if (!c.chunk || level.pendingChunkLoads.count(c.position) == 0) {
+                gen.ReleaseGenerationRequest(c.position);
+            }
+            // The chunk being FULL does not free its throttle slot; its 5x5
+            // being FULL does (the release above).
+        }
+        for (const auto& c : done) {
+            // Nobody wants it any more — or it was already taken when the
+            // library announced it ready.
+            if (level.pendingChunkLoads.count(c.position) == 0 ||
+                level.generationDelivered.count(c.position) != 0) {
                 gen.UnpinConversion(c.position);
                 continue;
             }
@@ -4554,18 +6346,12 @@ namespace Server {
                 if (pool) pool->SendChunkGenResult(dimension, c.position, nullptr, false, "generation failed");
                 continue;
             }
-            // Conversion (~0.5 ms) on a worker. The pin taken at request time
-            // keeps processUnloads off this holder until the job unpins.
+            // The pin taken when the request attached keeps processUnloads
+            // off this holder until the job unpins.
             Game::MyTerrainGenerator* genp = &gen;
             const Game::Math::ChunkPos pos = c.position;
-            minecraft::world::IChunk* lib = c.chunk;
-            pool->SubmitWorldIOJob([genp, provider, pool, dimension, pos, lib]() {
-                std::shared_ptr<Game::Chunk> chunk = genp->ConvertCompletedChunk(lib, pos);
-                if (chunk) chunk = provider->StoreChunkInCache(chunk);
-                genp->UnpinConversion(pos);
-                pool->SendChunkGenResult(dimension, pos, chunk, chunk != nullptr,
-                                         chunk ? "" : "conversion failed");
-            }, /*priority=*/1);
+            level.generationDelivered.insert(pos);
+            convert(pos, c.chunk, [genp, pos]() { genp->UnpinConversion(pos); });
         }
     }
 
@@ -4618,34 +6404,98 @@ namespace Server {
         // waitForTasks(), generalised to N queues. Any generator doing work
         // resets it, which is what keeps a busy overworld from being abandoned
         // because the End had nothing queued.
+        //
+        // FLOOR, then deadline — the same shape as ProcessAsyncChunkResults.
+        // At a high tick rate (/tick rate 400) the per-tick budget is a couple
+        // of milliseconds and the tick itself uses it, so a pure deadline pumped
+        // nothing at all and every generation request the library held stayed
+        // held (measured 2026-09-10: a 50k-chunk simulation ring froze at 24
+        // in flight). A few dozen task hops per tick is bounded work and keeps
+        // the pipeline alive whatever the rate.
+        constexpr size_t kMinPumpsPerTick = 64;
         size_t idle = 0;
         size_t next = 0;
-        while (idle < count && std::chrono::steady_clock::now() < deadline) {
+        size_t pumps = 0;
+        while (idle < count && (pumps < kMinPumpsPerTick || std::chrono::steady_clock::now() < deadline)) {
             if (generators[next]->PumpOneTask()) {
                 idle = 0;
             } else {
                 ++idle;
             }
+            ++pumps;
             next = (next + 1) % count;
         }
     }
 
+    void IntegratedServer::CancelLoadIfUnwanted(Game::DimensionId dim, Game::Math::ChunkPos pos,
+                                                const PlayerSession* excluding,
+                                                const std::vector<std::shared_ptr<PlayerSession>>& sessions) {
+        ServerLevel* L = GetLevel(dim);
+        if (!L) return;
+        if (L->Keeper() && L->Keeper()->Kept(pos)) return;
+        for (const auto& other : sessions) {
+            if (other && other.get() != excluding && other->KeepsLoaded(dim, pos)) return;
+        }
+        // The chunk has left every player's view: its generation ticket goes
+        // NOW, as MC's PLAYER_LOADING ticket does the moment the chunk is out
+        // of every player's range (DistanceManager.PlayerTicketTracker
+        // .onLevelChange -> removeTicket). The library's holders around it
+        // then unload once nothing else's ticket reaches them. Generating
+        // right now: that cancels the library's work on it, as MC cancels a
+        // chunk whose ticket goes (the failed completion still comes back and
+        // frees the in-flight slot). Already generated: the game keeps its
+        // chunk under MC's own rule (UnloadUnwatchedChunks); the ticket used
+        // to be held for as long as the game kept the chunk, which with the
+        // old two-minute residency meant a flying player's whole trail of
+        // library chunks. Idempotent for a chunk that holds no ticket.
+        if (auto* gen = L->TerrainGenerator()) gen->ReleaseGenerationRequest(pos);
+
+        // A load still in flight for a chunk nobody watches any more is pure
+        // waste — and after a far teleport that is most of the queue:
+        // measured 2026-08-29, ~1,500 chunks of the OLD area kept generating
+        // for 30 s after the player left. MC has no equivalent because its
+        // tickets ARE the request: drop the ticket and the chunk holder's
+        // future is cancelled.
+        auto pending = L->pendingChunkLoads.find(pos);
+        if (pending == L->pendingChunkLoads.end()) return;
+        L->pendingChunkLoads.erase(pending);
+        L->generationWaiting.erase(pos);
+        L->generationDelivered.erase(pos);
+        if (Threading::g_serverWorkerPool) {
+            Threading::g_serverWorkerPool->CancelChunkJobs(dim, pos);
+        }
+        ++m_abandonedLoadsCancelled;
+    }
+
+    void IntegratedServer::QueueAbandonedChunks(std::vector<DimChunkKey> keys) {
+        if (keys.empty()) return;
+        std::lock_guard<std::mutex> lock(m_abandonedMutex);
+        if (m_abandonedChunks.empty()) {
+            m_abandonedChunks = std::move(keys);
+        } else {
+            m_abandonedChunks.insert(m_abandonedChunks.end(), keys.begin(), keys.end());
+        }
+    }
+
     void IntegratedServer::ProcessWatchSetChanges() {
+        // /control: a controller's anchor follows the controlled player;
+        // pinned before the loaders below are computed from it.
+        if (m_remoteControl) m_remoteControl->Tick();
         PROFILE_ZONE;
         if (!m_sessionManager) return;
 
-        // Pump the terrain generator's async pipeline (like Minecraft's
-        // runDistanceManagerUpdates). Kept here as well as in the loop's idle
-        // window because the watch-set scan below enqueues NEW requests, and
-        // draining them right away starts generation this tick rather than next.
-        //
-        // Budgeted at one tick, which is MC's own overrun allowance for
-        // main-thread work (MinecraftServer:762 —
-        // `delayedTasksMaxNextTickTimeNanos = max(now + thisTickNanos,
-        // nextTickTimeNanos)`). Worst case this tick runs long; it cannot run
-        // unbounded, and the chunk send below still happens this tick.
-        PumpChunkPipeline(std::chrono::steady_clock::now() +
-                          std::chrono::nanoseconds(m_tickRateManager.nanosecondsPerTick()));
+        // Hand the generators the requests the workers have queued and take
+        // their completions — tickets in, results out, no generation work.
+        // MC's tick does the same share of chunk work: ServerChunkCache.tick
+        // runs ONE distance-manager pass (here TickLibrary, in the
+        // maintenance phase, which also attaches these requests), and the
+        // pipeline itself — MainThreadExecutor.pollTask — runs only in the
+        // time between ticks (the loop's pump window, PumpChunkPipeline).
+        // This used to pump here too, for up to a whole tick on top of that
+        // window, so the tick's own work waited behind generation callbacks.
+        ForEachLevel([this](ServerLevel& level) {
+            if (auto* gen = level.TerrainGenerator()) ServiceGenerationQueues(level, *gen);
+        });
 
         // Re-request anything whose load came back failed. Normally a no-op.
         // Per level, because the failure and the retry both have to name the
@@ -4654,6 +6504,7 @@ namespace Server {
             if (level.failedChunkLoads.empty()) return;
             auto failed = std::move(level.failedChunkLoads);
             level.failedChunkLoads.clear();
+            level.genRetried += failed.size();
             for (const auto& pos : failed) {
                 RequestChunkLoad(level.Dimension(), pos, 0);
             }
@@ -4663,19 +6514,11 @@ namespace Server {
         // re-evaluates its queue level per poll for the same reason: a request
         // burst ordered by where the player stood when it was issued is wrong
         // by the time the workers get to the far half of it.
-        {
-            std::vector<Game::Math::ChunkPos> anchors;
-            for (const auto& session : m_sessionManager->GetAllSessions()) {
-                if (!session) continue;
-                anchors.push_back(session->GetAnchorChunk());
-                // Portal far sides are anchors too — their chunks are wanted
-                // as urgently as the ones around the player.
-                for (const ChunkLoader& loader : session->Loaders()) {
-                    if (loader.source != ChunkLoader::Source::Player) anchors.push_back(loader.Center());
-                }
-            }
-            Threading::SetServerChunkLoadAnchors(std::move(anchors));
-        }
+        //
+        // Per dimension: a portal far side's centre is in the far level's
+        // coordinates, and measuring one level's chunks against another's
+        // positions is what turned nearest-first into a sweep across the map.
+        Threading::SetServerChunkLoadAnchors(CollectChunkLoadAnchors(m_sessionManager->GetAllSessions()));
 
         // Update every player's tracking view and act on the difference. This
         // is MC ChunkMap.move -> updateChunkTracking -> applyChunkTrackingView:
@@ -4690,6 +6533,20 @@ namespace Server {
         // comparison. That replaced a per-tick scan of every pending chunk
         // (up to 1369 IsChunkLoaded calls per session).
         auto sessions = m_sessionManager->GetAllSessions();
+
+        // Chunks a dimension change or a disconnect dropped without the
+        // per-chunk leave below (QueueAbandonedChunks). Their loads are
+        // cancelled here, on this thread, unless someone else still wants them.
+        {
+            std::vector<DimChunkKey> abandoned;
+            {
+                std::lock_guard<std::mutex> lock(m_abandonedMutex);
+                abandoned.swap(m_abandonedChunks);
+            }
+            for (const DimChunkKey& key : abandoned) {
+                CancelLoadIfUnwanted(key.Dimension(), key.Pos(), nullptr, sessions);
+            }
+        }
         for (const auto& session : sessions) {
             if (!session) continue;
 
@@ -4736,35 +6593,27 @@ namespace Server {
                         RequestChunkLoad(dim, pos, 0);
                     }
                 },
-                [&](Game::DimensionId dim, Game::Math::ChunkPos pos) {
+                [&](Game::DimensionId dim, Game::Math::ChunkPos pos, bool stillLoaded) {
                     session->DropChunk(dim, pos);
+                    // Left the view but still inside the simulation ring: the
+                    // client gets its unload, the server keeps the chunk.
+                    if (stillLoaded) return;
 
-                    ServerLevel* L = GetLevel(dim);
-                    if (!L) return;
-                    // A load still in flight for a chunk nobody watches any
-                    // more is pure waste — and after a far teleport that is
-                    // most of the queue: measured 2026-08-29, ~1,500 chunks of
-                    // the OLD area kept generating for 30 s after the player
-                    // left. MC has no equivalent because its tickets ARE the
-                    // request: drop the ticket and the chunk holder's future
-                    // is cancelled.
-                    //
                     // The session's own set is not updated until after this
                     // callback, so it still reports the chunk as watched —
                     // only OTHER sessions count.
-                    auto pending = L->pendingChunkLoads.find(pos);
-                    if (pending != L->pendingChunkLoads.end()) {
-                        bool watchedByOther = false;
-                        m_sessionManager->ForEachSessionWatching(
-                            dim, pos, [&](PlayerSession& other) {
-                                if (&other != session.get()) watchedByOther = true;
-                            });
-                        if (!watchedByOther) {
-                            L->pendingChunkLoads.erase(pending);
-                            if (Threading::g_serverWorkerPool) {
-                                Threading::g_serverWorkerPool->CancelChunkJobs(dim, pos);
-                            }
-                        }
+                    CancelLoadIfUnwanted(dim, pos, session.get(), sessions);
+                },
+                [&](Game::DimensionId dim, Game::Math::ChunkPos pos) {
+                    // Entered the simulation ring only: make sure it is
+                    // resident (and its entities with it) so it ticks; nothing
+                    // is queued for the client.
+                    ServerLevel* L = GetOrCreateLevel(dim);
+                    if (!L || !L->World()) return;
+                    if (L->World()->IsChunkLoaded(pos.x, pos.z)) {
+                        if (L->Entities()) L->Entities()->RequestLoad(pos);
+                    } else {
+                        RequestChunkLoad(dim, pos, 0);
                     }
                 });
         }
@@ -4805,80 +6654,123 @@ namespace Server {
             if (!chunkProvider) return;
 
             // Iterate only actually loaded chunks instead of scanning a huge grid
-            auto loadedPositions = chunkProvider->GetLoadedChunkPositions();
-
-            // "Watched" is now asked of the tracking views directly — the same
-            // question the reverse index used to answer, minus the index.
             const Game::DimensionId dimension = level.Dimension();
             auto anyoneTracking = [&sessions, dimension](Game::Math::ChunkPos pos) {
                 for (const auto& session : sessions) {
                     if (!session) continue;
-                    // The dimension test is load-bearing: a tracking view is a
-                    // set of ChunkPos with no world attached, so without it a
-                    // player standing in the Nether pins the Overworld chunks
-                    // at the same x/z — forever, since nobody is ever going to
-                    // stop tracking them.
-                    if (session->IsWatching(dimension, pos)) return true;
+                    if (session->KeepsLoaded(dimension, pos)) return true;
                 }
                 return false;
             };
 
-            // Mobs are removed for ALL unloaded chunks in one batched call
-            // after the loop — see MobManager::RemoveInChunks.
-            std::vector<Game::Math::ChunkPos> unloadedForMobs;
-            // Grace before an unwatched chunk is really unloaded (instant
-            // revisits: the client keeps its meshes, the server keeps the
-            // data, so coming back is a 20-byte packet per chunk). Over the
-            // soft cap the oldest-unwatched go first, down to the 3 s the
-            // sweep always had.
-            static constexpr int64_t kResidencyGraceTicks = 20 * 120;   // 2 minutes
-            static constexpr size_t  kResidencySoftCap    = 12000;      // loaded chunks per level
-            const int64_t now = m_currentServerTick;
-            const bool overCap = loadedPositions.size() > kResidencySoftCap;
-            for (const auto& pos : loadedPositions) {
-                if (anyoneTracking(pos)) { level.unwatchedSince.erase(pos); continue; }
-                auto since = level.unwatchedSince.find(pos);
-                if (since == level.unwatchedSince.end()) {
-                    level.unwatchedSince.emplace(pos, now);
-                    continue;
+            // MC keeps a chunk in memory while its holder's ticket level is
+            // at most MAX_LEVEL (44). A player's PLAYER_LOADING tickets sit at
+            // level 31 on every chunk within their view distance (DistanceManager
+            // .PlayerTicketTracker, Chebyshev), and the level rises by one per
+            // chunk beyond it — so a chunk goes once it is more than 44 - 31 = 13
+            // chunks outside every player's view, and not before. The same for
+            // simulation and portal loaders (PLAYER_SIMULATION and PORTAL
+            // tickets). There is no timer: this replaced a two-minute residency
+            // grace (and a 12,000-chunk cap that cut it short), which kept a
+            // flying player's whole trail loaded — and, through its generation
+            // tickets, the terrain library's chunks around it.
+            constexpr int kUnloadMargin = 44 - 31;   // MC ChunkLevel.MAX_LEVEL - DistanceManager.PLAYER_TICKET_LEVEL
+            std::vector<std::pair<Game::Math::ChunkPos, int>> reach;   // centre, radius + margin
+            for (const auto& session : sessions) {
+                if (!session) continue;
+                for (const ChunkLoader& loader : session->Loaders()) {
+                    if (loader.dimension == dimension) {
+                        reach.emplace_back(loader.Center(), loader.Radius() + kUnloadMargin);
+                    }
                 }
-                const int64_t age = now - since->second;
-                if (age < kResidencyGraceTicks && !(overCap && age >= 60)) continue;
-                level.unwatchedSince.erase(since);
+            }
+            ChunkKeeper* keeper = level.Keeper();
+            const auto wanted = [&](Game::Math::ChunkPos pos) {
+                for (const auto& [centre, radius] : reach) {
+                    if (std::max(std::abs(pos.x - centre.x), std::abs(pos.z - centre.z)) <= radius) return true;
+                }
+                return anyoneTracking(pos) || (keeper && keeper->Kept(pos));
+            };
+
+            std::vector<Game::Math::ChunkPos> unloadedForMobs;
+
+            // ── 1. Scan a slice ───────────────────────────────────────────
+            // MC learns a chunk is unwanted from the level change itself
+            // (ChunkMap.updateChunkScheduling -> toDrop). Ours asks: every
+            // loaded chunk once a second, a twentieth of the list per tick —
+            // one pass over every chunk against every session each tick was
+            // 240-330 ms (stress test 2026-09-23).
+            if (level.unloadScanCursor >= level.unloadScan.size()) {
+                level.unloadScan = chunkProvider->GetLoadedChunkPositions();
+                level.unloadScanCursor = 0;
+            }
+            const size_t slice = std::max<size_t>(64, (level.unloadScan.size() + 19) / 20);
+            const size_t scanEnd = std::min(level.unloadScan.size(), level.unloadScanCursor + slice);
+            for (size_t i = level.unloadScanCursor; i < scanEnd; ++i) {
+                const Game::Math::ChunkPos pos = level.unloadScan[i];
+                if (wanted(pos)) continue;
+                if (level.unloadQueued.insert(pos).second) level.unloadQueue.push_back(pos);
+            }
+            level.unloadScanCursor = scanEnd;
+
+            // ── 2. Unload in the tick's spare time ────────────────────────
+            // MC ChunkMap.processUnloads:
+            //     int minimal = Math.max(0, this.unloadQueue.size() - 2000);
+            //     while ((minimal > 0 || haveTime.getAsBoolean()) && (task = poll()) != null) ...
+            // Only a queue past 2,000 forces work into a tick that has none
+            // to spare.
+            size_t mustProcess = level.unloadQueue.size() > 2000 ? level.unloadQueue.size() - 2000 : 0;
+            const bool haveDeadline = m_tickDeadline.time_since_epoch().count() != 0;
+            // MC PersistentEntitySectionManager.processChunkUnload: a chunk
+            // whose entities cannot be stored yet — read Pending, or never
+            // read while it holds live ones — stays queued and is retried
+            // next tick, rather than dropping entities nobody has saved.
+            LevelEntityStore* entityStore = level.Entities();
+            std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> occupied;
+            bool occupiedKnown = false;
+            std::vector<Game::Math::ChunkPos> deferred;
+            while (!level.unloadQueue.empty() &&
+                   (mustProcess > 0 || !haveDeadline || std::chrono::steady_clock::now() < m_tickDeadline)) {
+                const Game::Math::ChunkPos pos = level.unloadQueue.front();
+                level.unloadQueue.pop_front();
+                level.unloadQueued.erase(pos);
+                if (mustProcess > 0) --mustProcess;
+                // Someone may have come back for it while it waited.
+                if (wanted(pos)) continue;
+                if (entityStore) {
+                    if (!occupiedKnown) {
+                        occupied = entityStore->OccupiedChunks();
+                        occupiedKnown = true;
+                    }
+                    if (!entityStore->ReadyToUnload(pos, occupied.count(pos) != 0)) {
+                        deferred.push_back(pos);
+                        continue;
+                    }
+                }
                 {
                     PROFILE_ZONE_N("Unload.CacheRemove");
                     if (!chunkProvider->UnloadChunk(pos)) continue;
                 }
-
-                // Entities BEFORE the three RemoveInChunk calls below: every
-                // one of them destroys the objects and hands back only ints,
-                // so anything not captured here is gone.
-                if (level.Entities()) {
-                    PROFILE_ZONE_N("Unload.EntitySave");
-                    level.Entities()->SaveAndForget(pos);
-                }
-
+                if (auto* light = world->Light()) light->RemoveChunk(pos);
                 unloaded++;
-                // Dropped items go with their chunk. They have just been
-                // written to entities/*.mca by SaveAndForget above, so this is
-                // an unload rather than a loss; leaving them resident would
-                // have them ticking against blocks that no longer exist
-                // through a world with no floor.
-                if (level.Items()) {
-                    level.Items()->RemoveInChunk(pos, removedItems);
-                }
-                if (level.Orbs()) {
-                    // Same removal broadcast — the client dispatches
-                    // RemoveEntities by id range.
-                    level.Orbs()->RemoveInChunk(pos, removedItems);
-                }
                 unloadedForMobs.push_back(pos);
             }
+            for (const Game::Math::ChunkPos& pos : deferred) {
+                if (level.unloadQueued.insert(pos).second) level.unloadQueue.push_back(pos);
+            }
 
-            // Mobs go the same way, and for the same reason: there is no
-            // entity persistence layer, so a mob left in an unloaded chunk
-            // would tick against blocks that no longer exist. One batched
-            // call: the per-chunk form was O(chunks x mobs).
+            // Entities of this tick's unloads: saved together (one pass over
+            // the level's entities, writes on the I/O worker), BEFORE the
+            // managers below let go of them.
+            if (level.Entities() && !unloadedForMobs.empty()) {
+                PROFILE_ZONE_N("Unload.EntitySave");
+                level.Entities()->SaveAndForgetMany(unloadedForMobs);
+            }
+            for (const auto& pos : unloadedForMobs) {
+                if (level.Items()) level.Items()->RemoveInChunk(pos, removedItems);
+                if (level.Orbs()) level.Orbs()->RemoveInChunk(pos, removedItems);
+            }
+
             if (!unloadedForMobs.empty()) {
                 PROFILE_ZONE_N("Unload.Mobs");
                 std::vector<EntityPacketOut> outgoing;
@@ -4907,8 +6799,23 @@ namespace Server {
             }
         });
 
-        if (unloaded > 0) {
-            Log::Info("Unloaded %zu unwatched chunks", unloaded);
+        // MC ChunkMap.saveChunksEagerly (called from processUnloads): up to 20
+        // dirty chunks a tick, only while the tick has time left, so freshly
+        // generated terrain reaches disk steadily instead of in one pile at
+        // the next autosave — the pile was the 13 s pause-save.
+        if (m_tickDeadline.time_since_epoch().count() != 0 &&
+            std::chrono::steady_clock::now() < m_tickDeadline) {
+            PROFILE_ZONE_N("SaveChunksEagerly");
+            ForEachLevel([&](ServerLevel& level) {
+                if (level.World()) level.World()->SaveDirtyChunksEagerly(20, m_tickDeadline);
+            });
+        }
+
+        // One line per ~3 s, not per tick.
+        m_unloadedSinceLog += unloaded;
+        if (m_currentServerTick % 60 == 0 && m_unloadedSinceLog > 0) {
+            Log::Info("Unloaded %zu unwatched chunks", m_unloadedSinceLog);
+            m_unloadedSinceLog = 0;
         }
     }
 
@@ -5017,6 +6924,104 @@ namespace Server {
         m_stats.packetsReceived.fetch_add(1, std::memory_order_relaxed);
     }
     
+    // ── Sleeping ────────────────────────────────────────────────────────
+
+    int IntegratedServer::SleepStatus::SleepersNeeded(int percentage) const {
+        // MC SleepStatus.sleepersNeeded: max(1, ceil(active * pct / 100)).
+        return std::max(1, static_cast<int>(std::ceil(
+            static_cast<float>(activePlayers * percentage) / 100.0f)));
+    }
+
+    void IntegratedServer::UpdateSleepingPlayerList() {
+        if (!m_sessionManager) return;
+        const auto sessions = m_sessionManager->GetAllSessions();
+
+        // MC SleepStatus.update over the Overworld's players: spectators do
+        // not count, and only the Overworld has nights to skip (a Nether bed
+        // never gets this far).
+        const int oldActive   = m_sleepStatus.activePlayers;
+        const int oldSleeping = m_sleepStatus.sleepingPlayers;
+        int active = 0, sleeping = 0;
+        for (const auto& session : sessions) {
+            const ServerPlayer* player = session ? session->GetPlayer() : nullptr;
+            if (!player || player->getGameMode() == GameMode::SPECTATOR) continue;
+            if (Game::DimensionFromRaw(player->getDimensionId()) != Game::DimensionId::Overworld) continue;
+            ++active;
+            if (player->isSleeping()) ++sleeping;
+        }
+        m_sleepStatus.activePlayers   = active;
+        m_sleepStatus.sleepingPlayers = sleeping;
+
+        const bool changed = (oldSleeping > 0 || sleeping > 0) &&
+                             (oldActive != active || oldSleeping != sleeping);
+        if (changed) AnnounceSleepStatus();
+    }
+
+    void IntegratedServer::AnnounceSleepStatus() {
+        // MC ServerLevel.announceSleepStatus. Nothing when no amount of rest
+        // can pass the night (canSleepThroughNights), and nothing when you
+        // are alone — MC's `!isSingleplayer() || isPublished()`: the count
+        // is for the people you share the night with.
+        const int percentage = Game::Rules::GetInt(Game::Rules::Id::PlayersSleepingPercentage);
+        if (percentage > 100 || !m_sessionManager) return;
+        const auto sessions = m_sessionManager->GetAllSessions();
+        if (sessions.size() <= 1) return;
+
+        const std::string message = m_sleepStatus.AreEnoughSleeping(percentage)
+            ? std::string("Sleeping through this night")
+            : std::to_string(m_sleepStatus.sleepingPlayers) + "/" +
+              std::to_string(m_sleepStatus.SleepersNeeded(percentage)) + " players sleeping";
+        for (const auto& session : sessions) {
+            if (session) session->SendOverlayMessage(message);
+        }
+    }
+
+    void IntegratedServer::TickSleep() {
+        if (!m_sessionManager) return;
+        UpdateSleepingPlayerList();
+
+        // ServerLevel.tick: enough in bed AND enough of them asleep for the
+        // full 100 ticks (SleepStatus.areEnoughDeepSleeping).
+        const int percentage = Game::Rules::GetInt(Game::Rules::Id::PlayersSleepingPercentage);
+        if (m_sleepStatus.sleepingPlayers <= 0 || !m_sleepStatus.AreEnoughSleeping(percentage)) return;
+        int deepSleepers = 0;
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            const ServerPlayer* player = session ? session->GetPlayer() : nullptr;
+            if (player && player->isSleepingLongEnough()) ++deepSleepers;
+        }
+        if (deepSleepers < m_sleepStatus.SleepersNeeded(percentage)) return;
+
+        // ClockTimeMarkers.WAKE_UP_FROM_SLEEP — tick 0 of the 24000-tick day,
+        // so the clock moves to the NEXT multiple of 24000 (the old
+        // `dayTime + 24000 - dayTime % 24000`). Only while the clock runs
+        // (advance_time), on every level since each keeps its own copy, and
+        // the clients are told at once rather than on the next 20-tick sync.
+        if (Game::Rules::GetBool(Game::Rules::Id::AdvanceTime)) {
+            ForEachLevel([](ServerLevel& level) {
+                Game::World* w = level.World();
+                if (!w) return;
+                const int64_t t = w->GetDayTime();
+                const int64_t into = ((t % 24000) + 24000) % 24000;
+                w->SetDayTime(t + 24000 - into);
+            });
+            ForceTimeSync();
+        }
+        WakeUpAllPlayers();
+        // advance_weather → resetWeatherCycle: there is no weather to clear.
+    }
+
+    void IntegratedServer::WakeUpAllPlayers() {
+        // MC ServerLevel.wakeUpAllPlayers: the count is dropped first, then
+        // every sleeper gets a soft wake (the fade-out plays) without
+        // re-running the count per player.
+        m_sleepStatus.sleepingPlayers = 0;
+        if (!m_sessionManager) return;
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            const ServerPlayer* player = session ? session->GetPlayer() : nullptr;
+            if (player && player->isSleeping()) session->StopSleepInBed(false, false);
+        }
+    }
+
     void IntegratedServer::BroadcastSystemMessage(const std::string& text, uint32_t color) {
         // MC PlayerList.broadcastSystemMessage(message, false) — sender-less,
         // position 0 (chat, not the action bar), everyone gets it.
@@ -5174,6 +7179,12 @@ namespace Server {
         // derived from the name, so loading earlier would look for the wrong
         // file. A first-time player simply has none, which is not an error.
         const bool restoredFromDisk = LoadPlayerData(*playerPtr);
+        // A first-time player faces the way the world's spawn says (MC
+        // PlayerList.placeNewPlayer reads the level's spawn angle); a returning
+        // one keeps the look direction ReadPlayerData restored.
+        if (!restoredFromDisk && m_savedLevelDat && m_savedLevelDat->hasSpawn) {
+            playerPtr->setRotation(m_savedLevelDat->spawnYaw, m_savedLevelDat->spawnPitch);
+        }
 
         // Capture the colour the client sent at LoginStart onto the ServerPlayer so
         // both the new-player broadcast (below) and any future PlayerInfo refreshes
@@ -5239,7 +7250,11 @@ namespace Server {
             // in LoadPlayerData, and setGameMode also clears m_flying — so
             // running it unconditionally is what used to land every returning
             // creative flier back in survival, falling.
-            if (!restoredFromDisk) {
+            // MC IntegratedServer.forceGameMode (default on): a GUEST is put
+            // in the world's default game mode every join, saved mode or not;
+            // the host keeps theirs.
+            const bool forcedGuest = m_forceGameMode.load() && !connection->IsSingleplayerOwner();
+            if (!restoredFromDisk || forcedGuest) {
                 playerPtr->setGameMode(static_cast<GameMode>(m_config.defaultGameMode));
             }
             connection->SendPlayerAbilities(*playerPtr);
@@ -5264,17 +7279,9 @@ namespace Server {
                     Game::DimensionFromRaw(playerPtr->getDimensionId());
                 GetOrCreateLevel(dim);
 
-                Network::ChangeDimensionS2CPacket dimPacket;
-                dimPacket.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(dim));
-                dimPacket.flags = static_cast<uint8_t>(
-                    (Game::DimensionHasSkyLight(dim)
-                         ? Network::ChangeDimensionS2CPacket::kFlagHasSkyLight : 0) |
-                    (Game::DimensionHasCeiling(dim)
-                         ? Network::ChangeDimensionS2CPacket::kFlagHasCeiling : 0));
-                dimPacket.ambientLight =
-                    (dim == Game::DimensionId::Nether) ? 0.1f : 0.0f;
-                dimPacket.minY   = Game::DimensionMinY(dim);
-                dimPacket.height = Game::DimensionLogicalHeight(dim);
+                const auto dimPacket =
+                    Network::ChangeDimensionS2CPacket::For(dim, /*keepPrevious=*/false,
+                                                           GetBiomeZoomSeed());
                 connection->SendPacket(
                     static_cast<uint8_t>(Network::PacketId::ChangeDimensionS2C),
                     Network::Serialization::Serialize(dimPacket));
@@ -5348,6 +7355,17 @@ namespace Server {
     // ========================================================================
     // PLAYER DISCONNECT
     // ========================================================================
+
+    void IntegratedServer::DrainClosedConnections() {
+        std::vector<std::shared_ptr<ServerConnection>> closed;
+        {
+            std::lock_guard<std::mutex> lock(m_closedMutex);
+            closed.swap(m_closedConnections);
+        }
+        for (auto& conn : closed) {
+            if (conn) OnPlayerDisconnected(conn);
+        }
+    }
 
     void IntegratedServer::OnPlayerDisconnected(std::shared_ptr<ServerConnection> connection) {
         uint32_t connectionId = connection->GetConnectionId();
@@ -5564,11 +7582,14 @@ namespace Server {
         // Clamp client's requested distance to [2, serverViewDistance]
         const int effectiveViewDistance =
             std::clamp(requested.viewDistance, 2, m_config.serverViewDistance);
-        // MC IntegratedServer.tickServer: max(2, options.simulationDistance),
-        // capped by the same server ceiling as the view distance so a client
-        // cannot ask this machine to tick more than it would ever send.
+        // MC IntegratedServer.tickServer: max(2, options.simulationDistance).
+        // MC caps it by the view distance because its chunk-level scale ends
+        // at 32; here the scale has headroom (ChunkLevel::SIMULATION_HEADROOM)
+        // and the ring beyond the view distance is loaded by a Simulation
+        // loader (ComputeChunkLoaders), so the cap is its own number.
         const int effectiveSimulationDistance =
-            std::clamp(requested.simulationDistance, 2, m_config.serverViewDistance);
+            std::clamp(requested.simulationDistance, 2,
+                       std::min(m_config.maxSimulationDistance, ChunkLevel::kMaxSimulationDistance));
 
         Log::Info("[IntegratedServer] Player %u requested view distance %d (effective %d), "
                   "simulation distance %d (effective %d), server cap %d",
@@ -5582,6 +7603,25 @@ namespace Server {
         // (PlayerSessionManager::UpdatePlayerTickets) and re-levels the
         // player's PLAYER_SIMULATION ticket in place.
         session.SetSimulationDistance(effectiveSimulationDistance);
+
+        // The chunk cache must hold the whole simulation ring plus the view
+        // and a stale area, or the LRU evicts ring chunks as fast as they
+        // load. Sized per player currently in the dimension (they may stand
+        // apart), grow-only (ChunkProvider::SetMaxLoadedChunks).
+        {
+            const size_t ringSide = 2 * static_cast<size_t>(std::max(effectiveSimulationDistance, effectiveViewDistance) + 2) + 1;
+            size_t players = 0;
+            if (m_sessionManager) {
+                for (const auto& s : m_sessionManager->GetAllSessions()) {
+                    if (s && s->GetDimensionId() == session.GetDimensionId()) ++players;
+                }
+            }
+            const size_t needed = ringSide * ringSide * std::max<size_t>(players, 1) + 8192;
+            ServerLevel& level = LevelOf(session);
+            if (level.World() && level.World()->GetChunkProvider()) {
+                level.World()->GetChunkProvider()->SetMaxLoadedChunks(needed);
+            }
+        }
 
         // Send effective view distance back to client
         SendSetChunkCacheRadius(connectionId, effectiveViewDistance);
@@ -5691,9 +7731,30 @@ namespace Server {
         // PendingLoads is the sum across every dimension — one number, because
         // the streaming health this line reports is a property of the pool, not
         // of any one world.
-        Log::Info("Server State: TPS=%.1f, TickTime=%.2fms, LoadedChunks=%zu, PendingLoads=%zu",
+        Log::Info("Server State: TPS=%.1f, TickTime=%.2fms, SentChunks=%zu, PendingLoads=%zu",
                  m_stats.averageTPS.load(), m_stats.averageTickTime.load(),
                  sentChunks, GetPendingChunkLoadCount());
+        // The generation pipeline, per level: what is waiting for the library,
+        // what the library holds, and the counters that tell a stall apart
+        // from a slow stream (refused = the library answered "no" at request
+        // time; empty = it completed without a chunk; retried = failed loads
+        // re-requested).
+        for (const auto& levelPtr : m_levels) {
+            if (!levelPtr) continue;
+            const ServerLevel& level = *levelPtr;
+            if (level.generationBacklog.empty() && level.generationInFlight == 0 && level.genCompleted == 0) continue;
+            Log::Info("  Generation[%s]: backlog=%zu inFlight=%zu pending=%zu failed=%zu | completed=%llu readyTaken=%llu empty=%llu refused=%llu retried=%llu stuck=%llu | poolJobs=%zu",
+                      std::string(Game::DimensionName(level.Dimension())).c_str(),
+                      level.generationBacklog.size(), level.generationInFlight,
+                      level.pendingChunkLoads.size(), level.failedChunkLoads.size(),
+                      static_cast<unsigned long long>(level.genCompleted),
+                      static_cast<unsigned long long>(level.genDeliveredReady),
+                      static_cast<unsigned long long>(level.genCompletedEmpty),
+                      static_cast<unsigned long long>(level.genRefused),
+                      static_cast<unsigned long long>(level.genRetried),
+                      static_cast<unsigned long long>(level.genStuck),
+                      Threading::g_serverWorkerPool ? Threading::g_serverWorkerPool->GetPendingJobCount() : size_t{0});
+        }
     }
 
     // ========================================================================
@@ -5754,6 +7815,12 @@ namespace Server {
         // construct its mob bridge.
         m_sendScheduler = std::make_unique<SendScheduler>();
         m_sessionManager = std::make_unique<PlayerSessionManager>();
+        m_remoteControl  = std::make_unique<RemoteControlManager>(*m_sessionManager);
+        m_morphCarry     = std::make_unique<MorphCarry>(*m_sessionManager, *m_remoteControl);
+        m_morphBlockAnchor = std::make_unique<MorphBlockAnchor>(*m_sessionManager);
+        // Every Level.playSound on this server now reaches its players.
+        m_soundBroadcaster = std::make_unique<ServerSoundBroadcaster>(m_sessionManager.get());
+        Game::Sound::SetServerSink(m_soundBroadcaster.get());
 
         // The pathfinder's block classification is derived from the block
         // registry, so it has to be (re)built after BlockRegistry::Init and
@@ -5806,9 +7873,28 @@ namespace Server {
         // torn down by ~ServerLevel, in reverse construction order, when
         // Shutdown() resets the array — which happens AFTER this, so a session
         // being cleaned up here can still reach its level.
+        //
+        // The sound sink goes first: it walks the session manager, and a
+        // level torn down after this may still play a sound on its way out.
+        if (m_soundBroadcaster) {
+            if (Game::Sound::GetServerSink() == m_soundBroadcaster.get()) {
+                Game::Sound::SetServerSink(nullptr);
+            }
+            m_soundBroadcaster.reset();
+        }
+        // Emptied, NOT destroyed. Every ServerLevel holds this manager as a
+        // raw pointer (the mob bridge, the delta broadcaster, the Silent
+        // Warden's bars, the Hush's stillness, Aurelith's cities), and their
+        // teardown in ~ServerLevel still asks it for sessions — to send the
+        // boss-bar remove, the stillness lift, the city forget. Destroying it
+        // here left those pointers dangling until Shutdown() reset the levels:
+        // a quit after meeting an Aurelith city locked the freed manager's
+        // mutex and aborted ("mutex lock failed: Invalid argument"). Emptied,
+        // it answers "no sessions" and those sends are no-ops. MC's PlayerList
+        // likewise outlives the levels it serves. The object itself goes with
+        // the server, after its levels (see ~IntegratedServer).
         if (m_sessionManager) {
             m_sessionManager->Shutdown();
-            m_sessionManager.reset();
         }
 
         if (m_sendScheduler) {

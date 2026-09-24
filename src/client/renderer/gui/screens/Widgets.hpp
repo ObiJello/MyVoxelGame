@@ -58,6 +58,12 @@ namespace Render {
 
         bool IsHovered() const { return m_hovered; }
         bool IsFocused() const { return m_focused; }
+
+        // MC AbstractWidget.playDownSound: the UI click (ui.button.click,
+        // pitch 1, SimpleSoundInstance.forUI's 0.25 volume). Played by the
+        // widgets MC's own play it — buttons and cycle buttons when pressed,
+        // sliders when let go; lists, text boxes and tab headers are silent.
+        static void PlayDownSound();
         // Virtual so containers (OptionsList) can mirror focus onto the child
         // row the keyboard is actually driving.
         virtual void SetFocused(bool f) { m_focused = f; }
@@ -128,7 +134,12 @@ namespace Render {
             : AbstractWidget(x, y, width, height, std::move(message)),
               m_onPress(std::move(onPress)) {}
 
-        void OnClick(double, double) override { if (m_onPress) m_onPress(); }
+        // MC AbstractButton: the click, then onPress — mouse, keyboard or a
+        // container forwarding the click alike.
+        void OnClick(double, double) override {
+            if (m_playsDownSound) PlayDownSound();
+            if (m_onPress) m_onPress();
+        }
         // Lets a screen attach the handler after construction, when the
         // callback needs to capture the button itself.
         void SetOnPress(OnPress onPress) { m_onPress = std::move(onPress); }
@@ -136,6 +147,9 @@ namespace Render {
 
     protected:
         void RenderWidget(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;
+
+        // MC TabButton.playDownSound is empty: a tab header switches silently.
+        bool m_playsDownSound = true;
 
     private:
         OnPress m_onPress;
@@ -199,6 +213,12 @@ namespace Render {
         }
 
         int GetIndex() const { return m_index; }
+        // MC CycleButton.setValue: show another value WITHOUT firing onChange.
+        void SetIndex(int index) {
+            if (index < 0 || index >= static_cast<int>(m_values.size())) return;
+            m_index = index;
+            UpdateMessage();
+        }
 
         void OnClick(double mouseX, double mouseY) override;
         bool KeyPressed(int glfwKey, int glfwMods) override;
@@ -213,7 +233,7 @@ namespace Render {
 
     private:
         void Cycle(int delta);
-        void UpdateMessage() { m_message = m_caption + ": " + m_values[m_index]; }
+        void UpdateMessage() { m_message = m_caption.empty() ? m_values[m_index] : m_caption + ": " + m_values[m_index]; }
 
         std::string m_caption;
         std::vector<std::string> m_values;
@@ -227,11 +247,19 @@ namespace Render {
     class EditBox : public AbstractWidget {
     public:
         EditBox(int x, int y, int width, int height, std::string label)
-            : AbstractWidget(x, y, width, height, std::move(label)) {}
+            : AbstractWidget(x, y, width, height, std::move(label)), m_baseWidth(width) {}
 
         const std::string& GetText() const { return m_text; }
         void SetText(const std::string& text);
         void SetMaxLength(int n) { m_maxLength = n; }
+        // MC EditBox.setTextColor — the game-rules screen paints a value it
+        // cannot parse red.
+        void SetTextColor(uint32_t argb) { m_textColor = argb; }
+        // Grow to the RIGHT as the text outruns the box (vanilla scrolls the
+        // text inside instead). The width given at construction is the
+        // minimum; the box never shrinks below it.
+        void SetAutoGrow(bool grow) { m_autoGrow = grow; }
+        int  GetBaseWidth() const { return m_baseWidth; }
         // Grey hint drawn while empty and unfocused (MC setHint).
         void SetHint(std::string hint) { m_hint = std::move(hint); }
         void SetResponder(std::function<void(const std::string&)> fn) { m_responder = std::move(fn); }
@@ -252,6 +280,9 @@ namespace Render {
         std::string m_hint;
         int m_cursorPos  = 0;
         int m_maxLength  = 128;
+        int m_baseWidth  = 0;
+        bool m_autoGrow  = false;
+        uint32_t m_textColor = 0xFFE0E0E0;
         std::function<void(const std::string&)> m_responder;
     };
 
@@ -272,6 +303,21 @@ namespace Render {
         uint32_t m_color;
     };
 
+    // ── LockIconButton — MC gui/components/LockIconButton ───────────────────
+    // The 20×20 padlock beside the difficulty button. Sprites
+    // widget/locked_button[_highlighted|_disabled] and the unlocked trio.
+    class LockIconButton : public Button {
+    public:
+        LockIconButton(int x, int y, OnPress onPress)
+            : Button(x, y, 20, 20, "", std::move(onPress)) {}
+        bool IsLocked() const { return m_locked; }
+        void SetLocked(bool locked) { m_locked = locked; }
+    protected:
+        void RenderWidget(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;
+    private:
+        bool m_locked = false;
+    };
+
     // ── PlainTextButton — MC gui/components/PlainTextButton ─────────────────
     // Text-only button (the copyright line on the title screen). Underlines
     // on hover like vanilla.
@@ -290,7 +336,7 @@ namespace Render {
     class TabButton : public Button {
     public:
         TabButton(int x, int y, int width, int height, std::string label, OnPress onPress)
-            : Button(x, y, width, height, std::move(label), std::move(onPress)) {}
+            : Button(x, y, width, height, std::move(label), std::move(onPress)) { m_playsDownSound = false; }
 
         bool selected = false;
 
@@ -332,6 +378,7 @@ namespace Render {
         // highlight tracks the list's own focus so Tabbing away and back
         // keeps the selection.
         bool KeyPressed(int glfwKey, int glfwMods) override;
+        bool CharTyped(unsigned int codepoint) override;
         void SetFocused(bool f) override;
 
         // The child currently being interacted with (mouse held down on it).

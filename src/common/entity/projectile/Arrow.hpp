@@ -28,6 +28,8 @@
 #pragma once
 
 #include "common/entity/projectile/Projectile.hpp"
+#include "common/entity/alchemy/Potions.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -46,15 +48,30 @@ namespace Game {
         // MC AbstractArrow.setBaseDamageFromMob.
         void SetBaseDamageFromMob(float power);
 
-        // MC Arrow.addEffect — a tipped arrow's payload. Custom effects apply
-        // at FULL duration on hit (the /8 division is PotionContents' business
-        // on a crafted tipped arrow, which no mob fires). Stray arrows carry
-        // SLOWNESS 600 through this.
+        // MC Arrow.addEffect — setPotionContents(contents.withEffectAdded).
+        // The stray's SLOWNESS 600 and the bogged's POISON 100 ride this; a
+        // mob's arrow has a plain ARROW pickup stack, so its duration scale
+        // stays 1.0 and the effect lands at full length.
         void AddEffect(MobEffectInstance effect) {
-            m_effects.push_back(std::move(effect));
+            m_potion = m_potion.WithEffectAdded(effect);
+        }
+
+        // MC Arrow(level, owner, pickupItemStack, weapon) for a tipped arrow:
+        // the pickup stack's POTION_CONTENTS and POTION_DURATION_SCALE (the
+        // tipped arrow's 0.125) become the payload — getPotionContents /
+        // getPotionDurationScale read them back off that stack.
+        void SetPotionFromPickupStack(const ItemStack& pickup);
+        const PotionContents& GetPotionContents() const { return m_potion; }
+        float GetPotionDurationScale() const { return m_potionDurationScale; }
+        void  SetPotionContents(const PotionContents& contents, float durationScale) {
+            m_potion = contents;
+            m_potionDurationScale = durationScale;
         }
 
         bool IsInGroundArrow() const { return m_inGround; }
+        // MC AbstractArrow.isPushedByFluid: an arrow stuck in a block is
+        // not carried off by the stream running over it.
+        bool IsPushedByFluid() const override { return !m_inGround; }
         int  GetShakeTime() const { return m_shakeTime; }
 
         // ── Save/load accessors ────────────────────────────────────────────
@@ -90,6 +107,10 @@ namespace Game {
         // always searches.
         virtual bool FindsHitEntities() const { return true; }
 
+        // MC AbstractArrow.getDefaultHitGroundSoundEvent (ARROW_HIT; the
+        // trident's TRIDENT_HIT_GROUND) — played on sticking into a block.
+        virtual const char* GetHitGroundSound() const { return SoundEvents::ARROW_HIT; }
+
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         virtual void OnHitBlockArrow(const glm::dvec3& hitPos,
                                      const glm::ivec3& blockPos);
@@ -100,8 +121,11 @@ namespace Game {
         void TickDespawn();
 
         double  m_baseDamage = kArrowBaseDamage;
-        // MC Arrow's potion contents, reduced to the delivered effects.
-        std::vector<MobEffectInstance> m_effects;
+        // MC Arrow's potion contents and duration scale — what its pickup
+        // stack carries (EXPOSED_POTION_DECAY_TIME clears them after 600
+        // ticks in the ground, as MC swaps the pickup for a plain arrow).
+        PotionContents m_potion;
+        float          m_potionDurationScale = 1.0f;
         bool    m_inGround = false;
         int     m_inGroundTime = 0;
         int     m_life = 0;

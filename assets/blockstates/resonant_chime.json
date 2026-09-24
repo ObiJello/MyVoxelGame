@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "lit=false": {
+      "model": "minecraft:block/resonant_chime"
+    },
+    "lit=true": {
+      "model": "minecraft:block/resonant_chime_on"
+    }
+  }
+}

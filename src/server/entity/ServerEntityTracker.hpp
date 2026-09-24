@@ -28,6 +28,7 @@
 #pragma once
 
 #include "common/network/packets/game/MobEntityPackets.hpp"
+#include "common/entity/effect/MobEffects.hpp"
 #include "common/world/math/WorldMath.hpp"
 
 #include <cstdint>
@@ -35,7 +36,10 @@
 #include <unordered_set>
 #include <vector>
 
-namespace Game { class Mob; }
+namespace Game {
+    class ArmorStand; class Mob; }
+
+namespace Network { struct ArmorStandDataS2CPacket; }
 
 namespace Server {
 
@@ -103,8 +107,17 @@ namespace Server {
         // impact) must be emitted while the entity is still tracked —
         // RemoveEntity erases the watcher set this flush needs, and the
         // client drops events for entities it has already removed.
+        //
+        // `keepUntracked`: an event for an entity not tracked YET stays queued
+        // for the flush at the end of Tick(), after this tick's new entities
+        // have gone out — a mob added this tick and given an event at once
+        // (the monster spawner's spawnAnim, entity event 20) reaches the
+        // client after its spawn, as in MC, where ServerLevel.addFreshEntity
+        // starts tracking before the event is broadcast. That last flush
+        // drops whatever is still untracked.
         void FlushEntityEvents(ServerLevelBridge& level,
-                               std::vector<EntityPacketOut>& out);
+                               std::vector<EntityPacketOut>& out,
+                               bool keepUntracked = false);
 
         // A player disconnected — forget everything they were tracking, so a
         // reconnecting id does not inherit a stale watch set.
@@ -155,12 +168,18 @@ namespace Server {
             // so the first data send always carries the riding link.
             int32_t lastVehicleId = INT32_MIN;
             float   lastScale = -1.0f;
+            // The last synched effect visuals (MC DATA_EFFECT_PARTICLES and the
+            // invisible / glowing flags). Starts empty, which is also the
+            // value AddEntity carried for an effect-free mob.
+            Game::EffectVisuals lastEffectVisuals;
 
             std::unordered_set<uint32_t> watchers;
         };
 
         static uint8_t PackFlags(const Game::Mob& mob);
         static uint8_t VariantData(const Game::Mob& mob);
+        // The armor stand's poses + equipment packet (ArmorStandDataS2C).
+        static Network::ArmorStandDataS2CPacket BuildArmorStandData(const Game::ArmorStand& stand, int32_t id);
         static Network::AddEntityS2CPacket BuildAddPacket(const Game::Mob& mob,
                                                           const glm::dvec3& base);
 

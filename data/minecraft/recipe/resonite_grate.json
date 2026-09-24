@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "R": "minecraft:resonite_ingot"
+  },
+  "pattern": [
+    " R ",
+    "R R",
+    " R "
+  ],
+  "result": {
+    "count": 4,
+    "id": "minecraft:resonite_grate"
+  }
+}

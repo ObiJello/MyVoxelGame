@@ -1,6 +1,7 @@
 #include "levelgen/structure/PieceBehaviors.h"
 
 #include "levelgen/structure/OrientedPieceBehavior.h"
+#include "levelgen/structure/StructureEntities.h"
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/WorldGenLevel.h"
 #include "levelgen/WorldgenRandom.h"
@@ -511,8 +512,19 @@ protected:
     }
 
     // Reference: OceanMonumentPiece.spawnElder - entity only, no draws from
-    // the passed random (level-random draws are dump-invisible here).
-    void spawnElder(WorldGenLevel*, const BoundingBox&, int, int, int) const {}
+    // the passed random (finalizeSpawn's level-random draws happen
+    // engine-side). heal(getMaxHealth()) is a fresh mob's own health;
+    // snapTo(x + 0.5, y, z + 0.5, 0, 0); no setPersistenceRequired (the
+    // elder is persistent by Guardian/ElderGuardian's own despawn rules).
+    void spawnElder(WorldGenLevel* level, const BoundingBox& chunkBB, int x, int y, int z) const {
+        core::BlockPos pos = worldPos(x, y, z);
+        if (!chunkBB.isInside(pos.getX(), pos.getY(), pos.getZ())) return;
+        StructureEntities::addFreshEntity(
+            level,
+            StructureEntities::mobTag("minecraft:elder_guardian", pos.getX() + 0.5, pos.getY(),
+                                      pos.getZ() + 0.5, 0.0f, 0.0f, false),
+            true);
+    }
 };
 
 // Reference: OceanMonumentEntryRoom.postProcess.

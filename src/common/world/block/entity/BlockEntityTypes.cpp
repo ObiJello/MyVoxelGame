@@ -1,10 +1,29 @@
 // File: src/common/world/block/entity/BlockEntityTypes.cpp
 #include "BlockEntityTypes.hpp"
+#include "SignBlockEntity.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/loot/ChestLootTables.hpp"
+#include "common/core/Log.hpp"
+#include <string_view>
+#include <tuple>
 #include "BaseContainerBlockEntity.hpp"
 #include "ChestBlockEntity.hpp"
 #include "FurnaceBlockEntity.hpp"
+#include "BrewingStandBlockEntity.hpp"
 #include "CampfireBlockEntity.hpp"
 #include "EndGatewayBlockEntity.hpp"
+#include "ComparatorBlockEntity.hpp"
+#include "DaylightDetectorBlockEntity.hpp"
+#include "PistonMovingBlockEntity.hpp"
+#include "HopperBlockEntity.hpp"
+#include "DispenserBlockEntity.hpp"
+#include "LecternBlockEntity.hpp"
+#include "SpawnerBlockEntity.hpp"
+#include "PotentSulfurBlockEntity.hpp"
+#include "AurelithBlockEntities.hpp"
+#include "HushLighthouseLampBlockEntity.hpp"
+#include "common/world/level/ILevelWrite.hpp"
 #include "../../../core/Log.hpp"
 #include <memory>
 #include <unordered_map>
@@ -114,17 +133,55 @@ namespace Game {
             BlockID::RedShulkerBox,       BlockID::BlackShulkerBox,
         });
 
-        // Dispenser / dropper — 9 slots in a 3x3 (DispenserBlockEntity).
-        registerContainer(BlockEntityTypeIds::DISPENSER, "dispenser", 9, {BlockID::Dispenser});
-        registerContainer(BlockEntityTypeIds::DROPPER,   "dropper",   9, {BlockID::Dropper});
+        // Dispenser / dropper — 9 slots in a 3x3, plus the random-slot pick
+        // and the insert used by dispense behaviours (DispenserBlockEntity).
+        {
+            auto registerDispenser = [](uint16_t typeId, const char* stringId, BlockID block) {
+                std::unordered_set<BlockID> blocks = { block };
+                const auto* type = RegisterType(
+                    typeId, stringId,
+                    [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                        return std::make_unique<DispenserBlockEntity>(t, pos, id);
+                    },
+                    blocks);
+                s_byId[typeId] = type;
+                g_byStringId[type->StringId()] = type;
+                const auto idx = static_cast<size_t>(block);
+                if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+            };
+            registerDispenser(BlockEntityTypeIds::DISPENSER, "dispenser", BlockID::Dispenser);
+            registerDispenser(BlockEntityTypeIds::DROPPER,   "dropper",   BlockID::Dropper);
+        }
 
-        // Hopper — 5 slots in a row (HopperBlockEntity).
-        registerContainer(BlockEntityTypeIds::HOPPER, "hopper", 5, {BlockID::Hopper});
+        // Hopper — 5 slots in a row plus the transfer tick (HopperBlockEntity).
+        {
+            std::unordered_set<BlockID> blocks = { BlockID::Hopper };
+            const auto* type = RegisterType(
+                BlockEntityTypeIds::HOPPER, "hopper",
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<HopperBlockEntity>(t, pos, id);
+                },
+                blocks);
+            s_byId[BlockEntityTypeIds::HOPPER] = type;
+            g_byStringId[type->StringId()] = type;
+            s_byBlockId[static_cast<size_t>(BlockID::Hopper)] = type;
+        }
 
-        // Brewing stand (5 slots) and crafter (9). Both store items, so both
-        // need a block entity; their behaviour lives in their menus.
-        registerContainer(BlockEntityTypeIds::BREWING_STAND, "brewing_stand", 5,
-                          {BlockID::BrewingStand});
+        // Brewing stand — five slots plus the brew/fuel tick
+        // (BrewingStandBlockEntity, MC BrewingStandBlockEntity.serverTick).
+        {
+            std::unordered_set<BlockID> blocks = { BlockID::BrewingStand };
+            const auto* type = RegisterType(
+                BlockEntityTypeIds::BREWING_STAND, "brewing_stand",
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<BrewingStandBlockEntity>(t, pos, id);
+                },
+                blocks);
+            s_byId[BlockEntityTypeIds::BREWING_STAND] = type;
+            g_byStringId[type->StringId()] = type;
+            s_byBlockId[static_cast<size_t>(BlockID::BrewingStand)] = type;
+        }
+        // Crafter (9) stores items; its behaviour lives in its menu.
         registerContainer(BlockEntityTypeIds::CRAFTER, "crafter", 9, {BlockID::Crafter});
 
         // ── Furnace family ────────────────────────────────────────────────
@@ -209,6 +266,39 @@ namespace Game {
             }
         }
 
+        // ── Signs ─────────────────────────────────────────────────────────
+        // Every "*_sign" block. MC registers SIGN against the 26 standing +
+        // wall signs and HANGING_SIGN against the 26 ceiling + wall hanging
+        // signs; the block's slug is the membership test, so a new wood type
+        // joins by existing.
+        {
+            std::unordered_set<BlockID> plain, hanging;
+            for (size_t i = 1; i < static_cast<size_t>(BlockID::Count); ++i) {
+                const std::string& slug = BlockRegistry::Get(static_cast<BlockID>(i)).registrySlug;
+                constexpr std::string_view kSuffix = "_sign";
+                if (slug.size() <= kSuffix.size() ||
+                    slug.compare(slug.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0) continue;
+                if (slug.find("hanging_sign") != std::string::npos) hanging.insert(static_cast<BlockID>(i));
+                else                                                 plain.insert(static_cast<BlockID>(i));
+            }
+            for (auto& [typeId, stringId, blocks] :
+                 { std::tuple<uint16_t, const char*, std::unordered_set<BlockID>*>{BlockEntityTypeIds::SIGN, "sign", &plain},
+                   std::tuple<uint16_t, const char*, std::unordered_set<BlockID>*>{BlockEntityTypeIds::HANGING_SIGN, "hanging_sign", &hanging} }) {
+                const auto* type = RegisterType(
+                    typeId, stringId,
+                    [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                        return std::make_unique<SignBlockEntity>(t, pos, id);
+                    },
+                    *blocks);
+                s_byId[typeId] = type;
+                g_byStringId[type->StringId()] = type;
+                for (BlockID id : *blocks) {
+                    const auto idx = static_cast<size_t>(id);
+                    if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+                }
+            }
+        }
+
         // ── End gateway ───────────────────────────────────────────────────
         // MC BlockEntityType.END_GATEWAY. The fight's post-kill gateways and
         // the return gateways placed at teleport time get theirs through
@@ -227,7 +317,144 @@ namespace Game {
             s_byBlockId[static_cast<size_t>(BlockID::EndGateway)] = type;
         }
 
+        // ── Redstone ──────────────────────────────────────────────────────
+        auto registerSimple = [](uint16_t typeId, const char* stringId, BlockID block,
+                                 BlockEntityType::Factory factory) {
+            std::unordered_set<BlockID> blocks = { block };
+            const auto* type = RegisterType(typeId, stringId, std::move(factory), blocks);
+            s_byId[typeId] = type;
+            g_byStringId[type->StringId()] = type;
+            const auto idx = static_cast<size_t>(block);
+            if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+        };
+        registerSimple(BlockEntityTypeIds::COMPARATOR, "comparator", BlockID::Comparator,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<ComparatorBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::DAYLIGHT_DETECTOR, "daylight_detector", BlockID::DaylightDetector,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<DaylightDetectorBlockEntity>(t, pos, id);
+            });
+        // MC MovingPistonBlock.newBlockEntity returns null: the piston hands
+        // the cell a fully-formed entity through World::SetBlockEntity. The
+        // factory here only serves the client, which rebuilds one from the
+        // wire, and a chunk load, which rebuilds one from NBT.
+        registerSimple(BlockEntityTypeIds::PISTON, "piston", BlockID::MovingPiston,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<PistonMovingBlockEntity>(t, pos, id);
+            });
+
+        // ── Lectern ───────────────────────────────────────────────────────
+        // MC BlockEntityTypes.LECTERN: the book lying on it and its page.
+        registerSimple(BlockEntityTypeIds::LECTERN, "lectern", BlockID::Lectern,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<LecternBlockEntity>(t, pos, id);
+            });
+
+        // ── Monster spawner ───────────────────────────────────────────────
+        // MC BlockEntityTypes.MOB_SPAWNER ("minecraft:mob_spawner", the id
+        // every generated spawner's payload carries): BaseSpawner's state
+        // and its server/client tickers (SpawnerBlockEntity).
+        registerSimple(BlockEntityTypeIds::MOB_SPAWNER, "mob_spawner", BlockID::Spawner,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<SpawnerBlockEntity>(t, pos, id);
+            });
+
+        // ── Potent sulfur ─────────────────────────────────────────────────
+        // MC BlockEntityTypes.POTENT_SULFUR ("minecraft:potent_sulfur"): the
+        // geyser (PotentSulfurBlockEntity) — nausea over the pool, the
+        // dormant/erupting countdown, the plume and the launch.
+        registerSimple(BlockEntityTypeIds::POTENT_SULFUR, "potent_sulfur", BlockID::PotentSulfur,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<PotentSulfurBlockEntity>(t, pos, id);
+            });
+
+        // ── The Hush lighthouse lamp ──────────────────────────────────────
+        // The beam's sweep is a pure function of the level's game time and
+        // the lamp's position (HushLighthouseRenderer), so every client sees
+        // the same sweep; the entity only carries where the nearest Aurelith
+        // is, filled in once by the server (HushLighthouseLampBlockEntity).
+        // Generated lamps get theirs from the Hush Lighthouse template's {id}
+        // nbt (AttachGeneratedBlockEntities), unchecked.
+        registerSimple(BlockEntityTypeIds::HUSH_LIGHTHOUSE_LAMP, "hush_lighthouse_lamp",
+                       BlockID::HushLighthouseLamp,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                // The sweep needs nothing saved; the lamp's one datum is the
+                // nearest Aurelith it points travellers to (Lighthouses that
+                // guide — HushLighthouseLampBlockEntity, LighthouseGuide).
+                return std::make_unique<HushLighthouseLampBlockEntity>(t, pos, id);
+            });
+
+        // ── Aurelith: the Heart and the gate beacons ─────────────────────
+        // Plain BlockEntities for the same reason as the lamp: nothing to
+        // save or sync, the renderers derive everything from game time and
+        // the block. Generated ones come from the Aurelith templates' {id}
+        // nbt (AttachGeneratedBlockEntities).
+        // The engine records the city's rotation (ResonanceEngineBlockEntity:
+        // the quest finds every landmark from the Heart through it).
+        registerSimple(BlockEntityTypeIds::RESONANCE_ENGINE, "resonance_engine",
+                       BlockID::ResonanceEngine,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<ResonanceEngineBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::VOICE_BEACON, "voice_beacon", BlockID::VoiceBeacon,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<BlockEntity>(t, pos, id);
+            });
+
+        // ── Aurelith: reawakening the Heart ──────────────────────────────
+        // The Podium's sockets, the pedestals and the Hall of Instruments'
+        // cabinet (AurelithBlockEntities.hpp). Generated ones come from the
+        // templates' nbt (TemplateEngine::blockEntityPayloadFor →
+        // AttachGeneratedBlockEntities).
+        registerSimple(BlockEntityTypeIds::CHORD_SOCKET, "chord_socket", BlockID::ChordSocket,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<ChordSocketBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::VOICE_PEDESTAL, "voice_pedestal", BlockID::VoicePedestal,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<VoicePedestalBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::CHOIR_CABINET, "choir_cabinet", BlockID::ChoirCabinet,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<ChoirCabinetBlockEntity>(t, pos, id);
+            });
+
         Log::Info("[BlockEntityTypes] initialised with %zu type(s)", g_typeStorage.size());
+    }
+
+    // MC BlockEntity.setChanged → Level.blockEntityChanged: mark for saving
+    // and, when the block has an analog output, tell the comparators reading
+    // it. Menus never have to remember to do this — Slot calls SetChanged
+    // through the container on every mutation.
+    void BaseContainerBlockEntity::SetChanged() {
+        MarkDirty();
+        if (ILevelWrite* level = GetLevel()) {
+            if (BlockRegistry::Get(GetBlockId()).hasAnalogOutputSignal) {
+                level->UpdateNeighbourForOutputSignal(GetWorldPos(), GetBlockId());
+            }
+        }
+    }
+
+    // MC RandomizableContainer.unpackLootTable. MC bails without a level (it
+    // needs the server's loot registry); here the table is read from the data
+    // pack, so a container the chunk loader has not yet handed a level to
+    // (the tick walker installs it later) still rolls — with the seed, or a
+    // time-seeded random when there is neither seed nor level.
+    void BaseContainerBlockEntity::UnpackLootTable(float luck) {
+        if (m_lootTable.empty()) return;
+        ILevelWrite* level = GetLevel();
+        if (level && level->IsClientSide()) return;   // the server rolls; the client is told
+        const std::string key = std::move(m_lootTable);
+        m_lootTable.clear();                            // re-entrancy guard, before fill
+        const int64_t seed = m_lootTableSeed;
+        m_lootTableSeed = 0;
+        if (!ChestLoot::Fill(*this, key, seed, level ? level->Random() : nullptr, luck)) {
+            Log::Warning("[BlockEntity] %s at (%d,%d,%d) named loot table '%s', which does not exist",
+                         GetType() ? std::string(GetType()->StringId()).c_str() : "container",
+                         GetWorldPos().x, GetWorldPos().y, GetWorldPos().z, key.c_str());
+        }
+        MarkDirty();
     }
 
     bool BlockEntityTypes::HasBlockEntity(BlockID id) {

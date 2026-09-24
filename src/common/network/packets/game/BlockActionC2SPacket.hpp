@@ -19,7 +19,11 @@ namespace Network {
         int worldX, worldY, worldZ;
         BlockActionType action;
         Game::BlockID   blockId = Game::BlockID::Air; // For PLACE action
-        uint8_t         face    = 0;                  // 0..5
+        // The face the dig started on, RaycastHit::hitFace order (0=+X,
+        // 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z), or kFaceUnknown. The vein mine's
+        // tunnel shape runs into it.
+        static constexpr uint8_t kFaceUnknown = 255;
+        uint8_t         face    = kFaceUnknown;
         glm::vec3       hitPosition;                  // exact hit point (for placement)
         uint32_t        sequenceNumber = 0;
         // Block-state index of the block being broken, captured client-side at
@@ -38,6 +42,11 @@ namespace Network {
         // and optional on the wire; kDimensionUnknown = the player's own.
         static constexpr int8_t kDimensionUnknown = 127;
         int8_t          dimensionId = kDimensionUnknown;
+        // Vein mine: on STOP_DESTROY / BREAK, the server also breaks every
+        // touching block of the same kind (PlayerSession::VeinMineFrom).
+        // Set when the player held the vein-mine key together with Sneak.
+        // Trailing and optional on the wire; absent = false.
+        bool            veinMine = false;
 
         BlockActionC2SPacket() = default;
         BlockActionC2SPacket(int x, int y, int z, BlockActionType act)
@@ -62,6 +71,7 @@ namespace Network {
             buffer.WriteVarInt(packet.sequenceNumber);
             buffer.WriteShort(packet.blockState);
             buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
+            buffer.WriteByte(packet.veinMine ? 1 : 0);
             return buffer.GetData();
         }
 
@@ -86,6 +96,9 @@ namespace Network {
             }
             if (reader.Remaining() >= 1) {
                 packet.dimensionId = static_cast<int8_t>(reader.ReadByte());
+            }
+            if (reader.Remaining() >= 1) {
+                packet.veinMine = reader.ReadByte() != 0;
             }
             return packet;
         }

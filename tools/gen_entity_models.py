@@ -22,12 +22,12 @@ import os
 import re
 import sys
 
-MC = "minecraft_code/decompiled_net/minecraft"
+MC = "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft"
 MODEL_DIR = os.path.join(MC, "client/model")
 # The NEWER decompile (26.3 Pre-Release 2) that the "Tiny Takeover" baby
 # remodel is read from — see remodel_meshes(). Everything else still comes from
 # the main tree above; the two are never mixed inside one mesh.
-MC2 = "minecraft_code2/decompiled_net/minecraft"
+MC2 = "minecraft_code_26.3-pre-2/decompiled_net/minecraft"
 # Mobs whose EVERY mesh comes from MC2 (remodel_meshes' explicit rows).
 MC2_ONLY_MESHES = {"sulfur_cube"}
 MODEL_DIR2 = os.path.join(MC2, "client/model")
@@ -117,9 +117,212 @@ HIDDEN_PARTS = {
 }
 
 # Hand-written models that already exist and must NOT be replaced — they carry
-# real setupAnim implementations.
+# real setupAnim implementations. The armor stand joined them in 2026-09
+# (ArmorStandModel, MobRenderer::CreateModelFor); without the row a
+# regeneration emitted an unused "armor_stand" mesh.
 HAND_WRITTEN = {"zombie", "skeleton", "creeper", "spider",
-                "cow", "pig", "sheep", "chicken"}
+                "cow", "pig", "sheep", "chicken", "armor_stand"}
+
+# ── Mod meshes (docs/mod-ports.md) ─────────────────────────────────────────
+#
+# Twilight Forest and Aether creatures, read from the mods' own model classes
+# (mods_reference/, git-ignored) with the same texOffs/addBox/PartPose parser.
+#   slug: (java path, factory method, texWidth, texHeight)
+# The sizes are the factory's own `LayerDefinition.create(mesh, w, h)` —
+# except the cockatrice, whose BipedBirdModel boxes all pass the texScale
+# pair (0.5, 0.5) on a 128x64 sheet (CubeListBuilder.addBox(..., deformation,
+# texScaleU, texScaleV)). MC bakes that as a 64x32 UV space; the cube does
+# not carry a texture scale here, so the row states the effective 64x32.
+#
+# The mod classes are added to a COPY of the MC source table (so a mod class
+# can call QuadrupedModel.createBodyMesh / HumanoidModel.createMesh); the MC
+# meshes are evaluated before any mod file is read and come out
+# byte-identical. Mod meshes are emitted AFTER every MC mesh for the same
+# reason — the part/cube indices of the existing rows never move.
+TF_MODELS = "mods_reference/twilightforest/src/main/java/twilightforest/client/model/entity"
+AETHER_MODELS = ("mods_reference/aether/src/main/java/com/aetherteam/aether/"
+                 "client/renderer/entity/model")
+MOD_MODELS = {
+    "deer":          (TF_MODELS + "/DeerModel.java",        "create", 64, 32),
+    "boar":          (TF_MODELS + "/BoarModel.java",        "create", 64, 32),
+    "bighorn_sheep": (TF_MODELS + "/BighornModel.java",     "create", 64, 32),
+    "tiny_bird":     (TF_MODELS + "/TinyBirdModel.java",    "create", 32, 32),
+    "kobold":        (TF_MODELS + "/KoboldModel.java",      "create", 64, 32),
+    "redcap":        (TF_MODELS + "/RedcapModel.java",      "create", 64, 32),
+    "sheepuff":      (AETHER_MODELS + "/SheepuffModel.java",   "createBodyLayer", 64, 32),
+    "cockatrice":    (AETHER_MODELS + "/CockatriceModel.java", "createBodyLayer", 64, 32),
+    "zephyr":        (AETHER_MODELS + "/ZephyrModel.java",     "createBodyLayer", 128, 32),
+    # Second-layer meshes on their own sheets: the Aether's QuadrupedWingsLayer
+    # (phyg_wings.png / flying_cow_wings.png) and SheepuffWoolLayer
+    # (sheepuff_wool.png). MobRenderer draws them as the type's overlay model.
+    "phyg_wings":       (AETHER_MODELS + "/QuadrupedWingsModel.java", "createMainLayer", 64, 32),
+    "flying_cow_wings": (AETHER_MODELS + "/QuadrupedWingsModel.java", "createMainLayer", 64, 32),
+    "sheepuff_wool":    (AETHER_MODELS + "/SheepuffWoolModel.java",   "createFurLayer",  64, 32),
+    # Pass two (2026-09-22): the rest of both mods' creatures. Emitted after
+    # every pass-one row (table order), so no existing index moves.
+    # Twilight Forest (TFModelLayers rows in ClientRegistrationEvents).
+    "squirrel":       (TF_MODELS + "/SquirrelModel.java",      "create", 32, 32),
+    "raven":          (TF_MODELS + "/RavenModel.java",         "create", 32, 32),
+    "dwarf_rabbit":   (TF_MODELS + "/BunnyModel.java",         "create", 32, 32),
+    "penguin":        (TF_MODELS + "/PenguinModel.java",       "create", 64, 32),
+    "skeleton_druid": (TF_MODELS + "/SkeletonDruidModel.java", "create", 64, 32),
+    "yeti":           (TF_MODELS + "/YetiModel.java",          "create", 128, 64),
+    "wraith":         (TF_MODELS + "/WraithModel.java",        "create", 64, 32),
+    "fire_beetle":    (TF_MODELS + "/FireBeetleModel.java",    "create", 64, 32),
+    "slime_beetle":   (TF_MODELS + "/SlimeBeetleModel.java",   "create", 64, 64),
+    "pinch_beetle":   (TF_MODELS + "/PinchBeetleModel.java",   "create", 64, 32),
+    "helmet_crab":    (TF_MODELS + "/HelmetCrabModel.java",    "create", 64, 32),
+    "troll":          (TF_MODELS + "/TrollModel.java",         "create", 128, 64),
+    "minotaur":       (TF_MODELS + "/MinotaurModel.java",      "create", 64, 32),
+    "block_and_chain_goblin": (TF_MODELS + "/BlockChainGoblinModel.java", "create", 32, 32),
+    # BlockChainRenderer's two meshes: the spiked ball (CHAIN_BLOCK =
+    # SpikeBlockModel) and a chain link (CHAIN = ChainModel), both on
+    # block_and_chain.png.
+    "tf_spike_block": (TF_MODELS + "/SpikeBlockModel.java",    "create", 32, 16),
+    "tf_chain":       (TF_MODELS + "/ChainModel.java",         "create", 32, 16),
+    "upper_goblin_knight": (TF_MODELS + "/UpperGoblinKnightModel.java", "create", 128, 64),
+    "lower_goblin_knight": (TF_MODELS + "/LowerGoblinKnightModel.java", "create", 128, 64),
+    # The Aether (AetherRenderers.registerLayerDefinitions). MOA is
+    # MoaModel.createBodyLayer(CubeDeformation.NONE) — BipedBirdModel's
+    # static, 128x64 at texScale 0.5 = 64x32 UV space (the cockatrice's note).
+    "moa":            (AETHER_MODELS + "/MoaModel.java",        "createBodyLayer", 64, 32),
+    "aerbunny":       (AETHER_MODELS + "/AerbunnyModel.java",   "createBodyLayer", 64, 32),
+    "aerwhale":       (AETHER_MODELS + "/AerwhaleModel.java",   "createBodyLayer", 256, 128),
+    "aechor_plant":   (AETHER_MODELS + "/AechorPlantModel.java", "createBodyLayer", 64, 32),
+    "mimic":          (AETHER_MODELS + "/MimicModel.java",      "createBodyLayer", 128, 64),
+    "valkyrie":       (AETHER_MODELS + "/ValkyrieModel.java",   "createBodyLayer", 64, 32),
+    # VALKYRIE_WINGS = ValkyrieWingsModel.createMainLayer(4.5F, 2.5F).
+    "valkyrie_wings": (AETHER_MODELS + "/ValkyrieWingsModel.java", "createMainLayer", 64, 32),
+    # FIRE_MINION = FireMinionModel.createBodyLayer, inherited from
+    # SunSpiritModel (MOD_EXTRA_SOURCES carries the parent), 64x64.
+    # MosquitoSwarmModel is absent on purpose: it builds its parts from a
+    # Random, so TwilightCreatureRender builds that mesh itself.
+    "fire_minion":    (AETHER_MODELS + "/FireMinionModel.java", "createBodyLayer", 64, 64),
+}
+# Factory arguments, bound by parameter name — the values AetherRenderers.
+# registerLayerDefinitions passes: PHYG_WINGS createMainLayer(10.0F),
+# FLYING_COW_WINGS createMainLayer(0.0F), SHEEPUFF_WOOL createFurLayer(new
+# CubeDeformation(1.75F), 0.0F). A number binds as a float, a 3-tuple as a
+# CubeDeformation.
+MOD_MODEL_ARGS = {
+    "phyg_wings":       {"offset": 10.0},
+    "flying_cow_wings": {"offset": 0.0},
+    "sheepuff_wool":    {"cube": (1.75, 1.75, 1.75), "height": 0.0},
+    "moa":              {"cube": (0.0, 0.0, 0.0)},
+    "valkyrie_wings":   {"offsetY": 4.5, "offsetZ": 2.5},
+}
+# CockatriceModel holds no mesh of its own — its createBodyLayer is inherited
+# from BipedBirdModel, which the class chain reaches once this file is loaded
+# beside it.
+MOD_EXTRA_SOURCES = [AETHER_MODELS + "/BipedBirdModel.java",
+                     AETHER_MODELS + "/SunSpiritModel.java"]
+# Mod creatures whose renderer draws a VANILLA body mesh (Aether's
+# PhygRenderer: PigModel.createBodyLayer; FlyingCowRenderer: CowModel) — they
+# get no generated row; MobRenderer builds the engine's hand-written
+# PigModel/CowModel for them.
+MOD_VANILLA_BODY = {"phyg", "flying_cow",
+                    # Pass two: renderers over a vanilla mesh — TFSpiderRenderer
+                    # (SpiderModel), the TF wolves (AdultWolfModel), the borer
+                    # (SilverfishModel), MazeSlimeRenderer / the swets / the
+                    # sentry (SlimeModel), the sapper (RedcapModel = the redcap
+                    # row); the whirlwinds draw particles only.
+                    "king_spider", "hedge_spider", "swarm_spider",
+                    "hostile_wolf", "mist_wolf", "winter_wolf",
+                    "towerwood_borer", "maze_slime", "redcap_sapper",
+                    "blue_swet", "golden_swet", "sentry",
+                    "whirlwind", "evil_whirlwind"}
+
+
+# ── Hush creature meshes (docs/the-hush.md) ──────────────────────────────
+#
+# The lumen moth, crystal golem, hush leviathan, echo mimic and Choir Mother
+# are original designs with no MC or mod model class to parse: their meshes
+# are data in tools/hush_creature_meshes.py, which gen_hush_entity_textures.py
+# reads too (one UV packing for both). Emitted AFTER the mod meshes, in that
+# module's order, so no existing row's part/cube indices move.
+def hush_meshes():
+    """{slug: mesh dict} for the Hush creature meshes, plus a report."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import hush_creature_meshes as hcm
+    out, report, order = {}, [], []
+    for mesh in hcm.meshes():
+        root = Part("root", None)
+        by_name = {}
+        parts = []
+        for hp in mesh.parts:
+            parent = root if hp.parent is None else by_name[hp.parent]
+            part = Part(hp.name, parent)
+            part.pose = [float(v) for v in hp.pose]
+            for c in hp.cubes:
+                part.cubes.append(dict(
+                    o=[float(v) for v in c.o], s=[float(v) for v in c.s],
+                    tu=float(c.tu), tv=float(c.tv),
+                    grow=(float(c.grow),) * 3, mirror=False))
+            by_name[hp.name] = part
+            parts.append(part)
+        out[mesh.slug] = dict(texw=mesh.texw, texh=mesh.texh, root=root, parts=parts,
+                              head=mesh.head, headguard=("None", False),
+                              clips=[], vis=[], cull=mesh.cull)
+        order.append(mesh.slug)
+        report.append(f"  hush mesh {mesh.slug:14s} {len(parts)} parts, "
+                      f"{sum(len(p.cubes) for p in parts)} cubes")
+    return out, report, order
+
+
+def mod_source_shims(src):
+    """Source-level fixes for mod code written against another MC version.
+
+    The Aether targets MC 1.21.1, whose QuadrupedModel.createBodyMesh took
+    (legSize, deformation) and mirrored no leg; 26.1's takes (legSize,
+    mirrorLeftLeg, mirrorRightLeg, deformation). The call is rewritten to the
+    26.1 form with both mirrors off, which is the 1.21.1 mesh exactly.
+    """
+    src = re.sub(r"QuadrupedModel\.createBodyMesh\(\s*([^,()]+?)\s*,\s*"
+                 r"(CubeDeformation\.NONE)\s*\)",
+                 r"QuadrupedModel.createBodyMesh(\1, false, false, \2)", src)
+    # Mth's float constants (the Aether poses its bodies with Mth.HALF_PI);
+    # evalnum only knows Math.PI, so they would otherwise read as 0.
+    src = re.sub(r"\bMth\.HALF_PI\b", "1.5707964F", src)
+    src = re.sub(r"\bMth\.TWO_PI\b", "6.2831855F", src)
+    return re.sub(r"\bMth\.PI\b", "3.1415927F", src)
+
+
+def mod_meshes(sources):
+    """{slug: mesh dict} for MOD_MODELS, plus a report line per slug."""
+    msources = dict(sources)
+    for path in [p for p, _, _, _ in MOD_MODELS.values()] + MOD_EXTRA_SOURCES:
+        if os.path.exists(path):
+            cls = os.path.basename(path)[:-5]
+            msources[cls] = mod_source_shims(
+                strip_comments(open(path, encoding="utf-8").read()))
+    out, report = {}, []
+    for slug, (path, method, texw, texh) in MOD_MODELS.items():
+        cls = os.path.basename(path)[:-5]
+        if cls not in msources:
+            report.append(f"  WARNING: mod mesh {slug}: {path} missing")
+            continue
+        args = MOD_MODEL_ARGS.get(slug, {})
+        got = parse_model(cls, msources, method,
+                          env={k: v for k, v in args.items() if not isinstance(v, tuple)},
+                          denv={k: v for k, v in args.items() if isinstance(v, tuple)})
+        if not got or not any(p.cubes for p in got["parts"]):
+            report.append(f"  WARNING: mod mesh {slug}: {cls}.{method} did not parse")
+            continue
+        got["texw"], got["texh"] = texw, texh
+        head, guard, clips, vis = setup_anim_info(cls, msources)
+        # The Aether's 1.21.1 setupAnim turns the head from netHeadYaw /
+        # headPitch, which the 26.x look-angle scan does not read; every
+        # mod model with a part named "head" turns it.
+        if not head and any(p.name == "head" for p in got["parts"]):
+            head = "head"
+        got["head"], got["headguard"], got["clips"], got["vis"] = head, guard, clips, vis
+        got["cull"] = model_culls(cls, msources)
+        out[slug] = got
+        names = [p.name for p in got["parts"] if p.parent is not None]
+        report.append(f"  mod mesh {slug:14s} {len(names)} parts, "
+                      f"{sum(len(p.cubes) for p in got['parts'])} cubes, "
+                      f"head={head or '-'}: {', '.join(names)}")
+    return out, report
 # The hand-written mobs that CAN be babies (their classic baby is built by
 # EntityModel::BecomeBaby, not a generated row).
 HAND_WRITTEN_BABIES = {"zombie", "cow", "pig", "sheep", "chicken"}
@@ -1087,6 +1290,40 @@ def run_mesh(body, src, sources, chain=(), env=None, denv=None, into=None):
                      dict(env), dict(denv), into=(root, parts))
             break
 
+    # The same for a void helper taking SEVERAL arguments, bound by name:
+    # QuadrupedModel.createBodyMesh ends in `createLegs(root, mirrorLeftLeg,
+    # mirrorRightLeg, legSize, g);`. No MC mesh this generator evaluates
+    # reached it (pig and sheep are hand-written), so the four legs only
+    # mattered once a mod mesh (the Aether's sheepuff) relied on them. A
+    # PartDefinition argument falls back to the mesh root, as above.
+    for m in re.finditer(r"(?:^|;|\})\s*(?:(\w+)\s*\.\s*)?(\w+)\s*\(([^;{}()]*,[^;{}()]*)\)\s*;",
+                         body):
+        howner, hmeth = m.group(1), m.group(2)
+        if hmeth in ("getRoot", "getChild", "addOrReplaceChild", "clearChild"):
+            continue
+        search = (class_chain(howner, sources) or [howner]) if howner else list(chain)
+        for cls in search:
+            csrc = sources.get(cls)
+            if not csrc:
+                continue
+            got = method_signature(csrc, hmeth)
+            if got is None:
+                continue
+            hparams, hbody = got
+            if "addOrReplaceChild" not in hbody:
+                break
+            henv, hdenv = dict(env), dict(denv)
+            for (ptype, pname), arg in zip(hparams, split_args(m.group(3))):
+                if ptype == "PartDefinition":
+                    continue
+                if ptype == "CubeDeformation" or is_deform(arg, denv):
+                    hdenv[pname] = evaldeform(arg, env, denv)
+                else:
+                    henv[pname] = evalnum(arg, env)
+            run_mesh(hbody, csrc, sources, class_chain(cls, sources) or chain,
+                     henv, hdenv, into=(root, parts))
+            break
+
     # Every addOrReplaceChild, in source order.
     for m in re.finditer(r"(\w+)((?:\.addOrReplaceChild\s*\()+)", body):
         pass
@@ -1333,7 +1570,7 @@ def apply_baby_poses(model, rules):
                 break
 
 
-def parse_model(cls, sources, entry_pin=None):
+def parse_model(cls, sources, entry_pin=None, env=None, denv=None):
     chain = class_chain(cls, sources)
     if not chain:
         return None
@@ -1381,7 +1618,9 @@ def parse_model(cls, sources, entry_pin=None):
         texw, texh = got
 
     body = resolve_forward(body, sources[home], sources, chain)
-    root, parts = run_mesh(body, sources[home], sources, chain)
+    # `env`/`denv` bind the entry method's own parameters (mod meshes whose
+    # factory takes arguments — MOD_MODEL_ARGS); None for every MC mesh.
+    root, parts = run_mesh(body, sources[home], sources, chain, env, denv)
     parts = [p for p in parts if p is not root or p.cubes]
     return dict(texw=texw, texh=texh, root=root, parts=parts)
 
@@ -2151,6 +2390,10 @@ def main():
     for slug in slugs:
         if slug in HAND_WRITTEN or slug in PROJECTILES:
             continue
+        # Mod creatures: their meshes come from MOD_MODELS below (or a
+        # vanilla hand-written body), never from an MC layer of the same name.
+        if slug in MOD_MODELS or slug in MOD_VANILLA_BODY:
+            continue
         # A 26.3-only mob's meshes come from the MC2 rows below (the sulfur
         # cube); 26.1 has nothing to look for.
         if slug in MC2_ONLY_MESHES:
@@ -2256,6 +2499,13 @@ def main():
          got["clips"], got["vis"]) = setup_anim_info(cls, sources)
         got["cull"] = model_culls(cls, sources)
         models[slug] = got
+
+    # ── Mod meshes (MOD_MODELS) ────────────────────────────────────────────
+    mods, mod_report = mod_meshes(sources)
+    models.update(mods)
+    hush, hush_report, hush_order = hush_meshes()
+    models.update(hush)
+    mod_report += hush_report
 
     # ── Emit ───────────────────────────────────────────────────────────────
     guard_enum = ", ".join(GUARD_NAMES)
@@ -2371,7 +2621,12 @@ namespace Render {{
     parts_rows, cubes_rows, model_rows = [], [], []
     clip_rows, vis_rows = [], []
     slot_index = read_mob_anim_slots()
-    for slug in sorted(models):
+    # MC meshes sorted as always, then the mod meshes in table order, then
+    # the Hush creature meshes in their module's order — so a new mod or
+    # Hush row never shifts an existing row's part/cube indices.
+    emit_order = sorted(s for s in models if s not in mods and s not in hush) + \
+        [s for s in MOD_MODELS if s in mods] + hush_order
+    for slug in emit_order:
         md = models[slug]
         # A baby mesh hides the same default-state parts as its adult — the
         # llama's chest packs and the turtle's egg belly exist in the baby
@@ -2471,6 +2726,8 @@ namespace Render {{
             print(f"    {slug:24s} (looked for {cls})")
     for slug, why in baby_skipped:
         print(f"  WARNING: no baby mesh for {slug}: {why}")
+    for line in mod_report:
+        print(line)
 
 
 if __name__ == "__main__":

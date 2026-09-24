@@ -29,7 +29,8 @@ namespace Server {
         // `playerPositions` must outlive the calculator (it lives for one
         // spawn tick). Entries are the non-spectator players.
         explicit LocalMobCapCalculator(const std::vector<glm::dvec3>* playerPositions)
-            : m_players(playerPositions) {}
+            : m_players(playerPositions),
+              m_counts(playerPositions ? playerPositions->size() : 0, CategoryCounts{}) {}
 
         // MC LocalMobCapCalculator.addMob.
         void AddMob(int chunkX, int chunkZ, Game::MobCategory category) {
@@ -44,10 +45,7 @@ namespace Server {
         bool CanSpawn(Game::MobCategory category, int chunkX, int chunkZ) {
             const int cap = Game::GetMobCategoryInfo(category).maxInstancesPerChunk;
             for (size_t player : PlayersNear(chunkX, chunkZ)) {
-                const auto it = m_counts.find(player);
-                const int count =
-                    it == m_counts.end() ? 0 : it->second[static_cast<size_t>(category)];
-                if (count < cap) return true;
+                if (m_counts[player][static_cast<size_t>(category)] < cap) return true;
             }
             return false;
         }
@@ -76,11 +74,12 @@ namespace Server {
             return nearby;
         }
 
+        using CategoryCounts = std::array<int, static_cast<size_t>(Game::MobCategory::Count)>;
+
         const std::vector<glm::dvec3>* m_players = nullptr;
         std::unordered_map<uint64_t, std::vector<size_t>> m_playersNearChunk;
-        std::unordered_map<size_t,
-                           std::array<int, static_cast<size_t>(Game::MobCategory::Count)>>
-            m_counts;
+        // MC's playerMobCounts, indexed by the player's slot in m_players.
+        std::vector<CategoryCounts> m_counts;
     };
 
 } // namespace Server

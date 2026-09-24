@@ -4,6 +4,10 @@
     "minecraft:leather_leggings",
     "minecraft:leather_chestplate",
     "minecraft:leather_helmet",
-    "minecraft:leather_horse_armor"
+    "minecraft:leather_horse_armor",
+    "minecraft:fiery_helmet",
+    "minecraft:fiery_chestplate",
+    "minecraft:fiery_leggings",
+    "minecraft:fiery_boots"
   ]
 }

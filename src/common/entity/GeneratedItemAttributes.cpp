@@ -13,43 +13,157 @@ namespace Game {
     { "copper_hoe", 0.0f, -2.0f, WeaponKind::Hoe },   // copper hoe
     { "copper_pickaxe", 2.0f, -2.8f, WeaponKind::Pickaxe },   // copper pickaxe
     { "copper_shovel", 2.5f, -3.0f, WeaponKind::Shovel },   // copper shovel
+    { "copper_spear", 1.0f, -2.8235f, WeaponKind::Spear },   // copper spear
     { "copper_sword", 4.0f, -2.4f, WeaponKind::Sword },   // copper sword
     { "diamond_axe", 8.0f, -3.0f, WeaponKind::Axe },   // diamond axe
     { "diamond_hoe", 0.0f, 0.0f, WeaponKind::Hoe },   // diamond hoe
     { "diamond_pickaxe", 4.0f, -2.8f, WeaponKind::Pickaxe },   // diamond pickaxe
     { "diamond_shovel", 4.5f, -3.0f, WeaponKind::Shovel },   // diamond shovel
+    { "diamond_spear", 3.0f, -3.0476f, WeaponKind::Spear },   // diamond spear
     { "diamond_sword", 6.0f, -2.4f, WeaponKind::Sword },   // diamond sword
+    { "echo_blade", 9.0f, -2.4f, WeaponKind::Sword },   // - sword
+    { "fiery_pickaxe", 5.0f, -2.8f, WeaponKind::Pickaxe },   // fiery pickaxe
+    { "fiery_sword", 7.0f, -2.4f, WeaponKind::Sword },   // fiery sword
     { "golden_axe", 6.0f, -3.0f, WeaponKind::Axe },   // gold axe
     { "golden_hoe", 0.0f, -3.0f, WeaponKind::Hoe },   // gold hoe
     { "golden_pickaxe", 1.0f, -2.8f, WeaponKind::Pickaxe },   // gold pickaxe
     { "golden_shovel", 1.5f, -3.0f, WeaponKind::Shovel },   // gold shovel
+    { "golden_spear", 0.0f, -2.9474f, WeaponKind::Spear },   // gold spear
     { "golden_sword", 3.0f, -2.4f, WeaponKind::Sword },   // gold sword
+    { "gravitite_axe", 8.0f, -3.0f, WeaponKind::Axe },   // gravitite axe
+    { "gravitite_hoe", 0.0f, 0.0f, WeaponKind::Hoe },   // gravitite hoe
+    { "gravitite_pickaxe", 4.0f, -2.8f, WeaponKind::Pickaxe },   // gravitite pickaxe
+    { "gravitite_shovel", 4.5f, -3.0f, WeaponKind::Shovel },   // gravitite shovel
+    { "gravitite_sword", 6.0f, -2.4f, WeaponKind::Sword },   // gravitite sword
+    { "holystone_axe", 8.0f, -3.2f, WeaponKind::Axe },   // holystone axe
+    { "holystone_hoe", 0.0f, -2.0f, WeaponKind::Hoe },   // holystone hoe
+    { "holystone_pickaxe", 2.0f, -2.8f, WeaponKind::Pickaxe },   // holystone pickaxe
+    { "holystone_shovel", 2.5f, -3.0f, WeaponKind::Shovel },   // holystone shovel
+    { "holystone_sword", 4.0f, -2.4f, WeaponKind::Sword },   // holystone sword
     { "iron_axe", 8.0f, -3.1f, WeaponKind::Axe },   // iron axe
     { "iron_hoe", 0.0f, -1.0f, WeaponKind::Hoe },   // iron hoe
     { "iron_pickaxe", 3.0f, -2.8f, WeaponKind::Pickaxe },   // iron pickaxe
     { "iron_shovel", 3.5f, -3.0f, WeaponKind::Shovel },   // iron shovel
+    { "iron_spear", 2.0f, -2.9474f, WeaponKind::Spear },   // iron spear
     { "iron_sword", 5.0f, -2.4f, WeaponKind::Sword },   // iron sword
+    { "ironwood_axe", 8.0f, -3.1f, WeaponKind::Axe },   // ironwood axe
+    { "ironwood_hoe", 0.0f, -1.0f, WeaponKind::Hoe },   // ironwood hoe
+    { "ironwood_pickaxe", 3.0f, -2.8f, WeaponKind::Pickaxe },   // ironwood pickaxe
+    { "ironwood_shovel", 3.5f, -3.0f, WeaponKind::Shovel },   // ironwood shovel
+    { "ironwood_sword", 5.0f, -2.4f, WeaponKind::Sword },   // ironwood sword
+    { "knightmetal_axe", 9.0f, -3.2f, WeaponKind::Axe },   // knightmetal axe
+    { "knightmetal_pickaxe", 4.0f, -2.8f, WeaponKind::Pickaxe },   // knightmetal pickaxe
+    { "knightmetal_sword", 6.0f, -2.4f, WeaponKind::Sword },   // knightmetal sword
     { "mace", 5.0f, -3.4f, WeaponKind::Mace },   // - mace
     { "netherite_axe", 9.0f, -3.0f, WeaponKind::Axe },   // netherite axe
     { "netherite_hoe", 0.0f, 0.0f, WeaponKind::Hoe },   // netherite hoe
     { "netherite_pickaxe", 5.0f, -2.8f, WeaponKind::Pickaxe },   // netherite pickaxe
     { "netherite_shovel", 5.5f, -3.0f, WeaponKind::Shovel },   // netherite shovel
+    { "netherite_spear", 4.0f, -3.1304f, WeaponKind::Spear },   // netherite spear
     { "netherite_sword", 7.0f, -2.4f, WeaponKind::Sword },   // netherite sword
+    { "resonite_axe", 9.0f, -3.0f, WeaponKind::Axe },   // resonite axe
+    { "resonite_hoe", 0.0f, 0.0f, WeaponKind::Hoe },   // resonite hoe
+    { "resonite_pickaxe", 5.0f, -2.8f, WeaponKind::Pickaxe },   // resonite pickaxe
+    { "resonite_shovel", 5.5f, -3.0f, WeaponKind::Shovel },   // resonite shovel
+    { "resonite_sword", 7.0f, -2.4f, WeaponKind::Sword },   // resonite sword
+    { "skyroot_axe", 6.0f, -3.2f, WeaponKind::Axe },   // skyroot axe
+    { "skyroot_hoe", 0.0f, -3.0f, WeaponKind::Hoe },   // skyroot hoe
+    { "skyroot_pickaxe", 1.0f, -2.8f, WeaponKind::Pickaxe },   // skyroot pickaxe
+    { "skyroot_shovel", 1.5f, -3.0f, WeaponKind::Shovel },   // skyroot shovel
+    { "skyroot_sword", 3.0f, -2.4f, WeaponKind::Sword },   // skyroot sword
+    { "steeleaf_axe", 9.0f, -3.0f, WeaponKind::Axe },   // steeleaf axe
+    { "steeleaf_hoe", 0.0f, -0.5f, WeaponKind::Hoe },   // steeleaf hoe
+    { "steeleaf_pickaxe", 4.0f, -2.8f, WeaponKind::Pickaxe },   // steeleaf pickaxe
+    { "steeleaf_shovel", 4.5f, -3.0f, WeaponKind::Shovel },   // steeleaf shovel
+    { "steeleaf_sword", 6.0f, -2.4f, WeaponKind::Sword },   // knightmetal sword
     { "stone_axe", 8.0f, -3.2f, WeaponKind::Axe },   // stone axe
     { "stone_hoe", 0.0f, -2.0f, WeaponKind::Hoe },   // stone hoe
     { "stone_pickaxe", 2.0f, -2.8f, WeaponKind::Pickaxe },   // stone pickaxe
     { "stone_shovel", 2.5f, -3.0f, WeaponKind::Shovel },   // stone shovel
+    { "stone_spear", 1.0f, -2.6667f, WeaponKind::Spear },   // stone spear
     { "stone_sword", 4.0f, -2.4f, WeaponKind::Sword },   // stone sword
     { "trident", 8.0f, -2.9f, WeaponKind::Trident },   // - trident
     { "wooden_axe", 6.0f, -3.2f, WeaponKind::Axe },   // wood axe
     { "wooden_hoe", 0.0f, -3.0f, WeaponKind::Hoe },   // wood hoe
     { "wooden_pickaxe", 1.0f, -2.8f, WeaponKind::Pickaxe },   // wood pickaxe
     { "wooden_shovel", 1.5f, -3.0f, WeaponKind::Shovel },   // wood shovel
+    { "wooden_spear", 0.0f, -2.4615f, WeaponKind::Spear },   // wood spear
     { "wooden_sword", 3.0f, -2.4f, WeaponKind::Sword },   // wood sword
+    { "zanite_axe", 8.0f, -3.1f, WeaponKind::Axe },   // zanite axe
+    { "zanite_hoe", 0.0f, -1.0f, WeaponKind::Hoe },   // zanite hoe
+    { "zanite_pickaxe", 3.0f, -2.8f, WeaponKind::Pickaxe },   // zanite pickaxe
+    { "zanite_shovel", 3.5f, -3.0f, WeaponKind::Shovel },   // zanite shovel
+    { "zanite_sword", 5.0f, -2.4f, WeaponKind::Sword },   // zanite sword
+    };
+
+    const ItemArmorRow kItemArmorAttributes[kItemArmorCount] = {
+    { "chainmail_boots", ArmorSlotGroup::Feet, 1.0f, 0.0f, 0.0f },   // chainmail
+    { "chainmail_chestplate", ArmorSlotGroup::Chest, 5.0f, 0.0f, 0.0f },   // chainmail
+    { "chainmail_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // chainmail
+    { "chainmail_leggings", ArmorSlotGroup::Legs, 4.0f, 0.0f, 0.0f },   // chainmail
+    { "copper_boots", ArmorSlotGroup::Feet, 1.0f, 0.0f, 0.0f },   // copper
+    { "copper_chestplate", ArmorSlotGroup::Chest, 4.0f, 0.0f, 0.0f },   // copper
+    { "copper_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // copper
+    { "copper_horse_armor", ArmorSlotGroup::Body, 4.0f, 0.0f, 0.0f },   // copper
+    { "copper_leggings", ArmorSlotGroup::Legs, 3.0f, 0.0f, 0.0f },   // copper
+    { "diamond_boots", ArmorSlotGroup::Feet, 3.0f, 2.0f, 0.0f },   // diamond
+    { "diamond_chestplate", ArmorSlotGroup::Chest, 8.0f, 2.0f, 0.0f },   // diamond
+    { "diamond_helmet", ArmorSlotGroup::Head, 3.0f, 2.0f, 0.0f },   // diamond
+    { "diamond_horse_armor", ArmorSlotGroup::Body, 11.0f, 2.0f, 0.0f },   // diamond
+    { "diamond_leggings", ArmorSlotGroup::Legs, 6.0f, 2.0f, 0.0f },   // diamond
+    { "fiery_boots", ArmorSlotGroup::Feet, 4.0f, 1.5f, 0.0f },   // fiery
+    { "fiery_chestplate", ArmorSlotGroup::Chest, 9.0f, 1.5f, 0.0f },   // fiery
+    { "fiery_helmet", ArmorSlotGroup::Head, 4.0f, 1.5f, 0.0f },   // fiery
+    { "fiery_leggings", ArmorSlotGroup::Legs, 7.0f, 1.5f, 0.0f },   // fiery
+    { "golden_boots", ArmorSlotGroup::Feet, 1.0f, 0.0f, 0.0f },   // gold
+    { "golden_chestplate", ArmorSlotGroup::Chest, 5.0f, 0.0f, 0.0f },   // gold
+    { "golden_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // gold
+    { "golden_horse_armor", ArmorSlotGroup::Body, 7.0f, 0.0f, 0.0f },   // gold
+    { "golden_leggings", ArmorSlotGroup::Legs, 3.0f, 0.0f, 0.0f },   // gold
+    { "gravitite_boots", ArmorSlotGroup::Feet, 3.0f, 2.0f, 0.0f },   // gravitite
+    { "gravitite_chestplate", ArmorSlotGroup::Chest, 8.0f, 2.0f, 0.0f },   // gravitite
+    { "gravitite_helmet", ArmorSlotGroup::Head, 3.0f, 2.0f, 0.0f },   // gravitite
+    { "gravitite_leggings", ArmorSlotGroup::Legs, 6.0f, 2.0f, 0.0f },   // gravitite
+    { "iron_boots", ArmorSlotGroup::Feet, 2.0f, 0.0f, 0.0f },   // iron
+    { "iron_chestplate", ArmorSlotGroup::Chest, 6.0f, 0.0f, 0.0f },   // iron
+    { "iron_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // iron
+    { "iron_horse_armor", ArmorSlotGroup::Body, 5.0f, 0.0f, 0.0f },   // iron
+    { "iron_leggings", ArmorSlotGroup::Legs, 5.0f, 0.0f, 0.0f },   // iron
+    { "ironwood_boots", ArmorSlotGroup::Feet, 2.0f, 0.0f, 0.0f },   // ironwood
+    { "ironwood_chestplate", ArmorSlotGroup::Chest, 7.0f, 0.0f, 0.0f },   // ironwood
+    { "ironwood_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // ironwood
+    { "ironwood_leggings", ArmorSlotGroup::Legs, 5.0f, 0.0f, 0.0f },   // ironwood
+    { "knightmetal_boots", ArmorSlotGroup::Feet, 3.0f, 1.0f, 0.0f },   // knightmetal
+    { "knightmetal_chestplate", ArmorSlotGroup::Chest, 8.0f, 1.0f, 0.0f },   // knightmetal
+    { "knightmetal_helmet", ArmorSlotGroup::Head, 3.0f, 1.0f, 0.0f },   // knightmetal
+    { "knightmetal_leggings", ArmorSlotGroup::Legs, 6.0f, 1.0f, 0.0f },   // knightmetal
+    { "leather_boots", ArmorSlotGroup::Feet, 1.0f, 0.0f, 0.0f },   // leather
+    { "leather_chestplate", ArmorSlotGroup::Chest, 3.0f, 0.0f, 0.0f },   // leather
+    { "leather_helmet", ArmorSlotGroup::Head, 1.0f, 0.0f, 0.0f },   // leather
+    { "leather_horse_armor", ArmorSlotGroup::Body, 3.0f, 0.0f, 0.0f },   // leather
+    { "leather_leggings", ArmorSlotGroup::Legs, 2.0f, 0.0f, 0.0f },   // leather
+    { "naga_chestplate", ArmorSlotGroup::Chest, 7.0f, 0.5f, 0.0f },   // naga
+    { "naga_leggings", ArmorSlotGroup::Legs, 6.0f, 0.5f, 0.0f },   // naga
+    { "netherite_boots", ArmorSlotGroup::Feet, 3.0f, 3.0f, 0.1f },   // netherite
+    { "netherite_chestplate", ArmorSlotGroup::Chest, 8.0f, 3.0f, 0.1f },   // netherite
+    { "netherite_helmet", ArmorSlotGroup::Head, 3.0f, 3.0f, 0.1f },   // netherite
+    { "netherite_horse_armor", ArmorSlotGroup::Body, 19.0f, 3.0f, 0.1f },   // netherite
+    { "netherite_leggings", ArmorSlotGroup::Legs, 6.0f, 3.0f, 0.1f },   // netherite
+    { "steeleaf_boots", ArmorSlotGroup::Feet, 3.0f, 0.0f, 0.0f },   // steeleaf
+    { "steeleaf_chestplate", ArmorSlotGroup::Chest, 8.0f, 0.0f, 0.0f },   // steeleaf
+    { "steeleaf_helmet", ArmorSlotGroup::Head, 3.0f, 0.0f, 0.0f },   // steeleaf
+    { "steeleaf_leggings", ArmorSlotGroup::Legs, 6.0f, 0.0f, 0.0f },   // steeleaf
+    { "turtle_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // turtle_scute
+    { "wolf_armor", ArmorSlotGroup::Body, 11.0f, 0.0f, 0.0f },   // armadillo_scute
+    { "zanite_boots", ArmorSlotGroup::Feet, 2.0f, 0.0f, 0.0f },   // zanite
+    { "zanite_chestplate", ArmorSlotGroup::Chest, 6.0f, 0.0f, 0.0f },   // zanite
+    { "zanite_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // zanite
+    { "zanite_leggings", ArmorSlotGroup::Legs, 5.0f, 0.0f, 0.0f },   // zanite
     };
 
     namespace {
         std::unordered_map<uint32_t, const ItemAttributeRow*> g_byId;
+        std::unordered_map<uint32_t, const ItemArmorRow*> g_armorById;
         bool g_initialised = false;
     }
 
@@ -60,14 +174,27 @@ namespace Game {
             const ItemID id = RecipeManager::ItemFromSlug(std::string(row.slug));
             if (id != Items::Air) g_byId[static_cast<uint32_t>(id)] = &row;
         }
+        for (const ItemArmorRow& row : kItemArmorAttributes) {
+            const ItemID id = RecipeManager::ItemFromSlug(std::string(row.slug));
+            if (id != Items::Air) g_armorById[static_cast<uint32_t>(id)] = &row;
+        }
 
         // Boot line, because the failure is otherwise invisible: an
         // unresolved table leaves every weapon at (0, 0), which reads in
         // game as a netherite axe hitting for the bare-hand 1.0 rather
         // than as anything obviously broken. Must run AFTER
         // RecipeManager::Initialize — that owns the slug map.
-        Log::Info("[ItemAttributes] %zu/%d weapons resolved",
-                  g_byId.size(), kItemAttributeCount);
+        Log::Info("[ItemAttributes] %zu/%d weapons, %zu/%d armour pieces resolved",
+                  g_byId.size(), kItemAttributeCount, g_armorById.size(), kItemArmorCount);
+    }
+
+    bool HasItemAttackAttributes(uint32_t itemId) {
+        return g_byId.find(itemId) != g_byId.end();
+    }
+
+    const ItemArmorRow* GetItemArmorAttributes(uint32_t itemId) {
+        const auto it = g_armorById.find(itemId);
+        return it == g_armorById.end() ? nullptr : it->second;
     }
 
     void GetItemAttackAttributes(uint32_t itemId, float& outDamage, float& outSpeed) {

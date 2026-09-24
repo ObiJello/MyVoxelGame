@@ -153,8 +153,15 @@ ServerChunkCache::FutureType ServerChunkCache::getChunkFuture(
 }
 
 // Reference: ServerChunkCache.java lines 204-224
+ServerChunkCache::FutureType ServerChunkCache::getChunkFutureHeld(
+    int x, int z, const ChunkStatus& targetStatus, const TicketType& ticketType)
+{
+    return getChunkFutureMainThread(x, z, targetStatus, /*loadOrGenerate=*/true, ticketType);
+}
+
 ServerChunkCache::FutureType ServerChunkCache::getChunkFutureMainThread(
-    int x, int z, const ChunkStatus& targetStatus, bool loadOrGenerate)
+    int x, int z, const ChunkStatus& targetStatus, bool loadOrGenerate,
+    const TicketType& ticketType)
 {
     world::ChunkPos pos(x, z);
     int64_t key = pos.toLong();
@@ -163,8 +170,8 @@ ServerChunkCache::FutureType ServerChunkCache::getChunkFutureMainThread(
     ChunkHolder* chunkHolder = getVisibleChunkIfPresent(key);
 
     if (loadOrGenerate) {
-        // Add a ticket to ensure the chunk stays loaded
-        addTicket(Ticket(TicketType::UNKNOWN, targetTicketLevel), pos);
+        // Add a ticket to ensure the chunk stays loaded (Java: UNKNOWN)
+        addTicket(Ticket(ticketType, targetTicketLevel), pos);
 
         if (chunkAbsent(chunkHolder, targetTicketLevel)) {
             // Run updates to create the holder
@@ -222,17 +229,23 @@ bool ServerChunkCache::hasChunk(int x, int z) {
 }
 
 // Reference: ServerChunkCache.java lines 283-300
-void ServerChunkCache::tick(std::function<bool()> /*haveTime*/, bool tickChunks) {
+void ServerChunkCache::tick(std::function<bool()> haveTime, bool tickChunks) {
     // Purge stale tickets
     m_ticketStorage.purgeStaleTickets(m_chunkMap);
 
-    // Run distance manager updates
+    // Run distance manager updates — this is what turns a removed ticket
+    // into unload candidates (holder levels rising past MAX).
     runDistanceManagerUpdates();
 
     if (tickChunks) {
         // TODO: Tick chunks, tick entities, etc.
         m_chunkMap.promoteChunkMap();
     }
+
+    // Java: this.chunkMap.tick(haveTime) -> processUnloads.
+    m_lastUnloadCount = m_chunkMap.processUnloads(
+        haveTime ? haveTime : std::function<bool()>([] { return false; }),
+        m_canUnload ? m_canUnload : std::function<bool(int64_t)>([](int64_t) { return true; }));
 
     clearCache();
 }
@@ -254,6 +267,10 @@ bool ServerChunkCache::runDistanceManagerUpdates() {
 // Reference: ServerChunkCache.java lines 448-450
 void ServerChunkCache::addTicket(const Ticket& ticket, const world::ChunkPos& pos) {
     m_ticketStorage.addTicket(ticket, pos);
+}
+
+void ServerChunkCache::removeTicket(const Ticket& ticket, const world::ChunkPos& pos) {
+    m_ticketStorage.removeTicket(ticket, pos);
 }
 
 ServerChunkCache::ChunkRangeFutureType ServerChunkCache::addTicketAndLoadWithRadius(

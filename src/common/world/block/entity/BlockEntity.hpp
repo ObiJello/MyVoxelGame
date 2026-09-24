@@ -29,12 +29,13 @@
 #pragma once
 
 #include "../Blocks.hpp"
+#include "../BlockState.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <memory>
 
 namespace Network { class PacketBuffer; class PacketReader; }
-namespace Game { class World; class DataComponentMap; }
+namespace Game { class World; class DataComponentMap; class ILevelWrite; }
 
 namespace Game {
 
@@ -54,6 +55,13 @@ namespace Game {
         BlockEntity& operator=(const BlockEntity&) = delete;
 
         const BlockEntityType* GetType() const { return m_type; }
+
+        // MC BlockEntity.level — the level this entity sits in, installed by
+        // the world when the entity joins it (World::SetBlock's creation
+        // path, World::SetBlockEntity, and the tick walker for entities that
+        // arrived with a chunk). Null on the client and before installation.
+        ILevelWrite* GetLevel() const { return m_level; }
+        void SetLevel(ILevelWrite* level) { m_level = level; }
         const glm::ivec3&      GetWorldPos() const { return m_worldPos; }
         BlockID                GetBlockId() const { return m_blockId; }
 
@@ -72,11 +80,41 @@ namespace Game {
         // (vast majority — most placed BEs never tick).
         virtual bool NeedsTicking() const { return false; }
 
+        // MC's client-side ticker (ClientLevel.tickBlockEntities). Only the
+        // piston's moving cell has one; everything else animates in its
+        // renderer. `level` is the client's own writable level.
+        virtual void ClientTick(ILevelWrite& /*level*/) {}
+
+        // MC BlockEntity.triggerEvent(b0, b1): a block event (ILevelWrite::
+        // BlockEvent) addressed to this entity, reached through the block's
+        // triggerEvent on BOTH sides — the server when it comes due, the
+        // client when the server mirrors it. Returns whether it was handled
+        // (the server broadcasts only handled events). The chest's lid rides
+        // this: event 1 carries its opener count.
+        virtual bool TriggerEvent(int /*b0*/, int /*b1*/) { return false; }
+
+        // MC BlockEntity.preRemoveSideEffects(pos, oldState): the block is
+        // being replaced by a different block and this entity is about to
+        // go. Runs BEFORE removal, with the new block already in the chunk.
+        // The piston's moving-block entity finishes its move here, which is
+        // what makes writing over an in-flight block land the carried block
+        // instead of losing it.
+        virtual void PreRemoveSideEffects(ILevelWrite& /*level*/, const glm::ivec3& /*pos*/,
+                                          BlockState /*oldState*/) {}
+
         // Apply any relevant item components from the held-item stack at the
         // moment the block was placed (sign text, banner patterns, custom name,
         // dye color, …). Default: no-op. Called by PlayerSession after a
         // successful placement creates this BE.
         virtual void ApplyItemComponents(const DataComponentMap& /*components*/) {}
+
+        // The client replaces its copy of a block entity with a fresh one
+        // built from every BlockEntityDataS2C; MC instead loads the update
+        // into the EXISTING entity, so client-only state (animation clocks)
+        // survives. `previous` is the entity being replaced (same type); an
+        // override copies whatever of that state must carry over. Default:
+        // nothing.
+        virtual void CarryClientState(const BlockEntity& /*previous*/) {}
 
         // Binary serialisation of this BE's persistent state (NOT pos/type id —
         // those are framed by the carrier packet). Subclasses override; base
@@ -89,6 +127,7 @@ namespace Game {
         glm::ivec3             m_worldPos{};
         BlockID                m_blockId = BlockID::Air;
         bool                   m_dirty   = false;
+        ILevelWrite*           m_level   = nullptr;
     };
 
 } // namespace Game

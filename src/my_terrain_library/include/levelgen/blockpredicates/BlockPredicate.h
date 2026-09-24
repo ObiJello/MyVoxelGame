@@ -103,6 +103,33 @@ public:
     static std::shared_ptr<BlockPredicate> not_(std::shared_ptr<BlockPredicate> predicate);
 
     /**
+     * pos.y within [min, max] (both inclusive), anchors resolved against the
+     * level's WorldGenerationContext.
+     * Reference: BlockPredicate.heightRange / HeightRangePredicate.java (26.3)
+     */
+    struct HeightAnchor {
+        enum class Kind { ABSOLUTE, ABOVE_BOTTOM, BELOW_TOP, RELATIVE_TO_SEA_LEVEL };
+        Kind kind;
+        int32_t value;
+
+        static HeightAnchor absolute(int32_t y) { return {Kind::ABSOLUTE, y}; }
+        static HeightAnchor bottom() { return {Kind::ABOVE_BOTTOM, 0}; }
+        static HeightAnchor top() { return {Kind::BELOW_TOP, 0}; }
+        static HeightAnchor seaLevel() { return {Kind::RELATIVE_TO_SEA_LEVEL, 0}; }
+
+        // VerticalAnchor.resolveY(WorldGenerationContext.of(level))
+        int32_t resolveY(const WorldGenLevel& level) const;
+    };
+    static std::shared_ptr<BlockPredicate> heightRange(HeightAnchor minInclusive, HeightAnchor maxInclusive);
+
+    /**
+     * Every offset in the box [min, max] (x, then z, then y innermost) matches.
+     * Reference: BlockPredicate.volumeMatch / VolumeMatchPredicate.java (26.3)
+     */
+    static std::shared_ptr<BlockPredicate> volumeMatch(const core::Vec3i& min, const core::Vec3i& max,
+                                                       std::shared_ptr<BlockPredicate> match);
+
+    /**
      * Create a predicate that matches replaceable blocks
      * Reference: BlockPredicate.java lines 90-96
      */
@@ -319,6 +346,10 @@ protected:
 
 bool matchesBlockTagName(BlockState* state, const std::string& tag);
 
+// The resolved block ids of a tag (nested tags expanded). The reference stays
+// valid for the process lifetime.
+const std::unordered_set<std::string>& blockTagValues(const std::string& tag);
+
 // Tag values in file order (nested tags expanded in place, deduped) — the
 // order Java's Registry.getRandomElementOf(tag, random) indexes into.
 const std::vector<std::string>& orderedBlockTagValues(const std::string& tag);
@@ -489,6 +520,44 @@ public:
 // InsideWorldBoundsPredicate - Checks if position is in world bounds
 // Reference: InsideWorldBoundsPredicate.java
 //=============================================================================
+
+class HeightRangePredicate : public BlockPredicate {
+private:
+    HeightAnchor m_minInclusive;
+    HeightAnchor m_maxInclusive;
+
+public:
+    HeightRangePredicate(HeightAnchor minInclusive, HeightAnchor maxInclusive)
+        : m_minInclusive(minInclusive), m_maxInclusive(maxInclusive) {}
+
+    // Reference: HeightRangePredicate.java test() (26.3)
+    bool test(const WorldGenLevel& level, const core::BlockPos& pos) const override {
+        return pos.getY() >= m_minInclusive.resolveY(level) && pos.getY() <= m_maxInclusive.resolveY(level);
+    }
+};
+
+class VolumeMatchPredicate : public BlockPredicate {
+private:
+    core::Vec3i m_min;
+    core::Vec3i m_max;
+    std::shared_ptr<BlockPredicate> m_match;
+
+public:
+    VolumeMatchPredicate(const core::Vec3i& min, const core::Vec3i& max, std::shared_ptr<BlockPredicate> match)
+        : m_min(min), m_max(max), m_match(std::move(match)) {}
+
+    // Reference: VolumeMatchPredicate.java test() (26.3)
+    bool test(const WorldGenLevel& level, const core::BlockPos& pos) const override {
+        for (int ox = m_min.getX(); ox <= m_max.getX(); ++ox) {
+            for (int oz = m_min.getZ(); oz <= m_max.getZ(); ++oz) {
+                for (int oy = m_min.getY(); oy <= m_max.getY(); ++oy) {
+                    if (!m_match->test(level, pos.offset(ox, oy, oz))) return false;
+                }
+            }
+        }
+        return true;
+    }
+};
 
 class InsideWorldBoundsPredicate : public BlockPredicate {
 private:

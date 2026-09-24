@@ -1,7 +1,7 @@
 {
   "values": [
     "#minecraft:base_stone_overworld",
-    "#minecraft:dirt",
+    "#minecraft:substrate_overworld",
     "#minecraft:sand",
     "#minecraft:terracotta",
     "#minecraft:iron_ores",
@@ -15,6 +15,7 @@
     "minecraft:calcite",
     "minecraft:packed_ice",
     "minecraft:raw_iron_block",
-    "minecraft:raw_copper_block"
+    "minecraft:raw_copper_block",
+    "minecraft:trollsteinn"
   ]
 }

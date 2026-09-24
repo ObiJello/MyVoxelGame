@@ -122,6 +122,9 @@ namespace Game {
         { Items::ZombieNautilusSpawnEgg, EntityTypeId::ZombieNautilus },
         { Items::ZombieVillagerSpawnEgg, EntityTypeId::ZombieVillager },
         { Items::ZombifiedPiglinSpawnEgg, EntityTypeId::ZombifiedPiglin },
+        // The engine-only mobs (The Hush, Twilight Forest, the Aether) —
+        // generated with their items by tools/gen_engine_spawn_eggs.py.
+#include "EngineSpawnEggs.inc"
     };
 
     // MC SpawnEggItem.getType(stack). Returns EntityTypeId::Count when the item

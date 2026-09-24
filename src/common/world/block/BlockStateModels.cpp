@@ -247,6 +247,24 @@ namespace Game {
             if (id == BlockID::Air) continue;
             fileTargets[slug].push_back({ id, {} });
         }
+        // The same gap for every block whose registered model name is not its
+        // registry name: the double plants (tall_grass, large_fern, lilac,
+        // peony, rose_bush, sunflower, pitcher_plant, tall_seagrass) are
+        // registered as "<name>_bottom", the bee nest as "bee_nest_empty",
+        // water as "water_still". Their blockstate JSON is named by the
+        // registry slug, so the modelName pass never found it and every
+        // state fell back to the ONE registered model — which is why a
+        // generated tall grass drew its upper half with the bottom model
+        // and read as two short grass stacked. Only blocks whose slug no
+        // other block already claims through its model name: the promoted
+        // state variants (snowy grass, the slab tops) share their base
+        // block's slug and are pinned by the base's file already.
+        for (size_t i = 0; i < BlockRegistry::Size; ++i) {
+            const Block& b = BlockRegistry::blockDefinitions[i];
+            if (b.registrySlug.empty() || b.registrySlug == b.modelName) continue;
+            if (fileTargets.count(b.registrySlug)) continue;
+            fileTargets[b.registrySlug].push_back({ static_cast<BlockID>(i), {} });
+        }
 
         size_t filesRead = 0, blocksMatched = 0, rotatedModels = 0;
         size_t mergedModels = 0, multipartBlocks = 0, multipartUnjudgeable = 0;

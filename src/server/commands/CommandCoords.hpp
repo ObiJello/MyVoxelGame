@@ -52,4 +52,12 @@ namespace Server {
                    const CommandSource& src, const CommandRotation& srcRot,
                    glm::dvec3& out, std::string& error);
 
+    // MC BlockPosArgument: the same grammar, floored to the block that
+    // contains the point (`BlockPos.containing(getPosition(source))`). `~` is
+    // relative to the source's UNFLOORED position, as in vanilla — the two
+    // agree for whole-number offsets and differ for `~0.5`.
+    bool ParseBlockPos(const std::string& ax, const std::string& ay, const std::string& az,
+                       const CommandSource& src, const CommandRotation& srcRot,
+                       glm::ivec3& out, std::string& error);
+
 } // namespace Server

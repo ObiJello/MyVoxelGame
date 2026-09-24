@@ -4,6 +4,7 @@
 #include "../session/PlayerSessionManager.hpp"
 #include "../IntegratedServer.hpp"
 #include "../level/ServerLevel.hpp"
+#include "../player/ServerPlayer.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
 #include <cmath>
@@ -80,6 +81,8 @@ namespace Server {
         // MC applies the time to every level (all share the overworld's
         // clock in vanilla; here each level's World keeps its own copy,
         // and the clients are synced from the overworld's).
+        // A fixed-time level (the Hush) ignores both — MC's setDayTime writes
+        // a clock that DimensionType.fixedTime hides from every reader.
         void SetAllLevels(int64_t dayTime) {
             g_integratedServer->ForEachLevel([&](ServerLevel& level) {
                 if (Game::World* w = level.World()) w->SetDayTime(dayTime);
@@ -91,9 +94,24 @@ namespace Server {
             });
         }
 
+        // The sender's own level may be pinned (DimensionType.fixedTime); the
+        // clock they just set is real everywhere else, so say so rather than
+        // letting "Set the time to 1000" look like a no-op in the Hush.
+        void NoteFixedTime(const CommandSourceStack& source, ServerConnection& connection) {
+            if (!source.sender) return;
+            const ServerLevel* level = g_integratedServer->GetLevel(
+                Game::DimensionFromRaw(source.sender->getDimensionId()));
+            const Game::World* w = level ? level->World() : nullptr;
+            if (w && w->HasFixedDayTime()) {
+                connection.SendChatMessage(
+                    std::string(Game::DimensionName(Game::DimensionFromRaw(source.sender->getDimensionId()))) +
+                    " keeps a fixed time of " + std::to_string(w->GetDayTime() % 24000), 1);
+            }
+        }
+
     } // namespace
 
-    void TimeCommand::Execute(ServerPlayer& /*sender*/,
+    void TimeCommand::Execute(const CommandSourceStack& source,
                               const std::vector<std::string>& args,
                               ServerConnection& connection,
                               PlayerSessionManager& /*sessionManager*/) {
@@ -129,6 +147,7 @@ namespace Server {
             g_integratedServer->ForceTimeSync();
             // commands.time.set reports the value that was set.
             connection.SendChatMessage("Set the time to " + std::to_string(time), 1);
+            NoteFixedTime(source, connection);
             return;
         }
 
@@ -142,6 +161,7 @@ namespace Server {
             g_integratedServer->ForceTimeSync();
             // addTime reports the resulting time of day (getDayTime).
             connection.SendChatMessage("Set the time to " + std::to_string(DayTimeOf(*world)), 1);
+            NoteFixedTime(source, connection);
             return;
         }
 

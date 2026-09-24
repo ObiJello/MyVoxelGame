@@ -4,12 +4,16 @@
 #include "common/entity/mobs/Fish.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
+#include "common/entity/ai/TargetingConditions.hpp"
+#include "common/entity/effect/MobEffects.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
+#include <vector>
 
 namespace Game {
 
@@ -110,8 +114,9 @@ namespace Game {
             m_breached =
                 blocks && blocks->GetBlock(pos.x, pos.y, pos.z) == BlockID::Water;
         }
-        // MC plays DOLPHIN_JUMP on the breach edge — sounds wait on the
-        // sound system.
+        if (m_breached && !alreadyBreached) {
+            m_dolphin->PlaySound(SoundEvents::DOLPHIN_JUMP, 1.0f, 1.0f);
+        }
 
         const glm::dvec3 v = m_dolphin->velocity;
         if (v.y * v.y < 0.03 && m_dolphin->xRot != 0.0f) {
@@ -232,6 +237,75 @@ namespace Game {
         if (found) {
             m_dolphin->GetNavigation().MoveTo(best.x + 0.5, best.y + 0.5,
                                               best.z + 0.5, 1.0);
+        }
+    }
+
+    // ── DolphinSwimWithPlayerGoal ──────────────────────────────────────────
+
+    DolphinSwimWithPlayerGoal::DolphinSwimWithPlayerGoal(Dolphin* dolphin, double speedModifier)
+        : m_dolphin(dolphin), m_speedModifier(speedModifier) {
+        SetFlags(GoalFlag::Move | GoalFlag::Look);
+    }
+
+    bool DolphinSwimWithPlayerGoal::CanUse() {
+        // MC: level.getNearestPlayer(SWIM_WITH_PLAYER_TARGETING, dolphin) —
+        // every player tested against the conditions, the nearest kept.
+        EntityLevel* level = m_dolphin->Level();
+        if (!level) return false;
+        static const TargetingConditions kSwimWithPlayerTargeting =
+            TargetingConditions::ForNonCombat().Range(10.0).IgnoreLineOfSight();
+        std::vector<LivingEntity*> players;
+        level->GetPlayers(players);
+        m_player = nullptr;
+        double best = -1.0;
+        for (LivingEntity* p : players) {
+            if (!p || !kSwimWithPlayerTargeting.Test(m_dolphin, *p)) continue;
+            const double d = p->DistanceToSqr(m_dolphin->position.x, m_dolphin->position.y,
+                                              m_dolphin->position.z);
+            if (best < 0.0 || d < best) {
+                best = d;
+                m_player = p;
+            }
+        }
+        if (!m_player) return false;
+        return m_player->IsSwimming() && m_dolphin->GetTarget() != m_player;
+    }
+
+    bool DolphinSwimWithPlayerGoal::CanContinueToUse() {
+        return m_player && m_player->IsAlive() && m_player->IsSwimming() &&
+               m_dolphin->DistanceToSqr(*m_player) < 256.0;
+    }
+
+    void DolphinSwimWithPlayerGoal::Start() {
+        if (m_player) {
+            m_player->AddEffect(MobEffectInstance(MobEffectId::DolphinsGrace, 100), m_dolphin);
+        }
+    }
+
+    void DolphinSwimWithPlayerGoal::ClearReferenceTo(const Entity* entity) {
+        if (entity && static_cast<const Entity*>(m_player) == entity) m_player = nullptr;
+    }
+
+    void DolphinSwimWithPlayerGoal::Stop() {
+        m_player = nullptr;
+        m_dolphin->GetNavigation().Stop();
+    }
+
+    void DolphinSwimWithPlayerGoal::Tick() {
+        if (!m_player) return;
+        m_dolphin->GetLookControl().SetLookAt(
+            m_player->position.x, m_player->GetEyeY(), m_player->position.z,
+            static_cast<float>(m_dolphin->GetMaxHeadYRot() + 20),
+            static_cast<float>(m_dolphin->GetMaxHeadXRot()));
+        if (m_dolphin->DistanceToSqr(*m_player) < 6.25) {
+            m_dolphin->GetNavigation().Stop();
+        } else {
+            m_dolphin->GetNavigation().MoveTo(*m_player, m_speedModifier);
+        }
+        // MC draws from the PLAYER's level random — the same level here.
+        if (m_player->IsSwimming() && m_dolphin->Level() &&
+            m_dolphin->Level()->Random().NextInt(6) == 0) {
+            m_player->AddEffect(MobEffectInstance(MobEffectId::DolphinsGrace, 100), m_dolphin);
         }
     }
 

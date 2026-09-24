@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "building",
+  "group": "planks",
+  "ingredients": [
+    [
+      "minecraft:skyroot_log",
+      "minecraft:stripped_skyroot_log",
+      "minecraft:golden_oak_log",
+      "minecraft:skyroot_wood",
+      "minecraft:stripped_skyroot_wood",
+      "minecraft:golden_oak_wood"
+    ]
+  ],
+  "result": {
+    "count": 4,
+    "id": "minecraft:skyroot_planks"
+  }
+}

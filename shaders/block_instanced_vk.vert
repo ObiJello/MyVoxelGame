@@ -18,6 +18,10 @@ layout (location = 2) in vec4 aColor;     // RGBA8 normalized
 
 // Per-instance: xyz = world translation, w = uniform scale.
 layout (location = 3) in vec4 aInstance;
+// Per-instance: the lightmap colour for the entity's packed light (MC
+// EntityRenderer.getPackedLightCoords, one per falling block / TNT), RGBA8
+// normalized. The draw's uDrawLight is 1 on this path.
+layout (location = 4) in vec4 aInstanceLight;
 
 layout (push_constant) uniform PushConstants {
     mat4 uMVP;              // HOLDS uViewProj for this shader (model is per-instance)
@@ -45,7 +49,7 @@ void main() {
     // World-space, from the TRANSFORMED position — aPos is model-space here,
     // unlike block_vk.vert where the mesher already emits world-space.
     fragWorldPos = worldPos.xyz;
-    fragColor    = aColor;
+    fragColor    = vec4(aColor.rgb * aInstanceLight.rgb, aColor.a);
 
     gl_ClipDistance[0] = dot(worldPos.xyz, pc.uPortalClipPlane.xyz) + pc.uPortalClipPlane.w;
 }

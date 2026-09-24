@@ -82,6 +82,11 @@ namespace Render {
         // .createFullScaleBabyMesh's g.extend(0, 5.5, 0)).
         float growX = 0.0f, growY = 0.0f, growZ = 0.0f;
         bool  mirror = false;               // MC CubeListBuilder.mirror()
+        // MC CubeDefinition.texScale: the texture SIZE this cube's UVs are
+        // laid over is (texWidth × u, texHeight × v) — the arrow's shaft
+        // plane, 16×4 in the model, reads a 16×5 strip of the art at 0.8.
+        float texScaleU = 1.0f;
+        float texScaleV = 1.0f;
     };
 
     class ModelPart {

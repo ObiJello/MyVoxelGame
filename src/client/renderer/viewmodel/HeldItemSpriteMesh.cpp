@@ -7,6 +7,7 @@
 #include "common/core/Log.hpp"
 
 #include <stb_image.h>
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <cstring>
@@ -97,7 +98,19 @@ namespace Render {
             Log::Warning("[HeldItemSpriteMesh] failed to load '%s'", spriteName.c_str());
             return false;
         }
+        const bool ok = BuildGeometryFromPixels(img.pixels, img.w, img.h, tintARGB,
+                                                spriteName, verts, idx);
+        stbi_image_free(img.pixels);
+        return ok;
+    }
 
+    bool HeldItemSpriteMesh::BuildGeometryFromPixels(const unsigned char* pixels, int w, int h,
+                                                     uint32_t tintARGB, const std::string& label,
+                                                     std::vector<Vertex>& verts,
+                                                     std::vector<uint32_t>& idx)
+    {
+        const PixelImage img{const_cast<unsigned char*>(pixels), w, h};
+        const std::string& spriteName = label;
         const size_t firstVert = verts.size();
 
         // ── Build the extrusion mesh. We walk every pixel once;
@@ -241,8 +254,6 @@ namespace Render {
             }
         }
 
-        stbi_image_free(img.pixels);
-
         if (verts.size() == firstVert) {
             Log::Warning("[HeldItemSpriteMesh] '%s' produced an empty mesh "
                          "(fully transparent texture?)", spriteName.c_str());
@@ -274,8 +285,22 @@ namespace Render {
         std::vector<uint32_t> idx;
         if (!BuildGeometry(spriteName, tintARGB, verts, idx)) return nullptr;
 
-        // Upload to GPU. We use BufferAccess::Static — the mesh is
-        // immutable once built; the renderer just rebinds it per frame.
+        // Reload the same sprite as a sampler-ready texture (the GuiGraphics
+        // LoadItemTexture cache does this already, but calling into it from
+        // this TU would pull the whole GUI header chain; cheaper to
+        // re-stb_load and stash our own handle).
+        PixelImage texImg = LoadSpritePixels(spriteName);
+        const bool ok = Upload(e, verts, idx, texImg.pixels, texImg.w, texImg.h, spriteName);
+        if (texImg.pixels) stbi_image_free(texImg.pixels);
+        return ok ? &e : nullptr;
+    }
+
+    bool HeldItemSpriteMesh::Upload(Entry& e, const std::vector<Vertex>& verts,
+                                    const std::vector<uint32_t>& idx,
+                                    const unsigned char* texPixels, int texW, int texH,
+                                    const std::string& label) {
+        // BufferAccess::Static — the mesh is immutable once built; the
+        // renderer just rebinds it per frame.
         e.vertexBuffer = g_renderBackend->CreateBuffer(
             BufferUsage::Vertex, verts.size() * sizeof(V),
             verts.data(), BufferAccess::Static);
@@ -284,30 +309,93 @@ namespace Render {
             idx.data(), BufferAccess::Static);
         if (e.vertexBuffer == INVALID_BUFFER || e.indexBuffer == INVALID_BUFFER) {
             Log::Error("[HeldItemSpriteMesh] GPU buffer creation failed for '%s'",
-                       spriteName.c_str());
-            return nullptr;
+                       label.c_str());
+            return false;
         }
         e.mesh = g_renderBackend->CreateMesh(
             e.vertexBuffer, e.indexBuffer, GetBlockVertexLayout());
         e.indexCount = (uint32_t)idx.size();
 
-        // Reload + upload the same sprite as a sampler-ready texture
-        // (the GuiGraphics LoadItemTexture cache does this already, but
-        // calling into it from this TU would pull the whole GUI header
-        // chain; cheaper to re-stb_load and stash our own handle).
-        PixelImage texImg = LoadSpritePixels(spriteName);
-        if (texImg.pixels) {
+        if (texPixels) {
             e.texture = g_renderBackend->CreateTexture2D(
-                texImg.w, texImg.h, TextureFormat::RGBA8, texImg.pixels);
+                texW, texH, TextureFormat::RGBA8, texPixels);
             if (e.texture != INVALID_TEXTURE) {
                 g_renderBackend->SetTextureFilter(e.texture,
                     TextureFilter::Nearest, TextureFilter::Nearest);
                 g_renderBackend->SetTextureWrap(e.texture,
                     TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
             }
-            stbi_image_free(texImg.pixels);
         }
-        return &e;
+        return true;
+    }
+
+    const HeldItemSpriteMesh::Entry* HeldItemSpriteMesh::GetOrBuildForStack(
+        const Game::ItemStack& stack)
+    {
+        const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
+        if (item.spriteLayers.size() <= 1) {
+            std::string name = item.spriteName;
+            if (name.empty() && !item.spriteFrames.empty()) name = item.spriteFrames[0];
+            if (name.empty() && !item.spriteLayers.empty()) name = item.spriteLayers[0];
+            if (name.empty()) return nullptr;
+            return GetOrBuild(name, Game::ResolveItemLayerTint(stack, 0));
+        }
+
+        // One key per (layer, tint) sequence: two potions share a mesh only
+        // when their colours agree.
+        std::string key = "layers";
+        std::vector<uint32_t> tints;
+        for (size_t i = 0; i < item.spriteLayers.size(); ++i) {
+            const uint32_t tint = Game::ResolveItemLayerTint(stack, i);
+            tints.push_back(tint);
+            key += "|" + item.spriteLayers[i] + "#" + std::to_string(tint);
+        }
+        auto it = s_cache.find(key);
+        if (it != s_cache.end()) return it->second.mesh == INVALID_MESH ? nullptr : &it->second;
+        Entry& e = s_cache[key];
+        if (!g_renderBackend) return nullptr;
+
+        // Composite over the first layer's grid: each layer's texel times its
+        // tint (RGB; untinted = white), alpha-over the layers below. A layer
+        // of another resolution samples nearest onto that grid.
+        int w = 0, h = 0;
+        std::vector<unsigned char> out;
+        for (size_t i = 0; i < item.spriteLayers.size(); ++i) {
+            PixelImage img = LoadSpritePixels(item.spriteLayers[i]);
+            if (!img.pixels) continue;
+            if (out.empty()) {
+                w = img.w; h = img.h;
+                out.assign(static_cast<size_t>(w) * h * 4, 0);
+            }
+            const float tr = tints[i] ? ((tints[i] >> 16) & 0xFF) / 255.0f : 1.0f;
+            const float tg = tints[i] ? ((tints[i] >>  8) & 0xFF) / 255.0f : 1.0f;
+            const float tb = tints[i] ? ( tints[i]        & 0xFF) / 255.0f : 1.0f;
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const int sx = x * img.w / w, sy = y * img.h / h;
+                    const unsigned char* src = img.pixels + (static_cast<size_t>(sy) * img.w + sx) * 4;
+                    unsigned char* dst = out.data() + (static_cast<size_t>(y) * w + x) * 4;
+                    const float sa = src[3] / 255.0f;
+                    if (sa <= 0.0f) continue;
+                    const float da = dst[3] / 255.0f;
+                    const float oa = sa + da * (1.0f - sa);
+                    const float c[3] = { src[0] * tr, src[1] * tg, src[2] * tb };
+                    for (int k = 0; k < 3; ++k) {
+                        const float v = (c[k] * sa + dst[k] * da * (1.0f - sa)) / oa;
+                        dst[k] = static_cast<unsigned char>(std::min(255.0f, v + 0.5f));
+                    }
+                    dst[3] = static_cast<unsigned char>(std::min(255.0f, oa * 255.0f + 0.5f));
+                }
+            }
+            stbi_image_free(img.pixels);
+        }
+        if (out.empty()) return nullptr;
+
+        // The tints are in the texture now; the mesh itself is untinted.
+        std::vector<V> verts;
+        std::vector<uint32_t> idx;
+        if (!BuildGeometryFromPixels(out.data(), w, h, 0, key, verts, idx)) return nullptr;
+        return Upload(e, verts, idx, out.data(), w, h, key) ? &e : nullptr;
     }
 
     void HeldItemSpriteMesh::ClearCache() {

@@ -50,6 +50,44 @@ namespace Game {
         // per-chunk block index today, not a BE — see EndPortalRenderer).
         // MC TheEndGatewayBlockEntity: age / cooldown / cached exit position.
         constexpr uint16_t END_GATEWAY   = 19;
+        // MC BlockEntityType.SIGN / HANGING_SIGN — the text on the board
+        // (SignBlockEntity). The board itself is chunk-mesh geometry from
+        // the 26.3 block models; the renderer draws only the text.
+        constexpr uint16_t SIGN          = 20;
+        constexpr uint16_t HANGING_SIGN  = 21;
+        // MC BlockEntityTypes.COMPARATOR — the comparator's output signal.
+        constexpr uint16_t COMPARATOR    = 22;
+        // MC BlockEntityTypes.DAYLIGHT_DETECTOR — a data-less ticker.
+        constexpr uint16_t DAYLIGHT_DETECTOR = 23;
+        // MC BlockEntityTypes.PISTON — the moving-block cell's carried state.
+        constexpr uint16_t PISTON        = 24;
+        // Engine block entity (The Hush): the lighthouse lamp. Data-less —
+        // it exists so HushLighthouseRenderer has something to draw the
+        // sweeping beams from, as MC's BeaconRenderer hangs off its BE.
+        constexpr uint16_t HUSH_LIGHTHOUSE_LAMP = 25;
+        // MC BlockEntityTypes.LECTERN — the book on a lectern and its open
+        // page (LecternBlockEntity).
+        constexpr uint16_t LECTERN       = 26;
+        // MC BlockEntityTypes.MOB_SPAWNER — the monster spawner's BaseSpawner
+        // (SpawnerBlockEntity): what it spawns, its delay and its limits.
+        constexpr uint16_t MOB_SPAWNER   = 27;
+        // MC BlockEntityTypes.POTENT_SULFUR — the geyser's countdown and
+        // eruption clock, and its tickers (PotentSulfurBlockEntity).
+        constexpr uint16_t POTENT_SULFUR = 28;
+        // Engine block entities (Aurelith, the Lantern City). Data-less, like
+        // the lamp: the Heart's hanging rings (AurelithHeartRenderer) and a
+        // gate tower's sky beam (VoiceBeaconRenderer) are functions of game
+        // time, position and (the beacon) facing. Taken from 40 up so the
+        // 20..29 band stays free for the remaining vanilla types.
+        constexpr uint16_t RESONANCE_ENGINE = 40;
+        constexpr uint16_t VOICE_BEACON     = 41;
+        // Aurelith's quest (AurelithBlockEntities.hpp): the Podium's chord
+        // sockets (the seated key), the pedestals (the item on show) and the
+        // Hall of Instruments' tuned cabinet. The engine's own entity
+        // (RESONANCE_ENGINE) carries the city's rotation since this drop.
+        constexpr uint16_t CHORD_SOCKET     = 42;
+        constexpr uint16_t VOICE_PEDESTAL   = 43;
+        constexpr uint16_t CHOIR_CABINET    = 44;
         // ... 20..29 reserved for the remaining MC BE types (Sign, Banner,
         // Bed, Bell, Conduit, EnchantingTable, Lectern, MobSpawner,
         // TrialSpawner, Vault, StructureBlock, TestInstanceBlock, Piston,

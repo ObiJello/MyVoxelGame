@@ -18,6 +18,7 @@ namespace Render {
         void Shutdown() override;
         BackendType GetType() const override { return BackendType::OpenGL; }
         const char* GetName() const override { return "OpenGL 3.3"; }
+        GpuDeviceInfo GetDeviceInfo() const override { return m_deviceInfo; }
         GLFWwindow* GetWindow() const override { return m_window; }
         void SetVSync(bool enabled) override;
 
@@ -70,6 +71,7 @@ namespace Render {
         void SetUniformVec2(ShaderHandle handle, const std::string& name, const glm::vec2& value) override;
         void SetUniformFloat(ShaderHandle handle, const std::string& name, float value) override;
         void SetUniformInt(ShaderHandle handle, const std::string& name, int value) override;
+        void SetUniformIVec3(ShaderHandle handle, const std::string& name, const glm::ivec3& value) override;
 
         // Meshes
         MeshHandle CreateMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
@@ -81,6 +83,15 @@ namespace Render {
         void InvalidateStateCache() override;
 
         void CopyFramebufferToTexture(TextureHandle dst) override;
+        bool CopyFramebufferDepthToTexture(TextureHandle dst) override;
+
+        // Backbuffer read-back — see RenderBackend.hpp. GL reads the pixels
+        // at Request time (glReadPixels stalls on the queue anyway).
+        void SetTextureAnisotropy(TextureHandle handle, float maxAnisotropy) override;
+        void UploadTextureRegionNow(TextureHandle handle, int level, int x, int y,
+                                    int width, int height, const void* data) override;
+        bool RequestBackbufferReadback(int x, int y, int w, int h) override;
+        bool TakeBackbufferReadback(std::vector<uint8_t>& outRgba, int& outW, int& outH) override;
 
         // Render targets (offscreen FBOs) — see RenderBackend.hpp.
         RenderTargetHandle CreateRenderTarget(const RenderTargetDesc& desc) override;
@@ -88,6 +99,18 @@ namespace Render {
         void               BindRenderTarget(RenderTargetHandle rt) override;
         TextureHandle      GetRenderTargetColorTexture(RenderTargetHandle rt) const override;
         void               ResizeRenderTarget(RenderTargetHandle rt, int w, int h) override;
+        RenderTargetHandle CreateRenderTargetFromTextures(const TextureHandle* colors, int colorCount,
+                                                          TextureHandle depth) override;
+        void SetUniformIVec2(ShaderHandle handle, const std::string& name, const glm::ivec2& value) override;
+        void BlitRenderTargetDepth(RenderTargetHandle src, RenderTargetHandle dst) override;
+        void SetShaderOverrideMode(bool on, RenderTargetHandle defaultTarget) override;
+        void SetShaderOverride(ShaderHandle engine, ShaderHandle pack, RenderTargetHandle target) override;
+        void ClearShaderOverrides() override;
+        std::vector<ShaderHandle> FindShadersBySource(
+            const std::function<bool(const std::string&, const std::string&)>& match) override;
+        void CheckErrors(const char* where) override;
+        bool ReadDepthPixel(RenderTargetHandle rt, int x, int y, float& out) override;
+        std::string DebugStateSummary() override;
 
         void SetStencilOverride(bool enabled,
                                 CompareOp compareOp = CompareOp::Always,
@@ -138,6 +161,8 @@ namespace Render {
         void ImGuiShutdown() override;
 
     private:
+        GpuDeviceInfo m_deviceInfo;
+
         // Handle → GL ID mappings
         uint32_t m_nextHandle = 1;
         uint32_t AllocHandle() { return m_nextHandle++; }
@@ -166,11 +191,32 @@ namespace Render {
         };
         std::unordered_map<uint32_t, GLTextureInfo> m_textures;
 
+        // CopyFramebufferDepthToTexture: the first copy is checked for a GL
+        // error once; a driver that refuses it is not asked again.
+        bool m_depthCopyChecked = false;
+        bool m_depthCopyBroken  = false;
+
         struct GLShaderInfo {
             GLuint programId = 0;
             mutable std::unordered_map<std::string, GLint> uniformCache;
             GLint GetUniform(const std::string& name) const;
+            // Kept for FindShadersBySource (shader packs match the engine's
+            // programs by what they declare).
+            std::string vertexSource;
+            std::string fragmentSource;
         };
+        struct GLShaderOverride {
+            ShaderHandle       shader = INVALID_SHADER;
+            RenderTargetHandle target = INVALID_RENDER_TARGET;
+        };
+        std::unordered_map<uint32_t, GLShaderOverride> m_shaderOverrides;
+        bool               m_overrideMode = false;
+        RenderTargetHandle m_overrideDefaultTarget = INVALID_RENDER_TARGET;
+        ShaderHandle ResolveShader(ShaderHandle handle) const {
+            if (!m_overrideMode) return handle;
+            auto it = m_shaderOverrides.find(handle);
+            return it != m_shaderOverrides.end() && it->second.shader != INVALID_SHADER ? it->second.shader : handle;
+        }
         std::unordered_map<uint32_t, GLShaderInfo> m_shaders;
 
         struct GLMeshInfo {
@@ -199,6 +245,9 @@ namespace Render {
             GLuint        fbo               = 0;
             GLuint        depthRBO          = 0;  // renderbuffer for depth (if no depth texture)
             TextureHandle colorTexture      = INVALID_TEXTURE;
+            // CreateRenderTargetFromTextures: the framebuffer only borrows
+            // its attachments, so Destroy leaves them alone.
+            bool          ownsTextures      = true;
             int           width             = 0;
             int           height            = 0;
             TextureFormat colorFormat       = TextureFormat::RGBA16F;
@@ -230,6 +279,11 @@ namespace Render {
         // into GL's bottom-left origin. glGet on every scissor call would be a
         // driver round-trip; this costs a store per viewport change.
         int m_viewportHeight = 0;
+
+        // The last RequestBackbufferReadback, rows top to bottom, until taken.
+        std::vector<uint8_t> m_readbackPixels;
+        int  m_readbackW = 0, m_readbackH = 0;
+        bool m_readbackReady = false;
 
         // Currently bound handles
         ShaderHandle m_boundShader = INVALID_SHADER;

@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "C": "minecraft:resonant_crystal",
+    "E": "minecraft:echo_shard",
+    "I": "minecraft:resonite_ingot",
+    "S": "minecraft:stick"
+  },
+  "pattern": [
+    " S ",
+    "IEI",
+    "ICI"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:recall_chime"
+  }
+}

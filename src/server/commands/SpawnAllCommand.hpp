@@ -19,7 +19,7 @@ namespace Server {
     class SpawnAllCommand {
     public:
         static void Register(CommandDispatcher& dispatcher);
-        static void Execute(ServerPlayer& sender,
+        static void Execute(const CommandSourceStack& source,
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);

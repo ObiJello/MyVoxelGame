@@ -192,16 +192,24 @@ bool TicketStorage::removeTicket(int64_t key, const Ticket& ticket) {
         return false;
     }
 
+    // The levels the chunk is left at, read BEFORE the list can go: Java
+    // keeps its reference to the removed list, but here erasing the map entry
+    // frees the vector `tickets` refers to. Reading it afterwards was a
+    // use-after-free on every removal of a chunk's last ticket — a crash
+    // (SIGSEGV in removeTicket) once requests released their tickets as
+    // chunks left a player's view (stress test 2026-09-24).
+    const int simulationLevel = getTicketLevelAt(tickets, true);
+    const int loadingLevel = getTicketLevelAt(tickets, false);
     if (tickets.empty()) {
         m_tickets.erase(it);
     }
 
     if (ticket.getType().doesSimulate() && m_simulationChunkUpdatedListener) {
-        m_simulationChunkUpdatedListener(key, getTicketLevelAt(tickets, true), false);
+        m_simulationChunkUpdatedListener(key, simulationLevel, false);
     }
 
     if (ticket.getType().doesLoad() && m_loadingChunkUpdatedListener) {
-        m_loadingChunkUpdatedListener(key, getTicketLevelAt(tickets, false), false);
+        m_loadingChunkUpdatedListener(key, loadingLevel, false);
     }
 
     if (ticket.getType() == TicketType::FORCED) {

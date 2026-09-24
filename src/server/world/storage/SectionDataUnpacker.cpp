@@ -424,11 +424,16 @@ namespace Game {
             }
 
             // Get block name
-            std::string blockName = entryCompound->GetValue<std::string>("Name", "minecraft:air");
+            // 26.3 renamed the block-state keys (BlockStateFieldNamesFix:
+            // Name -> id, Properties -> properties); read either.
+            std::string blockName = entryCompound->GetTag("id")
+                ? entryCompound->GetValue<std::string>("id", "minecraft:air")
+                : entryCompound->GetValue<std::string>("Name", "minecraft:air");
 
             // Get properties (optional)
             std::unordered_map<std::string, std::string> properties;
-            auto propertiesTag = entryCompound->GetTag("Properties");
+            auto propertiesTag = entryCompound->GetTag("properties");
+            if (!propertiesTag) propertiesTag = entryCompound->GetTag("Properties");
             if (propertiesTag) {
                 auto propertiesCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(propertiesTag);
                 if (propertiesCompound) {

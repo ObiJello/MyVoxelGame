@@ -3,6 +3,7 @@
 
 #include "common/core/Log.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <map>
@@ -47,22 +48,33 @@ namespace Render::FlickerDiag {
         }
     }
 
+    static bool g_enabledOverride = false;
+    static int  g_dumpFrames = 0;
+
     bool Enabled() {
-        // Opt-in (OBEY_FLICKER_DIAG=1). It found the reachable-slot
-        // contention of 2026-09-03 (ChunkRenderer::PickEvictionSlot); kept
-        // for the next one.
+        // Opt-in (OBEY_FLICKER_DIAG=1, or /portaldiag on). It found the
+        // reachable-slot contention of 2026-09-03
+        // (ChunkRenderer::PickEvictionSlot); kept for the next one.
         static const bool enabled = [] {
             const char* v = std::getenv("OBEY_FLICKER_DIAG");
             return v && v[0] == '1';
         }();
-        return enabled;
+        return enabled || g_enabledOverride;
     }
+
+    static bool g_debugFill = false;
+    void SetEnabled(bool on)  { g_enabledOverride = on; }
+    void SetDebugFill(bool on) { g_debugFill = on; }
+    bool DebugFill()          { return g_debugFill; }
+    void RequestDump(int frames) { g_dumpFrames = std::max(g_dumpFrames, frames); }
+    bool DumpPending()        { return g_dumpFrames > 0; }
 
     void Record(const std::string& key, int64_t value)      { if (Enabled()) Put(key, value, false); }
     void RecordState(const std::string& key, int64_t value) { if (Enabled()) Put(key, value, true); }
     void Note(const std::string& key, const std::string& text) { if (Enabled()) g_notes[key] = text; }
 
     void EndFrame() {
+        if (g_dumpFrames > 0) --g_dumpFrames;
         if (!Enabled()) return;
         std::string line;
         for (auto& [key, t] : g_tracks) {

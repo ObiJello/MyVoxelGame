@@ -13,6 +13,11 @@ in vec4 fragColor;      // Vertex color (tint * AO * directional shade baked in)
 flat in int fragSprite;   // see terrain.vert; -1 = untiled
 flat in int fragRecord;   // face-mapped: first record texel
 flat in int fragAux;      // two-sided: back mapping
+flat in float fragVisibility;   // MC ChunkVisibility (terrain.vert)
+// The lightmap colour of a face-mapped rectangle's (uniform) light; 1 for
+// every other quad, whose vertex colour already carries its lightmap sample
+// (terrain.vert, MC terrain.vsh: vertexColor = Color * sample_lightmap).
+in vec3 fragLight;
 
 // Uniforms
 uniform sampler2D uTextureAtlas;     // The main texture atlas
@@ -24,7 +29,6 @@ uniform sampler2D uSpriteTable;
 uniform samplerBuffer uFaceMap;
 uniform float uAlphaTest;           // Alpha discard threshold (per-pass)
 uniform vec3 uCameraPos;            // World-space camera position (per view)
-uniform float uSkyBrightness;       // Day/night terrain dim (0.2667..1, MC SKY_LIGHT track)
 uniform vec4 uFogColor;             // Time-of-day fog color
 uniform vec4 uFogEnv;               // (envStart, envEnd, rdStart, rdEnd); 1e9 = fog off
 // MC's entity OVERLAY — see the long note in block.frag for why the alpha is
@@ -159,8 +163,9 @@ void main() {
     // BEFORE the lightmap (see block.frag).
     finalColor = mix(finalColor, uOverlayColor.rgb, uOverlayColor.a);
 
-    // Day/night sky-light dim (approximation of MC's lightmap night curve)
-    finalColor *= uSkyBrightness;
+    // MC lightmap (Render::Lightmap): the vertex colour is already lit;
+    // a face-mapped rectangle takes its uniform light here.
+    finalColor *= fragLight;
 
     // MC fog.glsl: environmental fog on spherical distance + render-distance
     // fog on cylindrical distance, take the max.
@@ -170,6 +175,9 @@ void main() {
     float fogValue = max(linearFog(sph, uFogEnv.x, uFogEnv.y),
                          linearFog(cyl, uFogEnv.z, uFogEnv.w));
     finalColor = mix(finalColor, uFogColor.rgb, fogValue * uFogColor.a);
+    // MC terrain.fsh: a freshly loaded section fades in from the fog
+    // colour — mix(FogColor, color, ChunkVisibility), alpha untouched.
+    finalColor = mix(uFogColor.rgb, finalColor, fragVisibility);
 
     FragColor = vec4(finalColor, textureColor.a * vcol.a);
 }

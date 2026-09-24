@@ -9,7 +9,10 @@
 // it is scanned by its placement. Concentric rings (strongholds) are the
 // precomputed ring positions, nearest first. Random spread is walked ring by
 // ring of spacing cells outward from the player's chunk (radius 0..100); the
-// first ring with any hit wins. A candidate chunk counts when the placement
+// first ring with any hit wins. Twilight Forest landmark grids (neither, so
+// vanilla skips them) take the mod's WorldUtil.findNearestMapLandmark: the
+// landmark centres of 100 regions around the player, placement + biome at
+// the centre, nearest wins. A candidate chunk counts when the placement
 // says it is a structure chunk AND the structure's own generation
 // (Structures::generate — the biome check and the layout, exactly what a
 // chunk reaching STRUCTURE_STARTS runs) produces a valid start. Generation
@@ -25,7 +28,9 @@
 // rock or in the air, biomes being 3D) and "~" for a structure, so its
 // click-to-teleport keeps the player's own height. This game reports the
 // terrain surface of the found column for both (LocateSurfaceY) so the
-// teleport lands on the ground.
+// teleport lands on the ground. For a biome whose column surface is a
+// different biome (a cave biome: crystal caverns, lush caves, deep dark) it
+// is instead the open floor nearest the sample inside the biome.
 //
 // Both run on the server thread and can take a while on a miss (MC's do
 // too); the command logs the time as LocateCommand does.
@@ -71,6 +76,10 @@ namespace Server {
     // generator is not ready).
     int LocateSurfaceY(ServerLevel& level, int x, int z, int fallbackY);
 
+    // The generator's biome at a block position ("minecraft:plains"), the
+    // way FindClosestBiome samples it. Empty when the level cannot answer.
+    std::string BiomeAt(ServerLevel& level, const glm::ivec3& pos);
+
     // Is this name a tag? "#..." always; a bare name when a tag file of that
     // name exists (data/<ns>/tags/worldgen/<kind>/<path>.json) — this game
     // lets "is_jungle" stand for "#minecraft:is_jungle", which MC would
@@ -82,5 +91,48 @@ namespace Server {
     std::vector<std::string> ResolveStructureIdOrTag(const std::string& idOrTag);
     // Same for biomes, through the library's biome-tag resolver.
     std::unordered_set<std::string> ResolveBiomeIdOrTag(const std::string& idOrTag);
+
+    // The namespaced form of what the player typed, MC's Identifier parse
+    // plus one convenience MC does not have: a bare name finds its namespace.
+    // "#tag" / "ns:path" come back as typed ("#" kept). A bare name resolves,
+    // in order, to (1) an id the given level can generate — so `forest` in
+    // the Twilight Forest is twilightforest:forest — (2) minecraft:<name>
+    // when that is registered, (3) the first other namespace that registers
+    // it (skyroot_meadow → aether:skyroot_meadow, lich_tower →
+    // twilightforest:lich_tower), (4) a tag of that name in any namespace
+    // (is_aether → #aether:is_aether), else (5) minecraft:<name>, which
+    // then fails as unknown. `kind` is "structure" or "biome"; `level` may
+    // be null.
+    std::string CanonicalWorldgenId(const std::string& kind, const std::string& typed, ServerLevel* level);
+
+    // Every registered id, namespaced and sorted: the engine biome table
+    // (vanilla + Hush + Twilight Forest + Aether) / the loaded structure
+    // registry (StructureSets::allStructures).
+    const std::vector<std::string>& AllBiomeIds();
+    const std::vector<std::string>& AllStructureIds();
+
+    // Can this level's generator place it? (biome source possibleBiomes /
+    // a possible structure set containing the structure). False when the
+    // level has no generator.
+    bool LevelHasBiome(ServerLevel& level, const std::string& biomeId);
+    bool LevelHasStructure(ServerLevel& level, const std::string& structureId);
+
+    // Does this build generate the structure at all? (Structures::
+    // isImplemented — several Twilight Forest landmarks are data only so
+    // far.) False for an unknown id.
+    bool StructureIsGenerated(const std::string& structureId);
+
+    // What /locate can find in `level`'s dimension, for the client's tab
+    // completion (WorldgenIdsS2C): the biomes its biome source can produce,
+    // the structures its structure sets place and this build generates, and
+    // every biome / structure tag with at least one of those as a member.
+    // Full ids, sorted; tags as "#ns:path". Built once per dimension.
+    struct DimensionWorldgenIds {
+        std::vector<std::string> biomes;
+        std::vector<std::string> structures;
+        std::vector<std::string> biomeTags;
+        std::vector<std::string> structureTags;
+    };
+    const DimensionWorldgenIds& WorldgenIdsFor(ServerLevel& level);
 
 } // namespace Server

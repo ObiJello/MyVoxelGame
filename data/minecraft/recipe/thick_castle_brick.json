@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "#": [
+      "minecraft:castle_brick",
+      "minecraft:worn_castle_brick",
+      "minecraft:cracked_castle_brick",
+      "minecraft:mossy_castle_brick"
+    ]
+  },
+  "pattern": [
+    "##",
+    "##"
+  ],
+  "result": {
+    "count": 4,
+    "id": "minecraft:thick_castle_brick"
+  }
+}

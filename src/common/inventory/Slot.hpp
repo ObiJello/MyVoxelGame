@@ -85,10 +85,22 @@ namespace Game {
         int SafeInsert(ItemStack& input, int amount);
         int SafeInsert(ItemStack& input) { return SafeInsert(input, input.count); }
 
-        // MC Slot.safeTake(amount, maxAmount) — remove up to min(amount,
-        // maxAmount) items and return them, honouring mayPickup. The returned
-        // stack keeps this slot's components.
+        // MC Slot.safeTake / tryRemove(amount, maxAmount) — remove up to
+        // min(amount, maxAmount) items and return them, honouring mayPickup.
+        // A slot the player may not modify (MC allowModification: mayPickup
+        // && mayPlace(current item) — a result square) gives nothing unless
+        // its whole stack fits in `maxAmount`. The returned stack keeps this
+        // slot's components.
         ItemStack SafeTake(int amount, int maxAmount);
+
+        // MC Slot.allowModification.
+        bool AllowModification() const { return MayPickup() && MayPlace(GetItem()); }
+
+        // MC Slot.remove(amount) → container.removeItem(slot, amount): take up
+        // to `amount` out of the backing container. A container whose result
+        // square always hands over its whole stack (MC MerchantContainer's
+        // slot 2) overrides this.
+        virtual ItemStack Remove(int amount);
 
         // MC Slot.onTake — the player has just removed `taken` from this slot.
         // A crafting result slot uses it to consume one set of ingredients from

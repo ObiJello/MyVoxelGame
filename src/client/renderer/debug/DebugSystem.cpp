@@ -97,11 +97,15 @@ namespace Debug {
     ChunkPipelineSnapshot DebugSystem::s_pipelineSnap;
     WorldInfoSnapshot DebugSystem::s_worldInfoSnap;
 #ifdef NDEBUG
-    bool DebugSystem::s_debugEnabled = false; // Release: hidden until Shift+Tab+D
+    bool DebugSystem::s_debugEnabled = false; // Release: hidden until debug modifier + K
 #else
     bool DebugSystem::s_debugEnabled = true;  // Debug: always visible
 #endif
     bool DebugSystem::s_renderDistanceChanged = false;
+
+    namespace { bool s_freeCamCullFromPlayer = false; }
+    bool DebugSystem::FreeCamCullFromPlayer() { return s_freeCamCullFromPlayer; }
+    void DebugSystem::SetFreeCamCullFromPlayer(bool on) { s_freeCamCullFromPlayer = on; }
 
     bool DebugSystem::ConsumeRenderDistanceChanged() {
         bool changed = s_renderDistanceChanged;
@@ -189,14 +193,16 @@ namespace Debug {
     // Track whether we started an ImGui frame this cycle (must be matched with Render)
     static bool s_imguiFrameActive = false;
 
+    void DebugSystem::ToggleDebugUI() {
+        s_debugEnabled = !s_debugEnabled;
+        Log::Info(s_debugEnabled ? "Debug UI enabled" : "Debug UI disabled");
+    }
+
+    bool DebugSystem::IsDebugUIEnabled() { return s_debugEnabled; }
+
     void DebugSystem::BeginFrame() {
-        // Check toggle even when disabled so user can re-enable
-        if (Input::IsKeyDown(Input::Key::LeftShift) &&
-            Input::IsKeyDown(Input::Key::Tilde) &&
-            Input::IsKeyPressed(Input::Key::D)) {
-            s_debugEnabled = !s_debugEnabled;
-            Log::Info(s_debugEnabled ? "Debug UI enabled" : "Debug UI disabled");
-        }
+        // The toggle is the debug-modifier + K chord (Render::DebugScreen::DebugKeyHandler
+        // → ToggleDebugUI); the old Shift+`+D poll is gone.
 
         // Skip the entire ImGui frame cycle when debug UI is disabled
         if (!s_debugEnabled) {
@@ -350,7 +356,15 @@ namespace Debug {
         int framebufferWidth, int framebufferHeight) {
 
         // Skip all ImGui interaction if debug UI is disabled (no ImGui frame active)
-        if (!s_debugEnabled) return;
+        if (!s_debugEnabled) {
+            // The log-console bind (~) is only read below, so while the panels
+            // are hidden its click counter just piled up — and the first frame
+            // after the panels opened consumed one stale press and popped the
+            // log console "by default". Presses made with the panels hidden
+            // mean nothing; drop them here.
+            while (Input::ConsumeClick(*Input::Binds::LogConsole)) {}
+            return;
+        }
 
         // Disable ImGui mouse interaction when cursor is hidden (game mode)
         ImGuiIO& io = ImGui::GetIO();
@@ -359,19 +373,14 @@ namespace Debug {
         else
             io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
 
-        // Handle F3 toggle
-        if (Input::IsKeyPressed(Input::Key::F3)) {
-            s_visibility.f3Overlay = !s_visibility.f3Overlay;
-        }
+        // F3 belongs to the vanilla-style debug screen now (Render::DebugScreen,
+        // GAME_SOURCES): the overlay, its chords and the F3+F6 options screen
+        // all live there. The old ImGui F3 overlay is gone.
         // Handle tilde for log console
         if (Input::ConsumeClick(*Input::Binds::LogConsole)) {
             s_visibility.logConsole = !s_visibility.logConsole;
         }
 
-        // F3 overlay (rendered on foreground, always on top of game)
-        if (s_visibility.f3Overlay) {
-            DrawF3Overlay(camera, player, metrics, s_serverSnap);
-        }
 
         // ImGui panels
         DrawMenuBar();
@@ -893,6 +902,7 @@ namespace Debug {
         // Player Session
         if (ImGui::CollapsingHeader("Player Session", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("View Distance:   %d chunks", srv.sessionViewDistance);
+            ImGui::Text("Sim Distance:    %d chunks", srv.sessionSimulationDistance);
             ImGui::Text("Watch Set:       %zu chunks", srv.sessionWatchSetSize);
             ImGui::Text("Chunks Sent:     %zu", srv.sessionSentChunks);
         }
@@ -1246,6 +1256,25 @@ namespace Debug {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("How far chunks are loaded and rendered (2-32 chunks)");
 
+        // Simulation Distance — the same setting as Options -> Video Settings,
+        // but this slider goes all the way to the engine's cap. Applied through
+        // the same resend as the render distance (ConsumeRenderDistanceChanged).
+        static int simulationDistance = Platform::g_gameSettings.GetSimulationDistance();
+        if (ImGui::SliderInt("Simulation Distance", &simulationDistance, 2,
+                             Platform::GameSettings::kMaxSimulationDistance, "%d chunks")) {
+            Platform::g_gameSettings.SetSimulationDistance(simulationDistance);
+            s_renderDistanceChanged = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How far from you the server ticks redstone, entities and random ticks\n"
+                              "(2-%d chunks). Beyond the render distance the chunks are loaded and\n"
+                              "ticked but not sent to you. Every chunk in the ring costs memory and\n"
+                              "tick time: 64 is 16 000 chunks, 128 is 66 000 chunks, and the ring\n"
+                              "takes a while to stream in after a change.",
+                              Platform::GameSettings::kMaxSimulationDistance);
+
         ImGui::Separator();
 
         // VSync — mirrors the REAL game setting (same one as Options → Video
@@ -1316,6 +1345,18 @@ namespace Debug {
             bool greedyView = Render::g_chunkRenderer->IsGreedyMeshDebug();
             if (ImGui::Checkbox("Greedy Mesh View", &greedyView)) {
                 Render::g_chunkRenderer->SetGreedyMeshDebug(greedyView);
+            }
+
+            // The F+C free camera: what its culling follows.
+            bool freeCamCullAtPlayer = FreeCamCullFromPlayer();
+            if (ImGui::Checkbox("Free camera culls from player view (F+C)", &freeCamCullAtPlayer)) {
+                SetFreeCamCullFromPlayer(freeCamCullAtPlayer);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Off: the free camera sees everything around it (chunks still load\n"
+                                  "and unload around the player only).\n"
+                                  "On: every cull decision stays frozen at the player's view, so flying\n"
+                                  "outside it shows exactly what the culler kept.");
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Terrain as colored lines (remeshes the world):\n"
@@ -1694,7 +1735,7 @@ namespace Debug {
         ImGui::Text("N           Toggle noclip");
         ImGui::Text("F3          Toggle F3 overlay");
         ImGui::Text("~           Toggle log console");
-        ImGui::Text("Shift+`+D   Toggle debug UI");
+        ImGui::Text("RAlt+K      Toggle debug UI (debug modifier + K)");
         ImGui::Text("Escape      Exit");
 
         ImGui::Separator();

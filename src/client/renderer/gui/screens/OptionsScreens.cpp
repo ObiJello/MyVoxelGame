@@ -7,8 +7,10 @@
 #include "../../../world/ClientChunkManager.hpp"
 #include <GLFW/glfw3.h>
 #include "PanoramaRenderer.hpp"
+#include "../../texture/AtlasBuilder.hpp"   // RefreshTextureParameters (anisotropy)
 #include "SkyboxSelectScreen.hpp"
 #include "PackSelectionScreen.hpp"
+#include "ShaderPackScreen.hpp"
 #include "WorldSelectScreens.hpp"
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
@@ -19,7 +21,10 @@
 #include "server/world/storage/anvil/WorldSidecar.hpp"
 #include "common/core/HardwareProfile.hpp"
 #include "common/core/Log.hpp"
+#include "client/sound/MusicManager.hpp"
+#include "client/sound/SoundManager.hpp"
 #include <algorithm>
+#include <string_view>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -110,6 +115,7 @@ namespace Render {
             {"Language...",               [] { return std::make_unique<LanguageSelectScreen>(); },     nullptr},
             {"Chat Settings...",          [] { return std::make_unique<ChatOptionsScreen>(); },        nullptr},
             {"Resource Packs...",         [] { return std::make_unique<PackSelectionScreen>(); },      nullptr},
+            {"Shader Packs...",           [] { return std::make_unique<ShaderPackScreen>(); },         nullptr},
             {"Accessibility Settings...", [] { return std::make_unique<AccessibilityOptionsScreen>(); }, nullptr},
             {"Telemetry Data...",         nullptr,                                                     "Telemetry is not collected."},
             {"Credits & Attribution...",  [] { return std::make_unique<CreditsScreen>(); },            nullptr},
@@ -369,7 +375,7 @@ namespace Render {
                     Settings().SetRenderDistance(static_cast<int>(v));
                     mgr.MarkSettingApplied(ScreenManager::APPLY_RENDER_DISTANCE);
                 }),
-            ValueSlider("Simulation Distance", s.GetSimulationDistance(), 5, 32, 1,
+            ValueSlider("Simulation Distance", s.GetSimulationDistance(), 5, Platform::GameSettings::kMaxSimulationDistance, 1,
                 [](double v) { return std::to_string(static_cast<int>(v)) + " chunks"; },
                 [&mgr](double v) {
                     Settings().SetSimulationDistance(static_cast<int>(v));
@@ -430,6 +436,32 @@ namespace Render {
         }
 
         {
+            // MC options.chunkFade: 0..2 s in 0.05 s steps, "None" at 0.
+            auto* fade = ValueSlider("Chunk Fade-In", s.GetChunkFadeInTime(), 0.0, 2.0, 0.05,
+                [](double v) -> std::string {
+                    if (v <= 0.0) return "None";
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "%.2f s", v);
+                    return buf;
+                },
+                [](double v) { Settings().SetChunkFadeInTime(static_cast<float>(v)); });
+            fade->SetTooltip({"A newly loaded chunk section fades in",
+                              "from the fog colour over this long,",
+                              "like Minecraft. Applies instantly."});
+            m_list->AddBig(fade);
+        }
+
+        {
+            auto* underwater = OnOff("Underwater Effects", s.GetUnderwaterEffects(),
+                                     [](bool on) { Settings().SetUnderwaterEffects(on); });
+            underwater->SetTooltip({"The blue fog and screen overlay under",
+                                    "water, and the orange fog in lava.",
+                                    "OFF sees through fluids clearly.",
+                                    "Applies instantly."});
+            m_list->AddBig(underwater);
+        }
+
+        {
             auto* mipmaps = ValueSlider("Mipmap Levels", s.GetMipmapLevels(), 0, 4, 1,
                 [](double v) -> std::string {
                     int m = static_cast<int>(v);
@@ -449,6 +481,22 @@ namespace Render {
                                     "and orbs are still drawn. 100% is",
                                     "Minecraft's distance."});
             m_list->AddSmall(mipmaps, entityDist);
+
+            // Slider over the exponent: 0..4 -> 1, 2, 4, 8, 16.
+            auto anisoExp = [](int level) { int e = 0; while ((1 << (e + 1)) <= level) ++e; return e; };
+            auto* aniso = ValueSlider("Anisotropic Filtering", anisoExp(s.GetAnisotropicFiltering()), 0, 4, 1,
+                [](double v) -> std::string {
+                    const int level = 1 << static_cast<int>(v);
+                    return level == 1 ? "OFF" : std::to_string(level) + "x";
+                },
+                [](double v) {
+                    Settings().SetAnisotropicFiltering(1 << static_cast<int>(v));
+                    if (Render::g_atlasBuilder) Render::g_atlasBuilder->RefreshTextureParameters();
+                });
+            aniso->SetTooltip({"Smooths textures seen at an angle —",
+                               "the distant ground and walls. Needs",
+                               "mipmaps on. Applied at once."});
+            m_list->AddSmall(aniso, nullptr);
         }
 
         {
@@ -667,41 +715,94 @@ namespace Render {
 
     // ═══════════════════════════ SoundOptionsScreen ═════════════════════════
 
-    AbstractWidget* SoundOptionsScreen::VolumeSlider(const std::string& caption,
-                                                     const char* settingsKey,
-                                                     float defaultValue) {
-        float initial = Settings().GetFloat(settingsKey, defaultValue);
-        std::string key = settingsKey;
+    AbstractWidget* SoundOptionsScreen::VolumeSlider(const std::string& caption, Game::SoundSource source) {
+        const std::string key = "soundCategory_" + std::string(Game::SoundSourceName(source));
+        const float initial = Settings().GetFloat(key, 1.0f);
         return new SliderButton(0, 0, 150, 20, initial,
             [caption](double v) -> std::string {
                 if (v <= 0.0) return caption + ": OFF";
                 return FormatPercent(caption, v);
             },
-            [key](double v) { Settings().SetFloat(key, static_cast<float>(v)); },
+            [key, source](double v) {
+                Settings().SetFloat(key, static_cast<float>(v));
+                // MC createSoundSliderOptionInstance's onValueUpdate:
+                // soundManager.refreshCategoryVolume(category).
+                Client::GetSoundManager().OnCategoryVolumeChanged(source);
+            },
             0.01);
     }
 
     void SoundOptionsScreen::AddOptions() {
         auto& s = Settings();
+        using Game::SoundSource;
 
-        // Master gets vanilla's full-width row, categories pair up below.
-        m_list->AddBig(VolumeSlider("Master Volume", "soundCategory_master", 1.0f));
-        m_list->AddSmall(VolumeSlider("Music", "soundCategory_music", 1.0f),
-                         VolumeSlider("Jukebox/Note Blocks", "soundCategory_record", 1.0f));
-        m_list->AddSmall(VolumeSlider("Weather", "soundCategory_weather", 1.0f),
-                         VolumeSlider("Blocks", "soundCategory_block", 1.0f));
-        m_list->AddSmall(VolumeSlider("Hostile Creatures", "soundCategory_hostile", 1.0f),
-                         VolumeSlider("Friendly Creatures", "soundCategory_neutral", 1.0f));
-        m_list->AddSmall(VolumeSlider("Players", "soundCategory_player", 1.0f),
-                         VolumeSlider("Ambient/Environment", "soundCategory_ambient", 1.0f));
-        m_list->AddSmall(VolumeSlider("Voice/Speech", "soundCategory_voice", 1.0f),
-                         VolumeSlider("UI", "soundCategory_ui", 1.0f));
+        // MC SoundOptionsScreen.addOptions: master full width, then every
+        // other category in SoundSource order, two to a row (the
+        // soundCategory.* captions of en_us).
+        m_list->AddBig(VolumeSlider("Master Volume", SoundSource::Master));
+        m_list->AddSmall(VolumeSlider("Music", SoundSource::Music),
+                         VolumeSlider("Jukebox/Note Blocks", SoundSource::Records));
+        m_list->AddSmall(VolumeSlider("Weather", SoundSource::Weather),
+                         VolumeSlider("Blocks", SoundSource::Blocks));
+        m_list->AddSmall(VolumeSlider("Hostile Mobs", SoundSource::Hostile),
+                         VolumeSlider("Friendly Mobs", SoundSource::Neutral));
+        m_list->AddSmall(VolumeSlider("Players", SoundSource::Players),
+                         VolumeSlider("Ambient/Environment", SoundSource::Ambient));
+        m_list->AddSmall(VolumeSlider("Voice/Speech", SoundSource::Voice),
+                         VolumeSlider("UI", SoundSource::Ui));
 
-        m_list->AddSmall(
-            OnOff("Show Subtitles", s.GetShowSubtitles(),
-                  [](bool on) { Settings().SetShowSubtitles(on); }),
-            OnOff("Directional Audio", s.GetDirectionalAudio(),
-                  [](bool on) { Settings().SetDirectionalAudio(on); }));
+        // MC options.soundDevice: "" (System Default) or one of the devices
+        // OpenAL lists, shown without OpenAL Soft's "OpenAL Soft on " prefix.
+        // Changing it restarts the library on the new device.
+        {
+            std::vector<std::string> devices = Client::GetSoundManager().GetAvailableSoundDevices();
+            const std::string current = s.GetSoundDevice();
+            if (!current.empty() && std::find(devices.begin(), devices.end(), current) == devices.end()) {
+                devices.insert(devices.begin(), current);   // unplugged: keep the choice visible
+            }
+            std::vector<std::string> labels{"System Default"};
+            constexpr std::string_view kPrefix = "OpenAL Soft on ";
+            int initial = 0;
+            for (size_t i = 0; i < devices.size(); ++i) {
+                const std::string& d = devices[i];
+                labels.push_back(d.compare(0, kPrefix.size(), kPrefix) == 0 ? d.substr(kPrefix.size()) : d);
+                if (d == current) initial = static_cast<int>(i) + 1;
+            }
+            m_list->AddBig(Cycle("Device", std::move(labels), initial, [devices](int i) {
+                Settings().SetSoundDevice(i <= 0 ? std::string() : devices[static_cast<size_t>(i - 1)]);
+                Client::GetSoundManager().OnDeviceOptionsChanged();
+            }));
+        }
+
+        AbstractWidget* subtitles = OnOff("Show Subtitles", s.GetShowSubtitles(),
+                                          [](bool on) { Settings().SetShowSubtitles(on); });
+        subtitles->SetTooltip({"Enables captions for sounds played in the game.",
+                               "(Not shown yet: this engine has no subtitle overlay.)"});
+        AbstractWidget* directional = OnOff("Directional Audio", s.GetDirectionalAudio(), [](bool on) {
+            Settings().SetDirectionalAudio(on);
+            // MC directionalAudio's onValueUpdate: soundManager.reload() —
+            // HRTF is a context attribute, so the library restarts.
+            Client::GetSoundManager().OnDeviceOptionsChanged();
+        });
+        directional->SetTooltip({"Uses HRTF-based directional audio to improve the simulation of",
+                                 "3D sound. Requires HRTF compatible audio hardware, and is best",
+                                 "experienced with headphones."});
+        m_list->AddSmall(subtitles, directional);
+
+        // MC options.musicFrequency (DEFAULT / FREQUENT / CONSTANT): the most
+        // minutes between songs — 20, 10, or back to back.
+        {
+            const Client::MusicFrequency current =
+                Client::MusicFrequencyFromName(s.GetString("musicFrequency", "DEFAULT"));
+            AbstractWidget* frequency = Cycle("Music Frequency", {"Default", "Frequent", "Constant"},
+                                              static_cast<int>(current), [](int i) {
+                const auto f = static_cast<Client::MusicFrequency>(std::clamp(i, 0, 2));
+                Settings().SetString("musicFrequency", std::string(Client::MusicFrequencyName(f)));
+                Client::MusicManager::Get().SetMinutesBetweenSongs(f);
+            });
+            frequency->SetTooltip({"Changes how frequently music plays while in a game world."});
+            m_list->AddSmall(frequency, nullptr);
+        }
     }
 
     // ═══════════════════════════ ControlsScreen ═════════════════════════════

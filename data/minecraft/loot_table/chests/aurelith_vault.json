@@ -1,0 +1,307 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "bonus_rolls": 0.0,
+      "rolls": {
+        "type": "minecraft:uniform",
+        "min": 5.0,
+        "max": 8.0
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonite_ingot",
+          "weight": 8,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 4.0,
+                "max": 8.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonite_block",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_shard",
+          "weight": 8,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 6.0,
+                "max": 12.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:diamond",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 5.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:enchanted_golden_apple",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:golden_apple",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:music_disc_5",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:book",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            },
+            {
+              "function": "minecraft:enchant_randomly",
+              "options": "#minecraft:on_random_loot"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:voice_beacon",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:recall_chime",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:cloak_of_silence",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_compass",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:experience_bottle",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 4.0,
+                "max": 10.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonant_heart",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bonus_rolls": 0.0,
+      "rolls": 1.0,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "To Whoever Comes After"
+              },
+              "author": "Ysolde",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "To whoever comes\nafter.\n\nIf you are reading\nthis, a gate has\nopened that we\nshut, and you have\nwalked into our\ncity. Welcome.",
+                "You will think it\nempty. It is not.\nListen. The lamps\nstill burn because\ncrystal holds light\nthe way a lung\nholds breath, and\nlets it go slowly.",
+                "Aurelith is still\nsinging. Very\nquietly. Too\nquietly for the\nthing below to\nlearn from it,\nI hope.",
+                "Do not wake the\nHeart. Whatever\nyou are, whatever\nyou can do. The\nChord was not\nours alone at the\nend.",
+                "The Wardens are\nnot cruel. They\nare still on duty.\nWalk softly past\nthem, as we did.",
+                "You may meet me.\nI will not be as I\nwas. The silence\nwe left grows, and\nI stood in the\nmiddle of it.\n\nIf I am singing,\ndo not answer.",
+                "Under the Heart is\nwhat we could not\ncarry. Take it. We\nwould rather it\nwent on than lay\nin the dark.\n\nThe deep voice\nholds the way down.",
+                "What is sung is\nnever lost.\n\nRest is not an\nending.\n\n- Ysolde,\nlast conductor of\nAurelith. C. 1147."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "The Conductor's Diary"
+              },
+              "author": "Ysolde",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "I am the last to\nkeep this book.\nNine conductors\nwrote in it before\nme. None of them\nwrote about the\nend. I will have\nto.",
+                "C.1146.\nThe children dream\nthe same dream.\nA deep place, and\na voice in it that\nsounds like ours\nbut slower. Liesl\ncalls it the\nUndersong.",
+                "Stood on the Podium\nfacing the Heart\ntonight. Every\nring was humming a\nhalf-tone flat. I\nsang against it and\nit bent back, for a\nmoment. Only for a\nmoment.",
+                "Orrin says the\nChord is being\nlearned. If it\nlearns the whole\nChord it will not\nneed us to hold it.\nI do not want to\nknow what it will\nsing then.",
+                "C.1147.\nThe Tuners' vote\nis unanimous. The\nArchive's too. The\nchoice is still\nmine. That is the\none law we never\nwrote down.",
+                "We will Rest.\nThe Heart goes\nsilent at the\nfourth bell. The\ncity walks out\nthrough the gates\nin one night: the\nLast Procession.",
+                "The Wardens will\nstay. They cannot\nbe told the song is\nover. They were\nmade to hear a\nfalse note, and now\nevery note will be\nfalse.",
+                "I have sealed the\nlast of our best\nthings under the\ndais. The Bass\nholds it. The deep\nvoice always did\nthe holding.",
+                "The four keys are\nscattered: the deep\none below, the high\none with Liesl, the\nothers with their\nguilds. Whoever\ngathers them must\nnot sing them.",
+                "Someone has to\nstand on the Podium\nwhen the Heart\nstops, to be sure\nit stays stopped.\nIt should be the\nconductor.\n\nIt will be me."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "The Undersong"
+              },
+              "author": "Liesl of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "THE UNDERSONG\n\nwhat was heard\nbeneath the Chord,\nC. 1142 to 1147.\n\nNot to be sung.\nNot to be read\naloud.",
+                "It began below\nhearing. We found\nit in the water\nfirst: rings on a\nstill cup, in time\nwith nothing we\nwere playing.",
+                "We caught it in\nshards and slowed\nit. It is a voice.\nIt is very large\nand very far down,\nand it is singing\nthe Chord.",
+                "Not copying.\nLearning. Each year\nit sang more of it.\nIn C.1145 it sang\nthe Bass part\nwhole. Better than\nwe do.",
+                "The Soprano's key\nis here with me in\nthe cell. The high\nvoice keeps watch\nover what must not\nbe sung.",
+                "I have sealed the\nshards in the\nArchive's lowest\nshelf. Do not play\nthem. When you\nplay them, it\nlistens back.",
+                "The Heart will be\nsilenced tonight.\nYsolde believes a\nsong that stops\ncannot be learned.\nI want to believe\nher.",
+                "But I played the\nlast shard again\nthis evening, and\nthere was a pause\nin it, where our\nChord ends, and\nthen it"
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "random_sequence": "minecraft:chests/aurelith_vault"
+}

@@ -8,6 +8,10 @@
 #include "../block/BlockState.hpp"
 #include "common/world/biome/Biomes.hpp"
 
+namespace Game::Lighting {
+    enum class LightLayer : uint8_t;
+}
+
 namespace Game {
 
     // Minimal interface for read-only block access
@@ -107,9 +111,12 @@ namespace Game {
                             GetBlockState(x, y, z);
         }
 
-        // Biome id at a world position, quantised to MC's 4x4x4 noise-biome
-        // grid by the chunk. Accessors with no biome data answer 0, which is
-        // the fallback biome — so a colour query degrades to plains rather
+        // Biome id at a world position. The level accessors (World on the
+        // server, ClientBlockAccess on the client) answer MC
+        // LevelReader.getBiome — the fuzzy-zoomed biome of the block
+        // (BiomeZoom.hpp); a lower-level store such as ChunkProvider answers
+        // its plain 4x4x4 cell. Accessors with no biome data answer 0, which
+        // is the fallback biome — so a colour query degrades to plains rather
         // than failing, exactly as it did before biomes existed.
         virtual uint16_t GetBiome(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const {
             return kFallbackBiomeId;
@@ -141,32 +148,27 @@ namespace Game {
         // does not have to pull in BlockRegistry.
         virtual bool ContainsWater(int worldX, int worldY, int worldZ) const;
 
-        // ── Light (MC LevelReader.getRawBrightness(pos, amount)) ────────────
+        // ── Light (MC LevelReader light queries) ────────────────────────────
         //
-        // STAND-IN. This engine has no light engine at all — no sky light, no
-        // block light, no propagation — so there is nothing to read. Every MC
-        // farming rule is nevertheless gated on light (crops need >= 9 to grow
-        // and >= 8 to survive), and dropping those gates outright would let
-        // wheat grow in a sealed cave, which reads as a bug.
-        //
-        // So: 15 when this column is open to the sky, 0 when it is roofed.
-        // That reproduces the behaviour players actually notice — crops grow
-        // outdoors, refuse indoors — and gets the comparison operators right,
-        // so porting a real light engine later means replacing THIS function
-        // and nothing else. Call sites keep MC's literal `>= 9` / `>= 8`.
-        //
-        // Deliberately NOT modelled: torches (no block light to read), the
-        // per-block attenuation that lets crops grow under a leaf canopy at
-        // reduced light, and night. MC's crops keep growing at night because
-        // `getRawBrightness(pos, 0)` reads raw sky light, not the time-of-day
-        // -dimmed value — so returning a constant 15 for open sky is correct
-        // rather than a simplification.
-        //
-        // The default walks the column with GetBlock, which is honest but
-        // O(height). It is affordable because it is only reached for blocks
-        // that random-tick at all — a few per tick, never ordinary terrain —
-        // but an implementation with a heightmap should override it.
+        // GetBrightness is MC getBrightness(LightLayer, pos): the stored sky
+        // or block light, 0..15. World answers from the level light engine
+        // (Lighting::LevelLightManager), the client from the chunk layers the
+        // server sent. The DEFAULT here is for accessors that carry no light
+        // (snapshots, tests): sky 15 for a column no opaque block roofs, 0
+        // otherwise; block 0 — the stand-in the engine used before it had a
+        // light engine, kept so such an accessor still grows crops outdoors.
+        virtual int GetBrightness(Lighting::LightLayer layer, int worldX, int worldY, int worldZ) const;
+
+        // MC getRawBrightness(pos, 0) = max(block light, sky light). Crops
+        // (>= 9 to grow), stems, bamboo and berries read this: raw sky light
+        // is not dimmed at night, which is why vanilla crops grow in the dark
+        // outdoors — and why a torch lets them grow underground.
         virtual int GetRawBrightness(int worldX, int worldY, int worldZ) const;
+
+        // MC getMaxLocalRawBrightness(pos, amount) = max(block, sky - amount);
+        // pass the level's sky darkening for the time-dimmed value grass
+        // spread and saplings read.
+        int GetMaxLocalRawBrightness(int worldX, int worldY, int worldZ, int amount) const;
     };
 
 } // namespace Game

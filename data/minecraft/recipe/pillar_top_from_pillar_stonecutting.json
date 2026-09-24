@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:pillar",
+  "result": {
+    "count": 1,
+    "id": "minecraft:pillar_top"
+  }
+}

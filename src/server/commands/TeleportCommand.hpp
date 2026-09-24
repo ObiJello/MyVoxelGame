@@ -26,7 +26,20 @@
 // round trip that cancels out. The observable behaviour is "gather everything
 // to me", which is what vanilla does.
 //
-// NOT ported: cross-dimension teleports (there is one dimension).
+// The destination carries a LEVEL as well as a position (MC performTeleport's
+// `ServerLevel level` → Entity.teleportTo(level, …)): the destination
+// entity's level for `/tp <targets> <entity>`, the source's level
+// (`/execute in …`) for coordinates. A target in another level crosses:
+//   • players go through PortalTravel::ArriveAt — the same hand-off /dim and
+//     every portal use (tickets moved, ChangeDimensionS2C, loading screen) —
+//     landing at the exact position with the requested rotation;
+//   • mobs move between the two levels' MobManagers keeping their id (MC
+//     teleportCrossDimension recreates the entity; see EntityPortalTravel
+//     for why this engine moves the object instead);
+//   • dropped items are re-created in the destination level and the old
+//     one retired, which is exactly MC's recreate-and-remove.
+// Riders and vehicles do not travel with a cross-dimension target (MC takes
+// the passengers along) — the links are broken instead.
 #pragma once
 
 #include "CommandDispatcher.hpp"
@@ -37,7 +50,7 @@ namespace Server {
     public:
         static void Register(CommandDispatcher& dispatcher);
 
-        static void Execute(ServerPlayer& sender,
+        static void Execute(const CommandSourceStack& source,
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);

@@ -1,6 +1,6 @@
 // File: src/common/world/portal/EndPortalFrame.cpp
 //
-// Line references are to minecraft_code/decompiled_net/minecraft/world/level/
+// Line references are to minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/
 // block/EndPortalFrameBlock.java.
 
 #include "EndPortalFrame.hpp"

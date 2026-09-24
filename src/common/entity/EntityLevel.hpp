@@ -19,9 +19,12 @@
 #include "common/physics/Physics.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/block/BlockState.hpp"
+#include "common/sound/LevelSound.hpp"
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/world/level/DimensionId.hpp"
@@ -41,6 +44,8 @@ namespace Game {
     class JavaRandom;
     class BaseContainerBlockEntity;
     class IDragonFight;
+    class PoiManager;
+    class Mob;
 
     // MC net.minecraft.world.Difficulty. Nothing in this engine set a
     // difficulty before mobs existed, so the level implementations default to
@@ -92,6 +97,81 @@ namespace Game {
         // Smoke and Poof do — that is MC's own choice, not a stand-in — tinted
         // per block through AddColorParticle.
         FallingDust,
+        // ParticleTypes.BLOCK_MARKER (BlockMarker). The block's own particle
+        // sprite drawn as a 1-block billboard at the cell's centre for 80
+        // ticks — how a creative player holding a barrier (or a light) sees
+        // where the invisible blocks are (ClientLevel.animateTick's
+        // getMarkerParticleTarget). Carries the block STATE in the request
+        // (QueuedParticle::blockState) because the sprite is the state
+        // model's `particle` texture, which for a light block varies per
+        // level.
+        BlockMarker,
+        // ParticleTypes.PAUSE_MOB_GROWTH / RESET_MOB_GROWTH (SimpleVertical-
+        // Particle): the golden dandelion's burst over a baby — a glint that
+        // sinks when the age is locked and rises when it is unlocked.
+        PauseMobGrowth,
+        ResetMobGrowth,
+        // The Hush portal's ambient motes (a teal PortalParticle): spawned by
+        // the hush_portal block's animateTick and, for immersive frames, by
+        // the client around every HushPortal surface.
+        HushPortal,
+        // A slow cyan spark with a fade-in/out (MobParticleSystem). Once the
+        // Hush's dimension-wide ambient mote; that emitter was removed (too
+        // busy), the kind stays for anything that wants a soft glint.
+        HushMote,
+        // The Aether portal's motes (AetherParticleTypes.AETHER_PORTAL — a
+        // PortalParticle tinted pale blue, 0.6/0.8/1.0): spawned by the
+        // aether_portal block's animateTick (ModPortalBehaviors).
+        AetherPortal,
+        // ParticleTypes.PORTAL (PortalParticle), vanilla's purple (0.9, 0.3,
+        // 1.0): the twilight_portal pool's animateTick (TFPortalBlock
+        // .animateTick is a vanilla copy that throws PORTAL upward).
+        Portal,
+        // ParticleTypes.FLAME (FlameParticle, a RisingParticle): the monster
+        // spawner's cage fire (BaseSpawner.clientTick, LevelEvent 2004).
+        Flame,
+        // Aurelith's river Vesper (engine kinds, no MC counterpart; nothing
+        // spawns them at present — the river's mist and glints were removed):
+        // a slow, large, faint violet puff of mist that hugs the water and
+        // drifts with the current (MobParticleSystem: the generic smoke
+        // sheet, one frame kept for life, full-bright — the river's own
+        // light in the haze) ...
+        HushMist,
+        // ... and a small glint that skims the surface and twinkles out
+        // (the glint sprite, full-bright).
+        VesperGlint,
+        // ParticleTypes.HAPPY_VILLAGER (SuspendedTownParticle
+        // .HappyVillagerProvider): the green sparkle of a villager that
+        // traded, took a job, claimed a bed or a bell (entity event 14).
+        HappyVillager,
+        // The potent sulfur geyser (26.3, PotentSulfurBlock /
+        // PotentSulfurBlockEntity):
+        //   SulfurBubbles   ParticleTypes.SULFUR_BUBBLES (SulfurBubbleParticle) —
+        //                   rises through the water over wet sulfur and
+        //                   bursts at the surface; always shown
+        //                   (addAlwaysVisibleParticle).
+        //   NoxiousGas      ParticleTypes.NOXIOUS_GAS (NoxiousGasParticle) —
+        //                   the gas puff; always shown.
+        //   NoxiousGasCloud ParticleTypes.NOXIOUS_GAS_CLOUD (NoxiousGasCloud-
+        //                   Particle) — an unrendered 20-tick seed that puffs
+        //                   NOXIOUS_GAS over the water every other tick.
+        //   Geyser          ParticleTypes.GEYSER (GeyserEruptionParticle) — the
+        //                   eruption's unrendered 20-tick seed.
+        //   GeyserBase / GeyserPoof / GeyserPlume  ParticleTypes.GEYSER_BASE /
+        //                   GEYSER_POOF (GeyserBaseParticle) and GEYSER_PLUME
+        //                   (GeyserPlumeParticle) — what the seed throws.
+        // The geyser four carry GeyserParticleOptions.waterBlocks — the water
+        // column the plume is sized by — in the vx slot, as EXPLOSION carries
+        // its size: MC spawns every one of them at rest (the block entity
+        // passes zero velocity and the seed forwards its own), so the slot is
+        // free.
+        SulfurBubbles,
+        NoxiousGas,
+        NoxiousGasCloud,
+        Geyser,
+        GeyserBase,
+        GeyserPoof,
+        GeyserPlume,
     };
 
     // MC client ParticleStatus (Options "particles"): the ordinals are the
@@ -187,10 +267,16 @@ namespace Game {
         // PrimedTnt does, because the resolve runs before MobManager's sweep.
         virtual void QueueExplosion(const ExplosionParams& p);
 
+        // Cross-portal collision for this level's movers (see Physics.hpp
+        // PortalCollisionProvider). Null = the process-wide hooks, which are
+        // the local player's; the server bridge answers with its own.
+        virtual const PortalCollisionProvider* PortalCollision() const { return nullptr; }
+
         // Convenience: a PhysicsContext wrapping Blocks(), for the mover.
         PhysicsContext Physics() const {
             PhysicsContext ctx;
             ctx.blockAccess = Blocks();
+            ctx.portalCollision = PortalCollision();
             return ctx;
         }
 
@@ -207,19 +293,18 @@ namespace Game {
 
         // ── Light ──────────────────────────────────────────────────────────
         //
-        // This engine has NO light engine (see IBlockAccess::GetRawBrightness —
-        // it answers 15 for a column open to the sky and 0 for a roofed one).
-        // That stand-in is correct for crops, which read raw sky light, but it
-        // is not usable for mob spawning: monsters would never spawn on the
-        // surface at night, because the raw value never dims.
+        // The level light engine's values (Lighting::LevelLightManager on the
+        // server): stored sky light and block light, 0..15.
         //
-        // So the port routes every spawn/AI light test through this method,
-        // which is MC's getMaxLocalRawBrightness — raw sky light MINUS the
-        // time-of-day darkening. Open sky at midnight reads ~4, a cave reads 0,
-        // and open sky at noon reads 15, which is the behaviour the rules were
-        // written against. Torches still contribute nothing; that arrives with
-        // a real light engine and only this method changes.
+        // MC's getMaxLocalRawBrightness — max(block light, sky light minus the
+        // time-of-day darkening). Open sky at midnight reads ~4, a cave 0, a
+        // torch-lit cave 13, and open sky at noon 15.
         virtual int GetMaxLocalRawBrightness(int x, int y, int z) const = 0;
+
+        // MC LevelReader.getBrightness(LightLayer.BLOCK, pos) — torches,
+        // lava, glowstone... Monster.isDarkEnoughToSpawn tests it against the
+        // dimension's monster_spawn_block_light_limit.
+        virtual int GetBlockBrightness(int /*x*/, int /*y*/, int /*z*/) const { return 0; }
 
         // MC LevelReader.getBrightness(LightLayer.SKY, pos) — the RAW stored sky
         // light, with no time-of-day darkening applied. Distinct from
@@ -249,6 +334,11 @@ namespace Game {
         // MC Level.isDay / isThundering.
         virtual bool IsDay() const = 0;
         virtual bool IsThundering() const { return false; }
+
+        // MC Level.setSkyFlashTime — a no-op on the server; ClientLevel keeps
+        // the counter that brightens the sky (LightningBolt's client tick
+        // sets it to 2 while a bolt is flashing).
+        virtual void SetSkyFlashTime(int ticks) { (void)ticks; }
 
         // Biome base temperature at a position — MC Biome.getBaseTemperature,
         // the number the SNOW_GOLEM_MELTS environment attribute compares
@@ -298,12 +388,75 @@ namespace Game {
         // every mob. Returns 0 for non-players.
         virtual uint32_t GetHeldItemId(const LivingEntity& player) const { return 0; }
 
+        // The item id a player wears in the CHEST slot, or 0 for none / a
+        // non-player. Same bridge and same reason as GetHeldItemId: the Hush's
+        // cloak of silence (HushItems::IsSoundCloaked) is read by mob AI that
+        // cannot see the server's inventory.
+        virtual uint32_t GetChestItemId(const LivingEntity& player) const { (void)player; return 0; }
+
+        // A line of text to one player (MC ServerPlayer.displayClientMessage:
+        // `actionBar` = the overlay line above the hotbar, else chat). Same
+        // bridge as the two above: a boss telling the player standing at a
+        // statue how far its voice is restored (TheUnsung) has no reach into
+        // the server's connections. No-op for a non-player and on a client.
+        virtual void DisplayClientMessage(const LivingEntity& player, const std::string& text,
+                                          bool actionBar) const {
+            (void)player; (void)text; (void)actionBar;
+        }
+
         // ── Effects the entity system causes ───────────────────────────────
 
         // Broadcast a one-byte entity event to everyone tracking `entity`
         // (MC Level.broadcastEntityEvent): 3 = death, 60 = poof particles,
         // 10 = sheep eat, 18 = breeding hearts.
         virtual void BroadcastEntityEvent(const Entity& entity, uint8_t event) = 0;
+
+        // ── Sound (MC Level.playSound family) ──────────────────────────────
+        //
+        // See common/sound/LevelSound.hpp for `except`. Silent by default:
+        // the server bridge broadcasts through the ServerSoundSink, the
+        // client bridge plays only what its own player caused and what MC
+        // plays client-locally.
+        virtual void PlaySeededSound(const SoundExcept& except, const glm::dvec3& pos,
+                                     std::string_view event, SoundSource source,
+                                     float volume, float pitch, int64_t seed) {
+            (void)except; (void)pos; (void)event; (void)source; (void)volume; (void)pitch; (void)seed;
+        }
+        // MC Level.playSeededSound(except, Entity sourceEntity, ...) — the
+        // sound FOLLOWS the entity on the client (ClientboundSoundEntityPacket
+        // → EntityBoundSoundInstance): a ghast's moan, a minecart's rumble.
+        virtual void PlaySeededSoundFromEntity(const SoundExcept& except, const Entity& sourceEntity,
+                                               std::string_view event, SoundSource source,
+                                               float volume, float pitch, int64_t seed) {
+            (void)except; (void)sourceEntity; (void)event; (void)source; (void)volume; (void)pitch; (void)seed;
+        }
+        // MC Level.playSound(except, x, y, z, sound, source, volume, pitch).
+        void PlaySound(const SoundExcept& except, const glm::dvec3& pos, std::string_view event,
+                       SoundSource source, float volume = 1.0f, float pitch = 1.0f) {
+            PlaySeededSound(except, pos, event, source, volume, pitch, Sound::NextSeed());
+        }
+        void PlaySound(const SoundExcept& except, const glm::ivec3& pos, std::string_view event,
+                       SoundSource source, float volume = 1.0f, float pitch = 1.0f) {
+            PlaySound(except, Sound::BlockCenter(pos), event, source, volume, pitch);
+        }
+        // MC Level.playSound(except, Entity sourceEntity, sound, source, volume, pitch).
+        void PlaySoundFromEntity(const SoundExcept& except, const Entity& sourceEntity,
+                                 std::string_view event, SoundSource source,
+                                 float volume = 1.0f, float pitch = 1.0f) {
+            PlaySeededSoundFromEntity(except, sourceEntity, event, source, volume, pitch,
+                                      Sound::NextSeed());
+        }
+        // MC Level.playLocalSound(x, y, z, ...) / playLocalSound(Entity, ...):
+        // client-only, never sent (a blaze's burn crackle, a guardian's
+        // attack drone). No-ops on the server, as in MC.
+        virtual void PlayLocalSound(const glm::dvec3& pos, std::string_view event, SoundSource source,
+                                    float volume, float pitch, bool distanceDelay) {
+            (void)pos; (void)event; (void)source; (void)volume; (void)pitch; (void)distanceDelay;
+        }
+        virtual void PlayLocalSoundFromEntity(const Entity& sourceEntity, std::string_view event,
+                                              SoundSource source, float volume, float pitch) {
+            (void)sourceEntity; (void)event; (void)source; (void)volume; (void)pitch;
+        }
 
         // MC Level.addParticle. Live on the CLIENT only — exactly MC's
         // split: Level.addParticle is an empty default overridden by
@@ -333,6 +486,11 @@ namespace Game {
         // Drop an item stack in the world. Server-only; the client
         // implementation is a no-op.
         virtual void SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) {}
+        // The same, for a stack that carries components (an enchanted
+        // helmet off an armor stand) — MC Block.popResource(level, pos, stack).
+        virtual void SpawnItemStackDrop(const glm::dvec3& pos, const ItemStack& stack) {
+            (void)pos; (void)stack;
+        }
 
         // MC Level.getEntitiesOfClass(ItemEntity.class, box, ...) for a mob
         // that picks items up (the sulfur cube swallowing a dropped block).
@@ -342,6 +500,7 @@ namespace Game {
         struct NearbyItemEntity {
             int32_t    id = 0;
             glm::dvec3 pos{0.0};
+            glm::dvec3 velocity{0.0};   // MC getDeltaMovement, blocks per tick
             uint32_t   itemId = 0;
             int        count = 0;
             bool       canPickUp = false;
@@ -354,6 +513,19 @@ namespace Game {
         // item entity's stack (an emptied one despawns on its next tick).
         // Returns how many were taken — 0 when the id is gone.
         virtual int TakeFromItemEntity(int32_t id, int count) { (void)id; (void)count; return 0; }
+        // MC Entity.addDeltaMovement on an item entity (the potent sulfur
+        // geyser lifting what floats over it). False when the id is gone.
+        virtual bool AddItemEntityDeltaMovement(int32_t id, const glm::dvec3& delta) {
+            (void)id; (void)delta;
+            return false;
+        }
+
+        // The whole stack of a dropped item (components included), for the
+        // hopper's HopperBlockEntity.addItem(container, entity), and the
+        // write-back that leaves the remainder on the ground. Null / false
+        // when the id is gone.
+        virtual const ItemStack* GetItemEntityStack(int32_t id) const { (void)id; return nullptr; }
+        virtual bool SetItemEntityStack(int32_t id, const ItemStack& stack) { (void)id; (void)stack; return false; }
 
         // MC ItemUtils.createFilledResult for a mob interaction (Bucketable.
         // bucketMobPickup): the player's held stack gives up one item for
@@ -362,6 +534,29 @@ namespace Game {
         // with no inventory behind the player.
         virtual void CreateFilledResult(LivingEntity& player, ItemStack& held,
                                         const ItemStack& filled);   // Item.cpp
+
+        // MC BehaviorUtils.throwItem: an item entity launched with an
+        // explicit velocity and pickup delay (a villager handing a neighbour
+        // half its bread, a gift thrown to the Hero of the Village).
+        // Server-only; the default falls back to a plain drop.
+        virtual void SpawnThrownItem(const glm::dvec3& pos, const glm::dvec3& velocity,
+                                     const ItemStack& stack, int pickupDelay) {
+            (void)velocity; (void)pickupDelay;
+            SpawnItemStackDrop(pos, stack);
+        }
+
+        // ── Villages (server-only; the client answers null / nothing) ─────
+        //
+        // MC ServerLevel.getPoiManager — the level's job sites, beds and
+        // bells (common/entity/ai/village/PoiManager.hpp).
+        virtual PoiManager* GetPoiManager() { return nullptr; }
+        // MC Merchant.openTradingScreen → player.openMenu(MerchantMenu): the
+        // server records the request against the player's session, which
+        // opens the menu and sends the offers once the interaction returns
+        // (the same request/perform split as IUsePlayer::OpenMenu).
+        virtual void OpenMerchantMenu(LivingEntity& player, Mob& merchant) {
+            (void)player; (void)merchant;
+        }
 
         // MC ExperienceOrb.award(level, pos, amount): spawns real orb
         // entities at `pos` (Server::ExperienceOrbManager via
@@ -432,6 +627,12 @@ namespace Game {
         // common/entity/DragonFight.hpp for why the controller itself is
         // server-side.
         virtual IDragonFight* DragonFight() { return nullptr; }
+
+        // The Hush's stillness is on in this level (server-owned, see
+        // server/level/HushStillness.hpp): every mob but the bosses skips its
+        // AI step (common/world/level/HushStillnessRules.hpp). False
+        // everywhere else and always on the client.
+        virtual bool IsStilled() const { return false; }
 
         // MC GameRules.RULE_MOBGRIEFING. Default true, as in vanilla.
         virtual bool MobGriefing() const { return true; }

@@ -2,8 +2,16 @@
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "client/input/Input.hpp"
+#include "client/renderer/shader/ShaderPipeline.hpp"
 #include "client/input/KeyMapping.hpp"
 #include "client/dev/SessionReplay.hpp"
+#include "client/dev/BotSwarm.hpp"
+#include "client/control/RemoteControl.hpp"
+#include "client/sound/SoundHost.hpp"
+#include "client/renderer/gui/BossBarState.hpp"
+#include "client/sound/SoundManager.hpp"
+#include "common/world/block/entity/BlockEntityType.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/core/Log.hpp"
 #include <sentry.h>
 #include "common/core/Config.hpp"
@@ -21,6 +29,8 @@
 #include "client/entity/Player.hpp"
 #include "common/entity/GeneratedItemList.hpp"   // for Game::Items::Compass etc.
 #include "client/renderer/gui/InventoryScreen.hpp"
+#include "client/renderer/gui/CreativeModeInventoryScreen.hpp"
+#include "client/renderer/gui/MerchantScreen.hpp"
 #include "client/renderer/gui/items/ChestItemRenderer.hpp"
 #include "client/renderer/gui/items/BedItemRenderer.hpp"
 #include "client/renderer/gui/items/ShulkerBoxItemRenderer.hpp"
@@ -39,7 +49,24 @@
 #include "client/renderer/blockentity/BlockEntityRenderDispatcher.hpp"
 #include "client/renderer/blockentity/BlockEntityRenderers.hpp"
 #include "client/renderer/blockentity/EndPortalRenderer.hpp"
+#include "client/renderer/blockentity/BedRenderer.hpp"
+#include "client/renderer/blockentity/SpawnerRenderer.hpp"
+#include "common/world/block/BedBlock.hpp"
 #include "client/renderer/debug/Crosshair.hpp"
+#include "client/renderer/debug/Gizmos.hpp"
+#include "client/world/HushSignalState.hpp"
+#include "client/world/AurelithState.hpp"
+#include "client/renderer/debug/DebugRenderer.hpp"
+#include "client/renderer/gui/debug/DebugScreenEntries.hpp"
+#include "client/renderer/gui/debug/DebugScreenOverlay.hpp"
+#include "client/renderer/gui/debug/DebugKeyHandler.hpp"
+#include "client/renderer/gui/debug/FrameProfiler.hpp"
+#include "client/renderer/entity/EntityCulling.hpp"
+#include <glm/gtc/type_ptr.hpp>
+#include <array>
+#include <iomanip>
+#include <fstream>
+#include <ctime>
 #if ENABLE_IMMERSIVE_PORTALS
 #include "client/portal/ClientImmersivePortals.hpp"
 #include "client/renderer/portal/ImmersivePortalRenderer.hpp"
@@ -65,18 +92,25 @@
 #include "client/renderer/gui/FontRenderer.hpp"
 #include "client/renderer/gui/HudRenderer.hpp"
 #include "common/entity/GeneratedItemAttributes.hpp"
+#include "common/entity/EquipmentSlot.hpp"
 #include "client/renderer/gui/ChatComponent.hpp"
 #include <cctype>
 #include "common/network/packets/game/ChatMessageS2CPacket.hpp"
 #include "client/renderer/gui/ChatScreen.hpp"
 #include "client/renderer/gui/screens/Screen.hpp"
 #include "client/renderer/gui/screens/TitleScreen.hpp"
+#include "client/renderer/gui/screens/LevelLoadingScreen.hpp"
 #include "client/renderer/gui/screens/DisconnectedScreen.hpp"
 #include "client/renderer/gui/screens/PauseScreen.hpp"
+#include "client/renderer/gui/screens/WorldOptionsScreen.hpp"
 #include "client/renderer/gui/screens/DeathScreen.hpp"
+#include "client/renderer/gui/screens/InBedScreen.hpp"
+#include "client/renderer/gui/screens/SignEditScreen.hpp"
+#include "client/renderer/gui/screens/BookScreens.hpp"
 #include "client/renderer/gui/screens/PanoramaRenderer.hpp"
 #include "client/renderer/gui/screens/WorldSelectScreens.hpp"
 #include "client/renderer/environment/EnvironmentState.hpp"
+#include "client/renderer/environment/MobEffectEnvironment.hpp"
 #include "client/renderer/environment/SkyRenderer.hpp"
 #include "client/renderer/environment/CloudRenderer.hpp"
 #include "client/renderer/gui/screens/OptionsScreens.hpp"
@@ -133,6 +167,8 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #endif
 #include "client/world/LevelLoadTracker.hpp"
 #include "client/world/ClientBlockAccess.hpp"
+#include "common/world/lighting/ChunkLight.hpp"
+#include "client/world/ClientAnimateTick.hpp"
 #include "client/world/ClientLevel.hpp"
 #include "server/world/ServerWorkerPool.hpp"
 #include "client/world/ClientWorkerPool.hpp"
@@ -144,10 +180,10 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "client/entity/XpOrbManager.hpp"
 #include "client/renderer/entity/ItemEntityRenderer.hpp"
 #include "client/renderer/entity/XpOrbRenderer.hpp"
+#include "client/renderer/entity/LightningBoltRenderer.hpp"
 #include "client/entity/ClientMobManager.hpp"
 #include "client/entity/ClientFallingBlocks.hpp"
 #include "client/ClientTickRateManager.hpp"
-#include "client/world/ClientAnimateTick.hpp"
 #include "client/renderer/entity/BlockCubeEntityRenderer.hpp"
 #include "client/renderer/mesh/FillPreviewRenderer.hpp"
 #include "common/entity/SpawnEggs.hpp"
@@ -157,9 +193,12 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "server/level/ServerLevel.hpp"
 #include "common/world/spawn/NaturalSpawner.hpp"   // kMagicNumber
 #include "client/renderer/entity/MobRenderer.hpp"
+#include "client/renderer/entity/EntityOutline.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <cstring>   // memcpy — panorama tile assembly
+#include "common/core/DeferredDispose.hpp"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -188,11 +227,42 @@ static const bool g_portalDiag = std::getenv("OBEY_PORTAL_DIAG") != nullptr;
 static float s_thirdPersonZoom  = 4.0f;
 static float s_thirdPersonOrbit = 0.0f;
 
-static glm::mat4 BodyScaleModel(const glm::vec3& feet, float scale) {
-    if (std::abs(scale - 1.0f) < 1e-4f) return glm::mat4(1.0f);
-    return glm::translate(glm::mat4(1.0f), feet) *
-           glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
-           glm::translate(glm::mat4(1.0f), -feet);
+// DOUBLE, world space: PlayerRenderer::RenderSingle bridges it into the
+// view's render space itself (RenderOrigin.hpp).
+// /morph: a remote player's pose for the mob renderer, interpolated the way
+// the stick figure is (previous tick → current, partialTick).
+static Render::MobRenderer::MorphPose MorphPoseOf(const Client::RemotePlayer& rp, float partialTick) {
+    Render::MobRenderer::MorphPose pose;
+    pose.code      = rp.morph;
+    pose.position  = glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(partialTick));
+    pose.bodyYaw   = Game::Mth::RotLerp(partialTick, rp.renderPrevBodyYaw, rp.bodyYaw);
+    pose.headYaw   = Game::Mth::RotLerp(partialTick, rp.renderPrevRotation.x, rp.rotation.x);
+    pose.pitch     = Game::Mth::Lerp(partialTick, rp.renderPrevRotation.y, rp.rotation.y);
+    pose.walkPos   = rp.walk.PositionAt(partialTick);
+    pose.walkSpeed = rp.walk.SpeedAt(partialTick);
+    pose.ageTicks  = static_cast<float>(rp.ticks) + partialTick;
+    pose.scale     = rp.scale;
+    pose.hurtTime  = rp.hurtTime;
+    pose.deathTime = rp.deathTime;
+    pose.seed      = rp.playerId;
+    pose.crouching = rp.isCrouching;
+    pose.animTick  = Game::Mth::Lerp(partialTick, static_cast<float>(rp.morphAnimOld),
+                                     static_cast<float>(rp.morphAnim));
+    // MC Creeper.getSwelling(partialTick): the tick's lerp over maxSwell.
+    pose.swell     = Game::Mth::Lerp(partialTick, static_cast<float>(rp.morphAnimOld),
+                                     static_cast<float>(rp.morphAnim)) /
+                     static_cast<float>(Game::Morph::kCreeperSwellTicks);
+    // The synched INVISIBLE / GLOWING flags (MC shared flags 5 / 6).
+    pose.invisible = rp.effects.Invisible();
+    pose.glowing   = rp.effects.Glowing();
+    return pose;
+}
+
+static glm::dmat4 BodyScaleModel(const glm::dvec3& feet, float scale) {
+    if (std::abs(scale - 1.0f) < 1e-4f) return glm::dmat4(1.0);
+    return glm::translate(glm::dmat4(1.0), feet) *
+           glm::scale(glm::dmat4(1.0), glm::dvec3(scale)) *
+           glm::translate(glm::dmat4(1.0), -feet);
 }
 
 static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
@@ -205,9 +275,11 @@ static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
 
 #include <chrono>
 #include <filesystem>
+#include <csignal>
 #include <memory>
 #include <atomic>
 #include <optional>
+#include <mutex>
 #include <thread>   // frame limiter sleep_until
 #include "common/core/Assert.hpp"   // Client::g_clientThreadId
 
@@ -274,6 +346,9 @@ static void CloseSentryOnce() {
 // double-firing on the frame the inventory opens). The local `extern bool s_eKeyHeld;`
 // declarations inside Run() resolve to this via the enclosing namespace.
 bool s_eKeyHeld = false;
+// The first-person hand's walk distance (bob phase); file-scope so a
+// controlled client can send it in its view frame.
+static float s_heldWalkDist = 0.0f;
 
 // Same cross-branch pattern for ESC: the game branch opens the pause menu,
 // the pause branch closes it — one shared held-state so the opening press
@@ -289,6 +364,14 @@ static bool s_debugSystemInitialized = false;
 // session and kept for the process: the mapping is the same port every time,
 // so re-mapping per session would be pointless churn. Removed once at exit.
 static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
+// What the Hosting presence last said, so World Options changes (Joinable,
+// port) can re-announce without the session-start context. The external IP
+// is written by the UPnP worker thread, hence the mutex.
+static std::mutex   s_hostPresenceMutex;
+static std::string  s_hostPresenceWorld;
+static std::string  s_hostExternalIp;
+static bool         s_lastPresenceJoinable = true;
+static uint16_t     s_lastPresencePort = 0;
 
 
     // The engine's own copy of an asset (bundle Resources, or the tree).
@@ -329,49 +412,44 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         return GetVanillaAssetPath(relativePath);
     }
 
-    void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& proj,
-                              const glm::mat4& view, bool entityPicked) {
+    void RenderBlockHighlight(const std::optional<Game::RaycastHit>& hit, const glm::mat4& proj,
+                              const glm::mat4& view, bool entityPicked,
+                              const glm::vec3& cameraPos, float fovDeg, int fbWidth, int fbHeight) {
         // MC LevelRenderer.renderHitOutline only runs for
         // `hitResult.getType() == BLOCK`. With a mob under the crosshair the
         // hit result IS the entity, so no outline is drawn — which is also the
         // player's only cue that the click will hit the mob and not the wall.
         if (entityPicked) return;
 
-        const auto& hit = player.lastBlockHit;
-        if (Render::BlockHighlight::IsValidHighlight(hit)) {
-            // Use the block's actual model shape so partial blocks (leaf
-            // litter, slabs, fences, …) outline their real geometry instead of
-            // the enclosing full cube.
-            // World-aware so a paired chest outlines the half that is actually
-            // there — otherwise the selection box stops a pixel short of the
-            // seam that the raycast now accepts.
-            //
-            // One draw per box of the shape. MC outlines the whole VoxelShape
-            // (LevelRenderer.renderShape → shape.forAllEdges), so a stair gets
-            // the L-shaped profile rather than a cube around its empty half.
-            // Vanilla's merged edge walk drops the internal edges where two
-            // boxes meet and this does not, which shows as one extra line
-            // across the step; the alternative is merging voxel shapes here
-            // for a seam the player has to look for.
-            const auto shapes = Client::g_clientBlockAccess
-                ? Game::BlockRegistry::GetBlockShapeSetAt(*Client::g_clientBlockAccess,
-                                                          hit->blockPos, hit->state)
-                : Game::BlockRegistry::GetBlockShapeSet(hit->state);
-            for (const auto& shape : shapes) {
-                Render::g_blockHighlight.Render(hit->blockPos, proj, view,
-                                                shape.min, shape.max);
-            }
+        if (!Render::BlockHighlight::IsValidHighlight(hit)) return;
+
+        // MC LevelRenderer.submitBlockOutline: the block's VoxelShape through
+        // ShapeRenderer.renderShape — the UNION's edges (a stair is an L, not
+        // two boxes with a seam), black at 40% alpha, on the LINES render
+        // type (screen-space width, VIEW_OFFSET_Z_LAYERING) at
+        // Window.getAppropriateLineWidth = max(2.5, width / 1920 * 2.5).
+        // World-aware so a paired chest outlines the half that is there.
+        const auto shapes = Client::g_clientBlockAccess
+            ? Game::BlockRegistry::GetBlockShapeSetAt(*Client::g_clientBlockAccess,
+                                                      hit->blockPos, hit->state)
+            : Game::BlockRegistry::GetBlockShapeSet(hit->state);
+        Render::Gizmos::ShapeBox boxes[Game::BlockRegistry::kMaxShapeBoxes];
+        size_t count = 0;
+        for (const auto& shape : shapes) {
+            if (count >= Game::BlockRegistry::kMaxShapeBoxes) break;
+            boxes[count++] = { shape.min, shape.max };
         }
+        const float width = std::max(2.5f, static_cast<float>(fbWidth) / 1920.0f * 2.5f);
+        Render::Gizmos::ShapeOutline(boxes, count, glm::dvec3(hit->blockPos), 0x66000000u, width);
+        Render::Gizmos::Flush(proj, view, cameraPos, fovDeg, fbWidth, fbHeight);
     }
 
-    void RenderBlockBreakOverlay(const Game::ClientPlayerController& pc,
+    void RenderBlockBreakOverlay(int stage, const glm::ivec3& bp,
                                   const glm::mat4& proj, const glm::mat4& view) {
-        const int stage = pc.GetDestroyStage();
         if (stage < 0) {
             Render::g_blockBreakOverlay.Clear();
             return;
         }
-        const glm::ivec3 bp = pc.GetBreakingPos();
         // Size the crack overlay to the block's actual shape so partial
         // blocks (leaf litter, slabs, …) don't get a full-cube crack
         // floating above / around their geometry.
@@ -425,6 +503,533 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     // the one cheap screen-text path the game has — the F3 overlay lives in
     // the imgui target and can't be reached per-frame for a one-line hint.
     static bool s_freeCamHudBanner = false;
+    // Leaving a world into its panorama (LeaveCapture): the HUD — hotbar,
+    // hearts, chat, name tags, bubbles, the F3 overlay — is off, so the
+    // player sees the bare view the panorama will continue. Screens still
+    // draw, which is how the pause menu fades out over it.
+    static bool s_hideHudForLeave = false;
+
+    // ── F3 debug screen (Render::DebugScreen) ────────────────────────────
+    // The overlay's per-frame inputs (MC reads them off Minecraft.getInstance();
+    // here the frame loop fills them before RenderHUD draws the overlay) and
+    // the GUI scale it draws at.
+    static Render::DebugScreen::Context s_debugContext;
+    static int s_debugGuiScale = 1;
+    // gpu_utilization entry: the whole-frame GPU timer, begun at frame start
+    // and ended before Present; read back the following frame.
+    static Render::GPUTimerHandle s_frameGpuTimer = Render::INVALID_GPU_TIMER;
+    static Render::GPUTimerHandle s_frameGpuPending = Render::INVALID_GPU_TIMER;
+
+    // F3+L — MC records a 10-second profiler capture to debug/profiling/.
+    // This engine's profiler of record is Tracy; what a chord can capture
+    // without it is the frame loop's own phase timers, written as a CSV.
+    struct FrameProfileRecorder {
+        bool active = false;
+        std::chrono::steady_clock::time_point start;
+        std::vector<std::string> rows;
+    };
+    static FrameProfileRecorder s_frameProfile;
+
+    // ── --ui-test: in-process click-through of the pause menu's World Options
+    // screens (dev harness). Drives ScreenManager directly with GUI-space
+    // clicks, so it needs no Accessibility permission and works under
+    // libmalloc's MallocScribble. Logs every step; quits when done.
+    namespace UiTest {
+        struct Driver {
+            bool   enabled = false;
+            // --ui-test-pause: open the pause menu, hold it ~5 s, quit while
+            // still paused (the shutdown save then records where the player
+            // was DURING the pause — the vanilla-pause check).
+            bool   pauseOnly = false;
+            bool   started = false;
+            double startAt = 0.0;
+            int    step = 0;
+            int    wait = 0;
+            bool   releasePending = false;
+            double rx = 0, ry = 0;
+        };
+        static Driver s_ui;
+
+        static void Tick(GLFWwindow* window, Render::ScreenManager& screens) {
+            if (!s_ui.enabled) return;
+            if (!s_ui.started) {
+                if (!Client::g_levelLoadTracker.IsLoaded()) return;
+                if (s_ui.startAt == 0.0) { s_ui.startAt = glfwGetTime() + 3.0; return; }
+                if (glfwGetTime() < s_ui.startAt) return;
+                s_ui.started = true;
+                Log::Info("[UiTest] starting");
+            }
+            int fbW = 0, fbH = 0;
+            glfwGetFramebufferSize(window, &fbW, &fbH);
+            if (fbW <= 0 || fbH <= 0) return;
+            const float scale = ComputeGuiScale(fbW, fbH, 0);
+            const int GW = static_cast<int>(fbW / scale), GH = static_cast<int>(fbH / scale);
+            if (s_ui.releasePending) {
+                screens.MouseReleased(s_ui.rx, s_ui.ry, GLFW_MOUSE_BUTTON_LEFT);
+                s_ui.releasePending = false;
+                return;
+            }
+            if (s_ui.wait > 0) { --s_ui.wait; return; }
+
+            const int cx = GW / 2;
+            const int pauseY0 = GH / 4 + 32;
+            auto row = [](int i) { return 35 + 25 * i + 10; };
+            const int leftX = cx - 155 + 75, rightX = cx + 5 + 75;
+            const int applyX = cx - 154 + 75, footerY = GH - 26 + 10, cancelX = cx + 4 + 75;
+            const int confirmY = GH / 6 + 96 + 10;
+            auto click = [&](int x, int y, const char* what) {
+                Log::Info("[UiTest] step %d: click %s (%d,%d)", s_ui.step, what, x, y);
+                screens.MouseClicked(x, y, GLFW_MOUSE_BUTTON_LEFT);
+                s_ui.releasePending = true; s_ui.rx = x; s_ui.ry = y;
+            };
+            auto key = [&](int k, const char* what) {
+                Log::Info("[UiTest] step %d: key %s", s_ui.step, what);
+                screens.KeyPressed(k, 0);
+            };
+            auto type = [&](const char* text) {
+                Log::Info("[UiTest] step %d: type %s", s_ui.step, text);
+                for (const char* c = text; *c; ++c) screens.CharTyped(static_cast<unsigned int>(*c));
+            };
+            int wait = 8;
+            if (s_ui.pauseOnly) {
+                if (s_ui.step == 0) {
+                    Log::Info("[UiTest] pause-only: open pause, hold");
+                    screens.Push(std::make_unique<Render::PauseScreen>());
+                    s_ui.wait = 300; ++s_ui.step; return;
+                }
+                Log::Info("[UiTest] pause-only: quitting while paused");
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                s_ui.enabled = false;
+                return;
+            }
+            switch (s_ui.step) {
+                case 0:  Log::Info("[UiTest] step 0: open pause"); screens.Push(std::make_unique<Render::PauseScreen>()); wait = 15; break;
+                case 1:  click(cx + 51, pauseY0 + 58, "World Options"); wait = 15; break;
+                case 2:  click(cx, row(1), "default game mode"); break;
+                case 3:  click(cx, row(2), "personal game mode"); break;
+                case 4:  click(leftX, row(3), "allow cheats off"); break;
+                case 5:  click(leftX, row(3), "allow cheats on"); break;
+                case 6:  click(cx + 5 + 65, row(3), "difficulty"); break;
+                case 7:  click(cx + 5 + 140, row(3), "lock"); break;
+                case 8:  click(leftX, row(6), "joinable off"); break;
+                case 9:  click(leftX, row(6), "joinable on"); break;
+                case 10: click(rightX, row(6), "port box"); break;
+                case 11: type("25566"); break;
+                case 12: click(leftX, row(7), "command access"); break;
+                case 13: click(rightX, row(7), "force game mode"); break;
+                case 14: click(applyX, footerY, "apply (expect confirm)"); wait = 20; break;
+                case 15: click(cx + 5 + 75, confirmY, "confirm No"); wait = 20; break;
+                case 16: click(applyX, footerY, "apply again"); wait = 20; break;
+                case 17: click(cx - 155 + 75, confirmY, "confirm Yes"); wait = 40; break;
+                case 18: click(cx + 51, pauseY0 + 58, "World Options again"); wait = 15; break;
+                case 19: click(leftX, row(4), "edit game rules"); wait = 15; break;
+                case 20: click(cx - 155 + 310 - 22, row(1), "toggle drowning_damage (first Player row)"); break;
+                case 21: click(cancelX, footerY, "rules Cancel (expect apply question)"); wait = 15; break;
+                case 22: key(GLFW_KEY_ESCAPE, "ESC on question (back to rules)"); wait = 15; break;
+                case 23: click(cancelX, footerY, "rules Cancel again"); wait = 15; break;
+                // The question's Yes: PopupScreen layout, one change line →
+                // content 83 px tall centred, buttons on its last 20 px.
+                case 24: click(cx - 125 + 61, GH / 2 - 41 + 63 + 10, "apply question Yes (to pause)"); wait = 30; break;
+                case 25: click(cx + 51, pauseY0 + 58, "World Options"); wait = 15; break;
+                case 26: click(leftX, row(4), "edit game rules"); wait = 15; break;
+                case 27: click(cx - 155 + 310 - 22, row(1), "toggle drowning_damage back"); break;
+                case 28: click(applyX, footerY, "rules Done"); wait = 20; break;
+                case 29: click(rightX, row(4), "restrictions (disabled)"); break;
+                case 30: click(cancelX, footerY, "cancel"); wait = 20; break;
+                case 31: key(GLFW_KEY_ESCAPE, "ESC (close pause)"); wait = 30; break;
+                case 32: Log::Info("[UiTest] step 32: open pause again"); screens.Push(std::make_unique<Render::PauseScreen>()); wait = 15; break;
+                case 33: click(cx + 51, pauseY0 + 58, "World Options"); wait = 15; break;
+                case 34: click(cx + 5 + 140, row(3), "lock"); break;
+                case 35: click(applyX, footerY, "apply (confirm)"); wait = 20; break;
+                case 36: key(GLFW_KEY_ESCAPE, "ESC on confirm"); wait = 30; break;
+                case 37: click(applyX, footerY, "apply (confirm again)"); wait = 20; break;
+                case 38: click(cx - 155 + 75, confirmY, "confirm Yes"); wait = 40; break;
+                case 39: key(GLFW_KEY_ESCAPE, "ESC (close pause)"); wait = 60; break;
+                default:
+                    Log::Info("[UiTest] finished — quitting");
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    s_ui.enabled = false;
+                    return;
+            }
+            ++s_ui.step;
+            s_ui.wait = wait;
+        }
+    }
+
+    static std::string FinishFrameProfile() {
+        s_frameProfile.active = false;
+        const std::filesystem::path dir = std::filesystem::path(Platform::g_gameDirectory.GetGameDirectory()) / "debug" / "profiling";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &now);
+#else
+        localtime_r(&now, &tm);
+#endif
+        std::ostringstream name;
+        name << "profile-" << std::put_time(&tm, "%Y-%m-%d_%H.%M.%S") << ".csv";
+        const std::filesystem::path file = dir / name.str();
+        std::ofstream out(file);
+        if (!out) return {};
+        out << "t_ms,frame_ms,network_ms,mesh_results_ms,input_ms,game_logic_ms,mesh_schedule_ms,gpu_upload_ms,render_ms,debug_ui_ms,present_ms,texture_anim_ms,other_ms,sections_rendered,draw_calls\n";
+        for (const std::string& row : s_frameProfile.rows) out << row << '\n';
+        s_frameProfile.rows.clear();
+        return file.string();
+    }
+
+    // MC Minecraft.finishProfilers: "Profiling ended. Saved results to %s",
+    // the path underlined and clicking it opens the FOLDER (OpenFile of
+    // profilePath.getParent()).
+    static void AnnounceFrameProfile(const std::string& absoluteFile) {
+        auto& handler = Render::DebugScreen::KeyHandler();
+        if (absoluteFile.empty()) { handler.Feedback("Profiling ended (nothing saved)"); return; }
+        std::error_code ec;
+        const std::filesystem::path file(absoluteFile);
+        const std::string shown = std::filesystem::relative(file, Platform::g_gameDirectory.GetGameDirectory(), ec).string();
+        handler.FeedbackWithFile("Profiling ended. Saved results to ", shown.empty() ? absoluteFile : shown,
+                                 file.parent_path().string());
+    }
+
+    // ── /control: the per-frame work on both sides ──────────────────────
+    // (client/control/RemoteControl.hpp holds the state; the model is in
+    // common/network/packets/game/ControlPackets.hpp.)
+    //
+    // Controlled: the frames of input the controller sent are pushed into
+    // Input's remote source before this frame's input phase reads it.
+    // Controller: this window's events since last frame are collected into
+    // one ControlInput frame, the mirror of the controlled client's own
+    // screens (inventory, chat) is kept in step, and the shared cursor is
+    // moved by this mouse while a screen is up.
+    struct ControlGuiMetrics {
+        int    winW = 0, winH = 0, fbW = 0, fbH = 0;
+        float  guiScale = 1.0f;
+        double guiW = 0.0, guiH = 0.0;
+        bool   valid = false;
+        // GUI pixels -> window (logical) pixels, the inverse of the mapping
+        // every input branch applies to Input::GetMousePosition.
+        std::pair<double, double> ToWindow(double gx, double gy) const {
+            return { gx * guiScale * winW / fbW, gy * guiScale * winH / fbH };
+        }
+    };
+    static ControlGuiMetrics ControlMetrics(GLFWwindow* window) {
+        ControlGuiMetrics m;
+        glfwGetWindowSize(window, &m.winW, &m.winH);
+        glfwGetFramebufferSize(window, &m.fbW, &m.fbH);
+        if (m.winW <= 0 || m.winH <= 0 || m.fbW <= 0 || m.fbH <= 0) return m;
+        m.guiScale = ComputeGuiScale(m.fbW, m.fbH, m.winW);
+        m.guiW = m.fbW / m.guiScale;
+        m.guiH = m.fbH / m.guiScale;
+        m.valid = true;
+        return m;
+    }
+
+    static void ControlSendInput(Client::NetworkClient* networkClient, const Network::ControlInputPacket& out) {
+        if (!networkClient || !networkClient->IsConnected()) return;
+        auto conn = networkClient->GetConnection();
+        if (!conn) return;
+        conn->SendPacket(static_cast<uint8_t>(Network::PacketId::ControlInputC2S),
+                         Network::Serialization::Serialize(out));
+    }
+
+    // Take down whatever container screen is up, telling the server so its
+    // menu closes too (the screen's own Close only queues the close for the
+    // inventory branch, which stops running the moment the screen is down).
+    static void ControlCloseContainerScreen(Client::NetworkClient* networkClient) {
+        auto& inv = Render::GetInventoryScreen();
+        if (!inv.IsOpen()) return;
+        inv.CloseSilently();
+        if (!networkClient || !networkClient->IsConnected()) return;
+        if (auto conn = networkClient->GetConnection()) {
+            Network::InventoryCloseC2SPacket close{};
+            conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryCloseC2S),
+                             Network::Serialization::Serialize(close));
+        }
+    }
+
+    static void ControlBeginFrame(GLFWwindow* window, Render::Camera& camera,
+                                  Client::NetworkClient* networkClient) {
+        using Network::ControlRole;
+        using Network::ControlScreen;
+        auto& s = Client::Control::Get();
+        const ControlGuiMetrics gm = ControlMetrics(window);
+
+        if (s.roleChanged) {
+            s.roleChanged = false;
+            // Whatever the previous role left behind comes down first.
+            Input::SetRemoteMode(false);
+            Input::SetCaptureEvents(false);
+            Input::SetCursorOverride(false, 0.0, 0.0);
+            if (s.prevRole == ControlRole::Controller) {
+                // The mirrored screens were never the server's business.
+                Render::GetInventoryScreen().CloseSilently();
+                if (g_chatScreen.IsOpen()) g_chatScreen.Close();
+            }
+            if (s.prevRole == ControlRole::Controller) {
+                camera.yaw         = s.ownYaw;
+                camera.pitch       = s.ownPitch;
+                camera.perspective = Render::Perspective::FirstPerson;
+            }
+            Input::ReleaseAll();
+            if (s.role == ControlRole::Controller) {
+                s.ownYaw   = camera.yaw;
+                s.ownPitch = camera.pitch;
+                // A clean slate: the mirror starts from what the other
+                // client reports, not from what was open here.
+                if (g_chatScreen.IsOpen()) g_chatScreen.Close();
+                ControlCloseContainerScreen(networkClient);
+                Render::GetScreenManager().Clear();
+            } else if (s.role == ControlRole::Controlled) {
+                // Possession closes whatever this player had up — the
+                // controller cannot see a menu that is not mirrored.
+                if (g_chatScreen.IsOpen()) g_chatScreen.Close();
+                ControlCloseContainerScreen(networkClient);
+                Render::GetScreenManager().Clear();
+                Input::SetRemoteMode(true);
+            }
+        }
+
+        if (s.role == ControlRole::Controlled) {
+            for (const auto& in : s.pendingInput) {
+                if (in.releaseAll) Input::RemoteReleaseAll();
+                if (in.mouseDx != 0.0f || in.mouseDy != 0.0f) Input::RemoteMotion(in.mouseDx, in.mouseDy);
+                if (in.scrollX != 0.0f || in.scrollY != 0.0f) Input::RemoteScroll(in.scrollX, in.scrollY);
+                for (const auto& k : in.keys)    Input::RemoteKey(k.key, k.action, k.mods);
+                for (const auto& b : in.buttons) Input::RemoteMouseButton(b.button, b.action, b.mods);
+                for (uint32_t c : in.chars)      Input::RemoteChar(c);
+                s.remoteCursorValid = in.cursorValid;
+                s.remoteCursorRef   = in.cursorRef;
+                s.remoteCursorX     = in.cursorX;
+                s.remoteCursorY     = in.cursorY;
+            }
+            s.pendingInput.clear();
+            if (s.remoteCursorValid && gm.valid) {
+                double gx = gm.guiW * 0.5 + s.remoteCursorX;
+                double gy = gm.guiH * 0.5 + s.remoteCursorY;
+                if (s.remoteCursorRef == 1 && Render::GetInventoryScreen().IsOpen()) {
+                    // Panel-relative: the same slot as under the controller's
+                    // cursor, whatever this window's size.
+                    const auto& inv = Render::GetInventoryScreen();
+                    gx = inv.LeftPos(static_cast<int>(gm.guiW)) + s.remoteCursorX;
+                    gy = inv.TopPos(static_cast<int>(gm.guiH)) + s.remoteCursorY;
+                }
+                auto [px, py] = gm.ToWindow(gx, gy);
+                Input::SetCursorOverride(true, px, py);
+            } else {
+                Input::SetCursorOverride(false, 0.0, 0.0);
+            }
+            return;
+        }
+
+        // The frame to show this frame: played back on the sender's clock,
+        // a fixed delay behind, interpolated between its frames.
+        if (Client::Control::ReceivesView()) {
+            Client::Control::UpdateView(std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        }
+        if (s.role != ControlRole::Controller) return;
+
+        // This client's own menus (Esc) take the keyboard back; the other
+        // side gets one "everything released" so nothing stays held there.
+        // (The chat too: what the controller types is theirs — the other
+        // player never sees a chat box, and the line is spoken as them by the
+        // server when it is sent.)
+        const bool localUi = !Render::GetScreenManager().Empty() || g_chatScreen.IsOpen();
+        Input::SetCaptureEvents(!localUi);
+        if (localUi) {
+            s.cursorActive = false;
+            if (!s.sentReleaseForLocalUi) {
+                Network::ControlInputPacket out;
+                out.releaseAll = true;
+                ControlSendInput(networkClient, out);
+                s.sentReleaseForLocalUi = true;
+            }
+            return;
+        }
+        s.sentReleaseForLocalUi = false;
+
+        // Mirror of the controlled client's own screens. Transition-driven:
+        // the same input reaches both screens, so between transitions they
+        // run in step on their own; container screens arrive through the
+        // server's tee (OpenScreenS2C / InventoryFullS2C) like any other.
+        const ControlScreen screen = s.hasView ? s.view.screen : ControlScreen::None;
+        if (screen != s.mirrored) {
+            switch (s.mirrored) {
+                case ControlScreen::Survival: Render::GetSurvivalInventoryScreen().CloseSilently(); break;
+                case ControlScreen::Creative: Render::GetCreativeInventoryScreen().CloseSilently(); break;
+                default: break;
+            }
+            switch (screen) {
+                case ControlScreen::Survival:
+                    if (!Render::GetSurvivalInventoryScreen().IsOpen()) Render::GetSurvivalInventoryScreen().OpenSilently();
+                    // The E that opened it over there is very likely still
+                    // down here; the inventory branch's edge must not read
+                    // that as the press that closes it.
+                    s_eKeyHeld = Input::IsGlfwKeyDown(GLFW_KEY_E);
+                    break;
+                case ControlScreen::Creative:
+                    if (!Render::GetCreativeInventoryScreen().IsOpen()) Render::GetCreativeInventoryScreen().OpenSilently();
+                    s_eKeyHeld = Input::IsGlfwKeyDown(GLFW_KEY_E);
+                    break;
+                default: break;
+            }
+            s.mirrored = screen;
+        }
+        const bool otherHasScreen = (screen != ControlScreen::None && screen != ControlScreen::Chat) ||
+                                    Render::GetInventoryScreen().IsOpen();
+
+        // Keys that stay this client's own: Esc (its pause menu, when nothing
+        // is up over there), chat and command (its own chat box), and the
+        // cursor toggle. A chat key's character comes in the same frame and
+        // stays too, or it would land in the other player's world.
+        auto ownKey = [](int glfwKey) {
+            const Input::BoundKey k = Input::BoundKey::Keyboard(glfwKey);
+            return (Input::Binds::Chat         && Input::Binds::Chat->key == k) ||
+                   (Input::Binds::Command      && Input::Binds::Command->key == k) ||
+                   (Input::Binds::ToggleCursor && Input::Binds::ToggleCursor->key == k);
+        };
+        bool chatKeyThisFrame = false;
+        Network::ControlInputPacket out;
+        Input::CapturedEvent ev;
+        while (Input::PopCapturedEvent(ev)) {
+            switch (ev.kind) {
+                case Input::CapturedEvent::Kind::Key:
+                    // Esc with nothing up over there is this client's own
+                    // pause menu (the controlling branch below opens it).
+                    if (ev.a == GLFW_KEY_ESCAPE && !otherHasScreen) break;
+                    if (ownKey(ev.a)) {
+                        if (Input::Binds::ToggleCursor && Input::Binds::ToggleCursor->key != Input::BoundKey::Keyboard(ev.a)) {
+                            chatKeyThisFrame = true;
+                        }
+                        break;
+                    }
+                    out.keys.push_back({static_cast<int16_t>(ev.a), static_cast<uint8_t>(ev.b),
+                                        static_cast<uint8_t>(ev.c)});
+                    break;
+                case Input::CapturedEvent::Kind::MouseButton:
+                    // A freed cursor (Tab) with no screen up over there:
+                    // clicks are not the world's, as in ordinary play.
+                    if (!otherHasScreen && glfwGetInputMode(window, GLFW_CURSOR) != GLFW_CURSOR_DISABLED) break;
+                    out.buttons.push_back({static_cast<uint8_t>(ev.a), static_cast<uint8_t>(ev.b),
+                                           static_cast<uint8_t>(ev.c)});
+                    break;
+                case Input::CapturedEvent::Kind::Char:
+                    if (chatKeyThisFrame) break;
+                    out.chars.push_back(static_cast<uint32_t>(ev.a));
+                    break;
+                case Input::CapturedEvent::Kind::Scroll:
+                    out.scrollX += static_cast<float>(ev.x);
+                    out.scrollY += static_cast<float>(ev.y);
+                    break;
+            }
+        }
+        // With a screen up over there this cursor is free (HandleCursorToggle
+        // releases it, exactly as for this client's own inventory) and the
+        // motion is the OS cursor's, not the view's.
+        // (Not on the frame the screen came down either: that delta is the
+        // free cursor's last move, and the cursor is only recaptured below.)
+        static bool s_lastOtherHasScreen = false;
+        const bool cursorCaptured = glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED;
+        if (!otherHasScreen && !s_lastOtherHasScreen && cursorCaptured) {
+            auto [dx, dy] = Input::GetMouseDelta();
+            out.mouseDx = static_cast<float>(dx);
+            out.mouseDy = static_cast<float>(dy);
+        }
+        s_lastOtherHasScreen = otherHasScreen;
+
+        // The cursor: this window's real one, in GUI pixels, placed on the
+        // other client relative to the open panel's corner (or the screen
+        // centre for chat) so the same slot is under it there whatever the
+        // two windows' sizes and GUI scales.
+        if (otherHasScreen && gm.valid) {
+            auto [mx, my] = Input::GetLocalMousePosition();
+            const double gx = mx * (static_cast<double>(gm.fbW) / gm.winW) / gm.guiScale;
+            const double gy = my * (static_cast<double>(gm.fbH) / gm.winH) / gm.guiScale;
+            s.cursorActive  = true;
+            out.cursorValid = true;
+            if (Render::GetInventoryScreen().IsOpen()) {
+                const auto& inv = Render::GetInventoryScreen();
+                out.cursorRef = 1;
+                out.cursorX   = static_cast<float>(gx - inv.LeftPos(static_cast<int>(gm.guiW)));
+                out.cursorY   = static_cast<float>(gy - inv.TopPos(static_cast<int>(gm.guiH)));
+            } else {
+                out.cursorRef = 0;
+                out.cursorX   = static_cast<float>(gx - gm.guiW * 0.5);
+                out.cursorY   = static_cast<float>(gy - gm.guiH * 0.5);
+            }
+        } else {
+            s.cursorActive = false;
+        }
+
+        static bool  s_lastCursorValid = false;
+        static float s_lastCursorX = 0.0f, s_lastCursorY = 0.0f;
+        const bool worthSending = !out.keys.empty() || !out.buttons.empty() || !out.chars.empty() ||
+                                  out.mouseDx != 0.0f || out.mouseDy != 0.0f ||
+                                  out.scrollX != 0.0f || out.scrollY != 0.0f ||
+                                  out.cursorValid != s_lastCursorValid ||
+                                  (out.cursorValid && (out.cursorX != s_lastCursorX || out.cursorY != s_lastCursorY));
+        s_lastCursorValid = out.cursorValid;
+        s_lastCursorX = out.cursorX;
+        s_lastCursorY = out.cursorY;
+        if (worthSending) ControlSendInput(networkClient, out);
+    }
+
+    // Controlled side, end of frame: what this client just drew, for the
+    // controller to draw too. The camera is the RENDER camera — after the
+    // third-person pull-in — so the controller's view is this one exactly.
+    static void ControlEndFrame(const Render::Camera& camera, const Game::ClientPlayer& player,
+                                const Game::ClientPlayerController& playerController,
+                                Client::NetworkClient* networkClient) {
+        using Network::ControlScreen;
+        if (!Client::Control::IsControlled() && !Client::Control::IsWatched()) return;
+        if (!networkClient || !networkClient->IsConnected()) return;
+        auto conn = networkClient->GetConnection();
+        if (!conn) return;
+        Network::ControlViewPacket v;
+        v.cameraPos   = camera.position;
+        v.yaw         = camera.yaw;
+        v.pitch       = camera.pitch;
+        v.fov         = camera.fov;
+        v.perspective = static_cast<uint8_t>(camera.perspective);
+        v.playerPos   = player.physics.position;
+        v.dimension   = static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension()));
+        if (g_chatScreen.IsOpen()) {
+            v.screen   = ControlScreen::Chat;
+            v.chatText = g_chatScreen.InputText();
+        } else if (Render::GetSurvivalInventoryScreen().IsOpen()) {
+            v.screen = ControlScreen::Survival;
+        } else if (Render::GetCreativeInventoryScreen().IsOpen()) {
+            v.screen = ControlScreen::Creative;
+        } else if (Render::GetInventoryScreen().IsOpen()) {
+            v.screen = ControlScreen::Container;
+        }
+        v.statsHidden = !player.gameModeKnown || player.IsCreative() || player.IsSpectator();
+        v.eyeInWater  = player.physics.isEyeInWater;
+        v.selectedSlot = static_cast<uint8_t>(std::clamp(player.inventory.GetSelectedSlot(), 0, 8));
+        v.sendTimeMs = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (player.lastBlockHit) {
+            v.hitValid = true;
+            v.hitPos   = player.lastBlockHit->blockPos;
+        }
+        v.entityPicked = playerController.PickEntity() != 0;
+        v.breakStage   = static_cast<int8_t>(std::clamp(playerController.GetDestroyStage(), -1, 127));
+        v.breakPos     = playerController.GetBreakingPos();
+        {
+            auto& cs = Client::Control::Get();
+            v.swing = cs.pendingSwing;
+            cs.pendingSwing = false;
+        }
+        v.usingItem        = player.usingItem;
+        v.usingHand        = static_cast<uint8_t>(player.usingHand);
+        v.useAnim          = static_cast<uint8_t>(player.useAnim);
+        v.useItemRemaining = player.useItemRemaining;
+        v.useItemDuration  = player.useItemDuration;
+        v.walkDist         = s_heldWalkDist;
+        conn->SendPacket(static_cast<uint8_t>(Network::PacketId::ControlViewC2S),
+                         Network::Serialization::Serialize(v));
+    }
 
     void RenderHUD(GLFWwindow* window, const Game::Inventory& inventory, float deltaTime,
                    const glm::mat4& proj = glm::mat4(1.0f), const glm::mat4& view = glm::mat4(1.0f)) {
@@ -452,10 +1057,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // To replicate that without a 3D text pipeline, we project the head position to GUI
         // space and apply a scale = (0.025 * guiHeight * proj[1][1]) / (2 * depth) to GuiGraphics
         // so the rendered text occupies the same screen area as MC's billboard would.
-        if (Client::g_remotePlayerManager) {
+        if (Client::g_remotePlayerManager && !s_hideHudForLeave) {
             glm::mat4 nameVp = proj * view;
+            // `view` is the render-space (camera-relative) view, so the eye
+            // recovered from its inverse is the render-space one; it is
+            // moved back to world for the raycast and the 64-block cull.
             glm::mat4 invView = glm::inverse(view);
-            glm::vec3 cameraPos = glm::vec3(invView[3]);
+            const glm::dvec3 cameraPos = Render::ToWorld(glm::vec3(invView[3]));
 
             // proj[1][1] = 1 / tan(vfov/2) — vertical focal length in NDC units per world unit
             const float projY = proj[1][1];
@@ -464,8 +1072,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // already decided. Players in this level project directly; a
             // player seen through a portal projects at the image of their
             // position on this side of it.
-            auto drawTag = [&](const Client::RemotePlayer& rp, const glm::vec3& tagWorld, bool occluded) {
-                glm::vec4 clip = nameVp * glm::vec4(tagWorld, 1.0f);
+            // `occluded` draws the see-through half alone (behind a wall);
+            // `discrete` (a sneaking player, MC isDiscrete) the NORMAL-mode
+            // half alone, which a wall hides — its caller drops it then.
+            auto drawTag = [&](const Client::RemotePlayer& rp, const glm::dvec3& tagWorld, bool occluded,
+                               bool discrete = false) {
+                // nameVp is render-space: the world anchor goes through
+                // ToRender (double subtraction) before the projection.
+                glm::vec4 clip = nameVp * glm::vec4(Render::ToRender(tagWorld), 1.0f);
                 if (clip.w <= 0.0f) return;
 
                 float ndcX = clip.x / clip.w;
@@ -494,47 +1108,96 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // hung into the head.
                 int tagY = -lineH;
 
-                // Background is always drawn (25% alpha black, MC: 0x40000000).
-                graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, 0x40000000);
-                if (occluded) {
-                    // See-through (MC line 51): -2130706433 = 0x80FFFFFF, 50% white reads as grey.
-                    graphics.DrawString(rp.name, tagX, tagY, 0x80FFFFFF, true);
+                // MC SubmitNodeCollection.submitNameTag. The NORMAL-mode text
+                // goes through rendertype_text, which FOGS it (a player in
+                // the Blindness fog wears a black name); the see-through
+                // half (25 % black background, 50 % white text) is not
+                // fogged and is drawn after it, over it.
+                const uint32_t kSeeThroughText = 0x80FFFFFFu;   // MC textColor at the default opacity
+                const uint32_t kBackground     = 0x40000000u;   // ARGB.color(0.25, black)
+                auto foggedWhite = [&](uint32_t alpha) {
+                    const Render::EnvironmentFrame& env = Render::EnvironmentState::Get().Frame();
+                    const glm::dvec3 d = tagWorld - cameraPos;
+                    const auto linear = [](double v, float a, float b) {
+                        if (v <= a) return 0.0f;
+                        if (v >= b) return 1.0f;
+                        return static_cast<float>((v - a) / (b - a));
+                    };
+                    const float fog = std::max(linear(glm::length(d), env.fogEnvStart, env.fogEnvEnd),
+                                               linear(std::max(glm::length(glm::dvec2(d.x, d.z)), std::abs(d.y)),
+                                                      env.fogRdStart, env.fogRdEnd));
+                    const glm::vec3 c = glm::mix(glm::vec3(1.0f), env.fogColor, fog);
+                    const auto byte = [](float v) {
+                        return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+                    };
+                    return (alpha << 24) | (byte(c.r) << 16) | (byte(c.g) << 8) | byte(c.b);
+                };
+                if (discrete) {
+                    // Sneaking: NORMAL mode only, in the see-through colours
+                    // (textColor + background), depth-tested — so visible
+                    // only while nothing is in the way — and fogged.
+                    graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
+                    graphics.DrawString(rp.name, tagX, tagY, foggedWhite(0x80u), true);
+                } else if (occluded) {
+                    // Behind a wall only the see-through half passes.
+                    graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
+                    graphics.DrawString(rp.name, tagX, tagY, kSeeThroughText, true);
                 } else {
-                    // Normal (MC line 53): -1 = 0xFFFFFFFF solid white.
-                    graphics.DrawString(rp.name, tagX, tagY, 0xFFFFFFFF, true);
+                    // Both halves: the solid NORMAL text (white, fogged),
+                    // then the see-through background and text over it.
+                    graphics.DrawString(rp.name, tagX, tagY, foggedWhite(0xFFu), true);
+                    graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
+                    graphics.DrawString(rp.name, tagX, tagY, kSeeThroughText, true);
                 }
                 graphics.PopMatrix();
             };
 
-            // MC NameTagFeatureRenderer adds two passes (lines 49-54):
-            //   Visible (in front of geometry):  solid white text, NO background  (line 53)
-            //   Occluded (behind blocks):        50% white + 25% black bg          (line 51)
-            // We approximate the depth test by raycasting from the camera to the tag's
-            // world position — a hit means the player is behind something.
-            auto blocked = [](const glm::vec3& from, const glm::vec3& to) {
-                const glm::vec3 ray = to - from;
-                const float len = glm::length(ray);
-                if (len <= 0.001f) return false;
-                return Game::Raycast::CastRay(from, ray / len, len).has_value();
+            // MC submitNameTag draws two parts: the NORMAL text (solid white,
+            // depth-tested, fogged) and the SEE_THROUGH part (25% black
+            // background + 50% white text, drawn through walls, unfogged);
+            // a sneaking player's tag is the NORMAL part alone, in the
+            // see-through colours. We approximate the depth test by
+            // raycasting from the camera to the tag's world position — a hit
+            // means the player is behind something (drawTag above).
+            // The ray is taken in double, as CastRay is.
+            auto blocked = [](const glm::dvec3& from, const glm::dvec3& to) {
+                const glm::dvec3 ray = to - from;
+                const double len = glm::length(ray);
+                if (len <= 0.001) return false;
+                return Game::Raycast::CastRay(from, glm::vec3(ray / len),
+                                              static_cast<float>(len)).has_value();
             };
 
             for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                 if (rp.name.empty()) continue;
-                // Hide nametag entirely when the player is shifting/sneaking
-                if (rp.isCrouching) continue;
+                // /invisible, and MC LivingEntityRenderer.shouldShowName:
+                // `!entity.isInvisibleTo(localPlayer)` — INVISIBILITY hides
+                // the name with the body.
+                if (rp.invisible || rp.effects.Invisible()) continue;
+                if (rp.IsMorphed()) continue; // /morph: a mob has no name tag
 
                 // MC NameTagFeatureRenderer line 43: translate(x, nameTagAttachment.y + 0.5, z)
                 // where nameTagAttachment is at the top of the player's bbox (~1.8 high).
                 // Our remote player position is at feet, so feet + 1.8 + 0.5 = feet + 2.3.
                 // A scaled body is 1.8 × scale tall; the tag rides its top.
-                const glm::vec3 tagWorld(rp.position.x, rp.position.y + 1.8f * rp.scale + 0.5f, rp.position.z);
+                const glm::dvec3 tagWorld(rp.position.x, rp.position.y + 1.8 * rp.scale + 0.5, rp.position.z);
 
                 if (Client::IsRemotePlayerInBoundLevel(rp)) {
                     // MC default render distance for nametags is 64 blocks
-                    float dx = rp.position.x - cameraPos.x;
-                    float dz = rp.position.z - cameraPos.z;
-                    if (dx * dx + dz * dz > 64.0f * 64.0f) continue;
-                    drawTag(rp, tagWorld, blocked(cameraPos, tagWorld));
+                    const double dx = rp.position.x - cameraPos.x;
+                    const double dz = rp.position.z - cameraPos.z;
+                    if (dx * dx + dz * dz > 64.0 * 64.0) continue;
+                    const bool occluded = blocked(cameraPos, tagWorld);
+                    if (rp.isCrouching) {
+                        // MC shouldShowName for a discrete (sneaking) entity:
+                        // within 32 blocks only; and its NORMAL-mode tag is
+                        // depth-tested, so a wall hides it.
+                        if (glm::length(tagWorld - cameraPos) < 32.0 && !occluded) {
+                            drawTag(rp, tagWorld, false, /*discrete=*/true);
+                        }
+                    } else {
+                        drawTag(rp, tagWorld, occluded);
+                    }
                 }
 
 #if ENABLE_IMMERSIVE_PORTALS
@@ -547,9 +1210,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Client::GetClientImmersivePortals().ForEach([&](const Game::Immersive::Portal& p) {
                     if (!p.Has(Game::Immersive::PortalFlag::Visible) || p.IsMirror()) return;
                     if (p.destDimension != rp.dimension) return;
-                    if (!p.IsInFront(glm::dvec3(cameraPos))) return;
-                    const glm::dvec3 image = p.InverseTransformPoint(glm::dvec3(tagWorld));
-                    const glm::dvec3 eye(cameraPos);
+                    if (!p.IsInFront(cameraPos)) return;
+                    const glm::dvec3 image = p.InverseTransformPoint(tagWorld);
+                    const glm::dvec3& eye = cameraPos;
                     if (glm::length(image - eye) > 64.0) return;
                     const auto through = p.RaytraceSegment(eye, image, 0.0);
                     if (!through) {
@@ -563,25 +1226,42 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         // where they are, tested against this level only.
                         const double depth = p.SignedDistanceToPlane(image);
                         if (depth <= 0.0 || depth > 3.0 * std::max(rp.scale, 0.05f)) return;
-                        drawTag(rp, glm::vec3(image), blocked(cameraPos, glm::vec3(image)));
+                        const bool hidden = blocked(cameraPos, image);
+                        if (!rp.isCrouching) drawTag(rp, image, hidden);
+                        else if (!hidden && glm::length(image - eye) < 32.0) drawTag(rp, image, false, true);
                         return;
                     }
-                    bool occluded = blocked(cameraPos, glm::vec3(through->point) -
-                                                       glm::vec3(glm::normalize(through->point - eye)) * 0.05f);
+                    bool occluded = blocked(cameraPos, through->point -
+                                                       glm::normalize(through->point - eye) * 0.05);
                     if (!occluded) {
-                        const glm::vec3 farEye(p.TransformPoint(glm::dvec3(through->point)));
+                        const glm::dvec3 farEye = p.TransformPoint(through->point);
                         Client::ClientLevels::WithLevel(p.destDimension, [&]() {
                             occluded = blocked(farEye, tagWorld);
                         });
                     }
-                    drawTag(rp, glm::vec3(image), occluded);
+                    // A sneaking player's tag (discrete): unoccluded, within 32.
+                    if (!rp.isCrouching) drawTag(rp, image, occluded);
+                    else if (!occluded && glm::length(image - eye) < 32.0) drawTag(rp, image, false, true);
                 });
 #endif
             }
         }
 
-        { PROFILE_ZONE_N("Hud");
+        if (!s_hideHudForLeave) {
+        PROFILE_ZONE_N("Hud");
+        DEBUG_PIE_ZONE("hud");
         g_hudRenderer.Render(graphics, inventory, deltaTime);
+        }
+
+        // ── F3 debug screen — MC Gui's debug-overlay layer: above the hotbar,
+        // below chat and the screen stack. The world-space renderers' text
+        // billboards (water levels, light values, chunk labels) come first so
+        // the overlay's columns paint over them.
+        if (!s_hideHudForLeave) {
+            PROFILE_ZONE_N("DebugOverlay");
+            DEBUG_PIE_ZONE("overlay");
+            Render::DebugScreen::RenderBillboardTexts(graphics, glm::value_ptr(proj), glm::value_ptr(view), guiWidth, guiHeight);
+            Render::DebugScreen::Overlay().Render(graphics, s_debugContext, static_cast<int>(guiScale));
         }
 
         // Free-camera hint — drawn while the debug fly camera is detached so
@@ -589,20 +1269,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // gone. Top-center, out of the way of the hotbar and chat.
         if (s_freeCamHudBanner) {
             graphics.DrawCenteredString(
-                "FREE CAMERA - culling frozen at player (F+C to return)",
+                Debug::DebugSystem::FreeCamCullFromPlayer()
+                    ? "FREE CAMERA - culling frozen at player (F+C to return)"
+                    : "FREE CAMERA - chunks stay loaded at player (F+C to return)",
                 guiWidth / 2, 4, 0xFFFFFF55);
         }
 
         // Chat: update timer and render messages + input field
         { PROFILE_ZONE_N("Chat");
+        DEBUG_PIE_ZONE("screen");
         g_chatComponent.Update(deltaTime);
-        g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
-        g_chatScreen.Render(graphics);
+        if (!s_hideHudForLeave) {
+            g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
+            g_chatScreen.Render(graphics);
+        }
         }
 
         // Prime suspect when this zone is wide: the creative search tab draws
         // an icon per registered item, and every icon is its own sub-draw.
         { PROFILE_ZONE_N("InventoryScreen");
+        DEBUG_PIE_ZONE("screen");
         Render::GetInventoryScreen().Render(graphics);
         }
 
@@ -611,6 +1297,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             auto& screens = Render::GetScreenManager();
             if (!screens.Empty()) {
                 PROFILE_ZONE_N("ScreenStack");
+                DEBUG_PIE_ZONE("screen");
                 screens.Update(guiWidth, guiHeight);
                 auto [smx, smy] = Input::GetMousePosition();
                 const int sgx = static_cast<int>(
@@ -623,15 +1310,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         }
 
         // Chat bubbles above remote players (rendered in GUI space with text)
-        if (Client::g_remotePlayerManager) {
+        if (Client::g_remotePlayerManager && !s_hideHudForLeave) {
             glm::mat4 vp = proj * view;
             for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                 if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                // /invisible or INVISIBILITY: a bubble would give the position away.
+                if (rp.invisible || rp.effects.Invisible()) continue;
                 if (rp.chatBubbleTimer <= 0.0f || rp.chatBubbleText.empty()) continue;
 
-                // Project player head position to screen
-                glm::vec4 worldPos(rp.position.x, rp.position.y + 2.4f, rp.position.z, 1.0f);
-                glm::vec4 clip = vp * worldPos;
+                // Project player head position to screen. `vp` is render-
+                // space (the view is camera-relative), so the head goes
+                // through ToRender — double subtraction — before the multiply.
+                const glm::dvec3 headWorld(rp.position.x, rp.position.y + 2.4, rp.position.z);
+                glm::vec4 clip = vp * glm::vec4(Render::ToRender(headWorld), 1.0f);
                 if (clip.w <= 0.0f) continue;
 
                 // NDC to GUI-scaled coords
@@ -736,8 +1427,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     // chunk meshes (their UVs moved with the atlas). Block models,
     // blockstates, item definitions and lang are startup-only — see
     // ResourcePacks.hpp — and the pack screen says so.
-    void ReloadResources() {
-        if (!Resources::ApplySelection()) return;
+    void ReloadResources(bool force = false) {
+        if (!Resources::ApplySelection() && !force) return;
         Log::Info("[ResourcePacks] reloading resources...");
 
         // The mesh workers read the atlas UV table while they build; let
@@ -780,6 +1471,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Render::g_mobParticleSystem.ReloadTextures();
         Render::g_skyRenderer.ReloadResources();
         Render::g_cloudRenderer.ReloadTexture();
+        // MC SoundManager is a reload listener: a pack's sounds.json and
+        // .ogg files take effect now.
+        Client::GetSoundManager().ReloadResources();
 
         // MC LevelRenderer.allChanged: every section is rebuilt with the new
         // atlas (its UVs) and colormaps.
@@ -887,11 +1581,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Pick block (P key) — MC Minecraft.pickBlock: the client only says
         // what it aimed at (an entity under the crosshair beats the block
         // behind it); the server resolves the item and places it —
-        // PlayerSession::HandlePickItem. Creative only in this game, and the
-        // server enforces that too.
+        // PlayerSession::HandlePickItem. Every game mode sends it: in
+        // survival the server only switches to a stack the player already
+        // carries (MC tryPickItem), creative also conjures one.
         if (Input::ConsumeClick(*Input::Binds::PickItem)) {
-            const bool creative = player.gameModeKnown && player.gameMode == 1;
-            if (!freeCamDetached && creative) {
+            if (!freeCamDetached) {
                 Network::PickItemC2SPacket pick;
                 if (const int32_t entityId = controller.PickEntity(); entityId != 0) {
                     pick.kind = Network::PickItemC2SPacket::Kind::Entity;
@@ -931,14 +1625,33 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
         }
 
-        // Mouse wheel for inventory scrolling. Dead while the free camera is
+        // Mouse wheel for hotbar scrolling. Dead while the free camera is
         // detached (the offsets are reset per frame, so skipping is enough).
+        //
+        // MC ScrollWheelHandler.onMouseScroll: the (already sensitivity-
+        // scaled) offset ACCUMULATES, a direction change drops what was
+        // banked, and each whole unit is one slot step — so Scroll
+        // Sensitivity 0.5 needs two notches per slot and 2.0 moves two.
+        // The old sign test stepped once per frame with any offset at all,
+        // which is why the option never changed anything here.
         auto [scrollX, scrollY] = Input::GetScrollOffset();
-        if (!freeCamDetached) {
-            if (scrollY > 0) {
-                controller.OnHotbarChanged((player.GetSelectedSlot() - 1 + 9) % 9);
-            } else if (scrollY < 0) {
-                controller.OnHotbarChanged((player.GetSelectedSlot() + 1) % 9);
+        if (!freeCamDetached && scrollY != 0.0) {
+            static double s_accumulatedScrollY = 0.0;
+            if (s_accumulatedScrollY != 0.0 && (scrollY > 0.0) != (s_accumulatedScrollY > 0.0)) {
+                s_accumulatedScrollY = 0.0;
+            }
+            s_accumulatedScrollY += scrollY;
+            const int wheel = static_cast<int>(s_accumulatedScrollY);
+            if (wheel != 0) {
+                s_accumulatedScrollY -= wheel;
+                // ScrollWheelHandler.getNextScrollWheelSelection: one step
+                // per call in the wheel's direction (MC steps once per
+                // event even for a multi-unit wheel; kept).
+                if (wheel > 0) {
+                    controller.OnHotbarChanged((player.GetSelectedSlot() - 1 + 9) % 9);
+                } else {
+                    controller.OnHotbarChanged((player.GetSelectedSlot() + 1) % 9);
+                }
             }
         }
 
@@ -977,21 +1690,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Input::ResetMouseTracking();
     }
 
-    bool HandleCursorToggle(GLFWwindow* window, Render::Camera& camera, bool overlayWantsCursor) {
+    // `forceCaptured` (/control): the cursor stays captured whatever the
+    // overlays say — the controller's mouse is measured as deltas for the
+    // other player's look and its virtual cursor, and a controlled window's
+    // own cursor is nobody's.
+    bool HandleCursorToggle(GLFWwindow* window, Render::Camera& camera, bool overlayWantsCursor,
+                            bool forceCaptured = false) {
         static bool s_manualCursorVisible = false;
         static bool s_lastEffective = false;
         static bool s_initialized = false;
 
         // Ignore Tab while an overlay holds the cursor — otherwise pressing Tab inside chat
         // would flip the manual state and leave the cursor visible after chat closes.
-        if (!overlayWantsCursor && Input::ConsumeClick(*Input::Binds::ToggleCursor)) {
+        if (!overlayWantsCursor && !forceCaptured && Input::ConsumeClick(*Input::Binds::ToggleCursor)) {
             s_manualCursorVisible = !s_manualCursorVisible;
             Log::Info(s_manualCursorVisible
                       ? "Manual cursor enabled (Tab)"
                       : "Manual cursor disabled (Tab)");
         }
+        if (forceCaptured) s_manualCursorVisible = false;
 
-        bool effective = s_manualCursorVisible || overlayWantsCursor;
+        bool effective = !forceCaptured && (s_manualCursorVisible || overlayWantsCursor);
 
         if (!s_initialized || effective != s_lastEffective) {
             if (effective) {
@@ -1130,6 +1849,36 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     // LaunchWorld would for the worlds.json entry of that name. False when no
     // entry matches, so the caller can fall back to the title screen.
     static bool DevHarnessWorldAction(const std::string& name, Render::TitleAction& out) {
+        // Folder worlds first — the same list the Select World screen shows,
+        // built the way it builds its entries (level.dat + sidecar), so a
+        // world generated straight into saves/ (tools/redstone_computer) is
+        // launchable without a worlds.json entry.
+        for (const auto& w : Platform::g_gameDirectory.ListObeyCraftWorlds()) {
+            if (w.levelName != name) continue;
+            const Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(w.path);
+            Render::TitleAction a;
+            a.kind = Render::TitleAction::Kind::Singleplayer;
+            a.useMinecraftSave = false;
+            a.worldPath        = w.path;
+            a.readOnlyWorld    = false;
+            a.worldName        = w.levelName;
+            a.seed             = w.seed;
+            a.gameMode         = w.gameMode;
+            a.generateStructures = w.generateStructures;
+            a.worldType   = sidecar.worldType;
+            a.flatPreset  = sidecar.flatPreset;
+            a.flatLayers  = sidecar.flatLayers;
+            a.singleBiome = sidecar.singleBiome;
+            a.worldgenTweaks  = sidecar.worldgenTweaks;
+            a.dayTime         = w.dayTime;
+            a.doDaylightCycle = w.doDaylightCycle;
+            a.difficulty      = w.difficulty;
+            a.skybox          = sidecar.skybox;
+            a.skyboxMode      = sidecar.skyboxMode;
+            a.babyModels      = sidecar.babyModels;
+            out = std::move(a);
+            return true;
+        }
         for (const Render::WorldEntry& e : Render::WorldList::Load()) {
             if (e.name != name) continue;
             Render::TitleAction a;
@@ -1137,6 +1886,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             a.useMinecraftSave = e.isMinecraftSave;
             a.worldPath        = e.savePath;
             a.readOnlyWorld    = e.readOnly;
+            a.regenerateOnJoin = e.regenerateOnJoin;
             a.worldName        = e.name;
             a.seed             = e.seed;
             a.gameMode         = e.gameMode;
@@ -1172,7 +1922,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Back in menu-land: opaque menu backgrounds again (a quit-to-title
         // session left this set to the in-world transparent mode).
         screens.SetInWorld(false);
-        screens.Set(std::make_unique<Render::TitleScreen>(/*fadeIn=*/true));
+        // Straight from a world into its own panorama: the widgets still
+        // fade in, but the black veil would be a dip in what is meant to
+        // read as one continuous view.
+        screens.Set(std::make_unique<Render::TitleScreen>(
+            /*fadeIn=*/true, /*fadeFromBlack=*/!Render::g_panoramaRenderer.HandoffActive()));
 
         // If the last session ended because the server dropped us, say so —
         // on top of the title screen, which is the parent MC's
@@ -1204,11 +1958,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Input::SetUiActive(true);
             glfwPollEvents();
             Input::UpdateKeyStates();
+            Input::ClearRawKeyEvents();   // F3 chords are an in-world thing
 
             const double now = glfwGetTime();
             const float  dt  = static_cast<float>(now - lastTime);
             lastTime = now;
-
+            // The same frame limiter the game loop applies (max FPS
+            // setting; 260 = unlimited). The title used to spin freely
+            // with vsync off, so a world capped at 120 handed over to a
+            // panorama running at 500, and the turn's pacing changed at
+            // the seam.
+            {
+                const int maxFps = Platform::g_gameSettings.GetMaxFPS();
+                if (maxFps > 0 && maxFps < 260) {
+                    static auto s_titleFrameDeadline = std::chrono::steady_clock::now();
+                    const auto frameBudget = std::chrono::nanoseconds(1'000'000'000LL / maxFps);
+                    const auto nowClock = std::chrono::steady_clock::now();
+                    s_titleFrameDeadline += frameBudget;
+                    if (s_titleFrameDeadline < nowClock) s_titleFrameDeadline = nowClock;
+                    else std::this_thread::sleep_until(s_titleFrameDeadline);
+                }
+            }
             int winW = 0, winH = 0, fbW = 0, fbH = 0;
             glfwGetWindowSize(window, &winW, &winH);
             glfwGetFramebufferSize(window, &fbW, &fbH);
@@ -1225,7 +1995,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             const double gx = mx * (static_cast<double>(fbW) / winW) / guiScale;
             const double gy = my * (static_cast<double>(fbH) / winH) / guiScale;
 
-            const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            const bool lmb = Input::IsGlfwMouseButtonDown(GLFW_MOUSE_BUTTON_LEFT);
             if (lmb && !lmbHeld)      screens.MouseClicked(gx, gy, GLFW_MOUSE_BUTTON_LEFT);
             else if (!lmb && lmbHeld) screens.MouseReleased(gx, gy, GLFW_MOUSE_BUTTON_LEFT);
             else if (lmb)             screens.MouseDragged(gx, gy);
@@ -1291,8 +2061,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // here — the game loop reads both settings when it starts.
 
             // ── 20Hz screen ticks (caret blink etc.) ───────────────────────
+            // The sound tick rides the same 20 Hz clock: MC's Minecraft.tick
+            // runs musicManager.tick / soundManager.tick with no level too,
+            // which is where the menu music comes from.
             tickAccum += dt;
-            while (tickAccum >= 0.05) { screens.Tick(); tickAccum -= 0.05; }
+            while (tickAccum >= 0.05) {
+                screens.Tick();
+                Client::SoundHost::Tick(Client::SoundHost::TickContext{});
+                tickAccum -= 0.05;
+            }
 
             // ── Render: skybox pass, then GUI pass ─────────────────────────
             if (Render::g_renderBackend) {
@@ -1304,6 +2081,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             const float panoramaSpeed =
                 Platform::g_gameSettings.GetFloat("panoramaScrollSpeed", 1.0f);
+            Render::PanoramaRenderer::PumpLastWorldMips();   // captured faces' mips, one a frame
+            Render::g_skyRenderer.PumpPrefetch();            // the next world's sky pack, a layer a frame
             Render::g_panoramaRenderer.Render(fbW, fbH, dt, panoramaSpeed);
 
             {
@@ -1383,9 +2162,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         world.ClearDirtySections(dirtySections);
     }
 
-    bool InitializeGameSystems(GLFWwindow* window) {
-        Log::Info("Initializing game systems...");
-
+    // The CPU-only game data every mode needs — blocks, items, recipes,
+    // loot, block models and shapes (collision shapes come from the models,
+    // so a server needs them too). No GL: the headless server calls this
+    // alone; InitializeGameSystems calls it before the texture/render setup.
+    void InitializeCoreGameData() {
         // Resource packs first: everything below reads assets, and a pack
         // has to be able to replace any of them. options.txt is loaded much
         // later (InitializeGameDirectorySystem), so the two lists are read
@@ -1441,11 +2222,21 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // just keeps its default model.
         Game::BlockStateModels::Load(GetAssetPath("assets/blockstates"));
 
+        // Composite item models (the straw bed) are unions of block models,
+        // so they can only be built now that those are loaded.
+        Game::ItemRegistry::BakeCompositeItemModels();
+
         // Fill the shape caches now, on this thread, while nothing else is
         // running. AFTER Load, never between it and LoadModels — see the note
         // on the declaration. This removes every lazy population from the hot
         // paths, which is what lets multiple threads query shapes at once.
         Game::BlockRegistry::PrewarmShapeCaches();
+    }
+
+    bool InitializeGameSystems(GLFWwindow* window) {
+        Log::Info("Initializing game systems...");
+
+        InitializeCoreGameData();
 
         // Initialize texture systems
         if (!InitializeTextureSystem()) {
@@ -1455,6 +2246,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             return false;
         }
 
+        if (!Render::Gizmos::Initialize()) {
+            Log::Warning("F3 debug renderers unavailable (gizmo shader failed)");
+        }
         if (!Render::g_blockHighlight.Initialize()) {
             Log::Error("Failed to initialize block highlight system");
             glfwDestroyWindow(window);
@@ -1489,6 +2283,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Non-fatal — a failure leaves the portal invisible, as it is today.
         if (!Render::g_endPortalRenderer.Initialize()) {
             Log::Warning("End portal renderer init failed — end portals will not render");
+        }
+        // Beds: same arrangement as the end portal, for the same reason
+        // (BedRenderer.hpp). Non-fatal — beds stay invisible, as they were.
+        if (!Render::g_bedRenderer.Initialize()) {
+            Log::Warning("Bed renderer init failed — beds will not render");
         }
 
         // Vanilla first-person held-item renderer. Always enabled —
@@ -1589,6 +2388,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 if (auto conn = Client::g_networkClient->GetConnection()) conn->SendChatMessage(command);
             }
         });
+        Render::SetOpenFileHandler([](const std::string& path) {
+            if (!Platform::GameDirectory::OpenInFileBrowser(path)) Log::Warning("Could not open %s", path.c_str());
+        });
         Render::SetSuggestCommandHandler([](const std::string& command) {
             g_chatScreen.Open(false);
             g_chatScreen.InsertText(command);
@@ -1601,6 +2403,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         // Set up chat message callback
         SetChatMessageCallback([](const Network::ChatMessageS2CPacket& packet) {
+            // Position 2 is the action bar (MC ClientboundSystemChatPacket
+            // overlay=true → Gui.setOverlayMessage): the line above the
+            // hotbar, never the chat box.
+            if (packet.position == 2) {
+                std::string text;
+                for (const auto& s : packet.segments) text += s.text;
+                g_hudRenderer.SetOverlayMessage(text);
+                return;
+            }
             // Translate the wire segments into the renderer's own segment type.
             // Two types rather than one shared struct keeps the GUI free of any
             // network include, matching how the rest of the client is layered.
@@ -1635,9 +2446,268 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         // Compile shaders
         Shader blockShader = InitializeShaders();
+        // The selected shader pack, if any (OpenGL only; see ShaderPipeline).
+        Render::ShaderPipeline::Get().ApplySelected();
 
         Log::Info("✓ Game systems initialized");
         return true;
+    }
+
+    // The integrated server's configuration for a world picked on the title
+    // screen (or by --world). Shared by the game and the headless server so
+    // both open a world the same way; the caller sets the owner fields.
+    static Server::IntegratedServerConfig BuildServerConfig(const Render::TitleAction& titleAction,
+                                                            bool vanillaPortals) {
+        Server::IntegratedServerConfig serverConfig;
+        serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
+        serverConfig.enableAsyncChunkLoading = true;     // Async via ServerWorkerPool (non-blocking)
+        serverConfig.useMinecraftSave = titleAction.useMinecraftSave;
+
+        // World chosen on the Select World screen: created worlds are
+        // procedural-from-seed (metadata only, no save path yet), while
+        // the "world" list entry keeps the auto-detected Anvil save.
+        if (!titleAction.useMinecraftSave) {
+            serverConfig.useLocalSaveDirectory = false;
+        }
+
+        // World game mode from the create/select screen. World JSON ids:
+        // 0 Survival, 1 Creative, 2 Hardcore — hardcore plays as survival
+        // (server GameMode has no hardcore variant).
+        serverConfig.defaultGameMode = (titleAction.gameMode == 1) ? 1 : 0;
+        // World JSON id 2 = Hardcore: level.dat `hardcore` for a new world
+        // (World Options greys out what a hardcore world may not change).
+        serverConfig.hardcore = titleAction.gameMode == 2;
+
+        // Day/night cycle state restored from worlds.json metadata.
+        serverConfig.initialDayTime  = titleAction.dayTime;
+        serverConfig.doDaylightCycle = titleAction.doDaylightCycle;
+        serverConfig.immersivePortals = !vanillaPortals;
+        serverConfig.worldWrapSize    = titleAction.worldWrap;
+        serverConfig.dimensionStack   = titleAction.dimensionStack;
+        serverConfig.difficulty       = std::clamp(titleAction.difficulty, 0, 3);
+
+        // Read-only worlds (imported from the player's Minecraft install)
+        // must never write chunks back — see IntegratedServerConfig.
+        serverConfig.readOnlyWorld = titleAction.readOnlyWorld;
+
+        if (titleAction.useMinecraftSave && !titleAction.worldPath.empty()) {
+            // A specific world picked on the Select World screen. Point at
+            // the world FOLDER (not /region — MinecraftChunkLoader appends that).
+            serverConfig.minecraftWorldPath = titleAction.worldPath;
+            Log::Info("✓ Loading Anvil world%s: %s",
+                      serverConfig.readOnlyWorld ? " (read-only)" : "",
+                      serverConfig.minecraftWorldPath.c_str());
+        } else if (serverConfig.useLocalSaveDirectory &&
+                   Platform::g_gameDirectory.HasDefaultSaveWorld()) {
+            // Legacy fallback: the auto-detected saves/world.
+            serverConfig.minecraftWorldPath = Platform::g_gameDirectory.GetSavesDirectory() + "/world";
+            Log::Info("✓ Auto-detected Minecraft save at: %s", serverConfig.minecraftWorldPath.c_str());
+        } else {
+            Log::Info("No local Minecraft save found, will use procedural generation");
+        }
+
+        // Where an ObeyCraft world persists. Only for worlds that are OURS:
+        // an imported Minecraft save is loaded read-only and never gets a
+        // save path, which is the difference between the two fields.
+        //
+        // The folder is created by IntegratedServer::Initialize, so a world
+        // made before this existed picks one up the first time it is opened
+        // — same seed, same terrain, and from then on it saves.
+        if (!titleAction.useMinecraftSave && !titleAction.worldName.empty() &&
+            !titleAction.regenerateOnJoin) {
+            std::string reason;
+            const std::string folder =
+                Game::Anvil::SanitiseFolderName(titleAction.worldName);
+            serverConfig.savePath =
+                Platform::g_gameDirectory.GetSavesDirectory() + "/" + folder;
+            serverConfig.worldDisplayName = titleAction.worldName;
+            serverConfig.worldSeed        = titleAction.seed;
+            Log::Info("✓ World saves to: %s", serverConfig.savePath.c_str());
+        } else if (!titleAction.useMinecraftSave && titleAction.regenerateOnJoin) {
+            // WorldEntry::regenerateOnJoin: no folder, no chunk saver —
+            // the seed is the whole world.
+            serverConfig.worldDisplayName = titleAction.worldName;
+            serverConfig.worldSeed        = titleAction.seed;
+            Log::Info("✓ World '%s' regenerates on join (nothing is saved)",
+                      titleAction.worldName.c_str());
+        }
+        return serverConfig;
+    }
+
+    // Seed and generation options for a created world, BEFORE any chunk
+    // generation starts (the server thread starts later). No-op for an
+    // imported Minecraft save.
+    static void ApplyWorldGenSettings(Game::World* world, const Render::TitleAction& titleAction) {
+        if (!world) return;
+        if (!titleAction.useMinecraftSave) {
+            world->SetGenerationSeed(titleAction.seed);
+            // After the seed (these push the whole generation config to
+            // the generator).
+            static const char* kWorldTypeIds[] = {
+                "default", "flat", "large_biomes", "amplified", "single_biome_surface"};
+            const char* worldTypeId =
+                (titleAction.worldType >= 0 && titleAction.worldType <= 4)
+                    ? kWorldTypeIds[titleAction.worldType] : "default";
+            world->SetWorldGenOptions(worldTypeId, titleAction.flatPreset,
+                                      titleAction.flatLayers, titleAction.singleBiome);
+            world->SetWorldGenTweaks(titleAction.worldgenTweaks);
+            world->SetGenerateStructures(titleAction.generateStructures);
+            Log::Info("World '%s': procedural generation from seed %d (%s, type %s, structures %s)",
+                      titleAction.worldName.c_str(), titleAction.seed,
+                      titleAction.gameMode == 0 ? "Survival" : "Creative",
+                      worldTypeId,
+                      titleAction.generateStructures ? "on" : "off");
+        }
+    }
+
+    // <obeycraft>/logs/<kind>/<prefix>-<date>.csv, folder created — where the
+    // stress reports go (ServerStressStats, the bot swarm).
+    static std::string StressCsvPath(const char* kind, const char* prefix) {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::path(Platform::GameDirectory::GetDefaultGameDirectory()) / "logs" / kind;
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const std::time_t now = std::time(nullptr);
+        std::tm tmv{};
+#if defined(_WIN32)
+        localtime_s(&tmv, &now);
+#else
+        localtime_r(&now, &tmv);
+#endif
+        char stamp[64];
+        std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tmv);
+        return (dir / (std::string(prefix) + "-" + stamp + ".csv")).string();
+    }
+
+    // ── Headless (dedicated) server: --headless-server --world <name> ────
+    //
+    // The integrated server with no window, renderer, input, sound or local
+    // player — a world other machines (or the bot swarm) join. Everything the
+    // server needs is CPU-only: the game directory, the core game data
+    // (InitializeCoreGameData), the server worker pool. It gets the worker
+    // share a local client would have meshed with, and the stress report
+    // (ServerStressStats) is always on: a "[ServerStats]" line every second
+    // and a CSV under <obeycraft>/logs/server/.
+    //
+    // No one owns it: every player keep-alives and times out alike
+    // (hasSingleplayerOwner false). Ctrl+C / SIGTERM stops it cleanly and
+    // saves the world.
+    // The process-wide worker threads the game's own exit stops (see the end
+    // of Run): left running, their std::thread objects are destroyed joinable
+    // at static destruction and the process dies in std::terminate on the way
+    // out. The headless modes return early from Run, so they call this.
+    static void ShutdownHeadlessProcess() {
+        Core::DeferredDispose::Shutdown();
+        try {
+            JobSystem::g_ThreadPool.Stop();
+            Core::ShutdownTickParallel();
+        } catch (const std::exception& e) {
+            Log::Error("Exception stopping worker pools: %s", e.what());
+        } catch (...) {
+            Log::Error("Unknown exception stopping worker pools");
+        }
+        CloseSentryOnce();
+    }
+
+    struct HeadlessServerOptions {
+        std::string world;
+        uint16_t    port = 0;          // 0: OBEY_HOST_PORT, else 25565
+        double      quitAfterSec = 0.0;
+        bool        guestCommands = false;
+        bool        vanillaPortals = false;
+    };
+
+    static std::atomic<bool> s_headlessStop{false};
+
+    static int RunHeadlessServer(const HeadlessServerOptions& o) {
+        Log::Info("[Headless] dedicated server mode (no window)");
+        s_headlessStop.store(false);
+        std::signal(SIGINT, [](int) { s_headlessStop.store(true); });
+        std::signal(SIGTERM, [](int) { s_headlessStop.store(true); });
+
+        if (!Platform::InitializeGameDirectorySystem()) {
+            Log::Error("[Headless] could not initialise the game directory");
+            return 1;
+        }
+        InitializeCoreGameData();
+
+        Render::TitleAction titleAction;
+        if (o.world.empty() || !DevHarnessWorldAction(o.world, titleAction)) {
+            Log::Error("[Headless] --headless-server needs --world <name> naming an existing world. Worlds:");
+            for (const auto& w : Platform::g_gameDirectory.ListObeyCraftWorlds()) {
+                Log::Error("[Headless]   %s", w.levelName.c_str());
+            }
+            for (const Render::WorldEntry& e : Render::WorldList::Load()) {
+                Log::Error("[Headless]   %s", e.name.c_str());
+            }
+            return 1;
+        }
+        if (o.port != 0) {
+            // IntegratedServer::Start reads it (the dev-harness port override).
+            const std::string port = std::to_string(o.port);
+#ifdef _WIN32
+            _putenv_s("OBEY_HOST_PORT", port.c_str());
+#else
+            setenv("OBEY_HOST_PORT", port.c_str(), 1);
+#endif
+        }
+
+        Server::IntegratedServerConfig serverConfig = BuildServerConfig(titleAction, o.vanillaPortals);
+        serverConfig.hasSingleplayerOwner = false;
+        Server::InitializeIntegratedServer(serverConfig);
+        if (!Server::g_integratedServer) {
+            Log::Error("[Headless] server initialisation failed");
+            return 1;
+        }
+        Game::World* world = Server::g_integratedServer->GetWorld();
+        Game::g_world = world;
+        ApplyWorldGenSettings(world, titleAction);
+
+        auto& stress = Server::g_integratedServer->StressStats();
+        stress.SetEnabled(true);
+        stress.SetCsvPath(StressCsvPath("server", "stats"));
+
+        // No client in this process: the mesh workers' share goes to the server.
+        const Core::ThreadAllocation threadAlloc = Core::ThreadAllocator::GetOptimalAllocation();
+        const size_t serverWorkers = threadAlloc.serverWorldWorkers + threadAlloc.clientMeshWorkers;
+        Threading::InitializeServerWorkerPool(serverWorkers);
+        Log::Info("[Headless] server worker pool: %zu threads", serverWorkers);
+
+        if (!Server::StartIntegratedServer()) {
+            Log::Error("[Headless] could not start the server — is the port already in use?");
+            Threading::ShutdownServerWorkerPool();
+            Server::ShutdownIntegratedServer();
+            return 1;
+        }
+        if (!Server::g_integratedServer->IsJoinable()) {
+            Log::Warning("[Headless] world '%s' was closed to other players; opening it", o.world.c_str());
+            Server::g_integratedServer->SetJoinable(true);
+        }
+        if (o.guestCommands) {
+            // Saved with the world (level.dat), like the World Options toggle.
+            Server::g_integratedServer->SetGuestCommandAccess(true);
+        }
+        const uint16_t port = Server::g_integratedServer->GetNetworkServer()
+            ? Server::g_integratedServer->GetNetworkServer()->GetPort() : 0;
+        Log::Info("[Headless] serving '%s' on port %u — Ctrl+C to stop", o.world.c_str(), static_cast<unsigned>(port));
+
+        const auto start = std::chrono::steady_clock::now();
+        while (!s_headlessStop.load()) {
+            if (o.quitAfterSec > 0.0 &&
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= o.quitAfterSec) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        Log::Info("[Headless] stopping (saving the world)");
+        Server::StopIntegratedServer();
+        Threading::ShutdownServerWorkerPool();
+        Game::g_world = nullptr;
+        Server::ShutdownIntegratedServer();
+        ShutdownHeadlessProcess();
+        Log::Info("[Headless] stopped");
+        return 0;
     }
 
     int Run(int argc, char** argv) {
@@ -1660,8 +2730,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // interesting startup failures happen. The path is the same either way,
         // and OpenLogFile creates the folder itself.
         {
+            // A headless server or a bot swarm logs to its own folder, so it
+            // can run beside the game (or each other) without either rotating
+            // the other's latest.log away.
+            std::string logFolder = "/logs/";
+            for (int i = 1; i < argc; ++i) {
+                const std::string a = argv[i];
+                if (a == "--headless-server") logFolder = "/logs/server/";
+                else if (a == "--bots")       logFolder = "/logs/bots/";
+            }
             const std::string logPath =
-                Platform::GameDirectory::GetDefaultGameDirectory() + "/logs/latest.log";
+                Platform::GameDirectory::GetDefaultGameDirectory() + logFolder + "latest.log";
             if (Log::OpenLogFile(logPath)) {
                 Log::Info("Log file: %s", logPath.c_str());
             } else {
@@ -1719,6 +2798,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         bool isRemoteClient = false;
         std::string remoteServerAddress;
         uint16_t remoteServerPort = 25565;
+        // What the last-world panorama is a picture OF: a server by
+        // address, a world by its folder. The join transition only runs
+        // back into the same one.
+        std::string sessionWorldId;
         std::string playerName; // Empty → server auto-assigns "PlayerN" based on connection ID
         Game::PlayerColorId playerColor = Game::PlayerColorId::Default;
         // Friends-service identity (from the launcher; empty token = guest).
@@ -1768,6 +2851,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         std::vector<std::pair<double, std::string>> devExecAtCommands;
         double devExecDelaySec  = 8.0;
         double devQuitAfterSec  = 0.0;
+        bool   devQuitCapture   = false;   // --quit-capture: quit through the panorama capture
         // --remesh-at <sec>: mark every active client section dirty once, this
         // many seconds after session start (0 = never). Diagnostic for meshes
         // that were built before a neighbour chunk arrived: if gpuSections in
@@ -1775,6 +2859,30 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // were stale.
         double devRemeshAtSec   = 0.0;
         bool   devRemeshDone    = false;
+        // ── Stress testing ──────────────────────────────────────────────
+        //   --headless-server --world <name> [--port N] [--guest-commands]
+        //                         run the world's server with no window (a
+        //                         dedicated server); see RunHeadlessServer
+        //   --bots <N> --server host[:port]
+        //                         N headless fake players (src/client/dev/BotSwarm.hpp):
+        //     --bot-scenario spread|fly|cluster|scatter|idle   (default spread)
+        //     --bot-seed <n>             (headings / scatter spots; default new each run)
+        //     --bot-range <blocks>       (scatter: +/- x and z, default 20000)
+        //     --bot-hop <sec>            (scatter: jump again every N s; default once)
+        //     --bot-dimensions <list>    (scatter: default overworld,nether,end)
+        //     --bot-join-interval <sec>  (default 0.25; 0 = all at once)
+        //     --bot-speed <blocks/s>     (default 20)
+        //     --bot-radius <blocks>      (spread distance, default 1500)
+        //     --bot-view-distance <n> / --bot-sim-distance <n>  (12 / 8)
+        //     --bot-rate <chunks/tick>   (fixed ack rate; default: measured)
+        //     --bot-probe <sec>          (command round-trip probe interval, 5)
+        //     --bot-prefix <name>        (default "Bot")
+        //   --quit-after applies to both.
+        bool headlessServer = false;
+        bool headlessGuestCommands = false;
+        uint16_t headlessPort = 0;
+        Dev::BotSwarmOptions botOptions;
+        botOptions.count = 0;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--world" && i + 1 < argc) {
@@ -1785,6 +2893,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 devExecCommands.emplace_back(argv[++i]);
                 continue;
             }
+            if (arg == "--ui-test") { UiTest::s_ui.enabled = true; continue; }
+            if (arg == "--ui-test-pause") { UiTest::s_ui.enabled = true; UiTest::s_ui.pauseOnly = true; continue; }
             if (arg == "--exec-late" && i + 1 < argc) {
                 devExecLateCommands.emplace_back(argv[++i]);
                 continue;
@@ -1802,6 +2912,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 devQuitAfterSec = std::atof(argv[++i]);
                 continue;
             }
+            if (arg == "--quit-capture") { devQuitCapture = true; continue; }
             // --env NAME=VALUE: set an environment variable before any system
             // reads it. The OBEY_* kill switches (OBEY_NO_FACE_CULL,
             // OBEY_NO_TWO_SIDED, OBEY_MESH_CENSUS, ...) are read lazily, so
@@ -1836,6 +2947,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 devReplayHoldSec = std::atof(argv[++i]);
                 continue;
             }
+            if (arg == "--headless-server") { headlessServer = true; continue; }
+            if (arg == "--guest-commands")  { headlessGuestCommands = true; continue; }
+            if (arg == "--port" && i + 1 < argc) {
+                headlessPort = static_cast<uint16_t>(std::clamp(std::atoi(argv[++i]), 0, 65535));
+                continue;
+            }
+            if (arg == "--bots" && i + 1 < argc)              { botOptions.count = std::max(0, std::atoi(argv[++i])); continue; }
+            if (arg == "--bot-scenario" && i + 1 < argc)      { botOptions.scenario = argv[++i]; continue; }
+            if (arg == "--bot-join-interval" && i + 1 < argc) { botOptions.joinIntervalSec = std::atof(argv[++i]); continue; }
+            if (arg == "--bot-speed" && i + 1 < argc)         { botOptions.speed = std::atof(argv[++i]); continue; }
+            if (arg == "--bot-radius" && i + 1 < argc)        { botOptions.radius = std::atof(argv[++i]); continue; }
+            if (arg == "--bot-view-distance" && i + 1 < argc) { botOptions.viewDistance = std::atoi(argv[++i]); continue; }
+            if (arg == "--bot-sim-distance" && i + 1 < argc)  { botOptions.simulationDistance = std::atoi(argv[++i]); continue; }
+            if (arg == "--bot-rate" && i + 1 < argc)          { botOptions.fixedRate = static_cast<float>(std::atof(argv[++i])); continue; }
+            if (arg == "--bot-probe" && i + 1 < argc)         { botOptions.probeIntervalSec = std::atof(argv[++i]); continue; }
+            if (arg == "--bot-prefix" && i + 1 < argc)        { botOptions.namePrefix = argv[++i]; continue; }
+            if (arg == "--bot-seed" && i + 1 < argc)          { botOptions.seed = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10)); continue; }
+            if (arg == "--bot-range" && i + 1 < argc)         { botOptions.scatterRange = std::atof(argv[++i]); continue; }
+            if (arg == "--bot-hop" && i + 1 < argc)           { botOptions.hopIntervalSec = std::atof(argv[++i]); continue; }
+            if (arg == "--bot-dimensions" && i + 1 < argc)    { botOptions.dimensions = argv[++i]; continue; }
             if (arg == "--vulkan") {
                 useVulkan = true;
                 Log::Info("Vulkan backend requested via --vulkan flag");
@@ -1901,7 +3032,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Initialize crash reporting (must be first — catches crashes during all other init)
         sentry_options_t *sentryOptions = sentry_options_new();
         sentry_options_set_dsn(sentryOptions, "https://685865d2f16184d804534ac7e262e818@o4511006654791680.ingest.us.sentry.io/4511006665539584");
-        sentry_options_set_database_path(sentryOptions, ".sentry-native");
+        // Absolute, under the obeycraft directory. A relative path lands in
+        // whatever the working directory happens to be — the .app bundle root
+        // when launched from CLion or Finder, where codesign then refuses the
+        // bundle ("unsealed contents present in the bundle root"), or the
+        // repository root, which git picks up.
+        const std::string sentryDatabasePath =
+            Platform::GameDirectory::GetDefaultGameDirectory() + "/.sentry-native";
+        sentry_options_set_database_path(sentryOptions, sentryDatabasePath.c_str());
         sentry_options_set_release(sentryOptions, "myvoxelgame@" GAME_VERSION);
         sentry_options_set_debug(sentryOptions, 0);
 #ifdef __APPLE__
@@ -1935,7 +3073,6 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Platform::InstallCrashHandler(
             Platform::GameDirectory::GetDefaultGameDirectory() + "/crash-reports",
             GAME_VERSION);
-
         // Intentional crash for testing the crash pipeline (run with
         // --crash-test). Exercises BOTH reporters: Sentry via crashpad, and
         // the local handler above.
@@ -1948,6 +3085,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         }
 
         // Initialize systems
+        // Stress-test modes: no window, no renderer — see RunHeadlessServer
+        // and Dev::RunBotSwarm.
+        if (headlessServer) {
+            HeadlessServerOptions headless;
+            headless.world          = devWorldName;
+            headless.port           = headlessPort;
+            headless.quitAfterSec   = devQuitAfterSec;
+            headless.guestCommands  = headlessGuestCommands;
+            headless.vanillaPortals = vanillaPortals;
+            return RunHeadlessServer(headless);
+        }
+        if (botOptions.count > 0) {
+            botOptions.host = isRemoteClient ? remoteServerAddress : std::string("127.0.0.1");
+            botOptions.port = isRemoteClient ? remoteServerPort : static_cast<uint16_t>(25565);
+            botOptions.quitAfterSec = devQuitAfterSec;
+            botOptions.csvPath = StressCsvPath("bots", "bots");
+            const int botResult = Dev::RunBotSwarm(botOptions);
+            ShutdownHeadlessProcess();
+            return botResult;
+        }
+
         Log::Info("Starting Voxel Engine");
 
 #if defined(__APPLE__) && defined(HAS_VULKAN)
@@ -2165,6 +3323,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Render::g_atlasBuilder->SetMipmapLevels(Platform::g_gameSettings.GetMipmapLevels());
         }
 
+        // The sound engine (MC's SoundManager, built in the Minecraft
+        // constructor): after options.txt, which holds the volumes and the
+        // chosen device, and after the resource packs, whose sounds.json and
+        // .ogg files stack over the vanilla ones. Without extracted sounds it
+        // logs one line and stays silent.
+        Client::SoundHost::Startup(GetVanillaAssetPath("assets"));
+
         // Initialize input. Bindings are registered BEFORE Input::Init so the
         // GLFW callbacks it installs already have a table to dispatch into,
         // then loaded from options.txt (absent entries keep the vanilla
@@ -2212,6 +3377,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // the next outer-loop iteration consumes it directly instead of
         // showing the title screen.
         std::optional<Render::TitleAction> pendingSessionAction;
+        // Non-zero when a dev-harness session (--world) could not start and
+        // the process exits instead of showing the title screen.
+        int processExitCode = 0;
         for (;;) {
         // CLI --server bypasses the title screen for the FIRST session only;
         // after a quit-to-title the menu shows normally.
@@ -2258,9 +3426,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 g_fontRenderer.Shutdown();
                 g_guiAtlas.Shutdown();
                 Render::g_crosshair.Shutdown();
+                Render::Gizmos::Shutdown();
                 Render::g_blockHighlight.Shutdown();
                 Render::g_blockBreakOverlay.Shutdown();
                 Render::g_endPortalRenderer.Shutdown();
+                Render::g_bedRenderer.Shutdown();
 #if ENABLE_IMMERSIVE_PORTALS
         Render::g_immersivePortalRenderer.Shutdown();
 #endif
@@ -2279,6 +3449,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Debug::DebugSystem::Shutdown();
                     s_debugSystemInitialized = false;
                 }
+                Render::PanoramaRenderer::FinishPendingSaves();
+                Core::DeferredDispose::Shutdown();   // a quit-to-title session's chunk containers
                 if (Render::g_renderBackend) {
                     Render::g_renderBackend->Shutdown();
                     Render::g_renderBackend.reset();
@@ -2297,7 +3469,6 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
             // Singleplayer (or Multiplayer) — panorama is done, gameplay owns
             // the cursor again.
-            Render::g_panoramaRenderer.Shutdown();
             SetCursorCaptured(window, true);
         }
 
@@ -2322,36 +3493,118 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Initialize remote player tracking and renderer
         Client::g_remotePlayerManager = std::make_unique<Client::RemotePlayerManager>();
         Render::PlayerRenderer playerRenderer;
+        // The join's own zones (Join.*): the first world of a session costs
+        // ~0.4 s of main-thread setup and used to be one blank gap in a
+        // trace; each block below names its share.
+        { PROFILE_ZONE_N("Join.PlayerRenderer");
         if (!playerRenderer.Initialize()) {
             Log::Warning("Failed to initialize player renderer, remote players won't be visible");
+        }
         }
 
         // Dropped items, orbs, mobs and falling blocks live in the level
         // (ClientLevel.hpp) — created with it below, before the connection
         // opens, so a spawn packet on the first tick has somewhere to land.
         Render::MobRenderer mobRenderer;
+        { PROFILE_ZONE_N("Join.MobRenderer");
         if (!mobRenderer.Initialize()) {
             Log::Warning("[PlatformMain] mob renderer failed to initialize — mobs will be invisible");
         }
+        // The monster spawner's cage mob draws through it.
+        Render::SpawnerRenderer::SetMobRenderer(&mobRenderer);
+        }
         Render::ItemEntityRenderer itemEntityRenderer;
+        { PROFILE_ZONE_N("Join.ItemEntityRenderer");
         if (!itemEntityRenderer.Initialize()) {
             Log::Warning("Failed to initialize item entity renderer, dropped items won't be visible");
+        }
         }
         // Falling blocks and primed TNT. A separate renderer from MobRenderer
         // because those two ARE blocks, and MobRenderer is built around
         // ModelPart skeletons; this one reuses the item renderer's block-model
         // path so a falling cobblestone and a dropped one are one mesh builder.
+        { PROFILE_ZONE_N("Join.BlockCubeEntityRenderer");
         if (!Render::g_blockCubeEntityRenderer.Initialize()) {
             Log::Warning("Failed to initialize block-entity renderer, "
                          "falling blocks and TNT won't be visible");
         }
+        }
+        { PROFILE_ZONE_N("Join.FillPreviewRenderer");
         if (!Render::g_fillPreviewRenderer.Initialize()) {
             Log::Warning("Failed to initialize the fill preview renderer");
         }
+        }
         Render::XpOrbRenderer xpOrbRenderer;
+        { PROFILE_ZONE_N("Join.XpOrbRenderer");
         if (!xpOrbRenderer.Initialize()) {
             Log::Warning("Failed to initialize XP orb renderer, experience orbs won't be visible");
         }
+        }
+        Render::LightningBoltRenderer lightningBoltRenderer;
+        if (!lightningBoltRenderer.Initialize()) {
+            Log::Warning("Failed to initialize the lightning bolt renderer, lightning won't be visible");
+        }
+
+        // A session that fails before its frame loop — the integrated server
+        // cannot bind its port (another copy of the game holds it), the
+        // connection never comes up, the client level cannot be built — ends
+        // through the same teardown as a finished one, in the same order.
+        // These paths used to `return` out of Run() and leave the server, its
+        // levels, the client levels and the worker pools to static
+        // destruction, whose order is unspecified: ~ClientLevel logged through
+        // a Log mutex that was already destroyed and exit() aborted with
+        // "mutex lock failed: Invalid argument".
+        //
+        // Safe at every failure point: each step tolerates the piece it tears
+        // down not existing yet. The caller has already disconnected and
+        // released its NetworkClient, if it had one. Returns true to go back
+        // to the title screen (MC ConnectScreen → DisconnectedScreen), false
+        // for a dev-harness session, which exits instead of waiting on a menu.
+        auto abandonSessionSetup = [&](const std::string& reason) -> bool {
+            Log::Error("Session could not start: %s", reason.c_str());
+            if (isRemoteClient) {
+                Game::SetGlobalBlockAccess(nullptr);
+            }
+            Client::SoundHost::OnSessionEnd();
+            Client::AurelithState::Clear();
+            Client::ShutdownNetworkIOService();
+            Client::g_networkClient = nullptr;
+            if (!isRemoteClient) {
+                Server::StopIntegratedServer();
+            }
+            // Back to the global resource packs if the world had its own.
+            Resources::SelectFromOptionLists(
+                Resources::ParsePackList(Platform::g_gameSettings.GetResourcePacks()),
+                Resources::ParsePackList(Platform::g_gameSettings.GetIncompatibleResourcePacks()));
+            ReloadResources();
+            if (!isRemoteClient) {
+                Threading::ShutdownServerWorkerPool();
+            }
+            Threading::ShutdownClientWorkerPool();
+            Client::ClientLevels::DestroySession();
+            if (!isRemoteClient) {
+                Server::ShutdownIntegratedServer();
+            }
+            playerRenderer.Shutdown();
+            Client::g_remotePlayerManager.reset();
+            itemEntityRenderer.Shutdown();
+            Render::g_blockCubeEntityRenderer.Shutdown();
+            Render::g_fillPreviewRenderer.Shutdown();
+            xpOrbRenderer.Shutdown();
+            lightningBoltRenderer.Shutdown();
+            Render::SpawnerRenderer::SetMobRenderer(nullptr);
+            mobRenderer.Shutdown();
+            Render::EntityOutline::Get().Shutdown();
+            Render::SetInventoryScreenPlayer(nullptr);
+            Game::g_world = nullptr;
+
+            if (devAutoWorld) {
+                processExitCode = 1;
+                return false;
+            }
+            Render::SetPendingDisconnectReason(reason);
+            return true;
+        };
 
         // === MINECRAFT-STYLE ARCHITECTURE INITIALIZATION ===
         Log::Info("Initializing Minecraft Java Edition Architecture...");
@@ -2361,16 +3614,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Fresh session: drop any stale time from a previous world so the sky
         // doesn't flash the old time before the first TimeUpdate arrives, and
         // apply this world's skybox (multiplayer joins default to vanilla).
+        { PROFILE_ZONE_N("Join.EnvironmentReset");
         Render::EnvironmentState::Get().ResetSession();
+        }
+        // An OptiFine sky pack's layers are decoded and uploaded on this
+        // call — unless the title screen prefetched them (the Select World
+        // list asks for the most recent and the selected world's sky), in
+        // which case the pack is resident already, or at worst decoded.
+        { PROFILE_ZONE_N("Join.Skybox");
         Render::g_skyRenderer.SetSkybox(titleAction.skybox, titleAction.skyboxMode);
+        }
         // This world's baby look (multiplayer joins and Minecraft saves get
         // the default, New, for the session).
+        { PROFILE_ZONE_N("Join.BabyModels");
         Render::SetBabyModelLook(titleAction.babyModels == "classic"
                                      ? Render::BabyModelLook::Classic
                                      : Render::BabyModelLook::New);
+        }
         // A resource pack selection saved with this world (Options → Resource
         // Packs while in it) stands in for the global one for the session.
         if (!isRemoteClient && !titleAction.useMinecraftSave && !titleAction.worldName.empty()) {
+            PROFILE_ZONE_N("Join.WorldResourcePacks");
             std::string reason;
             if (auto root = Game::Anvil::RootForWorldName(titleAction.worldName, reason)) {
                 const Game::Anvil::WorldSidecar sidecar = Game::Anvil::ReadWorldSidecar(root->Root().string());
@@ -2387,70 +3651,53 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             titleAction.worldName,
             !isRemoteClient && !titleAction.useMinecraftSave);
 
+        sessionWorldId = isRemoteClient
+            ? remoteServerAddress + ":" + std::to_string(remoteServerPort)
+            : (titleAction.useMinecraftSave && !titleAction.worldPath.empty()
+                   ? titleAction.worldPath
+                   : "world:" + titleAction.worldName);
+
+        // ── Join transition ──────────────────────────────────────────────
+        // Back into the world the title panorama is a picture of: the
+        // panorama keeps drawing over the loading world, and the moment the
+        // level is loaded the camera takes the panorama's exact view — its
+        // yaw, pitch and (eased over a second) field of view — so the
+        // picture becomes the world without a cut. Otherwise the panorama
+        // is released here as it always was.
+        struct JoinTransition {
+            bool  active   = false;   // panorama over the loading world
+            // Leaving, backwards: once the world beneath is meshed, the
+            // PANORAMA turns, tilts and zooms smoothly to where the player
+            // was looking when they clicked to leave (from the capture's
+            // meta) and to the game's lens, and the world takes over at
+            // exactly that view — no HUD, hand or input until it lands.
+            bool  easing = false;
+            // Hand over the moment the level is ready — MC's own rule for
+            // closing its loading screen (LevelLoadTracker.isLevelReady): the
+            // camera's section compiled and 30 % faded in. The camera is
+            // held on the panorama's view all the while, so the scheduler
+            // compiles what will show first; the rest streams in behind the
+            // chunk fade, as on any join.
+            std::chrono::steady_clock::time_point startedAt{};   // the click
+            std::chrono::steady_clock::time_point loadedAt{};    // the level ready
+            std::chrono::steady_clock::time_point easeAt{};      // the view meshed, ease begun
+        } joinTransition;
+        joinTransition.startedAt = std::chrono::steady_clock::now();
+        {
+            using Render::PanoramaRenderer;
+            const bool wanted =
+                Platform::g_gameSettings.GetString("panoramaSet", PanoramaRenderer::kDefaultSet) ==
+                PanoramaRenderer::kLastWorldSet;
+            joinTransition.active = wanted &&
+                                    Render::g_panoramaRenderer.HasPanoramaTextures() &&
+                                    !PanoramaRenderer::LastWorldId().empty() &&
+                                    PanoramaRenderer::LastWorldId() == sessionWorldId;
+            if (!joinTransition.active) Render::g_panoramaRenderer.Shutdown();
+        }
+
         if (!isRemoteClient) {
             // 1. Initialize server-side systems (server creates and owns the world)
-            Server::IntegratedServerConfig serverConfig;
-            serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
-            serverConfig.enableAsyncChunkLoading = true;     // Async via ServerWorkerPool (non-blocking)
-            serverConfig.useMinecraftSave = titleAction.useMinecraftSave;
-
-            // World chosen on the Select World screen: created worlds are
-            // procedural-from-seed (metadata only, no save path yet), while
-            // the "world" list entry keeps the auto-detected Anvil save.
-            if (!titleAction.useMinecraftSave) {
-                serverConfig.useLocalSaveDirectory = false;
-            }
-
-            // World game mode from the create/select screen. World JSON ids:
-            // 0 Survival, 1 Creative, 2 Hardcore — hardcore plays as survival
-            // (server GameMode has no hardcore variant).
-            serverConfig.defaultGameMode = (titleAction.gameMode == 1) ? 1 : 0;
-
-            // Day/night cycle state restored from worlds.json metadata.
-            serverConfig.initialDayTime  = titleAction.dayTime;
-            serverConfig.doDaylightCycle = titleAction.doDaylightCycle;
-            serverConfig.immersivePortals = !vanillaPortals;
-            serverConfig.worldWrapSize    = titleAction.worldWrap;
-            serverConfig.dimensionStack   = titleAction.dimensionStack;
-            serverConfig.difficulty       = std::clamp(titleAction.difficulty, 0, 3);
-
-            // Read-only worlds (imported from the player's Minecraft install)
-            // must never write chunks back — see IntegratedServerConfig.
-            serverConfig.readOnlyWorld = titleAction.readOnlyWorld;
-
-            if (titleAction.useMinecraftSave && !titleAction.worldPath.empty()) {
-                // A specific world picked on the Select World screen. Point at
-                // the world FOLDER (not /region — MinecraftChunkLoader appends that).
-                serverConfig.minecraftWorldPath = titleAction.worldPath;
-                Log::Info("✓ Loading Anvil world%s: %s",
-                          serverConfig.readOnlyWorld ? " (read-only)" : "",
-                          serverConfig.minecraftWorldPath.c_str());
-            } else if (serverConfig.useLocalSaveDirectory &&
-                       Platform::g_gameDirectory.HasDefaultSaveWorld()) {
-                // Legacy fallback: the auto-detected saves/world.
-                serverConfig.minecraftWorldPath = Platform::g_gameDirectory.GetSavesDirectory() + "/world";
-                Log::Info("✓ Auto-detected Minecraft save at: %s", serverConfig.minecraftWorldPath.c_str());
-            } else {
-                Log::Info("No local Minecraft save found, will use procedural generation");
-            }
-
-            // Where an ObeyCraft world persists. Only for worlds that are OURS:
-            // an imported Minecraft save is loaded read-only and never gets a
-            // save path, which is the difference between the two fields.
-            //
-            // The folder is created by IntegratedServer::Initialize, so a world
-            // made before this existed picks one up the first time it is opened
-            // — same seed, same terrain, and from then on it saves.
-            if (!titleAction.useMinecraftSave && !titleAction.worldName.empty()) {
-                std::string reason;
-                const std::string folder =
-                    Game::Anvil::SanitiseFolderName(titleAction.worldName);
-                serverConfig.savePath =
-                    Platform::g_gameDirectory.GetSavesDirectory() + "/" + folder;
-                serverConfig.worldDisplayName = titleAction.worldName;
-                serverConfig.worldSeed        = titleAction.seed;
-                Log::Info("✓ World saves to: %s", serverConfig.savePath.c_str());
-            }
+            Server::IntegratedServerConfig serverConfig = BuildServerConfig(titleAction, vanillaPortals);
 
             // MC IntegratedServer.java:69 — the player who launched this
             // process is the singleplayer owner, and is exempt from keep-alive
@@ -2462,7 +3709,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             serverConfig.singleplayerProfileName = playerName;
             serverConfig.hasSingleplayerOwner    = true;
 
+            { PROFILE_ZONE_N("Join.ServerInit");
             Server::InitializeIntegratedServer(serverConfig);
+            }
+            // OBEY_SERVER_STATS=1: the headless server's load report, for a
+            // real hosted session (a friend joining over the internet).
+            if (Server::g_integratedServer && Server::g_integratedServer->StressStats().Enabled()) {
+                Server::g_integratedServer->StressStats().SetCsvPath(StressCsvPath("server", "stats"));
+            }
             Log::Info("✓ IntegratedServer initialized (20 TPS, world created on server)");
 
             // Get world reference for legacy systems (temporary)
@@ -2471,27 +3725,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             // Seed the generator for created worlds BEFORE any chunk
             // generation kicks off (server thread starts further down).
-            if (!titleAction.useMinecraftSave) {
-                world->SetGenerationSeed(titleAction.seed);
-                // After the seed (these push the whole generation config to
-                // the generator).
-                static const char* kWorldTypeIds[] = {
-                    "default", "flat", "large_biomes", "amplified", "single_biome_surface"};
-                const char* worldTypeId =
-                    (titleAction.worldType >= 0 && titleAction.worldType <= 4)
-                        ? kWorldTypeIds[titleAction.worldType] : "default";
-                world->SetWorldGenOptions(worldTypeId, titleAction.flatPreset,
-                                          titleAction.flatLayers, titleAction.singleBiome);
-                world->SetWorldGenTweaks(titleAction.worldgenTweaks);
-                world->SetGenerateStructures(titleAction.generateStructures);
-                Log::Info("World '%s': procedural generation from seed %d (%s, type %s, structures %s)",
-                          titleAction.worldName.c_str(), titleAction.seed,
-                          titleAction.gameMode == 0 ? "Survival" : "Creative",
-                          worldTypeId,
-                          titleAction.generateStructures ? "on" : "off");
-            }
+            ApplyWorldGenSettings(world, titleAction);
 
             // 3. Initialize worker pools with dynamic thread allocation
+            PROFILE_ZONE_N("Join.WorkerPools");
             Core::ThreadAllocation threadAlloc = Core::ThreadAllocator::GetOptimalAllocation();
             Threading::InitializeServerWorkerPool(threadAlloc.serverWorldWorkers);
             Threading::InitializeClientWorkerPool(threadAlloc.clientMeshWorkers);
@@ -2575,9 +3812,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // One ClientLevel per dimension (chunk manager, mesh manager, chunk
         // renderer, block view, entity managers, portals). The overworld is
         // the session's first level; others appear when their packets do.
+        { PROFILE_ZONE_N("Join.ClientLevel");
         if (!Client::ClientLevels::CreateSession(Game::DimensionId::Overworld)) {
-            Log::Error("Failed to initialize the client level");
-            return -7;
+            if (abandonSessionSetup("Could not initialize the client level.")) continue;
+            break;
+        }
         }
         Log::Info("✓ Client systems initialized (client level: chunk manager, mesh manager, chunk renderer)");
 
@@ -2585,11 +3824,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Arms the client-side readiness watch; once the player's own section
         // compiles it sends PlayerLoadedC2S, which is what lifts the server's
         // interaction gate (PlayerSession::HasClientLoaded).
-        Client::g_levelLoadTracker.StartClientLoad();
+        Client::g_levelLoadTracker.StartClientLoad(titleAction.freshWorld ? 500 : 0);
+        // MC startWaitingForNewLevel's LevelLoadingScreen ("Downloading
+        // terrain"), closed by the tick that finds the level ready. Not over
+        // the join transition: its panorama IS that screen's picture.
+        if (!joinTransition.active) {
+            Render::GetScreenManager().Push(std::make_unique<Render::LevelLoadingScreen>());
+        }
 
         // 5. Initialize player and controller
         Game::ClientPlayer player;
         player.color = playerColor;
+        // Entity-bound sounds (a sound following the local player, a mob or
+        // another player) look entities up through this session's stores.
+        Client::SoundHost::OnSessionStart(&player);
 #if ENABLE_IMMERSIVE_PORTALS
         // Last frame's eye, the start of the segment the immersive-portal
         // crossing test walks each frame (see ImmersivePortalTraveler).
@@ -2627,12 +3875,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // 8. Initialize debug system — ONCE per process (ImGui backend init
         // is not re-entrant); later sessions in the outer loop reuse it.
         if (!s_debugSystemInitialized) {
+            PROFILE_ZONE_N("Join.DebugSystem");
             Debug::DebugSystem::Initialize(window);
             s_debugSystemInitialized = true;
         }
 
         // 9. Start the IntegratedServer thread (host only)
         if (!isRemoteClient) {
+            PROFILE_ZONE_N("Join.StartServerThread");
             if (!Server::StartIntegratedServer()) {
                 // Almost always "port 25565 already bound" — i.e. a second copy
                 // of the game is running (i.e. one from the IDE and one from
@@ -2640,14 +3890,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // confusing bug report: the game loads, you can look around,
                 // and no chunk ever appears, because the client below dials
                 // 127.0.0.1 and finds either nothing or the OTHER instance's
-                // server. Loud and fatal beats quiet and mystifying.
+                // server. Loud beats quiet and mystifying — and the session
+                // ends cleanly, back on the title screen with the reason.
                 Log::Error("=========================================================");
                 Log::Error("FAILED TO START INTEGRATED SERVER");
                 Log::Error("Port 25565 is most likely already in use by another");
                 Log::Error("running copy of the game. Close it and try again.");
                 Log::Error("(check with: lsof -nP -iTCP:25565)");
                 Log::Error("=========================================================");
-                return -8;
+                if (abandonSessionSetup("Could not start the world's server: its network port is "
+                                        "already in use, most likely by another copy of the game. "
+                                        "Close it and try again.")) {
+                    continue;
+                }
+                break;
             }
             Log::Info("✓ IntegratedServer thread started (20 TPS)");
         }
@@ -2771,17 +4027,29 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Wait for connection with timeout (using yield instead of sleep)
         auto startTime = std::chrono::steady_clock::now();
         int timeoutSeconds = isRemoteClient ? 10 : 2;
+        bool connectTimedOut = false;
         while (!*connectionComplete) {
             if (std::chrono::steady_clock::now() - startTime > std::chrono::seconds(timeoutSeconds)) {
                 Log::Error("Connection timeout after %d seconds", timeoutSeconds);
-                return -8;
+                connectTimedOut = true;
+                break;
             }
             std::this_thread::yield();
         }
 
-        if (!*connected) {
-            Log::Error("Failed to connect to server");
-            return -8;
+        if (connectTimedOut || !*connected) {
+            if (!connectTimedOut) Log::Error("Failed to connect to server");
+            // The client first, as in the normal teardown: nothing may take
+            // this for the server dropping us, and its socket closes while the
+            // I/O service it runs on is still up.
+            networkClient->SetOnDisconnected([](const std::string&) {});
+            networkClient->Disconnect();
+            networkClient.reset();
+            const std::string reason = connectTimedOut
+                ? "Timed out connecting to " + connectHost + ":" + std::to_string(serverPort) + "."
+                : "Could not connect to " + connectHost + ":" + std::to_string(serverPort) + ".";
+            if (abandonSessionSetup(reason)) continue;
+            break;
         }
 
         Log::Info("✓ NetworkClient connected to %s:%d", connectHost.c_str(), serverPort);
@@ -2804,6 +4072,80 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // world — switch the screen stack to the transparent background mode.
         Render::GetScreenManager().SetInWorld(true);
 
+        // ── F3 debug screen: the chords' hooks into this loop ────────────
+        // (MC KeyboardHandler reaches these through Minecraft; here they are
+        // lambdas over the session's objects.)
+        {
+            using Render::DebugScreen::KeyHandler;
+            Input::ClearRawKeyEvents();
+            Render::DebugScreen::Overlay().Reset();
+            Render::DebugRenderer::Reset();
+            Render::DebugScreen::DebugKeyCallbacks cb;
+            cb.reloadChunks = [] {
+                // MC LevelRenderer.allChanged: every active section rebuilt.
+                if (!Render::g_clientMeshManager || !Client::g_clientChunkManager) return;
+                std::vector<Render::ClientMeshManager::SectionKey> keys;
+                Render::g_clientMeshManager->ForEachActiveSection(
+                    [&keys](const Render::ClientMeshManager::SectionKey& key, const Render::GPUSectionData*) { keys.push_back(key); });
+                for (const auto& key : keys) Client::g_clientChunkManager->MarkSectionDirty(key.chunkPos, key.sectionY);
+                // ...and the occlusion graph rebuilt (allChanged ->
+                // SectionOcclusionGraph.invalidate).
+                if (Render::g_chunkRenderer) Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+                Log::Info("[Debug] Reloading all chunks: %zu sections queued", keys.size());
+            };
+            cb.reloadResourcePacks = [] { ReloadResources(true); };
+            cb.clearChat = [] { g_chatComponent.Clear(); g_chatScreen.ClearHistory(); };
+            cb.showChat = [](const std::string& text) { g_chatComponent.AddMessage(text, 0xFFFFFFFF); };
+            cb.showChatFileLink = [](const std::string& before, const std::string& linkText, const std::string& openPath) {
+                std::vector<Render::ChatSegment> segments;
+                segments.push_back(Render::ChatSegment{before, 0xFFFFFFFF, Render::ChatClickAction::None, "", ""});
+                // MC: ChatFormatting.UNDERLINE + ClickEvent.OpenFile.
+                segments.push_back(Render::ChatSegment{"\xC2\xA7n" + linkText, 0xFFFFFFFF,
+                                                       Render::ChatClickAction::OpenFile, openPath, "Click to open"});
+                g_chatComponent.AddMessage(std::move(segments));
+            };
+            cb.pauseWithoutMenu = [] {
+                if (Render::GetScreenManager().Empty()) {
+                    Render::GetScreenManager().Push(std::make_unique<Render::DebugScreen::SilentPauseScreen>());
+                }
+            };
+            cb.dumpDynamicTextures = [](std::string& shown, std::string& absolute) -> bool {
+                // MC TextureUtil.getDebugTexturePath: screenshots/debug/. The
+                // block atlas is the one dynamic sheet this engine builds.
+                const std::filesystem::path dir = std::filesystem::path(Platform::g_gameDirectory.GetGameDirectory()) / "screenshots" / "debug";
+                std::error_code ec;
+                std::filesystem::create_directories(dir, ec);
+                bool ok = false;
+                if (Render::g_atlasBuilder) ok = Render::g_atlasBuilder->SaveAtlasDebugImage((dir / "atlas_blocks.png").string());
+                if (!ok) return false;
+                shown = std::filesystem::relative(dir, Platform::g_gameDirectory.GetGameDirectory(), ec).string();
+                absolute = dir.string();
+                return true;
+            };
+            cb.toggleProfiling = []() -> bool {
+                if (s_frameProfile.active) {
+                    AnnounceFrameProfile(FinishFrameProfile());
+                    return false;
+                }
+                s_frameProfile.active = true;
+                s_frameProfile.start = std::chrono::steady_clock::now();
+                s_frameProfile.rows.clear();
+                return true;
+            };
+            Client::NetworkClient* const nc = networkClient.get();
+            cb.sendCommand = [nc](const std::string& command) {
+                if (!nc) return;
+                if (auto conn = nc->GetConnection()) conn->SendChatMessage(command);
+            };
+            cb.hasLevel = [nc] {
+                return Client::ClientLevels::HasSession() && nc && nc->IsConnected();
+            };
+            KeyHandler().SetCallbacks(std::move(cb));
+            s_debugContext = Render::DebugScreen::Context{};
+            s_debugContext.isRemoteClient = isRemoteClient;
+            s_debugContext.serverBrand = "MyVoxelGame";
+        }
+
         // Presence: in a world. Hosting = integrated server (friends can
         // join via join_info); Playing = we're a client on someone's server.
         if (Client::g_friendsClient) {
@@ -2817,8 +4159,16 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
                 // Announce immediately so friends see the world right away;
                 // the UPnP attempt below refines this with the WAN address.
+                const bool joinableNow = Server::g_integratedServer ? Server::g_integratedServer->IsJoinable() : true;
+                {
+                    std::lock_guard<std::mutex> lock(s_hostPresenceMutex);
+                    s_hostPresenceWorld = worldName;
+                    s_hostExternalIp.clear();
+                }
+                s_lastPresenceJoinable = joinableNow;
+                s_lastPresencePort = hostPort;
                 Client::g_friendsClient->SetPresence(
-                    Client::FriendPresence::State::Hosting, worldName, hostPort);
+                    Client::FriendPresence::State::Hosting, worldName, hostPort, "", joinableNow);
 
                 // Friends who can't reach us directly are relayed: the
                 // service pushes relay_open, our friends client dials out,
@@ -2842,12 +4192,16 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 if (!g_portMapper) {
                     g_portMapper = std::make_unique<Client::UPnPPortMapper>();
                 }
-                std::thread([worldName, hostPort]() {
+                std::thread([worldName, hostPort, joinableNow]() {
                     const auto mapping = g_portMapper->Map(hostPort);
+                    {
+                        std::lock_guard<std::mutex> lock(s_hostPresenceMutex);
+                        s_hostExternalIp = mapping.externalIp;
+                    }
                     if (Client::g_friendsClient) {
                         Client::g_friendsClient->SetPresence(
                             Client::FriendPresence::State::Hosting,
-                            worldName, hostPort, mapping.externalIp);
+                            worldName, hostPort, mapping.externalIp, joinableNow);
                     }
                 }).detach();
             } else {
@@ -2891,7 +4245,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                                 float yRot, float xRot,
                                                 double dx, double dy, double dz) {
             glm::dvec3 dpos(x, y, z);
-            player.physics.position = glm::vec3(dpos);
+            player.physics.position = dpos;   // double: /tp 10000 100 323333 lands exactly
             // Velocity in blocks/sec from the server (rotated through the
             // portal pair for portal teleports, zero for /tp). Writing to
             // physics.velocity preserves the player's momentum across the
@@ -2905,6 +4259,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             player.visualPos    = dpos;
             player.yaw   = yRot;
             player.pitch = xRot;
+            // A server teleport (a portal the client did not predict, /tp)
+            // rewrites the view the same way a predicted crossing does.
+            Render::g_heldItemRenderer.OnViewRewritten(xRot - camera.pitch, yRot - camera.yaw);
             camera.yaw   = yRot;
             camera.pitch = xRot;
             // Teleports break falls (MC resetFallDistance on teleport) —
@@ -2928,41 +4285,58 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // appeared, then vanished. sendPlayerMove(false) closes the gap on
         // demand: the controller calls it right before every interaction
         // packet, and it sends nothing when the server is already current.
-        glm::vec3 lastSentMovePos(1e30f);
+        glm::dvec3 lastSentMovePos(1e30);
         glm::vec2 lastSentMoveRot(0.0f);
         bool      lastSentOnGround = false;
+        bool      lastSentCrouch   = false;
         auto sendPlayerMove = [&](bool force) {
             // Same gate as the player physics, and for the same reason MC
             // puts sendPosition() inside its hasClientLoaded() guard
             // (LocalPlayer.tick:228): a position produced before the world
             // exists is not a position worth telling the server about.
+            // Nor is one from a paused world: sendPosition() lives inside the
+            // same LocalPlayer.tick the pause skips.
             if (!networkClient || !networkClient->IsConnected() ||
-                !Client::g_levelLoadTracker.IsLoaded()) {
+                !Client::g_levelLoadTracker.IsLoaded() ||
+                Client::g_clientTickRate.IsWorldPaused()) {
                 return;
             }
-            const glm::vec3 playerPos = player.physics.position;
+            const glm::dvec3 playerPos = player.physics.position;
             const glm::vec2 rotation(camera.yaw, camera.pitch);
+            const bool crouching = Input::IsDown(*Input::Binds::Sneak);
+            // The sneak flag rides the move packet, and the server reads its
+            // LAST value when a use packet arrives (the portal gun's shift +
+            // right-click clears instead of firing). Hovering in place with
+            // shift held used to send nothing, so the server kept the stale
+            // flag and the gun sometimes fired. A flag change is a move.
+            static uint8_t lastSentMorphAnim = 0;
             if (!force && playerPos == lastSentMovePos && rotation == lastSentMoveRot &&
-                player.physics.isOnGround == lastSentOnGround) {
+                player.physics.isOnGround == lastSentOnGround && crouching == lastSentCrouch &&
+                player.MorphAnimByte() == lastSentMorphAnim) {
                 return;
             }
+            lastSentMorphAnim = player.MorphAnimByte();
             Network::PlayerMoveC2SPacket movePacket;
             movePacket.position = playerPos;
             movePacket.rotation = rotation;
             movePacket.onGround = player.physics.isOnGround;
-            movePacket.isCrouching = Input::IsDown(*Input::Binds::Sneak);
+            movePacket.isCrouching = crouching;
             movePacket.isSprinting = player.physics.isSprinting;
             movePacket.jumpedThisTick = player.jumpedSinceMoveSend;
             player.jumpedSinceMoveSend = false;
-            movePacket.fallDistance = player.landedFallSinceMoveSend;
+            // A chicken morph takes no fall damage (MC Chicken.causeFallDamage).
+            movePacket.fallDistance = Game::Morph::IsMob(player.morph, Game::EntityTypeId::Chicken)
+                                          ? 0.0f : player.landedFallSinceMoveSend;
             player.landedFallSinceMoveSend = 0.0f;
             movePacket.sequenceNumber = ++playerMoveSequence;
             movePacket.dimensionId = static_cast<int8_t>(
                 Game::DimensionToRaw(Client::ClientLevels::ActiveDimension()));
+            movePacket.morphAnim = player.MorphAnimByte();   // /morph: creeper swell
             movePacket.timestamp = std::chrono::steady_clock::now();
             lastSentMovePos  = playerPos;
             lastSentMoveRot  = rotation;
             lastSentOnGround = player.physics.isOnGround;
+            lastSentCrouch   = crouching;
             networkClient->GetConnection()->SendPlayerMove(movePacket);
         };
         playerController.SetMovementFlush([&sendPlayerMove]() { sendPlayerMove(false); });
@@ -2995,6 +4369,131 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // loop, the session teardown below runs, and the outer session loop
         // returns to the title screen.
         bool returnToTitle = false;
+
+        // ── Leaving-the-world panorama ────────────────────────────────────
+        // Six 90° views from the player's eye, taken while the pause menu is
+        // up when the world is paused (see `prepass`) and otherwise over the
+        // last frames of a session, saved as the "Last World" title panorama
+        // (PanoramaRenderer::kLastWorldSet). Each face is drawn at the start
+        // of a frame, read back, and cleared away before the frame's own
+        // view — nothing of it shows. Every way out of a world goes through
+        // it: Save and Quit, a join handover, Quit Game, the window closing,
+        // and the server dropping the connection — the client's copy of the
+        // world is still here for those frames, which is what lets a host
+        // that shut down its server leave a picture too.
+        constexpr int kLeaveTiles = 2;   // tiles per axis of a captured face (see LeaveCapture::tile)
+
+        struct LeaveCapture {
+            enum class Then { Title, Quit };
+            bool active   = false;
+            bool finished = false;   // ran once; never re-armed this session
+            // The pause menu's capture (see where it starts, before the
+            // outro turn): the six faces are taken while the menu is up and
+            // the world is paused, so a click finds them done. `prepass`
+            // while it runs, `captured` once they are in; both off again
+            // when the menu closes without a leave (the view moves on).
+            bool prepass      = false;
+            bool prepassStop  = false;   // the menu closed: drop it once no read-back is outstanding
+            bool captured     = false;
+            bool viaPauseMenu = false;   // the leave came through the pause menu (its prewarm has run)
+            Then then     = Then::Title;
+            // Warm-up first: the mesher only ever compiled what some view
+            // reached, so the sections behind the player may have no mesh.
+            // For these frames one face a frame is drawn (not read back)
+            // with the portal-view list pinned, which puts all six faces'
+            // sections in front of the mesh scheduler; the capture starts
+            // once the worker pool has drained — or at the cap.
+            bool warming  = true;
+            int  warmFrames = 0;
+            int  idleFrames = 0;     // consecutive frames with nothing queued
+            std::chrono::steady_clock::time_point warmStart{};
+            // The outro: from the click on, the pause menu is gone and the
+            // world turns left on its own at the panorama's rate, so the
+            // title picks the motion up mid-turn (PanoramaRenderer::
+            // SetHandoff). The faces are captured about `baseYaw`, the
+            // view's yaw when the capture proper began.
+            float outroSpeed = 1.0f;
+            float baseYaw    = 0.0f;
+            float clickYaw   = 0.0f;   // the look at the click, before the turn
+            float clickPitch = 0.0f;
+            int  face     = 0;       // face being captured, 0..6
+            // Resolution: a face is drawn as kTiles×kTiles off-axis tiles,
+            // each the size of the square viewport, so the panorama holds
+            // kTiles times the pixels the window does per degree — on the
+            // title it is magnified (90° of face over ~70° of screen, and
+            // more at the edges), and at 1× it read softer than the world
+            // it continues. 2× covers that with headroom.
+            int  tile     = 0;       // tile within the face, row-major, 0..kTiles²
+            int  tileSide = 0;       // one tile's side (the viewport square)
+            bool awaitingTake = false;   // a read-back is outstanding
+            // Frames since the request. The tile is taken on the SECOND
+            // frame after it: the backend's frame N+2 has already waited on
+            // frame N's fence, so the take costs nothing — taken one frame
+            // after, it stalls the CPU on the GPU every capture frame and
+            // the outro turn stutters through it.
+            int  framesSinceRequest = 0;
+            // Frames to sit out after a take before the next tile is drawn.
+            // Zero now: the next tile goes out on the take frame, two
+            // frames a tile. (One rest frame kept the outro's frame time
+            // nearer play's on a GPU-bound machine, at a third more frames
+            // between the click and the title.)
+            int  restFrames = 0;
+            bool complete = true;    // every tile came back
+            int  size     = 0;       // face side, pixels (= tileSide × kTiles)
+            std::array<std::vector<uint8_t>, 6> faces;   // the face being assembled
+            // A face's GPU texture and CPU buffer are made during the
+            // warm-up, one face a frame (those frames only draw), so the
+            // capture's request frames carry neither; a face the warm-up
+            // did not reach is prepared on its own request frame.
+            std::array<bool, 6> facePrepared{};
+            // The finished faces, shared with the GPU upload, the mip jobs
+            // and the PNG writer — each moved in as it completes, never copied.
+            std::shared_ptr<Render::PanoramaRenderer::LastWorldFaces> pack;
+        } leaveCapture;
+        // Only with the "Last World" panorama selected. Otherwise leaving is
+        // what it always was: straight out, no turn, no capture.
+        auto lastWorldPanoramaWanted = [] {
+            return Platform::g_gameSettings.GetString("panoramaSet", Render::PanoramaRenderer::kDefaultSet) ==
+                   Render::PanoramaRenderer::kLastWorldSet;
+        };
+        auto beginLeave = [&](LeaveCapture::Then then) {
+            if (leaveCapture.active || leaveCapture.finished) return;
+            if (!lastWorldPanoramaWanted() || !Render::g_renderBackend) {
+                Render::PanoramaRenderer::DiscardAdoptedFaces();   // nothing will fill them
+                leaveCapture.finished = true;
+                if (then == LeaveCapture::Then::Quit) glfwSetWindowShouldClose(window, GLFW_TRUE);
+                else                                  returnToTitle = true;
+                return;
+            }
+            // The pause menu's capture is carried on from wherever it is —
+            // or is already complete, and the leave is then just the menu's
+            // fade-out and the teardown.
+            const bool resume = leaveCapture.prepass || leaveCapture.captured;
+            leaveCapture.prepass      = false;
+            leaveCapture.prepassStop  = false;
+            leaveCapture.active       = true;
+            leaveCapture.then         = then;
+            leaveCapture.viaPauseMenu =
+                dynamic_cast<Render::PauseScreen*>(Render::GetScreenManager().Current()) != nullptr;
+            if (!resume) {
+                leaveCapture.warming      = true;
+                leaveCapture.warmFrames   = 0;
+                leaveCapture.idleFrames   = 0;
+                leaveCapture.warmStart    = std::chrono::steady_clock::now();
+                leaveCapture.face         = 0;
+                leaveCapture.tile         = 0;
+                leaveCapture.restFrames   = 0;
+                leaveCapture.awaitingTake = false;
+                leaveCapture.complete     = Render::g_renderBackend != nullptr;
+                leaveCapture.baseYaw      = camera.yaw;
+            }
+            leaveCapture.outroSpeed   = Platform::g_gameSettings.GetFloat("panoramaScrollSpeed", 1.0f);
+            leaveCapture.clickYaw     = camera.yaw;
+            leaveCapture.clickPitch   = camera.pitch;
+            // The pause menu goes on the click, as MC's does; with the
+            // faces captured under it the next frame is the title's.
+            Render::GetScreenManager().Clear();
+        };
 
         // Dev harness state (see the --exec / --quit-after flags in Run()).
         const auto harnessStart      = std::chrono::steady_clock::now();
@@ -3233,8 +4732,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     }
                 }
                 if (devQuitAfterSec > 0.0 && elapsed >= devQuitAfterSec) {
-                    Log::Info("[Harness] --quit-after reached; closing");
-                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    // --quit-capture: leave the way the pause menu's Quit does,
+                    // through the last-world panorama capture — six faces of
+                    // exactly what the player sees, written to panorama/
+                    // last_world, which is how a scripted run can be LOOKED
+                    // at. Plain --quit-after closes at once.
+                    if (devQuitCapture) {
+                        Log::Info("[Harness] --quit-after reached; leaving through the panorama capture");
+                        Platform::g_gameSettings.SetString("panoramaSet", Render::PanoramaRenderer::kLastWorldSet);
+                        devQuitAfterSec = 0.0;
+                        beginLeave(LeaveCapture::Then::Quit);
+                    } else {
+                        Log::Info("[Harness] --quit-after reached; closing");
+                        glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    }
                 }
                 if (poseReplayQuitWhenDone && poseReplayer.Finished()) {
                     poseReplayQuitWhenDone = false;
@@ -3246,30 +4757,63 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Server dropped us (kick, host quit, connection lost). Same exit
             // as "Save and Quit to Title": the teardown below runs and the
             // outer session loop shows the title screen again.
-            if (serverDropped->load(std::memory_order_acquire)) {
+            if (serverDropped->load(std::memory_order_acquire) &&
+                !leaveCapture.active && !leaveCapture.finished) {
                 Log::Info("Connection lost — ending session and returning to title");
                 // Queued rather than pushed: the title screen this belongs on
                 // top of does not exist until RunTitleScreenPhase rebuilds the
                 // stack, several hundred lines of teardown from here.
                 Render::SetPendingDisconnectReason(*dropReason);
-                returnToTitle = true;
-                break;
+                // The session ends once the leave capture has its six faces
+                // (a handful of frames); the world is still here for them.
+                beginLeave(LeaveCapture::Then::Title);
             }
 
             // === PER-FRAME: Poll events and handle input (must be every frame for responsiveness) ===
             bool cursorEnabled;
             // Covers polling AND every UI branch (chat / inventory / pause) —
             // not just input. The children below say which part actually ran.
+            // F3+1 pie chart: MC-named sections (see FrameProfiler.hpp). Only
+            // records while the chart is up; beside, not instead of, the
+            // metrics timers and Tracy zones.
+            Render::DebugScreen::FrameProfiler::SetActive(Render::DebugScreen::Overlay().ShowProfilerChart());
+            Render::DebugScreen::FrameProfiler::BeginFrame();
             { PROFILE_ZONE_N("InputUI");
             PROFILE_TIMER_START(input);
+            Render::DebugScreen::FrameProfiler::Push("frame");
             { PROFILE_ZONE_N("PollEvents");
+            DEBUG_PIE_ZONE("update window");
             glfwPollEvents();
             }
+            // The window's close button: hold the close for the few frames
+            // the leave capture takes, then let it through (LeaveCapture).
+            if (glfwWindowShouldClose(window) && !leaveCapture.active && !leaveCapture.finished) {
+                glfwSetWindowShouldClose(window, GLFW_FALSE);
+                beginLeave(LeaveCapture::Then::Quit);
+            }
+            Render::DebugScreen::FrameProfiler::Pop();
+            DEBUG_PIE_ZONE("Keybindings");
 #ifdef __APPLE__
             MacTrackNativeFullscreen(window);
 #endif
             { PROFILE_ZONE_N("KeyStates");
             Input::UpdateKeyStates();
+            }
+
+            // ── F3 chords (MC KeyboardHandler.keyPress) ────────────────
+            // Runs every frame, screen or no screen: F3+F6 must close the
+            // options screen it opened and the game-mode switcher commits on
+            // F3's release. A key that fired a chord is cancelled as a
+            // gameplay binding for that press.
+            {
+                PROFILE_ZONE_N("DebugKeys");
+                s_debugContext.player = &player;
+                s_debugContext.controller = &playerController;
+                s_debugContext.camera = &camera;
+                Render::DebugScreen::SetDebugContext(&s_debugContext);
+                Render::DebugScreen::KeyHandler().NotifyGameMode(player.gameModeKnown ? static_cast<int>(player.gameMode) : -1);
+                Render::WorldOptionsScreen::SetClientGameMode(player.gameModeKnown ? static_cast<int>(player.gameMode) : -1);
+                Render::DebugScreen::KeyHandler().ProcessFrame();
             }
 
             // Apply menu-editable options every frame (cheap settings-map
@@ -3297,11 +4841,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // reaches the game, which is how a fullscreen test could run
                 // without the window ever leaving windowed mode.
                 static bool s_chordHeld = false;
-                const bool cmd  = glfwGetKey(window, GLFW_KEY_LEFT_SUPER) == GLFW_PRESS ||
-                                  glfwGetKey(window, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS;
-                const bool ctrl = glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-                                  glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
-                const bool chord = cmd && ctrl && glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
+                const bool cmd  = Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SUPER) ||
+                                  Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SUPER);
+                const bool ctrl = Input::IsGlfwKeyDown(GLFW_KEY_LEFT_CONTROL) ||
+                                  Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_CONTROL);
+                const bool chord = cmd && ctrl && Input::IsGlfwKeyDown(GLFW_KEY_F);
                 if (chord && !s_chordHeld) ToggleFullscreen(window);
                 s_chordHeld = chord;
             }
@@ -3313,17 +4857,43 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // guarantees that same physical press can't re-edge in the game
             // branch one frame later and pop the pause menu open.
             extern bool s_escKeyHeld;
-            const bool escIsDown = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+            const bool escIsDown = Input::IsGlfwKeyDown(GLFW_KEY_ESCAPE);
             // From the key callback, not the poll: a tap shorter than one
             // frame (easy at portal-view frame times) was missed outright
             // and had to be pressed again.
             const bool escPressedThisFrame = Input::ConsumeEscapePress();
             s_escKeyHeld = escIsDown;
 
+            // /control: remote input in, this frame's input out (see the
+            // function for which side does what).
+            ControlBeginFrame(window, camera, networkClient.get());
+            // A controlled player's OWN Escape: their pause menu, which sits
+            // over the game the controller keeps driving. Consumed by the
+            // screen branch when a menu is up, else it opens one.
+            bool localEsc = Client::Control::IsControlled() && Input::ConsumeLocalEscapePress();
+
             // ── Pause-menu / options overlay (ESC — MC Game Menu) ──────────
             // Takes priority over chat/inventory (those close before the
             // pause menu can open, so they're never open simultaneously).
-            if (!Render::GetScreenManager().Empty()) {
+            //
+            // The one screen that lives WITH the chat is the bed's (MC
+            // InBedChatScreen is a ChatScreen with a button): while it is
+            // up and the chat is open, the chat branch below owns the
+            // keyboard and hands the button and ESC to the screen.
+            const bool inBedChat = Render::IsInBedScreenOpen() && g_chatScreen.IsOpen();
+            if (leaveCapture.active || joinTransition.active) {
+                // Leaving: the world is turning itself into the title
+                // panorama (LeaveCapture); joining: the panorama is turning
+                // itself back into the world (JoinTransition). No input
+                // reaches either.
+            } else {
+            // /control: the controlled player's pause menu is their own,
+            // driven by their own mouse and Escape, and it does NOT stop the
+            // world: the chat / inventory / gameplay chain below still runs
+            // on the controller's input behind it.
+            const bool screenMgrBranch = !Render::GetScreenManager().Empty() && !inBedChat;
+            const bool controlledMenu  = screenMgrBranch && Client::Control::IsControlled();
+            if (screenMgrBranch) {
                 PROFILE_ZONE_N("ScreenMgrInput");
                 auto& screens = Render::GetScreenManager();
 
@@ -3340,7 +4910,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
                 // Mouse position in GUI coords (same mapping as the render
                 // pass in RenderHUD).
-                auto [pmx, pmy] = Input::GetMousePosition();
+                auto [pmx, pmy] = controlledMenu ? Input::GetLocalMousePosition() : Input::GetMousePosition();
                 double pgx = 0.0, pgy = 0.0;
                 {
                     int winW = 0, winH = 0, fbW = 0, fbH = 0;
@@ -3353,24 +4923,32 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     }
                 }
 
+                UiTest::Tick(window, screens);
+
                 // LMB edge → click/drag/release.
                 static bool pauseLmbHeld = false;
-                const bool pLmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                const bool pLmb = controlledMenu ? Input::IsLocalMouseButtonDown(GLFW_MOUSE_BUTTON_LEFT)
+                                                 : Input::IsGlfwMouseButtonDown(GLFW_MOUSE_BUTTON_LEFT);
                 if (pLmb && !pauseLmbHeld)      screens.MouseClicked(pgx, pgy, GLFW_MOUSE_BUTTON_LEFT);
                 else if (!pLmb && pauseLmbHeld) screens.MouseReleased(pgx, pgy, GLFW_MOUSE_BUTTON_LEFT);
                 else if (pLmb)                  screens.MouseDragged(pgx, pgy);
                 pauseLmbHeld = pLmb;
 
                 // Scroll → options lists; consume so the hotbar doesn't move.
-                auto [pScrollX, pScrollY] = Input::GetScrollOffset();
-                if (pScrollY != 0.0) screens.MouseScrolled(pgx, pgy, pScrollY);
-                Input::ResetScrollOffset();
+                // (Not a controlled player's: that scroll and those chars are
+                // the controller's, for the hotbar and the chat.)
+                if (!controlledMenu) {
+                    auto [pScrollX, pScrollY] = Input::GetScrollOffset();
+                    if (pScrollY != 0.0) screens.MouseScrolled(pgx, pgy, pScrollY);
+                    Input::ResetScrollOffset();
 
-                // Chars → screens (future edit boxes); drains the queue.
-                while (Input::HasCharInput()) screens.CharTyped(Input::PopCharInput());
+                    // Chars → screens (future edit boxes); drains the queue.
+                    while (Input::HasCharInput()) screens.CharTyped(Input::PopCharInput());
+                }
 
                 // ESC closes the top screen (shared edge state — see above).
-                if (escPressedThisFrame) screens.KeyPressed(GLFW_KEY_ESCAPE, 0);
+                if (controlledMenu ? localEsc : escPressedThisFrame) screens.KeyPressed(GLFW_KEY_ESCAPE, 0);
+                if (controlledMenu) localEsc = false;   // delivered; not also a new menu below
 
                 // Every key press, from the GLFW callback — see the title
                 // phase for why the old polled whitelist wasn't enough. ESC is
@@ -3466,19 +5044,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::TitleAction pauseAction = Render::ConsumeTitleAction();
                 if (pauseAction.kind == Render::TitleAction::Kind::QuitToTitle) {
                     Log::Info("Save and Quit to Title from pause menu");
-                    returnToTitle = true;
+                    beginLeave(LeaveCapture::Then::Title);   // -> returnToTitle
                 } else if (pauseAction.kind == Render::TitleAction::Kind::Multiplayer) {
                     Log::Info("Joining %s:%u from in-game (session handover)",
                               pauseAction.host.c_str(),
                               static_cast<unsigned>(pauseAction.port));
                     pendingSessionAction = pauseAction;
-                    returnToTitle = true;
+                    beginLeave(LeaveCapture::Then::Title);   // -> returnToTitle
                 } else if (pauseAction.kind == Render::TitleAction::Kind::Quit) {
-                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    beginLeave(LeaveCapture::Then::Quit);    // -> window close
                 }
             }
+            if (!screenMgrBranch || controlledMenu) {
             // Chat system: open on T or /, route input when open
-            else if (g_chatScreen.IsOpen()) {
+            if (g_chatScreen.IsOpen()) {
                 PROFILE_ZONE_N("ChatInput");
                 // Mouse, so chat lines can be clicked. MC's chat is clickable
                 // (ChatComponent.getClickedComponentStyleAt) and /seed leans on
@@ -3496,13 +5075,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     }
                     static bool chatLmbHeld = false;
                     const bool chatLmb =
-                        glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                        Input::IsGlfwMouseButtonDown(GLFW_MOUSE_BUTTON_LEFT);
                     if (chatLmb && !chatLmbHeld) g_chatComponent.HandleClick();
                     chatLmbHeld = chatLmb;
 
                     // Pointing-hand cursor over a clickable chat component,
                     // as MC does.
                     SetChatPointerCursor(window, g_chatComponent.IsHoveringClickable());
+
+                    // In bed: the "Leave Bed" button is a ScreenManager
+                    // widget above the input — same LMB edge, GUI coords.
+                    if (inBedChat && winW2 > 0 && winH2 > 0 && gScale > 0.0f) {
+                        auto& bedScreens = Render::GetScreenManager();
+                        const double bgx = cmx * (static_cast<double>(fbW2) / winW2) / gScale;
+                        const double bgy = cmy * (static_cast<double>(fbH2) / winH2) / gScale;
+                        static bool bedLmbHeld = false;
+                        if (chatLmb && !bedLmbHeld)      bedScreens.MouseClicked(bgx, bgy, GLFW_MOUSE_BUTTON_LEFT);
+                        else if (!chatLmb && bedLmbHeld) bedScreens.MouseReleased(bgx, bgy, GLFW_MOUSE_BUTTON_LEFT);
+                        else if (chatLmb)                bedScreens.MouseDragged(bgx, bgy);
+                        bedLmbHeld = chatLmb;
+                    }
                 }
 
                 // Route character input to chat
@@ -3515,12 +5107,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 {
                     static bool pasteHeld = false, copyHeld = false;
                     const bool chord =
-                        glfwGetKey(window, GLFW_KEY_LEFT_SUPER)   == GLFW_PRESS ||
-                        glfwGetKey(window, GLFW_KEY_RIGHT_SUPER)  == GLFW_PRESS ||
-                        glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-                        glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
-                    const bool pasteDown = chord && glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
-                    const bool copyDown  = chord && glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
+                        Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SUPER) ||
+                        Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SUPER) ||
+                        Input::IsGlfwKeyDown(GLFW_KEY_LEFT_CONTROL) ||
+                        Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_CONTROL);
+                    const bool pasteDown = chord && Input::IsGlfwKeyDown(GLFW_KEY_V);
+                    const bool copyDown  = chord && Input::IsGlfwKeyDown(GLFW_KEY_C);
                     if (pasteDown && !pasteHeld) {
                         if (const char* clip = glfwGetClipboardString(window)) g_chatScreen.InsertText(clip);
                     }
@@ -3536,12 +5128,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Input::ClearUiKeyPresses();
                 // Route key input (Enter, Escape, Backspace, arrows)
                 if (escPressedThisFrame) {
-                    g_chatScreen.OnKeyDown(GLFW_KEY_ESCAPE);
+                    if (inBedChat) {
+                        // MC InBedChatScreen.onClose → sendWakeUp: ESC gets
+                        // you up; the chat closes with the screen once the
+                        // server confirms.
+                        Render::GetScreenManager().KeyPressed(GLFW_KEY_ESCAPE, 0);
+                    } else {
+                        g_chatScreen.OnKeyDown(GLFW_KEY_ESCAPE);
+                    }
                 }
                 // Check raw GLFW keys for Enter/Backspace (need glfwGetKey for repeat)
                 static bool enterHeld = false, backspaceHeld = false;
-                bool enterDown = glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS;
-                bool backspaceDown = glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+                bool enterDown = Input::IsGlfwKeyDown(GLFW_KEY_ENTER);
+                bool backspaceDown = Input::IsGlfwKeyDown(GLFW_KEY_BACKSPACE);
                 if (enterDown && !enterHeld) g_chatScreen.OnKeyDown(GLFW_KEY_ENTER);
                 if (backspaceDown && !backspaceHeld) g_chatScreen.OnKeyDown(GLFW_KEY_BACKSPACE);
                 enterHeld = enterDown;
@@ -3550,14 +5149,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 static bool upHeld = false, downHeld = false;
                 static bool leftHeld = false, rightHeld = false;
                 static bool homeHeld = false, endHeld = false, deleteHeld = false;
-                bool upDown    = glfwGetKey(window, GLFW_KEY_UP)    == GLFW_PRESS;
-                bool downDown  = glfwGetKey(window, GLFW_KEY_DOWN)  == GLFW_PRESS;
-                bool leftDown  = glfwGetKey(window, GLFW_KEY_LEFT)  == GLFW_PRESS;
-                bool rightDown = glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
-                bool homeDown  = glfwGetKey(window, GLFW_KEY_HOME)  == GLFW_PRESS;
-                bool endDown   = glfwGetKey(window, GLFW_KEY_END)   == GLFW_PRESS;
-                bool deleteDown = glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS;
-                bool tabDown    = glfwGetKey(window, GLFW_KEY_TAB)    == GLFW_PRESS;
+                bool upDown    = Input::IsGlfwKeyDown(GLFW_KEY_UP);
+                bool downDown  = Input::IsGlfwKeyDown(GLFW_KEY_DOWN);
+                bool leftDown  = Input::IsGlfwKeyDown(GLFW_KEY_LEFT);
+                bool rightDown = Input::IsGlfwKeyDown(GLFW_KEY_RIGHT);
+                bool homeDown  = Input::IsGlfwKeyDown(GLFW_KEY_HOME);
+                bool endDown   = Input::IsGlfwKeyDown(GLFW_KEY_END);
+                bool deleteDown = Input::IsGlfwKeyDown(GLFW_KEY_DELETE);
+                bool tabDown    = Input::IsGlfwKeyDown(GLFW_KEY_TAB);
                 static bool tabHeld = false;
                 if (upDown    && !upHeld)    g_chatScreen.OnKeyDown(GLFW_KEY_UP);
                 if (downDown  && !downHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_DOWN);
@@ -3604,6 +5203,35 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         // left to scroll back to.
                         g_chatComponent.Clear();
                         g_chatScreen.ClearHistory();
+                        submitted.clear();   // never reaches the server
+                    } else if (cmd == "/portaldiag") {
+                        // Portal render diagnostics, client-side (FlickerDiag):
+                        //   /portaldiag on|off   log every per-frame toggle
+                        //   /portaldiag mark     dump every portal's geometry
+                        //                        and pass numbers for the
+                        //                        next 3 frames
+                        std::string arg1;
+                        {
+                            std::istringstream rest(sp == std::string::npos
+                                ? std::string() : submitted.substr(sp));
+                            rest >> arg1;
+                        }
+                        if (arg1 == "on" || arg1 == "off") {
+                            Render::FlickerDiag::SetEnabled(arg1 == "on");
+                            Log::Info("[PortalDiag] %s", arg1 == "on" ? "ON" : "OFF");
+                            g_chatComponent.AddMessage("Portal diagnostics " + arg1 + " (see latest.log)", 0xFFAAAAAA);
+                        } else if (arg1 == "fill") {
+                            const bool on = !Render::FlickerDiag::DebugFill();
+                            Render::FlickerDiag::SetDebugFill(on);
+                            Log::Info("[PortalDiag] debug fill %s", on ? "ON" : "OFF");
+                            g_chatComponent.AddMessage(std::string("Portal debug fill ") + (on ? "on: views are magenta, far world skipped" : "off"), 0xFFAAAAAA);
+                        } else if (arg1 == "mark") {
+                            Render::FlickerDiag::RequestDump(3);
+                            Log::Info("[PortalDiag] ===== MARK =====");
+                            g_chatComponent.AddMessage("Portal diagnostics: marked (3 frames dumped to latest.log)", 0xFFAAAAAA);
+                        } else {
+                            g_chatComponent.AddMessage("/portaldiag on|off|mark|fill", 0xFFAAAAAA);
+                        }
                         submitted.clear();   // never reaches the server
                     } else if (cmd == "/record" || cmd == "/replay") {
                         // Pose recording / replay, client-side (see
@@ -3690,13 +5318,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                             num5=false, num6=false, num7=false, num8=false, num9=false;
                 static bool ileftH=false, irightH=false, ihomeH=false, iendH=false,
                             ibsH=false, idelH=false;
-                int mods = ((glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)   == GLFW_PRESS) ||
-                            (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT)  == GLFW_PRESS)) ? GLFW_MOD_SHIFT : 0;
-                mods |= ((glfwGetKey(window, GLFW_KEY_LEFT_CONTROL)    == GLFW_PRESS) ||
-                         (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL)   == GLFW_PRESS)) ? GLFW_MOD_CONTROL : 0;
+                int mods = ((Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SHIFT)) ||
+                            (Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SHIFT))) ? GLFW_MOD_SHIFT : 0;
+                mods |= ((Input::IsGlfwKeyDown(GLFW_KEY_LEFT_CONTROL)) ||
+                         (Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_CONTROL))) ? GLFW_MOD_CONTROL : 0;
 
                 auto edge = [&](bool& held, int key, int glfwKey) {
-                    bool down = glfwGetKey(window, key) == GLFW_PRESS;
+                    bool down = Input::IsGlfwKeyDown(key);
                     if (down && !held) inv.OnKeyDown(glfwKey, mods);
                     held = down;
                 };
@@ -3749,9 +5377,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
                 // Edge-detect mouse buttons (Input.cpp doesn't register a glfwSetMouseButtonCallback)
                 static bool lmbH=false, rmbH=false, mmbH=false;
-                bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT)   == GLFW_PRESS;
-                bool rmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT)  == GLFW_PRESS;
-                bool mmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+                bool lmb = Input::IsGlfwMouseButtonDown(GLFW_MOUSE_BUTTON_LEFT);
+                bool rmb = Input::IsGlfwMouseButtonDown(GLFW_MOUSE_BUTTON_RIGHT);
+                bool mmb = Input::IsGlfwMouseButtonDown(GLFW_MOUSE_BUTTON_MIDDLE);
                 // These latches are stale while no screen is up, so a screen
                 // that opens with a button already down — the right-click that
                 // opened a crafting table — would see the very next diff as a
@@ -3773,6 +5401,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // Drain pending clicks → server.
                 Network::InventoryClickC2SPacket click;
                 while (inv.ConsumePendingClick(click)) {
+                    // /control: a mirrored screen predicts for the picture
+                    // only; the other client's clicks are the server's.
+                    if (Client::Control::IsControlling()) continue;
                     if (networkClient && networkClient->IsConnected()) {
                         auto conn = networkClient->GetConnection();
                         if (conn) {
@@ -3787,6 +5418,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                             }
                         }
                     }
+                }
+            } else if (Client::Control::IsControlling()) {
+                // /control: every key and click went out as the other
+                // player's this frame (ControlBeginFrame); nothing here acts
+                // on this player. Esc alone stays ours — with no screen up
+                // over there it is this client's pause menu.
+                SetChatPointerCursor(window, false);
+                // Its own chat box (the line is spoken as the other player
+                // when sent; a command runs as this one).
+                if (Input::ConsumeClick(*Input::Binds::Chat))         g_chatScreen.Open(false);
+                else if (Input::ConsumeClick(*Input::Binds::Command)) g_chatScreen.Open(true);
+                // Everything else queued this frame went out as the other
+                // player's; drop it here — except the cursor toggle, which
+                // HandleCursorToggle consumes further down.
+                const int tabClicks = Input::Binds::ToggleCursor ? Input::Binds::ToggleCursor->clickCount : 0;
+                Input::ReleaseAll();
+                if (Input::Binds::ToggleCursor) Input::Binds::ToggleCursor->clickCount = tabClicks;
+                Input::ClearUiKeyPresses();
+                while (Input::HasCharInput()) Input::PopCharInput();
+                if (escPressedThisFrame) {
+                    Render::GetScreenManager().Push(std::make_unique<Render::PauseScreen>());
                 }
             } else {
                 PROFILE_ZONE_N("GameKeybinds");
@@ -3803,10 +5455,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     if (Input::PopCharInput() == static_cast<unsigned int>('/')) slashTyped = true;
                 }
 
-                // Open chat on T or /
+                // Open chat on T or /. The vein-mine key is read as held
+                // state only (ClientPlayerController::SendDigPacket), so
+                // its clicks are drained every frame; and should a player
+                // rebind it onto the command key, a press while sneaking is
+                // the mining modifier, not a request for the command line.
+                const bool veinModifier = Input::IsDown(*Input::Binds::Sneak) &&
+                                          Input::IsDown(*Input::Binds::VeinMine);
+                while (Input::ConsumeClick(*Input::Binds::VeinMine)) {}
+                const bool commandClick = Input::ConsumeClick(*Input::Binds::Command);
                 if (Input::ConsumeClick(*Input::Binds::Chat)) {
                     g_chatScreen.Open(false);
-                } else if (Input::ConsumeClick(*Input::Binds::Command) || slashTyped) {
+                } else if ((commandClick || slashTyped) && !veinModifier) {
                     g_chatScreen.Open(true);
                 }
 
@@ -3826,11 +5486,30 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // ESC opens the pause menu (MC Game Menu). Uses the shared
                 // edge computed above so an ESC that just closed chat or the
                 // inventory can't also open the pause menu.
-                if (escPressedThisFrame) {
+                if (Client::Control::IsControlled() ? localEsc : escPressedThisFrame) {
                     Render::GetScreenManager().Push(std::make_unique<Render::PauseScreen>());
+                }
+                UiTest::Tick(window, Render::GetScreenManager());
+
+                // MC Minecraft.pauseIfInactive: with "Pause on Lost Focus"
+                // on (F3+P), a window unfocused for 500 ms opens the pause
+                // menu. Only from here — the gameplay branch — so a screen
+                // that is already up is never doubled.
+                {
+                    static double s_lastActive = glfwGetTime();
+                    const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
+                    if (focused || !Platform::g_gameSettings.GetPauseOnLostFocus()) {
+                        s_lastActive = glfwGetTime();
+                    } else if (glfwGetTime() - s_lastActive > 0.5 && Render::GetScreenManager().Empty() &&
+                               !Client::Control::IsControlled()) {   // nobody is at this keyboard on purpose
+                        Render::GetScreenManager().Push(std::make_unique<Render::PauseScreen>());
+                        s_lastActive = glfwGetTime();
+                    }
                 }
 
             }
+            }   // chain
+            }   // not leaving / joining
 
             // ── Screen-state bookkeeping ─────────────────────────────────
             // OUTSIDE the branch chain above, and it has to stay that way.
@@ -3864,11 +5543,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // GLFW reflects the manual toggle's last-frame state; the
             // screen flags are OR'd in so the very frame an overlay pops,
             // WASD input is already dropped.
+            // (/control: a controlled player's own pause menu is not a screen
+            // as far as the controller's input is concerned.)
             const bool screenOpen = g_chatScreen.IsOpen() ||
                                     Render::GetInventoryScreen().IsOpen() ||
-                                    !Render::GetScreenManager().Empty();
+                                    (!Render::GetScreenManager().Empty() && !Client::Control::IsControlled());
             const bool cursorVisible = screenOpen ||
-                (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
+                (!Client::Control::IsControlled() &&
+                 glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
 
             // Screen open/close, handled the way MC does it.
             //
@@ -3906,6 +5588,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             {
                 const bool nowPaused = Render::GetScreenManager().IsPauseScreenOpen();
                 localPaused = nowPaused;
+                // Vanilla singleplayer pause: the WORLD is paused only when the
+                // server says every player is (the host reads its own server
+                // directly — same tick, no round trip; a guest has the
+                // ServerPausedS2C mirror). Then this client stops its own
+                // player too (physics, move packets, mobs, sky). With another
+                // player still playing the server never pauses, and neither
+                // does this body — a published vanilla world's rule.
+                {
+                    const bool serverPaused = Server::g_integratedServer
+                        ? Server::g_integratedServer->IsPaused()
+                        : Client::g_clientTickRate.IsServerPaused();
+                    Client::g_clientTickRate.SetWorldPaused(nowPaused && serverPaused);
+                }
                 if (nowPaused != sentPaused) {
                     // `sentPaused` advances ONLY when the packet actually went
                     // out. It used to advance unconditionally, which made it a
@@ -3956,6 +5651,106 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Gated on !screenOpen so typing "f"/"c" into chat can't toggle
             // it, and any screen opening while detached re-attaches — same
             // rule as leaving the world (session-local state above).
+            // /morph block: Left Alt locks the body to the block grid and
+            // holds it there; Alt again releases it (edge-triggered, no
+            // screen open, block morphs only — the key stays the fill
+            // tool's modifier for everyone else).
+            {
+                static bool s_prevAlt = false;
+                const bool altHeld = !screenOpen && Input::IsKeyDown(Input::Key::LeftAlt);
+                // A snow golem morph leaves snow while Alt is HELD: the held
+                // state rides the move packet's anim byte (re-armed every
+                // frame, so it reads 1 for as long as the key is down) and
+                // the server lays the trail (MC SnowGolem.aiStep).
+                // (2, not 1: TickMorph counts the byte down once before the
+                // tick's move packet reads it, and 1 would read as 0.)
+                if (altHeld && Game::Morph::IsMob(player.morph, Game::EntityTypeId::SnowGolem)) {
+                    player.StartMorphAnim(2);
+                    static double s_lastTrailLog = 0.0;
+                    if (glfwGetTime() - s_lastTrailLog > 1.0) {
+                        s_lastTrailLog = glfwGetTime();
+                        Log::Info("[Morph] golem trail: Alt held, anim byte=%u", static_cast<unsigned>(player.MorphAnimByte()));
+                    }
+                }
+                // A chicken morph's wings: airborne rides the same byte so
+                // every client runs MC's flap machine (Chicken.aiStep) on it.
+                if (Game::Morph::IsMob(player.morph, Game::EntityTypeId::Chicken) &&
+                    !player.physics.isOnGround && !player.physics.isFlying) {
+                    player.StartMorphAnim(2);
+                }
+                if (altHeld && !s_prevAlt && player.IsMorphed() &&
+                    (Game::Morph::KindOf(player.morph) == Game::Morph::Kind::Mob ||
+                     Game::Morph::KindOf(player.morph) == Game::Morph::Kind::Player)) {
+                    // The mob's own act: the animation starts here, the
+                    // world-side of it is the server's (`/morph ability`).
+                    const bool isMob = Game::Morph::KindOf(player.morph) == Game::Morph::Kind::Mob;
+                    const auto type = static_cast<Game::EntityTypeId>(Game::Morph::MobTypeOf(player.morph));
+                    bool send = true;
+                    if (isMob && type == Game::EntityTypeId::Sheep) {
+                        // MC EatBlockGoal.canUse: grass at the feet or a grass
+                        // block below, else nothing to graze on.
+                        // (+1e-4 on y: a body resting on a block top can sit a
+                        // rounding error below the integer.)
+                        const glm::ivec3 feet(static_cast<int>(std::floor(player.physics.position.x)),
+                                              static_cast<int>(std::floor(player.physics.position.y + 1.0e-4)),
+                                              static_cast<int>(std::floor(player.physics.position.z)));
+                        const Game::BlockID at    = Game::Raycast::GetBlockStateAt(feet.x, feet.y, feet.z).Block();
+                        const Game::BlockID below = Game::Raycast::GetBlockStateAt(feet.x, feet.y - 1, feet.z).Block();
+                        const bool edible = at == Game::BlockID::ShortGrass || at == Game::BlockID::Fern ||
+                                            at == Game::BlockID::ShortDryGrass || at == Game::BlockID::TallDryGrass ||
+                                            below == Game::BlockID::Grass;
+                        Log::Info("[Morph] sheep graze: feet=(%d,%d,%d) at=%u below=%u edible=%d animTicks=%d",
+                                  feet.x, feet.y, feet.z, static_cast<unsigned>(at), static_cast<unsigned>(below),
+                                  edible ? 1 : 0, player.morphAnimTicks);
+                        if (edible && player.morphAnimTicks == 0) player.StartMorphAnim(Game::Morph::kSheepEatTicks);
+                        else send = false;
+                    } else if (isMob && (type == Game::EntityTypeId::Skeleton || type == Game::EntityTypeId::Stray ||
+                                         type == Game::EntityTypeId::Bogged)) {
+                        player.StartMorphAnim(Game::Morph::kSkeletonAimTicks);
+                    } else if (isMob && type == Game::EntityTypeId::SnowGolem) {
+                        send = false;   // the trail is the held key's, above
+                    }
+                    if (send && Client::g_networkClient) {
+                        if (auto conn = Client::g_networkClient->GetConnection()) conn->SendChatMessage("/morph ability");
+                    }
+                } else if (altHeld && !s_prevAlt && player.heldByPlayer != 0) {
+                    // /morph item, carried: out of the holder's hand, as a Q
+                    // drop. Server-side (MorphCarry).
+                    if (Client::g_networkClient) {
+                        if (auto conn = Client::g_networkClient->GetConnection()) conn->SendChatMessage("/morph ability");
+                    }
+                } else if (altHeld && !s_prevAlt && player.IsBlockMorph()) {
+                    if (Input::IsKeyDown(Input::Key::LeftShift)) {
+                        // Shift+Alt: a quarter turn. The turn lives in the
+                        // morph code on the server, so it goes as the
+                        // command and comes back on the abilities packet.
+                        if (Client::g_networkClient) {
+                            if (auto conn = Client::g_networkClient->GetConnection()) conn->SendChatMessage("/morph rotate");
+                        }
+                    } else {
+                        player.SetMorphGridLock(!player.morphGridLock);
+                        g_chatComponent.AddMessage(player.morphGridLock
+                            ? "Locked to the block grid (Alt to release, Shift+Alt to turn)"
+                            : "Released from the block grid", 0xFFAAAAAA);
+                        // The world's half: the real block in the cell while
+                        // locked (MorphBlockAnchor), gone on release.
+                        if (Client::g_networkClient) {
+                            if (auto conn = Client::g_networkClient->GetConnection()) {
+                                if (player.morphGridLock) {
+                                    const glm::ivec3 cell(static_cast<int>(std::floor(player.morphLockPos.x)),
+                                                          static_cast<int>(std::floor(player.morphLockPos.y + 0.5)),
+                                                          static_cast<int>(std::floor(player.morphLockPos.z)));
+                                    conn->SendChatMessage("/morph lock " + std::to_string(cell.x) + " " +
+                                                          std::to_string(cell.y) + " " + std::to_string(cell.z));
+                                } else {
+                                    conn->SendChatMessage("/morph unlock");
+                                }
+                            }
+                        }
+                    }
+                }
+                s_prevAlt = altHeld;
+            }
             {
                 static bool s_prevFreeCamChord = false;
                 const bool chordHeld = !screenOpen &&
@@ -3975,7 +5770,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         freeCam.yaw      = camera.yaw;
                         freeCam.pitch    = camera.pitch;
                         player.physics.velocity = glm::vec3(0.0f);
-                        Log::Info("[FreeCam] Detached - culling stays at the player; F+C to return");
+                        Log::Info("[FreeCam] Detached - culling %s; F+C to return",
+                                  Debug::DebugSystem::FreeCamCullFromPlayer()
+                                      ? "frozen at the player view (Render Controls)"
+                                      : "follows the free camera (Render Controls to freeze it at the player)");
                     } else {
                         Log::Info("[FreeCam] Re-attached to player view");
                     }
@@ -3990,22 +5788,58 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // MC Minecraft.tick:1778-1780 — refreshed every frame a screen
             // is open; ContinueAttack(false) clears it once the button is up.
             // The free camera pins it too: no attack may start while detached.
-            if (cursorVisible || freeCamActive) playerController.SetMissTime(10000);
+            // (A player carried as an item — /morph item — acts on nothing
+            // either: no breaking, no using, just looking around.)
+            if (cursorVisible || freeCamActive || Client::Control::IsControlling() ||
+                player.heldByPlayer != 0) {
+                playerController.SetMissTime(10000);
+            }
 
             // Drains attack/use and stops an in-progress break/place whenever
             // the cursor is up, which is what tears down held-RMB when a screen
             // takes over.
             { PROFILE_ZONE_N("PlayerInput");
-            HandlePlayerInput(player, playerController, camera, cursorVisible,
+            HandlePlayerInput(player, playerController, camera,
+                              cursorVisible || Client::Control::IsControlling() ||
+                                  player.heldByPlayer != 0,
                               freeCamActive);
             }
 
             // Resolve cursor state AFTER chat/inventory/pause handling so
             // opening/closing this frame takes effect immediately.
             { PROFILE_ZONE_N("CursorToggle");
-            cursorEnabled = HandleCursorToggle(window, camera,
+            // Leaving to the title: the cursor stays up the whole way — it
+            // was up on the pause menu and it is up on the title, and a
+            // capture-then-release in between is a blink. Mouse look stays
+            // off regardless (below), so the view is not the mouse's.
+            const bool leavingToTitle = leaveCapture.active || leaveCapture.finished ||
+                                        joinTransition.active;   // joining, the mirror
+            const bool overlayWantsCursor =
                 g_chatScreen.IsOpen() || Render::GetInventoryScreen().IsOpen() ||
-                !Render::GetScreenManager().Empty());
+                !Render::GetScreenManager().Empty() || leavingToTitle;
+            // /control: the controller's mouse is deltas for the other
+            // player (and its virtual cursor) unless its own menu is up; a
+            // controlled window's cursor is captured whenever no screen is.
+            // (/control: the controller's cursor follows the ordinary rules —
+            // captured in the world, free over a screen, Tab to free it — and
+            // the look deltas only go out while it is captured.)
+            cursorEnabled = HandleCursorToggle(window, camera, overlayWantsCursor, false);
+            // A controlled player may free their cursor (Tab) or open their
+            // menu; the controller's look still lands, so mouse look stays
+            // on regardless. Put back on the frame control ends.
+            static bool s_lookForcedByControl = false;
+            if (Client::Control::IsControlled()) {
+                // On unless the controller has a screen up here (chat, a
+                // container): then the deltas are the cursor's, not the view's.
+                camera.enableMouseLook = !(g_chatScreen.IsOpen() || Render::GetInventoryScreen().IsOpen());
+                s_lookForcedByControl = true;
+            } else if (s_lookForcedByControl) {
+                camera.enableMouseLook = !cursorEnabled;
+                s_lookForcedByControl = false;
+            }
+            // The outro owns the view: with the cursor up the toggle leaves
+            // mouse look alone, but it is forced off here regardless.
+            if (leavingToTitle) camera.enableMouseLook = false;
             }
 
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
@@ -4048,6 +5882,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // frame drains more often than the tick rate rather than less.
             { PROFILE_ZONE_N("Network");
             PROFILE_TIMER_START(network);
+            DEBUG_PIE_ZONE("scheduledPacketProcessing");
             if (networkClient) {
                 networkClient->DrainIncomingPackets();
                 // The active level may have changed during the drain
@@ -4068,6 +5903,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             while (now >= nextClientTick && ticksThisFrame < MAX_TICKS_PER_FRAME) {
                 PROFILE_ZONE_N("ClientTick");
+                DEBUG_PIE_ZONE("tick");
 
                 // MC ClientPacketListener.tick: levelLoadTracker.tickClientLoad()
                 // then notifyPlayerLoaded() once the level is ready. Still per
@@ -4075,6 +5911,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // runTick), and still after the drain — which now happened just
                 // above, for the whole frame.
                 Client::g_levelLoadTracker.Tick(player.physics.position);
+                // /morph: the own body's walk animation and creeper swell,
+                // per tick; a full swell is the creeper's bang, done by the
+                // server so everyone's world agrees on the crater.
+                if (player.TickMorph(camera.yaw) && Client::g_networkClient) {
+                    if (auto conn = Client::g_networkClient->GetConnection()) conn->SendChatMessage("/morph boom");
+                }
+                // MC LevelLoadingScreen.tick: `if (loadTracker.isLevelReady()) onClose()`.
+                if (Client::g_levelLoadTracker.IsLoaded() &&
+                    dynamic_cast<Render::LevelLoadingScreen*>(Render::GetScreenManager().Current())) {
+                    Render::GetScreenManager().Pop();
+                }
 
                 // (Mesh scheduling used to live here, in the 20 Hz tick. It is a
                 // FRAME phase now — see the MeshSchedule block next to MeshUpload
@@ -4094,6 +5941,93 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 //     feeds the crosshair indicator has to count in TICKS, or
                 //     the bar fills at frame rate.
                 player.Tick();
+                g_hudRenderer.Tick();   // MC Gui.tick — the status bars' 20 Hz clock
+                // MC LivingEntity.tickEffects' client particle roll for the
+                // local and remote players (mobs roll their own).
+                Client::TickPlayerEffectParticles(player);
+
+                // MC ClientLevel.tickBlockEntities: the moving piston cells the
+                // client built from block events advance here — and push the
+                // local player, which is how vanilla moves you on a piston.
+                if (Client::g_clientChunkManager && Client::g_clientBlockAccess) {
+                    Client::g_clientBlockAccess->SetLocalPlayer(&player);
+                    // A moving cell that outlives the server's final block
+                    // writes the carried block itself — a local write.
+                    Client::ClientBlockAccess::LocalWriteScope scope(*Client::g_clientBlockAccess);
+                    Client::g_clientChunkManager->TickBlockEntities(*Client::g_clientBlockAccess);
+                }
+
+                // MC Gui.tick: a sleeping player gets the InBedChatScreen when
+                // nothing else is up, and it goes away once they are up.
+                // In-bed screen "Leave Bed" (or ESC) → STOP_SLEEPING. The
+                // server gets the player up and its PlayerSleepS2C closes the
+                // screen (MC InBedChatScreen.sendWakeUp). Drained HERE, in the
+                // tick, not in the pause-menu input branch: with the chat open
+                // in bed that branch never runs, which is how the button did
+                // nothing.
+                if (Render::ConsumeWakeUpRequest() && player.IsSleeping()) {
+                    playerController.SendPlayerAction(Network::PlayerAction::STOP_SLEEPING);
+                }
+                // A sign editor closed → its four lines (MC
+                // AbstractSignEditScreen.removed → ServerboundSignUpdatePacket).
+                {
+                    Network::SignUpdateC2SPacket signUpdate;
+                    if (Render::ConsumeSignUpdate(signUpdate) && networkClient && networkClient->IsConnected()) {
+                        if (auto conn = networkClient->GetConnection()) {
+                            conn->SendPacket(static_cast<uint8_t>(Network::PacketId::SignUpdateC2S),
+                                             Network::Serialization::Serialize(signUpdate));
+                        }
+                    }
+                }
+                // The book screens' packets (BookScreens.hpp): a book and
+                // quill saved or signed (ServerboundEditBookPacket), the
+                // lectern's page turns / Take Book
+                // (ServerboundContainerButtonClickPacket), then its close
+                // (LocalPlayer.closeContainer) — in that order, so a click
+                // lands on the menu it was aimed at.
+                {
+                    auto conn = (networkClient && networkClient->IsConnected()) ? networkClient->GetConnection() : nullptr;
+                    Network::EditBookC2SPacket editBook;
+                    while (Render::ConsumeEditBook(editBook)) {
+                        if (conn) conn->SendPacket(static_cast<uint8_t>(Network::PacketId::EditBookC2S),
+                                                   Network::Serialization::Serialize(editBook));
+                    }
+                    Network::ContainerButtonClickC2SPacket buttonClick;
+                    while (Render::ConsumeContainerButtonClick(buttonClick)) {
+                        if (conn) conn->SendPacket(static_cast<uint8_t>(Network::PacketId::ContainerButtonClickC2S),
+                                                   Network::Serialization::Serialize(buttonClick));
+                    }
+                    // The merchant screen's trade picks (MC
+                    // ServerboundSelectTradePacket, MerchantScreen.hpp).
+                    Network::SelectTradeC2SPacket selectTrade;
+                    while (Render::ConsumeSelectTrade(selectTrade)) {
+                        if (conn) conn->SendPacket(static_cast<uint8_t>(Network::PacketId::SelectTradeC2S),
+                                                   Network::Serialization::Serialize(selectTrade));
+                    }
+                    if (Render::ConsumeBookContainerClose() && conn) {
+                        Network::InventoryCloseC2SPacket close{};
+                        conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryCloseC2S),
+                                         Network::Serialization::Serialize(close));
+                    }
+                }
+                if (player.IsSleeping()) {
+                    if (Render::GetScreenManager().Empty() && !Render::IsInBedScreenOpen()) {
+                        Render::ShowInBedScreen();
+                        // InBedChatScreen IS a ChatScreen (closeOnSubmit =
+                        // false): the input box is up the whole time, Enter
+                        // sends and keeps it, the button sits above it.
+                        g_chatScreen.SetCloseOnSubmit(false);
+                        g_chatScreen.Open(false);
+                    }
+                } else if (Render::IsInBedScreenOpen()) {
+                    // InBedChatScreen.onPlayerWokeUp: a half-typed line is
+                    // handed to a plain chat screen, an empty box just goes.
+                    g_chatScreen.SetCloseOnSubmit(true);
+                    if (g_chatScreen.InputText().empty()) g_chatScreen.Close();
+                    Render::DismissInBedScreen();
+                } else {
+                    Render::DismissInBedScreen();
+                }
 
                 // 3. Interpolate remote player positions (Minecraft's InterpolationHandler)
                 if (Client::g_remotePlayerManager) {
@@ -4113,8 +6047,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // A pause screen freezes them for the same reason a /tick freeze
                 // does — the server has stopped simulating, so an animating mob
                 // is showing motion that is not happening.
-                const bool entitiesFrozen =
-                    Client::g_clientTickRate.IsEntityFrozen() || localPaused;
+                const bool entitiesFrozen = Client::g_clientTickRate.IsEntityFrozen();
 
                 if (Client::g_itemEntityManager && !entitiesFrozen) {
                     // Feet position, for pickup animations to fly toward.
@@ -4208,7 +6141,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     // the player's block position). This is the ONLY producer
                     // of block particles: without it the dust under
                     // unsupported sand never appears, and neither will torch
-                    // flames or lava pops when those land.
+                    // flames or lava pops when those land. It is also what
+                    // shows a creative player holding a barrier or a light
+                    // where those invisible blocks are (the BLOCK_MARKER
+                    // sprite — ClientLevel.getMarkerParticleTarget).
                     //
                     // Gated on entitiesFrozen for the same reason the mob tick
                     // is: a frozen world should look frozen.
@@ -4221,7 +6157,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                        static_cast<int>(std::floor(camPos.z))),
                             *Client::g_clientBlockAccess,
                             Client::g_clientMobManager->Level(),
-                            s_animateRandom);
+                            s_animateRandom,
+                            Client::MarkerParticleTarget(player));
                     }
                 }
 
@@ -4237,14 +6174,94 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // !this.pause)` (Minecraft.java:1741) on top of the /tick
                 // freeze gate. Without it the sky keeps sliding while the
                 // server is paused and then snaps back on the next TimeUpdate.
-                if (Client::g_clientTickRate.RunsNormally() && !localPaused) {
+                if (Client::g_clientTickRate.RunsNormally()) {
                     Render::EnvironmentState::Get().TickClient();
                 }
-
                 // Screen 20Hz tick (death-screen button delay, caret blink).
                 // The title phase has its own pump; in-game screens only got
                 // Update/Render before this.
                 Render::GetScreenManager().Tick();
+
+                // World Options → Joinable / port changed: re-announce the
+                // Hosting presence so friends' Join buttons follow, and move
+                // the router mapping to the new port so direct joins still
+                // land (guests were already disconnected by the change).
+                if (Client::g_friendsClient && Server::g_integratedServer &&
+                    Client::g_friendsClient->CurrentPresence() == Client::FriendPresence::State::Hosting) {
+                    const bool     joinable = Server::g_integratedServer->IsJoinable();
+                    const uint16_t port     = Server::g_integratedServer->GetPort();
+                    if (joinable != s_lastPresenceJoinable || (port != 0 && port != s_lastPresencePort)) {
+                        const bool portChanged = port != 0 && port != s_lastPresencePort;
+                        s_lastPresenceJoinable = joinable;
+                        s_lastPresencePort = port;
+                        std::string world, externalIp;
+                        {
+                            std::lock_guard<std::mutex> lock(s_hostPresenceMutex);
+                            world = s_hostPresenceWorld;
+                            externalIp = s_hostExternalIp;
+                        }
+                        Client::g_friendsClient->SetPresence(
+                            Client::FriendPresence::State::Hosting, world, port, externalIp, joinable);
+                        Log::Info("[Presence] hosting '%s' on port %u, joinable=%d", world.c_str(), port, joinable ? 1 : 0);
+                        if (portChanged && g_portMapper) {
+                            std::thread([world, port, joinable]() {
+                                g_portMapper->Unmap();
+                                const auto mapping = g_portMapper->Map(port);
+                                {
+                                    std::lock_guard<std::mutex> lock(s_hostPresenceMutex);
+                                    s_hostExternalIp = mapping.externalIp;
+                                }
+                                if (Client::g_friendsClient) {
+                                    Client::g_friendsClient->SetPresence(
+                                        Client::FriendPresence::State::Hosting,
+                                        world, port, mapping.externalIp, joinable);
+                                }
+                            }).detach();
+                        }
+                    }
+                }
+
+                // ── F3 charts, on the tick cadence MC samples them at ──────
+                {
+                    auto& overlay = Render::DebugScreen::Overlay();
+                    Render::DebugScreen::KeyHandler().Tick();   // the F3+C countdown
+                    if (networkClient) {
+                        const auto& cs = networkClient->GetStats();
+                        static uint64_t s_lastBytesIn = 0, s_lastPacketsIn = 0, s_lastPacketsOut = 0;
+                        static int s_secondTicks = 0;
+                        // BandwidthDebugMonitor: bytes received per tick.
+                        const uint64_t bytesIn = cs.bytesReceived.load(std::memory_order_relaxed);
+                        overlay.BandwidthLogger().LogSample(static_cast<int64_t>(bytesIn - std::min(bytesIn, s_lastBytesIn)));
+                        s_lastBytesIn = bytesIn;
+                        // Connection.tickSecond: averageX = lerp(0.75, count, averageX) once a second,
+                        // and PingDebugMonitor's one request per second.
+                        if (++s_secondTicks >= 20) {
+                            s_secondTicks = 0;
+                            const uint64_t in = cs.packetsReceived.load(std::memory_order_relaxed);
+                            const uint64_t out = cs.packetsSent.load(std::memory_order_relaxed);
+                            const float rx = static_cast<float>(in - std::min(in, s_lastPacketsIn));
+                            const float tx = static_cast<float>(out - std::min(out, s_lastPacketsOut));
+                            s_lastPacketsIn = in; s_lastPacketsOut = out;
+                            s_debugContext.avgReceivedPackets = s_debugContext.avgReceivedPackets + (rx - s_debugContext.avgReceivedPackets) * 0.75f;
+                            s_debugContext.avgSentPackets = s_debugContext.avgSentPackets + (tx - s_debugContext.avgSentPackets) * 0.75f;
+                            if (auto conn = networkClient->GetConnection()) conn->SendPingRequest();
+                        }
+                        if (auto conn = networkClient->GetConnection()) {
+                            const int32_t rtt = conn->ConsumePingRtt();
+                            if (rtt >= 0) overlay.PingLogger().LogSample(rtt);
+                        }
+                    }
+                    if (Server::g_integratedServer) {
+                        static std::vector<std::array<int64_t, 4>> s_tickSamples;
+                        s_tickSamples.clear();
+                        Server::g_integratedServer->DrainTickTimeSamples(s_tickSamples);
+                        for (const auto& t : s_tickSamples) overlay.TickTimeLogger().LogFullSample(t.data(), 4);
+                        Server::g_integratedServer->SetDebugWantsChunkMap(
+                            Render::DebugScreen::Entries().IsCurrentlyEnabled(Render::DebugScreen::Ids::VisualizeChunksOnServer));
+                        Server::g_integratedServer->SetDebugWantsChunkGen(
+                            Render::DebugScreen::Entries().IsCurrentlyEnabled(Render::DebugScreen::Ids::ChunkGenerationStats));
+                    }
+                }
 
                 // 4. Send player position to server (one packet per tick = 20 Hz,
                 //    unconditionally — the on-demand flushes before interaction
@@ -4320,13 +6337,57 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     // MC's convention now, so they go straight through — the
                     // pitch used to be negated here to undo the camera's old
                     // positive-up convention.
+                    // /control: the controller's hand is the controlled
+                    // player's — their swings, and the view angles the
+                    // render will use (the mirrored ones; feeding this
+                    // client's own here and the mirrored ones there is the
+                    // permanent-tilt bug the note below describes). The
+                    // controlled client banks its swings for its view frame.
+                    bool  heldSwing = lmbEdge || placeEdge || armSwing;
+                    float heldPitch = camera.pitch, heldYaw = camera.yaw;
+                    if ((Client::Control::IsControlled() || Client::Control::IsWatched()) && heldSwing) {
+                        Client::Control::Get().pendingSwing = true;
+                    }
+                    if (Client::Control::ReceivesView() && Client::Control::Get().hasView) {
+                        auto& cs = Client::Control::Get();
+                        heldSwing = cs.pendingSwing;
+                        cs.pendingSwing = false;
+                        if (Client::Control::IsControlling()) {   // the camera is theirs too
+                            heldPitch = cs.view.pitch;
+                            heldYaw   = cs.view.yaw;
+                        }
+                    }
                     Render::g_heldItemRenderer.Tick(
                         player.inventory.GetSelectedItem(),
                         player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).itemId,
-                        lmbEdge || placeEdge || armSwing,
+                        heldSwing,
                         // MC ItemInHandRenderer.tick:564 — getItemSwapScale(1.0F).
                         player.GetItemSwapScale(1.0f),
-                        camera.pitch, camera.yaw);
+                        heldPitch, heldYaw);
+                }
+
+                // MC Minecraft.tick:1975 — musicManager.tick(); then
+                // soundManager.tick(pause); the ambient handlers ride the
+                // local player's tick (LocalPlayer.tick).
+                {
+                    Client::SoundHost::TickContext soundContext;
+                    soundContext.paused = Client::g_clientTickRate.IsWorldPaused();
+                    soundContext.inWorld = true;
+                    soundContext.levelLoading = dynamic_cast<Render::LevelLoadingScreen*>(
+                        Render::GetScreenManager().Current()) != nullptr;
+                    soundContext.player = &player;
+                    soundContext.blocks = Client::g_clientBlockAccess;
+                    soundContext.dimension = Client::ClientLevels::ActiveDimension();
+                    soundContext.cameraPosition = camera.position;
+                    // MC: abilities.instabuild && abilities.mayfly.
+                    soundContext.creative = player.instabuild && player.physics.mayFly;
+                    // MC Entity.isUnderWater: the eye in water.
+                    soundContext.underwater = player.physics.isEyeInWater;
+                    // MC: the End and a boss bar with playBossMusic — the
+                    // dragon's is the only one this engine shows there.
+                    soundContext.bossMusic = soundContext.dimension == Game::DimensionId::End &&
+                                             Client::g_bossBarState.visible;
+                    Client::SoundHost::Tick(soundContext);
                 }
 
                 nextClientTick += CLIENT_TICK_INTERVAL;
@@ -4381,11 +6442,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // sample as a crossing, and the replayer's crossing handshake
             // reads it (see SessionReplay.hpp).
             bool poseCrossedThisFrame = false;
+            Render::DebugScreen::FrameProfiler::Push("frame");
             { PROFILE_ZONE_N("GameLogic");
             PROFILE_TIMER_START(gamelogic);
+            DEBUG_PIE_ZONE("update");
             Time::Tick();
             dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt * 1000.0f);
+            Render::DebugScreen::Overlay().LogFrameDuration(static_cast<int64_t>(dt * 1.0e9f));
 
             // Capture pre-physics state for the portal prediction below.
             // Critically, prevVel is the velocity BEFORE the physics
@@ -4397,7 +6461,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // a zeroed velocity → player exits the destination at 0 m/s
             // → infinite-fall acceleration restarts from scratch.
 #if ENABLE_PORTAL_GUN
-            const glm::vec3 prevEye = player.GetEyePosition();
+            const glm::dvec3 prevEye = player.GetEyePosition();
             const glm::vec3 prevVel = player.physics.velocity;
 #endif
 
@@ -4425,6 +6489,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // 30-second escape hatch, so this cannot strand the player.
             if (player.health <= 0 || !Client::g_levelLoadTracker.IsLoaded()) {
                 player.physics.velocity = glm::vec3(0.0f);
+            } else if (Client::g_clientTickRate.IsWorldPaused()) {
+                // MC Minecraft.java:1959 `if (!this.pause)` around the level
+                // tick: the paused player is simply not ticked. Velocity is
+                // kept, as an unticked entity's is — a fall resumes on
+                // unpause instead of restarting from rest.
             } else if (poseReplayer.Active()) {
                 // Replay owns the pose: the recorded path is written in
                 // place of the physics step. Everything downstream — the
@@ -4444,7 +6513,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // ~50 ms (3 frames at 60 fps) gap where the camera was past
             // the source plane and the portal mesh stopped drawing.
             {
-                const glm::vec3 currEye = player.GetEyePosition();
+                const glm::dvec3 currEye = player.GetEyePosition();
                 auto pred = Client::GetClientPortalManager().CheckEyeCrossing(
                     prevEye, currEye, player.physics.position,
                     prevVel, camera.yaw, camera.pitch,
@@ -4453,11 +6522,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 if (pred.valid) {
                     player.physics.position = pred.newFeet;
                     player.physics.velocity = pred.newVelocity;
+                    // The hand's look-sway must not read the portal's
+                    // rotation as a flick of the mouse.
+                    Render::g_heldItemRenderer.OnViewRewritten(pred.newPitchDeg - camera.pitch,
+                                                               pred.newYawDeg - camera.yaw);
                     camera.yaw              = pred.newYawDeg;
                     camera.pitch            = pred.newPitchDeg;
-                    player.predictedPos     = glm::dvec3(pred.newFeet);
-                    player.serverPos        = glm::dvec3(pred.newFeet);
-                    player.visualPos        = glm::dvec3(pred.newFeet);
+                    player.predictedPos     = pred.newFeet;
+                    player.serverPos        = pred.newFeet;
+                    player.visualPos        = pred.newFeet;
                     justTeleportedThisFrame = true;
                     poseCrossedThisFrame    = true;
                     poseReplayer.OnCrossing();
@@ -4504,9 +6577,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                 Client::GetClientImmersivePortals().Get(crossing->portalId);
                             return p && p->Has(Game::Immersive::PortalFlag::Global);
                         }();
-                        player.physics.position = glm::vec3(crossing->newFeet);
+                        player.physics.position = crossing->newFeet;
                         player.physics.velocity = crossing->newVelocity;
                         player.physics.scale    = crossing->newScale;
+                        // See the portal-gun crossing above: the hand's
+                        // sway rides the rotation instead of reacting to it.
+                        Render::g_heldItemRenderer.OnViewRewritten(crossing->newPitch - camera.pitch,
+                                                                   crossing->newYaw - camera.yaw);
                         camera.yaw              = crossing->newYaw;
                         camera.pitch            = crossing->newPitch;
                         Client::g_immersivePortalTraveler.Commit(*crossing);
@@ -4573,7 +6650,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                             if (!allowVertical && t.y != 0.0f) continue;
                                             if (!allowBack && glm::dot(t, onward) < -1e-4f) continue;
                                             if ((t.x != 0.0f || t.z != 0.0f) && r > reachSide) continue;
-                                            if (!Game::CheckCollision(player.physics.position + t, player.physics, ctx)) {
+                                            if (!Game::CheckCollision(player.physics.position + glm::dvec3(t), player.physics, ctx)) {
                                                 best = t; freed = true; break;
                                             }
                                         }
@@ -4665,6 +6742,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     ? Game::PlayerPhysics::NOCLIP_SPRINT_HORIZONTAL_SPEED
                     : player.physics.noclipHorizontalSpeed;
                 freeCam.Update(dt);
+            } else if (Client::Control::IsControlling()) {
+                // /control: this mouse turns the other player's head, not
+                // this camera. Same save/restore as the free camera.
+                const bool savedMouseLook = camera.enableMouseLook;
+                camera.enableMouseLook = false;
+                camera.Update(dt);
+                camera.enableMouseLook = savedMouseLook;
             } else if (poseReplayer.Active()) {
                 // The replay wrote yaw/pitch; the mouse must not add to it.
                 // Same save/restore as the free camera, for the same reason.
@@ -4672,6 +6756,28 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 camera.enableMouseLook = false;
                 camera.Update(dt);
                 camera.enableMouseLook = savedMouseLook;
+            } else if (player.IsSleeping()) {
+                // MC Camera.setup for a sleeper: the view is locked to the
+                // bed — yaw = bedFacing.toYRot() − 180, pitch 0 — and lifted
+                // 0.15 above the (0.2) sleeping eye. Mouse-look is masked
+                // the way the free camera masks it, so the locked yaw is
+                // also what PlayerMoveC2S keeps sending.
+                float bedYaw = camera.yaw;
+                if (Client::g_clientBlockAccess) {
+                    const glm::ivec3 bed = *player.sleepingPos;
+                    const Game::BlockState state =
+                        Client::g_clientBlockAccess->GetBlockState(bed.x, bed.y, bed.z);
+                    if (Game::IsBedBlock(state.Block())) {
+                        bedYaw = Game::ToYRot(Game::BedFacing(state)) - 180.0f;
+                    }
+                }
+                camera.yaw   = bedYaw;
+                camera.pitch = 0.0f;
+                const bool savedMouseLook = camera.enableMouseLook;
+                camera.enableMouseLook = false;
+                camera.Update(dt);
+                camera.enableMouseLook = savedMouseLook;
+                camera.position.y += 0.15;
             } else {
                 camera.Update(dt);
             }
@@ -4819,8 +6925,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 s_thirdPersonOrbit = s_orbitYaw;
             }
 
-            const bool tpActive = !camera.IsFirstPerson() && !freeCamActive;
-            const glm::vec3 tpSavedPos  = camera.position;
+            // /control: the controller draws the frame the controlled client
+            // reported — its render camera, whole — instead of its own.
+            const bool controlView = Client::Control::IsControlling() && Client::Control::Get().hasView;
+            // The HUD, hotbar and hand from the other client: a controller's
+            // view of the controlled player, or a carried player's of the
+            // holder (whose camera stays its own).
+            const bool controlHud  = Client::Control::ReceivesView() && Client::Control::Get().hasView;
+            const bool tpActive = !camera.IsFirstPerson() && !freeCamActive && !controlView;
+            const glm::dvec3 tpSavedPos = camera.position;
             const float     tpSavedYaw  = camera.yaw;
             const float     tpSavedPitch = camera.pitch;
             if (tpActive) {
@@ -4841,12 +6954,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     const glm::vec3 off(((i & 1) * 2 - 1) * 0.1f * bodyScale,
                                         ((i >> 1 & 1) * 2 - 1) * 0.1f * bodyScale,
                                         ((i >> 2 & 1) * 2 - 1) * 0.1f * bodyScale);
-                    if (auto hit = Game::Raycast::CastRay(tpSavedPos + off, back, maxZoom)) {
-                        const float d = glm::length(hit->hitPoint - tpSavedPos);
+                    // MC ClipContext.Block.VISUAL: the camera passes through
+                    // anything without a collision box — grass, flowers.
+                    if (auto hit = Game::Raycast::CastRay(tpSavedPos + glm::dvec3(off), back, maxZoom,
+                                                          /*collisionOnly=*/true)) {
+                        const float d = static_cast<float>(glm::length(glm::dvec3(hit->hitPoint) - tpSavedPos));
                         if (d < maxZoom) maxZoom = d;
                     }
                 }
-                camera.position = tpSavedPos + back * maxZoom;
+                camera.position = tpSavedPos + glm::dvec3(back * maxZoom);
             }
 
             // === Debug free camera: swap the fly pose in for the render
@@ -4863,8 +6979,24 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 camera.pitch    = freeCam.pitch;
             }
 
+            if (controlView) {
+                const auto& cv = Client::Control::Get().view;
+                camera.position    = cv.cameraPos;
+                camera.yaw         = cv.yaw;
+                camera.pitch       = cv.pitch;
+                camera.fov         = cv.fov;
+                camera.perspective = static_cast<Render::Perspective>(cv.perspective % 3);
+            }
+            if (controlHud) {
+                // The teed inventory plus their hotbar selection: the HUD
+                // and the hand in view are theirs.
+                player.inventory.SetSelectedSlot(Client::Control::Get().view.selectedSlot % 9);
+            }
+
             // === PER-FRAME: Set player position for mesh prioritization ===
-            glm::vec3 playerPos = player.physics.position;
+            // (/control: around the view being shown, not this body.)
+            glm::vec3 playerPos = controlView ? glm::vec3(Client::Control::Get().view.playerPos)
+                                              : glm::vec3(player.physics.position);
             Render::SetClientMeshPlayerPosition(playerPos);
 
             // 6b. Schedule mesh builds — a FRAME phase, like MC's
@@ -4881,8 +7013,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // mesh workers, which take a permit when they start a job, so
             // throughput no longer scales with frame rate. Do not re-add a cap
             // here; see the comment on ScheduleMeshBuildsWithSnapshots.
+            Render::DebugScreen::FrameProfiler::Push("render");
+            Render::DebugScreen::FrameProfiler::Push("world");
+            Render::DebugScreen::FrameProfiler::Push("level");
             { PROFILE_ZONE_N("MeshSchedule");
             PROFILE_TIMER_START(meshsched);
+            DEBUG_PIE_ZONE("compileSections");
             Render::ScheduleClientMeshBuilds(player.physics.position);
             PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
             }
@@ -4894,9 +7030,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // in Present. Watch the UploadBytes plot, not this zone's width.
             { PROFILE_ZONE_N("MeshUpload");
             PROFILE_TIMER_START(gpuupload);
+            DEBUG_PIE_ZONE("uploadTerrainBuffers");
             Render::PerformClientGPUUploads();
             PROFILE_TIMER_END(gpuupload, metrics.gpuUploadTime);
             }
+            Render::DebugScreen::FrameProfiler::Pop();   // level
+            Render::DebugScreen::FrameProfiler::Pop();   // world
+            Render::DebugScreen::FrameProfiler::Pop();   // render
 
             // Capture per-frame mesh stats BEFORE they get reset
             int lastFrameMeshUploads = 0;
@@ -4914,6 +7054,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // 8. Update texture animations
             { PROFILE_ZONE_N("TexAnimation");
             PROFILE_TIMER_START(texanim);
+            DEBUG_PIE_ZONE("textures");
             if (Render::g_textureAnimator) {
                 Render::g_textureAnimator->UpdateAnimations(dt);
             }
@@ -4925,6 +7066,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Frustum frustum;
             { PROFILE_ZONE_N("Render");
             PROFILE_TIMER_START(render);
+            DEBUG_PIE_ZONE("render");
+            Render::DebugScreen::FrameProfiler::Push("world");
+            Render::DebugScreen::FrameProfiler::Push("level");
 
             // Pipeline warm-up behind the world-load screen, once per
             // process: every pipeline any earlier session built is built
@@ -4950,9 +7094,35 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             // Reset per-frame render stats
             metrics.ResetFrameMetrics();
+            Render::EntityCulling::g_renderedThisFrame = 0;
+
+            // F3 gpu_utilization — MC times the whole frame on the GPU (one
+            // TimerQuery) and divides by the CPU frame time, but only while
+            // the entry is enabled: the query itself costs on Apple's GL.
+            {
+                const bool wantGpu = Render::DebugScreen::Entries().IsCurrentlyEnabled(Render::DebugScreen::Ids::GpuUtilization);
+                if (Render::g_renderBackend && s_frameGpuPending != Render::INVALID_GPU_TIMER) {
+                    const float gpuMs = Render::g_renderBackend->GetGPUTimerResultMs(s_frameGpuPending);
+                    if (gpuMs >= 0.0f) {
+                        s_frameGpuPending = Render::INVALID_GPU_TIMER;
+                        s_debugContext.gpuUtilization = metrics.frameTime > 0.0f ? gpuMs * 100.0 / metrics.frameTime : 0.0;
+                    }
+                }
+                if (!wantGpu) {
+                    s_debugContext.gpuUtilization = -1.0;
+                } else if (Render::g_renderBackend && s_frameGpuPending == Render::INVALID_GPU_TIMER) {
+                    s_frameGpuTimer = Render::g_renderBackend->BeginGPUTimer("frame");
+                }
+            }
 
             // Get framebuffer size — needed for viewport.
             glfwGetFramebufferSize(window, &width, &height);
+            // A shader pack: the level draws into the pack's scene target
+            // from here until EndScene, just before the hand. Not while the
+            // leave capture is drawing its panorama faces: those are read
+            // back from the window, with the engine's own shaders.
+            Render::ShaderPipeline::Get().SetSuspended(leaveCapture.active || leaveCapture.finished);
+            Render::ShaderPipeline::Get().BeginScene(width, height);
 
             // Update the environment state (time-of-day colors, fog, sun/moon
             // angles) BEFORE clearing — the clear color is the fog color.
@@ -4982,19 +7152,67 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
                 const float envPartialTick =
                     std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                {
+                    // MC Camera.getFluidInCamera: the fluid the eye is in
+                    // (the player's own fluid scan, camera-height rule
+                    // included), and the biome at the eye for its
+                    // WATER_FOG_COLOR. Drives the fluid fog below.
+                    int cameraFluid = Render::EnvironmentState::kFluidNone;
+                    if (player.physics.isEyeInWater)      cameraFluid = Render::EnvironmentState::kFluidWater;
+                    else if (player.physics.isEyeInLava)  cameraFluid = Render::EnvironmentState::kFluidLava;
+                    Game::BiomeId biomeAtEye = Game::kFallbackBiomeId;
+                    // Aurelith's river: the eye's water is resonant water,
+                    // which fogs violet instead of the biome's colour.
+                    bool eyeInResonantWater = false;
+                    if (Client::g_clientChunkManager) {
+                        const glm::dvec3 eye = player.physics.GetEyePosition();
+                        const glm::ivec3 eyeCell(static_cast<int>(std::floor(eye.x)),
+                                                 static_cast<int>(std::floor(eye.y)),
+                                                 static_cast<int>(std::floor(eye.z)));
+                        biomeAtEye = Client::g_clientChunkManager->BiomeAtWorld(
+                            eyeCell.x, eyeCell.y, eyeCell.z);
+                        eyeInResonantWater = cameraFluid == Render::EnvironmentState::kFluidWater &&
+                            Client::g_clientChunkManager->GetBlockAt(eyeCell) == Game::BlockID::ResonantWater;
+                    }
+                    // Video Settings → Underwater Effects OFF: no fluid fog
+                    // (and no overlay below) — the world reads through
+                    // water and lava as if from the air.
+                    if (!Platform::g_gameSettings.GetUnderwaterEffects()) {
+                        cameraFluid = Render::EnvironmentState::kFluidNone;
+                    }
+                    Render::EnvironmentState::Get().SetCameraFluid(cameraFluid, biomeAtEye,
+                                                                   player.IsSpectator(),
+                                                                   eyeInResonantWater);
+                }
+                // The local player's status effects for the frame's fog,
+                // night vision and darkness (MobEffectEnvironment.hpp) —
+                // read by UpdateFrame below.
+                Render::UpdateMobEffectView(player, envPartialTick,
+                                            Platform::g_gameSettings.GetDarknessEffectScale());
                 { PROFILE_ZONE_N("EnvUpdate");
+                // The biomes around the camera (the Twilight Forest's
+                // per-biome fog and sky — EnvironmentState::Atmosphere).
+                Render::EnvironmentState::Get().SetCameraPosition(camera.position);
                 Render::EnvironmentState::Get().UpdateFrame(
                     envPartialTick, camera.GetForward(), camera.position.y,
                     effectiveRenderDist, Platform::g_gameSettings.GetFogEnabled());
                 }
+                // MC runTick: soundManager.updateSource(camera) — the ears are
+                // where this frame's eye is (third person included).
+                {
+                    const glm::vec3 forward = camera.GetForward();
+                    const glm::vec3 up = glm::normalize(glm::cross(camera.GetRight(), forward));
+                    Client::SoundHost::OnFrame(camera.position, forward, up);
+                }
                 // Where the viewer stands, for an OptiFine sky's biome and
-                // height rules (OptiFine: the camera entity's block position).
-                if (Client::g_clientChunkManager) {
+                // height rules (OptiFine: the camera entity's block position,
+                // and world.getBiome — the zoomed biome, not the raw cell).
+                if (Client::g_clientBlockAccess) {
                     const glm::ivec3 block(static_cast<int>(std::floor(camera.position.x)),
                                            static_cast<int>(std::floor(camera.position.y)),
                                            static_cast<int>(std::floor(camera.position.z)));
                     Render::g_skyRenderer.SetObserver(
-                        block, Client::g_clientChunkManager->BiomeAtWorld(block.x, block.y, block.z));
+                        block, Client::g_clientBlockAccess->GetBiome(block.x, block.y, block.z));
                 }
             }
             const glm::vec3 clearColor = Render::EnvironmentState::Get().Frame().fogColor;
@@ -5042,11 +7260,529 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     player.health <= 0, player.deathTime, partialTickView);
                 // The hand rides the same pose in vanilla.
                 Render::g_heldItemRenderer.SetViewTilt(camera.viewTilt);
+                // …and is lit by the light at the eye.
+                Render::g_heldItemRenderer.SetLightProbe(camera.position);
+                // MC GameRenderer's NAUSEA warp, after bobHurt on the level
+                // projection (the hand's projection never gets it):
+                // P · bobHurt · W · V — see Render::MakeNauseaWarp.
+                camera.viewTilt = camera.viewTilt * Render::MakeNauseaWarp(
+                    player.GetEffectBlendFactor(Game::MobEffectId::Nausea, partialTickView),
+                    Platform::g_gameSettings.GetScreenEffectScale(),
+                    player.GetSpinningEffectAngle(partialTickView));
             }
 
+            // A panorama face's camera: the player's eye, the face's yaw and
+            // pitch about `baseYaw`, 90° FOV. Straight up and down get an
+            // explicit frame (see inside). Shared by the leave capture and
+            // by the prewarm that keeps every direction meshed for it.
+            auto makeFaceCamera = [&](int faceIndex, float baseYaw, bool publishOrigin) {
+                // MC Minecraft.grabPanoramixScreenshot: front, right, back,
+                // left, up, down — the cube map PanoramaRenderer draws.
+                static const float kFaceYaw[6]   = { 0.0f, 90.0f, 180.0f, -90.0f, 0.0f, 0.0f };
+                static const float kFacePitch[6] = { 0.0f,  0.0f,   0.0f,   0.0f, -90.0f, 90.0f };
+                Render::Camera faceCam = camera;
+                faceCam.perspective     = Render::Perspective::FirstPerson;
+                faceCam.hasViewOverride = false;
+                faceCam.viewTilt        = glm::mat4(1.0f);
+                faceCam.roll            = 0.0f;
+                faceCam.fov             = 90.0f;
+                faceCam.position        = player.GetEyePosition();
+                faceCam.yaw             = baseYaw + kFaceYaw[faceIndex];
+                faceCam.pitch           = kFacePitch[faceIndex];
+                // Drawing publishes the origin (the main camera's
+                // PrepareRender follows and restores it); a culling-only
+                // use must leave the frame's origin alone.
+                if (publishOrigin) faceCam.PrepareRender();
+                else               faceCam.renderOrigin = Render::RenderOriginFor(faceCam.position);
+                if (faceIndex >= 4) {
+                    // Straight up and down: the look vector is parallel to
+                    // world up, so the lookAt inside GetViewMatrix has no
+                    // cross product to build its up from (a float cos(90°)
+                    // leaves a rounding-sized, wrong-signed sliver, which
+                    // rolled these faces by half a turn). Spell the frame
+                    // out: looking up, the bottom of the image is the way
+                    // you face — MC's cube map, and the way PanoramaRenderer
+                    // lays face 4 and 5 out.
+                    const glm::vec3 forward = Game::Mth::ViewVector(0.0f, baseYaw);
+                    const glm::vec3 dir = faceIndex == 4 ? glm::vec3(0.0f, 1.0f, 0.0f)
+                                                         : glm::vec3(0.0f, -1.0f, 0.0f);
+                    const glm::vec3 up  = faceIndex == 4 ? -forward : forward;
+                    const glm::vec3 eye = faceCam.RenderPosition();
+                    faceCam.viewOverride    = glm::lookAt(eye, eye + dir, up);
+                    faceCam.hasViewOverride = true;
+                }
+                return faceCam;
+            };
+
+            // Join transition, the hand-over frame: the level is loaded, so
+            // this frame draws the world — from exactly where the panorama
+            // was looking. The pitch and yaw are the panorama's; the field
+            // of view eases from its 85° to the game's over a second.
+            if (joinTransition.active) {
+                // Every frame of the transition: the world beneath the
+                // panorama is culled and meshed for the view it will be
+                // handed over at — the leave look, which is where the
+                // panorama is steered to.
+                camera.yaw   = Render::PanoramaRenderer::LastWorldLeaveYaw();
+                camera.pitch = Render::PanoramaRenderer::LastWorldLeavePitch();
+                if (joinTransition.easing) {
+                    if (Render::g_panoramaRenderer.EaseDone()) {
+                        joinTransition.active = false;
+                        joinTransition.easing = false;
+                        Render::g_panoramaRenderer.Shutdown();   // the world owns the screen now
+                        Log::Info("[Join] hand-over %.2f s after the click",
+                                  std::chrono::duration<float>(std::chrono::steady_clock::now() -
+                                                               joinTransition.startedAt).count());
+                    }
+                } else if (Client::g_levelLoadTracker.IsLoaded()) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (joinTransition.loadedAt == std::chrono::steady_clock::time_point{}) {
+                        joinTransition.loadedAt = now;
+                    }
+                    // MC LevelLoadingScreen.tick: the screen closes the
+                    // moment the tracker says the level is ready — the
+                    // camera's own section compiled and 30 % faded in, plus
+                    // the new-world delay — and the world is shown as it is,
+                    // the rest streaming in behind the chunk fade. Nothing
+                    // else is waited for here either.
+                    {
+                        // Shortest way round to the click look, at the
+                        // game's lens, paced by how far there is to go.
+                        auto wrapDeg = [](float d) { while (d > 180.0f) d -= 360.0f; while (d < -180.0f) d += 360.0f; return d; };
+                        const float yawOffsetTo = Render::PanoramaRenderer::LastWorldLeaveYaw() -
+                                                  Render::PanoramaRenderer::LastWorldBaseYaw();
+                        const float yawTravel   = std::abs(wrapDeg(yawOffsetTo - Render::g_panoramaRenderer.CurrentYawOffset()));
+                        const float pitchTravel = std::abs(Render::PanoramaRenderer::LastWorldLeavePitch() -
+                                                           Render::g_panoramaRenderer.CurrentPitch());
+                        // 90° a second, between 0.6 s and 1.2 s: the title
+                        // turns 2°/s, so a long sit there is a long way back
+                        // — the cap keeps that from becoming a wait.
+                        const float seconds = std::clamp(std::max(yawTravel, pitchTravel) / 90.0f, 0.6f, 1.2f);
+                        Render::g_panoramaRenderer.EaseTo(yawOffsetTo,
+                                                          Render::PanoramaRenderer::LastWorldLeavePitch(),
+                                                          Platform::g_gameSettings.GetFOV(), seconds);
+                        joinTransition.easing = true;
+                        joinTransition.easeAt = now;
+                        Log::Info("[Join] level ready %.2f s after the click; easing %.2f s to the leave look",
+                                  std::chrono::duration<float>(joinTransition.loadedAt - joinTransition.startedAt).count(),
+                                  seconds);
+                    }
+                }
+            }
+
+            // Nothing but the view while leaving: no HUD, no hand, no
+            // crosshair, no block outline (each gated on this below). From
+            // the click to the end of the session — `finished` included:
+            // the frame that ends the capture still draws and then STAYS
+            // on screen through the teardown, and it must not be the one
+            // frame with the hand and hotbar back.
+            const bool leavingWorld = leaveCapture.active || leaveCapture.finished ||
+                                      joinTransition.active;   // and joining: the same bare view
+            s_hideHudForLeave = leavingWorld;
+
+
+            // ── The pause menu's capture ─────────────────────────────────
+            // The six faces are taken while the pause menu is up, through
+            // the same tile pipeline the leave uses, so Save and Quit finds
+            // them done and the title is up as soon as the menu has faded.
+            // Only with the WORLD paused (vanilla's singleplayer pause: the
+            // camera does not move and nothing in view does either), so the
+            // faces are exactly the view the outro continues; a multiplayer
+            // leave, where the world keeps going, captures at the click as
+            // before. Not under a shader pack: the faces are read back from
+            // the window with the engine's own shaders (see SetSuspended),
+            // and suspending the pack while paused would show. The menu
+            // closing without a leave drops the faces — the view moves on.
+            {
+                const bool pauseUp = Render::GetScreenManager().IsPauseScreenOpen();
+                if (!leaveCapture.active && !leaveCapture.finished && Render::g_renderBackend) {
+                    if (!leaveCapture.prepass && !leaveCapture.captured && pauseUp &&
+                        lastWorldPanoramaWanted() && Client::g_clientTickRate.IsWorldPaused() &&
+                        !Render::ShaderPipeline::Get().Active()) {
+                        leaveCapture.prepass      = true;
+                        leaveCapture.prepassStop  = false;
+                        leaveCapture.warming      = true;
+                        leaveCapture.warmFrames   = 0;
+                        leaveCapture.idleFrames   = 0;
+                        leaveCapture.warmStart    = std::chrono::steady_clock::now();
+                        leaveCapture.face         = 0;
+                        leaveCapture.tile         = 0;
+                        leaveCapture.restFrames   = 0;
+                        leaveCapture.awaitingTake = false;
+                        leaveCapture.complete     = true;
+                        leaveCapture.baseYaw      = camera.yaw;
+                        leaveCapture.facePrepared.fill(false);
+                    }
+                    if (leaveCapture.prepass && !pauseUp) leaveCapture.prepassStop = true;
+                    // Mid-capture and the menu is gone: dropped once the
+                    // outstanding read-back (if any) has been taken — a
+                    // request left pending would land in the next
+                    // capture's first tile.
+                    if (leaveCapture.prepass && leaveCapture.prepassStop && !leaveCapture.awaitingTake) {
+                        Render::PanoramaRenderer::DiscardAdoptedFaces();
+                        leaveCapture.pack.reset();
+                        for (auto& f : leaveCapture.faces) { f.clear(); f.shrink_to_fit(); }
+                        leaveCapture.facePrepared.fill(false);
+                        leaveCapture.prepass     = false;
+                        leaveCapture.prepassStop = false;
+                    }
+                    // Resumed after a complete capture: those faces are of
+                    // a view the player is about to leave.
+                    if (leaveCapture.captured && !pauseUp) {
+                        Render::PanoramaRenderer::DiscardAdoptedFaces();
+                        leaveCapture.pack.reset();
+                        for (auto& f : leaveCapture.faces) { f.clear(); f.shrink_to_fit(); }
+                        leaveCapture.facePrepared.fill(false);
+                        leaveCapture.captured = false;
+                    }
+                }
+            }
+
+            // The outro turn (see LeaveCapture::outroSpeed): the same rate
+            // and direction as the title panorama, 2°/s at speed 1, left.
+            if (leaveCapture.active) {
+                const float dtSec = std::clamp(metrics.frameTime / 1000.0f, 0.0f, 0.1f);
+                camera.yaw -= 2.0f * leaveCapture.outroSpeed * dtSec;
+            }
+
+            // ── Leave capture: one panorama face, before the frame's own
+            //    view. Drawn square in the bottom-left, read back, cleared. ──
+            if ((leaveCapture.active || leaveCapture.prepass) && Render::g_renderBackend) {
+                auto& backend = *Render::g_renderBackend;
+                // A finished face's mip (a 9.5 MB upload) only on the idle
+                // frame between a tile's request and its take, or once the
+                // capture is over. Landing it on a take frame stacked it on
+                // the next face's first tile and dropped that frame.
+                const bool idleFrame = leaveCapture.awaitingTake && leaveCapture.framesSinceRequest == 0;
+                if (idleFrame || leaveCapture.face >= 6 || !leaveCapture.complete) {
+                    Render::PanoramaRenderer::PumpLastWorldMips();
+                }
+                // Rest frames count down before the take: decremented after
+                // it, the frame that took a tile drew the next one too, and
+                // the "one every third frame" pacing was really every other.
+                if (leaveCapture.restFrames > 0) --leaveCapture.restFrames;
+                if (leaveCapture.awaitingTake && ++leaveCapture.framesSinceRequest >= 2) {
+                    // The tile requested two frames ago: into its place in the
+                    // face (the tile counter has already moved on, so the
+                    // one just taken is the previous index).
+                    int rw = 0, rh = 0;
+                    std::vector<uint8_t> pixels;
+                    const int tiles   = kLeaveTiles;
+                    const int tileIdx = (leaveCapture.tile + tiles * tiles - 1) % (tiles * tiles);
+                    const int faceIdx = leaveCapture.tile == 0 ? leaveCapture.face - 1 : leaveCapture.face;
+                    if (backend.TakeBackbufferReadback(pixels, rw, rh) &&
+                        rw == leaveCapture.tileSide && rh == leaveCapture.tileSide &&
+                        faceIdx >= 0 && faceIdx < 6) {
+                        auto& face = leaveCapture.faces[static_cast<size_t>(faceIdx)];
+                        const size_t faceStride = static_cast<size_t>(leaveCapture.size) * 4u;
+                        const size_t tileStride = static_cast<size_t>(rw) * 4u;
+                        if (face.size() != faceStride * static_cast<size_t>(leaveCapture.size)) {
+                            face.assign(faceStride * static_cast<size_t>(leaveCapture.size), 0);
+                        }
+                        const int tx = tileIdx % tiles, ty = tileIdx / tiles;
+                        for (int r = 0; r < rh; ++r) {
+                            std::memcpy(&face[(static_cast<size_t>(ty) * rh + r) * faceStride + static_cast<size_t>(tx) * tileStride],
+                                        &pixels[static_cast<size_t>(r) * tileStride], tileStride);
+                        }
+                        // Onto the GPU a tile at a time (the immediate path,
+                        // ~8 MB each), so no frame carries a whole face;
+                        // the face's texture was made on tile 0's request
+                        // frame and its mip job starts at its last tile.
+                        Render::PanoramaRenderer::UploadLastWorldRegion(faceIdx, tx * rw, ty * rh, rw, rh, pixels.data());
+                        if (tileIdx == tiles * tiles - 1) {
+                            if (!leaveCapture.pack) leaveCapture.pack = std::make_shared<Render::PanoramaRenderer::LastWorldFaces>();
+                            leaveCapture.pack->size = leaveCapture.size;
+                            leaveCapture.pack->rgba[static_cast<size_t>(faceIdx)] = std::move(face);
+                            Render::PanoramaRenderer::FinishLastWorldFace(faceIdx, leaveCapture.pack);
+                        }
+                    } else {
+                        leaveCapture.complete = false;
+                    }
+                    leaveCapture.awaitingTake = false;
+                    // No rest frame: the next tile is drawn on this same
+                    // frame, so a tile costs two frames (request, idle+take)
+                    // and the six faces are in within about fifty frames.
+                    // The rest frame kept the outro's frame time nearer
+                    // play's on a GPU-bound machine; the seconds it added
+                    // between the click and the title were the worse deal.
+                    leaveCapture.restFrames   = 0;
+                }
+                // Warm-up: is the mesher caught up? Six faces must have been
+                // shown to the scheduler, then a few quiet frames — or the
+                // cap, so a slow machine still leaves promptly.
+                if (leaveCapture.warming) {
+                    // Through the pause menu the prewarm has already meshed
+                    // every direction and this only mops up, so it is
+                    // short. The window's close button (or Quit Game) had
+                    // no pause menu first: give the mesher time — the
+                    // picture is wanted before the game goes.
+                    constexpr int  kMinWarmFrames = 2;
+                    constexpr int  kQuietFrames   = 2;
+                    // The trace shows the worker pool never idles at a
+                    // large render distance (the scheduler keeps ~2000 jobs
+                    // queued the whole time), so the quiet test never
+                    // passes and the title path always ran to its cap.
+                    // The pause menu has done the near work by the time
+                    // of the click; a quarter second is enough of a mop-up
+                    // (it was half, and every warm-up ran to the cap).
+                    const auto kWarmCap = leaveCapture.then == LeaveCapture::Then::Quit
+                        ? std::chrono::milliseconds(3000)
+                        : std::chrono::milliseconds(250);
+                    const size_t queued = Render::ClientMeshManager::GetPendingMeshBuildCount() +
+                                          Render::ClientMeshManager::GetCompletedResultCount();
+                    leaveCapture.idleFrames = queued == 0 ? leaveCapture.idleFrames + 1 : 0;
+                    const bool caughtUp = leaveCapture.warmFrames >= kMinWarmFrames &&
+                                          leaveCapture.idleFrames >= kQuietFrames;
+                    const bool capped   = std::chrono::steady_clock::now() - leaveCapture.warmStart >= kWarmCap;
+                    // Through the pause menu its prewarm has been feeding a
+                    // face a frame to the scheduler the whole time it was
+                    // up; the minimum is all the leave needs.
+                    const bool prewarmed = leaveCapture.active && leaveCapture.viaPauseMenu &&
+                                           leaveCapture.warmFrames >= kMinWarmFrames;
+                    if (caughtUp || capped || prewarmed) {
+                        leaveCapture.warming = false;
+                        leaveCapture.face    = 0;
+                        leaveCapture.tile    = 0;
+                        leaveCapture.baseYaw = camera.yaw;   // the six faces are about this
+                        Log::Info("Leave capture: meshes %s after %d warm-up frame(s)",
+                                  caughtUp ? "caught up" : "still building (capped)", leaveCapture.warmFrames);
+                    }
+                }
+                // Warm-up frames draw nothing extra: the face-a-frame cull
+                // that feeds the scheduler runs after the portal pass, the
+                // same one the pause menu uses (see there). Counted here.
+                if (leaveCapture.warming) ++leaveCapture.warmFrames;
+                const bool drawFace = !leaveCapture.warming && !leaveCapture.prepassStop &&
+                                      leaveCapture.face < 6 && leaveCapture.complete &&
+                                      !leaveCapture.awaitingTake && leaveCapture.restFrames == 0;
+                if (drawFace) {
+                    // One face per frame either way; warm-up cycles 0..5
+                    // and only feeds the scheduler, the capture reads back.
+                    const int faceIndex = leaveCapture.warming ? (leaveCapture.warmFrames % 6) : leaveCapture.face;
+                    // Tile side. The world at the hand-over shows ~70° over
+                    // the window's height; a face is 90° wide, so the face
+                    // that matches the world pixel for pixel is about 1.44×
+                    // the height (2·tan45° / 2·tan35°). Two tiles of 0.72
+                    // heights make exactly that: neither the soft magnified
+                    // 1× nor the sparkling minified 2× it used to be.
+                    const int side = std::max(1, static_cast<int>(std::lround(std::min(width, height) * 0.72)));
+                    // Warm-up faces follow the turning view (any direction
+                    // serves the scheduler); the captured six are about the
+                    // yaw the capture began at, so they join up.
+                    const Render::Camera faceCam = makeFaceCamera(
+                        faceIndex, leaveCapture.warming ? camera.yaw : leaveCapture.baseYaw,
+                        /*publishOrigin=*/true);
+                    // The projection: the whole 90° face for a warm-up
+                    // frame; for the capture, the off-axis frustum of this
+                    // tile of it (a kTiles×kTiles cut of the same 90° near
+                    // plane), so the tiles butt together into one face.
+                    const int  tiles = leaveCapture.warming ? 1 : kLeaveTiles;
+                    const int  tx    = leaveCapture.warming ? 0 : leaveCapture.tile % tiles;
+                    const int  ty    = leaveCapture.warming ? 0 : leaveCapture.tile / tiles;
+                    auto tileProjection = [&](float nearPlane, float farPlaneZ) {
+                        // 90° both ways: the near plane's half-extent is
+                        // the near distance. Rows top-down (ty 0 = top).
+                        const float l = nearPlane * (-1.0f + 2.0f * static_cast<float>(tx)     / static_cast<float>(tiles));
+                        const float r = nearPlane * (-1.0f + 2.0f * static_cast<float>(tx + 1) / static_cast<float>(tiles));
+                        const float t = nearPlane * ( 1.0f - 2.0f * static_cast<float>(ty)     / static_cast<float>(tiles));
+                        const float b = nearPlane * ( 1.0f - 2.0f * static_cast<float>(ty + 1) / static_cast<float>(tiles));
+                        return glm::frustum(l, r, b, t, nearPlane, farPlaneZ);
+                    };
+                    const glm::mat4 faceProj = tileProjection(Render::ChunkRenderer::NearPlane(), farPlane);
+                    const glm::mat4 faceView = faceCam.GetViewMatrix();
+                    const Frustum faceFrustum = Frustum::FromMatrix(faceProj * faceCam.GetWorldViewMatrix());
+                    const float facePartial = [&] {
+                        const float remaining = std::chrono::duration<float>(
+                            nextClientTick - std::chrono::steady_clock::now()).count();
+                        const float tickSeconds = std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                        return std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                    }();
+
+                    backend.SetViewport(0, 0, side, side);
+                    backend.Clear(true, true, true);
+                    {
+                        const glm::mat4 skyProj = tileProjection(0.05f, 2048.0f);
+                        Render::g_skyRenderer.Render(skyProj, glm::mat4(glm::mat3(faceView)));
+                    }
+                    // Exact: the square 90° projection on every backend
+                    // (the Vulkan path otherwise substitutes the window's).
+                    // No chunk fade-in on a face: the warm-up meshed these
+                    // sections moments ago, and the panorama is a finished
+                    // picture, not a view still arriving.
+                    if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetSectionFadeSuppressed(true);
+                    Render::RenderChunksAll(faceCam, faceFrustum, faceProj, /*exactProjection=*/true);
+                    itemEntityRenderer.Render(faceProj, faceView, faceCam.position, facePartial);
+                    Render::g_blockCubeEntityRenderer.Render(faceProj, faceView, faceCam.position, facePartial);
+                    xpOrbRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum, facePartial);
+                    if (Client::g_clientMobManager) {
+                        mobRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum,
+                                           *Client::g_clientMobManager, facePartial);
+                    }
+                    if (Client::g_remotePlayerManager) {
+                        playerRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum,
+                                              *Client::g_remotePlayerManager, facePartial, nullptr,
+                                              Render::ChunkRenderer::PortalEntityClipPlane());
+                    }
+                    if (Render::g_blockEntityRenderDispatcher) {
+                        Render::g_blockEntityRenderDispatcher->RenderAll(
+                            Client::g_clientChunkManager, faceProj, faceView, faceCam.position, facePartial);
+                    }
+                    Render::g_endPortalRenderer.Render(Client::g_clientChunkManager, faceProj, faceView,
+                                                       faceCam.position, facePartial);
+                    Render::g_bedRenderer.Render(Client::g_clientChunkManager, faceProj, faceView,
+                                                 faceCam.position, facePartial);
+                    // Translucent terrain after the entities, as the frame does.
+                    Render::RenderChunksDeferredTranslucent();
+                    if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetSectionFadeSuppressed(false);
+                    // Clouds, as the frame draws them after the level — and
+                    // only where the frame draws them: the panorama is of
+                    // the ACTIVE dimension (the sky above is g_skyRenderer's
+                    // own), so the Overworld's cloud layer must not be
+                    // painted over a Hush or End horizon.
+                    if (Render::g_skyRenderer.HasClouds()) {
+                        Render::g_cloudRenderer.Render(faceProj, faceView, faceCam.position,
+                                                       effectiveRenderDist, facePartial);
+                    }
+
+                    // A face's 38 MB CPU buffer (zero-filled, page-faulted
+                    // in) and its 48 MB GPU texture, on a frame that does
+                    // nothing else: one face per warm-up frame, else the
+                    // face's own request frame. Never a take frame.
+                    auto prepareFace = [&](int f, int faceSize) {
+                        if (f < 0 || f >= 6 || leaveCapture.facePrepared[static_cast<size_t>(f)]) return;
+                        auto& faceBuf = leaveCapture.faces[static_cast<size_t>(f)];
+                        const size_t bytes = static_cast<size_t>(faceSize) * static_cast<size_t>(faceSize) * 4u;
+                        if (faceBuf.size() != bytes) faceBuf.assign(bytes, 0);
+                        Render::PanoramaRenderer::BeginLastWorldFace(f, faceSize);
+                        leaveCapture.facePrepared[static_cast<size_t>(f)] = true;
+                    };
+                    if (leaveCapture.warming) {
+                        if (leaveCapture.warmFrames < 6) prepareFace(leaveCapture.warmFrames, side * tiles);
+                        ++leaveCapture.warmFrames;
+                    } else {
+                        if (backend.RequestBackbufferReadback(0, 0, side, side)) {
+                            leaveCapture.awaitingTake = true;
+                            leaveCapture.framesSinceRequest = 0;
+                            leaveCapture.tileSide = side;
+                            leaveCapture.size     = side * tiles;
+                            if (leaveCapture.tile == 0) prepareFace(leaveCapture.face, leaveCapture.size);
+                        } else {
+                            leaveCapture.complete = false;
+                        }
+                        if (++leaveCapture.tile >= tiles * tiles) {
+                            leaveCapture.tile = 0;
+                            ++leaveCapture.face;
+                        }
+                    }
+                    // Gone before the frame's own view; the main camera's
+                    // PrepareRender below restores the render origin.
+                    backend.Clear(true, true, true);
+                    backend.SetViewport(0, 0, width, height);
+                } else if (!leaveCapture.warming && !leaveCapture.awaitingTake &&
+                           (leaveCapture.face >= 6 || !leaveCapture.complete)) {
+                    // Finished: every face is in (or one could not be). Not
+                    // on a warm-up frame, and not on a rest frame between
+                    // tiles — when the warm-up stopped drawing, this branch
+                    // fired on the click frame and ended the session at once.
+                    if (leaveCapture.prepass) {
+                        // The pause menu's capture is in: the faces wait
+                        // for the click. A failed read-back drops them and
+                        // the leave captures again.
+                        leaveCapture.prepass = false;
+                        if (leaveCapture.complete) {
+                            leaveCapture.captured = true;
+                            Log::Info("Leave capture: six faces taken under the pause menu");
+                        } else {
+                            Render::PanoramaRenderer::DiscardAdoptedFaces();
+                            leaveCapture.pack.reset();
+                            for (auto& f : leaveCapture.faces) { f.clear(); f.shrink_to_fit(); }
+                            leaveCapture.facePrepared.fill(false);
+                        }
+                    } else {
+                        if (leaveCapture.complete) {
+                            // Off the main thread: six PNG encodes took the
+                            // seconds that used to sit between the last world
+                            // frame and the title. The title builds its textures
+                            // from these same faces in memory.
+                            auto pack = leaveCapture.pack ? leaveCapture.pack
+                                                          : std::make_shared<Render::PanoramaRenderer::LastWorldFaces>();
+                            leaveCapture.pack.reset();
+                            pack->size    = leaveCapture.size;
+                            pack->worldId    = sessionWorldId;
+                            pack->baseYaw    = leaveCapture.baseYaw;
+                            pack->leaveYaw   = leaveCapture.clickYaw;
+                            pack->leavePitch = leaveCapture.clickPitch;
+                            Render::PanoramaRenderer::SaveLastWorldAsync(std::move(pack));
+                            // Where the view is NOW, past face 0 (the capture's
+                            // base yaw): the title panorama opens right there.
+                            Render::PanoramaRenderer::SetHandoff(camera.yaw - leaveCapture.baseYaw,
+                                                                 camera.pitch, camera.fov);
+                        } else {
+                            Log::Info("Leave capture: the backend could not read the frame back — no last-world panorama");
+                            Render::PanoramaRenderer::DiscardAdoptedFaces();
+                        }
+                        for (auto& f : leaveCapture.faces) { f.clear(); f.shrink_to_fit(); }
+                        leaveCapture.active   = false;
+                        leaveCapture.finished = true;
+                        if (leaveCapture.then == LeaveCapture::Then::Quit) {
+                            glfwSetWindowShouldClose(window, GLFW_TRUE);
+                        } else {
+                            returnToTitle = true;
+                        }
+                        leaveCapture.captured = false;
+                    }
+                }
+            }
+
+            // The camera's position is final for this frame: pick this
+            // view's render origin (its block position) and publish it —
+            // every matrix and vertex built below is relative to it, the
+            // culling below stays in world space (RenderOrigin.hpp).
+            camera.PrepareRender();
             glm::mat4 view = camera.GetViewMatrix();
-            glm::mat4 viewProj = proj * view;
-            frustum = Frustum::FromMatrix(viewProj);
+            // What a shader pack's uniforms are built from this frame; set on
+            // its gbuffers programs before the terrain draws, and given to
+            // EndScene for the composites.
+            auto shaderFrameInput = [&]() {
+                const Render::EnvironmentFrame& env = Render::EnvironmentState::Get().Frame();
+                Render::ShaderFrameInput in;
+                in.projection     = proj;
+                in.view           = view;
+                in.cameraPosition = camera.position;
+                in.nearPlane      = Render::ChunkRenderer::NearPlane();
+                in.farPlane       = farPlane;
+                in.sunAngleDeg    = env.sunAngleDeg;
+                in.moonPhase      = env.moonPhase;
+                in.skyColor       = env.skyColor;
+                in.fogColor       = env.fogColor;
+                in.fogStart       = env.fogEnvStart;
+                in.fogEnd         = env.fogEnvEnd;
+                in.skyBrightness  = env.skyBrightness;
+                in.dayTime        = static_cast<long long>(Render::EnvironmentState::Get().DayTime());
+                in.isEyeInWater   = player.physics.isEyeInWater ? 1
+                                  : (player.physics.isEyeInLava ? 2 : 0);
+                // MC eyeBrightness: the packed light at the camera
+                // entity's eye (getPackedLightCoords), from the chunk light.
+                in.eyeSkyLight = 15;
+                in.eyeBlockLight = 0;
+                if (Client::g_clientBlockAccess) {
+                    const int bx = static_cast<int>(std::floor(camera.position.x));
+                    const int by = static_cast<int>(std::floor(camera.position.y));
+                    const int bz = static_cast<int>(std::floor(camera.position.z));
+                    in.eyeSkyLight = Client::g_clientBlockAccess->GetBrightness(
+                        Game::Lighting::LightLayer::Sky, bx, by, bz);
+                    in.eyeBlockLight = Client::g_clientBlockAccess->GetBrightness(
+                        Game::Lighting::LightLayer::Block, bx, by, bz);
+                }
+                in.deltaSeconds   = dt;
+                in.hideGui        = s_hideHudForLeave;
+                in.dimension      = static_cast<int>(Client::ClientLevels::ActiveDimension());
+                return in;
+            };
+            if (Render::ShaderPipeline::Get().Active()) {
+                Render::ShaderPipeline::Get().SetFrameInput(shaderFrameInput());
+            }
+            frustum = Frustum::FromMatrix(proj * camera.GetWorldViewMatrix());
 
             // Free camera: `frustum` — the one handed to RenderChunksAll AND
             // to every entity renderer below (MobRenderer, PlayerRenderer,
@@ -5060,12 +7796,21 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // — which means their camera-DISTANCE culls also measure from the
             // fly position; accepted, it can only ever draw more, never cull
             // what the player view would keep.
-            if (freeCamActive) {
+            // Which view the free camera culls from is the Render Controls
+            // checkbox (Debug::DebugSystem::FreeCamCullFromPlayer): by default
+            // the free camera itself, so `frustum` (built from `camera`,
+            // which already holds the free cam's pose) and the BFS origin
+            // simply follow it and everything around it draws — the chunk
+            // set is still the player's, since nothing about loading reads
+            // the camera. The frozen-at-player override is the
+            // culling-verification mode.
+            const bool freeCamCullAtPlayer = freeCamActive && Debug::DebugSystem::FreeCamCullFromPlayer();
+            if (freeCamCullAtPlayer) {
                 Render::Camera playerViewCam = camera;   // keeps fov + viewTilt
                 playerViewCam.position = tpSavedPos;
                 playerViewCam.yaw      = tpSavedYaw;
                 playerViewCam.pitch    = tpSavedPitch;
-                frustum = Frustum::FromMatrix(proj * playerViewCam.GetViewMatrix());
+                frustum = Frustum::FromMatrix(proj * playerViewCam.GetWorldViewMatrix());
                 if (Render::g_chunkRenderer) {
                     Render::g_chunkRenderer->SetCullOverride(playerViewCam, frustum);
                 }
@@ -5076,14 +7821,28 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // the main far plane at low render distances.
             {
                 PROFILE_ZONE_N("SkyPass");
+                DEBUG_PIE_ZONE("Sky");
                 glm::mat4 skyProj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, 2048.0f);
                 glm::mat4 viewRotation = glm::mat4(glm::mat3(view));
-                if (!Render::DevSkip("sky")) Render::g_skyRenderer.Render(skyProj, viewRotation);
+                // MC Camera.doesMobEffectBlockSky: BLINDNESS / DARKNESS leave
+                // the sky undrawn — the darkened fog clear colour shows.
+                if (!Render::DevSkip("sky") && !Render::MobEffectBlocksSky())
+                    Render::g_skyRenderer.Render(skyProj, viewRotation);
             }
 
             // Main chunk rendering (includes frustum culling and all render passes)
+            // MC's "Main" frame-graph pass: solid terrain, the solid
+            // features (entities, block entities), translucent terrain. The
+            // terrain halves come from the chunk renderer's own pass timers.
+            Render::DebugScreen::FrameProfiler::Push("Main");
             { PROFILE_ZONE_N("ChunkPass.Main");
             Render::RenderChunksAll(camera, frustum);
+            if (Render::DebugScreen::FrameProfiler::IsActive()) {
+                if (auto* rs = Render::GetChunkRendererStats()) {
+                    Render::DebugScreen::FrameProfiler::AddChildTime("solidTerrain", rs->opaquePassTimeMs + rs->cutoutPassTimeMs);
+                    // translucentTerrain is added where the deferred pass draws.
+                }
+            }
             }
             // Flicker diagnostics: the MAIN pass's numbers, read here and not
             // at frame end — a portal view into this same level re-enters
@@ -5099,7 +7858,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // The cull override applies to the MAIN view only — clear it
             // before the portal see-through pass re-enters RenderChunksAll,
             // which must cull each recursion from its own virtual camera.
-            if (freeCamActive && Render::g_chunkRenderer) {
+            if (freeCamCullAtPlayer && Render::g_chunkRenderer) {
                 Render::g_chunkRenderer->ClearCullOverride();
             }
 
@@ -5145,13 +7904,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // the plane. Hoisted to the outer render-loop scope so it
             // can be used both by the main-scene ghost paths and by
             // the see-through callback below.
-            auto BodyStraddlesEntryPlane = [](const glm::vec3& pos,
-                                              const glm::vec4& plane,
+            // DOUBLE: the plane's w is world-sized (−n·origin), and a
+            // float one is 3 cm off at x = 300,000 — the same as the body.
+            auto BodyStraddlesEntryPlane = [](const glm::dvec3& pos,
+                                              const glm::dvec4& plane,
                                               float height) {
-                const glm::vec3 n = glm::vec3(plane);
-                const float sdF = glm::dot(pos, n) + plane.w;          // feet
-                const float sdH = sdF + height * n.y;                   // head
-                return (sdF * sdH) <= 0.0f;
+                const glm::dvec3 n(plane);
+                const double sdF = glm::dot(pos, n) + plane.w;         // feet
+                const double sdH = sdF + static_cast<double>(height) * n.y;   // head
+                return (sdF * sdH) <= 0.0;
             };
             if (Client::g_remotePlayerManager) {
                 PROFILE_ZONE_N("RemotePlayers");
@@ -5160,6 +7921,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // (main pass, then each portal recursion below) — see
                 // EntityFrame.hpp. Once, before the first of them runs.
                 Render::EntityFrame::Begin();
+                // GLOWING outlines (EntityOutline.hpp): the main view's
+                // entity draws below hand their glowing entities over; the
+                // portal views later in the frame do not.
+                Render::EntityOutline::Get().BeginFrame();
+                Render::EntityOutline::Get().SetCollecting(true);
                 g_playerDrawDiag.Reset();
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
@@ -5189,11 +7955,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 {
                     auto& portals = Client::GetClientPortalManager();
                     for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
-                        const glm::vec3 renderPosCheck {
-                            glm::mix(rp.renderPrevPosition.x, rp.position.x, partialTick),
-                            glm::mix(rp.renderPrevPosition.y, rp.position.y, partialTick),
-                            glm::mix(rp.renderPrevPosition.z, rp.position.z, partialTick),
-                        };
+                        if (rp.invisible) continue;
+                        const glm::dvec3 renderPosCheck =
+                            glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(partialTick));
                         auto gC = portals.GetStraddlingGhost(renderPosCheck, 1.8f * rp.scale);
                         if (gC.valid && BodyStraddlesEntryPlane(renderPosCheck,
                                                                 gC.entryClipPlane, 1.8f * rp.scale)) {
@@ -5205,11 +7969,98 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 #else
                 const std::unordered_set<uint32_t>* bulkSkipIds = nullptr;
 #endif
+                // /control: seen from inside their head, the controlled
+                // player's own body is not drawn (MC: the camera entity is
+                // skipped in first person).
+                std::unordered_set<uint32_t> controlSkipIds;
+                if (controlView && Client::Control::Get().view.perspective == 0) {
+                    if (bulkSkipIds) controlSkipIds = *bulkSkipIds;
+                    controlSkipIds.insert(Client::Control::Get().otherId);
+                    bulkSkipIds = &controlSkipIds;
+                }
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
 
                 // Dropped items, drawn with the same partialTick the remote
                 // players use so everything in the world moves on one clock.
+                // /morph: one body by kind. Items and orbs draw at once through
+                // their own renderers; mobs and blocks collect for one mob-
+                // renderer call. `seed` gives an item its own bob phase.
+                auto drawMorph = [&](const Render::MobRenderer::MorphPose& pose, uint32_t seed,
+                                     std::vector<Render::MobRenderer::MorphPose>& mobsAndBlocks) {
+                    // INVISIBILITY: an item, orb or block-entity body has no
+                    // layers to keep — nothing is drawn (MC: the body render
+                    // type is null). Mob and block bodies go on: the mob
+                    // renderer keeps their layers and outlines a glowing one.
+                    const Game::Morph::Kind morphKind = Game::Morph::KindOf(pose.code);
+                    if (pose.invisible && (morphKind == Game::Morph::Kind::Item ||
+                                           morphKind == Game::Morph::Kind::Xp)) {
+                        return;
+                    }
+                    // A bed is a block entity, not a block model: its own
+                    // renderer draws it, foot in the player's cell, head one
+                    // cell along the morph's turn (Shift+Alt).
+                    if (Game::Morph::KindOf(pose.code) == Game::Morph::Kind::Block &&
+                        Game::IsBedBlock(static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code)))) {
+                        if (pose.invisible) return;
+                        static constexpr Game::Direction kTurns[4] = {
+                            Game::Direction::South, Game::Direction::West,
+                            Game::Direction::North, Game::Direction::East };
+                        Render::g_bedRenderer.RenderSingle(
+                            static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code)),
+                            kTurns[Game::Morph::BlockRotationOf(pose.code)],
+                            pose.position - glm::dvec3(0.5, 0.0, 0.5), proj, view,
+                            glm::dvec3(camera.position));
+                        return;
+                    }
+                    // Any other block whose look is a block-entity renderer's
+                    // (chest, shulker box…): its block MODEL has no faces of
+                    // its own, so the model path drew an atlas-sized nothing.
+                    // The renderer's item form (BEWLR — the same mesh the hand
+                    // and the inventory icon use, in MC pixel space [0,16]³)
+                    // is placed in the cell and turned by the morph's
+                    // rotation about the cell's centre.
+                    if (Game::Morph::KindOf(pose.code) == Game::Morph::Kind::Block &&
+                        Render::g_blockEntityRenderDispatcher) {
+                        const auto blockId = static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code));
+                        const Game::BlockEntityType* beType = Game::BlockEntityTypes::ForBlock(blockId);
+                        Render::BlockEntityRenderer* beRenderer =
+                            beType ? Render::g_blockEntityRenderDispatcher->GetRenderer(beType->TypeId()) : nullptr;
+                        if (beRenderer && beRenderer->SupportsBEWLR()) {
+                            if (pose.invisible) return;
+                            glm::mat4 model = glm::translate(glm::mat4(1.0f),
+                                Render::ToRender(pose.position - glm::dvec3(0.5, 0.0, 0.5)));
+                            model = glm::translate(model, glm::vec3(0.5f, 0.0f, 0.5f));
+                            model = glm::rotate(model, glm::radians(-90.0f * static_cast<float>(Game::Morph::BlockRotationOf(pose.code))),
+                                                glm::vec3(0.0f, 1.0f, 0.0f));
+                            model = glm::translate(model, glm::vec3(-0.5f, 0.0f, -0.5f));
+                            model = glm::scale(model, glm::vec3(1.0f / 16.0f));
+                            // A body in the level: the frame's fog and light.
+                            Render::BEWLRLight light;
+                            light.world = true;
+                            light.localToRender = model;
+                            light.cameraWorld = glm::dvec3(camera.position);
+                            beRenderer->RenderBEWLR(blockId, proj * view * model, light);
+                            return;
+                        }
+                    }
+                    switch (Game::Morph::KindOf(pose.code)) {
+                        case Game::Morph::Kind::Item:
+                            itemEntityRenderer.RenderSingle(
+                                Game::ItemStack(static_cast<Game::ItemID>(Game::Morph::IdOf(pose.code)), 1),
+                                pose.position, pose.ageTicks,
+                                static_cast<float>(seed % 32) / 32.0f * 6.2831853f,
+                                proj, view, camera.position);
+                            break;
+                        case Game::Morph::Kind::Xp:
+                            xpOrbRenderer.RenderSingle(5, pose.position, pose.ageTicks, proj, view, camera.position);
+                            break;
+                        default:
+                            mobsAndBlocks.push_back(pose);
+                            break;
+                    }
+                };
                 auto drawWorldEntities = [&]() {
+                    DEBUG_PIE_ZONE("renderSolidFeatures");
                     // Remote players go through the same cut as everything
                     // else below: a friend stepping into a nether portal is
                     // drawn up to the surface here and from it in the
@@ -5235,6 +8086,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         PROFILE_ZONE_N("Render.Mobs");
                         mobRenderer.Render(proj, view, camera.position, frustum,
                                            *Client::g_clientMobManager, partialTick);
+                        // MC LightningBoltRenderer (additive, after opaque terrain).
+                        lightningBoltRenderer.Render(proj, view, camera.position,
+                                                     *Client::g_clientMobManager);
+                    }
+                    // /morph: a morphed remote player is their body, drawn
+                    // with the player's pose (the stick figure pass skipped
+                    // them): a mob or block by the mob renderer, an item or
+                    // orb by theirs.
+                    if (Client::g_remotePlayerManager && !Render::DevSkip("players")) {
+                        std::vector<Render::MobRenderer::MorphPose> morphs;
+                        for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                            if (!rp.IsMorphed() || rp.invisible || !rp.positionInitialized) continue;
+                            if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                            if (bulkSkipIds && bulkSkipIds->count(id)) continue;
+                            drawMorph(MorphPoseOf(rp, partialTick), id, morphs);
+                        }
+                        if (!morphs.empty()) {
+                            PROFILE_ZONE_N("Render.Morphs");
+                            mobRenderer.RenderMorphs(proj, view, camera.position, frustum, morphs, partialTick);
+                        }
                     }
                 };
 #if ENABLE_IMMERSIVE_PORTALS
@@ -5324,10 +8195,16 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                             if (!farLevel) continue;
                             const Game::Immersive::Portal* r = farLevel->Portals().Get(p->reversePortalId);
                             if (!r) continue;
-                            const glm::mat4 Minv(glm::inverse(p->TransformMatrix()));
-                            const glm::mat4 backView = view * Minv;
-                            const glm::vec3 farEye(p->TransformPoint(glm::dvec3(camera.position)));
-                            const Frustum backFrustum = Frustum::FromMatrix(proj * backView);
+                            // The far level is drawn relative to the far
+                            // eye's own render origin; the view bridges the
+                            // two render spaces in double (RenderOrigin.hpp).
+                            const glm::dmat4 Minv = glm::inverse(p->TransformMatrix());
+                            const glm::dvec3 farEyeD = p->TransformPoint(camera.position);
+                            const glm::dvec3 farOrigin = Render::RenderOriginFor(farEyeD);
+                            const glm::mat4 backView = Render::FarRenderView(view, Minv, camera.renderOrigin, farOrigin);
+                            const glm::vec3 farEye(farEyeD);
+                            // Culling stays in world space.
+                            const Frustum backFrustum = Frustum::FromMatrix(proj * camera.GetWorldViewMatrix() * glm::mat4(Minv));
                             const Game::Immersive::HalfSpace behind{ r->origin, -r->Normal() };
                             Render::ChunkRenderer::SetPortalClipPlane(behind.AsClipPlane());
                             Render::EntityCulling::g_crossingFilter =
@@ -5335,6 +8212,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                     return r->IntersectsBox(glm::dvec3(lo), glm::dvec3(hi), 0.25);
                                 };
                             Client::ClientLevels::WithLevel(p->destDimension, [&]() {
+                                Render::SetRenderOrigin(farOrigin);
                                 if (Client::g_remotePlayerManager && !Render::DevSkip("players")) {
                                     // A player's copy on this client lags the
                                     // real one by a few ticks: just after a
@@ -5354,7 +8232,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                         };
                                     playerRenderer.Render(proj, backView, farEye, backFrustum,
                                                           *Client::g_remotePlayerManager, partialTick, nullptr,
-                                                          behind.AsClipPlane());
+                                                          Render::PlaneToRender(behind.AsClipPlane()));
                                     g_playerDrawDiag.Add(g_playerDrawDiag.reverse, playerRenderer.LastTally());
                                     Render::EntityCulling::g_crossingFilter =
                                         [r](const glm::vec3& lo, const glm::vec3& hi) {
@@ -5370,9 +8248,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                     mobRenderer.Render(proj, backView, farEye, backFrustum,
                                                        *Client::g_clientMobManager, partialTick);
                                 }
+                                camera.ActivateRenderOrigin();
                             });
                         }
-                        Render::ChunkRenderer::SetPortalClipPlane(glm::vec4(0.0f));
+                        Render::ChunkRenderer::SetPortalClipPlane(glm::dvec4(0.0));
                         Render::EntityCulling::g_crossingFilter = nullptr;
                     }
                 }
@@ -5386,17 +8265,64 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // transform; the body still faces where the player looks.
                 // The free camera is a detached camera too, so the same rule
                 // applies: the frozen body must be visible from the fly view.
-                if (tpActive || freeCamActive) {
-                    playerRenderer.RenderSingle(
-                        proj, view, glm::vec3(player.visualPos),
-                        tpSavedYaw, tpSavedYaw, tpSavedPitch,
-                        player.physics.isSneaking,
-                        static_cast<uint8_t>(player.color),
-                        BodyScaleModel(glm::vec3(player.visualPos), player.physics.scale), glm::vec4(0.0f),
-                        // Your own corpse topples too — MC renders the camera
-                        // entity like any other while the camera is detached.
-                        Render::MobRenderer::DeathFlipDegrees(player.deathTime,
-                                                              partialTick));
+                // (A carried item — /morph item, picked up — has no body to
+                // draw: it is invisible, in the holder's hand.)
+                // (Nor a block morph locked into a cell the real block now
+                // fills — the block is the body.)
+                const bool ownBodyVisible = (tpActive || freeCamActive || controlView) &&
+                                            player.heldByPlayer == 0 &&
+                                            !(player.morphGridLock && player.morphLockBlockSeen);
+                if (ownBodyVisible && player.IsMorphed()) {
+                    // /morph: your own body is the morph too, with the same
+                    // lagged body yaw the other clients draw (TickMorph) and
+                    // the camera's look for the head.
+                    Render::MobRenderer::MorphPose pose;
+                    pose.code      = player.morph;
+                    pose.position  = player.visualPos;
+                    pose.bodyYaw   = Game::Mth::RotLerp(partialTick, player.morphBodyYawOld, player.morphBodyYaw);
+                    pose.headYaw   = tpSavedYaw;
+                    pose.pitch     = tpSavedPitch;
+                    pose.walkPos   = player.morphWalk.PositionAt(partialTick);
+                    pose.walkSpeed = player.morphWalk.SpeedAt(partialTick);
+                    pose.ageTicks  = static_cast<float>(player.morphTicks) + partialTick;
+                    pose.scale     = player.physics.scale;
+                    pose.hurtTime  = player.hurtTime;
+                    pose.deathTime = player.deathTime;
+                    pose.swell     = Game::Mth::Lerp(partialTick, static_cast<float>(player.morphSwellOld),
+                                                     static_cast<float>(player.morphSwell)) /
+                                     static_cast<float>(Game::Morph::kCreeperSwellTicks);
+                    pose.animTick  = Game::Mth::Lerp(partialTick, static_cast<float>(player.morphAnimTicksOld),
+                                                     static_cast<float>(player.morphAnimTicks));
+                    pose.crouching = player.physics.isSneaking;
+                    // MC renders the camera entity like any other in third
+                    // person: its own INVISIBILITY and GLOWING apply.
+                    pose.invisible = player.HasEffect(Game::MobEffectId::Invisibility);
+                    pose.glowing   = player.HasEffect(Game::MobEffectId::Glowing);
+                    std::vector<Render::MobRenderer::MorphPose> own;
+                    drawMorph(pose, 0, own);
+                    if (!own.empty()) {
+                        mobRenderer.RenderMorphs(proj, view, camera.position, frustum, own, partialTick);
+                    }
+                } else if (ownBodyVisible) {
+                    // MC renders the camera entity like any other in third
+                    // person: INVISIBILITY hides the body (the stick figure
+                    // has no layers to keep), GLOWING outlines it — both at
+                    // once leave the outline alone.
+                    const bool ownInvisible = player.HasEffect(Game::MobEffectId::Invisibility);
+                    const bool ownGlowing   = player.HasEffect(Game::MobEffectId::Glowing);
+                    if (!ownInvisible || ownGlowing) {
+                        playerRenderer.RenderSingle(
+                            proj, view, player.visualPos,
+                            tpSavedYaw, tpSavedYaw, tpSavedPitch,
+                            player.physics.isSneaking,
+                            static_cast<uint8_t>(player.color),
+                            BodyScaleModel(player.visualPos, player.physics.scale), glm::dvec4(0.0),
+                            // Your own corpse topples too — MC renders the camera
+                            // entity like any other while the camera is detached.
+                            Render::MobRenderer::DeathFlipDegrees(player.deathTime,
+                                                                  partialTick),
+                            ownGlowing, /*drawBody=*/!ownInvisible);
+                    }
                 }
 
 #if ENABLE_PORTAL_GUN
@@ -5412,11 +8338,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 {
                     auto& portals = Client::GetClientPortalManager();
                     for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
-                        const glm::vec3 renderPos {
-                            glm::mix(rp.renderPrevPosition.x, rp.position.x, partialTick),
-                            glm::mix(rp.renderPrevPosition.y, rp.position.y, partialTick),
-                            glm::mix(rp.renderPrevPosition.z, rp.position.z, partialTick),
-                        };
+                        // No portal ghost for an invisible body either
+                        // (/invisible or INVISIBILITY — a stick figure has
+                        // no layers to keep).
+                        if (rp.invisible || rp.effects.Invisible()) continue;
+                        if (rp.IsMorphed()) continue; // a morph is drawn by the mob renderer
+                        // Double all the way into the ghost test, RenderSingle
+                        // and BodyScaleModel.
+                        const glm::dvec3 renderPos =
+                            glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(partialTick));
                         const float headYaw = Client::RotLerp(partialTick,
                             rp.renderPrevRotation.x, rp.rotation.x);
                         const float pitch   = glm::mix(rp.renderPrevRotation.y,
@@ -5437,7 +8367,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                                      g.entryClipPlane, 1.8f * rp.scale)) {
                             continue;
                         }
-                        const glm::mat4 bodyScale = BodyScaleModel(renderPos, rp.scale);
+                        const glm::dmat4 bodyScale = BodyScaleModel(renderPos, rp.scale);
                         // 1) Entry-side body, clipped to the half on the
                         //    source side of the source portal plane. Uses
                         //    identity model — same world position as the
@@ -5481,6 +8411,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     }
                 }
 #endif
+                Render::EntityOutline::Get().SetCollecting(false);
             }
 
             // Update per-frame item render context so animated items (compass, clock, etc.)
@@ -5499,6 +8430,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // Compass target: world spawn at (0, 0). LodestoneTracker support TODO.
                 ctx.compassTargetX = 0.0f;
                 ctx.compassTargetZ = 0.0f;
+                // The Hush's echo compass: the nearest Echo Vault, when the
+                // server has one for this dimension; otherwise it spins.
+                {
+                    double ex = 0.0, ez = 0.0;
+                    ctx.echoCompassHasTarget = Client::HushSignalState::CompassTarget(
+                        Client::ClientLevels::ActiveDimension(), ex, ez);
+                    ctx.echoCompassTargetX = static_cast<float>(ex);
+                    ctx.echoCompassTargetZ = static_cast<float>(ez);
+                }
                 ctx.timeSeconds = static_cast<float>(glfwGetTime());
                 // Shield-raise predicate feed (BLOCK use animation running).
                 ctx.usingItemBlock = player.usingItem
@@ -5508,15 +8448,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Game::ItemRegistry::TickAnimated(dt);
             }
 
-            // Render UI overlay elements
-#if ENABLE_IMMERSIVE_PORTALS
-            if (player.lastBlockHitPortalId == 0)
-#endif
-            {
-                RenderBlockHighlight(player, proj, view,
-                                     playerController.PickEntity() != 0);
-                RenderBlockBreakOverlay(playerController, proj, view);
-            }
+            // The block outline and the crack overlay used to be drawn here,
+            // before the block-entity and bed passes. The outline writes no
+            // depth (it is translucent), so a chest or a bed drawn later
+            // painted straight over it. It now follows those passes — MC
+            // LevelRenderer's order (terrain → entities → block entities →
+            // hit outline), the same order the portal pass already uses.
             // The fill tool's box, from its mark to the crosshair.
             {
                 glm::ivec3 fillLo, fillHi;
@@ -5525,6 +8462,50 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Render::g_fillPreviewRenderer.Render(proj, view, camera.position, fillState,
                                                          fillLo, fillHi);
                 }
+            }
+            // ── F3 world-space debug renderers (MC DebugRenderer) ──────────
+            // Chunk borders, hitboxes, the 3D crosshair and the visualize_*
+            // entries; drawn over the world, before the HUD, main view only.
+            if (Render::DebugRenderer::AnyEnabled()) {
+                PROFILE_ZONE_N("DebugRenderers");
+                DEBUG_PIE_ZONE("debug");
+                Render::DebugRenderer::FrameArgs dbg;
+                dbg.player = &player;
+                dbg.camera = &camera;
+                dbg.proj = proj;
+                dbg.view = view;
+                dbg.cameraPos = camera.position;
+                dbg.firstPerson = camera.IsFirstPerson() && !freeCamActive;
+                dbg.guiScale = s_debugGuiScale;
+                dbg.fovDeg = camera.fov;
+                dbg.fbWidth = width;
+                dbg.fbHeight = height;
+                {
+                    const auto nowPT = std::chrono::steady_clock::now();
+                    const float remainPT = std::chrono::duration<float>(nextClientTick - nowPT).count();
+                    const float tickPT = std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                    dbg.partialTick = std::clamp(1.0f - remainPT / tickPT, 0.0f, 1.0f);
+                }
+                Render::DebugRenderer::RenderWorld(dbg);
+            } else {
+                Render::DebugScreen::ClearBillboardTexts();
+            }
+            // ── The Hush's item signals: the tuning fork's ping outlines
+            // (always on top — seen through walls) and the pending mote
+            // rings (ping, resonance-arrow burst). Main view only, after the
+            // F3 renderers so their flush cannot take these with the wrong
+            // matrices; Flush is a no-op on an empty queue.
+            {
+                Client::HushSignalState::DrawAndSpawn(Client::ClientLevels::ActiveDimension(),
+                                                      static_cast<float>(width));
+                // Aurelith's flourishes (a key seated, a cabinet sung open,
+                // the Heart's bloom): the server's pending bursts as motes.
+                Client::AurelithState::SpawnPendingBursts(Client::ClientLevels::ActiveDimension());
+                Client::AurelithState::TickParticles(Client::ClientLevels::ActiveDimension(),
+                                                     glm::dvec3(camera.position),
+                                                     static_cast<int64_t>(Render::EnvironmentState::Get().GameTimeF(0.0f)));
+                Render::Gizmos::Flush(proj, view, glm::vec3(camera.position), camera.fov,
+                                      width, height);
             }
 
 
@@ -5537,9 +8518,23 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             if (Render::g_blockEntityRenderDispatcher && Client::g_clientChunkManager
                 && !Render::DevSkip("blockentities")) {
                 PROFILE_ZONE_N("BlockEntities");
+                DEBUG_PIE_ZONE("renderSolidFeatures");
+                // Fraction of the current client tick elapsed — the same
+                // expression the entity passes use — so a moving piston
+                // interpolates between ticks (MC getProgress(partialTicks)).
+                const float beRemaining = std::chrono::duration<float>(
+                    nextClientTick - std::chrono::steady_clock::now()).count();
+                const float beTickSeconds =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float bePartialTick =
+                    std::clamp(1.0f - beRemaining / beTickSeconds, 0.0f, 1.0f);
                 Render::g_blockEntityRenderDispatcher->RenderAll(
                     Client::g_clientChunkManager,
-                    proj, view, camera.position, /*partialTick=*/0.0f);
+                    proj, view, camera.position, bePartialTick);
+                // The blocks the piston renderer submitted, drawn now, in
+                // this view, through the block-model instancing path.
+                Render::g_blockCubeEntityRenderer.Render(proj, view, camera.position,
+                                                         bePartialTick, /*movingBlocksOnly=*/true);
             }
 
             // End portals — same slot in the frame as the block entities
@@ -5548,6 +8543,57 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Render::g_endPortalRenderer.Render(
                 Client::g_clientChunkManager,
                 proj, view, camera.position, /*partialTick=*/0.0f);
+            // Beds — off the same per-chunk index arrangement.
+            Render::g_bedRenderer.Render(
+                Client::g_clientChunkManager,
+                proj, view, camera.position, /*partialTick=*/0.0f);
+
+            // Translucent terrain (water, glass, ice) LAST among the world
+            // geometry — MC LevelRenderer: solid terrain, entities, block
+            // entities, then translucent. It writes depth, so anything drawn
+            // after it is hidden behind every pane of glass and every pool;
+            // the mobs and players above are exactly what must show through.
+            { PROFILE_ZONE_N("ChunkPass.Translucent");
+            Render::RenderChunksDeferredTranslucent();
+            if (Render::DebugScreen::FrameProfiler::IsActive()) {
+                if (auto* rs = Render::GetChunkRendererStats()) {
+                    Render::DebugScreen::FrameProfiler::AddChildTime("translucentTerrain", rs->translucentPassTimeMs);
+                }
+            }
+            }
+
+            // The block outline + crack overlay, after every opaque pass that
+            // could cover them (see the note where they used to be).
+#if ENABLE_IMMERSIVE_PORTALS
+            if (player.lastBlockHitPortalId == 0)
+#endif
+            if (!leavingWorld)   // no block outline in the bare view
+            {
+                if (controlView) {
+                    // /control: the controlled player's aim, from their view
+                    // frame — this client's own crosshair is somewhere else
+                    // entirely. The state comes from this client's copy of
+                    // the same chunks.
+                    const auto& cv = Client::Control::Get().view;
+                    std::optional<Game::RaycastHit> mirroredHit;
+                    if (cv.hitValid) {
+                        Game::RaycastHit h{};
+                        h.blockPos = cv.hitPos;
+                        h.state    = Game::Raycast::GetBlockStateAt(cv.hitPos.x, cv.hitPos.y, cv.hitPos.z);
+                        h.blockId  = h.state.Block();
+                        mirroredHit = h;
+                    }
+                    RenderBlockHighlight(mirroredHit, proj, view, cv.entityPicked,
+                                         camera.position, camera.fov, width, height);
+                    RenderBlockBreakOverlay(cv.breakStage, cv.breakPos, proj, view);
+                } else {
+                    RenderBlockHighlight(player.lastBlockHit, proj, view,
+                                         playerController.PickEntity() != 0,
+                                         camera.position, camera.fov, width, height);
+                    RenderBlockBreakOverlay(playerController.GetDestroyStage(),
+                                            playerController.GetBreakingPos(), proj, view);
+                }
+            }
 #if ENABLE_IMMERSIVE_PORTALS
             // Immersive portals: every portal of the active level, drawn
             // see-through, recursively. The renderer manages stencil masks,
@@ -5555,8 +8601,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // lambda draws one level from one viewpoint — what a frame's
             // main pass does, minus the things that belong to the viewer
             // (nametags, the block highlight, the held item).
+            // Main ends where the portal recursions start (they re-enter
+            // the terrain and entity passes under their own name).
+            Render::DebugScreen::FrameProfiler::Pop();
             {
                 PROFILE_ZONE_N("ImmersivePortalRender");
+                DEBUG_PIE_ZONE("portals");
                 const auto nowForImm = std::chrono::steady_clock::now();
                 const float remainingImm =
                     std::chrono::duration<float>(nextClientTick - nowForImm).count();
@@ -5639,18 +8689,25 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     // uEntityClipPlane).
                     if (ctx.through && !ctx.through->IsMirror()) {
                         const Game::Immersive::Portal& thr = *ctx.through;
-                        const glm::mat4 M(thr.TransformMatrix());
-                        const glm::mat4 crossView = ctx.view * M;
-                        const glm::vec3 nearEye(thr.InverseTransformPoint(glm::dvec3(ctx.camera.position)));
-                        const glm::vec4 farClip = Render::ChunkRenderer::PortalClipPlane();
+                        // The near level is drawn relative to the near eye's
+                        // own render origin; the view bridges the two render
+                        // spaces in double (RenderOrigin.hpp).
+                        const glm::dmat4 M = thr.TransformMatrix();
+                        const glm::dvec3 nearEyeD = thr.InverseTransformPoint(ctx.camera.position);
+                        const glm::dvec3 nearOrigin = Render::RenderOriginFor(nearEyeD);
+                        const glm::mat4 crossView = Render::FarRenderView(ctx.view, M, ctx.camera.renderOrigin, nearOrigin);
+                        const glm::vec3 nearEye(nearEyeD);
+                        const glm::dvec4 farClip = Render::ChunkRenderer::PortalClipPlaneWorld();
                         Render::ChunkRenderer::SetPortalClipPlane(glm::transpose(M) * farClip);
-                        const Frustum crossFrustum = Frustum::FromMatrix(ctx.projection * crossView);
+                        // Culling stays in world space.
+                        const Frustum crossFrustum = Frustum::FromMatrix(ctx.projection * ctx.camera.GetWorldViewMatrix() * glm::mat4(M));
                         // Only what is IN the surface — see EntityCulling::g_crossingFilter.
                         Render::EntityCulling::g_crossingFilter =
                             [&thr](const glm::vec3& lo, const glm::vec3& hi) {
                                 return thr.IntersectsBox(glm::dvec3(lo), glm::dvec3(hi), 0.25);
                             };
                         Client::ClientLevels::WithLevel(thr.dimension, [&]() {
+                            Render::SetRenderOrigin(nearOrigin);
                             if (Client::g_remotePlayerManager) {
                                 // The entity plane (the surface plus the mark
                                 // band's margin), as the mobs use: the exact
@@ -5669,6 +8726,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                 mobRenderer.Render(ctx.projection, crossView, nearEye, crossFrustum,
                                                    *Client::g_clientMobManager, ctx.partialTick);
                             }
+                            ctx.camera.ActivateRenderOrigin();
                         });
                         Render::EntityCulling::g_crossingFilter = nullptr;
                         Render::ChunkRenderer::SetPortalClipPlane(farClip);
@@ -5704,6 +8762,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Render::g_endPortalRenderer.Render(
                         Client::g_clientChunkManager, ctx.projection, ctx.view,
                         ctx.camera.position, ctx.partialTick);
+                    Render::g_bedRenderer.Render(
+                        Client::g_clientChunkManager, ctx.projection, ctx.view,
+                        ctx.camera.position, ctx.partialTick);
+                    // This view's translucent terrain, after its entities.
+                    Render::RenderChunksDeferredTranslucent();
                     // The particles that live in this level, billboarded to
                     // the far camera.
                     if (!Render::DevSkip("particles")) {
@@ -5723,7 +8786,6 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     const glm::dvec3 viewExit = ctx.through
                         ? (ctx.through->IsMirror() ? ctx.through->origin : ctx.through->destination)
                         : glm::dvec3(0.0);
-                    const glm::vec3 viewExitF(viewExit);
                     Render::g_portalRenderer.Render(
                         ctx.projection, ctx.view, ctx.camera, ctx.frustum, aspect, farPlane,
                         static_cast<int8_t>(Game::DimensionToRaw(ctx.dimension)),
@@ -5731,16 +8793,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         ctx.through ? &viewExit : nullptr);
                     Render::g_portalParticleSystem.Render(ctx.projection, ctx.view,
                                                           ctx.camera.position, ctx.dimension,
-                                                          ctx.through ? &viewExitF : nullptr);
+                                                          ctx.through ? &viewExit : nullptr);
 #endif
                     // The block under the crosshair, when the crosshair got
                     // there through THIS portal: outline and crack overlay
                     // drawn inside the view, in the far level's space.
                     if (ctx.through && ctx.through->id == player.lastBlockHitPortalId &&
                         ctx.dimension == player.lastBlockHitDimension) {
-                        RenderBlockHighlight(player, ctx.projection, ctx.view,
-                                             playerController.PickEntity() != 0);
-                        RenderBlockBreakOverlay(playerController, ctx.projection, ctx.view);
+                        RenderBlockHighlight(player.lastBlockHit, ctx.projection, ctx.view,
+                                             playerController.PickEntity() != 0,
+                                             ctx.camera.position, ctx.camera.fov, width, height);
+                        RenderBlockBreakOverlay(playerController.GetDestroyStage(), playerController.GetBreakingPos(),
+                                                ctx.projection, ctx.view);
                     }
                 };
 
@@ -5777,6 +8841,44 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::g_immersivePortalRenderer.Render(proj, view, camera, frustum, aspect,
                                                          effectiveRenderDist, partialTickImm, renderLevelView,
                                                          renderCrossers);
+                // Prewarm for the last-world panorama, while the pause menu
+                // is up: each frame one of its six faces is CULLED (never
+                // drawn) and its sections handed to the mesh scheduler, so
+                // by the time "Save and Quit" is clicked every direction is
+                // meshed and leaving needs no wait. Nothing runs during
+                // play; the window's close button gets the leave capture's
+                // own (longer) warm-up instead. Here, after the portal
+                // pass: the visible-section list it overwrites is not read
+                // again this frame.
+                // Join transition: the title panorama, still turning, over
+                // whatever of the world has arrived so far (depth off — it
+                // covers everything until the hand-over frame).
+                if (joinTransition.active && Render::g_renderBackend) {
+                    const float dtSec = std::clamp(metrics.frameTime / 1000.0f, 0.0f, 0.1f);
+                    Render::g_panoramaRenderer.Render(
+                        width, height, dtSec,
+                        Platform::g_gameSettings.GetFloat("panoramaScrollSpeed", 1.0f));
+                }
+                // The leave's own warm-up feeds the scheduler the same way —
+                // one face a frame, never all six at once: with the list
+                // PINNED and six faces dumped in together, the scheduler
+                // snapshotted every outstanding section in ONE frame on the
+                // main thread, which was the freeze right after the click.
+                const bool prewarmForLeave = (leaveCapture.active || leaveCapture.prepass) && leaveCapture.warming;
+                if (Render::g_chunkRenderer && lastWorldPanoramaWanted() &&
+                    (prewarmForLeave ||
+                     (!leaveCapture.active && !leaveCapture.prepass && !leaveCapture.captured &&
+                      Render::GetScreenManager().IsPauseScreenOpen()))) {
+                    // (The face size is chosen in the capture; see `side` there.)
+                    static int s_pauseFace = 0;
+                    const int faceIndex = s_pauseFace;
+                    s_pauseFace = (s_pauseFace + 1) % 6;
+                    const Render::Camera faceCam = makeFaceCamera(faceIndex, camera.yaw, /*publishOrigin=*/false);
+                    const glm::mat4 faceProj = glm::perspective(glm::radians(90.0f), 1.0f,
+                                                                Render::ChunkRenderer::NearPlane(), farPlane);
+                    const Frustum faceFrustum = Frustum::FromMatrix(faceProj * faceCam.GetWorldViewMatrix());
+                    Render::g_chunkRenderer->RecordViewForScheduler(faceCam, faceFrustum);
+                }
                 // OBEY_PORTAL_DIAG=1: one line per frame for each remote
                 // player within a few blocks of a surface — where they are
                 // filed, and which pass drew them or what culled them.
@@ -5787,7 +8889,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                             lvl->Portals().ForEach([&](const Game::Immersive::Portal& p) {
                                 glm::dvec3 mn, mx;
                                 p.BoundingBox(mn, mx, 0.0);
-                                const glm::dvec3 c(rp.position);
+                                const glm::dvec3& c = rp.position;
                                 if (glm::length(glm::clamp(c, mn, mx) - c) < 4.0) nearPortal = true;
                             });
                         }
@@ -5817,6 +8919,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // chat bubbles in see-through (per user request — model only).
             {
                 PROFILE_ZONE_N("PortalRender");
+                DEBUG_PIE_ZONE("portals");
                 // partialTick — interpolation fraction within the current
                 // 50ms client tick. Same calc as the main remote-player
                 // render below; recomputed here so it's in lambda scope.
@@ -5920,9 +9023,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                             gLocalST.valid &&
                             BodyStraddlesEntryPlane(player.physics.position,
                                                     gLocalST.entryClipPlane, 1.8f);
-                        const glm::vec4 entryClip =
+                        const glm::dvec4 entryClip =
                             straddlesEntry ? gLocalST.entryClipPlane
-                                           : glm::vec4(0.0f);
+                                           : glm::dvec4(0.0);
                         // Skip the local body for the teleport frame
                         // itself. virtCam was derived from the just-
                         // snapped real camera, so applying SrcToDst
@@ -6001,6 +9104,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                     gR.transform, gR.exitClipPlane);
                             }
                         }
+                        // The recursion's translucent terrain, after its
+                        // entities, under the same stencil and projection.
+                        Render::RenderChunksDeferredTranslucent();
                     });
             }
             // Tick + render the portal particle system. Tick uses dt
@@ -6008,6 +9114,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // happens AFTER the portal pass so sparks composite over the
             // see-through view (additive blending).
             { PROFILE_ZONE_N("PortalParticles");
+            DEBUG_PIE_ZONE("renderTranslucentFeatures");
             Render::g_portalParticleSystem.Update(dt, Client::GetClientPortalManager());
             Render::g_portalParticleSystem.Render(proj, view, camera.position,
                                                   Client::ClientLevels::ActiveDimension());
@@ -6020,10 +9127,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // draw. After the world pass (depth-tested, no depth write),
             // before the clouds — MC's particle pass sits the same way.
             { PROFILE_ZONE_N("Particles.Update");
+            DEBUG_PIE_ZONE("particles");
             Render::g_mobParticleSystem.Update(dt, camera.position);
             }
             if (!Render::DevSkip("particles")) {
                 PROFILE_ZONE_N("Particles.Render");
+                DEBUG_PIE_ZONE("renderTranslucentFeatures");
                 Render::g_mobParticleSystem.Render(proj, view, camera.position,
                                                    Client::ClientLevels::ActiveDimension());
             }
@@ -6034,11 +9143,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Overworld only. MC gives the Nether and the End a cloud level of
             // Float.NaN (DimensionSpecialEffects.NetherEffects / EndEffects),
             // which is its way of saying "no cloud layer" — a band of white
-            // clouds across the Nether's ceiling would be very obviously wrong.
-            if (!Render::g_skyRenderer.SkyHidden()
-                && Render::g_skyRenderer.CurrentSkyboxIsEnd() == false
-                && !Render::DevSkip("clouds")) {
+            // clouds across the Nether's ceiling would be very obviously wrong,
+            // and the Hush's fixed night has none either (HasClouds).
+            if (Render::g_skyRenderer.HasClouds() && !Render::DevSkip("clouds")) {
                 PROFILE_ZONE_N("CloudPass");
+                DEBUG_PIE_ZONE("Clouds");
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
                     std::chrono::duration<float>(nextClientTick - nowForPartial).count();
@@ -6052,6 +9161,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::g_cloudRenderer.Render(proj, view, camera.position,
                                                effectiveRenderDist, cloudPartialTick);
             }
+            // A shader pack's composite and final passes, over the level
+            // just drawn; the backbuffer holds the result for the hand and
+            // the HUD to draw over.
+            if (Render::ShaderPipeline::Get().Active()) {
+                Render::ShaderPipeline::Get().EndScene(shaderFrameInput());
+            }
+            // "level" ends before the viewmodels: MC renderLevel is level, then hand.
+            Render::DebugScreen::FrameProfiler::Pop();   // level
 
 #if ENABLE_PORTAL_GUN
             // First-person portal-gun viewmodel.
@@ -6069,12 +9186,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Still after the particle system, so the rim sparks composite
             // behind the gun. Hidden unless the gun is actually held (and
             // never in third person).
-            if (camera.IsFirstPerson() && !freeCamActive &&
+            if (camera.IsFirstPerson() && !freeCamActive && !leavingWorld &&
                 player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
                     : 16.0f / 9.0f;
                 PROFILE_ZONE_N("GunViewmodel");
+                DEBUG_PIE_ZONE("hand");
                 Render::g_portalGunViewmodel.Render(fbAspect, dt);
             }
 #endif
@@ -6098,10 +9216,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // belong to the frozen player, whose body is drawn in the world
             // instead (the forced third-person render above).
             const bool drawHeldItem = camera.IsFirstPerson() && !freeCamActive &&
+                !leavingWorld &&   // the panorama has no hand; neither does the way into it
                 (renderMainHand ||
                  !player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).IsEmpty());
             if (drawHeldItem && !Render::DevSkip("helditem")) {
                 PROFILE_ZONE_N("HeldItem");
+                DEBUG_PIE_ZONE("hand");
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
                     : 16.0f / 9.0f;
@@ -6115,19 +9235,30 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // Accumulate walk distance from horizontal velocity. MC
                 // does this once per tick; per-frame approximation is
                 // close enough for the bob amplitude.
-                static float s_walkDist = 0.0f;
+                float& s_walkDist = s_heldWalkDist;
                 const float vx = player.physics.velocity.x;
                 const float vz = player.physics.velocity.z;
                 const float speed = std::sqrt(vx * vx + vz * vz);
                 s_walkDist += speed * dt * 0.6f;
                 // Feed the predicted hold-to-use state (eat wiggle / shield
                 // block pose) — routed to whichever hand is using.
-                Render::g_heldItemRenderer.SetUseState(
-                    player.usingItem,
-                    player.usingHand,
-                    player.useAnim,
-                    player.useItemRemaining,
-                    player.useItemDuration);
+                // (/control: the controlled player's hand, from their frame.)
+                float heldWalkDist = s_walkDist;
+                if (controlHud) {
+                    const auto& cv = Client::Control::Get().view;
+                    heldWalkDist = cv.walkDist;
+                    Render::g_heldItemRenderer.SetUseState(
+                        cv.usingItem, cv.usingHand,
+                        static_cast<Game::ItemUseAnimation>(cv.useAnim),
+                        cv.useItemRemaining, cv.useItemDuration);
+                } else {
+                    Render::g_heldItemRenderer.SetUseState(
+                        player.usingItem,
+                        player.usingHand,
+                        player.useAnim,
+                        player.useItemRemaining,
+                        player.useItemDuration);
+                }
                 // Live view angles, MC convention — and they MUST be the same
                 // ones Tick() was given. The sway is a lag term,
                 // `(viewXRot - xBob) * 0.1` (ItemInHandRenderer), where xBob is
@@ -6137,9 +9268,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // sat at a permanent -0.2 * pitch tilt that swung as you looked
                 // up and down.
                 Render::g_heldItemRenderer.Render(fbAspect, partialTickHeld,
-                                                  s_walkDist,
+                                                  heldWalkDist,
                                                   camera.pitch, camera.yaw,
                                                   renderMainHand);
+            }
+            // MC GameRenderer.render: blitEntityOutline right after
+            // renderLevel (the hand included), before the GUI — the glowing
+            // entities' outlines over everything, walls included. On Vulkan
+            // this interrupts the frame's pass (its depth is not kept), which
+            // is why it waits until nothing in the world needs depth.
+            if (!Render::DevSkip("outline")) {
+                Render::EntityOutline::Get().Composite(width, height);
             }
             // Push the server-synced stat triple into the HUD before drawing
             // (health/hunger bars read these; SetHealthS2C writes the player).
@@ -6160,8 +9299,31 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
 
             g_hudRenderer.SetHealth(player.health);
+            // HEALTH_BOOST's extra containers, and the effect icons.
+            g_hudRenderer.SetMaxHealth(static_cast<int>(std::ceil(player.GetMaxHealth())));
+            g_hudRenderer.SetActiveEffects(player.activeEffects);
+            g_hudRenderer.SetSleepTimer(player.sleepCounter);
             g_hudRenderer.SetFood(player.food);
             g_hudRenderer.SetSaturation(player.saturation);
+            g_hudRenderer.SetAbsorption(player.absorption);
+            g_hudRenderer.SetHudFlags(player.hudFlags);
+            g_hudRenderer.SetDamageCooldown(player.damageCooldownTime);
+            g_hudRenderer.SetAir(player.airSupply, 300, player.physics.isEyeInWater);
+            // MC Player.getArmorValue — the ARMOR attribute summed from the
+            // worn pieces; the client reads it off its own inventory, which
+            // is the same four slots the server sums for damage().
+            {
+                int armor = 0;
+                for (const Game::EquipmentSlot slot : { Game::EquipmentSlot::HEAD, Game::EquipmentSlot::CHEST,
+                                                        Game::EquipmentSlot::LEGS, Game::EquipmentSlot::FEET }) {
+                    const Game::ItemStack& piece = player.inventory.GetSlot(Game::InventoryIndexFor(slot));
+                    if (piece.IsEmpty()) continue;
+                    if (const Game::ItemArmorRow* row = Game::GetItemArmorAttributes(piece.itemId)) {
+                        armor += static_cast<int>(row->armor);
+                    }
+                }
+                g_hudRenderer.SetArmor(armor);
+            }
             g_hudRenderer.SetExperience(player.xpProgress, player.xpLevel);
             // MC Gui gates the survival stat block on gameMode.canHurtPlayer()
             // (Gui.java:524). The extra !gameModeKnown term covers a window MC
@@ -6169,10 +9331,50 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // connects, so without it a creative joiner gets a frame or two of
             // hearts and hunger drawn off the survival default before the first
             // abilities packet lands.
-            g_hudRenderer.SetStatsHidden(!player.gameModeKnown ||
-                                         player.IsCreative() || player.IsSpectator());
+            g_hudRenderer.SetStatsHidden(controlHud
+                                             ? Client::Control::Get().view.statsHidden
+                                             : (!player.gameModeKnown ||
+                                                player.IsCreative() || player.IsSpectator()));
+            // MC LevelExtractor: the water overlay while the eyes are in
+            // water, at the lightmap brightness of the eye's light. With no
+            // light engine the sky's day/night brightness stands in.
+            // First person only, as MC's `getCameraType().isFirstPerson()`.
+            g_hudRenderer.SetWaterOverlay((controlHud ? Client::Control::Get().view.eyeInWater
+                                                       : player.physics.isEyeInWater) &&
+                                              Platform::g_gameSettings.GetUnderwaterEffects() &&
+                                              camera.perspective == Render::Perspective::FirstPerson,
+                                          Render::EnvironmentState::Get().Frame().skyBrightness,
+                                          camera.yaw, camera.pitch);
+            // "world" ends before the GUI (MC GameRenderer.render: "world", then "gui").
+            Render::DebugScreen::FrameProfiler::Pop();   // world
             if (!Render::DevSkip("hud")) {
                 PROFILE_ZONE_N("HudRender");
+                DEBUG_PIE_ZONE("gui");
+                {
+                    // The F3 screen's inputs for this frame.
+                    int winW = 0, winH = 0;
+                    glfwGetWindowSize(window, &winW, &winH);
+                    s_debugGuiScale = static_cast<int>(ComputeGuiScale(width, height, winW));
+                    s_debugContext.fps = static_cast<int>(std::lround(metrics.GetFPS()));
+                    s_debugContext.windowWidth = winW;
+                    s_debugContext.windowHeight = winH;
+                    s_debugContext.framebufferWidth = width;
+                    s_debugContext.framebufferHeight = height;
+                    static double s_refreshPolled = -10.0;
+                    if (glfwGetTime() - s_refreshPolled > 1.0) {
+                        s_refreshPolled = glfwGetTime();
+                        GLFWmonitor* mon = glfwGetWindowMonitor(window);
+                        if (!mon) mon = glfwGetPrimaryMonitor();
+                        const GLFWvidmode* mode = mon ? glfwGetVideoMode(mon) : nullptr;
+                        s_debugContext.refreshRate = mode ? mode->refreshRate : 0;
+                    }
+                    s_debugContext.vsync = Platform::g_gameSettings.GetVSync();
+                    s_debugContext.maxFps = Platform::g_gameSettings.GetMaxFPS();
+                    s_debugContext.effectiveRenderDistance = effectiveRenderDist;
+                    s_debugContext.simulationDistance = Platform::g_gameSettings.GetSimulationDistance();
+                    s_debugContext.entitiesRendered = Render::EntityCulling::g_renderedThisFrame;
+                    s_debugContext.freeCamActive = freeCamActive;
+                }
                 RenderHUD(window, player.inventory, dt, proj, view);
             }
             // Hide the crosshair while any Screen is shown (inventory, pause
@@ -6182,8 +9384,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // same visible result: no crosshair over the menu.
             if (!Render::GetInventoryScreen().IsOpen() &&
                 Render::GetScreenManager().Empty() &&
+                !leavingWorld &&            // bare view on the way out
                 !freeCamActive &&           // detached camera cannot interact
-                camera.IsFirstPerson()) {   // MC: crosshair only in first person
+                camera.IsFirstPerson() &&   // MC: crosshair only in first person
+                // MC Gui.renderCrosshair: the 3D axes replace the 2D crosshair
+                // while the debug screen shows them.
+                !(Render::DebugScreen::Overlay().ShowDebugScreen() &&
+                  Render::DebugScreen::Entries().IsCurrentlyEnabled(Render::DebugScreen::Ids::ThreeDimensionalCrosshair))) {
                 RenderCrosshair(window);
 #if ENABLE_PORTAL_GUN
                 // Portal quickinfo brackets layer on top of the base
@@ -6205,6 +9412,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // 10. Debug UI with new architecture statistics
             { PROFILE_ZONE_N("DebugUI");
             PROFILE_TIMER_START(debugui);
+            DEBUG_PIE_ZONE("imgui");
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -6259,6 +9467,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     srvSnap.sessionWatchSetSize = sessionStats.chunksInWatch;
                     srvSnap.sessionSentChunks = sessionStats.chunksSent;
                     srvSnap.sessionViewDistance = session->GetViewDistance();
+                    srvSnap.sessionSimulationDistance = session->GetSimulationDistance();
                     srvSnap.chunkSenderPending = session->GetPendingChunksToSendCount();
                     srvSnap.chunkSendRate = session->GetDesiredChunksPerTick();
                     srvSnap.chunkSenderUnacked = session->GetUnackedBatches();
@@ -6567,6 +9776,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // OBEY_FLICKER_DIAG=1: the main view's per-frame numbers, then
             // one line for anything that went A -> B -> A this frame (the
             // portal renderer recorded its own above). See FlickerDiag.hpp.
+            if (!Render::FlickerDiag::Enabled() && Render::FlickerDiag::DumpPending()) {
+                Render::FlickerDiag::EndFrame();   // ticks the /portaldiag mark countdown
+            }
             if (Render::FlickerDiag::Enabled() && Client::ClientLevels::HasSession()) {
                 Client::ClientLevel& active = Client::ClientLevels::Active();
                 if (auto* c = active.Chunks()) {
@@ -6593,7 +9805,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Handle render distance change from debug UI
             if (Debug::DebugSystem::ConsumeRenderDistanceChanged()) {
                 int newDist = Platform::g_gameSettings.GetRenderDistance();
-                Log::Info("Render distance changed to %d", newDist);
+                Log::Info("Render distance %d, simulation distance %d (debug panel)",
+                          newDist, Platform::g_gameSettings.GetSimulationDistance());
 
                 // Resend client settings to server (Minecraft-style broadcastOptions)
                 if (networkClient) {
@@ -6619,8 +9832,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // is behind the CPU. With vsync OFF a long "Present" means the GPU
             // is still chewing on work this frame queued (usually buffer
             // uploads), not that anything is waiting on the display.
+            if (Render::g_renderBackend && s_frameGpuTimer != Render::INVALID_GPU_TIMER) {
+                Render::g_renderBackend->EndGPUTimer(s_frameGpuTimer);
+                s_frameGpuPending = s_frameGpuTimer;
+                s_frameGpuTimer = Render::INVALID_GPU_TIMER;
+            }
             { PROFILE_ZONE_N("Present");
             PROFILE_TIMER_START(vsync);
+            DEBUG_PIE_ZONE("present");
             if (Render::g_renderBackend) {
                 Render::g_renderBackend->EndFrame(window);
             } else {
@@ -6642,6 +9861,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // previous "resync" did exactly that, which is why the limiter
             // used to be disabled under VSync).
             {
+                DEBUG_PIE_ZONE("frameLimiter");
                 const int maxFps = Platform::g_gameSettings.GetMaxFPS();
                 if (maxFps > 0 && maxFps < 260) {
                     static auto s_nextFrameDeadline = std::chrono::steady_clock::now();
@@ -6661,7 +9881,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // camera's swap restores through the same site — next frame's
             // input/tick phases (raycast, PlayerMoveC2S) must read the frozen
             // player pose, never the fly pose.
-            if (tpActive || freeCamActive) {
+            // /control, controlled side: this frame's view, for the
+            // controller — the render camera, before it is put back.
+            ControlEndFrame(camera, player, playerController, networkClient.get());
+
+            if (tpActive || freeCamActive || controlView) {
                 camera.position = tpSavedPos;
                 camera.yaw      = tpSavedYaw;
                 camera.pitch    = tpSavedPitch;
@@ -6694,6 +9918,30 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Calculate total frame time and unaccounted time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
+
+            // F3+1 profiler pie: the MC-named section tree recorded this
+            // frame (FrameProfiler.hpp). The "frame" section closes here, after
+            // the limiter, like MC's popPush("frame") … pop() around renderFrame.
+            {
+                Render::DebugScreen::FrameProfiler::Pop();   // frame
+                Render::DebugScreen::ProfileNode root;
+                Render::DebugScreen::FrameProfiler::EndFrame(root);
+                Render::DebugScreen::Overlay().SetProfileResults(std::move(root));
+            }
+            if (s_frameProfile.active) {
+                const float t = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - s_frameProfile.start).count();
+                char row[512];
+                std::snprintf(row, sizeof(row), "%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d",
+                              t, metrics.frameTime, metrics.networkProcessingTime, metrics.meshResultProcessingTime,
+                              metrics.inputHandlingTime, metrics.gameLogicTime, metrics.meshSchedulingTime, metrics.gpuUploadTime,
+                              metrics.renderTime, metrics.debugUITime, metrics.vsyncWaitTime, metrics.textureAnimationTime,
+                              metrics.otherTime, metrics.meshesRenderedThisFrame,
+                              Render::GetChunkRendererStats() ? Render::GetChunkRendererStats()->totalDrawCalls : 0);
+                s_frameProfile.rows.push_back(row);
+                if (t >= 10000.0f) {
+                    AnnounceFrameProfile(FinishFrameProfile());
+                }
+            }
             
             // Calculate unaccounted time (operations we didn't explicitly measure)
             float totalMeasured = metrics.networkProcessingTime + metrics.meshResultProcessingTime + 
@@ -6754,17 +10002,34 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // player is still the one it sampled.
         poseRecorder.Stop();
 
+        // MC updateLevelInEngines(null): the world's sounds stop with it, and
+        // nothing may look up this session's player or mobs any more.
+        Client::SoundHost::OnSessionEnd();
+        // The cities this session knew (AurelithS2C) belong to its server.
+        Client::AurelithState::Clear();
+
+        // Every step of the teardown carries a zone: the "leave to title"
+        // hitch is this sequence, and without them it was one blank gap.
         // 1. Disconnect NetworkClient
+        { PROFILE_ZONE_N("Exit.Disconnect");
         Log::Info("Disconnecting NetworkClient...");
         networkClient->Disconnect();
         networkClient.reset();
+        // /control does not outlive the session on either side.
+        Client::Control::Reset();
+        Input::SetRemoteMode(false);
+        Input::SetCaptureEvents(false);
+        Input::SetCursorOverride(false, 0.0, 0.0);
         Client::g_networkClient = nullptr;   // global mirror of the session-scoped client
         Log::Info("✓ NetworkClient disconnected");
+        }
 
         // 2. Stop Network I/O Service (dedicated I/O thread)
+        { PROFILE_ZONE_N("Exit.NetIO");
         Log::Info("Stopping Network I/O Service...");
         Client::ShutdownNetworkIOService();
         Log::Info("✓ Network I/O Service stopped");
+        }
 
         // 3. Persist world time + gamerules back to worlds.json, then stop
         //    the IntegratedServer thread (host only). Minecraft-save worlds
@@ -6772,6 +10037,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         if (!isRemoteClient) {
             if (!titleAction.useMinecraftSave && Server::g_integratedServer &&
                 Server::g_integratedServer->GetWorld()) {
+                PROFILE_ZONE_N("Exit.WorldsJson");
                 const auto* serverWorld = Server::g_integratedServer->GetWorld();
                 auto worlds = Render::WorldList::Load();
                 for (auto& entry : worlds) {
@@ -6788,33 +10054,42 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
 
             Log::Info("Stopping IntegratedServer thread...");
+            { PROFILE_ZONE_N("Exit.StopServer");
             Server::StopIntegratedServer();
+            }
             Log::Info("✓ IntegratedServer stopped");
         }
         // Back to the global resource pack selection (options.txt) now that
         // the world's own, if it had one, is no longer in play.
+        { PROFILE_ZONE_N("Exit.ResourcePacks");
         Resources::SelectFromOptionLists(
             Resources::ParsePackList(Platform::g_gameSettings.GetResourcePacks()),
             Resources::ParsePackList(Platform::g_gameSettings.GetIncompatibleResourcePacks()));
         ReloadResources();
+        }
 
         // 4. Stop worker pools (stops background threads)
+        { PROFILE_ZONE_N("Exit.WorkerPools");
         Log::Info("Stopping worker thread pools...");
         if (!isRemoteClient) {
             Threading::ShutdownServerWorkerPool();
         }
         Threading::ShutdownClientWorkerPool();
         Log::Info("✓ Worker pools stopped");
+        }
 
         // 5. Note: Chunks are now saved by IntegratedServer during its shutdown
 
         // 6. Shutdown client systems
+        { PROFILE_ZONE_N("Exit.ClientLevels");
         Log::Info("Shutting down client systems...");
         Client::ClientLevels::DestroySession();
         Log::Info("✓ Client systems shutdown");
+        }
 
         // 7. Shutdown server systems (host only)
         if (!isRemoteClient) {
+            PROFILE_ZONE_N("Exit.ServerShutdown");
             Log::Info("Shutting down server systems...");
             Server::ShutdownIntegratedServer();
             Log::Info("✓ Server systems shutdown");
@@ -6823,13 +10098,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // 8. Shutdown rendering systems (the chunk renderer went with the levels)
 
         // 8a. Session-scoped render resources
+        { PROFILE_ZONE_N("Exit.RenderResources");
         playerRenderer.Shutdown();
         Client::g_remotePlayerManager.reset();
         itemEntityRenderer.Shutdown();
         Render::g_blockCubeEntityRenderer.Shutdown();
         Render::g_fillPreviewRenderer.Shutdown();
         xpOrbRenderer.Shutdown();
+        lightningBoltRenderer.Shutdown();
+        Render::SpawnerRenderer::SetMobRenderer(nullptr);
         mobRenderer.Shutdown();
+        Render::EntityOutline::Get().Shutdown();
+        }
         // The inventory screens are singletons but their menu is bound to this
         // session's ClientPlayer, which is about to go out of scope.
         Render::SetInventoryScreenPlayer(nullptr);
@@ -6848,6 +10128,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         } // for(;;) — outer session loop
 
         // === PROCESS-LEVEL CLEANUP (runs once, after the last session) ===
+        // MC Minecraft.close → soundManager.destroy: every channel stopped,
+        // the decoders and the sound thread joined, the device closed.
+        Client::SoundHost::Shutdown();
+
         // Friends connection first — its io thread is independent of the
         // renderer, and stopping it flips this player offline for friends.
         if (Client::g_friendsClient) {
@@ -6866,9 +10150,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         g_fontRenderer.Shutdown();
         g_guiAtlas.Shutdown();
         Render::g_crosshair.Shutdown();
+        Render::Gizmos::Shutdown();
         Render::g_blockHighlight.Shutdown();
         Render::g_blockBreakOverlay.Shutdown();
         Render::g_endPortalRenderer.Shutdown();
+                Render::g_bedRenderer.Shutdown();
 #if ENABLE_IMMERSIVE_PORTALS
         Render::g_immersivePortalRenderer.Shutdown();
 #endif
@@ -6884,6 +10170,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         // 8b. Cleanup debug system (before render backend, since ImGui shutdown needs the backend)
         Debug::DebugSystem::Shutdown();
+
+        // A last-world panorama may still be writing on its thread — never
+        // exit mid-write.
+        Render::PanoramaRenderer::FinishPendingSaves();
+        // The chunk containers the last session handed to the background
+        // disposer (ClientChunkManager::Shutdown, ~ChunkCache).
+        Core::DeferredDispose::Shutdown();
 
         // 8c. Shutdown render backend (now safe — all dependent resources are gone)
         if (Render::g_renderBackend) {
@@ -6945,7 +10238,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // never ran (see CrashHandler.hpp on crashpad winning the race).
         Log::CloseLogFile();
 
-        return 0;
+        return processExitCode;
     }
 
 } // namespace PlatformMain

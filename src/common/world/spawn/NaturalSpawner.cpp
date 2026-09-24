@@ -13,6 +13,9 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/block/HushBlocks.hpp"
+#include "common/world/level/AurelithQuest.hpp"
+#include "common/entity/MobCategory.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
 #include <algorithm>
@@ -90,29 +93,91 @@ namespace Game {
             return nullptr;
         }
 
-        // MC getRandomSpawnMobAt: the water-ambient 98% thin-out, then the
-        // weighted pick over the biome's list. (MC also swaps in the nether-
-        // fortress list over nether bricks — no nether dimension or structure
-        // data exists here yet, so that override is absent.)
-        const MobSpawnEntry* GetRandomSpawnMobAt(const SpawnContext& ctx,
-                                                 MobCategory category,
-                                                 int x, int y, int z, JavaRandom& rng) {
-            const std::string_view biome = ctx.biomeAt(x, y, z);
-            const BiomeSpawnList* list = FindBiomeSpawnList(biome);
+        // What one placement attempt asks the level about its position, each
+        // answer resolved at most once. MC asks again at every step — mobsAt
+        // in getRandomSpawnMobAt and again in canSpawnMobAt, the biome's
+        // spawn costs in canSpawn and again in afterSpawn — and gets the same
+        // answer every time: a biome never changes mid-tick, and nothing
+        // between those steps writes the block below (the structure
+        // override's input). Scoped to a single attempt, so a later attempt
+        // that walks back onto the same spot asks afresh.
+        class SpawnPosition {
+        public:
+            SpawnPosition(const SpawnContext& ctx, MobCategory category, int x, int y, int z)
+                : x(x), y(y), z(z), m_ctx(ctx), m_category(category) {}
+
+            const int x, y, z;
+
+            // The biome's slug — the key the biome-tag tests read.
+            std::string_view BiomeName() {
+                return m_ctx.biomeIdAt ? BiomeRegistry::Get(BiomeIdAt()).name
+                                       : m_ctx.biomeAt(x, y, z);
+            }
+
+            // The BIOME's list, whatever structure the position is in — the
+            // spawn-cost lookups read this one.
+            const BiomeSpawnList* BiomeList() {
+                if (!m_haveBiomeList) {
+                    m_biomeList = m_ctx.biomeIdAt ? SpawnListForBiome(BiomeIdAt())
+                                                  : FindBiomeSpawnList(m_ctx.biomeAt(x, y, z));
+                    m_haveBiomeList = true;
+                }
+                return m_biomeList;
+            }
+
+            // MC NaturalSpawner.mobsAt for the pass's category:
+            // isInNetherFortressBounds ? FORTRESS_ENEMIES : generator.getMobsAt
+            // — a structure's spawn_overrides list replaces the biome's inside
+            // it (StructureSpawnOverrides), else the biome's.
+            const BiomeSpawnList* MobsAt() {
+                if (!m_haveMobs) {
+                    const BiomeSpawnList* structure =
+                        m_ctx.structureSpawnsAt ? m_ctx.structureSpawnsAt(m_category, x, y, z)
+                                                : nullptr;
+                    m_mobs = structure ? structure : BiomeList();
+                    m_haveMobs = true;
+                }
+                return m_mobs;
+            }
+
+        private:
+            BiomeId BiomeIdAt() {
+                if (!m_haveBiomeId) {
+                    m_biomeId = m_ctx.biomeIdAt(x, y, z);
+                    m_haveBiomeId = true;
+                }
+                return m_biomeId;
+            }
+
+            const SpawnContext&   m_ctx;
+            const MobCategory     m_category;
+            BiomeId               m_biomeId = 0;
+            const BiomeSpawnList* m_biomeList = nullptr;
+            const BiomeSpawnList* m_mobs = nullptr;
+            bool                  m_haveBiomeId = false;
+            bool                  m_haveBiomeList = false;
+            bool                  m_haveMobs = false;
+        };
+
+        // MC getRandomSpawnMobAt: the water-ambient 98% thin-out (on the
+        // BIOME's tag, before and regardless of any structure), then the
+        // weighted pick over mobsAt's list.
+        const MobSpawnEntry* GetRandomSpawnMobAt(MobCategory category, SpawnPosition& pos,
+                                                 JavaRandom& rng) {
             if (category == MobCategory::WaterAmbient &&
-                SpawnTags::ReduceWaterAmbientSpawns(biome) && rng.NextFloat() < 0.98f) {
+                SpawnTags::ReduceWaterAmbientSpawns(pos.BiomeName()) &&
+                rng.NextFloat() < 0.98f) {
                 return nullptr;
             }
+            const BiomeSpawnList* list = pos.MobsAt();
             return list ? PickWeighted(*list, category, rng) : nullptr;
         }
 
-        // MC canSpawnMobAt: the chosen entry must still be in the spawn list
+        // MC canSpawnMobAt: the chosen entry must still be in mobsAt's list
         // at the CURRENT (drifted) position — the pack walk can cross into a
-        // biome that does not spawn this mob at all.
-        bool CanSpawnMobAt(const SpawnContext& ctx, MobCategory category,
-                           const MobSpawnEntry* entry, int x, int y, int z) {
-            (void)category;
-            const BiomeSpawnList* list = FindBiomeSpawnList(ctx.biomeAt(x, y, z));
+        // biome, or out of a structure, that does not spawn this mob at all.
+        bool CanSpawnMobAt(const MobSpawnEntry* entry, SpawnPosition& pos) {
+            const BiomeSpawnList* list = pos.MobsAt();
             if (!list) return false;
             // MC compares SpawnerData records by value; the baked tables share
             // storage per biome, so pointer equality also covers the common
@@ -130,22 +195,19 @@ namespace Game {
 
         // MC SpawnState.canSpawn — the spawn-cost (PotentialCalculator) gate.
         bool CanSpawnWithinBudget(const SpawnContext& ctx, EntityTypeId type,
-                                  int x, int y, int z) {
+                                  SpawnPosition& pos) {
             if (!ctx.spawnPotential) return true;
-            const BiomeSpawnList* list = FindBiomeSpawnList(ctx.biomeAt(x, y, z));
-            const MobSpawnCost* cost = FindMobSpawnCost(list, type);
+            const MobSpawnCost* cost = FindMobSpawnCost(pos.BiomeList(), type);
             if (!cost) return true;
             return ctx.spawnPotential->GetPotentialEnergyChange(
-                       glm::ivec3(x, y, z), cost->charge) <= cost->energyBudget;
+                       glm::ivec3(pos.x, pos.y, pos.z), cost->charge) <= cost->energyBudget;
         }
 
         // The spawnPotential half of MC SpawnState.afterSpawn.
-        void AddSpawnCharge(const SpawnContext& ctx, EntityTypeId type,
-                            int x, int y, int z) {
+        void AddSpawnCharge(const SpawnContext& ctx, EntityTypeId type, SpawnPosition& pos) {
             if (!ctx.spawnPotential) return;
-            const BiomeSpawnList* list = FindBiomeSpawnList(ctx.biomeAt(x, y, z));
-            if (const MobSpawnCost* cost = FindMobSpawnCost(list, type)) {
-                ctx.spawnPotential->AddCharge(glm::ivec3(x, y, z), cost->charge);
+            if (const MobSpawnCost* cost = FindMobSpawnCost(pos.BiomeList(), type)) {
+                ctx.spawnPotential->AddCharge(glm::ivec3(pos.x, pos.y, pos.z), cost->charge);
             }
         }
 
@@ -153,9 +215,9 @@ namespace Game {
         // None of them draws RNG, but CheckSpawnRules right after them does,
         // so keeping the order still matters.
         bool IsValidSpawnPositionForType(const SpawnContext& ctx, const IBlockAccess& blocks,
-                                         const MobSpawnEntry& entry, MobCategory category,
-                                         int x, int y, int z, double nearestSq,
-                                         JavaRandom& rng) {
+                                         const MobSpawnEntry& entry, SpawnPosition& pos,
+                                         double nearestSq, JavaRandom& rng) {
+            const int x = pos.x, y = pos.y, z = pos.z;
             const EntityTypeId type = entry.type;
             if (GetEntityTypeInfo(type).category == MobCategory::Misc) return false;
 
@@ -171,16 +233,41 @@ namespace Game {
 
             // MC: type.canSummon() && canSpawnMobAt(...). Every mob type here
             // is summonable.
-            if (!CanSpawnMobAt(ctx, category, &entry, x, y, z)) return false;
+            if (!CanSpawnMobAt(&entry, pos)) return false;
 
-            if (!IsSpawnPositionOk(type, blocks, x, y, z)) return false;
+            {
+                PROFILE_ZONE_DETAIL("Spawn.PositionOk");
+                if (!IsSpawnPositionOk(type, blocks, x, y, z)) return false;
+            }
 
-            SpawnRuleContext ruleCtx{ *ctx.level, blocks, rng, SpawnReason::Natural,
-                                      &ctx.biomeAt, &ctx.surfaceHeight,
-                                      ctx.seaLevel, ctx.worldSeed };
-            if (!CheckSpawnRules(type, ruleCtx, glm::ivec3(x, y, z))) return false;
+            // The Hush's echo heart (HushBlocks.hpp): no hostile mob spawns
+            // naturally within its radius. Keyed on the TYPE's category, like
+            // the despawn test above — a monster in any pass's list. Before
+            // CheckSpawnRules so a refused position draws no RNG, exactly as
+            // if the heart's ward were one more of the position tests.
+            if (ctx.level && IsMonsterCategory(GetEntityTypeInfo(type).category) &&
+                EchoHeart::SuppressesHostileSpawn(ctx.level->Dimension(), glm::ivec3(x, y, z),
+                                                  ctx.level->GetGameTime())) {
+                return false;
+            }
+            // An awakened Aurelith (AurelithQuest.hpp): no hostile mob spawns
+            // naturally inside its walls — the Chord held again keeps them
+            // out, as the echo heart does its sixteen blocks.
+            if (ctx.level && IsMonsterCategory(GetEntityTypeInfo(type).category) &&
+                Aurelith::SuppressesHostileSpawn(ctx.level->Dimension(), glm::ivec3(x, y, z))) {
+                return false;
+            }
+
+            {
+                PROFILE_ZONE_DETAIL("Spawn.Rules");
+                SpawnRuleContext ruleCtx{ *ctx.level, blocks, rng, SpawnReason::Natural,
+                                          &ctx.biomeAt, &ctx.surfaceHeight,
+                                          ctx.seaLevel, ctx.worldSeed };
+                if (!CheckSpawnRules(type, ruleCtx, glm::ivec3(x, y, z))) return false;
+            }
 
             // MC's last gate: noCollision(type.getSpawnAABB(...)).
+            PROFILE_ZONE_DETAIL("Spawn.BoxFree");
             if (ctx.spawnBoxFree && !ctx.spawnBoxFree(type, x + 0.5, y, z + 0.5)) {
                 return false;
             }
@@ -208,7 +295,10 @@ namespace Game {
             // MC tests isRedstoneConductor on the start block, which for a
             // vanilla block is `isCollisionShapeFullBlock` plus the block's own
             // opt-out. The shape half is the part that matters here.
-            if (IsCollisionShapeFullBlock(blocks, startX, startY, startZ)) return;
+            {
+                PROFILE_ZONE_DETAIL("Spawn.StartBlock");
+                if (IsCollisionShapeFullBlock(blocks, startX, startY, startZ)) return;
+            }
 
             int clusterSize = 0;
 
@@ -235,17 +325,24 @@ namespace Game {
                     const double zz = z + 0.5;
 
                     double nearestSq = 0.0;
-                    if (!NearestPlayerDistanceSq(ctx, xx, startY, zz, nearestSq)) {
-                        continue;   // MC: nearestPlayer == null
-                    }
-                    if (!IsRightDistanceToPlayerAndSpawnPoint(ctx, x, startY, z,
-                                                              chunkX, chunkZ, nearestSq)) {
-                        continue;
+                    {
+                        PROFILE_ZONE_DETAIL("Spawn.Distance");
+                        if (!NearestPlayerDistanceSq(ctx, xx, startY, zz, nearestSq)) {
+                            continue;   // MC: nearestPlayer == null
+                        }
+                        if (!IsRightDistanceToPlayerAndSpawnPoint(ctx, x, startY, z,
+                                                                  chunkX, chunkZ, nearestSq)) {
+                            continue;
+                        }
                     }
 
+                    SpawnPosition pos(ctx, category, x, startY, z);
+
                     if (!currentSpawnData) {
-                        currentSpawnData =
-                            GetRandomSpawnMobAt(ctx, category, x, startY, z, rng);
+                        {
+                            PROFILE_ZONE_DETAIL("Spawn.Pick");
+                            currentSpawnData = GetRandomSpawnMobAt(category, pos, rng);
+                        }
                         if (!currentSpawnData) break;   // MC: empty pick ends the group
 
                         // The pack size comes from the CHOSEN entry, replacing
@@ -256,14 +353,17 @@ namespace Game {
                                           currentSpawnData->minCount);
                     }
 
-                    if (!IsValidSpawnPositionForType(ctx, blocks, *currentSpawnData,
-                                                     category, x, startY, z,
-                                                     nearestSq, rng)) {
-                        continue;
+                    {
+                        PROFILE_ZONE_DETAIL("Spawn.Validate");
+                        if (!IsValidSpawnPositionForType(ctx, blocks, *currentSpawnData, pos,
+                                                         nearestSq, rng)) {
+                            continue;
+                        }
+                        if (!CanSpawnWithinBudget(ctx, currentSpawnData->type, pos)) {
+                            continue;
+                        }
                     }
-                    if (!CanSpawnWithinBudget(ctx, currentSpawnData->type, x, startY, z)) {
-                        continue;
-                    }
+                    PROFILE_ZONE_DETAIL("Spawn.Place");
 
                     std::unique_ptr<Mob> mob = ctx.createMob(currentSpawnData->type);
                     if (!mob) return;   // MC returns from the whole call here
@@ -292,7 +392,7 @@ namespace Game {
 
                     // MC SpawnState.afterSpawn: tighten the local cap and add
                     // the spawn-cost charge within the same tick.
-                    AddSpawnCharge(ctx, currentSpawnData->type, x, startY, z);
+                    AddSpawnCharge(ctx, currentSpawnData->type, pos);
                     if (ctx.afterSpawn) {
                         ctx.afterSpawn(category, glm::ivec3(x, startY, z));
                     }
@@ -305,6 +405,22 @@ namespace Game {
         }
 
     } // namespace
+
+    const BiomeSpawnList* SpawnListForBiome(BiomeId biome) {
+        // The biome table is generated and fixed at build time, so one pass
+        // over it answers every id for the life of the process.
+        static const std::vector<const BiomeSpawnList*> kByBiome = [] {
+            std::vector<const BiomeSpawnList*> table(BiomeRegistry::Count());
+            for (BiomeId id = 0; id < BiomeRegistry::Count(); ++id) {
+                table[id] = FindBiomeSpawnList(BiomeRegistry::Get(id).name);
+            }
+            return table;
+        }();
+        // An id past the table resolves to the fallback biome, as
+        // BiomeRegistry::Get does.
+        return biome < kByBiome.size() ? kByBiome[biome]
+                                       : FindBiomeSpawnList(BiomeRegistry::Get(biome).name);
+    }
 
     bool CanSpawnForCategory(const SpawnContext& ctx, MobCategory category) {
         if (!ctx.categoryCounts) return false;
@@ -332,6 +448,12 @@ namespace Game {
             MobCategory::UndergroundWaterCreature,
             MobCategory::WaterCreature,
             MobCategory::WaterAmbient,
+            // The Aether's appended categories (MobCategory.hpp) — MC's
+            // SPAWNING_CATEGORIES is every value but MISC, so they are in it.
+            MobCategory::AetherSurfaceMonster,
+            MobCategory::AetherDarknessMonster,
+            MobCategory::AetherSkyMonster,
+            MobCategory::AetherAerwhale,
         };
 
         std::vector<MobCategory> out;
@@ -359,9 +481,15 @@ namespace Game {
         if (!blocks) return;
 
         for (MobCategory category : categories) {
+            // Opt-in (EXPLOSION_DETAIL_ZONES): tens of thousands per tick
+            // under a few dozen players — see Profiling_Tracy.hpp.
+            PROFILE_ZONE_DETAIL("Spawn.Category");
             // MC checks the per-player local cap per chunk, in addition to the
             // per-tick global filter.
-            if (ctx.canSpawnLocal && !ctx.canSpawnLocal(category, chunkX, chunkZ)) continue;
+            {
+                PROFILE_ZONE_DETAIL("Spawn.LocalCap");
+                if (ctx.canSpawnLocal && !ctx.canSpawnLocal(category, chunkX, chunkZ)) continue;
+            }
 
             // ── MC spawnCategoryForChunk / getRandomPosWithin ──────────────
             const int startX = (chunkX << 4) + rng.NextInt(16);

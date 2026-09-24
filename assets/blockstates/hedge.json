@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "": [
+      {
+        "model": "minecraft:block/hedge",
+        "weight": 10
+      },
+      {
+        "model": "minecraft:block/hedge_rose"
+      }
+    ]
+  }
+}

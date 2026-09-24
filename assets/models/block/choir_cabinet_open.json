@@ -1,0 +1,9 @@
+{
+  "parent": "minecraft:block/orientable",
+  "textures": {
+    "front": "minecraft:block/choir_cabinet_front_open",
+    "side": "minecraft:block/choir_cabinet_side",
+    "top": "minecraft:block/choir_cabinet_top",
+    "particle": "minecraft:block/choir_cabinet_side"
+  }
+}

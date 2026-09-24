@@ -35,6 +35,12 @@ namespace Client {
         enum class State { Offline, Menu, Playing, Hosting };
         State state = State::Offline;
         std::string world;   // world name (hosting) / server address (playing)
+        // Hosting only: the host's World Options "Joinable" switch. Off =
+        // the world is shown but cannot be joined (Join greyed out).
+        bool joinable = true;
+        // Offline only: Unix seconds when their last game connection
+        // dropped, as the service recorded it. 0 = unknown / never.
+        int64_t lastOnline = 0;
     };
 
     struct FriendEntry {
@@ -116,7 +122,8 @@ namespace Client {
         // address it observes would then be a private one.
         void SetPresence(FriendPresence::State state,
                          const std::string& world, uint16_t hostPort,
-                         const std::string& externalIp = "");
+                         const std::string& externalIp = "",
+                         bool joinable = true);
         void SendInvite(int64_t friendId);
 
         // Where this client is talking to — the joiner dials the same
@@ -197,6 +204,7 @@ namespace Client {
         std::string m_presenceWorld;
         uint16_t m_presencePort = 0;
         std::string m_presenceExternalIp;
+        bool m_presenceJoinable = true;
 
         RelaySocketHandler m_relayHandler;
 

@@ -1,7 +1,7 @@
 // File: src/client/renderer/entity/model/EntityModels.hpp
 //
 // The eight mob models, transcribed from
-// minecraft_code/decompiled_net/minecraft/client/model/.
+// minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/client/model/.
 //
 // Every cube origin, size and texOffs below is MC's, unrounded. They are not
 // tunable: the texture atlas layout is derived from them, so changing a size
@@ -64,7 +64,23 @@ namespace Render {
     // What a model needs to pose itself. Assembled by the renderer from the
     // entity plus the partial tick — MC's LivingEntityRenderState, reduced to
     // the fields these eight actually read.
+    // MC ArmorStandRenderState's own fields: the six part poses (degrees,
+    // MC Rotations), the entity yaw the base plate counter-rotates by, and
+    // the two visibility flags. Read by ArmorStandModel / ArmorStandArmorModel.
+    struct ArmorStandRenderState {
+        glm::vec3 headPose{0.0f};
+        glm::vec3 bodyPose{0.0f};
+        glm::vec3 leftArmPose{-10.0f, 0.0f, -10.0f};
+        glm::vec3 rightArmPose{-15.0f, 0.0f, 10.0f};
+        glm::vec3 leftLegPose{-1.0f, 0.0f, -1.0f};
+        glm::vec3 rightLegPose{1.0f, 0.0f, 1.0f};
+        float entityYaw = 0.0f;
+        bool  showArms = false;
+        bool  showBasePlate = true;
+    };
+
     struct EntityRenderState {
+        ArmorStandRenderState armorStand;
         float yRot = 0.0f;          // head yaw RELATIVE to the body, degrees
         float xRot = 0.0f;          // head pitch, degrees
         float walkAnimationPos = 0.0f;
@@ -193,6 +209,7 @@ namespace Render {
         float yHeadRotAbs = 0.0f;        // shulker: ABSOLUTE head yaw
         float yBodyRotAbs = 0.0f;        // shulker: ABSOLUTE body yaw
         float biteProgress = 0.0f;       // evoker fangs 0..1 lifetime
+        float arrowShake = 0.0f;         // MC ArrowRenderState.shake (shakeTime - partialTick)
         // Enum ordinals, in MC declaration order. mobArmPose is
         // IllagerArmPose or PiglinArmPose depending on the mob; mobPose is
         // ParrotModel.Pose. swingAnimType is SwingAnimationType — WHACK (1)
@@ -362,6 +379,58 @@ namespace Render {
     };
 
     // MC AbstractZombieModel — HumanoidModel plus the arms-out pose.
+    // ── Armor stand ────────────────────────────────────────────────────────
+    //
+    // MC ArmorStandArmorModel: HumanoidModel's mesh (createBaseMesh — the
+    // head sits one pixel low, the legs one pixel high and a tenth thinner)
+    // whose setupAnim is the six poses, nothing else. One instance per armor
+    // deformation: 1.0 for the outer pieces, 0.5 for the leggings (MC's
+    // ArmorModelSet pair). 64×32 sheet — the equipment textures.
+    class ArmorStandArmorModel : public EntityModel {
+    public:
+        explicit ArmorStandArmorModel(float grow);
+        void SetupAnim(const EntityRenderState& state) override;
+        // MC HumanoidModel.ADULT_ARMOR_PARTS_PER_SLOT: only the parts a
+        // slot's piece covers draw. `equipmentSlot` is Game::EquipmentSlot's
+        // value: 2 feet, 3 legs, 4 chest, 5 head.
+        void ShowPartsForSlot(int equipmentSlot);
+
+    protected:
+        ArmorStandArmorModel() = default;   // ArmorStandModel builds its own mesh
+        // MC ArmorStandArmorModel.setupAnim's body: the poses onto the parts.
+        void ApplyPoses(const EntityRenderState& state);
+
+        ModelPart* m_head = nullptr;
+        ModelPart* m_hat = nullptr;
+        ModelPart* m_body = nullptr;
+        ModelPart* m_rightArm = nullptr;
+        ModelPart* m_leftArm = nullptr;
+        ModelPart* m_rightLeg = nullptr;
+        ModelPart* m_leftLeg = nullptr;
+    };
+
+    // MC ArmorStandModel: the wooden stand itself — thin limbs, the two body
+    // sticks, the shoulder stick and the base plate (createBodyLayer). The
+    // arms draw only with ShowArms, the plate only with ShowBasePlate, and
+    // the plate counter-rotates by the entity yaw so it stays square to the
+    // world. 64×64 sheet (armorstand/wood.png).
+    class ArmorStandModel : public ArmorStandArmorModel {
+    public:
+        ArmorStandModel();
+        void SetupAnim(const EntityRenderState& state) override;
+        // MC ArmorStandModel.translateToHand: the arm's chain whether or not
+        // the arm is drawn (an armless stand still holds its items).
+        bool RightHandMatrix(glm::mat4& out) const override;
+        bool LeftHandMatrix(glm::mat4& out) const;
+        bool HeadMatrix(glm::mat4& out) const;
+
+    private:
+        ModelPart* m_rightBodyStick = nullptr;
+        ModelPart* m_leftBodyStick = nullptr;
+        ModelPart* m_shoulderStick = nullptr;
+        ModelPart* m_basePlate = nullptr;
+    };
+
     class ZombieModel : public HumanoidModel {
     public:
         ZombieModel() : HumanoidModel(false) {}
@@ -571,18 +640,19 @@ namespace Render {
     // zero-thickness box paired with a flipped twin so both sides draw — the
     // cube UV layout maps only one face of a flat box onto the artwork.
     //
-    // SetupAnim pitches the whole assembly by the entity xRot: an arrow's
-    // orientation IS its rotation pair, there is nothing else to animate.
+    // MC ArrowModel (26.x): a fletching plane at the tail and two crossed
+    // shaft planes, the mesh at 0.9. The orientation is the RENDERER's
+    // (ArrowRenderer.submit: yaw − 90 about Y, then the pitch about Z),
+    // not the model's; SetupAnim only adds the shake of a fresh hit.
     class ArrowModel : public EntityModel {
     public:
         ArrowModel();
         void SetupAnim(const EntityRenderState& state) override;
-        // MC ArrowModel: RenderTypes::entityCutout (the culling cutout in
-        // 26.1's naming) — culled.
+        // MC ArrowModel: RenderTypes::entityCutoutCull — culled.
         bool CullBackFaces() const override { return true; }
 
     private:
-        ModelPart* m_pivot = nullptr;
+        ModelPart* m_arrow = nullptr;   // the 0.9-scaled root the parts hang off
     };
 
     // ── Projectile models ──────────────────────────────────────────────────

@@ -1,17 +1,25 @@
 // File: src/client/renderer/mesh/Mesher.cpp
 #include "Mesher.hpp"
+#include "common/world/block/RedstoneWire.hpp"
+#include "common/world/block/GeneratedBlockStates.hpp"
 #include "MeshCensus.hpp"
 #include <atomic>
 #include "MeshJobData.hpp"
 #include "../culling/VisGraph.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/ShapeOcclusion.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "../texture/ConnectedTextures.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/lighting/BlockLightProperties.hpp"
+#include "common/world/lighting/LightCoords.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "common/world/biome/BiomeZoom.hpp"
+#include "common/world/chunk/Chunk.hpp"
+#include "client/world/ClientBiomeZoom.hpp"
 #include "platform/GameDirectory.hpp"
 #include <chrono>
 #include <mutex>
@@ -77,6 +85,7 @@ namespace Render {
 
     void Mesher::SetDimension(Game::DimensionId dimension) {
         m_dimension = dimension;
+        if (m_fluidBuilder) m_fluidBuilder->netherCardinalLight = dimension == Game::DimensionId::Nether;
         std::shared_ptr<const std::vector<AoExclusion>> list;
         std::shared_ptr<const std::vector<PortalFace>>  faces;
         {
@@ -179,6 +188,14 @@ namespace Render {
                 // UNMERGED (ineligible): this quad must then stay a 1x1 too,
                 // or the pair's tessellations differ and z-fight.
                 uint8_t   solo;
+                // The face's light word, the same at all four corners (the
+                // stash's eligibility test). Part of the merge test: a merged
+                // rectangle carries ONE light (TerrainVertex::light), so only
+                // cells lit alike join.
+                uint32_t  light;
+                // The four corners' light words, for a 1x1 survivor's verbatim
+                // re-emit (all equal to `light` by eligibility, kept for clarity).
+                std::array<uint32_t, 4> cornerLight;
             };
             // The merge test compares NOTHING about a quad's look any more:
             // colour, AO and sprite all travel per block in the face map, so
@@ -340,7 +357,8 @@ namespace Render {
                 const Game::BlockID block = GetBlock(worldX, worldY, worldZ);
                 return block != Game::BlockID::Air &&
                        block != Game::BlockID::Water &&
-                       block != Game::BlockID::Lava;
+                       block != Game::BlockID::Lava &&
+                       block != Game::BlockID::ResonantWater;   // Aurelith's river (always-water)
             }
 
             bool IsBlockFluid(int worldX, int worldY, int worldZ) const override {
@@ -379,6 +397,13 @@ namespace Render {
                        ? BlendedBiomeTint(BiomeChannel::Water, x, y, z)
                        : glm::vec4(1.0f);
         };
+        // MC FluidRenderer reads the level's light coords per cell; the fluid
+        // builder asks the same cache the block faces read.
+        m_fluidBuilder->lightProvider = [this](int x, int y, int z) {
+            return LightCoordsAt(x, y, z);
+        };
+        std::memset(m_lightCache, 0xF0, sizeof(m_lightCache));
+        std::memset(m_lightPermeable, 1, sizeof(m_lightPermeable));
     }
 
     void Mesher::SetWorld(Game::World* world) {
@@ -415,7 +440,12 @@ namespace Render {
     static std::atomic<bool>     s_greedyEnabled{true};
 
     void Mesher::SetGreedyEnabled(bool enable) {
-        s_greedyEnabled.store(enable, std::memory_order_release);
+        if (s_greedyEnabled.exchange(enable, std::memory_order_acq_rel) != enable) {
+            // The stamp parked chunks are checked against when revived: a
+            // mesh built under the other setting is re-dirtied then, as
+            // after a debug-colour toggle.
+            s_greedyPaletteGen.fetch_add(1, std::memory_order_release);
+        }
     }
     bool Mesher::GreedyEnabled() {
         return s_greedyEnabled.load(std::memory_order_acquire);
@@ -566,13 +596,16 @@ namespace Render {
             // states. Clamping here would silently skip the tail of every one
             // of them.
             const uint16_t stateCount = Game::BlockRegistry::GetStateCount(blockId);
+            // Asked of the model's elements (IsOcclusionFullCube), not of the
+            // shape set's bounds: a piston head's arm reaches into the next
+            // cell, so its BOUNDS fill the cube while its faces do not.
             const bool fullCube =
-                Game::BlockRegistry::GetBlockShapeSet(
-                    Game::BlockStates::FromIndex(blockId, 0)).IsFullCube();
+                Game::BlockRegistry::IsOcclusionFullCube(
+                    Game::BlockStates::FromIndex(blockId, 0));
             bool variesByState = false;
             for (uint16_t s = 1; s < stateCount; ++s) {
-                if (Game::BlockRegistry::GetBlockShapeSet(
-                        Game::BlockStates::FromIndex(blockId, s)).IsFullCube() != fullCube) {
+                if (Game::BlockRegistry::IsOcclusionFullCube(
+                        Game::BlockStates::FromIndex(blockId, s)) != fullCube) {
                     variesByState = true;
                     break;
                 }
@@ -598,9 +631,9 @@ namespace Render {
             //
             // packed_ice is deliberately absent: vanilla registers it as a
             // plain Block, so it is opaque and already culls by occlusion.
-            // Glass PANES are IronBarsBlock, whose skipRendering depends on the
-            // per-side connection properties this engine does not model, so
-            // they are left alone rather than guessed at.
+            // Glass PANES and bars are IronBarsBlock, whose skipRendering
+            // reads the per-side connection properties (isPane / isBars,
+            // resolved at the face below).
             {
                 const std::string& n = block.modelName;
                 auto ends = [&](std::string_view suffix) {
@@ -611,7 +644,13 @@ namespace Render {
                     n == "glass" || n == "tinted_glass" || ends("_stained_glass") ||
                     n == "ice" || n == "frosted_ice" || n == "blue_ice" ||
                     n == "honey_block" || n == "slime_block" ||
-                    ends("copper_grate");
+                    ends("copper_grate") ||
+                    // The Aether's HalfTransparentBlocks (AercloudBlock,
+                    // AerogelBlock, quicksoil glass): same skipRendering rule.
+                    ends("_aercloud") || n == "aerogel" || n == "quicksoil_glass";
+                s_blockPropsCache[i].isPane = n == "glass_pane" || ends("_stained_glass_pane");
+                // MC BlockTags.BARS: iron bars and the copper bars family.
+                s_blockPropsCache[i].isBars = n == "iron_bars" || ends("copper_bars");
             }
 
             // Connected textures. Resolve the 16 variant rects once per block
@@ -698,21 +737,11 @@ namespace Render {
                     p.tintSource = TS::Constant;  // BlockColors.java: -2046180
                     p.tintConstant = 0xE0C71C;
                 } else if (is("redstone_wire")) {
-                    // MC BlockColors registers RedStoneWireBlock.getColorForPower;
-                    // RedStoneWireBlock.java:453-461 builds the table as
-                    //   red   = power*0.6 + (power > 0 ? 0.4 : 0.3)
-                    //   green = clamp(power*power*0.7 - 0.5, 0, 1)
-                    //   blue  = clamp(power*power*0.6 - 0.7, 0, 1)
-                    // At power 0 that is (0.3, 0, 0) -> 0x4D0000, the dark red
-                    // of unpowered dust. A CONSTANT is exactly right here: there
-                    // is no redstone power simulation, so every wire is at 0.
-                    // When power arrives this becomes a per-state resolver, the
-                    // same shape as the stem tint below.
-                    //
-                    // The dust texture is greyscale and relies entirely on this
-                    // tint — untinted it renders white.
-                    p.tintSource = TS::Constant;
-                    p.tintConstant = 0x4D0000;
+                    // MC BlockColors registers RedstoneWireBlock.getColorForPower
+                    // with addColoringState(POWER): the dust texture is
+                    // greyscale and its whole colour — dark red at 0, bright
+                    // red at 15 — comes from the state's power.
+                    p.tintSource = TS::RedstonePower;
                 } else if (is("melon_stem") || is("pumpkin_stem")) {
                     // BlockColors.java:54-57 — a growing stem fades from green
                     // to the attached stem's yellow as it ages:
@@ -742,6 +771,15 @@ namespace Render {
                 auto& p = s_blockPropsCache[i];
                 p.isLeaves = n.size() >= kSuffix.size() &&
                              n.compare(n.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+                // Two Twilight Forest blocks end in "_leaves" without being a
+                // LeavesBlock: fallen_leaves (TF FallenLeavesBlock, a layered
+                // ground cover like leaf_litter) and hardened_dark_leaves
+                // (TF HardenedDarkLeavesBlock extends Block — the maze-wall
+                // "thick darkwood leaves" that stay cutout under Fast too).
+                if (block.registrySlug == "fallen_leaves" ||
+                    block.registrySlug == "hardened_dark_leaves") {
+                    p.isLeaves = false;
+                }
                 // ItemBlockRenderTypes.getChunkRenderType:
                 //   block instanceof LeavesBlock -> cutoutLeaves ? CUTOUT : SOLID
                 // Under Fast the whole canopy goes through the opaque pass,
@@ -831,6 +869,8 @@ namespace Render {
 
         m_biomeSource = &region;
         m_biomeAccess = nullptr;
+        // One read per section build: the seed only changes between levels.
+        m_biomeZoomSeed = ::Client::BiomeZoomSeed();
 
         const Client::Render::SectionCopy* centre = region.Centre();
 
@@ -905,8 +945,8 @@ namespace Render {
                 continue;
             }
             dst[i] = props.opaqueMaterial &&
-                     Game::BlockRegistry::GetBlockShapeSet(
-                         Game::BlockStates::FromIndex(src[i], st[i])).IsFullCube();
+                     Game::BlockRegistry::IsOcclusionFullCube(
+                         Game::BlockStates::FromIndex(src[i], st[i]));
         }
     }
 
@@ -961,9 +1001,80 @@ namespace Render {
         return m_blockCache[ly][lz][lx];
     }
 
+    Game::BlockState Mesher::GetCachedBlockState(int worldX, int worldY, int worldZ) const {
+        const int lx = worldX - m_sectionBaseWorldX + 1;
+        const int ly = worldY - m_sectionBaseWorldY + 1;
+        const int lz = worldZ - m_sectionBaseWorldZ + 1;
+        if (lx < 0 || lx >= 18 || ly < 0 || ly >= 18 || lz < 0 || lz >= 18) {
+            return Game::BlockState{};
+        }
+        const Game::BlockID id = m_blockCache[ly][lz][lx];
+        const Game::BlockStateIndex st = m_stateCacheAllZero ? 0 : m_stateCache[ly][lz][lx];
+        return Game::BlockStates::FromIndex(id, st);
+    }
+
+    bool Mesher::IsFaceOccludedByPartialNeighbour(int worldX, int worldY, int worldZ,
+                                                  BlockFace cullAgainst, bool thisOccludes,
+                                                  const glm::vec3& from, const glm::vec3& to) const {
+        const glm::ivec3& off = FACE_OFFSETS[static_cast<int>(cullAgainst)];
+        const int nx = worldX + off.x, ny = worldY + off.y, nz = worldZ + off.z;
+        const Game::BlockID neighbour = GetCachedBlock(nx, ny, nz);
+        if (neighbour == Game::BlockID::Air) return false;
+        // Only a block that can occlude at all has a face occlusion shape;
+        // glass, ice, leaves, fluids and block-entity blocks are empty here.
+        const auto& nprops = s_blockPropsCache[static_cast<size_t>(neighbour)];
+        if (!nprops.opaqueMaterial) return false;
+        // A full cube was already handled by the opaque cache.
+        if (GetCachedOpaque(nx, ny, nz)) return false;
+
+        const Game::BlockRegistry::BlockShapeSet shape =
+            Game::BlockRegistry::GetBlockShapeSet(GetCachedBlockState(nx, ny, nz));
+        if (shape.count == 0) return false;
+
+        Game::Direction toward;
+        switch (cullAgainst) {
+            case BlockFace::PositiveY: toward = Game::Direction::Up;    break;
+            case BlockFace::NegativeY: toward = Game::Direction::Down;  break;
+            case BlockFace::PositiveZ: toward = Game::Direction::South; break;
+            case BlockFace::NegativeZ: toward = Game::Direction::North; break;
+            case BlockFace::PositiveX: toward = Game::Direction::East;  break;
+            default:                   toward = Game::Direction::West;  break;
+        }
+        const Game::Direction occluderFace = Game::Opposite(toward);
+
+        // `occluder == Shapes.block()`: the neighbour's face toward us is a
+        // full square (calculateFace: a cube-like slice IS Shapes.block()).
+        if (Game::Shapes::FaceCovers(shape, occluderFace, Game::Shapes::FaceRect{0.0f, 0.0f, 1.0f, 1.0f})) {
+            return true;
+        }
+        // Otherwise only an occluding block's own face can be covered — a
+        // non-occluding block's face shape is empty and always renders.
+        if (!thisOccludes) return false;
+
+        // This element face's rectangle in the face's tangent coordinates
+        // (ShapeOcclusion's convention: Up/Down (x, z), East/West (y, z),
+        // North/South (x, y)), model units to block units.
+        Game::Shapes::FaceRect rect;
+        switch (toward) {
+            case Game::Direction::Up:
+            case Game::Direction::Down:
+                rect = {from.x / 16.0f, from.z / 16.0f, to.x / 16.0f, to.z / 16.0f};
+                break;
+            case Game::Direction::East:
+            case Game::Direction::West:
+                rect = {from.y / 16.0f, from.z / 16.0f, to.y / 16.0f, to.z / 16.0f};
+                break;
+            default:
+                rect = {from.x / 16.0f, from.y / 16.0f, to.x / 16.0f, to.y / 16.0f};
+                break;
+        }
+        return Game::Shapes::FaceCovers(shape, occluderFace, rect);
+    }
+
     void Mesher::BuildSectionMesh(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
         EnsureBlockPropsCache();
         FillBlockCacheFromAccess(blocks, chunkPos, sectionY);
+        FillLightCaches(nullptr, &blocks);
         BuildSectionMeshFromCache(chunkPos, sectionY, outMesh);
     }
 
@@ -971,7 +1082,229 @@ namespace Render {
                                   Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
         EnsureBlockPropsCache();
         FillBlockCacheFromRegion(region, chunkPos, sectionY);
+        FillLightCaches(&region, nullptr);
         BuildSectionMeshFromCache(chunkPos, sectionY, outMesh);
+    }
+
+    // ── Light ────────────────────────────────────────────────────────────────
+
+    void Mesher::FillLightCaches(const Client::Render::RegionSnapshot* region,
+                                 const Game::IBlockAccess* blocks) {
+        PROFILE_ZONE_N("Mesher.FillLight");
+        // Raw light over the 18^3 halo.
+        for (int ly = -1; ly <= 16; ++ly) {
+            for (int lz = -1; lz <= 16; ++lz) {
+                for (int lx = -1; lx <= 16; ++lx) {
+                    uint8_t v = 0xF0;                       // sky 15, block 0: a missing chunk
+                    if (region) {
+                        v = region->LightAtLocal(lx, ly, lz);
+                    } else if (blocks) {
+                        const int wx = m_sectionBaseWorldX + lx, wy = m_sectionBaseWorldY + ly,
+                                  wz = m_sectionBaseWorldZ + lz;
+                        const int sky = blocks->GetBrightness(Game::Lighting::LightLayer::Sky, wx, wy, wz);
+                        const int blk = blocks->GetBrightness(Game::Lighting::LightLayer::Block, wx, wy, wz);
+                        v = static_cast<uint8_t>(((sky & 15) << 4) | (blk & 15));
+                    }
+                    m_lightCache[ly + 1][lz + 1][lx + 1] = v;
+                }
+            }
+        }
+        // isLightPermeable over 20^3: the 18^3 interior from the state
+        // caches, the outer shell (cells two out) from the region.
+        using Game::Lighting::BlockLightProperties;
+        for (int ly = -2; ly <= 17; ++ly) {
+            for (int lz = -2; lz <= 17; ++lz) {
+                for (int lx = -2; lx <= 17; ++lx) {
+                    const bool inHalo = lx >= -1 && lx <= 16 && ly >= -1 && ly <= 16 && lz >= -1 && lz <= 16;
+                    Game::BlockState st;
+                    if (inHalo) {
+                        st = Game::BlockStates::FromIndex(
+                            m_blockCache[ly + 1][lz + 1][lx + 1],
+                            m_stateCacheAllZero ? 0 : m_stateCache[ly + 1][lz + 1][lx + 1]);
+                    } else if (region) {
+                        st = Game::BlockState::FromRawId(region->StateIdAtLocal(lx, ly, lz));
+                    } else if (blocks) {
+                        st = blocks->GetBlockState(m_sectionBaseWorldX + lx, m_sectionBaseWorldY + ly,
+                                                   m_sectionBaseWorldZ + lz);
+                    }
+                    m_lightPermeable[ly + 2][lz + 2][lx + 2] = BlockLightProperties::LightPermeable(st);
+                }
+            }
+        }
+    }
+
+    int Mesher::LightCoordsWith(Game::BlockState state, int worldX, int worldY, int worldZ) const {
+        namespace LC = Game::Lighting::LightCoords;
+        using Game::Lighting::BlockLightProperties;
+        const Game::Lighting::StateLightInfo& info = BlockLightProperties::Info(state);
+        if (info.flags & BlockLightProperties::kEmissiveRendering) return LC::kFullBright;
+        const int lx = worldX - m_sectionBaseWorldX + 1;
+        const int ly = worldY - m_sectionBaseWorldY + 1;
+        const int lz = worldZ - m_sectionBaseWorldZ + 1;
+        uint8_t raw = 0xF0;
+        if (lx >= 0 && lx < 18 && ly >= 0 && ly < 18 && lz >= 0 && lz < 18) raw = m_lightCache[ly][lz][lx];
+        const int sky = raw >> 4;
+        const int block = std::max(static_cast<int>(raw & 15), static_cast<int>(info.emission));
+        return LC::Pack(block, sky);
+    }
+
+    bool Mesher::LightPermeableAt(int worldX, int worldY, int worldZ) const {
+        const int lx = worldX - m_sectionBaseWorldX + 2;
+        const int ly = worldY - m_sectionBaseWorldY + 2;
+        const int lz = worldZ - m_sectionBaseWorldZ + 2;
+        if (lx < 0 || lx >= 20 || ly < 0 || ly >= 20 || lz < 0 || lz >= 20) return true;
+        return m_lightPermeable[ly][lz][lx];
+    }
+
+    namespace {
+        // MC Direction for the mesher's BlockFace.
+        Game::Direction DirectionOf(BlockFace f) {
+            switch (f) {
+                case BlockFace::PositiveY: return Game::Direction::Up;
+                case BlockFace::NegativeY: return Game::Direction::Down;
+                case BlockFace::PositiveZ: return Game::Direction::South;
+                case BlockFace::NegativeZ: return Game::Direction::North;
+                case BlockFace::PositiveX: return Game::Direction::East;
+                default:                   return Game::Direction::West;
+            }
+        }
+        // The model JSON's FaceDir (Up = 0, Down = 1, ...) as MC's Direction.
+        Game::Direction FaceDirToDirection(Game::FaceDir d) {
+            switch (d) {
+                case Game::FaceDir::Up:    return Game::Direction::Up;
+                case Game::FaceDir::Down:  return Game::Direction::Down;
+                case Game::FaceDir::North: return Game::Direction::North;
+                case Game::FaceDir::South: return Game::Direction::South;
+                case Game::FaceDir::West:  return Game::Direction::West;
+                case Game::FaceDir::East:  return Game::Direction::East;
+            }
+            return Game::Direction::Up;
+        }
+        // MC BlockModelLighter.AdjacencyInfo.corners, by Direction ordinal.
+        constexpr Game::Direction kLightCorners[6][4] = {
+            /* Down  */ { Game::Direction::West, Game::Direction::East, Game::Direction::North, Game::Direction::South },
+            /* Up    */ { Game::Direction::East, Game::Direction::West, Game::Direction::North, Game::Direction::South },
+            /* North */ { Game::Direction::Up,   Game::Direction::Down, Game::Direction::East,  Game::Direction::West  },
+            /* South */ { Game::Direction::West, Game::Direction::East, Game::Direction::Down,  Game::Direction::Up    },
+            /* West  */ { Game::Direction::Up,   Game::Direction::Down, Game::Direction::North, Game::Direction::South },
+            /* East  */ { Game::Direction::Down, Game::Direction::Up,   Game::Direction::North, Game::Direction::South },
+        };
+        // MC prepareQuadShape's faceCubic: the quad lies flat on the side of
+        // its cell it faces (or the block's collision is a full cube), so
+        // its light and shade come from the neighbour cell.
+        bool FaceCubic(Game::Direction dir, const glm::vec3 (&localPos)[4], bool fullCollision) {
+            glm::vec3 mn(32.0f), mx(-32.0f);
+            for (const glm::vec3& p : localPos) { mn = glm::min(mn, p); mx = glm::max(mx, p); }
+            constexpr float kLo = 1.0e-4f, kHi = 0.9999f;
+            switch (dir) {
+                case Game::Direction::Down:  return mn.y == mx.y && (mn.y < kLo || fullCollision);
+                case Game::Direction::Up:    return mn.y == mx.y && (mx.y > kHi || fullCollision);
+                case Game::Direction::North: return mn.z == mx.z && (mn.z < kLo || fullCollision);
+                case Game::Direction::South: return mn.z == mx.z && (mx.z > kHi || fullCollision);
+                case Game::Direction::West:  return mn.x == mx.x && (mn.x < kLo || fullCollision);
+                case Game::Direction::East:  return mn.x == mx.x && (mx.x > kHi || fullCollision);
+            }
+            return false;
+        }
+        // Bilinear weight of a cell-face corner that sits on the `d` side,
+        // at a vertex whose block-local coordinate along d's axis is `p`.
+        inline float CornerWeight(Game::Direction d, const glm::vec3& p) {
+            const int axis = d == Game::Direction::East || d == Game::Direction::West ? 0
+                           : d == Game::Direction::Up   || d == Game::Direction::Down ? 1 : 2;
+            const bool positive = d == Game::Direction::East || d == Game::Direction::Up || d == Game::Direction::South;
+            const float c = std::clamp(p[axis], 0.0f, 1.0f);
+            return positive ? c : 1.0f - c;
+        }
+    }
+
+    void Mesher::ComputeFaceLight(Game::BlockState state, int worldX, int worldY, int worldZ,
+                                  BlockFace face, int cullfaceDir, bool smooth,
+                                  const glm::vec3 (&localPos)[4], std::array<uint32_t, 4>& outLight) const {
+        namespace LC = Game::Lighting::LightCoords;
+        using Game::Lighting::BlockLightProperties;
+        const Game::Direction dir = DirectionOf(face);
+        const int dx = Game::StepX(dir), dy = Game::StepY(dir), dz = Game::StepZ(dir);
+
+        // MC prepareQuadShape: the quad's bounds decide whether it lies on
+        // the cell boundary (faceCubic: its light comes from the neighbour
+        // cell) and whether it covers the whole face (else facePartial: the
+        // per-vertex weighted blend).
+        const bool faceCubic = FaceCubic(dir, localPos, BlockLightProperties::FullCollision(state));
+
+        if (!smooth) {
+            // MC tesselateFlat: a culled quad reads the cell its cullface
+            // names; an unculled one the neighbour when it lies on the face,
+            // else its own cell — both through the block's OWN state
+            // (emission, emissiveRendering).
+            int lx = worldX, ly = worldY, lz = worldZ;
+            if (cullfaceDir >= 0) {
+                const Game::Direction cd = FaceDirToDirection(static_cast<Game::FaceDir>(cullfaceDir));
+                lx += Game::StepX(cd); ly += Game::StepY(cd); lz += Game::StepZ(cd);
+            } else if (faceCubic) {
+                lx += dx; ly += dy; lz += dz;
+            }
+            const uint32_t word = TerrainVertex::LightWord(LightCoordsWith(state, lx, ly, lz));
+            outLight = { word, word, word, word };
+            return;
+        }
+
+        // MC prepareQuadAmbientOcclusion, light half.
+        const int bx = faceCubic ? worldX + dx : worldX;
+        const int by = faceCubic ? worldY + dy : worldY;
+        const int bz = faceCubic ? worldZ + dz : worldZ;
+        const Game::Direction (&corners)[4] = kLightCorners[static_cast<int>(dir)];
+        int light[4];
+        bool permeable[4];
+        for (int i = 0; i < 4; ++i) {
+            const Game::Direction c = corners[i];
+            const int cx = bx + Game::StepX(c), cy = by + Game::StepY(c), cz = bz + Game::StepZ(c);
+            light[i] = LightCoordsAt(cx, cy, cz);
+            permeable[i] = LightPermeableAt(cx + dx, cy + dy, cz + dz);
+        }
+        auto diagonal = [&](int a, int b) {
+            const Game::Direction ca = corners[a], cb = corners[b];
+            return LightCoordsAt(bx + Game::StepX(ca) + Game::StepX(cb),
+                                 by + Game::StepY(ca) + Game::StepY(cb),
+                                 bz + Game::StepZ(ca) + Game::StepZ(cb));
+        };
+        // Where both side cells are opaque the diagonal is hidden: MC takes
+        // the first side's light instead (26.x: light0 for all four).
+        const int lightCorner02 = (!permeable[2] && !permeable[0]) ? light[0] : diagonal(0, 2);
+        const int lightCorner03 = (!permeable[3] && !permeable[0]) ? light[0] : diagonal(0, 3);
+        const int lightCorner12 = (!permeable[2] && !permeable[1]) ? light[0] : diagonal(1, 2);
+        const int lightCorner13 = (!permeable[3] && !permeable[1]) ? light[0] : diagonal(1, 3);
+
+        int lightCenter = LightCoordsWith(state, worldX, worldY, worldZ);
+        {
+            const Game::BlockState next = GetCachedBlockState(worldX + dx, worldY + dy, worldZ + dz);
+            if (faceCubic || !BlockLightProperties::SolidRender(next)) {
+                lightCenter = LightCoordsWith(next, worldX + dx, worldY + dy, worldZ + dz);
+            }
+        }
+
+        // The four cell-face corner values (MC _tc1.._tc4) and where each
+        // sits: (c3, c0), (c2, c0), (c2, c1), (c3, c1).
+        const int tc[4] = {
+            LC::SmoothBlend(light[3], light[0], lightCorner03, lightCenter),
+            LC::SmoothBlend(light[2], light[0], lightCorner02, lightCenter),
+            LC::SmoothBlend(light[2], light[1], lightCorner12, lightCenter),
+            LC::SmoothBlend(light[3], light[1], lightCorner13, lightCenter),
+        };
+        static constexpr int kCornerSides[4][2] = { {3, 0}, {2, 0}, {2, 1}, {3, 1} };
+
+        // Each vertex takes the bilinear blend of the four at its position on
+        // the face — for a full face that is exactly one corner's value; for
+        // a partial one it is MC's smoothWeightedBlend with the quad-shape
+        // weights (the vertices sit on the corners of the quad's bounds).
+        for (int v = 0; v < 4; ++v) {
+            float w[4];
+            for (int k = 0; k < 4; ++k) {
+                w[k] = CornerWeight(corners[kCornerSides[k][0]], localPos[v]) *
+                       CornerWeight(corners[kCornerSides[k][1]], localPos[v]);
+            }
+            const int blended = LC::SmoothWeightedBlend(tc[0], tc[1], tc[2], tc[3], w[0], w[1], w[2], w[3]);
+            outLight[static_cast<size_t>(v)] = TerrainVertex::LightWord(blended);
+        }
     }
 
     void Mesher::BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
@@ -1101,7 +1434,10 @@ namespace Render {
             // MC LiquidBlock.getRenderShape() is INVISIBLE, so a plain water or
             // lava cell contributes no model geometry — only the fluid above.
             // Everything else falls through and draws its model as usual.
-            if (blockId == Game::BlockID::Water || blockId == Game::BlockID::Lava) {
+            // Aurelith's resonant water is the same (bubble_column's rule: an
+            // always-water block with an invisible render shape).
+            if (blockId == Game::BlockID::Water || blockId == Game::BlockID::Lava ||
+                blockId == Game::BlockID::ResonantWater) {
                 return;
             }
         }
@@ -1171,6 +1507,37 @@ namespace Render {
                     // sheet a single clean surface instead of a stack of
                     // blended internal panes.
                     const auto& props = s_blockPropsCache[static_cast<size_t>(blockId)];
+                    // MC IronBarsBlock.skipRendering: against the same block
+                    // (a pane against its own kind; bars against any bars),
+                    // a top or bottom face is always skipped, a side face
+                    // when this block connects that way AND the neighbour
+                    // connects back. Booleans list [true, false]: index 0.
+                    if (props.isPane || props.isBars) {
+                        const glm::ivec3& off = FACE_OFFSETS[static_cast<int>(cullAgainst)];
+                        const int nx = worldX + off.x, ny = worldY + off.y, nz = worldZ + off.z;
+                        const Game::BlockID neighbour = GetCachedBlock(nx, ny, nz);
+                        const auto& nprops = s_blockPropsCache[static_cast<size_t>(neighbour)];
+                        if (neighbour == blockId || (props.isBars && nprops.isBars)) {
+                            bool skip = false;
+                            Game::PropertyId mine = Game::PropertyId::NORTH, theirs = Game::PropertyId::SOUTH;
+                            switch (cullAgainst) {
+                                case BlockFace::PositiveY:
+                                case BlockFace::NegativeY: skip = true; break;
+                                case BlockFace::PositiveZ: mine = Game::PropertyId::SOUTH; theirs = Game::PropertyId::NORTH; break;
+                                case BlockFace::NegativeZ: mine = Game::PropertyId::NORTH; theirs = Game::PropertyId::SOUTH; break;
+                                case BlockFace::PositiveX: mine = Game::PropertyId::EAST;  theirs = Game::PropertyId::WEST;  break;
+                                case BlockFace::NegativeX: mine = Game::PropertyId::WEST;  theirs = Game::PropertyId::EAST;  break;
+                            }
+                            if (!skip) {
+                                const Game::BlockState nstate = GetCachedBlockState(nx, ny, nz);
+                                skip = state.GetIndex(mine) == 0 && nstate.GetIndex(theirs) == 0;
+                            }
+                            if (skip) {
+                                m_lastStats.facesCulled++;
+                                continue;
+                            }
+                        }
+                    }
                     if (props.cullsAgainstSelf || props.skipAgainstLeaves) {
                         const glm::ivec3& off = FACE_OFFSETS[static_cast<int>(cullAgainst)];
                         const Game::BlockID neighbour =
@@ -1188,6 +1555,19 @@ namespace Render {
                             m_lastStats.facesCulled++;
                             continue;
                         }
+                    }
+                    // The partial-occluder half of Block.shouldRenderFace: a
+                    // slab, stair or wall next door whose face toward us is a
+                    // full square hides this face like a cube would (the
+                    // bottom of glass or ice on a top slab, the wall behind a
+                    // stair's back); one that only covers an OPAQUE block's
+                    // smaller element face hides that too. Glass, ice and
+                    // leaves never occlude and are never covered this way.
+                    if (IsFaceOccludedByPartialNeighbour(worldX, worldY, worldZ, cullAgainst,
+                                                         props.opaqueMaterial,
+                                                         element.from, element.to)) {
+                        m_lastStats.facesCulled++;
+                        continue;
                     }
                 }
 
@@ -1226,9 +1606,9 @@ namespace Render {
             for (auto& fv : verts) fv.SetColor(kGreedyIneligibleColor);
         }
         if (c.layer == RenderLayer::Cutout) {
-            GenerateQuad(verts, mesh.cutoutVerts, mesh.cutoutIdxs, &mesh.cutoutFacing);
+            GenerateQuad(verts, c.light, mesh.cutoutVerts, mesh.cutoutIdxs, &mesh.cutoutFacing);
         } else {
-            GenerateQuad(verts, mesh.opaqueVerts, mesh.opaqueIdxs, &mesh.opaqueFacing);
+            GenerateQuad(verts, c.light, mesh.opaqueVerts, mesh.opaqueIdxs, &mesh.opaqueFacing);
         }
         MeshCensus::Count(c.blockId, static_cast<int>(c.layer), false);
     }
@@ -1266,6 +1646,8 @@ namespace Render {
                 for (int j = 0; j < 4 && !found; ++j) {
                     const Vertex& vb = b.verts[static_cast<size_t>(j)];
                     if (vb.pos != va.pos || vb.packedColor != va.packedColor) continue;
+                    // One vertex carries one light: the two faces must agree.
+                    if (b.light[static_cast<size_t>(j)] != a.light[static_cast<size_t>(i)]) continue;
                     if (std::fabs(vb.uv.x - want.x) > 1e-6f || std::fabs(vb.uv.y - want.y) > 1e-6f) continue;
                     found = true;
                 }
@@ -1317,7 +1699,8 @@ namespace Render {
             const Vertex& v = a.verts[static_cast<size_t>(i)];
             const glm::vec3 rel = v.pos - glm::vec3(base);
             outVerts.push_back(TerrainVertex::TwoSided(rel, tu[i], tv[i], normalCode, mirrorMode, mirrorSum16, a.sprite.id,
-                                                       debug ? kGreedyTwoSidedColor : v.packedColor));
+                                                       debug ? kGreedyTwoSidedColor : v.packedColor,
+                                                       a.light[static_cast<size_t>(i)]));
         }
         // Both windings over the same four vertices: two six-index quads in
         // the group layout's terms (GroupIndicesByFacing counts a facing per
@@ -1399,6 +1782,15 @@ namespace Render {
                         tintColor = BlendedBiomeTint(BiomeChannel::Grass, worldX, worldY, worldZ);
                     }
                     break;
+                case TS::RedstonePower: {
+                    const Game::BlockState st = Game::BlockStates::FromIndex(blockId, stateIndex);
+                    const uint32_t c = Game::RedstoneWireColorForPower(st.GetIndex(Game::PropertyId::POWER));
+                    tintColor = glm::vec4(static_cast<float>((c >> 16) & 0xFF) / 255.0f,
+                                          static_cast<float>((c >> 8)  & 0xFF) / 255.0f,
+                                          static_cast<float>( c        & 0xFF) / 255.0f,
+                                          1.0f);
+                    break;
+                }
                 case TS::StemAge: {
                     // BlockColors.java:54-57, verbatim:
                     //   ARGB.color(age * 32, 255 - age * 8, age * 4)
@@ -1450,6 +1842,10 @@ namespace Render {
                                                               1.0f / 16.0f);
             }
         }
+        // The baked quad's shape as MC's lighter sees it: rotated, not yet
+        // offset (BlockModelLighter.prepareQuadShape reads quad.position).
+        glm::vec3 lightLocal[4];
+        for (int v = 0; v < 4; ++v) lightLocal[v] = faceVerts[v].pos - blockPos;
 
         // MC BlockRenderDispatcher.renderBatched: the block's offset is added
         // to the pose before the quads are emitted. Purely visual — collision
@@ -1485,11 +1881,19 @@ namespace Render {
         // the Smooth Lighting option (Minecraft.useAmbientOcclusion()). Off
         // takes renderModelFaceFlat's single value per face.
         // The occlusion wand's boxes: a block inside one bakes no AO.
-        const bool  useAO = model.ambientOcclusion && s_activeMeshOptions.smoothLighting &&
-                            !AoDisabledAt(worldX, worldY, worldZ);
+        // MC also takes the flat path for any block that EMITS light
+        // (`blockState.getLightEmission() == 0` in tesselateBlock): a torch,
+        // glowstone or a lantern is lit flat and carries no AO. An
+        // emissiveRendering block is flat too — its faces are FULL_BRIGHT
+        // whatever the corners around it read (every MC one also emits).
+        const Game::BlockState faceState = Game::BlockStates::FromIndex(blockId, stateIndex);
+        const bool smoothModel = model.ambientOcclusion && s_activeMeshOptions.smoothLighting &&
+                                 Game::Lighting::BlockLightProperties::Emission(faceState) == 0 &&
+                                 !Game::Lighting::BlockLightProperties::EmissiveRendering(faceState);
+        const bool  useAO = smoothModel && !AoDisabledAt(worldX, worldY, worldZ);
         float aoShades[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         if (useAO) {
-            ComputeFaceAO(blocks, worldX, worldY, worldZ, blockFace, aoLocal, aoShades);
+            ComputeFaceAO(faceState, worldX, worldY, worldZ, blockFace, aoLocal, aoShades);
         }
         // For the greedy merger: the colour WITHOUT AO, and AO as one of MC's
         // four levels per corner. A merged rectangle carries these apart —
@@ -1504,8 +1908,9 @@ namespace Render {
             base.SetColor(glm::vec4(c.r * directionalShade, c.g * directionalShade,
                                     c.b * directionalShade, c.a));
             baseColor[v] = base.packedColor;
-            // CalculateVertexAO yields (e1 + e2 + corner + 1) / 4 with each
-            // term 0.2 or 1.0: exactly 1.0, 0.8, 0.6, 0.4 for full-cube faces.
+            // ComputeFaceAO yields (side + side + diagonal + centre) / 4 with
+            // each term 0.2 or 1.0: 1.0, 0.8, 0.6, 0.4 (or 0.2 with a dark
+            // centre, which the merger leaves unmerged) for full-cube faces.
             const float level = (1.0f - aoShades[v]) / 0.2f;
             const int   code  = static_cast<int>(level + 0.5f);
             aoCode[v] = (code >= 0 && code <= 3 && std::abs(level - static_cast<float>(code)) < 0.01f)
@@ -1517,6 +1922,15 @@ namespace Render {
             c.b *= finalShade;
             faceVerts[v].SetColor(c);
         }
+        // MC BlockModelLighter: the vertices' light coords (smooth: the
+        // four-corner blend; flat: one value for the face). Emissive blocks
+        // come out FULL_BRIGHT here through their emissiveRendering flag.
+        std::array<uint32_t, 4> faceLight{};
+        {
+            PROFILE_ZONE_N("Mesher.FaceLight");
+            ComputeFaceLight(faceState, worldX, worldY, worldZ, blockFace, faceDef.cullfaceDir,
+                             smoothModel, lightLocal, faceLight);
+        }
 
         // Greedy routing: a full-cube, full-sprite, uniformly-lit opaque or
         // cutout face parks in the merge grid and is emitted by
@@ -1527,7 +1941,7 @@ namespace Render {
         if (layer != RenderLayer::Translucent) {
             stashed = TryStashGreedyQuad(faceVerts, sprite, element, faceDef,
                                          blockFace, hasBlockOffset, layer, blockId,
-                                         baseColor, aoCode,
+                                         baseColor, aoCode, faceLight,
                                          worldX, worldY, worldZ);
         }
         if (!stashed && capture) {
@@ -1535,6 +1949,7 @@ namespace Render {
             // (see FaceCapture) instead of emitting it. Nothing below applies
             // to it — a thin element is never a full cube.
             capture->verts   = faceVerts;
+            capture->light   = faceLight;
             capture->sprite  = sprite;
             capture->uvRect  = uvRect;
             capture->layer   = layer;
@@ -1578,13 +1993,13 @@ namespace Render {
             }
             switch (layer) {
                 case RenderLayer::Opaque:
-                    GenerateQuad(faceVerts, mesh.opaqueVerts, mesh.opaqueIdxs, &mesh.opaqueFacing);
+                    GenerateQuad(faceVerts, faceLight, mesh.opaqueVerts, mesh.opaqueIdxs, &mesh.opaqueFacing);
                     break;
                 case RenderLayer::Cutout:
-                    GenerateQuad(faceVerts, mesh.cutoutVerts, mesh.cutoutIdxs, &mesh.cutoutFacing);
+                    GenerateQuad(faceVerts, faceLight, mesh.cutoutVerts, mesh.cutoutIdxs, &mesh.cutoutFacing);
                     break;
                 case RenderLayer::Translucent:
-                    GenerateQuad(faceVerts, mesh.translucentVerts, mesh.translucentIdxs, nullptr);
+                    GenerateQuad(faceVerts, faceLight, mesh.translucentVerts, mesh.translucentIdxs, nullptr);
                     break;
             }
             MeshCensus::Count(blockId, static_cast<int>(layer), false);
@@ -1595,13 +2010,23 @@ namespace Render {
 
     uint16_t Mesher::ResolveBiome(int worldX, int worldY, int worldZ) const {
         if (m_biomeSource) {
-            // The region covers the whole 3x3x3 neighbourhood, so the blend
-            // margin resolves against real neighbour biomes rather than against
-            // a clamped edge of a per-job margin grid.
-            return m_biomeSource->BiomeAtLocal(worldX - m_sectionBaseWorldX,
-                                               worldY - m_sectionBaseWorldY,
-                                               worldZ - m_sectionBaseWorldZ);
+            // MC ClientLevel.getBiome: the fuzzy zoom picks the quart this
+            // block shows (BiomeZoom.hpp), then its noise biome is read. Quart
+            // Y is clamped into the column as ChunkAccess.getNoiseBiome does.
+            // The region covers the whole 3x3x3 neighbourhood, and the zoom
+            // moves at most one quart, so the widest blend (radius 7) still
+            // resolves against real neighbour biomes; a neighbour that is not
+            // loaded reads plains, MC's getUncachedNoiseBiome.
+            constexpr int kMinQuartY = Game::Math::WorldCoordinates::MIN_WORLD_Y >> 2;
+            constexpr int kMaxQuartY = kMinQuartY + Game::Chunk::BIOME_VERTICAL - 1;
+            const glm::ivec3 quart =
+                Game::BiomeZoom::NoiseQuartAt(m_biomeZoomSeed, worldX, worldY, worldZ);
+            const int quartY = std::clamp(quart.y, kMinQuartY, kMaxQuartY);
+            return m_biomeSource->BiomeAtLocal(quart.x * 4 - m_sectionBaseWorldX,
+                                               quartY * 4 - m_sectionBaseWorldY,
+                                               quart.z * 4 - m_sectionBaseWorldZ);
         }
+        // Already MC getBiome: the level accessors zoom themselves.
         return m_biomeAccess ? m_biomeAccess->GetBiome(worldX, worldY, worldZ) : 0;
     }
 
@@ -1719,7 +2144,7 @@ namespace Render {
         return glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
     }
 
-    void Mesher::GenerateQuad(const std::array<Vertex, 4>& quadVerts,
+    void Mesher::GenerateQuad(const std::array<Vertex, 4>& quadVerts, const std::array<uint32_t, 4>& light,
                              std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices,
                              std::vector<uint8_t>* outFacing) {
         // 16-bit index guard: a section layer cannot exceed 65,536 vertices.
@@ -1732,10 +2157,13 @@ namespace Render {
 
         // Add vertices, made relative to this section's origin (TerrainVertex).
         const glm::ivec3 base(m_sectionBaseWorldX, m_sectionBaseWorldY, m_sectionBaseWorldZ);
-        for (const Vertex& v : quadVerts) {
-            outVerts.push_back(TerrainVertex::FromWorld(v, base));
+        const uint8_t facing = QuadFacing(quadVerts[0].pos, quadVerts[1].pos, quadVerts[2].pos);
+        for (size_t k = 0; k < 4; ++k) {
+            TerrainVertex t = TerrainVertex::FromWorld(quadVerts[k], base, light[k]);
+            t.slot = static_cast<uint16_t>(t.slot | ((facing & 7u) << TerrainVertex::kNormalShift));
+            outVerts.push_back(t);
         }
-        if (outFacing) outFacing->push_back(QuadFacing(quadVerts[0].pos, quadVerts[1].pos, quadVerts[2].pos));
+        if (outFacing) outFacing->push_back(facing);
 
         // **FIXED**: Correct triangle winding for counter-clockwise faces (viewed from outside)
         // Vertices are ordered: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
@@ -1754,6 +2182,7 @@ namespace Render {
                                     BlockFace face, bool hasBlockOffset,
                                     RenderLayer layer, Game::BlockID blockId,
                                     const uint32_t (&baseColor)[4], const uint8_t (&aoCode)[4],
+                                    const std::array<uint32_t, 4>& light,
                                     int worldX, int worldY, int worldZ) {
         if (!m_config.enableGreedyMeshing || Greedy::Disabled() || !GreedyEnabled()) return false;
 
@@ -1789,6 +2218,11 @@ namespace Render {
         const uint32_t color = baseColor[0];
         if (baseColor[1] != color || baseColor[2] != color || baseColor[3] != color) return false;
         if (aoCode[0] > 3 || aoCode[1] > 3 || aoCode[2] > 3 || aoCode[3] > 3) return false;
+        // Light rides the VERTEX (one value per merged rectangle, not per
+        // block like AO), so only a face lit the same at all four corners
+        // can merge: open sky, a dark cave, a torch-lit room's flat wall
+        // interior — not the gradient around a torch or under an overhang.
+        if (light[1] != light[0] || light[2] != light[0] || light[3] != light[0]) return false;
         // Place each corner's AO level at its TILE corner, derived from the
         // vertex's actual position inside the cell through the same per-face
         // tile-uv mapping emitMerged applies (tileUV): u/v of a unit cell are
@@ -1836,7 +2270,8 @@ namespace Render {
         // (AddBlockFace) — this one must stay 1x1 to match it.
         if (cell != 0) return false;
 
-        Greedy::t_pending.push_back({faceVerts, sprite.id, color, blockId, aoByte, 0ull, 0});
+        Greedy::t_pending.push_back({faceVerts, sprite.id, color, blockId, aoByte, 0ull, 0,
+                                     light[0], light});
         cell = static_cast<int32_t>(Greedy::t_pending.size());
         // Link with a coplanar face of the other layer in this cell, either
         // stash order (see PendingQuad::partnerKey).
@@ -2001,7 +2436,7 @@ namespace Render {
                 const glm::vec2 t = tileUV(local[k]);
                 outVerts.push_back(TerrainVertex::Mapped(local[k],
                                                          static_cast<int>(t.x), static_cast<int>(t.y),
-                                                         tu0, tv0, w, h, recordBase));
+                                                         tu0, tv0, w, h, recordBase, q.light));
             }
             MeshCensus::Count(q.blockId, &outVerts == &outMesh.opaqueVerts ? 0 : 1, true,
                               static_cast<uint32_t>(w * h));
@@ -2040,7 +2475,10 @@ namespace Render {
                     auto matches = [&](int32_t other) {
                         if (other <= 0 || q.solo) return false;
                         const PendingQuad& o = Greedy::t_pending[other - 1];
-                        return !o.solo && o.partnerKey == q.partnerKey;
+                        // Same light too: the rectangle carries one. Both
+                        // layers of a coplanar pair read the same light, so
+                        // they still break at the same cells.
+                        return !o.solo && o.partnerKey == q.partnerKey && o.light == q.light;
                     };
 
                     int w = 1;
@@ -2067,9 +2505,9 @@ namespace Render {
                             std::array<Vertex, 4> dbg = q.verts;
                             const uint32_t red = GreedyHeatColor(1);
                             for (auto& dv2 : dbg) dv2.packedColor = red;
-                            GenerateQuad(dbg, outVerts, outIdxs, &outFacing);
+                            GenerateQuad(dbg, q.cornerLight, outVerts, outIdxs, &outFacing);
                         } else {
-                            GenerateQuad(q.verts, outVerts, outIdxs, &outFacing);
+                            GenerateQuad(q.verts, q.cornerLight, outVerts, outIdxs, &outFacing);
                         }
                         MeshCensus::Count(q.blockId, pr.layer, false);
                         continue;
@@ -2288,151 +2726,93 @@ namespace Render {
         return mask;
     }
 
-    float Mesher::GetDirectionalShade(BlockFace face) {
+    float Mesher::GetDirectionalShade(BlockFace face) const {
         // Values live in Game::DirectionalShade (BlockModel.hpp) so the chunk
         // mesher and the item-model builder cannot drift apart — a dropped
-        // block has to be shaded identically to the one it came from.
+        // block has to be shaded identically to the one it came from. The
+        // level's cardinal lighting picks the table (MC ClientLevel.
+        // cardinalLighting: the Nether's up/down faces are 0.9).
+        const bool nether = m_dimension == Game::DimensionId::Nether;
         switch (face) {
-            case BlockFace::PositiveY: return Game::DirectionalShade(Game::FaceDir::Up);
-            case BlockFace::NegativeY: return Game::DirectionalShade(Game::FaceDir::Down);
-            case BlockFace::PositiveZ: return Game::DirectionalShade(Game::FaceDir::South);
-            case BlockFace::NegativeZ: return Game::DirectionalShade(Game::FaceDir::North);
-            case BlockFace::PositiveX: return Game::DirectionalShade(Game::FaceDir::East);
-            case BlockFace::NegativeX: return Game::DirectionalShade(Game::FaceDir::West);
+            case BlockFace::PositiveY: return Game::DirectionalShade(Game::FaceDir::Up, nether);
+            case BlockFace::NegativeY: return Game::DirectionalShade(Game::FaceDir::Down, nether);
+            case BlockFace::PositiveZ: return Game::DirectionalShade(Game::FaceDir::South, nether);
+            case BlockFace::NegativeZ: return Game::DirectionalShade(Game::FaceDir::North, nether);
+            case BlockFace::PositiveX: return Game::DirectionalShade(Game::FaceDir::East, nether);
+            case BlockFace::NegativeX: return Game::DirectionalShade(Game::FaceDir::West, nether);
             default: return 1.0f;
         }
     }
 
-    // Per-vertex AO neighbor offset tables.
-    // For each face direction, for each vertex (0-3), defines:
-    //   {edge1_dx, edge1_dy, edge1_dz, edge2_dx, edge2_dy, edge2_dz, corner_dx, corner_dy, corner_dz}
-    // The offsets are relative to the block position, shifted by the face normal.
-    // Vertex ordering matches CreateFaceVertices() winding.
-
-    struct AOVertexNeighbors {
-        glm::ivec3 edge1;
-        glm::ivec3 edge2;
-        glm::ivec3 corner;
-    };
-
-    // For each face, 4 vertices, each with 2 edge neighbors and 1 corner neighbor
-    // All offsets include the face normal direction (we sample in the plane one step out from the face)
-    static const AOVertexNeighbors AO_NEIGHBORS[6][4] = {
-        // PositiveY (Top face, +Y) — vertices: 0=front-left, 1=front-right, 2=back-right, 3=back-left
-        {
-            { {-1, 1, 0}, { 0, 1, 1}, {-1, 1, 1} },  // v0: west + south edges, SW corner
-            { { 1, 1, 0}, { 0, 1, 1}, { 1, 1, 1} },  // v1: east + south edges, SE corner
-            { { 1, 1, 0}, { 0, 1,-1}, { 1, 1,-1} },  // v2: east + north edges, NE corner
-            { {-1, 1, 0}, { 0, 1,-1}, {-1, 1,-1} },  // v3: west + north edges, NW corner
-        },
-        // NegativeY (Bottom face, -Y) — vertices: 0=back-left, 1=back-right, 2=front-right, 3=front-left
-        {
-            { {-1,-1, 0}, { 0,-1,-1}, {-1,-1,-1} },  // v0
-            { { 1,-1, 0}, { 0,-1,-1}, { 1,-1,-1} },  // v1
-            { { 1,-1, 0}, { 0,-1, 1}, { 1,-1, 1} },  // v2
-            { {-1,-1, 0}, { 0,-1, 1}, {-1,-1, 1} },  // v3
-        },
-        // PositiveZ (Front/South face, +Z) — vertices: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
-        {
-            { {-1, 0, 1}, { 0,-1, 1}, {-1,-1, 1} },  // v0
-            { { 1, 0, 1}, { 0,-1, 1}, { 1,-1, 1} },  // v1
-            { { 1, 0, 1}, { 0, 1, 1}, { 1, 1, 1} },  // v2
-            { {-1, 0, 1}, { 0, 1, 1}, {-1, 1, 1} },  // v3
-        },
-        // NegativeZ (Back/North face, -Z) — vertices: 0=bottom-right, 1=bottom-left, 2=top-left, 3=top-right
-        {
-            { { 1, 0,-1}, { 0,-1,-1}, { 1,-1,-1} },  // v0
-            { {-1, 0,-1}, { 0,-1,-1}, {-1,-1,-1} },  // v1
-            { {-1, 0,-1}, { 0, 1,-1}, {-1, 1,-1} },  // v2
-            { { 1, 0,-1}, { 0, 1,-1}, { 1, 1,-1} },  // v3
-        },
-        // PositiveX (Right/East face, +X) — vertices: 0=bottom-front, 1=bottom-back, 2=top-back, 3=top-front
-        {
-            { { 1, 0, 1}, { 1,-1, 0}, { 1,-1, 1} },  // v0
-            { { 1, 0,-1}, { 1,-1, 0}, { 1,-1,-1} },  // v1
-            { { 1, 0,-1}, { 1, 1, 0}, { 1, 1,-1} },  // v2
-            { { 1, 0, 1}, { 1, 1, 0}, { 1, 1, 1} },  // v3
-        },
-        // NegativeX (Left/West face, -X) — vertices: 0=bottom-back, 1=bottom-front, 2=top-front, 3=top-back
-        {
-            { {-1, 0,-1}, {-1,-1, 0}, {-1,-1,-1} },  // v0
-            { {-1, 0, 1}, {-1,-1, 0}, {-1,-1, 1} },  // v1
-            { {-1, 0, 1}, {-1, 1, 0}, {-1, 1, 1} },  // v2
-            { {-1, 0,-1}, {-1, 1, 0}, {-1, 1,-1} },  // v3
-        },
-    };
-
-    // Minecraft-style per-vertex AO calculation
-    // Uses the exact Minecraft values: solid blocks = 0.2 shade, non-solid = 1.0
-    // Formula: vertex_ao = (edge1 + edge2 + corner + center) * 0.25
-    // Corner rule: if both edges are solid, corner is forced solid (prevents diagonal light leak)
-    float Mesher::CalculateVertexAO(const Game::IBlockAccess& /*blocks*/, int worldX, int worldY, int worldZ,
-                                    BlockFace face, int vertexIndex) {
-        if (!m_config.enableAmbientOcclusion) {
-            return 1.0f;
-        }
-
-        const auto& neighbors = AO_NEIGHBORS[static_cast<int>(face)][vertexIndex];
-
-        // Use the pre-built opaque cache instead of GetBlock + IsBlockOpaque per sample.
-        // This eliminates 12 block lookups + 12 registry lookups per face (3 per vertex × 4 vertices).
-        bool edge1Solid = GetCachedOpaque(worldX + neighbors.edge1.x, worldY + neighbors.edge1.y, worldZ + neighbors.edge1.z);
-        bool edge2Solid = GetCachedOpaque(worldX + neighbors.edge2.x, worldY + neighbors.edge2.y, worldZ + neighbors.edge2.z);
-
-        float edge1Shade = edge1Solid ? 0.2f : 1.0f;
-        float edge2Shade = edge2Solid ? 0.2f : 1.0f;
-
-        // Corner rule: if both edges are solid, corner is forced solid (no diagonal light leak)
-        float cornerShade;
-        if (edge1Solid && edge2Solid) {
-            cornerShade = 0.2f;
-        } else {
-            bool cornerSolid = GetCachedOpaque(worldX + neighbors.corner.x, worldY + neighbors.corner.y, worldZ + neighbors.corner.z);
-            cornerShade = cornerSolid ? 0.2f : 1.0f;
-        }
-
-        float centerShade = 1.0f;
-        return (edge1Shade + edge2Shade + cornerShade + centerShade) * 0.25f;
-    }
-
-    void Mesher::ComputeFaceAO(const Game::IBlockAccess& blocks,
-                               int worldX, int worldY, int worldZ,
+    // MC BlockModelLighter.prepareQuadAmbientOcclusion, shade half — the
+    // light half is ComputeFaceLight; both walk the same cells.
+    //
+    // Every sample is MC getShadeBrightness (0.2 for a full-collision block,
+    // 1.0 otherwise, with the vanilla class overrides — see
+    // BlockLightProperties::ShadeBrightness). The four side cells sit around
+    // `base` (the neighbour cell for a face on the cell boundary, the block's
+    // own cell otherwise); a diagonal is read only when one of its two sides
+    // is light-permeable one step further out, else it takes shade0 (26.x:
+    // shade0 for all four, as the light half takes light0); the centre is the
+    // base cell's shade. Each cell-face corner averages its two sides, its
+    // diagonal and the centre, and every vertex takes the bilinear blend of
+    // the four at its position (MC's vertN weights over the quad's bounds —
+    // for a full face exactly one corner's value).
+    void Mesher::ComputeFaceAO(Game::BlockState state, int worldX, int worldY, int worldZ,
                                BlockFace face, const glm::vec3 (&localPos)[4],
-                               float (&outAO)[4]) {
+                               float (&outAO)[4]) const {
         if (!m_config.enableAmbientOcclusion) {
             outAO[0] = outAO[1] = outAO[2] = outAO[3] = 1.0f;
             return;
         }
+        using Game::Lighting::BlockLightProperties;
+        const Game::Direction dir = DirectionOf(face);
+        const int dx = Game::StepX(dir), dy = Game::StepY(dir), dz = Game::StepZ(dir);
+        const bool faceCubic = FaceCubic(dir, localPos, BlockLightProperties::FullCollision(state));
+        const int bx = faceCubic ? worldX + dx : worldX;
+        const int by = faceCubic ? worldY + dy : worldY;
+        const int bz = faceCubic ? worldZ + dz : worldZ;
+        auto shadeAt = [&](int x, int y, int z) {
+            return BlockLightProperties::ShadeBrightness(GetCachedBlockState(x, y, z));
+        };
 
-        // The face's two in-plane axes. The normal axis is whichever component
-        // of the face normal is non-zero.
-        const glm::vec3 n = GetFaceNormal(face);
-        const int nAxis = (n.x != 0.0f) ? 0 : ((n.y != 0.0f) ? 1 : 2);
-        const int a1 = (nAxis + 1) % 3;
-        const int a2 = (nAxis + 2) % 3;
-
-        // Each corner's value, and WHICH corner of the cell's face it is.
-        // The side is read straight off AO_NEIGHBORS' own corner offset, so the
-        // weights cannot drift from the values they are weighting.
-        float cornerAO[4];
-        float cornerS[4], cornerT[4];
-        for (int k = 0; k < 4; ++k) {
-            cornerAO[k] = CalculateVertexAO(blocks, worldX, worldY, worldZ, face, k);
-            const glm::ivec3& c = AO_NEIGHBORS[static_cast<int>(face)][k].corner;
-            cornerS[k] = (c[a1] > 0) ? 1.0f : 0.0f;
-            cornerT[k] = (c[a2] > 0) ? 1.0f : 0.0f;
+        const Game::Direction (&corners)[4] = kLightCorners[static_cast<int>(dir)];
+        float shade[4];
+        bool permeable[4];
+        for (int i = 0; i < 4; ++i) {
+            const Game::Direction c = corners[i];
+            const int cx = bx + Game::StepX(c), cy = by + Game::StepY(c), cz = bz + Game::StepZ(c);
+            shade[i] = shadeAt(cx, cy, cz);
+            permeable[i] = LightPermeableAt(cx + dx, cy + dy, cz + dz);
         }
+        auto diagonal = [&](int a, int b) {
+            const Game::Direction ca = corners[a], cb = corners[b];
+            return shadeAt(bx + Game::StepX(ca) + Game::StepX(cb),
+                           by + Game::StepY(ca) + Game::StepY(cb),
+                           bz + Game::StepZ(ca) + Game::StepZ(cb));
+        };
+        const float shadeCorner02 = (!permeable[2] && !permeable[0]) ? shade[0] : diagonal(0, 2);
+        const float shadeCorner03 = (!permeable[3] && !permeable[0]) ? shade[0] : diagonal(0, 3);
+        const float shadeCorner12 = (!permeable[2] && !permeable[1]) ? shade[0] : diagonal(1, 2);
+        const float shadeCorner13 = (!permeable[3] && !permeable[1]) ? shade[0] : diagonal(1, 3);
+        // MC: faceCubic ? shade(basePosition) : shade(centerPosition) — the
+        // same cell either way, since base is the centre when not cubic.
+        const float shadeCenter = shadeAt(bx, by, bz);
 
+        const float level[4] = {
+            (shade[3] + shade[0] + shadeCorner03 + shadeCenter) * 0.25f,
+            (shade[2] + shade[0] + shadeCorner02 + shadeCenter) * 0.25f,
+            (shade[2] + shade[1] + shadeCorner12 + shadeCenter) * 0.25f,
+            (shade[3] + shade[1] + shadeCorner13 + shadeCenter) * 0.25f,
+        };
+        static constexpr int kCornerSides[4][2] = { {3, 0}, {2, 0}, {2, 1}, {3, 1} };
         for (int v = 0; v < 4; ++v) {
-            const float s = std::clamp(localPos[v][a1], 0.0f, 1.0f);
-            const float t = std::clamp(localPos[v][a2], 0.0f, 1.0f);
             float ao = 0.0f;
             for (int k = 0; k < 4; ++k) {
-                const float ws = (cornerS[k] > 0.5f) ? s : (1.0f - s);
-                const float wt = (cornerT[k] > 0.5f) ? t : (1.0f - t);
-                ao += cornerAO[k] * ws * wt;
+                ao += level[k] * CornerWeight(corners[kCornerSides[k][0]], localPos[v]) *
+                                 CornerWeight(corners[kCornerSides[k][1]], localPos[v]);
             }
-            outAO[v] = ao;
+            outAO[v] = std::clamp(ao, 0.0f, 1.0f);
         }
     }
 

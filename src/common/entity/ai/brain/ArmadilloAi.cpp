@@ -6,6 +6,7 @@
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -96,7 +97,7 @@ namespace Game {
 
                 if (armadillo->ShouldSwitchToScaredState()) {
                     armadillo->SwitchToState(Armadillo::State::Scared);
-                    // The ARMADILLO_LAND sound waits on the sound system.
+                    if (armadillo->onGround) armadillo->PlaySound(SoundEvents::ARMADILLO_LAND);
                     return;
                 }
 
@@ -118,8 +119,7 @@ namespace Game {
                     }
                     if (dangerTicks
                         < Armadillo::AnimationDuration(Armadillo::State::Unrolling)) {
-                        // The ARMADILLO_UNROLL_START sound waits on the sound
-                        // system.
+                        armadillo->PlaySound(SoundEvents::ARMADILLO_UNROLL_START);
                         armadillo->SwitchToState(Armadillo::State::Unrolling);
                     }
                 } else if (state == Armadillo::State::Unrolling

@@ -87,6 +87,10 @@ namespace Server {
         Network::PacketBuffer buffer;
         buffer.WriteString(std::to_string(playerId));  // UUID as string
         buffer.WriteString(username);
+        // Trailing: the hashed seed for the client's biome zoom (MC's
+        // ClientboundLoginPacket carries it the same way).
+        buffer.WriteLong(static_cast<uint64_t>(
+            g_integratedServer ? g_integratedServer->GetBiomeZoomSeed() : 0));
         
         Log::Info("[LoginPacketListener] Sending LoginSuccess for player %s (ID: %u)", 
                   username.c_str(), playerId);

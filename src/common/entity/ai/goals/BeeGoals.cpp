@@ -10,6 +10,7 @@
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -313,11 +314,11 @@ namespace Game {
         }
 
         ++m_successfulPollinatingTicks;
-        // MC: the BEE_POLLINATE sound roll — no sound system; the roll is
-        // kept so the RNG stream matches.
+        // MC: now and then, the BEE_POLLINATE buzz.
         if (rng.NextFloat() < 0.05f &&
             m_successfulPollinatingTicks > m_lastSoundPlayedTick + 60) {
             m_lastSoundPlayedTick = m_successfulPollinatingTicks;
+            m_bee->PlaySound(SoundEvents::BEE_POLLINATE, 1.0f, 1.0f);
         }
     }
 

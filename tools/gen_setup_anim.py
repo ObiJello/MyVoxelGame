@@ -32,12 +32,12 @@ import os
 import re
 import sys
 
-MC = "minecraft_code/decompiled_net/minecraft"
+MC = "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft"
 MODEL_DIR = os.path.join(MC, "client/model")
 # The newer decompile the 26.1 baby remodel is read from — the meshes in
 # gen_entity_models.REMODEL_MESHES have their setupAnim compiled from THIS
 # tree's classes, under the same out slug.
-MC2 = "minecraft_code2/decompiled_net/minecraft"
+MC2 = "minecraft_code_26.3-pre-2/decompiled_net/minecraft"
 MODEL_DIR2 = os.path.join(MC2, "client/model")
 MODELS_CPP = "src/client/renderer/entity/model/GeneratedEntityModels.cpp"
 OUT_HPP = "src/client/renderer/entity/model/GeneratedSetupAnim.hpp"

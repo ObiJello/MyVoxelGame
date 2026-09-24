@@ -1,3 +1,4 @@
+#include "util/LiveCounters.h"
 #include "server/level/ChunkMap.h"
 #include <cstdio>
 #include <cstdlib>
@@ -41,6 +42,7 @@ ChunkMap::ChunkMap(
     , m_ticketStorage(ticketStorage)
     , m_backgroundExecutor(backgroundExecutor)
     , m_mainThreadExecutor(std::move(mainThreadExecutor))
+    , m_dataVersion(world::level::chunk::storage::ChunkSerializer::DATA_VERSION)
     , m_storagePath(storagePath)
     , m_serverLevel(std::make_unique<ServerLevel>(
         minY, worldHeight, blockRegistry, airBlock, defaultBlock, seed
@@ -247,7 +249,10 @@ std::shared_ptr<ChunkGenerationTask> ChunkMap::scheduleGenerationTask(
     const world::ChunkPos& pos)
 {
     auto task = ChunkGenerationTask::create(*this, targetStatus, pos);
-    m_pendingGenerationTasks.push_back(task);
+    {
+        std::lock_guard<std::mutex> lock(m_pendingTasksMutex);
+        m_pendingGenerationTasks.push_back(task);
+    }
     return task;
 }
 
@@ -255,10 +260,14 @@ std::shared_ptr<ChunkGenerationTask> ChunkMap::scheduleGenerationTask(
 // Java: this.pendingGenerationTasks.forEach(this::runGenerationTask);
 //       this.pendingGenerationTasks.clear();
 void ChunkMap::runGenerationTasks() {
-    // Copy tasks to iterate (like Java's forEach)
-    // The shared_ptrs keep tasks alive even after clear()
-    auto tasks = m_pendingGenerationTasks;
-    m_pendingGenerationTasks.clear();
+    // Take the list in one step under its lock (see m_pendingTasksMutex):
+    // a task scheduled from the lane while these run lands in the fresh
+    // list and runs on the next call. The shared_ptrs keep tasks alive.
+    std::vector<std::shared_ptr<ChunkGenerationTask>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(m_pendingTasksMutex);
+        tasks.swap(m_pendingGenerationTasks);
+    }
 
     for (auto& task : tasks) {
         runGenerationTask(task);
@@ -316,36 +325,36 @@ ChunkMap::scheduleChunkLoad(const world::ChunkPos& pos) {
 
         loadFuture->thenAccept([this, pos, resultFuture](
             const std::optional<std::unique_ptr<nbt::CompoundTag>>& optionalTag) {
-
+            // Reference: ChunkMap.scheduleChunkLoad - a saved chunk is read back
+            // with everything it had (SerializableChunkData.parse + read); no
+            // data (or a tag without a Status) is a fresh EMPTY proto. A chunk
+            // that fails to decode is reported and generated anew, and is then
+            // never saved over (the storage remembers it as unreadable).
+            ChunkAccess* chunk = nullptr;
             if (optionalTag && *optionalTag) {
-                // Reference: ChunkMap.java scheduleChunkLoad -> ChunkSerializer.read.
-                // Build a real ProtoChunk from the saved data (blocks, biomes,
-                // heightmaps, status) so a neighbour that already exists on
-                // disk satisfies dependencies instead of being regenerated.
-                nbt::CompoundTag& tag = **optionalTag;
-                ChunkAccess* chunk = nullptr;
                 try {
                     auto data = world::level::chunk::storage::SerializableChunkData::parse(
-                        m_minY, m_worldHeight, tag);
+                        m_minY, m_worldHeight, **optionalTag, m_airBlock);
                     if (data) {
-                        auto proto = data->readDirect(m_minY, m_worldHeight, m_airBlock,
-                                                      m_defaultBlock, m_blockRegistry);
-                        if (proto) chunk = proto.release();
+                        auto proto = data->read(pos, m_minY, m_worldHeight, m_airBlock,
+                                                m_defaultBlock, m_blockRegistry);
+                        if (proto) {
+                            markPosition(pos, data->getChunkStatus().getChunkType()
+                                                  == world::chunk::status::ChunkType::LEVELCHUNK);
+                            chunk = proto.release();
+                        }
                     }
                 } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[ChunkMap] chunk (%d,%d) on disk could not be read: %s\n",
+                    std::fprintf(stderr, "[ChunkMap] Couldn't load chunk (%d,%d): %s\n",
                                  pos.x(), pos.z(), e.what());
+                    m_chunkIo->markUnreadable(pos);
                     chunk = nullptr;
                 }
-                if (!chunk) {
-                    chunk = createEmptyChunk(pos);   // regenerate from scratch
-                }
-                resultFuture->complete(chunk);
-            } else {
-                // No chunk data on disk - create new empty chunk
-                ChunkAccess* chunk = createEmptyChunk(pos);
-                resultFuture->complete(chunk);
             }
+            if (!chunk) {
+                chunk = createEmptyChunk(pos);
+            }
+            resultFuture->complete(chunk);
         });
 
         return resultFuture;
@@ -380,6 +389,99 @@ ChunkMap::ChunkAccess* ChunkMap::createEmptyChunk(const world::ChunkPos& pos) {
     return chunk;
 }
 
+void ChunkMap::setChunkStorage(
+    std::shared_ptr<world::level::chunk::storage::ChunkStorageBackend> storage, int dataVersion) {
+    m_chunkIo = storage ? std::make_unique<world::level::chunk::storage::IOWorker>(std::move(storage))
+                        : nullptr;
+    m_dataVersion = dataVersion;
+}
+
+// Reference: ChunkMap.markPosition.
+void ChunkMap::markPosition(const world::ChunkPos& pos, bool full) {
+    std::lock_guard<std::mutex> lock(m_chunkTypeCacheMutex);
+    m_chunkTypeCache[pos.toLong()] = full ? 1 : -1;
+}
+
+// Reference: ChunkMap.isExistingChunkFull. MC reads the chunk's status from
+// disk when the cache does not know it; here the storage makes the same
+// check itself, atomically with the write (a backend refuses to replace a
+// full chunk), so only what this map has already seen is consulted.
+bool ChunkMap::isExistingChunkFull(const world::ChunkPos& pos) {
+    std::lock_guard<std::mutex> lock(m_chunkTypeCacheMutex);
+    auto it = m_chunkTypeCache.find(pos.toLong());
+    return it != m_chunkTypeCache.end() && it->second == 1;
+}
+
+// Reference: ChunkMap.save(ChunkAccess).
+bool ChunkMap::save(ChunkAccess* chunk) {
+    auto* proto = dynamic_cast<world::ProtoChunk*>(chunk);
+    if (!m_chunkIo || proto == nullptr) {
+        return false;
+    }
+    const ChunkStatus* status = proto->getPersistedStatus();
+    // FULL chunks are the embedder's: it converts and saves them itself.
+    if (status == nullptr || status->getChunkType() == world::chunk::status::ChunkType::LEVELCHUNK) {
+        return false;
+    }
+    if (!proto->tryMarkSaved()) {
+        return false;
+    }
+    const world::ChunkPos pos = proto->getPos();
+    // A position whose saved data could not be read is never written over.
+    if (m_chunkIo->isUnreadable(pos) || isExistingChunkFull(pos)) {
+        return false;
+    }
+    if (status == &ChunkStatus::EMPTY) {
+        bool anyValid = false;
+        for (const auto& [name, start] : proto->getAllStructureStarts()) {
+            if (start.isValid()) { anyValid = true; break; }
+        }
+        if (!anyValid) return false;
+    }
+
+    try {
+        // Copy here (the chunk is quiet), encode on the I/O thread — MC's
+        // copyOf on the main thread + write on the background executor.
+        std::shared_ptr<world::level::chunk::storage::SerializableChunkData> data =
+            world::level::chunk::storage::SerializableChunkData::copyOf(
+                *proto, m_gameTime.load(std::memory_order_relaxed));
+        const int dataVersion = m_dataVersion;
+        m_chunkIo->store(pos, [data, dataVersion]() { return data->write(dataVersion); });
+        markPosition(pos, false);
+        return true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[ChunkMap] Failed to save chunk (%d,%d): %s\n", pos.x(), pos.z(), e.what());
+        return false;
+    }
+}
+
+// Reference: ChunkMap.saveAllChunks(boolean).
+void ChunkMap::saveAllChunks(bool flush, const std::function<bool(int64_t)>& canUnload,
+                             bool quiesced) {
+    if (!flush || !m_chunkIo) {
+        return;
+    }
+    std::vector<ChunkHolder*> holders;
+    {
+        std::lock_guard<std::mutex> lock(m_mapMutex);
+        holders.reserve(m_updatingChunkMap.size());
+        for (auto& [key, holder] : m_updatingChunkMap) {
+            holders.push_back(holder.get());
+        }
+    }
+    for (ChunkHolder* holder : holders) {
+        // MC blocks until each holder is ready. Here a holder a task still
+        // works on keeps what it had when it was last saved — unless the
+        // embedder has stopped every task (quiesced).
+        if (!quiesced && (holder->generationRefCount() != 0 || !holder->isReadyForSaving())) continue;
+        if (ChunkAccess* chunk = holder->getLatestChunk()) {
+            save(chunk);
+        }
+    }
+    processUnloads([]() { return true; }, canUnload);
+    m_chunkIo->synchronize(true)->join();
+}
+
 // Reference: ChunkMap.java lines 240-262
 std::string ChunkMap::debugHotTasks(size_t n) {
     std::vector<std::pair<int, std::string>> rows;
@@ -401,35 +503,103 @@ std::string ChunkMap::debugHotTasks(size_t n) {
 
 size_t ChunkMap::processUnloads(const std::function<bool()>& haveTime,
                                 const std::function<bool(int64_t)>& canUnload) {
+    // Reference: ChunkMap.processUnloads / scheduleUnload (26.3). A dropped
+    // holder joins MC's unloadQueue only once its save-sync future completes
+    // (no generation task still works on it); the tick then unloads while
+    // (minimalNumberOfChunksToProcess > 0 || haveTime()), the minimum being
+    // how far that READY queue is over 2,000, counted down per unload. The
+    // same here: m_pendingUnloads holds every dropped holder, and a holder
+    // counts as queued once it passes the readiness checks below.
+    constexpr size_t kUnloadQueueReserve = 2000;
     std::vector<int64_t> candidates;
     {
         std::lock_guard<std::mutex> lock(m_mapMutex);
         candidates.assign(m_pendingUnloads.begin(), m_pendingUnloads.end());
     }
     if (candidates.empty()) return 0;
+    // Fewer pending than the reserve means fewer ready than it too: with no
+    // time left there is nothing MC would force.
+    if (candidates.size() <= kUnloadQueueReserve && !haveTime()) return 0;
 
-    // Java: while ((floor > 0 || haveTime()) && poll()) — floor keeps a late
-    // tick draining a few, and forces progress on a large backlog.
-    size_t floor = candidates.size() > 2000 ? candidates.size() - 2000 : 0;
-    floor = std::max<size_t>(floor, 4);
-    size_t destroyed = 0;
     const int maxLevel = ChunkLevel::getMaxLevel();
-    for (int64_t key : candidates) {
-        if (destroyed >= floor && !haveTime()) break;
+
+    // Whether a pending holder is ready to go (MC: in the unloadQueue). Also
+    // drops the holders that left the pending set meanwhile.
+    //
+    // Status and the embedder's veto run OUTSIDE the map lock: the status
+    // takes the holder's futures mutex, and future completions run their
+    // continuations under that mutex — which can reach back into this map.
+    // The holder cannot go meanwhile: only this function destroys holders,
+    // on this thread.
+    //
+    // Java (scheduleUnload) waits for the holder's save-sync future — every
+    // generation task that touched the chunk has finished — then saves the
+    // chunk and drops the holder whatever its status; a later request
+    // reloads it with everything it had. So does this port: a proto is
+    // written to the storage (FULL chunks are the embedder's, which saves them
+    // itself).
+    //
+    // Without storage (a read-only world) nothing can be saved. There a holder
+    // is dropped only when regenerating it loses nothing: FULL (the embedder
+    // owns the chunk) or before TERRAIN (only its own deterministic generation
+    // touched it; decoration writes only into neighbours at TERRAIN or
+    // later). A proto from TERRAIN up to FULL may hold a neighbour's
+    // decoration — a tree crown or ore vein spilled across the border — that
+    // the neighbour will not place again, so it stays resident.
+    auto readyHolder = [&](int64_t key) -> ChunkHolder* {
+        ChunkHolder* holder = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_mapMutex);
+            auto it = m_updatingChunkMap.find(key);
+            if (it == m_updatingChunkMap.end()) { m_pendingUnloads.erase(key); return nullptr; }
+            holder = it->second.get();
+            if (holder->getTicketLevel() <= maxLevel) { m_pendingUnloads.erase(key); return nullptr; }   // wanted again
+            if (holder->generationRefCount() != 0) return nullptr;   // a task still holds it in its cache
+        }
+        const ChunkStatus* latest = holder->getLatestStatus();
+        const bool holdsSpills = !m_chunkIo && latest != nullptr &&
+                                 !latest->isBefore(ChunkStatus::TERRAIN) &&
+                                 latest->isBefore(ChunkStatus::FULL);
+        if (holdsSpills) {
+            std::lock_guard<std::mutex> lock(m_mapMutex);
+            m_pendingUnloads.erase(key);
+            return nullptr;
+        }
+        if (!canUnload(key)) return nullptr;             // embedder still reads it
+        if (!holder->isReadyForSaving()) return nullptr; // a task still writes it
+        return holder;
+    };
+
+    // The unload itself (MC: the scheduleUnload task).
+    auto unload = [&](int64_t key, ChunkHolder* holder) -> bool {
         std::unique_ptr<ChunkHolder> victim;
         {
             std::lock_guard<std::mutex> lock(m_mapMutex);
             auto it = m_updatingChunkMap.find(key);
-            if (it == m_updatingChunkMap.end()) { m_pendingUnloads.erase(key); continue; }
-            ChunkHolder* holder = it->second.get();
-            if (holder->getTicketLevel() <= maxLevel) { m_pendingUnloads.erase(key); continue; }   // wanted again
-            if (holder->generationRefCount() != 0) continue;   // a task still holds it in its cache
-            if (!canUnload(key)) continue;                     // embedder still reads it
+            if (it == m_updatingChunkMap.end() || it->second.get() != holder) return false;
+            // Re-checked: the lane may have claimed it, or a ticket landed.
+            if (holder->getTicketLevel() <= maxLevel) { m_pendingUnloads.erase(key); return false; }
+            if (holder->generationRefCount() != 0) return false;
             victim = std::move(it->second);
             m_updatingChunkMap.erase(it);
             m_pendingUnloads.erase(key);
-            m_visibleRemoves.push_back(key);
+            // Out of the visible map NOW, not at the next promotion: until
+            // then getChunkFutureMainThread / getChunkNow would hand out the
+            // holder being destroyed. Both maps are main-thread (this is).
+            // A holder created and unloaded between two promotions is still
+            // on the add list — it must not be promoted afterwards either.
+            m_visibleChunkMap.erase(key);
+            m_visibleAdds.erase(std::remove_if(m_visibleAdds.begin(), m_visibleAdds.end(),
+                                               [key, holder](const auto& add) {
+                                                   return add.first == key && add.second == holder;
+                                               }),
+                                m_visibleAdds.end());
             m_modified = true;
+        }
+        // Reference: ChunkMap.scheduleUnload -> save(chunk). Out of the maps
+        // already, so no new task can reach the chunk while it is copied.
+        if (ChunkAccess* chunk = victim->getLatestChunk()) {
+            save(chunk);
         }
         // Lifetime: ChunkHolder::updateFutures hands the dispatchers lambdas
         // that capture the holder (`[this] { return getQueueLevel(); }`), and
@@ -439,17 +609,115 @@ size_t ChunkMap::processUnloads(const std::function<bool()>& haveTime,
         // dispatchers (release() with clearQueue=false only sequences — it
         // does not drop queued tasks; and a holder with queued tasks never
         // gets here because they hold generation refs).
-        {
-            ChunkHolder* raw = victim.release();
-            auto light = m_lightTaskDispatcher.get();
-            m_worldgenTaskDispatcher->release(key, [raw, light, key]() {
-                if (light) light->release(key, [raw]() { delete raw; }, false);
-                else       delete raw;
-            }, false);
+        ChunkHolder* raw = victim.release();
+        auto light = m_lightTaskDispatcher.get();
+        m_worldgenTaskDispatcher->release(key, [raw, light, key]() {
+            auto destroy = [raw]() {
+                delete raw;
+                ::minecraft::util::LiveCounters::holdersDeleted().fetch_add(1, std::memory_order_relaxed);
+            };
+            if (light) light->release(key, destroy, false);
+            else       destroy();
+        }, false);
+        return true;
+    };
+
+    size_t destroyed = 0;
+    if (candidates.size() <= kUnloadQueueReserve) {
+        // No minimum: unload ready holders while the tick has time.
+        for (int64_t key : candidates) {
+            if (!haveTime()) break;
+            if (ChunkHolder* holder = readyHolder(key)) {
+                if (unload(key, holder)) ++destroyed;
+            }
         }
-        ++destroyed;
+        return destroyed;
+    }
+
+    // Over the reserve: find the ready queue first, then force its excess.
+    std::vector<std::pair<int64_t, ChunkHolder*>> ready;
+    ready.reserve(candidates.size());
+    for (int64_t key : candidates) {
+        if (ChunkHolder* holder = readyHolder(key)) ready.emplace_back(key, holder);
+    }
+    size_t minimalNumberOfChunksToProcess = ready.size() > kUnloadQueueReserve ? ready.size() - kUnloadQueueReserve : 0;
+    for (const auto& [key, holder] : ready) {
+        if (minimalNumberOfChunksToProcess == 0 && !haveTime()) break;
+        if (minimalNumberOfChunksToProcess > 0) --minimalNumberOfChunksToProcess;
+        if (unload(key, holder)) ++destroyed;
     }
     return destroyed;
+}
+
+void ChunkMap::markHandedOff(int64_t key) {
+    if (m_handedOffSet.insert(key).second) m_handedOff.push_back(key);
+}
+
+size_t ChunkMap::releaseHandedOffChunks(size_t maxChecks,
+                                        const std::function<bool(int64_t)>& canRelease) {
+    // No storage: a chunk the embedder drops cannot be read back from its
+    // save, so this copy is what it would regenerate from. Keep them all.
+    if (!m_chunkIo) {
+        m_handedOff.clear();
+        m_handedOffSet.clear();
+        m_handedOffCursor = 0;
+        return 0;
+    }
+
+    // Map lookups under the map lock, statuses outside it (a status takes the
+    // holder's futures mutex, which must not nest inside the map lock — see
+    // processUnloads). Holders are only destroyed on this thread.
+    const auto holderAt = [this](int64_t key) -> ChunkHolder* {
+        std::lock_guard<std::mutex> lock(m_mapMutex);
+        auto it = m_updatingChunkMap.find(key);
+        return it == m_updatingChunkMap.end() ? nullptr : it->second.get();
+    };
+    const auto neighboursPastSpawn = [&](int64_t key) {
+        const world::ChunkPos pos(key);
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dz = -1; dz <= 1; ++dz) {
+                if (dx == 0 && dz == 0) continue;
+                ChunkHolder* neighbour = holderAt(world::ChunkPos::asLong(pos.x() + dx, pos.z() + dz));
+                // Absent: it may yet be generated (or reloaded below SPAWN),
+                // and its TERRAIN and SPAWN would read this chunk.
+                if (neighbour == nullptr) return false;
+                const ChunkStatus* status = neighbour->getLatestStatus();
+                if (status == nullptr || status->isBefore(ChunkStatus::SPAWN)) return false;
+            }
+        }
+        return true;
+    };
+    // Swap-remove: the candidate order carries no meaning.
+    const auto dropCandidate = [this](size_t index) {
+        m_handedOffSet.erase(m_handedOff[index]);
+        m_handedOff[index] = m_handedOff.back();
+        m_handedOff.pop_back();
+    };
+
+    size_t released = 0;
+    for (size_t checked = 0; checked < maxChecks && !m_handedOff.empty(); ++checked) {
+        if (m_handedOffCursor >= m_handedOff.size()) m_handedOffCursor = 0;
+        const int64_t key = m_handedOff[m_handedOffCursor];
+        ChunkHolder* holder = holderAt(key);
+        auto* proto = holder ? dynamic_cast<world::ProtoChunk*>(holder->getLatestChunk()) : nullptr;
+        if (proto == nullptr || proto->isBlockDataReleased()) {
+            dropCandidate(m_handedOffCursor);   // unloaded, or already done
+            continue;
+        }
+        const bool ready = holder->hasCompletedStep(ChunkStatus::FULL) &&
+                           holder->generationRefCount() == 0 &&
+                           canRelease(key) &&
+                           neighboursPastSpawn(key);
+        if (!ready) {
+            ++m_handedOffCursor;
+            continue;
+        }
+        proto->releaseBlockData();
+        ++released;
+        ++m_releasedChunks;
+        dropCandidate(m_handedOffCursor);
+    }
+    return released;
 }
 
 // Reference: ChunkMap.java lines 374-381
@@ -472,18 +740,13 @@ bool ChunkMap::promoteChunkMap() {
         return false;
     }
 
-    // Incremental: holders are only ever ADDED to m_updatingChunkMap (nothing
-    // processes m_pendingUnloads), so the visible map is brought up to date by
-    // appending. If removal is ever implemented, this must also erase — or
-    // fall back to the full rebuild Java does (ChunkMap.java promoteChunkMap).
+    // Incremental rather than Java's full rebuild (ChunkMap.java
+    // promoteChunkMap): holders added since the last promotion are appended,
+    // and the ones processUnloads destroyed are erased.
     for (const auto& [key, holder] : m_visibleAdds) {
         m_visibleChunkMap[key] = holder;
     }
     m_visibleAdds.clear();
-    for (int64_t key : m_visibleRemoves) {
-        m_visibleChunkMap.erase(key);
-    }
-    m_visibleRemoves.clear();
 
     m_modified = false;
     return true;
@@ -597,21 +860,32 @@ ChunkMap::prepareTickingChunk(ChunkHolder* chunk) {
         // Center chunk is at the middle of the list
         ChunkAccess* levelChunk = chunks[chunks.size() / 2];
 
-        // In full implementation:
-        // levelChunk->postProcessGeneration(m_level);
-        // m_level.startTickingChunk(levelChunk);
-        //
-        // auto sendSync = chunk->getSendSyncFuture();
-        // if (sendSync->isDone()) {
-        //     onChunkReadyToSend(chunk, levelChunk);
-        // } else {
-        //     sendSync->thenAcceptAsync([this, chunk, levelChunk](auto) {
-        //         onChunkReadyToSend(chunk, levelChunk);
-        //     }, m_mainThreadExecutor);
-        // }
+        // MC: postProcessGeneration and startTickingChunk are the embedder's
+        // (it owns the world the chunk ticks in). onChunkReadyToSend runs on
+        // the main thread (thenApplyAsync(..., mainThreadExecutor)); the
+        // holder is looked up again there, since a level change in between
+        // may already have dropped it.
+        const int64_t key = chunk->getPos().toLong();
+        m_mainThreadExecutor([this, key]() { onChunkReadyToSend(key); });
 
         return ChunkResult<ChunkAccess*>::of(levelChunk);
     });
+}
+
+void ChunkMap::setChunkReadyListener(ChunkReadyListener listener) {
+    m_chunkReadyListener = std::move(listener);
+}
+
+void ChunkMap::onChunkReadyToSend(int64_t key) {
+    // Reference: ChunkMap.onChunkReadyToSend — the chunk and its 3x3 are
+    // FULL (BLOCK_TICKING), so the players tracking it get it, whichever
+    // ticket brought it there. Main thread.
+    if (!m_chunkReadyListener) return;
+    ChunkHolder* holder = getVisibleChunkIfPresent(key);
+    if (holder == nullptr || !holder->hasCompletedStep(ChunkStatus::FULL)) return;
+    ChunkAccess* chunk = holder->getLatestChunk();
+    if (chunk == nullptr) return;
+    m_chunkReadyListener(key, chunk);
 }
 
 // Reference: ChunkMap.java lines 343-345

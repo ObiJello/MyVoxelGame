@@ -73,3 +73,17 @@ tools/tracy/
 # the XML tables tools/gpu_report.py exports next to them
 *.trace/
 *.trace.export/
+
+# Profiling artifacts — Tracy captures and CSV plot exports run to 50-110 MB,
+# over GitHub's file limits (a push was rejected for plots.csv on 2026-09-05).
+*.tracy
+plots.csv
+
+# Mod source trees cloned for porting reference (Twilight Forest, The Aether)
+mods_reference/
+
+# Minecraft's sound assets (~370 MB of Mojang files), copied from the local
+# Minecraft install by tools/extract_mc_sounds.py. The engine's own sound
+# overlays (assets/sound_overlays/) ARE tracked.
+/assets/sounds/
+/assets/sounds.json

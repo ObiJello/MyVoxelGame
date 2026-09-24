@@ -159,6 +159,12 @@ namespace Game::Nbt {
         m_scopes.push_back('C');
     }
 
+    void Writer::EmbedCompound(std::string_view name, const std::vector<uint8_t>& payload) {
+        if (payload.empty() || payload.back() != 0) { Fail("embedded compound is not terminated"); return; }
+        if (!Header(TagType::Compound, name)) return;
+        m_buf.insert(m_buf.end(), payload.begin(), payload.end());
+    }
+
     void Writer::EndCompound() {
         if (!m_ok) return;
         if (m_scopes.size() < 2 || m_scopes.back() != 'C') { Fail("EndCompound without BeginCompound"); return; }

@@ -63,6 +63,12 @@ namespace Server {
         // Held item change
         void onHeldItemChangeC2S(const Network::HeldItemChangeC2SPacket& packet) override;
         void onPickItemC2S(const Network::PickItemC2SPacket& packet) override;
+        void onSignUpdateC2S(const Network::SignUpdateC2SPacket& packet) override;
+        // Book and quill / lectern (BookPackets.hpp)
+        void onEditBookC2S(const Network::EditBookC2SPacket& packet) override;
+        void onContainerButtonClickC2S(const Network::ContainerButtonClickC2SPacket& packet) override;
+        // Trading (MerchantPackets.hpp)
+        void onSelectTradeC2S(const Network::SelectTradeC2SPacket& packet) override;
 
         // Inventory click + close
         void onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) override;

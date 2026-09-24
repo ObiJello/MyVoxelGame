@@ -3,6 +3,7 @@
 #include "common/entity/Item.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/world/loot/LootTables.hpp"
 #include "common/world/block/Direction.hpp"
 #include "server/IntegratedServer.hpp"
@@ -44,6 +45,15 @@ namespace Game {
         return true;
     }
 
+    bool SpawnItemEntity(DimensionId dimension, const glm::dvec3& pos, const glm::dvec3& velocity,
+                         const ItemStack& stack, int pickupDelay) {
+        if (stack.IsEmpty()) return true;
+        auto* items = ItemsFor(dimension);
+        if (!items) return false;
+        items->Spawn(pos, velocity, stack, pickupDelay);
+        return true;
+    }
+
     bool DropItemStackFromFace(DimensionId dimension, const glm::ivec3& pos,
                                int face, const ItemStack& stack) {
         if (stack.IsEmpty()) return true;
@@ -59,13 +69,12 @@ namespace Game {
         return true;
     }
 
-    void DestroyBlockWithDrops(ILevelWrite& level, const glm::ivec3& pos) {
-        const BlockState state = level.GetBlockState(pos.x, pos.y, pos.z);
-        const BlockID    id    = state.Block();
+    void DropBlockLoot(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+        const BlockID id = state.Block();
         if (id == BlockID::Air) return;
 
-        // Roll the loot BEFORE clearing — the tables key on the block that is
-        // still there, and on its state.
+        // The tables key on the block and on its state, so the caller passes
+        // the state it is about to clear.
         JavaRandom rng(static_cast<uint64_t>(
             (static_cast<int64_t>(pos.x) * 3129871) ^
             (static_cast<int64_t>(pos.z) * 116129781) ^
@@ -80,9 +89,19 @@ namespace Game {
         // the client is not rolling authoritative loot anyway.
         ctx.blocks     = &level;
 
-        for (const ItemStack& drop : LootTables::GetDrops(ctx)) {
-            DropItemStackNear(level.GetDimension(), pos, drop);
+        // MC Block.popResource: nothing pops while block_drops is off.
+        if (Rules::GetBool(Rules::Id::BlockDrops)) {
+            for (const ItemStack& drop : LootTables::GetDrops(ctx)) {
+                DropItemStackNear(level.GetDimension(), pos, drop);
+            }
         }
+    }
+
+    void DestroyBlockWithDrops(ILevelWrite& level, const glm::ivec3& pos) {
+        const BlockState state = level.GetBlockState(pos.x, pos.y, pos.z);
+        if (state.Block() == BlockID::Air) return;
+        // Roll the loot BEFORE clearing — see DropBlockLoot.
+        DropBlockLoot(level, pos, state);
         level.SetBlock(pos.x, pos.y, pos.z, BlockID::Air, World::UpdateFlags::All);
     }
 

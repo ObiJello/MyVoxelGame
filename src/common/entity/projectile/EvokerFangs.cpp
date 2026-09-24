@@ -4,6 +4,8 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/core/Mth.hpp"
+#include "common/core/JavaRandom.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <vector>
 
@@ -79,7 +81,10 @@ namespace Game {
     void EvokerFangs::HandleEntityEvent(uint8_t id) {
         if (id == 4) {
             m_clientSideAttackStarted = true;
-            // MC plays EVOKER_FANGS_ATTACK here — no sound system.
+            if (!IsSilent() && m_level) {
+                m_level->PlayLocalSound(position, SoundEvents::EVOKER_FANGS_ATTACK, GetSoundSource(), 1.0f,
+                                        m_level->Random().NextFloat() * 0.2f + 0.85f, false);
+            }
         } else {
             Projectile::HandleEntityEvent(id);
         }

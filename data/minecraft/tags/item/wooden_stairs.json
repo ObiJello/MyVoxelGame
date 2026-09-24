@@ -12,6 +12,8 @@
     "minecraft:mangrove_stairs",
     "minecraft:bamboo_stairs",
     "minecraft:cherry_stairs",
-    "minecraft:poplar_stairs"
+    "minecraft:poplar_stairs",
+    "minecraft:whisperwood_stairs",
+    "minecraft:skyroot_stairs"
   ]
 }

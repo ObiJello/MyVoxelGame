@@ -1,0 +1,7 @@
+{
+  "parent": "minecraft:block/thorns_no_section",
+  "textures": {
+    "end": "minecraft:block/burnt_thorns_top",
+    "side": "minecraft:block/burnt_thorns_side"
+  }
+}

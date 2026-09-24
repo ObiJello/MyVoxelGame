@@ -1,0 +1,49 @@
+{
+  "block.hush_portal.ambient": {
+    "sounds": [
+      { "name": "minecraft:block.portal.ambient", "type": "event", "pitch": 0.6 }
+    ],
+    "subtitle": "subtitles.block.portal.ambient"
+  },
+  "block.hush_portal.trigger": {
+    "sounds": [
+      { "name": "minecraft:block.portal.trigger", "type": "event", "pitch": 0.65 }
+    ],
+    "subtitle": "subtitles.block.portal.trigger"
+  },
+  "block.hush_portal.travel": {
+    "sounds": [
+      { "name": "minecraft:block.portal.travel", "type": "event", "pitch": 0.7 }
+    ]
+  },
+  "block.hush_portal.ignite": {
+    "sounds": [
+      { "name": "minecraft:block.sculk_shrieker.shriek", "type": "event" }
+    ],
+    "subtitle": "subtitles.block.sculk_shrieker.shriek"
+  },
+  "block.resonant_chime.strike": {
+    "sounds": [
+      { "name": "minecraft:block.amethyst_block.resonate", "type": "event" }
+    ],
+    "subtitle": "subtitles.block.amethyst_block.resonate"
+  },
+  "block.choir_altar.sing": {
+    "sounds": [
+      { "name": "minecraft:block.beacon.activate", "type": "event" }
+    ],
+    "subtitle": "subtitles.block.beacon.activate"
+  },
+  "block.choir_altar.fail": {
+    "sounds": [
+      { "name": "minecraft:block.amethyst_block.break", "type": "event" }
+    ],
+    "subtitle": "subtitles.block.generic.break"
+  },
+  "entity.choir_mother.emerge": {
+    "sounds": [
+      { "name": "minecraft:entity.warden.emerge", "type": "event" }
+    ],
+    "subtitle": "subtitles.entity.warden.emerge"
+  }
+}

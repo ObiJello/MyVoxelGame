@@ -14,6 +14,7 @@
 #include "../level/ServerLevel.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace Server {
 
@@ -21,24 +22,16 @@ namespace Server {
         dispatcher.RegisterCommand("kill", KillCommand::Execute);
     }
 
-    void KillCommand::Execute(ServerPlayer& sender,
+    void KillCommand::Execute(const CommandSourceStack& source,
                               const std::vector<std::string>& args,
                               ServerConnection& connection,
                               PlayerSessionManager& sessionManager) {
+        ServerPlayer& sender = *source.sender;
         // MC KillCommand takes an EntityArgument.entities(), so every selector
         // form works and a bare player name is accepted too. This used to
         // hand-roll a name lookup and could only ever kill players — `/kill @e`
-        // failed with "Player not found: @e".
-        CommandSource source;
-        source.sender   = &sender;
-        source.sessions = &sessionManager;
-        source.position = sender.getPosition();
-        // The sender's DIMENSION — selectors are level-scoped (see
-        // CommandSource); without this `/kill @e` from the End acted on the
-        // Overworld's mobs.
-        if (auto session = sessionManager.GetSession(sender.getPlayerId())) {
-            source.dimension = Game::DimensionFromRaw(session->GetDimensionId());
-        }
+        // failed with "Player not found: @e". The stack's dimension scopes
+        // the selector (a `/kill @e` from the End clears the End).
 
         std::vector<SelectedEntity> targets;
         std::string error;
@@ -51,12 +44,18 @@ namespace Server {
 
         // DELIBERATE DIVERGENCE, requested: vanilla's `@e` includes players, so
         // `/kill @e` in MC kills you along with everything else. Here the
-        // SENDER is always spared, because the overwhelmingly common use is
-        // "clear the world around me" and doing that should not cost you your
-        // inventory. Every other player is still killed, and `/kill @s` or
-        // `/kill <yourname>` still works if you actually mean yourself.
-        const bool sparedSelf = [&] {
-            if (token == "@s") return false;   // asked for yourself explicitly
+        // SENDER is spared from the SWEEP selectors — `@e` and `@n`, the ones
+        // that mean "the entities around me" — because the overwhelmingly
+        // common use is "clear the world around me" and doing that should
+        // not cost you your inventory. Anything that names the player means
+        // the player: `@s`, a bare name, and the player-only `@a`/`@p`/`@r`.
+        // (This used to test the token against the literal "@s", which
+        // spared the sender from a bare name too — `/kill Notch` did nothing.)
+        const bool sweepSelector =
+            token.size() >= 2 && token[0] == '@' &&
+            (std::tolower(static_cast<unsigned char>(token[1])) == 'e' ||
+             std::tolower(static_cast<unsigned char>(token[1])) == 'n');
+        const bool sparedSelf = sweepSelector && [&] {
             const size_t before = targets.size();
             targets.erase(std::remove_if(targets.begin(), targets.end(),
                 [&](const SelectedEntity& e) { return e.player == &sender; }),
@@ -69,17 +68,10 @@ namespace Server {
             switch (target.kind) {
                 case SelectedEntity::Kind::Player: {
                     if (!target.player) break;
-                    // MC /kill uses damageSources().genericKill(), which
-                    // BYPASSES_INVULNERABILITY — a creative player dies too.
-                    // ServerPlayer::damage is gamemode-gated, so say so rather
-                    // than silently no-op.
-                    if (target.player->getGameMode() == GameMode::CREATIVE ||
-                        target.player->getGameMode() == GameMode::SPECTATOR) {
-                        connection.SendChatMessage(
-                            target.player->getName() + " is invulnerable (creative/spectator)", 1);
-                        break;
-                    }
-                    target.player->damage(1000.0f, DamageSource::VOID_DAMAGE);
+                    // MC LivingEntity.kill: damageSources().genericKill(),
+                    // which BYPASSES_INVULNERABILITY — a creative player dies
+                    // too, and so does one inside the hurt cooldown.
+                    target.player->kill();
                     ++killed;
                     break;
                 }

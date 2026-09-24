@@ -15,6 +15,7 @@
 #endif
 #include "common/physics/RayCast.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 
 namespace Client {
 
@@ -77,12 +78,14 @@ namespace Client {
         m_orbs.reset();
         m_items.reset();
         m_blocks.reset();
-        if (m_meshes)   m_meshes->Shutdown();
-        if (m_chunks)   m_chunks->Shutdown();
-        if (m_renderer) m_renderer->Shutdown();
+        { PROFILE_ZONE_N("Exit.ClientLevel.Meshes");   if (m_meshes)   m_meshes->Shutdown(); }
+        { PROFILE_ZONE_N("Exit.ClientLevel.Chunks");   if (m_chunks)   m_chunks->Shutdown(); }
+        { PROFILE_ZONE_N("Exit.ClientLevel.Renderer"); if (m_renderer) m_renderer->Shutdown(); }
+        { PROFILE_ZONE_N("Exit.ClientLevel.Release");
         m_meshes.reset();
         m_chunks.reset();
         m_renderer.reset();
+        }
     }
 
     bool ClientLevel::IsEmpty() const {
@@ -163,11 +166,14 @@ namespace Client {
     }
 
     void ClientLevels::DestroySession() {
+        PROFILE_ZONE_N("Exit.ClientLevels.DestroySession");
         s_bound  = nullptr;
         s_active = nullptr;
         BindGlobals(nullptr);
         for (auto& slot : s_levels) {
-            if (slot) { slot->Shutdown(); slot.reset(); }
+            if (!slot) continue;
+            { PROFILE_ZONE_N("Exit.ClientLevel.Shutdown"); slot->Shutdown(); }
+            { PROFILE_ZONE_N("Exit.ClientLevel.Destroy");  slot.reset(); }
         }
         ++s_activeGeneration;
     }

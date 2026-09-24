@@ -1,0 +1,10 @@
+{
+  "values": [
+    "minecraft:trapped_carved_stone",
+    "minecraft:trapped_sentry_stone",
+    "minecraft:trapped_angelic_stone",
+    "minecraft:trapped_light_angelic_stone",
+    "minecraft:trapped_hellfire_stone",
+    "minecraft:trapped_light_hellfire_stone"
+  ]
+}

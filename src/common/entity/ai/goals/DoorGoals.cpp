@@ -8,6 +8,9 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/entity/EntityLevel.hpp"
+#include "common/sound/EntitySounds.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 
 #include <algorithm>
 #include <string_view>
@@ -161,8 +164,9 @@ namespace Game {
         if (!level) return;
 
         // MC: a pound roughly every 20 ticks — level event 1019 (the wood
-        // thud; no sound system) plus the arm swing every watcher sees.
+        // thud) plus the arm swing every watcher sees.
         if (level->Random().NextInt(20) == 0) {
+            PlayEntityLevelEventSound(*level, EntityLevelEvent::ZOMBIE_ATTACK_WOODEN_DOOR, m_doorPos);
             if (!m_mob->swinging) m_mob->Swing();
         }
 
@@ -182,11 +186,15 @@ namespace Game {
             // falls out via the door's neighbour update. This engine has no
             // double-block linkage (see World::NotifyNeighborBlocks), so both
             // halves are cleared explicitly — same observable result.
-            // Level events 1021/2001 (break sound + particles) skipped.
+            // Level events 1021 (the splinter) and 2001 (the block's break
+            // sound; its particles wait on particles).
             const IBlockAccess* blocks = level->Blocks();
             if (blocks) {
                 const BlockState state = blocks->GetBlockState(
                     m_doorPos.x, m_doorPos.y, m_doorPos.z);
+                PlayEntityLevelEventSound(*level, EntityLevelEvent::ZOMBIE_BREAK_WOODEN_DOOR, m_doorPos);
+                PlayLevelEventSound(*level, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, m_doorPos,
+                                    static_cast<int>(state.RawId()), &level->Random());
                 const glm::ivec3 other =
                     state.GetName(PropertyId::DOUBLE_BLOCK_HALF) == "lower"
                         ? m_doorPos + glm::ivec3(0, 1, 0)

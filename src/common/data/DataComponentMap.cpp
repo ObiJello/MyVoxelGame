@@ -19,6 +19,34 @@ namespace Game {
         }
     }
 
+    bool DataComponentMap::IsExactSubsetOf(const DataComponentMap& target,
+                                           const DataComponentMap* targetDefaults) const {
+        if (entries.empty()) return true;
+        Network::PacketBuffer mine, theirs;
+        for (const auto& e : entries) {
+            const Entry* match = nullptr;
+            for (const auto& o : target.entries) {
+                if (o.type == e.type) { match = &o; break; }
+            }
+            if (!match && targetDefaults) {
+                for (const auto& o : targetDefaults->entries) {
+                    if (o.type == e.type) { match = &o; break; }
+                }
+            }
+            if (!match) return false;
+            if (e.value.get() == match->value.get()) continue;
+            // Same rule as Equals: without a codec there is no way to compare
+            // values, and refusing is the safe answer.
+            if (!e.type->HasNetworkCodec()) return false;
+            mine.Clear();
+            theirs.Clear();
+            e.type->SerializeErased(mine, e.value.get());
+            match->type->SerializeErased(theirs, match->value.get());
+            if (mine.GetData() != theirs.GetData()) return false;
+        }
+        return true;
+    }
+
     bool DataComponentMap::Equals(const DataComponentMap& other) const {
         // Fast path: the overwhelming majority of stacks are vanilla and carry
         // no per-stack overrides at all. Keeping this allocation-free matters —
@@ -36,6 +64,12 @@ namespace Game {
                 if (o.type == e.type) { match = &o; break; }
             }
             if (!match) return false;
+
+            // The same allocation is the same value: set() always installs a
+            // fresh value and nothing mutates one in place, so a stack and
+            // its copy (the per-tick diff's remote model) compare without
+            // serializing — which matters once a component is a 100-page book.
+            if (e.value.get() == match->value.get()) continue;
 
             if (!e.type->HasNetworkCodec()) {
                 // No codec means no way to inspect the value. Fall back to

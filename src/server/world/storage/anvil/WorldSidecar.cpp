@@ -31,6 +31,8 @@ namespace Game::Anvil {
             out.babyModels     = j.value("babyModels",     out.babyModels);
             out.tickFrozen     = j.value("tickFrozen",     out.tickFrozen);
             out.tickRate       = j.value("tickRate",       out.tickRate);
+            out.joinable       = j.value("joinable",       out.joinable);
+            out.portalGun      = j.value("portalGun",      out.portalGun);
             out.worldType      = j.value("worldType",      out.worldType);
             out.flatPreset     = j.value("flatPreset",     out.flatPreset);
             out.flatLayers     = j.value("flatLayers",     out.flatLayers);
@@ -64,6 +66,8 @@ namespace Game::Anvil {
             j["babyModels"]     = sidecar.babyModels;
             j["tickFrozen"]     = sidecar.tickFrozen;
             j["tickRate"]       = sidecar.tickRate;
+            j["joinable"]       = sidecar.joinable;
+            j["portalGun"]      = sidecar.portalGun;
             j["worldType"]      = sidecar.worldType;
             j["flatPreset"]     = sidecar.flatPreset;
             j["flatLayers"]     = sidecar.flatLayers;

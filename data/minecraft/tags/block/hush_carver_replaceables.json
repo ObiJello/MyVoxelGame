@@ -1,0 +1,16 @@
+{
+  "values": [
+    "minecraft:hushstone",
+    "minecraft:polished_hushstone",
+    "minecraft:sculk_loam",
+    "minecraft:hush_moss",
+    "minecraft:echo_ore",
+    "minecraft:resonite_ore",
+    "minecraft:resonite_ore",
+    "minecraft:sculk",
+    "minecraft:water",
+    "minecraft:gravel",
+    "#minecraft:base_stone_overworld",
+    "#minecraft:substrate_overworld"
+  ]
+}

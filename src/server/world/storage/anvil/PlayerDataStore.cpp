@@ -2,6 +2,7 @@
 #include "server/world/storage/anvil/PlayerDataStore.hpp"
 
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
+#include "server/world/storage/anvil/EntityNbt.hpp"
 #include "server/player/ServerPlayer.hpp"
 
 #include "common/core/Log.hpp"
@@ -146,6 +147,10 @@ namespace Game::Anvil {
         w.Float("Health", player.getHealth());
         w.Short("HurtTime", 0);
         w.Short("DeathTime", 0);
+        // MC LivingEntity.addAdditionalSaveData: AbsorptionAmount and the
+        // active_effects list (MobEffectInstance.CODEC, omitted when empty).
+        w.Float("AbsorptionAmount", player.getAbsorptionAmount());
+        WriteActiveEffects(w, player.activeEffects());
 
         const auto& food = player.getFoodData();
         w.Int  ("foodLevel",           food.getFoodLevel());
@@ -161,9 +166,8 @@ namespace Game::Anvil {
         w.Int  ("Score",   0);
 
         w.Int   ("playerGameType", static_cast<int>(player.getGameMode()));
-        w.String("Dimension", player.getDimensionId() == -1 ? "minecraft:the_nether"
-                            : player.getDimensionId() ==  1 ? "minecraft:the_end"
-                                                            : "minecraft:overworld");
+        w.String("Dimension", std::string(Game::DimensionRegistryName(
+                                  Game::DimensionFromRaw(player.getDimensionId()))));
         w.Int   ("SelectedItemSlot", inventory.GetSelectedSlot());
 
         {
@@ -228,6 +232,40 @@ namespace Game::Anvil {
         // The body's size from scaled immersive portals; 1 is vanilla.
         w.Float("obey_scale",   player.getScale());
         w.EndCompound();
+
+        // MC ServerPlayer.addAdditionalSaveData: `respawn` is RespawnConfig's
+        // codec — LevelData.RespawnData's map codec (GlobalPos flattened to
+        // `dimension` + `pos`, then `yaw`, `pitch`) plus `forced`. Absent when
+        // the player has no respawn point, as storeNullable leaves it.
+        if (const auto& respawn = player.getRespawnConfig()) {
+            w.BeginCompound("respawn");
+            w.String("dimension", respawn->dimensionId == -1 ? "minecraft:the_nether"
+                                : respawn->dimensionId ==  1 ? "minecraft:the_end"
+                                                             : "minecraft:overworld");
+            {
+                const int32_t pos[3] = {respawn->pos.x, respawn->pos.y, respawn->pos.z};
+                w.IntArray("pos", pos, 3);
+            }
+            w.Float("yaw",    respawn->yaw);
+            w.Float("pitch",  respawn->pitch);
+            w.Bool ("forced", respawn->forced);
+            w.EndCompound();
+        }
+
+        // Engine-only (the Hush's recall chime, docs/the-hush.md): where the
+        // player last arrived through a hush gate. The dimension is written by
+        // registry name so the Hush itself round-trips (the `respawn` writer
+        // above only knows the three vanilla ones). Absent when never crossed.
+        if (const auto& gate = player.getLastHushGate()) {
+            w.BeginCompound("obey_hush_gate");
+            w.String("dimension", std::string(Game::DimensionRegistryName(
+                                      Game::DimensionFromRaw(gate->dimensionId))));
+            w.Double("x", gate->pos.x);
+            w.Double("y", gate->pos.y);
+            w.Double("z", gate->pos.z);
+            w.Float ("yaw", gate->yaw);
+            w.EndCompound();
+        }
 
         w.EndRootCompound();
         if (!w.ok()) { error = "NBT writer refused the player data"; return false; }
@@ -340,6 +378,13 @@ namespace Game::Anvil {
             player.setScale(abilities->GetValue<float>("obey_scale", 1.0f));
         }
 
+        // MC LivingEntity.readAdditionalSaveData's order: absorption, then
+        // the effects (they move MAX_HEALTH), THEN Health. Installed
+        // directly — the view re-folds their attribute modifiers when it is
+        // built, and sends them to the client (PlayerList
+        // .sendActivePlayerEffects).
+        player.setAbsorptionAmount(data->GetValue<float>("AbsorptionAmount", 0.0f));
+        player.activeEffects() = ReadActiveEffects(*data);
         player.setHealthDirect(data->GetValue<float>("Health", 20.0f));
         player.setOnGround(data->GetValue<int8_t>("OnGround", 1) != 0);
         // The WRITE side stores MC's string key ("minecraft:the_end"); this
@@ -348,13 +393,63 @@ namespace Game::Anvil {
         // stays for any file that predates the string.
         {
             const std::string dim = data->GetValue<std::string>("Dimension", "");
-            if (dim == "minecraft:the_nether")      player.setDimensionId(-1);
-            else if (dim == "minecraft:the_end")    player.setDimensionId(1);
-            else if (dim == "minecraft:overworld")  player.setDimensionId(0);
-            else {
+            if (const auto known = Game::DimensionFromRegistryName(dim)) {
+                player.setDimensionId(Game::DimensionToRaw(*known));
+            } else {
                 player.setDimensionId(data->GetValue<int32_t>(
                     "playerDimensionId", player.getDimensionId()));
             }
+        }
+
+        // The respawn point: the modern `respawn` compound (see the writer),
+        // with the pre-DataVersion-4548 SpawnX/SpawnY/SpawnZ/SpawnAngle/
+        // SpawnDimension/SpawnForced keys as the fallback for a file a real
+        // Minecraft wrote before the codec change.
+        {
+            auto dimensionFromName = [](const std::string& name, int fallback) {
+                const auto known = Game::DimensionFromRegistryName(name);
+                return known ? Game::DimensionToRaw(*known) : fallback;
+            };
+            std::optional<Server::ServerPlayer::RespawnConfig> config;
+            if (auto respawn = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("respawn"))) {
+                if (auto pos = std::dynamic_pointer_cast<::World::NBTTagIntArray>(respawn->GetTag("pos"));
+                    pos && pos->value.size() == 3) {
+                    Server::ServerPlayer::RespawnConfig c;
+                    c.dimensionId = dimensionFromName(respawn->GetValue<std::string>("dimension", ""), 0);
+                    c.pos    = glm::ivec3(pos->value[0], pos->value[1], pos->value[2]);
+                    c.yaw    = respawn->GetValue<float>("yaw", 0.0f);
+                    c.pitch  = respawn->GetValue<float>("pitch", 0.0f);
+                    c.forced = respawn->GetValue<int8_t>("forced", 0) != 0;
+                    config = c;
+                }
+            } else if (data->GetTag("SpawnX") && data->GetTag("SpawnY") && data->GetTag("SpawnZ")) {
+                Server::ServerPlayer::RespawnConfig c;
+                c.dimensionId = dimensionFromName(data->GetValue<std::string>("SpawnDimension", ""), 0);
+                c.pos    = glm::ivec3(data->GetValue<int32_t>("SpawnX", 0),
+                                      data->GetValue<int32_t>("SpawnY", 0),
+                                      data->GetValue<int32_t>("SpawnZ", 0));
+                c.yaw    = data->GetValue<float>("SpawnAngle", 0.0f);
+                c.forced = data->GetValue<int8_t>("SpawnForced", 0) != 0;
+                config = c;
+            }
+            player.setRespawnConfig(config);
+        }
+
+        // The last hush gate crossed (see the writer). An unknown dimension
+        // name drops the mark rather than guessing a dimension.
+        if (auto gate = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("obey_hush_gate"))) {
+            if (const auto dim = Game::DimensionFromRegistryName(
+                    gate->GetValue<std::string>("dimension", ""))) {
+                Server::ServerPlayer::HushGateMark mark;
+                mark.dimensionId = Game::DimensionToRaw(*dim);
+                mark.pos = glm::dvec3(gate->GetValue<double>("x", 0.0),
+                                      gate->GetValue<double>("y", 0.0),
+                                      gate->GetValue<double>("z", 0.0));
+                mark.yaw = gate->GetValue<float>("yaw", 0.0f);
+                player.setLastHushGate(mark);
+            }
+        } else {
+            player.setLastHushGate(std::nullopt);
         }
 
         auto& food = player.getFoodData();

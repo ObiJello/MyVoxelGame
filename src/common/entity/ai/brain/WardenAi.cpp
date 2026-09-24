@@ -1,5 +1,6 @@
 // File: src/common/entity/ai/brain/WardenAi.cpp
 #include "common/entity/ai/brain/WardenAi.hpp"
+#include "common/world/level/HushItems.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -7,6 +8,7 @@
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
 
@@ -115,6 +117,10 @@ namespace Game {
         protected:
             bool CanStillUse(EntityLevel&, LivingEntity&, int64_t) override { return true; }
 
+            void Start(EntityLevel&, LivingEntity& body, int64_t) override {
+                body.PlaySound(SoundEvents::WARDEN_SNIFF, 5.0f, 1.0f);   // MC Sniffing.start
+            }
+
             void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
                 auto* warden = dynamic_cast<Warden*>(&body);
                 Brain* brain = body.GetBrain();
@@ -154,7 +160,7 @@ namespace Game {
 
             void Start(EntityLevel&, LivingEntity& body, int64_t) override {
                 body.SetPose(Pose::Emerging);
-                // MC plays WARDEN_EMERGE here.
+                body.PlaySound(SoundEvents::WARDEN_EMERGE, 5.0f, 1.0f);   // MC Emerging.start
             }
 
             void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
@@ -184,11 +190,12 @@ namespace Game {
             void Start(EntityLevel&, LivingEntity& body, int64_t) override {
                 if (body.onGround) {
                     body.SetPose(Pose::Digging);
-                    // MC plays WARDEN_DIG.
+                    body.PlaySound(SoundEvents::WARDEN_DIG, 5.0f, 1.0f);
                 } else {
                     // MC plays WARDEN_AGITATED and stop()s itself, which
                     // discards the warden on the spot — a floating warden
                     // cannot dig, it just leaves.
+                    body.PlaySound(SoundEvents::WARDEN_AGITATED, 5.0f, 1.0f);
                     body.Discard();
                 }
             }
@@ -235,14 +242,13 @@ namespace Game {
             void Tick(EntityLevel&, LivingEntity& body, int64_t) override {
                 Brain* brain = body.GetBrain();
                 if (!brain) return;
-                // MC: the WARDEN_ROAR sound fires once, 25 ticks in. The
-                // memory dance is kept so the timing is right when sounds
-                // arrive.
+                // MC: the WARDEN_ROAR sound fires once, 25 ticks in.
                 if (!brain->HasMemoryValue(MemoryModule::RoarSoundDelay)
                     && !brain->HasMemoryValue(MemoryModule::RoarSoundCooldown)) {
                     brain->SetMemoryWithExpiry(
                         MemoryModule::RoarSoundCooldown, std::monostate{},
                         WardenAi::kRoarDuration - kTicksBeforeRoarSound);
+                    body.PlaySound(SoundEvents::WARDEN_ROAR, 3.0f, 1.0f);
                 }
             }
 
@@ -294,7 +300,7 @@ namespace Game {
                                            std::monostate{}, kTicksBeforeSound);
                 // Entity event 62 — the client starts the sonic-boom wind-up.
                 level.BroadcastEntityEvent(body, 62);
-                // MC plays WARDEN_SONIC_CHARGE here.
+                body.PlaySound(SoundEvents::WARDEN_SONIC_CHARGE, 3.0f, 1.0f);
             }
 
             void Tick(EntityLevel& level, LivingEntity& body, int64_t) override {
@@ -324,14 +330,16 @@ namespace Game {
                 // damage line is the whole of the effect.
                 const glm::dvec3 source = warden->GetEyePosition();
                 glm::dvec3 delta = target->GetEyePosition() - source;
+                warden->PlaySound(SoundEvents::WARDEN_SONIC_BOOM, 3.0f, 1.0f);
                 const double len = std::sqrt(delta.x * delta.x + delta.y * delta.y
                                              + delta.z * delta.z);
                 if (len > 1.0e-8) delta /= len;
 
-                // MC: 10.0F of armor-BYPASSING damage. This port's armor
-                // absorb has no bypass channel; mobs carry no armor, so only
-                // an armored player notices the difference.
-                if (target->Hurt(MobDamageSource::Generic, 10.0f, warden)) {
+                // MC: 10.0F of armor-BYPASSING damage (Warden::SonicBoomDamage
+                // — 12 for the Silent Warden). This port's armor absorb has
+                // no bypass channel; mobs carry no armor, so only an armored
+                // player notices the difference.
+                if (target->Hurt(MobDamageSource::Generic, warden->SonicBoomDamage(), warden)) {
                     // MC push: horizontal 2.5, vertical 0.5, both scaled by
                     // (1 − knockback resistance). Knockback() carries the
                     // resistance scaling and the player wire-sync; MC's exact
@@ -506,6 +514,13 @@ namespace Game {
                         for (Entity* e : *nearest) {
                             if ((pass == 0) != e->IsPlayer()) continue;
                             if (!warden->CanTargetEntity(e)) continue;
+                            // The Hush's cloak of silence: the sniff (this
+                            // memory is what Sniffing reads) cannot find its
+                            // wearer. A warden already angry keeps its anger.
+                            if (auto* living = dynamic_cast<LivingEntity*>(e);
+                                living && HushItems::IsSoundCloaked(level, *living)) {
+                                continue;
+                            }
                             found = e;
                             break;
                         }

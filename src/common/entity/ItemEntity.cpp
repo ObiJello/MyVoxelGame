@@ -1,5 +1,6 @@
 // File: src/common/entity/ItemEntity.cpp
 #include "ItemEntity.hpp"
+#include "common/world/block/BlockFriction.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -93,8 +94,17 @@ namespace Game {
             }
 
             // Drag AFTER the move — see the header note. Horizontal drag picks
-            // up the ground multiplier once we're resting on something.
-            const double horizDrag = onGround ? kGroundDrag : kAirDrag;
+            // up the supporting block's friction once we're resting on
+            // something (ItemEntity.tick: airDrag * getFriction() of
+            // getBlockPosBelowThatAffectsMyMovement).
+            double horizDrag = kAirDrag;
+            if (onGround) {
+                const glm::ivec3 below = BlockPosBelowThatAffectsMovement(pos);
+                // The motion-aware overload: quicksoil (friction 1.1) is
+                // FrictionCapped and must see the item's speed.
+                horizDrag *= GetBlockFriction(context.GetBlock(below.x, below.y, below.z),
+                                              glm::dvec3(vel));
+            }
             vel.x *= horizDrag;
             vel.y *= kAirDrag;
             vel.z *= horizDrag;

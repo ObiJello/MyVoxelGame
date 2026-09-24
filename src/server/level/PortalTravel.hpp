@@ -45,14 +45,38 @@ namespace Server {
         // The same trip without a portal block (the /dimension command): the
         // entity goes where a portal at its own position would have sent it.
         // To or from the End that is the End-portal rule (the obsidian
-        // platform at END_SPAWN_POINT, or the world spawn coming home); the
-        // Nether and the Overworld use the nether-portal rule — coordinates
-        // scaled by 8, the nearest portal within range reused, else the spot
-        // a new one would take (PortalForcer's placement search) with NO
-        // portal built: you arrive where the crossing would have put you,
-        // and the world stays as it was. Arms the entity's portal cooldown.
+        // platform at END_SPAWN_POINT, or the world spawn coming home); to
+        // or from the Hush the hush-portal rule (1:1, the exit aimed at the
+        // Hush's surface); the Nether and the Overworld use the nether-portal
+        // rule — coordinates scaled by 8, the nearest portal within range
+        // reused, else the spot a new one would take (PortalForcer's
+        // placement search) with NO portal built: you arrive where the
+        // crossing would have put you, and the world stays as it was. Arms
+        // the entity's portal cooldown.
         void TravelToDimension(IntegratedServer& server, ServerLevel& from, Game::Entity& entity,
                                Game::DimensionId toDim);
+
+        // MC PoiManager.ensureLoadedAndValid as PortalForcer uses it: hold
+        // and synchronously generate the chunks (radius 2) around `around`
+        // in `level` before a portal search or build reads them. Shared with
+        // TwilightTeleporter (TFTeleporter.loadSurroundingArea).
+        void EnsureExitAreaLoaded(ServerLevel& level, const glm::ivec3& around);
+
+        // MC Entity.teleport(TeleportTransition) for a landing another
+        // module resolved (TwilightTeleporter, the Aether fall-out): moves a
+        // player from `from` to `to` at `position` keeping its own facing,
+        // carrying `velocityPerTick` (blocks per tick; zero = arrive still)
+        // and the entity's portal state. Non-players are logged and stay,
+        // as for every portal route.
+        void ArriveAt(IntegratedServer& server, ServerLevel& from, ServerLevel& to,
+                      Game::Entity& entity, const glm::dvec3& position,
+                      const glm::dvec3& velocityPerTick = glm::dvec3(0.0));
+
+        // Aether EntityMixin.entityFell: `entity` fell to or below the
+        // Aether's floor — it comes out at the top of the Overworld at the
+        // same x/z (maxBuildHeight − bbHeight), keeping its velocity and
+        // rotation, with the portal cooldown armed. No-op outside the Aether.
+        void FallOutOfAether(IntegratedServer& server, ServerLevel& from, Game::Entity& entity);
 
     } // namespace PortalTravel
 

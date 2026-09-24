@@ -88,6 +88,10 @@ namespace Client {
         // the server so other clients render this player's stick figure in the
         // chosen colour.
         void SetPlayerColor(uint8_t colorId) { m_playerColor = colorId; }
+
+        // Headless bots: the connection decodes only what a bot acts on
+        // (ClientConnection::SetLightweightDecode). Set before connecting.
+        void SetLightweightDecode(bool on) { m_lightweightDecode = on; }
         uint8_t GetPlayerColor() const { return m_playerColor; }
 
         // Raw bytes written immediately after TCP connect, BEFORE the game
@@ -168,6 +172,7 @@ namespace Client {
         std::string m_playerName;
         std::string m_connectPreamble;   // relay ticket line (see SetConnectPreamble)
         uint8_t     m_playerColor = 0; // Game::PlayerColorId::Default
+        bool        m_lightweightDecode = false;   // see SetLightweightDecode
         
         // Client state
         std::atomic<ClientState> m_state{ClientState::IDLE};

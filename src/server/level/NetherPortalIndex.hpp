@@ -1,7 +1,11 @@
 // File: src/server/level/NetherPortalIndex.hpp
 //
-// Where the nether portals are, per dimension. Stands in for MC's
-// `PoiManager` + `PoiTypes.NETHER_PORTAL`.
+// Where the portal blocks of one family are, per dimension. Stands in for
+// MC's `PoiManager` + `PoiTypes.NETHER_PORTAL`. One instance per
+// PortalFamily per level (ServerLevel::Portals): the nether index tracks
+// nether_portal blocks, the hush index hush_portal blocks, and each answers
+// only its own family's PortalForcer search. The class keeps its name —
+// the mechanism is the nether portal's, the Hush merely borrows it.
 //
 // WHY A BESPOKE INDEX RATHER THAN A POI SYSTEM
 // --------------------------------------------
@@ -29,9 +33,11 @@
 // anyway before returning a position.
 #pragma once
 
+#include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
 
 #include <cstdint>
+#include <vector>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,12 +53,18 @@ namespace Server {
 
     class NetherPortalIndex {
     public:
-        // A nether_portal block appeared at `pos`. Called from the block-change
-        // hook and by PortalForcer when it builds one.
+        // `portalBlock` is the family's block (nether_portal / hush_portal):
+        // the one the chunk scan looks for and FindClosest re-validates.
+        explicit NetherPortalIndex(Game::BlockID portalBlock) : m_portalBlock(portalBlock) {}
+
+        Game::BlockID PortalBlock() const { return m_portalBlock; }
+
+        // A portal block of this family appeared at `pos`. Called from the
+        // block-change hook and by PortalForcer when it builds one.
         void Add(const glm::ivec3& pos);
 
-        // A nether_portal block at `pos` is gone. Cheap no-op when it was
-        // never indexed.
+        // A portal block at `pos` is gone. Cheap no-op when it was never
+        // indexed.
         void Remove(const glm::ivec3& pos);
 
         // Scan a freshly loaded or generated chunk for portal blocks.
@@ -82,6 +94,12 @@ namespace Server {
 
         size_t Size() const { return m_positions.size(); }
 
+        // Every indexed portal block inside `chunkPos` — what the immersive
+        // adoption scan (NetherPortalGeneration::OnChunkLoaded) walks. May
+        // include stale entries (see the header note); callers re-check the
+        // block.
+        std::vector<glm::ivec3> InChunk(Game::Math::ChunkPos chunkPos) const;
+
     private:
         struct IVec3Hash {
             size_t operator()(const glm::ivec3& v) const noexcept {
@@ -98,6 +116,7 @@ namespace Server {
             }
         };
 
+        Game::BlockID m_portalBlock;
         std::unordered_set<glm::ivec3, IVec3Hash> m_positions;
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_scannedChunks;
     };

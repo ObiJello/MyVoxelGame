@@ -34,9 +34,10 @@ namespace Game::EquipmentBehavior {
             return UseResult::Fail;
         }
 
-        // Equip sound — log-stub (ItemBehaviors.cpp PlaySound pattern).
-        Log::Debug("[Equip] sound=%s — TODO: wire sound system",
-                   equippable.equipSound.c_str());
+        // The equip sound is not played here: MC plays it from
+        // LivingEntity.onEquipItem whatever filled the slot, and so does
+        // this engine — ServerPlayer::tick notices the new armor piece and
+        // sounds its Equippable.equipSound for everyone.
 
         if (inHand.count <= 1) {
             // :62-66 — single item: straight swap.
@@ -141,9 +142,27 @@ namespace Game {
         Tier(Items::NetheriteHelmet, Items::NetheriteChestplate, Items::NetheriteLeggings, Items::NetheriteBoots, "item.armor.equip_netherite");
         SetArmor(Items::TurtleHelmet, EquipmentSlot::HEAD, "item.armor.equip_turtle");
 
+        // The Aether (AetherArmorMaterials: aether's own equip sounds) and
+        // Twilight Forest (TFArmorMaterials: ARMOR_EQUIP_GENERIC except
+        // knightmetal's TFSounds.KNIGHTMETAL_EQUIP), docs/mod-ports.md.
+        Tier(Items::ZaniteHelmet,      Items::ZaniteChestplate,      Items::ZaniteLeggings,      Items::ZaniteBoots,      "aether:item.armor.equip_zanite");
+        Tier(Items::GravititeHelmet,   Items::GravititeChestplate,   Items::GravititeLeggings,   Items::GravititeBoots,   "aether:item.armor.equip_gravitite");
+        Tier(Items::IronwoodHelmet,    Items::IronwoodChestplate,    Items::IronwoodLeggings,    Items::IronwoodBoots,    "item.armor.equip_generic");
+        Tier(Items::SteeleafHelmet,    Items::SteeleafChestplate,    Items::SteeleafLeggings,    Items::SteeleafBoots,    "item.armor.equip_generic");
+        Tier(Items::KnightmetalHelmet, Items::KnightmetalChestplate, Items::KnightmetalLeggings, Items::KnightmetalBoots, "twilightforest:item.knightmetal.equip");
+        Tier(Items::FieryHelmet,       Items::FieryChestplate,       Items::FieryLeggings,       Items::FieryBoots,       "item.armor.equip_generic");
+        SetArmor(Items::NagaChestplate, EquipmentSlot::CHEST, "item.armor.equip_generic");
+        SetArmor(Items::NagaLeggings,   EquipmentSlot::LEGS,  "item.armor.equip_generic");
+
         // Elytra — CHEST slot, equip_elytra (Items.java elytra row). Data-only:
         // no gliding system, but it equips/renders in the chest slot.
         SetArmor(Items::Elytra, EquipmentSlot::CHEST, "item.armor.equip_elytra");
+
+        // The Hush's cloak of silence (docs/the-hush.md) — a CHEST wearable
+        // like the elytra: no armour value, the equip sound of leather. What
+        // it does is read where the listeners pick players
+        // (HushItems::IsSoundCloaked).
+        SetArmor(Items::CloakOfSilence, EquipmentSlot::CHEST, "item.armor.equip_leather");
 
         // Shield — Items.java shield row:
         //   .component(DataComponents.EQUIPPABLE, Equippable.builder(OFFHAND)
@@ -170,7 +189,7 @@ namespace Game {
             it->second.maxStackSize = 1;
         }
 
-        Log::Info("[ItemRegistry] Registered EQUIPPABLE on 31 armor items + shield BLOCKS_ATTACKS");
+        Log::Info("[ItemRegistry] Registered EQUIPPABLE on 57 armor items + shield BLOCKS_ATTACKS");
     }
 
 } // namespace Game

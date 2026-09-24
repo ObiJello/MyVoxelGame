@@ -2,9 +2,12 @@
 #include "levelgen/structure/TemplateEngine.h"
 
 #include "levelgen/structure/OrientedPieceBehavior.h"
+#include "levelgen/structure/StructureEntities.h"
 #include "levelgen/WorldGenLevel.h"
 #include "levelgen/WorldgenRandom.h"
 #include "levelgen/blockpredicates/BlockPredicate.h"
+#include "levelgen/TwilightBlocks.h"
+#include "levelgen/AetherBlocks.h"
 #include "math/Mth.h"
 #include "nbt/AllTags.h"
 #include "nbt/CanonicalNbt.h"
@@ -60,10 +63,17 @@ std::string normalizeId(const std::string& id) {
 }
 
 // Reference: RandomizableContainerBlockEntity subclasses (loot-seed draw).
+// Copper chests (every weathering stage, waxed or not) are ChestBlocks and
+// get a ChestBlockEntity (26.3 Blocks.COPPER_CHEST -> CopperChestBlock).
 bool isLootContainerBlock(const std::string& blockId) {
+    static const std::string kCopperChest = "copper_chest";
     return blockId == "minecraft:chest" || blockId == "minecraft:trapped_chest"
         || blockId == "minecraft:barrel" || blockId == "minecraft:dispenser"
         || blockId == "minecraft:dropper" || blockId == "minecraft:hopper"
+        || blockId == "minecraft:crafter"
+        || blockId.size() >= kCopperChest.size()
+               && blockId.compare(blockId.size() - kCopperChest.size(),
+                                  kCopperChest.size(), kCopperChest) == 0
         || blockId == "minecraft:decorated_pot"  // DecoratedPotBlockEntity is
                                                  // a RandomizableContainer
         || blockId.size() > 12
@@ -73,8 +83,77 @@ bool isLootContainerBlock(const std::string& blockId) {
 
 // Resolve one palette entry (Name + Properties) to a registry BlockState by
 // matching the property map against the block's possible states.
+// Twilight Forest templates (data/twilightforest/structure/**): the mod's NBT
+// names its own blocks "twilightforest:<name>" and may use pre-26.x vanilla
+// ids. Those resolve through levelgen/TwilightBlocks — the engine's slug when
+// registered, else the logged stand-in, with every property the resolved
+// block shares kept — so a TF template never throws on a block that is still
+// being ported. Vanilla templates stay strict (below).
+bool isTwilightTemplate(const std::string& templateId, const std::string& blockName) {
+    return templateId.rfind("twilightforest:", 0) == 0
+        || blockName.rfind("twilightforest:", 0) == 0;
+}
+
+// A palette entry's block id and properties. 26.3 renamed the block-state
+// NBT keys (BlockStateFieldNamesFix: Name -> id, Properties -> properties);
+// templates saved by either version load.
+std::string paletteBlockName(nbt::CompoundTag* entry) {
+    if (entry->contains("id")) return entry->getStringOr("id", "");
+    return entry->getStringOr("Name", "");
+}
+
+nbt::CompoundTag* paletteProperties(nbt::CompoundTag* entry) {
+    if (nbt::CompoundTag* props = entry->getCompoundPtr("properties")) return props;
+    return entry->getCompoundPtr("Properties");
+}
+
+BlockState* resolveTwilightPaletteEntry(nbt::CompoundTag* entry, const std::string& name,
+                                        const std::string& templateId) {
+    std::unordered_map<std::string, std::string> want;
+    if (nbt::CompoundTag* props = paletteProperties(entry)) {
+        for (const auto& key : props->keys()) {
+            want[key] = props->getStringOr(key.c_str(), "");
+        }
+    }
+    BlockState* state = twilight_blocks::state(name, want);
+    if (state == nullptr) {
+        throw std::runtime_error("Template " + templateId + " uses block " + name
+                                 + " with no registered block or stand-in");
+    }
+    return state;
+}
+
+// The Aether templates (data/aether/structure/**): "aether:<name>" palette
+// entries resolve through levelgen/AetherBlocks — the engine's slug when
+// registered, else the logged stand-in, keeping every property the resolved
+// block accepts (the mod's double_drops is dropped).
+BlockState* resolveAetherPaletteEntry(nbt::CompoundTag* entry, const std::string& name,
+                                      const std::string& templateId) {
+    std::unordered_map<std::string, std::string> want;
+    if (nbt::CompoundTag* props = paletteProperties(entry)) {
+        for (const auto& key : props->keys()) {
+            want[key] = props->getStringOr(key.c_str(), "");
+        }
+    }
+    BlockState* state = aether_blocks::state(name, want);
+    if (state == nullptr) {
+        throw std::runtime_error("Template " + templateId + " uses block " + name
+                                 + " with no registered block or stand-in");
+    }
+    return state;
+}
+
 BlockState* resolvePaletteEntry(nbt::CompoundTag* entry, const std::string& templateId) {
-    std::string name = normalizeId(entry->getStringOr("Name", ""));
+    std::string name = normalizeId(paletteBlockName(entry));
+    if (aether_blocks::isAetherId(name)
+        || (templateId.rfind("aether:", 0) == 0 && name != "minecraft:jigsaw")) {
+        // Every entry of an Aether template (vanilla ones too: the mod's NBT
+        // may carry properties this engine's block lacks) resolves leniently.
+        return resolveAetherPaletteEntry(entry, name, templateId);
+    }
+    if (name != "minecraft:jigsaw" && isTwilightTemplate(templateId, name)) {
+        return resolveTwilightPaletteEntry(entry, name, templateId);
+    }
     if (name == "minecraft:jigsaw") {
         // Jigsaw blocks are placed then immediately overwritten by their
         // final_state (TemplateStructurePiece jigsaw pass); the orientation
@@ -86,7 +165,7 @@ BlockState* resolvePaletteEntry(nbt::CompoundTag* entry, const std::string& temp
         throw std::runtime_error("Template " + templateId + " uses unregistered block "
                                  + name + " - register it with its full property set");
     }
-    nbt::CompoundTag* props = entry->getCompoundPtr("Properties");
+    nbt::CompoundTag* props = paletteProperties(entry);
     if (props == nullptr) {
         return block->defaultBlockState();
     }
@@ -177,10 +256,28 @@ const FullTemplateData& load(const std::string& templateId) {
                 // B8: retain the full BE nbt for save-format payloads.
                 info.nbt = std::shared_ptr<nbt::CompoundTag>(
                     static_cast<nbt::CompoundTag*>(nbtTag->copy().release()));
-                std::string blockName = normalizeId(
+                std::string blockName = normalizeId(paletteBlockName(
                     static_cast<nbt::CompoundTag*>(
-                        paletteTags.front()->get(static_cast<size_t>(info.stateIdx)))
-                        ->getStringOr("Name", ""));
+                        paletteTags.front()->get(static_cast<size_t>(info.stateIdx)))));
+                if (isTwilightTemplate(id, blockName)
+                    && blockName != "minecraft:structure_block" && blockName != "minecraft:jigsaw") {
+                    // A TF container (canopy_chest, keepsake_casket) is its
+                    // stand-in's kind: the resolved id decides the loot draw.
+                    const std::string resolved = twilight_blocks::resolveName(blockName);
+                    if (!resolved.empty()) blockName = resolved;
+                }
+                if (aether_blocks::isAetherId(blockName)) {
+                    // The Aether's treasure_chest / chest_mimic block entities
+                    // are RandomizableContainers (the loot-seed draw), whether
+                    // registered or standing in; other blocks classify by the
+                    // id they resolve to.
+                    if (blockName == "aether:treasure_chest" || blockName == "aether:chest_mimic") {
+                        blockName = "minecraft:chest";
+                    } else {
+                        const std::string resolved = aether_blocks::resolveName(blockName);
+                        if (!resolved.empty()) blockName = resolved;
+                    }
+                }
                 if (blockName == "minecraft:structure_block") {
                     if (nbtTag->getStringOr("mode", "") == "DATA") {
                         info.isDataMarker = true;
@@ -194,6 +291,34 @@ const FullTemplateData& load(const std::string& templateId) {
                 }
             }
             data.blocks.push_back(std::move(info));
+        }
+    }
+
+    // Reference: StructureTemplate.load - "entities": pos (doubles, default
+    // 0), blockPos (ints, default 0), and the entity compound; an entry
+    // without "nbt" is dropped (getCompound(...).ifPresent).
+    if (nbt::ListTag* entities = root->getListPtr("entities")) {
+        data.entities.reserve(entities->size());
+        for (size_t ei = 0; ei < entities->size(); ++ei) {
+            nbt::Tag* element = entities->get(ei);
+            if (element == nullptr || element->getId() != nbt::TagType::TAG_COMPOUND) continue;
+            auto* entityTag = static_cast<nbt::CompoundTag*>(element);
+            nbt::CompoundTag* entityNbt = entityTag->getCompoundPtr("nbt");
+            if (entityNbt == nullptr) continue;
+            TemplateEntityInfo info;
+            if (nbt::ListTag* pos = entityTag->getListPtr("pos")) {
+                info.x = pos->getDouble(0);
+                info.y = pos->getDouble(1);
+                info.z = pos->getDouble(2);
+            }
+            if (nbt::ListTag* blockPos = entityTag->getListPtr("blockPos")) {
+                info.blockX = blockPos->getInt(0);
+                info.blockY = blockPos->getInt(1);
+                info.blockZ = blockPos->getInt(2);
+            }
+            info.nbt = std::shared_ptr<nbt::CompoundTag>(
+                static_cast<nbt::CompoundTag*>(entityNbt->copy().release()));
+            data.entities.push_back(std::move(info));
         }
     }
     return s_cache.emplace(templateId, std::move(data)).first->second;
@@ -246,10 +371,11 @@ bool isBushLike(const BlockState* state) {
         || idEndsWith(state, "_sapling");
 }
 
+// 26.3 VegetationBlock.mayPlaceOn: #supports_vegetation
+// (#substrate_overworld + farmland).
 bool bushMayPlaceOn(BlockState* below) {
     return ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
-               below, "minecraft:dirt")
-        || isId(below, "minecraft:farmland");
+               below, "minecraft:supports_vegetation");
 }
 
 // Reference: StairBlock.canTakeShape - neighbor at `dir` is not stairs with
@@ -341,11 +467,11 @@ BlockState* updateShape(BlockState* state, WorldGenLevel* level,
     if (isId(state, "minecraft:snow")) {
         if (dir == Direction::DOWN) {
             if (::minecraft::levelgen::blockpredicates::matchesBlockTagName(
-                    neighborState, "minecraft:snow_layer_cannot_survive_on")) {
+                    neighborState, "minecraft:cannot_support_snow_layer")) {
                 return airState();
             }
             if (!::minecraft::levelgen::blockpredicates::matchesBlockTagName(
-                    neighborState, "minecraft:snow_layer_can_survive_on")
+                    neighborState, "minecraft:support_override_snow_layer")
                 && !neighborState->isFaceSturdy(*level, neighborPos, Direction::UP)) {
                 return airState();
             }
@@ -688,6 +814,114 @@ core::BlockPos calculateRelativePosition(const TemplatePlaceSettings& settings,
     }
 }
 
+// Reference: StructureTemplate.transform(Vec3, mirror, rotation, pivot).
+void transformVec(const TemplatePlaceSettings& settings, double& x, double& y, double& z) {
+    (void)y;
+    switch (settings.mirror) {
+        case 1:  // LEFT_RIGHT
+            z = 1.0 - z;
+            break;
+        case 2:  // FRONT_BACK
+            x = 1.0 - x;
+            break;
+        default:
+            break;
+    }
+    const int pivotX = settings.rotationPivot.getX();
+    const int pivotZ = settings.rotationPivot.getZ();
+    const double ox = x;
+    const double oz = z;
+    switch (settings.rotation) {
+        case 3:  // COUNTERCLOCKWISE_90
+            x = static_cast<double>(pivotX - pivotZ) + oz;
+            z = static_cast<double>(pivotX + pivotZ + 1) - ox;
+            break;
+        case 1:  // CLOCKWISE_90
+            x = static_cast<double>(pivotX + pivotZ + 1) - oz;
+            z = static_cast<double>(pivotZ - pivotX) + ox;
+            break;
+        case 2:  // CLOCKWISE_180
+            x = static_cast<double>(pivotX + pivotX + 1) - ox;
+            z = static_cast<double>(pivotZ + pivotZ + 1) - oz;
+            break;
+        default:
+            break;
+    }
+}
+
+namespace {
+
+// Reference: StructureTemplate.placeEntities. Each entity whose TRANSFORMED
+// blockPos lies in the settings box (= the decorating chunk's box, so a
+// multi-chunk piece places each entity exactly once) gets its compound
+// copied with Pos rewritten to the transformed fractional position, UUID
+// removed and block_pos (hanging entities) rewritten; then EntityType.create
+// loads it and the yaw is re-based:
+//   yRot = rotate(rotation) + mirror(mirror) - getYRot()
+// (rotate: wrapDegrees(yRot) + 0/90/180/270; mirror FRONT_BACK: -wrapped,
+// LEFT_RIGHT: 180 - wrapped), followed by snapTo(pos, yRot, xRot) and
+// setYBodyRot/setYHeadRot(yRot). The re-based yaw goes into Rotation, which
+// Entity.load also copies to the body and head yaw. finalizeSpawn and
+// addFreshEntityWithPassengers are the engine's (IChunk::addEntity).
+void placeEntities(WorldGenLevel* level, const FullTemplateData& data,
+                   const core::BlockPos& position, const TemplatePlaceSettings& settings,
+                   const BoundingBox& chunkBB) {
+    for (const TemplateEntityInfo& info : data.entities) {
+        core::BlockPos blockPos = calculateRelativePosition(
+            settings, core::BlockPos(info.blockX, info.blockY, info.blockZ)).offset(
+                position.getX(), position.getY(), position.getZ());
+        if (!chunkBB.isInside(blockPos.getX(), blockPos.getY(), blockPos.getZ())) continue;
+
+        auto tag = std::shared_ptr<nbt::CompoundTag>(
+            static_cast<nbt::CompoundTag*>(info.nbt->copy().release()));
+        double x = info.x, y = info.y, z = info.z;
+        transformVec(settings, x, y, z);
+        x += position.getX();
+        y += position.getY();
+        z += position.getZ();
+        auto pos = std::make_unique<nbt::ListTag>();
+        pos->add(nbt::DoubleTag::valueOf(x));
+        pos->add(nbt::DoubleTag::valueOf(y));
+        pos->add(nbt::DoubleTag::valueOf(z));
+        tag->put("Pos", std::move(pos));
+        tag->remove("UUID");
+        if (tag->contains("block_pos")) {
+            // BlockPos.CODEC = IntStreamCodec -> int array [x, y, z].
+            tag->putIntArray("block_pos", {blockPos.getX(), blockPos.getY(), blockPos.getZ()});
+        }
+
+        float yRot = 0.0f;
+        float xRot = 0.0f;
+        if (nbt::ListTag* rotation = tag->getListPtr("Rotation")) {
+            yRot = rotation->getFloat(0);
+            xRot = rotation->getFloat(1);
+        }
+        const float wrapped = StructureEntities::wrapDegrees(yRot);
+        float rotated = wrapped;
+        switch (settings.rotation) {
+            case 2: rotated = wrapped + 180.0f; break;   // CLOCKWISE_180
+            case 3: rotated = wrapped + 270.0f; break;   // COUNTERCLOCKWISE_90
+            case 1: rotated = wrapped + 90.0f; break;    // CLOCKWISE_90
+            default: break;
+        }
+        float mirrored = wrapped;
+        switch (settings.mirror) {
+            case 2: mirrored = -wrapped; break;           // FRONT_BACK
+            case 1: mirrored = 180.0f - wrapped; break;   // LEFT_RIGHT
+            default: break;
+        }
+        const float newYRot = rotated + (mirrored - yRot);
+        auto rotation = std::make_unique<nbt::ListTag>();
+        rotation->add(nbt::FloatTag::valueOf(newYRot));
+        rotation->add(nbt::FloatTag::valueOf(xRot));
+        tag->put("Rotation", std::move(rotation));
+
+        StructureEntities::addFreshEntity(level, std::move(tag), settings.finalizeEntities);
+    }
+}
+
+} // namespace
+
 std::vector<DataMarker> dataMarkers(const std::string& templateId,
                                     const core::BlockPos& position,
                                     const TemplatePlaceSettings& settings,
@@ -725,7 +959,8 @@ std::string canonicalValue(const nbt::Tag* tag) {
 
 std::string blockEntityPayloadFor(const std::string& blockId,
                                   const nbt::CompoundTag* templateNbt,
-                                  std::optional<int64_t> lootSeed) {
+                                  std::optional<int64_t> lootSeed,
+                                  std::optional<int> placementRotation) {
     // Reference: the BlockEntity load->save round trip that
     // getBlockEntityNbtForSaving serializes (pinned by the java_be_* dumps in
     // tests/parity/targets/B8_BE_INVENTORY.md). Returns "" when the type is
@@ -750,8 +985,121 @@ std::string blockEntityPayloadFor(const std::string& blockId,
         return "{Items:" + items + ",components:{},id:\"" + beId + "\"}";
     };
 
+    if (blockId == "minecraft:hush_lighthouse_lamp") {
+        // Engine block entity (The Hush Lighthouse): no saved fields - the
+        // beam's sweep is a function of game time and the lamp's position.
+        return "{components:{},id:\"minecraft:hush_lighthouse_lamp\"}";
+    }
+    if (blockId == "minecraft:resonance_engine") {
+        // Engine block entity (Aurelith's Heart): the rings are functions of
+        // game time and position, but the quest must know how the whole city
+        // was turned (every landmark is a design offset from the Heart —
+        // common/world/level/AurelithQuest.hpp), so the engine records the
+        // start piece's rotation ordinal as Rotation.
+        if (placementRotation) {
+            return "{Rotation:" + std::to_string(*placementRotation & 3)
+                 + "b,components:{},id:\"minecraft:resonance_engine\"}";
+        }
+        return "{components:{},id:\"minecraft:resonance_engine\"}";
+    }
+    if (blockId == "minecraft:voice_beacon") {
+        // Engine block entity (Aurelith's gate beams): data-less like the
+        // lighthouse lamp — the beam is a function of game time, the block's
+        // position and its facing.
+        return "{components:{},id:\"minecraft:voice_beacon\"}";
+    }
+    if (blockId == "minecraft:chord_socket" || blockId == "minecraft:voice_pedestal") {
+        // Engine block entities (Aurelith's Podium sockets and pedestals):
+        // the one item they hold (Item, an ItemStack), straight from the
+        // template (a pedestal set with its voice key); a bare one has none.
+        std::string out = "{";
+        if (templateNbt != nullptr) {
+            if (const nbt::CompoundTag* item = templateNbt->getCompoundPtr("Item")) {
+                out += "Item:" + canonicalValue(item) + ",";
+            }
+        }
+        out += "components:{},id:\"" + blockId + "\"}";
+        return out;
+    }
+    if (blockId == "minecraft:choir_cabinet") {
+        // Engine block entity (the Hall of Instruments' tuned cabinet): its
+        // contents (Items, a container's list) and the song that opens it
+        // (Melody, a list of lumen colour names), straight from the template.
+        std::string out = "{";
+        if (templateNbt != nullptr) {
+            if (const nbt::ListTag* items = templateNbt->getListPtr("Items")) {
+                out += "Items:" + canonicalValue(items) + ",";
+            }
+            if (const nbt::ListTag* melody = templateNbt->getListPtr("Melody")) {
+                out += "Melody:" + canonicalValue(melody) + ",";
+            }
+        }
+        out += "components:{},id:\"minecraft:choir_cabinet\"}";
+        return out;
+    }
+    if (blockId.size() > 5 && blockId.compare(blockId.size() - 5, 5, "_sign") == 0) {
+        // Reference: SignBlockEntity.saveAdditional — front_text/back_text
+        // (SignText: messages, color, has_glowing_text) and is_waxed, straight
+        // from the template nbt (Aurelith's street names and plaques). All
+        // standing and wall signs share "minecraft:sign"; the hanging ones
+        // "minecraft:hanging_sign". A template sign without text keeps the
+        // bare id, which the engine turns into an empty sign.
+        const bool hanging = blockId.size() > 13
+            && blockId.compare(blockId.size() - 13, 13, "_hanging_sign") == 0;
+        std::string out = "{";
+        if (templateNbt != nullptr) {
+            if (const nbt::CompoundTag* back = templateNbt->getCompoundPtr("back_text")) {
+                out += "back_text:" + canonicalValue(back) + ",";
+            }
+        }
+        out += "components:{},";
+        if (templateNbt != nullptr) {
+            if (const nbt::CompoundTag* front = templateNbt->getCompoundPtr("front_text")) {
+                out += "front_text:" + canonicalValue(front) + ",";
+            }
+        }
+        out += std::string("id:\"") + (hanging ? "minecraft:hanging_sign" : "minecraft:sign") + "\"";
+        if (templateNbt != nullptr && templateNbt->getByteOr("is_waxed", 0) != 0) {
+            out += ",is_waxed:1b";
+        }
+        out += "}";
+        return out;
+    }
+    if (blockId == "minecraft:campfire" || blockId == "minecraft:soul_campfire") {
+        // Reference: CampfireBlockEntity load -> saveAdditional: Items
+        // (always written), then CookingTimes / CookingTotalTimes as the four
+        // slots' int arrays (a template array fills the leading slots; a
+        // missing one is all zeros). Both campfires share "minecraft:campfire".
+        std::string items = "[]";
+        std::vector<int32_t> cookingTimes(4, 0);
+        std::vector<int32_t> cookingTotalTimes(4, 0);
+        if (templateNbt != nullptr) {
+            if (const nbt::ListTag* list = templateNbt->getListPtr("Items")) {
+                items = canonicalValue(list);
+            }
+            const std::vector<int32_t> times = templateNbt->getIntArray("CookingTimes");
+            std::copy_n(times.begin(), std::min<size_t>(times.size(), 4), cookingTimes.begin());
+            const std::vector<int32_t> totals = templateNbt->getIntArray("CookingTotalTimes");
+            std::copy_n(totals.begin(), std::min<size_t>(totals.size(), 4), cookingTotalTimes.begin());
+        }
+        auto intArray = [](const std::vector<int32_t>& values) {
+            std::string out = "[I;";
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (i) out += ",";
+                out += std::to_string(values[i]);
+            }
+            return out + "]";
+        };
+        return "{CookingTimes:" + intArray(cookingTimes) + ",CookingTotalTimes:"
+             + intArray(cookingTotalTimes) + ",Items:" + items
+             + ",components:{},id:\"minecraft:campfire\"}";
+    }
     if (blockId == "minecraft:chest") return lootContainer("minecraft:chest");
     if (blockId == "minecraft:trapped_chest") return lootContainer("minecraft:trapped_chest");
+    // Copper chests (every stage, waxed or not) carry a ChestBlockEntity.
+    if (blockId.size() > 12 && blockId.compare(blockId.size() - 12, 12, "copper_chest") == 0) {
+        return lootContainer("minecraft:chest");
+    }
     if (blockId == "minecraft:barrel") return lootContainer("minecraft:barrel");
     if (blockId == "minecraft:dispenser") return lootContainer("minecraft:dispenser");
     if (blockId == "minecraft:dropper") return lootContainer("minecraft:dropper");
@@ -825,6 +1173,16 @@ std::string blockEntityPayloadFor(const std::string& blockId,
                "selector:{tick:-1l}}}";
     }
     if (blockId == "minecraft:lectern") {
+        // Reference: LecternBlockEntity.saveAdditional — Book (an ItemStack)
+        // and Page only while it holds a book. Template lecterns (Aurelith's
+        // open books) carry both; a bare one saves neither.
+        if (templateNbt != nullptr) {
+            if (const nbt::CompoundTag* book = templateNbt->getCompoundPtr("Book")) {
+                return "{Book:" + canonicalValue(book) + ",Page:"
+                     + std::to_string(templateNbt->getIntOr("Page", 0))
+                     + ",components:{},id:\"minecraft:lectern\"}";
+            }
+        }
         return "{components:{},id:\"minecraft:lectern\"}";
     }
     if (blockId == "minecraft:comparator") {
@@ -846,21 +1204,46 @@ std::string blockEntityPayloadFor(const std::string& blockId,
         return "{components:{},id:\"minecraft:bell\"}";
     }
     if (blockId == "minecraft:spawner") {
-        // BaseSpawner defaults + SpawnData from the template nbt (mansion
-        // jail spawners etc.); bare spawners keep only the defaults.
+        // Reference: BaseSpawner.load -> save over the template nbt - every
+        // scalar read with its default (getShortOr / getIntOr accept any
+        // numeric tag) and written back as a short; SpawnData as given;
+        // SpawnPotentials as given (the ancient city's saved [] stays []),
+        // else load's WeightedList.of(nextSpawnData, or a new empty
+        // SpawnData) - one weight-1 entry.
+        auto shortField = [&](const char* key, int fallback) {
+            int value = fallback;
+            if (templateNbt != nullptr) {
+                if (const nbt::Tag* t = templateNbt->get(key)) {
+                    if (auto v = t->asInt()) value = *v;
+                }
+            }
+            return std::to_string(static_cast<int16_t>(value)) + "s";
+        };
         std::string spawnData;
+        std::string potentials;
         if (templateNbt != nullptr) {
             if (const nbt::CompoundTag* sd = templateNbt->getCompoundPtr("SpawnData")) {
                 spawnData = canonicalValue(sd);
             }
+            if (const nbt::ListTag* list = templateNbt->getListPtr("SpawnPotentials")) {
+                potentials = canonicalValue(list);
+            }
         }
-        std::string out = "{Delay:20s,MaxNearbyEntities:6s,MaxSpawnDelay:800s,"
-                          "MinSpawnDelay:200s,RequiredPlayerRange:16s,SpawnCount:4s,";
+        if (potentials.empty()) {
+            potentials = "[{data:" + (spawnData.empty() ? std::string("{entity:{}}") : spawnData)
+                       + ",weight:1}]";
+        }
+        std::string out = "{Delay:" + shortField("Delay", 20)
+                        + ",MaxNearbyEntities:" + shortField("MaxNearbyEntities", 6)
+                        + ",MaxSpawnDelay:" + shortField("MaxSpawnDelay", 800)
+                        + ",MinSpawnDelay:" + shortField("MinSpawnDelay", 200)
+                        + ",RequiredPlayerRange:" + shortField("RequiredPlayerRange", 16)
+                        + ",SpawnCount:" + shortField("SpawnCount", 4) + ",";
         if (!spawnData.empty()) {
             out += "SpawnData:" + spawnData + ",";
         }
-        out += "SpawnPotentials:[],SpawnRange:4s,components:{},"
-               "id:\"minecraft:mob_spawner\"}";
+        out += "SpawnPotentials:" + potentials + ",SpawnRange:" + shortField("SpawnRange", 4)
+             + ",components:{},id:\"minecraft:mob_spawner\"}";
         return out;
     }
     if (blockId.size() > 7
@@ -983,14 +1366,21 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
     // Reference: settings.getRandomPalette(palettes, position) -
     // LegacyRandomSource(Mth.getSeed(pos)).nextInt(paletteCount).
     size_t paletteIndex = 0;
-    if (data.palettes.size() > 1) {
+    if (settings.paletteIndex >= 0) {
+        // The caller drew it from settings.getRandom() (a feature's random).
+        paletteIndex = static_cast<size_t>(settings.paletteIndex) % data.palettes.size();
+    } else if (data.palettes.size() > 1) {
         LegacyRandomSource paletteRandom(
             Mth::getSeed(position.getX(), position.getY(), position.getZ()));
         paletteIndex = static_cast<size_t>(
             paletteRandom.nextInt(static_cast<int32_t>(data.palettes.size())));
     }
     const std::vector<BlockState*>& palette = data.palettes[paletteIndex];
-    if (data.blocks.empty() || data.sizeX < 1 || data.sizeY < 1 || data.sizeZ < 1) {
+    // Reference: (!blockInfoList.isEmpty() || !settings.isIgnoreEntities() &&
+    // !entityInfoList.isEmpty()) && size >= 1 on every axis.
+    const bool placesEntities = !settings.ignoreEntities && !data.entities.empty();
+    if ((data.blocks.empty() && !placesEntities)
+        || data.sizeX < 1 || data.sizeY < 1 || data.sizeZ < 1) {
         return false;
     }
 
@@ -1000,8 +1390,8 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
         core::BlockPos pos;
         BlockState* state;
         const TemplateBlockInfo* info;
-        // B8: capped append_loot payload, written AFTER setBlock (which lays
-        // down the pending DUMMY tag this replaces).
+        // B8: append_loot payload (rule or capped), written AFTER setBlock
+        // (which lays down the pending DUMMY tag this replaces).
         std::string cappedPayload;
     };
     std::vector<Processed> processed;
@@ -1012,8 +1402,8 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
             settings, core::BlockPos(info.x, info.y, info.z)).offset(
                 position.getX(), position.getY(), position.getZ());
         BlockState* state = palette[static_cast<size_t>(info.stateIdx)];
-        // Java threads originalBlockInfo (the raw palette state) through the
-        // whole processor chain; BlockRotProcessor's rottable gate tests it.
+        // The raw palette state, handed to every processor (26.3 processors
+        // only see the processed state; CappedProcessor keeps the original).
         BlockState* originalState = state;
         // Reference: BlockIgnoreProcessor.STRUCTURE_BLOCK - always first.
         if (state->is(structureBlock)) continue;
@@ -1044,6 +1434,16 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
             }
         }
         if (dropped) continue;
+        std::string lootPayload;
+        for (const TemplatePlaceSettings::AppendLootRule& rule : settings.appendLootRules) {
+            if (state->getBlock()->getIdentifier() != rule.block) continue;
+            state = Blocks::getDefaultState(rule.block);
+            LegacyRandomSource ruleRandom(Mth::getSeed(world.getX(), world.getY(), world.getZ()));
+            const int64_t seed = ruleRandom.nextLong();
+            lootPayload = "{LootTable:\"" + rule.lootTable + "\",LootTableSeed:" + std::to_string(seed)
+                + "l,components:{},id:\"" + rule.beId + "\"}";
+            break;
+        }
         // Reference: GravityProcessor (TERRAIN_MATCHING) - LAST in the chain:
         // rules saw the pre-gravity pos; the placed y snaps to the heightmap
         // plus the ORIGINAL template-local y.
@@ -1053,7 +1453,7 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
                        + settings.gravityOffset;
             world = core::BlockPos(world.getX(), height + info.y, world.getZ());
         }
-        processed.push_back({world, state, &info});
+        processed.push_back({world, state, &info, std::move(lootPayload)});
     }
 
     // Reference: CappedProcessor.finalizeProcessing - runs after the
@@ -1185,7 +1585,7 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
             }
             std::string payload = blockEntityPayloadFor(
                 state->getBlock()->getIdentifier(), entry.info->nbt.get(),
-                lootSeed);
+                lootSeed, settings.rotation);
             if (!payload.empty()) {
                 if (::world::IChunk* chunk =
                         level->getChunk(pos.getX() >> 4, pos.getZ() >> 4)) {
@@ -1255,6 +1655,13 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
                 }
             }
         }
+    }
+
+    // Reference: placeEntities runs last in Java, after the shape passes.
+    // It reads no blocks and the passes read no entities, so running it here
+    // (ahead of the early returns below) is order-equivalent.
+    if (placesEntities) {
+        placeEntities(level, data, position, settings, chunkBB);
     }
 
     if (placedPositions.empty()) return true;

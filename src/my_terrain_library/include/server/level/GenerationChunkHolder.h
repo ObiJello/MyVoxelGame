@@ -125,6 +125,15 @@ public:
 
     int generationRefCount() const { return m_generationRefCount.load(std::memory_order_acquire); }
 
+    // True once the step to `status` has completed on this holder. A chunk
+    // read from disk has a high persisted status before any loading step has
+    // run, so the persisted status cannot answer this.
+    bool hasCompletedStep(const world::chunk::status::ChunkStatus& status) const {
+        const world::chunk::status::ChunkStatus* completed =
+            m_completedWork.load(std::memory_order_acquire);
+        return completed != nullptr && !status.isAfter(*completed);
+    }
+
     void increaseGenerationRefCount();
 
     /**
@@ -269,9 +278,14 @@ private:
     // The status we've started working on
     std::atomic<const world::chunk::status::ChunkStatus*> m_startedWork{nullptr};
 
+    // The highest status whose future completed successfully (monotonic:
+    // completed futures are never cleared). Not in Java; it backs the
+    // lock-free layer skip in ChunkGenerationTask::scheduleChunkInLayer.
+    std::atomic<const world::chunk::status::ChunkStatus*> m_completedWork{nullptr};
+
     // Array of futures, one for each status
     // Protected by m_futuresMutex since Apple's libc++ doesn't support std::atomic<shared_ptr>
-    static constexpr int STATUS_COUNT = 12;  // Number of ChunkStatus values
+    static constexpr int STATUS_COUNT = world::chunk::status::ChunkStatus::STATUS_COUNT;
     mutable std::mutex m_futuresMutex;
     // The EMPTY future's chunk, mirrored lock-free: getPersistedStatus() is
     // read once per holder per pyramid layer (~1,250 times per generated

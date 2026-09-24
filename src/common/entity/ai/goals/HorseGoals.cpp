@@ -77,7 +77,8 @@ namespace Game {
 
     void RandomStandGoal::Start() {
         m_horse->StandIfPossible();
-        // MC also plays getAmbientStandSound — sounds wait on the system.
+        // MC playStandSound: horse.playSound(getAmbientStandSound()).
+        m_horse->PlaySound(m_horse->GetAmbientStandSound(), 1.0f, 1.0f);
     }
 
     void RandomStandGoal::ResetStandInterval() {

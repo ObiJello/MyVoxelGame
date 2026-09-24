@@ -26,7 +26,7 @@ namespace Game {
     // pull the recipe matcher in for one pointer.
     struct CookingRecipe;
 
-    class FurnaceBlockEntity : public BaseContainerBlockEntity {
+    class FurnaceBlockEntity : public BaseContainerBlockEntity, public IWorldlyContainer {
     public:
         static constexpr int SLOT_INPUT  = 0;
         static constexpr int SLOT_FUEL   = 1;
@@ -63,6 +63,17 @@ namespace Game {
         // notices. Count changes are deliberately NOT a swap, matching MC's
         // isSameItemSameComponents test.
         void SetItem(int index, const ItemStack& stack) override;
+
+        // MC AbstractFurnaceBlockEntity.canPlaceItem: never the result slot;
+        // the fuel slot only takes fuel (or an empty bucket over a bucket).
+        bool CanPlaceItem(int slot, const ItemStack& stack) const override;
+
+        // MC WorldlyContainer: input from above, fuel from the sides, the
+        // result (then spent buckets) out of the bottom.
+        void GetSlotsForFace(Direction face, std::vector<int>& out) const override;
+        bool CanPlaceItemThroughFace(int slot, const ItemStack& stack, Direction face,
+                                     bool hasDirection) const override;
+        bool CanTakeItemThroughFace(int slot, const ItemStack& stack, Direction face) const override;
 
         // ── The counters the menu publishes ───────────────────────────────
         int  LitTime() const      { return m_litTime; }

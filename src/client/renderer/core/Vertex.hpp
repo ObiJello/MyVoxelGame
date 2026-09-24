@@ -48,14 +48,21 @@ namespace Render {
         }
     };
 
-    // TERRAIN vertex — 16 bytes. Chunk-section geometry only (Mesher,
+    // TERRAIN vertex — 20 bytes. Chunk-section geometry only (Mesher,
     // FluidMeshBuilder); everything else keeps the 24-byte Vertex above.
     //
     // Why it is this small: the Metal System Trace of 2026-09-04 showed the
     // GPU vertex stage (Apple's tiler, which reads every vertex before any
     // pixel is shaded) as the frame-rate ceiling, at 0.57 ns per 32-byte
-    // vertex over ~6.5 M vertices a frame — vertex FETCH bandwidth. Halving
-    // the vertex halves what the tiler streams.
+    // vertex over ~6.5 M vertices a frame — vertex FETCH bandwidth. It was
+    // halved to 16 bytes; the light engine (2026-09-22) grew it DELIBERATELY
+    // to 20 for MC's light coordinates: 8 bits each of block and sky light,
+    // the 0..240 values MC's smooth lighting produces (LightCoordsUtil
+    // smoothBlend averages four cells: quarter levels; the partial-face
+    // weighted blend: any value). No free field of the 16-byte vertex could
+    // take 16 bits in every vertex mode (a two-sided quad's alpha byte, u and
+    // v are all spoken for), and 4 + 4 bits would round every smooth corner
+    // to a whole level. +25% vertex bytes — see engineering-notes "Lighting".
     //
     //   px py pz  3 x uint16   position RELATIVE TO THE SECTION ORIGIN, fixed
     //                          point: v = (p + kPosBias) * kPosScale. Range
@@ -84,11 +91,24 @@ namespace Render {
     //                          origin (tu0, tv0) and size (w, h), which the
     //                          fragment shader needs to find a block's record.
     //   color     RGBA8        untiled/tiled: biome tint * AO * face shade,
-    //                          alpha = tint alpha.
+    //                          alpha = tint alpha (always 0xFF: block tints are
+    //                          opaque, water's translucency is in its sprite).
     //                          face-mapped: the 32-bit texel index of the
     //                          rectangle's first face-map record, RELATIVE to
     //                          the section layer's record array; the mega
     //                          buffer adds the array's slab position at upload.
+    //   light     RGBA8        r = block light, g = sky light, each 0..240 (MC
+    //                          "smooth" light coords: level * 16, fractions
+    //                          from smooth lighting's blends); b, a = 0,
+    //                          reserved. The vertex shader samples the
+    //                          lightmap with it (MC terrain.vsh:
+    //                          vertexColor = Color * sample_lightmap(UV2)).
+    //                          A merged rectangle (face-mapped or a fluid
+    //                          plate) is lit uniformly — the mesher only
+    //                          merges faces whose four corners all read the
+    //                          same light. MC emissiveRendering faces (magma,
+    //                          active sculk sensors, the engine's full-bright
+    //                          Block::emissive blocks) carry 240/240.
     //
     // The vertex shader adds origins[slot] back (a per-slab uniform block the
     // mega buffer maintains) and decodes uv per mode; the fragment shader
@@ -101,7 +121,8 @@ namespace Render {
         uint16_t slot = 0;
         uint16_t u = 0, v = 0;
         uint32_t packedColor = 0xFFFFFFFFu;
-        // Total: 16 bytes
+        uint32_t light = 0;
+        // Total: 20 bytes
 
         static constexpr float    kPosScale  = 2048.0f;
         static constexpr float    kPosBias   = 2.0f;
@@ -115,6 +136,20 @@ namespace Render {
         static constexpr uint16_t kTwoSidedFlag = 0x2000u;
         static constexpr uint16_t kFlagMask     = 0xE000u;
         static constexpr uint16_t kSlotMask  = 0x03FFu;
+        // Bits 10..12: the quad's facing (SectionMesh's QuadFacing code),
+        // written by GenerateQuad. Free bits the terrain shaders mask off;
+        // a shader pack's gbuffers programs decode gl_Normal from them.
+        static constexpr uint16_t kNormalShift = 10;
+        static constexpr uint16_t kNormalMask  = 0x1C00u;
+
+        // The light word from MC light coords (packed block<<4|sky<<20 or
+        // smooth block8|sky8<<16 — the two share bit positions).
+        static constexpr uint32_t LightWord(int lightCoords) {
+            return static_cast<uint32_t>(lightCoords & 0xFF) |
+                   (static_cast<uint32_t>((lightCoords >> 16) & 0xFF) << 8);
+        }
+        // MC LightCoordsUtil.FULL_BRIGHT.
+        static constexpr uint32_t kFullBrightLight = 0xF0F0u;
 
         static uint16_t EncodeUnorm16(float f) {
             return static_cast<uint16_t>(glm::clamp(f, 0.0f, 1.0f) * 65535.0f + 0.5f);
@@ -129,8 +164,8 @@ namespace Render {
 
         // An unmerged quad corner: world-space Vertex from the mesher, made
         // relative to the section origin `base` (world block coordinates of
-        // the section's min corner).
-        static TerrainVertex FromWorld(const Vertex& src, const glm::ivec3& base) {
+        // the section's min corner), with its light word.
+        static TerrainVertex FromWorld(const Vertex& src, const glm::ivec3& base, uint32_t lightWord) {
             TerrainVertex t;
             t.px = EncodePos(src.pos.x - static_cast<float>(base.x));
             t.py = EncodePos(src.pos.y - static_cast<float>(base.y));
@@ -139,14 +174,16 @@ namespace Render {
             t.u = EncodeUnorm16(src.uv.x);
             t.v = EncodeUnorm16(src.uv.y);
             t.packedColor = src.packedColor;
+            t.light = lightWord;
             return t;
         }
 
         // A greedy-merged FLUID plate corner: section-relative position,
         // integer tile-space uv (0..16 repeats each) and the sprite to tile.
-        // Colour is uniform over the plate (fluids carry no AO).
+        // Colour and light are uniform over the plate (fluids carry no AO; the
+        // merge only joins cells lit alike).
         static TerrainVertex Tiled(const glm::vec3& rel, int tileU, int tileV,
-                                   uint16_t spriteId, uint32_t color) {
+                                   uint16_t spriteId, uint32_t color, uint32_t lightWord) {
             TerrainVertex t;
             t.px = EncodePos(rel.x);
             t.py = EncodePos(rel.y);
@@ -155,6 +192,7 @@ namespace Render {
             t.u = static_cast<uint16_t>((tileU & 0xFF) | ((tileV & 0xFF) << 8));
             t.v = spriteId;
             t.packedColor = color;
+            t.light = lightWord;
             return t;
         }
 
@@ -171,8 +209,9 @@ namespace Render {
         // code << 10. The fragment shader applies the mapping when the
         // camera is behind the normal and outputs alpha 1.
         static TerrainVertex TwoSided(const glm::vec3& rel, int tileU16, int tileV16, int normalCode,
-                                      int mirrorMode, int mirrorSum16, uint16_t spriteId, uint32_t color) {
-            TerrainVertex t = Tiled(rel, 0, 0, spriteId, color);
+                                      int mirrorMode, int mirrorSum16, uint16_t spriteId, uint32_t color,
+                                      uint32_t lightWord) {
+            TerrainVertex t = Tiled(rel, 0, 0, spriteId, color, lightWord);
             t.slot = static_cast<uint16_t>(kTiledFlag | kTwoSidedFlag);
             t.u = static_cast<uint16_t>((tileU16 & 0x1F) | ((tileV16 & 0x1F) << 5) | ((normalCode & 0x3F) << 10));
             t.packedColor = (color & 0x00FFFFFFu) |
@@ -182,10 +221,12 @@ namespace Render {
 
         // A greedy-merged BLOCK rectangle corner (face-mapped): the corner's
         // tile coordinate (0..16), the rectangle's tile-space origin (tu0,
-        // tv0, 0..15) and size (w, h, 1..16), and the texel index of its
-        // first face-map record within the section layer's record array.
+        // tv0, 0..15) and size (w, h, 1..16), the texel index of its first
+        // face-map record within the section layer's record array, and the
+        // rectangle's (uniform) light.
         static TerrainVertex Mapped(const glm::vec3& rel, int tileU, int tileV,
-                                    int tu0, int tv0, int w, int h, uint32_t recordTexel) {
+                                    int tu0, int tv0, int w, int h, uint32_t recordTexel,
+                                    uint32_t lightWord) {
             TerrainVertex t;
             t.px = EncodePos(rel.x);
             t.py = EncodePos(rel.y);
@@ -194,6 +235,7 @@ namespace Render {
             t.u = static_cast<uint16_t>((tileU & 0x1F) | ((tileV & 0x1F) << 5) | ((tu0 & 0xF) << 10));
             t.v = static_cast<uint16_t>((w & 0x1F) | ((h & 0x1F) << 5) | ((tv0 & 0xF) << 10));
             t.packedColor = recordTexel;
+            t.light = lightWord;
             return t;
         }
         // One face-map record = two uint32 words = one RGBA16 texel of the
@@ -202,6 +244,8 @@ namespace Render {
         // shade in rgb with the block's four 2-bit AO corner codes in the
         // top byte (tile-corner order, see Mesher::TryStashGreedyQuad);
         // word 1 = the sprite id. The vertex's record index counts records.
+        // Records start 8-byte aligned in the slab (ChunkMegaBuffer pads the
+        // 20-byte vertex run up to the next texel).
         static constexpr uint32_t kFaceMapWordsPerRecord = 2;
         static uint32_t FaceMapTexel0(uint32_t baseColor, uint8_t aoByte) {
             return (baseColor & 0x00FFFFFFu) | (static_cast<uint32_t>(aoByte) << 24);
@@ -211,7 +255,7 @@ namespace Render {
         }
     };
 
-    static_assert(sizeof(TerrainVertex) == 16,
+    static_assert(sizeof(TerrainVertex) == 20,
                   "TerrainVertex must match GetTerrainVertexLayout / ChunkMegaBuffer::VERTEX_STRIDE");
 
 } // namespace Render

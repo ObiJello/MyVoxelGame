@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "lit=false": {
+      "model": "minecraft:block/blue_redstone_torch_off"
+    },
+    "lit=true": {
+      "model": "minecraft:block/blue_redstone_torch"
+    }
+  }
+}

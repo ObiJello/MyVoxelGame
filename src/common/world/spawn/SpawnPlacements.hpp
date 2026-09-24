@@ -109,9 +109,11 @@ namespace Game {
     // free: not a full collision cube, not a redstone signal source, no fluid,
     // not inside PREVENT_MOB_SPAWNING_INSIDE (rails), and not a block this
     // type finds dangerous (fire/cactus/berry bush/wither rose/powder snow,
-    // minus the type's immunities).
+    // minus the type's immunities). `checkFluid` false is MC's call with
+    // Fluids.EMPTY.defaultFluidState() in place of the cell's own fluid
+    // (IronGolem.checkSpawnObstruction's feet cell).
     bool IsValidEmptySpawnBlock(EntityTypeId type, const IBlockAccess& blocks,
-                                int x, int y, int z);
+                                int x, int y, int z, bool checkFluid = true);
 
     // MC BlockBehaviour.isSignalSource for this engine's registry: buttons,
     // pressure plates, levers, redstone torches/wire/block, observers, and the
@@ -123,7 +125,8 @@ namespace Game {
     bool CanSpawnFarFromPlayer(EntityTypeId type);
 
     // MC EntityType.getSpawnAABB's spawnDimensionsScale — 4.0 for slime and
-    // magma cube (they spawn at up to size 4), 1.0 for everything else. The
+    // magma cube (they spawn at up to size 4), 2.0 for the sulfur cube, 1.0
+    // for everything else. The
     // spawn-box collision test must use the scaled box or big slimes spawn
     // embedded in walls.
     float GetSpawnDimensionsScale(EntityTypeId type);

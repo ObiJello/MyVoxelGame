@@ -29,6 +29,8 @@ namespace Game {
         velocity.z *= 0.02;
         yRot += 180.0f;
         yRotO += 180.0f;
+        // MC: TRIDENT_HIT (the channeling thunder waits on enchantments).
+        PlaySound(SoundEvents::TRIDENT_HIT, 1.0f, 1.0f);
     }
 
 } // namespace Game

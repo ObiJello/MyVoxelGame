@@ -3,6 +3,7 @@
 #include "server/level/ServerLevel.h"
 #include "core/BlockPos.h"
 #include "world/level/block/state/BlockState.h"
+#include "world/level/block/Blocks.h"
 #include "world/chunk/status/ChunkDependencies.h"
 #include "levelgen/WorldgenRandom.h"
 #include <stdexcept>
@@ -214,11 +215,32 @@ bool WorldGenRegion::setBlock(
         chunk->removeBlockEntity(pos);
     }
 
-    // Check for post-processing
-    // Reference: WorldGenRegion.java lines 281-283
-    // In full implementation: if (blockState.hasPostProcess(this, pos) && (updateFlags & 16) == 0)
+    // Reference: 26.3 WorldGenRegion.setBlock - blockState.getPostProcessPos
+    // (BlockBehaviour.Properties.postProcess): brown and red mushrooms mark
+    // themselves, soul sand and magma the block above (its bubble column);
+    // UPDATE_KNOWN_SHAPE (16) skips it.
+    if ((updateFlags & 16) == 0 && blockState != nullptr) {
+        using world::level::block::Blocks;
+        static world::level::block::Block* const kBrownMushroom = Blocks::getBlock("minecraft:brown_mushroom");
+        static world::level::block::Block* const kRedMushroom = Blocks::getBlock("minecraft:red_mushroom");
+        static world::level::block::Block* const kSoulSand = Blocks::getBlock("minecraft:soul_sand");
+        static world::level::block::Block* const kMagmaBlock = Blocks::getBlock("minecraft:magma_block");
+        world::level::block::Block* block = blockState->getBlock();
+        if (block != nullptr) {
+            if (block == kBrownMushroom || block == kRedMushroom) {
+                markPosForPostprocessing(pos);
+            } else if (block == kSoulSand || block == kMagmaBlock) {
+                markPosForPostprocessing(pos.above());
+            }
+        }
+    }
 
     return true;
+}
+
+void WorldGenRegion::markPosForPostprocessing(const core::BlockPos& pos) {
+    ChunkAccess* chunk = getChunk(pos);
+    if (chunk != nullptr) chunk->markPosForPostprocessing(pos);
 }
 
 // Reference: WorldGenRegion.java lines 151-153

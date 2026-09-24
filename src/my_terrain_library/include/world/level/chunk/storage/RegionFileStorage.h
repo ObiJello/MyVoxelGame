@@ -1,6 +1,7 @@
 #pragma once
 
 #include "world/level/chunk/storage/RegionFile.h"
+#include "world/level/chunk/storage/ChunkStorageBackend.h"
 #include "nbt/CompoundTag.h"
 #include <unordered_map>
 #include <memory>
@@ -19,27 +20,27 @@ namespace storage {
  * RegionFileStorage - Manages a cache of RegionFile instances
  * Reference: RegionFileStorage.java
  */
-class RegionFileStorage {
+class RegionFileStorage : public ChunkStorageBackend {
 public:
     // Reference: RegionFileStorage.java constructor
     RegionFileStorage(const RegionStorageInfo& info, const std::string& folder, bool sync);
 
-    ~RegionFileStorage();
+    ~RegionFileStorage() override;
 
     // Reference: RegionFileStorage.java read(ChunkPos)
-    std::unique_ptr<nbt::CompoundTag> read(const ChunkPos& pos);
+    std::unique_ptr<nbt::CompoundTag> read(const ChunkPos& pos) override;
 
     // Reference: RegionFileStorage.java write(ChunkPos, CompoundTag)
-    void write(const ChunkPos& pos, const nbt::CompoundTag* tag);
+    void write(const ChunkPos& pos, const nbt::CompoundTag* tag) override;
 
     // Reference: RegionFileStorage.java flush()
-    void flush();
+    void flush() override;
 
     // Reference: RegionFileStorage.java close()
-    void close();
+    void close() override;
 
     // Reference: RegionFileStorage.java hasChunk(ChunkPos)
-    bool hasChunk(const ChunkPos& pos);
+    bool hasChunk(const ChunkPos& pos) override;
 
     // Get storage info
     const RegionStorageInfo& getInfo() const { return m_info; }

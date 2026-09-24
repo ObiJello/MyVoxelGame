@@ -1,0 +1,8 @@
+{
+  "parent": "minecraft:block/util/bisected_inner_stairs",
+  "textures": {
+    "end": "minecraft:block/castle_brick",
+    "middle": "minecraft:block/castle_roof_tile",
+    "side": "minecraft:block/encased_castle_brick_pillar_h"
+  }
+}

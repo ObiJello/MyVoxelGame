@@ -292,6 +292,7 @@ namespace Input {
         KeyMapping* PickItem = nullptr;
         KeyMapping* Drop = nullptr;
         KeyMapping* SwapOffhand = nullptr;
+        KeyMapping* VeinMine = nullptr;
         KeyMapping* Inventory = nullptr;
         KeyMapping* Chat = nullptr;
         KeyMapping* Command = nullptr;
@@ -305,6 +306,34 @@ namespace Input {
         KeyMapping* ToggleCursor = nullptr;
         KeyMapping* Noclip = nullptr;
         KeyMapping* LogConsole = nullptr;
+        KeyMapping* DebugOverlay = nullptr;
+        KeyMapping* DebugModifier = nullptr;
+        KeyMapping* DebugCrash = nullptr;
+        KeyMapping* DebugReloadChunk = nullptr;
+        KeyMapping* DebugShowHitboxes = nullptr;
+        KeyMapping* DebugClearChat = nullptr;
+        KeyMapping* DebugShowChunkBorders = nullptr;
+        KeyMapping* DebugShowAdvancedTooltips = nullptr;
+        KeyMapping* DebugCopyRecreateCommand = nullptr;
+        KeyMapping* DebugSpectate = nullptr;
+        KeyMapping* DebugSwitchGameMode = nullptr;
+        KeyMapping* DebugDebugOptions = nullptr;
+        KeyMapping* DebugFocusPause = nullptr;
+        KeyMapping* DebugDumpDynamicTextures = nullptr;
+        KeyMapping* DebugReloadResourcePacks = nullptr;
+        KeyMapping* DebugProfiling = nullptr;
+        KeyMapping* DebugCopyLocation = nullptr;
+        KeyMapping* DebugDumpVersion = nullptr;
+        KeyMapping* DebugProfilingChart = nullptr;
+        KeyMapping* DebugFpsCharts = nullptr;
+        KeyMapping* DebugNetworkCharts = nullptr;
+        KeyMapping* DebugLightmapTexture = nullptr;
+        KeyMapping* DebugSwitchTranslucencyMode = nullptr;
+        KeyMapping* DebugImGuiPanels = nullptr;
+    }
+
+    bool IsDebugMapping(const KeyMapping& mapping) {
+        return mapping.category == "Debug";
     }
 
     void InitKeyMappings() {
@@ -338,6 +367,12 @@ namespace Input {
                                        BoundKey::Keyboard(GLFW_KEY_Q));
         Binds::SwapOffhand = &Register("key.swapOffhand", "Gameplay", "Swap Item With Offhand",
                                        BoundKey::Keyboard(GLFW_KEY_F));
+        // No vanilla counterpart. Shares Left Control with Sprint on
+        // purpose: sneaking already rules sprinting out, so the two never
+        // fire together. (The Controls screen paints the pair red, as MC
+        // does for any shared key; rebind either to clear it.)
+        Binds::VeinMine    = &Register("key.veinMine",    "Gameplay", "Vein Mine (Hold + Sneak)",
+                                       BoundKey::Keyboard(GLFW_KEY_LEFT_CONTROL));
 
         Binds::Inventory = &Register("key.inventory", "Inventory", "Open/Close Inventory",
                                      BoundKey::Keyboard(GLFW_KEY_E));
@@ -379,6 +414,40 @@ namespace Input {
         Binds::LogConsole   = &Register("key.logConsole",   "Miscellaneous", "Toggle Log Console",
                                         BoundKey::Keyboard(GLFW_KEY_GRAVE_ACCENT));
 
+        // MC Options.keyDebug* (Options.java:1213-1235), same ids and
+        // defaults. Listed last, as vanilla's Debug category is.
+        Binds::DebugOverlay  = &Register("key.debug.overlay",  "Debug", "Toggle Overlay",      BoundKey::Keyboard(GLFW_KEY_F3));
+        // Right Alt, not vanilla's F3: on a Mac keyboard F3 lives on the Fn/Globe
+        // layer, and macOS eats Fn+C/H/A/N/M/D/F/E/Q before any app sees them.
+        // F3 alone still toggles the overlay (key.debug.overlay).
+        Binds::DebugModifier = &Register("key.debug.modifier", "Debug", "Debug Modifier Key",  BoundKey::Keyboard(GLFW_KEY_RIGHT_ALT));
+        Binds::DebugReloadChunk          = &Register("key.debug.reloadChunk",          "Debug", "Reload Chunks",               BoundKey::Keyboard(GLFW_KEY_A));
+        Binds::DebugShowHitboxes         = &Register("key.debug.showHitboxes",         "Debug", "Show Hitboxes",               BoundKey::Keyboard(GLFW_KEY_B));
+        Binds::DebugClearChat            = &Register("key.debug.clearChat",            "Debug", "Clear Chat",                  BoundKey::Keyboard(GLFW_KEY_D));
+        Binds::DebugCrash                = &Register("key.debug.crash",                "Debug", "Debug Crash",                 BoundKey::Keyboard(GLFW_KEY_C));
+        Binds::DebugShowChunkBorders     = &Register("key.debug.showChunkBorders",     "Debug", "Show Chunk Boundaries",       BoundKey::Keyboard(GLFW_KEY_G));
+        Binds::DebugShowAdvancedTooltips = &Register("key.debug.showAdvancedTooltips", "Debug", "Show Advanced Tooltips",      BoundKey::Keyboard(GLFW_KEY_H));
+        Binds::DebugCopyRecreateCommand  = &Register("key.debug.copyRecreateCommand",  "Debug", "Copy Data",                   BoundKey::Keyboard(GLFW_KEY_I));
+        Binds::DebugSpectate             = &Register("key.debug.spectate",             "Debug", "Cycle Spectator",             BoundKey::Keyboard(GLFW_KEY_N));
+        Binds::DebugSwitchGameMode       = &Register("key.debug.switchGameMode",       "Debug", "Game Mode Switcher",          BoundKey::Keyboard(GLFW_KEY_F4));
+        Binds::DebugDebugOptions         = &Register("key.debug.debugOptions",         "Debug", "Debug Options",               BoundKey::Keyboard(GLFW_KEY_F6));
+        Binds::DebugFocusPause           = &Register("key.debug.focusPause",           "Debug", "Toggle Lost Focus Pause",     BoundKey::Keyboard(GLFW_KEY_P));
+        Binds::DebugDumpDynamicTextures  = &Register("key.debug.dumpDynamicTextures",  "Debug", "Dump Dynamic Textures",       BoundKey::Keyboard(GLFW_KEY_S));
+        Binds::DebugReloadResourcePacks  = &Register("key.debug.reloadResourcePacks",  "Debug", "Reload Resource Packs",       BoundKey::Keyboard(GLFW_KEY_T));
+        Binds::DebugProfiling            = &Register("key.debug.profiling",            "Debug", "Start/Stop Profiling",        BoundKey::Keyboard(GLFW_KEY_L));
+        Binds::DebugCopyLocation         = &Register("key.debug.copyLocation",         "Debug", "Copy Location",               BoundKey::Keyboard(GLFW_KEY_C));
+        Binds::DebugDumpVersion          = &Register("key.debug.dumpVersion",          "Debug", "Dump Version Info",           BoundKey::Keyboard(GLFW_KEY_V));
+        Binds::DebugProfilingChart       = &Register("key.debug.profilingChart",       "Debug", "Profiling Chart",             BoundKey::Keyboard(GLFW_KEY_1));
+        Binds::DebugFpsCharts            = &Register("key.debug.fpsCharts",            "Debug", "Fps Charts",                  BoundKey::Keyboard(GLFW_KEY_2));
+        Binds::DebugNetworkCharts        = &Register("key.debug.networkCharts",        "Debug", "Network Charts",              BoundKey::Keyboard(GLFW_KEY_3));
+        Binds::DebugLightmapTexture      = &Register("key.debug.lightmapTexture",      "Debug", "Lightmap Texture",            BoundKey::Keyboard(GLFW_KEY_4));
+        Binds::DebugSwitchTranslucencyMode = &Register("key.debug.improvedTransparency", "Debug", "Toggle Improved Transparency", BoundKey::Keyboard(GLFW_KEY_X));
+        // Not vanilla: this engine's ImGui panel set. K is free in vanilla's
+        // F3 chord table, cannot be hit without F3 held, and — unlike M, C,
+        // H, A, N, D, E, F, Q — is not one of macOS's Fn/Globe shortcuts
+        // (Fn+M focuses the menu bar, which ate the old chord).
+        Binds::DebugImGuiPanels = &Register("key.debug.imguiPanels", "Debug", "Toggle Debug Panels (ImGui)", BoundKey::Keyboard(GLFW_KEY_K));
+
         Log::Info("Key mappings registered: %zu bindings", s_ordered.size());
     }
 
@@ -403,9 +472,20 @@ namespace Input {
 
     bool HasBindingConflict(const KeyMapping& mapping) {
         if (!mapping.key.IsBound()) return false;
+        // A debug mapping is chorded with F3, so sharing its key with a plain
+        // action is not a conflict; only two debug mappings on one key, or
+        // two plain actions on one key, clash. (F3 itself is deliberately
+        // both the overlay toggle and the modifier, as in vanilla.)
+        const bool debug = IsDebugMapping(mapping);
         for (const KeyMapping* other : s_ordered) {
             if (other == &mapping) continue;
-            if (other->key == mapping.key) return true;
+            if (other->key != mapping.key) continue;
+            if (IsDebugMapping(*other) != debug) continue;
+            if (debug && (&mapping == Binds::DebugOverlay || &mapping == Binds::DebugModifier) &&
+                (other == Binds::DebugOverlay || other == Binds::DebugModifier)) continue;
+            if (debug && (&mapping == Binds::DebugCrash || &mapping == Binds::DebugCopyLocation) &&
+                (other == Binds::DebugCrash || other == Binds::DebugCopyLocation)) continue;
+            return true;
         }
         return false;
     }
@@ -436,6 +516,15 @@ namespace Input {
     }
 
     bool IsDown(const KeyMapping& mapping) { return mapping.down; }
+
+    void CancelBoundKey(BoundKey key) {
+        if (!key.IsBound()) return;
+        for (KeyMapping* m : s_ordered) {
+            if (m->key != key || IsDebugMapping(*m)) continue;
+            m->down = false;
+            m->clickCount = 0;
+        }
+    }
 
     bool ConsumeClick(KeyMapping& mapping) {
         if (mapping.clickCount == 0) return false;

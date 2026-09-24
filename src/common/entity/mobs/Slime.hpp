@@ -19,6 +19,7 @@
 
 #include "common/entity/Mob.hpp"
 #include "common/entity/ai/Controls.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -67,6 +68,18 @@ namespace Game {
         int GetXpReward() const override { return m_size; }
 
         bool IsTiny() const { return m_size <= 1; }
+
+        // ── Sounds (MC AbstractCubeMob + Slime) ────────────────────────────
+        // Hurt/death/squish/jump pick the small variant when tiny; the voice
+        // scales with the body (0.4 × size).
+        const char* GetHurtSound(MobDamageSource source) const override;
+        const char* GetDeathSound() const override;
+        float GetSoundVolume() const override { return 0.4f * static_cast<float>(GetSize()); }
+        virtual const char* GetSquishSound() const;
+        virtual const char* GetJumpSound() const;
+        // MC doPlayJumpSound / getSoundPitch (1.4× tiny, 0.8× otherwise).
+        virtual bool DoPlayJumpSound() const { return GetSize() > 0; }
+        float GetCubeSoundPitch() const;
         // MC isDealsDamage — a tiny slime is harmless (a magma cube never is).
         virtual bool DealsDamage() const { return !IsTiny() && IsEffectiveAi(); }
 
@@ -146,6 +159,18 @@ namespace Game {
             needsSync = true;
         }
         bool CauseFallDamage(double, float) override { return false; }
+
+        // MC MagmaCube's sound overrides.
+        const char* GetHurtSound(MobDamageSource) const override {
+            return IsTiny() ? SoundEvents::MAGMA_CUBE_HURT_SMALL : SoundEvents::MAGMA_CUBE_HURT;
+        }
+        const char* GetDeathSound() const override {
+            return IsTiny() ? SoundEvents::MAGMA_CUBE_DEATH_SMALL : SoundEvents::MAGMA_CUBE_DEATH;
+        }
+        const char* GetSquishSound() const override {
+            return IsTiny() ? SoundEvents::MAGMA_CUBE_SQUISH_SMALL : SoundEvents::MAGMA_CUBE_SQUISH;
+        }
+        const char* GetJumpSound() const override { return SoundEvents::MAGMA_CUBE_JUMP; }
 
         float GetAttackDamageValue() const override {
             return Slime::GetAttackDamageValue() + 2.0f;

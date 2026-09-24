@@ -34,12 +34,19 @@ namespace Game {
 
     ItemStack Slot::SafeTake(int amount, int maxAmount) {
         if (!MayPickup()) return {};
-        ItemStack& here = GetItemMut();
+        const ItemStack& here = GetItem();
         if (here.IsEmpty()) return {};
+        // MC tryRemove: `!allowModification(player) && decrement < count`.
+        if (!AllowModification() && maxAmount < here.count) return {};
+        const int wanted = std::min(amount, maxAmount);
+        if (wanted <= 0) return {};
+        return Remove(wanted);
+    }
 
-        const int taken = std::min({amount, maxAmount, here.count});
-        if (taken <= 0) return {};
-
+    ItemStack Slot::Remove(int amount) {
+        ItemStack& here = GetItemMut();
+        const int taken = std::min(amount, here.count);
+        if (here.IsEmpty() || taken <= 0) return {};
         ItemStack out = here;              // component-preserving copy
         out.count = taken;
         here.count -= taken;

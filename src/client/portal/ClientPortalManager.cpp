@@ -170,33 +170,35 @@ namespace Client {
         // normal, translation = origin. Mirrors PortalRegistry's
         // PortalToWorld / WorldToPortal pair so the resulting M matrix
         // equals the server's SrcToDst transform exactly (and the camera
-        // virtual-pose used by PortalCameraTransform). Float precision is
-        // sufficient — players are within ±10⁵ m of origin, far below
-        // float epsilon for visible artifacts on this scale.
-        glm::mat4 PortalToWorldF(const ClientPortal& p) {
-            return glm::mat4{
-                glm::vec4(p.right,  0.0f),
-                glm::vec4(p.upDir,  0.0f),
-                glm::vec4(p.normal, 0.0f),
-                glm::vec4(glm::vec3(p.origin), 1.0f),
+        // virtual-pose used by PortalCameraTransform). The matrices are DOUBLE
+        // (see below).
+        // DOUBLE (2026-09-07): a float translation at x = 300,000 is on
+        // a 3 cm grid, and this is what places the player after a
+        // predicted crossing.
+        glm::dmat4 PortalToWorldD(const ClientPortal& p) {
+            return glm::dmat4{
+                glm::dvec4(glm::dvec3(p.right),  0.0),
+                glm::dvec4(glm::dvec3(p.upDir),  0.0),
+                glm::dvec4(glm::dvec3(p.normal), 0.0),
+                glm::dvec4(p.origin, 1.0),
             };
         }
-        glm::mat4 SrcToDstF(const ClientPortal& src, const ClientPortal& dst) {
-            const glm::mat4 srcM = PortalToWorldF(src);
-            const glm::mat4 dstM = PortalToWorldF(dst);
-            glm::mat4 mirror(1.0f);
-            mirror[0][0] = -1.0f;  // flip right
-            mirror[2][2] = -1.0f;  // flip normal
+        glm::dmat4 SrcToDstD(const ClientPortal& src, const ClientPortal& dst) {
+            const glm::dmat4 srcM = PortalToWorldD(src);
+            const glm::dmat4 dstM = PortalToWorldD(dst);
+            glm::dmat4 mirror(1.0);
+            mirror[0][0] = -1.0;  // flip right
+            mirror[2][2] = -1.0;  // flip normal
             return dstM * mirror * glm::inverse(srcM);
         }
     } // namespace
 
     ClientPortalManager::GhostInfo
-    ClientPortalManager::GetStraddlingGhost(const glm::vec3& playerPos,
+    ClientPortalManager::GetStraddlingGhost(const glm::dvec3& playerPos,
                                             float playerHeight) const {
         // Body center used for both the plane-distance and lateral tests.
-        const glm::vec3 center = playerPos +
-            glm::vec3(0.0f, playerHeight * 0.5f, 0.0f);
+        const glm::dvec3 center = playerPos +
+            glm::dvec3(0.0, playerHeight * 0.5, 0.0);
 
         // 1.0 m straddle window — picked to cover both the player's body
         // half-width along a wall (~0.3 m) and half-height along a
@@ -215,7 +217,8 @@ namespace Client {
                 { &pair.orange, &pair.blue   },
             };
             for (const Side& s : sides) {
-                const glm::vec3 d = center - glm::vec3(s.src->origin);
+                // The difference is small: float is fine from here.
+                const glm::vec3 d(center - s.src->origin);
                 const float sd = glm::dot(d, s.src->normal);
                 if (std::abs(sd) > kStraddleNormalRange) continue;
 
@@ -226,15 +229,13 @@ namespace Client {
 
                 GhostInfo g;
                 g.valid     = true;
-                g.transform = SrcToDstF(*s.src, *s.dst);
+                g.transform = SrcToDstD(*s.src, *s.dst);
                 // Plane keeping the +normal side: discard fragments where
                 // dot(p, n) + w < 0  ⇔  dot(p - origin, n) < 0.
-                const glm::vec3 dstO = glm::vec3(s.dst->origin);
-                g.exitClipPlane  = glm::vec4(s.dst->normal,
-                                             -glm::dot(s.dst->normal, dstO));
-                const glm::vec3 srcO = glm::vec3(s.src->origin);
-                g.entryClipPlane = glm::vec4(s.src->normal,
-                                             -glm::dot(s.src->normal, srcO));
+                const glm::dvec3 dstN(s.dst->normal);
+                g.exitClipPlane  = glm::dvec4(dstN, -glm::dot(dstN, s.dst->origin));
+                const glm::dvec3 srcN(s.src->normal);
+                g.entryClipPlane = glm::dvec4(srcN, -glm::dot(srcN, s.src->origin));
                 return g;
             }
         }
@@ -242,9 +243,9 @@ namespace Client {
     }
 
     ClientPortalManager::TeleportPrediction
-    ClientPortalManager::CheckEyeCrossing(const glm::vec3& prevEye,
-                                          const glm::vec3& currEye,
-                                          const glm::vec3& currFeet,
+    ClientPortalManager::CheckEyeCrossing(const glm::dvec3& prevEye,
+                                          const glm::dvec3& currEye,
+                                          const glm::dvec3& currFeet,
                                           const glm::vec3& currVel,
                                           float currYawDeg,
                                           float currPitchDeg,
@@ -279,8 +280,8 @@ namespace Client {
                 { &pair.orange, &pair.blue   },
             };
             for (const Side& s : sides) {
-                const glm::vec3 nrm = s.src->normal;
-                const glm::vec3 origin = glm::vec3(s.src->origin);
+                const glm::dvec3 nrm(s.src->normal);
+                const glm::dvec3 origin = s.src->origin;
 
                 // Eye crossing check — fire when the player approached
                 // from the +normal side and is now within (or past)
@@ -293,8 +294,8 @@ namespace Client {
                 //     trigger, regardless of distance — fixes the
                 //     "20 blocks behind the wall" warp bug.
                 //   • Front-only entry naturally falls out.
-                const float currSigned = glm::dot(currEye - origin, nrm);
-                const float prevSigned = glm::dot(prevEye - origin, nrm);
+                const double currSigned = glm::dot(currEye - origin, nrm);
+                const double prevSigned = glm::dot(prevEye - origin, nrm);
 
                 if (currSigned > kEarlyPredictDistance) continue;
                 if (prevSigned <= 0.0f) continue;
@@ -308,10 +309,10 @@ namespace Client {
                 // ground truth for motion direction. If currSigned >
                 // prevSigned (eye moving in +normal direction = away
                 // from plane), skip the trigger.
-                if (currSigned > prevSigned + 1.0e-4f) continue;
+                if (currSigned > prevSigned + 1.0e-4) continue;
 
                 // Lateral fit using current eye position.
-                const glm::vec3 d = currEye - origin;
+                const glm::vec3 d(currEye - origin);
                 const float su = glm::dot(d, s.src->right);
                 const float tu = glm::dot(d, s.src->upDir);
                 if (std::abs(su) > 0.5f || std::abs(tu) > 1.0f) continue;
@@ -322,10 +323,10 @@ namespace Client {
                 // exactly at the position M would map the source eye
                 // to — Portal's "eye high to the new portal's plane"
                 // result for cross-orientation.
-                const float eyeHeight = currEye.y - currFeet.y;
-                const glm::mat4 M = SrcToDstF(*s.src, *s.dst);
-                const glm::vec3 newEye = glm::vec3(M * glm::vec4(currEye, 1.0f));
-                glm::vec3 newFeet = newEye - glm::vec3(0.0f, eyeHeight, 0.0f);
+                const double eyeHeight = currEye.y - currFeet.y;
+                const glm::dmat4 M = SrcToDstD(*s.src, *s.dst);
+                const glm::dvec3 newEye = glm::dvec3(M * glm::dvec4(currEye, 1.0));
+                glm::dvec3 newFeet = newEye - glm::dvec3(0.0, eyeHeight, 0.0);
                 glm::vec3 newVel  = glm::mat3(M) * currVel;
 
 
@@ -347,12 +348,11 @@ namespace Client {
                 // the destination side — otherwise a stopped player at
                 // the post-teleport position would satisfy
                 // `curr ≤ threshold` and re-trigger forever.
-                constexpr float kEyeOffsetFromPlane = 0.086f;
+                constexpr double kEyeOffsetFromPlane = 0.086;
                 const float dstNy = s.dst->normal.y;
                 if (dstNy > 0.7f) {
                     // Floor: eye at floor + 5cm.
-                    newFeet.y = static_cast<float>(s.dst->origin.y)
-                                + kEyeOffsetFromPlane - eyeHeight;
+                    newFeet.y = s.dst->origin.y + kEyeOffsetFromPlane - eyeHeight;
                 } else if (dstNy < -0.7f) {
                     // Ceiling: eye placed so the head doesn't poke into
                     // the ceiling block AND the eye is well outside the
@@ -362,9 +362,8 @@ namespace Client {
                     // plane and gives ~0.115 m of margin against the
                     // 0.085 m trigger threshold — enough to absorb FP
                     // jitter and prevent instant re-trigger.
-                    constexpr float kCeilingEyeOffset = 0.1f;
-                    newFeet.y = static_cast<float>(s.dst->origin.y)
-                                - kCeilingEyeOffset - eyeHeight;
+                    constexpr double kCeilingEyeOffset = 0.1;
+                    newFeet.y = s.dst->origin.y - kCeilingEyeOffset - eyeHeight;
                 } else {
                     // Vertical wall — push the eye slightly OFF the
                     // dst plane in +dst.normal direction (= into the
@@ -373,11 +372,11 @@ namespace Client {
                     // by enough that the eye lands at +kEyeOffsetFromPlane
                     // on +dst.normal side, matching the convention
                     // used for floor/ceiling exits.
-                    const glm::vec3 currEyePos = newFeet + glm::vec3(0.0f, eyeHeight, 0.0f);
-                    const float currEyeSd = glm::dot(
-                        currEyePos - glm::vec3(s.dst->origin), s.dst->normal);
-                    const float adjustment = kEyeOffsetFromPlane - currEyeSd;
-                    newFeet += s.dst->normal * adjustment;
+                    const glm::dvec3 currEyePos = newFeet + glm::dvec3(0.0, eyeHeight, 0.0);
+                    const double currEyeSd = glm::dot(
+                        currEyePos - s.dst->origin, glm::dvec3(s.dst->normal));
+                    const double adjustment = kEyeOffsetFromPlane - currEyeSd;
+                    newFeet += glm::dvec3(s.dst->normal) * adjustment;
 
                     // Floor/ceiling-source → wall-dest puts the EYE at
                     // the wall portal's Y center, which leaves the
@@ -385,8 +384,7 @@ namespace Client {
                     // block beneath the portal opening. Clamp feet to
                     // the wall portal's bottom edge so the player
                     // stands on the surface below.
-                    const float portalBottomY =
-                        static_cast<float>(s.dst->origin.y) - 1.0f;
+                    const double portalBottomY = s.dst->origin.y - 1.0;
                     if (newFeet.y < portalBottomY) {
                         newFeet.y = portalBottomY;
                     }
@@ -489,9 +487,7 @@ namespace Client {
     }
 
     void ClientPortalManager::OnPortalFizzle(const Network::PortalFizzleS2CPacket& p) {
-        const glm::vec3 origin(static_cast<float>(p.originX),
-                               static_cast<float>(p.originY),
-                               static_cast<float>(p.originZ));
+        const glm::dvec3 origin(p.originX, p.originY, p.originZ);
         const glm::vec3 normal(p.normalX, p.normalY, p.normalZ);
         const bool isOrange = (p.color == 1);
         // Reason byte mirrors PortalParticleSystem::BurstKind on the

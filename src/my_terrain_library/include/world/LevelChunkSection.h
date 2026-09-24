@@ -383,15 +383,13 @@ public:
      * Fill biomes from noise for this section
      * Reference: LevelChunkSection.java fillBiomesFromNoise() lines 191-204
      *
-     * @param biomeSource The biome source to sample from
-     * @param sampler Climate sampler for noise
+     * @param resolver The chunk's biome resolver
      * @param quartMinX Quart X of section origin
      * @param quartMinY Quart Y of section origin
      * @param quartMinZ Quart Z of section origin
      */
     void fillBiomesFromNoise(
-        biome::BiomeSource* biomeSource,
-        const biome::Climate::Sampler& sampler,
+        const biome::BiomeSource::BiomeResolver& resolver,
         int32_t quartMinX,
         int32_t quartMinY,
         int32_t quartMinZ
@@ -408,9 +406,7 @@ public:
                     int32_t quartZ = quartMinZ + z;
 
                     // Get biome from source at absolute quart coordinates
-                    biome::BiomeKey biome = biomeSource->getNoiseBiome(
-                        quartX, quartY, quartZ, sampler
-                    );
+                    biome::BiomeKey biome = resolver(quartX, quartY, quartZ);
 
                     setNoiseBiome(x, y, z, biome::Biomes::get(biome));
                 }

@@ -24,10 +24,11 @@ namespace Server {
         return true;
     }
 
-    void KickCommand::Execute(ServerPlayer& sender,
+    void KickCommand::Execute(const CommandSourceStack& source,
                               const std::vector<std::string>& args,
                               ServerConnection& connection,
                               PlayerSessionManager& sessionManager) {
+        ServerPlayer& sender = *source.sender;
         if (args.empty()) {
             connection.SendChatMessage("Usage: /kick <player> [reason]", 1);
             return;

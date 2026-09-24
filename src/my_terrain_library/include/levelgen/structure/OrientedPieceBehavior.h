@@ -38,6 +38,11 @@ protected:
     // Reference: ScatteredFeaturePiece.heightPosition (-1 until computed).
     int m_heightPosition = -1;
 
+    // Reference: ScatteredFeaturePiece.addAdditionalSaveData "HPos" / its
+    // CompoundTag constructor.
+    void saveHeightPosition(nbt::CompoundTag& tag) const;
+    void loadHeightPosition(const nbt::CompoundTag& tag);
+
     // Per-call current piece record (set by subclasses at postProcess entry
     // via bind(); FEATURES is never parallelized, so instance state is safe).
     StructurePieceData* m_self = nullptr;

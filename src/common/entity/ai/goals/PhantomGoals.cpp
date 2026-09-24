@@ -7,6 +7,9 @@
 #include "common/core/Mth.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/entity/mobs/Animals.hpp"
+#include "common/sound/EntitySounds.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -224,7 +227,7 @@ namespace Game {
         if (!CanUse()) return false;
 
         // MC: every 20 ticks, scan for living cats within 16 blocks. Each
-        // found cat hisses (sound — no sound system); ANY cat scares the
+        // found cat hisses; ANY cat scares the
         // phantom off its dive.
         if (m_phantom->tickCount > m_catSearchTick) {
             m_catSearchTick = m_phantom->tickCount + 20;
@@ -238,6 +241,7 @@ namespace Game {
                 level->GetEntitiesInBox(box, m_phantom, nearby);
                 for (Entity* e : nearby) {
                     if (e->GetType() == EntityTypeId::Cat && e->IsAlive()) {
+                        if (auto* cat = dynamic_cast<Cat*>(e)) cat->Hiss();
                         anyCat = true;
                     }
                 }
@@ -268,7 +272,10 @@ namespace Game {
         if (reach.Intersects(target->GetAABB())) {
             m_phantom->DoHurtTarget(*target);
             m_phantom->SetAttackPhase(PhantomAttackPhase::Circle);
-            // MC level event 1039 (phantom bite sound) — no sound system.
+            if (!m_phantom->IsSilent() && m_phantom->Level()) {
+                PlayEntityLevelEventSound(*m_phantom->Level(), EntityLevelEvent::PHANTOM_BITE,
+                                          m_phantom->BlockPosition());
+            }
         } else if (m_phantom->horizontalCollision || m_phantom->hurtTime > 0) {
             m_phantom->SetAttackPhase(PhantomAttackPhase::Circle);
         }
@@ -312,7 +319,8 @@ namespace Game {
                 SetAnchorAboveTarget();
                 m_nextSweepTick = AdjustedTickDelay(
                     (8 + m_phantom->Level()->Random().NextInt(4)) * 20);
-                // MC plays PHANTOM_SWOOP here — no sound system.
+                m_phantom->PlaySound(SoundEvents::PHANTOM_SWOOP, 10.0f,
+                                     0.95f + m_phantom->Level()->Random().NextFloat() * 0.1f);
             }
         }
     }

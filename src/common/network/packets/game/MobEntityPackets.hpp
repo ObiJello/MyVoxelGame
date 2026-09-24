@@ -18,6 +18,7 @@
 // deltas always fit would silently teleport mobs backwards on fast movement.
 #pragma once
 
+#include "common/network/packets/game/MobEffectPackets.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include <glm/glm.hpp>
 #include <cmath>
@@ -50,7 +51,7 @@ namespace Network {
         // frame. MC sends these as synched data in a follow-up packet; folding
         // them in avoids a frame where a baby cow renders adult-sized.
         float      health = 0.0f;
-        uint8_t    flags = 0;           // bit0 baby, bit1 aggressive, bit2 on fire
+        uint8_t    flags = 0;           // bit0 baby, bit1 aggressive, bit2 on fire, bit3 age-locked
         uint8_t    variantData = 0;     // sheep wool byte; unused by other types
         // MC DATA_POSE. Drives the episodic animation timers — a frog croaks
         // because this turned CROAKING, not because a timer was sent.
@@ -93,6 +94,11 @@ namespace Network {
         uint32_t   blockStateRaw = 0;
         // APPENDED FIELD: the entity's size (Entity::scale). Absent = 1.
         float      scale = 1.0f;
+        // APPENDED FIELD: the synched effect visuals (Game::EffectVisuals —
+        // MC DATA_EFFECT_PARTICLES / DATA_EFFECT_AMBIENCE_ID and the
+        // invisible / glowing shared flags). Absent = none.
+        uint8_t              effectFlags = 0;
+        std::vector<uint8_t> effectParticles;
     };
 
     // MC ClientboundMoveEntityPacket.Pos / .Rot / .PosRot, merged into one
@@ -119,6 +125,12 @@ namespace Network {
         glm::vec3  velocity{0.0f};
         int8_t     yRot = 0, xRot = 0, yHeadRot = 0;
         bool       onGround = false;
+        // APPENDED FIELD — absence decodes as 0. Bit 0: the entity went
+        // through an immersive surface; the client snaps position AND
+        // rotation instead of interpolating toward them (see PortalState::
+        // MarkCrossedSurface).
+        static constexpr uint8_t kFlagPortalCrossing = 0x01;
+        uint8_t    flags = 0;
     };
 
     // Many EntityPositionSync in one packet, for the compact falling-block
@@ -166,6 +178,9 @@ namespace Network {
         // unlike the falling block's or the TNT's CHANGES (swallow, shear).
         // 0 = none. AddEntity carries the same value in its data int.
         uint32_t blockStateRaw = 0;
+        // APPENDED: the synched effect visuals, as on AddEntity.
+        uint8_t              effectFlags = 0;
+        std::vector<uint8_t> effectParticles;
     };
 
     // MC ClientboundEntityEventPacket. One byte: 3 death, 60 poof, 10 eat,
@@ -206,6 +221,14 @@ namespace Network {
         // re-validates it against its own part layout before routing the
         // head-vs-body damage. APPENDED FIELD — absence decodes as -1.
         int8_t  dragonPart = -1;
+        // Where on the entity the click landed, relative to the entity's
+        // position (MC ServerboundInteractPacket.InteractionAtLocationAction
+        // / Entity.interact's `location`): what an armor stand reads the
+        // clicked slot from. APPENDED FIELD — absence decodes as
+        // hasLocation=false, and a server treats that as a click at the
+        // feet.
+        bool      hasLocation = false;
+        glm::vec3 location{0.0f};
     };
 
     namespace Serialization {
@@ -234,6 +257,7 @@ namespace Network {
             b.WriteInt(static_cast<uint32_t>(p.vehicleId));
             b.WriteInt(p.blockStateRaw);
             b.WriteFloat(p.scale);
+            WriteEffectVisuals(b, p.effectFlags, p.effectParticles);
             return b.GetData();
         }
 
@@ -264,6 +288,7 @@ namespace Network {
             // the extra four bytes unread.
             if (r.Remaining() >= 4) p.blockStateRaw = r.ReadInt();
             if (r.Remaining() >= 4) p.scale = r.ReadFloat();
+            ReadEffectVisuals(r, p.effectFlags, p.effectParticles);
             return p;
         }
 
@@ -331,6 +356,7 @@ namespace Network {
             b.WriteByte(static_cast<uint8_t>(p.xRot));
             b.WriteByte(static_cast<uint8_t>(p.yHeadRot));
             b.WriteByte(p.onGround ? 1 : 0);
+            b.WriteByte(p.flags);
             return b.GetData();
         }
 
@@ -349,6 +375,8 @@ namespace Network {
             p.xRot       = static_cast<int8_t>(r.ReadByte());
             p.yHeadRot   = static_cast<int8_t>(r.ReadByte());
             p.onGround   = r.ReadByte() != 0;
+            // Appended field: an older peer's stream ends here.
+            if (r.Remaining() >= 1) p.flags = r.ReadByte();
             return p;
         }
 
@@ -428,6 +456,7 @@ namespace Network {
             b.WriteInt(static_cast<uint32_t>(p.vehicleId));
             b.WriteFloat(p.scale);
             b.WriteInt(p.blockStateRaw);
+            WriteEffectVisuals(b, p.effectFlags, p.effectParticles);
             return b.GetData();
         }
 
@@ -449,6 +478,7 @@ namespace Network {
             if (r.Remaining() >= 4) p.vehicleId = static_cast<int32_t>(r.ReadInt());
             if (r.Remaining() >= 4) p.scale = r.ReadFloat();
             if (r.Remaining() >= 4) p.blockStateRaw = r.ReadInt();
+            ReadEffectVisuals(r, p.effectFlags, p.effectParticles);
             return p;
         }
 
@@ -494,6 +524,10 @@ namespace Network {
             b.WriteByte(p.sneaking ? 1 : 0);
             b.WriteByte(p.sprinting ? 1 : 0);
             b.WriteByte(static_cast<uint8_t>(p.dragonPart));
+            b.WriteByte(p.hasLocation ? 1 : 0);
+            b.WriteFloat(p.location.x);
+            b.WriteFloat(p.location.y);
+            b.WriteFloat(p.location.z);
             return b.GetData();
         }
 
@@ -507,6 +541,12 @@ namespace Network {
             // Appended field — an older peer's stream simply ends here, and
             // the struct default (-1, no part) is the right answer for it.
             if (r.Remaining() >= 1) p.dragonPart = static_cast<int8_t>(r.ReadByte());
+            if (r.Remaining() >= 13) {
+                p.hasLocation = r.ReadByte() != 0;
+                p.location.x = r.ReadFloat();
+                p.location.y = r.ReadFloat();
+                p.location.z = r.ReadFloat();
+            }
             return p;
         }
 

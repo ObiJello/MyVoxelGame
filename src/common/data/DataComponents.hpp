@@ -20,6 +20,9 @@
 //    5  ITEM_NAME                     12  BLOCKS_ATTACKS
 //    6  LORE                          13  BUNDLE_CONTENTS
 //    7  RARITY                        14  SULFUR_CUBE_BUCKET
+//   15  POTION_CONTENTS               16  POTION_DURATION_SCALE
+//   17  SUSPICIOUS_STEW_EFFECTS       18  WRITTEN_BOOK_CONTENT
+//   19  WRITABLE_BOOK_CONTENT         20  DYED_COLOR
 //  100  PORTAL_GUN_NEXT_COLOR        101  PORTAL_GUN_INSTANCE_ID
 #pragma once
 
@@ -28,6 +31,8 @@
 #include "../entity/MiningTier.hpp"
 #include "../entity/Item.hpp"              // ItemStack (UseRemainder), ItemUseAnimation
 #include "../entity/EquipmentSlot.hpp"
+#include "../entity/alchemy/Potions.hpp"   // PotionContents, SuspiciousStewEffects
+#include "BookContent.hpp"                 // WrittenBookContent, WritableBookContent
 #include "../core/Features.hpp"
 #include <cmath>
 #include <string>
@@ -255,6 +260,37 @@ namespace Game::DataComponents {
     // Bundle contents (nested stacks + client-side selection). Mirrors
     // DataComponents.BUNDLE_CONTENTS; behaviour in BundleBehavior.cpp.
     extern const DataComponentType<BundleContents> BUNDLE_CONTENTS;
+
+    // What a potion / splash / lingering potion / tipped arrow holds — MC
+    // DataComponents.POTION_CONTENTS (PotionContents.java). Default EMPTY on
+    // all four items (Items.java); the creative tab and brewing set a
+    // potion. Also a ConsumableListener: drinking applies it
+    // (ConsumableBehavior::OnConsume).
+    extern const DataComponentType<PotionContents> POTION_CONTENTS;
+
+    // MC DataComponents.POTION_DURATION_SCALE — the lingering potion's 0.25
+    // and the tipped arrow's 0.125 (Items.java); 1.0 when absent.
+    extern const DataComponentType<float> POTION_DURATION_SCALE;
+
+    // MC DataComponents.SUSPICIOUS_STEW_EFFECTS — the stew's effect list
+    // (default EMPTY); a ConsumableListener like POTION_CONTENTS.
+    extern const DataComponentType<SuspiciousStewEffects> SUSPICIOUS_STEW_EFFECTS;
+
+    // MC DataComponents.WRITTEN_BOOK_CONTENT — a signed book's title,
+    // author, generation and pages (text components). Set by signing a book
+    // and quill, by the set_written_book_pages / set_book_cover loot
+    // functions, and read from disk. A written_book with none opens nothing.
+    extern const DataComponentType<WrittenBookContent> WRITTEN_BOOK_CONTENT;
+
+    // MC DataComponents.WRITABLE_BOOK_CONTENT — a book and quill's plain
+    // pages. Default EMPTY on writable_book (Items.java).
+    extern const DataComponentType<WritableBookContent> WRITABLE_BOOK_CONTENT;
+
+    // MC DataComponents.DYED_COLOR (DyedItemColor.rgb) — the dye on a piece
+    // of leather armour. Written by the set_random_dyes loot function (the
+    // leatherworker's dyed armour trades) and read by the "dye" item tint
+    // (Game::ResolveItemLayerTint); absent = the tint's LEATHER_COLOR default.
+    extern const DataComponentType<int32_t> DYED_COLOR;
 
     // ── TODO: future component types to register, in MC parity order ────────
     // Each one unlocks a chunk of behaviour by populating Item.use() base

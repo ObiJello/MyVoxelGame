@@ -4,6 +4,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -148,7 +149,10 @@ namespace Game {
 
     bool ShulkerBullet::Hurt(MobDamageSource source, float amount, Entity* attacker) {
         (void)source; (void)amount; (void)attacker;
-        if (m_level && !m_level->IsClientSide()) Destroy();
+        if (m_level && !m_level->IsClientSide()) {
+            PlaySound(SoundEvents::SHULKER_BULLET_HURT, 1.0f, 1.0f);
+            Destroy();
+        }
         return true;   // MC hurtServer: any hit pops the bullet
     }
 
@@ -163,14 +167,28 @@ namespace Game {
         const bool wasHurt = DealHitDamage(target, hit, MobDamageSource::Projectile, 4.0f,
                                          livingOwner ? GetOwner() : this);
         // MC ShulkerBullet.onHitEntity: a landed hit applies LEVITATION for
-        // 200 ticks (10 s), attributed to firstNonNull(owner, this). On a
-        // player the stored effect ticks down but cannot move them — player
-        // motion is client-authoritative and no effect sync exists yet (the
-        // documented follow-up).
+        // 200 ticks (10 s), attributed to firstNonNull(owner, this). A
+        // player's client receives it (UpdateMobEffectS2C) and its own
+        // physics lifts them (PlayerPhysics::effectLevitation).
         if (wasHurt) {
-            target.AddEffect(MobEffectInstance(MobEffectId::Levitation, 200),
-                             GetOwner() ? GetOwner() : this);
+            // Aurelith's Unsung fires these as its "discord notes"
+            // (TheUnsung.hpp): a wrong note that drags instead of lifting —
+            // Slowness II and Weakness I for 3 s in place of LEVITATION,
+            // which in an open plaza would drop a player from a height.
+            if (GetOwner() && GetOwner()->GetType() == EntityTypeId::TheUnsung) {
+                target.AddEffect(MobEffectInstance(MobEffectId::Slowness, 60, 1), GetOwner());
+                target.AddEffect(MobEffectInstance(MobEffectId::Weakness, 60, 0), GetOwner());
+            } else {
+                target.AddEffect(MobEffectInstance(MobEffectId::Levitation, 200),
+                                 GetOwner() ? GetOwner() : this);
+            }
         }
+    }
+
+    void ShulkerBullet::OnHitBlock(const HitResult& hit) {
+        // MC onHitBlock: the pop (its EXPLOSION particles wait on particles).
+        Projectile::OnHitBlock(hit);
+        PlaySound(SoundEvents::SHULKER_BULLET_HIT, 1.0f, 1.0f);
     }
 
     void ShulkerBullet::OnHit(const HitResult& hit) {

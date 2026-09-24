@@ -37,6 +37,13 @@ namespace Render {
                     const glm::vec3& cameraPos, float partialTick);
 
         // Last Render's tally, for the portal diagnostics (OBEY_PORTAL_DIAG).
+        // /morph: one dropped item at a world position, bobbing and
+        // spinning as a drop does (`bobOffs` is the drop's phase). No cull.
+        void RenderSingle(const Game::ItemStack& stack, const glm::dvec3& worldPos,
+                          float ageTicks, float bobOffs,
+                          const glm::mat4& projection, const glm::mat4& view,
+                          const glm::vec3& cameraPos);
+
         struct Tally { int entities = 0, drawn = 0, cullDistance = 0, cullFrustum = 0, cullSection = 0; };
         const Tally& LastTally() const { return m_tally; }
 
@@ -73,7 +80,9 @@ namespace Render {
             bool          lastBlock = false;
             TextureHandle lastTex   = INVALID_TEXTURE;
         };
-        void DrawItem(const Game::ItemStack& stack, const glm::vec3& worldPos,
+        // `renderPos` is render-space (Render::ToRender of the item's
+        // interpolated world position); `cameraPos` stays world-space.
+        void DrawItem(const Game::ItemStack& stack, const glm::vec3& renderPos,
                       float ageTicks, float bobOffs,
                       const glm::mat4& viewProj, const glm::vec3& cameraPos,
                       PassState& pass, float scale = 1.0f);

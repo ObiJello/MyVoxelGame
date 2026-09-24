@@ -1,24 +1,49 @@
 #pragma once
 
 #include "world/ChunkPos.h"
-#include "world/chunk/status/ChunkStatus.h"
+#include "world/IChunk.h"
 #include "world/LevelChunkSection.h"
+#include "world/chunk/status/ChunkStatus.h"
 #include "world/level/block/state/BlockState.h"
 #include "nbt/CompoundTag.h"
 #include "nbt/ListTag.h"
+#include <array>
 #include <memory>
+#include <tuple>
+#include <utility>
 #include <vector>
 #include <map>
-#include <optional>
+#include <set>
+#include <string>
 
 // Reference: net/minecraft/world/level/chunk/storage/SerializableChunkData.java
+//
+// The on-disk form of a chunk, in vanilla Anvil layout. MC 26.3 writes every
+// chunk it unloads this way — a proto chunk at any status as well as a full
+// one — and reads it back with everything it had, so a partly generated
+// chunk survives both unloading and a server restart.
+//
+// This port writes PROTO chunks only. FULL chunks belong to the embedder,
+// which converts and saves them in its own code; the library reads them back
+// (as neighbours whose status satisfies every dependency) but never writes
+// one. What a proto carries, as in MC:
+//   blocks, biomes, heightmaps, status, inhabited time
+//   structure starts and references ("structures")
+//   pending block entities, generated entities, post-processing positions
+// The generator schedules no ticks and makes no UpgradeData, blending or
+// below-zero retrogen data, so those fields are never written; a writable
+// world is always one this port generated. Plus one engine extension, "obeycraft:structure_spawn_areas" (the
+// structure spawn areas recorded at FEATURES, see IChunk::StructureSpawnArea),
+// and "obeycraft:finalize_spawn" on generated entities the engine still has
+// to finalize. Vanilla ignores both keys.
+//
+// The layout follows the DataVersion being written: saves before 5006 name a
+// block state's fields Name/Properties (26.3: id/properties), and saves before
+// 5013 call TERRAIN "carvers" (MergeTerrainChunkStatusFix). Reads accept both.
 
 namespace minecraft {
 
-// Forward declarations
-namespace server { namespace level { class ServerLevel; } }
 namespace world {
-class IChunk;
 class ProtoChunk;
 }
 
@@ -27,121 +52,71 @@ namespace level {
 namespace chunk {
 namespace storage {
 
-// Forward declarations for chunk types
-class LevelChunk;
-
-// Bring types into scope
 using ChunkStatusPtr = ::minecraft::world::chunk::status::ChunkStatus;
-using ChunkAccess = ::minecraft::world::IChunk;
 using ProtoChunk = ::minecraft::world::ProtoChunk;
 
-/**
- * Heightmap accessor for world generation
- */
-struct HeightmapData {
-    std::map<levelgen::Heightmap::Types, std::vector<int64_t>> heightmaps;
-};
-
-/**
- * Packed tick data for scheduled ticks
- */
-struct PackedTicks {
-    nbt::ListTag blockTicks;
-    nbt::ListTag fluidTicks;
-};
-
-/**
- * Section data for a 16x16x16 chunk section
- */
-struct SectionData {
-    int8_t y;
-    std::unique_ptr<nbt::CompoundTag> blockStates;  // Paletted container
-    std::unique_ptr<nbt::CompoundTag> biomes;       // Paletted container
-    std::unique_ptr<nbt::CompoundTag> blockLight;
-    std::unique_ptr<nbt::CompoundTag> skyLight;
-};
-
-/**
- * SerializableChunkData - Handles chunk serialization/deserialization
- * Reference: SerializableChunkData.java
- *
- * This class is responsible for converting between ChunkAccess objects
- * and NBT format for storage.
- */
 class SerializableChunkData {
 public:
-    // =========================================================================
-    // Static parsing/writing methods
-    // Reference: SerializableChunkData.java lines 90-162
-    // =========================================================================
+    struct SectionData {
+        int y = 0;
+        std::vector<BlockState*> blockPalette;      // MC palette order
+        std::vector<int32_t> blockIndices;          // 4096, empty = no block_states
+        std::vector<std::string> biomePalette;
+        std::vector<int32_t> biomeIndices;          // 64, empty = no biomes
+
+        // A copyOf snapshot instead (MC: LevelChunkSection.copy()): the
+        // container's own palette and packed ids, copied as they are, and
+        // repacked into MC's palette order by write() on the I/O thread.
+        bool snapshot = false;
+        int snapshotBits = 0;                       // container bits per entry
+        std::vector<BlockState*> snapshotPalette;   // container palette (bits <= 8)
+        std::vector<int64_t> snapshotData;          // container storage
+        std::vector<BlockState*> snapshotCells;     // global palette: the 4096 states
+        std::array<const biome::Biome*, 64> snapshotBiomes{};
+    };
 
     /**
-     * Parse chunk data from NBT
-     * Reference: SerializableChunkData.java parse(LevelHeightAccessor, RegistryAccess, CompoundTag)
+     * Parse a saved chunk. Returns nullptr when the tag has no Status, which
+     * MC treats as "no chunk here" (SerializableChunkData.parse). Throws
+     * std::runtime_error on a structurally broken tag.
+     * Reference: SerializableChunkData.parse(LevelHeightAccessor, ..., CompoundTag)
      */
     static std::unique_ptr<SerializableChunkData> parse(
-        int minY,
-        int height,
-        nbt::CompoundTag& chunkData
-    );
+        int minY, int height, const nbt::CompoundTag& chunkData, BlockState* airBlock);
 
     /**
-     * Copy data from a chunk to create serializable data
-     * Reference: SerializableChunkData.java copyOf(ServerLevel, ChunkAccess)
+     * Snapshot a proto chunk. Must run while nothing writes the chunk. As in
+     * MC this only copies (section palettes and packed ids, heightmaps,
+     * block-entity text, entities); the packing into the on-disk form is
+     * write()'s, which the save runs on the I/O thread. The snapshot owns
+     * everything it holds, so the chunk may be freed right after.
+     * Reference: SerializableChunkData.copyOf(ServerLevel, ChunkAccess)
      */
-    static std::unique_ptr<SerializableChunkData> copyOf(
-        server::level::ServerLevel& level,
-        ChunkAccess& chunk
-    );
+    static std::unique_ptr<SerializableChunkData> copyOf(ProtoChunk& chunk, int64_t gameTime);
 
     /**
-     * Write chunk data to NBT
-     * Reference: SerializableChunkData.java write()
+     * Encode for the given DataVersion.
+     * Reference: SerializableChunkData.write()
      */
-    std::unique_ptr<nbt::CompoundTag> write() const;
+    std::unique_ptr<nbt::CompoundTag> write(int dataVersion) const;
 
     /**
-     * Get chunk status from NBT tag (without full parsing)
-     * Reference: SerializableChunkData.java getChunkStatusFromTag(CompoundTag)
-     */
-    static const ChunkStatusPtr* getChunkStatusFromTag(nbt::CompoundTag* tag);
-
-    // =========================================================================
-    // Chunk creation methods
-    // Reference: SerializableChunkData.java lines 165-268
-    // =========================================================================
-
-    /**
-     * Create a ProtoChunk from the serialized data
-     * Reference: SerializableChunkData.java read(ServerLevel, PoiManager, RegionStorageInfo, ChunkPos)
+     * Build the proto chunk (any saved status, FULL included).
+     * Reference: SerializableChunkData.read(ServerLevel, PoiManager, RegionStorageInfo, ChunkPos)
      */
     std::unique_ptr<ProtoChunk> read(
-        server::level::ServerLevel& level,
-        const ChunkPos& pos
-    ) const;
-
-    /**
-     * Create a ProtoChunk from the serialized data (direct parameters version)
-     * This version doesn't require ServerLevel
-     */
-    std::unique_ptr<ProtoChunk> readDirect(
+        const ChunkPos& expectedPos,
         int minY,
         int height,
         BlockState* airBlock,
         BlockState* defaultBlock,
-        BlockRegistry* registry
-    ) const;
+        BlockRegistry* registry) const;
 
     /**
-     * Copy data from a ProtoChunk directly (without ServerLevel)
+     * Status of a saved chunk without a full parse; EMPTY for a missing tag.
+     * Reference: SerializableChunkData.getChunkStatusFromTag(CompoundTag)
      */
-    static std::unique_ptr<SerializableChunkData> copyOfDirect(
-        ProtoChunk& chunk
-    );
-
-    // =========================================================================
-    // Data accessors
-    // =========================================================================
+    static const ChunkStatusPtr* getChunkStatusFromTag(const nbt::CompoundTag* tag);
 
     const ChunkPos& getChunkPos() const { return m_chunkPos; }
     const ChunkStatusPtr& getChunkStatus() const { return *m_chunkStatus; }
@@ -153,94 +128,42 @@ private:
     SerializableChunkData() = default;
 
     ChunkPos m_chunkPos;
-    int m_minSectionY;
-    int64_t m_lastUpdateTime;
-    int64_t m_inhabitedTime;
-    const ChunkStatusPtr* m_chunkStatus;
-    bool m_lightCorrect;
+    int m_minSectionY = 0;
+    int64_t m_lastUpdateTime = 0;
+    int64_t m_inhabitedTime = 0;
+    const ChunkStatusPtr* m_chunkStatus = nullptr;
+    bool m_lightCorrect = false;
 
-    // Section data
-    std::vector<SectionData> m_sectionData;
+    std::vector<SectionData> m_sections;
+    std::map<levelgen::Heightmap::Types, std::vector<int64_t>> m_heightmaps;
 
-    // Heightmaps
-    HeightmapData m_heightmaps;
+    // Indexed by section index (min section = 0); empty sets are absent.
+    std::vector<std::vector<int16_t>> m_postProcessing;
 
-    // Ticks
-    PackedTicks m_packedTicks;
-
-    // Entity/block entity data
-    std::vector<std::unique_ptr<nbt::CompoundTag>> m_entities;
+    // Pending block-entity tags, full NBT including x/y/z.
     std::vector<std::unique_ptr<nbt::CompoundTag>> m_blockEntities;
+    // copyOf keeps them as the chunk holds them ((y,z,x) -> canonical text);
+    // write() parses them on the I/O thread.
+    std::vector<std::pair<std::tuple<int, int, int>, std::string>> m_blockEntityText;
+    // Generated entities (proto chunks only).
+    std::vector<::minecraft::world::IChunk::GeneratedEntity> m_entities;
+    std::vector<::minecraft::world::IChunk::StructureSpawnArea> m_spawnAreas;
 
-    // Structure data
+    // "structures": {starts:{...}, References:{...}}
     std::unique_ptr<nbt::CompoundTag> m_structureData;
-
-    // Upgrade data (for version upgrades)
-    std::unique_ptr<nbt::CompoundTag> m_upgradeData;
-
-    // Post-processing sections (for deferred processing)
-    std::vector<std::vector<int16_t>> m_postProcessingSections;
-
-    // Blending data (for chunk borders)
-    std::unique_ptr<nbt::CompoundTag> m_blendingData;
-
-    // Below zero retrogen data (for cave generation below y=0)
-    std::unique_ptr<nbt::CompoundTag> m_belowZeroRetrogen;
-
-    // Carving mask
-    std::unique_ptr<std::vector<int64_t>> m_carvingMask;
-
-    // Helper methods
-    static void parseSections(
-        SerializableChunkData& data,
-        nbt::ListTag& sections,
-        int minY,
-        int height
-    );
-
-    static void parseHeightmaps(
-        SerializableChunkData& data,
-        nbt::CompoundTag& heightmaps
-    );
-
-    static void parseTicks(
-        SerializableChunkData& data,
-        nbt::CompoundTag& chunkData
-    );
-
-    void writeSections(nbt::CompoundTag& tag) const;
-    void writeHeightmaps(nbt::CompoundTag& tag) const;
-    void writeTicks(nbt::CompoundTag& tag) const;
 };
 
 /**
- * ChunkSerializer - Namespace for chunk serialization utilities
- * Reference: ChunkSerializer.java (merged functionality)
+ * Chunk data versions this port reads and writes.
  */
 namespace ChunkSerializer {
 
-/**
- * Current chunk data version
- * Reference: ChunkSerializer.java DATA_VERSION
- */
-constexpr int32_t DATA_VERSION = 3953;  // 1.21.1
-
-/**
- * Read a chunk from NBT, returning either ProtoChunk or LevelChunk
- */
-std::unique_ptr<ChunkAccess> read(
-    server::level::ServerLevel& level,
-    const ChunkPos& pos,
-    nbt::CompoundTag& tag
-);
-
-/**
- * Write a chunk to NBT
- */
-std::unique_ptr<nbt::CompoundTag> write(
-    server::level::ServerLevel& level,
-    ChunkAccess& chunk
-);
+// Minecraft 26.3-pre-2 (version.json world_version).
+constexpr int32_t DATA_VERSION = 5018;
+// BlockStateFieldNamesFix: Name/Properties -> id/properties.
+constexpr int32_t BLOCK_STATE_FIELD_NAMES_VERSION = 5006;
+// MergeTerrainChunkStatusFix: noise/surface/carvers -> terrain.
+constexpr int32_t MERGED_TERRAIN_STATUS_VERSION = 5013;
 
 } // namespace ChunkSerializer
 

@@ -1,7 +1,8 @@
 // File: src/common/entity/projectile/ThrowableProjectile.hpp
 //
 // MC net.minecraft.world.entity.projectile.ThrowableProjectile and the
-// throwableitemprojectile family: Snowball, ThrownEgg, ThrownSplashPotion.
+// throwableitemprojectile family: Snowball, ThrownEgg, ThrownEnderpearl and
+// the thrown potions (ThrownSplashPotion covers MC's splash and lingering).
 //
 // Physics is ThrowableProjectile.tick transcribed: gravity 0.03 (0.05 for a
 // potion), then drag 0.99 (0.8 in water), then the hit clip along the
@@ -10,6 +11,7 @@
 #pragma once
 
 #include "common/entity/projectile/Projectile.hpp"
+#include "common/entity/alchemy/Potions.hpp"
 
 namespace Game {
 
@@ -72,33 +74,56 @@ namespace Game {
         void OnHit(const HitResult& hit) override;
     };
 
-    // MC ThrownSplashPotion. The payload is a list of MobEffectInstances —
-    // MC's PotionContents reduced to what a potion actually delivers — and
-    // OnHit is onHitAsPotion: everything within the (4, 2, 4)-inflated box
-    // and inside 4 blocks takes scale = 1 - dist/4 of each effect,
-    // instantaneous ones through applyInstantenousEffect, durations scaled
-    // and dropped when the result would last under a second.
+    // MC AbstractThrownPotion + ThrownSplashPotion + ThrownLingeringPotion —
+    // ONE class here, because MC's two differ only in onHitAsPotion and the
+    // carried item already says which one this is (ThrowableItemProjectile.
+    // getItem: a splash_potion or a lingering_potion stack). The engine has
+    // no lingering_potion entity type on the wire, so a thrown lingering
+    // potion rides as EntityTypeId::SplashPotion (the ZephyrSnowball-as-
+    // Snowball precedent) and its SAVE keeps it lingering: the "Item" compound
+    // is written, exactly as MC writes it, and the item decides.
     //
-    // Defaults to HARMING (instant damage, amplifier 0) — the witch's
-    // baseline throw and what a /summon'd splash potion carries here.
+    // OnHit is AbstractThrownPotion.onHit: the water-potion extras
+    // (affectEntitiesAround: 1.0 indirect-magic to water-sensitive mobs,
+    // extinguish burning ones, rehydrate axolotls; onHitBlock: douse fire,
+    // lit candles and lit campfires), then onHitAsPotion when the contents
+    // have effects —
+    //   splash:    everything in the potion box inflated by (4, 2, 4) and
+    //              within 4 blocks (AABB-to-AABB) takes scale = 1 - dist/4:
+    //              instantaneous effects through applyInstantaneousEffect at
+    //              that scale, the rest with duration scale * d * the stack's
+    //              POTION_DURATION_SCALE + 0.5, dropped under a second;
+    //   lingering: an AreaEffectCloud (radius 3, radiusOnUse -0.5, 600
+    //              ticks, wait 10, shrinking to nothing over its life) that
+    //              carries the stack's contents and duration scale (0.25).
+    // Not modelled: the splash particle / sound level events (2002 / 2007 /
+    // 1053 / 1054 — no particle system for them).
     class ThrownSplashPotion : public ThrowableProjectile {
     public:
-        explicit ThrownSplashPotion(EntityLevel* level)
-            : ThrowableProjectile(EntityTypeId::SplashPotion, level) {
-            m_effects.emplace_back(MobEffectId::InstantDamage, 1);
-        }
+        explicit ThrownSplashPotion(EntityLevel* level);
 
-        // Replace the payload (MC: the ItemStack's PotionContents).
-        void SetEffects(std::vector<MobEffectInstance> effects) {
-            m_effects = std::move(effects);
-        }
+        // MC ThrowableItemProjectile.setItem / getItem. The stack is copied
+        // at count 1; its POTION_CONTENTS and POTION_DURATION_SCALE are the
+        // payload.
+        void SetItem(const ItemStack& stack);
+        const ItemStack& GetItem() const { return m_item; }
+
+        // ThrownLingeringPotion vs ThrownSplashPotion.
+        bool IsLingering() const;
 
     protected:
         double GetDefaultGravity() const override { return 0.05; }  // AbstractThrownPotion
+        void OnHitBlock(const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
 
     private:
-        std::vector<MobEffectInstance> m_effects;
+        void AffectEntitiesAround(const PotionContents& potion);
+        void OnHitAsSplash(const PotionContents& contents, float durationScale,
+                           const HitResult& hit);
+        void OnHitAsLingering(const HitResult& hit);
+        void DouseFire(const glm::ivec3& pos);
+
+        ItemStack m_item;
     };
 
 } // namespace Game

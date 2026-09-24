@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "minecraft:block/locked_sentry_stone"
+    }
+  }
+}

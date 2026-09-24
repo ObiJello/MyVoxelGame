@@ -8,6 +8,7 @@
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 
 #include <cmath>
@@ -68,7 +69,7 @@ namespace Game {
         bool IsAlertableEntity(const Fox& fox, const LivingEntity& target) {
             if (target.GetType() == EntityTypeId::Fox) return false;
             if (IsStalkablePrey(target)) return true;
-            if (target.TypeInfo().category == MobCategory::Monster) return true;
+            if (IsMonsterCategory(target.TypeInfo().category)) return true;
             // TamableAnimal → !isTame; no taming exists, so always alertable.
             if (target.GetType() == EntityTypeId::Wolf
                 || target.GetType() == EntityTypeId::Cat
@@ -411,6 +412,14 @@ namespace Game {
         return !m_fox->IsSitting() && !m_fox->IsSleeping()
             && !m_fox->IsFoxCrouching() && !m_fox->IsFaceplanted()
             && MeleeAttackGoal::CanUse();
+    }
+
+    void FoxMeleeAttackGoal::CheckAndPerformAttack(LivingEntity& target) {
+        // MC Fox.FoxMeleeAttackGoal.checkAndPerformAttack.
+        if (!CanPerformAttack(target)) return;
+        ResetAttackCooldown();
+        m_mob->DoHurtTarget(target);
+        m_fox->PlaySound(SoundEvents::FOX_BITE, 1.0f, 1.0f);
     }
 
     void FoxMeleeAttackGoal::Start() {

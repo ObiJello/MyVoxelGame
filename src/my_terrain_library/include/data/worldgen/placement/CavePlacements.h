@@ -44,6 +44,8 @@ public:
     static const PlacedFeature* DRIPSTONE_CLUSTER;
     static const PlacedFeature* LARGE_DRIPSTONE;
     static const PlacedFeature* POINTED_DRIPSTONE;
+    static const PlacedFeature* SULFUR_SPIKE_CLUSTER;   // 26.3
+    static const PlacedFeature* SULFUR_SPIKE;           // 26.3
 
     // =========================================================================
     // UNDERWATER FEATURES - Reference: CavePlacements.java line 36
@@ -59,6 +61,7 @@ public:
     // LUSH CAVES - Reference: CavePlacements.java lines 38-44
     // =========================================================================
     static const PlacedFeature* ROOTED_AZALEA_TREE;
+    static const PlacedFeature* ROOTED_SULFUR_SPRING;   // 26.3
     static const PlacedFeature* CAVE_VINES;
     static const PlacedFeature* LUSH_CAVES_VEGETATION;
     static const PlacedFeature* LUSH_CAVES_CLAY;

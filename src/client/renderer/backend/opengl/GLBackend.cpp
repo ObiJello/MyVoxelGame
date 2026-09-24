@@ -7,6 +7,9 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
+#include <string>
 #include <cstdlib>
 
 #include "imgui.h"
@@ -94,6 +97,28 @@ namespace Render {
         // pass) when the uniform plane is vec4(0), so this has no effect
         // outside the portal pass.
         glEnable(GL_CLIP_DISTANCE0);
+
+        // Captured once for the F3 overlay (glGetString is a driver round trip).
+        {
+            auto str = [](GLenum e) { const GLubyte* v = glGetString(e); return v ? std::string(reinterpret_cast<const char*>(v)) : std::string(); };
+            m_deviceInfo.vendorName  = str(GL_VENDOR);
+            m_deviceInfo.name        = str(GL_RENDERER);
+            m_deviceInfo.driverInfo  = str(GL_VERSION);
+            m_deviceInfo.backendName = GetName();
+            // GL has no device-class query; Apple's integrated parts and every
+            // software renderer announce themselves in the renderer string.
+            std::string lower = m_deviceInfo.name;
+            for (char& c : lower) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+            if (lower.find("llvmpipe") != std::string::npos || lower.find("software") != std::string::npos ||
+                lower.find("swiftshader") != std::string::npos) {
+                m_deviceInfo.type = GpuDeviceInfo::Type::Cpu;
+            } else if (lower.find("apple m") != std::string::npos || lower.find("intel") != std::string::npos ||
+                       lower.find("iris") != std::string::npos || lower.find("uhd") != std::string::npos) {
+                m_deviceInfo.type = GpuDeviceInfo::Type::Integrated;
+            } else if (!lower.empty()) {
+                m_deviceInfo.type = GpuDeviceInfo::Type::Discrete;
+            }
+        }
 
         m_stateInitialized = true;
         Log::Info("GLBackend: Initialized successfully");
@@ -617,7 +642,7 @@ namespace Render {
         }
 
         uint32_t handle = AllocHandle();
-        m_shaders[handle] = {program, {}};
+        m_shaders[handle] = {program, {}, vertexSource, fragmentSource};
         m_memStats.shaderCount++;
         return handle;
     }
@@ -639,12 +664,115 @@ namespace Render {
     }
 
     void GLBackend::BindShader(ShaderHandle handle) {
-        if (handle == m_boundShader) return;
-        auto it = m_shaders.find(handle);
+        if (!m_overrideMode) {
+            if (handle == m_boundShader) return;
+            auto it = m_shaders.find(handle);
+            if (it != m_shaders.end()) {
+                glUseProgram(it->second.programId);
+                m_boundShader = handle;
+            }
+            return;
+        }
+        // Override mode: the pack's program and its render target, or the
+        // engine's program into the default target.
+        RenderTargetHandle target = m_overrideDefaultTarget;
+        ShaderHandle real = handle;
+        auto ov = m_shaderOverrides.find(handle);
+        if (ov != m_shaderOverrides.end()) {
+            if (ov->second.shader != INVALID_SHADER) real = ov->second.shader;
+            if (ov->second.target != INVALID_RENDER_TARGET) target = ov->second.target;
+        }
+        auto it = m_shaders.find(real);
         if (it != m_shaders.end()) {
             glUseProgram(it->second.programId);
             m_boundShader = handle;
         }
+        if (target != INVALID_RENDER_TARGET) BindRenderTarget(target);
+    }
+
+    void GLBackend::SetShaderOverrideMode(bool on, RenderTargetHandle defaultTarget) {
+        m_overrideMode = on;
+        m_overrideDefaultTarget = on ? defaultTarget : INVALID_RENDER_TARGET;
+        m_boundShader = INVALID_SHADER;   // force the next bind through
+    }
+
+    void GLBackend::SetShaderOverride(ShaderHandle engine, ShaderHandle pack, RenderTargetHandle target) {
+        if (engine == INVALID_SHADER) return;
+        if (pack == INVALID_SHADER && target == INVALID_RENDER_TARGET) { m_shaderOverrides.erase(engine); return; }
+        m_shaderOverrides[engine] = {pack, target};
+    }
+
+    void GLBackend::ClearShaderOverrides() {
+        m_shaderOverrides.clear();
+        m_overrideMode = false;
+        m_overrideDefaultTarget = INVALID_RENDER_TARGET;
+    }
+
+    void GLBackend::CheckErrors(const char* where) {
+        static std::unordered_map<std::string, bool> s_seen;
+        for (GLenum err = glGetError(); err != GL_NO_ERROR; err = glGetError()) {
+            const std::string key = std::string(where) + "#" + std::to_string(err);
+            if (s_seen.emplace(key, true).second) {
+                const char* name = err == GL_INVALID_ENUM ? "INVALID_ENUM" : err == GL_INVALID_VALUE ? "INVALID_VALUE"
+                                 : err == GL_INVALID_OPERATION ? "INVALID_OPERATION"
+                                 : err == GL_INVALID_FRAMEBUFFER_OPERATION ? "INVALID_FRAMEBUFFER_OPERATION"
+                                 : err == GL_OUT_OF_MEMORY ? "OUT_OF_MEMORY" : "?";
+                Log::Error("GLBackend: GL error %s (0x%x) at %s", name, err, where);
+            }
+        }
+    }
+
+    bool GLBackend::ReadDepthPixel(RenderTargetHandle rt, int x, int y, float& out) {
+        auto it = m_renderTargets.find(rt);
+        if (it == m_renderTargets.end()) return false;
+        GLint bound = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, it->second.fbo);
+        float depth = -1.0f;
+        glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(bound));
+        out = depth;
+        return true;
+    }
+
+    std::string GLBackend::DebugStateSummary() {
+        GLint vp[4] = {0, 0, 0, 0}, sc[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_VIEWPORT, vp);
+        glGetIntegerv(GL_SCISSOR_BOX, sc);
+        GLboolean mask[4] = {0, 0, 0, 0};
+        glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+        GLint drawFbo = 0, readFbo = 0, program = 0, vao = 0, drawBuffer = 0, stencilFunc = 0, stencilRef = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+        glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
+        glGetIntegerv(GL_STENCIL_FUNC, &stencilFunc);
+        glGetIntegerv(GL_STENCIL_REF, &stencilRef);
+        GLint polyMode[2] = {0, 0};
+        glGetIntegerv(GL_POLYGON_MODE, polyMode);
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+                      "viewport %d,%d %dx%d | scissor %s %d,%d %dx%d | colormask %d%d%d%d | depth %s mask %d | stencil %s func 0x%x ref %d | "
+                      "cull %s | blend %s | rasterDiscard %s | polygon 0x%x | fbo draw %d read %d drawbuffer 0x%x | program %d vao %d",
+                      vp[0], vp[1], vp[2], vp[3],
+                      glIsEnabled(GL_SCISSOR_TEST) ? "on" : "off", sc[0], sc[1], sc[2], sc[3],
+                      mask[0], mask[1], mask[2], mask[3],
+                      glIsEnabled(GL_DEPTH_TEST) ? "on" : "off", [] { GLboolean m = 0; glGetBooleanv(GL_DEPTH_WRITEMASK, &m); return static_cast<int>(m); }(),
+                      glIsEnabled(GL_STENCIL_TEST) ? "on" : "off", stencilFunc, stencilRef,
+                      glIsEnabled(GL_CULL_FACE) ? "on" : "off", glIsEnabled(GL_BLEND) ? "on" : "off",
+                      glIsEnabled(GL_RASTERIZER_DISCARD) ? "on" : "off", polyMode[0],
+                      drawFbo, readFbo, drawBuffer, program, vao);
+        return buf;
+    }
+
+    std::vector<ShaderHandle> GLBackend::FindShadersBySource(
+        const std::function<bool(const std::string&, const std::string&)>& match) {
+        std::vector<ShaderHandle> out;
+        for (const auto& [handle, info] : m_shaders) {
+            if (match(info.vertexSource, info.fragmentSource)) out.push_back(handle);
+        }
+        return out;
     }
 
     GLint GLBackend::GLShaderInfo::GetUniform(const std::string& name) const {
@@ -658,7 +786,7 @@ namespace Render {
 
     void GLBackend::SetUniformMat4(ShaderHandle handle, const std::string& name,
                                    const glm::mat4& value) {
-        auto it = m_shaders.find(handle);
+        auto it = m_shaders.find(ResolveShader(handle));
         if (it == m_shaders.end()) return;
         if (it->second.programId == 0) {
             Log::Error("GLBackend: SetUniformMat4 called with shader handle %u but programId is 0", handle);
@@ -670,7 +798,7 @@ namespace Render {
 
     void GLBackend::SetUniformVec4(ShaderHandle handle, const std::string& name,
                                    const glm::vec4& value) {
-        auto it = m_shaders.find(handle);
+        auto it = m_shaders.find(ResolveShader(handle));
         if (it == m_shaders.end()) return;
         GLint loc = it->second.GetUniform(name);
         if (loc != -1) glUniform4fv(loc, 1, glm::value_ptr(value));
@@ -678,7 +806,7 @@ namespace Render {
 
     void GLBackend::SetUniformVec3(ShaderHandle handle, const std::string& name,
                                    const glm::vec3& value) {
-        auto it = m_shaders.find(handle);
+        auto it = m_shaders.find(ResolveShader(handle));
         if (it == m_shaders.end()) return;
         GLint loc = it->second.GetUniform(name);
         if (loc != -1) glUniform3fv(loc, 1, glm::value_ptr(value));
@@ -686,24 +814,52 @@ namespace Render {
 
     void GLBackend::SetUniformVec2(ShaderHandle handle, const std::string& name,
                                    const glm::vec2& value) {
-        auto it = m_shaders.find(handle);
+        auto it = m_shaders.find(ResolveShader(handle));
         if (it == m_shaders.end()) return;
         GLint loc = it->second.GetUniform(name);
         if (loc != -1) glUniform2fv(loc, 1, glm::value_ptr(value));
     }
 
     void GLBackend::SetUniformFloat(ShaderHandle handle, const std::string& name, float value) {
-        auto it = m_shaders.find(handle);
+        auto it = m_shaders.find(ResolveShader(handle));
         if (it == m_shaders.end()) return;
         GLint loc = it->second.GetUniform(name);
         if (loc != -1) glUniform1f(loc, value);
     }
 
     void GLBackend::SetUniformInt(ShaderHandle handle, const std::string& name, int value) {
-        auto it = m_shaders.find(handle);
+        auto it = m_shaders.find(ResolveShader(handle));
         if (it == m_shaders.end()) return;
         GLint loc = it->second.GetUniform(name);
         if (loc != -1) glUniform1i(loc, value);
+    }
+
+    void GLBackend::BlitRenderTargetDepth(RenderTargetHandle src, RenderTargetHandle dst) {
+        auto s = m_renderTargets.find(src);
+        auto d = m_renderTargets.find(dst);
+        if (s == m_renderTargets.end() || d == m_renderTargets.end()) return;
+        GLint bound = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, s->second.fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->second.fbo);
+        glBlitFramebuffer(0, 0, s->second.width, s->second.height,
+                          0, 0, d->second.width, d->second.height,
+                          GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(bound));
+    }
+
+    void GLBackend::SetUniformIVec2(ShaderHandle handle, const std::string& name, const glm::ivec2& value) {
+        auto it = m_shaders.find(ResolveShader(handle));
+        if (it == m_shaders.end()) return;
+        GLint loc = it->second.GetUniform(name);
+        if (loc != -1) glUniform2i(loc, value.x, value.y);
+    }
+
+    void GLBackend::SetUniformIVec3(ShaderHandle handle, const std::string& name, const glm::ivec3& value) {
+        auto it = m_shaders.find(ResolveShader(handle));
+        if (it == m_shaders.end()) return;
+        GLint loc = it->second.GetUniform(name);
+        if (loc != -1) glUniform3iv(loc, 1, glm::value_ptr(value));
     }
 
     // ========================================================================
@@ -792,6 +948,96 @@ namespace Render {
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
+    bool GLBackend::CopyFramebufferDepthToTexture(TextureHandle dst) {
+        if (m_depthCopyBroken) return false;
+        auto it = m_textures.find(dst);
+        if (it == m_textures.end() || it->second.internalFormat != GL_DEPTH24_STENCIL8) return false;
+        // The default framebuffer only: its depth-stencil is D24S8 (the
+        // window hints ask for 24 + 8), the texture's exact format, so the
+        // copy is a straight transfer. An offscreen target (a shader pack's)
+        // has its own formats and size.
+        GLint readFbo = 0;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+        if (readFbo != 0) return false;
+
+        const bool check = !m_depthCopyChecked;
+        if (check) {
+            while (glGetError() != GL_NO_ERROR) {}   // only this copy's error counts
+        }
+        // With a DEPTH_STENCIL internal format glCopyTexSubImage2D reads the
+        // read framebuffer's depth and stencil, not its colour.
+        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, it->second.width, it->second.height);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (check) {
+            m_depthCopyChecked = true;
+            const GLenum err = glGetError();
+            if (err != GL_NO_ERROR) {
+                m_depthCopyBroken = true;
+                Log::Warning("GLBackend: depth framebuffer copy failed (0x%04X) — disabled for this session", err);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void GLBackend::UploadTextureRegionNow(TextureHandle handle, int level, int x, int y,
+                                           int width, int height, const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end() || !data) return;
+        // The level's storage must already exist (glTexImage2D declared it —
+        // CreateTexture2D for level 0, UploadTextureMipLevel for the rest).
+        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        glTexSubImage2D(GL_TEXTURE_2D, level, x, y, width, height,
+                        it->second.dataFormat, it->second.dataType, data);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    void GLBackend::SetTextureAnisotropy(TextureHandle handle, float maxAnisotropy) {
+        if (!GLAD_GL_EXT_texture_filter_anisotropic && !GLAD_GL_ARB_texture_filter_anisotropic) return;
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+        GLfloat deviceMax = 1.0f;
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &deviceMax);
+        const float value = std::clamp(maxAnisotropy, 1.0f, std::max(1.0f, static_cast<float>(deviceMax)));
+        glBindTexture(it->second.target, it->second.glId);
+        glTexParameterf(it->second.target, GL_TEXTURE_MAX_ANISOTROPY_EXT, value);
+        glBindTexture(it->second.target, 0);
+    }
+
+    bool GLBackend::RequestBackbufferReadback(int x, int y, int w, int h) {
+        if (w <= 0 || h <= 0) return false;
+        const size_t stride = static_cast<size_t>(w) * 4u;
+        std::vector<uint8_t> rows(stride * static_cast<size_t>(h));
+        // Whatever is being drawn to: the window, or a bound render target
+        // (a shader pack's scene, whose leave capture reads the same way).
+        GLint drawFbo = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(drawFbo));
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rows.data());
+        // GL hands rows back bottom-up; the contract is top-down.
+        m_readbackPixels.resize(rows.size());
+        for (int r = 0; r < h; ++r) {
+            std::memcpy(&m_readbackPixels[static_cast<size_t>(r) * stride],
+                        &rows[static_cast<size_t>(h - 1 - r) * stride], stride);
+        }
+        m_readbackW = w;
+        m_readbackH = h;
+        m_readbackReady = true;
+        return true;
+    }
+
+    bool GLBackend::TakeBackbufferReadback(std::vector<uint8_t>& outRgba, int& outW, int& outH) {
+        if (!m_readbackReady) return false;
+        outRgba.swap(m_readbackPixels);
+        m_readbackPixels.clear();
+        outW = m_readbackW;
+        outH = m_readbackH;
+        m_readbackReady = false;
+        return true;
+    }
+
     // ========================================================================
     // RENDER TARGETS (offscreen FBOs)
     // ========================================================================
@@ -855,9 +1101,65 @@ namespace Render {
         auto it = m_renderTargets.find(rt);
         if (it == m_renderTargets.end()) return;
         glDeleteFramebuffers(1, &it->second.fbo);
-        glDeleteRenderbuffers(1, &it->second.depthRBO);
-        DestroyTexture(it->second.colorTexture);
+        if (it->second.ownsTextures) {
+            if (it->second.depthRBO) glDeleteRenderbuffers(1, &it->second.depthRBO);
+            if (it->second.colorTexture != INVALID_TEXTURE) DestroyTexture(it->second.colorTexture);
+        }
         m_renderTargets.erase(it);
+    }
+
+    RenderTargetHandle GLBackend::CreateRenderTargetFromTextures(const TextureHandle* colors, int colorCount,
+                                                                 TextureHandle depth) {
+        if (colorCount < 0 || colorCount > 8 || (colorCount > 0 && !colors)) return INVALID_RENDER_TARGET;
+        if (colorCount == 0 && depth == INVALID_TEXTURE) return INVALID_RENDER_TARGET;
+        GLRenderTargetInfo info;
+        info.ownsTextures = false;
+        info.colorTexture = colorCount > 0 ? colors[0] : INVALID_TEXTURE;
+        if (colorCount == 0) {
+            auto dit = m_textures.find(depth);
+            if (dit == m_textures.end()) return INVALID_RENDER_TARGET;
+            info.width = dit->second.width;
+            info.height = dit->second.height;
+        }
+
+        glGenFramebuffers(1, &info.fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, info.fbo);
+        GLenum drawBuffers[8];
+        for (int i = 0; i < colorCount; ++i) {
+            auto it = m_textures.find(colors[i]);
+            if (it == m_textures.end()) {
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glDeleteFramebuffers(1, &info.fbo);
+                return INVALID_RENDER_TARGET;
+            }
+            if (i == 0) { info.width = it->second.width; info.height = it->second.height; info.colorFormat = TextureFormat::RGBA8; }
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i),
+                                   GL_TEXTURE_2D, it->second.glId, 0);
+            drawBuffers[i] = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i);
+        }
+        if (colorCount > 0) {
+            glDrawBuffers(colorCount, drawBuffers);
+        } else {
+            glDrawBuffer(GL_NONE);   // depth-only: a snapshot target
+            glReadBuffer(GL_NONE);
+        }
+        if (depth != INVALID_TEXTURE) {
+            auto dit = m_textures.find(depth);
+            if (dit != m_textures.end()) {
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, dit->second.glId, 0);
+            }
+        }
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            Log::Error("GLBackend: wrapped render target incomplete (status 0x%x, %d colour attachment(s), depth %s)",
+                       status, colorCount, depth != INVALID_TEXTURE ? "yes" : "no");
+            glDeleteFramebuffers(1, &info.fbo);
+            return INVALID_RENDER_TARGET;
+        }
+        const uint32_t handle = AllocHandle();
+        m_renderTargets[handle] = info;
+        return handle;
     }
 
     void GLBackend::BindRenderTarget(RenderTargetHandle rt) {
@@ -1235,7 +1537,7 @@ namespace Render {
         if (m_hasVertexAttribBinding) {
             glBindVertexBuffer(0, it->second.glId, 0, static_cast<GLsizei>(stride));
         } else {
-            // Packed 16-byte TerrainVertex — keep in step with
+            // Packed 20-byte TerrainVertex — keep in step with
             // SetupBlockVertexFormat and GetTerrainVertexLayout.
             glBindBuffer(GL_ARRAY_BUFFER, it->second.glId);
             glVertexAttribPointer(0, 4, GL_UNSIGNED_SHORT, GL_TRUE,
@@ -1247,6 +1549,9 @@ namespace Render {
             glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE,
                                   static_cast<GLsizei>(stride),
                                   reinterpret_cast<void*>(static_cast<uintptr_t>(12)));
+            glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE,
+                                  static_cast<GLsizei>(stride),
+                                  reinterpret_cast<void*>(static_cast<uintptr_t>(16)));
         }
     }
 
@@ -1319,21 +1624,25 @@ namespace Render {
             //
             // This shared VAO serves ONLY the chunk-terrain mega-buffers (bound
             // via BindBlockVertexFormat from ClientMeshManager), so it carries
-            // the packed 16-byte TERRAIN format (Render::TerrainVertex /
+            // the packed 20-byte TERRAIN format (Render::TerrainVertex /
             // GetTerrainVertexLayout): px py pz slot as 4 unorm16, u v as 2
-            // unorm16, rgba8. All normalized — the shader recovers the
-            // integers (value * 65535), so no I-format attributes are needed.
+            // unorm16, rgba8 colour, rgba8 light. All normalized — the shader
+            // recovers the integers (value * 65535 / * 255), so no I-format
+            // attributes are needed.
             glVertexAttribFormat(0, 4, GL_UNSIGNED_SHORT, GL_TRUE, 0);
             glVertexAttribBinding(0, 0);
             glVertexAttribFormat(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, 8);
             glVertexAttribBinding(1, 0);
             glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 12);
             glVertexAttribBinding(2, 0);
+            glVertexAttribFormat(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, 16);
+            glVertexAttribBinding(3, 0);
         }
 
         glEnableVertexAttribArray(0);
         glEnableVertexAttribArray(1);
         glEnableVertexAttribArray(2);
+        glEnableVertexAttribArray(3);
 
         glBindVertexArray(0);
     }

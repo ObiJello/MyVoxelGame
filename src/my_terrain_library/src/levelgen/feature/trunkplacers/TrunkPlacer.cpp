@@ -864,6 +864,70 @@ foliageplacers::FoliageAttachment CherryTrunkPlacer::generateBranch(
     }
 }
 
+// ============================================================================
+// PoplarTrunkPlacer
+// Reference: 26.3 PoplarTrunkPlacer.java
+// ============================================================================
+
+namespace {
+
+// Direction.allShuffled(random) (Util.shuffledCopy over DOWN, UP, NORTH,
+// SOUTH, WEST, EAST: for i = 6..2 swap(i - 1, nextInt(i))) with the
+// vertical faces dropped - PoplarTrunkPlacer.getShuffledBranchDirections.
+std::vector<core::Direction> shuffledBranchDirections(WorldgenRandom& random) {
+    core::Direction all[6] = {
+        core::Direction::DOWN, core::Direction::UP, core::Direction::NORTH,
+        core::Direction::SOUTH, core::Direction::WEST, core::Direction::EAST};
+    for (int i = 6; i > 1; --i) {
+        const int swapTo = random.nextInt(i);
+        std::swap(all[i - 1], all[swapTo]);
+    }
+    std::vector<core::Direction> horizontal;
+    horizontal.reserve(4);
+    for (core::Direction direction : all) {
+        if (direction != core::Direction::DOWN && direction != core::Direction::UP) {
+            horizontal.push_back(direction);
+        }
+    }
+    return horizontal;
+}
+
+} // namespace
+
+std::vector<foliageplacers::FoliageAttachment> PoplarTrunkPlacer::placeTrunk(
+    LevelReader& level,
+    TrunkSetter trunkSetter,
+    WorldgenRandom& random,
+    int treeHeight,
+    const core::BlockPos& origin,
+    std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+    std::shared_ptr<stateproviders::BlockStateProvider> dirtProvider,
+    bool forceDirt
+) {
+    // placeBelowTrunkBlock (SOIL_BENEATH_TREE, the same blocks as setDirtAt)
+    setDirtAt(level, trunkSetter, random, origin.below(), dirtProvider, forceDirt);
+    const int trunkHeightUpToFoliageBranches = treeHeight - m_trunkHeightAboveBranches->sample(random);
+
+    for (int y = 0; y < treeHeight; ++y) {
+        placeLog(level, trunkSetter, random, origin.above(y), trunkProvider);
+        // Drawn for every trunk block, used only at the branch height.
+        const std::vector<core::Direction> directions = shuffledBranchDirections(random);
+        if (trunkHeightUpToFoliageBranches - 1 == y) {
+            const int branches = m_branchAmount->sample(random);
+            for (int x = 0; x < branches; ++x) {
+                const core::Direction branchDirection = directions[static_cast<size_t>(x)];
+                placeLog(level, trunkSetter, random, origin.above(y).relative(branchDirection), trunkProvider,
+                         [branchDirection](BlockState* state) {
+                             return state->trySetValue(*world::level::block::RotatedPillarBlock::AXIS,
+                                                       core::getAxis(branchDirection));
+                         });
+            }
+        }
+    }
+
+    return {foliageplacers::FoliageAttachment(origin.above(trunkHeightUpToFoliageBranches), 0, false)};
+}
+
 } // namespace trunkplacers
 } // namespace feature
 } // namespace levelgen

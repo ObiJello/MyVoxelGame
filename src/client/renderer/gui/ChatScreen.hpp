@@ -22,6 +22,14 @@ namespace Render {
     void SetServerCommandNames(std::vector<std::string> names);
     const std::vector<std::string>& GetServerCommandNames();
 
+    // The player's current dimension's biome / structure ids and tags
+    // (WorldgenIdsS2C, sent on join and on every dimension change): what
+    // /locate completes, shown without namespaces. Full ids in.
+    void SetDimensionWorldgenIds(const std::vector<std::string>& biomes,
+                                 const std::vector<std::string>& structures,
+                                 const std::vector<std::string>& biomeTags,
+                                 const std::vector<std::string>& structureTags);
+
     class ChatScreen {
     public:
         static constexpr int MAX_MESSAGE_LENGTH = 256;
@@ -30,6 +38,9 @@ namespace Render {
         void Open(bool withSlash = false);
         void Close();
         bool IsOpen() const { return m_open; }
+        // MC ChatScreen(initial, isDraft, closeOnSubmit): the in-bed chat
+        // keeps the box open after Enter (InBedChatScreen passes false).
+        void SetCloseOnSubmit(bool close) { m_closeOnSubmit = close; }
 
         // Input handling
         void OnCharInput(unsigned int codepoint);
@@ -39,6 +50,12 @@ namespace Render {
         void InsertText(const std::string& text);
         // The current input line, for copy.
         const std::string& InputText() const { return m_inputText; }
+        // Replace the input line, caret at its end (/control's mirror
+        // adopts the controlled client's line when it opens).
+        void SetInputText(const std::string& text) {
+            m_inputText = text.substr(0, static_cast<size_t>(MAX_MESSAGE_LENGTH));
+            m_cursorPos = static_cast<int>(m_inputText.size());
+        }
         bool OnKeyDown(int glfwKey);  // Returns true if key was consumed
 
         // Update cursor blink
@@ -53,6 +70,7 @@ namespace Render {
     private:
         bool m_open = false;
         std::string m_inputText;
+        bool m_closeOnSubmit = true;
         std::string m_submittedMessage;
         int m_cursorPos = 0;          // Caret position in m_inputText (0..size())
         // MC EditBox.java line 408 uses real wall-clock millis, NOT frame deltas:

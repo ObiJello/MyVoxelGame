@@ -19,13 +19,20 @@ public:
         const levelgen::WorldGenLevel& level,
         const core::BlockPos& pos
     ) const override {
-        return mayPlaceOn(level.getBlockState(pos.below()));
+        return mayPlaceOn(level.getBlockState(pos.below()), level, pos.below());
     }
 
 protected:
+    // VegetationBlock.mayPlaceOn(state, level, pos): the level-aware form
+    // (seagrass tests the face below); plain plants only need the state.
+    virtual bool mayPlaceOn(BlockState* stateBelow, const levelgen::WorldGenLevel& /*level*/,
+                            const core::BlockPos& /*belowPos*/) const {
+        return mayPlaceOn(stateBelow);
+    }
+
     virtual bool mayPlaceOn(BlockState* stateBelow) const {
-        return minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:dirt") ||
-               (stateBelow && stateBelow->getIdentifier() == "minecraft:farmland");
+        // 26.3 VegetationBlock.mayPlaceOn: BlockTags.SUPPORTS_VEGETATION
+        return minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:supports_vegetation");
     }
 };
 

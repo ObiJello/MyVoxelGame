@@ -70,6 +70,16 @@ namespace Game::Anvil {
         bool WriteChunkNbt(DimensionId dim, RegionKind kind, Math::ChunkPos pos,
                            const std::vector<uint8_t>& payload, std::string& error);
 
+        // The terrain library's write (a proto chunk): like WriteChunkNbt for
+        // RegionKind::Chunks, but it leaves a chunk whose saved Status is
+        // FULL alone — that chunk is the game's (MC ChunkMap.save skips a
+        // proto whose position isExistingChunkFull). Check and write happen
+        // under one lock, so a FULL save can never be overwritten by a proto
+        // that raced it. `skipped` reports the refusal.
+        bool WriteProtoChunkNbt(DimensionId dim, Math::ChunkPos pos,
+                                const std::vector<uint8_t>& payload, bool& skipped,
+                                std::string& error);
+
         // Drop a chunk entirely — entities/*.mca needs this when a chunk's
         // entity list empties out.
         bool ClearChunk(DimensionId dim, RegionKind kind, Math::ChunkPos pos, std::string& error);
@@ -99,7 +109,11 @@ namespace Game::Anvil {
 
         bool Initialize() override;
         ChunkSaveResult SaveChunk(const Chunk& chunk) override;
+        // Serialises on the CALLER's thread (the chunk is live; the content
+        // lock is shared), compresses and writes on the IO thread — MC's split:
+        // copyOf on the main thread, encode + IO on a worker.
         std::future<ChunkSaveResult> SaveChunkAsync(const Chunk& chunk) override;
+        std::future<ChunkSaveResult> SaveChunkNowAsync(const Chunk& chunk) override;
         // Serialise + compress on the IO thread (see IChunkSaver). Measured
         // 2026-08-29: the caller-thread Encode cost ~0.9 ms per chunk, and a
         // far teleport evicts ~2,400 chunks in one tick — a 2.1 s server stall.
@@ -110,6 +124,14 @@ namespace Game::Anvil {
         // pending job still holds the chunk object, it is serialised here (on
         // the loader's thread) so the read sees exactly what the write will.
         bool TryReadPending(Math::ChunkPos pos, std::vector<uint8_t>& nbtOut, std::string& error);
+
+        // True while a save of this chunk is queued and not yet written. The
+        // terrain library skips its own (proto) write then: the game's FULL
+        // chunk is about to land and must win.
+        bool HasPendingWrite(Math::ChunkPos pos) const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_pending.find(pos) != m_pending.end();
+        }
         std::vector<ChunkSaveResult> SaveChunks(
             const std::vector<std::shared_ptr<const Chunk>>& chunks) override;
         void FlushAndJoin() override;
@@ -133,7 +155,12 @@ namespace Game::Anvil {
             // SaveEvictedAsync jobs: payload is empty and the IO thread
             // encodes this just before writing. Null for snapshot jobs.
             std::shared_ptr<const Chunk>         chunk;
+            // Snapshot jobs: `payload` is uncompressed NBT; the IO thread
+            // compresses it before writing.
+            bool                                 needsCompress = false;
         };
+
+        std::future<ChunkSaveResult> SaveResidentAsync(const Chunk& chunk, bool honourCooldown);
 
         // Snapshot + compress, on the CALLER's thread.
         bool Encode(const Chunk& chunk, std::vector<uint8_t>& out, std::string& error);

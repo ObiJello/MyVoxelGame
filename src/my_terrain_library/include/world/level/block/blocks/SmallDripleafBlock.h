@@ -68,7 +68,7 @@ private:
     ) const {
         if (minecraft::levelgen::blockpredicates::matchesBlockTagName(
                 stateBelow,
-                "minecraft:small_dripleaf_placeable"
+                "minecraft:supports_small_dripleaf"
             )) {
             return true;
         }

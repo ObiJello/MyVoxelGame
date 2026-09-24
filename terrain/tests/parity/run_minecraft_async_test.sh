@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MINECRAFT_DIR="$HOME/Library/Application Support/minecraft"
-VERSION="26.1-snapshot-1"
+VERSION="${MC_VERSION:-26.3-pre-2}"   # classpath comes from minecraft_classpath.txt (build script)
 MINECRAFT_JAR="$MINECRAFT_DIR/versions/$VERSION/$VERSION.jar"
 LIBRARIES_DIR="$MINECRAFT_DIR/libraries"
 
@@ -41,7 +41,9 @@ STRUCTURE_TRACE_OUTPUT=""
 TRACE_PLACEMENTS=""
 PLACEMENT_RADIUS=""
 DUMP_BLOCK_ENTITIES=""
+FEATURE_ORDER=""
 DIMENSION=""
+BLOCK_TRACE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -101,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             DIMENSION="--dimension $2"
             shift 2
             ;;
+        --block-trace)
+            BLOCK_TRACE="--block-trace $2"
+            shift 2
+            ;;
         --trace-structures)
             TRACE_STRUCTURES="--trace-structures"
             shift
@@ -120,6 +126,10 @@ while [[ $# -gt 0 ]]; do
         --dump-block-entities)
             DUMP_BLOCK_ENTITIES="--dump-block-entities"
             shift
+            ;;
+        --dump-feature-order)
+            FEATURE_ORDER="--dump-feature-order $2"
+            shift 2
             ;;
         --world-type)
             WORLD_TYPE="--world-type $2"
@@ -197,7 +207,7 @@ echo "Output: $OUTPUT"
 echo ""
 
 # Build Java arguments
-JAVA_ARGS="--phases $PHASES --output $OUTPUT $SEED $DUMP_FULL $VERBOSE $TRACE_FEATURES $TRACE_OUTPUT $TRACE_FEATURE_FILTER $TRACE_WATCH $TRACE_STRUCTURES $STRUCTURE_TRACE_OUTPUT $TRACE_PLACEMENTS $PLACEMENT_RADIUS $DUMP_BLOCK_ENTITIES $DIMENSION ${WORLD_TYPE:-} ${FLAT_PRESET:-} ${SINGLE_BIOME:-}"
+JAVA_ARGS="--phases $PHASES --output $OUTPUT $SEED $DUMP_FULL $VERBOSE $TRACE_FEATURES $TRACE_OUTPUT $TRACE_FEATURE_FILTER $TRACE_WATCH $TRACE_STRUCTURES $STRUCTURE_TRACE_OUTPUT $TRACE_PLACEMENTS $PLACEMENT_RADIUS $DUMP_BLOCK_ENTITIES $FEATURE_ORDER $DIMENSION $BLOCK_TRACE ${WORLD_TYPE:-} ${FLAT_PRESET:-} ${SINGLE_BIOME:-}"
 if [ -n "$SINGLE_MODE" ]; then
     JAVA_ARGS="$JAVA_ARGS --single $SINGLE_X $SINGLE_Z"
 else

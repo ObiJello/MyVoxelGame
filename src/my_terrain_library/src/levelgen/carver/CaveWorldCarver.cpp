@@ -17,7 +17,7 @@ bool CaveWorldCarver::carve(
     ::world::IChunk* chunk,
     std::function<void*(const core::BlockPos&)> biomeGetter,
     XoroshiroRandomSource& random,
-    Aquifer* aquifer,
+    density::Aquifer* aquifer,
     const ::world::ChunkPos& sourceChunkPos,
     CarvingMask& mask
 ) {
@@ -94,7 +94,7 @@ void CaveWorldCarver::createRoom(
     const CaveCarverConfiguration& configuration,
     ::world::IChunk* chunk,
     std::function<void*(const core::BlockPos&)> biomeGetter,
-    Aquifer* aquifer,
+    density::Aquifer* aquifer,
     double x, double y, double z,
     float thickness,
     double yScale,
@@ -119,7 +119,7 @@ void CaveWorldCarver::createTunnel(
     ::world::IChunk* chunk,
     std::function<void*(const core::BlockPos&)> biomeGetter,
     int64_t tunnelSeed,
-    Aquifer* aquifer,
+    density::Aquifer* aquifer,
     double x, double y, double z,
     double horizontalRadiusMultiplier,
     double verticalRadiusMultiplier,
@@ -247,7 +247,7 @@ bool CaveWorldCarver::carve(
     ::world::IChunk* chunk,
     std::function<void*(const core::BlockPos&)> biomeGetter,
     LegacyRandomSource& random,
-    Aquifer* aquifer,
+    density::Aquifer* aquifer,
     const ::world::ChunkPos& sourceChunkPos,
     CarvingMask& mask
 ) {
@@ -343,7 +343,7 @@ void CaveWorldCarver::createTunnelLegacy(
     ::world::IChunk* chunk,
     std::function<void*(const core::BlockPos&)> biomeGetter,
     int64_t tunnelSeed,
-    Aquifer* aquifer,
+    density::Aquifer* aquifer,
     double x, double y, double z,
     double horizontalRadiusMultiplier,
     double verticalRadiusMultiplier,

@@ -83,9 +83,13 @@ void collectJigsawStates(nbt::ListTag* palette,
                          std::unordered_map<int, std::pair<int, int>>& out) {
     for (size_t i = 0; i < palette->size(); ++i) {
         auto* entry = static_cast<nbt::CompoundTag*>(palette->get(i));
-        if (entry->getStringOr("Name", "") != "minecraft:jigsaw") continue;
+        // 26.3 block-state keys are id / properties (26.1: Name / Properties)
+        const std::string name = entry->contains("id") ? entry->getStringOr("id", "")
+                                                       : entry->getStringOr("Name", "");
+        if (name != "minecraft:jigsaw") continue;
         int front = D_NORTH, top = D_UP;
-        nbt::CompoundTag* props = entry->getCompoundPtr("Properties");
+        nbt::CompoundTag* props = entry->getCompoundPtr("properties");
+        if (props == nullptr) props = entry->getCompoundPtr("Properties");
         if (props != nullptr) {
             std::string orientation = props->getStringOr("orientation", "");
             if (!orientation.empty()) parseOrientation(orientation, front, top);

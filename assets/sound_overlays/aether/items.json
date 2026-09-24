@@ -1,0 +1,14 @@
+{
+  "item.armor.equip_gravitite": {
+    "sounds": [
+      { "name": "item.armor.equip_netherite", "type": "event", "pitch": 1.2 }
+    ],
+    "subtitle": "subtitles.item.armor.equip"
+  },
+  "item.armor.equip_zanite": {
+    "sounds": [
+      { "name": "item.armor.equip_diamond", "type": "event", "pitch": 1.1 }
+    ],
+    "subtitle": "subtitles.item.armor.equip"
+  }
+}

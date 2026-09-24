@@ -53,6 +53,11 @@ namespace Game {
 
         virtual bool IsSneaking() const = 0;
 
+        // MC Player.getPlainTextName — the name a command source built from
+        // this player answers "@s" / "@p" with (a book resolved as it is put
+        // on a lectern). Empty for an adapter with no name behind it.
+        virtual std::string getPlainTextName() const { return {}; }
+
         // MC Player.displayClientMessage(component, actionBar). Only the
         // server can actually send one; the client's adapter is a no-op so
         // prediction stays silent instead of double-printing.
@@ -115,6 +120,39 @@ namespace Game {
             (void)pos;
             (void)hand;
         }
+
+        // MC AbstractBedBlock.useWithoutItem → player.startSleepInBed (or, for
+        // a bed in a dimension whose BedRule destroys it, BedBlock
+        // .destroyOnUse's explosion). `headPos` is always the HEAD cell.
+        //
+        // Same request/perform split as the two above: whether you may sleep
+        // is a chain of server-only checks (range, obstruction, daylight,
+        // monsters within 8 blocks), the answer goes out as an action-bar
+        // message, and the blast needs the level. The client no-ops; what it
+        // gets from the shared dispatch is the consumed click.
+        virtual void UseBed(const glm::ivec3& headPos, bool destroyOnUse) {
+            (void)headPos;
+            (void)destroyOnUse;
+        }
+
+        // MC SignBlock.useWithoutItem → openTextEdit: the player asked to edit
+        // the sign at `pos` (the face is worked out from where they stand).
+        // Server: records the editor and sends OpenSignEditorS2C, unless the
+        // sign is waxed or someone else is editing it. Client: no-op.
+        virtual void OpenSignEditor(const glm::ivec3& pos) { (void)pos; }
+
+        // MC SignBlock.useItemOn with a SignApplicator — dye, ink sac, glow
+        // ink sac, honeycomb — held in `hand`. The block entity is the
+        // server's to change; the client only learns the click was taken.
+        virtual void ApplySignItem(const glm::ivec3& pos, uint32_t hand) { (void)pos; (void)hand; }
+
+        // MC Player.openItemGui(stack, hand) — what the two book items' `use`
+        // calls. Each side answers the half MC gives it:
+        //   server (ServerPlayer.openItemGui): a WRITTEN book in `hand` is
+        //     resolved and the client told to show it (OpenBookS2C);
+        //   client (LocalPlayer.openItemGui): a WRITABLE book opens the
+        //     book-and-quill editor straight away.
+        virtual void OpenItemGui(ItemStack& stack, uint32_t hand) { (void)stack; (void)hand; }
     };
 
 } // namespace Game

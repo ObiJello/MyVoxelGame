@@ -59,26 +59,11 @@ namespace Client {
         // the time a box reaches this test its record is one the eye is in
         // front of, so no per-box side test is needed here.
         // The WHOLE box must fit inside the opening in the plane, like a
-        // body fitting through a hole: a box hanging out past the opening's
-        // side would walk into the wall block's side face, and one a block
-        // too high would slip through a hole it cannot fit. The opening is
-        // the gun's full 1×2 for a gun portal (its oval is the picture, the
-        // two wall cells are the hole), the outline for anything else.
-        const bool gun = portal.kind == Game::Immersive::PortalKind::PortalGun;
-        const double hw = gun ? 0.5 : portal.HalfWidth();
-        const double hh = gun ? 1.0 : portal.HalfHeight();
-        constexpr double kFitSlack = 0.08;
-        double uMin = 1e300, uMax = -1e300, vMin = 1e300, vMax = -1e300;
-        for (int i = 0; i < 8; ++i) {
-            const glm::dvec3 corner((i & 1) ? box.max.x : box.min.x,
-                                    (i & 2) ? box.max.y : box.min.y,
-                                    (i & 4) ? box.max.z : box.min.z);
-            const glm::dvec3 local = portal.WorldToLocal(corner);
-            uMin = std::min(uMin, local.x); uMax = std::max(uMax, local.x);
-            vMin = std::min(vMin, local.y); vMax = std::max(vMax, local.y);
-        }
-        return uMin >= -hw - kFitSlack && uMax <= hw + kFitSlack &&
-               vMin >= -hh - kFitSlack && vMax <= hh + kFitSlack;
+        // body fitting through a hole (Portal::BoxFitsOpening — the same
+        // test the server makes for a mob, so what a mob can walk through
+        // is exactly what the player can).
+        return portal.BoxFitsOpening(glm::dvec3(box.min), glm::dvec3(box.max),
+                                     Game::Immersive::kFitSlack);
     }
 
     bool ImmersivePortalCollision::CellBehind(const Portal& portal, int x, int y, int z, double maxDepth) {
@@ -170,8 +155,36 @@ namespace Client {
             // rule (unloaded = open): their far side is loaded long before
             // anyone can reach the surface.
             if (p.Has(PortalFlag::Global) && !level->Blocks()->IsChunkLoaded(fx >> 4, fz >> 4)) return true;
-            const Game::BlockID id = level->Blocks()->GetBlock(fx, fy, fz);
-            if (Game::BlockRegistry::HasCollision(id)) return true;
+            const Game::BlockState farState = level->Blocks()->GetBlockState(fx, fy, fz);
+            if (!Game::BlockRegistry::HasCollision(farState.Block())) continue;
+
+            // The block's REAL collision shape, not its whole cell. "Has
+            // collision" used to be the answer, which made every far-side
+            // block a full cube: an open door (a thin slab against one
+            // jamb), a fence post, a slab all barred the doorway from this
+            // side while being walkable from the other. The body box goes
+            // through the portal — its eight corners, re-boxed, which is
+            // exact for a same-orientation pair and a conservative hull for
+            // a rotated one — and is tested against the shape's boxes at
+            // the far cell.
+            Game::AABB farBox;
+            farBox.min = glm::vec3( 1e30f);
+            farBox.max = glm::vec3(-1e30f);
+            for (int corner = 0; corner < 8; ++corner) {
+                const glm::dvec3 c((corner & 1) ? box.max.x : box.min.x,
+                                   (corner & 2) ? box.max.y : box.min.y,
+                                   (corner & 4) ? box.max.z : box.min.z);
+                const glm::dvec3 t = p.TransformPoint(c);
+                farBox.min = glm::min(farBox.min, glm::vec3(t));
+                farBox.max = glm::max(farBox.max, glm::vec3(t));
+            }
+            const auto shapes = Game::BlockRegistry::GetBlockCollisionShapeSet(farState);
+            for (uint8_t i = 0; i < shapes.count; ++i) {
+                Game::AABB cell;
+                cell.min = glm::vec3(fx, fy, fz) + shapes.boxes[i].min;
+                cell.max = glm::vec3(fx, fy, fz) + shapes.boxes[i].max;
+                if (farBox.Intersects(cell)) return true;
+            }
         }
         return false;
     }

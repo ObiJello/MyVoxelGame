@@ -16,6 +16,8 @@
 namespace minecraft {
 namespace random {
 
+class AnyPositionalRandomFactory;
+
 class AnyRandomSource {
 public:
     explicit AnyRandomSource(XoroshiroRandomSource source)
@@ -38,6 +40,17 @@ public:
     bool nextBoolean() {
         return m_legacy ? m_legacySource.nextBoolean() : m_xoroshiro.nextBoolean();
     }
+    // RandomSource.consumeCount: Legacy uses the interface default (nextInt()
+    // per round), Xoroshiro its override (a generator nextLong() per round).
+    void consumeCount(int32_t rounds) {
+        if (m_legacy) {
+            m_legacySource.consumeCount(rounds);
+        } else {
+            m_xoroshiro.consumeCount(rounds);
+        }
+    }
+    // RandomSource.forkPositional (defined below AnyPositionalRandomFactory).
+    AnyPositionalRandomFactory forkPositional();
 
     bool isLegacy() const { return m_legacy; }
     XoroshiroRandomSource& xoroshiro() { return m_xoroshiro; }
@@ -74,6 +87,11 @@ private:
     mutable XoroshiroPositionalRandomFactory m_xoroshiro;
     LegacyPositionalRandomFactory m_legacyFactory;
 };
+
+inline AnyPositionalRandomFactory AnyRandomSource::forkPositional() {
+    return m_legacy ? AnyPositionalRandomFactory(m_legacySource.forkPositional())
+                    : AnyPositionalRandomFactory(m_xoroshiro.forkPositional());
+}
 
 } // namespace random
 } // namespace minecraft

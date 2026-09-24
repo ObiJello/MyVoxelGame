@@ -1,4 +1,5 @@
 #include "world/level/chunk/storage/IOWorker.h"
+#include <cstdio>
 
 // Reference: net/minecraft/world/level/chunk/storage/IOWorker.java
 
@@ -10,7 +11,12 @@ namespace storage {
 
 // Reference: IOWorker.java constructor lines 40-43
 IOWorker::IOWorker(const RegionStorageInfo& info, const std::string& folder, bool sync)
-    : m_storage(info, folder, sync)
+    : IOWorker(std::make_shared<RegionFileStorage>(info, folder, sync))
+{
+}
+
+IOWorker::IOWorker(std::shared_ptr<ChunkStorageBackend> storage)
+    : m_storage(std::move(storage))
 {
     // Start worker thread
     m_workerThread = std::thread([this]() {
@@ -162,7 +168,7 @@ void IOWorker::processPendingWrite(const ChunkPos& pos) {
 
     // Write to storage (outside lock)
     try {
-        m_storage.write(pos, data.get());
+        m_storage->write(pos, data.get());
         if (future) {
             future->complete();
         }
@@ -193,7 +199,7 @@ void IOWorker::processAllPendingWrites() {
         }
 
         try {
-            m_storage.write(pos, data.get());
+            m_storage->write(pos, data.get());
             if (pair.second.result) {
                 pair.second.result->complete();
             }
@@ -235,15 +241,22 @@ IOWorker::loadAsync(const ChunkPos& pos)
     // Submit async load task
     ChunkPos posCopy = pos;
     submitTask([this, posCopy, future]() {
+        std::unique_ptr<nbt::CompoundTag> data;
         try {
-            auto data = m_storage.read(posCopy);
-            if (data) {
-                future->complete(std::optional<std::unique_ptr<nbt::CompoundTag>>(std::move(data)));
-            } else {
-                future->complete(std::nullopt);
-            }
-        } catch (...) {
-            future->completeExceptionally(std::current_exception());
+            data = m_storage->read(posCopy);
+        } catch (const std::exception& e) {
+            // Reference: ChunkMap.handleChunkLoadFailure - MC logs and
+            // generates the chunk anew. The position is remembered so the
+            // library never saves over data it could not read.
+            std::fprintf(stderr, "[IOWorker] chunk (%d,%d) could not be read: %s\n",
+                         posCopy.x(), posCopy.z(), e.what());
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_unreadable.insert(posCopy.toLong());
+        }
+        if (data) {
+            future->complete(std::optional<std::unique_ptr<nbt::CompoundTag>>(std::move(data)));
+        } else {
+            future->complete(std::nullopt);
         }
     });
 
@@ -269,7 +282,17 @@ std::unique_ptr<nbt::CompoundTag> IOWorker::load(const ChunkPos& pos) {
     }
 
     // Read directly from storage
-    return m_storage.read(pos);
+    return m_storage->read(pos);
+}
+
+bool IOWorker::isUnreadable(const ChunkPos& pos) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_unreadable.count(pos.toLong()) != 0;
+}
+
+void IOWorker::markUnreadable(const ChunkPos& pos) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_unreadable.insert(pos.toLong());
 }
 
 bool IOWorker::hasChunk(const ChunkPos& pos) {
@@ -282,7 +305,7 @@ bool IOWorker::hasChunk(const ChunkPos& pos) {
         }
     }
 
-    return m_storage.hasChunk(pos);
+    return m_storage->hasChunk(pos);
 }
 
 // Reference: IOWorker.java synchronize(boolean)
@@ -292,7 +315,7 @@ std::shared_ptr<util::CompletableFuture<void>> IOWorker::synchronize(bool flush)
     submitTask([this, flush, future]() {
         processAllPendingWrites();
         if (flush) {
-            m_storage.flush();
+            m_storage->flush();
         }
         future->complete();
     });
@@ -312,7 +335,7 @@ void IOWorker::close() {
         m_workerThread.join();
     }
 
-    m_storage.close();
+    m_storage->close();
 }
 
 } // namespace storage

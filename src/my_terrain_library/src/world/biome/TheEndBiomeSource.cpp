@@ -1,6 +1,5 @@
 #include "world/biome/TheEndBiomeSource.h"
 #include "random/LegacyRandomSource.h"
-#include "levelgen/DensityFunction.h"
 #include <cmath>
 
 // Reference: net/minecraft/world/level/biome/TheEndBiomeSource.java
@@ -50,9 +49,8 @@ BiomeKey TheEndBiomeSource::getNoiseBiome(
 
     int32_t weirdBlockX = (chunkX * 2 + 1) * 8;
     int32_t weirdBlockZ = (chunkZ * 2 + 1) * 8;
-    minecraft::density::DensityFunction::SinglePointContext context(
-        weirdBlockX, blockY, weirdBlockZ);
-    double heightValue = sampler.erosion()->compute(context);
+    const double heightValue =
+        static_cast<double>(sampler.erosion().sampleValue(weirdBlockX, blockY, weirdBlockZ));
 
     if (heightValue > 0.25) {
         return BiomeKeys::END_HIGHLANDS;

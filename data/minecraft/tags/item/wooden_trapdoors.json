@@ -12,6 +12,8 @@
     "minecraft:mangrove_trapdoor",
     "minecraft:bamboo_trapdoor",
     "minecraft:cherry_trapdoor",
-    "minecraft:poplar_trapdoor"
+    "minecraft:poplar_trapdoor",
+    "minecraft:whisperwood_trapdoor",
+    "minecraft:skyroot_trapdoor"
   ]
 }

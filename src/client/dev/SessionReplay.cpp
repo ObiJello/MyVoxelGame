@@ -297,11 +297,10 @@ namespace Client::Dev {
     void PoseReplayer::Write(Game::ClientPlayer& player, Render::Camera& camera,
                              const PoseSample& s, const glm::dvec3& pos,
                              float yaw, float pitch, float dt) const {
-        const glm::vec3 newPos(pos);
         if (dt > 0.0f) {
-            player.physics.velocity = (newPos - player.physics.position) / dt;
+            player.physics.velocity = glm::vec3((pos - player.physics.position) / static_cast<double>(dt));
         }
-        player.physics.position     = newPos;
+        player.physics.position     = pos;
         player.physics.scale        = s.scale;
         player.physics.currentSpeed = s.speed;
         player.physics.isSneaking   = s.sneak;

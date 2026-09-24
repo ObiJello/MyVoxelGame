@@ -20,7 +20,7 @@ import os
 import re
 import sys
 
-MC = "minecraft_code/decompiled_net/minecraft"
+MC = "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft"
 SRC = os.path.join(MC, "world/entity/ai/memory/MemoryModuleType.java")
 OUT_HPP = "src/common/entity/ai/brain/GeneratedMemoryModules.hpp"
 OUT_CPP = "src/common/entity/ai/brain/GeneratedMemoryModules.cpp"

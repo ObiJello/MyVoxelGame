@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "E": "minecraft:echo_shard",
+    "I": "minecraft:resonite_ingot"
+  },
+  "pattern": [
+    "I I",
+    " E ",
+    " I "
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:tuning_fork"
+  }
+}

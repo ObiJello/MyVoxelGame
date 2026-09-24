@@ -23,10 +23,13 @@
 #include "common/entity/EntityType.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/portal/PortalState.hpp"
+#include "common/sound/SoundSource.hpp"
 
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <string_view>
 #include <vector>
+#include "common/world/fluid/FluidState.hpp"
 
 namespace Game {
 
@@ -36,6 +39,7 @@ namespace Game {
     // mangles class and struct differently, so a mismatched tag links fine on
     // Clang and gives LNK2019 on MSVC (see CLAUDE.md).
     class  LivingEntity;
+    class  BlockState;
 
     // ── Entity id space ────────────────────────────────────────────────────
     //
@@ -572,15 +576,62 @@ namespace Game {
         virtual void Tick();
         virtual void BaseTick();
 
-        // ── State queries used across the port ─────────────────────────────
-        virtual bool IsInWater() const;
-        virtual bool IsInLava()  const { return false; }
+        // ── Fluid state (MC Entity.fluidInteraction / EntityFluidInteraction) ──
+        //
+        // Refreshed once per tick by UpdateInWaterStateAndDoFluidPushing from
+        // the cells the bounding box overlaps: per fluid, how far its surface
+        // stands above the feet (`getFluidHeight`), whether the eye point is
+        // under it (`isEyeInFluid`), and the summed flow of those cells for
+        // the current push. Every query below is a read of that snapshot —
+        // exactly MC's `wasTouchingWater` latch — so nothing here touches the
+        // world between refreshes.
+        struct FluidContact {
+            // Indexed by FluidType (Empty slot unused).
+            double     height[3]      = {0.0, 0.0, 0.0};
+            bool       eyesInside[3]  = {false, false, false};
+            glm::dvec3 current[3]     = {glm::dvec3(0.0), glm::dvec3(0.0), glm::dvec3(0.0)};
+            int        currentCount[3]= {0, 0, 0};
+            double     currentHeight[3]={0.0, 0.0, 0.0};
+        };
+
+        // MC Entity.isInWater — `wasTouchingWater`, the latch from the last
+        // refresh (touching water at all, however shallow).
+        virtual bool IsInWater() const { return m_wasTouchingWater; }
+        // MC Entity.isInLava — `getFluidHeight(LAVA) > 0`.
+        virtual bool IsInLava()  const { return m_fluid.height[static_cast<int>(FluidType::Lava)] > 0.0; }
         bool IsInLiquid() const { return IsInWater() || IsInLava(); }
 
-        // MC Entity.isEyeInFluid(FluidTags.WATER) — the block at eye level is
-        // water. Distinct from IsInWater on purpose: a mob wading chest-deep
-        // breathes fine; drowning and zombie conversion key on the EYES.
-        bool IsEyeInWater() const;
+        // MC Entity.getFluidHeight(tag): the fluid's surface above the feet,
+        // 0 when the box touches none of it.
+        double GetFluidHeight(FluidType type) const { return m_fluid.height[static_cast<int>(type)]; }
+
+        // MC Entity.isEyeInFluid(tag) — the eye point is below the fluid's
+        // camera surface. Distinct from IsInWater on purpose: a mob wading
+        // chest-deep breathes fine; drowning and zombie conversion key on the
+        // EYES.
+        bool IsEyeInWater() const { return m_fluid.eyesInside[static_cast<int>(FluidType::Water)]; }
+        bool IsEyeInLava()  const { return m_fluid.eyesInside[static_cast<int>(FluidType::Lava)]; }
+        // MC Entity.isUnderWater / isInShallowWater.
+        bool IsUnderWater()     const { return IsEyeInWater() && IsInWater(); }
+        bool IsInShallowWater() const { return IsInWater() && !IsUnderWater(); }
+
+        // MC Entity.getFluidJumpThreshold: how deep a fluid must stand before
+        // pressing jump swims (bobs) rather than jumps off the floor. Small
+        // entities (eye below 0.4) swim in anything.
+        double GetFluidJumpThreshold() const { return GetEyeHeight() < 0.4f ? 0.0 : 0.4; }
+        // MC LivingEntity.isInShallowFluid.
+        bool IsInShallowFluid(FluidType type) const { return GetFluidHeight(type) <= GetFluidJumpThreshold(); }
+
+        // MC Entity.isPushedByFluid — whether currents move this entity. True
+        // for almost everything; water mobs, turtles, frogs and axolotls hold
+        // their place, and a player's own client applies its push.
+        virtual bool IsPushedByFluid() const { return true; }
+
+        // MC Entity.lavaHurt / lavaIgnite — LavaFluid.entityInside's two
+        // effects. A plain Entity has no health, so the hurt is a no-op here
+        // and real on LivingEntity; the ignition is shared.
+        virtual void LavaHurt() {}
+        void LavaIgnite();
 
         // ── Air supply (MC Entity.TOTAL_AIR_SUPPLY / DATA_AIR_SUPPLY_ID) ───
         //
@@ -609,17 +660,56 @@ namespace Game {
         // the two concepts cannot collide again.
         virtual bool IsAbilityFlying() const { return false; }
 
-        // MC Entity.updateInWaterStateAndDoFluidPushing — the water-state
-        // refresh plus the current push, split out of baseTick because MC's
-        // own PrimedTnt calls it directly and does NOT call baseTick.
+        // MC Entity.updateFluidInteraction (26.x's name for
+        // updateInWaterStateAndDoFluidPushing) — the per-tick fluid refresh
+        // plus the current push, split out of baseTick because MC's own
+        // PrimedTnt calls it directly and does NOT call baseTick.
         //
-        // The state half is exact. The PUSH half is not implemented: it needs
-        // FluidState.getFlow, i.e. per-cell fluid heights and a flow gradient,
-        // and this engine models fluids as plain blocks with no level or
-        // direction. The seam is here (and named) so the day a fluid model
-        // lands, water currents start carrying entities from one place.
+        // Also where LavaFluid.entityInside / WaterFluid.entityInside land:
+        // MC applies them from checkInsideBlocks through the fluid state of
+        // every overlapped cell, which is the same set of cells this scans,
+        // so lava ignites and hurts here and water puts fire out here.
         void UpdateInWaterStateAndDoFluidPushing();
 
+        // The state half alone — no push, no contact effects. For the
+        // server's player views, which are never BaseTick'ed but are asked
+        // IsInWater / IsEyeInWater by every mob that targets them.
+        void RefreshFluidState() { UpdateFluidInteraction(/*ignoreCurrent=*/true); }
+
+        // ── Sound (MC Entity.playSound / getSoundSource / isSilent) ─────────
+        //
+        // MC Entity.getSoundSource: NEUTRAL, overridden by Monster (HOSTILE),
+        // Player (PLAYERS) and a few others — the generated per-type row
+        // (common/sound/EntitySounds.hpp) holds each type's answer.
+        virtual SoundSource GetSoundSource() const;
+        // MC DATA_SILENT (the "Silent" NBT flag): a silent entity makes no
+        // sound of its own, and a sound bound to it never starts.
+        bool IsSilent() const { return m_silent; }
+        void SetSilent(bool silent) { m_silent = silent; }
+        // MC Entity.playSound(sound, volume, pitch): unless silent, the level
+        // plays it at this entity for everyone (except = null), in this
+        // entity's sound category. Entity.cpp.
+        // Virtual for MC Player.playSound, which excepts the player itself.
+        virtual void PlaySound(std::string_view event, float volume = 1.0f, float pitch = 1.0f);
+
+        // MC Entity.playStepSound(pos, state): the type's own step event, or
+        // the stepped-on block's SoundType step at 0.15 × its volume.
+        virtual void PlayStepSound(const glm::ivec3& pos, BlockState state);
+        // MC getSwimSound / getSwimSplashSound / getSwimHighSpeedSplashSound.
+        virtual const char* GetSwimSound() const;
+        virtual const char* GetSwimSplashSound() const;
+        virtual const char* GetSwimHighSpeedSplashSound() const;
+        // MC getMovementEmission().emitsSounds(): does moving play footsteps
+        // (and swim strokes) at all. Bats, squids, shulkers, guardians,
+        // silverfish, endermites, breezes, projectiles and items do not.
+        virtual bool EmitsMovementSounds() const;
+        // MC isFlapping / onFlap: a flier moving through air (a parrot's wing
+        // beat). Checked where MC checks it — a movement step over air.
+        virtual bool IsFlapping() const { return false; }
+        virtual void OnFlap() {}
+        // MC playEntityOnFireExtinguishedSound: GENERIC_EXTINGUISH_FIRE, 0.7,
+        // 1.6 ± 0.4 — a burning entity doused (server only).
+        void PlayEntityOnFireExtinguishedSound();
         // True only for the player adapters the level bridge hands out.
         // Goals that MC writes as `Player.class` filters test this instead —
         // the port has a closed entity set, so a type predicate is enough and
@@ -719,6 +809,8 @@ namespace Game {
         void SetRemainingFireTicks(int t) { m_remainingFireTicks = t; }
         int  GetRemainingFireTicks() const { return m_remainingFireTicks; }
         void IgniteForSeconds(int seconds);
+        // MC Entity.clearFire.
+        void ClearFire() { m_remainingFireTicks = 0; }
 
     protected:
         // MC Entity.checkFallDamage, called from Move with the ACTUAL vertical
@@ -746,10 +838,47 @@ namespace Game {
         bool m_sprinting = false;
         bool m_noGravity = false;
         int  m_remainingFireTicks = 0;
+
+        // MC EntityFluidInteraction.update + Entity.wasTouchingWater. See the
+        // FluidContact note above. `UpdateFluidInteraction` fills the
+        // snapshot and (unless told not to) applies the current push;
+        // returns whether the box touched any fluid at all.
+        FluidContact m_fluid;
+        bool         m_wasTouchingWater = false;
+        bool UpdateFluidInteraction(bool ignoreCurrent);
+        // MC EntityFluidInteraction.CurrentAccumulator.applyTo.
+        void ApplyFluidCurrent(FluidType type, double scale);
         // Starts full (MC defines DATA_AIR_SUPPLY_ID with getMaxAirSupply()).
         // A type with a larger maximum re-fills it in its own constructor,
         // exactly as MC's Dolphin constructor does.
         int  m_airSupply = kTotalAirSupply;
+        bool m_silent = false;   // MC DATA_SILENT
+
+        // MC Entity.applyMovementEmissionAndPlaySound's odometers: moveDist
+        // (horizontal, or full while climbing) and flyDist, each ×0.6, and the
+        // distance at which the next footstep falls (nextStep).
+        float m_moveDist = 0.0f;
+        float m_flyDist  = 0.0f;
+        float m_nextStep = 1.0f;
+        // MC crystalSoundIntensity / lastCrystalSoundPlayTick — the amethyst
+        // chime that walking on amethyst builds up.
+        float m_crystalSoundIntensity = 0.0f;
+        int   m_lastCrystalSoundPlayTick = 0;
+        // The fluid state has been read once: MC doWaterSplashEffect skips
+        // the entity's first tick (`!this.firstTick`), which here has already
+        // been cleared by the time the fluid is updated.
+        bool  m_fluidPrimed = false;
+
+        // MC Entity.nextStep: the next whole block of moveDist.
+        virtual float NextStep() const { return static_cast<float>(static_cast<int>(m_moveDist) + 1); }
+        // MC waterSwimSound / playSwimSound / doWaterSplashEffect.
+        void WaterSwimSound();
+        virtual void PlaySwimSound(float volume);
+        void DoWaterSplashEffect();
+        // MC applyMovementEmissionAndPlaySound + vibrationAndSoundEffectsFrom-
+        // Block + walkingStepSound, for one move's clipped displacement.
+        void ApplyMovementEmissionAndPlaySound(const glm::dvec3& clippedMovement);
+
 
         // ── Riding state ───────────────────────────────────────────────────
         // MC Entity.passengers / Entity.vehicle. Invariant (MC's, enforced by

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <vector>
 #include <cstdint>
 #include <algorithm>
@@ -11,11 +12,10 @@
 #include <functional>
 #include <unordered_map>
 
+#include "levelgen/density/DensitySampler.h"
+
 // Forward declarations
 namespace minecraft {
-    namespace density {
-        class DensityFunction;
-    }
     namespace core {
         class BlockPos;
     }
@@ -247,9 +247,10 @@ public:
     template<typename T>
     class RTree {
     public:
-        static constexpr int CHILDREN_PER_NODE = 6;
+        // Reference: 26.3 Climate.RTree.CHILDREN_PER_NODE (ParameterList
+        // builds with 19; 1.18-1.21 used 6).
+        static constexpr int CHILDREN_PER_NODE = 19;
 
-        // Forward declaration of Node types
         class Node;
         class Leaf;
         class SubTree;
@@ -257,37 +258,48 @@ public:
     private:
         std::unique_ptr<Node> m_root;
 
-        // Thread-local cache to match Java's ThreadLocal<Leaf> lastResult
-        // behavior. Java keeps one ThreadLocal<Leaf> per RTree instance; a
-        // single owner-tagged slot gives identical within-instance history for
-        // the one tree active during generation without a per-search hash
-        // lookup. A different owner reads as a miss (null candidate), which
-        // only changes the pruning start, exactly like a fresh Java thread.
+        // Java keeps a ThreadLocal<Leaf> lastResult per RTree instance: the
+        // previous answer seeds the next search, which decides ties between
+        // equally distant leaves. A few owner-tagged slots per thread give
+        // every live tree its own history (a thread alternating between two
+        // dimensions' trees keeps both), without a hash lookup per search.
         struct LastResultSlot {
             const RTree* owner = nullptr;
             Leaf* leaf = nullptr;
         };
+        static constexpr int LAST_RESULT_SLOTS = 8;
 
-        static LastResultSlot& lastResultSlot() {
-            static thread_local LastResultSlot slot;
-            return slot;
+        static std::array<LastResultSlot, LAST_RESULT_SLOTS>& lastResultSlots() {
+            static thread_local std::array<LastResultSlot, LAST_RESULT_SLOTS> slots{};
+            return slots;
         }
 
         Leaf* getLastResult() const {
-            const LastResultSlot& slot = lastResultSlot();
-            return (slot.owner == this) ? slot.leaf : nullptr;
+            for (const LastResultSlot& slot : lastResultSlots()) {
+                if (slot.owner == this) return slot.leaf;
+            }
+            return nullptr;
         }
 
         void setLastResult(Leaf* leaf) const {
-            LastResultSlot& slot = lastResultSlot();
-            slot.owner = this;
-            slot.leaf = leaf;
+            auto& slots = lastResultSlots();
+            for (LastResultSlot& slot : slots) {
+                if (slot.owner == this) { slot.leaf = leaf; return; }
+            }
+            // A new tree on this thread: take the first free slot, else
+            // shift out the oldest (a tree is only ever evicted once more than
+            // LAST_RESULT_SLOTS trees alternate on one thread).
+            for (LastResultSlot& slot : slots) {
+                if (slot.owner == nullptr) { slot.owner = this; slot.leaf = leaf; return; }
+            }
+            for (int i = 1; i < LAST_RESULT_SLOTS; ++i) slots[static_cast<size_t>(i - 1)] = slots[static_cast<size_t>(i)];
+            slots[LAST_RESULT_SLOTS - 1] = LastResultSlot{this, leaf};
         }
 
     public:
         /**
          * Node - Base class for RTree nodes
-         * Reference: Climate.java lines 203-225
+         * Reference: Climate.RTree.Node
          */
         class Node {
         public:
@@ -296,18 +308,13 @@ public:
             Node(const std::vector<Parameter>& params) : parameterSpace(params) {}
             virtual ~Node() = default;
 
-            /**
-             * Search for the closest leaf node
-             */
             virtual Leaf* search(const int64_t* target, Leaf* candidate) = 0;
 
-            /**
-             * Calculate distance from this node to target (7 values)
-             * Reference: Climate.java lines 212-220
-             */
+            // Node.distance: the squared distance of each of the 7 targets to
+            // this node's span, summed.
             int64_t distance(const int64_t* target) const {
                 int64_t dist = 0;
-                for (size_t i = 0; i < 7 && i < parameterSpace.size(); ++i) {
+                for (size_t i = 0; i < 7; ++i) {
                     int64_t d = parameterSpace[i].distance(target[i]);
                     dist += d * d;  // Mth.square
                 }
@@ -315,10 +322,6 @@ public:
             }
         };
 
-        /**
-         * Leaf - Leaf node containing a biome value
-         * Reference: Climate.java lines 227-238
-         */
         class Leaf : public Node {
         public:
             T value;
@@ -326,29 +329,19 @@ public:
             Leaf(const ParameterPoint& point, const T& val)
                 : Node(point.parameterSpace()), value(val) {}
 
-            Leaf* search(const int64_t* target, Leaf* candidate) override {
+            Leaf* search(const int64_t*, Leaf*) override {
                 return this;
             }
         };
 
-        /**
-         * SubTree - Internal node containing child nodes
-         * Reference: Climate.java lines 240-270
-         */
         class SubTree : public Node {
         public:
             std::vector<std::unique_ptr<Node>> children;
 
-            SubTree(const std::vector<Parameter>& params, std::vector<std::unique_ptr<Node>>&& kids)
-                : Node(params), children(std::move(kids)) {}
-
             SubTree(std::vector<std::unique_ptr<Node>>&& kids)
                 : Node(buildParameterSpace(kids)), children(std::move(kids)) {}
 
-            /**
-             * Search through children for closest match
-             * Reference: Climate.java lines 252-269
-             */
+            // Reference: Climate.RTree.SubTree.search.
             Leaf* search(const int64_t* target, Leaf* candidate) override {
                 int64_t minDistance = candidate == nullptr ? INT64_MAX : candidate->distance(target);
                 Leaf* closestLeaf = candidate;
@@ -368,26 +361,19 @@ public:
                 return closestLeaf;
             }
 
-        private:
+            // RTree.buildParameterSpace: the per-dimension span of the children.
             static std::vector<Parameter> buildParameterSpace(const std::vector<std::unique_ptr<Node>>& kids) {
                 if (kids.empty()) {
                     throw std::invalid_argument("SubTree needs at least one child");
                 }
-
                 std::vector<Parameter> bounds(7);
                 bool first = true;
-
                 for (const auto& child : kids) {
-                    for (size_t d = 0; d < 7 && d < child->parameterSpace.size(); ++d) {
-                        if (first) {
-                            bounds[d] = child->parameterSpace[d];
-                        } else {
-                            bounds[d] = bounds[d].span(&child->parameterSpace[d]);
-                        }
+                    for (size_t d = 0; d < 7; ++d) {
+                        bounds[d] = first ? child->parameterSpace[d] : child->parameterSpace[d].span(&bounds[d]);
                     }
                     first = false;
                 }
-
                 return bounds;
             }
         };
@@ -397,288 +383,181 @@ public:
 
     public:
         /**
-         * Create an RTree from a list of parameter point / value pairs
-         * Reference: Climate.java lines 70-82
+         * Reference: Climate.RTree.create(values, childrenPerNode).
          */
-        static RTree<T> create(const std::vector<std::pair<ParameterPoint, T>>& values) {
+        static RTree<T> create(const std::vector<std::pair<ParameterPoint, T>>& values,
+                               int childrenPerNode = CHILDREN_PER_NODE) {
             if (values.empty()) {
                 throw std::invalid_argument("Need at least one value to build the search tree.");
             }
-
-            size_t dimensions = values[0].first.parameterSpace().size();
+            const size_t dimensions = values[0].first.parameterSpace().size();
             if (dimensions != 7) {
                 throw std::runtime_error("Expecting parameter space to be 7, got " + std::to_string(dimensions));
             }
-
-            // Create leaf nodes
             std::vector<std::unique_ptr<Node>> leaves;
             leaves.reserve(values.size());
             for (const auto& p : values) {
                 leaves.push_back(std::make_unique<Leaf>(p.first, p.second));
             }
-
-            return RTree<T>(build(dimensions, std::move(leaves)));
+            return RTree<T>(build(dimensions, std::move(leaves), childrenPerNode));
         }
 
         /**
-         * Search for the best matching value.
-         * Reference: Climate.java lines 196-201 (the only metric ever used is
-         * Node::distance, matching Java's (node, targets) -> node.distance).
+         * Reference: Climate.RTree.search - Node.distance is the only metric.
          */
         T search(const TargetPoint& target) {
             const int64_t targetArray[7] = {
                 target.temperature, target.humidity, target.continentalness,
                 target.erosion, target.depth, target.weirdness, 0
             };
-            Leaf* lastResult = getLastResult();
-            Leaf* leaf = m_root->search(targetArray, lastResult);
+            Leaf* leaf = m_root->search(targetArray, getLastResult());
             setLastResult(leaf);
             return leaf->value;
         }
 
     private:
-        /**
-         * Recursively build the tree
-         * Reference: Climate.java lines 84-125
-         */
-        static std::unique_ptr<Node> build(size_t dimensions, std::vector<std::unique_ptr<Node>>&& children) {
-            if (children.empty()) {
-                throw std::runtime_error("Need at least one child to build a node");
-            }
-
-            if (children.size() == 1) {
-                return std::move(children[0]);
-            }
-
-            if (children.size() <= CHILDREN_PER_NODE) {
-                // Sort by total center magnitude
-                // Reference: Climate.java lines 90-99
-                std::sort(children.begin(), children.end(),
-                    [dimensions](const std::unique_ptr<Node>& a, const std::unique_ptr<Node>& b) {
-                        int64_t totalA = 0, totalB = 0;
-                        for (size_t d = 0; d < dimensions; ++d) {
-                            const Parameter& pa = a->parameterSpace[d];
-                            const Parameter& pb = b->parameterSpace[d];
-                            totalA += std::abs((pa.min() + pa.max()) / 2);
-                            totalB += std::abs((pb.min() + pb.max()) / 2);
-                        }
-                        return totalA < totalB;
-                    });
-
-                return std::make_unique<SubTree>(std::move(children));
-            }
-
-            // Find optimal dimension for splitting
-            // Reference: Climate.java lines 102-120
-            // Try each dimension, calculate bucket costs, keep minimum
-            int64_t minCost = INT64_MAX;
-            size_t minDimension = 0;
-
-            // Calculate expected children per bucket
-            double logBase = std::log(static_cast<double>(CHILDREN_PER_NODE));
-            double logValue = std::log(static_cast<double>(children.size()) - 0.01);
-            size_t expectedChildrenCount = static_cast<size_t>(
-                std::pow(static_cast<double>(CHILDREN_PER_NODE),
-                        std::floor(logValue / logBase)));
-
-            for (size_t d = 0; d < dimensions; ++d) {
-                // Sort by this dimension
-                sortNodes(children, dimensions, d, false);
-
-                // Calculate bucket costs without moving nodes
-                // Reference: Climate.java lines 108-119
-                int64_t totalCost = 0;
-                size_t bucketStart = 0;
-                while (bucketStart < children.size()) {
-                    size_t bucketEnd = std::min(bucketStart + expectedChildrenCount, children.size());
-                    totalCost += costRange(children, bucketStart, bucketEnd);
-                    bucketStart = bucketEnd;
-                }
-
-                if (totalCost < minCost) {
-                    minCost = totalCost;
-                    minDimension = d;
-                }
-            }
-
-            // Re-sort by the best dimension and create actual buckets
-            sortNodes(children, dimensions, minDimension, false);
-            auto buckets = bucketize(children);
-
-            // Convert buckets to SubTrees for sorting
-            std::vector<std::unique_ptr<SubTree>> subTrees;
-            for (auto& bucket : buckets) {
-                subTrees.push_back(std::make_unique<SubTree>(std::move(bucket)));
-            }
-
-            // Sort SubTrees by the best dimension (absolute=true)
-            // Reference: Climate.java line 122
-            sortSubTrees(subTrees, dimensions, minDimension, true);
-
-            // Recursively build subtrees from each bucket's children
-            // Reference: Climate.java line 123
-            std::vector<std::unique_ptr<Node>> builtChildren;
-            for (auto& subTree : subTrees) {
-                builtChildren.push_back(build(dimensions, std::move(subTree->children)));
-            }
-
-            return std::make_unique<SubTree>(std::move(builtChildren));
+        // (min + max) / 2 of one dimension (Java long division).
+        static int64_t center(const Node& node, size_t dimension) {
+            const Parameter& parameter = node.parameterSpace[dimension];
+            return (parameter.min() + parameter.max()) / 2;
         }
 
-        static void sortNodes(std::vector<std::unique_ptr<Node>>& children,
-                             size_t dimensions, size_t primaryDim, bool absolute) {
-            std::sort(children.begin(), children.end(),
-                [dimensions, primaryDim, absolute](const std::unique_ptr<Node>& a,
-                                                   const std::unique_ptr<Node>& b) {
+        // RTree.sort: a STABLE sort (List.sort is TimSort) by the centre of
+        // `dimension`, then of each following dimension in turn.
+        static void sortNodes(std::vector<std::unique_ptr<Node>>& children, size_t dimensions, size_t dimension,
+                              bool absolute) {
+            std::stable_sort(children.begin(), children.end(),
+                [dimensions, dimension, absolute](const std::unique_ptr<Node>& a, const std::unique_ptr<Node>& b) {
                     for (size_t i = 0; i < dimensions; ++i) {
-                        size_t d = (primaryDim + i) % dimensions;
-                        const Parameter& pa = a->parameterSpace[d];
-                        const Parameter& pb = b->parameterSpace[d];
-                        int64_t centerA = (pa.min() + pa.max()) / 2;
-                        int64_t centerB = (pb.min() + pb.max()) / 2;
+                        const size_t d = (dimension + i) % dimensions;
+                        int64_t centerA = center(*a, d);
+                        int64_t centerB = center(*b, d);
                         if (absolute) {
                             centerA = std::abs(centerA);
                             centerB = std::abs(centerB);
                         }
-                        if (centerA != centerB) {
-                            return centerA < centerB;
-                        }
+                        if (centerA != centerB) return centerA < centerB;
                     }
                     return false;
                 });
         }
 
-        /**
-         * Sort SubTrees by their parameterSpace
-         * Reference: Climate.java lines 127-135
-         */
-        static void sortSubTrees(std::vector<std::unique_ptr<SubTree>>& subTrees,
-                                 size_t dimensions, size_t primaryDim, bool absolute) {
-            std::sort(subTrees.begin(), subTrees.end(),
-                [dimensions, primaryDim, absolute](const std::unique_ptr<SubTree>& a,
-                                                   const std::unique_ptr<SubTree>& b) {
-                    // Multi-dimensional comparison like sortNodes
-                    for (size_t i = 0; i < dimensions; ++i) {
-                        size_t d = (primaryDim + i) % dimensions;
-                        const Parameter& pa = a->parameterSpace[d];
-                        const Parameter& pb = b->parameterSpace[d];
-                        int64_t centerA = (pa.min() + pa.max()) / 2;
-                        int64_t centerB = (pb.min() + pb.max()) / 2;
-                        if (absolute) {
-                            centerA = std::abs(centerA);
-                            centerB = std::abs(centerB);
-                        }
-                        if (centerA != centerB) {
-                            return centerA < centerB;
-                        }
-                    }
-                    return false;
-                });
-        }
-
-        /**
-         * Calculate cost of a range of children (sum of parameter ranges of merged space)
-         * Reference: Climate.java lines 165-173
-         */
-        static int64_t costRange(const std::vector<std::unique_ptr<Node>>& children,
-                                 size_t start, size_t end) {
-            if (start >= end || start >= children.size()) return 0;
-
-            // Build combined parameter space for this range
-            std::vector<Parameter> combined(7);
-            bool first = true;
-
-            for (size_t i = start; i < end && i < children.size(); ++i) {
-                const auto& node = children[i];
-                for (size_t d = 0; d < 7 && d < node->parameterSpace.size(); ++d) {
-                    if (first) {
-                        combined[d] = node->parameterSpace[d];
-                    } else {
-                        combined[d] = combined[d].span(&node->parameterSpace[d]);
-                    }
-                }
-                first = false;
-            }
-
-            // Calculate cost: sum of |max - min| for all dimensions
-            int64_t result = 0;
-            for (const auto& param : combined) {
-                result += std::abs(param.max() - param.min());
-            }
-            return result;
-        }
-
-        /**
-         * Calculate cost of a parameter space array
-         * Reference: Climate.java lines 165-173
-         */
-        static int64_t cost(const std::vector<Parameter>& parameterSpace) {
-            int64_t result = 0;
-            for (const auto& param : parameterSpace) {
-                result += std::abs(param.max() - param.min());
-            }
-            return result;
-        }
-
-        /**
-         * Bucketize nodes into groups
-         * Reference: Climate.java lines 145-163
-         */
-        static std::vector<std::vector<std::unique_ptr<Node>>> bucketize(
-            std::vector<std::unique_ptr<Node>>& nodes) {
-
-            std::vector<std::vector<std::unique_ptr<Node>>> buckets;
-            std::vector<std::unique_ptr<Node>> currentBucket;
-
-            // Calculate expected children per bucket
-            double logBase = std::log(static_cast<double>(CHILDREN_PER_NODE));
-            double logValue = std::log(static_cast<double>(nodes.size()) - 0.01);
-            int expectedChildrenCount = static_cast<int>(
-                std::pow(static_cast<double>(CHILDREN_PER_NODE),
-                        std::floor(logValue / logBase)));
-
-            for (auto& node : nodes) {
-                currentBucket.push_back(std::move(node));
-                if (static_cast<int>(currentBucket.size()) >= expectedChildrenCount) {
-                    buckets.push_back(std::move(currentBucket));
-                    currentBucket.clear();
+        // RTree.bucketize: runs of expectedChildrenCount consecutive nodes,
+        // expectedChildrenCount = childrenPerNode ^ floor(log(n - 0.01) / log(childrenPerNode)).
+        static std::vector<std::vector<size_t>> bucketize(size_t nodeCount, int childrenPerNode) {
+            const int expectedChildrenCount = static_cast<int>(std::pow(
+                static_cast<double>(childrenPerNode),
+                std::floor(std::log(static_cast<double>(nodeCount) - 0.01) /
+                           std::log(static_cast<double>(childrenPerNode)))));
+            std::vector<std::vector<size_t>> buckets;
+            std::vector<size_t> children;
+            for (size_t i = 0; i < nodeCount; ++i) {
+                children.push_back(i);
+                if (static_cast<int>(children.size()) >= expectedChildrenCount) {
+                    buckets.push_back(std::move(children));
+                    children.clear();
                 }
             }
-
-            if (!currentBucket.empty()) {
-                buckets.push_back(std::move(currentBucket));
-            }
-
+            if (!children.empty()) buckets.push_back(std::move(children));
             return buckets;
         }
 
-        /**
-         * Calculate cost of a bucket (sum of parameter ranges)
-         * Reference: Climate.java lines 165-173
-         */
-        static int64_t cost(const std::vector<std::unique_ptr<Node>>& bucket) {
-            if (bucket.empty()) return 0;
-
-            // Build combined parameter space
-            std::vector<Parameter> combined(7);
+        // RTree.cost over the span of a bucket's nodes.
+        static int64_t bucketCost(const std::vector<std::unique_ptr<Node>>& nodes, const std::vector<size_t>& bucket) {
+            std::vector<Parameter> bounds(7);
             bool first = true;
-
-            for (const auto& node : bucket) {
-                for (size_t d = 0; d < 7 && d < node->parameterSpace.size(); ++d) {
-                    if (first) {
-                        combined[d] = node->parameterSpace[d];
-                    } else {
-                        combined[d] = combined[d].span(&node->parameterSpace[d]);
-                    }
+            for (size_t index : bucket) {
+                const Node& node = *nodes[index];
+                for (size_t d = 0; d < 7; ++d) {
+                    bounds[d] = first ? node.parameterSpace[d] : node.parameterSpace[d].span(&bounds[d]);
                 }
                 first = false;
             }
-
             int64_t result = 0;
-            for (const auto& param : combined) {
-                result += std::abs(param.max() - param.min());
+            for (const Parameter& parameter : bounds) {
+                result += std::abs(parameter.max() - parameter.min());
             }
             return result;
+        }
+
+        /**
+         * Reference: Climate.RTree.build. For more than childrenPerNode
+         * children: for each dimension in turn, re-sort the SAME list (each
+         * stable sort starting from the previous one's order) and bucketize;
+         * the first cheapest split's buckets are kept as they were at that
+         * point, sorted as whole buckets by |centre| of that dimension, and
+         * each is built recursively.
+         */
+        static std::unique_ptr<Node> build(size_t dimensions, std::vector<std::unique_ptr<Node>>&& children,
+                                           int childrenPerNode) {
+            if (children.empty()) {
+                throw std::runtime_error("Need at least one child to build a node");
+            }
+            if (children.size() == 1) {
+                return std::move(children[0]);
+            }
+            if (children.size() <= static_cast<size_t>(childrenPerNode)) {
+                std::stable_sort(children.begin(), children.end(),
+                    [dimensions](const std::unique_ptr<Node>& a, const std::unique_ptr<Node>& b) {
+                        int64_t totalA = 0;
+                        int64_t totalB = 0;
+                        for (size_t d = 0; d < dimensions; ++d) {
+                            totalA += std::abs(center(*a, d));
+                            totalB += std::abs(center(*b, d));
+                        }
+                        return totalA < totalB;
+                    });
+                return std::make_unique<SubTree>(std::move(children));
+            }
+
+            // Node pointers stay valid while `children` is re-sorted, so the
+            // winning buckets are recorded as node pointers.
+            int64_t minCost = INT64_MAX;
+            size_t minDimension = 0;
+            std::vector<std::vector<Node*>> minBuckets;
+            for (size_t d = 0; d < dimensions; ++d) {
+                sortNodes(children, dimensions, d, false);
+                const std::vector<std::vector<size_t>> buckets = bucketize(children.size(), childrenPerNode);
+                int64_t totalCost = 0;
+                for (const auto& bucket : buckets) totalCost += bucketCost(children, bucket);
+                if (minCost > totalCost) {
+                    minCost = totalCost;
+                    minDimension = d;
+                    minBuckets.clear();
+                    for (const auto& bucket : buckets) {
+                        std::vector<Node*> nodes;
+                        nodes.reserve(bucket.size());
+                        for (size_t index : bucket) nodes.push_back(children[index].get());
+                        minBuckets.push_back(std::move(nodes));
+                    }
+                }
+            }
+
+            // Take ownership back from `children` in the winning buckets' order.
+            std::unordered_map<Node*, std::unique_ptr<Node>> owned;
+            owned.reserve(children.size());
+            for (auto& child : children) {
+                Node* raw = child.get();
+                owned.emplace(raw, std::move(child));
+            }
+            std::vector<std::unique_ptr<Node>> bucketTrees;
+            bucketTrees.reserve(minBuckets.size());
+            for (const auto& bucket : minBuckets) {
+                std::vector<std::unique_ptr<Node>> members;
+                members.reserve(bucket.size());
+                for (Node* raw : bucket) members.push_back(std::move(owned.at(raw)));
+                bucketTrees.push_back(std::make_unique<SubTree>(std::move(members)));
+            }
+            // sort(minBuckets, dimensions, minDimension, true) - by the
+            // buckets' own spans.
+            sortNodes(bucketTrees, dimensions, minDimension, true);
+            std::vector<std::unique_ptr<Node>> built;
+            built.reserve(bucketTrees.size());
+            for (auto& bucketTree : bucketTrees) {
+                auto* subTree = static_cast<SubTree*>(bucketTree.get());
+                built.push_back(build(dimensions, std::move(subTree->children), childrenPerNode));
+            }
+            return std::make_unique<SubTree>(std::move(built));
         }
     };
 
@@ -746,54 +625,42 @@ public:
     // Reference: Climate.java lines 386-398
     // =========================================================================
 
+    // Reference: 26.3 Climate.Sampler (record of six DensitySampler.Bound):
+    // the router's climate functions bound to one SamplerContext. Point
+    // queries go through sample(); the chunk biome fill samples whole
+    // volumes (MultiNoiseBiomeSource.createResolverForChunk) through the
+    // bound samplers directly. A default-constructed Sampler is unbound.
     class Sampler {
-    private:
-        minecraft::density::DensityFunction* m_temperature;
-        minecraft::density::DensityFunction* m_humidity;
-        minecraft::density::DensityFunction* m_continentalness;
-        minecraft::density::DensityFunction* m_erosion;
-        minecraft::density::DensityFunction* m_depth;
-        minecraft::density::DensityFunction* m_weirdness;
-        std::vector<ParameterPoint> m_spawnTarget;
-
     public:
-        Sampler(minecraft::density::DensityFunction* temperature,
-                minecraft::density::DensityFunction* humidity,
-                minecraft::density::DensityFunction* continentalness,
-                minecraft::density::DensityFunction* erosion,
-                minecraft::density::DensityFunction* depth,
-                minecraft::density::DensityFunction* weirdness,
-                const std::vector<ParameterPoint>& spawnTarget = {})
-            : m_temperature(temperature)
-            , m_humidity(humidity)
-            , m_continentalness(continentalness)
-            , m_erosion(erosion)
-            , m_depth(depth)
-            , m_weirdness(weirdness)
-            , m_spawnTarget(spawnTarget)
-        {
-        }
+        Sampler() = default;
+        Sampler(levelgen::density::BoundSampler temperature, levelgen::density::BoundSampler humidity,
+                levelgen::density::BoundSampler continentalness, levelgen::density::BoundSampler erosion,
+                levelgen::density::BoundSampler depth, levelgen::density::BoundSampler weirdness)
+            : m_temperature(temperature), m_humidity(humidity), m_continentalness(continentalness),
+              m_erosion(erosion), m_depth(depth), m_weirdness(weirdness) {}
 
         /**
          * Sample climate parameters at a quart position
-         * Reference: Climate.java lines 387-393
+         * Reference: 26.3 Climate.Sampler.sample
          */
         TargetPoint sample(int32_t quartX, int32_t quartY, int32_t quartZ) const;
 
-        /**
-         * Find spawn position
-         * Reference: Climate.java lines 395-397
-         */
-        core::BlockPos findSpawnPosition() const;
+        bool isBound() const { return m_temperature.sampler != nullptr; }
 
-        // Accessors
-        minecraft::density::DensityFunction* temperature() const { return m_temperature; }
-        minecraft::density::DensityFunction* humidity() const { return m_humidity; }
-        minecraft::density::DensityFunction* continentalness() const { return m_continentalness; }
-        minecraft::density::DensityFunction* erosion() const { return m_erosion; }
-        minecraft::density::DensityFunction* depth() const { return m_depth; }
-        minecraft::density::DensityFunction* weirdness() const { return m_weirdness; }
-        const std::vector<ParameterPoint>& spawnTarget() const { return m_spawnTarget; }
+        const levelgen::density::BoundSampler& temperature() const { return m_temperature; }
+        const levelgen::density::BoundSampler& humidity() const { return m_humidity; }
+        const levelgen::density::BoundSampler& continentalness() const { return m_continentalness; }
+        const levelgen::density::BoundSampler& erosion() const { return m_erosion; }
+        const levelgen::density::BoundSampler& depth() const { return m_depth; }
+        const levelgen::density::BoundSampler& weirdness() const { return m_weirdness; }
+
+    private:
+        levelgen::density::BoundSampler m_temperature;
+        levelgen::density::BoundSampler m_humidity;
+        levelgen::density::BoundSampler m_continentalness;
+        levelgen::density::BoundSampler m_erosion;
+        levelgen::density::BoundSampler m_depth;
+        levelgen::density::BoundSampler m_weirdness;
     };
 
     // =========================================================================
@@ -834,18 +701,6 @@ public:
      */
     static float unquantizeCoord(int64_t coord);
 
-    /**
-     * Create an empty sampler
-     * Reference: Climate.java lines 52-55
-     */
-    static Sampler empty();
-
-    /**
-     * Find spawn position from target climates
-     * Reference: Climate.java lines 57-59
-     */
-    static core::BlockPos findSpawnPosition(const std::vector<ParameterPoint>& targetClimates,
-                                           const Sampler& sampler);
 };
 
 } // namespace biome

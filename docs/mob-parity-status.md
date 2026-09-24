@@ -43,7 +43,7 @@ documented. The headline items, each verified against its MC source:
   bear, fox, goat, bee, turtle, axolotl, armadillo, strider, snifflet,
   happy ghast, nautilus, plus the adult rabbit remodel with its hop /
   idle-head-tilt clips and the baby axolotl's seven keyframe states)
-  generated from `minecraft_code2/` as `<slug>_baby_new` rows with their own
+  generated from `minecraft_code_26.3-pre-2/` as `<slug>_baby_new` rows with their own
   compiled setupAnim, on the `_baby` sheets (GeneratedBabyTextures);
   selectable per world (World Settings → Baby Models, New / Classic).
   Hitboxes and eye heights are 26.3's in both looks. Baby sounds wait on a

@@ -1,0 +1,269 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "bonus_rolls": 0.0,
+      "rolls": {
+        "type": "minecraft:uniform",
+        "min": 3.0,
+        "max": 6.0
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:whisperfruit",
+          "weight": 8,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonance_bloom",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 4.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:paper",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 4.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:glow_ink_sac",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_shard",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:white_candle",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:amethyst_shard",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:string",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:book",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:name_tag",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:cyan_carpet",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:music_disc_cat",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bonus_rolls": 0.0,
+      "rolls": 1.0,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "A Lesson for Small Voices"
+              },
+              "author": "Aubade",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "MY LESSON BOOK\nAubade, age 8\nStillhouse Row\n\nDo not draw in\nthis book.\n(I did not.)",
+                "THE FOUR VOICES\nSoprano is high.\nAlto is warm.\nTenor is bright.\nBass is deep and\nholds everyone up.\n\nI am a Soprano.\nThe teacher says\nnot yet.",
+                "WHY WE WHISPER\nThe Hush has no\nnoise of its own so\nall noise is ours.\nIf you shout, the\nwhole world has\nto hear it.\n\nGood. -T.",
+                "WHY LANTERNS GLOW\nLight is song you\ncan see. A lantern\nis a little bit of\nthe Chord in a\ncage so it does\nnot fly off.\n\n(It does not fly.\nIt fades. -T.)",
+                "THE HEART\nThe Heart is the\nbiggest instrument\nthere is. It sings\none note forever\nand the rings go\nround and round.\nI am not allowed\nto touch the rings.",
+                "THE WARDENS\nWardens have no\neyes because they\nnever needed them.\nThey will not hurt\nyou if you are\nquiet.\n\nVery quiet. -T.",
+                "HOW TO SING THE\nCHORD\nStart at the bottom.\nYou cannot put a\nroof on nothing.\nSo the deep one\nfirst and the high\none LAST.\n\nThat is me. -A.",
+                "My dream last night\nwas the deep place\nagain. Everyone in\nclass has it. The\nvoice was singing\nour Chord but\nwrong, like it was\nstill learning.",
+                "Teacher says we\nare going on a walk\ntonight, the whole\ncity, and I can\nbring one thing.\n\nI am bringing this\nbook.",
+                "(page torn out)"
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "A Letter, Unsent"
+              },
+              "author": "Maren",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "Dear Tobin,\n\nYou will have gone\nahead with the\nTenor families by\nthe time this\nreaches you. If it\nreaches you.",
+                "They told us to\nbring one thing\neach. I stood in\nour kitchen for an\nhour. The table is\nstill laid. I could\nnot clear it. It\nfelt like a lie.",
+                "The whole street\nis walking north to\nthe Soprano Gate.\nNobody is talking.\nYou would laugh.\nThe quietest city\nin any world, and\nit got quieter.",
+                "I left the lamp in\nthe window on, so\nthe house would not\nbe dark. Hesper\nsays it will burn\nfor a hundred\nyears. Good.",
+                "I wrote on the\nwall by the gate,\nwhere they will\nsee it, that we\nwill come back.",
+                "I do not know if\nthat is true. I\nwanted it to be\nthe last thing\nsomeone read here.",
+                "Keep singing where\nyou are. Softly.\n\nYour Maren"
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:empty",
+          "weight": 2
+        }
+      ]
+    }
+  ],
+  "random_sequence": "minecraft:chests/aurelith_stillhouse"
+}

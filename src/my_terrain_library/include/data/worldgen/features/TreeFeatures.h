@@ -90,6 +90,9 @@ public:
     static levelgen::ConfiguredFeature* FANCY_OAK_BEES_0002_LEAF_LITTER;
     static levelgen::ConfiguredFeature* FANCY_OAK_BEES_002;
     static levelgen::ConfiguredFeature* FANCY_OAK_BEES;
+    static levelgen::ConfiguredFeature* OAK_BEES_005;
+    static levelgen::ConfiguredFeature* BIRCH_BEES_005;
+    static levelgen::ConfiguredFeature* FANCY_OAK_BEES_005;
     static levelgen::ConfiguredFeature* SUPER_BIRCH_BEES_0002;
     static levelgen::ConfiguredFeature* SUPER_BIRCH_BEES;
 
@@ -100,6 +103,15 @@ public:
     static levelgen::ConfiguredFeature* FALLEN_OAK_TREE;
     static levelgen::ConfiguredFeature* FALLEN_BIRCH;
     static levelgen::ConfiguredFeature* FALLEN_BIRCH_TREE;
+
+    // 26.3 dappled forest poplars
+    static levelgen::ConfiguredFeature* RED_POPLAR;
+    static levelgen::ConfiguredFeature* ORANGE_POPLAR;
+    static levelgen::ConfiguredFeature* YELLOW_POPLAR;
+    static levelgen::ConfiguredFeature* RED_POPLAR_LEAF_LITTER;
+    static levelgen::ConfiguredFeature* ORANGE_POPLAR_LEAF_LITTER;
+    static levelgen::ConfiguredFeature* YELLOW_POPLAR_LEAF_LITTER;
+    static levelgen::ConfiguredFeature* FALLEN_POPLAR_TREE;
     static levelgen::ConfiguredFeature* FALLEN_SUPER_BIRCH_TREE;
     static levelgen::ConfiguredFeature* FALLEN_SPRUCE_TREE;
     static levelgen::ConfiguredFeature* FALLEN_JUNGLE_TREE;
@@ -139,6 +151,11 @@ private:
      * Reference: TreeFeatures.java createOak
      */
     static TreeConfigurationBuilder createOak();
+
+    /**
+     * Helper: Create a poplar configuration (26.3 TreeFeatures.createPoplar)
+     */
+    static TreeConfigurationBuilder createPoplar(const std::string& leavesBlock);
 
     /**
      * Helper: Create birch configuration

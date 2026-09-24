@@ -18,20 +18,132 @@ import os
 import re
 import sys
 
-MC = "minecraft_code/decompiled_net/minecraft"
+MC = "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft"
 SRC = os.path.join(MC, "world/entity/EntityType.java")
-# MC 26.3 (minecraft_code2): the registrations moved to EntityTypes.java and
+# MC 26.3 (minecraft_code_26.3-pre-2): the registrations moved to EntityTypes.java and
 # key on EntityTypeIds.X instead of the string. Gameplay follows 26.3 here
 # (the baby remodel's boxes already do), so every type present in BOTH trees
 # takes its 26.3 box, eye height and peaceful flag from this file; the 26.1
 # row only supplies what 26.3 does not restate. The differences that matter
 # (2026-09-05): bee 0.7x0.6 -> 0.55x0.5, rabbit 0.4x0.5 -> 0.49x0.6 with an
 # explicit 0.59 eye line, hoglin notInPeaceful.
-SRC2 = "minecraft_code2/decompiled_net/minecraft/world/entity/EntityTypes.java"
+SRC2 = "minecraft_code_26.3-pre-2/decompiled_net/minecraft/world/entity/EntityTypes.java"
 # 26.3-only mobs this engine implements (2026-09-05: the sulfur cube —
 # AbstractCubeMob sibling of the slime, ported as a standalone mob without
 # its sulfur-caves biome).
 MC2_ONLY = {"sulfur_cube"}
+# Engine-only mobs — no MC row to parse (2026-09-22: The Hush, docs/the-hush.md).
+# Each carries the builder-chain numbers its vanilla counterpart has, so the
+# tracking range and box behave like the mob it is modelled on: the hushling is
+# an endermite reskin, the echo wraith a vex, the silent warden a warden.
+# Appended at the END of the enum by existing_order like everything else.
+#   slug: (width, height, eyeHeight, category, clientTrackingRange,
+#          updateInterval, xpReward, notInPeaceful)
+ENGINE_ONLY = {
+    "hushling":      (0.4, 0.3, 0.13,    "CREATURE",  8, 3,   1, False),  # endermite box
+    "echo_wraith":   (0.4, 0.8, 0.51875, "MONSTER",   8, 3,   3, True),   # vex box
+    "silent_warden": (0.9, 2.9, 2.465,   "MONSTER",  16, 3, 100, True),   # warden box
+    # Twilight Forest and Aether creatures (2026-09-22, docs/mod-ports.md),
+    # from the mods' own registrations: TFEntities.java and
+    # AetherEntityTypes.java (sized, clientTrackingRange, notInPeaceful).
+    # No row states .eyeHeight, so the eye is MC's default height * 0.85.
+    # Animals pay Animal.getBaseExperienceReward (1-3, Animal::GetXpReward),
+    # so their xp column is unused (0); monsters take Monster's base 5 — the
+    # zephyr also sets xpReward = 5 in its constructor.
+    # The Aether registers the cockatrice under AETHER_DARKNESS_MONSTER and
+    # the zephyr under AETHER_SKY_MONSTER, its own MobCategory entries with
+    # MONSTER's cap semantics; both land in MONSTER here. It targets MC
+    # 1.21.1, which had no notInPeaceful(): the peaceful discard came from
+    # Monster/Zephyr.shouldDespawnInPeaceful() = true, which is what the
+    # flag expresses in this engine.
+    "deer":          (0.7, 1.8, 1.53,    "CREATURE",  8, 3,   0, False),  # TFEntities.DEER
+    "boar":          (0.9, 0.9, 0.765,   "CREATURE",  8, 3,   0, False),  # TFEntities.BOAR
+    "bighorn_sheep": (0.9, 1.3, 1.105,   "CREATURE",  8, 3,   0, False),  # TFEntities.BIGHORN_SHEEP
+    "tiny_bird":     (0.3, 0.3, 0.255,   "CREATURE",  8, 3,   0, False),  # TFEntities.TINY_BIRD
+    "kobold":        (0.8, 1.1, 0.935,   "MONSTER",   8, 3,   5, True),   # TFEntities.KOBOLD
+    "redcap":        (0.9, 1.4, 1.19,    "MONSTER",   8, 3,   5, True),   # TFEntities.REDCAP
+    "phyg":          (0.9, 0.9, 0.765,   "CREATURE", 10, 3,   0, False),  # AetherEntityTypes.PHYG
+    "flying_cow":    (0.9, 1.4, 1.19,    "CREATURE", 10, 3,   0, False),  # AetherEntityTypes.FLYING_COW
+    "sheepuff":      (0.9, 1.3, 1.105,   "CREATURE", 10, 3,   0, False),  # AetherEntityTypes.SHEEPUFF
+    # The Aether files these two under its own appended categories
+    # (MobCategory.hpp: AETHER_DARKNESS_MONSTER cap 5, AETHER_SKY_MONSTER
+    # cap 4), which the spawner now has — their biome spawners list them
+    # under those keys, not "monster".
+    "cockatrice":    (0.9, 2.15, 1.8275, "AETHER_DARKNESS_MONSTER", 10, 3, 5, True),  # AetherEntityTypes.COCKATRICE
+    "zephyr":        (4.5, 3.5, 2.975,   "AETHER_SKY_MONSTER",      10, 3, 5, True),  # AetherEntityTypes.ZEPHYR
+    # Pass two (2026-09-22): the rest of both mods' biome spawners, then the
+    # Twilight Forest's landmark hostiles and the Aether's dungeon mobs.
+    # Rows transcribed from TFEntities / AetherEntityTypes; eye heights are
+    # the stated .eyeHeight(...) or height * 0.85. clientTrackingRange 5 is
+    # MC's default where the row states none (hedge spider). xp: Monster's
+    # base 5 unless the ctor writes xpReward (SwarmSpider 2, MazeSlime
+    # size + 3 — dynamic, see the class; Wraith and the whirlwinds are
+    # plain Mobs: 0; the aechor plant writes 5).
+    # Twilight Forest, biome spawners.
+    "squirrel":        (0.3, 0.5, 0.425,  "CREATURE",  8, 3, 0, False),   # TFEntities.SQUIRREL
+    "raven":           (0.3, 0.5, 0.425,  "CREATURE", 10, 3, 0, False),   # TFEntities.RAVEN
+    "dwarf_rabbit":    (0.4, 0.4, 0.34,   "CREATURE",  8, 3, 0, False),   # TFEntities.DWARF_RABBIT
+    "penguin":         (0.5, 0.9, 0.765,  "CREATURE",  8, 3, 0, False),   # TFEntities.PENGUIN
+    "king_spider":     (1.6, 1.6, 1.36,   "MONSTER",   8, 3, 5, True),    # TFEntities.KING_SPIDER
+    "hostile_wolf":    (0.6, 0.85, 0.7225, "MONSTER",  8, 3, 5, True),    # TFEntities.HOSTILE_WOLF
+    "mist_wolf":       (1.4, 1.9, 1.615,  "MONSTER",   8, 3, 5, True),    # TFEntities.MIST_WOLF
+    "mosquito_swarm":  (0.7, 1.9, 1.615,  "MONSTER",  10, 3, 5, True),    # TFEntities.MOSQUITO_SWARM
+    "skeleton_druid":  (0.6, 1.99, 1.6915, "MONSTER", 10, 3, 5, True),    # TFEntities.SKELETON_DRUID
+    "winter_wolf":     (1.4, 1.9, 1.45,   "MONSTER",   8, 3, 5, True),    # TFEntities.WINTER_WOLF
+    "yeti":            (1.4, 2.4, 2.04,   "MONSTER",   8, 3, 5, True),    # TFEntities.YETI
+    # Twilight Forest, landmark hostiles.
+    "hedge_spider":    (1.4, 0.9, 0.765,  "MONSTER",   5, 3, 5, True),    # TFEntities.HEDGE_SPIDER
+    "swarm_spider":    (0.8, 0.4, 0.34,   "MONSTER",   8, 3, 2, True),    # TFEntities.SWARM_SPIDER
+    "wraith":          (0.6, 2.1, 1.785,  "MONSTER",   8, 3, 0, True),    # TFEntities.WRAITH
+    "fire_beetle":     (1.1, 0.5, 0.425,  "MONSTER",   8, 3, 5, True),    # TFEntities.FIRE_BEETLE
+    "slime_beetle":    (0.9, 0.5, 0.425,  "MONSTER",   8, 3, 5, True),    # TFEntities.SLIME_BEETLE
+    "pinch_beetle":    (1.2, 0.5, 0.425,  "MONSTER",   8, 3, 5, True),    # TFEntities.PINCH_BEETLE
+    "helmet_crab":     (0.8, 1.1, 0.45,   "MONSTER",   8, 3, 5, True),    # TFEntities.HELMET_CRAB
+    "troll":           (1.4, 2.4, 2.04,   "MONSTER",   8, 3, 5, True),    # TFEntities.TROLL
+    "towerwood_borer": (0.4, 0.3, 0.13,   "MONSTER",   8, 3, 5, True),    # TFEntities.TOWERWOOD_BORER
+    "maze_slime":      (0.52, 0.52, 0.325, "MONSTER", 10, 3, 5, True),    # TFEntities.MAZE_SLIME
+    "minotaur":        (0.6, 2.1, 1.785,  "MONSTER",   8, 3, 5, True),    # TFEntities.MINOTAUR
+    "redcap_sapper":   (0.9, 1.4, 1.19,   "MONSTER",   8, 3, 5, True),    # TFEntities.REDCAP_SAPPER
+    "block_and_chain_goblin": (0.9, 1.4, 1.19, "MONSTER", 8, 3, 5, True), # TFEntities.BLOCKCHAIN_GOBLIN
+    "upper_goblin_knight": (1.1, 1.3, 1.105, "MONSTER", 8, 3, 5, True),   # TFEntities.UPPER_GOBLIN_KNIGHT
+    "lower_goblin_knight": (0.7, 1.1, 0.935, "MONSTER", 10, 3, 5, True),  # TFEntities.LOWER_GOBLIN_KNIGHT
+    # The Aether, biome spawners (1.21.1: no notInPeaceful(); the flag
+    # carries shouldDespawnInPeaceful — Slime/Monster true, the passive
+    # whirlwind and the aerwhale false).
+    "moa":             (0.9, 2.15, 1.8275, "CREATURE", 10, 3, 0, False),  # AetherEntityTypes.MOA
+    "aerbunny":        (0.6, 0.5, 0.425,  "CREATURE", 10, 3, 0, False),   # AetherEntityTypes.AERBUNNY
+    "aerwhale":        (3.0, 3.0, 2.55,   "AETHER_AERWHALE", 10, 3, 0, False),        # AetherEntityTypes.AERWHALE
+    "blue_swet":       (0.9, 0.9, 0.765,  "AETHER_SURFACE_MONSTER", 10, 3, 5, True),  # AetherEntityTypes.BLUE_SWET
+    "golden_swet":     (0.9, 0.9, 0.765,  "AETHER_SURFACE_MONSTER", 10, 3, 5, True),  # AetherEntityTypes.GOLDEN_SWET
+    "whirlwind":       (0.6, 0.8, 0.68,   "AETHER_SURFACE_MONSTER",  8, 3, 0, True),  # AetherEntityTypes.WHIRLWIND (AbstractWhirlwind.shouldDespawnInPeaceful)
+    "evil_whirlwind":  (0.6, 0.8, 0.68,   "AETHER_SURFACE_MONSTER",  8, 3, 0, True),  # AetherEntityTypes.EVIL_WHIRLWIND
+    "aechor_plant":    (1.0, 1.0, 0.85,   "AETHER_SURFACE_MONSTER",  8, 3, 5, True),  # AetherEntityTypes.AECHOR_PLANT
+    # The Aether, dungeon mobs.
+    "mimic":           (1.0, 2.0, 1.7,    "MONSTER",   8, 3, 5, True),    # AetherEntityTypes.MIMIC
+    "sentry":          (0.9, 0.9, 0.765,  "MONSTER",  10, 3, 0, True),    # AetherEntityTypes.SENTRY (Slime: xp only in setSize)
+    "valkyrie":        (0.8, 1.95, 1.6575, "MONSTER",  8, 3, 5, False),   # AetherEntityTypes.VALKYRIE (AbstractValkyrie.shouldDespawnInPeaceful false)
+    "fire_minion":     (1.1, 1.95, 1.6575, "MONSTER",  8, 3, 5, True),    # AetherEntityTypes.FIRE_MINION
+    # The Hush, the deep-Hush creatures (2026-09-22, docs/the-hush.md;
+    # HushCreatures.hpp). Original designs, each sized after the vanilla mob
+    # whose niche it fills: the moth a bat-class ambient flutterer (tracking
+    # 5 like the bat), the golem the iron golem's box, the mimic a player's,
+    # the leviathan an aerwhale-class sky drifter grown to 3.5 x 3 (its
+    # mesh is 6.4 blocks long; the box is square, as every MC box is). The
+    # Choir Mother is the second boss: tracking 16 like the Silent Warden.
+    # Eye heights are height * 0.85 except the moth's (0.3, the allay's
+    # proportion) and the Mother's (her veiled head sits at 3.0).
+    "lumen_moth":      (0.5, 0.5, 0.3,    "AMBIENT",   5, 3,   0, False),
+    "crystal_golem":   (1.4, 2.7, 2.295,  "CREATURE", 10, 3,   8, False),
+    "hush_leviathan":  (3.5, 3.0, 2.55,   "CREATURE", 10, 3,   3, False),
+    "echo_mimic":      (0.6, 1.95, 1.6575, "MONSTER",  8, 3,   5, True),
+    "choir_mother":    (1.4, 3.6, 3.0,    "MONSTER",  16, 3, 150, True),
+    # Aurelith's boss (2026-09-22, docs/the-hush.md "The Unsung";
+    # common/entity/mobs/TheUnsung.hpp): the Undersong given a body, risen
+    # from the Heart's dais when the city is woken. A robed conductor's
+    # silhouette ~3.8 tall; tracking 16 like the other Hush bosses; its
+    # blank face (the eye line) at 3.3. The xp is the Choir Mother's scale.
+    "the_unsung":      (1.5, 3.8, 3.3,    "MONSTER",  16, 3, 200, True),
+}
 OUT_HPP = "src/common/entity/GeneratedEntityTypes.hpp"
 OUT_CPP = "src/common/entity/GeneratedEntityTypes.cpp"
 
@@ -72,6 +184,10 @@ MISC_KEEP = {
     # but it rides this engine's mob pipeline the way the arrow does, so it
     # needs a type id, a size and a tracking range like any other.
     "eye_of_ender",
+    # The lightning bolt (2026-09, the Twilight Forest portal's strike —
+    # TFPortalBlock.causeLightning). A plain Entity in MC; it rides the Misc
+    # pipeline like the eye of ender, so it needs a type id and a size.
+    "lightning_bolt",
     # Block-shaped entities (2026-08, falling blocks + TNT). Neither is a Mob
     # in MC — both are plain Entity — but both ride this engine's Mob pipeline
     # for the same reason the projectiles do: tracking, the wire, NBT and the
@@ -86,6 +202,9 @@ MISC_KEEP = {
     # The thrown ender pearl (2026-09) — same projectile pipeline as the
     # snowball and the eye of ender.
     "ender_pearl",
+    # The armor stand (2026-09-21): a LivingEntity, not a Mob, that rides
+    # the mob pipeline like the block-shaped entities do (ArmorStand.hpp).
+    "armor_stand",
 }
 
 CATEGORY_CPP = {
@@ -97,6 +216,10 @@ CATEGORY_CPP = {
     "WATER_CREATURE": "MobCategory::WaterCreature",
     "WATER_AMBIENT": "MobCategory::WaterAmbient",
     "MISC": "MobCategory::Misc",
+    "AETHER_SURFACE_MONSTER": "MobCategory::AetherSurfaceMonster",
+    "AETHER_DARKNESS_MONSTER": "MobCategory::AetherDarknessMonster",
+    "AETHER_SKY_MONSTER": "MobCategory::AetherSkyMonster",
+    "AETHER_AERWHALE": "MobCategory::AetherAerwhale",
 }
 
 # The head of each registration. The TAIL (the builder chain) cannot be matched
@@ -189,6 +312,12 @@ def parse():
             update=int(num("updateInterval", 3)),
             peaceful="notInPeaceful()" in tail,
         )
+    # Engine-only rows: no builder chain, the numbers are stated outright.
+    for slug, (w, h, e, cat, tr, up, _xp, pf) in ENGINE_ONLY.items():
+        out.setdefault(slug, dict(
+            slug=slug, category=cat, width=w, height=h, eye=e,
+            track=tr, update=up, peaceful=pf,
+        ))
     return out
 
 
@@ -303,7 +432,7 @@ def main():
     hpp.append("} // namespace Game")
     hpp.append("")
 
-    # Baby eye heights and boxes — MC 26.3's BABY_DIMENSIONS (minecraft_code2,
+    # Baby eye heights and boxes — MC 26.3's BABY_DIMENSIONS (minecraft_code_26.3-pre-2,
     # `<Mob>.java` static init: `EntityDimensions.scalable(w, h).withEyeHeight
     # (e)` or `<TYPE>.getDimensions().scale(s)...`) and the getAgeScale
     # overrides. The 26.x baby remodel gave nearly every baby its own box and
@@ -344,6 +473,12 @@ def main():
         "dolphin":          0.09375,  # Dolphin.java:343
         "squid":            0.37,     # Squid.java:51
         "glow_squid":       0.37,     # (GlowSquid extends Squid)
+        # The Aether's FlyingCow.BABY_DIMENSIONS: COW.scale(0.5)
+        # .withEyeHeight(0.665F) — the box derives (the adult's halved).
+        "flying_cow":       0.665,
+        # TF SkeletonDruid.BABY_DIMENSIONS: .withEyeHeight(0.93F) (the box
+        # derives).
+        "skeleton_druid":   0.93,
     }
 
     # Boxes that are NOT the adult's halved. Cow, pig, sheep, goat, wolf,
@@ -398,6 +533,8 @@ def main():
     }
 
     def xp(slug, cat):
+        if slug in ENGINE_ONLY:
+            return ENGINE_ONLY[slug][6]
         return XP_OVERRIDES.get(slug, 5 if cat == "MONSTER" else 0)
 
     cpp = []

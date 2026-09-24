@@ -3,6 +3,8 @@
 #include "server/world/ticketing/ChunkTicketManager.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
+#include "common/entity/ArmorStand.hpp"
+#include "common/network/packets/game/ArmorStandDataS2CPacket.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/network/packets/game/DragonPackets.hpp"
 #include "common/network/packets/game/RemoveEntitiesS2CPacket.hpp"
@@ -24,6 +26,7 @@ namespace Server {
         constexpr uint8_t kFlagBaby       = 0x01;
         constexpr uint8_t kFlagAggressive = 0x02;
         constexpr uint8_t kFlagOnFire     = 0x04;
+        constexpr uint8_t kFlagAgeLocked  = 0x08;   // MC AgeableMob.AGE_LOCKED
 
         int64_t Encode(double v) { return Network::EncodeEntityPos(v); }
     }
@@ -33,7 +36,22 @@ namespace Server {
         if (mob.IsBaby())       flags |= kFlagBaby;
         if (mob.IsAggressive()) flags |= kFlagAggressive;
         if (mob.IsOnFire())     flags |= kFlagOnFire;
+        if (mob.IsAgeLocked())  flags |= kFlagAgeLocked;
         return flags;
+    }
+
+    Network::ArmorStandDataS2CPacket ServerEntityTracker::BuildArmorStandData(const Game::ArmorStand& stand,
+                                                                             int32_t id) {
+        Network::ArmorStandDataS2CPacket p;
+        p.entityId = id;
+        const Game::ArmorStand::Pose& pose = stand.GetPose();
+        p.poses = { pose.head, pose.body, pose.leftArm, pose.rightArm, pose.leftLeg, pose.rightLeg };
+        static constexpr Game::EquipmentSlot kSlots[6] = {
+            Game::EquipmentSlot::MAINHAND, Game::EquipmentSlot::OFFHAND, Game::EquipmentSlot::FEET,
+            Game::EquipmentSlot::LEGS,     Game::EquipmentSlot::CHEST,   Game::EquipmentSlot::HEAD,
+        };
+        for (int i = 0; i < 6; ++i) p.equipment[static_cast<size_t>(i)] = stand.GetItemBySlot(kSlots[i]);
+        return p;
     }
 
     uint8_t ServerEntityTracker::VariantData(const Game::Mob& mob) {
@@ -70,6 +88,13 @@ namespace Server {
         // in sendPairingData; here the same fact rides the add packet.
         p.vehicleId  = mob.GetVehicle() ? mob.GetVehicle()->GetId() : -1;
         p.scale      = mob.scale;
+        // MC sendPairingData's entity data: the effect particles and the
+        // invisible / glowing flags on first sight.
+        {
+            const Game::EffectVisuals& visuals = mob.GetEffectVisuals();
+            p.effectFlags     = visuals.flags;
+            p.effectParticles = visuals.particles;
+        }
 
         // The block a block-shaped entity carries. Sent once, on the add
         // packet, because neither entity's state changes after spawn — a
@@ -264,6 +289,14 @@ namespace Server {
                     // data on tracking start; here it is its own packet (see
                     // DragonPackets.hpp). Only when a target is set — the
                     // client default is "no beam".
+                    // An armor stand's poses and equipment follow its add
+                    // packet (ArmorStandDataS2C) — its flags byte is the
+                    // add packet's own variant byte.
+                    if (const auto* stand = dynamic_cast<const Game::ArmorStand*>(&mob)) {
+                        EmitTo(connId, Network::PacketId::ArmorStandDataS2C,
+                               Network::Serialization::Serialize(BuildArmorStandData(*stand, id)),
+                               EntityPacketOut::Kind::Data, out);
+                    }
                     if (const auto* crystal =
                             dynamic_cast<const Game::EndCrystal*>(&mob);
                         crystal && crystal->HasBeamTarget()) {
@@ -306,6 +339,17 @@ namespace Server {
                 const auto payload = Network::Serialization::Serialize(beam);
                 for (uint32_t connId : tracked.watchers) {
                     EmitTo(connId, Network::PacketId::EndCrystalBeamS2C,
+                           payload, EntityPacketOut::Kind::Data, out);
+                }
+            }
+
+            // An armor stand whose poses or equipment changed this tick (a
+            // swap, a break, /data) tells every current watcher.
+            if (auto* stand = dynamic_cast<Game::ArmorStand*>(mobPtr);
+                stand && stand->ConsumeDataDirty()) {
+                const auto payload = Network::Serialization::Serialize(BuildArmorStandData(*stand, id));
+                for (uint32_t connId : tracked.watchers) {
+                    EmitTo(connId, Network::PacketId::ArmorStandDataS2C,
                            payload, EntityPacketOut::Kind::Data, out);
                 }
             }
@@ -378,8 +422,11 @@ namespace Server {
             const int32_t vehicleId =
                 mob.GetVehicle() ? mob.GetVehicle()->GetId() : -1;
             const uint32_t carriedBlock = mob.GetCarriedBlockRaw();
+            // MC updateDirtyEffects → DATA_EFFECT_PARTICLES / shared flags.
+            const Game::EffectVisuals& effectVisuals = mob.GetEffectVisuals();
 
             const bool dataChanged =
+                effectVisuals != tracked.lastEffectVisuals ||
                 flags != tracked.lastFlags || variant != tracked.lastVariant ||
                 carriedBlock != tracked.lastCarriedBlock ||
                 hurtTime != tracked.lastHurtTime || deathTime != tracked.lastDeathTime ||
@@ -466,6 +513,9 @@ namespace Server {
                 sendMovement && tracked.teleportDelay > kForcedTeleportPeriod;
             const bool groundChanged =
                 sendMovement && tracked.wasOnGround != mob.onGround;
+            // Through an immersive surface since the last pass: a full sync
+            // whatever the distance, flagged so the watchers snap to it.
+            const bool crossedSurface = mob.portal.ConsumeCrossedSurface();
 
             if (mob.IsPassenger()) {
                 // MC ServerEntity.sendChanges' passenger branch: NO position
@@ -494,7 +544,7 @@ namespace Server {
                 tracked.wasRiding = true;
 
             } else if (deltaTooBig || forceTeleport || groundChanged ||
-                       tracked.wasRiding) {
+                       tracked.wasRiding || crossedSurface) {
                 Network::EntityPositionSyncS2CPacket p;
                 p.entityId = id;
                 p.position = mob.position;
@@ -503,6 +553,7 @@ namespace Server {
                 p.xRot = xRotN;
                 p.yHeadRot = yHeadRotN;
                 p.onGround = mob.onGround;
+                if (crossedSurface) p.flags |= Network::EntityPositionSyncS2CPacket::kFlagPortalCrossing;
 
                 const auto payload = Network::Serialization::Serialize(p);
                 for (uint32_t connId : tracked.watchers) {
@@ -606,6 +657,8 @@ namespace Server {
                 p.vehicleId = vehicleId;
                 p.scale     = mob.scale;
                 p.blockStateRaw = carriedBlock;
+                p.effectFlags     = effectVisuals.flags;
+                p.effectParticles = effectVisuals.particles;
 
                 const auto payload = Network::Serialization::Serialize(p);
                 for (uint32_t connId : tracked.watchers) {
@@ -624,6 +677,7 @@ namespace Server {
                 tracked.lastCarriedBlock = carriedBlock;
                 tracked.lastVehicleId = vehicleId;
                 tracked.lastScale     = mob.scale;
+                tracked.lastEffectVisuals = effectVisuals;
             }
         }
 
@@ -659,11 +713,18 @@ namespace Server {
     }
 
     void ServerEntityTracker::FlushEntityEvents(ServerLevelBridge& level,
-                                                std::vector<EntityPacketOut>& out) {
+                                                std::vector<EntityPacketOut>& out,
+                                                bool keepUntracked) {
         auto& events = level.DrainEvents();
+        size_t kept = 0;
         for (const auto& ev : events) {
             const auto it = m_tracked.find(ev.entityId);
-            if (it == m_tracked.end()) continue;
+            if (it == m_tracked.end()) {
+                // Not tracked yet: held (in order, compacted to the front)
+                // for Tick()'s closing flush, or dropped by that flush.
+                if (keepUntracked) events[kept++] = ev;
+                continue;
+            }
 
             Network::EntityEventS2CPacket p;
             p.entityId = ev.entityId;
@@ -675,7 +736,7 @@ namespace Server {
                        EntityPacketOut::Kind::Event, out);
             }
         }
-        events.clear();
+        events.resize(kept);
     }
 
     void ServerEntityTracker::RemoveEntities(const std::vector<int32_t>& entityIds,

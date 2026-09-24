@@ -15,6 +15,7 @@
 #pragma once
 
 #include "common/entity/MiningTier.hpp"
+#include "common/world/block/PushReaction.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -47,6 +48,14 @@ namespace Game {
         ToolType    preferredTool;
         // From data/minecraft/tags/block/needs_*_tool.json.
         MiningTier  minTier;
+        // MC Properties.pushReaction — what a piston does to this block.
+        PushReaction      pushReaction;
+        // MC Properties.isRedstoneConductor — Blocks.java's never/always
+        // overrides of the "is my collision shape a full cube" default.
+        RedstoneConductor redstoneConductor;
+        // MC Properties.instrument, as NoteBlockInstrument's serialized name
+        // ("harp", "basedrum", "bass"…) — what a note block on top plays.
+        std::string_view  instrument;
     };
 
     extern const GeneratedBlockHardnessRow kBlockHardnessTable[];

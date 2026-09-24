@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:hellfire_stone",
+  "result": {
+    "count": 1,
+    "id": "minecraft:hellfire_wall"
+  }
+}

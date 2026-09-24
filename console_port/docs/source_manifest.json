@@ -1,0 +1,3600 @@
+{
+  "source_root": "/Users/obey/Downloads/minecraft console",
+  "files": [
+    {
+      "source": "Minecraft.World/Random.h",
+      "destination": "original/Minecraft.World/Random.h",
+      "sha256": "b13e1913e324d2232d3492ea4d68ebafe5c9da23a85e4868d86163757712b0f6"
+    },
+    {
+      "source": "Minecraft.World/Random.cpp",
+      "destination": "original/Minecraft.World/Random.cpp",
+      "sha256": "9bfe6b09a8cc4aa8eee7caf7552f9b3636c39d25e91cab4e3dccead3c4b99fdf"
+    },
+    {
+      "source": "Minecraft.World/ImprovedNoise.h",
+      "destination": "original/Minecraft.World/ImprovedNoise.h",
+      "sha256": "4b751525bc538deb102c1deee3d0965fb7940f59f41c89938879822b259728c9"
+    },
+    {
+      "source": "Minecraft.World/ImprovedNoise.cpp",
+      "destination": "original/Minecraft.World/ImprovedNoise.cpp",
+      "sha256": "3f102722795263c11c91e2ac7e98f075d9556fe4656de86f2dcc1714b5336cb7"
+    },
+    {
+      "source": "Minecraft.World/PerlinNoise.h",
+      "destination": "original/Minecraft.World/PerlinNoise.h",
+      "sha256": "bc07e9f79b0edb685a6b82b3f013fe03aa36cf24d649b50e4f3b41de16eb2cee"
+    },
+    {
+      "source": "Minecraft.World/PerlinNoise.cpp",
+      "destination": "original/Minecraft.World/PerlinNoise.cpp",
+      "sha256": "53909784f430bd997d8f8d5b220474f48a31ba7d6a15e1568be2ee05773e80c5"
+    },
+    {
+      "source": "Minecraft.World/Synth.h",
+      "destination": "original/Minecraft.World/Synth.h",
+      "sha256": "6452cffd965dd23af84e44fe522c6ed5f6e772c514f9092ecab882694276ea31"
+    },
+    {
+      "source": "Minecraft.World/Synth.cpp",
+      "destination": "original/Minecraft.World/Synth.cpp",
+      "sha256": "05875f6cd3d25b758d17d0b6e4d8b19ab04dffcddfffa9ce5bbce6ad8fd4b223"
+    },
+    {
+      "source": "Minecraft.World/Mth.h",
+      "destination": "original/Minecraft.World/Mth.h",
+      "sha256": "bffaf8bf46c87b9e77ff0e2b3817d93129f5c630f69848727a67b2d0479ff158"
+    },
+    {
+      "source": "Minecraft.World/Mth.cpp",
+      "destination": "original/Minecraft.World/Mth.cpp",
+      "sha256": "a7a3564895ab483e41d98087fe78e196862c298a214a6f5e50d6554952caff94"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/terrain.png",
+      "destination": "assets/terrain.png",
+      "sha256": "bf24bf11c546ca10685b0873ae05cea2eb0792a920daed2ee9d5e86c736c9aa2"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/font/default.png",
+      "destination": "assets/font.png",
+      "sha256": "938fceb737d068ad386a21d8b23aa286b7a09488b4014259c21347507a315e00"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/gui/icons.png",
+      "destination": "assets/icons.png",
+      "sha256": "8b5a8cfd44b933559c36aecaa722165ad048f1e942f1eeae616554124d6dac43"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/gui/gui.png",
+      "destination": "assets/gui.png",
+      "sha256": "e223bea0b5004a3b5497607c6d529daf840396526a46eff75c299364cf9dc795"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/MenuTitle.png",
+      "destination": "assets/logo.png",
+      "sha256": "41be866d07c16350ea3681202890e2c1f669cce8b7698596c06390d6c9e9bb5c"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Panorama_Background_N.png",
+      "destination": "assets/panorama_n.png",
+      "sha256": "b67f7aafe9c43770a4b16e47fc0ed1b40443deb6565103c7aff62b7ee54b0327"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Panorama_Background_S.png",
+      "destination": "assets/panorama_s.png",
+      "sha256": "5a9c3bb0ec3e46a9af5c8c51f2913dd2129d765ed3bb042a12c37ef8677371ca"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/MainMenuButton_Norm.png",
+      "destination": "assets/button.png",
+      "sha256": "d87be146345d7df9faf20b48182762f4ee84b5e132005da7b4749daef8f75a7e"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/MainMenuButton_Over.png",
+      "destination": "assets/button_focus.png",
+      "sha256": "fb481b918fb08c61107715cda5ae7ca974dba08ebf43bf540c6e672085568c1f"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/MainMenuButton_Down.png",
+      "destination": "assets/button_down.png",
+      "sha256": "0c30434e09262f0ee9fb3f731ba3bfeb1b90782d5c3a6f27db914d73b89db1ff"
+    },
+    {
+      "source": "Minecraft.World/AddIslandLayer.h",
+      "destination": "original/Minecraft.World/AddIslandLayer.h",
+      "sha256": "bb98a0115adadd518dc0541d1ee3465e16ad6e5fcd1aa06a2ba6a5b4787aa91d"
+    },
+    {
+      "source": "Minecraft.World/AddMushroomIslandLayer.h",
+      "destination": "original/Minecraft.World/AddMushroomIslandLayer.h",
+      "sha256": "9cba30d11bbc4c8157559c8d9ed574435792c76ea6238e11042f024fc6d71993"
+    },
+    {
+      "source": "Minecraft.World/AddSnowLayer.h",
+      "destination": "original/Minecraft.World/AddSnowLayer.h",
+      "sha256": "50d0f3b89eac8300374d8d8e2fca44eac4af4c78eb9e4cff72549aba7ce7f2f2"
+    },
+    {
+      "source": "Minecraft.World/BiomeInitLayer.h",
+      "destination": "original/Minecraft.World/BiomeInitLayer.h",
+      "sha256": "902109489336dd760d5f27b58935bdeab88b1a34ef955377be876b9d7bc762d3"
+    },
+    {
+      "source": "Minecraft.World/DownfallLayer.h",
+      "destination": "original/Minecraft.World/DownfallLayer.h",
+      "sha256": "690b2ddedc6f84756a5a1e2c22e52cbb5f6207a070372872e7280776cbb1364d"
+    },
+    {
+      "source": "Minecraft.World/DownfallMixerLayer.h",
+      "destination": "original/Minecraft.World/DownfallMixerLayer.h",
+      "sha256": "006a4aa8626beb0c43550861265cd4bc930bf636cfa2be542a49593f84038e2d"
+    },
+    {
+      "source": "Minecraft.World/FlatLayer.h",
+      "destination": "original/Minecraft.World/FlatLayer.h",
+      "sha256": "eb51eced4afbad713b76aad6dd106927760f39b7d2ffcfa1f693f48edf32ea64"
+    },
+    {
+      "source": "Minecraft.World/FuzzyZoomLayer.h",
+      "destination": "original/Minecraft.World/FuzzyZoomLayer.h",
+      "sha256": "0ce1c32b04f18b2ab7044ea690d1df93e100ec8af6d044a76e45d18cdc99b9bb"
+    },
+    {
+      "source": "Minecraft.World/IntCache.h",
+      "destination": "original/Minecraft.World/IntCache.h",
+      "sha256": "07361692db25a92109bd7beef13cdaec22a0677720e874af1c915d69c7b5dd57"
+    },
+    {
+      "source": "Minecraft.World/IslandLayer.h",
+      "destination": "original/Minecraft.World/IslandLayer.h",
+      "sha256": "21d9cc587aca5330644565572ba1f461885e4109621a36cfb62769ec8ff9b541"
+    },
+    {
+      "source": "Minecraft.World/Layer.h",
+      "destination": "original/Minecraft.World/Layer.h",
+      "sha256": "6b289fc11feb44cb569926105f9118165b6e9f8ea618bdabc3a6ca048521091f"
+    },
+    {
+      "source": "Minecraft.World/RiverInitLayer.h",
+      "destination": "original/Minecraft.World/RiverInitLayer.h",
+      "sha256": "aff09d3bd99fcae7c410bc8ac8d38b27368772510b847f51190e52f404a9c0eb"
+    },
+    {
+      "source": "Minecraft.World/RiverLayer.h",
+      "destination": "original/Minecraft.World/RiverLayer.h",
+      "sha256": "612a4a53845c99f67728c36d57a6d6ecd14c81033a45f17a132ffc2c093403e1"
+    },
+    {
+      "source": "Minecraft.World/RiverMixerLayer.h",
+      "destination": "original/Minecraft.World/RiverMixerLayer.h",
+      "sha256": "8c55073f373dc6bbbbf3701f62b688132f81898e9dbae2eb96056a33de460eb2"
+    },
+    {
+      "source": "Minecraft.World/ShoreLayer.h",
+      "destination": "original/Minecraft.World/ShoreLayer.h",
+      "sha256": "353f5f8a228651015c53b8804043fabf552c31648cc5b99578488a20762a506a"
+    },
+    {
+      "source": "Minecraft.World/SmoothLayer.h",
+      "destination": "original/Minecraft.World/SmoothLayer.h",
+      "sha256": "6add6fd72eabc135cabd397dd77d682f41cd9a8a9dfaf8b0bb5b6810a55c42bc"
+    },
+    {
+      "source": "Minecraft.World/SmoothZoomLayer.h",
+      "destination": "original/Minecraft.World/SmoothZoomLayer.h",
+      "sha256": "8581087898d20aeddf122456cec82b9006983083c562c35d976bb229be3d92fb"
+    },
+    {
+      "source": "Minecraft.World/TemperatureLayer.h",
+      "destination": "original/Minecraft.World/TemperatureLayer.h",
+      "sha256": "dcf89a23cb4f9a71cda3b45f660db88719dd1a8e50daf88c0912bbb0665c5774"
+    },
+    {
+      "source": "Minecraft.World/TemperatureMixerLayer.h",
+      "destination": "original/Minecraft.World/TemperatureMixerLayer.h",
+      "sha256": "b8363961fe091102de3eb0c9877ba14998cb049d460f24527b1477d293a1276a"
+    },
+    {
+      "source": "Minecraft.World/VoronoiZoom.h",
+      "destination": "original/Minecraft.World/VoronoiZoom.h",
+      "sha256": "d0b5a63053638ea47ae4702e128783e1863eddf61bad2a135842464ff20c5fcc"
+    },
+    {
+      "source": "Minecraft.World/ZoomLayer.h",
+      "destination": "original/Minecraft.World/ZoomLayer.h",
+      "sha256": "f574905994d2b54336b39f6d0a65e77f4404de2c50af1fc4857c8bb2812d8f5c"
+    },
+    {
+      "source": "Minecraft.World/GrowMushroomIslandLayer.h",
+      "destination": "original/Minecraft.World/GrowMushroomIslandLayer.h",
+      "sha256": "271926305239a8714b4f63a0d295cef7facbde664780872063887c5405bfda6f"
+    },
+    {
+      "source": "Minecraft.World/RegionHillsLayer.h",
+      "destination": "original/Minecraft.World/RegionHillsLayer.h",
+      "sha256": "cabd2bc707ccd583f54e9aab75e069e52baec4e3e18487bb35c9306683b4cc0f"
+    },
+    {
+      "source": "Minecraft.World/SwampRiversLayer.h",
+      "destination": "original/Minecraft.World/SwampRiversLayer.h",
+      "sha256": "5b74ee948af1681178f80fd5d0187c42f429758845c4be8bfa3f2349cdc57c7f"
+    },
+    {
+      "source": "Minecraft.World/AddIslandLayer.cpp",
+      "destination": "original/Minecraft.World/AddIslandLayer.cpp",
+      "sha256": "4a25557aee36e6933e58205b90102c4cdbbe5ab737b406c78f6cec2f78067dfa"
+    },
+    {
+      "source": "Minecraft.World/AddMushroomIslandLayer.cpp",
+      "destination": "original/Minecraft.World/AddMushroomIslandLayer.cpp",
+      "sha256": "c1a2ff07f7ccf3f03c579786ee2c1ae7e4b11a9808dbb6b9c2be3a684ed0eb0c"
+    },
+    {
+      "source": "Minecraft.World/AddSnowLayer.cpp",
+      "destination": "original/Minecraft.World/AddSnowLayer.cpp",
+      "sha256": "6bd498a2bbee44f23fc5aea9eede399dcb2c7718a7fa79a7b2d309239b7c50df"
+    },
+    {
+      "source": "Minecraft.World/BiomeInitLayer.cpp",
+      "destination": "original/Minecraft.World/BiomeInitLayer.cpp",
+      "sha256": "6ed4984f882ccd3bc1e289ba6feb8ca5ed95155803f3ca125bfd54037afd9fea"
+    },
+    {
+      "source": "Minecraft.World/DownfallLayer.cpp",
+      "destination": "original/Minecraft.World/DownfallLayer.cpp",
+      "sha256": "e1b57d2066db4ca4353868f661f36454af6c933888c56704b1c0190e21d5a82b"
+    },
+    {
+      "source": "Minecraft.World/DownfallMixerLayer.cpp",
+      "destination": "original/Minecraft.World/DownfallMixerLayer.cpp",
+      "sha256": "159dde7f7e1e851c8584bcbfebf98387dc628d401f5c6030bb1878188cf9cc47"
+    },
+    {
+      "source": "Minecraft.World/FlatLayer.cpp",
+      "destination": "original/Minecraft.World/FlatLayer.cpp",
+      "sha256": "0ed5efdf51b10116190cee5beb772274f5b90b0c440bbe43d81c702cd1b34555"
+    },
+    {
+      "source": "Minecraft.World/FuzzyZoomLayer.cpp",
+      "destination": "original/Minecraft.World/FuzzyZoomLayer.cpp",
+      "sha256": "002a0a57e78061d8af1884a79516027a40fd87aa850f346c71e0507712b3da6b"
+    },
+    {
+      "source": "Minecraft.World/IntCache.cpp",
+      "destination": "original/Minecraft.World/IntCache.cpp",
+      "sha256": "569962425e547962d53a0bfd98a6d0e2b6716d23e9036fc9eb077a93284529fd"
+    },
+    {
+      "source": "Minecraft.World/IslandLayer.cpp",
+      "destination": "original/Minecraft.World/IslandLayer.cpp",
+      "sha256": "5ed394c2890244975e43009136120cadc395e9cd214b1026fff3cac270bfbb81"
+    },
+    {
+      "source": "Minecraft.World/Layer.cpp",
+      "destination": "original/Minecraft.World/Layer.cpp",
+      "sha256": "53148cd5b9ef7a5a3c1bcc0709a822751c142d0db9132dfb12ed46b47ea31fb1"
+    },
+    {
+      "source": "Minecraft.World/RiverInitLayer.cpp",
+      "destination": "original/Minecraft.World/RiverInitLayer.cpp",
+      "sha256": "ab589bf8f116cac690b4f0502d40c013cf54ef2ddb755bf960616ecebc54f142"
+    },
+    {
+      "source": "Minecraft.World/RiverLayer.cpp",
+      "destination": "original/Minecraft.World/RiverLayer.cpp",
+      "sha256": "f12f33caf93993132f482626f24a236fde1746a9d2ee9ae9da3e5a1c7f39c196"
+    },
+    {
+      "source": "Minecraft.World/RiverMixerLayer.cpp",
+      "destination": "original/Minecraft.World/RiverMixerLayer.cpp",
+      "sha256": "4a3eed2b310775f1bee77c419e1f358b37253b27a6eb2c53298952c2a3d093d4"
+    },
+    {
+      "source": "Minecraft.World/ShoreLayer.cpp",
+      "destination": "original/Minecraft.World/ShoreLayer.cpp",
+      "sha256": "1da2a77e2843dd1367a3196880cea128fded324240e2335f9468e70b895ab4db"
+    },
+    {
+      "source": "Minecraft.World/SmoothLayer.cpp",
+      "destination": "original/Minecraft.World/SmoothLayer.cpp",
+      "sha256": "c51adfd99b95c8bcdc25d98c51945b2d6b7e898698a8ca35c42a09c73b4fb037"
+    },
+    {
+      "source": "Minecraft.World/SmoothZoomLayer.cpp",
+      "destination": "original/Minecraft.World/SmoothZoomLayer.cpp",
+      "sha256": "60ad5e417a16fb8f8c03bccec9894605679b0638324641174340c6ea24c32395"
+    },
+    {
+      "source": "Minecraft.World/TemperatureLayer.cpp",
+      "destination": "original/Minecraft.World/TemperatureLayer.cpp",
+      "sha256": "1c9de2f5e4e0823177f785ea4700ecd865cb35db798267d67ef5998de2a35a73"
+    },
+    {
+      "source": "Minecraft.World/TemperatureMixerLayer.cpp",
+      "destination": "original/Minecraft.World/TemperatureMixerLayer.cpp",
+      "sha256": "d1a403eaa84912694bb26829a864d56dbc7261c4633c535b12f1cd88355356cf"
+    },
+    {
+      "source": "Minecraft.World/VoronoiZoom.cpp",
+      "destination": "original/Minecraft.World/VoronoiZoom.cpp",
+      "sha256": "1b7e1e8f53921452931fba2f338a31d03e71e58e7140467f8abe1ffc50c974e8"
+    },
+    {
+      "source": "Minecraft.World/ZoomLayer.cpp",
+      "destination": "original/Minecraft.World/ZoomLayer.cpp",
+      "sha256": "cb19439c6ea2674f0776ff9f9a97f46229dca9aac6e508a17cd6ad85532ee3a3"
+    },
+    {
+      "source": "Minecraft.World/GrowMushroomIslandLayer.cpp",
+      "destination": "original/Minecraft.World/GrowMushroomIslandLayer.cpp",
+      "sha256": "0ea4c90c9bb6f3bf877c3ed50121f27f671d377ba27de420b2db3be3faa01fcf"
+    },
+    {
+      "source": "Minecraft.World/RegionHillsLayer.cpp",
+      "destination": "original/Minecraft.World/RegionHillsLayer.cpp",
+      "sha256": "5d91f37d854f4658cd559dce9a008a9750138a8767ef05d6a241a4357ce8eff0"
+    },
+    {
+      "source": "Minecraft.World/SwampRiversLayer.cpp",
+      "destination": "original/Minecraft.World/SwampRiversLayer.cpp",
+      "sha256": "1b312c1b1fb06b93cc8f49c366704bdae8247a461a8c36288b751df44488ed57"
+    },
+    {
+      "source": "Minecraft.World/net.minecraft.world.level.newbiome.layer.h",
+      "destination": "original/Minecraft.World/net.minecraft.world.level.newbiome.layer.h",
+      "sha256": "283d367143ee401fd9177d946cf5173f2b35f3dbefd789789121da757b908279"
+    },
+    {
+      "source": "Minecraft.World/LevelType.h",
+      "destination": "original/Minecraft.World/LevelType.h",
+      "sha256": "45623e4b1f58c696e88706ddf82051872530a2d0c7046b77a29f753d93440ad1"
+    },
+    {
+      "source": "Minecraft.World/LevelType.cpp",
+      "destination": "original/Minecraft.World/LevelType.cpp",
+      "sha256": "51e68d529d16994176f40ac235d50800e9cf7c1aab9471bdf599710be30248a0"
+    },
+    {
+      "source": "Minecraft.World/BiomeOverrideLayer.h",
+      "destination": "original/Minecraft.World/BiomeOverrideLayer.h",
+      "sha256": "1aa55f0e5197be93804d0070b8097713c2a2d3b1f5d01e87dee9389403cc53d8"
+    },
+    {
+      "source": "Minecraft.World/Biome.cpp",
+      "destination": "original/reference-only/Biome.cpp",
+      "sha256": "a99dcb7a8051f2fe7ef3fad803044bd70145b71ebf634aae2191da612d9dde68"
+    },
+    {
+      "source": "Minecraft.World/Biome.h",
+      "destination": "original/reference-only/Biome.h",
+      "sha256": "d0fd4e4e44ea7c843b8b1915cf4f40a859f42fd5ad619401b90ac44379ecd44a"
+    },
+    {
+      "source": "Minecraft.World/DesertBiome.cpp",
+      "destination": "original/reference-only/DesertBiome.cpp",
+      "sha256": "5f93cfd6d808e54bc818ddba5b6facfeee0cd18cf412b893f873e37cc00ba343"
+    },
+    {
+      "source": "Minecraft.World/BeachBiome.cpp",
+      "destination": "original/reference-only/BeachBiome.cpp",
+      "sha256": "29cb3f88321e3f3c3f1aa0e8bd0a0ae3100a214fd3e9f08883bd38f32e591393"
+    },
+    {
+      "source": "Minecraft.World/MushroomIslandBiome.cpp",
+      "destination": "original/reference-only/MushroomIslandBiome.cpp",
+      "sha256": "e03518cdc2d382023ee07ae5b20f9c02b9a75a967ef2317370bc4abbc4b13ffc"
+    },
+    {
+      "source": "Minecraft.World/RandomLevelSource.cpp",
+      "destination": "original/reference-only/RandomLevelSource.cpp",
+      "sha256": "4d66ef2e52534e33e80ea94aee0dc34b6ebed5a978e92fe0a02f68e7a65c27ee"
+    },
+    {
+      "source": "Minecraft.World/RandomLevelSource.h",
+      "destination": "original/reference-only/RandomLevelSource.h",
+      "sha256": "6a653227f3c23db493f9594de8ae117bcbcebd6bdd6ef39afd707aad487a712c"
+    },
+    {
+      "source": "Minecraft.World/LargeFeature.h",
+      "destination": "original/Minecraft.World/LargeFeature.h",
+      "sha256": "ca1879d7c984b3152607b54d24fdff7792d542c4b40f676a2db5f51356548821"
+    },
+    {
+      "source": "Minecraft.World/LargeFeature.cpp",
+      "destination": "original/Minecraft.World/LargeFeature.cpp",
+      "sha256": "b7768b6f842bcd273b6c6cbc560f6e940471184cb11a62fc0f04530293ff38c7"
+    },
+    {
+      "source": "Minecraft.World/LargeCaveFeature.h",
+      "destination": "original/Minecraft.World/LargeCaveFeature.h",
+      "sha256": "affb8f57c6eafa022d1ae4f7f345e8046e54f38b698cd8b31fea415b8f4ea9fc"
+    },
+    {
+      "source": "Minecraft.World/LargeCaveFeature.cpp",
+      "destination": "original/Minecraft.World/LargeCaveFeature.cpp",
+      "sha256": "4bb3a380a1ee3171a8c899c3e7c981b765a134a180cf8e6174baee4a09c76b7a"
+    },
+    {
+      "source": "Minecraft.World/CanyonFeature.h",
+      "destination": "original/Minecraft.World/CanyonFeature.h",
+      "sha256": "64960e22da57685ccd8eb5332bd342cd0322069d2b1ae5e5a554d1f3fc32c4b7"
+    },
+    {
+      "source": "Minecraft.World/CanyonFeature.cpp",
+      "destination": "original/Minecraft.World/CanyonFeature.cpp",
+      "sha256": "b3f9f06325d895ed6f54152808d3831dcfb8a6d87f87f0e077b24458bc707bf2"
+    },
+    {
+      "source": "Minecraft.World/DataLayer.h",
+      "destination": "original/Minecraft.World/DataLayer.h",
+      "sha256": "41e338af778f4cbf58e26180e28611b61098e95679994b21adabd66bdb50d25c"
+    },
+    {
+      "source": "Minecraft.World/DataLayer.cpp",
+      "destination": "original/Minecraft.World/DataLayer.cpp",
+      "sha256": "7895a2c866ffcda857fdbbbe854d5c725a327922ec0dbb467053079845ab7cc0"
+    },
+    {
+      "source": "Minecraft.World/Feature.h",
+      "destination": "original/Minecraft.World/Feature.h",
+      "sha256": "3a26f4a0a2a63f6bd4bd5c95a3672d2d0cd4f0c32820de997d7118c06dbb7211"
+    },
+    {
+      "source": "Minecraft.World/Feature.cpp",
+      "destination": "original/Minecraft.World/Feature.cpp",
+      "sha256": "2f0e3a9dacf36154514c21be58d679c8213087e1b42a70acb11ef2ee622c282d"
+    },
+    {
+      "source": "Minecraft.World/TreeFeature.h",
+      "destination": "original/Minecraft.World/TreeFeature.h",
+      "sha256": "f2e5d66dbe33e2222270943cb0c385c52d55f30602d3532bf98dfd4dc6490c60"
+    },
+    {
+      "source": "Minecraft.World/TreeFeature.cpp",
+      "destination": "original/Minecraft.World/TreeFeature.cpp",
+      "sha256": "2729ba15dd6be29b2f4db4954a3f95830d6998656c99f5305127e20f8a06a2bc"
+    },
+    {
+      "source": "Minecraft.World/BasicTree.h",
+      "destination": "original/Minecraft.World/BasicTree.h",
+      "sha256": "c9f8a939276e4f4644b7e5dcf855d24ab2aae57c9fb0e57422c1f6a3560cb4bc"
+    },
+    {
+      "source": "Minecraft.World/BasicTree.cpp",
+      "destination": "original/Minecraft.World/BasicTree.cpp",
+      "sha256": "b0571191c0abcdb8262aec0e1f486b9d28750afe3beef69335547d18ade1026c"
+    },
+    {
+      "source": "Minecraft.World/BirchFeature.h",
+      "destination": "original/Minecraft.World/BirchFeature.h",
+      "sha256": "1b0952b9fc9b88b845d7f368c1a33836f486f30ffdfabcab288102453c0d91ca"
+    },
+    {
+      "source": "Minecraft.World/BirchFeature.cpp",
+      "destination": "original/Minecraft.World/BirchFeature.cpp",
+      "sha256": "7e26489ccc0ef4a84f2fb7a07c6afa3425bfbcaa9057474b4473e592270d4889"
+    },
+    {
+      "source": "Minecraft.World/PineFeature.h",
+      "destination": "original/Minecraft.World/PineFeature.h",
+      "sha256": "5c1f7ba1f97859e49e37a291f793766450f347f9b467d7626e1db437881a2e87"
+    },
+    {
+      "source": "Minecraft.World/PineFeature.cpp",
+      "destination": "original/Minecraft.World/PineFeature.cpp",
+      "sha256": "4ee87f4f65fb315e0afd862c29865a9c4d2b8c86719ee1ffd587cf7662440867"
+    },
+    {
+      "source": "Minecraft.World/SpruceFeature.h",
+      "destination": "original/Minecraft.World/SpruceFeature.h",
+      "sha256": "3bc60432c13e83b20641ddc61b3d92c6c00fcc985da72218fac985134b209b0f"
+    },
+    {
+      "source": "Minecraft.World/SpruceFeature.cpp",
+      "destination": "original/Minecraft.World/SpruceFeature.cpp",
+      "sha256": "1e7ee215589897aa67e23e117ca743bab1d4689d8f1d3f54735118effc4b5fc0"
+    },
+    {
+      "source": "Minecraft.World/OreFeature.h",
+      "destination": "original/Minecraft.World/OreFeature.h",
+      "sha256": "986f1023cc07ed2047edb5041e93ef991f90318ef965426d413a3fd26b5152f2"
+    },
+    {
+      "source": "Minecraft.World/OreFeature.cpp",
+      "destination": "original/Minecraft.World/OreFeature.cpp",
+      "sha256": "7328bd5e90e5ded76142aa13a11c80f8d1876fa16780eda612a0347cf2d2acd2"
+    },
+    {
+      "source": "Minecraft.World/Material.h",
+      "destination": "original/Minecraft.World/Material.h",
+      "sha256": "c15b5e75f139547c7b5916ae0dbdb0acb8ff533be26843c1c961a38a2b98b881"
+    },
+    {
+      "source": "Minecraft.World/Material.cpp",
+      "destination": "original/Minecraft.World/Material.cpp",
+      "sha256": "2f8579fc386af3c06e70a70ee32ad0fe3d1de9b71a8a5f8362c6e1d487c38605"
+    },
+    {
+      "source": "Minecraft.World/MaterialColor.h",
+      "destination": "original/Minecraft.World/MaterialColor.h",
+      "sha256": "ecbc9b5933a1c9f471b54da247c54280660310ea78bed32f5b4d50ff83b06794"
+    },
+    {
+      "source": "Minecraft.World/MaterialColor.cpp",
+      "destination": "original/Minecraft.World/MaterialColor.cpp",
+      "sha256": "b730b426ead02d013921cac4913a5f53cf716f3dad59bc0173e26140f02ec393"
+    },
+    {
+      "source": "Minecraft.World/ClayFeature.h",
+      "destination": "original/Minecraft.World/ClayFeature.h",
+      "sha256": "beb9550a7949be04b5cd239741595da0b7509b5ebb03fd5f122c825903342fff"
+    },
+    {
+      "source": "Minecraft.World/ClayFeature.cpp",
+      "destination": "original/Minecraft.World/ClayFeature.cpp",
+      "sha256": "15d080602419f9241125e50ba1764e93bf651c629baa56b37ae5ca1ea38a8b39"
+    },
+    {
+      "source": "Minecraft.World/SandFeature.h",
+      "destination": "original/Minecraft.World/SandFeature.h",
+      "sha256": "27300817e9fcd94c2c118932ad960c21d97465edb7756a1ae5090905c37eccc1"
+    },
+    {
+      "source": "Minecraft.World/SandFeature.cpp",
+      "destination": "original/Minecraft.World/SandFeature.cpp",
+      "sha256": "36c4927c932a0ebbeacdc8e3434903d30a3dd689655e534f476d4d15094d8385"
+    },
+    {
+      "source": "Minecraft.World/SwampTreeFeature.h",
+      "destination": "original/Minecraft.World/SwampTreeFeature.h",
+      "sha256": "be979d2a64a1729cf07f9300aaa6abe0bdb16af8ed9e6966a8c4918cfe423765"
+    },
+    {
+      "source": "Minecraft.World/SwampTreeFeature.cpp",
+      "destination": "original/Minecraft.World/SwampTreeFeature.cpp",
+      "sha256": "bad1d522055b47e32432bfcd50136db7f0c943d4d876b3cecd2ede457baa30c1"
+    },
+    {
+      "source": "Minecraft.World/MegaTreeFeature.h",
+      "destination": "original/Minecraft.World/MegaTreeFeature.h",
+      "sha256": "6fbc2e933a7eacb54addaf427457ae92544108d9283c81cf9812a7eaf9c633fa"
+    },
+    {
+      "source": "Minecraft.World/MegaTreeFeature.cpp",
+      "destination": "original/Minecraft.World/MegaTreeFeature.cpp",
+      "sha256": "28b9e46760501c424d75cc5fe1a5d5e23bfa7acc4e81bf4e2c90669701807e9e"
+    },
+    {
+      "source": "Minecraft.World/GroundBushFeature.h",
+      "destination": "original/Minecraft.World/GroundBushFeature.h",
+      "sha256": "75810edc2e6e46234c894c48ac01f5a5d689793dfaed965989d8303b880bcc47"
+    },
+    {
+      "source": "Minecraft.World/GroundBushFeature.cpp",
+      "destination": "original/Minecraft.World/GroundBushFeature.cpp",
+      "sha256": "40f6b5dbd8e39a18ee0c4ebe4df2587e4d995a9f06aa5d08f5dbb8cfa36ea9ed"
+    },
+    {
+      "source": "Minecraft.World/HugeMushroomFeature.h",
+      "destination": "original/Minecraft.World/HugeMushroomFeature.h",
+      "sha256": "c962aa045b38df6b8117db4c4ddd803634069c8ef6d36f6ffc68f38ee7773058"
+    },
+    {
+      "source": "Minecraft.World/HugeMushroomFeature.cpp",
+      "destination": "original/Minecraft.World/HugeMushroomFeature.cpp",
+      "sha256": "762a02d25f0d46c62f956e060034f29fb9ad7ed0f062e328957cea101720ebe9"
+    },
+    {
+      "source": "Minecraft.World/DesertWellFeature.h",
+      "destination": "original/Minecraft.World/DesertWellFeature.h",
+      "sha256": "f2db7933312f44985d65aed04cf010d9b012191c5a836bccda00a9da87fcf579"
+    },
+    {
+      "source": "Minecraft.World/DesertWellFeature.cpp",
+      "destination": "original/Minecraft.World/DesertWellFeature.cpp",
+      "sha256": "69ee82aacd5bda8737295146bd94836a1ea9a3882e2d4410d911d63c68902bf9"
+    },
+    {
+      "source": "Minecraft.World/DecorationMaterial.h",
+      "destination": "original/Minecraft.World/DecorationMaterial.h",
+      "sha256": "402751411ce19d322756e53ab2ddfba2b676c5dce24c200d2b1b699c678453c0"
+    },
+    {
+      "source": "Minecraft.World/GasMaterial.h",
+      "destination": "original/Minecraft.World/GasMaterial.h",
+      "sha256": "7f291a77804feeef102c568051c366991fcee9a3ebb5187838e65e1659a9fb34"
+    },
+    {
+      "source": "Minecraft.World/LiquidMaterial.h",
+      "destination": "original/Minecraft.World/LiquidMaterial.h",
+      "sha256": "aa2dcf2fc9aa93863a8436ac79cd629e1332233d1a4dc657874b379e0cc3c4db"
+    },
+    {
+      "source": "Minecraft.World/PortalMaterial.h",
+      "destination": "original/Minecraft.World/PortalMaterial.h",
+      "sha256": "3bf1aac1056427cd73f5d3e5b01e206a472c47b7c2e5b6a7b00ad6c0478ad267"
+    },
+    {
+      "source": "Minecraft.World/WebMaterial.h",
+      "destination": "original/Minecraft.World/WebMaterial.h",
+      "sha256": "f9aa827158e660ee4bac6634897fc90c849423d3744434e7d3e5d5e39a546f59"
+    },
+    {
+      "source": "Minecraft.World/JavaMath.h",
+      "destination": "original/Minecraft.World/JavaMath.h",
+      "sha256": "992c7c53d747abae707ad95aa6afff36ddb1cb32bfe5cb3e9965e250b10ac147"
+    },
+    {
+      "source": "Minecraft.World/Tile.cpp",
+      "destination": "original/reference-only/Tile.cpp",
+      "sha256": "a2b45b6a583d11666c4869a7f00c6f17bde16b8c0238b2c516e2b1526f043e35"
+    },
+    {
+      "source": "Minecraft.World/HalfSlabTile.cpp",
+      "destination": "original/reference-only/HalfSlabTile.cpp",
+      "sha256": "2a20ce0ce5862c80c4946f30fc4f1407dbe6af3f8c9bd39fd642834ac350c8c8"
+    },
+    {
+      "source": "Minecraft.World/LevelChunk.cpp",
+      "destination": "original/reference-only/LevelChunk.cpp",
+      "sha256": "49c41121b3dcedec6035a8d2bf7904711fe5e343c90dba7d2de1b22d03a33c02"
+    },
+    {
+      "source": "Minecraft.World/Level.cpp",
+      "destination": "original/reference-only/Level.cpp",
+      "sha256": "4aac4b0721b9f540c313c014c0069c600bea2f6e514fd2a9741765d27e20a15d"
+    },
+    {
+      "source": "Minecraft.Client/Common/App_enums.h",
+      "destination": "original/reference-only/App_enums.h",
+      "sha256": "54198e036465db97961852775199d560eaa421d66a72f44c8f2c7e847f5a285d"
+    },
+    {
+      "source": "Minecraft.World/CocoaTile.cpp",
+      "destination": "original/reference-only/CocoaTile.cpp",
+      "sha256": "4e6966b5ba2693e45b39611fba6c065164119234065ffa534f4ccb38d18362a7"
+    },
+    {
+      "source": "Minecraft.World/StoneMonsterTile.cpp",
+      "destination": "original/reference-only/StoneMonsterTile.cpp",
+      "sha256": "a325af8cc9835e78ff050f4ef471ce55c0d0147a9f5978e827a37b9fcd506785"
+    },
+    {
+      "source": "Minecraft.World/HellSandTile.cpp",
+      "destination": "original/reference-only/HellSandTile.cpp",
+      "sha256": "8ba49cc0526fcdc86ef3865538b774aba21f1f7d566d9eda664a61e047f73a87"
+    },
+    {
+      "source": "Minecraft.World/VineTile.cpp",
+      "destination": "original/reference-only/VineTile.cpp",
+      "sha256": "3bf6aacb79cbf00af2e6ddbcab1b2c0f270e2e59c49e14ef4be6618065c37cae"
+    },
+    {
+      "source": "Minecraft.World/Facing.h",
+      "destination": "original/Minecraft.World/Facing.h",
+      "sha256": "fc1302cf671c85547dfaae88fa5a6343b1683ac40bab981b5e35704876806624"
+    },
+    {
+      "source": "Minecraft.World/Facing.cpp",
+      "destination": "original/Minecraft.World/Facing.cpp",
+      "sha256": "90b53a6fc81eb0fb9aeed692a050db9751a2f83346d9772121e05d25049e8b66"
+    },
+    {
+      "source": "Minecraft.World/Direction.h",
+      "destination": "original/Minecraft.World/Direction.h",
+      "sha256": "1b57112d65d0dbf8edcf24b1a11e2e24222170b2fd7a3ed2e58a1b5eb36ac943"
+    },
+    {
+      "source": "Minecraft.World/Direction.cpp",
+      "destination": "original/Minecraft.World/Direction.cpp",
+      "sha256": "a0fd56d372f6ecf99bb4a137648a01e8dbe749ead844bc2ec55f33fdc15dc553"
+    },
+    {
+      "source": "Minecraft.World/FlowerFeature.h",
+      "destination": "original/Minecraft.World/FlowerFeature.h",
+      "sha256": "cebc6f452f2f90d4c7cea4558f60fd323c086e5b333b07b508be23e91a0ad745"
+    },
+    {
+      "source": "Minecraft.World/FlowerFeature.cpp",
+      "destination": "original/Minecraft.World/FlowerFeature.cpp",
+      "sha256": "76c042d3f345de6d99e4b653d12c014bfd026761cd01c3de2c58e6ff45b40b12"
+    },
+    {
+      "source": "Minecraft.World/TallGrassFeature.h",
+      "destination": "original/Minecraft.World/TallGrassFeature.h",
+      "sha256": "da449d95e91f6913b3c44fe4236625fa60e78e83a57ffcb5ee9374a1e7efcfde"
+    },
+    {
+      "source": "Minecraft.World/TallGrassFeature.cpp",
+      "destination": "original/Minecraft.World/TallGrassFeature.cpp",
+      "sha256": "61d24ec979b209357ad0a0a05d11e230be03368693de4136c78ad5e28e0e77a1"
+    },
+    {
+      "source": "Minecraft.World/DeadBushFeature.h",
+      "destination": "original/Minecraft.World/DeadBushFeature.h",
+      "sha256": "741047b752a33226d68b6396d5464ec5b149c4c80ea1bdfbd848e5cc76b62c09"
+    },
+    {
+      "source": "Minecraft.World/DeadBushFeature.cpp",
+      "destination": "original/Minecraft.World/DeadBushFeature.cpp",
+      "sha256": "c11f2dd94bd52d474de37fac8915c4c798b78aba6ea85280d027867256317d00"
+    },
+    {
+      "source": "Minecraft.World/ReedsFeature.h",
+      "destination": "original/Minecraft.World/ReedsFeature.h",
+      "sha256": "e3c4a89faafd9f08afa79bb84adc1b6bb3c7e8beada40087b57ee79ecfbd6c66"
+    },
+    {
+      "source": "Minecraft.World/ReedsFeature.cpp",
+      "destination": "original/Minecraft.World/ReedsFeature.cpp",
+      "sha256": "89f7b2f197aab357b73dee174c40437a3bbcaa2d4c7d66f98b2f75e93f95bd1e"
+    },
+    {
+      "source": "Minecraft.World/CactusFeature.h",
+      "destination": "original/Minecraft.World/CactusFeature.h",
+      "sha256": "8c354213a88f0cff84c76fd0aa82583b80c163571edbb4c49ecf71e7b0b1d0f5"
+    },
+    {
+      "source": "Minecraft.World/CactusFeature.cpp",
+      "destination": "original/Minecraft.World/CactusFeature.cpp",
+      "sha256": "71176bb73e84aaaf1bc88be3c9578b11cc24df2dd076fc79afc015d77058e673"
+    },
+    {
+      "source": "Minecraft.World/WaterlilyFeature.h",
+      "destination": "original/Minecraft.World/WaterlilyFeature.h",
+      "sha256": "97cd336f2909237a488599337e2766b09f9f43b3ae2fd2b2f24299e9774cfc8c"
+    },
+    {
+      "source": "Minecraft.World/WaterlilyFeature.cpp",
+      "destination": "original/Minecraft.World/WaterlilyFeature.cpp",
+      "sha256": "6dced0f053796c1c1b1080ed191b1fb67103ec0820a704891e9e954a8c18f6c3"
+    },
+    {
+      "source": "Minecraft.World/PumpkinFeature.h",
+      "destination": "original/Minecraft.World/PumpkinFeature.h",
+      "sha256": "14f8e7dbafd007835cbf6b54dca7a0a753edb3309dbbff315cc1445cdb9a4920"
+    },
+    {
+      "source": "Minecraft.World/PumpkinFeature.cpp",
+      "destination": "original/Minecraft.World/PumpkinFeature.cpp",
+      "sha256": "1fc4b6163845ea97342c0d873f860a3ea3cae5a35a09d4b0ce2e5c2212bb449e"
+    },
+    {
+      "source": "Minecraft.World/VinesFeature.h",
+      "destination": "original/Minecraft.World/VinesFeature.h",
+      "sha256": "f56e9165d0c1af4cf463f5081a0481ecf1e4630a53b8e350eb3b89aafad74a8c"
+    },
+    {
+      "source": "Minecraft.World/VinesFeature.cpp",
+      "destination": "original/Minecraft.World/VinesFeature.cpp",
+      "sha256": "060a8b017491ba13536145f8a57ebc3f70d2db5182b8d002605147a09682989c"
+    },
+    {
+      "source": "Minecraft.World/Bush.cpp",
+      "destination": "original/reference-only/Bush.cpp",
+      "sha256": "a960c250ca1921d7cb40e0b3c4ef9c2ab853466163745ae8ad15aca37dcc38f1"
+    },
+    {
+      "source": "Minecraft.World/DeadBushTile.cpp",
+      "destination": "original/reference-only/DeadBushTile.cpp",
+      "sha256": "5281c85e73aec90df7a79bbee16d7146e820308b8988731fb4d2eb8170138a2c"
+    },
+    {
+      "source": "Minecraft.World/Mushroom.cpp",
+      "destination": "original/reference-only/Mushroom.cpp",
+      "sha256": "a8a3a1a9d74c741be58bfcd85eb68bd6a16dc5d580dcd67e664d33862c025ad0"
+    },
+    {
+      "source": "Minecraft.World/CactusTile.cpp",
+      "destination": "original/reference-only/CactusTile.cpp",
+      "sha256": "afd0bd3bf51e05099660cf6455681648d2644b83b95375615e23f4c23c69ba1c"
+    },
+    {
+      "source": "Minecraft.World/ReedTile.cpp",
+      "destination": "original/reference-only/ReedTile.cpp",
+      "sha256": "7ba04751b31ec61716d349c5717031f04225d2d851d1c1f858bf8716a0447b7e"
+    },
+    {
+      "source": "Minecraft.World/WaterlilyTile.cpp",
+      "destination": "original/reference-only/WaterlilyTile.cpp",
+      "sha256": "414ad1287734122a521539004817c11e04e2ede64a9911c047194af942732ed9"
+    },
+    {
+      "source": "Minecraft.World/PumpkinTile.cpp",
+      "destination": "original/reference-only/PumpkinTile.cpp",
+      "sha256": "443a98d3deade2893b2cc140393519711aee009c703c32e664d74e2880790024"
+    },
+    {
+      "source": "Minecraft.World/TallGrass.cpp",
+      "destination": "original/reference-only/TallGrass.cpp",
+      "sha256": "1a778047189c1403ec3137cf569153b9994c08ec9810034335c95c6113a177f2"
+    },
+    {
+      "source": "Minecraft.World/FarmTile.cpp",
+      "destination": "original/reference-only/FarmTile.cpp",
+      "sha256": "f1777fbc00b6e51191a11e16f02c9ff6093d1668c6f5f10cecc3e3dddfd820bc"
+    },
+    {
+      "source": "Minecraft.World/LightLayer.h",
+      "destination": "original/Minecraft.World/LightLayer.h",
+      "sha256": "d287df80cab7f71d78dbf513f55415e41adb67a95201bee824b2fcf2e10e344d"
+    },
+    {
+      "source": "Minecraft.World/LakeFeature.h",
+      "destination": "original/Minecraft.World/LakeFeature.h",
+      "sha256": "a28b7a93f5e8318bd4c88cb414232c9f95cb7458d2283b740f0a6ca5cf2cfd7f"
+    },
+    {
+      "source": "Minecraft.World/LakeFeature.cpp",
+      "destination": "original/Minecraft.World/LakeFeature.cpp",
+      "sha256": "46e38c9aace37ffd27c786d897f0abf91273172d364c0b9ede5744679b202a8f"
+    },
+    {
+      "source": "Minecraft.World/SpringFeature.h",
+      "destination": "original/Minecraft.World/SpringFeature.h",
+      "sha256": "54c8564b19bf7590c66782e7db951a43556d267905bd513e1ef10f2e69d4aeb7"
+    },
+    {
+      "source": "Minecraft.World/SpringFeature.cpp",
+      "destination": "original/Minecraft.World/SpringFeature.cpp",
+      "sha256": "72fc154cba6d3edad0dd7a9cb8d7e5995cdc20075853b55a1020d7f351d9a333"
+    },
+    {
+      "source": "Minecraft.World/StairTile.h",
+      "destination": "original/reference-only/StairTile.h",
+      "sha256": "f8a316a38c75ef2ac04ada98f697aed206beda40526ca4116ef934d2019694ee"
+    },
+    {
+      "source": "Minecraft.World/HalfSlabTile.h",
+      "destination": "original/reference-only/HalfSlabTile.h",
+      "sha256": "d622287701771adb136ca9e4a03fb71003278970baec2253ef350ac26ac2c257"
+    },
+    {
+      "source": "Minecraft.World/TopSnowTile.h",
+      "destination": "original/reference-only/TopSnowTile.h",
+      "sha256": "8aa0af8d81ef16af0d2184ea924fd7a1ca867156bc7ec12614137fe54e6f0ffa"
+    },
+    {
+      "source": "Minecraft.World/TopSnowTile.cpp",
+      "destination": "original/reference-only/TopSnowTile.cpp",
+      "sha256": "0e4a1ae304d61dc6465dae15e3d11cc1690f31017d8458f687d67aac60555b7e"
+    },
+    {
+      "source": "Minecraft.World/LevelChunk.h",
+      "destination": "original/reference-only/LevelChunk.h",
+      "sha256": "532602bc8696f66adcde29e625dde9591db9bf3003972cf7902e48add0b35a08"
+    },
+    {
+      "source": "Minecraft.World/ByteArrayInputStream.h",
+      "destination": "original/Minecraft.World/ByteArrayInputStream.h",
+      "sha256": "34afe13d7ef4aea43a9a4332a39adccec11a1268b3c2e0ad742077a3423f0405"
+    },
+    {
+      "source": "Minecraft.World/ByteArrayInputStream.cpp",
+      "destination": "original/Minecraft.World/ByteArrayInputStream.cpp",
+      "sha256": "a8b312286e06c62a346990cdfc94e33f399022ff0b2831798e8e53559aaa3b28"
+    },
+    {
+      "source": "Minecraft.World/ByteArrayOutputStream.h",
+      "destination": "original/Minecraft.World/ByteArrayOutputStream.h",
+      "sha256": "a942ce8e3560b370b833857ca32ef82cb0feaa7b21e14b96e6ed6a89c098c0ca"
+    },
+    {
+      "source": "Minecraft.World/ByteArrayOutputStream.cpp",
+      "destination": "original/Minecraft.World/ByteArrayOutputStream.cpp",
+      "sha256": "6c94311515e3c369fd1bd2ab4e8caec2321c1726410fb9a94cf38879c237612d"
+    },
+    {
+      "source": "Minecraft.World/BufferedOutputStream.h",
+      "destination": "original/Minecraft.World/BufferedOutputStream.h",
+      "sha256": "97d5834cfd7e93b297ca360a7902af7d74b0ed9cfa39dbbb44352e2776a1e642"
+    },
+    {
+      "source": "Minecraft.World/BufferedOutputStream.cpp",
+      "destination": "original/Minecraft.World/BufferedOutputStream.cpp",
+      "sha256": "1a73cd8e6e236fc7c8459027726e71814a39bf2ff5c856f1cf2f32c482357583"
+    },
+    {
+      "source": "Minecraft.World/InputStream.h",
+      "destination": "original/Minecraft.World/InputStream.h",
+      "sha256": "18443341841163526280a8faea087942cb97694440354eb0d28bfc8fba0e2e79"
+    },
+    {
+      "source": "Minecraft.World/OutputStream.h",
+      "destination": "original/Minecraft.World/OutputStream.h",
+      "sha256": "e852fe271bb8bb25f5e59d986cd0dea115481313db71bd1a77cef47f537a9a61"
+    },
+    {
+      "source": "Minecraft.World/ArrayWithLength.h",
+      "destination": "original/reference-only/ArrayWithLength.h",
+      "sha256": "5967c34ede471a8c2984e4896f959beec8f9bf4b41c45069bba12e5846c61226"
+    },
+    {
+      "source": "Minecraft.World/DataInput.h",
+      "destination": "original/Minecraft.World/DataInput.h",
+      "sha256": "132feec7bcaa15bf3369d73e4bd78aa1e4fbfba840b26003b24479a44934c2eb"
+    },
+    {
+      "source": "Minecraft.World/DataOutput.h",
+      "destination": "original/Minecraft.World/DataOutput.h",
+      "sha256": "839255d648557bec447416af1f4b76986cff4574097f775a34abef3786a6aa87"
+    },
+    {
+      "source": "Minecraft.World/DataInputStream.h",
+      "destination": "original/Minecraft.World/DataInputStream.h",
+      "sha256": "a1b78926ea9c4306b39aa4771649fbbbd2f38a6ac8f662a3ae54b1b047cb8bad"
+    },
+    {
+      "source": "Minecraft.World/DataInputStream.cpp",
+      "destination": "original/Minecraft.World/DataInputStream.cpp",
+      "sha256": "849faf4e36c094feeb26252fdd60ec438fd2f881b2cc7aed351ec531077d9fbe"
+    },
+    {
+      "source": "Minecraft.World/DataOutputStream.h",
+      "destination": "original/Minecraft.World/DataOutputStream.h",
+      "sha256": "c143e84bef8a54fd6e874309551789343d2b8b9a15804a1e65797c86eeeead1a"
+    },
+    {
+      "source": "Minecraft.World/DataOutputStream.cpp",
+      "destination": "original/Minecraft.World/DataOutputStream.cpp",
+      "sha256": "f5651fd7dd06833e0abee01b7c3c3ed0bd2cca3ba831824d43945f9d24babcbf"
+    },
+    {
+      "source": "Minecraft.World/BasicTypeContainers.h",
+      "destination": "original/Minecraft.World/BasicTypeContainers.h",
+      "sha256": "43eeece09c1aec89fae506e09131e1b5b54e57317cae97910bf63b4ee9b5fd10"
+    },
+    {
+      "source": "Minecraft.World/BasicTypeContainers.cpp",
+      "destination": "original/Minecraft.World/BasicTypeContainers.cpp",
+      "sha256": "1e08b63930b5f238b9a19ae1e0fd8b0dcce3f656826c992ca1da67f4b4426c75"
+    },
+    {
+      "source": "Minecraft.World/Tag.h",
+      "destination": "original/Minecraft.World/Tag.h",
+      "sha256": "75233a10a957af64e52998c684127648cc88136e69feefd17ff0a86254c39be8"
+    },
+    {
+      "source": "Minecraft.World/Tag.cpp",
+      "destination": "original/Minecraft.World/Tag.cpp",
+      "sha256": "9afb61d3a5707d586a9fb5b47d76c28130091ef8e5f5c4f22f5158e4bfa0017d"
+    },
+    {
+      "source": "Minecraft.World/NbtIo.h",
+      "destination": "original/Minecraft.World/NbtIo.h",
+      "sha256": "b0dd1eba3ac20fba7e7232707e92b9714155c3b22f6e670676fbc4e19bde0cde"
+    },
+    {
+      "source": "Minecraft.World/NbtIo.cpp",
+      "destination": "original/Minecraft.World/NbtIo.cpp",
+      "sha256": "8a855373831cfdfe39bb42478773899ca25b19f3dedd4e29af3507e8715035e2"
+    },
+    {
+      "source": "Minecraft.World/EndTag.h",
+      "destination": "original/Minecraft.World/EndTag.h",
+      "sha256": "ae8a0768ab79d39cb9b1a94b79e0f85a8d43b7befd4c86e7ba276b1cb5b80aff"
+    },
+    {
+      "source": "Minecraft.World/ByteTag.h",
+      "destination": "original/Minecraft.World/ByteTag.h",
+      "sha256": "4a65d09fe24fc77e55229bdcd1d3d07aa4ca7990f78dbb11f39ec73889125649"
+    },
+    {
+      "source": "Minecraft.World/ShortTag.h",
+      "destination": "original/Minecraft.World/ShortTag.h",
+      "sha256": "a80138f47e62e501841b257975aaf9a4a9fcd30de736ab33e52576cc1b615d09"
+    },
+    {
+      "source": "Minecraft.World/IntTag.h",
+      "destination": "original/Minecraft.World/IntTag.h",
+      "sha256": "654802e3678a702ae104f377df7407b14be475fc7ca80c116b3e717302780ed8"
+    },
+    {
+      "source": "Minecraft.World/LongTag.h",
+      "destination": "original/Minecraft.World/LongTag.h",
+      "sha256": "5d29d9663e24c2ba87ba82823f14529e780c657df4267c92847157f2f6d34b09"
+    },
+    {
+      "source": "Minecraft.World/FloatTag.h",
+      "destination": "original/Minecraft.World/FloatTag.h",
+      "sha256": "893046af8b8e8ad1a6ebd5b71d8eed0140ce1dace535a1b82c7a05368c953200"
+    },
+    {
+      "source": "Minecraft.World/DoubleTag.h",
+      "destination": "original/Minecraft.World/DoubleTag.h",
+      "sha256": "e39ccce78cf448b9d2c8ef9eea65b45173d35203c4cc62586c6451c2e2b91298"
+    },
+    {
+      "source": "Minecraft.World/ByteArrayTag.h",
+      "destination": "original/Minecraft.World/ByteArrayTag.h",
+      "sha256": "2ddc370fc6d65f2d8837e07932a7089ff075d518717d92d96578cd31fa47916f"
+    },
+    {
+      "source": "Minecraft.World/IntArrayTag.h",
+      "destination": "original/Minecraft.World/IntArrayTag.h",
+      "sha256": "8cd3338d0fe0551650b73cb523d60a135cb6a2b5126d85d18f51d1cbab06687d"
+    },
+    {
+      "source": "Minecraft.World/StringTag.h",
+      "destination": "original/Minecraft.World/StringTag.h",
+      "sha256": "5e6890ba49496f0f2e99996c115c1eafcc021f10a6d9ecf8d9b1b28778ff5d36"
+    },
+    {
+      "source": "Minecraft.World/ListTag.h",
+      "destination": "original/Minecraft.World/ListTag.h",
+      "sha256": "f963ca12dccac15a791357f5182568008052b312a43e5612efa88102b1fb169b"
+    },
+    {
+      "source": "Minecraft.World/CompoundTag.h",
+      "destination": "original/Minecraft.World/CompoundTag.h",
+      "sha256": "07303702099814ac588edbf2d203fdb4ec649e7a6dc53b0b1dadd6b1ae1f90b2"
+    },
+    {
+      "source": "Minecraft.World/LevelData.h",
+      "destination": "original/Minecraft.World/LevelData.h",
+      "sha256": "9496fe10e228a0c61bb22d0308e921dec846b828d02d096c838fcb80b7ad84bd"
+    },
+    {
+      "source": "Minecraft.World/LevelData.cpp",
+      "destination": "original/Minecraft.World/LevelData.cpp",
+      "sha256": "627425c58a5e2eb62fc0f0582131c73a99f864d067f32b7d5fe8920956e1aa01"
+    },
+    {
+      "source": "Minecraft.World/LevelSettings.h",
+      "destination": "original/Minecraft.World/LevelSettings.h",
+      "sha256": "fdcce3bbf04f50db535aa22e090682119452ba5bdadd4bfd63afc8bf8828b14f"
+    },
+    {
+      "source": "Minecraft.World/LevelSettings.cpp",
+      "destination": "original/Minecraft.World/LevelSettings.cpp",
+      "sha256": "6cf8e81ad81dca7e07b286dd3ab0bb3324ee30fcdf9d5e7a32f85b7981cbecff"
+    },
+    {
+      "source": "Minecraft.World/Abilities.h",
+      "destination": "original/Minecraft.World/Abilities.h",
+      "sha256": "df5f67b0c8ff3a3f23b332728362aa295159037358b3aaa65239e73cd84f9c2e"
+    },
+    {
+      "source": "Minecraft.World/Abilities.cpp",
+      "destination": "original/Minecraft.World/Abilities.cpp",
+      "sha256": "e36b9b1ca700850ede28e4d372f9fa699d0f0531c2a2de3b605e19433cb269c3"
+    },
+    {
+      "source": "Minecraft.World/ChunkSource.h",
+      "destination": "original/reference-only/ChunkSource.h",
+      "sha256": "87a36f9cc382263a14e4895116a946e6e0ff3c8d0b8a9c6eba8982f905d6eac8"
+    },
+    {
+      "source": "Minecraft.World/CompressedTileStorage.h",
+      "destination": "original/Minecraft.World/CompressedTileStorage.h",
+      "sha256": "6704c72f59e4797cc82ded61a7f508a1669a47650ff9620dd81dde2a874ee6e8"
+    },
+    {
+      "source": "Minecraft.World/CompressedTileStorage.cpp",
+      "destination": "original/Minecraft.World/CompressedTileStorage.cpp",
+      "sha256": "08306bacf8b622ca43b7a7c74409ff194d7b279aec00534fc7cc185438ef29f5"
+    },
+    {
+      "source": "Minecraft.World/SparseDataStorage.h",
+      "destination": "original/Minecraft.World/SparseDataStorage.h",
+      "sha256": "345cbf0f5a71cfcec9fde11be03a7f375405f8dc5dbe4d77a756fbb0a2d55906"
+    },
+    {
+      "source": "Minecraft.World/SparseDataStorage.cpp",
+      "destination": "original/Minecraft.World/SparseDataStorage.cpp",
+      "sha256": "2e3e3b83928e027fbb91df4036b28b7d4e2e9938e69f8b8680169c866bf45385"
+    },
+    {
+      "source": "Minecraft.World/SparseLightStorage.h",
+      "destination": "original/Minecraft.World/SparseLightStorage.h",
+      "sha256": "0592de9798c58276c0f583082a396faf79442078764c37e35eaaf028d9f0398c"
+    },
+    {
+      "source": "Minecraft.World/SparseLightStorage.cpp",
+      "destination": "original/Minecraft.World/SparseLightStorage.cpp",
+      "sha256": "f275b2bde7b13c06e113e0c6bcd27d8294408bcc6b357d4f73986efb55f663a7"
+    },
+    {
+      "source": "Minecraft.World/OldChunkStorage.cpp",
+      "destination": "original/reference-only/OldChunkStorage.cpp",
+      "sha256": "b28550bd325ad043164d7f19e390a3e22ed5ab6952c37a72d0ccfd3cebead7d0"
+    },
+    {
+      "source": "Minecraft.World/OldChunkStorage.h",
+      "destination": "original/reference-only/OldChunkStorage.h",
+      "sha256": "1c643c2612d870b26369c61b176a65751a6aa1fb645174ddd4031cc9323f4497"
+    },
+    {
+      "source": "Minecraft.World/FileHeader.h",
+      "destination": "original/reference-only/FileHeader.h",
+      "sha256": "151424c3ffdc24a9cd7523ec061819ac944c8d42cb333b9b33f18d7377b498f1"
+    },
+    {
+      "source": "Minecraft.World/FileHeader.cpp",
+      "destination": "original/reference-only/FileHeader.cpp",
+      "sha256": "204ebc9c546b0564d6fe9e103389080ced8329491eccb8ef6cf76c50b7666757"
+    },
+    {
+      "source": "Minecraft.World/ConsoleSaveFileOriginal.cpp",
+      "destination": "original/reference-only/ConsoleSaveFileOriginal.cpp",
+      "sha256": "922b851c2bdd7665d9aa59e496d0a4acb911c01fbfe26a039876b52ad7d329ef"
+    },
+    {
+      "source": "Minecraft.World/ConsoleSaveFileOriginal.h",
+      "destination": "original/reference-only/ConsoleSaveFileOriginal.h",
+      "sha256": "947dfbaf86e5f9cb8e62bf015db0ac8d9252085df5e44bfba4dbfaecd8252be8"
+    },
+    {
+      "source": "Minecraft.World/compression.cpp",
+      "destination": "original/reference-only/compression.cpp",
+      "sha256": "aa61dd57bb1a0ad16ec1ee9dd8edd4133548d6541b31b55d887a9feba617d274"
+    },
+    {
+      "source": "Minecraft.World/compression.h",
+      "destination": "original/reference-only/compression.h",
+      "sha256": "39a8e03aadc7c60ff569c70b262ed475b7bddec4db85b4912097cbd5540f1f60"
+    },
+    {
+      "source": "Minecraft.Client/PS3/PS3Extras/EdgeZLib.cpp",
+      "destination": "original/reference-only/EdgeZLib.cpp",
+      "sha256": "a6242aa5d56c15bb482b784df010b6844544ecc20be7379e0cacc07a2097b666"
+    },
+    {
+      "source": "Minecraft.Client/PS3/PS3Extras/EdgeZLib.h",
+      "destination": "original/reference-only/EdgeZLib.h",
+      "sha256": "86d6dfdca5ba325b2c9de174063d1cfbe06ad3c5e8d2eeda95e92d0a877d9c87"
+    },
+    {
+      "source": "Minecraft.World/RegionFile.h",
+      "destination": "original/reference-only/RegionFile.h",
+      "sha256": "30bb00ea5b5dadf311b076009e89de81466b5955eb9c53407eff9abd7331aaa6"
+    },
+    {
+      "source": "Minecraft.World/RegionFile.cpp",
+      "destination": "original/reference-only/RegionFile.cpp",
+      "sha256": "68ae2e8d302e8a864c316611ba4ed07ad62f4fbc4ef663147d26cef86c32fdde"
+    },
+    {
+      "source": "Minecraft.World/RegionFileCache.h",
+      "destination": "original/reference-only/RegionFileCache.h",
+      "sha256": "d2828e8372b93800e752f8804006f2f13adf56c5b4193d2d50c9acc9184e4e56"
+    },
+    {
+      "source": "Minecraft.World/RegionFileCache.cpp",
+      "destination": "original/reference-only/RegionFileCache.cpp",
+      "sha256": "9b0fd8fa08d7ca33213f63cf57ad45bb88e0e2b0ca82cffc5856a0bb636d8906"
+    },
+    {
+      "source": "Minecraft.World/DirectoryLevelStorage.h",
+      "destination": "original/reference-only/DirectoryLevelStorage.h",
+      "sha256": "eb8e6f47c5953ca1234494f3daf17ed7596767e7c30a7b24fba0dedfcab88288"
+    },
+    {
+      "source": "Minecraft.World/DirectoryLevelStorage.cpp",
+      "destination": "original/reference-only/DirectoryLevelStorage.cpp",
+      "sha256": "4efb9705bc86b0e8cf89bb8b8bd6c9809cc86c0fc481f1dbf2e563d25f262a07"
+    },
+    {
+      "source": "Minecraft.World/McRegionChunkStorage.h",
+      "destination": "original/reference-only/McRegionChunkStorage.h",
+      "sha256": "89e988d4eae0399d5491a222e3ddb123f99b1b85875b2fb51e416eba9a9a039d"
+    },
+    {
+      "source": "Minecraft.World/McRegionChunkStorage.cpp",
+      "destination": "original/reference-only/McRegionChunkStorage.cpp",
+      "sha256": "2e0c07a51d8c51d2d813cd6f54022cc5197fe491ddc7bca73c5fb6abf2637ea0"
+    },
+    {
+      "source": "Minecraft.World/McRegionLevelStorage.h",
+      "destination": "original/reference-only/McRegionLevelStorage.h",
+      "sha256": "d2c177dd2ed416011f0243490076c73eac92f6e27c85ac2da9a1e98c7667fe7f"
+    },
+    {
+      "source": "Minecraft.World/McRegionLevelStorage.cpp",
+      "destination": "original/reference-only/McRegionLevelStorage.cpp",
+      "sha256": "e1e6c805cdf819274c082173c6fd347ccdd48bd80a3f13edf9b6358477b2429b"
+    },
+    {
+      "source": "Minecraft.World/LevelStorage.h",
+      "destination": "original/reference-only/LevelStorage.h",
+      "sha256": "e48433eb1280ff62b862ffd442e049790c64aa2a7e890d326d09f0ba8e34f857"
+    },
+    {
+      "source": "Minecraft.World/LevelStorage.cpp",
+      "destination": "original/reference-only/LevelStorage.cpp",
+      "sha256": "bac3346f6aed7b22349735c579121894dfa4a84a28a0be6ff940df89426eb9de"
+    },
+    {
+      "source": "Minecraft.World/HellRandomLevelSource.h",
+      "destination": "original/reference-only/HellRandomLevelSource.h",
+      "sha256": "d286ea132d1d78784423d1e0f647b2d461c60b414ce1326a7cfa08474dda3496"
+    },
+    {
+      "source": "Minecraft.World/HellRandomLevelSource.cpp",
+      "destination": "original/reference-only/HellRandomLevelSource.cpp",
+      "sha256": "b44853b7f9d782a06b1566fe6b72a72214204ba4105dbbfc1cac2ddbd64172b9"
+    },
+    {
+      "source": "Minecraft.World/TheEndLevelRandomLevelSource.h",
+      "destination": "original/reference-only/TheEndLevelRandomLevelSource.h",
+      "sha256": "f6381498a89d750e3e023d0ec0296259b2b566e87c4df312302207abf4e84c47"
+    },
+    {
+      "source": "Minecraft.World/TheEndLevelRandomLevelSource.cpp",
+      "destination": "original/reference-only/TheEndLevelRandomLevelSource.cpp",
+      "sha256": "ff01a4de50b814ad330f30731097c5887bee28cbec5aa205af8bfdbbe7c09751"
+    },
+    {
+      "source": "Minecraft.World/LargeHellCaveFeature.h",
+      "destination": "original/Minecraft.World/LargeHellCaveFeature.h",
+      "sha256": "3aa268040cba984dca314194327b809ee01c74a34c35d81b079a68c9e1c0687e"
+    },
+    {
+      "source": "Minecraft.World/LargeHellCaveFeature.cpp",
+      "destination": "original/Minecraft.World/LargeHellCaveFeature.cpp",
+      "sha256": "d14333abfe6a9468fdec2793743dc5f63e265a4e9060d0752972e096977481b8"
+    },
+    {
+      "source": "Minecraft.World/NetherStalkTile.h",
+      "destination": "original/reference-only/NetherStalkTile.h",
+      "sha256": "6bfdefdabc529d6a8be6f837b1985c90efb0089a59b3ca78dfa4ff8c955e323b"
+    },
+    {
+      "source": "Minecraft.World/NetherStalkTile.cpp",
+      "destination": "original/reference-only/NetherStalkTile.cpp",
+      "sha256": "e28927e37227d4e0da66f8c199e83a376a5cb3dd26d27f2ffb76c4c2770e7831"
+    },
+    {
+      "source": "Minecraft.World/Tile.h",
+      "destination": "original/reference-only/Tile.h",
+      "sha256": "d493cc8d975fd66d10385d303919fe5f6b9b82c17418912ba66d3286efd03fa8"
+    },
+    {
+      "source": "Minecraft.World/TickNextTickData.h",
+      "destination": "original/Minecraft.World/TickNextTickData.h",
+      "sha256": "51b5a79160806a53bbd70fd77650da8689c31b7e9425177c41d41c614368f82f"
+    },
+    {
+      "source": "Minecraft.World/TickNextTickData.cpp",
+      "destination": "original/Minecraft.World/TickNextTickData.cpp",
+      "sha256": "9b1aa1df7eca98a6a29c366cf344e6ec1d717b751365b76730538d54e0759320"
+    },
+    {
+      "source": "Minecraft.Client/ServerLevel.cpp",
+      "destination": "original/reference-only/ServerLevel.cpp",
+      "sha256": "3758d0826cbeac1f83732e379f22cfb47ed0cd7314bffed4b9e60a085c45d918"
+    },
+    {
+      "source": "Minecraft.Client/ServerLevel.h",
+      "destination": "original/reference-only/ServerLevel.h",
+      "sha256": "a990f62ff87e320491a2d16471a40a001e5d7a344ed00029310e492dd9960eca"
+    },
+    {
+      "source": "Minecraft.World/Level.h",
+      "destination": "original/reference-only/Level.h",
+      "sha256": "e21bd09f7efa8c5c2ea5288762da62acd821a3491c2814b52a02f96b46a28c35"
+    },
+    {
+      "source": "Minecraft.World/Vec3.h",
+      "destination": "original/Minecraft.World/Vec3.h",
+      "sha256": "257222ce3f4157554ef8dbd4fb77b31f2d170272774c4e6a7312112344dd5f48"
+    },
+    {
+      "source": "Minecraft.World/Vec3.cpp",
+      "destination": "original/Minecraft.World/Vec3.cpp",
+      "sha256": "84936b61d25baad7664c400110ccd8af5cb6e7326604b8de25de1f61359bcf10"
+    },
+    {
+      "source": "Minecraft.World/AABB.h",
+      "destination": "original/Minecraft.World/AABB.h",
+      "sha256": "44b22431044309b51e27121846b2ba318b3e3e134bc602f40f3d706a3a93d658"
+    },
+    {
+      "source": "Minecraft.World/AABB.cpp",
+      "destination": "original/Minecraft.World/AABB.cpp",
+      "sha256": "6a168bc538f674b699f525a8e117374d47e1eacfd94e1dfd31553aaf18f24103"
+    },
+    {
+      "source": "Minecraft.World/HitResult.h",
+      "destination": "original/Minecraft.World/HitResult.h",
+      "sha256": "49a94baa0ca7e136e08b46dc58f4d515bf424d9f86bd3760125111a23bdb3a45"
+    },
+    {
+      "source": "Minecraft.World/HitResult.cpp",
+      "destination": "original/Minecraft.World/HitResult.cpp",
+      "sha256": "ce1cfaeba94b10a61973579022f4fe0d2a0753a494440a5e23af3a024bf5cd09"
+    },
+    {
+      "source": "Minecraft.World/StringHelpers.h",
+      "destination": "original/Minecraft.World/StringHelpers.h",
+      "sha256": "2d9fb389dc8a98ae741ee6c8c256cab05652a28f05cdbb66992d681665593548"
+    },
+    {
+      "source": "Minecraft.World/FoodData.h",
+      "destination": "original/Minecraft.World/FoodData.h",
+      "sha256": "e99327efdf0734f3c05d78b2aa0584aaa99bbdb80e0e35a09ee739aca516853d"
+    },
+    {
+      "source": "Minecraft.World/FoodData.cpp",
+      "destination": "original/Minecraft.World/FoodData.cpp",
+      "sha256": "d667255e832c8c6655b2e5328a927d361b1306b03316d418415fa73366bf88cb"
+    },
+    {
+      "source": "Minecraft.World/FoodConstants.h",
+      "destination": "original/Minecraft.World/FoodConstants.h",
+      "sha256": "2ee3f33296863b4191cc03340ad021e2dfd3168a4a24ff59867471dbdf486c43"
+    },
+    {
+      "source": "Minecraft.World/FoodConstants.cpp",
+      "destination": "original/Minecraft.World/FoodConstants.cpp",
+      "sha256": "0d8b01d7325a42eaae20c61e2b90e11ffffb6a1cb5aea65395cf5e09f7c71e07"
+    },
+    {
+      "source": "Minecraft.World/Difficulty.h",
+      "destination": "original/Minecraft.World/Difficulty.h",
+      "sha256": "f4bb1b1a8a0df167dd7f3c7f41722d6ab7be4dbc098fd37d9776bd593b696e6c"
+    },
+    {
+      "source": "Minecraft.World/Player.cpp",
+      "destination": "original/reference-only/Player.cpp",
+      "sha256": "2e5a320736b0c2ea23e069790c72bfaeed58c0b5ec30d831c3eb2a03008f2528"
+    },
+    {
+      "source": "Minecraft.Client/GameRenderer.cpp",
+      "destination": "original/reference-only/GameRenderer.cpp",
+      "sha256": "414e753d13e1847e66ea01dbdf584cfdaa1ef489b9c7d1f9a7e4f579dd804e18"
+    },
+    {
+      "source": "Minecraft.Client/TileRenderer.cpp",
+      "destination": "original/reference-only/TileRenderer.cpp",
+      "sha256": "c466df222da8f8d10b0029e669b38fae785212b8174eb9e2f19fc08879c39b45"
+    },
+    {
+      "source": "Minecraft.World/Dimension.cpp",
+      "destination": "original/reference-only/Dimension.cpp",
+      "sha256": "49ef54ed45c7aea6dbf0311afac9acb1a5d5dbe2e9c297de20dc0cd9e4dbb71e"
+    },
+    {
+      "source": "Minecraft.World/HellDimension.cpp",
+      "destination": "original/reference-only/HellDimension.cpp",
+      "sha256": "57ec1a6d1b244f83c1660ac63c5016433ff5781b1387a41a6419736668fca690"
+    },
+    {
+      "source": "Minecraft.World/TheEndDimension.cpp",
+      "destination": "original/reference-only/TheEndDimension.cpp",
+      "sha256": "2e650d56b49f76493267caedf81eba6b07f02c6ff4e0e9f580c3cdf1f341aff9"
+    },
+    {
+      "source": "Minecraft.World/LiquidTile.cpp",
+      "destination": "original/reference-only/LiquidTile.cpp",
+      "sha256": "2d08ddcb392136e5947783025af0ccda1eda434c2b63cb73db547008c5c6dbc0"
+    },
+    {
+      "source": "Minecraft.Client/PreStitchedTextureMap.cpp",
+      "destination": "original/reference-only/PreStitchedTextureMap.cpp",
+      "sha256": "a47c0312fb213f547aa1d5cd33d50a0f5a95a32daf439495aa40b6a915b8c55c"
+    },
+    {
+      "source": "Minecraft.Client/StitchedTexture.cpp",
+      "destination": "original/reference-only/StitchedTexture.cpp",
+      "sha256": "5a29fc5cc351f49bac08c2377f570a56caa1dc5654115b2b0d6714416a372e0c"
+    },
+    {
+      "source": "Minecraft.Client/TextureManager.cpp",
+      "destination": "original/reference-only/TextureManager.cpp",
+      "sha256": "243df5f61c3bb5efd4c72b2b8ed4bd2a46a17a5f86be32b346c6697267861810"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/water.png",
+      "destination": "assets/animations/water.png",
+      "sha256": "f4a5a43c2fe921ed80331cff62f1d5c635dae06e580e52b237b1090ce242ee4e"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/water.txt",
+      "destination": "assets/animations/water.txt",
+      "sha256": "f2802c8c7fcbec8f8aa172f397c335374cbbd8cabd8adfdd9fc6bc1f5551dcf1"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/water_flow.png",
+      "destination": "assets/animations/water_flow.png",
+      "sha256": "89af5588ba72e4d669c07e18ac8acd5768cbd8628c3d1f52b62f1e9ffd839110"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/water_flow.txt",
+      "destination": "assets/animations/water_flow.txt",
+      "sha256": "36a9e7f1c95b82ffb99743e0c5c4ce95d83c9a430aac59f84ef3cbfab6145068"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/lava.png",
+      "destination": "assets/animations/lava.png",
+      "sha256": "8bc4c492d24df2089961835624398e21ae50cfcb3077eaebb1f836a4cafc19eb"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/lava.txt",
+      "destination": "assets/animations/lava.txt",
+      "sha256": "3df8101543674e0f25159ef05c21a396537dd78ae5c78152ea1bd0183ab08053"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/lava_flow.png",
+      "destination": "assets/animations/lava_flow.png",
+      "sha256": "ee3673eb09b74e4b0374a98019c8e860c6c766aa966b8d193e2b71103028c528"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/lava_flow.txt",
+      "destination": "assets/animations/lava_flow.txt",
+      "sha256": "4a3b266182ac7f54b6d75befac820ec9932ed1106c23de605f2361399b21a8d9"
+    },
+    {
+      "source": "Minecraft.Client/Common/UI/UIScene_LoadOrJoinMenu.cpp",
+      "destination": "original/reference-only/UIScene_LoadOrJoinMenu.cpp",
+      "sha256": "773178ac6e02e63acf97b9f35afd1ecc8aefc57759891a0120beee554db197c1"
+    },
+    {
+      "source": "Minecraft.Client/Common/UI/UIScene_CreateWorldMenu.cpp",
+      "destination": "original/reference-only/UIScene_CreateWorldMenu.cpp",
+      "sha256": "571d5f565d6a7864029356755bf918ad5e4dfd4242b5cd716996c3dc140f0e8b"
+    },
+    {
+      "source": "Minecraft.Client/Common/DLC/DLCManager.cpp",
+      "destination": "original/reference-only/DLCManager.cpp",
+      "sha256": "550d6ea6430b0784f6070077403c359cc3503ef8a582c1340b5695055eb322c6"
+    },
+    {
+      "source": "Minecraft.Client/PS3/4JLibs/inc/4J_Storage.h",
+      "destination": "original/reference-only/PS3_4J_Storage.h",
+      "sha256": "2f079ccbf49b4a5a3d57364316bc34a515564f5f69fa4c62c7b97d402fe50b22"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/GameRuleManager.cpp",
+      "destination": "original/reference-only/GameRuleManager.cpp",
+      "sha256": "251eacb6e9cb1a2dac501253e490b997f3c73eb256af7dca165dff482fc9cad8"
+    },
+    {
+      "source": "Minecraft.Client/PS3Media/Media/Tutorial.pck",
+      "destination": "assets/tutorial/Tutorial.pck",
+      "sha256": "3cffa4e0b30b7dfb2a1e0dc887369b3a92bc46b7d5d395f18c0639d1f4e69250"
+    },
+    {
+      "source": "Minecraft.Client/LevelRenderer.cpp",
+      "destination": "original/reference-only/LevelRenderer.cpp",
+      "sha256": "8e221777c474691e0f889d7eebb94f6357f9698dbd3cd2dd5c7fa661a6a8f7f1"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/terrain/sun.png",
+      "destination": "assets/sun.png",
+      "sha256": "59bb3d5c4c5e2bc5cddb10e2e0f2c3dba979b64574a40c1cdc843c2ae9139e9e"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/1_2_2/terrain/moon_phases.png",
+      "destination": "assets/moon_phases.png",
+      "sha256": "6317ed4c6ad8c2ed41276ec6057efd78d3acd27cf6d19ffe0d11751d8eaf83f3"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/colours.xml",
+      "destination": "assets/colours.xml",
+      "sha256": "0243e162dbd4a5baab4828165413f97c44f30b600b6d1fb6c01bbe84e086d250"
+    },
+    {
+      "source": "Minecraft.World/GrassTile.cpp",
+      "destination": "original/reference-only/GrassTile.cpp",
+      "sha256": "acded886792e37eb33ffc77db37eb349736ced4b8dc785b9ae7855f45ee5554d"
+    },
+    {
+      "source": "Minecraft.World/LeafTile.cpp",
+      "destination": "original/reference-only/LeafTile.cpp",
+      "sha256": "99f06755da68a77ded834b68c0a35dee86a10b2bcd7de21299c8507c46dd7567"
+    },
+    {
+      "source": "Minecraft.World/FlatLevelSource.cpp",
+      "destination": "original/reference-only/FlatLevelSource.cpp",
+      "sha256": "e4f2d6753b12be60dd33ea92ddb3056294cca984eae49b617afc62a234cbdb5c"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/environment/clouds.png",
+      "destination": "assets/clouds.png",
+      "sha256": "7029b5412cf9eb13e003bb6673c0a5d7631edba226e998cf4aac571f4d768cf0"
+    },
+    {
+      "source": "Minecraft.World/BiomeSource.cpp",
+      "destination": "original/reference-only/BiomeSource.cpp",
+      "sha256": "280a38c2f59e0078adcc048c6852389835c6f0ba43f1c49d4da6dd4113f841a7"
+    },
+    {
+      "source": "Minecraft.World/TreeTile.cpp",
+      "destination": "original/reference-only/TreeTile.cpp",
+      "sha256": "dc5ca6f2a24fa10c51aa71ddd499dc5c12ca6987dca9abcdfe5d86b06a6eac32"
+    },
+    {
+      "source": "Minecraft.World/TreeTile.h",
+      "destination": "original/reference-only/TreeTile.h",
+      "sha256": "0f4537b61c3b5207f88cbf5b1c640a563dbbd087611ad72a60fe6a2814c2d85a"
+    },
+    {
+      "source": "Minecraft.World/WoodTile.cpp",
+      "destination": "original/reference-only/WoodTile.cpp",
+      "sha256": "ed198d502142aceaffba63cace4011da87d49604d08431c7d979c4bc3fe7f79c"
+    },
+    {
+      "source": "Minecraft.World/WoodTile.h",
+      "destination": "original/reference-only/WoodTile.h",
+      "sha256": "95edd0de8c41aa05cad51de68bb274430008403456a14a53d745eb9dd86b7b9e"
+    },
+    {
+      "source": "Minecraft.World/SandStoneTile.cpp",
+      "destination": "original/reference-only/SandStoneTile.cpp",
+      "sha256": "5e1d5007f18b133b952eb6799b252377d51fa7c57ab98ade7d3553141e4426e8"
+    },
+    {
+      "source": "Minecraft.World/SandStoneTile.h",
+      "destination": "original/reference-only/SandStoneTile.h",
+      "sha256": "6f176bae1bd6b10fe440fa7e1c7749542a3ea00516236bce752ec281c3ea62da"
+    },
+    {
+      "source": "Minecraft.World/ClothTile.cpp",
+      "destination": "original/reference-only/ClothTile.cpp",
+      "sha256": "6e5c46fc571d8bf5371d831ac48ecf21d55640e5ad719a17449bafc0f80cf92a"
+    },
+    {
+      "source": "Minecraft.World/LeafTile.h",
+      "destination": "original/reference-only/LeafTile.h",
+      "sha256": "7b265133e327f45772fc9c621a62e1d6a52afa1d871b3e0584f16bf7521c65e1"
+    },
+    {
+      "source": "Minecraft.World/PistonBaseTile.cpp",
+      "destination": "original/reference-only/PistonBaseTile.cpp",
+      "sha256": "2e6108205db59784dffc1f14b7bd94007cb9002640684a8f20737c94ea24bff5"
+    },
+    {
+      "source": "Minecraft.Client/ServerChunkCache.cpp",
+      "destination": "original/reference-only/ServerChunkCache.cpp",
+      "sha256": "f9112c0362dc0e5f16cc0da77774a9bf72f6d9fa1a9bb5041637617b0f44cbfa"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/CasTes1.sch",
+      "destination": "assets/tutorial/schematics/CasTes1.sch",
+      "sha256": "aa2a1d2c6c45601c44e3d75b19ca6683d6ed8ce34f2339a866726924014d7b59"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Ship.sch",
+      "destination": "assets/tutorial/schematics/Ship.sch",
+      "sha256": "e394f48b5f231fc7193f8d08c227cd4752ff1c9152ff87908de89c98f2e4dc23"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/CasTes2.sch",
+      "destination": "assets/tutorial/schematics/CasTes2.sch",
+      "sha256": "f847fbd628160c608c2961bdddb2e38143a1d0c5de9bb80318d28a1d275ac386"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Spider.sch",
+      "destination": "assets/tutorial/schematics/Spider.sch",
+      "sha256": "41262bb8f11198ee4849d0295109dc4074e2d01029b5c7fe6bbc3018941c0f0e"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Lava.sch",
+      "destination": "assets/tutorial/schematics/Lava.sch",
+      "sha256": "9dde17679731ce0ea4b08d56c7350b562319bf73b3179bb2b79088ba91a5f58a"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Mushroom.sch",
+      "destination": "assets/tutorial/schematics/Mushroom.sch",
+      "sha256": "f0024106df6324eb8f88a1daba12b95a6463366713724ffbba3b90c632589764"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Boat.sch",
+      "destination": "assets/tutorial/schematics/Boat.sch",
+      "sha256": "9b8a48d7f1c4953954755609d94cec82cecf58179040f51e6957bf36c3dcaa7b"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/StoneCircle.sch",
+      "destination": "assets/tutorial/schematics/StoneCircle.sch",
+      "sha256": "8a435dcf7d8a53116c23cb6ed84bd7aa309aa468c0980ca0376bb0803d2b38fe"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/MinecraftSign.sch",
+      "destination": "assets/tutorial/schematics/MinecraftSign.sch",
+      "sha256": "478ea17e35390e7a52b93270102df6c22e32e248923e597e14499f58a8e10d63"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Smithy.sch",
+      "destination": "assets/tutorial/schematics/Smithy.sch",
+      "sha256": "f3150bf03d68f0e69873c714f0d348df9f634b25652a299aff92e419dd20fa97"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/RuinedHouse.sch",
+      "destination": "assets/tutorial/schematics/RuinedHouse.sch",
+      "sha256": "72e5b075a82603053a2a41ac214214dc17907c4ece7d045e72eef4815d287cbf"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/SnowHouse.sch",
+      "destination": "assets/tutorial/schematics/SnowHouse.sch",
+      "sha256": "cfeac8660926dfcbcaa66512234c2f3e217e2cc3d94c2767c58e5e3463079ccb"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Tower.sch",
+      "destination": "assets/tutorial/schematics/Tower.sch",
+      "sha256": "1494cad035f8fb93b9fb687242295a68c97023c6fbb5b42f027727a4e0588851"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/StoneTemp.sch",
+      "destination": "assets/tutorial/schematics/StoneTemp.sch",
+      "sha256": "1ec818bafb40ba1335543e32b05fb87c143705ab39f55894543590ad813665b2"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/PillarHouse.sch",
+      "destination": "assets/tutorial/schematics/PillarHouse.sch",
+      "sha256": "c7de2730fb3ac90de0104a4b2c4f1301a90031d6a94b586fdd6db2281a7cdbec"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Stairs.sch",
+      "destination": "assets/tutorial/schematics/Stairs.sch",
+      "sha256": "2821247ffefc92fd873aa33d59d4d754d1e42e990440a536a4814e6e4efd328b"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/Pyramid.sch",
+      "destination": "assets/tutorial/schematics/Pyramid.sch",
+      "sha256": "64bbfc0f0b6895cf5e7237cfcb88dc460f72a629706d55cfd13e6b20bf8e7ced"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/UWChamber.sch",
+      "destination": "assets/tutorial/schematics/UWChamber.sch",
+      "sha256": "5bb68b9401e5f4d310bf0f8db633797a6558d15748f5c23b9f8675bd462ef86c"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/schematics/JungleTemp.sch",
+      "destination": "assets/tutorial/schematics/JungleTemp.sch",
+      "sha256": "e66d4ac8a32d08af3a44fb67d792a585924d06e743fcbf3ad781ef196bbcd542"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/GameRules/BuildOnly/Tutorial/GameRules.xml",
+      "destination": "assets/tutorial/GameRules.xml",
+      "sha256": "3cf2c708a52c02d83300e3363e6dc03f44e410c485de8120705765e1f1de5d5b"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/ConsoleSchematicFile.cpp",
+      "destination": "original/reference-only/ConsoleSchematicFile.cpp",
+      "sha256": "536e04e9ee84a106d173b7afc1ddfc3ad393ba1ed26379b198695a10cf5e21f9"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/ConsoleSchematicFile.h",
+      "destination": "original/reference-only/ConsoleSchematicFile.h",
+      "sha256": "53ebc5ae4cad9e1797c7039d8452d41754dd5704e31e5529f8f0281aa816893c"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/ApplySchematicRuleDefinition.cpp",
+      "destination": "original/reference-only/ApplySchematicRuleDefinition.cpp",
+      "sha256": "07c45b82534709eb687afbf460e6e30f52f6330ed30d2754b6b701afae05ecb2"
+    },
+    {
+      "source": "Minecraft.World/AnvilTile.cpp",
+      "destination": "original/reference-only/AnvilTile.cpp",
+      "sha256": "a40f956f2bb45f377ca0167e33bfb5c11c07421c7123ad5d0691e3954b2297e5"
+    },
+    {
+      "source": "Minecraft.World/AnvilTile.h",
+      "destination": "original/reference-only/AnvilTile.h",
+      "sha256": "2ef3f104bde0ce017b56e91160c6349659245516aac32fa584daa72a4e4d718d"
+    },
+    {
+      "source": "Minecraft.World/BedTile.cpp",
+      "destination": "original/reference-only/BedTile.cpp",
+      "sha256": "33ee99de60869c4a39afd392407be9ddd914cc520e69966430dcb2314524ab1d"
+    },
+    {
+      "source": "Minecraft.World/BedTile.h",
+      "destination": "original/reference-only/BedTile.h",
+      "sha256": "4b8e59035be510a83483e02158369b39f82b502a1c640d2f810c471eaea040e1"
+    },
+    {
+      "source": "Minecraft.World/BrewingStandTile.cpp",
+      "destination": "original/reference-only/BrewingStandTile.cpp",
+      "sha256": "05053d85d2288b7403f80dc34dfad7791fa6340c0edd4d19a1a2ec6cf5f3e560"
+    },
+    {
+      "source": "Minecraft.World/BrewingStandTile.h",
+      "destination": "original/reference-only/BrewingStandTile.h",
+      "sha256": "c096799f1fcd756a3442d801c22c78f5d427b9c7144597b8af50141bd9a64091"
+    },
+    {
+      "source": "Minecraft.World/ButtonTile.cpp",
+      "destination": "original/reference-only/ButtonTile.cpp",
+      "sha256": "f9223257e895c087fcd8ee5d74586e17dc7ccf43d4655d52021c4a11cbf4fecc"
+    },
+    {
+      "source": "Minecraft.World/ButtonTile.h",
+      "destination": "original/reference-only/ButtonTile.h",
+      "sha256": "eed5e01949fc881358492e1bdac85aaf91cf62c5f693167aa451a3721032bf8a"
+    },
+    {
+      "source": "Minecraft.World/CarrotTile.cpp",
+      "destination": "original/reference-only/CarrotTile.cpp",
+      "sha256": "db8a96803c580c99a3687fb322e224da19ba942bfd320226c246bb46c42a5f34"
+    },
+    {
+      "source": "Minecraft.World/CarrotTile.h",
+      "destination": "original/reference-only/CarrotTile.h",
+      "sha256": "ac7f10e20552aae2ce9a7cc441b709e06e54786e1d47f8c74317e8fefddff4ee"
+    },
+    {
+      "source": "Minecraft.World/CauldronTile.cpp",
+      "destination": "original/reference-only/CauldronTile.cpp",
+      "sha256": "024a6755c7b1698b3dd6a2e674ec218d0ae6046ece36b193277c1ec585237172"
+    },
+    {
+      "source": "Minecraft.World/CauldronTile.h",
+      "destination": "original/reference-only/CauldronTile.h",
+      "sha256": "0ba8e171645ccb13fc6959216b3db83448dffe9b4f26b543b2d19b5cc41aaaa9"
+    },
+    {
+      "source": "Minecraft.World/ChestTile.cpp",
+      "destination": "original/reference-only/ChestTile.cpp",
+      "sha256": "f958d1e065210c0e16a2c037aeced52f5016c7130cb696068bb5750e7a2e4e37"
+    },
+    {
+      "source": "Minecraft.World/ChestTile.h",
+      "destination": "original/reference-only/ChestTile.h",
+      "sha256": "fe7ed7017628946aa01055e0e42eae6ee85fa220cc2974a7bec1166aea8ba0c1"
+    },
+    {
+      "source": "Minecraft.World/CropTile.cpp",
+      "destination": "original/reference-only/CropTile.cpp",
+      "sha256": "55250144f5204927fabc379b0df58153618801269652a5cc83d26e0121dc4465"
+    },
+    {
+      "source": "Minecraft.World/CropTile.h",
+      "destination": "original/reference-only/CropTile.h",
+      "sha256": "699127b9186eb8dd6c9fe8535bada6098a169b5290f243e40e1b25887c394df5"
+    },
+    {
+      "source": "Minecraft.World/DiodeTile.cpp",
+      "destination": "original/reference-only/DiodeTile.cpp",
+      "sha256": "f56bb5d9e64ace806c6995a146db540df152f29066b292c7ed83414bca95a546"
+    },
+    {
+      "source": "Minecraft.World/DiodeTile.h",
+      "destination": "original/reference-only/DiodeTile.h",
+      "sha256": "d645ca0930d71841e791060f77b8ff8eed7008cb51fa1bf333fc3a7102c2b8ca"
+    },
+    {
+      "source": "Minecraft.World/DirectionalTile.cpp",
+      "destination": "original/reference-only/DirectionalTile.cpp",
+      "sha256": "82e4dc096d812625c02cfb51a87d248ed4867f49a611e35318a8537ce8169efb"
+    },
+    {
+      "source": "Minecraft.World/DoorTile.cpp",
+      "destination": "original/reference-only/DoorTile.cpp",
+      "sha256": "9ba683aae1be5a2373ebb3ed484e0ccff7d2463ab741629f7380beb909cf054e"
+    },
+    {
+      "source": "Minecraft.World/DoorTile.h",
+      "destination": "original/reference-only/DoorTile.h",
+      "sha256": "b22daa4d11c821bd67e7ac8a610bb2160be5de60f18b73ca7cb92d0235011bd9"
+    },
+    {
+      "source": "Minecraft.World/EnchantmentTableTile.cpp",
+      "destination": "original/reference-only/EnchantmentTableTile.cpp",
+      "sha256": "0425a572b06e3d81d172ee6c7ab7f36800ac59f7a5c62247b303bc1e581af65b"
+    },
+    {
+      "source": "Minecraft.World/EnchantmentTableTile.h",
+      "destination": "original/reference-only/EnchantmentTableTile.h",
+      "sha256": "7b68c133e779157fcab1ea956c3d5f00b8ca9ace633007940db1f1657b12aea7"
+    },
+    {
+      "source": "Minecraft.World/EnderChestTile.cpp",
+      "destination": "original/reference-only/EnderChestTile.cpp",
+      "sha256": "b107b55e566128a127c71febe8d9218e3fc52ab4f1c0619a9a5f6be761f0cea0"
+    },
+    {
+      "source": "Minecraft.World/EnderChestTile.h",
+      "destination": "original/reference-only/EnderChestTile.h",
+      "sha256": "1c2c65d1971aa33a5339b6f84bd8a875759c89ef6922dbf1871e97633fdec6c6"
+    },
+    {
+      "source": "Minecraft.World/EntityTile.cpp",
+      "destination": "original/reference-only/EntityTile.cpp",
+      "sha256": "db69f628ebfd5544cdef89e4e68823920905f060ed228728845d577d1fdffe72"
+    },
+    {
+      "source": "Minecraft.World/FenceGateTile.cpp",
+      "destination": "original/reference-only/FenceGateTile.cpp",
+      "sha256": "e9212b2ac1640a182475011a9382484be11d05d80841f63cb19fc4f55a984482"
+    },
+    {
+      "source": "Minecraft.World/FenceGateTile.h",
+      "destination": "original/reference-only/FenceGateTile.h",
+      "sha256": "1539e4aee0ca1559f717f5b997c7646f3cdc8754f9d5f35b8547931c6c37a96a"
+    },
+    {
+      "source": "Minecraft.World/FenceTile.cpp",
+      "destination": "original/reference-only/FenceTile.cpp",
+      "sha256": "f3c1ae7f41f91f671efa2932a957718197d91c0c9c0884bcbee2b64be2b622d4"
+    },
+    {
+      "source": "Minecraft.World/FenceTile.h",
+      "destination": "original/reference-only/FenceTile.h",
+      "sha256": "6f3429a5e94e118134f4843261ef420f43d3a47cbb6a57424efe53b48c91c627"
+    },
+    {
+      "source": "Minecraft.World/FireTile.cpp",
+      "destination": "original/reference-only/FireTile.cpp",
+      "sha256": "9634b98e09ed585feba16b46a8f23bddc65983300091c54ff67e0eb597a465db"
+    },
+    {
+      "source": "Minecraft.World/FireTile.h",
+      "destination": "original/reference-only/FireTile.h",
+      "sha256": "de33cceae4b83b7029c9933269c9da4ab08dffe62c5c3516e94d2e369330e9c9"
+    },
+    {
+      "source": "Minecraft.World/FlowerPotTile.cpp",
+      "destination": "original/reference-only/FlowerPotTile.cpp",
+      "sha256": "409184f03665cd02c588cc84bb2d7527e7e218a453989d0d0749f09ed3460405"
+    },
+    {
+      "source": "Minecraft.World/FlowerPotTile.h",
+      "destination": "original/reference-only/FlowerPotTile.h",
+      "sha256": "7350274666ae38f63d544a1749d48414d3f5872ddb89c9843d20f67323c3dfbe"
+    },
+    {
+      "source": "Minecraft.World/FurnaceTile.cpp",
+      "destination": "original/reference-only/FurnaceTile.cpp",
+      "sha256": "816e5e41b58ed3aa423907c9fc826e18b05d0167806806eaa56c0f63510dcda9"
+    },
+    {
+      "source": "Minecraft.World/FurnaceTile.h",
+      "destination": "original/reference-only/FurnaceTile.h",
+      "sha256": "c0e49d37150d6bbf61a5b404d6d80059cde10dc221fe2ffdb4af8d048ad58bd3"
+    },
+    {
+      "source": "Minecraft.World/HalfTransparentTile.cpp",
+      "destination": "original/reference-only/HalfTransparentTile.cpp",
+      "sha256": "c4a14fff5a69e28d878824e6ca355f5a98bd93b082190c6e34c898882a805372"
+    },
+    {
+      "source": "Minecraft.World/HeavyTile.cpp",
+      "destination": "original/reference-only/HeavyTile.cpp",
+      "sha256": "6f5a7857f3ae87e3a881db0f5c162e5cf3155b6e12b746204da1f9a700e1cb79"
+    },
+    {
+      "source": "Minecraft.World/LadderTile.cpp",
+      "destination": "original/reference-only/LadderTile.cpp",
+      "sha256": "e95aabc6def759c00b40943426b49d0255f9295351684bb57b03a3226671d10b"
+    },
+    {
+      "source": "Minecraft.World/LadderTile.h",
+      "destination": "original/reference-only/LadderTile.h",
+      "sha256": "769ddf6b8bbf42c02fa5c6e357bb8c34708520d5262cd5eae76825f96a4166d3"
+    },
+    {
+      "source": "Minecraft.World/LeverTile.cpp",
+      "destination": "original/reference-only/LeverTile.cpp",
+      "sha256": "f6066596e0d0f8a0ffb1ed430204c3521a9e7fb166f2386742e207ee90831d5a"
+    },
+    {
+      "source": "Minecraft.World/LeverTile.h",
+      "destination": "original/reference-only/LeverTile.h",
+      "sha256": "c437271c12e0138960cce0409e78c152318e208a6538b82ecda9497e2a46437a"
+    },
+    {
+      "source": "Minecraft.World/MelonTile.cpp",
+      "destination": "original/reference-only/MelonTile.cpp",
+      "sha256": "26b6011a9d6c7e87d4af1ee66220b81e5018dc8dee0076fc7ebb00e1af3f1d9f"
+    },
+    {
+      "source": "Minecraft.World/MelonTile.h",
+      "destination": "original/reference-only/MelonTile.h",
+      "sha256": "9653e59667560ffc04a8e047ff7225adb0f3a7755a4988db3570ba3f616b7450"
+    },
+    {
+      "source": "Minecraft.World/NotGateTile.cpp",
+      "destination": "original/reference-only/NotGateTile.cpp",
+      "sha256": "f5c17d2a57c70b480a44bf0adfa41e664df13a83a2114ef8258bf3160dab7fb6"
+    },
+    {
+      "source": "Minecraft.World/NotGateTile.h",
+      "destination": "original/reference-only/NotGateTile.h",
+      "sha256": "d2e070f28cf2ce893b19cef8ad5b726cfe237695d5944afba1afa573986466f4"
+    },
+    {
+      "source": "Minecraft.World/PistonBaseTile.h",
+      "destination": "original/reference-only/PistonBaseTile.h",
+      "sha256": "558419f4c348f0b86cb1c457e2d00740e83e4f63a4cdab1f5d02b6dd7c192632"
+    },
+    {
+      "source": "Minecraft.World/PistonExtensionTile.cpp",
+      "destination": "original/reference-only/PistonExtensionTile.cpp",
+      "sha256": "1055129afd54d638716899a5618830d4587017b63c9c109d0c7f221e244f5290"
+    },
+    {
+      "source": "Minecraft.World/PistonExtensionTile.h",
+      "destination": "original/reference-only/PistonExtensionTile.h",
+      "sha256": "b9c34d4a4a30e7a2c8241283ffe1efd903c49d76f456f8edaabffd6548508986"
+    },
+    {
+      "source": "Minecraft.World/PortalTile.cpp",
+      "destination": "original/reference-only/PortalTile.cpp",
+      "sha256": "954cc8289e2be0a7c18e32bad00314280e47a39d656864c1fe53e4d2e110d87b"
+    },
+    {
+      "source": "Minecraft.World/PortalTile.h",
+      "destination": "original/reference-only/PortalTile.h",
+      "sha256": "0bbc4a43ca744e5200f0b1ca05a571762d9a4dd7219e582f42cba55ed820c89b"
+    },
+    {
+      "source": "Minecraft.World/PotatoTile.cpp",
+      "destination": "original/reference-only/PotatoTile.cpp",
+      "sha256": "75051a8594cbaf96fc4e155d6f9d40c656f8dcd69d871d0e1308c57343cdba7d"
+    },
+    {
+      "source": "Minecraft.World/PotatoTile.h",
+      "destination": "original/reference-only/PotatoTile.h",
+      "sha256": "c3bfeb31ff423c32cee98f178006838a5092c2a8373fecb1c040e0672f2b5d91"
+    },
+    {
+      "source": "Minecraft.World/PressurePlateTile.cpp",
+      "destination": "original/reference-only/PressurePlateTile.cpp",
+      "sha256": "2ce6f8b0153880264af72e894c50e8bf630a40fb078800582c77ed94ff090fd6"
+    },
+    {
+      "source": "Minecraft.World/PressurePlateTile.h",
+      "destination": "original/reference-only/PressurePlateTile.h",
+      "sha256": "407e2b34339ab120663455c36998067a76621969b77fed50644aa3a4b6298b00"
+    },
+    {
+      "source": "Minecraft.World/QuartzBlockTile.cpp",
+      "destination": "original/reference-only/QuartzBlockTile.cpp",
+      "sha256": "1f9fd099e9b6b7eb7d89e95bbc00cbab1e821c22342598a9f7ae390a8b59c4c3"
+    },
+    {
+      "source": "Minecraft.World/QuartzBlockTile.h",
+      "destination": "original/reference-only/QuartzBlockTile.h",
+      "sha256": "7e50977f32fb27e3011f3dae393e52768df5d7395bb67836070bb32a5d20d530"
+    },
+    {
+      "source": "Minecraft.World/RailTile.cpp",
+      "destination": "original/reference-only/RailTile.cpp",
+      "sha256": "f0ace435cc1a97cea06d88feb99b5163bcc7c095f8ed080f1a0c574563391b41"
+    },
+    {
+      "source": "Minecraft.World/RailTile.h",
+      "destination": "original/reference-only/RailTile.h",
+      "sha256": "a20e1f411f2938b2c8946c739cf7814685e97125ce718e8e0b8c4265c93bec3f"
+    },
+    {
+      "source": "Minecraft.World/RedStoneDustTile.cpp",
+      "destination": "original/reference-only/RedStoneDustTile.cpp",
+      "sha256": "e18472273339f5b226a612d31d5b4e45a038f8164600261c323507c84842525d"
+    },
+    {
+      "source": "Minecraft.World/RedStoneDustTile.h",
+      "destination": "original/reference-only/RedStoneDustTile.h",
+      "sha256": "96b54dcb4be2adf42b3030337d755870c4dbacc5f06fd26bb65adab080384788"
+    },
+    {
+      "source": "Minecraft.World/RedlightTile.cpp",
+      "destination": "original/reference-only/RedlightTile.cpp",
+      "sha256": "c5f98ec6078a24fd1b41f8c314a5af146f1ff47725ef1d6dcb557350adbb2104"
+    },
+    {
+      "source": "Minecraft.World/RedlightTile.h",
+      "destination": "original/reference-only/RedlightTile.h",
+      "sha256": "004e55471b820d3b4925a1f4bd35d6aa67fa7043c5f518b007890554fb57ae17"
+    },
+    {
+      "source": "Minecraft.World/SkullTile.cpp",
+      "destination": "original/reference-only/SkullTile.cpp",
+      "sha256": "362d3d283f5f1a76cdc9f1a3fa37df4e4e94b53b4122709dac1f12e0f0dc449d"
+    },
+    {
+      "source": "Minecraft.World/SkullTile.h",
+      "destination": "original/reference-only/SkullTile.h",
+      "sha256": "45589c536bf6b34422c23df9cdf50c1c97d1df937ac866c15e731aec6e37b8f3"
+    },
+    {
+      "source": "Minecraft.World/StairTile.cpp",
+      "destination": "original/reference-only/StairTile.cpp",
+      "sha256": "20b18c56e4e78e0df9805666d4198e7f89de3fb2e07a5ef635dd0ab2cddaae8d"
+    },
+    {
+      "source": "Minecraft.World/StemTile.cpp",
+      "destination": "original/reference-only/StemTile.cpp",
+      "sha256": "1fde51b6a192d608e6964a0dd5b411ac52081d9b4bd9876fb0de65524cecad7b"
+    },
+    {
+      "source": "Minecraft.World/StemTile.h",
+      "destination": "original/reference-only/StemTile.h",
+      "sha256": "6e244ee80a3243118a4e37c177c4850e6d370ff6d5876e8ccf6800a922a3b56d"
+    },
+    {
+      "source": "Minecraft.World/ThinFenceTile.cpp",
+      "destination": "original/reference-only/ThinFenceTile.cpp",
+      "sha256": "b04478315897e4af1a4e47535710f4b859451ece58319a83c3c8b23c6cbec694"
+    },
+    {
+      "source": "Minecraft.World/ThinFenceTile.h",
+      "destination": "original/reference-only/ThinFenceTile.h",
+      "sha256": "c04279083c91a5f54ad8494a06549b26db90e3bf391b84d225c470922cb9a6d3"
+    },
+    {
+      "source": "Minecraft.World/TorchTile.cpp",
+      "destination": "original/reference-only/TorchTile.cpp",
+      "sha256": "22fbba288e5f561247c72492562b037aa56f7bde1042eedd522d5b7f0183a499"
+    },
+    {
+      "source": "Minecraft.World/TorchTile.h",
+      "destination": "original/reference-only/TorchTile.h",
+      "sha256": "066f3dc0a728df142b9a641c27e8e91a1c0395f30df4638e3bb617afa72b6ba1"
+    },
+    {
+      "source": "Minecraft.World/TrapDoorTile.cpp",
+      "destination": "original/reference-only/TrapDoorTile.cpp",
+      "sha256": "8c0e3c85159deeb630367e64b333263c88aaa9ee31c1d4b1b0c85d0d0eb65f90"
+    },
+    {
+      "source": "Minecraft.World/TrapDoorTile.h",
+      "destination": "original/reference-only/TrapDoorTile.h",
+      "sha256": "a0f0335a53b3ef6f63623514c787802496e0f72e4d074594252fc3df85aa1935"
+    },
+    {
+      "source": "Minecraft.World/TripWireSourceTile.cpp",
+      "destination": "original/reference-only/TripWireSourceTile.cpp",
+      "sha256": "14744fca1092ff70a51aa8fd06f4cbcda3dc5b3363079fc64183f46078b65fc2"
+    },
+    {
+      "source": "Minecraft.World/TripWireSourceTile.h",
+      "destination": "original/reference-only/TripWireSourceTile.h",
+      "sha256": "92ff581627fa38430a42b856e2e35d3139269f63cf78cf4c41291087e6804bbc"
+    },
+    {
+      "source": "Minecraft.World/TripWireTile.cpp",
+      "destination": "original/reference-only/TripWireTile.cpp",
+      "sha256": "2f800bbc5706f606793833d3c472fb954f08f9b804d644ba616637297d3fe5c3"
+    },
+    {
+      "source": "Minecraft.World/TripWireTile.h",
+      "destination": "original/reference-only/TripWireTile.h",
+      "sha256": "41a056911f36f897ff8403ab51bf9b49033c1f5c56112a13c698673e6f5fa1ca"
+    },
+    {
+      "source": "Minecraft.World/WallTile.cpp",
+      "destination": "original/reference-only/WallTile.cpp",
+      "sha256": "53690339b8ec7f88a2a7e77632e8c818265209b45007a33aef298eb56456b187"
+    },
+    {
+      "source": "Minecraft.World/WallTile.h",
+      "destination": "original/reference-only/WallTile.h",
+      "sha256": "ee154a80d724db8d2d12b2b759cbf80e5ac5df3d448de46cc3e4463b44026362"
+    },
+    {
+      "source": "Minecraft.World/WoolCarpetTile.cpp",
+      "destination": "original/reference-only/WoolCarpetTile.cpp",
+      "sha256": "63b813b72c2b6d695f402007f6e086bc84e27ea41c91ef5cbece4de25bcb0581"
+    },
+    {
+      "source": "Minecraft.World/WoolCarpetTile.h",
+      "destination": "original/reference-only/WoolCarpetTile.h",
+      "sha256": "aa2ea125b2020abfa590b3d7ecf9f8c211e963c4027bf4b9dc5d05aa8215a688"
+    },
+    {
+      "source": "Minecraft.Client/ServerPlayer.cpp",
+      "destination": "original/reference-only/ServerPlayer.cpp",
+      "sha256": "390dd661b3fbeedec462c954e0082e7c4775cd18f18e97acea8fbd29b072c5b1"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/UpdatePlayerRuleDefinition.cpp",
+      "destination": "original/reference-only/UpdatePlayerRuleDefinition.cpp",
+      "sha256": "b200605ce19d673782085d1c928df4cd6920f0a31e25a42af9fc94117be169d6"
+    },
+    {
+      "source": "Minecraft.World/StoneSlabTile.cpp",
+      "destination": "original/reference-only/StoneSlabTile.cpp",
+      "sha256": "561584c6cd445adb47166bb2dfa8c646d83fbfd3d52311f3efac536bdf07b8fe"
+    },
+    {
+      "source": "Minecraft.World/StoneSlabTile.h",
+      "destination": "original/reference-only/StoneSlabTile.h",
+      "sha256": "22b8fae844cbea7b336b997afc4efb23744f48fe84fdc597efbd1ab01118d5c8"
+    },
+    {
+      "source": "Minecraft.World/Mob.cpp",
+      "destination": "original/reference-only/Mob.cpp",
+      "sha256": "a0257528c23e3d63178f6ff2ba8fe6ed607d59091c3126c1daa4e8fb09767aef"
+    },
+    {
+      "source": "Minecraft.World/SmoothStoneBrickTile.cpp",
+      "destination": "original/reference-only/SmoothStoneBrickTile.cpp",
+      "sha256": "480815202216861479ccaad93ec04b576b91ede3ae1efd4cbe679bd0753598d8"
+    },
+    {
+      "source": "Minecraft.World/SmoothStoneBrickTile.h",
+      "destination": "original/reference-only/SmoothStoneBrickTile.h",
+      "sha256": "78e86e0a709d40514c0b9569c2e0a239bb9b7ef04255db85a882f5ec4036b7ad"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/ConsoleGenerateStructure.cpp",
+      "destination": "original/reference-only/ConsoleGenerateStructure.cpp",
+      "sha256": "b49b2404a523b7180d5ea2d94ea0094ce3686789cc42a793031cd3a834dcb648"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/XboxStructureActionPlaceContainer.cpp",
+      "destination": "original/reference-only/XboxStructureActionPlaceContainer.cpp",
+      "sha256": "7ca3d47c2658c61bb9e77a8d54540fbbc21bfe452260931634d189e4e6eb5b64"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/XboxStructureActionPlaceBlock.cpp",
+      "destination": "original/reference-only/XboxStructureActionPlaceBlock.cpp",
+      "sha256": "c1e6292a92cd3ce55c8c46e2ab0226977c83dceb4588802f3b6ef9bb745aa753"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/AddItemRuleDefinition.cpp",
+      "destination": "original/reference-only/AddItemRuleDefinition.cpp",
+      "sha256": "c50c09e420818d3d5d4e5a55cbe1d81113802489ed0feed77b7520ed06ba71c7"
+    },
+    {
+      "source": "Minecraft.Client/Common/GameRules/AddEnchantmentRuleDefinition.cpp",
+      "destination": "original/reference-only/AddEnchantmentRuleDefinition.cpp",
+      "sha256": "0106a739ec6ed0e4238e7a030558a2b6824542f470609ade50eac6b48c03d4ab"
+    },
+    {
+      "source": "Minecraft.World/Item.cpp",
+      "destination": "original/reference-only/Item.cpp",
+      "sha256": "79560db8916f776748c602664c28a7e80fb12aa5ff6bfd407da3b184c736a13c"
+    },
+    {
+      "source": "Minecraft.World/ItemInstance.cpp",
+      "destination": "original/reference-only/ItemInstance.cpp",
+      "sha256": "5d2ea5f774fe3e7a5f4cfaf5a41d744bec7b46df635ff7b537fa8ea9ac39ecbc"
+    },
+    {
+      "source": "Minecraft.World/EnchantedBookItem.cpp",
+      "destination": "original/reference-only/EnchantedBookItem.cpp",
+      "sha256": "7081b68d8c0fca2c4a3a35225fddce18ffa0701aa11caeb557c58940f25ded3a"
+    },
+    {
+      "source": "Minecraft.World/ChestTileEntity.cpp",
+      "destination": "original/reference-only/ChestTileEntity.cpp",
+      "sha256": "ebc0e9dd2ac1eef5ecfd0ef76f52bf35cabbf1ca995a6895547d85a8ff64b2d1"
+    },
+    {
+      "source": "Minecraft.World/StructurePiece.cpp",
+      "destination": "original/reference-only/StructurePiece.cpp",
+      "sha256": "25ceb8bec2cc2f73569ea82dfa4ac3b0570b25255f01aabb4caf57383d278a38"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/items.png",
+      "destination": "assets/items.png",
+      "sha256": "ffa3a846560394163852e7012e9ce44a203d9e9b28704ab346f338d18a18b226"
+    },
+    {
+      "source": "Minecraft.Client/ChestModel.cpp",
+      "destination": "original/reference-only/ChestModel.cpp",
+      "sha256": "c45427a902c7fd3cb6d17085c9269e09150889e893087dac65b522ef9c21a94e"
+    },
+    {
+      "source": "Minecraft.Client/ChestRenderer.cpp",
+      "destination": "original/reference-only/ChestRenderer.cpp",
+      "sha256": "98a9fe036345ad50a0b38b2afbab79e51fd73b3cf03ea6c368708f517f6cdf6d"
+    },
+    {
+      "source": "Minecraft.Client/Cube.cpp",
+      "destination": "original/reference-only/Cube.cpp",
+      "sha256": "12c1bf445d0e5b460388d3701c52d501c0a0d61787e87938e15eed767e0c281b"
+    },
+    {
+      "source": "Minecraft.Client/Polygon.cpp",
+      "destination": "original/reference-only/Polygon.cpp",
+      "sha256": "60e3282c42d2711041b2c1cf3418b86ddae97c1c574cdcf005a9efb463c925cf"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/item/chest.png",
+      "destination": "assets/chest.png",
+      "sha256": "c413ebdb395ee97ecf205bd00405a5e6a53cd921d4939a06e81a00b4af435514"
+    },
+    {
+      "source": "Minecraft.World/DyePowderItem.cpp",
+      "destination": "original/reference-only/DyePowderItem.cpp",
+      "sha256": "4a78c7f461ba7c5e9d9d6b52162b6b3f6a72453c16a5c99c67d29858510b89c5"
+    },
+    {
+      "source": "Minecraft.Client/LargeChestModel.cpp",
+      "destination": "original/reference-only/LargeChestModel.cpp",
+      "sha256": "42c704b37108838b43d4229984bd4482a7c988208651a5edeb6baa63b8a0db86"
+    },
+    {
+      "source": "Minecraft.World/CompoundContainer.cpp",
+      "destination": "original/reference-only/CompoundContainer.cpp",
+      "sha256": "ac38c41ba35cfe82ac416378c691a8a9fa5fa0dc3e4a0faa6a04c222e3b215ff"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/item/largechest.png",
+      "destination": "assets/largechest.png",
+      "sha256": "8cdec64731de0af6e161ef46c7268241cf116b86f3f66372711d8892c18104eb"
+    },
+    {
+      "source": "Minecraft.World/WeaponItem.h",
+      "destination": "original/reference-only/WeaponItem.h",
+      "sha256": "fea4be4f44292ef6f51fce277286b037ef6a127e77e2f5f08923ee13920aaa72"
+    },
+    {
+      "source": "Minecraft.World/WeaponItem.cpp",
+      "destination": "original/reference-only/WeaponItem.cpp",
+      "sha256": "ed49f8f9a8ab0c946656ecbcb9037a1202caeb80c0cbead8a6e63be0039cdb1b"
+    },
+    {
+      "source": "Minecraft.World/ShovelItem.h",
+      "destination": "original/reference-only/ShovelItem.h",
+      "sha256": "42630e6879b8ca9459b119e001fdb96fccdcce82b4093f2322ef3de5185ab474"
+    },
+    {
+      "source": "Minecraft.World/ShovelItem.cpp",
+      "destination": "original/reference-only/ShovelItem.cpp",
+      "sha256": "17fde8e5de960bd2d828e769fcaa4085a947ac9dc97172c0c8993f40d7ce165d"
+    },
+    {
+      "source": "Minecraft.World/DiggerItem.h",
+      "destination": "original/reference-only/DiggerItem.h",
+      "sha256": "189971e5543281cc38ec81f2c655331620dcb3d576fc7f21825661dd58f4595c"
+    },
+    {
+      "source": "Minecraft.World/DiggerItem.cpp",
+      "destination": "original/reference-only/DiggerItem.cpp",
+      "sha256": "d512cc6909ae53cd24a2423a6ae39ed7f539ba93a08aec5425e4e47a3cf7c05a"
+    },
+    {
+      "source": "Minecraft.World/PickaxeItem.h",
+      "destination": "original/reference-only/PickaxeItem.h",
+      "sha256": "321fbc69e59c67f1a29df766c5c6032b2af1bfde543afcbbbe94b31be9ef8b1c"
+    },
+    {
+      "source": "Minecraft.World/PickaxeItem.cpp",
+      "destination": "original/reference-only/PickaxeItem.cpp",
+      "sha256": "2035b67d3a8b22429895cbd6215e37c57b69987f334ea556f1c1c530fff0fd89"
+    },
+    {
+      "source": "Minecraft.World/HatchetItem.h",
+      "destination": "original/reference-only/HatchetItem.h",
+      "sha256": "fc5da3f895509c67b5114f73922c22c859375f87a282a1478ce5e49b267fe1c9"
+    },
+    {
+      "source": "Minecraft.World/HatchetItem.cpp",
+      "destination": "original/reference-only/HatchetItem.cpp",
+      "sha256": "f9b992fb7310fc1ecc6824ee5bd6b80ded52cb76bdd7675a946640c4ac50026b"
+    },
+    {
+      "source": "Minecraft.World/HoeItem.h",
+      "destination": "original/reference-only/HoeItem.h",
+      "sha256": "a83e2eda01d79b65e6fead7e610603c7399ed430596026bdec72a1cae8438146"
+    },
+    {
+      "source": "Minecraft.World/HoeItem.cpp",
+      "destination": "original/reference-only/HoeItem.cpp",
+      "sha256": "147935139a92b3d586b091fefe3fc956eaff05fa18736baeb7a7042f5dce8c63"
+    },
+    {
+      "source": "Minecraft.World/DoorItem.h",
+      "destination": "original/reference-only/DoorItem.h",
+      "sha256": "0874c803292c98358b57e92d1bfa45c9cc063c37e2bd247b230005ee4104a992"
+    },
+    {
+      "source": "Minecraft.World/DoorItem.cpp",
+      "destination": "original/reference-only/DoorItem.cpp",
+      "sha256": "68a83d0df663fc84d96b3fcd760675e8a673034e8bbe2668e000a78ee422b80d"
+    },
+    {
+      "source": "Minecraft.World/ArmorItem.h",
+      "destination": "original/reference-only/ArmorItem.h",
+      "sha256": "4f172a140a81d504ab64d813614ddb90227d82b8d9bf90d579998b68e53da97b"
+    },
+    {
+      "source": "Minecraft.World/ArmorItem.cpp",
+      "destination": "original/reference-only/ArmorItem.cpp",
+      "sha256": "37d0480427d66cd25af72a3e8f1b29abf5faf722ed3ed165311d8e12dae67b9d"
+    },
+    {
+      "source": "Minecraft.World/BucketItem.h",
+      "destination": "original/reference-only/BucketItem.h",
+      "sha256": "c16458562c25e0f1c51cf52c86cb15b86e497829314364405447c720cbb5d675"
+    },
+    {
+      "source": "Minecraft.World/BucketItem.cpp",
+      "destination": "original/reference-only/BucketItem.cpp",
+      "sha256": "cab851eab5350f6a1f7041d90ba3ca115eac300931dea59a347461c493ee3f77"
+    },
+    {
+      "source": "Minecraft.World/MilkBucketItem.h",
+      "destination": "original/reference-only/MilkBucketItem.h",
+      "sha256": "e86b61a5bf93495585fb69d57f7ceeabe13c6b0b955c10c835e68e8685046bc7"
+    },
+    {
+      "source": "Minecraft.World/MilkBucketItem.cpp",
+      "destination": "original/reference-only/MilkBucketItem.cpp",
+      "sha256": "739925ce66f28a2ce4acb4c9b4762f7661e171ad627bf9ab3fdfb1fd38fe77cd"
+    },
+    {
+      "source": "Minecraft.World/BowItem.h",
+      "destination": "original/reference-only/BowItem.h",
+      "sha256": "87bea4df35d65f374004023d04a7ae19cdeb6456fdeb1909d792bb53a08f73d5"
+    },
+    {
+      "source": "Minecraft.World/BowItem.cpp",
+      "destination": "original/reference-only/BowItem.cpp",
+      "sha256": "2e33fcd5fd3c7325ded1ec6e84e38a98349f87d75f6b878b27d4ad6a5111f282"
+    },
+    {
+      "source": "Minecraft.World/CompassItem.h",
+      "destination": "original/reference-only/CompassItem.h",
+      "sha256": "b4137ad510e968e48a47086710e45de56a127b57c89d8ec1dadcacff2f63e8ac"
+    },
+    {
+      "source": "Minecraft.World/CompassItem.cpp",
+      "destination": "original/reference-only/CompassItem.cpp",
+      "sha256": "ee0afc419c8525bfa83d0d29ade6a550a669a715ef0c9c7521550683c135de06"
+    },
+    {
+      "source": "Minecraft.World/ClockItem.h",
+      "destination": "original/reference-only/ClockItem.h",
+      "sha256": "d33f5d187469c94a82521ca80f5eb4bdea626004c0612a60dc208e79ab0a9e75"
+    },
+    {
+      "source": "Minecraft.World/ClockItem.cpp",
+      "destination": "original/reference-only/ClockItem.cpp",
+      "sha256": "36dbd3c1a7140febdc3576874b9dc78e29bc62beb78cd6fd32bde513a5c9dd27"
+    },
+    {
+      "source": "Minecraft.World/MapItem.h",
+      "destination": "original/reference-only/MapItem.h",
+      "sha256": "da666414160a6ea4b75df2620d3f126c13324352657dee1a48d738865b1551a3"
+    },
+    {
+      "source": "Minecraft.World/MapItem.cpp",
+      "destination": "original/reference-only/MapItem.cpp",
+      "sha256": "811be66ddb6bbac301a5ab5fba4f2cdc1c6b5aaa28134b928d1808e0b21225be"
+    },
+    {
+      "source": "Minecraft.World/FlintAndSteelItem.h",
+      "destination": "original/reference-only/FlintAndSteelItem.h",
+      "sha256": "2c4a71cd342b68d9309567001a830ce9be47cc429d76722f7ec5d97a5bbd9c2d"
+    },
+    {
+      "source": "Minecraft.World/FlintAndSteelItem.cpp",
+      "destination": "original/reference-only/FlintAndSteelItem.cpp",
+      "sha256": "5885b420ce613b2725ee6d5ecd32667ac81afd72a1b1a537a11e86c10323d0f7"
+    },
+    {
+      "source": "Minecraft.World/FoodItem.h",
+      "destination": "original/reference-only/FoodItem.h",
+      "sha256": "57c1eb4fc737b0973c6a4354f0307a346a292cbcec330cf51eb476d4de318abb"
+    },
+    {
+      "source": "Minecraft.World/FoodItem.cpp",
+      "destination": "original/reference-only/FoodItem.cpp",
+      "sha256": "5078f5c24566327662e288b3be1cd40300a67c64d405c9a82a181b87a943e687"
+    },
+    {
+      "source": "Minecraft.World/CoalItem.h",
+      "destination": "original/reference-only/CoalItem.h",
+      "sha256": "165ccb433b45d6fab53da5aedf8c7d9f19f6e4ca1dee52a5bfcb9c642f24f64e"
+    },
+    {
+      "source": "Minecraft.World/CoalItem.cpp",
+      "destination": "original/reference-only/CoalItem.cpp",
+      "sha256": "d1183bcc793244648af7d9a1c7b3d6f2fe645d0b266ab58c13e946afdd46b720"
+    },
+    {
+      "source": "Minecraft.World/BowlFoodItem.h",
+      "destination": "original/reference-only/BowlFoodItem.h",
+      "sha256": "d4c07ff906f005433ce2f6f2ca45804bd2b7ffe7012e86f5ed72608346b9cd12"
+    },
+    {
+      "source": "Minecraft.World/BowlFoodItem.cpp",
+      "destination": "original/reference-only/BowlFoodItem.cpp",
+      "sha256": "6a01bdc0cf6b2b8fc9e0042d5f25da985f3638581f6c3b6ab271459ee837d176"
+    },
+    {
+      "source": "Minecraft.World/TilePlanterItem.h",
+      "destination": "original/reference-only/TilePlanterItem.h",
+      "sha256": "8aa2c5e57c95e50ddd703cd4239faed161e9cdf22823967b5d3b5338ce727217"
+    },
+    {
+      "source": "Minecraft.World/TilePlanterItem.cpp",
+      "destination": "original/reference-only/TilePlanterItem.cpp",
+      "sha256": "d50d19a06a44105c1334b1ed49222b051efafd241e4e30a8208c73582f28c285"
+    },
+    {
+      "source": "Minecraft.World/SeedItem.h",
+      "destination": "original/reference-only/SeedItem.h",
+      "sha256": "d0b6a3424d91e51cad93739c0b5935b21e2adc6fe88588e820334edff93c9bca"
+    },
+    {
+      "source": "Minecraft.World/SeedItem.cpp",
+      "destination": "original/reference-only/SeedItem.cpp",
+      "sha256": "a164ac446da91f6e591ae67f09b682c48322008640116cc3f0614d675179febc"
+    },
+    {
+      "source": "Minecraft.World/HangingEntityItem.h",
+      "destination": "original/reference-only/HangingEntityItem.h",
+      "sha256": "dc5b087cba31ea0a6f6701ca02dfa28dbf71711264ab333b7ffad0707f298f80"
+    },
+    {
+      "source": "Minecraft.World/HangingEntityItem.cpp",
+      "destination": "original/reference-only/HangingEntityItem.cpp",
+      "sha256": "ddb6582b4098f4eb776afb84cf6763ee808baa3b6cb072d92ffe080ca58e26bd"
+    },
+    {
+      "source": "Minecraft.World/GoldenAppleItem.h",
+      "destination": "original/reference-only/GoldenAppleItem.h",
+      "sha256": "8f38d74cb4df90d03379444182c6b24836c33dce9dc5224022eeebea984297cb"
+    },
+    {
+      "source": "Minecraft.World/GoldenAppleItem.cpp",
+      "destination": "original/reference-only/GoldenAppleItem.cpp",
+      "sha256": "401c2c48bddf6ee8c3dad3a2e8944f94635f63a08d02e8c0b963ee3cf5fdd7c8"
+    },
+    {
+      "source": "Minecraft.World/SignItem.h",
+      "destination": "original/reference-only/SignItem.h",
+      "sha256": "147abc98e1c409365717f6c7e1dc7928e55c42ac4ff479e6a3ca60b229cad81b"
+    },
+    {
+      "source": "Minecraft.World/SignItem.cpp",
+      "destination": "original/reference-only/SignItem.cpp",
+      "sha256": "67a0c9416df866c787cb65dadc44aa44953c6502590a82fe272591e02932e58f"
+    },
+    {
+      "source": "Minecraft.World/MinecartItem.h",
+      "destination": "original/reference-only/MinecartItem.h",
+      "sha256": "64531f268ddc246583417f3b38b2ba814cecd44776ff3a50d74b6890a39c3a7c"
+    },
+    {
+      "source": "Minecraft.World/MinecartItem.cpp",
+      "destination": "original/reference-only/MinecartItem.cpp",
+      "sha256": "000117f395452b1340e66797bb2ad5c899e8048b07f8973615e47db84efca131"
+    },
+    {
+      "source": "Minecraft.World/SaddleItem.h",
+      "destination": "original/reference-only/SaddleItem.h",
+      "sha256": "b556c6c77b1068a92a976d75f2ba965af48a94d6bbaa08bab649abb2464f02ac"
+    },
+    {
+      "source": "Minecraft.World/SaddleItem.cpp",
+      "destination": "original/reference-only/SaddleItem.cpp",
+      "sha256": "613d1a75047223ad7f1511677133b535da90cf1b45e2d780f9f7ec90b7078dba"
+    },
+    {
+      "source": "Minecraft.World/RedStoneItem.h",
+      "destination": "original/reference-only/RedStoneItem.h",
+      "sha256": "2523ac38e2cdf435c74de70be7a2b7c0ff8806465bb189e40a0a13a49705702e"
+    },
+    {
+      "source": "Minecraft.World/RedStoneItem.cpp",
+      "destination": "original/reference-only/RedStoneItem.cpp",
+      "sha256": "14e499338fb5db3fcb1608326c6336dff6acfb77d214fa205f2ebbe9c01ad448"
+    },
+    {
+      "source": "Minecraft.World/SnowballItem.h",
+      "destination": "original/reference-only/SnowballItem.h",
+      "sha256": "82eb7040cb1e178715a4734c2efc69dd977edffb08e8baef194bdb279d619ca7"
+    },
+    {
+      "source": "Minecraft.World/SnowballItem.cpp",
+      "destination": "original/reference-only/SnowballItem.cpp",
+      "sha256": "12a475becbe52f7b545592862537f44bb75d39e3440fac8b40e81611c917b2ff"
+    },
+    {
+      "source": "Minecraft.World/BoatItem.h",
+      "destination": "original/reference-only/BoatItem.h",
+      "sha256": "62fc212010db41d35ce37403fe78244244e420dfc2f0bba35603d4b77c83ec78"
+    },
+    {
+      "source": "Minecraft.World/BoatItem.cpp",
+      "destination": "original/reference-only/BoatItem.cpp",
+      "sha256": "3e2ffd3488899a8b620210887b0f5e7355d4dcb52b7d337776f3b23f4a1d620d"
+    },
+    {
+      "source": "Minecraft.World/BookItem.h",
+      "destination": "original/reference-only/BookItem.h",
+      "sha256": "c2834f1df0171461ea7a2f759bcb70dc061df782ff84b4da47828159c6ca1606"
+    },
+    {
+      "source": "Minecraft.World/BookItem.cpp",
+      "destination": "original/reference-only/BookItem.cpp",
+      "sha256": "688364db4ef500417dc31a4437a3441ef3d7839fc5860d0b39ac7d7071cfdc44"
+    },
+    {
+      "source": "Minecraft.World/EggItem.h",
+      "destination": "original/reference-only/EggItem.h",
+      "sha256": "eafcd8765d6e8e8d315deaea4c869a86477bd2d3e20cbed042a1f5edcaac64d7"
+    },
+    {
+      "source": "Minecraft.World/EggItem.cpp",
+      "destination": "original/reference-only/EggItem.cpp",
+      "sha256": "7c81b38dae535069fa28fba37f3f9d5f8eae9c02e7a5103330cdbdf561cbe0be"
+    },
+    {
+      "source": "Minecraft.World/FishingRodItem.h",
+      "destination": "original/reference-only/FishingRodItem.h",
+      "sha256": "2f11653ad8331e41a123af56b1dafa39d2dd92340cc8155d15c8f1da3618c32f"
+    },
+    {
+      "source": "Minecraft.World/FishingRodItem.cpp",
+      "destination": "original/reference-only/FishingRodItem.cpp",
+      "sha256": "e77366d73b064b44a5ddcb48ec0d72304d74d56934a6e57481c5d4ab0e145305"
+    },
+    {
+      "source": "Minecraft.World/DyePowderItem.h",
+      "destination": "original/reference-only/DyePowderItem.h",
+      "sha256": "b6dc1f48154c8d115f98c430c99e6d59d2188fb44a0af2350d71069ecdca54b4"
+    },
+    {
+      "source": "Minecraft.World/BedItem.h",
+      "destination": "original/reference-only/BedItem.h",
+      "sha256": "9161802dd7fddc856de77e6710e66d39eed9620289feba817df1560b9bb1d51f"
+    },
+    {
+      "source": "Minecraft.World/BedItem.cpp",
+      "destination": "original/reference-only/BedItem.cpp",
+      "sha256": "b6facff93623dd738788543330ebce83b9dd825ae6aa6514c8b51eec681bb31b"
+    },
+    {
+      "source": "Minecraft.World/ShearsItem.h",
+      "destination": "original/reference-only/ShearsItem.h",
+      "sha256": "9d743d6930a72391e4dcbd54ba637b5676245edac84290b41d36eff588d2a3a0"
+    },
+    {
+      "source": "Minecraft.World/ShearsItem.cpp",
+      "destination": "original/reference-only/ShearsItem.cpp",
+      "sha256": "a4944ccd25357e9a082ec985518850ec44ca0ebfa7223f63b5b916e85838279d"
+    },
+    {
+      "source": "Minecraft.World/EnderpearlItem.h",
+      "destination": "original/reference-only/EnderpearlItem.h",
+      "sha256": "181ddc0be003fddad324d930d846a9fe7bfd23c149aaf42ae2d58ace57a8132a"
+    },
+    {
+      "source": "Minecraft.World/EnderpearlItem.cpp",
+      "destination": "original/reference-only/EnderpearlItem.cpp",
+      "sha256": "82d13e2a6e0070fdfd17da879587e7516e3293538cb4d6f445dcca759bd452cb"
+    },
+    {
+      "source": "Minecraft.World/PotionItem.h",
+      "destination": "original/reference-only/PotionItem.h",
+      "sha256": "eeca1a8b2f6ed24f7434c11136d8330277925a9f82c146d07f639fc08eb5b9d5"
+    },
+    {
+      "source": "Minecraft.World/PotionItem.cpp",
+      "destination": "original/reference-only/PotionItem.cpp",
+      "sha256": "7de69bd47b177f0d93ab5c9d05e7000a6b28536eca3860808cdd2df0bb87f955"
+    },
+    {
+      "source": "Minecraft.World/BottleItem.h",
+      "destination": "original/reference-only/BottleItem.h",
+      "sha256": "5ea58205aaa9f322de8ee9bc92c10854cdaaf24abaed50e45e2d5949ff52d9f3"
+    },
+    {
+      "source": "Minecraft.World/BottleItem.cpp",
+      "destination": "original/reference-only/BottleItem.cpp",
+      "sha256": "160a576d44b3ba409c419de464e85f081330ae4bc868b10854c90e4056705177"
+    },
+    {
+      "source": "Minecraft.World/EnderEyeItem.h",
+      "destination": "original/reference-only/EnderEyeItem.h",
+      "sha256": "6697cac63026bdd24f0030ae1807aca9b78964a86bf9dd62d4d6574cfa3fe583"
+    },
+    {
+      "source": "Minecraft.World/EnderEyeItem.cpp",
+      "destination": "original/reference-only/EnderEyeItem.cpp",
+      "sha256": "2f5680498482f688f5c8c05f73b5238f657bcb475335a29fb9e48ba1643d9716"
+    },
+    {
+      "source": "Minecraft.World/MonsterPlacerItem.h",
+      "destination": "original/reference-only/MonsterPlacerItem.h",
+      "sha256": "a19e42b222c56fa006b38a4640fc30cd1236188fd522d47fccc88c89d685c51e"
+    },
+    {
+      "source": "Minecraft.World/MonsterPlacerItem.cpp",
+      "destination": "original/reference-only/MonsterPlacerItem.cpp",
+      "sha256": "88b03dc6ef26e2347557817a5732b4d3956360c5d91858c099ef508bbbc60311"
+    },
+    {
+      "source": "Minecraft.World/ExperienceItem.h",
+      "destination": "original/reference-only/ExperienceItem.h",
+      "sha256": "f6a038db3952cf4d40faf0702fd2414dd70d487d65bbfd093a3f671e7cac492f"
+    },
+    {
+      "source": "Minecraft.World/ExperienceItem.cpp",
+      "destination": "original/reference-only/ExperienceItem.cpp",
+      "sha256": "cbf4f508624c7458b8edf99d6cc4593c1490284cdedb1989e0f5710724167371"
+    },
+    {
+      "source": "Minecraft.World/RecordingItem.h",
+      "destination": "original/reference-only/RecordingItem.h",
+      "sha256": "eadcd923faee3149f0a2e8c3df9661013955ecce853f9c2f92618d0c59dd496a"
+    },
+    {
+      "source": "Minecraft.World/RecordingItem.cpp",
+      "destination": "original/reference-only/RecordingItem.cpp",
+      "sha256": "e43c47ffd9a52eefc7463872fca8b48dc5bb19ccff92713c4c357bd8c6fc0f2e"
+    },
+    {
+      "source": "Minecraft.World/FireChargeItem.h",
+      "destination": "original/reference-only/FireChargeItem.h",
+      "sha256": "e6237c79df75284a235f192787ca4cbfe5d74e9c3041668210bd80ee8c638f5b"
+    },
+    {
+      "source": "Minecraft.World/FireChargeItem.cpp",
+      "destination": "original/reference-only/FireChargeItem.cpp",
+      "sha256": "51d17a86c75dd32aeda95b83f9cd001271b1a19dfc9c561a9b4c7442fa662518"
+    },
+    {
+      "source": "Minecraft.World/SkullItem.h",
+      "destination": "original/reference-only/SkullItem.h",
+      "sha256": "8b4551f6f8e8c80291ced89b76b2231e4c01b3f7c5bfad93128de4a5061a2fd2"
+    },
+    {
+      "source": "Minecraft.World/SkullItem.cpp",
+      "destination": "original/reference-only/SkullItem.cpp",
+      "sha256": "82037500a35bf3990cd262a2110e7f74d9ef45bee22d7a8f418a809212c6a42e"
+    },
+    {
+      "source": "Minecraft.World/SeedFoodItem.h",
+      "destination": "original/reference-only/SeedFoodItem.h",
+      "sha256": "8741638c2e9ff6007b46a6ed13e05420c060895a593494c034e9e5729e5cef04"
+    },
+    {
+      "source": "Minecraft.World/SeedFoodItem.cpp",
+      "destination": "original/reference-only/SeedFoodItem.cpp",
+      "sha256": "d64877c891ff37c652d74801074f1dcca0eaee25fe6d76d3f082a9bc4cc12a50"
+    },
+    {
+      "source": "Minecraft.World/CarrotOnAStickItem.h",
+      "destination": "original/reference-only/CarrotOnAStickItem.h",
+      "sha256": "4e1a4bffe1cd05db6ecbf985ccdb74f4683fcb70aeffccf4acefd1758074669c"
+    },
+    {
+      "source": "Minecraft.World/CarrotOnAStickItem.cpp",
+      "destination": "original/reference-only/CarrotOnAStickItem.cpp",
+      "sha256": "1155b5301e99ea4f0cde76f0829148631299734f349806bde4ccfa7ebd5b1dc7"
+    },
+    {
+      "source": "Minecraft.World/EnchantedBookItem.h",
+      "destination": "original/reference-only/EnchantedBookItem.h",
+      "sha256": "9fc7b369109f0975933c0afc86c11625c0a25be383305f1db970a27616b73546"
+    },
+    {
+      "source": "Minecraft.World/AbstractContainerMenu.cpp",
+      "destination": "original/reference-only/AbstractContainerMenu.cpp",
+      "sha256": "d527b13de203b235b9044c5670270b0b9026f0bb7f7687995877ae1b36c8ce6c"
+    },
+    {
+      "source": "Minecraft.World/Item.h",
+      "destination": "original/reference-only/Item.h",
+      "sha256": "3fe545b365c50341f4dc303b3430034f3a4ce6cf3dc0ae44b1f1b9fc321af736"
+    },
+    {
+      "source": "Minecraft.World/Container.h",
+      "destination": "original/reference-only/Container.h",
+      "sha256": "ec2b15c5fb21325bf3dc91174a0d0bf2eaedfa42877cf3df1c60311d17cef065"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/zombie.png",
+      "destination": "assets/mob_zombie.png",
+      "sha256": "b5427e233c97e5c7e8ddc135033ff36ac65ff12eb02eb3fa251b3a2d269d3b13"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/skeleton.png",
+      "destination": "assets/mob_skeleton.png",
+      "sha256": "3eb64018f7fa55b332548147d9966580ae87352418bf07dfa190ffa39be79b1b"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/spider.png",
+      "destination": "assets/mob_spider.png",
+      "sha256": "0754bf71e157e8ed447c475663f866cd6b35813e9e5ea138dafbfdb02675bd81"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/cow.png",
+      "destination": "assets/mob_cow.png",
+      "sha256": "1d2d8da46f37f83c128743bc90905dc7b46bbb4425f5c28a93edf4909395464f"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/pig.png",
+      "destination": "assets/mob_pig.png",
+      "sha256": "0770b7a10a829e5fe101e236b25014e4c9633838f0067d8b0cf413b605428385"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/sheep.png",
+      "destination": "assets/mob_sheep.png",
+      "sha256": "01410b8f7c3dcb372c0a663bb80e46bdb2243420075585addb08dd93f6d35323"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/sheep_fur.png",
+      "destination": "assets/mob_sheep_fur.png",
+      "sha256": "9f4ef6ad8906027ad6e5ebb9259f4107c449cfbfe703f641d02b0a785417964d"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/chicken.png",
+      "destination": "assets/mob_chicken.png",
+      "sha256": "f274296053d7993975270300388cd184635010a7082cf56c537e903274b12216"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/creeper.png",
+      "destination": "assets/mob_creeper.png",
+      "sha256": "c27e7c20555f1bf5ef1cd848a4291f90465000708185e6743e72b8adffed2a4b"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/art/kz.png",
+      "destination": "assets/art_kz.png",
+      "sha256": "38c92415a4337d99160e5df2c81f2a63ff60cdbbefa77af3467d0230d71307c7"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/item/enderchest.png",
+      "destination": "assets/enderchest.png",
+      "sha256": "a71b4c909056fd19c37eab6c0af423974c4a8be1d86221a37c1d6bc5410d888d"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/skeleton_wither.png",
+      "destination": "assets/mob_skeleton_wither.png",
+      "sha256": "ac5b66af14589e689ab4b830d47474a1383634081b6b6cae3f1fe8d16734df15"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/mob/char.png",
+      "destination": "assets/mob_char.png",
+      "sha256": "1a683a41813ff8b6f4633053b38412a506f2e6e666b0351941d0bb48f49534f0"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/item/book.png",
+      "destination": "assets/book.png",
+      "sha256": "8c5c37e0c6fbaccfaaf7fd2c6c01b0a068897b7397aaf6b500b9a5c77f5746f7"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_TL.png",
+      "destination": "assets/panel_tl.png",
+      "sha256": "a77463c40c9d0c853e19e67a3056c91978c30c42a0ba5365647645f095fa4f8d"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_TM.png",
+      "destination": "assets/panel_tm.png",
+      "sha256": "c74244cb3b89c33f75b3950db34375016a1753e8d41844c6f335911f8cff3c72"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_TR.png",
+      "destination": "assets/panel_tr.png",
+      "sha256": "aea6184ffa1e016a880a29be41868f34b7d805e7c01f66e89f3a003d81e92169"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_ML.png",
+      "destination": "assets/panel_ml.png",
+      "sha256": "958a05c97c680bbde46fe36295a4135618cecc49ca7a4263d9875689cba8338b"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_MM.png",
+      "destination": "assets/panel_mm.png",
+      "sha256": "3e6f6bacefc28871091a7be9126dd1280e986865314b33c9c8c8b9567e25465e"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_MR.png",
+      "destination": "assets/panel_mr.png",
+      "sha256": "5c85e17cd3eecfbc21dc0ed1ae90a0f4cd9f4192bbd050b7101b90e2abd99e8f"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_BL.png",
+      "destination": "assets/panel_bl.png",
+      "sha256": "55c513874dabe53de1fdf781d27d96be42f640167783c0cff0236cf482d9975d"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_BM.png",
+      "destination": "assets/panel_bm.png",
+      "sha256": "31f2069c3dd77e812b7e9b425d1ff9466f2693876b290fd26aa88cd60816f99d"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_BR.png",
+      "destination": "assets/panel_br.png",
+      "sha256": "e4a7153147b7de5d4dac22680a425df79371a6a32c1a870ecf8570e59485c535"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/BrewingStand.png",
+      "destination": "assets/brewing_stand.png",
+      "sha256": "567d23625fa1195320c1fd6721dd2d9eb89507d02012f3773d3b7f2774ced458"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/BrewingArrow_On.png",
+      "destination": "assets/brewing_arrow_on.png",
+      "sha256": "a8894ca4024f38b6429c89c4d778ae2cdc7034741b31a8c0eb97aa8ed470167e"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/BrewingArrow_Off.png",
+      "destination": "assets/brewing_arrow_off.png",
+      "sha256": "7a285cb9af5daf0b8a4268ddc1ac61315ffb0bf18d19c7ff97517f4f08f31b6f"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/BrewingBubbles_On.png",
+      "destination": "assets/brewing_bubbles_on.png",
+      "sha256": "9d09ec15a11fba2899c87934e63b26a6dcd2f8e5efd97e529123caace765f332"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/BrewingBubbles_Off.png",
+      "destination": "assets/brewing_bubbles_off.png",
+      "sha256": "0768e8def719c4308c475aa66978a05b3788ca1da5ae429a955042a7178466ab"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/xuiscene_brewingstand.xui",
+      "destination": "original/Minecraft.Client/PS3/Media/xuiscene_brewingstand.xui",
+      "sha256": "e67b9ee8fea09574a279c8e9c8738259c4e72a21e9bcfaa2cf9254f90d556b37"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/skin_Minecraft.xui",
+      "destination": "original/Minecraft.Client/PS3/Media/skin_Minecraft.xui",
+      "sha256": "f9ee31f26d74aba80cc95e2f466c49c3efca6b30ea9fd3dff3784559cf20bb16"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Flame_Off.png",
+      "destination": "assets/flame_off.png",
+      "sha256": "f0469054a106cb9b21f03435183d541ddbbd041d59e4dd3c09e719bc3433a2bd"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Flame_On.png",
+      "destination": "assets/flame_on.png",
+      "sha256": "21250611bea23f2a73ea43350359aa3629fffe2e5e1f148f7aaa73900eca2ad1"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Arrow_Off.png",
+      "destination": "assets/arrow_off.png",
+      "sha256": "0447951227efef8f1af73ff9abc6ed70cfac9f4719b00702e7d3928ae803b8a7"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Arrow_On.png",
+      "destination": "assets/arrow_on.png",
+      "sha256": "78fd6bc21bcfc58303f23951413ba61502c8f5c6401e6d8c560801e84df06dff"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/xuiscene_furnace.xui",
+      "destination": "original/Minecraft.Client/PS3/Media/xuiscene_furnace.xui",
+      "sha256": "ee0272d168cbb444e4de816fecda9c0fe23fc4a7ef9189e9b240a587bca4b035"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/xuiscene_container.xui",
+      "destination": "original/Minecraft.Client/PS3/Media/xuiscene_container.xui",
+      "sha256": "70bbcf08a45b1238d30a52bb8f1f88de95196c7387f0c4a940df6f7e7f6de7e9"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/IconHolder.png",
+      "destination": "assets/icon_holder.png",
+      "sha256": "1ea75527c1088f48690ca2c8d61873a0d0b63f288437ad85bc5a3e5636c0c22a"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/xuiscene_main.xui",
+      "destination": "original/Minecraft.Client/PS3/Media/xuiscene_main.xui",
+      "sha256": "f0751d31180ff5fb3e4042b939f5e879f516f552d4742d1c53f8c75d1c2a85a3"
+    },
+    {
+      "source": "Minecraft.World/PotionBrewing.cpp",
+      "destination": "original/reference-only/PotionBrewing.cpp",
+      "sha256": "aff73cdb3911cb79fed54b2a606d030c36498f1396e9fafc927a7f2118342b88"
+    },
+    {
+      "source": "Minecraft.World/PotionBrewing.h",
+      "destination": "original/reference-only/PotionBrewing.h",
+      "sha256": "b5fad08df647f058788b55accb9745d006453c4096b4517a769f499eccb6febf"
+    },
+    {
+      "source": "Minecraft.World/MobEffect.cpp",
+      "destination": "original/reference-only/MobEffect.cpp",
+      "sha256": "38091699106deb06b27c2a4b5472805350fadcb9dc64d87b42af79c0a3d093e1"
+    },
+    {
+      "source": "Minecraft.World/MobEffect.h",
+      "destination": "original/reference-only/MobEffect.h",
+      "sha256": "42d396e78c8c395d0dee4aaa563a88bf33c6312e816e4cd7949bd4f770684349"
+    },
+    {
+      "source": "Minecraft.World/MobEffectInstance.cpp",
+      "destination": "original/reference-only/MobEffectInstance.cpp",
+      "sha256": "dd82312f23d1461dea118160c1cca0557c0d7be61e243c0efcfa95d3039d60df"
+    },
+    {
+      "source": "Minecraft.World/MobEffectInstance.h",
+      "destination": "original/reference-only/MobEffectInstance.h",
+      "sha256": "570942f6ea09ce9708ac27b29a91da2f1a10526916b27293a3a4b6f91db0cbe4"
+    },
+    {
+      "source": "Minecraft.World/Inventory.cpp",
+      "destination": "original/reference-only/Inventory.cpp",
+      "sha256": "8453b852b7747725b75a15ae02d9889ab212b75ba35c2ce3fba305d6f3e5f508"
+    },
+    {
+      "source": "Minecraft.World/Inventory.h",
+      "destination": "original/reference-only/Inventory.h",
+      "sha256": "ff9344e766c7bbc15687b8aac6e91b2ebebb902a4fe4bda5e472f1f8a5f01e15"
+    },
+    {
+      "source": "Minecraft.Client/Common/UI/IUIScene_CreativeMenu.cpp",
+      "destination": "original/reference-only/IUIScene_CreativeMenu.cpp",
+      "sha256": "8150f01d611a32466b1f0df79b0d5eff484f31da1c8a1e755f263e608db74c7b"
+    },
+    {
+      "source": "Minecraft.World/Sapling.h",
+      "destination": "original/reference-only/Sapling.h",
+      "sha256": "4b495e298a2feae63197c9a1ef27d4c05a5268a3416cb709cbd37ddd621d325a"
+    },
+    {
+      "source": "Minecraft.World/SkullTileEntity.h",
+      "destination": "original/reference-only/SkullTileEntity.h",
+      "sha256": "8ca4b23a28e1c04a0fbce31e0fab344f3f3b6825917a8afad8182f23ab229196"
+    },
+    {
+      "source": "Minecraft.World/StoneMonsterTile.h",
+      "destination": "original/reference-only/StoneMonsterTile.h",
+      "sha256": "72ae8f31c762059238c99fa9b1aa55d707b247d94ca2dd056577f2d3ceab73a3"
+    },
+    {
+      "source": "Minecraft.World/TallGrass.h",
+      "destination": "original/reference-only/TallGrass.h",
+      "sha256": "ba8edcd8f543075a44e41b47a85ac8fee62949097c498bd6957b26518e5022de"
+    },
+    {
+      "source": "Minecraft.Client/Common/Potion_Macros.h",
+      "destination": "original/reference-only/Potion_Macros.h",
+      "sha256": "a6bd299342ac64a5d58f5dc36845b768bf23be2e16f7612ec1340891ace6d2e7"
+    },
+    {
+      "source": "Minecraft.Client/Common/UI/IUIScene_CreativeMenu.h",
+      "destination": "original/reference-only/IUIScene_CreativeMenu.h",
+      "sha256": "a0c5455b242c3d256c39b56de612cec77832b93beb7b85ca9225502e0dfddcc6"
+    },
+    {
+      "source": "Minecraft.World/Sapling.cpp",
+      "destination": "original/reference-only/Sapling.cpp",
+      "sha256": "3a676861c13e98070f8cb066b25233b5ef96881d4eead0706d8366c02e8bd34d"
+    },
+    {
+      "source": "Minecraft.World/ClothTileItem.cpp",
+      "destination": "original/reference-only/ClothTileItem.cpp",
+      "sha256": "24390fba7a8b92971406c995daccd4232862f3cb5ce54124c75c3e05f64941e3"
+    },
+    {
+      "source": "Minecraft.Client/Common/Media/strings.resx",
+      "destination": "original/reference-only/strings.resx",
+      "sha256": "9dc63146e8f17dcd7df7d759ba25cc2c95b8af4068e6c2ce23d493448af4819f"
+    },
+    {
+      "source": "Minecraft.World/EntityIO.cpp",
+      "destination": "original/reference-only/EntityIO.cpp",
+      "sha256": "7efacb5d4b68213cb5be54d0aa697b5c63bb29a96d3c5e828775b4882c43c745"
+    },
+    {
+      "source": "Minecraft.Client/SilverfishModel.cpp",
+      "destination": "original/reference-only/SilverfishModel.cpp",
+      "sha256": "06b2cad055800cfac1ed6aad3b993042126fbc09469d4a03183dfcd5ecc9e35c"
+    },
+    {
+      "source": "Minecraft.Client/SilverfishModel.h",
+      "destination": "original/reference-only/SilverfishModel.h",
+      "sha256": "6e2c063eed13973f6567662d13e3c8710f53f8e10f87bdc183063bdb9381f10d"
+    },
+    {
+      "source": "Minecraft.Client/SpiderRenderer.cpp",
+      "destination": "original/reference-only/SpiderRenderer.cpp",
+      "sha256": "1c16bcbf88357cb6d204f39d055045044924a77d3f656483189239ae2f143f9f"
+    },
+    {
+      "source": "Minecraft.Client/EntityRenderDispatcher.cpp",
+      "destination": "original/reference-only/EntityRenderDispatcher.cpp",
+      "sha256": "94318f373cbe433da7a9b9adccb88e0b89dda97f79929e162fb11aa1f3b749c2"
+    },
+    {
+      "source": "Minecraft.Client/SilverfishRenderer.cpp",
+      "destination": "original/reference-only/SilverfishRenderer.cpp",
+      "sha256": "73646096c1f8d3f4f18cbc04b06f8d6e78cbe8a0bed89617695dbf2f63e556bb"
+    },
+    {
+      "source": "Minecraft.World/CaveSpider.cpp",
+      "destination": "original/reference-only/CaveSpider.cpp",
+      "sha256": "b5023f2b4ba7989f22b439a0ffff80edc00cd76d4910a919e2abcd617694c355"
+    },
+    {
+      "source": "Minecraft.World/PigZombie.cpp",
+      "destination": "original/reference-only/PigZombie.cpp",
+      "sha256": "a4e607bfcd17f120d547096fa71cb888652caf70383980263669c7da287fbb73"
+    },
+    {
+      "source": "Minecraft.World/Silverfish.cpp",
+      "destination": "original/reference-only/Silverfish.cpp",
+      "sha256": "057bec439c14a157a38e5983b1d7d84c7a71befe8c312c78394c6c3d3d7e234f"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/pigzombie.png",
+      "destination": "assets/mob_pigzombie.png",
+      "sha256": "7554a56189049967d31c2066bbf05ffcf3eaeba7a9f3fbba4b9d2a7ccf928ff8"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/cavespider.png",
+      "destination": "assets/mob_cavespider.png",
+      "sha256": "753fd5426f35aa8bd89227d9b18756e1914fc86f233cdef936b0228e12df91b7"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/silverfish.png",
+      "destination": "assets/mob_silverfish.png",
+      "sha256": "4d87a61e77d39fc6fc1dd8c4ba3b5752a5922b0360e341f3b9c7667384e97cc9"
+    },
+    {
+      "source": "Minecraft.Client/VillagerModel.cpp",
+      "destination": "original/reference-only/VillagerModel.cpp",
+      "sha256": "350afafb41e3ee9a957ff241821b7b44c5c4347e09e6d2a842f282269f8c0ae2"
+    },
+    {
+      "source": "Minecraft.Client/VillagerModel.h",
+      "destination": "original/reference-only/VillagerModel.h",
+      "sha256": "b43fe5e4fd9ea91472145a243baad9a0387fa9673e4080c2135889181d9f216a"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/villager/villager.png",
+      "destination": "assets/mob_villager.png",
+      "sha256": "ae6571999eab9313bf92bd85222dab1c151eb012c1f0d9e77462c4df8be8670c"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/villager/farmer.png",
+      "destination": "assets/mob_villager_farmer.png",
+      "sha256": "1bd68e76589249368c74342756643b68c52764ae521a4ffa04e51cedbfdb3941"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/villager/librarian.png",
+      "destination": "assets/mob_villager_librarian.png",
+      "sha256": "93e8fc1dc3d75116fe30baf46d30dbeb9e77095f3b7c045b9b10654584334ef5"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/villager/priest.png",
+      "destination": "assets/mob_villager_priest.png",
+      "sha256": "1605c5ac715b93f6532f164dcbb06d66fc39cb4cbba2fec0e448592558d4aae3"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/villager/smith.png",
+      "destination": "assets/mob_villager_smith.png",
+      "sha256": "d9d11fc51ee389526ba69d2ac6774fe39cb2b0e0b6ccf5f940539a6ec78e9ee0"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/villager/butcher.png",
+      "destination": "assets/mob_villager_butcher.png",
+      "sha256": "11462b72bc9ec921a2fbb807470f50908286a243fe437bafa1089b3fe421b231"
+    },
+    {
+      "source": "Minecraft.World/Villager.cpp",
+      "destination": "original/reference-only/Villager.cpp",
+      "sha256": "9a9b5e5744212ad5cca91db3315cf13e214a61cee884355d1cd53c062ed0b3e6"
+    },
+    {
+      "source": "Minecraft.World/Villager.h",
+      "destination": "original/reference-only/Villager.h",
+      "sha256": "36d61d143b1233d68477378ae9802dc4b6689a01f7be1b61019e460d35163ec6"
+    },
+    {
+      "source": "Minecraft.Client/Textures.cpp",
+      "destination": "original/reference-only/Textures.cpp",
+      "sha256": "687c2e153139377849132aa431a37e3d4d81a55485ca0e2b9e72e02972682903"
+    },
+    {
+      "source": "Minecraft.Client/OzelotModel.cpp",
+      "destination": "original/reference-only/OzelotModel.cpp",
+      "sha256": "0139538eb50c9c915d219dab5b1717235456cb26073c3e614710c7e865d05e91"
+    },
+    {
+      "source": "Minecraft.Client/OzelotModel.h",
+      "destination": "original/reference-only/OzelotModel.h",
+      "sha256": "d6bd9eb31cf1b5ea477ce8a360a480ee3d5ff308210763b80698d8c5ce29f390"
+    },
+    {
+      "source": "Minecraft.World/Ozelot.cpp",
+      "destination": "original/reference-only/Ozelot.cpp",
+      "sha256": "56320a6283dc1e1845b7f9153337e868f81d2f0c33c730ac4990e54bd8328d5f"
+    },
+    {
+      "source": "Minecraft.World/Ozelot.h",
+      "destination": "original/reference-only/Ozelot.h",
+      "sha256": "296853530c1b503a8a0ab54b3ba7eb6ffd4d64b4c00cb26020db5e125dec4ecd"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/ozelot.png",
+      "destination": "assets/mob_ozelot.png",
+      "sha256": "daf4874f3b818844735b9be671e9ba355a1942e2778cac52a751e64940cf7aca"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/cat_black.png",
+      "destination": "assets/mob_cat_black.png",
+      "sha256": "9980882203d386b8725721f805f23d24caf40d9f123c1bd22fcf1761f7f6763f"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/cat_red.png",
+      "destination": "assets/mob_cat_red.png",
+      "sha256": "30dfa4b43b877219d31ebf7fe2063ba6b1c90b29b8eefaaf90f8b4a438fe4314"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/cat_siamese.png",
+      "destination": "assets/mob_cat_siamese.png",
+      "sha256": "505fafe4b946b61184ea35f5876530495b18ac0cb1a31590638d963e1603fc47"
+    },
+    {
+      "source": "Minecraft.Client/WolfModel.cpp",
+      "destination": "original/reference-only/WolfModel.cpp",
+      "sha256": "4ea633cfd2584aef3e3a73ee6ce748678a3f6586d318fc999e8e793d093f3942"
+    },
+    {
+      "source": "Minecraft.Client/WolfModel.h",
+      "destination": "original/reference-only/WolfModel.h",
+      "sha256": "c32f9238d07b8c352dfda39084addf5fee124bc6c57d91567fcf76a28212aa0e"
+    },
+    {
+      "source": "Minecraft.Client/WolfRenderer.cpp",
+      "destination": "original/reference-only/WolfRenderer.cpp",
+      "sha256": "3e77d925ba1b33143637867baeded041a05421c34e50317fb6b722e547d8bdf6"
+    },
+    {
+      "source": "Minecraft.World/Wolf.cpp",
+      "destination": "original/reference-only/Wolf.cpp",
+      "sha256": "4accaef3686c9d89a44402733502774e944173046ddf7a0fec0658d1277e21f1"
+    },
+    {
+      "source": "Minecraft.World/Wolf.h",
+      "destination": "original/reference-only/Wolf.h",
+      "sha256": "99f72aa0dcbe7722de32af56a394b93f24b33a80f28359b7ab8f78d1bb3aee46"
+    },
+    {
+      "source": "Minecraft.World/TamableAnimal.cpp",
+      "destination": "original/reference-only/TamableAnimal.cpp",
+      "sha256": "2a6f37401c7884c00259a7ed4aace313d905fd52a5c4d83e6d4583eb88505a29"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/wolf.png",
+      "destination": "assets/mob_wolf.png",
+      "sha256": "7b9cb3dd8ae37b902c2f8c489aa4348d096efa553f145da7fd550930a1f80022"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/wolf_angry.png",
+      "destination": "assets/mob_wolf_angry.png",
+      "sha256": "12ab0a8a07c8ef0ebd6623fd78f6cc5fe83902ee9df052ddaa30c4c7c884cd1e"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/wolf_tame.png",
+      "destination": "assets/mob_wolf_tame.png",
+      "sha256": "02534d1d52359e48b0cf523d742233ce1a40207d3236b168f5dcc9565dac7a09"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/mob/wolf_collar.png",
+      "destination": "assets/mob_wolf_collar.png",
+      "sha256": "11b0d7e624f122f865608769c9808d87a2fec56f04d1001cc8f59091f1cdda66"
+    },
+    {
+      "source": "Minecraft.Client/SlimeModel.cpp",
+      "destination": "source_ref/Minecraft.Client/SlimeModel.cpp",
+      "sha256": "6d144e8d09c4c898d5ff41397b5850c760bc6064490e7ed4b9f2ed7dc86b9237"
+    },
+    {
+      "source": "Minecraft.Client/SlimeModel.h",
+      "destination": "source_ref/Minecraft.Client/SlimeModel.h",
+      "sha256": "dc19b250bc1df00939640076dc9f60b153db0ec427b91e12048e2197c63dae68"
+    },
+    {
+      "source": "Minecraft.Client/LavaSlimeModel.cpp",
+      "destination": "source_ref/Minecraft.Client/LavaSlimeModel.cpp",
+      "sha256": "e8713023e9df96ec6a4a0d97aaa2869d8ebb7662a5ee5e53915479808ec7ef30"
+    },
+    {
+      "source": "Minecraft.Client/LavaSlimeModel.h",
+      "destination": "source_ref/Minecraft.Client/LavaSlimeModel.h",
+      "sha256": "2a9f251f4adba30a5514d3c5c614892f593627248e6b8fc6e138c8de229dea61"
+    },
+    {
+      "source": "Minecraft.Client/GhastModel.cpp",
+      "destination": "source_ref/Minecraft.Client/GhastModel.cpp",
+      "sha256": "d7eb6e3242de74c4e3eb74f63762555e9cc2058c4c675dea9b543184a8877d47"
+    },
+    {
+      "source": "Minecraft.Client/GhastModel.h",
+      "destination": "source_ref/Minecraft.Client/GhastModel.h",
+      "sha256": "461807431e42a118e00c9725bb184a76bc0b247c2e08f9e5817ea2a866d6222d"
+    },
+    {
+      "source": "Minecraft.Client/BlazeModel.cpp",
+      "destination": "source_ref/Minecraft.Client/BlazeModel.cpp",
+      "sha256": "b6bd699944101068b15fa2c82b319948d51ec38c7c49994ae6ce0747e9b0f893"
+    },
+    {
+      "source": "Minecraft.Client/BlazeModel.h",
+      "destination": "source_ref/Minecraft.Client/BlazeModel.h",
+      "sha256": "23959bf023ee420958f86ffbffdcf9165776ef0dee4c53f9fa65c7a2338bcd81"
+    },
+    {
+      "source": "Minecraft.Client/SquidModel.cpp",
+      "destination": "source_ref/Minecraft.Client/SquidModel.cpp",
+      "sha256": "af8975732326cf346572920a9cb5d9780624b74da22012f329f3ad6bdf395562"
+    },
+    {
+      "source": "Minecraft.Client/SquidModel.h",
+      "destination": "source_ref/Minecraft.Client/SquidModel.h",
+      "sha256": "c1e33ea2de44fd697638950c24ed91ed7d64343dd659495e245f20651c0661ba"
+    },
+    {
+      "source": "Minecraft.Client/EndermanModel.cpp",
+      "destination": "source_ref/Minecraft.Client/EndermanModel.cpp",
+      "sha256": "b3394b878f264ac2029d247991dc34c5be5b8515f0d09272d5f81ca52c6dc2e8"
+    },
+    {
+      "source": "Minecraft.Client/EndermanModel.h",
+      "destination": "source_ref/Minecraft.Client/EndermanModel.h",
+      "sha256": "4b4637be27970d8c6c67ca351c905d5c9fd872c99e03a0e71bf8bc2c63aaaaa9"
+    },
+    {
+      "source": "Minecraft.World/Slime.cpp",
+      "destination": "source_ref/Minecraft.World/Slime.cpp",
+      "sha256": "ae640c323b2c5e4accee78f646f475d3c6cd67d820e780c8744976cf8ae28ae7"
+    },
+    {
+      "source": "Minecraft.World/Slime.h",
+      "destination": "source_ref/Minecraft.World/Slime.h",
+      "sha256": "6c09630e1494ffae6f9307e81c6b2fa5683c0c70df58d5abb3273f7512d3a6fd"
+    },
+    {
+      "source": "Minecraft.World/LavaSlime.cpp",
+      "destination": "source_ref/Minecraft.World/LavaSlime.cpp",
+      "sha256": "92d2e1a292e835e04a17e5c6e01dc67e79875079625dcac8e5546b9efaf01222"
+    },
+    {
+      "source": "Minecraft.World/LavaSlime.h",
+      "destination": "source_ref/Minecraft.World/LavaSlime.h",
+      "sha256": "d8e5700b4f4edfe3ab926b87b97656e5c04ea2f72b6be638708ddff8b2571f77"
+    },
+    {
+      "source": "Minecraft.World/Ghast.cpp",
+      "destination": "source_ref/Minecraft.World/Ghast.cpp",
+      "sha256": "0e36e45b4b158d2f628ab38f27e635bdc74bf25b166b918cd7604dc57869a7d1"
+    },
+    {
+      "source": "Minecraft.World/Ghast.h",
+      "destination": "source_ref/Minecraft.World/Ghast.h",
+      "sha256": "911c9565698149d9ca0bcc9facc223cf93f74d774f62e7b2f618f34801771128"
+    },
+    {
+      "source": "Minecraft.World/Blaze.cpp",
+      "destination": "source_ref/Minecraft.World/Blaze.cpp",
+      "sha256": "d62fa6c359888b4d677b270353dbf238434e4a43e41c5593b761065e73a88443"
+    },
+    {
+      "source": "Minecraft.World/Blaze.h",
+      "destination": "source_ref/Minecraft.World/Blaze.h",
+      "sha256": "ebfba32ab93be5ade6ecc35c621b480ffcc927fdb09c667b44b5110fb899f401"
+    },
+    {
+      "source": "Minecraft.World/Squid.cpp",
+      "destination": "source_ref/Minecraft.World/Squid.cpp",
+      "sha256": "c620cd13952042bc9ee9fa9a88491c34d3de2502d3c54f7680a144a5d7d8425c"
+    },
+    {
+      "source": "Minecraft.World/Squid.h",
+      "destination": "source_ref/Minecraft.World/Squid.h",
+      "sha256": "3c01778ea377580fa948a49102c842d5a0e671a703a261eeaa8d6397ae42f58f"
+    },
+    {
+      "source": "Minecraft.World/EnderMan.cpp",
+      "destination": "source_ref/Minecraft.World/EnderMan.cpp",
+      "sha256": "95a2e5222aa52c71f36123694b8b10f2eb364453c9e3da7d65656bd149460d2a"
+    },
+    {
+      "source": "Minecraft.World/EnderMan.h",
+      "destination": "source_ref/Minecraft.World/EnderMan.h",
+      "sha256": "9be8a96fff4daaa6527eb1872f68b2cf84f9134ce43af9ee47e5b3b3b43c701c"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/slime.png",
+      "destination": "assets/mob_slime.png",
+      "sha256": "e78d19f08ec60e30fce77387032d5b67a54d58ef74275c7de9a5d9ded15c19a4"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/lava.png",
+      "destination": "assets/mob_lava.png",
+      "sha256": "169e4f1e991785a22d8acaa72db36111b37f0acc5157cb97b7f2dea4f72a644d"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/ghast.png",
+      "destination": "assets/mob_ghast.png",
+      "sha256": "6e892c6a509d1dd4776183595643c553fea459b13893d9d986beffb6b26f9553"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/fire.png",
+      "destination": "assets/mob_blaze.png",
+      "sha256": "5c55f0daa81193951d3794f1f750b05d0511aa5b3fca5bffa2b533d0b3b14f7c"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/squid.png",
+      "destination": "assets/mob_squid.png",
+      "sha256": "5d1c69fca4f4ae815590d89ef4f3e95b840c6287beb8f5b70f6719e0f67b012f"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/enderman.png",
+      "destination": "assets/mob_enderman.png",
+      "sha256": "fc2b78288097ccada088543c6e98b85bc510a1fd594e46c1106c8f5d7ab32f50"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/redcow.png",
+      "destination": "assets/mob_redcow.png",
+      "sha256": "8cd2a34baf43a1703f4ec867c3c8bd5176a2ab7959c8806d3b7ce469e0e29b56"
+    },
+    {
+      "source": "Minecraft.Client/MushroomCowRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/MushroomCowRenderer.cpp",
+      "sha256": "ae576cc23fd13a111bb23b039cef95f569c601ea19d918052d769a49780ce053"
+    },
+    {
+      "source": "Minecraft.Client/MushroomCowRenderer.h",
+      "destination": "source_ref/Minecraft.Client/MushroomCowRenderer.h",
+      "sha256": "4886b22608eb433e582fa2073783c434041ee5c780a235f0b6aaeabd66529894"
+    },
+    {
+      "source": "Minecraft.World/MushroomCow.cpp",
+      "destination": "source_ref/Minecraft.World/MushroomCow.cpp",
+      "sha256": "d254dff8392ffa53f4b726f72ceb0320f3426f45921b7b35e854c14a7be8517a"
+    },
+    {
+      "source": "Minecraft.World/MushroomCow.h",
+      "destination": "source_ref/Minecraft.World/MushroomCow.h",
+      "sha256": "72cf296b2d0763505daf0208cfa8cb1ed34ec2dda6303b21ac74306879aca7c9"
+    },
+    {
+      "source": "Minecraft.Client/PS4_GAME/Common/res/1_2_2/mob/enderman_eyes.png",
+      "destination": "assets/mob_enderman_eyes.png",
+      "sha256": "8ccc406764e3ad9a756c437fcd43657c2efd48c3e644f04d10e012d5612338ba"
+    },
+    {
+      "source": "Minecraft.Client/EnderManRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/EnderManRenderer.cpp",
+      "sha256": "43b643ceebdd518eca2e9aef1876d393a9d55d07cf51413131b1158ee2b3073d"
+    },
+    {
+      "source": "Minecraft.Client/EnderManRenderer.h",
+      "destination": "source_ref/Minecraft.Client/EnderManRenderer.h",
+      "sha256": "1455857c464814bf666e9bfe4b098b21dfeaf12f01f716788585349fbf48989c"
+    },
+    {
+      "source": "Minecraft.Client/GhastRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/GhastRenderer.cpp",
+      "sha256": "4b61957d93c3a11361d5b07404fccd6a0df62020210fe337d9c276846145f240"
+    },
+    {
+      "source": "Minecraft.Client/GhastRenderer.h",
+      "destination": "source_ref/Minecraft.Client/GhastRenderer.h",
+      "sha256": "ddc496b3b50a85814aae21f6dfac891b7c73b40c8dfeac985c640241ee795ce7"
+    },
+    {
+      "source": "Minecraft.Client/SlimeRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/SlimeRenderer.cpp",
+      "sha256": "d09b2c1df392da09248ea54ea9d2f6210a0fd8672da706825def61199ec254e8"
+    },
+    {
+      "source": "Minecraft.Client/SlimeRenderer.h",
+      "destination": "source_ref/Minecraft.Client/SlimeRenderer.h",
+      "sha256": "1c800b03e23f2f829ef3ccef0fea4fd337f6a1475c51dd0d72c1df29b8fee48c"
+    },
+    {
+      "source": "Minecraft.Client/LavaSlimeRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/LavaSlimeRenderer.cpp",
+      "sha256": "1e996d0c398593b2f1372e9da198860030ff423d315d6c201fccc13941408c8b"
+    },
+    {
+      "source": "Minecraft.Client/LavaSlimeRenderer.h",
+      "destination": "source_ref/Minecraft.Client/LavaSlimeRenderer.h",
+      "sha256": "6370588fb373fe0dd3c5fde60f54c8adf775430eab5ea2e9b3fc619bbbef6afb"
+    },
+    {
+      "source": "Minecraft.Client/SquidRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/SquidRenderer.cpp",
+      "sha256": "a5109f99d2d44c08928c3db60757eb99a11ef2ddf3e1d4dd170f0861db2855e8"
+    },
+    {
+      "source": "Minecraft.Client/SquidRenderer.h",
+      "destination": "source_ref/Minecraft.Client/SquidRenderer.h",
+      "sha256": "95cfb4bb1b65ed79daa06c9e2e7c443429ac64965c1368a68d02cb0e4996f119"
+    },
+    {
+      "source": "Minecraft.Client/MobRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/MobRenderer.cpp",
+      "sha256": "eb93d262c93d7ccd81b8f47cd1552b4d945a3cdd2e225fa463e7db3dfff8cafa"
+    },
+    {
+      "source": "Minecraft.Client/MobRenderer.h",
+      "destination": "source_ref/Minecraft.Client/MobRenderer.h",
+      "sha256": "3d8b9a5d2d1ffee1c6433046edb1511e751e3655c783ad2d3d1e183b8111ebae"
+    },
+    {
+      "source": "Minecraft.World/FlyingMob.cpp",
+      "destination": "source_ref/Minecraft.World/FlyingMob.cpp",
+      "sha256": "82ebee11cd840285ed494fcf5c1d48d14554b2631be0f3b3cc6cebb08cfdbe3e"
+    },
+    {
+      "source": "Minecraft.World/FlyingMob.h",
+      "destination": "source_ref/Minecraft.World/FlyingMob.h",
+      "sha256": "f2f8a41c744503e5d12e6ee48663022c5ee1197d35a52092061861c2ac6e6916"
+    },
+    {
+      "source": "Minecraft.World/Player.cpp",
+      "destination": "source_ref/Minecraft.World/Player.cpp",
+      "sha256": "2e5a320736b0c2ea23e069790c72bfaeed58c0b5ec30d831c3eb2a03008f2528"
+    },
+    {
+      "source": "Minecraft.World/Player.h",
+      "destination": "source_ref/Minecraft.World/Player.h",
+      "sha256": "3b2ab2a9bf4c3ba3ab956950a9504b5f857c99ed3071a4c08f47d375b412a0fe"
+    },
+    {
+      "source": "Minecraft.World/Inventory.cpp",
+      "destination": "source_ref/Minecraft.World/Inventory.cpp",
+      "sha256": "8453b852b7747725b75a15ae02d9889ab212b75ba35c2ce3fba305d6f3e5f508"
+    },
+    {
+      "source": "Minecraft.World/Inventory.h",
+      "destination": "source_ref/Minecraft.World/Inventory.h",
+      "sha256": "ff9344e766c7bbc15687b8aac6e91b2ebebb902a4fe4bda5e472f1f8a5f01e15"
+    },
+    {
+      "source": "Minecraft.World/Item.cpp",
+      "destination": "source_ref/Minecraft.World/Item.cpp",
+      "sha256": "79560db8916f776748c602664c28a7e80fb12aa5ff6bfd407da3b184c736a13c"
+    },
+    {
+      "source": "Minecraft.World/Item.h",
+      "destination": "source_ref/Minecraft.World/Item.h",
+      "sha256": "3fe545b365c50341f4dc303b3430034f3a4ce6cf3dc0ae44b1f1b9fc321af736"
+    },
+    {
+      "source": "Minecraft.World/WeaponItem.cpp",
+      "destination": "source_ref/Minecraft.World/WeaponItem.cpp",
+      "sha256": "ed49f8f9a8ab0c946656ecbcb9037a1202caeb80c0cbead8a6e63be0039cdb1b"
+    },
+    {
+      "source": "Minecraft.World/WeaponItem.h",
+      "destination": "source_ref/Minecraft.World/WeaponItem.h",
+      "sha256": "fea4be4f44292ef6f51fce277286b037ef6a127e77e2f5f08923ee13920aaa72"
+    },
+    {
+      "source": "Minecraft.World/DiggerItem.cpp",
+      "destination": "source_ref/Minecraft.World/DiggerItem.cpp",
+      "sha256": "d512cc6909ae53cd24a2423a6ae39ed7f539ba93a08aec5425e4e47a3cf7c05a"
+    },
+    {
+      "source": "Minecraft.World/DiggerItem.h",
+      "destination": "source_ref/Minecraft.World/DiggerItem.h",
+      "sha256": "189971e5543281cc38ec81f2c655331620dcb3d576fc7f21825661dd58f4595c"
+    },
+    {
+      "source": "Minecraft.World/Mob.cpp",
+      "destination": "source_ref/Minecraft.World/Mob.cpp",
+      "sha256": "a0257528c23e3d63178f6ff2ba8fe6ed607d59091c3126c1daa4e8fb09767aef"
+    },
+    {
+      "source": "Minecraft.World/Mob.h",
+      "destination": "source_ref/Minecraft.World/Mob.h",
+      "sha256": "139b34031067c5ba9825b8839ce777375eb79ce19c560020de380fe719198313"
+    },
+    {
+      "source": "Minecraft.World/Monster.cpp",
+      "destination": "source_ref/Minecraft.World/Monster.cpp",
+      "sha256": "2a80e8e0726d87358f06b1e92771d898434953e11c78bd1473f1de4248d6a153"
+    },
+    {
+      "source": "Minecraft.World/Monster.h",
+      "destination": "source_ref/Minecraft.World/Monster.h",
+      "sha256": "4793d25f37ddbe697d34f810e2b6155774959e5ea960b281753d2236817543f2"
+    },
+    {
+      "source": "Minecraft.World/Level.cpp",
+      "destination": "source_ref/Minecraft.World/Level.cpp",
+      "sha256": "4aac4b0721b9f540c313c014c0069c600bea2f6e514fd2a9741765d27e20a15d"
+    },
+    {
+      "source": "Minecraft.World/Level.h",
+      "destination": "source_ref/Minecraft.World/Level.h",
+      "sha256": "e21bd09f7efa8c5c2ea5288762da62acd821a3491c2814b52a02f96b46a28c35"
+    },
+    {
+      "source": "Minecraft.World/Spider.cpp",
+      "destination": "source_ref/Minecraft.World/Spider.cpp",
+      "sha256": "841fdeb779f70bf4706d7a3e45301b5cf405ee9f2eb6e32eb2e0704ae0f73c63"
+    },
+    {
+      "source": "Minecraft.World/Spider.h",
+      "destination": "source_ref/Minecraft.World/Spider.h",
+      "sha256": "48420ca88a3b59fa186e350723541f3807cd693772f77f68baf9d5e884b63b66"
+    },
+    {
+      "source": "Minecraft.World/CaveSpider.cpp",
+      "destination": "source_ref/Minecraft.World/CaveSpider.cpp",
+      "sha256": "b5023f2b4ba7989f22b439a0ffff80edc00cd76d4910a919e2abcd617694c355"
+    },
+    {
+      "source": "Minecraft.World/CaveSpider.h",
+      "destination": "source_ref/Minecraft.World/CaveSpider.h",
+      "sha256": "fb3eea19baf74e1532290eaf7fc759d7bbb99407985b3d25f6e1b45c2fcbcc40"
+    },
+    {
+      "source": "Minecraft.World/Silverfish.cpp",
+      "destination": "source_ref/Minecraft.World/Silverfish.cpp",
+      "sha256": "057bec439c14a157a38e5983b1d7d84c7a71befe8c312c78394c6c3d3d7e234f"
+    },
+    {
+      "source": "Minecraft.World/Silverfish.h",
+      "destination": "source_ref/Minecraft.World/Silverfish.h",
+      "sha256": "14669da90794b7de0a1c8413830708c38cced5f256c4d610233c92b0113ec5a7"
+    },
+    {
+      "source": "Minecraft.World/Zombie.cpp",
+      "destination": "source_ref/Minecraft.World/Zombie.cpp",
+      "sha256": "dbb5deda7ef8d1ded3d56c6964254845c0e4c322d4c8c42acfb4fbc92d499fbb"
+    },
+    {
+      "source": "Minecraft.World/Zombie.h",
+      "destination": "source_ref/Minecraft.World/Zombie.h",
+      "sha256": "46785d75e9beee333662b7ad01ddfae87f54b1baa8dd334e02c11213d7db1b84"
+    },
+    {
+      "source": "Minecraft.World/PigZombie.cpp",
+      "destination": "source_ref/Minecraft.World/PigZombie.cpp",
+      "sha256": "a4e607bfcd17f120d547096fa71cb888652caf70383980263669c7da287fbb73"
+    },
+    {
+      "source": "Minecraft.World/PigZombie.h",
+      "destination": "source_ref/Minecraft.World/PigZombie.h",
+      "sha256": "ad04e49b1af6ec64970153cf291d57b7e44196fae80fb9af601fd85cda79dda6"
+    },
+    {
+      "source": "Minecraft.World/Wolf.cpp",
+      "destination": "source_ref/Minecraft.World/Wolf.cpp",
+      "sha256": "4accaef3686c9d89a44402733502774e944173046ddf7a0fec0658d1277e21f1"
+    },
+    {
+      "source": "Minecraft.World/Wolf.h",
+      "destination": "source_ref/Minecraft.World/Wolf.h",
+      "sha256": "99f72aa0dcbe7722de32af56a394b93f24b33a80f28359b7ab8f78d1bb3aee46"
+    },
+    {
+      "source": "Minecraft.World/ExperienceOrb.cpp",
+      "destination": "source_ref/Minecraft.World/ExperienceOrb.cpp",
+      "sha256": "63d7f7c0a585038de86e2f836b302cb3e4a0607def4bb83614edcf906f403045"
+    },
+    {
+      "source": "Minecraft.World/ExperienceOrb.h",
+      "destination": "source_ref/Minecraft.World/ExperienceOrb.h",
+      "sha256": "df28233ada1e14c71b4d9588a9925756d14a530c65d6002fa6809345c0acfb6d"
+    },
+    {
+      "source": "Minecraft.Client/ExperienceOrbRenderer.cpp",
+      "destination": "source_ref/Minecraft.Client/ExperienceOrbRenderer.cpp",
+      "sha256": "39373d7c1dd3c8c31ebd34361b905dd60f8dab9cbed41d9976d5e1a580e58fbb"
+    },
+    {
+      "source": "Minecraft.Client/ExperienceOrbRenderer.h",
+      "destination": "source_ref/Minecraft.Client/ExperienceOrbRenderer.h",
+      "sha256": "91b22df67253a5a80e60da47ee1e870444dbf756d25c5e65aea24ee68ca9770a"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/1_2_2/item/xporb.png",
+      "destination": "assets/xporb.png",
+      "sha256": "a2d0218fe72da3b03dbfcc11a4cb02d32910959e422b3a73f1431ebcb1d334bd"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/tutorialDiff",
+      "destination": "assets/tutorial/tutorialDiff",
+      "sha256": "58da431eb7d4b5c02f9fbbb5bbfedbeb6b99ee6456892a17f1440cb4c974dca7"
+    },
+    {
+      "source": "Minecraft.Client/Common/Tutorial/TutorialEnum.h",
+      "destination": "source_ref/Minecraft.Client/TutorialEnum.h",
+      "sha256": "67ce5d3cc88b7e45fe27e96e928cbfce3396d1ecf999450b21d359484d4199c3"
+    },
+    {
+      "source": "Minecraft.World/OldChunkStorage.cpp",
+      "destination": "source_ref/Minecraft.World/OldChunkStorage.cpp",
+      "sha256": "b28550bd325ad043164d7f19e390a3e22ed5ab6952c37a72d0ccfd3cebead7d0"
+    },
+    {
+      "source": "Minecraft.Client/Common/Tutorial/Tutorial",
+      "destination": "assets/tutorial/Tutorial",
+      "sha256": "f160aa2807f39ae10832442ef48de88da017845b8ea2519c150571958375a972"
+    }
+  ]
+}

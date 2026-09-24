@@ -9,9 +9,14 @@
 #include <set>
 #include <tuple>
 #include <string>
+#include <memory>
+#include <vector>
 
 // Forward declare to avoid circular dependencies
 namespace minecraft {
+    namespace nbt {
+        class CompoundTag;
+    }
     namespace core {
         class BlockPos;
     }
@@ -135,6 +140,49 @@ public:
     virtual void removeBlockEntity(const BlockPos& pos) { (void)pos; }
     virtual const std::map<std::tuple<int, int, int>, std::string>*
     getBlockEntityNbts() const {
+        return nullptr;
+    }
+
+    // =========================================================================
+    // Worldgen entities. Reference: ProtoChunk.addEntity(CompoundTag) /
+    // getEntities - WorldGenRegion.addFreshEntity files an entity under the
+    // chunk its position falls in, and ServerLevel.addWorldGenChunkEntities
+    // adds them to the world when the chunk is promoted to FULL. The library
+    // has no Entity classes, so an entry is the entity's SAVED compound (id,
+    // Pos, Rotation, and whatever the template or piece put there) plus
+    // whether Mob.finalizeSpawn(STRUCTURE) is still owed: in Java it runs
+    // at placement, on the live entity, which only the engine can build.
+    // =========================================================================
+    struct GeneratedEntity {
+        std::shared_ptr<const nbt::CompoundTag> tag;
+        bool finalizeSpawn = false;
+    };
+    virtual void addEntity(GeneratedEntity entity) { (void)entity; }
+    virtual const std::vector<GeneratedEntity>* getEntities() const { return nullptr; }
+
+    // =========================================================================
+    // Structure spawn areas (engine hand-off). Reference: the input of
+    // ChunkGenerator.getMobsAt - StructureManager.getAllStructuresAt(pos)
+    // over this chunk's references, then structureHasPieceAt (PIECE) or
+    // start.getBoundingBox().isInside (FULL), plus NaturalSpawner
+    // .isInNetherFortressBounds' getStructureAt. The engine keeps no
+    // structure starts, so every start referencing this chunk whose
+    // structure has spawn_overrides is recorded here: its full box and the
+    // boxes (with jigsaw template ids) of the pieces over this chunk column.
+    // =========================================================================
+    struct StructureSpawnPiece {
+        levelgen::structure::BoundingBox box;
+        std::string templateId;   // jigsaw element location ("" otherwise)
+        int rotation = 0;         // Rotation ordinal (0 NONE, 1 CW90, 2 CW180, 3 CCW90)
+        std::string pieceType;    // StructurePieceType id ("twilightforest:tfhill", ...)
+    };
+    struct StructureSpawnArea {
+        std::string structure;                        // "minecraft:swamp_hut"
+        levelgen::structure::BoundingBox startBox;    // StructureStart.getBoundingBox
+        std::vector<StructureSpawnPiece> pieces;
+    };
+    virtual void addStructureSpawnArea(StructureSpawnArea area) { (void)area; }
+    virtual const std::vector<StructureSpawnArea>* getStructureSpawnAreas() const {
         return nullptr;
     }
 

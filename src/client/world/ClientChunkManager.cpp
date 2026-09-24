@@ -2,10 +2,18 @@
 #include <cstdint>
 #include <bit>
 #include "ClientChunkManager.hpp"
+#include "client/renderer/mesh/SectionFade.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include <cstdlib>
+#include "common/world/block/entity/BlockEntity.hpp"
+#include "common/world/block/entity/PistonMovingBlockEntity.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/block/BedBlock.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "common/core/DeferredDispose.hpp"
 #include "common/world/chunk/ChunkSection.hpp"
 #include "ClientWorkerPool.hpp"
 #include "../renderer/core/Frustum.hpp"
@@ -101,8 +109,22 @@ namespace Client {
                   m_partialNeighborBuilds, m_staleBorderRemeshes);
 
 
-        // Clear all chunks
-        m_chunks.clear();
+        // Every chunk, loaded and retained, goes to the background
+        // disposer whole: clearing the map here was 24 ms of the
+        // leave-to-title gap, all of it freeing sections and mesh
+        // snapshots nothing waits on. The mesh workers that could share a
+        // chunk's data were joined before the level shuts down.
+        m_chunksWithDirtySections.clear();
+        Core::DeferredDispose::Run([chunks = std::move(m_chunks), retained = std::move(m_retained),
+                                    lru = std::move(m_retainedLru)]() mutable {
+            lru.clear();
+            retained.clear();
+            chunks.clear();
+        });
+        m_chunks.clear();       // a moved-from map is valid but unspecified
+        m_retained.clear();
+        m_retainedLru.clear();
+        m_retainedBytes    = 0;
         m_loadedChunkCount = 0;
         
         // Clear pending diffs
@@ -196,7 +218,7 @@ namespace Client {
     }
 
     void ClientChunkManager::MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY,
-                                              bool fromPlayer) {
+                                              bool fromPlayer, bool blockEdit) {
         ASSERT_MAIN_THREAD();
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end() && it->second->state == ChunkState::LOADED) {
@@ -221,9 +243,14 @@ namespace Client {
             // the partial update walks through it THIS frame instead of
             // waiting for a full rebuild.
             if (m_renderer) {
-                m_renderer->SchedulePropagationFrom(chunkPos, sectionY);
+                m_renderer->SchedulePropagationFrom(chunkPos, sectionY, /*mayRequestRebuild=*/blockEdit);
             }
-            if (++m_dirtyMarksSinceRebuild >= 256) {
+            // Block edits only. Chunk streaming re-dirties border sections
+            // (MarkNeighborSectionsDirty) and light updates re-dirty whole
+            // neighbourhoods — thousands of marks while loading, which tripped
+            // this every few hundred ms and replaced the visible list with a
+            // fresh full rebuild each time.
+            if (blockEdit && ++m_dirtyMarksSinceRebuild >= 256) {
                 m_dirtyMarksSinceRebuild = 0;
                 if (m_renderer) {
                     m_renderer->MarkVisibleSectionsDirty();
@@ -269,7 +296,7 @@ namespace Client {
         // never even handed to the mesher. Until the graph learns the section
         // is renderable, marking it dirty accomplishes nothing.
         if (m_renderer) {
-            m_renderer->SchedulePropagationFrom(chunk.position, sectionY);
+            m_renderer->SchedulePropagationFrom(chunk.position, sectionY, /*mayRequestRebuild=*/true);
         }
     }
 
@@ -505,6 +532,7 @@ namespace Client {
         // Notify RenderGrid when chunk becomes loaded
         if (newState == ChunkState::LOADED && oldState != ChunkState::LOADED) {
             ++m_loadedChunkCount;
+            ++m_loadedSetVersion;
             NotifyRenderGridChunkLoaded(chunk->position, chunk);
             chunk->neighborsAllLoaded = -1;
             InvalidateNeighborLoadCache(chunk->position);
@@ -512,6 +540,7 @@ namespace Client {
         // Notify RenderGrid when chunk becomes unloaded
         else if (oldState == ChunkState::LOADED && newState != ChunkState::LOADED) {
             if (m_loadedChunkCount > 0) --m_loadedChunkCount;
+            ++m_loadedSetVersion;
             NotifyRenderGridChunkUnloaded(chunk->position);
             chunk->neighborsAllLoaded = -1;
             InvalidateNeighborLoadCache(chunk->position);
@@ -575,7 +604,56 @@ namespace Client {
             section->AdoptStates(std::move(states));
             section->AdoptBiomes(std::move(biomes));
         }
+        AdoptLight(*built, packet.light.get());
         return built;
+    }
+
+    void ClientChunkManager::AdoptLight(Game::Chunk& chunk, const Game::Lighting::NetCodec::Decoded* light) {
+        auto& dst = chunk.light;
+        if (!light || light->blockMask == 0) {
+            // No light came with the chunk (an older server): read as open
+            // daylight everywhere, the look the engine had before it lit.
+            for (auto& d : dst.sky) d = Game::Lighting::DataLayer(15);
+            for (auto& d : dst.block) d = Game::Lighting::DataLayer(0);
+            dst.lightCorrect = false;
+            return;
+        }
+        for (int i = 0; i < Game::Lighting::kLightSectionCount; ++i) {
+            const size_t u = static_cast<size_t>(i);
+            // A dimension without sky light sends no sky layers: all zero.
+            dst.sky[u]   = (light->skyMask & (1u << i))   ? light->sky[u]   : Game::Lighting::DataLayer(0);
+            dst.block[u] = (light->blockMask & (1u << i)) ? light->block[u] : Game::Lighting::DataLayer(0);
+        }
+        dst.lightCorrect = true;
+    }
+
+    void ClientChunkManager::ApplyLightUpdate(Game::Math::ChunkPos chunkPos,
+                                              const Game::Lighting::NetCodec::Decoded& light) {
+        PROFILE_ZONE_N("ApplyLightUpdate");
+        ASSERT_MAIN_THREAD();
+        auto it = m_chunks.find(chunkPos);
+        if (it == m_chunks.end() || !it->second || !it->second->chunkData ||
+            it->second->state != ChunkState::LOADED) {
+            return;         // its chunk packet, still to come, carries this light
+        }
+        ClientChunk* chunk = it->second.get();
+        auto& dst = chunk->chunkData->light;
+        for (int i = 0; i < Game::Lighting::kLightSectionCount; ++i) {
+            const size_t u = static_cast<size_t>(i);
+            if (light.skyMask & (1u << i))   dst.sky[u]   = light.sky[u];
+            if (light.blockMask & (1u << i)) dst.block[u] = light.block[u];
+        }
+        // Exactly the sections the server's light run affected (its set
+        // already includes a neighbour section wherever a changed cell sits
+        // on a section edge — MC SectionPos.aroundAndAtBlockPos). Light index
+        // i is block section i - 1; an all-air section has nothing to relight.
+        const uint32_t mask = light.skyMask | light.blockMask;
+        for (int i = 1; i <= Game::Math::SECTIONS_PER_CHUNK; ++i) {
+            if (!(mask & (1u << i))) continue;
+            const int sectionY = i - 1;
+            if (chunk->sectionInfos[static_cast<size_t>(sectionY)].isAllAir) continue;
+            MarkSectionDirty(chunkPos, sectionY);
+        }
     }
 
     void ClientChunkManager::ProcessChunkDataS2CPacket(const Network::ChunkDataS2CPacket& packet) {
@@ -641,6 +719,35 @@ namespace Client {
             chunk->chunkData->GetBlock(localX, pos.y, localZ);
 
         // Set the block in the chunk
+        // MC LevelChunk.setBlockState on the client drops a block entity whose
+        // block is gone. Limited to the moving-piston cell: its entity is the
+        // client's own (built from the block event), and the server's final
+        // block write is what retires it. Other block entities arrive and
+        // leave by their own packets.
+        Game::PistonMovingBlockEntity* landing = nullptr;
+        if (prevBlockId == Game::BlockID::MovingPiston && blockId != Game::BlockID::MovingPiston) {
+            auto* piston = dynamic_cast<Game::PistonMovingBlockEntity*>(
+                chunk->chunkData->GetBlockEntity(localX, pos.y, localZ));
+            static const bool kPistonDebug = std::getenv("OBEY_PISTON_DEBUG") != nullptr;
+            if (kPistonDebug) {
+                Log::Info("[PistonDbg] tick %lld cell (%d,%d,%d) moving -> %s; entity %s moved=%s landed=%d",
+                          static_cast<long long>(m_clientTicks), pos.x, pos.y, pos.z,
+                          Game::BlockRegistry::Get(blockId).registrySlug.c_str(),
+                          piston ? "yes" : "NONE",
+                          piston ? Game::BlockRegistry::Get(piston->GetMovedState().Block()).registrySlug.c_str() : "-",
+                          piston ? (piston->IsLanded() ? 1 : 0) : -1);
+            }
+            // The carried block is what landed here: keep drawing it at rest
+            // until the section mesh shows it (see RetireLandedBlockEntities).
+            // Anything else — the cell became air, or a different block — has
+            // no picture to bridge, so the entity goes at once.
+            if (piston && !piston->IsLanded() && blockId != Game::BlockID::Air &&
+                piston->GetMovedState().Block() == blockId) {
+                landing = piston;
+            } else {
+                chunk->chunkData->RemoveBlockEntity(localX, pos.y, localZ);
+            }
+        }
         chunk->chunkData->SetBlock(localX, pos.y, localZ, blockId, stateIndex);
 
         // Keep the render-side emptiness mirror true. This is the whole reason
@@ -663,9 +770,23 @@ namespace Client {
         } else if (prevBlockId != Game::BlockID::EndGateway && blockId == Game::BlockID::EndGateway) {
             chunk->endGateways.push_back(pos);
         }
+        {
+            const bool wasBed = IsEntityRenderedBed(prevBlockId);
+            const bool isBed  = IsEntityRenderedBed(blockId);
+            if (wasBed && !isBed) {
+                auto& list = chunk->beds;
+                list.erase(std::remove(list.begin(), list.end(), pos), list.end());
+            } else if (!wasBed && isBed) {
+                chunk->beds.push_back(pos);
+            }
+        }
 
         // Mark section as dirty for remeshing
-        MarkSectionDirty(chunkPos, sectionY, fromPlayer);
+        MarkSectionDirty(chunkPos, sectionY, fromPlayer, /*blockEdit=*/true);
+        if (landing) {
+            landing->Land(chunk->sectionInfos[static_cast<size_t>(sectionY)].version, m_clientTicks);
+            RegisterTickingBlockEntity(pos);
+        }
 
         // Mark neighbor sections dirty when block is on a chunk/section boundary
         // (the neighbor's mesh depends on this block for face culling).
@@ -673,12 +794,12 @@ namespace Client {
         // player flag across the whole dirtied range, and a boundary edit whose
         // neighbour lagged a frame behind would look like a seam.
         int localY = (pos.y + 64) & 0xF;  // position within section (0-15)
-        if (localX == 0)  MarkSectionDirty({chunkPos.x - 1, chunkPos.z}, sectionY, fromPlayer);
-        if (localX == 15) MarkSectionDirty({chunkPos.x + 1, chunkPos.z}, sectionY, fromPlayer);
-        if (localZ == 0)  MarkSectionDirty({chunkPos.x, chunkPos.z - 1}, sectionY, fromPlayer);
-        if (localZ == 15) MarkSectionDirty({chunkPos.x, chunkPos.z + 1}, sectionY, fromPlayer);
-        if (localY == 0  && sectionY > 0)  MarkSectionDirty(chunkPos, sectionY - 1, fromPlayer);
-        if (localY == 15 && sectionY < 23) MarkSectionDirty(chunkPos, sectionY + 1, fromPlayer);
+        if (localX == 0)  MarkSectionDirty({chunkPos.x - 1, chunkPos.z}, sectionY, fromPlayer, /*blockEdit=*/true);
+        if (localX == 15) MarkSectionDirty({chunkPos.x + 1, chunkPos.z}, sectionY, fromPlayer, /*blockEdit=*/true);
+        if (localZ == 0)  MarkSectionDirty({chunkPos.x, chunkPos.z - 1}, sectionY, fromPlayer, /*blockEdit=*/true);
+        if (localZ == 15) MarkSectionDirty({chunkPos.x, chunkPos.z + 1}, sectionY, fromPlayer, /*blockEdit=*/true);
+        if (localY == 0  && sectionY > 0)  MarkSectionDirty(chunkPos, sectionY - 1, fromPlayer, /*blockEdit=*/true);
+        if (localY == 15 && sectionY < 23) MarkSectionDirty(chunkPos, sectionY + 1, fromPlayer, /*blockEdit=*/true);
     }
 
     Game::BlockID ClientChunkManager::GetBlockAt(const glm::ivec3& pos) const {
@@ -734,9 +855,11 @@ namespace Client {
         }
         
         ClientChunk* chunk = it->second.get();
+        const bool wasLoaded = chunk->state == ChunkState::LOADED;
         
         // Increment generation for groundUp loads
         if (packet.groundUpContinuous) {
+            chunk->dataArrivedMs = ::Render::SectionFade::NowMs();
             chunk->generation = m_nextGeneration.fetch_add(1);
             Log::Debug("Chunk (%d, %d) groundUp load - generation %u", 
                       chunkPos.x, chunkPos.z, chunk->generation);
@@ -838,6 +961,10 @@ namespace Client {
         
         // Transition to LOADED state
         TransitionChunkState(chunk, ChunkState::LOADED);
+        // A re-send of a chunk that was already loaded fires no load
+        // transition, but its sections just changed (dirty = see-through to
+        // the occlusion graph) — tell the graph the way an arrival does.
+        if (wasLoaded) ScheduleChunkPropagation(chunkPos);
         
         // Mark neighbor chunks' sections as dirty for proper face culling
         MarkNeighborSectionsDirty(chunkPos);
@@ -859,9 +986,16 @@ namespace Client {
         }
     }
     
+    bool ClientChunkManager::IsEntityRenderedBed(Game::BlockID id) {
+        // The straw bed's model has elements and meshes like any block; the
+        // sixteen dyed beds are vanilla's builtin/entity stub.
+        return Game::IsBedBlock(id) && id != Game::BlockID::StrawBed;
+    }
+
     void ClientChunkManager::RebuildEndPortalIndex(ClientChunk& chunk) {
         chunk.endPortals.clear();
         chunk.endGateways.clear();
+        chunk.beds.clear();
         if (!chunk.chunkData) return;
 
         for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
@@ -881,7 +1015,8 @@ namespace Client {
                     const Game::BlockID id =
                         Game::BlockState::FromRawId(rawState).Block();
                     if (id == Game::BlockID::EndPortal ||
-                        id == Game::BlockID::EndGateway) {
+                        id == Game::BlockID::EndGateway ||
+                        IsEntityRenderedBed(id)) {
                         present = true;
                         break;
                     }
@@ -894,15 +1029,18 @@ namespace Client {
                 for (int z = 0; z < Game::Math::CHUNK_SIZE_Z; ++z) {
                     for (int x = 0; x < Game::Math::CHUNK_SIZE_X; ++x) {
                         const Game::BlockID id = section->GetBlockID(x, y, z);
+                        const bool bed = IsEntityRenderedBed(id);
                         if (id != Game::BlockID::EndPortal &&
-                            id != Game::BlockID::EndGateway) {
+                            id != Game::BlockID::EndGateway && !bed) {
                             continue;
                         }
                         const glm::ivec3 pos{
                             chunk.position.x * Game::Math::CHUNK_SIZE_X + x,
                             baseY + y,
                             chunk.position.z * Game::Math::CHUNK_SIZE_Z + z};
-                        if (id == Game::BlockID::EndPortal) {
+                        if (bed) {
+                            chunk.beds.push_back(pos);
+                        } else if (id == Game::BlockID::EndPortal) {
                             chunk.endPortals.push_back(pos);
                         } else {
                             chunk.endGateways.push_back(pos);
@@ -1004,9 +1142,40 @@ namespace Client {
         return true;
     }
 
+    void ClientChunkManager::RelieveMeshBufferPressure() {
+        // Parked meshes (the retention cache) share the mega-buffers with the
+        // live ones, and those buffers have a hard slab ceiling. A far /tp
+        // parks a whole render distance of terrain and then meshes another:
+        // measured 2026-09-23 at RD 32, the second world's uploads hit the
+        // 128-slab limit and failed. Live terrain wins — MC keeps no meshes
+        // for unloaded chunks at all, so this only trims our own cache.
+        // Oldest first, a bounded batch per frame; each discard frees its
+        // regions for reuse a few frames later (kFreeDelayFrames).
+        if (!m_meshes || m_retainedLru.empty()) {
+            if (m_meshes) (void)m_meshes->ConsumeMeshBufferPressure();   // clear stale failure flags
+            return;
+        }
+        if (!m_meshes->ConsumeMeshBufferPressure()) return;
+        constexpr int kDiscardPerFrame = 128;
+        int discarded = 0;
+        while (discarded < kDiscardPerFrame && !m_retainedLru.empty()) {
+            DiscardRetained(m_retainedLru.back());
+            ++discarded;
+        }
+        m_retainPressureDiscards += static_cast<uint64_t>(discarded);
+        const auto now = std::chrono::steady_clock::now();
+        if (now - m_lastPressureLog >= std::chrono::seconds(5)) {
+            m_lastPressureLog = now;
+            Log::Info("[Retention] mesh buffers near capacity: dropped %llu parked chunks so far, %zu still parked",
+                      static_cast<unsigned long long>(m_retainPressureDiscards), m_retained.size());
+        }
+    }
+
     void ClientChunkManager::ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition) {
         PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
+
+        RelieveMeshBufferPressure();
 
         // ADMISSION ONLY. This function decides what to hand to the compile
         // queue; it does NOT decide how fast meshing runs. That distinction is
@@ -1542,8 +1711,12 @@ namespace Client {
         if (jobSeq != 0) sectionInfo.uploadedJobSeq = jobSeq;
 
         // If version changed while meshing (neighbor loaded/unloaded), keep dirty for re-mesh
-        // but still show this mesh result so the player sees something
-        if (sectionInfo.version != sectionInfo.meshingVersion) {
+        // but still show this mesh result so the player sees something.
+        // The same for a mesh built under the previous greedy setting (the
+        // stamp moved while the job ran — a shader pack turning merging off
+        // re-dirties the active sections, but not the jobs already running).
+        if (sectionInfo.version != sectionInfo.meshingVersion ||
+            paletteGen != ::Render::Mesher::GreedyPaletteGen()) {
             sectionInfo.meshingVersion = 0; // Allow rescheduling
             sectionInfo.dirty = true;
             chunk->AddDirty(sectionY);
@@ -1805,17 +1978,31 @@ namespace Client {
     
     void ClientChunkManager::NotifyRenderGridChunkLoaded(Game::Math::ChunkPos pos, ClientChunk* chunk) {
         ASSERT_MAIN_THREAD();
-        // Notify the occlusion graph that a chunk loaded — sections deferred by
-        // hasAllNeighbors will be re-evaluated on the next BFS rebuild.
-        if (m_renderer) {
-            m_renderer->MarkVisibleSectionsDirty();
-        }
+        // MC onChunkReadyToRender: the sections of a chunk that just arrived
+        // become propagation sources, and the live graph grows into them from
+        // whichever neighbour it already reached. NOT a full rebuild. This
+        // used to MarkVisibleSectionsDirty, which while streaming meant a
+        // fresh full BFS every 250 ms whose (stricter) result REPLACED the
+        // incrementally-grown list — built, unchanged terrain blinking out
+        // until the next partial update re-added it (the temporary [Vanish] detector's log,
+        // 2026-09-23: every vanish landed on the frame a rebuild was adopted).
+        (void)chunk;
+        ScheduleChunkPropagation(pos);
     }
     
     void ClientChunkManager::NotifyRenderGridChunkUnloaded(Game::Math::ChunkPos pos) {
         ASSERT_MAIN_THREAD();
-        if (m_renderer) {
-            m_renderer->MarkVisibleSectionsDirty();
+        // Nothing to invalidate: the reachable lists hold identity only, and
+        // an unloaded section resolves to no GPU data and draws nothing. An
+        // unload only ever REMOVES reachability, which the next camera-move
+        // rebuild tidies — MC does not invalidate its graph on unload either.
+        (void)pos;
+    }
+
+    void ClientChunkManager::ScheduleChunkPropagation(Game::Math::ChunkPos pos) {
+        if (!m_renderer) return;
+        for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+            m_renderer->SchedulePropagationFrom(pos, sy, /*mayRequestRebuild=*/false);
         }
     }
     
@@ -1823,6 +2010,79 @@ namespace Client {
                                                            ::Render::GPUSectionData* gpu) {
         ASSERT_MAIN_THREAD();
         // No-op: RenderGrid has been removed
+    }
+
+} // namespace Client
+namespace Client {
+
+    void ClientChunkManager::RegisterTickingBlockEntity(const glm::ivec3& pos) {
+        for (const glm::ivec3& p : m_tickingBlockEntities) if (p == pos) return;
+        m_tickingBlockEntities.push_back(pos);
+    }
+
+    void ClientChunkManager::RetireLandedBlockEntities() {
+        ASSERT_MAIN_THREAD();
+        if (m_tickingBlockEntities.empty()) return;
+        std::vector<glm::ivec3> keep;
+        keep.reserve(m_tickingBlockEntities.size());
+        for (const glm::ivec3& pos : m_tickingBlockEntities) {
+            const Game::Math::ChunkPos cp{pos.x >> 4, pos.z >> 4};
+            ClientChunk* chunk = GetChunk(cp);
+            if (!chunk || !chunk->chunkData) continue;
+            const int lx = pos.x & 0xF, lz = pos.z & 0xF;
+            auto* piston = dynamic_cast<Game::PistonMovingBlockEntity*>(
+                chunk->chunkData->GetBlockEntity(lx, pos.y, lz));
+            // Only a landed moving piston retires here. Everything else on
+            // the list (a chest whose lid is moving) stays: TickBlockEntities
+            // drops it once it is at rest. Dropping it here left a chest
+            // lid ticking once per block event — a jerky climb while open,
+            // and hung part-open after the close event.
+            if (!piston) { keep.push_back(pos); continue; }
+            if (piston->IsLanded()) {
+                const int sectionY = (pos.y + 64) >> 4;
+                const auto& info = chunk->sectionInfos[static_cast<size_t>(sectionY)];
+                // Uploaded past the write that landed the block — or, as a
+                // backstop for a section nobody rebuilds, a second later.
+                const bool meshShowsIt = info.uploadedVersion >= piston->LandedVersion();
+                const bool stale       = m_clientTicks - piston->LandedTick() > 20;
+                static const bool kPistonDebug = std::getenv("OBEY_PISTON_DEBUG") != nullptr;
+                if (kPistonDebug && (meshShowsIt || stale)) {
+                    Log::Info("[PistonDbg] tick %lld retire (%d,%d,%d) uploaded=%u landed=%u stale=%d",
+                              static_cast<long long>(m_clientTicks), pos.x, pos.y, pos.z,
+                              info.uploadedVersion, piston->LandedVersion(), stale ? 1 : 0);
+                }
+                if (meshShowsIt || stale) {
+                    chunk->chunkData->RemoveBlockEntity(lx, pos.y, lz);
+                    continue;
+                }
+            }
+            keep.push_back(pos);
+        }
+        m_tickingBlockEntities = std::move(keep);
+    }
+
+    void ClientChunkManager::TickBlockEntities(Game::ILevelWrite& level) {
+        ASSERT_MAIN_THREAD();
+        ++m_clientTicks;
+        if (m_tickingBlockEntities.empty()) return;
+        // Snapshot: a tick may write blocks and remove entities, including
+        // itself, and may register new ones.
+        std::vector<glm::ivec3> positions = m_tickingBlockEntities;
+        std::vector<glm::ivec3> keep;
+        for (const glm::ivec3& pos : positions) {
+            Game::BlockEntity* be = level.GetBlockEntity(pos);
+            if (!be || !be->NeedsTicking()) continue;
+            be->ClientTick(level);
+            if (level.GetBlockEntity(pos) == be) keep.push_back(pos);
+        }
+        // Registrations made during the ticks survive; retired ones do not.
+        std::vector<glm::ivec3> merged = keep;
+        for (const glm::ivec3& p : m_tickingBlockEntities) {
+            bool known = false;
+            for (const glm::ivec3& q : positions) if (q == p) { known = true; break; }
+            if (!known) merged.push_back(p);
+        }
+        m_tickingBlockEntities = std::move(merged);
     }
 
 } // namespace Client

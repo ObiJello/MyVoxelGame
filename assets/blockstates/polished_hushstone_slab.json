@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "type=bottom": {
+      "model": "minecraft:block/polished_hushstone_slab"
+    },
+    "type=double": {
+      "model": "minecraft:block/polished_hushstone"
+    },
+    "type=top": {
+      "model": "minecraft:block/polished_hushstone_slab_top"
+    }
+  }
+}

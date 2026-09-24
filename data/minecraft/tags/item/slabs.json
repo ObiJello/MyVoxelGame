@@ -58,6 +58,14 @@
     "minecraft:polished_sulfur_slab",
     "minecraft:sulfur_brick_slab",
     "#minecraft:wool_slabs",
-    "#minecraft:concrete_slabs"
+    "#minecraft:concrete_slabs",
+    "minecraft:skyroot_slab",
+    "minecraft:carved_slab",
+    "minecraft:angelic_slab",
+    "minecraft:hellfire_slab",
+    "minecraft:holystone_slab",
+    "minecraft:mossy_holystone_slab",
+    "minecraft:icestone_slab",
+    "minecraft:holystone_brick_slab"
   ]
 }

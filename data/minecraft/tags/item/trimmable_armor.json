@@ -3,6 +3,14 @@
     "#minecraft:foot_armor",
     "#minecraft:leg_armor",
     "#minecraft:chest_armor",
-    "#minecraft:head_armor"
+    "#minecraft:head_armor",
+    "minecraft:zanite_helmet",
+    "minecraft:zanite_chestplate",
+    "minecraft:zanite_leggings",
+    "minecraft:zanite_boots",
+    "minecraft:gravitite_helmet",
+    "minecraft:gravitite_chestplate",
+    "minecraft:gravitite_leggings",
+    "minecraft:gravitite_boots"
   ]
 }

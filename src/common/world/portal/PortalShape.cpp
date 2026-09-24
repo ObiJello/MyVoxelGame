@@ -1,7 +1,7 @@
 // File: src/common/world/portal/PortalShape.cpp
 //
 // Line references are to
-// minecraft_code/decompiled_net/minecraft/world/level/portal/PortalShape.java.
+// minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/portal/PortalShape.java.
 
 #include "PortalShape.hpp"
 
@@ -23,36 +23,43 @@ namespace Game {
     } // namespace
 
     // PortalShape.java:162
-    bool PortalShape::IsEmptyForPortal(BlockState state) {
+    bool PortalShape::IsEmptyForPortal(BlockState state, const PortalFamily& family) {
         const BlockID id = state.Block();
         // MC: state.isAir() || state.is(BlockTags.FIRE) || state.is(NETHER_PORTAL).
-        // BlockTags.FIRE is exactly {fire, soul_fire} in vanilla data.
+        // BlockTags.FIRE is exactly {fire, soul_fire} in vanilla data. The
+        // portal block is the FAMILY's — a hush_portal inside an obsidian
+        // frame is not "empty" for a nether walk, and vice versa.
+        // AetherPortalShape.isEmpty adds water: the Aether frame is lit WITH
+        // water, so a frame that already holds some must still count as empty.
         return id == BlockID::Air
             || id == BlockID::Fire
             || id == BlockID::SoulFire
-            || id == BlockID::NetherPortal;
+            || id == family.portalBlock
+            || (family.id == PortalFamilyId::Aether && id == BlockID::Water);
     }
 
     // PortalShape.java:50
     std::optional<PortalShape> PortalShape::FindEmptyPortalShape(
-        const IBlockAccess& level, const glm::ivec3& pos, Axis preferredAxis)
+        const IBlockAccess& level, const glm::ivec3& pos, Axis preferredAxis,
+        const PortalFamily& family)
     {
         return FindPortalShape(
             level, pos,
             [](const PortalShape& s) { return s.IsValid() && s.m_numPortalBlocks == 0; },
-            preferredAxis);
+            preferredAxis, family);
     }
 
     // PortalShape.java:54
     std::optional<PortalShape> PortalShape::FindPortalShape(
         const IBlockAccess& level, const glm::ivec3& pos,
-        const std::function<bool(const PortalShape&)>& isValid, Axis preferredAxis)
+        const std::function<bool(const PortalShape&)>& isValid, Axis preferredAxis,
+        const PortalFamily& family)
     {
-        PortalShape first = FindAnyShape(level, pos, preferredAxis);
+        PortalShape first = FindAnyShape(level, pos, preferredAxis, family);
         if (isValid(first)) return first;
 
         const Axis otherAxis = (preferredAxis == Axis::X) ? Axis::Z : Axis::X;
-        PortalShape second = FindAnyShape(level, pos, otherAxis);
+        PortalShape second = FindAnyShape(level, pos, otherAxis, family);
         if (isValid(second)) return second;
 
         return std::nullopt;
@@ -65,41 +72,42 @@ namespace Game {
     // picks these two so that bottomLeft ends up at the corner it does, and
     // changing them changes which cell createPortalBlocks starts from.
     PortalShape PortalShape::FindAnyShape(const IBlockAccess& level,
-                                          const glm::ivec3& pos, Axis axis)
+                                          const glm::ivec3& pos, Axis axis,
+                                          const PortalFamily& family)
     {
         const Direction rightDir = (axis == Axis::X) ? Direction::West : Direction::South;
 
         glm::ivec3 bottomLeft{0, 0, 0};
-        if (!CalculateBottomLeft(level, rightDir, pos, bottomLeft)) {
-            return PortalShape(axis, 0, rightDir, pos, 0, 0);
+        if (!CalculateBottomLeft(level, family, rightDir, pos, bottomLeft)) {
+            return PortalShape(family, axis, 0, rightDir, pos, 0, 0);
         }
 
-        const int width = CalculateWidth(level, bottomLeft, rightDir);
+        const int width = CalculateWidth(level, family, bottomLeft, rightDir);
         if (width == 0) {
-            return PortalShape(axis, 0, rightDir, bottomLeft, 0, 0);
+            return PortalShape(family, axis, 0, rightDir, bottomLeft, 0, 0);
         }
 
         int portalBlockCount = 0;
-        const int height = CalculateHeight(level, bottomLeft, rightDir, width,
+        const int height = CalculateHeight(level, family, bottomLeft, rightDir, width,
                                            portalBlockCount);
-        return PortalShape(axis, portalBlockCount, rightDir, bottomLeft, width, height);
+        return PortalShape(family, axis, portalBlockCount, rightDir, bottomLeft, width, height);
     }
 
     // PortalShape.java:81
-    bool PortalShape::CalculateBottomLeft(const IBlockAccess& level, Direction rightDir,
-                                          glm::ivec3 pos, glm::ivec3& out)
+    bool PortalShape::CalculateBottomLeft(const IBlockAccess& level, const PortalFamily& family,
+                                          Direction rightDir, glm::ivec3 pos, glm::ivec3& out)
     {
         // Fall to the bottom of the cavity, but never more than 21 blocks —
         // that is the tallest portal, so anything further down cannot be the
         // same frame.
         const int minY = std::max(Math::WorldCoordinates::MIN_WORLD_Y, pos.y - kMaxHeight);
         while (pos.y > minY &&
-               IsEmptyForPortal(level.GetBlockState(pos.x, pos.y - 1, pos.z))) {
+               IsEmptyForPortal(level.GetBlockState(pos.x, pos.y - 1, pos.z), family)) {
             pos.y -= 1;
         }
 
         const Direction leftDir = Opposite(rightDir);
-        const int edge = DistanceUntilEdgeAboveFrame(level, pos, leftDir) - 1;
+        const int edge = DistanceUntilEdgeAboveFrame(level, family, pos, leftDir) - 1;
         if (edge < 0) return false;
 
         out = Relative(pos, leftDir, edge);
@@ -107,10 +115,10 @@ namespace Game {
     }
 
     // PortalShape.java:90
-    int PortalShape::CalculateWidth(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                    Direction rightDir)
+    int PortalShape::CalculateWidth(const IBlockAccess& level, const PortalFamily& family,
+                                    const glm::ivec3& bottomLeft, Direction rightDir)
     {
-        const int width = DistanceUntilEdgeAboveFrame(level, bottomLeft, rightDir);
+        const int width = DistanceUntilEdgeAboveFrame(level, family, bottomLeft, rightDir);
         return (width >= kMinWidth && width <= kMaxWidth) ? width : 0;
     }
 
@@ -121,31 +129,32 @@ namespace Game {
     // hits a frame block, and that step count IS the width. Anything else —
     // a non-frame solid, a missing floor, or running past 21 — is a failure,
     // reported as 0.
-    int PortalShape::DistanceUntilEdgeAboveFrame(const IBlockAccess& level,
+    int PortalShape::DistanceUntilEdgeAboveFrame(const IBlockAccess& level, const PortalFamily& family,
                                                  const glm::ivec3& pos,
                                                  Direction direction)
     {
         for (int width = 0; width <= kMaxWidth; ++width) {
             const glm::ivec3 at = Relative(pos, direction, width);
             const BlockState state = level.GetBlockState(at.x, at.y, at.z);
-            if (!IsEmptyForPortal(state)) {
-                if (IsFrame(state)) return width;
+            if (!IsEmptyForPortal(state, family)) {
+                if (IsFrame(state, family)) return width;
                 break;
             }
             const BlockState below = level.GetBlockState(at.x, at.y - 1, at.z);
-            if (!IsFrame(below)) break;
+            if (!IsFrame(below, family)) break;
         }
         return 0;
     }
 
     // PortalShape.java:117
-    int PortalShape::CalculateHeight(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                     Direction rightDir, int width, int& portalBlockCount)
+    int PortalShape::CalculateHeight(const IBlockAccess& level, const PortalFamily& family,
+                                     const glm::ivec3& bottomLeft, Direction rightDir,
+                                     int width, int& portalBlockCount)
     {
-        const int height = DistanceUntilTop(level, bottomLeft, rightDir, width,
+        const int height = DistanceUntilTop(level, family, bottomLeft, rightDir, width,
                                             portalBlockCount);
         const bool ok = height >= kMinHeight && height <= kMaxHeight
-                     && HasTopFrame(level, bottomLeft, rightDir, width, height);
+                     && HasTopFrame(level, family, bottomLeft, rightDir, width, height);
         return ok ? height : 0;
     }
 
@@ -155,40 +164,42 @@ namespace Game {
     // are present at that height and every interior cell is empty. The portal
     // block tally is collected on the way up so IsComplete can be answered
     // from the same walk.
-    int PortalShape::DistanceUntilTop(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                      Direction rightDir, int width, int& portalBlockCount)
+    int PortalShape::DistanceUntilTop(const IBlockAccess& level, const PortalFamily& family,
+                                      const glm::ivec3& bottomLeft, Direction rightDir,
+                                      int width, int& portalBlockCount)
     {
         for (int height = 0; height < kMaxHeight; ++height) {
             const glm::ivec3 row = { bottomLeft.x, bottomLeft.y + height, bottomLeft.z };
 
             const glm::ivec3 leftFrame = Relative(row, rightDir, -1);
-            if (!IsFrame(level.GetBlockState(leftFrame.x, leftFrame.y, leftFrame.z))) {
+            if (!IsFrame(level.GetBlockState(leftFrame.x, leftFrame.y, leftFrame.z), family)) {
                 return height;
             }
 
             const glm::ivec3 rightFrame = Relative(row, rightDir, width);
-            if (!IsFrame(level.GetBlockState(rightFrame.x, rightFrame.y, rightFrame.z))) {
+            if (!IsFrame(level.GetBlockState(rightFrame.x, rightFrame.y, rightFrame.z), family)) {
                 return height;
             }
 
             for (int i = 0; i < width; ++i) {
                 const glm::ivec3 cell = Relative(row, rightDir, i);
                 const BlockState state = level.GetBlockState(cell.x, cell.y, cell.z);
-                if (!IsEmptyForPortal(state)) return height;
-                if (state.Is(BlockID::NetherPortal)) ++portalBlockCount;
+                if (!IsEmptyForPortal(state, family)) return height;
+                if (state.Is(family.portalBlock)) ++portalBlockCount;
             }
         }
         return kMaxHeight;
     }
 
     // PortalShape.java:123
-    bool PortalShape::HasTopFrame(const IBlockAccess& level, const glm::ivec3& bottomLeft,
-                                  Direction rightDir, int width, int height)
+    bool PortalShape::HasTopFrame(const IBlockAccess& level, const PortalFamily& family,
+                                  const glm::ivec3& bottomLeft, Direction rightDir,
+                                  int width, int height)
     {
         for (int i = 0; i < width; ++i) {
             const glm::ivec3 top = Relative(
                 { bottomLeft.x, bottomLeft.y + height, bottomLeft.z }, rightDir, i);
-            if (!IsFrame(level.GetBlockState(top.x, top.y, top.z))) return false;
+            if (!IsFrame(level.GetBlockState(top.x, top.y, top.z), family)) return false;
         }
         return true;
     }
@@ -345,8 +356,10 @@ namespace Game {
 
     // PortalShape.java:170
     void PortalShape::CreatePortalBlocks(ILevelWrite& level) const {
+        // hush_portal aliases nether_portal's state set (gen_block_states
+        // ALIAS_EXACT), so the same HORIZONTAL_AXIS write fits both.
         const BlockState portalState =
-            BlockStates::Default(BlockID::NetherPortal)
+            BlockStates::Default(m_family->portalBlock)
                 .SetName(PropertyId::HORIZONTAL_AXIS, NameOf(m_axis));
 
         // See the header for why the flags are MarkDirty and nothing else.

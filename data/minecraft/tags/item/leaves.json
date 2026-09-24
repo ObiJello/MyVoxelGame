@@ -13,6 +13,13 @@
     "minecraft:cherry_leaves",
     "minecraft:red_poplar_leaves",
     "minecraft:orange_poplar_leaves",
-    "minecraft:yellow_poplar_leaves"
+    "minecraft:yellow_poplar_leaves",
+    "minecraft:lantern_leaves",
+    "minecraft:twilight_oak_leaves",
+    "minecraft:canopy_leaves",
+    "minecraft:tf_mangrove_leaves",
+    "minecraft:dark_leaves",
+    "minecraft:skyroot_leaves",
+    "minecraft:golden_oak_leaves"
   ]
 }

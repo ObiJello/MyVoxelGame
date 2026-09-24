@@ -1,5 +1,9 @@
 // File: src/common/physics/Physics.cpp
 #include "Physics.hpp"
+#include "common/world/block/AercloudBlock.hpp"
+#include "common/world/block/BlockBounce.hpp"
+#include "common/world/block/BlockFriction.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/world//block/BlockRegistry.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
@@ -8,6 +12,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
+#include <string_view>
+#include "common/world/fluid/FluidState.hpp"
+#include "common/world/chunk/IBlockAccess.hpp"
 
 namespace Game {
 
@@ -36,6 +44,39 @@ namespace Game {
         g_portalExtraSolid = fn;
     }
 
+    // The context's own provider when it has one, the global hooks
+    // otherwise — see PortalCollisionProvider.
+    namespace {
+        bool PortalPassthroughAt(const PhysicsContext& ctx, int x, int y, int z, const AABB& box) {
+            if (ctx.portalCollision) return ctx.portalCollision->IsBlockBehindPortal(x, y, z, box);
+            return g_portalPassthrough && g_portalPassthrough(x, y, z, box);
+        }
+        bool PortalFarSideSolidAt(const PhysicsContext& ctx, int x, int y, int z, const AABB& box) {
+            if (ctx.portalCollision) return ctx.portalCollision->IsFarSideSolid(x, y, z, box);
+            return g_portalExtraSolid && g_portalExtraSolid(x, y, z, box);
+        }
+        bool PortalFarSideEngaged(const PhysicsContext& ctx) {
+            if (ctx.portalCollision) return ctx.portalCollision->HasFarSideSolidity();
+            return g_portalExtraSolid && g_portalCollisionActive;
+        }
+
+        // Aether AercloudBlock.getCollisionShape for the cloud at (x, y, z),
+        // as this context's mover sees it (AercloudBlock.hpp: the shape
+        // depends on the mover's fall distance and on the block above). The
+        // block above is read here rather than taken from a caller's bulk
+        // read — the rule looks one cell past any box it is asked about, and
+        // one extra read per cloud cell is nothing. False = no collision.
+        bool AercloudColliderAt(const PhysicsContext& ctx, BlockID id, int x, int y, int z,
+                                glm::vec3& lo, glm::vec3& hi) {
+            Aercloud::Asker asker;
+            asker.entity       = ctx.collisionEntity;
+            asker.fallDistance = ctx.collisionFallDistance;
+            asker.fallFlying   = ctx.collisionFallFlying;
+            const BlockID above = ctx.GetBlockState(x, y + 1, z).Block();
+            return Aercloud::CollisionBox(id, above, asker, lo, hi);
+        }
+    }
+
     bool PhysicsContext::IsBlockSolid(int x, int y, int z) const {
         if (!blockAccess) {
             return false;
@@ -57,6 +98,11 @@ namespace Game {
     bool IsCollisionShapeFullBlock(const PhysicsContext& context, int x, int y, int z) {
         const BlockID bid = context.GetBlock(x, y, z);
         if (!BlockRegistry::HasCollision(bid)) return false;
+        if (Aercloud::IsAercloud(bid)) {
+            // A cloud with another above it is a full block (AercloudBlock).
+            glm::vec3 lo, hi;
+            return AercloudColliderAt(context, bid, x, y, z, lo, hi) && hi.y >= 0.9999f;
+        }
         return BlockRegistry::GetBlockCollisionShapeSet(
                    context.GetBlockState(x, y, z)).IsFullCube();
     }
@@ -67,14 +113,9 @@ namespace Game {
         const double minX = box.min.x + 0.001, maxX = box.max.x - 0.001;
         const double minY = box.min.y + 0.001, maxY = box.max.y - 0.001;
         const double minZ = box.min.z + 0.001, maxZ = box.max.z - 0.001;
-
-        const auto isFluid = [&](int x, int y, int z) {
-            return lava ? context.GetBlock(x, y, z) == BlockID::Lava
-                        : context.ContainsWater(x, y, z);
-        };
-
-        // FlowingFluid.getOwnHeight for a source block — 8/9 of the cell.
-        constexpr double kSourceHeight = 8.0 / 9.0;
+        if (!context.blockAccess) return 0.0;
+        const IBlockAccess& blocks = *context.blockAccess;
+        const FluidType want = lava ? FluidType::Lava : FluidType::Water;
 
         const int x0 = static_cast<int>(std::floor(minX));
         const int x1 = static_cast<int>(std::floor(maxX));
@@ -87,13 +128,11 @@ namespace Game {
         for (int x = x0; x <= x1; ++x) {
             for (int y = y0; y <= y1; ++y) {
                 for (int z = z0; z <= z1; ++z) {
-                    if (!isFluid(x, y, z)) continue;
-                    // A fluid cell with the same fluid overhead is a
-                    // continuous column — MC FluidState.getHeight returns
-                    // 1.0 for it.
-                    const double surface = isFluid(x, y + 1, z)
-                        ? static_cast<double>(y) + 1.0
-                        : static_cast<double>(y) + kSourceHeight;
+                    const FluidState fs = GetFluidState(blocks, x, y, z);
+                    if (!fs.Is(want)) continue;
+                    const double surface = static_cast<double>(y) +
+                                           FluidHeight(blocks, glm::ivec3(x, y, z), fs);
+                    if (surface < minY) continue;
                     height = std::max(height, surface - box.min.y);
                 }
             }
@@ -148,13 +187,57 @@ namespace Game {
         velocity = scaled;
     }
 
+    namespace {
+        // MC Entity.checkInsideBlocks, for the Aether's aerclouds only: the
+        // cloud cells the body's box overlaps. MC's cell range is the box
+        // shrunk by 1e-7 on every side, so a body resting flush on a face
+        // is not "inside" the cell beyond it.
+        void ProbeAerclouds(PlayerPhysics& physics, const PhysicsContext& context) {
+            physics.inAercloud = false;
+            physics.inBlueAercloud = false;
+            const double half   = physics.GetWidth() * 0.5;
+            const double height = physics.GetCurrentHeight();
+            constexpr double kShrink = 1.0e-7;
+            const int minX = static_cast<int>(std::floor(physics.position.x - half + kShrink));
+            const int maxX = static_cast<int>(std::floor(physics.position.x + half - kShrink));
+            const int minY = static_cast<int>(std::floor(physics.position.y + kShrink));
+            const int maxY = static_cast<int>(std::floor(physics.position.y + height - kShrink));
+            const int minZ = static_cast<int>(std::floor(physics.position.z - half + kShrink));
+            const int maxZ = static_cast<int>(std::floor(physics.position.z + half - kShrink));
+            for (int x = minX; x <= maxX; ++x)
+                for (int y = minY; y <= maxY; ++y)
+                    for (int z = minZ; z <= maxZ; ++z) {
+                        const BlockID id = context.GetBlockState(x, y, z).Block();
+                        if (!Aercloud::IsAercloud(id)) continue;
+                        physics.inAercloud = true;
+                        if (id == BlockID::BlueAercloud) physics.inBlueAercloud = true;
+                    }
+        }
+
+        // BlueAercloudBlock.entityInside launches anything that is not
+        // sneaking; a sneaking player gets the plain AercloudBlock behaviour.
+        // (The vehicle clause has nothing to apply to — the local player is
+        // never a vehicle.)
+        bool BlueAercloudLaunches(const PlayerPhysics& physics) {
+            return physics.inBlueAercloud && !physics.isSneaking;
+        }
+    }
+
     // **NEW**: Main physics update function with PhysicsContext
     void UpdatePlayerPhysics(PlayerPhysics& physics,
                             const glm::vec3& movementInput,
                             bool jumpPressed,
                             bool sneakPressed,
                             float deltaTime,
-                            const PhysicsContext& context) {
+                            const PhysicsContext& baseContext) {
+
+        // The caller's context plus MC's EntityCollisionContext for the
+        // player: the aerclouds' collision shape reads the fall distance
+        // (AercloudBlock.hpp). The engine has no elytra, so never gliding.
+        PhysicsContext context = baseContext;
+        context.collisionEntity       = true;
+        context.collisionFallDistance = physics.fallDistance;
+        context.collisionFallFlying   = false;
 
         physics.totalTime += deltaTime;
 
@@ -187,19 +270,27 @@ namespace Game {
         // Update base speed based on current state
         UpdateBaseSpeed(physics);
 
-        // Check if player is in water (AABB scan, sets waterDepth + isEyeInWater)
-        bool wasInWater = physics.isInWater;
+        // Fluid state (AABB scan: water/lava heights, eye submersion, current)
+        const bool wasInFluid = physics.isInWater || physics.isInLava;
         UpdateWaterState(physics, context);
+        const bool inFluid = physics.isInWater || physics.isInLava;
 
-        // Water↔land transitions: preserve momentum
-        if (physics.isInWater && !wasInWater) {
+        // Fluid↔land transitions: preserve momentum
+        if (inFluid && !wasInFluid) {
             physics.waterVelocity = physics.velocity;
-        } else if (!physics.isInWater && wasInWater) {
+        } else if (!inFluid && wasInFluid) {
             physics.velocity.y = physics.waterVelocity.y;
             physics.waterVelocity = glm::vec3(0.0f);
         }
 
-        if (!physics.isInWater && !physics.isFlying) {
+        physics.onClimbable = !physics.noclip && !physics.isFlying && !inFluid &&
+                              (OnClimbable(physics, context) ||
+                               // MC Spider.onClimbable: the wall it walked
+                               // into last step (the flag is the previous
+                               // move's, which is what MC reads too).
+                               (physics.morphClimbsWalls && physics.horizontalCollision));
+
+        if (!inFluid && !physics.isFlying) {
             // Land/air physics
             HandleJump(physics, jumpPressed, deltaTime, context);
 
@@ -214,6 +305,38 @@ namespace Game {
                     physics.isOnGround = false;
                 }
             }
+
+            // MC LivingEntity.handleOnClimbable: on a ladder the fall is capped
+            // at 0.15 blocks a tick (3 blocks/s), and a sneaking player holds
+            // still instead of sliding.
+            if (physics.onClimbable) {
+                const float slide = -PlayerPhysics::CLIMB_SLIDE_SPEED * physics.scale;
+                if (physics.velocity.y < slide) physics.velocity.y = slide;
+                if (physics.isSneaking && physics.velocity.y < 0.0f) physics.velocity.y = 0.0f;
+            }
+
+            // The Aether's aerclouds — AercloudBlock / BlueAercloudBlock
+            // .entityInside, which MC runs at the end of the previous tick's
+            // move; here it is the cells the body is in as this step begins
+            // (the previous step's end position), applied before the move so
+            // the step's displacement is already the cloud's:
+            //   • blue, not sneaking: deltaMovement.y = 2.0 — the launch,
+            //     carried over as the speed that reaches MC's apex
+            //     (AercloudBlock.hpp), and off the ground;
+            //   • any other cloud: a downward motion ×0.005 each tick, which
+            //     with the tick's gravity settles at MC's sink rate — so the
+            //     fall is cut to that rate, never sped up.
+            // Gravity scales with the body (ApplyGravity), so both do too.
+            if (!physics.noclip) {
+                ProbeAerclouds(physics, context);
+                if (BlueAercloudLaunches(physics)) {
+                    physics.velocity.y = Aercloud::kBlueLaunchSpeedPerSecond * physics.scale;
+                    physics.isOnGround = false;
+                } else if (physics.inAercloud) {
+                    const float sink = Aercloud::kSinkSpeedPerSecond * physics.scale;
+                    if (physics.velocity.y < sink) physics.velocity.y = sink;
+                }
+            }
         }
 
         // Handle movement (water uses per-frame friction model, land unchanged)
@@ -223,6 +346,23 @@ namespace Game {
         // (onGround && abilities.flying && !isSpectator → flying = false).
         if (physics.isFlying && physics.isOnGround) {
             physics.isFlying = false;
+        }
+
+        // The Aether's aerclouds, the rest of entityInside for the cells the
+        // body ended this step in: AercloudBlock sets onGround for a living
+        // thing unless it is a flying player (so a player sinking through a
+        // cloud can jump out of it), BlueAercloudBlock clears it for a
+        // launch. The fall-distance reset both do is in the fall tracking
+        // below — after this step's descent is counted, as MC's
+        // checkInsideBlocks follows checkFallDamage.
+        if (!physics.noclip) {
+            ProbeAerclouds(physics, context);
+            if (physics.inAercloud) {
+                physics.isOnGround = BlueAercloudLaunches(physics) ? false : !physics.isFlying;
+            }
+        } else {
+            physics.inAercloud = false;
+            physics.inBlueAercloud = false;
         }
 
         // Fall tracking (see the field comment in Physics.hpp). Order
@@ -236,18 +376,81 @@ namespace Game {
             // the shortfall shows up as a whole missing damage point on every
             // integer-height drop. Mirrors Entity::CheckFallDamage.
             const float fallDy = physics.position.y - fallPrevY;
-            if (physics.isInWater || physics.isFlying || physics.noclip) {
-                physics.fallDistance = 0.0f;      // MC resetFallDistance
+            if (physics.isInWater || physics.isFlying || physics.noclip || physics.onClimbable ||
+                physics.inAercloud || physics.effectSlowFalling || physics.effectLevitation >= 0) {
+                // MC resetFallDistance (handleOnClimbable too, and both
+                // aercloud entityInside hooks — the cloud breaks the fall).
+                physics.fallDistance = 0.0f;
+            } else if (physics.isInLava) {
+                // MC Entity.baseTick: lava only HALVES the fall each tick,
+                // so a drop into a lava pool still lands with damage.
+                physics.fallDistance *= std::pow(0.5f, deltaTime * 20.0f);
             } else if (fallDy < 0.0f) {
                 physics.fallDistance += -fallDy;
             }
             if (physics.isOnGround) {
                 if (physics.fallDistance > 0.0f) {
-                    physics.landedFallDistance =
-                        std::max(physics.landedFallDistance, physics.fallDistance);
+                    // MC Block.fallOn: fallDistance * (1 - fallDistanceReduction)
+                    // is what causeFallDamage sees — the bed's half fall.
+                    physics.landedFallDistance = std::max(
+                        physics.landedFallDistance,
+                        physics.fallDistance * (1.0f - physics.landingFallReduction));
                 }
                 physics.fallDistance = 0.0f;
             }
+            physics.landingFallReduction = 0.0f;
+            // A bounce is a landing that immediately leaves the ground again
+            // (MC: the next tick's move has movement.y > 0). Cleared here,
+            // after the flush above has seen the contact, so the rebound is
+            // reported as the landing it was and the next step's ground jump
+            // and ground friction do not treat the airborne player as standing.
+            if (physics.bouncedThisStep) {
+                physics.bouncedThisStep = false;
+                physics.isOnGround = false;
+            }
+        }
+    }
+
+    // MC LivingEntity.onClimbable: the block at the feet is in
+    // #minecraft:climbable (ladder, vines, scaffolding, the nether and cave
+    // vines), or an open trapdoor over a ladder facing the same way
+    // (trapdoorUsableAsLadder).
+    bool OnClimbable(const PlayerPhysics& physics, const PhysicsContext& context) {
+        const int x = static_cast<int>(std::floor(physics.position.x));
+        const int y = static_cast<int>(std::floor(physics.position.y));
+        const int z = static_cast<int>(std::floor(physics.position.z));
+        const BlockState state = context.GetBlockState(x, y, z);
+        const BlockID id = state.Block();
+        if (id == BlockID::Air) return false;
+        static constexpr std::string_view kClimbable[] = {
+            "ladder", "vine", "scaffolding", "weeping_vines", "weeping_vines_plant",
+            "twisting_vines", "twisting_vines_plant", "cave_vines", "cave_vines_plant",
+        };
+        const std::string& slug = BlockRegistry::Get(id).registrySlug;
+        for (std::string_view c : kClimbable) if (slug == c) return true;
+        if (slug.size() > 9 && slug.compare(slug.size() - 9, 9, "_trapdoor") == 0 &&
+            state.GetValueByName("open") == "true") {
+            const BlockState below = context.GetBlockState(x, y - 1, z);
+            return below.Block() == BlockID::Ladder &&
+                   below.GetValueByName("facing") == state.GetValueByName("facing");
+        }
+        return false;
+    }
+
+    namespace {
+        // MC's per-tick jump (y += v; v = (v − 0.08) · 0.98) reaches an apex
+        // that this continuous model matches with v = √(2·g·h): 0.42 gives
+        // the 9.04 b/s JUMP_VELOCITY above, and JUMP_BOOST's +0.1/level
+        // gives MC's exact extra height (1.84 blocks at I, 2.52 at II).
+        float JumpVelocityForPower(float power) {
+            if (power <= 1.0e-5f) return 0.0f;   // MC jumpFromGround's gate
+            double v = power, y = 0.0, apex = 0.0;
+            for (int i = 0; i < 4096 && v > 0.0; ++i) {
+                y += v;
+                v = (v - 0.08) * 0.98;
+                apex = std::max(apex, y);
+            }
+            return static_cast<float>(std::sqrt(2.0 * -static_cast<double>(PlayerPhysics::GRAVITY) * apex));
         }
     }
 
@@ -259,9 +462,27 @@ namespace Game {
         // long as it always did and rises the same number of body heights.
         // With gravity left at vanilla a small player was slammed back down
         // in a fraction of the time.
-        physics.velocity.y += PlayerPhysics::GRAVITY * physics.scale * deltaTime;
+        if (physics.effectLevitation >= 0) {
+            // MC travelInAir under LEVITATION: movementY += (0.05·(amp+1) −
+            // movementY)·0.2 instead of gravity, then the 0.98 drag — per
+            // tick v' = 0.784·v + 0.196·L, evaluated at the fractional tick
+            // (exact at every tick boundary).
+            const float target = 0.05f * static_cast<float>(physics.effectLevitation + 1) *
+                                 20.0f * physics.scale;   // blocks/s
+            const float steady = 0.196f * target / 0.216f;
+            const float k = std::pow(0.784f, deltaTime * 20.0f);
+            physics.velocity.y = steady + (physics.velocity.y - steady) * k;
+            return;
+        }
 
-        const float terminal = PlayerPhysics::TERMINAL_VELOCITY * physics.scale;
+        // MC getEffectiveGravity: SLOW_FALLING caps gravity at 0.01 (an
+        // eighth of 0.08) while falling; the 0.98 drag then settles at
+        // 0.49 blocks a tick.
+        const bool slowFalling = physics.effectSlowFalling && physics.velocity.y <= 0.0f;
+        const float gravityScale = slowFalling ? 0.125f : 1.0f;
+        physics.velocity.y += PlayerPhysics::GRAVITY * physics.scale * gravityScale * deltaTime;
+
+        const float terminal = (slowFalling ? -9.8f : PlayerPhysics::TERMINAL_VELOCITY) * physics.scale;
         if (physics.velocity.y < terminal) {
             physics.velocity.y = terminal;
         }
@@ -282,7 +503,10 @@ namespace Game {
             CheckCollision(physics.position, physics, context);
         // A scaled player jumps their own height in the usual time: with
         // gravity scaled too (ApplyGravity), the velocity scales linearly.
-        const float jumpVelocity = PlayerPhysics::JUMP_VELOCITY * physics.scale;
+        // JUMP_BOOST adds its +0.1/level to MC's 0.42 jump power.
+        const float jumpVelocity = (physics.effectJumpBoost > 0.0f
+            ? JumpVelocityForPower(0.42f + physics.effectJumpBoost)
+            : PlayerPhysics::JUMP_VELOCITY) * physics.scale;
         if (stuckInBlock) {
             physics.velocity.y = jumpVelocity;
             physics.lastJumpTime = physics.totalTime;
@@ -330,8 +554,15 @@ namespace Game {
         // split — notably the speed-driven FOV in PlatformMain, which used to
         // zoom IN while sneaking because this function folded the two together.
         // The sneak scale is applied to the movement vector in HandleMovement.
-        physics.baseSpeed = (physics.isSprinting ? PlayerPhysics::SPRINT_SPEED
-                                                 : PlayerPhysics::WALK_SPEED) * physics.scale;
+        // A morph walks at the mob's speed (PlayerPhysics::SetMorph); sprint
+        // keeps the player's own ×1.3 on top of it.
+        const float walk = physics.morphed ? PlayerPhysics::WALK_SPEED * physics.morphWalkFactor
+                                           : PlayerPhysics::WALK_SPEED;
+        // SPEED / SLOWNESS: MOVEMENT_SPEED's ADD_MULTIPLIED_TOTAL factors
+        // multiply in with the sprint's ×1.3, exactly as the attribute folds.
+        physics.baseSpeed = (physics.isSprinting
+                                 ? walk * (PlayerPhysics::SPRINT_SPEED / PlayerPhysics::WALK_SPEED)
+                                 : walk) * physics.scale * physics.effectSpeedFactor;
 
         // Reset current speed when changing movement modes
         if (!physics.isSprinting) {
@@ -382,41 +613,138 @@ namespace Game {
             return;
         }
 
-        if (physics.isInWater && !physics.isFlying) {
+        if ((physics.isInWater || physics.isInLava) && !physics.isFlying) {
             // ============================================================
-            // Water movement — per-frame continuous model
-            // Uses exponential decay: dv/dt = accel - decay * v
-            // Steady state: v_ss = accel / decay
-            // Matched to MC steady states: walk=2.0, sink=-0.5, bob=+3.5 b/s
+            // Fluid movement — MC LivingEntity.travelInFluid, exactly.
+            //
+            // MC advances a fluid at 20 Hz with, per tick and per axis,
+            //     v' = d · (v + a) − g
+            // (moveRelative adds `a`, move() displaces by v + a, the drag
+            // `d` multiplies, the gravity term `g` subtracts). This runs
+            // per frame, so each axis is advanced by the map's exact
+            // solution at a fractional tick count f = dt · 20:
+            //     v* = (d·a − g) / (1 − d),   v(f) = v* + (v − v*) · d^f
+            // which lands on MC's value at every tick boundary and is the
+            // same curve in between, and displaces by the pre-drag velocity
+            // of the final tick, (v(f) + g) / d, times f. Velocities inside
+            // this block are MC's blocks per TICK; waterVelocity stays b/s
+            // for everything outside it.
+            //
+            // travelInFluid picks travelInWater whenever isInWater() holds
+            // (water wins over lava), else travelInLava.
             // ============================================================
+            const float f = deltaTime * 20.0f;
+            const bool  lavaTravel  = !physics.isInWater;
+            const bool  lavaShallow = lavaTravel && physics.lavaDepth <= 0.4f;
+            const float depth       = lavaTravel ? physics.lavaDepth : physics.waterDepth;
+            // MC LocalPlayer.aiStep: a sprint is cancelled in water unless
+            // the player is under it — sprint-swimming is the only sprint
+            // there is in water.
+            const bool  sprint      = physics.isSprinting && (lavaTravel || physics.isEyeInWater);
+            const bool  swimming    = !lavaTravel && sprint && physics.isEyeInWater;   // updateSwimming
 
-            float decay = physics.isSprinting ?
-                PlayerPhysics::WATER_SPRINT_DECAY : PlayerPhysics::WATER_DECAY;
+            glm::vec3 vt = physics.waterVelocity / 20.0f;   // blocks per tick
 
-            // 1. Horizontal input acceleration
-            glm::vec3 inputDir(movementInput.x, 0.0f, movementInput.z);
-            if (glm::length(inputDir) > 0.0f) {
-                inputDir = glm::normalize(inputDir);
-                float accel = physics.isSprinting ?
-                    PlayerPhysics::WATER_SPRINT_ACCEL : PlayerPhysics::WATER_WALK_ACCEL;
-                physics.waterVelocity.x += inputDir.x * accel * deltaTime;
-                physics.waterVelocity.z += inputDir.z * accel * deltaTime;
+            // One tick-map step at fractional f; returns the new velocity and
+            // writes the displacement for the step.
+            auto tickAxis = [&](float v, float a, float d, float g, float& outDisplacement) {
+                const float fixed = (d * a - g) / (1.0f - d);
+                const float df    = std::pow(d, f);
+                const float vNew  = fixed + (v - fixed) * df;
+                outDisplacement   = ((vNew + g) / d) * f;
+                return vNew;
+            };
+
+            // ── Before travel (MC aiStep order) ────────────────────────
+            // The current (Entity.updateFluidInteraction): an impulse per
+            // tick, in blocks per tick.
+            vt += physics.fluidCurrent * f;
+
+            // Player.travel's swim steering: sprint-swimming follows the
+            // look vector's pitch, faster when diving.
+            if (swimming) {
+                const float lookY = physics.lookDirY;
+                const float d = lookY < -0.2f ? 0.085f : 0.06f;
+                if (lookY <= 0.0f || jumpPressed || physics.fluidAboveHead) {
+                    vt.y += (lookY - vt.y) * (1.0f - std::pow(1.0f - d, f));
+                }
             }
 
-            // 2. Vertical: gravity pulls down, jump bob pushes up
-            physics.waterVelocity.y -= PlayerPhysics::WATER_GRAVITY_ACCEL * deltaTime;
+            // aiStep's jump block: in water above the jump threshold (or off
+            // the floor) the key SWIMS (jumpInLiquid, +0.04 a tick); on the
+            // floor in shallow fluid it is a real jump, ten ticks apart while
+            // held. Shift in water is goDownInWater (−0.04 a tick).
+            if (physics.noJumpDelayTicks > 0.0f) physics.noJumpDelayTicks -= f;
+            float verticalInput = 0.0f;
+            const bool groundJump = jumpPressed && physics.isOnGround && depth <= 0.4f &&
+                                    !(lavaTravel && !lavaShallow);
             if (jumpPressed) {
-                physics.waterVelocity.y += PlayerPhysics::WATER_BOB_ACCEL * deltaTime;
+                if (groundJump) {
+                    if (physics.noJumpDelayTicks <= 0.0f) {
+                        // jumpFromGround → getJumpPower: JUMP_BOOST's +0.1 a
+                        // level applies to a wading jump exactly as on land.
+                        const float jumpVelocity = physics.effectJumpBoost > 0.0f
+                            ? JumpVelocityForPower(0.42f + physics.effectJumpBoost)
+                            : PlayerPhysics::JUMP_VELOCITY;
+                        vt.y = (jumpVelocity * physics.scale) / 20.0f;
+                        physics.isOnGround = false;
+                        physics.lastJumpTime = physics.totalTime;
+                        physics.didJumpThisStep = true;
+                        physics.noJumpDelayTicks = 10.0f;
+                    }
+                } else {
+                    verticalInput += 0.04f;
+                }
+            } else {
+                physics.noJumpDelayTicks = 0.0f;
+            }
+            if (!lavaTravel && physics.isSneaking) verticalInput -= 0.04f;
+
+            // ── travelInWater / travelInLava ───────────────────────────
+            // moveRelative(0.02, input): the input vector, normalised when
+            // longer than one, scaled by the fixed fluid speed; a crouching
+            // player's input is 0.3 (isMovingSlowly).
+            glm::vec3 inputDir(movementInput.x, 0.0f, movementInput.z);
+            if (glm::dot(inputDir, inputDir) > 1.0f) inputDir = glm::normalize(inputDir);
+            if (physics.isSneaking) inputDir *= 0.3f;
+            const float speed = 0.02f;
+
+            // MC travelInFluid's baseGravity is getEffectiveGravity(): with
+            // SLOW_FALLING and the body not rising (isFalling, sampled after
+            // the jump/swim impulses above) it is min(0.08, 0.01) — a slow
+            // faller sinks through water and lava at an eighth of the rate.
+            const bool  fluidFalling = vt.y + verticalInput <= 0.0f;
+            const float baseGravity  = (physics.effectSlowFalling && fluidFalling) ? 0.01f : 0.08f;
+
+            float hDrag, vDrag, gravityTerm;
+            if (!lavaTravel) {
+                hDrag = sprint ? 0.9f : 0.8f;                  // getWaterSlowDown
+                if (physics.effectDolphinsGrace) hDrag = 0.96f;   // DOLPHINS_GRACE
+                vDrag = 0.8f;
+                // getFluidFallingAdjustedMovement: gravity/16 — 0.08/16 —
+                // unless sprinting (a sprint-swimmer does not sink).
+                gravityTerm = sprint ? 0.0f : baseGravity / 16.0f;
+            } else if (lavaShallow) {
+                hDrag = 0.5f; vDrag = 0.8f;
+                gravityTerm = baseGravity / 16.0f + baseGravity / 4.0f;   // sixteenth, then the quarter
+            } else {
+                hDrag = 0.5f; vDrag = 0.5f;
+                gravityTerm = baseGravity / 4.0f;             // scale(0.5) then −gravity/4
             }
 
-            // 3. Apply exponential friction decay (all axes)
-            float frictionMul = std::exp(-decay * deltaTime);
-            physics.waterVelocity.x *= frictionMul;
-            physics.waterVelocity.z *= frictionMul;
-            physics.waterVelocity.y *= std::exp(-PlayerPhysics::WATER_DECAY * deltaTime);
+            glm::vec3 disp(0.0f);
+            vt.x = tickAxis(vt.x, inputDir.x * speed, hDrag, 0.0f, disp.x);
+            vt.z = tickAxis(vt.z, inputDir.z * speed, hDrag, 0.0f, disp.z);
+            vt.y = tickAxis(vt.y, verticalInput,       vDrag, gravityTerm, disp.y);
+            // getFluidFallingAdjustedMovement's −0.003 snap is not carried:
+            // its two conditions, |y − 0.005| >= 0.003 and |y − gravity/16|
+            // < 0.003, are the same quantity at the player's gravity of 0.08
+            // and can never both hold. Under SLOW_FALLING (gravity 0.01) they
+            // can; the snap's −0.003 then sits within 0.0002 of the −0.003125
+            // this map settles at anyway, so the continuous solution stands.
 
             // 4. Move with collision
-            glm::vec3 movement = physics.waterVelocity * deltaTime;
+            glm::vec3 movement = disp;
 
             // Vertical collision — snap to collision boundary (mirrors
             // MC's Entity.collide()/Shapes.collide which return the
@@ -425,18 +753,21 @@ namespace Game {
             // floating slightly above the floor; the next ~5 frames of
             // gravity would drift them down — visible as a "land,
             // stall, drift" stutter.
-            glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
+            glm::dvec3 newPosition = physics.position + glm::dvec3(0.0f, movement.y, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.y = newPosition.y;
                 if (movement.y != 0.0f) {
                     physics.isOnGround = false;
                 }
             } else {
-                float lo = newPosition.y;        // colliding endpoint
-                float hi = physics.position.y;   // last frame's resting Y (assumed safe)
-                glm::vec3 testPos = physics.position;
+                double lo = newPosition.y;       // colliding endpoint
+                double hi = physics.position.y;  // last frame's resting Y (assumed safe)
+                // Double: a float copy put the test box on a 3 cm grid in x/z
+                // far from the origin, so it touched block edges the real
+                // body did not.
+                glm::dvec3 testPos = physics.position;
                 for (int i = 0; i < 10; ++i) {   // 10 iter ≈ 1024× precision
-                    const float mid = (lo + hi) * 0.5f;
+                    const double mid = (lo + hi) * 0.5;
                     testPos.y = mid;
                     if (CheckCollision(testPos, physics, context)) {
                         lo = mid;
@@ -447,16 +778,16 @@ namespace Game {
                 physics.position.y = hi;
                 if (movement.y < 0.0f) {
                     physics.isOnGround = true;
-                    physics.waterVelocity.y = 0.0f;
+                    vt.y = 0.0f;
                 }
                 if (movement.y > 0.0f) {
-                    physics.waterVelocity.y = 0.0f;
+                    vt.y = 0.0f;
                 }
             }
 
             // Ground check when not moving vertically
             if (movement.y == 0.0f) {
-                glm::vec3 testPos = physics.position + glm::vec3(0.0f, -0.1f, 0.0f);
+                glm::dvec3 testPos = physics.position + glm::dvec3(0.0f, -0.1f, 0.0f);
                 physics.isOnGround = CheckCollision(testPos, physics, context);
             }
 
@@ -467,27 +798,29 @@ namespace Game {
             // Horizontal collision with jump-out-of-fluid
             bool hadHorizontalCollision = false;
 
-            newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
+            newPosition = physics.position + glm::dvec3(movement.x, 0.0f, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.x = newPosition.x;
             } else {
                 hadHorizontalCollision = true;
-                physics.waterVelocity.x = 0.0f;
+                vt.x = 0.0f;
             }
 
-            newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
+            newPosition = physics.position + glm::dvec3(0.0f, 0.0f, movement.z);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.z = newPosition.z;
             } else {
                 hadHorizontalCollision = true;
-                physics.waterVelocity.z = 0.0f;
+                vt.z = 0.0f;
             }
 
-            // 5. Jump-out-of-fluid (MC: jumpOutOfFluid)
-            // Only trigger at the water surface (partially submerged), not deep underwater.
+            physics.waterVelocity = vt * 20.0f;
+
+            // 5. Jump-out-of-fluid (MC: jumpOutOfFluid, from both fluid travels)
+            // Only trigger at the surface (partially submerged), not deep in the fluid.
             // MC checks if the player can move upward to exit the fluid.
-            if (hadHorizontalCollision && physics.waterDepth < physics.GetCurrentHeight()) {
-                glm::vec3 abovePos = physics.position + glm::vec3(0.0f, 0.6f, 0.0f);
+            if (hadHorizontalCollision && depth < physics.GetCurrentHeight()) {
+                glm::dvec3 abovePos = physics.position + glm::dvec3(0.0f, 0.6f, 0.0f);
                 if (!CheckCollision(abovePos, physics, context)) {
                     physics.waterVelocity.y = PlayerPhysics::WATER_JUMP_OUT;
                 }
@@ -554,8 +887,68 @@ namespace Game {
             // fall velocity gets rotated into horizontal exit velocity).
             // Without this the velocity field is ignored and the player
             // just stands at the wall portal exit.
-            horizontalMovement.x += physics.velocity.x;
-            horizontalMovement.z += physics.velocity.z;
+            // handleOnClimbable clamps the horizontal motion to 0.15 a tick.
+            if (physics.onClimbable) {
+                const float cap = PlayerPhysics::CLIMB_SLIDE_SPEED * physics.scale;
+                const float len = glm::length(horizontalMovement);
+                if (len > cap) horizontalMovement *= cap / len;
+            }
+
+            // Block friction — MC LivingEntity.travelInAir on the ground:
+            //   moveRelative(speed · 0.21600002 / f³), move, then
+            //   deltaMovement.xz *= f · 0.91,
+            // f being the friction of the block that affects movement
+            // (getBlockPosBelowThatAffectsMyMovement). This engine's walk is
+            // instant — the steady state MC reaches on a 0.6 block — so the
+            // tick map only runs where it gives something else: ice and blue
+            // ice (0.98 / 0.989), slime (0.8) and the Aether's quicksoil
+            // (1.1 — above 1, the slide that speeds up, until the
+            // FrictionCapped cap drops it to 0.99 past one block a tick;
+            // QuicksoilBlock.getFriction via GetBlockFriction's motion
+            // overload). The walk input is carried over as the acceleration
+            // that gives this engine's walk speed on a 0.6 block, scaled by
+            // MC's 0.216 / f³, and the map is advanced by its exact solution
+            // at a fractional tick count, as the fluid branch above does.
+            // velocity.xz then IS the slide (MC's deltaMovement), so the
+            // residual add and the ground decay below are skipped.
+            bool slide = false;
+            if (physics.isOnGround && !physics.isFlying) {
+                const glm::ivec3 below = BlockPosBelowThatAffectsMovement(physics.position);
+                const BlockID belowId = context.GetBlockState(below.x, below.y, below.z).Block();
+                const glm::dvec3 motionPerTick(physics.velocity.x / 20.0, 0.0, physics.velocity.z / 20.0);
+                const float friction = GetBlockFriction(belowId, motionPerTick);
+                constexpr float kDefaultFriction = 0.6f;
+                if (friction != kDefaultFriction) {
+                    slide = true;
+                    const float f        = deltaTime * 20.0f;
+                    const float retain   = friction * 0.91f;
+                    const float steady   = 1.0f - kDefaultFriction * 0.91f;   // 0.454
+                    const float accelMul = steady * (0.21600002f / (friction * friction * friction));
+                    auto slideAxis = [&](float velPerSecond, float inputPerSecond, float& displacement) {
+                        const float u = velPerSecond / 20.0f;
+                        const float a = (inputPerSecond / 20.0f) * accelMul;
+                        float uNew;
+                        if (std::abs(1.0f - retain) < 1.0e-6f) {
+                            uNew = u + a * f;   // retain == 1: no decay, pure acceleration
+                        } else {
+                            const float fixed = retain * a / (1.0f - retain);
+                            uNew = fixed + (u - fixed) * std::pow(retain, f);
+                        }
+                        displacement = (uNew / retain) * f;   // pre-friction motion of the last tick
+                        return uNew * 20.0f;
+                    };
+                    float dispX = 0.0f, dispZ = 0.0f;
+                    physics.velocity.x = slideAxis(physics.velocity.x, horizontalMovement.x, dispX);
+                    physics.velocity.z = slideAxis(physics.velocity.z, horizontalMovement.z, dispZ);
+                    horizontalMovement.x = deltaTime > 0.0f ? dispX / deltaTime : 0.0f;
+                    horizontalMovement.z = deltaTime > 0.0f ? dispZ / deltaTime : 0.0f;
+                }
+            }
+            if (!slide) {
+                horizontalMovement.x += physics.velocity.x;
+                horizontalMovement.z += physics.velocity.z;
+            }
+            physics.horizontalCollision = false;
 
             glm::vec3 totalMovement = horizontalMovement + glm::vec3(0.0f, physics.velocity.y, 0.0f);
             glm::vec3 movement = totalMovement * deltaTime;
@@ -576,7 +969,7 @@ namespace Game {
             // still snaps so they don't fall through the world.
             const bool currentlyStuck =
                 CheckCollision(physics.position, physics, context);
-            glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
+            glm::dvec3 newPosition = physics.position + glm::dvec3(0.0f, movement.y, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.y = newPosition.y;
                 if (movement.y != 0.0f) {
@@ -586,11 +979,11 @@ namespace Game {
                 physics.position.y = newPosition.y;
                 physics.isOnGround = false;
             } else {
-                float lo = newPosition.y;
-                float hi = physics.position.y;
-                glm::vec3 testPos = physics.position;
+                double lo = newPosition.y;
+                double hi = physics.position.y;
+                glm::dvec3 testPos = physics.position;   // double, see above
                 for (int i = 0; i < 10; ++i) {
-                    const float mid = (lo + hi) * 0.5f;
+                    const double mid = (lo + hi) * 0.5;
                     testPos.y = mid;
                     if (CheckCollision(testPos, physics, context)) {
                         lo = mid;
@@ -601,7 +994,37 @@ namespace Game {
                 physics.position.y = hi;
                 if (movement.y < 0.0f) {
                     physics.isOnGround = true;
-                    physics.velocity.y = 0.0f;
+                    // The block landed on — MC Entity.getOnPos(0.2F), the
+                    // `effectState` of Entity.move — decides two things
+                    // (BlockBounce.hpp):
+                    //   • Block.fallOn: its fallDistanceReduction scales the
+                    //     distance the fall-tracking block flushes (a bed
+                    //     halves it), sneaking or not.
+                    //   • Entity.restituteMovementAfterCollisions: unless
+                    //     sneaking (isSuppressingBounce) or the block forbids
+                    //     it (honey), an impact faster than one tick of
+                    //     gravity comes back up at bounceRestitution × the
+                    //     impact speed — a bed's 0.75, a slime block's 1.0.
+                    //     Slower than that and it is a plain landing, so a
+                    //     standing player does not vibrate on the mattress.
+                    // The player is a LivingEntity, so no ×0.8; gravity
+                    // scales with the body here, so the threshold does too.
+                    const BlockID landedOn = context.GetBlock(
+                        static_cast<int>(std::floor(physics.position.x)),
+                        static_cast<int>(std::floor(physics.position.y - 0.2)),
+                        static_cast<int>(std::floor(physics.position.z)));
+                    physics.landingFallReduction = FallDistanceReduction(landedOn);
+                    const float impact = physics.velocity.y;   // blocks/s, negative
+                    const float oneTickOfGravity = -PlayerPhysics::GRAVITY * physics.scale * 0.05f;
+                    const float restitution =
+                        (!physics.isSneaking && !SuppressesBounce(landedOn))
+                            ? BounceRestitution(landedOn) : 0.0f;
+                    if (restitution > 0.0f && -impact > oneTickOfGravity) {
+                        physics.velocity.y = -impact * restitution;
+                        physics.bouncedThisStep = true;
+                    } else {
+                        physics.velocity.y = 0.0f;
+                    }
                 }
                 if (movement.y > 0.0f) {
                     physics.velocity.y = 0.0f;
@@ -610,7 +1033,7 @@ namespace Game {
 
             // Ground check when not moving vertically
             if (movement.y == 0.0f) {
-                glm::vec3 testPosition = physics.position + glm::vec3(0.0f, -0.1f, 0.0f);
+                glm::dvec3 testPosition = physics.position + glm::dvec3(0.0f, -0.1f, 0.0f);
                 physics.isOnGround = CheckCollision(testPosition, physics, context);
             }
 
@@ -620,11 +1043,11 @@ namespace Game {
 
             // Sneaking ledge protection
             if (physics.isSneaking && physics.isOnGround) {
-                glm::vec3 testPosX = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
+                glm::dvec3 testPosX = physics.position + glm::dvec3(movement.x, 0.0f, 0.0f);
                 if (!HasSupportBelow(testPosX, physics, context)) {
                     movement.x = 0.0f;
                 }
-                glm::vec3 testPosZ = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
+                glm::dvec3 testPosZ = physics.position + glm::dvec3(0.0f, 0.0f, movement.z);
                 if (!HasSupportBelow(testPosZ, physics, context)) {
                     movement.z = 0.0f;
                 }
@@ -642,18 +1065,18 @@ namespace Game {
             auto tryStepUp = [&](float dx, float dz) -> bool {
                 if (!physics.isOnGround) return false;
                 // 1. Vertical clearance above current position.
-                glm::vec3 upPos = physics.position + glm::vec3(0.0f, kMaxUpStep, 0.0f);
+                glm::dvec3 upPos = physics.position + glm::dvec3(0.0f, kMaxUpStep, 0.0f);
                 if (CheckCollision(upPos, physics, context)) return false;
                 // 2. Horizontal move at elevated height.
-                glm::vec3 stepPos = upPos + glm::vec3(dx, 0.0f, dz);
+                glm::dvec3 stepPos = upPos + glm::dvec3(dx, 0.0, dz);
                 if (CheckCollision(stepPos, physics, context)) return false;
                 // 3. Snap Y back down to the top surface of whatever we stepped
                 //    onto (binary search between elevated Y and original Y).
-                float lo = physics.position.y;   // would collide if dropped this far
-                float hi = stepPos.y;            // confirmed clear
-                glm::vec3 testPos = stepPos;
+                double lo = physics.position.y;  // would collide if dropped this far
+                double hi = stepPos.y;           // confirmed clear
+                glm::dvec3 testPos = stepPos;
                 for (int i = 0; i < 10; ++i) {
-                    const float mid = (lo + hi) * 0.5f;
+                    const double mid = (lo + hi) * 0.5;
                     testPos.y = mid;
                     if (CheckCollision(testPos, physics, context)) {
                         lo = mid;
@@ -661,8 +1084,8 @@ namespace Game {
                         hi = mid;
                     }
                 }
-                const float oldY = physics.position.y;
-                physics.position = glm::vec3(stepPos.x, hi, stepPos.z);
+                const double oldY = physics.position.y;
+                physics.position = glm::dvec3(stepPos.x, hi, stepPos.z);
                 // Visual smoothing: shove the eye offset DOWN by the step
                 // delta we just absorbed, then let it decay back to 0 over
                 // the next ~tick. MC's Camera.setup interpolates between yo
@@ -672,7 +1095,7 @@ namespace Game {
                 // the same delta here. Combines additively with any prior
                 // unresolved offset so back-to-back steps stack instead of
                 // cancelling out.
-                const float dy = hi - oldY;
+                const float dy = static_cast<float>(hi - oldY);
                 if (dy > 0.0f) {
                     physics.stepVisualOffset -= dy;
                     // Don't let the camera drop below 0.6 m below the foot
@@ -690,7 +1113,7 @@ namespace Game {
             };
 
             // Horizontal collision
-            newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
+            newPosition = physics.position + glm::dvec3(movement.x, 0.0f, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.x = newPosition.x;
             } else if (!tryStepUp(movement.x, 0.0f)) {
@@ -698,13 +1121,22 @@ namespace Game {
                 // the blocked axis so the player doesn't keep "pushing"
                 // into the wall after hitting one.
                 physics.velocity.x = 0.0f;
+                if (movement.x != 0.0f) physics.horizontalCollision = true;
             }
 
-            newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
+            newPosition = physics.position + glm::dvec3(0.0f, 0.0f, movement.z);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.z = newPosition.z;
             } else if (!tryStepUp(0.0f, movement.z)) {
                 physics.velocity.z = 0.0f;
+                if (movement.z != 0.0f) physics.horizontalCollision = true;
+            }
+
+            // MC LivingEntity.travelInAir: pushing into the ladder (or holding
+            // jump) while on it climbs at 0.2 blocks a tick (4 blocks/s).
+            if (physics.onClimbable && (physics.horizontalCollision || jumpPressed)) {
+                physics.velocity.y = PlayerPhysics::CLIMB_UP_SPEED * physics.scale;
+                physics.isOnGround = false;
             }
 
             // Decay residual horizontal velocity ONLY when on ground.
@@ -712,7 +1144,7 @@ namespace Game {
             // through the air after a wall-portal exit). On ground,
             // friction ≈ 0.83 per 20-TPS tick (doubled from MC's 0.91:
             // 0.91² ≈ 0.83). Scaled to per-frame via the dt exponent.
-            if (physics.isOnGround) {
+            if (physics.isOnGround && !slide) {
                 const float frictionFactor =
                     std::pow(0.83f, deltaTime * 20.0f);
                 physics.velocity.x *= frictionFactor;
@@ -722,8 +1154,16 @@ namespace Game {
     }
 
     bool CollidesAt(const AABB& box, const PhysicsContext& context) {
+        return CollidesAt(AABBd::FromMinMax(glm::dvec3(box.min), glm::dvec3(box.max)), context);
+    }
 
-        // Check blocks that the box could be colliding with
+    bool CollidesAt(const AABBd& box, const PhysicsContext& context) {
+        PROFILE_ZONE_N("Physics.CollidesAt");
+
+        // Check blocks that the box could be colliding with. The cell range
+        // is taken from the DOUBLE box: a float box at x = 300,000 has a
+        // 0.03-block grid, so its faces land in the wrong cell near a block
+        // boundary and the player snags or sinks far from the origin.
         int minX = static_cast<int>(std::floor(box.min.x));
         int maxX = static_cast<int>(std::floor(box.max.x));
         // One cell lower than the box needs, because a collision shape may
@@ -735,6 +1175,17 @@ namespace Game {
         int minZ = static_cast<int>(std::floor(box.min.z));
         int maxZ = static_cast<int>(std::floor(box.max.z));
 
+        // The overlap tests run in a LOCAL frame anchored at the region's
+        // min cell: box and block shapes are both expressed relative to
+        // (minX, minY, minZ), so the floats involved are a few blocks in
+        // size and exact to a micron wherever the region is. `worldF` is
+        // the box in world floats for the portal hooks, which compare it
+        // against their own world-space surfaces.
+        const glm::dvec3 frameOrigin(minX, minY, minZ);
+        const AABB local = AABB::FromMinMax(glm::vec3(box.min - frameOrigin),
+                                            glm::vec3(box.max - frameOrigin));
+        const AABB worldF = AABB::FromMinMax(glm::vec3(box.min), glm::vec3(box.max));
+
         // Same open-sky early-out as CollectBlockColliders: an all-air box
         // cannot collide, and the section flags say so without a cell read.
         // Not while a portal is engaged (see SetPortalCollisionActive): the
@@ -742,7 +1193,7 @@ namespace Game {
         // — the void below bedrock — and the early-out answered before the
         // extra-solid hook could say so, which is how a player fell out of
         // the Overworld into the Nether's roof instead of standing on it.
-        if (context.blockAccess && !(g_portalExtraSolid && g_portalCollisionActive) &&
+        if (context.blockAccess && !PortalFarSideEngaged(context) &&
             context.blockAccess->IsRegionAllAir(glm::ivec3(minX, minY, minZ),
                                                 glm::ivec3(maxX, maxY, maxZ),
                                                 /*absentIsAir=*/true)) {
@@ -808,13 +1259,27 @@ namespace Game {
                     if (!BlockRegistry::HasCollision(bstate.Block())) {
                         // Empty here — but maybe solid on the far side of a
                         // portal this box is entering (see PortalExtraSolidFn).
-                        if (g_portalExtraSolid && g_portalExtraSolid(x, y, z, box)) {
+                        if (PortalFarSideSolidAt(context, x, y, z, worldF)) {
                             AABB cube;
-                            cube.min = glm::vec3(x, y, z);
+                            cube.min = glm::vec3(x - minX, y - minY, z - minZ);
                             cube.max = cube.min + glm::vec3(1.0f);
-                            if (box.Intersects(cube)) return true;
+                            if (local.Intersects(cube)) return true;
                         }
                         continue;
+                    }
+
+                    // The Aether's aerclouds: a shape that depends on the
+                    // mover and the block above (AercloudBlock.hpp), never
+                    // the model's cube.
+                    if (Aercloud::IsAercloud(bstate.Block())) {
+                        glm::vec3 lo, hi;
+                        if (!AercloudColliderAt(context, bstate.Block(), x, y, z, lo, hi)) continue;
+                        AABB cloudAABB;
+                        cloudAABB.min = glm::vec3(x - minX, y - minY, z - minZ) + lo;
+                        cloudAABB.max = glm::vec3(x - minX, y - minY, z - minZ) + hi;
+                        if (!local.Intersects(cloudAABB)) continue;
+                        if (PortalPassthroughAt(context, x, y, z, worldF)) continue;
+                        return true;
                     }
 
                     // Build the block's actual collision AABB from its model
@@ -838,9 +1303,9 @@ namespace Game {
                     for (size_t bi = 0; bi < boxCount; ++bi) {
                         const BlockRegistry::BlockShape& shape = boxes[bi];
                         AABB blockAABB;
-                        blockAABB.min = glm::vec3(x, y, z) + shape.min;
-                        blockAABB.max = glm::vec3(x, y, z) + shape.max;
-                        if (!box.Intersects(blockAABB)) continue;
+                        blockAABB.min = glm::vec3(x - minX, y - minY, z - minZ) + shape.min;
+                        blockAABB.max = glm::vec3(x - minX, y - minY, z - minZ) + shape.max;
+                        if (!local.Intersects(blockAABB)) continue;
 
                         // Portal-passthrough exception. The block is
                         // solid AND the moving AABB overlaps it, but
@@ -850,8 +1315,7 @@ namespace Game {
                         // exceeds the opening laterally (e.g. they're
                         // approaching from the side), the hook returns
                         // false and the wall stays solid.
-                        if (g_portalPassthrough &&
-                            g_portalPassthrough(x, y, z, box)) {
+                        if (PortalPassthroughAt(context, x, y, z, worldF)) {
                             continue;
                         }
                         return true; // Collision detected
@@ -863,19 +1327,22 @@ namespace Game {
         return false; // No collision
     }
 
-    bool CheckCollision(const glm::vec3& position, const PlayerPhysics& physics,
+    bool CheckCollision(const glm::dvec3& position, const PlayerPhysics& physics,
                        const PhysicsContext& context) {
         // Player-shaped wrapper over the generic test. Kept as its own
         // function (rather than inlined at every call site) so the player's
-        // sneak-dependent height stays in one place.
-        const float height = physics.GetCurrentHeight();
+        // sneak-dependent height stays in one place. Double in, double box:
+        // the player's position is double so that a far-away player stands
+        // on the ground exactly instead of on a 3 cm float grid.
+        const double height = physics.GetCurrentHeight();
+        const double half   = physics.GetWidth() * 0.5;
         return CollidesAt(
-            AABB(glm::vec3(position.x, position.y + height * 0.5f, position.z),
-                 glm::vec3(physics.GetWidth(), height, physics.GetWidth())),
+            AABBd::FromMinMax(position - glm::dvec3(half, 0.0, half),
+                              position + glm::dvec3(half, height, half)),
             context);
     }
 
-    bool HasSupportBelow(const glm::vec3& position, const PlayerPhysics& physics,
+    bool HasSupportBelow(const glm::dvec3& position, const PlayerPhysics& physics,
                         const PhysicsContext& context) {
 
         float halfWidth = physics.GetWidth() / 2.0f;
@@ -890,14 +1357,16 @@ namespace Game {
         // feet read as "approached from behind" and made the ground solid
         // again: the player stood in the surface, never entering.
         const float bodyHeight = physics.GetCurrentHeight();
-        const AABB bodyBox(glm::vec3(position.x, position.y + bodyHeight * 0.5f, position.z),
+        const AABB bodyBox(glm::vec3(position.x, position.y + bodyHeight * 0.5, position.z),
                            glm::vec3(physics.GetWidth(), bodyHeight, physics.GetWidth()));
 
         for (float xOffset : offsets) {
             for (float zOffset : offsets) {
-                glm::vec3 cornerPosition(
+                // Double: the corner's cell must be the one the double
+                // position is in, not the one its float rounding lands in.
+                glm::dvec3 cornerPosition(
                     position.x + xOffset,
-                    position.y - 0.1f, // Slightly below the player's feet
+                    position.y - 0.1, // Slightly below the player's feet
                     position.z + zOffset
                 );
 
@@ -911,6 +1380,28 @@ namespace Game {
                 int blockY = static_cast<int>(std::floor(cornerPosition.y));
                 bool inside = false;
                 BlockID bid = BlockID::Air;
+                // An Aether aercloud's floor is 0.000625 thick
+                // (AercloudBlock.hpp): resting on it the feet are in the
+                // cloud's OWN cell, and the probe point 0.1 lower has already
+                // left it. The floor supports the corner when it spans the
+                // probe's drop — what MC's backOffFromEdge finds by moving
+                // the box down a step and hitting it.
+                {
+                    const int feetCell = static_cast<int>(std::floor(position.y));
+                    const BlockID feetBlock = context.GetBlockState(blockX, feetCell, blockZ).Block();
+                    glm::vec3 lo, hi;
+                    if (feetCell != blockY && Aercloud::IsAercloud(feetBlock) &&
+                        AercloudColliderAt(context, feetBlock, blockX, feetCell, blockZ, lo, hi)) {
+                        const float lx = static_cast<float>(cornerPosition.x - blockX);
+                        const float lz = static_cast<float>(cornerPosition.z - blockZ);
+                        if (lx >= lo.x && lx <= hi.x && lz >= lo.z && lz <= hi.z &&
+                            feetCell + static_cast<double>(lo.y) <= position.y &&
+                            feetCell + static_cast<double>(hi.y) >= cornerPosition.y) {
+                            inside = true;
+                            blockY = feetCell;
+                        }
+                    }
+                }
                 for (int dy = 0; dy >= -1 && !inside; --dy) {
                     const int by = blockY + dy;
                     // Registry collision only — same rule as CheckCollision,
@@ -923,8 +1414,8 @@ namespace Game {
                         // The far side of a portal underfoot can be the floor
                         // (see PortalExtraSolidFn) — a full cube, so the probe
                         // point is inside it whenever it is in the cell.
-                        if (g_portalExtraSolid) {
-                            if (g_portalExtraSolid(blockX, by, blockZ, bodyBox)) {
+                        {
+                            if (PortalFarSideSolidAt(context, blockX, by, blockZ, bodyBox)) {
                                 inside = true;
                                 blockY = by;
                                 break;
@@ -937,7 +1428,18 @@ namespace Game {
                     // actually lies inside the block's collision shape (its top
                     // surface may be lower than the cube top for slabs / leaf
                     // litter / etc., and higher than it for a fence).
-                    const auto shapes = BlockRegistry::GetBlockCollisionShapeSet(context.GetBlockState(blockX, by, blockZ));
+                    BlockRegistry::BlockShapeSet shapes;
+                    if (Aercloud::IsAercloud(bid)) {
+                        // The mover-dependent cloud shape (AercloudBlock.hpp).
+                        glm::vec3 lo, hi;
+                        if (AercloudColliderAt(context, bid, blockX, by, blockZ, lo, hi)) {
+                            shapes.boxes[0].min = lo;
+                            shapes.boxes[0].max = hi;
+                            shapes.count = 1;
+                        }
+                    } else {
+                        shapes = BlockRegistry::GetBlockCollisionShapeSet(context.GetBlockState(blockX, by, blockZ));
+                    }
                     const float lx = cornerPosition.x - blockX;
                     const float ly = cornerPosition.y - by;
                     const float lz = cornerPosition.z - blockZ;
@@ -957,10 +1459,8 @@ namespace Game {
                 // inside a portal opening the body is going through, the
                 // corner doesn't count as support — needed so floor
                 // portals let the player fall through.
-                if (g_portalPassthrough) {
-                    if (g_portalPassthrough(blockX, blockY, blockZ, bodyBox)) {
-                        continue;
-                    }
+                if (PortalPassthroughAt(context, blockX, blockY, blockZ, bodyBox)) {
+                    continue;
                 }
                 return true;
             }
@@ -970,58 +1470,102 @@ namespace Game {
     }
 
     void UpdateWaterState(PlayerPhysics& physics, const PhysicsContext& context) {
-        // Scan the player's AABB (deflated by 0.001 like Minecraft) for water blocks.
-        // Track the highest water surface touching the player to compute waterDepth.
-        float height = physics.GetCurrentHeight();
-        float halfWidth = physics.GetWidth() * 0.5f - 0.001f;
-        float feetY = physics.position.y + 0.001f;
-        float topY = physics.position.y + height - 0.001f;
+        // MC EntityFluidInteraction.update for the player: every cell the
+        // body box (deflated 0.001, like getFluidInteractionBox) overlaps,
+        // per fluid the highest surface above the feet, whether the eye
+        // point is under the fluid's camera surface, and the summed flow of
+        // the overlapped cells for the current.
+        const float height = physics.GetCurrentHeight();
+        const float halfWidth = physics.GetWidth() * 0.5f - 0.001f;
+        const double feetY = physics.position.y + 0.001;
+        const double topY  = physics.position.y + height - 0.001;
 
-        int minX = static_cast<int>(std::floor(physics.position.x - halfWidth));
-        int maxX = static_cast<int>(std::floor(physics.position.x + halfWidth));
-        int minY = static_cast<int>(std::floor(feetY));
-        int maxY = static_cast<int>(std::floor(topY));
-        int minZ = static_cast<int>(std::floor(physics.position.z - halfWidth));
-        int maxZ = static_cast<int>(std::floor(physics.position.z + halfWidth));
+        const int minX = static_cast<int>(std::floor(physics.position.x - halfWidth));
+        const int maxX = static_cast<int>(std::floor(physics.position.x + halfWidth));
+        const int minY = static_cast<int>(std::floor(feetY));
+        const int maxY = static_cast<int>(std::floor(topY));
+        const int minZ = static_cast<int>(std::floor(physics.position.z - halfWidth));
+        const int maxZ = static_cast<int>(std::floor(physics.position.z + halfWidth));
 
-        float highestWaterSurface = 0.0f;
-        bool foundWater = false;
+        double     fluidHeight[3]   = {0.0, 0.0, 0.0};
+        bool       eyesInside[3]    = {false, false, false};
+        glm::dvec3 current[3]       = {glm::dvec3(0.0), glm::dvec3(0.0), glm::dvec3(0.0)};
+        int        currentCount[3]  = {0, 0, 0};
+        double     currentHeight[3] = {0.0, 0.0, 0.0};
 
-        for (int x = minX; x <= maxX; x++) {
-            for (int z = minZ; z <= maxZ; z++) {
-                for (int y = minY; y <= maxY; y++) {
-                    try {
-                        if (context.GetBlock(x, y, z) == BlockID::Water) {
-                            // Water surface is at the top of this block
-                            // (source blocks fill to ~0.9, but treat as full block for physics)
-                            float waterTop = static_cast<float>(y + 1);
-                            if (waterTop > highestWaterSurface) {
-                                highestWaterSurface = waterTop;
-                            }
-                            foundWater = true;
+        const double eyeY = physics.GetEyePosition().y;
+        const int eyeBlockX = static_cast<int>(std::floor(physics.position.x));
+        const int eyeBlockZ = static_cast<int>(std::floor(physics.position.z));
+        // MC Player.isPushedByFluid: `!abilities.flying`.
+        const bool wantCurrent = !physics.isFlying && !physics.noclip;
+
+        if (const IBlockAccess* blocks = context.blockAccess) {
+            for (int x = minX; x <= maxX; x++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        const FluidState fs = GetFluidState(*blocks, x, y, z);
+                        if (fs.IsEmpty()) continue;
+                        const glm::ivec3 cell(x, y, z);
+                        const double fluidBottom = static_cast<double>(y);
+                        const double fluidTop = fluidBottom + FluidHeight(*blocks, cell, fs);
+                        if (fluidTop < feetY) continue;
+                        const int t = static_cast<int>(fs.type);
+
+                        if (x == eyeBlockX && z == eyeBlockZ && eyeY >= fluidBottom) {
+                            const double topForCamera =
+                                fluidBottom + FluidHeightForCamera(*blocks, cell, fs);
+                            if (eyeY <= topForCamera) eyesInside[t] = true;
                         }
-                    } catch (...) {}
+                        fluidHeight[t] = std::max(fluidTop - physics.position.y, fluidHeight[t]);
+
+                        if (wantCurrent) {
+                            glm::dvec3 flow = FluidFlow(*blocks, cell, fs);
+                            currentHeight[t] = std::max(fluidHeight[t], currentHeight[t]);
+                            if (currentHeight[t] < 0.4) flow *= currentHeight[t];
+                            current[t] += flow;
+                            ++currentCount[t];
+                        }
+                    }
                 }
             }
         }
 
-        physics.isInWater = foundWater;
-        if (foundWater) {
-            physics.waterDepth = std::max(0.0f, highestWaterSurface - physics.position.y);
-            physics.waterDepth = std::min(physics.waterDepth, height); // Clamp to player height
-        } else {
-            physics.waterDepth = 0.0f;
+        constexpr int kWater = static_cast<int>(FluidType::Water);
+        constexpr int kLava  = static_cast<int>(FluidType::Lava);
+        physics.fluidAboveHead = false;
+        if (const IBlockAccess* blocks = context.blockAccess) {
+            physics.fluidAboveHead = !GetFluidState(*blocks,
+                static_cast<int>(std::floor(physics.position.x)),
+                static_cast<int>(std::floor(physics.position.y + 1.0 - 0.1)),
+                static_cast<int>(std::floor(physics.position.z))).IsEmpty();
         }
+        physics.isInWater    = fluidHeight[kWater] > 0.0;
+        physics.waterDepth   = std::min(static_cast<float>(fluidHeight[kWater]), height);
+        physics.isEyeInWater = eyesInside[kWater];
+        physics.isInLava     = fluidHeight[kLava] > 0.0;
+        physics.lavaDepth    = std::min(static_cast<float>(fluidHeight[kLava]), height);
+        physics.isEyeInLava  = eyesInside[kLava];
 
-        // Check if eyes are submerged
-        float eyeY = physics.GetEyePosition().y;
-        int eyeBlockX = static_cast<int>(std::floor(physics.position.x));
-        int eyeBlockY = static_cast<int>(std::floor(eyeY));
-        int eyeBlockZ = static_cast<int>(std::floor(physics.position.z));
-        try {
-            physics.isEyeInWater = (context.GetBlock(eyeBlockX, eyeBlockY, eyeBlockZ) == BlockID::Water);
-        } catch (...) {
-            physics.isEyeInWater = false;
+        // MC CurrentAccumulator.applyTo, for a player: the AVERAGE of the
+        // cells' flows (a mob takes the unit direction), scaled 0.014 for
+        // water and 0.0023 (0.007 with FAST_LAVA) for lava, with the
+        // minimum-nudge rule that keeps a still player from being pinned in
+        // a slow current. Both fluids contribute when the body is in both.
+        physics.fluidCurrent = glm::vec3(0.0f);
+        if (wantCurrent) {
+            for (int t : {kWater, kLava}) {
+                if (currentCount[t] == 0) continue;
+                const glm::dvec3 acc = current[t];
+                if (glm::dot(acc, acc) < 9.999999747378752E-6) continue;
+                const double scale = t == kWater ? 0.014 : (context.fastLava ? 0.007 : 0.0023333333333333335);
+                glm::dvec3 impulse = acc * (scale / static_cast<double>(currentCount[t]));
+                const double vx = physics.waterVelocity.x / 20.0, vz = physics.waterVelocity.z / 20.0;
+                if (std::abs(vx) < 0.003 && std::abs(vz) < 0.003 &&
+                    glm::length(impulse) < 0.0045000000000000005) {
+                    impulse = glm::normalize(impulse) * 0.0045000000000000005;
+                }
+                physics.fluidCurrent += glm::vec3(impulse);
+            }
         }
     }
 
@@ -1102,8 +1646,18 @@ namespace Game {
     // ── MC-faithful entity mover ───────────────────────────────────────────
 
     void CollectBlockColliders(const AABBd& region, const PhysicsContext& context,
-                               std::vector<AABBd>& out) {
+                               std::vector<AABBd>& out, const AABBd* mover) {
         out.clear();
+
+        // The mover's box as the provider takes it. Built once, outside the
+        // cell loop; only asked about at all when this context has a
+        // provider (a server level's mobs) and a mover was given.
+        const PortalCollisionProvider* portals = mover ? context.portalCollision : nullptr;
+        AABB moverF;
+        if (portals) {
+            moverF.min = glm::vec3(mover->min);
+            moverF.max = glm::vec3(mover->max);
+        }
 
         const int minX = static_cast<int>(std::floor(region.min.x));
         const int maxX = static_cast<int>(std::floor(region.max.x));
@@ -1162,6 +1716,23 @@ namespace Game {
                     const BlockID bid = cellState.Block();
                     if (!BlockRegistry::HasCollision(bid)) continue;
 
+                    // The Aether's aerclouds: the mover-dependent shape of
+                    // AercloudBlock.getCollisionShape (AercloudBlock.hpp) —
+                    // Entity::Move puts the mob's fall distance on the
+                    // context, so a mob sinks into a cloud exactly as the
+                    // player does and BlockBehaviors' entityInside hooks do
+                    // the rest.
+                    if (Aercloud::IsAercloud(bid)) {
+                        if (portals && portals->IsBlockBehindPortal(x, y, z, moverF)) continue;
+                        glm::vec3 lo, hi;
+                        if (!AercloudColliderAt(context, bid, x, y, z, lo, hi)) continue;
+                        AABBd cloudAABB;
+                        cloudAABB.min = glm::dvec3(x, y, z) + glm::dvec3(lo);
+                        cloudAABB.max = glm::dvec3(x, y, z) + glm::dvec3(hi);
+                        out.push_back(cloudAABB);
+                        continue;
+                    }
+
                     // The box UNION, not its bounds. MC's getCollisionShape is
                     // a VoxelShape and its collision walks every box in it;
                     // a stair contributes two or three, which is what lets the
@@ -1176,14 +1747,15 @@ namespace Game {
                     const BlockRegistry::BlockShape* shapesBegin = one ? one : multi.begin();
                     const size_t shapesCount = one ? 1u : multi.count;
 
-                    // Portal passthrough is deliberately NOT consulted here.
-                    // The hook's answer depends on the moving entity's own box
-                    // (it only opens for something that fits the 1x2 opening
-                    // laterally), and this collider set is reused across the
-                    // step-up candidates — so there is no single box to ask
-                    // about. Mobs therefore treat portal frames as solid, which
-                    // is the intended behaviour: nothing but the player travels
-                    // through a portal.
+                    // Portal passthrough, by the mover's box: the wall a gun
+                    // portal is painted on is not solid for a body that fits
+                    // the opening and is walking into it. The global player
+                    // hook is deliberately NOT consulted here — its portal
+                    // list is the player's, refreshed on the client thread;
+                    // only a context-owned provider (the server level's
+                    // MobPortalCollision) answers, and it calls nothing back
+                    // into physics (see the re-entrancy note in MoveEntity).
+                    if (portals && portals->IsBlockBehindPortal(x, y, z, moverF)) continue;
                     for (size_t bi = 0; bi < shapesCount; ++bi) {
                         const BlockRegistry::BlockShape& shape = shapesBegin[bi];
                         // Built in DOUBLES from the integer block coordinate,
@@ -1305,6 +1877,7 @@ namespace Game {
                                 float maxUpStep, bool wasOnGround,
                                 const PhysicsContext& context) {
         EntityMoveResult result;
+        PROFILE_ZONE_N("Physics.MoveEntity");
 
         // MC's equality epsilon (Mth.equal). Anything closer than this counts
         // as "went the whole way" and does NOT raise a collision flag.
@@ -1361,7 +1934,14 @@ namespace Game {
             glm::dvec3 probe = pos;
             probe.y -= 0.001;
             const AABBd pb = boxAt(probe);
-            if (CollidesAt(AABB{ glm::vec3(pb.min), glm::vec3(pb.max) }, context)) {
+            // FromMinMax, not AABB{min, max}: the braces picked the (centre,
+            // size) constructor, so this probe tested a box centred on the
+            // entity's min corner and as WIDE AS ITS COORDINATES — at
+            // z = 323,000 that was 12.6 million chunk columns per idle mob
+            // per tick on both server and client (untitled1.tracy), and a
+            // few hundred columns even at spawn. The resting probe below
+            // had the same bug.
+            if (CollidesAt(pb, context)) {
                 // Still standing on it. Zero the components the full resolve
                 // would have zeroed, and report the same flags it would have.
                 velocity.x = 0.0;
@@ -1380,9 +1960,8 @@ namespace Game {
             // and free-fall must not restart the moment it stops.
             glm::dvec3 probe = pos;
             probe.y -= 0.001;
-            // A boolean overlap query, so the float AABB is fine here.
             const AABBd p = boxAt(probe);
-            result.onGround = CollidesAt(AABB{ glm::vec3(p.min), glm::vec3(p.max) }, context);
+            result.onGround = CollidesAt(p, context);
             return result;
         }
 
@@ -1434,12 +2013,17 @@ namespace Game {
         //
         // Not re-entrant. Audited: nothing in the SetBlock/NotifyNeighborBlocks
         // chain calls back into MoveEntity, and the resting-contact probe uses
-        // CollidesAt, which has its own inline cell loop. If the portal
-        // passthrough hook deliberately excluded from CollectBlockColliders
-        // (see the note ~line 1032) is ever revisited, this buffer would be
-        // live across that callback and would need a guard.
+        // CollidesAt, which has its own inline cell loop. The portal
+        // passthrough CollectBlockColliders now consults is the context's
+        // PortalCollisionProvider, which is pure geometry against a copied
+        // portal list and calls nothing back into physics — this buffer is
+        // never live across a callback. Keep it that way for any provider.
+        //
+        // The mover for the passthrough is the box where the move STARTS:
+        // a body entering a gun portal is judged by where it stands, and
+        // the same answer serves every step-up candidate.
         thread_local std::vector<AABBd> colliders;
-        CollectBlockColliders(region, context, colliders);
+        CollectBlockColliders(region, context, colliders, &startBox);
 
         // MC Direction.axisStepOrder: resolve the LARGEST component first, so
         // a mostly-horizontal move commits to its dominant axis before the

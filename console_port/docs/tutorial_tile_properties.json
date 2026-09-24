@@ -1,0 +1,458 @@
+[
+  {
+    "id": 26,
+    "source_class": "BedTile",
+    "material": "cloth",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 27,
+    "source_class": "RailTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 29,
+    "source_class": "PistonBaseTile",
+    "material": "piston",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 34,
+    "source_class": "PistonExtensionTile",
+    "material": "piston",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 50,
+    "source_class": "TorchTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 14
+  },
+  {
+    "id": 51,
+    "source_class": "FireTile",
+    "material": "fire",
+    "solid": false,
+    "opacity": 0,
+    "emission": 15
+  },
+  {
+    "id": 53,
+    "source_class": "StairTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 54,
+    "source_class": "ChestTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 55,
+    "source_class": "RedStoneDustTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 59,
+    "source_class": "CropTile",
+    "material": "plant",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 61,
+    "source_class": "FurnaceTile",
+    "material": "stone",
+    "solid": true,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 64,
+    "source_class": "DoorTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 65,
+    "source_class": "LadderTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 66,
+    "source_class": "RailTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 67,
+    "source_class": "StairTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 69,
+    "source_class": "LeverTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 71,
+    "source_class": "DoorTile",
+    "material": "metal",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 72,
+    "source_class": "PressurePlateTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 75,
+    "source_class": "NotGateTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 76,
+    "source_class": "NotGateTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 7
+  },
+  {
+    "id": 77,
+    "source_class": "ButtonTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 78,
+    "source_class": "TopSnowTile",
+    "material": "topSnow",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 85,
+    "source_class": "FenceTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 90,
+    "source_class": "PortalTile",
+    "material": "portal",
+    "solid": false,
+    "opacity": 0,
+    "emission": 11
+  },
+  {
+    "id": 93,
+    "source_class": "DiodeTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 94,
+    "source_class": "DiodeTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 9
+  },
+  {
+    "id": 96,
+    "source_class": "TrapDoorTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 101,
+    "source_class": "ThinFenceTile",
+    "material": "metal",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 102,
+    "source_class": "ThinFenceTile",
+    "material": "glass",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 103,
+    "source_class": "MelonTile",
+    "material": "vegetable",
+    "solid": true,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 104,
+    "source_class": "StemTile",
+    "material": "plant",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 105,
+    "source_class": "StemTile",
+    "material": "plant",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 107,
+    "source_class": "FenceGateTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 108,
+    "source_class": "StairTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 109,
+    "source_class": "StairTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 114,
+    "source_class": "StairTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 116,
+    "source_class": "EnchantmentTableTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 117,
+    "source_class": "BrewingStandTile",
+    "material": "metal",
+    "solid": false,
+    "opacity": 0,
+    "emission": 1
+  },
+  {
+    "id": 118,
+    "source_class": "CauldronTile",
+    "material": "metal",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 123,
+    "source_class": "RedlightTile",
+    "material": "buildable_glass",
+    "solid": true,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 124,
+    "source_class": "RedlightTile",
+    "material": "buildable_glass",
+    "solid": true,
+    "opacity": 255,
+    "emission": 15
+  },
+  {
+    "id": 128,
+    "source_class": "StairTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 130,
+    "source_class": "EnderChestTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 0,
+    "emission": 7
+  },
+  {
+    "id": 131,
+    "source_class": "TripWireSourceTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 132,
+    "source_class": "TripWireTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 134,
+    "source_class": "StairTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 135,
+    "source_class": "StairTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 136,
+    "source_class": "StairTile",
+    "material": "wood",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 139,
+    "source_class": "WallTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 140,
+    "source_class": "FlowerPotTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 141,
+    "source_class": "CarrotTile",
+    "material": "plant",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 142,
+    "source_class": "PotatoTile",
+    "material": "plant",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 144,
+    "source_class": "SkullTile",
+    "material": "decoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 145,
+    "source_class": "AnvilTile",
+    "material": "heavyMetal",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  },
+  {
+    "id": 155,
+    "source_class": "QuartzBlockTile",
+    "material": "stone",
+    "solid": true,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 156,
+    "source_class": "StairTile",
+    "material": "stone",
+    "solid": false,
+    "opacity": 255,
+    "emission": 0
+  },
+  {
+    "id": 171,
+    "source_class": "WoolCarpetTile",
+    "material": "clothDecoration",
+    "solid": false,
+    "opacity": 0,
+    "emission": 0
+  }
+]

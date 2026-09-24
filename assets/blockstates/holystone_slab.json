@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "type=bottom": {
+      "model": "minecraft:block/holystone_slab"
+    },
+    "type=double": {
+      "model": "minecraft:block/holystone"
+    },
+    "type=top": {
+      "model": "minecraft:block/holystone_slab_top"
+    }
+  }
+}

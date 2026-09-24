@@ -3,6 +3,9 @@
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
+#include "common/sound/SoundEvents.hpp"
+#include "common/sound/SoundType.hpp"
+#include "common/world/block/BlockRegistry.hpp"
 #include "common/core/Mth.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/Goal.hpp"
@@ -74,6 +77,10 @@ namespace Game {
         FrogAi::InitMemories(*this);
     }
 
+    void Frog::PlayEatingSound() {
+        if (m_level) m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::FROG_EAT, SoundSource::Neutral, 2.0f, 1.0f);
+    }
+
     void Frog::UpdateBrainActivity() {
         // MC Frog.customServerAiStep: tick the brain, then re-pick the
         // activity. Mob::ServerAiStep does the first half.
@@ -141,6 +148,7 @@ namespace Game {
 
     void Camel::SitDown() {
         if (IsCamelSitting()) return;
+        MakeSound(IsHusk() ? SoundEvents::CAMEL_HUSK_SIT : SoundEvents::CAMEL_SIT);   // MC getSitDownSound
         SetPose(Pose::Sitting);
         // NEGATIVE while sitting — that sign IS the sitting flag in MC.
         ResetLastPoseChangeTick(-(m_level ? m_level->GetGameTime() : 0));
@@ -148,6 +156,7 @@ namespace Game {
 
     void Camel::StandUp() {
         if (!IsCamelSitting()) return;
+        MakeSound(IsHusk() ? SoundEvents::CAMEL_HUSK_STAND : SoundEvents::CAMEL_STAND);   // MC getStandUpSound
         SetPose(Pose::Standing);
         ResetLastPoseChangeTick(m_level ? m_level->GetGameTime() : 0);
     }
@@ -158,6 +167,28 @@ namespace Game {
         // considered "in transition" at all.
         const int64_t now = m_level ? m_level->GetGameTime() : 0;
         ResetLastPoseChangeTick(std::max<int64_t>(0, now - kStandUpDuration - 1));
+    }
+
+    void Camel::PlayStepSound(const glm::ivec3& pos, BlockState state) {
+        (void)pos;
+        // #camel_sand_step_sound_blocks = #sand + #concrete_powder.
+        const std::string& slug = BlockRegistry::Get(state.Block()).registrySlug;
+        const bool sandy = slug == "sand" || slug == "red_sand" || slug == "suspicious_sand"
+            || (slug.size() > 16 && slug.compare(slug.size() - 16, 16, "_concrete_powder") == 0);
+        if (IsHusk()) {
+            PlaySound(sandy ? SoundEvents::CAMEL_HUSK_STEP_SAND : SoundEvents::CAMEL_HUSK_STEP, 0.4f, 1.0f);
+        } else {
+            PlaySound(sandy ? SoundEvents::CAMEL_STEP_SAND : SoundEvents::CAMEL_STEP, 1.0f, 1.0f);
+        }
+    }
+
+    void Camel::PlayEatingSound() {
+        // MC Camel.feed's eat: level.playSound(null, x, y, z, getEatingSound(),
+        // getSoundSource(), 1, 1 ± 0.2).
+        if (!m_level) return;
+        JavaRandom& rng = m_level->Random();
+        m_level->PlaySound(nullptr, position, IsHusk() ? SoundEvents::CAMEL_HUSK_EAT : SoundEvents::CAMEL_EAT,
+                           GetSoundSource(), 1.0f, 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.2f);
     }
 
     void Camel::OnPoseUpdated() {
@@ -185,7 +216,13 @@ namespace Game {
         }
         if (m_dashCooldown > 0) {
             --m_dashCooldown;
-            // MC plays CAMEL_DASH_READY at zero; no sound system yet.
+            // MC: at zero, level.playSound(null, blockPosition(),
+            // getDashReadySound(), NEUTRAL, 1, 1).
+            if (m_dashCooldown == 0 && m_level) {
+                m_level->PlaySound(nullptr, BlockPosition(),
+                                   IsHusk() ? SoundEvents::CAMEL_HUSK_DASH_READY : SoundEvents::CAMEL_DASH_READY,
+                                   SoundSource::Neutral, 1.0f, 1.0f);
+            }
         }
 
         // MC Camel.tick: a sitting camel that ends up in water stands straight
@@ -260,6 +297,13 @@ namespace Game {
         }
 
     } // namespace
+
+    const char* Bat::GetAmbientSound() const {
+        // MC Bat.getAmbientSound: `isResting() && random.nextInt(4) != 0 ?
+        // null : BAT_AMBIENT`.
+        if (IsResting() && m_level && m_level->Random().NextInt(4) != 0) return "";
+        return SoundEvents::BAT_AMBIENT;
+    }
 
     Bat::Bat(EntityLevel* level) : GenericMob(EntityTypeId::Bat, level) {
         // MC's Bat does not override registerGoals at all — its entire
@@ -403,6 +447,13 @@ namespace Game {
     }
     void Goat::UpdateBrainActivity() { GoatAi::UpdateActivity(*this); }
 
+    void Goat::PlayEatingSound() {
+        if (!m_level) return;
+        JavaRandom& rng = m_level->Random();
+        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::GOAT_EAT, SoundSource::Neutral, 1.0f,
+                                     0.8f + rng.NextFloat() * 0.4f);
+    }
+
     Hoglin::Hoglin(EntityLevel* level) : GenericAnimal(EntityTypeId::Hoglin, level) {
         m_goalSelector.Clear();
         m_targetSelector.Clear();
@@ -411,17 +462,39 @@ namespace Game {
     }
     void Hoglin::UpdateBrainActivity() { HoglinAi::UpdateActivity(*this); }
 
+    const char* Hoglin::GetAmbientSound() const {
+        if (!m_level || m_level->IsClientSide()) return "";
+        const Brain* brain = GetBrain();
+        const std::optional<Activity> activity = brain ? brain->GetActiveNonCoreActivity() : std::nullopt;
+        if (!activity) return "";
+        if (*activity == Activity::Avoid) return SoundEvents::HOGLIN_RETREAT;
+        if (*activity == Activity::Fight) return SoundEvents::HOGLIN_ANGRY;
+        return SoundEvents::HOGLIN_AMBIENT;
+    }
+
+    const char* Piglin::GetAmbientSound() const {
+        if (!m_level || m_level->IsClientSide()) return "";
+        return PiglinAi::SoundForCurrentActivity(*this);
+    }
+
+    const char* Zoglin::GetAmbientSound() const {
+        if (!m_level || m_level->IsClientSide()) return "";
+        const Brain* brain = GetBrain();
+        return brain && brain->HasMemoryValue(MemoryModule::AttackTarget) ? SoundEvents::ZOGLIN_ANGRY
+                                                                           : SoundEvents::ZOGLIN_AMBIENT;
+    }
+
     bool Hoglin::DoHurtTarget(Entity& target) {
         // MC Hoglin.doHurtTarget: only living targets; arm the headbutt clock
         // and broadcast event 4 BEFORE the hit lands, so the animation starts
-        // on the same tick. The HOGLIN_ATTACK sound waits on the sound
-        // system; HoglinAi.onHitTarget (the pack-retaliation memory) is not
+        // on the same tick, with the HOGLIN_ATTACK grunt. HoglinAi.onHitTarget (the pack-retaliation memory) is not
         // ported; HoglinBase.hurtAndThrowTarget's damage + fling is covered
         // by the base hit — ATTACK_KNOCKBACK 1.0 from the def rides the
         // base's extra knockback (the extra vertical toss is not modelled).
         if (dynamic_cast<LivingEntity*>(&target) == nullptr) return false;
         m_attackAnimationRemainingTicks = 10;
         if (m_level) m_level->BroadcastEntityEvent(*this, 4);
+        MakeSound(SoundEvents::HOGLIN_ATTACK);
         return GenericAnimal::DoHurtTarget(target);
     }
 
@@ -435,8 +508,9 @@ namespace Game {
     }
 
     void Hoglin::HandleEntityEvent(uint8_t id) {
-        // MC Hoglin.handleEntityEvent(4) — restart the headbutt clock (the
-        // attack sound waits on the sound system).
+        // MC Hoglin.handleEntityEvent(4) — restart the headbutt clock (its
+        // client-side attack sound is MC's silent null-except playSound; the
+        // server's DoHurtTarget voices it).
         if (id == 4) {
             m_attackAnimationRemainingTicks = 10;
         } else {
@@ -507,12 +581,13 @@ namespace Game {
 
     bool Zoglin::DoHurtTarget(Entity& target) {
         // MC Zoglin.doHurtTarget, the Hoglin twin: only living targets, arm
-        // the clock, broadcast event 4, then the hit. The ZOGLIN_ATTACK
-        // sound waits on the sound system; hurtAndThrowTarget's fling is
+        // the clock, broadcast event 4, ZOGLIN_ATTACK, then the hit.
+        // hurtAndThrowTarget's fling is
         // covered by the base's ATTACK_KNOCKBACK (1.0 from the def).
         if (dynamic_cast<LivingEntity*>(&target) == nullptr) return false;
         m_attackAnimationRemainingTicks = 10;
         if (m_level) m_level->BroadcastEntityEvent(*this, 4);
+        MakeSound(SoundEvents::ZOGLIN_ATTACK);
         return GenericMonster::DoHurtTarget(target);
     }
 
@@ -570,9 +645,9 @@ namespace Game {
     Piglin::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
         // MC Piglin.finalizeSpawn — 20% baby (the adult's spawn weapon and
         // the 10%-per-piece gold armor rolls are skipped: no equipment
-        // system). MC exempts STRUCTURE spawns; structures do not spawn mobs
-        // here.
-        if (m_level && m_level->Random().NextFloat() < 0.2f) {
+        // system). STRUCTURE spawns (the bastion's template piglins) skip the
+        // roll entirely: they keep the template's adult body and its weapon.
+        if (reason != SpawnReason::Structure && m_level && m_level->Random().NextFloat() < 0.2f) {
             SetBaby(true);
         }
         PiglinAi::InitMemories(*this);
@@ -599,13 +674,16 @@ namespace Game {
         const bool converting = !IsImmuneToZombification() && !IsNoAi();
         m_timeInOverworld = converting ? m_timeInOverworld + 1 : 0;
         if (m_timeInOverworld > 300) {
-            // MC finishConversion → ZOMBIFIED_PIGLIN. The 200-tick nausea on
-            // the convert is skipped (no nausea effect); the conversion-shake
-            // visual is skipped like the zombie→drowned one; cancelAdmiring
-            // and the inventory drop are items-system work.
+            // MC finishConversion → ZOMBIFIED_PIGLIN, whose afterConversion
+            // callback gives the new body NAUSEA for 200 ticks (after
+            // convertCommon has copied the piglin's own effects over). The
+            // conversion-shake visual is skipped like the zombie→drowned one;
+            // cancelAdmiring and the inventory drop are items-system work.
+            MakeSound(SoundEvents::PIGLIN_CONVERTED_TO_ZOMBIFIED);   // MC playConvertedSound
             auto zombified = std::make_unique<ZombifiedPiglin>(m_level);
             CopyConversionState(*zombified);
             zombified->SetBaby(IsBaby());
+            zombified->AddEffect(MobEffectInstance(MobEffectId::Nausea, 200, 0));
             FinishConversion(std::move(zombified));
         }
     }
@@ -646,11 +724,21 @@ namespace Game {
     void PiglinBrute::CustomServerAiStep() {
         // MC AbstractPiglin.customServerAiStep — see Piglin::CustomServerAiStep.
         if (!m_level || m_level->IsClientSide()) return;
+        // MC PiglinBrute.customServerAiStep → PiglinBruteAi.maybePlayActivitySound:
+        // a 1.25% chance a tick of the angry snort while fighting.
+        if (m_level->Random().NextFloat() < 0.0125f) {
+            if (const Brain* brain = GetBrain(); brain && brain->GetActiveNonCoreActivity() == Activity::Fight) {
+                MakeSound(SoundEvents::PIGLIN_BRUTE_ANGRY);
+            }
+        }
         const bool converting = !IsImmuneToZombification() && !IsNoAi();
         m_timeInOverworld = converting ? m_timeInOverworld + 1 : 0;
         if (m_timeInOverworld > 300) {
+            MakeSound(SoundEvents::PIGLIN_BRUTE_CONVERTED_TO_ZOMBIFIED);   // MC playConvertedSound
             auto zombified = std::make_unique<ZombifiedPiglin>(m_level);
             CopyConversionState(*zombified);
+            // AbstractPiglin.finishConversion's NAUSEA 200 (see above).
+            zombified->AddEffect(MobEffectInstance(MobEffectId::Nausea, 200, 0));
             FinishConversion(std::move(zombified));
         }
     }
@@ -1050,10 +1138,10 @@ namespace Game {
                         this);
                 }
             }
-            // MC: setHasStung(true) + stopBeingAngry() (the BEE_STING sound
-            // waits on the sound system).
+            // MC: setHasStung(true), stopBeingAngry(), BEE_STING.
             m_hasStung = true;
             StopBeingAngry();
+            PlaySound(SoundEvents::BEE_STING, 1.0f, 1.0f);
         }
         return wasHurt;
     }
@@ -1147,6 +1235,19 @@ namespace Game {
 
     void Breeze::UpdateBrainActivity() { BreezeAi::UpdateActivity(*this); }
 
+    void Breeze::PlayAmbientSound() {
+        const Brain* brain = GetBrain();
+        const bool hasTarget = brain && brain->HasMemoryValue(MemoryModule::AttackTarget);
+        if ((!hasTarget || !onGround) && m_level) {
+            m_level->PlayLocalSoundFromEntity(*this, GetAmbientSound(), GetSoundSource(), 1.0f, 1.0f);
+        }
+    }
+
+    bool Breeze::CauseFallDamage(double fallDist, float damageMultiplier) {
+        if (fallDist > 3.0) PlaySound(SoundEvents::BREEZE_LAND, 1.0f, 1.0f);
+        return GenericMonster::CauseFallDamage(fallDist, damageMultiplier);
+    }
+
     bool Breeze::CanAttack(const LivingEntity& target) const {
         // MC Breeze.canAttack — players and iron golems, nothing else. The
         // base adds MC's alive/attackable gate, which its callers apply.
@@ -1192,7 +1293,17 @@ namespace Game {
                 Anim(MobAnim::Slide).Stop();
             }
         }
-        // MC's 1–80-tick whirl-sound timer would run here; no sound system.
+        // MC Breeze.tick: the whirl, on a 1..80-tick timer — a local sound, so
+        // only a client hears it (the server's playLocalSound is a no-op).
+        if (m_level) {
+            m_soundTick = m_soundTick == 0 ? m_level->Random().NextInt(1, 80) : m_soundTick - 1;
+            if (m_soundTick == 0) {
+                JavaRandom& rng = m_level->Random();
+                const float pitch = 0.7f + 0.4f * rng.NextFloat();
+                const float volume = 0.8f + 0.2f * rng.NextFloat();
+                m_level->PlayLocalSoundFromEntity(*this, SoundEvents::BREEZE_WHIRL, GetSoundSource(), volume, pitch);
+            }
+        }
         GenericMonster::Tick();
     }
 
@@ -1245,7 +1356,20 @@ namespace Game {
         constexpr uint8_t kEventCreakingInvulnerable = 66;
     }
 
-    Warden::Warden(EntityLevel* level) : GenericMonster(EntityTypeId::Warden, level) {
+    bool Warden::CheckSpawnObstruction(EntityLevel& level) const {
+        // MC Warden.checkSpawnObstruction: super && level.noCollision(this,
+        // getType().getDimensions().makeBoundingBox(position())) — the TYPE's
+        // box (not the current pose's), feet at the position.
+        if (!Mob::CheckSpawnObstruction(level)) return false;
+        const EntityTypeInfo& info = GetEntityTypeInfo(GetType());
+        const double half = static_cast<double>(info.width) * 0.5;
+        AABBd box;
+        box.min = glm::dvec3(position.x - half, position.y, position.z - half);
+        box.max = glm::dvec3(position.x + half, position.y + info.height, position.z + half);
+        return !CollidesAt(box, level.Physics());
+    }
+
+    Warden::Warden(EntityLevel* level, EntityTypeId type) : GenericMonster(type, level) {
         // NO GOALS — MC's Warden is all brain.
         m_goalSelector.Clear();
         m_targetSelector.Clear();
@@ -1272,7 +1396,9 @@ namespace Game {
         // world border have no equivalents.)
         auto* living = dynamic_cast<const LivingEntity*>(entity);
         if (!living || living == this) return false;
-        if (living->GetType() == EntityTypeId::Warden) return false;
+        // MC `entity instanceof Warden` — the class, so the Silent Warden
+        // and the vanilla warden leave each other alone.
+        if (dynamic_cast<const Warden*>(living)) return false;
         if (living->IsCreative() || living->IsSpectator()) return false;
         return living->IsAttackable() && living->IsAlive();
     }
@@ -1283,12 +1409,21 @@ namespace Game {
             brain->SetMemoryWithExpiry(MemoryModule::DigCooldown, std::monostate{},
                                        WardenAi::kDiggingCooldown);
         }
-        // MC: only EntitySpawnReason.TRIGGERED — a sculk shrieker's summon —
-        // spawns the warden EMERGING (pose + IS_EMERGING for the emerge
-        // activity). No shriekers and no TRIGGERED reason exist yet, so every
-        // warden here starts above ground, exactly like MC's /summon; the
-        // whole emerge path below is wired for when they do.
-        (void)reason;
+        // MC Warden.finalizeSpawn: only EntitySpawnReason.TRIGGERED — a
+        // sculk shrieker's summon, or here the echo core's (PlayerSession's
+        // break path) — spawns the warden EMERGING: the pose starts the clip
+        // client-side (OnPoseUpdated), the IS_EMERGING memory selects the
+        // EMERGE activity for kEmergeDuration ticks, and WARDEN_AGITATED
+        // plays at volume 5. Every other reason (/summon, a spawn egg)
+        // starts above ground.
+        if (reason == SpawnReason::Triggered) {
+            SetPose(Pose::Emerging);
+            if (Brain* brain = GetBrain()) {
+                brain->SetMemoryWithExpiry(MemoryModule::IsEmerging, std::monostate{},
+                                           WardenAi::kEmergeDuration);
+            }
+            PlaySound(SoundEvents::WARDEN_AGITATED, 5.0f, 1.0f);
+        }
         return GenericMonster::FinalizeSpawn(reason, std::move(groupData));
     }
 
@@ -1301,17 +1436,48 @@ namespace Game {
             WardenAi::SetDigCooldown(*this);
         }
         GenericMonster::Tick();
-        // MC's client half — heartbeat sound, tendril/heart counters, digging
-        // particles — is model-layer work the generated warden has no hooks
-        // for.
+        // MC Warden.tick, client half: the heartbeat, every
+        // getHeartBeatDelay() ticks — 40 calm, down to 10 at full anger —
+        // as a local sound (5.0, the voice pitch) unless silent. (The
+        // tendril/heart animation counters and digging particles are
+        // model-layer work the generated warden has no hooks for.)
+        if (m_level && m_level->IsClientSide()) {
+            const float f = static_cast<float>(GetActiveAnger()) / static_cast<float>(kAngerAngry);
+            const int delay = 40 - static_cast<int>(std::floor(std::clamp(f, 0.0f, 1.0f) * 30.0f));
+            if (delay > 0 && tickCount % delay == 0 && !IsSilent()) {
+                m_level->PlayLocalSound(position, SoundEvents::WARDEN_HEARTBEAT, GetSoundSource(),
+                                        5.0f, GetVoicePitch(), false);
+            }
+        }
+    }
+
+    const char* Warden::GetAmbientSound() const {
+        // MC Warden.getAmbientSound: silent while roaring, digging or
+        // emerging; otherwise the AngerLevel's voice (CALM ambient,
+        // AGITATED, ANGRY).
+        if (GetPose() == Pose::Roaring || IsDiggingOrEmerging()) return "";
+        const int anger = GetActiveAnger();
+        if (anger >= kAngerAngry)    return SoundEvents::WARDEN_ANGRY;
+        if (anger >= kAngerAgitated) return SoundEvents::WARDEN_AGITATED;
+        return SoundEvents::WARDEN_AMBIENT;
     }
 
     void Warden::UpdateBrainActivity() {
-        // MC Warden.customServerAiStep's order around the brain tick: anger
-        // decays every 20 ticks, THEN the activity switch reads the result.
-        // (applyDarknessAround is skipped even with the effect system in:
-        // DARKNESS is a pure screen effect — it has no server-side gameplay
-        // half — and no effect sync/rendering exists to show it.)
+        // MC Warden.customServerAiStep's order around the brain tick: the
+        // darkness pulse, anger decays every 20 ticks, THEN the activity
+        // switch reads the result.
+        //
+        // MC Warden.applyDarknessAround(level, position, this, 20): every 120
+        // ticks (staggered by entity id), DARKNESS 260 ticks, no particles,
+        // on every survival player within 20 blocks that does not already
+        // have it for more than 199 more ticks (MobEffectUtil
+        // .addEffectToPlayersAround's display limit of 200).
+        if (m_level && !m_level->IsClientSide() && (tickCount + GetId()) % 120 == 0) {
+            AddEffectToPlayersAround(*m_level, this, position, 20.0,
+                                     MobEffectInstance(MobEffectId::Darkness, 260, 0,
+                                                       /*ambient=*/false, /*visible=*/false),
+                                     200);
+        }
         if (tickCount % 20 == 0) TickAngerManagement();
         WardenAi::UpdateActivity(*this);
     }
@@ -1349,9 +1515,8 @@ namespace Game {
     }
 
     void Warden::IncreaseAngerAt(Entity* entity, int amount, bool playSound) {
-        // MC Warden.increaseAngerAt. playSound picks WARDEN_LISTENING[-ANGRY];
-        // no sound system.
-        (void)playSound;
+        // MC Warden.increaseAngerAt, then playListeningSound (the AngerLevel's
+        // WARDEN_LISTENING / WARDEN_LISTENING_ANGRY at 10.0, never mid-roar).
         if (IsNoAi() || !CanTargetEntity(entity)) return;
         WardenAi::SetDigCooldown(*this);
 
@@ -1382,6 +1547,12 @@ namespace Game {
         if (brain && entity->IsPlayer() && maybeSwitchTarget
             && newAnger >= kAngerAngry) {
             brain->EraseMemory(MemoryModule::AttackTarget);
+        }
+
+        if (playSound && GetPose() != Pose::Roaring) {
+            PlaySound(GetActiveAnger() >= kAngerAgitated ? SoundEvents::WARDEN_LISTENING_ANGRY
+                                                         : SoundEvents::WARDEN_LISTENING,
+                      10.0f, GetVoicePitch());
         }
     }
 
@@ -1467,6 +1638,7 @@ namespace Game {
         // starts on the same tick the damage lands rather than the next one —
         // and every landed swing re-arms the 40-tick sonic-boom cooldown.
         if (m_level) m_level->BroadcastEntityEvent(*this, kEventMobAttack);
+        PlaySound(SoundEvents::WARDEN_ATTACK_IMPACT, 10.0f, GetVoicePitch());
         if (Brain* brain = GetBrain()) {
             brain->SetMemoryWithExpiry(MemoryModule::SonicBoomCooldown,
                                        std::monostate{}, 40);
@@ -1639,7 +1811,14 @@ namespace Game {
         if (m_level && !m_level->IsClientSide()) {
             const bool couldMove = m_canMove;
             const bool nowCanMove = CheckCanMove();
-            if (nowCanMove != couldMove && !nowCanMove) StopInPlace();
+            if (nowCanMove != couldMove) {
+                if (nowCanMove) {
+                    MakeSound(SoundEvents::CREAKING_UNFREEZE);
+                } else {
+                    StopInPlace();
+                    MakeSound(SoundEvents::CREAKING_FREEZE);
+                }
+            }
             m_canMove = nowCanMove;
         }
         GenericMonster::AiStep();
@@ -1664,6 +1843,8 @@ namespace Game {
         // creaking; the twitch death is this port's death for every creaking.
         m_tearingDown = true;
         GenericMonster::Die(source, attacker);
+        // MC creakingDeathEffects: die, then CREAKING_TWITCH.
+        if (m_level && !m_level->IsClientSide()) MakeSound(SoundEvents::CREAKING_TWITCH);
     }
 
     void Creaking::TickDeath() {
@@ -1694,12 +1875,12 @@ namespace Game {
     }
 
     void Creaking::Activate(LivingEntity* player) {
-        // MC Creaking.activate — CREAKING_ACTIVATE plays here when sounds
-        // exist.
+        // MC Creaking.activate.
         if (Brain* brain = GetBrain()) {
             brain->SetMemory(MemoryModule::AttackTarget, static_cast<Entity*>(player));
         }
         m_isActive = true;
+        MakeSound(SoundEvents::CREAKING_ACTIVATE);
     }
 
     void Creaking::Deactivate() {
@@ -1707,6 +1888,12 @@ namespace Game {
             brain->EraseMemory(MemoryModule::AttackTarget);
         }
         m_isActive = false;
+        MakeSound(SoundEvents::CREAKING_DEACTIVATE);   // MC Creaking.deactivate
+    }
+
+    const char* Creaking::GetAmbientSound() const {
+        // MC: `isActive() ? null : CREAKING_AMBIENT`.
+        return IsActive() ? "" : SoundEvents::CREAKING_AMBIENT;
     }
 
     bool Creaking::CheckCanMove() {
@@ -1800,9 +1987,14 @@ namespace Game {
     bool Sniffer::IsFood(uint32_t itemId) const { return IsSnifferFood(itemId); }
 
     Sniffer& Sniffer::TransitionTo(State state) {
-        // MC Sniffer.transitionTo. Each branch's entry sound (SNIFFER_HAPPY,
-        // SNIFFER_SNIFFING, SNIFFER_SCENTING, SNIFFER_DIGGING_STOP) waits on a
-        // sound system.
+        // MC Sniffer.transitionTo, with each branch's entry sound.
+        switch (state) {
+            case State::FeelingHappy: PlaySound(SoundEvents::SNIFFER_HAPPY, 1.0f, 1.0f); break;
+            case State::Scenting:     PlaySound(SoundEvents::SNIFFER_SCENTING, 1.0f, IsBaby() ? 1.3f : 1.0f); break;
+            case State::Sniffing:     PlaySound(SoundEvents::SNIFFER_SNIFFING, 1.0f, 1.0f); break;
+            case State::Rising:       PlaySound(SoundEvents::SNIFFER_DIGGING_STOP, 1.0f, 1.0f); break;
+            default: break;
+        }
         if (state == State::Digging) {
             // MC onDiggingStart: DATA_DROP_SEED_AT_TICK = now + 120 — the
             // seed pops out mid-dig, not at the end.
@@ -1941,8 +2133,11 @@ namespace Game {
     }
 
     void Sniffer::Tick() {
-        // MC Sniffer.tick: SEARCHING loops its sound (client, absent) and
-        // DIGGING emits particles (absent) and drops the seed.
+        // MC Sniffer.tick: SEARCHING sniffs audibly once a second (a client-
+        // local sound), DIGGING emits particles (absent) and drops the seed.
+        if (m_level && m_level->IsClientSide() && m_state == State::Searching && tickCount % 20 == 0) {
+            m_level->PlayLocalSoundFromEntity(*this, SoundEvents::SNIFFER_SEARCHING, GetSoundSource(), 1.0f, 1.0f);
+        }
         if (m_level && !m_level->IsClientSide() && m_state == State::Digging) {
             DropSeed();
         }
@@ -1961,6 +2156,18 @@ namespace Game {
         const glm::ivec3 head = GetHeadBlock();
         m_level->SpawnItemDrop(glm::dvec3(head.x + 0.5, head.y + 0.5, head.z + 0.5),
                                static_cast<uint32_t>(pick), 1);
+        PlaySound(SoundEvents::SNIFFER_DROP_SEED, 1.0f, 1.0f);
+    }
+
+    const char* Sniffer::GetAmbientSound() const {
+        return (m_state == State::Digging || m_state == State::Searching) ? "" : SoundEvents::SNIFFER_IDLE;
+    }
+
+    void Sniffer::PlayEatingSound() {
+        if (!m_level) return;
+        JavaRandom& rng = m_level->Random();
+        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::SNIFFER_EAT, SoundSource::Neutral, 1.0f,
+                                     0.8f + rng.NextFloat() * 0.4f);   // Mth.randomBetween(0.8, 1.2)
     }
 
     void Sniffer::Die(MobDamageSource source, Entity* attacker) {
@@ -2037,10 +2244,13 @@ namespace Game {
                         tickCount + m_level->Random().NextInt(kSpinAnimationMinCooldown,
                                                               kSpinAnimationMaxCooldown);
                 }
-                // MC: SPIN_SOUND_TIME_INTERVAL_OFFSET ticks into the spin.
-                // The playHeadSpinSound half waits on a sound system; the
-                // re-arm is what keeps the spin periodic.
+                // MC: SPIN_SOUND_TIME_INTERVAL_OFFSET ticks into the spin,
+                // playHeadSpinSound (a local COPPER_GOLEM_SPIN) and the re-arm
+                // that keeps the spin periodic.
                 if (tickCount == m_idleAnimationStartTick + 10) {
+                    if (m_level && !IsSilent()) {
+                        m_level->PlayLocalSound(position, SoundEvents::COPPER_GOLEM_SPIN, GetSoundSource(), 1.0f, 1.0f, false);
+                    }
                     m_idleAnimationStartTick = 0;
                 }
                 break;
@@ -2241,15 +2451,25 @@ namespace Game {
         return false;
     }
 
+    const char* Armadillo::GetAmbientSound() const {
+        return IsScared() ? "" : SoundEvents::ARMADILLO_AMBIENT;
+    }
+
+    const char* Armadillo::GetHurtSound(MobDamageSource) const {
+        return IsScared() ? SoundEvents::ARMADILLO_HURT_REDUCED : SoundEvents::ARMADILLO_HURT;
+    }
+
     void Armadillo::RollUp() {
         if (IsScared()) return;
         StopInPlace();
         ResetLove();
+        MakeSound(SoundEvents::ARMADILLO_ROLL);
         SwitchToState(State::Rolling);
     }
 
     void Armadillo::RollOut() {
         if (!IsScared()) return;
+        MakeSound(SoundEvents::ARMADILLO_UNROLL_FINISH);
         SwitchToState(State::Idle);
     }
 
@@ -2309,6 +2529,10 @@ namespace Game {
         // MC Armadillo.handleEntityEvent: 64 is "peek now".
         if (id == 64) {
             m_peekReceivedClient = true;
+            // MC: the client's ARMADILLO_PEEK, a local sound.
+            if (m_level && m_level->IsClientSide()) {
+                m_level->PlayLocalSound(position, SoundEvents::ARMADILLO_PEEK, GetSoundSource(), 1.0f, 1.0f, false);
+            }
             return;
         }
         GenericAnimal::HandleEntityEvent(id);

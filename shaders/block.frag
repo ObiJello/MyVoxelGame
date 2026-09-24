@@ -10,7 +10,7 @@ in vec4 fragColor;      // Vertex color (tint * AO * directional shade baked in)
 uniform sampler2D uTextureAtlas;     // The main texture atlas
 uniform float uAlphaTest;           // Alpha discard threshold (per-pass)
 uniform vec3 uCameraPos;            // World-space camera position (per view)
-uniform float uSkyBrightness;       // Day/night terrain dim (0.2667..1, MC SKY_LIGHT track)
+uniform vec3 uDrawLight;            // The draw's lightmap colour (EntityEnvironment::SetDrawLight)
 uniform vec4 uFogColor;             // Time-of-day fog color
 uniform vec4 uFogEnv;               // (envStart, envEnd, rdStart, rdEnd); 1e9 = fog off
 
@@ -56,8 +56,11 @@ void main() {
     // TNT in a dark cave is not a floating white square.
     finalColor = mix(finalColor, uOverlayColor.rgb, uOverlayColor.a);
 
-    // Day/night sky-light dim (approximation of MC's lightmap night curve)
-    finalColor *= uSkyBrightness;
+    // MC entity.fsh: the lightmap colour for the draw's packed light (a
+    // dropped item's, an orb's, the held item's cell — see
+    // EntityEnvironment.hpp); the instanced path passes 1 and carries each
+    // instance's own light in the vertex colour.
+    finalColor *= uDrawLight;
 
     // MC fog.glsl: environmental fog on spherical distance + render-distance
     // fog on cylindrical distance, take the max.

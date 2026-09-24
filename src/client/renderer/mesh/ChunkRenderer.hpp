@@ -11,6 +11,7 @@
 #include "../backend/RenderTypes.hpp"
 #include <climits>
 #include <cstdint>
+#include <functional>
 #include <vector>
 #include <chrono>
 #include <array>
@@ -173,8 +174,26 @@ namespace Render {
         // destination room from the virtual camera. The override is used as
         // the projection matrix for ALL render passes; pass the same matrix
         // you used to derive `frustum`.
+        // `exactProjection`: use the matrix on every backend. The default
+        // (false) lets Vulkan build its own perspective instead — the
+        // portal pass's OBLIQUE matrix compresses depth past the far plane
+        // there (see the note at the use), and it clips with
+        // gl_ClipDistance instead. A plain perspective with a different
+        // aspect or field of view — the panorama capture's square 90° —
+        // has no such problem and needs the matrix honoured.
         void RenderAll(const Camera& camera, const Frustum& frustum,
-                       const glm::mat4& projectionOverride);
+                       const glm::mat4& projectionOverride, bool exactProjection = false);
+
+        // The translucent pass RenderAll held back. RenderAll draws the
+        // opaque and cutout passes and parks the translucent one here; the
+        // caller draws its entities and block entities, then calls this.
+        // That is MC LevelRenderer's order — solid terrain, entities, block
+        // entities, translucent terrain — and the reason it matters is that
+        // the translucent pass writes depth: drawn first, water and glass
+        // hid every mob and player behind them. No-op when nothing is
+        // pending (a second call, or a RenderAll with no translucent
+        // sections in view). Greedy-debug mode draws inline instead.
+        void RenderDeferredTranslucent();
 
         // Configuration - **UPDATED**: Now reads from game settings
         void RefreshSettings(); // Call when settings change
@@ -195,8 +214,17 @@ namespace Render {
         // LevelRenderer.addRecentlyCompiledSection. Makes it a propagation
         // source for next frame's incremental occlusion-graph update.
         // MAIN THREAD ONLY (called from the mesh upload drain).
-        void SchedulePropagationFrom(::Game::Math::ChunkPos chunkPos, int sectionY) {
-            m_occlusionGraph.SchedulePropagationFrom(chunkPos, sectionY);
+        // `mayRequestRebuild`: see SectionOcclusionGraph::PendingSource —
+        // true only for block edits.
+        //
+        // Every event also advances the propagation epoch: a cached slot the
+        // live graph is NOT anchored to never receives these events, so a slot
+        // built before the latest one is out of date even when no world-
+        // version bump happened (see IsSlotFresh).
+        void SchedulePropagationFrom(::Game::Math::ChunkPos chunkPos, int sectionY,
+                                     bool mayRequestRebuild = false) {
+            m_occlusionGraph.SchedulePropagationFrom(chunkPos, sectionY, mayRequestRebuild);
+            ++m_propagationEpoch;
         }
 
         // Post-BFS, post-frustum list for the MAIN camera — MC's
@@ -226,6 +254,23 @@ namespace Render {
         void ClearPortalViewSections() {
             m_portalViewSections.clear(); m_portalViewGrid.Clear();
         }
+        // Cull one view and hand its sections to the mesh scheduler as a
+        // portal view, drawing nothing. The last-world panorama's prewarm:
+        // one of its six faces a frame while the pause menu is up, so every
+        // direction is meshed before "Save and Quit". Overwrites the
+        // visible-section list, so it belongs after the frame's last draw
+        // that reads it.
+        void RecordViewForScheduler(const Camera& camera, const Frustum& frustum);
+        // Of the main view's visible sections this frame, how many still
+        // have a mesh outstanding (dirty, or a build in flight). Zero for a
+        // few frames running means the view on screen is complete — what
+        // the join transition waits for before it hands the panorama over.
+        int MainViewSectionsPending() const { return m_mainViewPending; }
+        // The chunk fade-in (SectionFade.hpp) off for the draws that follow:
+        // the leave capture's panorama faces are built from sections its
+        // warm-up has only just meshed, and a picture of the world must
+        // not carry them half-faded. The world's own view keeps fading.
+        void SetSectionFadeSuppressed(bool suppressed) { m_fadeSuppressed = suppressed; }
         // Membership in the main view's list / the same-level portal views'
         // lists (one lookup each). The mesh scheduler asks these for every
         // DIRTY section instead of walking the ~4,000-section visible list
@@ -235,7 +280,7 @@ namespace Render {
             return m_mainViewGrid.HasSection(chunkPos, sectionY);
         }
         bool IsPortalViewSection(::Game::Math::ChunkPos chunkPos, int sectionY) const {
-            return m_portalViewGrid.HasSection(chunkPos, sectionY);
+            return m_portalViewGrid.HasSection(chunkPos, sectionY) || m_shadowViewGrid.HasSection(chunkPos, sectionY);
         }
         // Column-level pre-test for the same question: a streamed-in chunk
         // holds 24 dirty sections, and while flying most of them are behind
@@ -246,7 +291,7 @@ namespace Render {
             return m_mainViewGrid.HasColumn(chunkPos);
         }
         bool IsPortalViewColumn(::Game::Math::ChunkPos chunkPos) const {
-            return m_portalViewGrid.HasColumn(chunkPos);
+            return m_portalViewGrid.HasColumn(chunkPos) || m_shadowViewGrid.HasColumn(chunkPos);
         }
 
         // The camera jumped — a same-level portal crossing (a wrap border)
@@ -266,6 +311,8 @@ namespace Render {
         // per pass (block entities) read this, so what a portal shows is
         // gathered from the portal's own view rather than the main camera's.
         const std::vector<SectionRenderData>& GetVisibleSections() const { return m_visibleSections; }
+        // For the F3 chunk-culling renderers (section paths / visibility).
+        const SectionOcclusionGraph& OcclusionGraph() const { return m_occlusionGraph; }
 
         // Is (chunkPos, sectionY) in the draw list of the MOST RECENT
         // PrepareVisibleSections — post-BFS, post-frustum, for whichever
@@ -332,6 +379,32 @@ namespace Render {
         void SetPortalViewSeed(const glm::vec3& seed) { m_portalSeed = seed; m_portalSeedActive = true; }
         void ClearPortalViewSeed() { m_portalSeedActive = false; }
 
+        // ── Directional (shadow-map) view ───────────────────────────────
+        // A shader pack's shadow pass draws the terrain from the sun with an
+        // orthographic projection. While set, a projection-override RenderAll
+        // is that view: discovery is frustum-only (the light's ortho box)
+        // over the render-distance disc around `centre` (the player, not the
+        // light's virtual eye, which sits 100 blocks away along the light),
+        // the face-direction groups are chosen by `toLight` (a face is a
+        // shadow caster iff its normal faces the light — a point test from
+        // the eye is wrong for a parallel light), and the sections found are
+        // remembered for the mesh scheduler (IsPortalViewSection) so that
+        // casters behind the player get meshed too — MC compiles every
+        // chunk in range whether or not the player looks at it, and a
+        // shadow map is only as complete as the meshes it can draw.
+        void SetDirectionalView(const glm::vec3& toLight, const glm::dvec3& centre) {
+            m_directionalActive = true;
+            m_directionalToLight = toLight;
+            m_directionalCentre  = centre;
+        }
+        void ClearDirectionalView() {
+            m_directionalActive = false;
+            m_shadowViewGrid.Clear();
+        }
+        // After the shadow pass: the view is over, its sections stay for the
+        // scheduler until the next pass (or ClearDirectionalView).
+        void ClearDirectionalViewKeepSections() { m_directionalActive = false; }
+
         // Call when a GPUSectionData object is ERASED (chunk unload, section
         // remeshed to empty, mesh-manager shutdown) — cached reachable lists
         // and any in-flight async BFS result hold raw pointers into those
@@ -363,6 +436,25 @@ namespace Render {
         void SetGreedyMeshingEnabled(bool enable);   // remeshes the world
         bool IsGreedyMeshingEnabled() const;
 
+        // Shader-pack terrain passes (Render::ShaderPipeline): a pack program
+        // drawn in place of the engine's for a pass, and the render target
+        // bound before it (the pack's gbuffer set). The same uniforms are
+        // set on the pack program — its translation declares them. A hook
+        // runs before the translucent pass (the pack's depthtex1 copy).
+        // Everything here is inert while no pack is loaded.
+        enum TerrainPass { kPassOpaque = 0, kPassCutout = 1, kPassTranslucent = 2 };
+        struct PassOverride {
+            ShaderHandle       shader = INVALID_SHADER;
+            RenderTargetHandle target = INVALID_RENDER_TARGET;
+        };
+        void SetPassOverride(TerrainPass pass, PassOverride o) { m_passOverride[pass] = o; }
+        void ClearPassOverrides();
+        void SetBeforeTranslucentHook(std::function<void()> fn) { m_beforeTranslucent = std::move(fn); }
+        // Bound again once the three passes are done, so what the frame
+        // draws next (entities, clouds) lands in the pack's colour + depth
+        // rather than the last pass's gbuffer set.
+        void SetAfterPassesTarget(RenderTargetHandle rt) { m_afterPassesTarget = rt; }
+
         // Occlusion/frustum readout for the debug panel: sections the BFS
         // reached from the (cull) camera, and how many survived the frustum.
         uint32_t GetLastReachableCount() const { return m_lastReachableCount; }
@@ -392,6 +484,33 @@ namespace Render {
         ShaderHandle m_cutoutShader = INVALID_SHADER;        // block.vert + block.frag (alpha discard)
         ShaderHandle m_solidShader = INVALID_SHADER;         // block.vert + block_solid.frag (zero discard)
         ShaderHandle m_activeShader = INVALID_SHADER;        // Currently bound shader
+        PassOverride m_passOverride[3];
+        std::function<void()> m_beforeTranslucent;
+        RenderTargetHandle m_afterPassesTarget = INVALID_RENDER_TARGET;
+
+        // The translucent pass parked by the last RenderAll (see
+        // RenderDeferredTranslucent): the cameras it was prepared with and
+        // the projection override that was in force.
+        struct DeferredTranslucent {
+            bool      pending = false;
+            bool      gpuTiming = false;
+            Camera    camera;
+            Camera    cullCamera;
+            Frustum   cullFrustum{};
+            bool      useProjectionOverride = false;
+            bool      projectionOverrideExact = false;
+            glm::mat4 projectionOverride{1.0f};
+        };
+        DeferredTranslucent m_deferredTranslucent;
+        // The translucent pass proper — shader bind, uniforms, the pack's
+        // before-translucent hook, the sorted draw. Shared by the inline
+        // (debug) and deferred paths.
+        void DrawTranslucentPass(const Camera& camera, const Camera& cullCamera,
+                                 const Frustum& cullFrustum, bool gpuTiming);
+        ShaderHandle PassShader(TerrainPass pass, ShaderHandle engine) const {
+            return m_passOverride[pass].shader != INVALID_SHADER ? m_passOverride[pass].shader : engine;
+        }
+        void BindPassTarget(TerrainPass pass);
         TextureHandle m_backendAtlasTexture = INVALID_TEXTURE;
         glm::mat4 m_cachedMVP{1.0f};                         // Cached for shader switches
 
@@ -402,6 +521,9 @@ namespace Render {
         // automatically by the (camera, frustum, projection) overload after
         // the call returns.
         bool      m_useProjectionOverride = false;
+        bool      m_projectionOverrideExact = false;   // honour it on Vulkan too
+        bool      m_fadeSuppressed = false;            // see SetSectionFadeSuppressed
+        int       m_mainViewPending = 0;               // see MainViewSectionsPending
         glm::mat4 m_projectionOverride{1.0f};
         bool      m_recordMainView = false;
         bool      m_portalSeedActive = false;
@@ -430,10 +552,17 @@ namespace Render {
         // distance are kept; negative are clipped via gl_ClipDistance[0].
         // vec4(0) = no clipping.
     public:
-        static void SetPortalClipPlane(const glm::vec4& plane) {
+        // DOUBLE: w = −n·point is world-sized; rounded to float at
+        // x = 300,000 the plane sits 3 cm off its surface.
+        static void SetPortalClipPlane(const glm::dvec4& plane) {
             s_portalClipPlane = plane;
         }
-        static glm::vec4 PortalClipPlane() { return s_portalClipPlane; }
+        // The plane as a shader wants it: in the CURRENT view's render space
+        // (RenderOrigin.hpp), so every uniform site hands this straight to
+        // the backend. Composing with a portal transform or saving it to
+        // restore later takes the world-space one below.
+        static glm::vec4  PortalClipPlane() { return Render::PlaneToRender(s_portalClipPlane); }
+        static glm::dvec4 PortalClipPlaneWorld() { return s_portalClipPlane; }
         // Entities clip against the same plane with its kept side widened
         // by this margin (world units). The immersive portal renderer's
         // mark pass sits its stencil a few centimetres in front of the
@@ -460,15 +589,44 @@ namespace Render {
         static void  SetRenderDistanceOverride(int chunks) { s_renderDistanceOverride = chunks; }
         static int   RenderDistanceOverride() { return s_renderDistanceOverride; }
         static void  SetNearPlane(float nearPlane) { s_nearPlane = nearPlane; }
+        // How far, in blocks along the view ray, a surface that lies ON a
+        // block face (a portal's oval, its rim) must be pushed toward the
+        // eye to beat that face's depth reliably at distance `dist`. Two
+        // terms: the depth buffer's own resolution there (a float depth's
+        // 2^-24 ulp, taken with eight times the headroom), and — the one
+        // that actually bites — the float32 error of the vertex transform.
+        // Rendering is camera-relative (RenderOrigin.hpp), so the
+        // coordinates the GPU multiplies are the distance from the eye, not
+        // the world position: the MVP products for a vertex are that size
+        // and round to about dist·2^-24 in clip z, and each surface's plane
+        // lands with its own rounding, so two coplanar surfaces sit
+        // dist·2^-24·dist/near apart in world terms before either is
+        // pushed. (Before the render origin existed the world coordinate
+        // stood in for `dist` here, ~0.7 mm per block of distance at
+        // coordinates of 300 — why a portal's view fought its wall from
+        // ten blocks out, worse the farther away.) Four times that error
+        // for headroom, a 256-block floor for the matrix entries' own
+        // rounding, capped at a quarter block (nothing stands that close
+        // to a distant portal). `eye` is the world eye, kept for the
+        // callers' sake; only its distance matters now.
+        static float SurfaceDepthMargin(float dist, const glm::vec3& eye) {
+            (void)eye;
+            const float nearPlane = s_nearPlane;
+            const float coordMag  = std::max(256.0f, dist);
+            const float buffer    = dist * dist / (nearPlane * 2097152.0f);
+            const float transform = coordMag * 5.96e-8f * dist / nearPlane * 4.0f;
+            return std::clamp(std::max(buffer, transform), 0.005f, 0.25f);
+        }
         static float NearPlane() { return s_nearPlane; }
+        // Render space, like PortalClipPlane().
         static glm::vec4 PortalEntityClipPlane() {
-            glm::vec4 plane = s_portalClipPlane;
-            const float len = glm::length(glm::vec3(plane));
-            if (len > 0.0f) plane.w += s_portalEntityClipMargin * len;
-            return plane;
+            glm::dvec4 plane = s_portalClipPlane;
+            const double len = glm::length(glm::dvec3(plane));
+            if (len > 0.0) plane.w += s_portalEntityClipMargin * len;
+            return Render::PlaneToRender(plane);
         }
     private:
-        static glm::vec4 s_portalClipPlane;
+        static glm::dvec4 s_portalClipPlane;
         static float     s_portalEntityClipMargin;
         static float     s_nearPlane;
         static int       s_renderDistanceOverride;
@@ -548,7 +706,23 @@ namespace Render {
             // a portal view drawn at one distance must not serve a view at
             // another (see SetRenderDistanceOverride).
             int renderDistance = 0;
+            // m_propagationEpoch when the list's snapshot was taken.
+            uint64_t propagationEpoch = 0;
         };
+        // A slot describes the world as it is now: no world-version bump
+        // since its snapshot, and either the live graph is anchored to it
+        // (the per-frame partial updates keep it current) or no propagation
+        // event has happened since. MC keeps one graph and invalidates it
+        // only on camera movement; a cached slot for another camera section
+        // is the thing MC does not have, and it goes out of date by missing
+        // exactly those partial updates.
+        bool IsSlotFresh(const ReachableCacheSlot& slot, int renderDistanceChunks) const {
+            if (!slot.valid || slot.worldVersion != m_worldVersion) return false;
+            if (slot.propagationEpoch == m_propagationEpoch) return true;
+            return !slot.portalView &&
+                   m_occlusionGraph.HasGraphFor(slot.cx, slot.cz, slot.sy, renderDistanceChunks, m_eraseToken);
+        }
+        uint64_t m_propagationEpoch = 0;
         // Main camera + portal views: every distinct far surface in view
         // keys its own slot (a chain of views through one portal shares one).
         // Enough for the main view and a screenful of portals at once; at 8,
@@ -563,9 +737,12 @@ namespace Render {
         bool m_mainViewAwaitingBfs = false;
         uint32_t m_prepareCounter = 0;  // Monotonic, for LRU slot eviction
 
-        // Async BFS bookkeeping. m_worldVersion advances on every dirty event
-        // (mesh upload/unload) — slots built against an older version are
-        // usable but trigger an async refresh. m_eraseToken advances only on
+        // Async BFS bookkeeping. m_worldVersion advances only on the events
+        // MC would invalidate its graph for (render distance, smart-cull
+        // toggle, explicit reload, mass block edits) — chunk streaming and
+        // mesh uploads are propagation events instead (see IsSlotFresh).
+        // Slots built against an older version are usable but trigger an
+        // async refresh. m_eraseToken advances only on
         // GPUSectionData ERASURE — results/slots from an older token hold
         // dangling pointers and are discarded outright (see
         // MarkSectionDataErased). BFS stats are copied out of completed jobs.
@@ -593,8 +770,14 @@ namespace Render {
         std::chrono::steady_clock::time_point m_diagLastLog{};
         // Steady-camera full-rebuild rate limit (see PrepareVisibleSections).
         std::chrono::steady_clock::time_point m_lastRebuildSubmit{};
+        // The main view's BFS section last frame. Arriving in a different one
+        // whose slot is stale is not a "steady camera": its rebuild skips the
+        // rate limit above.
+        glm::ivec3 m_lastMainBfsSection{INT_MIN, INT_MIN, INT_MIN};
+        bool       m_arrivalRebuildPending = false;
         void DumpViewRay(const Camera& camera, const Frustum& frustum,
                          const ReachableCacheSlot& slot, int renderDistanceChunks);
+
 
         // Per-frame draw list: the active slot's sections filtered through the
         // current frustum. Rebuilt every frame (cheap — a few thousand AABB
@@ -685,6 +868,13 @@ namespace Render {
         // IsMainViewSection / IsMainViewColumn).
         SectionGrid m_mainViewGrid;
         SectionGrid m_portalViewGrid;
+        // The directional (shadow) view's sections, refreshed by each shadow
+        // pass and kept until ClearDirectionalView: the main pass clears the
+        // portal-view list at frame start, after the shadow pass has run.
+        SectionGrid m_shadowViewGrid;
+        bool       m_directionalActive = false;
+        glm::vec3  m_directionalToLight{0.0f, 1.0f, 0.0f};
+        glm::dvec3 m_directionalCentre{0.0};
         // Per-frame column-visibility memo for the frustum filter: one byte
         // per chunk column of the render-distance grid (0 untested, 1 out,
         // 2 crosses the frustum, 3 fully inside), so a column's 24 sections
@@ -776,6 +966,32 @@ namespace Render {
         // zero-gap ascending neighbours — translucent. Each returns the number
         // of sub-draws issued.
         int SubmitMergedRuns(ChunkMegaBuffer& megaBuffer);
+
+        // ── Stray-section audit (OBEY_STRAY_AUDIT=1) ─────────────────────────
+        // Gap bridging draws whatever lives between two visible runs of a
+        // slab. Once a second (main view only) every bridged gap is resolved
+        // to the sections it holds, and each is classified against the
+        // client's chunk state and the render distance; one [StrayAudit] log
+        // line reports what bridging drew that the frame did not ask for.
+        struct StrayAudit {
+            size_t gaps = 0, gapIndices = 0, sections = 0;
+            size_t parked = 0, notLoaded = 0, outOfRange = 0, hiddenLoaded = 0, visible = 0;
+            struct Example { ::Game::Math::ChunkPos pos; int sectionY; int dist; const char* what; };
+            std::vector<Example> examples;
+        };
+        void AuditBridgedGap(const std::vector<std::vector<ChunkMegaBuffer::DebugRegionRef>>& regions,
+                             uint32_t slab, size_t gapBegin, size_t gapEnd);
+        void FlushStrayAudit();
+        // Fences the loaded chunks outside the rendered view from bridged
+        // gaps (ClientMeshManager::SetOutsideViewChunks) whenever the camera
+        // chunk, the render distance or the loaded set changed. Main view.
+        void UpdateOutsideViewFence(int cameraChunkX, int cameraChunkZ, int renderDistanceChunks);
+        int m_fenceCamX = INT_MIN, m_fenceCamZ = INT_MIN, m_fenceRenderDistance = -1;
+        uint64_t m_fenceLoadedVersion = ~uint64_t{0};
+        StrayAudit m_strayAudit;
+        bool m_strayAuditFrame = false;          // this frame's main view is sampled
+        int  m_strayAuditRenderDistance = 0;
+        std::chrono::steady_clock::time_point m_strayAuditLast{};
         int SubmitOrderedRuns(ChunkMegaBuffer& megaBuffer);
         int SubmitPerSectionIbos(ChunkMegaBuffer& megaBuffer);
 
@@ -864,8 +1080,10 @@ namespace Render {
     void RenderChunksAll(const Camera& camera, const Frustum& frustum);
     // Variant that lets the caller (portal see-through pass) inject a
     // non-standard projection matrix. See ChunkRenderer::RenderAll above.
+    // ChunkRenderer::RenderDeferredTranslucent on the global renderer.
+    void RenderChunksDeferredTranslucent();
     void RenderChunksAll(const Camera& camera, const Frustum& frustum,
-                         const glm::mat4& projectionOverride);
+                         const glm::mat4& projectionOverride, bool exactProjection = false);
     
     // Get current frame's rendering statistics
     const RenderStats* GetChunkRendererStats();

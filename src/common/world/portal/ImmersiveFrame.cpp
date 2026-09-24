@@ -46,11 +46,31 @@ namespace Game::Immersive {
     } // namespace
 
     bool FrameShape::IsObsidian(BlockID id) {
-        return id == BlockID::Obsidian || id == BlockID::CryingObsidian;
+        return NetherFamily().isImmersiveFrame(id);
+    }
+
+    bool FrameShape::IsReinforcedDeepslate(BlockID id) {
+        return HushFamily().isImmersiveFrame(id);
     }
 
     bool FrameShape::IsAirLike(BlockID id) {
-        return id == BlockID::Air || id == BlockID::Fire;
+        // A vanilla portal block (nether_portal, hush_portal) inside a frame
+        // is the placeholder the immersive_portals rule leaves behind while
+        // it is OFF (and what a frame lit under vanilla rules holds). For
+        // every frame question — finding a loop from a cell, matching a far
+        // frame, integrity — it is empty space: the immersive surface
+        // replaces it, and the server clears it out of any frame that
+        // carries a record (NetherPortalGeneration::ClearPortalBlocks).
+        // Before this, a frame restored with those blocks still inside was
+        // judged "broken" and its cluster deleted on the first integrity
+        // sweep. Any family's block counts: which family the frame is comes
+        // from the loop, not from what happens to be inside it.
+        // Water too, for the Aether (AetherPortalShape.isEmpty): its frame is
+        // lit with a water bucket, so water already inside must not break the
+        // loop. Harmless for the nether and the Hush — fire cannot burn in
+        // water and an echo shard lights only a dry frame's interior anyway.
+        return id == BlockID::Air || id == BlockID::Fire || id == BlockID::Water
+            || IsFamilyPortalBlock(id);
     }
 
     bool FrameShape::IsRectangle() const {
@@ -144,22 +164,24 @@ namespace Game::Immersive {
     }
 
     std::optional<FrameShape> FrameShape::Find(const IBlockAccess& level, const glm::ivec3& start,
-                                               int lengthLimit, int areaLimit) {
+                                               PortalFamilyId family, int lengthLimit, int areaLimit) {
         for (Axis axis : { Axis::X, Axis::Y, Axis::Z }) {
-            if (auto s = FindOnAxis(level, start, axis, lengthLimit, areaLimit)) return s;
+            if (auto s = FindOnAxis(level, start, family, axis, lengthLimit, areaLimit)) return s;
         }
         return std::nullopt;
     }
 
     std::optional<FrameShape> FrameShape::FindOnAxis(const IBlockAccess& level, const glm::ivec3& start,
-                                                     Axis axis, int lengthLimit, int areaLimit) {
+                                                     PortalFamilyId family, Axis axis,
+                                                     int lengthLimit, int areaLimit) {
         if (!IsAirLike(level.GetBlock(start.x, start.y, start.z))) return std::nullopt;
 
         glm::ivec3 dirs[4];
         InPlaneDirections(axis, dirs);
 
         FrameShape shape;
-        shape.axis = axis;
+        shape.axis   = axis;
+        shape.family = family;
         std::unordered_set<glm::ivec3, IVec3Hash> visited;
         std::unordered_set<glm::ivec3, IVec3Hash> frameSet;
         std::vector<glm::ivec3> queue{ start };
@@ -183,10 +205,10 @@ namespace Game::Immersive {
                 if (IsAirLike(id)) {
                     visited.insert(n);
                     queue.push_back(n);
-                } else if (IsObsidian(id)) {
+                } else if (shape.IsFrameBlock(id)) {
                     frameSet.insert(n);
                 } else {
-                    return std::nullopt;   // the loop is not closed by obsidian
+                    return std::nullopt;   // the loop is not closed by this family's frame
                 }
             }
         }
@@ -200,7 +222,7 @@ namespace Game::Immersive {
 
     bool FrameShape::IsIntact(const IBlockAccess& level) const {
         for (const glm::ivec3& c : frame) {
-            if (!IsObsidian(level.GetBlock(c.x, c.y, c.z))) return false;
+            if (!IsFrameBlock(level.GetBlock(c.x, c.y, c.z))) return false;
         }
         for (const glm::ivec3& c : area) {
             if (!IsAirLike(level.GetBlock(c.x, c.y, c.z))) return false;
@@ -233,7 +255,7 @@ namespace Game::Immersive {
         const FrameShape t = Translated(newMin - minCell);
         for (const glm::ivec3& c : t.FrameWithCorners()) {
             const BlockID id = level.GetBlock(c.x, c.y, c.z);
-            if (!(IsAirLike(id) || IsObsidian(id))) return false;
+            if (!(IsAirLike(id) || IsFrameBlock(id))) return false;
         }
         for (const glm::ivec3& c : t.area) {
             if (!IsAirLike(level.GetBlock(c.x, c.y, c.z))) return false;
@@ -280,6 +302,11 @@ namespace Game::Immersive {
 
         FrameShape shape;
         shape.axis = static_cast<Axis>(ni);
+        // The family rides on the record's kind; a record of no family (a
+        // command portal that happens to sit on the grid) is judged as a
+        // nether frame, which is what every caller filtered for before
+        // families existed.
+        if (const PortalFamily* fam = FamilyOfKind(portal.kind)) shape.family = fam->id;
 
         // Recover the cells: a rectangle from the bounds, a mesh from its quads.
         std::vector<glm::dvec3> centres;

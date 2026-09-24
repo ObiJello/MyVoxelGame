@@ -22,11 +22,14 @@
 // screen stays up until the new dimension's chunks arrive.
 //
 // Wire layout:
-//   int8   dimensionId   — Game::DimensionId raw value (-1 nether, 0 overworld, 1 end)
+//   int8   dimensionId   — Game::DimensionId raw value (-1 nether, 0 overworld, 1 end, 2 hush)
 //   uint8  flags         — bit 0 hasSkyLight, bit 1 hasCeiling
 //   float  ambientLight  — MC DimensionType.ambientLight (nether 0.1, else 0)
 //   int32  minY          — lowest generated Y in the new dimension
 //   int32  height        — its logical height
+//   int64  hashedSeed    — trailing: BiomeManager.obfuscateSeed(world seed),
+//                          the client's biome zoom seed (MC's respawn packet
+//                          carries it in CommonPlayerSpawnInfo)
 //
 // The last four are derivable from dimensionId today, and are on the wire
 // anyway because the client's fog, sky and (eventually) lighting read them,
@@ -35,6 +38,7 @@
 #pragma once
 
 #include "common/network/PacketRegistry.hpp"
+#include "common/world/level/DimensionId.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -47,6 +51,8 @@ namespace Network {
         float    ambientLight = 0.0f;
         int32_t  minY         = -64;
         int32_t  height       = 384;
+        int64_t  hashedSeed   = 0;
+        bool     hasHashedSeed = false;   // decode side: a sender without the field
 
         static constexpr uint8_t kFlagHasSkyLight = 1u << 0;
         static constexpr uint8_t kFlagHasCeiling  = 1u << 1;
@@ -58,6 +64,24 @@ namespace Network {
         bool HasSkyLight()  const { return (flags & kFlagHasSkyLight)  != 0; }
         bool HasCeiling()   const { return (flags & kFlagHasCeiling)   != 0; }
         bool KeepPrevious() const { return (flags & kFlagKeepPrevious) != 0; }
+
+        // The one builder every sender uses, so the dimension table is read
+        // in exactly one place (DimensionId.hpp) rather than copied per site.
+        static ChangeDimensionS2CPacket For(Game::DimensionId dim, bool keepPrevious,
+                                            int64_t hashedSeed) {
+            ChangeDimensionS2CPacket p;
+            p.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(dim));
+            p.flags = static_cast<uint8_t>(
+                (Game::DimensionHasSkyLight(dim) ? kFlagHasSkyLight  : 0) |
+                (Game::DimensionHasCeiling(dim)  ? kFlagHasCeiling   : 0) |
+                (keepPrevious                    ? kFlagKeepPrevious : 0));
+            p.ambientLight = Game::DimensionAmbientLight(dim);
+            p.minY         = Game::DimensionMinY(dim);
+            p.height       = Game::DimensionLogicalHeight(dim);
+            p.hashedSeed    = hashedSeed;
+            p.hasHashedSeed = true;
+            return p;
+        }
     };
 
     namespace Serialization {
@@ -69,6 +93,7 @@ namespace Network {
             b.WriteFloat(p.ambientLight);
             b.WriteInt(static_cast<uint32_t>(p.minY));
             b.WriteInt(static_cast<uint32_t>(p.height));
+            b.WriteLong(static_cast<uint64_t>(p.hashedSeed));
             return b.GetData();
         }
 
@@ -81,6 +106,10 @@ namespace Network {
             p.ambientLight = r.ReadFloat();
             p.minY         = static_cast<int32_t>(r.ReadInt());
             p.height       = static_cast<int32_t>(r.ReadInt());
+            if (r.Remaining() >= 8) {
+                p.hashedSeed    = static_cast<int64_t>(r.ReadLong());
+                p.hasHashedSeed = true;
+            }
             return p;
         }
 

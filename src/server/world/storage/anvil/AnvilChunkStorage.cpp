@@ -3,10 +3,12 @@
 #include "server/world/storage/anvil/AnvilChunkStorage.hpp"
 
 #include "server/world/storage/anvil/ChunkSerializer.hpp"
+#include "server/world/storage/anvil/NbtScan.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/nbt/NbtWrite.hpp"
 #include "common/world/chunk/Chunk.hpp"
+
 
 namespace Game::Anvil {
 
@@ -39,6 +41,37 @@ namespace Game::Anvil {
         if (!region) {
             if (error.empty()) error = "could not open the region file for writing";
             return false;
+        }
+        return region->Write(RegionStore::LocalCoord(pos.x),
+                             RegionStore::LocalCoord(pos.z),
+                             payload, AnvilRegion::kCompressionZlib, error);
+    }
+
+    bool AnvilChunkIo::WriteProtoChunkNbt(DimensionId dim, Math::ChunkPos pos,
+                                          const std::vector<uint8_t>& payload, bool& skipped,
+                                          std::string& error) {
+        skipped = false;
+        if (!m_writable) { error = "region store is read-only"; return false; }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        AnvilRegion* region = m_store->Get(dim, RegionKind::Chunks,
+                                           RegionStore::RegionCoord(pos.x),
+                                           RegionStore::RegionCoord(pos.z), error,
+                                           /*createIfMissing=*/true);
+        if (!region) {
+            if (error.empty()) error = "could not open the region file for writing";
+            return false;
+        }
+        std::vector<uint8_t> existing;
+        std::string readError;
+        if (region->Read(RegionStore::LocalCoord(pos.x), RegionStore::LocalCoord(pos.z),
+                         existing, readError)) {
+            std::string status;
+            if (NbtScan::ReadRootString(existing, "Status", status) &&
+                (status == "minecraft:full" || status == "full")) {
+                skipped = true;
+                return true;
+            }
         }
         return region->Write(RegionStore::LocalCoord(pos.x),
                              RegionStore::LocalCoord(pos.z),
@@ -126,6 +159,14 @@ namespace Game::Anvil {
     }
 
     std::future<ChunkSaveResult> AnvilChunkStorage::SaveChunkAsync(const Chunk& chunk) {
+        return SaveResidentAsync(chunk, /*honourCooldown=*/true);
+    }
+
+    std::future<ChunkSaveResult> AnvilChunkStorage::SaveChunkNowAsync(const Chunk& chunk) {
+        return SaveResidentAsync(chunk, /*honourCooldown=*/false);
+    }
+
+    std::future<ChunkSaveResult> AnvilChunkStorage::SaveResidentAsync(const Chunk& chunk, bool honourCooldown) {
         auto promise = std::make_shared<std::promise<ChunkSaveResult>>();
         auto future  = promise->get_future();
 
@@ -140,7 +181,7 @@ namespace Game::Anvil {
         // LOCK ORDER, everywhere in this file: m_mutex before m_statsMutex,
         // never the reverse. The stats update below deliberately happens after
         // m_mutex is released rather than nested inside it.
-        if (WithinWriteCooldown(chunk.pos)) {
+        if (honourCooldown && WithinWriteCooldown(chunk.pos)) {
             {
                 std::lock_guard<std::mutex> s(m_statsMutex);
                 ++m_stats.chunksSkipped;
@@ -149,16 +190,33 @@ namespace Game::Anvil {
             return future;
         }
 
-        std::vector<uint8_t> payload;
+        // Serialise here — the chunk is live and only this thread can snapshot
+        // it consistently — but leave the zlib to the IO thread. Compressing
+        // on the caller was most of the ~0.9 ms per chunk that a pause-save
+        // of 15,000 fresh chunks spent on the server thread (13 s, 2026-09-23).
+        std::vector<uint8_t> nbt;
         std::string error;
-        if (!Encode(chunk, payload, error)) {
+        if (!SerialiseChunk(chunk, m_dataVersion, m_gameTime.load(std::memory_order_relaxed), nbt, error)) {
             promise->set_value(ChunkSaveResult::Failure(chunk.pos, error));
             std::lock_guard<std::mutex> s(m_statsMutex);
             ++m_stats.saveFailures;
             return future;
         }
+#ifndef NDEBUG
+        {
+            std::string mismatch;
+            if (!VerifyRoundTrip(chunk, nbt, mismatch)) {
+                error = "round-trip check failed, refusing to write: " + mismatch;
+                Log::Error("[Anvil] chunk (%d,%d): %s", chunk.pos.x, chunk.pos.z, error.c_str());
+                promise->set_value(ChunkSaveResult::Failure(chunk.pos, error));
+                return future;
+            }
+        }
+#endif
 
-        Enqueue(Job{chunk.pos, std::move(payload), promise});
+        Job job{chunk.pos, std::move(nbt), promise};
+        job.needsCompress = true;
+        Enqueue(std::move(job));
         return future;
     }
 
@@ -270,6 +328,19 @@ namespace Game::Anvil {
                     continue;
                 }
                 job.chunk.reset();
+            }
+            if (job.needsCompress) {
+                std::vector<uint8_t> packed;
+                if (!Nbt::ZlibCompress(job.payload, packed)) {
+                    {
+                        std::lock_guard<std::mutex> s(m_statsMutex);
+                        ++m_stats.saveFailures;
+                    }
+                    Log::Error("[Anvil] failed to compress chunk (%d,%d)", job.pos.x, job.pos.z);
+                    if (job.promise) job.promise->set_value(ChunkSaveResult::Failure(job.pos, "zlib compression failed"));
+                    continue;
+                }
+                job.payload.swap(packed);
             }
             const bool ok = m_io->WriteChunkNbt(m_dimension, RegionKind::Chunks,
                                                 job.pos, job.payload, error);

@@ -1,5 +1,10 @@
 {
   "values": [
-    "#minecraft:chest_armor"
+    "#minecraft:chest_armor",
+    "minecraft:naga_chestplate",
+    "minecraft:ironwood_chestplate",
+    "minecraft:steeleaf_chestplate",
+    "minecraft:knightmetal_chestplate",
+    "minecraft:fiery_chestplate"
   ]
 }

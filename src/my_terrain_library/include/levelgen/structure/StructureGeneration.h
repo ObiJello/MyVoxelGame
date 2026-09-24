@@ -1,5 +1,9 @@
 #pragma once
 
+#include "levelgen/density/DensitySampler.h"
+
+#include <memory>
+
 #include "levelgen/structure/ChunkGeneratorStructureState.h"
 #include "world/IChunk.h"
 #include <vector>
@@ -12,6 +16,7 @@ namespace minecraft {
 namespace levelgen {
 class ChunkGenerator;
 class RandomState;
+class WorldGenLevel;
 class Beardifier;
 namespace structure {
 
@@ -40,13 +45,23 @@ void createReferences(const std::vector<std::vector<::world::IChunk*>>& chunks,
                       ::world::IChunk* chunk);
 
 /**
+ * Engine hand-off for spawn_overrides (see IChunk::StructureSpawnArea): for
+ * every structure with spawn overrides referenced by `chunk`, resolve each
+ * referenced start through `level` and record its union box and the pieces
+ * over this chunk's column. Run after the chunk's decoration, so a piece that
+ * settles its height in postProcess (ScatteredFeaturePiece
+ * .updateAverageGroundHeight - the swamp hut) is recorded where it ended up,
+ * as Java's saved start would hold it. No RNG.
+ */
+void recordSpawnOverrideAreas(WorldGenLevel* level, ::world::IChunk* chunk);
+
+/**
  * Reference: Beardifier.forStructuresInChunk() + StructureManager
  * .startsForStructure(ChunkPos, predicate). Reads `chunk`'s reference map,
  * resolves each referenced start from the dependency grid (same convention as
  * createReferences), and collects Rigid pieces + jigsaw junctions for every
  * piece within 12 blocks of the chunk. Returns nullptr for Java's EMPTY
- * (caller falls back to Beardifier::EMPTY()); otherwise the caller owns the
- * returned Beardifier.
+ * (the terrain reads the beardifier context field's default, 0).
  *
  * Ordering note: Java iterates a HashMap<Structure, LongSet> (identity-hash
  * order) and a LongOpenHashSet; we iterate name-sorted std::map and numeric
@@ -55,7 +70,7 @@ void createReferences(const std::vector<std::vector<::world::IChunk*>>& chunks,
  * range (~12 blocks) of the same density point - contributions are exactly
  * 0.0 beyond that.
  */
-levelgen::Beardifier* createBeardifier(
+std::shared_ptr<const levelgen::density::DensitySampler> createBeardifier(
     const std::vector<std::vector<::world::IChunk*>>& chunks,
     ::world::IChunk* chunk);
 

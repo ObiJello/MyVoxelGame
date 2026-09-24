@@ -27,7 +27,10 @@ namespace Client {
     public:
         // MC LevelLoadTracker.startClientLoad — called when the client enters a
         // level: once per session, and again after a respawn.
-        void StartClientLoad();
+        // `closeDelayMs`: MC LevelLoadTracker(closeDelayMs) — 500 for a
+        // world created by this launch (Minecraft.doWorldLoad), 0 otherwise;
+        // the level counts as ready that long after the section compiled.
+        void StartClientLoad(int closeDelayMs = 0);
 
         // MC ClientPacketListener.tick's `levelLoadTracker.tickClientLoad()` +
         // `notifyPlayerLoaded()`. Sends PlayerLoadedC2S exactly once per load,
@@ -48,7 +51,10 @@ namespace Client {
         void LogWaitDiagnosis(const glm::vec3& playerFeetPos) const;
 
         Stage m_stage = Stage::Idle;
+        int   m_closeDelayMs = 0;
+        std::chrono::steady_clock::time_point m_readyAt{};      // ClientLevelReady.readyAt
         std::chrono::steady_clock::time_point m_timeoutAfter{};
+        std::chrono::steady_clock::time_point m_startedAt{};   // StartClientLoad, for the log
     };
 
     // One per client process, like MC's (it hangs off the connection listener,

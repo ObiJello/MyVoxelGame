@@ -12,10 +12,15 @@
 // for a column that can HOST a 4x5 frame with air in front of it, prefers a
 // spot with clearance on both sides, and only falls back to bulldozing a
 // platform at y>=70 when the whole spiral came up empty.
+//
+// Every entry point takes the PortalFamily: it decides which index is
+// searched, what the frame is built of and which portal block fills it.
+// The search and the placement are the same for both families.
 #pragma once
 
 #include "common/world/block/Direction.hpp"
 #include "common/world/portal/BlockUtil.hpp"
+#include "common/world/portal/PortalFamily.hpp"
 
 #include <optional>
 #include <glm/glm.hpp>
@@ -32,20 +37,21 @@ namespace Server {
         // set fills in.
         inline constexpr int kTicketRadius = 3;
 
-        // MC's two search radii (PortalForcer.java:25-26). Which one applies
-        // depends on the DESTINATION dimension, not the origin — that
-        // asymmetry is deliberate in vanilla and is why an overworld portal
-        // can link to a nether portal up to 128 blocks away while the return
-        // trip only looks 16.
-        inline constexpr int kNetherSearchRadius    = 16;
-        inline constexpr int kOverworldSearchRadius = 128;
+        // MC's two search radii (PortalForcer.java:25-26) live on the family
+        // (PortalFamily::SearchRadiusToward). Which one applies depends on
+        // the DESTINATION dimension, not the origin — that asymmetry is
+        // deliberate in vanilla and is why an overworld portal can link to a
+        // nether portal up to 128 blocks away while the return trip only
+        // looks 16. `level` IS the destination here.
 
         // Step 1. Null when nothing suitable is in range.
         std::optional<glm::ivec3> FindClosestPortalPosition(
-            ServerLevel& level, const glm::ivec3& approximateExitPos, bool toNether);
+            ServerLevel& level, const glm::ivec3& approximateExitPos,
+            const Game::PortalFamily& family);
 
-        // Step 2 — MC PortalForcer.createPortal (:52). Builds a 4x5 obsidian
-        // frame around a 2x3 opening and fills it with portal blocks.
+        // Step 2 — MC PortalForcer.createPortal (:52). Builds a 4x5 frame of
+        // the family's build block around a 2x3 opening and fills it with
+        // the family's portal blocks.
         //
         // Returns the opening as a rectangle whose min corner is its bottom
         // cell and whose sizes are (2, 3) — the same shape
@@ -55,14 +61,16 @@ namespace Server {
         // Empty only when the level has no legal Y band at all for a portal,
         // which in practice means a world border pushed everything out.
         std::optional<Game::FoundRectangle> CreatePortal(
-            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis);
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis,
+            const Game::PortalFamily& family);
 
         // Step 2 without the blocks: the opening CreatePortal WOULD place —
         // the same spiral search and the same over-the-void fallback — with
         // nothing written to the world. For "where would a portal take me"
         // (the /dimension command).
         std::optional<Game::FoundRectangle> FindPortalPlacement(
-            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis);
+            ServerLevel& level, const glm::ivec3& origin, Game::Axis portalAxis,
+            const Game::PortalFamily& family);
 
     } // namespace PortalForcer
 

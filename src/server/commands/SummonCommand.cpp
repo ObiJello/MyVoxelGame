@@ -55,14 +55,29 @@ namespace Server {
         }
     } // namespace
 
+    bool SummonCommand::ParseEntityType(const std::string& text, Game::EntityTypeId& out) {
+        // Accept the vanilla "minecraft:" prefix so a command copied from the
+        // wiki works unchanged.
+        std::string slug = text;
+        if (slug.rfind("minecraft:", 0) == 0) slug = slug.substr(10);
+        std::transform(slug.begin(), slug.end(), slug.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        for (uint16_t i = 0; i < static_cast<uint16_t>(Game::EntityTypeId::Count); ++i) {
+            const auto candidate = static_cast<Game::EntityTypeId>(i);
+            if (Game::GetEntityTypeInfo(candidate).slug == slug) { out = candidate; return true; }
+        }
+        return false;
+    }
+
     void SummonCommand::Register(CommandDispatcher& dispatcher) {
         dispatcher.RegisterCommand("summon", SummonCommand::Execute);
     }
 
-    void SummonCommand::Execute(ServerPlayer& sender,
+    void SummonCommand::Execute(const CommandSourceStack& source,
                                 const std::vector<std::string>& rawArgs,
                                 ServerConnection& connection,
                                 PlayerSessionManager& /*sessionManager*/) {
+        ServerPlayer& sender = *source.sender;
         // ── Keyword overrides (MC's NBT compound, without an NBT parser) ───
         //
         // Vanilla spells per-entity overrides as `/summon tnt ~ ~ ~ {Fuse:40}`.
@@ -116,27 +131,12 @@ namespace Server {
 
 
 
-        // Accept the vanilla "minecraft:" prefix so a command copied from the
-        // wiki works unchanged.
-        std::string slug = args[0];
-        if (slug.rfind("minecraft:", 0) == 0) slug = slug.substr(10);
-        std::transform(slug.begin(), slug.end(), slug.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
         Game::EntityTypeId type{};
-        bool found = false;
-        for (uint16_t i = 0; i < static_cast<uint16_t>(Game::EntityTypeId::Count); ++i) {
-            const auto candidate = static_cast<Game::EntityTypeId>(i);
-            if (Game::GetEntityTypeInfo(candidate).slug == slug) {
-                type = candidate;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
+        if (!ParseEntityType(args[0], type)) {
             connection.SendChatMessage("Unknown entity type: " + args[0], 1);
             return;
         }
+        const std::string slug(Game::GetEntityTypeInfo(type).slug);
 
         // ── Argument shapes ────────────────────────────────────────────────
         //
@@ -172,15 +172,14 @@ namespace Server {
             return;
         }
 
-        glm::dvec3 pos = sender.getPosition();
+        // MC: the source's position (which `/execute positioned` may have
+        // moved) and the source's LEVEL — a summon from the Nether lands in
+        // the Nether.
+        glm::dvec3 pos = source.position;
         if (coordAt != 0) {
-            CommandSource source;
-            source.sender   = &sender;
-            source.position = sender.getPosition();
-            CommandRotation rot{ sender.getYaw(), sender.getPitch() };
             std::string error;
             if (!ParseVec3(args[coordAt], args[coordAt + 1], args[coordAt + 2],
-                           source, rot, pos, error)) {
+                           source, source.rotation, pos, error)) {
                 connection.SendChatMessage(error, 1);
                 return;
             }
@@ -191,7 +190,7 @@ namespace Server {
             return;
         }
 
-        const int spawned = g_integratedServer->SummonMobs(type, pos, count, options);
+        const int spawned = g_integratedServer->SummonMobs(type, pos, count, options, source.dimension);
         if (spawned == 0) {
             connection.SendChatMessage("Failed to summon " + slug, 1);
             return;

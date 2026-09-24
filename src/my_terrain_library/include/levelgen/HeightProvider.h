@@ -1,7 +1,7 @@
 #pragma once
 
 #include "levelgen/VerticalAnchor.h"
-#include "levelgen/SurfaceRules.h"
+#include "levelgen/VerticalAnchor.h"
 #include "math/Mth.h"
 #include <cstdint>
 #include <memory>

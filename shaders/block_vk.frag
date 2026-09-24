@@ -16,6 +16,9 @@ layout (push_constant) uniform PushConstants {
     vec2 uScreenSize;   // 8 bytes
     float uLineWidth;   // 4 bytes
     float uAlphaTest;   // 4 bytes
+    vec4  uPortalClipPlane_;  // 80 (vertex stage)
+    vec4  uUVRange_;    // 96
+    vec4  uDrawLight;   // 112 — xyz: the draw's lightmap colour (uScalars; "uDrawLight")
 } pc;
 
 // Common UBO (portal pipeline layout, set=1) — the chunk shaders are created
@@ -38,7 +41,7 @@ layout (std140, set = 1, binding = 0) uniform Common {
     vec2  _pad_;
     vec4  uFogColor_;      // rgb = fog color, a = fog strength
     vec4  uFogEnv_;        // (envStart, envEnd, rdStart, rdEnd)
-    vec4  uCamPosBright_;  // xyz = camera pos, w = sky brightness
+    vec4  uCamPosBright_;  // xyz = camera pos (w unused here)
     // MC's entity OVERLAY — the TNT white flash. rgb = overlay colour,
     // a = STRENGTH. See the long note in shaders/block.frag for why the alpha
     // is inverted relative to vanilla's OverlayTexture texel.
@@ -73,8 +76,8 @@ void main() {
     // the lightmap, so a flashing block still dims and fogs.
     finalColor = mix(finalColor, U.uOverlayColor_.rgb, U.uOverlayColor_.a);
 
-    // Day/night sky-light dim + MC-style distance fog
-    finalColor *= U.uCamPosBright_.w;
+    // The draw's lightmap colour (see block.frag) + MC-style distance fog
+    finalColor *= pc.uDrawLight.xyz;
     vec3 fogDelta = fragWorldPos - U.uCamPosBright_.xyz;
     float sph = length(fogDelta);
     float cyl = max(length(fogDelta.xz), abs(fogDelta.y));

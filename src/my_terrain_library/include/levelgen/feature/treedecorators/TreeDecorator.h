@@ -363,6 +363,21 @@ public:
     void place(DecoratorContext& context) override;
 };
 
+/**
+ * ShelfMushroomDecorator - 26.3 treedecorators/ShelfMushroomDecorator.java:
+ * shelf mushrooms on a standing trunk (1-4 blocks up, two perpendicular
+ * faces) or along a fallen log (both sides).
+ */
+class ShelfMushroomDecorator : public TreeDecorator {
+private:
+    float m_placementProbability;
+
+public:
+    explicit ShelfMushroomDecorator(float probability) : m_placementProbability(probability) {}
+
+    void place(DecoratorContext& context) override;
+};
+
 } // namespace treedecorators
 } // namespace feature
 } // namespace levelgen

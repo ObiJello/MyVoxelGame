@@ -6,6 +6,13 @@
     "minecraft:netherite_axe",
     "minecraft:wooden_axe",
     "minecraft:iron_axe",
-    "minecraft:copper_axe"
+    "minecraft:copper_axe",
+    "minecraft:skyroot_axe",
+    "minecraft:holystone_axe",
+    "minecraft:zanite_axe",
+    "minecraft:gravitite_axe",
+    "minecraft:ironwood_axe",
+    "minecraft:steeleaf_axe",
+    "minecraft:knightmetal_axe"
   ]
 }

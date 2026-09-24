@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "C": "minecraft:resonant_crystal",
+    "H": "minecraft:resonant_heart",
+    "I": "minecraft:resonite_ingot",
+    "S": "minecraft:stick"
+  },
+  "pattern": [
+    "CHC",
+    " I ",
+    " S "
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:echo_blade"
+  }
+}

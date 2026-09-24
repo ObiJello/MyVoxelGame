@@ -1,0 +1,355 @@
+{
+  "entity.aechor_plant.death": {
+    "sounds": [
+      "damage/fallbig"
+    ],
+    "subtitle": "subtitles.aether.entity.aechor_plant.death"
+  },
+  "entity.aechor_plant.hurt": {
+    "sounds": [
+      "damage/hit1",
+      "damage/hit2",
+      "damage/hit3"
+    ],
+    "subtitle": "subtitles.aether.entity.aechor_plant.hurt"
+  },
+  "entity.aerbunny.death": {
+    "sounds": [
+      {
+        "name": "entity.rabbit.death",
+        "type": "event",
+        "pitch": 1.2
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.aerbunny.death"
+  },
+  "entity.aerbunny.hurt": {
+    "sounds": [
+      {
+        "name": "entity.rabbit.hurt",
+        "type": "event",
+        "pitch": 1.2
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.aerbunny.hurt"
+  },
+  "entity.aerwhale.ambient": {
+    "sounds": [
+      {
+        "name": "entity.dolphin.ambient_water",
+        "type": "event",
+        "pitch": 0.4
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.aerwhale.ambient"
+  },
+  "entity.aerwhale.death": {
+    "sounds": [
+      {
+        "name": "entity.dolphin.death",
+        "type": "event",
+        "pitch": 0.4
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.aerwhale.death"
+  },
+  "entity.cockatrice.ambient": {
+    "sounds": [
+      {
+        "name": "entity.parrot.ambient",
+        "type": "event",
+        "pitch": 0.7
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.cockatrice.ambient"
+  },
+  "entity.cockatrice.death": {
+    "sounds": [
+      {
+        "name": "entity.parrot.death",
+        "type": "event",
+        "pitch": 0.7
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.cockatrice.death"
+  },
+  "entity.cockatrice.hurt": {
+    "sounds": [
+      {
+        "name": "entity.parrot.hurt",
+        "type": "event",
+        "pitch": 0.7
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.cockatrice.hurt"
+  },
+  "entity.cockatrice.shoot": {
+    "sounds": [
+      "random/bow"
+    ],
+    "subtitle": "subtitles.aether.entity.cockatrice.shoot"
+  },
+  "entity.fire_minion.death": {
+    "sounds": [
+      {
+        "name": "entity.blaze.death",
+        "type": "event",
+        "pitch": 1.2
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.fire_minion.death"
+  },
+  "entity.fire_minion.hurt": {
+    "sounds": [
+      {
+        "name": "entity.blaze.hurt",
+        "type": "event",
+        "pitch": 1.2
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.fire_minion.hurt"
+  },
+  "entity.flying_cow.ambient": {
+    "sounds": [
+      "mob/cow/say1",
+      "mob/cow/say2",
+      "mob/cow/say3",
+      "mob/cow/say4"
+    ],
+    "subtitle": "subtitles.aether.entity.flying_cow.ambient"
+  },
+  "entity.flying_cow.death": {
+    "sounds": [
+      "mob/cow/hurt1",
+      "mob/cow/hurt2",
+      "mob/cow/hurt3"
+    ],
+    "subtitle": "subtitles.aether.entity.flying_cow.death"
+  },
+  "entity.flying_cow.hurt": {
+    "sounds": [
+      "mob/cow/hurt1",
+      "mob/cow/hurt2",
+      "mob/cow/hurt3"
+    ],
+    "subtitle": "subtitles.aether.entity.flying_cow.hurt"
+  },
+  "entity.flying_cow.step": {
+    "sounds": [
+      "mob/cow/step1",
+      "mob/cow/step2",
+      "mob/cow/step3",
+      "mob/cow/step4"
+    ],
+    "subtitle": "subtitles.block.generic.footsteps"
+  },
+  "entity.mimic.death": {
+    "sounds": [
+      "block/chest/close1",
+      "block/chest/close2",
+      "block/chest/close3"
+    ],
+    "subtitle": "subtitles.aether.entity.mimic.death"
+  },
+  "entity.mimic.hurt": {
+    "sounds": [
+      "dig/wood1",
+      "dig/wood2",
+      "dig/wood3",
+      "dig/wood4"
+    ],
+    "subtitle": "subtitles.aether.entity.mimic.hurt"
+  },
+  "entity.moa.ambient": {
+    "sounds": [
+      {
+        "name": "entity.chicken.ambient",
+        "type": "event",
+        "pitch": 0.7
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.moa.ambient"
+  },
+  "entity.moa.death": {
+    "sounds": [
+      {
+        "name": "entity.chicken.death",
+        "type": "event",
+        "pitch": 0.7
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.moa.death"
+  },
+  "entity.moa.hurt": {
+    "sounds": [
+      {
+        "name": "entity.chicken.hurt",
+        "type": "event",
+        "pitch": 0.7
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.moa.hurt"
+  },
+  "entity.moa.step": {
+    "sounds": [
+      "mob/pig/step1",
+      "mob/pig/step2",
+      "mob/pig/step3",
+      "mob/pig/step4",
+      "mob/pig/step5"
+    ],
+    "subtitle": "subtitles.block.generic.footsteps"
+  },
+  "entity.phyg.ambient": {
+    "sounds": [
+      "mob/pig/say1",
+      "mob/pig/say2",
+      "mob/pig/say3"
+    ],
+    "subtitle": "subtitles.aether.entity.phyg.ambient"
+  },
+  "entity.phyg.death": {
+    "sounds": [
+      "mob/pig/death"
+    ],
+    "subtitle": "subtitles.aether.entity.phyg.death"
+  },
+  "entity.phyg.hurt": {
+    "sounds": [
+      "mob/pig/say1",
+      "mob/pig/say2",
+      "mob/pig/say3"
+    ],
+    "subtitle": "subtitles.aether.entity.phyg.hurt"
+  },
+  "entity.phyg.step": {
+    "sounds": [
+      "mob/pig/step1",
+      "mob/pig/step2",
+      "mob/pig/step3",
+      "mob/pig/step4",
+      "mob/pig/step5"
+    ],
+    "subtitle": "subtitles.block.generic.footsteps"
+  },
+  "entity.sentry.death": {
+    "sounds": [
+      "mob/slime/big1",
+      "mob/slime/big2",
+      "mob/slime/big3",
+      "mob/slime/big4"
+    ],
+    "subtitle": "subtitles.aether.entity.sentry.death"
+  },
+  "entity.sentry.hurt": {
+    "sounds": [
+      "mob/slime/big1",
+      "mob/slime/big2",
+      "mob/slime/big3",
+      "mob/slime/big4"
+    ],
+    "subtitle": "subtitles.aether.entity.sentry.hurt"
+  },
+  "entity.sheepuff.ambient": {
+    "sounds": [
+      "mob/sheep/say1",
+      "mob/sheep/say2",
+      "mob/sheep/say3"
+    ],
+    "subtitle": "subtitles.aether.entity.sheepuff.ambient"
+  },
+  "entity.sheepuff.death": {
+    "sounds": [
+      "mob/sheep/say1",
+      "mob/sheep/say2",
+      "mob/sheep/say3"
+    ],
+    "subtitle": "subtitles.aether.entity.sheepuff.death"
+  },
+  "entity.sheepuff.hurt": {
+    "sounds": [
+      "mob/sheep/say1",
+      "mob/sheep/say2",
+      "mob/sheep/say3"
+    ],
+    "subtitle": "subtitles.aether.entity.sheepuff.hurt"
+  },
+  "entity.swet.death": {
+    "sounds": [
+      "mob/slime/big1",
+      "mob/slime/big2",
+      "mob/slime/big3",
+      "mob/slime/big4"
+    ],
+    "subtitle": "subtitles.aether.entity.swet.death"
+  },
+  "entity.swet.hurt": {
+    "sounds": [
+      "mob/slime/big1",
+      "mob/slime/big2",
+      "mob/slime/big3",
+      "mob/slime/big4"
+    ],
+    "subtitle": "subtitles.aether.entity.swet.hurt"
+  },
+  "entity.valkyrie.death": {
+    "sounds": [
+      {
+        "name": "entity.player.death",
+        "type": "event",
+        "pitch": 1.3
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.valkyrie.death"
+  },
+  "entity.valkyrie.hurt": {
+    "sounds": [
+      {
+        "name": "entity.player.hurt",
+        "type": "event",
+        "pitch": 1.3
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.valkyrie.hurt"
+  },
+  "entity.zephyr.ambient": {
+    "sounds": [
+      {
+        "name": "entity.ghast.ambient",
+        "type": "event",
+        "pitch": 1.5
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.zephyr.ambient"
+  },
+  "entity.zephyr.death": {
+    "sounds": [
+      {
+        "name": "entity.ghast.death",
+        "type": "event",
+        "pitch": 1.5
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.zephyr.death"
+  },
+  "entity.zephyr.hurt": {
+    "sounds": [
+      {
+        "name": "entity.ghast.hurt",
+        "type": "event",
+        "pitch": 1.5
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.zephyr.hurt"
+  },
+  "entity.zephyr.shoot": {
+    "sounds": [
+      {
+        "name": "entity.ghast.shoot",
+        "type": "event",
+        "pitch": 1.5
+      }
+    ],
+    "subtitle": "subtitles.aether.entity.zephyr.shoot"
+  }
+}

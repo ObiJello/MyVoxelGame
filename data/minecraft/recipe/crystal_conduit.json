@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "key": {
+    "R": "minecraft:resonite_ingot",
+    "C": "minecraft:resonant_crystal"
+  },
+  "pattern": [
+    "R",
+    "C",
+    "R"
+  ],
+  "result": {
+    "count": 4,
+    "id": "minecraft:crystal_conduit"
+  }
+}

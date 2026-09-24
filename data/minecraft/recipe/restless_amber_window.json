@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "group": "lumen_window",
+  "key": {
+    "N": "minecraft:nightglass",
+    "P": "minecraft:amber_lumen_panel"
+  },
+  "pattern": [
+    "N",
+    "P",
+    "N"
+  ],
+  "result": {
+    "count": 3,
+    "id": "minecraft:restless_amber_window"
+  }
+}

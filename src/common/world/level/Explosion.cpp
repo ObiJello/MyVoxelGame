@@ -3,7 +3,7 @@
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Profiling_Tracy.hpp"
-#include "common/core/SoundEvents.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "common/entity/Entity.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/Item.hpp"
@@ -11,6 +11,7 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/ExplosionTrigger.hpp"
 #include "common/world/level/BlockClip.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
@@ -1057,6 +1058,9 @@ namespace Game {
                     // apply_explosion_decay from no-ops into 1/radius rolls.
                     ctx.explosionRadius = decay ? p.radius : -1.0f;
 
+                    // MC Block.dropResources -> popResource: an explosion's
+                    // block loot is behind block_drops like any other.
+                    if (!Rules::GetBool(Rules::Id::BlockDrops)) continue;
                     for (const ItemStack& drop : LootTables::GetDrops(ctx)) {
                         if (drop.IsEmpty()) continue;
                         // MC ItemEntity.merge(to, from, 16): the cap is
@@ -1256,9 +1260,18 @@ namespace Game {
             if (p.fire) CreateFire(level, toBlow);
 
             if (p.spawnVisual) {
-                // MC's client plays this at volume 4.0 with pitch
-                // (1 + (rand - rand) * 0.2) * 0.7.
-                PlaySound("entity.generic.explode", p.center, 4.0f, 0.7f);
+                // MC ClientPacketListener.handleExplosion:1276 plays the
+                // packet's explosionSound on every client the explode packet
+                // reaches (64 blocks): playLocalSound(centre, sound, BLOCKS,
+                // 4.0, (1 + (r - r) * 0.2) * 0.7). Played from here instead
+                // — a volume-4 sound's range IS those 64 blocks — with the
+                // pitch rolled once, so every client hears the same blast.
+                if (p.explosionSound && p.explosionSound[0] != '\0') {
+                    JavaRandom& r = level.Random();
+                    const float a = r.NextFloat();
+                    const float pitch = (1.0f + (a - r.NextFloat()) * 0.2f) * 0.7f;
+                    level.PlaySound(nullptr, p.center, p.explosionSound, SoundSource::Blocks, 4.0f, pitch);
+                }
                 // MC Explosion.isSmall(): under radius 2, or nothing was touched.
                 const bool small = p.radius < kLargeExplosionRadius ||
                                    !InteractsWithBlocks(bi);

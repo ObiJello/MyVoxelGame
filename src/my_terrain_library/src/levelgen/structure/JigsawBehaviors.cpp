@@ -12,6 +12,7 @@
 #include "data/worldgen/features/TreeFeatures.h"
 #include "data/worldgen/features/CaveFeatures.h"
 #include "data/worldgen/features/VegetationFeatures.h"
+#include "data/worldgen/placement/TreePlacements.h"
 #include "levelgen/placement/PlacementModifiers.h"
 #include "levelgen/blockpredicates/BlockPredicate.h"
 #include "world/level/block/Blocks.h"
@@ -111,6 +112,48 @@ placement::PlacedFeature* featureById(const std::string& featureId) {
                         "minecraft:spruce_sapling");
         saplingFiltered("minecraft:spruce", data::worldgen::features::TreeFeatures::SPRUCE,
                         "minecraft:spruce_sapling");
+        // 26.3 AbandonedCampStructurePools tree/bamboo elements: the
+        // TreePlacements *_CHECKED / bee / poplar placed features (sapling
+        // survival filter), SPRUCE_ON_SNOW, and VegetationPlacements
+        // BAMBOO_IN_STRUCTURE (bamboo_no_podzol, isEmpty()).
+        {
+            using data::worldgen::placement::TreePlacements;
+            if (!TreePlacements::isInitialized()) TreePlacements::bootstrap();
+            auto placedTree = [&](const std::string& id, const placement::PlacedFeature* placed) {
+                if (placed == nullptr) {
+                    throw std::runtime_error("jigsaw feature element not bootstrapped: " + id);
+                }
+                registry[id] = const_cast<placement::PlacedFeature*>(placed);
+            };
+            placedTree("minecraft:acacia_checked", TreePlacements::ACACIA_CHECKED);
+            placedTree("minecraft:birch_bees_002", TreePlacements::BIRCH_BEES_002);
+            placedTree("minecraft:birch_checked", TreePlacements::BIRCH_CHECKED);
+            placedTree("minecraft:cherry_bees_005", TreePlacements::CHERRY_BEES_005);
+            placedTree("minecraft:cherry_checked", TreePlacements::CHERRY_CHECKED);
+            placedTree("minecraft:fancy_oak_bees_002", TreePlacements::FANCY_OAK_BEES_002);
+            placedTree("minecraft:fancy_oak_checked", TreePlacements::FANCY_OAK_CHECKED);
+            placedTree("minecraft:jungle_tree", TreePlacements::JUNGLE_TREE_CHECKED);
+            placedTree("minecraft:mega_jungle_tree_checked", TreePlacements::MEGA_JUNGLE_TREE_CHECKED);
+            placedTree("minecraft:mega_pine_checked", TreePlacements::MEGA_PINE_CHECKED);
+            placedTree("minecraft:mega_spruce_checked", TreePlacements::MEGA_SPRUCE_CHECKED);
+            placedTree("minecraft:oak_checked", TreePlacements::OAK_CHECKED);
+            placedTree("minecraft:orange_poplar", TreePlacements::ORANGE_POPLAR);
+            placedTree("minecraft:pale_oak_checked", TreePlacements::PALE_OAK_CHECKED);
+            placedTree("minecraft:pine_checked", TreePlacements::PINE_CHECKED);
+            placedTree("minecraft:red_poplar", TreePlacements::RED_POPLAR);
+            placedTree("minecraft:spruce_checked", TreePlacements::SPRUCE_CHECKED);
+            placedTree("minecraft:spruce_on_snow", TreePlacements::SPRUCE_ON_SNOW);
+            placedTree("minecraft:super_birch_bees_0002", TreePlacements::SUPER_BIRCH_BEES_0002);
+            placedTree("minecraft:yellow_poplar", TreePlacements::YELLOW_POPLAR);
+
+            ownedFilters.push_back(std::make_unique<placement::BlockPredicateFilter>(
+                placement::BlockPredicateFilter::forPredicate(
+                    blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE)));
+            addPlaced("minecraft:bamboo_in_structure",
+                      data::worldgen::features::VegetationFeatures::BAMBOO_NO_PODZOL,
+                      {ownedFilters.back().get()});
+        }
+
         // Reference: PileFeatures - BLOCK_PILE with the exact providers.
         pile("minecraft:pile_hay", std::make_shared<RotatedBlockProvider>(
             Blocks::getDefaultState("minecraft:hay_block")));
@@ -188,6 +231,11 @@ private:
                 settings.keepLiquids = m_keepLiquids;
                 settings.knownShape = true;
                 settings.jigsawReplacement = true;
+                // Reference: setIgnoreEntities(false) + setFinalizeEntities(true)
+                // - the template's mobs (villagers, golems, cats, bastion
+                // piglins, ...) are placed and finalizeSpawn(STRUCTURE)'d.
+                settings.ignoreEntities = false;
+                settings.finalizeEntities = true;
                 if (!element.processors.empty()
                     && element.processors != "minecraft:empty") {
                     ProcessorLists::appendProcessors(element.processors, settings, level);

@@ -130,6 +130,11 @@ namespace Game::Nbt {
         // A nested list element; end it with EndList like any other.
         [[nodiscard]] ListScope ListListBegin(ListScope& parent, TagType elem);
 
+        // A named compound whose payload — its entries and the closing End
+        // byte — is already encoded: NBT another encoder produced, carried
+        // through unchanged (the terrain library's "structures" compound).
+        void EmbedCompound(std::string_view name, const std::vector<uint8_t>& payload);
+
         bool ok() const { return m_ok; }
         const std::vector<uint8_t>& Bytes() const { return m_buf; }
         std::vector<uint8_t>&& TakeBytes() { return std::move(m_buf); }

@@ -1,5 +1,9 @@
 {
   "values": [
-    "#minecraft:head_armor"
+    "#minecraft:head_armor",
+    "minecraft:ironwood_helmet",
+    "minecraft:steeleaf_helmet",
+    "minecraft:knightmetal_helmet",
+    "minecraft:fiery_helmet"
   ]
 }

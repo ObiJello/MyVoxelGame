@@ -11,6 +11,9 @@
 // the per-family placement logic paired with one StructurePieceData entry.
 
 namespace minecraft {
+namespace nbt {
+class CompoundTag;
+}
 namespace levelgen {
 class WorldGenLevel;
 class ChunkGenerator;
@@ -36,6 +39,21 @@ public:
                              const ::world::ChunkPos& chunkPos,
                              const core::BlockPos& referencePos,
                              StructurePieceData& self) = 0;
+
+    /**
+     * Reference: StructurePiece.addAdditionalSaveData - the state a piece
+     * changes while it places (a height it settled on, a chest it already
+     * put down), written into the piece's saved tag under MC's field names.
+     * A reloaded start is regenerated from the seed and then handed this
+     * state back through loadState, so a structure half placed before an
+     * unload finishes exactly as it would have. Stateless pieces keep the
+     * default no-ops.
+     */
+    virtual void saveState(nbt::CompoundTag& tag) const { (void)tag; }
+    virtual void loadState(const nbt::CompoundTag& tag, StructurePieceData& self) {
+        (void)tag;
+        (void)self;
+    }
 };
 
 } // namespace structure

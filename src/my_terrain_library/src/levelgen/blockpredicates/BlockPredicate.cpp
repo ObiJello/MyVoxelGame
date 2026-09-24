@@ -2,10 +2,12 @@
 #include "external/json.hpp"
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace minecraft {
 namespace levelgen {
@@ -47,6 +49,45 @@ std::optional<fs::path> findTagRoot() {
     return std::nullopt;
 }
 
+// One `values` entry of a tag file: MC's TagEntry — a plain string, or
+// {"id": ..., "required": false} (an optional entry, skipped when what it
+// names does not exist).
+struct TagFileEntry {
+    std::string value;
+    bool required = true;
+};
+
+// The entries of one tag file, or nullopt when the file does not exist.
+// Throws only for a file that exists but cannot be read or parsed.
+std::optional<std::vector<TagFileEntry>> readTagFile(const fs::path& tagPath) {
+    if (!fs::exists(tagPath)) {
+        return std::nullopt;
+    }
+    std::ifstream input(tagPath);
+    if (!input.is_open()) {
+        throw std::runtime_error("Block tag file unreadable: " + tagPath.string());
+    }
+    json parsed;
+    try {
+        input >> parsed;
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Block tag file unparseable: " + tagPath.string() +
+                                 ": " + e.what());
+    }
+    std::vector<TagFileEntry> entries;
+    if (!parsed.contains("values") || !parsed["values"].is_array()) {
+        return entries;
+    }
+    for (const auto& entry : parsed["values"]) {
+        if (entry.is_string()) {
+            entries.push_back({entry.get<std::string>(), true});
+        } else if (entry.is_object() && entry.contains("id") && entry["id"].is_string()) {
+            entries.push_back({entry["id"].get<std::string>(), entry.value("required", true)});
+        }
+    }
+    return entries;
+}
+
 class BlockTagRegistry {
 public:
     const std::unordered_set<std::string>& resolve(const std::string& tag) {
@@ -84,17 +125,17 @@ private:
         std::string pathPart = colon == std::string::npos ? tag : tag.substr(colon + 1);
         fs::path tagPath = *m_tagRoot / nameSpace / "tags" / "block" / (pathPart + ".json");
 
-        std::ifstream input(tagPath);
-        json parsed;
-        input >> parsed;
-        if (!parsed.contains("values") || !parsed["values"].is_array()) {
+        // A missing file was already reported by resolveLocked.
+        const auto entries = readTagFile(tagPath);
+        if (!entries) {
             return;
         }
-        for (const auto& entry : parsed["values"]) {
-            if (!entry.is_string()) continue;
-            std::string value = entry.get<std::string>();
+        for (const TagFileEntry& entry : *entries) {
+            const std::string& value = entry.value;
             if (!value.empty() && value[0] == '#') {
-                collectOrderedLocked(normalizeNamespacedId(value.substr(1), nameSpace), out, seen);
+                const std::string nested = normalizeNamespacedId(value.substr(1), nameSpace);
+                if (!entry.required && !tagFileExists(nested)) continue;
+                collectOrderedLocked(nested, out, seen);
             } else {
                 std::string id = normalizeNamespacedId(value, nameSpace);
                 if (seen.insert(id).second) {
@@ -136,42 +177,41 @@ private:
         return values;
     }
 
-    void loadTagValuesLocked(const std::string& tag, std::unordered_set<std::string>& out) {
+    fs::path tagPathFor(const std::string& tag) const {
         size_t colon = tag.find(':');
         std::string nameSpace = colon == std::string::npos ? "minecraft" : tag.substr(0, colon);
         std::string pathPart = colon == std::string::npos ? tag : tag.substr(colon + 1);
-        fs::path tagPath = *m_tagRoot / nameSpace / "tags" / "block" / (pathPart + ".json");
+        return *m_tagRoot / nameSpace / "tags" / "block" / (pathPart + ".json");
+    }
 
-        if (!fs::exists(tagPath)) {
-            throw std::runtime_error("Block tag file missing: " + tagPath.string());
-        }
+    bool tagFileExists(const std::string& tag) const {
+        return fs::exists(tagPathFor(tag));
+    }
 
-        std::ifstream input(tagPath);
-        if (!input.is_open()) {
-            throw std::runtime_error("Block tag file unreadable: " + tagPath.string());
-        }
+    void loadTagValuesLocked(const std::string& tag, std::unordered_set<std::string>& out) {
+        size_t colon = tag.find(':');
+        std::string nameSpace = colon == std::string::npos ? "minecraft" : tag.substr(0, colon);
+        const fs::path tagPath = tagPathFor(tag);
 
-        json parsed;
-        try {
-            input >> parsed;
-        } catch (const std::exception& e) {
-            throw std::runtime_error("Block tag file unparseable: " + tagPath.string() +
-                                     ": " + e.what());
-        }
-
-        if (!parsed.contains("values") || !parsed["values"].is_array()) {
+        const auto entries = readTagFile(tagPath);
+        if (!entries) {
+            // MC refuses to load a datapack whose required tag reference
+            // dangles. Throwing here instead would kill the worldgen task
+            // that asked, whose future then never completes, and every chunk
+            // waiting on it — the whole generator — stalls for good. Report it
+            // loudly, once (the empty result is cached), and read it as empty.
+            std::cerr << "[BlockTags] ERROR: block tag file missing: " << tagPath.string()
+                      << " - #" << tag << " reads as empty; add the tag to data/\n";
             return;
         }
 
-        for (const auto& entry : parsed["values"]) {
-            if (!entry.is_string()) {
-                continue;
-            }
-
-            std::string value = entry.get<std::string>();
+        for (const TagFileEntry& entry : *entries) {
+            const std::string& value = entry.value;
             if (!value.empty() && value[0] == '#') {
-                const auto& nested = resolveLocked(normalizeNamespacedId(value.substr(1), nameSpace));
-                out.insert(nested.begin(), nested.end());
+                const std::string nested = normalizeNamespacedId(value.substr(1), nameSpace);
+                if (!entry.required && !tagFileExists(nested)) continue;
+                const auto& resolved = resolveLocked(nested);
+                out.insert(resolved.begin(), resolved.end());
             } else {
                 out.insert(normalizeNamespacedId(value, nameSpace));
             }
@@ -191,11 +231,12 @@ TrueBlockPredicate TrueBlockPredicate::INSTANCE;
 
 // Common predicate instances
 // Reference: BlockPredicate.java lines 21-22
+// 26.3: #air (air, void_air, cave_air); 26.1 matched the air block only.
 std::shared_ptr<BlockPredicate> BlockPredicate::ONLY_IN_AIR_PREDICATE =
-    BlockPredicate::matchesBlocks("minecraft:air");
+    BlockPredicate::matchesTag("minecraft:air");
 
 std::shared_ptr<BlockPredicate> BlockPredicate::ONLY_IN_AIR_OR_WATER_PREDICATE =
-    BlockPredicate::matchesBlocks(std::vector<std::string>{"minecraft:air", "minecraft:water"});
+    BlockPredicate::anyOf(ONLY_IN_AIR_PREDICATE, BlockPredicate::matchesBlocks("minecraft:water"));
 
 //=============================================================================
 // Static Factory Method Implementations
@@ -353,6 +394,28 @@ std::shared_ptr<BlockPredicate> BlockPredicate::unobstructed() {
     return unobstructed(core::Vec3i::ZERO());
 }
 
+int32_t BlockPredicate::HeightAnchor::resolveY(const WorldGenLevel& level) const {
+    // WorldGenerationContext: minY, height (getMaxY here is exclusive), sea level
+    const int32_t minY = level.getMinY();
+    const int32_t height = level.getMaxY() - minY;
+    switch (kind) {
+        case Kind::ABSOLUTE: return value;
+        case Kind::ABOVE_BOTTOM: return minY + value;
+        case Kind::BELOW_TOP: return height - 1 + minY - value;
+        case Kind::RELATIVE_TO_SEA_LEVEL: return level.getSeaLevel() + value;
+    }
+    return value;
+}
+
+std::shared_ptr<BlockPredicate> BlockPredicate::heightRange(HeightAnchor minInclusive, HeightAnchor maxInclusive) {
+    return std::make_shared<HeightRangePredicate>(minInclusive, maxInclusive);
+}
+
+std::shared_ptr<BlockPredicate> BlockPredicate::volumeMatch(const core::Vec3i& min, const core::Vec3i& max,
+                                                            std::shared_ptr<BlockPredicate> match) {
+    return std::make_shared<VolumeMatchPredicate>(min, max, std::move(match));
+}
+
 bool matchesBlockTagName(BlockState* state, const std::string& tag) {
     if (!state) {
         return false;
@@ -360,6 +423,10 @@ bool matchesBlockTagName(BlockState* state, const std::string& tag) {
 
     const auto& values = blockTagRegistry().resolve(tag);
     return values.find(state->getIdentifier()) != values.end();
+}
+
+const std::unordered_set<std::string>& blockTagValues(const std::string& tag) {
+    return blockTagRegistry().resolve(tag);
 }
 
 const std::vector<std::string>& orderedBlockTagValues(const std::string& tag) {

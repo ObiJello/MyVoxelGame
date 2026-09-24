@@ -1,6 +1,6 @@
 // File: src/common/world/portal/BlockPattern.cpp
 //
-// Line references are to minecraft_code/decompiled_net/minecraft/world/level/
+// Line references are to minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/
 // block/state/pattern/BlockPattern.java and BlockPatternBuilder.java.
 
 #include "BlockPattern.hpp"

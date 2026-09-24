@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "key": {
+    "I": "minecraft:resonite_ingot",
+    "N": "minecraft:nightglass",
+    "C": "minecraft:resonant_crystal"
+  },
+  "pattern": [
+    " I ",
+    "NCN",
+    " I "
+  ],
+  "result": {
+    "count": 2,
+    "id": "minecraft:choir_lamp"
+  }
+}

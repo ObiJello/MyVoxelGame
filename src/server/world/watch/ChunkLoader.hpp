@@ -10,6 +10,13 @@
 // A session's watched set is the union of its loaders' views. Everything
 // that used to ask "is chunk X in the player's tracking view" now asks "is
 // (dimension, X) in the union" — see PlayerSession::IsWatching.
+//
+// One loader kind is different: Source::Simulation keeps chunks LOADED so
+// they tick (the player's simulation distance can exceed their view
+// distance, up to ChunkLevel::kMaxSimulationDistance) but never sends them
+// to the client — it contributes to PlayerSession::KeepsLoaded, not to
+// IsWatching. MC has no such loader because its simulation distance can
+// never exceed 32, where the view distance's own loading already reaches.
 #pragma once
 
 #include "ChunkTrackingView.hpp"
@@ -56,7 +63,9 @@ namespace Server {
             Player,          // the player's own view distance
             Portal,          // the far side of a portal the player is near
             IndirectPortal,  // the far side of a portal visible THROUGH such a portal
+            Simulation,      // the player's simulation distance beyond their view: loaded, ticked, never sent
         };
+        bool IsSimulation() const { return source == Source::Simulation; }
 
         Game::DimensionId dimension = Game::DimensionId::Overworld;
         ChunkTrackingView view      = ChunkTrackingView::Empty();

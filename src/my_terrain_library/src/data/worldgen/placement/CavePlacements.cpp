@@ -38,6 +38,8 @@ const PlacedFeature* CavePlacements::FOSSIL_LOWER = nullptr;
 const PlacedFeature* CavePlacements::DRIPSTONE_CLUSTER = nullptr;
 const PlacedFeature* CavePlacements::LARGE_DRIPSTONE = nullptr;
 const PlacedFeature* CavePlacements::POINTED_DRIPSTONE = nullptr;
+const PlacedFeature* CavePlacements::SULFUR_SPIKE_CLUSTER = nullptr;
+const PlacedFeature* CavePlacements::SULFUR_SPIKE = nullptr;
 
 // Underwater
 const PlacedFeature* CavePlacements::UNDERWATER_MAGMA = nullptr;
@@ -47,6 +49,7 @@ const PlacedFeature* CavePlacements::GLOW_LICHEN = nullptr;
 
 // Lush caves
 const PlacedFeature* CavePlacements::ROOTED_AZALEA_TREE = nullptr;
+const PlacedFeature* CavePlacements::ROOTED_SULFUR_SPRING = nullptr;
 const PlacedFeature* CavePlacements::CAVE_VINES = nullptr;
 const PlacedFeature* CavePlacements::LUSH_CAVES_VEGETATION = nullptr;
 const PlacedFeature* CavePlacements::LUSH_CAVES_CLAY = nullptr;
@@ -655,6 +658,63 @@ void CavePlacements::bootstrap() {
     }
 
     // =========================================================================
+    // SULFUR_SPIKE_CLUSTER PLACEMENT (26.3 CavePlacements.java): as
+    // DRIPSTONE_CLUSTER - CountPlacement.of(UniformInt.of(48, 96)),
+    // InSquarePlacement.spread(), RANGE_BOTTOM_TO_MAX_TERRAIN_HEIGHT,
+    // BiomeFilter.biome()
+    // =========================================================================
+    {
+        s_uniformInts.push_back(levelgen::carver::UniformInt::of(48, 96));
+        s_countPlacements.push_back(CountPlacement::of(&s_uniformInts.back()));
+        s_uniformHeights.push_back(UniformHeight(
+            VerticalAnchor::aboveBottom(0),
+            VerticalAnchor::absolute(256)
+        ));
+        s_heightPlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
+        std::vector<PlacementModifier*> modifiers = {
+            &s_countPlacements.back(),
+            &InSquarePlacement::spread(),
+            &s_heightPlacements.back(),
+            &BiomeFilter::biome()
+        };
+        SULFUR_SPIKE_CLUSTER = createPlaced(CaveFeatures::SULFUR_SPIKE_CLUSTER, modifiers, "SULFUR_SPIKE_CLUSTER");
+    }
+
+    // =========================================================================
+    // SULFUR_SPIKE PLACEMENT (26.3 CavePlacements.java): as POINTED_DRIPSTONE -
+    // CountPlacement.of(UniformInt.of(192, 256)), InSquarePlacement.spread(),
+    // RANGE_BOTTOM_TO_MAX_TERRAIN_HEIGHT, CountPlacement.of(UniformInt.of(1, 5)),
+    // OffsetPlacement.of(ClampedNormalInt(0,3,-10,10), ClampedNormalInt(0,0.6,-2,2)),
+    // BiomeFilter.biome()
+    // =========================================================================
+    {
+        s_uniformInts.push_back(levelgen::carver::UniformInt::of(192, 256));
+        s_countPlacements.push_back(CountPlacement::of(&s_uniformInts.back()));
+        s_uniformHeights.push_back(UniformHeight(
+            VerticalAnchor::aboveBottom(0),
+            VerticalAnchor::absolute(256)
+        ));
+        s_heightPlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
+        s_uniformInts.push_back(levelgen::carver::UniformInt::of(1, 5));
+        s_countPlacements.push_back(CountPlacement::of(&s_uniformInts.back()));
+        s_clampedNormalInts.push_back(levelgen::carver::ClampedNormalInt::of(0.0f, 3.0f, -10, 10));
+        s_clampedNormalInts.push_back(levelgen::carver::ClampedNormalInt::of(0.0f, 0.6f, -2, 2));
+        s_randomOffsetPlacements.push_back(RandomOffsetPlacement::of(
+            &s_clampedNormalInts[s_clampedNormalInts.size() - 2],
+            &s_clampedNormalInts.back()
+        ));
+        std::vector<PlacementModifier*> modifiers = {
+            &s_countPlacements[s_countPlacements.size() - 2],
+            &InSquarePlacement::spread(),
+            &s_heightPlacements.back(),
+            &s_countPlacements.back(),
+            &s_randomOffsetPlacements.back(),
+            &BiomeFilter::biome()
+        };
+        SULFUR_SPIKE = createPlaced(CaveFeatures::SULFUR_SPIKE, modifiers, "SULFUR_SPIKE");
+    }
+
+    // =========================================================================
     // ROOTED_AZALEA_TREE PLACEMENT
     // Reference: CavePlacements.java line 80
     // CountPlacement.of(UniformInt.of(1, 2)), InSquarePlacement.spread(),
@@ -697,6 +757,39 @@ void CavePlacements::bootstrap() {
         };
 
         ROOTED_AZALEA_TREE = createPlaced(CaveFeatures::ROOTED_AZALEA_TREE, modifiers, "ROOTED_AZALEA_TREE");
+    }
+
+    // =========================================================================
+    // ROOTED_SULFUR_SPRING PLACEMENT (26.3 CavePlacements.java): as
+    // ROOTED_AZALEA_TREE - Count(UniformInt(1, 2)), InSquarePlacement.spread(),
+    // RANGE_BOTTOM_TO_MAX_TERRAIN_HEIGHT, EnvironmentScan(UP, solid,
+    // ONLY_IN_AIR, 12), Offset.vertical(-1), BiomeFilter.biome()
+    // =========================================================================
+    {
+        s_uniformInts.push_back(levelgen::carver::UniformInt::of(1, 2));
+        s_countPlacements.push_back(CountPlacement::of(&s_uniformInts.back()));
+        s_uniformHeights.push_back(UniformHeight(
+            VerticalAnchor::aboveBottom(0),
+            VerticalAnchor::absolute(256)
+        ));
+        s_heightPlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
+        s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
+            EnvironmentScanPlacement::Direction::UP,
+            BlockPredicate::solid(),
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
+            12
+        ));
+        s_constantInts.push_back(levelgen::carver::ConstantInt::of(-1));
+        s_randomOffsetPlacements.push_back(RandomOffsetPlacement::vertical(&s_constantInts.back()));
+        std::vector<PlacementModifier*> modifiers = {
+            &s_countPlacements.back(),
+            &InSquarePlacement::spread(),
+            &s_heightPlacements.back(),
+            &s_envScanPlacements.back(),
+            &s_randomOffsetPlacements.back(),
+            &BiomeFilter::biome()
+        };
+        ROOTED_SULFUR_SPRING = createPlaced(CaveFeatures::ROOTED_SULFUR_SPRING, modifiers, "ROOTED_SULFUR_SPRING");
     }
 
     // =========================================================================

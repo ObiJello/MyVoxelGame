@@ -23,6 +23,10 @@ struct TextureAnimation {
     int frametime = 1;        // Ticks per frame (20 ticks = 1 second)
     bool interpolate = false; // Whether to interpolate between frames
     std::vector<int> frames;  // Custom frame sequence (empty = use all frames in order)
+    // Per-entry durations, parallel to `frames` (MC AnimationFrame.time:
+    // a frame object's "time", else the section's frametime). 0 = frametime.
+    // Empty when the .mcmeta lists no timed frame.
+    std::vector<int> frameTimes;
 
     // The .mcmeta's optional `width` / `height`, 0 when absent. MC's
     // AnimationMetadataSection.calculateFrameSize only falls back to a
@@ -118,6 +122,10 @@ namespace Render {
 
         // Look up UV coordinates for a texture key
         bool GetUVRect(const std::string& textureKey, AtlasUVRect& uvRect) const;
+        // Every packed sprite, (key, rect), in no particular order.
+        template <class F> void ForEachUVRect(F&& fn) const {
+            for (const auto& [key, rect] : textureKeyToUV) fn(key, rect);
+        }
 
         // Get atlas dimensions
         int GetAtlasWidth() const { return atlasWidth; }
@@ -138,6 +146,9 @@ namespace Render {
         // SetMipmapEnabled + SetMipmapLevel in sequence. Safe before the
         // atlas exists — the values are picked up by BuildFromJSON.
         void SetMipmapLevels(int levels);
+        // Re-read the sampling settings (mip filter, anisotropy) onto the
+        // atlas — the Video Settings screen calls it on a change.
+        void RefreshTextureParameters() { UpdateTextureParameters(); }
         
         // Border extrusion control (for toggling between rendering modes)
         void SetBorderExtrusionEnabled(bool enabled) { m_borderExtrusionEnabled = enabled; }

@@ -25,6 +25,8 @@
     // Numeric time-series plot (name must be a string literal). Shows up in
     // Tracy's Plots pane — use for per-frame counts (visible sections, uploads).
     #define PROFILE_PLOT(name, value)       TracyPlot(name, value)
+    #define PROFILE_ZONE_TEXT(txt, len)     ZoneText(txt, len)
+    #define PROFILE_ZONE_VALUE(v)           ZoneValue(static_cast<uint64_t>(v))
 
     // A zone on a call site hot enough that the instrumentation itself
     // distorts the measurement. Each ZoneScopedN pair is a TracyQueuePrepare +
@@ -48,5 +50,7 @@
     #define PROFILE_FRAME_MARK_NAMED(name)  (void)0
     #define PROFILE_THREAD(name)    (void)0
     #define PROFILE_PLOT(name, value)       (void)0
+    #define PROFILE_ZONE_TEXT(txt, len)     (void)0
+    #define PROFILE_ZONE_VALUE(v)           (void)0
     #define PROFILE_ZONE_DETAIL(name)       (void)0
 #endif

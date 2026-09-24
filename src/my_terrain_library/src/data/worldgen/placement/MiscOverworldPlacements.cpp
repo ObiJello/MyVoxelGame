@@ -40,6 +40,7 @@ const PlacedFeature* MiscOverworldPlacements::FOREST_ROCK = nullptr;
 // Lakes
 const PlacedFeature* MiscOverworldPlacements::LAKE_LAVA_UNDERGROUND = nullptr;
 const PlacedFeature* MiscOverworldPlacements::LAKE_LAVA_SURFACE = nullptr;
+const PlacedFeature* MiscOverworldPlacements::SULFUR_POOL = nullptr;
 
 // Disks
 const PlacedFeature* MiscOverworldPlacements::DISK_CLAY = nullptr;
@@ -317,6 +318,42 @@ void MiscOverworldPlacements::bootstrap() {
     }
 
     // =========================================================================
+    // SULFUR_POOL PLACEMENT (26.3 MiscOverworldPlacements.java)
+    // CountPlacement.of(256), InSquarePlacement.spread(),
+    // RANGE_BOTTOM_TO_MAX_TERRAIN_HEIGHT, BlockPredicateFilter(solid),
+    // EnvironmentScan(UP, ONLY_IN_AIR, 32), Offset.vertical(-1),
+    // BlockPredicateFilter(matchesBlocks(sulfur)), BiomeFilter.biome()
+    // =========================================================================
+    {
+        using levelgen::blockpredicates::BlockPredicate;
+        s_constantInts.push_back(levelgen::carver::ConstantInt::of(256));
+        s_countPlacements.push_back(CountPlacement::of(&s_constantInts.back()));
+        CountPlacement* count = &s_countPlacements.back();
+        s_uniformHeights.push_back(UniformHeight(
+            VerticalAnchor::aboveBottom(0),
+            VerticalAnchor::absolute(256)
+        ));
+        s_heightRangePlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
+        HeightRangePlacement* range = &s_heightRangePlacements.back();
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(BlockPredicate::solid()));
+        BlockPredicateFilter* solidFilter = &s_blockPredicateFilters.back();
+        s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
+            EnvironmentScanPlacement::Direction::UP, BlockPredicate::ONLY_IN_AIR_PREDICATE, 32));
+        EnvironmentScanPlacement* scan = &s_envScanPlacements.back();
+        s_constantInts.push_back(levelgen::carver::ConstantInt::of(-1));
+        s_randomOffsetPlacements.push_back(RandomOffsetPlacement::vertical(&s_constantInts.back()));
+        RandomOffsetPlacement* down = &s_randomOffsetPlacements.back();
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(
+            BlockPredicate::matchesBlocks(std::vector<std::string>{"minecraft:sulfur"})));
+        BlockPredicateFilter* sulfurFilter = &s_blockPredicateFilters.back();
+        SULFUR_POOL = createPlaced(
+            MiscOverworldFeatures::SULFUR_POOL,
+            { count, &InSquarePlacement::spread(), range, solidFilter, scan, down, sulfurFilter, &BiomeFilter::biome() },
+            "SULFUR_POOL"
+        );
+    }
+
+    // =========================================================================
     // DISK_CLAY PLACEMENT
     // Reference: Java line 79
     // InSquarePlacement.spread(), HEIGHTMAP_TOP_SOLID, BlockPredicateFilter(water), BiomeFilter
@@ -405,14 +442,25 @@ void MiscOverworldPlacements::bootstrap() {
 
     // =========================================================================
     // DESERT_WELL PLACEMENT
-    // Reference: Java line 85
-    // RarityFilter.onAverageOnceEvery(1000), InSquarePlacement.spread(), HEIGHTMAP, BiomeFilter
+    // Reference: 26.3 MiscOverworldPlacements.java line 90
+    // RarityFilter.onAverageOnceEvery(1000), InSquarePlacement.spread(), HEIGHTMAP,
+    // OffsetPlacement.of(DOWN), BlockPredicateFilter(allOf(matchesBlocks(sand),
+    // volumeMatch((-2,-2,-2), (2,-1,2), not(ONLY_IN_AIR)))), BiomeFilter
     // =========================================================================
     {
+        using levelgen::blockpredicates::BlockPredicate;
+        static levelgen::carver::ConstantInt s_zero(0);
+        static levelgen::carver::ConstantInt s_down(-1);
+        static OffsetPlacement s_wellDown(&s_zero, &s_down, &s_zero);
+        static BlockPredicateFilter s_wellGround = BlockPredicateFilter::forPredicate(BlockPredicate::allOf(
+            BlockPredicate::matchesBlocks(std::string("minecraft:sand")),
+            BlockPredicate::volumeMatch(core::Vec3i(-2, -2, -2), core::Vec3i(2, -1, 2),
+                                        BlockPredicate::not_(BlockPredicate::ONLY_IN_AIR_PREDICATE))));
         s_rarityFilters.push_back(RarityFilter::onAverageOnceEvery(1000));
         DESERT_WELL = createPlaced(
             MiscOverworldFeatures::DESERT_WELL,
-            { &s_rarityFilters.back(), &InSquarePlacement::spread(), heightmapMotionBlocking(), &BiomeFilter::biome() },
+            { &s_rarityFilters.back(), &InSquarePlacement::spread(), heightmapMotionBlocking(),
+              &s_wellDown, &s_wellGround, &BiomeFilter::biome() },
             "DESERT_WELL"
         );
     }

@@ -11,7 +11,13 @@
 #include <mutex>
 #include <chrono>
 #include <list>
+#include <deque>
+#include <utility>
+#include <vector>
+#include <future>
 #include "../interfaces/IChunkSaver.hpp"
+
+#include <functional>
 
 namespace Game {
 
@@ -97,8 +103,22 @@ namespace Game {
         // Get all dirty chunks
         std::vector<Math::ChunkPos> GetDirtyChunks() const;
 
-        // Save all dirty chunks
-        void SaveAllDirty();
+        // Save all dirty chunks.
+        //   wait = true  — MC saveAllChunks(flush = true): every dirty chunk,
+        //                  write cooldown ignored, returns once all are on
+        //                  disk. Shutdown, cache teardown.
+        //   wait = false — MC autosave: queue them and return; the IO thread
+        //                  writes in the background. Each chunk's flag is
+        //                  cleared as it is snapshotted and set again if its
+        //                  write turns out to fail (PollInflightSaves).
+        void SaveAllDirty(bool wait = true);
+
+        // MC ChunkMap.saveChunksEagerly: up to `maxChunks` dirty chunks, in the
+        // order they became dirty, while `deadline` has not passed and fewer
+        // than 128 writes are in flight. Once a tick, in the tick's spare
+        // time, so freshly generated chunks trickle to disk instead of piling
+        // up for the next autosave. Returns the number queued.
+        size_t SaveSomeDirty(size_t maxChunks, std::chrono::steady_clock::time_point deadline);
 
         // Clear dirty flag for chunk (after successful save)
         void ClearDirtyFlag(Math::ChunkPos position);
@@ -113,6 +133,17 @@ namespace Game {
         // Set chunk saver for automatic dirty chunk saving
         void SetChunkSaver(std::shared_ptr<IChunkSaver> saver);
 
+        // Told about every chunk handed to the saver, with the content that is
+        // being written (ChunkKeeper's redstone index). Called on the saving
+        // thread, before the write; may be null.
+        void SetSavedObserver(std::function<void(Math::ChunkPos, const Chunk&)> cb) { m_onSaved = std::move(cb); }
+        void NotifySaved(Math::ChunkPos position, const Chunk& chunk) const { if (m_onSaved) m_onSaved(position, chunk); }
+
+        // Raise the capacity (never lowers it: shrinking would evict resident
+        // chunks nobody asked to drop). Used when a player's simulation
+        // distance asks for more chunks than the cache was built for.
+        void GrowMaxSize(size_t maxSize);
+        size_t MaxSize() const;
         // Set callback for when chunks are evicted
         using EvictionCallback = std::function<void(Math::ChunkPos, std::shared_ptr<Chunk>, bool wasDirty)>;
         void SetEvictionCallback(EvictionCallback callback);
@@ -142,6 +173,13 @@ namespace Game {
 
         // Get all loaded chunk positions (for iteration without full debug state)
         std::vector<Math::ChunkPos> GetLoadedChunkPositions() const;
+
+        // The resident chunks holding at least one block entity, in the same
+        // (hash) order GetLoadedChunkPositions walks. One lock for the whole
+        // walk — the block-entity tick used to take the lock once per loaded
+        // chunk to find the handful that have any.
+        std::vector<std::pair<Math::ChunkPos, std::shared_ptr<Chunk>>>
+            GetChunksWithBlockEntities() const;
 
         // === DEBUGGING ===
 
@@ -182,6 +220,20 @@ namespace Game {
 
         // Dependencies
         std::shared_ptr<IChunkSaver> m_chunkSaver;
+        std::function<void(Math::ChunkPos, const Chunk&)> m_onSaved;
+
+        // Background saves not yet confirmed (see SaveAllDirty(false) /
+        // SaveSomeDirty); a failure re-marks the chunk dirty.
+        void PollInflightSaves();
+        // Snapshot one chunk for a background save: flag cleared first (a
+        // change during the snapshot sets it again), restored if the saver
+        // skipped (write cooldown) or failed. True if a write was queued.
+        bool QueueBackgroundSave(Math::ChunkPos pos, const std::shared_ptr<Chunk>& chunk);
+        std::mutex m_inflightMutex;
+        std::vector<std::pair<Math::ChunkPos, std::future<ChunkSaveResult>>> m_inflightSaves;
+        // Chunks in the order they became dirty (duplicates and stale entries
+        // are skipped when popped) — SaveSomeDirty's queue.
+        std::deque<Math::ChunkPos> m_eagerSaveQueue;
         EvictionCallback m_evictionCallback;
 
         // Statistics

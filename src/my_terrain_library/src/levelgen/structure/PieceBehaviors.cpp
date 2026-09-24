@@ -1,6 +1,8 @@
 #include "levelgen/structure/PieceBehaviors.h"
+#include "nbt/AllTags.h"
 
 #include "levelgen/structure/OrientedPieceBehavior.h"
+#include "levelgen/structure/StructureEntities.h"
 #include "levelgen/WorldGenLevel.h"
 #include "levelgen/WorldgenRandom.h"
 #include "levelgen/Heightmap.h"
@@ -181,12 +183,18 @@ public:
     }
 };
 
-// Reference: SwampHutPiece.postProcess. Witch/cat spawns are entities (out
-// of scope; they draw from the LEVEL random, not the worldgen random, so
-// skipping them cannot desync the block RNG stream).
+// Reference: SwampHutPiece.postProcess. The witch and cat draw from the
+// LEVEL random (finalizeSpawn), not the worldgen random, so they cannot
+// desync the block RNG stream; they are filed as worldgen entities.
 class SwampHutBehavior final : public OrientedPieceBehavior {
 public:
     using OrientedPieceBehavior::OrientedPieceBehavior;
+
+    // Reference: SwampHutPiece.addAdditionalSaveData - HPos. MC's Witch/Cat
+    // flags have no counterpart here: the witch and cat are placed only by
+    // the chunk that contains their spot.
+    void saveState(nbt::CompoundTag& tag) const override { saveHeightPosition(tag); }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override { loadHeightPosition(tag); }
 
     void postProcess(WorldGenLevel* level, ChunkGenerator* generator,
                      WorldgenRandom& random, const BoundingBox& chunkBB,
@@ -256,7 +264,22 @@ public:
                 fillColumnDown(level, log, x, -1, z, chunkBB);
             }
         }
-        // Witch + cat spawns intentionally omitted (entities).
+        // Reference: the spawnedWitch branch, then spawnCat - both at
+        // getWorldPos(2, 2, 5), each once: setPersistenceRequired, snapTo
+        // (x + 0.5, y, z + 0.5, 0, 0), finalizeSpawn(STRUCTURE). Java's
+        // spawnedWitch/spawnedCat piece flags only guard against a second
+        // pass over the chunk holding that position; exactly one chunk's box
+        // contains it, so the box test alone places each once.
+        core::BlockPos spawn = worldPos(2, 2, 5);
+        if (chunkBB.isInside(spawn.getX(), spawn.getY(), spawn.getZ())) {
+            for (const char* id : {"minecraft:witch", "minecraft:cat"}) {
+                StructureEntities::addFreshEntity(
+                    level,
+                    StructureEntities::mobTag(id, spawn.getX() + 0.5, spawn.getY(),
+                                              spawn.getZ() + 0.5, 0.0f, 0.0f, true),
+                    true);
+            }
+        }
     }
 };
 
@@ -274,6 +297,22 @@ public:
     bool hasPlacedChest[4] = {false, false, false, false};
     std::vector<core::BlockPos> potentialSuspiciousSandWorldPositions;
     core::BlockPos randomCollapsedRoofPos{0, 0, 0};
+
+    // Reference: DesertPyramidPiece.addAdditionalSaveData (the suspicious
+    // sand positions and collapsed roof are refilled by every postProcess
+    // and are not saved).
+    void saveState(nbt::CompoundTag& tag) const override {
+        saveHeightPosition(tag);
+        for (int i = 0; i < 4; ++i) {
+            tag.putBoolean("hasPlacedChest" + std::to_string(i), hasPlacedChest[i]);
+        }
+    }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        loadHeightPosition(tag);
+        for (int i = 0; i < 4; ++i) {
+            hasPlacedChest[i] = tag.getBooleanOr("hasPlacedChest" + std::to_string(i), hasPlacedChest[i]);
+        }
+    }
 
     void postProcess(WorldGenLevel* level, ChunkGenerator* generator,
                      WorldgenRandom& random, const BoundingBox& chunkBB,
@@ -633,6 +672,22 @@ public:
     bool placedHiddenChest = false;
     bool placedTrap1 = false;
     bool placedTrap2 = false;
+
+    // Reference: JungleTemplePiece.addAdditionalSaveData.
+    void saveState(nbt::CompoundTag& tag) const override {
+        saveHeightPosition(tag);
+        tag.putBoolean("placedMainChest", placedMainChest);
+        tag.putBoolean("placedHiddenChest", placedHiddenChest);
+        tag.putBoolean("placedTrap1", placedTrap1);
+        tag.putBoolean("placedTrap2", placedTrap2);
+    }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        loadHeightPosition(tag);
+        placedMainChest = tag.getBooleanOr("placedMainChest", placedMainChest);
+        placedHiddenChest = tag.getBooleanOr("placedHiddenChest", placedHiddenChest);
+        placedTrap1 = tag.getBooleanOr("placedTrap1", placedTrap1);
+        placedTrap2 = tag.getBooleanOr("placedTrap2", placedTrap2);
+    }
 
     void postProcess(WorldGenLevel* level, ChunkGenerator* generator,
                      WorldgenRandom& random, const BoundingBox& chunkBB,

@@ -38,6 +38,12 @@ namespace Game {
 
     class Frog : public GenericAnimal {
     public:
+        // MC Frog.isPushedByFluid: false.
+        bool IsPushedByFluid() const override { return false; }
+        // MC Frog.playEatingSound: FROG_EAT bound to the frog at 2.0.
+        void PlayEatingSound() override;
+
+    public:
         explicit Frog(EntityLevel* level);
 
         // MC Frog.isBaby is hardcoded false — frogs hatch from tadpoles, they
@@ -72,6 +78,14 @@ namespace Game {
         // `type` so a camel husk keeps its own EntityTypeId (and therefore its
         // own texture, attributes and loot) while sharing MC's Camel class.
         explicit Camel(EntityLevel* level, EntityTypeId type = EntityTypeId::Camel);
+
+        // MC Camel.playStepSound: a padded step on #camel_sand_step_sound_blocks
+        // (sand, concrete powder), the ordinary one elsewhere — 1.0 for the
+        // camel, 0.4 for the husk (CamelHusk.playStepSound).
+        void PlayStepSound(const glm::ivec3& pos, BlockState state) override;
+        // MC Camel.playEatingSound (via Animal feeding).
+        void PlayEatingSound() override;
+        bool IsHusk() const { return GetType() == EntityTypeId::CamelHusk; }
 
         // MC CamelHusk.removeWhenFarAway (CamelHusk.java:28-30) — the husk
         // despawns like the monster it is; the living camel keeps Animal's
@@ -163,6 +177,9 @@ namespace Game {
         bool IsResting() const { return m_resting; }
         void SetResting(bool v) { m_resting = v; }
 
+        // MC Bat.getAmbientSound: a hanging bat squeaks a quarter as often.
+        const char* GetAmbientSound() const override;
+
         // MC's DATA_ID_FLAGS bit 0. One bit in the shared animation-state byte
         // here; the meaning is private to this class on both sides.
         uint8_t GetAnimStateByte() const override { return m_resting ? 1 : 0; }
@@ -191,6 +208,13 @@ namespace Game {
     // silently changes the attributes the mob is built with.
     class Tadpole : public GenericPathfinderMob {
     public:
+        // MC AbstractFish → WaterAnimal.isPushedByFluid: false.
+        bool IsPushedByFluid() const override { return false; }
+        // MC WaterAnimal.checkSpawnObstruction: level.isUnobstructed(this) only — the
+        // base's no-liquid half would refuse every underwater spawn.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
+
+    public:
         explicit Tadpole(EntityLevel* level);
         void UpdateBrainActivity() override;
 
@@ -202,6 +226,9 @@ namespace Game {
     class Goat : public GenericAnimal {
     public:
         explicit Goat(EntityLevel* level);
+        // MC Goat.playEatingSound — bound to the goat, 0.8..1.2 pitch. (No
+        // screaming goats here, so never the GOAT_SCREAMING_* set.)
+        void PlayEatingSound() override;
         void UpdateBrainActivity() override;
     };
 
@@ -211,6 +238,9 @@ namespace Game {
     public:
         explicit Hoglin(EntityLevel* level);
         void UpdateBrainActivity() override;
+        // MC Hoglin.getAmbientSound → HoglinAi.getSoundForCurrentActivity
+        // (server only): ANGRY while fighting, RETREAT while avoiding.
+        const char* GetAmbientSound() const override;
 
         // MC Hoglin.removeWhenFarAway (Hoglin.java:182-184) — true: hoglins
         // despawn despite being Animals (they are Enemy). Overrides Animal's
@@ -249,6 +279,9 @@ namespace Game {
     class Zoglin : public GenericMonster {
     public:
         explicit Zoglin(EntityLevel* level);
+        // MC Zoglin.getAmbientSound: ANGRY with a target, else AMBIENT
+        // (server only).
+        const char* GetAmbientSound() const override;
 
         void UpdateBrainActivity() override;
 
@@ -297,6 +330,8 @@ namespace Game {
     class Piglin : public GenericMonster {
     public:
         explicit Piglin(EntityLevel* level);
+        // MC Piglin.getAmbientSound → PiglinAi.getSoundForCurrentActivity.
+        const char* GetAmbientSound() const override;
 
         void UpdateBrainActivity() override;
 
@@ -390,6 +425,15 @@ namespace Game {
     // half of the class (Bucketable, fromBucket persistence, mobInteract,
     // saveToBucketTag) is SKIPPED — no bucket-item system; leashing likewise.
     class Axolotl : public GenericAnimal {
+    public:
+        // MC Axolotl.isPushedByFluid: false.
+        bool IsPushedByFluid() const override { return false; }
+        // MC Axolotl.checkSpawnObstruction: level.isUnobstructed(this) only — the
+        // base's no-liquid half would refuse every underwater spawn.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
+        // MC Axolotl.playAttackSound.
+        void PlayAttackSound() override { PlaySound("entity.axolotl.attack", 1.0f, 1.0f); }
+
     public:
         // MC Axolotl.Variant — the ids are MC's and they are the wire encoding
         // (low 3 bits of the animation-state byte).
@@ -645,8 +689,16 @@ namespace Game {
         // projectile subsystem landed; the brain's timings are unchanged.
         void ShootWindCharge(double xd, double yd, double zd, float inaccuracy);
 
+        // MC Breeze.playAmbientSound: a CLIENT-local idle voice (level.
+        // playLocalSound(this, ...)), and only when not fighting on the ground.
+        void PlayAmbientSound() override;
+        // MC Breeze.causeFallDamage: a landing from over 3 blocks thumps.
+        bool CauseFallDamage(double fallDist, float damageMultiplier) override;
+
     private:
         void ResetAnimations();
+        // MC Breeze.soundTick — the whirl's 1..80-tick timer.
+        int m_soundTick = 0;
     };
 
     // ── Warden ─────────────────────────────────────────────────────────────
@@ -659,7 +711,18 @@ namespace Game {
     // the real MC structure on the ported brain.
     class Warden : public GenericMonster {
     public:
-        explicit Warden(EntityLevel* level);
+        // `type` lets a subclass register under its own id (SilentWarden,
+        // HushMobs.hpp) — the CamelHusk-on-Camel precedent.
+        explicit Warden(EntityLevel* level, EntityTypeId type = EntityTypeId::Warden);
+
+        // MC Warden.checkSpawnObstruction: the base test plus no block
+        // collision for the type's standing box at the spawn position.
+        bool CheckSpawnObstruction(EntityLevel& level) const override;
+
+        // MC SonicBoom's `10.0F` (ai/behavior/warden/SonicBoom.java) — the
+        // armour-bypassing beam damage. Virtual so the Silent Warden can hit
+        // harder without forking the behaviour.
+        virtual float SonicBoomDamage() const { return 10.0f; }
 
         // MC AngerLevel minimums.
         static constexpr int kAngerAgitated = 40;
@@ -707,6 +770,9 @@ namespace Game {
         LivingEntity* GetEntityAngryAt() const;
         bool IsAngry() const { return GetActiveAnger() >= kAngerAngry; }
 
+        // MC Warden.getAmbientSound — the AngerLevel's voice.
+        const char* GetAmbientSound() const override;
+
     private:
         void TickAngerManagement();
         void SortAnger();
@@ -738,6 +804,9 @@ namespace Game {
 
         bool CanMove() const { return m_canMove; }
         bool IsActive() const { return m_isActive; }
+        const char* GetAmbientSound() const override;
+        // MC Creaking.playAttackSound.
+        void PlayAttackSound() override { MakeSound("entity.creaking.attack"); }
         bool IsTearingDown() const { return m_tearingDown; }
 
         // MC's CAN_MOVE / IS_ACTIVE / IS_TEARING_DOWN synched booleans, packed
@@ -812,6 +881,11 @@ namespace Game {
         };
 
         explicit Sniffer(EntityLevel* level);
+
+        // MC Sniffer.getAmbientSound: quiet while searching or digging.
+        const char* GetAmbientSound() const override;
+        // MC Sniffer.playEatingSound — bound to the sniffer, 0.8..1.2 pitch.
+        void PlayEatingSound() override;
 
         State GetState() const { return m_state; }
 
@@ -896,6 +970,11 @@ namespace Game {
         void RollUp();
         void RollOut();
 
+        // MC Armadillo: quiet while scared; a rolled-up hurt is muffled.
+        const char* GetAmbientSound() const override;
+        const char* GetHurtSound(MobDamageSource source) const override;
+        void PlayEatingSound() override { MakeSound("entity.armadillo.eat"); }
+
         // MC's DANGER_DETECTED_RECENTLY memory — ArmadilloBallUp reads the
         // REMAINING time (brain getTimeUntilExpiry) to decide when to unroll.
         int64_t DangerTicksRemaining() const;
@@ -956,6 +1035,12 @@ namespace Game {
 
         explicit CopperGolem(EntityLevel* level);
 
+        // MC CopperGolemOxidationLevels — the voice of the golem's weather
+        // stage. This port has no weathering, so it is always UNAFFECTED.
+        const char* GetHurtSound(MobDamageSource) const override { return "entity.copper_golem.hurt"; }
+        const char* GetDeathSound() const override { return "entity.copper_golem.death"; }
+        void PlayStepSound(const glm::ivec3&, BlockState) override { PlaySound("entity.copper_golem.step", 1.0f, 1.0f); }
+
         State GetState() const { return m_state; }
         // MC CopperGolem.setState — a synched accessor in MC; here the tracker
         // polls the anim byte, so a plain write is the whole job.
@@ -974,12 +1059,12 @@ namespace Game {
         // EntityLevel is incomplete here.
         bool IsHoldingItem() const;
 
-        // MC CopperGolem.setOpenedChestPos / clearOpenedChestPos. MC's only
-        // reader is hasContainerOpen, ContainerOpenersCounter's callback —
-        // which waits on the chest lid counter — so nothing consumes it yet;
-        // kept so CopperGolemAi transcribes verbatim.
+        // MC CopperGolem.setOpenedChestPos / clearOpenedChestPos. The reader
+        // is hasContainerOpen — the chest lid's opener recheck counts a golem
+        // whose opened chest is that chest (the server's chest user counter).
         void SetOpenedChestPos(const glm::ivec3& pos) { m_openedChestPos = pos; }
         void ClearOpenedChestPos() { m_openedChestPos.reset(); }
+        const std::optional<glm::ivec3>& OpenedChestPos() const { return m_openedChestPos; }
 
         uint8_t GetAnimStateByte() const override;
         void    SetAnimStateByte(uint8_t v) override;
@@ -1028,6 +1113,10 @@ namespace Game {
     class Allay : public GenericPathfinderMob {
     public:
         explicit Allay(EntityLevel* level);
+
+        // MC Allay.getAmbientSound: with or without an item in hand — no
+        // allay here carries one (the item-delivery loop is not ported).
+        const char* GetAmbientSound() const override { return "entity.allay.ambient_without_item"; }
         void UpdateBrainActivity() override;
 
         // MC Allay.removeWhenFarAway (Allay.java:384-386) — false: an allay

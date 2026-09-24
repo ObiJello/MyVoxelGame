@@ -198,9 +198,10 @@ namespace Game {
 
     BlockState CrossUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                 BlockState state, Direction toNeighbour) {
-        // MC schedules a water tick when waterlogged; there are no fluid ticks
-        // here, so only the side matters. Vertical changes are ignored, exactly
-        // as vanilla's `directionToNeighbour.getAxis().isHorizontal()` gate.
+        // MC schedules a water tick when waterlogged; World::ExecuteShapeUpdate
+        // books that for every waterloggable block, so only the side matters
+        // here. Vertical changes are ignored, exactly as vanilla's
+        // `directionToNeighbour.getAxis().isHorizontal()` gate.
         if (!IsHorizontal(toNeighbour)) return state;
         return CrossStateWithSide(state, toNeighbour,
                                   CrossConnectsTo(level, pos, state.Block(), toNeighbour));

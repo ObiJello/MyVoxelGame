@@ -47,6 +47,8 @@ namespace Render {
         void DrawCenteredString(const std::string& text, int x, int y, uint32_t color);
         void DrawStringWithBackdrop(const std::string& text, int x, int y, int width, uint32_t color);
         int GetStringWidth(const std::string& text) const;
+        // §n underline / §m strikethrough spans for a string about to be drawn at (x, y).
+        void DrawTextEffects(const std::string& text, int x, int y, uint32_t color, bool dropShadow);
 
         // --- Item rendering ---
         // Single entry point matching MC's GuiGraphics.renderItem(ItemStack, x, y) — dispatches

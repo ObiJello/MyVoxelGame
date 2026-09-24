@@ -2,6 +2,7 @@
 #include "common/entity/Animal.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/spawn/GeneratedSpawnTags.hpp"
@@ -52,16 +53,100 @@ namespace Game {
 
         // Server only: the client learns the age from synched data rather than
         // counting it itself, so both sides agree on when a baby grows up.
-        if (!IsEffectiveAi()) return;
+        if (IsEffectiveAi()) {
+            // MC ticks forcedAgeTimer client-side, purely for the happy-villager
+            // particles every 4th tick; with no particle system the countdown
+            // runs where the timer lives, and only the timer's zero matters
+            // (AgeUp re-arms it at 40 per feeding).
+            if (m_forcedAgeTimer > 0) --m_forcedAgeTimer;
 
-        // MC ticks forcedAgeTimer client-side, purely for the happy-villager
-        // particles every 4th tick; with no particle system the countdown
-        // runs where the timer lives, and only the timer's zero matters
-        // (AgeUp re-arms it at 40 per feeding).
-        if (m_forcedAgeTimer > 0) --m_forcedAgeTimer;
+            // MC AgeableMob.aiStep: a baby counts up only while canAgeUp —
+            // an age-locked baby stays exactly where the dandelion put it.
+            if (IsAlive()) {
+                if (CanAgeUp())     ++m_age;
+                else if (m_age > 0) --m_age;
+            }
+        }
 
-        if (m_age < 0)      ++m_age;
-        else if (m_age > 0) --m_age;
+        // Both sides, like MC: the timer is the toggle cooldown on the
+        // server and the particle clock on the client.
+        TickAgeLockParticles();
+    }
+
+    // ── Age lock ───────────────────────────────────────────────────────────
+
+    bool AgeableMob::CanBeAgeLocked(EntityTypeId type) {
+        switch (type) {
+            case EntityTypeId::ZombieHorse:
+            case EntityTypeId::SkeletonHorse:
+            case EntityTypeId::Villager:
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    bool AgeableMob::CanUseGoldenDandelion(const ItemStack& held, bool isBaby, int cooldown,
+                                           const Mob& mob) {
+        static constexpr ItemID kGoldenDandelion = ItemRegistry::FromBlock(BlockID::GoldenDandelion);
+        return held.itemId == kGoldenDandelion && isBaby && cooldown == 0 &&
+               CanBeAgeLocked(mob.GetType());
+    }
+
+    void AgeableMob::SetAgeLockedData() {
+        SetAgeLocked(!IsAgeLocked());
+        SetAge(kBabyStartAge);
+        m_ageLockParticleTimer = kAgeLockCooldownTicks;
+    }
+
+    void AgeableMob::TickAgeLockParticles() {
+        // MC AgeableMob.makeAgeLockedParticle, verbatim positions: x/z
+        // anywhere across the body (getRandomX(1.0)), y in the bottom fifth
+        // of the body plus the body's height — i.e. just above the head —
+        // and a further 0.2 up for the locked burst, whose particles drift
+        // DOWN (PAUSE_MOB_GROWTH) where the unlocked ones drift up.
+        if (m_ageLockParticleTimer <= 0) return;
+        if ((m_ageLockParticleTimer % 2) == 0 && m_level) {
+            JavaRandom& rng = m_level->Random();
+            const double w = static_cast<double>(GetBbWidth());
+            const double h = static_cast<double>(GetBbHeight());
+            const double yOffset = m_ageLocked ? static_cast<double>(kAgeLockDownwardsParticleYOffset) : 0.0;
+            const double px = position.x + w * (2.0 * rng.NextDouble() - 1.0);
+            const double py = position.y + h * 0.2 * rng.NextDouble() + h + yOffset;
+            const double pz = position.z + w * (2.0 * rng.NextDouble() - 1.0);
+            m_level->AddParticle(m_ageLocked ? ParticleKind::PauseMobGrowth : ParticleKind::ResetMobGrowth,
+                                 px, py, pz, 0.0, 0.0, 0.0);
+        }
+        --m_ageLockParticleTimer;
+    }
+
+    UseResult AgeableMob::MobInteract(LivingEntity& player, ItemStack& held) {
+        // MC AgeableMob.mobInteract + the static setAgeLocked, in one place.
+        if (CanUseGoldenDandelion(held, IsBaby(), m_ageLockParticleTimer, *this)) {
+            const bool clientSide = m_level && m_level->IsClientSide();
+            // The client spends the flower and swallows the click, as it does
+            // for the feed path; the toggle itself is the server's, and the
+            // client sees it through the synched lock flag (which is also
+            // what starts its particle burst — see ArmAgeLockParticles).
+            Animal::UsePlayerItem(held);
+            if (!clientSide) {
+                SetAgeLockedData();
+                // A locked animal is a kept pet: it never despawns. (Animals
+                // never do anyway; a locked dolphin or hoglin now doesn't
+                // either.)
+                if (IsAgeLocked()) SetPersistenceRequired(true);
+                // MC AgeableMob.setAgeLocked: level.playSound(null,
+                // blockPosition(), GOLDEN_DANDELION_[UN]USE, PLAYERS, 1, 1).
+                if (m_level) {
+                    m_level->PlaySound(nullptr, BlockPosition(),
+                                       IsAgeLocked() ? SoundEvents::GOLDEN_DANDELION_USE
+                                                     : SoundEvents::GOLDEN_DANDELION_UNUSE,
+                                       SoundSource::Players, 1.0f, 1.0f);
+                }
+            }
+            return UseResult::Success;
+        }
+        return PathfinderMob::MobInteract(player, held);
     }
 
     // ── Animal ─────────────────────────────────────────────────────────────
@@ -96,7 +181,7 @@ namespace Game {
     UseResult Animal::MobInteract(LivingEntity& player, ItemStack& held) {
         // MC Animal.mobInteract, verbatim shape. The packet carries no hand
         // (mainhand-only — see InteractC2SPacket), so `held` IS the hand MC
-        // reads. playEatingSound waits on the sound system at each site.
+        // reads. Each feeding plays the animal's playEatingSound.
         if (IsFood(held.itemId)) {
             const int age = GetAge();
             const bool clientSide = m_level && m_level->IsClientSide();
@@ -105,13 +190,17 @@ namespace Game {
             if (!clientSide && age == 0 && CanFallInLove()) {
                 UsePlayerItem(held);
                 SetInLove(&player);
+                PlayEatingSound();
                 return UseResult::SuccessServer;
             }
 
-            if (IsBaby()) {
+            // MC: canAgeUp, not isBaby — food does nothing for an age-locked
+            // baby, and the click falls through to the flower test below.
+            if (CanAgeUp()) {
                 UsePlayerItem(held);
                 // 10% of the remaining growth, forced (the forcedAge path).
                 AgeUp(GetSpeedUpSecondsWhenFeeding(-age), /*forced=*/true);
+                PlayEatingSound();
                 return UseResult::Success;
             }
 
@@ -120,7 +209,7 @@ namespace Game {
             if (clientSide) return UseResult::Consume;
         }
 
-        return Mob::MobInteract(player, held);
+        return AgeableMob::MobInteract(player, held);
     }
     int32_t Animal::GetLoveCauseId() const {
         EntityLevel* level = Level();

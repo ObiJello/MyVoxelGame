@@ -1,6 +1,7 @@
 // File: src/client/renderer/mesh/BlockBreakOverlay.cpp
 #include "BlockBreakOverlay.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
 #include "common/core/Log.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstdio>
@@ -184,8 +185,10 @@ void main() {
         // Translate to the block, then scale the unit-cube mesh by the shape
         // bounds so partial blocks (leaf litter, slabs, fences, …) get the
         // crack wrapped on their real surface instead of a floating cube.
+        // Render-space translation (the block minus the view's origin, in
+        // double) — the view matrix is camera-relative, see RenderOrigin.hpp.
         const glm::vec3 size = m_shapeMax - m_shapeMin;
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(m_pos) + m_shapeMin);
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), Render::ToRender(glm::dvec3(m_pos)) + m_shapeMin);
         model = glm::scale(model, size);
         glm::mat4 mvp = projectionMatrix * viewMatrix * model;
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);

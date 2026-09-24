@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Game { class World; }
@@ -178,6 +179,13 @@ namespace Server {
         static constexpr int kSyncIntervalTicks = 20;
 
         std::unordered_map<int32_t, Game::ItemEntity> m_entities;
+        // Items a player threw (DropFromPlayer) — MC ItemEntity.getOwner()
+        // reduced to the one question the Twilight Forest portal asks
+        // ("did a player throw this diamond?"). Kept beside the entities
+        // rather than on Game::ItemEntity: nothing else reads it, and it is
+        // not saved (TF's owner check is a same-session affair). Pruned
+        // wherever an entity leaves m_entities.
+        std::unordered_set<int32_t> m_playerThrown;
         bool     m_randomSeeded = false;
         Game::JavaRandom m_random{0};
 

@@ -23,7 +23,23 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIOME_DIR = os.path.join(ROOT, "data", "minecraft", "worldgen", "biome")
+DATA_DIR = os.path.join(ROOT, "data")
+BIOME_DIR = os.path.join(DATA_DIR, "minecraft", "worldgen", "biome")
+
+
+def biome_files():
+    """Every data/<namespace>/worldgen/biome/*.json; slug is the bare name for
+    minecraft and "<namespace>:<name>" otherwise (same rule as gen_biomes.py,
+    and the string BiomeRegistry names the biome by)."""
+    for ns in sorted(os.listdir(DATA_DIR)):
+        d = os.path.join(DATA_DIR, ns, "worldgen", "biome")
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".json"):
+                continue
+            slug = name[:-5] if ns == "minecraft" else f"{ns}:{name[:-5]}"
+            yield slug, os.path.join(d, name)
 OUT_DIR = os.path.join(ROOT, "src", "common", "world", "spawn")
 
 # Mob slug -> Game::EntityTypeId enumerator, read from the GENERATED entity
@@ -42,7 +58,12 @@ KNOWN_MOBS = load_known_mobs()
 
 # MC MobCategory keys as they appear in the biome JSON.
 CATEGORIES = ["monster", "creature", "ambient", "water_creature", "water_ambient",
-              "underground_water_creature", "axolotls", "misc"]
+              "underground_water_creature", "axolotls", "misc",
+              # The Aether's appended MobCategory values (its
+              # enumextensions.json; MobCategory.hpp), keyed by their
+              # serialized names in the Aether's biome JSON.
+              "aether:aether_surface_monster", "aether:aether_darkness_monster",
+              "aether:aether_sky_monster", "aether:aether_aerwhale"]
 CATEGORY_ENUM = {
     "monster": "Monster",
     "creature": "Creature",
@@ -52,6 +73,10 @@ CATEGORY_ENUM = {
     "water_creature": "WaterCreature",
     "water_ambient": "WaterAmbient",
     "misc": "Misc",
+    "aether:aether_surface_monster": "AetherSurfaceMonster",
+    "aether:aether_darkness_monster": "AetherDarknessMonster",
+    "aether:aether_sky_monster": "AetherSkyMonster",
+    "aether:aether_aerwhale": "AetherAerwhale",
 }
 
 
@@ -63,37 +88,53 @@ def main():
     biomes = []
     skipped = set()
 
-    for filename in sorted(os.listdir(BIOME_DIR)):
-        if not filename.endswith(".json"):
-            continue
-        slug = filename[:-5]
-
-        with open(os.path.join(BIOME_DIR, filename), encoding="utf-8") as f:
+    for slug, path in biome_files():
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
-        spawners = data.get("spawners", {})
+        # 26.1 files carry "spawners" / "spawn_costs" at the top level; 26.3
+        # moved both into the minecraft:gameplay/natural_mob_spawns attribute
+        # (spawns_by_category, with "count" an int or a uniform provider).
+        spawn_attr = data.get("attributes", {}).get("minecraft:gameplay/natural_mob_spawns")
+        if spawn_attr is not None:
+            spawn_arg = spawn_attr.get("argument", spawn_attr)
+            spawners = spawn_arg.get("spawns_by_category", {})
+            spawn_costs = spawn_arg.get("spawn_costs", {})
+        else:
+            spawners = data.get("spawners", {})
+            spawn_costs = data.get("spawn_costs", {})
         entries = []
 
         for category in CATEGORIES:
             for entry in spawners.get(category, []):
-                mob = entry.get("type", "").removeprefix("minecraft:")
+                mob = entry.get("type", "").split(":")[-1]   # any namespace: mod mobs are engine slugs
                 if mob not in KNOWN_MOBS:
                     skipped.add(mob)
                     continue
+                if "count" in entry:
+                    count = entry["count"]
+                    if isinstance(count, dict):
+                        min_count = int(count["min_inclusive"])
+                        max_count = int(count["max_inclusive"])
+                    else:
+                        min_count = max_count = int(count)
+                else:
+                    min_count = int(entry.get("minCount", 1))
+                    max_count = int(entry.get("maxCount", 1))
                 entries.append((
                     CATEGORY_ENUM[category],
                     KNOWN_MOBS[mob],
                     int(entry.get("weight", 0)),
-                    int(entry.get("minCount", 1)),
-                    int(entry.get("maxCount", 1)),
+                    min_count,
+                    max_count,
                 ))
 
         # MC MobSpawnSettings.mobSpawnCosts — the PotentialCalculator budget
         # (soul sand valley and friends). Kept even when every weighted entry
         # was dropped, so the costs arrive the day the mob does.
         costs = []
-        for mob_key, cost in sorted(data.get("spawn_costs", {}).items()):
-            mob = mob_key.removeprefix("minecraft:")
+        for mob_key, cost in sorted(spawn_costs.items()):
+            mob = mob_key.split(":")[-1]
             if mob not in KNOWN_MOBS:
                 skipped.add(mob)
                 continue
@@ -171,8 +212,11 @@ namespace Game {
 namespace Game {
 
 """)
+        # FindBiomeSpawnList binary-searches on the slug string: sort by the
+        # full slug (namespaced mod biomes interleave with vanilla ones).
+        biomes.sort(key=lambda b: b[0])
         for slug, entries, costs in biomes:
-            ident = slug.replace("-", "_")
+            ident = slug.replace("-", "_").replace(":", "__")
             if entries:
                 f.write(f"    static const MobSpawnEntry k_{ident}[] = {{\n")
                 for cat, mob, weight, mn, mx in entries:
@@ -188,7 +232,7 @@ namespace Game {
 
         f.write("    const BiomeSpawnList kBiomeSpawnLists[] = {\n")
         for slug, entries, costs in biomes:
-            ident = slug.replace("-", "_")
+            ident = slug.replace("-", "_").replace(":", "__")
             entries_ref = f"k_{ident}" if entries else "nullptr"
             costs_ref = f"k_{ident}_costs" if costs else "nullptr"
             f.write(f'        {{ "{slug}", {entries_ref}, {len(entries)}, '

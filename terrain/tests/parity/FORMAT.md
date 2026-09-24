@@ -34,8 +34,8 @@ agree; the rules are part of this contract):
 - `R`: emitted iff structures are enabled AND the target status is
   STRUCTURE_REFERENCES or later (i.e. not for `0-1`).
 - `B`/`Q`: emitted iff the target status is BIOMES or later.
-- `H`: emitted iff the target status is NOISE or later (heightmaps are a
-  NOISE-phase product; before that they are unprimed).
+- `H`: emitted iff the target status is TERRAIN or later (heightmaps are a
+  TERRAIN-phase product; before that they are unprimed).
 - `E`: emitted iff `--dump-block-entities` is passed AND the target status is
   FEATURES or later.
 

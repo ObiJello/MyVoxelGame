@@ -760,6 +760,138 @@ void AttachedToLogsDecorator::place(DecoratorContext& context) {
     }
 }
 
+// ============================================================================
+// ShelfMushroomDecorator
+// Reference: 26.3 ShelfMushroomDecorator.java
+// ============================================================================
+
+namespace {
+
+constexpr float SHELF_PER_SIDE_PLACEMENT_CHANCE = 0.25f;
+constexpr int SHELF_MIN_HEIGHT_OFFSET = 1;
+constexpr int SHELF_MAX_HEIGHT_OFFSET = 4;
+constexpr int SHELF_MAX_AGE_EXCLUSIVE = 2;
+
+// Direction.Plane.HORIZONTAL faces order (NORTH, EAST, SOUTH, WEST)
+constexpr core::Direction kShelfHorizontal[4] = {
+    core::Direction::NORTH, core::Direction::EAST, core::Direction::SOUTH, core::Direction::WEST};
+
+core::Direction clockWise(core::Direction direction) {
+    switch (direction) {
+        case core::Direction::NORTH: return core::Direction::EAST;
+        case core::Direction::EAST:  return core::Direction::SOUTH;
+        case core::Direction::SOUTH: return core::Direction::WEST;
+        case core::Direction::WEST:  return core::Direction::NORTH;
+        default: return direction;
+    }
+}
+
+bool isWater(DecoratorContext& context, const core::BlockPos& pos) {
+    return context.checkBlock(pos, [](BlockState* state) {
+        return state && state->getIdentifier() == "minecraft:water";
+    });
+}
+
+// TreeDecorator.Context.isWaterOrWaterNearby: the position or a horizontal
+// neighbour (east, west, north, south) is water.
+bool isWaterOrWaterNearby(DecoratorContext& context, const core::BlockPos& pos) {
+    return isWater(context, pos) || isWater(context, pos.east()) || isWater(context, pos.west())
+        || isWater(context, pos.north()) || isWater(context, pos.south());
+}
+
+bool isBlockReplaceableWithShelfMushroom(DecoratorContext& context, const core::BlockPos& pos) {
+    const bool replaceable = context.checkBlock(pos, [](BlockState* state) {
+        return state && state->canBeReplaced();
+    });
+    return replaceable && !isWaterOrWaterNearby(context, pos);
+}
+
+bool hasShelfMushroomAt(DecoratorContext& context, const core::BlockPos& pos) {
+    return context.checkBlock(pos, [](BlockState* state) {
+        return state && state->getIdentifier() == "minecraft:shelf_mushroom";
+    });
+}
+
+bool hasHorizontallyAdjacentShelfMushroom(DecoratorContext& context, const core::BlockPos& pos) {
+    for (core::Direction direction : kShelfHorizontal) {
+        if (hasShelfMushroomAt(context, pos.relative(direction))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+core::BlockPos mushroomPosFor(const core::BlockPos& logPos, core::Direction facing) {
+    return logPos.offset(core::getStepX(facing), 0, core::getStepZ(facing));
+}
+
+void placeShelfMushroom(DecoratorContext& context, const core::BlockPos& pos, core::Direction facing,
+                        WorldgenRandom& random) {
+    using minecraft::world::level::block::state::properties::BlockStateProperties;
+    BlockState* state = minecraft::world::level::block::Blocks::SHELF_MUSHROOM->defaultBlockState();
+    state = state->setValue(*BlockStateProperties::AGE_1, random.nextInt(SHELF_MAX_AGE_EXCLUSIVE));
+    state = state->setValue(*BlockStateProperties::HORIZONTAL_FACING, facing);
+    context.setBlock(pos, state);
+}
+
+} // namespace
+
+void ShelfMushroomDecorator::place(DecoratorContext& context) {
+    WorldgenRandom& random = context.random();
+    if (random.nextFloat() >= m_placementProbability) {
+        return;
+    }
+    const std::vector<core::BlockPos>& logs = context.logs();
+    if (logs.empty()) {
+        return;
+    }
+
+    if (logs.front().getY() == logs.back().getY()) {
+        // placeOnFallenLog: both faces across the log's axis
+        const bool alongX = logs.front().getX() != logs.back().getX();
+        const core::Direction directions[2] = {
+            alongX ? core::Direction::NORTH : core::Direction::EAST,
+            alongX ? core::Direction::SOUTH : core::Direction::WEST};
+        for (const core::BlockPos& logPos : logs) {
+            for (core::Direction facing : directions) {
+                if (!(random.nextFloat() > SHELF_PER_SIDE_PLACEMENT_CHANCE)) {
+                    const core::BlockPos mushroomPos = mushroomPosFor(logPos, facing);
+                    if (isBlockReplaceableWithShelfMushroom(context, mushroomPos)
+                        && !hasHorizontallyAdjacentShelfMushroom(context, mushroomPos)
+                        && !hasHorizontallyAdjacentShelfMushroom(context, logPos)) {
+                        placeShelfMushroom(context, mushroomPos, facing, random);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // placeOnStandingTree: Direction.Plane.HORIZONTAL.getRandomDirection
+    // and its clockwise neighbour
+    const core::Direction first = kShelfHorizontal[random.nextInt(4)];
+    const core::Direction directions[2] = {first, clockWise(first)};
+    const int treeBaseY = logs.front().getY();
+    for (const core::BlockPos& logPos : logs) {
+        const int dy = logPos.getY() - treeBaseY;
+        if (dy < SHELF_MIN_HEIGHT_OFFSET || dy > SHELF_MAX_HEIGHT_OFFSET) {
+            continue;
+        }
+        for (core::Direction facing : directions) {
+            if (random.nextFloat() > SHELF_PER_SIDE_PLACEMENT_CHANCE) {
+                continue;
+            }
+            const core::BlockPos mushroomPos = mushroomPosFor(logPos, facing);
+            if (!isBlockReplaceableWithShelfMushroom(context, mushroomPos)
+                || hasShelfMushroomAt(context, mushroomPos.below())) {
+                continue;
+            }
+            placeShelfMushroom(context, mushroomPos, facing, random);
+            break;
+        }
+    }
+}
+
 } // namespace treedecorators
 } // namespace feature
 } // namespace levelgen

@@ -28,18 +28,25 @@ namespace Game {
     //     ToolType AND meet the block's minTier.
     bool HasCorrectToolForDrops(ItemID held, const Block& target);
 
-    // MC `Player.getDestroySpeed(state)` (the subset we model — no enchants,
-    // no potion effects, no submerged check yet):
+    // MC `Player.getDestroySpeed(state)` (the subset we model — no
+    // enchantments, so no EFFICIENCY / MINING_EFFICIENCY and no AQUA_AFFINITY):
     //   speed = item.getDestroySpeed(state)
+    //   speed *= effect factor               (HASTE / CONDUIT_POWER, MINING_FATIGUE)
+    //   if (eye in water) speed *= SUBMERGED_MINING_SPEED (0.2 base)
     //   if (!onGround) speed /= 5.0
-    float GetPlayerDestroySpeed(ItemID held, const Block& target, bool onGround);
+    // `effectMultiplier` is the status-effect factor
+    // (Game::GetEffectDigSpeedMultiplier) — which is how CONDUIT_POWER's
+    // haste cancels most of the underwater x0.2.
+    float GetPlayerDestroySpeed(ItemID held, const Block& target, bool onGround,
+                                float effectMultiplier = 1.0f, bool eyeInWater = false);
 
     // MC `BlockBehaviour.getDestroyProgress(state, player, level, pos)`:
     //   if (destroyTime < 0) return 0       (unbreakable)
     //   modifier = hasCorrectToolForDrops ? 30 : 100
     //   return playerDestroySpeed / destroyTime / modifier
     // Returned value is the per-tick progress increment; sum >= 1.0 → broken.
-    float GetDestroyProgressPerTick(ItemID held, const Block& target, bool onGround);
+    float GetDestroyProgressPerTick(ItemID held, const Block& target, bool onGround,
+                                    float effectMultiplier = 1.0f, bool eyeInWater = false);
 
     // MC `MultiPlayerGameMode.getDestroyStage()`:
     //   progress > 0 ? (int)(progress * 10) : -1, clamped to [0,9].

@@ -92,6 +92,24 @@ namespace Input {
     bool HasCharInput();
     unsigned int PopCharInput();
 
+    // ── Raw key events (MC KeyboardHandler.keyPress) ────────────────────
+    // Every keyboard PRESS and RELEASE, in order, screen or no screen, with
+    // the GLFW key code and modifier bits. This is what the F3 debug chords
+    // consume: a chord is "a key pressed while F3 is held" and needs the
+    // press EVENT (not a polled level) and the F3 RELEASE (to know whether
+    // the modifier was used as one). Repeats are not queued. Drained once
+    // per frame by the debug key handler; capped so an unattended queue
+    // cannot grow.
+    struct RawKeyEvent {
+        int glfwKey = 0;
+        int action  = 0;   // GLFW_PRESS or GLFW_RELEASE
+        int mods    = 0;
+    };
+    bool PopRawKeyEvent(RawKeyEvent& out);
+    void ClearRawKeyEvents();
+    // Live level of a physical key by GLFW code (glfwGetKey).
+    bool IsGlfwKeyDown(int glfwKey);
+
     // ========================================================================
     // EVENT-DRIVEN ACTION INPUT  (port of MC KeyMapping + MouseHandler.onButton)
     // ========================================================================
@@ -154,4 +172,61 @@ namespace Input {
     // last call. Polling glfwGetKey missed a tap shorter than a frame, which
     // at portal-view frame times meant pressing it twice.
     bool ConsumeEscapePress();
+
+    // Live level of a mouse button by GLFW code (glfwGetMouseButton).
+    bool IsGlfwMouseButtonDown(int glfwButton);
+
+    // ========================================================================
+    // REMOTE INPUT  (/control — see common/network/packets/game/ControlPackets.hpp)
+    // ========================================================================
+    //
+    // A controlled client's input comes from another player's window. In
+    // remote mode this window's own GLFW callbacks are ignored and the
+    // controller's events are pushed through the SAME handlers the callbacks
+    // use, so every consumer above — bindings, click queues, the raw key
+    // stream, the UI key queue, chars, scroll, mouse deltas — sees them as
+    // if they had happened here. Level reads (IsKeyDown, IsGlfwKeyDown,
+    // IsGlfwMouseButtonDown, GetMousePosition) answer from a shadow of the
+    // remote state instead of asking GLFW.
+    void SetRemoteMode(bool remote);
+    bool IsRemoteMode();
+    void RemoteKey(int glfwKey, int action, int mods);
+    void RemoteMouseButton(int glfwButton, int action, int mods);
+    void RemoteChar(unsigned int codepoint);
+    // Raw offsets; the scroll settings are applied here as the callback would.
+    void RemoteScroll(double xoffset, double yoffset);
+    // Already in GetMouseDelta's form (dy positive = up).
+    void RemoteMotion(double dx, double dy);
+    // Every remote key and button up, every queued click dropped.
+    void RemoteReleaseAll();
+
+    // What the controlled player keeps of their OWN window while in remote
+    // mode: Escape (their pause menu), the cursor-toggle binding (Tab), and
+    // the OS mouse for that menu. Everything else of theirs is ignored.
+    bool ConsumeLocalEscapePress();
+    std::pair<double, double> GetLocalMousePosition();   // glfwGetCursorPos, never the override
+    bool IsLocalMouseButtonDown(int glfwButton);          // glfwGetMouseButton, never the shadow
+
+    // A cursor position that GetMousePosition returns instead of GLFW's:
+    // the controller's virtual cursor on both sides (the controller's own
+    // OS cursor stays captured for mouse-look; the controlled window's is
+    // not the one being moved).
+    void SetCursorOverride(bool enabled, double x, double y);
+    bool HasCursorOverride();
+
+    // Event capture, the controller's half: while enabled, every key,
+    // mouse-button, char and scroll event this window receives is ALSO
+    // queued here (before any UI gating), to be sent as the frame's
+    // ControlInput. Local handling is unaffected.
+    struct CapturedEvent {
+        enum class Kind : uint8_t { Key, MouseButton, Char, Scroll };
+        Kind   kind = Kind::Key;
+        int    a = 0;      // key / button / codepoint
+        int    b = 0;      // action
+        int    c = 0;      // mods
+        double x = 0.0;    // scroll offsets
+        double y = 0.0;
+    };
+    void SetCaptureEvents(bool enabled);
+    bool PopCapturedEvent(CapturedEvent& out);
 }

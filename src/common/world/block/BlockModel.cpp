@@ -327,6 +327,11 @@ namespace Game {
         return modelRef;
     }
 
+    namespace {
+        // Defined with the rotation helpers below; needed by the loader too.
+        glm::vec4 DefaultUv(FaceDir dir, const glm::vec3& from, const glm::vec3& to);
+    }
+
     Element BlockModelRegistry::ParseElement(const nlohmann::json& elemJson) {
         Element element;
 
@@ -392,8 +397,13 @@ namespace Game {
                         faceJson["uv"][3].get<float>()
                     );
                 } else {
-                    // Default to full face UV
-                    faceDef.uv = glm::vec4(0.0f, 0.0f, 16.0f, 16.0f);
+                    // MC BlockElement.uvsByFace: a face with no `uv` takes
+                    // the element's own footprint on the cell, NOT the whole
+                    // texture. A hopper's 2-wide rim face shows a 2-wide
+                    // strip of hopper_outside; stretching the full 16x16
+                    // over it is what made every implicit-UV model (hopper,
+                    // cauldron, anvil, brewing stand…) look smeared.
+                    faceDef.uv = DefaultUv(dir, element.from, element.to);
                 }
 
                 // CRITICAL FIX: Parse texture reference and strip leading '#' for clean storage

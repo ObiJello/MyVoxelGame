@@ -73,9 +73,21 @@ namespace Render {
                                          ChunkSet& seen);
 
     private:
+        // The off-screen pass (BlockEntityRenderer::ShouldRenderOffScreen):
+        // the loaded chunks within m_offScreenReach of the camera that
+        // CollectVisibleChunks did not return, and in them only the
+        // entities whose renderer draws off-screen.
+        void RenderOffScreen(Client::ClientChunkManager* chunkMgr,
+                             const glm::mat4& proj, const glm::mat4& view,
+                             const glm::vec3& cameraPos, float partialTick);
+
         // Match BlockEntityTypeIds::MAX_ID = 64. Storing as a fixed array
         // keeps lookups branchless after the bounds check.
         std::array<std::unique_ptr<BlockEntityRenderer>, 64> m_renderers;
+
+        // Largest GetOffScreenReach() among the registered renderers that
+        // draw off-screen; 0 = no off-screen pass. Kept by Register.
+        int m_offScreenReach = 0;
 
         // Per-frame scratch for CollectVisibleChunks.
         std::vector<Client::ClientChunk*> m_visibleChunks;

@@ -249,11 +249,12 @@ namespace Render {
         constexpr float kSurfaceBias = 0.0f;   // the mark pass carries its own margin now
         const glm::vec3 n(portal.Normal());
         const float open = GunOpenScale(portal);
+        // Translation in the current view's RENDER space (RenderOrigin.hpp).
         return glm::mat4{
             glm::vec4(glm::vec3(portal.axisW) * open, 0.0f),
             glm::vec4(glm::vec3(portal.axisH) * open, 0.0f),
             glm::vec4(n, 0.0f),
-            glm::vec4(glm::vec3(portal.origin) + n * kSurfaceBias, 1.0f),
+            glm::vec4(Render::ToRender(portal.origin) + n * kSurfaceBias, 1.0f),
         };
     }
 
@@ -334,7 +335,7 @@ namespace Render {
         // The fog uniforms are set here, not left over: on Vulkan every
         // shader shares one uniform block, and the far view's terrain pass
         // just wrote the FAR world's fog and camera into it.
-        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", camera.position);
+        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", Render::ToRender(camera.position));
         g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
         g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
             glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
@@ -400,6 +401,34 @@ namespace Render {
         for (auto& f : m_farLevels) f.pending = false;
         m_renderCrossers = &renderCrossers;
 
+        if (FlickerDiag::DumpPending()) {
+            // /portaldiag mark: every portal of the active level near the
+            // camera, with the numbers the culling and the mask decide on.
+            const glm::dvec3 eye(camera.position);
+            const double range = RenderRange(0, nullptr, renderDistanceChunks);
+            Log::Info("[PortalDiag] frame %llu eye=(%.2f,%.2f,%.2f) yaw=%.1f pitch=%.1f layer0 range=%.0f",
+                      static_cast<unsigned long long>(m_frame), eye.x, eye.y, eye.z, camera.yaw, camera.pitch, range);
+            Client::GetClientImmersivePortals().ForEach([&](const Portal& p) {
+                const double distance = DistanceToSurface(p, eye);
+                if (distance > 64.0) return;
+                const glm::dvec3 n = p.Normal();
+                const double signedDist = p.SignedDistanceToPlane(eye);
+                const glm::dvec3 toCentre = p.origin - eye;
+                const double centreDist = glm::length(toCentre);
+                const double cosView = centreDist > 1e-9 ? glm::dot(toCentre / centreDist, n) : 0.0;
+                glm::dvec3 mn, mx;
+                p.BoundingBox(mn, mx, 0.05);
+                const bool inFrustum = frustum.IsBoxVisible(glm::vec3(mn), glm::vec3(mx));
+                Log::Info("[PortalDiag]  #%u %s | origin=(%.3f,%.3f,%.3f) n=(%.2f,%.2f,%.2f) axisW=(%.2f,%.2f,%.2f) axisH=(%.2f,%.2f,%.2f) size=%.2fx%.2f flags=0x%x",
+                          p.id, p.Describe().c_str(), p.origin.x, p.origin.y, p.origin.z, n.x, n.y, n.z,
+                          p.axisW.x, p.axisW.y, p.axisW.z, p.axisH.x, p.axisH.y, p.axisH.z,
+                          p.width, p.height, static_cast<unsigned>(p.flags));
+                Log::Info("[PortalDiag]     signedDist=%.4f surfaceDist=%.3f centreDist=%.3f cosView=%.4f (edge-on when ~0) inFront=%d inFrustum=%d visibleFlag=%d drawnLastFrame=%d",
+                          signedDist, distance, centreDist, cosView, p.IsInFront(eye) ? 1 : 0, inFrustum ? 1 : 0,
+                          p.Has(Game::Immersive::PortalFlag::Visible) ? 1 : 0,
+                          m_drawnLastFrame.count(p.id) ? 1 : 0);
+            });
+        }
         if (FlickerDiag::Enabled()) {
             // Why each portal of the active level is or is not drawn this
             // frame, as a state (every change logs): 0 drawn, 1 not in
@@ -436,7 +465,7 @@ namespace Render {
             // Leave the pipeline where the HUD expects it.
             g_renderBackend->SetStencilOverride(false);
             g_renderBackend->SetCullInvert(false);
-            ChunkRenderer::SetPortalClipPlane(glm::vec4(0.0f));
+            ChunkRenderer::SetPortalClipPlane(glm::dvec4(0.0));
             EnvironmentState::Get().SetFrameOverride(nullptr);
             PipelineState defaultState;
             g_renderBackend->SetPipelineState(defaultState);
@@ -467,7 +496,7 @@ namespace Render {
                 model[0] = glm::vec4(glm::vec3(w), 0.0f);
                 model[1] = glm::vec4(glm::vec3(h), 0.0f);
                 model[2] = glm::vec4(glm::vec3(d), 0.0f);
-                model[3] = glm::vec4(glm::vec3(corner), 1.0f);
+                model[3] = glm::vec4(Render::ToRender(corner), 1.0f);
                 g_blockHighlight.RenderOriented(model, projection, view);
             });
         }
@@ -542,7 +571,7 @@ namespace Render {
         if (candidates.empty()) return;
         PROFILE_ZONE_N("ImmersivePortals.Crossers");
 
-        const glm::vec4 outerClip = ChunkRenderer::PortalClipPlane();
+        const glm::dvec4 outerClip = ChunkRenderer::PortalClipPlaneWorld();
         // These are cut at the exact surface: what the mark wipes of them
         // the far view draws back with its own margin.
         const float outerMargin = ChunkRenderer::PortalEntityClipMargin();
@@ -554,29 +583,33 @@ namespace Render {
             const Game::DimensionId farDim = portal.destDimension;
 
             // The far level drawn through the portal's INVERSE: far-space
-            // positions land where they belong on this side.
-            const glm::mat4 Minv(glm::inverse(portal.TransformMatrix()));
+            // positions land where they belong on this side. The far camera
+            // has its own render origin, and the view bridges the two
+            // render spaces in double (Render::FarRenderView).
+            const glm::dmat4 Minv = glm::inverse(portal.TransformMatrix());
             Camera farCam = camera;
-            farCam.position        = glm::vec3(portal.TransformPoint(eye));
+            farCam.position        = portal.TransformPoint(eye);
+            farCam.renderOrigin    = Render::RenderOriginFor(farCam.position);
             farCam.hasViewOverride = true;
-            farCam.viewOverride    = view * Minv;
+            farCam.viewOverride    = Render::FarRenderView(view, Minv, camera.renderOrigin, farCam.renderOrigin);
             farCam.viewTilt        = glm::mat4(1.0f);
             const glm::mat4 farView = farCam.GetViewMatrix();
 
             // Keep only what lies in FRONT of this surface: the near-space
             // outer plane, expressed in far space (a plane transforms by the
             // inverse transpose of the point transform: (M⁻¹)ᵀ p).
-            const glm::vec4 nearPlane = portal.OuterClipPlane().AsClipPlane();
+            const glm::dvec4 nearPlane = portal.OuterClipPlane().AsClipPlane();
             ChunkRenderer::SetPortalClipPlane(glm::transpose(Minv) * nearPlane);
 
             glm::dvec3 corners[4];
             portal.Corners(corners);
             glm::vec3 farCorners[4];
             for (int i = 0; i < 4; ++i) farCorners[i] = glm::vec3(portal.TransformPoint(corners[i]));
-            const Frustum baseFrustum = Frustum::FromMatrix(projection * farView);
+            // Culling stays in world space.
+            const Frustum baseFrustum = Frustum::FromMatrix(projection * farCam.GetWorldViewMatrix());
             const Frustum farFrustum = c.distance < 0.35
                 ? baseFrustum
-                : Frustum::ThroughQuad(farCam.position, farCorners, baseFrustum);   // see RenderLayer
+                : Frustum::ThroughQuad(glm::vec3(farCam.position), farCorners, baseFrustum);   // see RenderLayer
 
             Client::ClientLevels::WithLevel(farDim, [&]() {
                 ViewContext ctx;
@@ -588,7 +621,9 @@ namespace Render {
                 ctx.partialTick = partialTick;
                 ctx.layer       = layer;
                 ctx.through     = &portal;
+                farCam.ActivateRenderOrigin();
                 (*m_renderCrossers)(ctx);
+                camera.ActivateRenderOrigin();
             });
         }
         ChunkRenderer::SetPortalClipPlane(outerClip);
@@ -608,7 +643,7 @@ namespace Render {
 
         const int inner = layer + 1;
         const EnvironmentFrame* outerFrame = EnvironmentState::Get().FrameOverride();
-        const glm::vec4 outerClip = ChunkRenderer::PortalClipPlane();
+        const glm::dvec4 outerClip = ChunkRenderer::PortalClipPlaneWorld();
         const float outerMargin = ChunkRenderer::PortalEntityClipMargin();
         const bool outerCullInvert = g_renderBackend->CullInverted();
 
@@ -636,7 +671,8 @@ namespace Render {
             // the real one along the normal. The band between is wiped by
             // the mark and drawn back by the far view's entity passes — an
             // item lying in the surface showed a bare stripe there.
-            const glm::vec3 eyeF(camera.position);
+            // In render space, like `model`.
+            const glm::vec3 eyeF = Render::ToRender(camera.position);
             // To the SURFACE, not its centre: a global surface's centre can
             // be a kilometre off while the eye is right at the plane.
             const float markDist   = std::max(0.2f, static_cast<float>(DistanceToSurface(portal, eye)));
@@ -649,10 +685,18 @@ namespace Render {
             // sky along the edges. Up close the margin is now half a
             // centimetre; far away it grows to what the buffer needs.
             const float nearPlane   = ChunkRenderer::NearPlane();
-            const float kMarkMargin = std::clamp(markDist * markDist / (nearPlane * 2097152.0f), 0.005f, 0.25f);
+            // Buffer resolution AND the transform's own float error — see
+            // ChunkRenderer::SurfaceDepthMargin; the buffer term alone left
+            // the view fighting its wall from ten blocks out.
+            const float kMarkMargin = ChunkRenderer::SurfaceDepthMargin(markDist, eyeF);
             const float markShrink  = std::max(0.5f, 1.0f - kMarkMargin / markDist);
             const float markShift  =
                 static_cast<float>(std::max(0.0, portal.SignedDistanceToPlane(eye))) * (1.0f - markShrink);
+            if (FlickerDiag::DumpPending()) {
+                Log::Info("[PortalDiag]  layer %d draws #%u: markDist=%.3f margin=%.4f shrink=%.6f shift=%.4f nearPlane=%.3f mesh=%s",
+                          layer, portal.id, markDist, kMarkMargin, markShrink, markShift, nearPlane,
+                          mesh.mesh != INVALID_MESH ? "ok" : "MISSING");
+            }
 
             // 1. Mark: EQUAL layer → layer+1 where the surface is visible.
             //
@@ -711,18 +755,25 @@ namespace Render {
                 s.stencilCompareOp   = CompareOp::Equal;
                 s.stencilReference   = static_cast<uint32_t>(inner);
                 s.stencilWriteMask   = 0u;
-                DrawSurface(mesh, s, FarPlaneProjection(projection) * view * model, farFrame.fogColor, model);
+                const glm::vec3 fill = FlickerDiag::DebugFill() ? glm::vec3(1.0f, 0.0f, 1.0f) : farFrame.fogColor;
+                DrawSurface(mesh, s, FarPlaneProjection(projection) * view * model, fill, model);
             }
 
             // 3. The far world. Camera through the portal: position mapped,
             //    view = view · M⁻¹ (M: this side → far side), so the far
             //    world appears exactly where the surface is.
             {
+                //    The far camera has its own render origin — the far
+                //    side is drawn relative to ITS block position — and the
+                //    view bridges the two render spaces in double
+                //    (Render::FarRenderView, RenderOrigin.hpp).
                 const glm::dmat4 M = portal.TransformMatrix();
                 Camera farCam = camera;
-                farCam.position        = glm::vec3(portal.TransformPoint(eye));
+                farCam.position        = portal.TransformPoint(eye);
+                farCam.renderOrigin    = Render::RenderOriginFor(farCam.position);
                 farCam.hasViewOverride = true;
-                farCam.viewOverride    = view * glm::mat4(glm::inverse(M));
+                farCam.viewOverride    = Render::FarRenderView(view, glm::inverse(M),
+                                                               camera.renderOrigin, farCam.renderOrigin);
                 farCam.viewTilt        = glm::mat4(1.0f);   // already inside `view`
                 const glm::mat4 farView = farCam.GetViewMatrix();
 
@@ -738,10 +789,23 @@ namespace Render {
                 // edges; with no distance to speak of one flips and culls
                 // half the far world). Within a third of a block the surface
                 // fills the view anyway: use the plain camera frustum.
-                const Frustum baseFrustum = Frustum::FromMatrix(projection * farView);
+                // Culling stays in world space.
+                const Frustum baseFrustum = Frustum::FromMatrix(projection * farCam.GetWorldViewMatrix());
                 const Frustum farFrustum = c.distance < 0.35
                     ? baseFrustum
-                    : Frustum::ThroughQuad(farCam.position, farCorners, baseFrustum);
+                    : Frustum::ThroughQuad(glm::vec3(farCam.position), farCorners, baseFrustum);
+                if (FlickerDiag::DumpPending()) {
+                    const glm::vec3 quadCentre = (farCorners[0] + farCorners[1] + farCorners[2] + farCorners[3]) * 0.25f;
+                    const glm::vec3 toCentre = quadCentre - glm::vec3(farCam.position);
+                    const glm::vec3 quadNormal = glm::cross(farCorners[1] - farCorners[0], farCorners[3] - farCorners[0]);
+                    const float cosQuad = (glm::length(toCentre) > 1e-6f && glm::length(quadNormal) > 1e-9f)
+                        ? std::abs(glm::dot(glm::normalize(quadNormal), glm::normalize(toCentre))) : 0.0f;
+                    Log::Info("[PortalDiag]     far: dim=%d farCam=(%.2f,%.2f,%.2f) candDist=%.3f frustum=%s cosQuad=%.4f clip=(%.2f,%.2f,%.2f,%.2f) fog=(%.2f,%.2f,%.2f) renderDist=%d",
+                              static_cast<int>(Game::DimensionToRaw(farDim)), farCam.position.x, farCam.position.y, farCam.position.z,
+                              c.distance, c.distance < 0.35 ? "base(close)" : (cosQuad < 0.02f ? "base(edge-on)" : "throughQuad"),
+                              cosQuad, portal.InnerClipPlane().AsClipPlane().x, portal.InnerClipPlane().AsClipPlane().y, portal.InnerClipPlane().AsClipPlane().z, portal.InnerClipPlane().AsClipPlane().w,
+                              farFrame.fogColor.r, farFrame.fogColor.g, farFrame.fogColor.b, farRenderDistance);
+                }
 
                 // Nothing on the near side of the destination surface, cut
                 // EXACTLY at it. The wall a flush portal sits on (the gun's,
@@ -753,7 +817,7 @@ namespace Render {
                 // face that ran into the plane stopped a centimetre short —
                 // a line of sky along the edges, a stair you could see into.
                 Game::Immersive::HalfSpace innerPlane = portal.InnerClipPlane();
-                const glm::vec4 clip = innerPlane.AsClipPlane();
+                const glm::dvec4 clip = innerPlane.AsClipPlane();
                 ChunkRenderer::SetPortalClipPlane(clip);
                 // A little past the mark's shift: with the two exactly
                 // equal, rounding left a hairline at the seam between a
@@ -767,6 +831,10 @@ namespace Render {
                 EnvironmentState::Get().SetFrameOverride(&farFrame);
 
                 Client::ClientLevels::WithLevel(farDim, [&]() {
+                    // Everything drawn in here is relative to the far
+                    // camera's origin; the enclosing view's is restored at
+                    // the end of the lambda.
+                    farCam.ActivateRenderOrigin();
                     ViewContext ctx;
                     ctx.dimension   = farDim;
                     ctx.camera      = farCam;
@@ -807,9 +875,15 @@ namespace Render {
                         g_chunkRenderer->SetPortalViewSeed(glm::vec3(seed));
                     }
                     ChunkRenderer::SetRenderDistanceOverride(farRenderDistance);
-                    renderLevel(ctx);
+                    if (!FlickerDiag::DebugFill()) renderLevel(ctx);
                     ChunkRenderer::SetRenderDistanceOverride(0);
                     if (g_chunkRenderer) g_chunkRenderer->ClearPortalViewSeed();
+                    if (FlickerDiag::DumpPending() && g_chunkRenderer) {
+                        Log::Info("[PortalDiag]     far view of #%u: sections=%d drawCalls=%d bfsSource=%d",
+                                  portal.id, g_chunkRenderer->GetStats().sectionsRendered,
+                                  g_chunkRenderer->GetStats().totalDrawCalls,
+                                  static_cast<int>(g_chunkRenderer->LastPrepareSource()));
+                    }
                     if (FlickerDiag::Enabled() && g_chunkRenderer) {
                         const std::string k = "portal#" + std::to_string(portal.id);
                         FlickerDiag::Record(k + ".farSections", g_chunkRenderer->GetStats().sectionsRendered);
@@ -840,6 +914,7 @@ namespace Render {
                         RenderLayer(inner, &portal, through, farCam, farView, projection, farFrustum,
                                     aspect, renderDistanceChunks, partialTick, renderLevel);
                     }
+                    camera.ActivateRenderOrigin();
                 });
 
                 EnvironmentState::Get().SetFrameOverride(outerFrame);

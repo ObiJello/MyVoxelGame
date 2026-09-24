@@ -54,12 +54,20 @@ namespace Render {
 
         void OnClick(double mouseX, double mouseY) override;
         bool OnScroll(double deltaY) override;
+        // "Join is off." over a greyed-out invite-row Join button.
+        const std::vector<std::string>* TooltipAt(double mx, double my) override;
 
     protected:
         void RenderWidget(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;
 
     private:
         int RowAt(double mouseX, double mouseY) const;
+        // The invite banner's Join is disabled while the inviting host's
+        // world is not joinable (World Options → Joinable off).
+        bool InviteJoinDisabled(const Row& row) const {
+            return row.kind == Row::Kind::Invite && !row.presence.joinable;
+        }
+        std::vector<std::string> m_joinOffTip{"Join is off."};
         int RowTop(int index) const;
         double MaxScroll() const;
 

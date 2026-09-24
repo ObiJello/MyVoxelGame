@@ -65,6 +65,7 @@ ConfiguredFeature* VegetationFeatures::PATCH_BERRY_BUSH = nullptr;
 ConfiguredFeature* VegetationFeatures::PATCH_WATERLILY = nullptr;
 ConfiguredFeature* VegetationFeatures::PATCH_FIREFLY_BUSH = nullptr;
 ConfiguredFeature* VegetationFeatures::PATCH_BUSH = nullptr;
+ConfiguredFeature* VegetationFeatures::RED_SHRUB = nullptr;
 
 // ConfiguredFeature pointers - Bamboo & vines
 ConfiguredFeature* VegetationFeatures::BAMBOO_NO_PODZOL = nullptr;
@@ -101,6 +102,7 @@ ConfiguredFeature* VegetationFeatures::TREES_WINDSWEPT_FOREST = nullptr;
 ConfiguredFeature* VegetationFeatures::TREES_WINDSWEPT_HILLS = nullptr;
 ConfiguredFeature* VegetationFeatures::TREES_WATER = nullptr;
 ConfiguredFeature* VegetationFeatures::TREES_SPARSE_JUNGLE = nullptr;
+ConfiguredFeature* VegetationFeatures::TREES_DAPPLED_FOREST = nullptr;
 ConfiguredFeature* VegetationFeatures::TREES_OLD_GROWTH_SPRUCE_TAIGA = nullptr;
 ConfiguredFeature* VegetationFeatures::TREES_OLD_GROWTH_PINE_TAIGA = nullptr;
 ConfiguredFeature* VegetationFeatures::TREES_JUNGLE = nullptr;
@@ -901,15 +903,17 @@ void VegetationFeatures::bootstrap() {
     //   WeightedPlacedFeature(fallenOak, 0.0125F)),
     //   oakBees005)
     // =========================================================================
+    // 26.3: fancyOakBees005 / oakBees005 are the CONFIGURED features,
+    // inlined with no placement modifiers.
     {
         using TreePl = placement::TreePlacements;
-        if (TreePl::FANCY_OAK_BEES && TreePl::FALLEN_OAK_TREE && TreePl::OAK_BEES_002) {
+        if (TreeFeatures::FANCY_OAK_BEES_005 && TreePl::FALLEN_OAK_TREE && TreeFeatures::OAK_BEES_005) {
             auto config = std::make_unique<RandomFeatureConfiguration>(
                 std::vector<WeightedPlacedFeature>{
-                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FANCY_OAK_BEES), 0.33333334f),
+                    WeightedPlacedFeature(inlinePlaced(TreeFeatures::FANCY_OAK_BEES_005), 0.33333334f),
                     WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FALLEN_OAK_TREE), 0.0125f),
                 },
-                const_cast<PlacedFeature*>(TreePl::OAK_BEES_002)
+                inlinePlaced(TreeFeatures::OAK_BEES_005)
             );
             auto feature = std::make_unique<ConfiguredFeatureImpl<RandomFeatureConfiguration, RandomSelectorFeature>>(
                 s_randomSelectorFeature.get(), *config);
@@ -1253,6 +1257,30 @@ void VegetationFeatures::bootstrap() {
     }
 
     // =========================================================================
+    // TREES_DAPPLED_FOREST (26.3 VegetationFeatures) - WeightedRandomSelector
+    // {red poplar + leaf litter 200, orange 240, yellow 90, spruce_checked 27,
+    //  fallen poplar 120}
+    // =========================================================================
+    {
+        static WeightedRandomSelectorFeature s_weightedSelectorFeature;
+        static std::vector<std::unique_ptr<WeightedRandomFeatureConfiguration>> s_weightedConfigs;
+        using TreePl = data::worldgen::placement::TreePlacements;
+        auto config = std::make_unique<WeightedRandomFeatureConfiguration>(
+            std::vector<WeightedRandomFeatureConfiguration::Entry>{
+                {const_cast<PlacedFeature*>(TreePl::RED_POPLAR_LEAF_LITTER), 200},
+                {const_cast<PlacedFeature*>(TreePl::ORANGE_POPLAR_LEAF_LITTER), 240},
+                {const_cast<PlacedFeature*>(TreePl::YELLOW_POPLAR_LEAF_LITTER), 90},
+                {const_cast<PlacedFeature*>(TreePl::SPRUCE_CHECKED), 27},
+                {const_cast<PlacedFeature*>(TreePl::FALLEN_POPLAR_TREE), 120},
+            });
+        auto feature = std::make_unique<ConfiguredFeatureImpl<WeightedRandomFeatureConfiguration, WeightedRandomSelectorFeature>>(
+            &s_weightedSelectorFeature, *config);
+        TREES_DAPPLED_FOREST = feature.get();
+        s_weightedConfigs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
+    }
+
+    // =========================================================================
     // TREES_JUNGLE - RandomSelectorFeature
     // Reference: VegetationFeatures.java line 218
     // =========================================================================
@@ -1532,6 +1560,12 @@ void VegetationFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
+    // RED_SHRUB (26.3 VegetationFeatures): SimpleBlockFeature(red_shrub). The
+    // patch shape lives in its placement (PATCH_RED_SHRUB).
+    RED_SHRUB = createSimpleBlockConfiguredFeature(
+        levelgen::feature::stateproviders::BlockStateProvider::simple(
+            minecraft::world::level::block::Blocks::RED_SHRUB));
+
     // PATCH_FIREFLY_BUSH - tries=20
     // Reference: VegetationFeatures.java line 185
     {
@@ -1683,21 +1717,17 @@ void VegetationFeatures::bootstrap() {
     }
 
     // FLOWER_PALE_GARDEN - closed eyeblossom
-    // Reference: VegetationFeatures.java line 194
+    // Reference: 26.3 VegetationFeatures.java line 197 -
+    // SimpleBlockFeature(closed_eyeblossom, scheduleTick = true): no patch
+    // and no ONLY_IN_AIR filter any more.
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(
-            1,
-            0,
-            0,
-            onlyWhenEmptySimpleBlock(
-                levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::CLOSED_EYEBLOSSOM),
-                true
-            )
-        );
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
-            &s_randomPatchFeature, *config);
+        static std::shared_ptr<levelgen::feature::stateproviders::BlockStateProvider> s_eyeblossom =
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::CLOSED_EYEBLOSSOM);
+        static SimpleBlockConfiguration s_eyeblossomConfig(s_eyeblossom.get(), true);
+        auto feature = std::make_unique<ConfiguredFeatureImpl<SimpleBlockConfiguration, SimpleBlockFeature>>(
+            &s_simpleBlockFeature, s_eyeblossomConfig);
         FLOWER_PALE_GARDEN = feature.get();
-        s_configs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 

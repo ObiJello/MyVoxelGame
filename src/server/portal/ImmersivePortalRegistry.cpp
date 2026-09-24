@@ -11,6 +11,8 @@
 #include "server/session/PlayerSessionManager.hpp"
 #include "common/network/packets/game/ImmersivePortalPackets.hpp"
 #include "common/core/Log.hpp"
+#include "common/world/portal/PortalFamily.hpp"
+#include "common/world/portal/PortalState.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -29,6 +31,16 @@ namespace Server {
     namespace {
 
         constexpr int kSaveVersion = 1;
+
+        // Does /gamerule immersive_portals park and restore this record? The
+        // nether family's frames and everything that is not a frame family
+        // (command portals, mirrors). The Hush's and the Aether's portals are
+        // always vanilla blocks (Portals::FamilyIsImmersive); a record of
+        // theirs from an older build is converted at startup, not parked.
+        bool RuleGoverns(const Game::Immersive::Portal& p) {
+            const Game::PortalFamily* family = Game::FamilyOfKind(p.kind);
+            return !family || Game::Portals::FamilyFollowsImmersiveRule(family->id);
+        }
 
         nlohmann::json Vec3Json(const glm::dvec3& v) { return { v.x, v.y, v.z }; }
 
@@ -464,6 +476,105 @@ namespace Server {
         const std::string& root = overworld->Config().savePath;
         if (root.empty()) return {};
         return (std::filesystem::path(root) / "data" / "immersive_portals.json").string();
+    }
+
+    std::string ImmersivePortalRegistry::StashPath() const {
+        const std::string path = SavePath();
+        if (path.empty()) return {};
+        return (std::filesystem::path(path).parent_path() / "immersive_portals_disabled.json").string();
+    }
+
+    bool ImmersivePortalRegistry::HasStash() const {
+        const std::string path = StashPath();
+        std::error_code ec;
+        return !path.empty() && std::filesystem::exists(path, ec);
+    }
+
+    size_t ImmersivePortalRegistry::StashAll() {
+        const std::string path = StashPath();
+        std::vector<const Portal*> keep;      // → the stash file
+        std::vector<PortalId> gunSurfaces;    // → just removed
+        for (const auto& [id, portal] : m_portals) {
+            if (portal.Has(Game::Immersive::PortalFlag::Global)) continue;   // world options rebuild these
+            if (!RuleGoverns(portal)) continue;                               // hush/aether frames: not the rule's
+            if (portal.kind == Game::Immersive::PortalKind::PortalGun) { gunSurfaces.push_back(id); continue; }
+            keep.push_back(&portal);
+        }
+        std::sort(keep.begin(), keep.end(), [](const Portal* a, const Portal* b) { return a->id < b->id; });
+        if (!keep.empty() && !path.empty()) {
+            try {
+                nlohmann::json j;
+                j["version"] = kSaveVersion;
+                nlohmann::json portals = nlohmann::json::array();
+                // Merge with an older stash rather than lose it (the rule may
+                // be flipped off twice with a restore failure between).
+                std::error_code ec;
+                if (std::filesystem::exists(path, ec)) {
+                    std::ifstream f(path);
+                    nlohmann::json old; f >> old;
+                    if (old.contains("portals") && old["portals"].is_array()) portals = old["portals"];
+                }
+                for (const Portal* p : keep) portals.push_back(PortalToJson(*p));
+                j["portals"] = std::move(portals);
+                std::ofstream f(path, std::ios::trunc);
+                f << j.dump(2);
+            } catch (const std::exception& e) {
+                Log::Warning("[ImmersivePortals] Could not write %s: %s — portals are removed WITHOUT a stash", path.c_str(), e.what());
+            }
+        }
+        std::vector<PortalId> ids;
+        for (const Portal* p : keep) ids.push_back(p->id);
+        for (auto id : gunSurfaces) Remove(id);
+        for (auto id : ids) Remove(id);
+        Log::Info("[ImmersivePortals] stashed %zu portal(s) to %s, dropped %zu gun surface(s)",
+                  ids.size(), path.c_str(), gunSurfaces.size());
+        return ids.size();
+    }
+
+    size_t ImmersivePortalRegistry::RestoreStashed(bool ruleExemptOnly) {
+        const std::string path = StashPath();
+        std::error_code ec;
+        if (path.empty() || !std::filesystem::exists(path, ec)) return 0;
+        size_t restored = 0;
+        // What stays parked (ruleExemptOnly: the rule's own records).
+        nlohmann::json remaining = nlohmann::json::array();
+        nlohmann::json j;
+        try {
+            std::ifstream f(path);
+            f >> j;
+            if (j.contains("portals") && j["portals"].is_array()) {
+                for (const auto& pj : j["portals"]) {
+                    Portal p;
+                    if (!PortalFromJson(pj, p) || p.id == kInvalidPortalId) continue;
+                    if (ruleExemptOnly && RuleGoverns(p)) { remaining.push_back(pj); continue; }
+                    // A record already live (restored by an earlier exempt
+                    // pass) is not a second copy.
+                    if (Get(p.id)) continue;
+                    // Add keeps a caller-chosen id, which is what keeps the
+                    // reverse/flipped/parallel links of a bi-way pair intact.
+                    if (Add(p) != kInvalidPortalId) ++restored;
+                }
+            }
+        } catch (const std::exception& e) {
+            Log::Warning("[ImmersivePortals] Could not read %s: %s", path.c_str(), e.what());
+            return 0;
+        }
+        if (remaining.empty()) {
+            std::filesystem::remove(path, ec);
+        } else if (restored > 0) {
+            try {
+                j["portals"] = std::move(remaining);
+                std::ofstream f(path, std::ios::trunc);
+                f << j.dump(2);
+            } catch (const std::exception& e) {
+                Log::Warning("[ImmersivePortals] Could not rewrite %s: %s", path.c_str(), e.what());
+            }
+        }
+        if (restored > 0 || !ruleExemptOnly) {
+            Log::Info("[ImmersivePortals] restored %zu stashed %sportal(s)", restored,
+                      ruleExemptOnly ? "hush/aether " : "");
+        }
+        return restored;
     }
 
     bool ImmersivePortalRegistry::Load() {

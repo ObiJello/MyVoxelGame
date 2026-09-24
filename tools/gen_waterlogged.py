@@ -43,10 +43,10 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BLOCK_DIR = os.path.join(ROOT, "minecraft_code/decompiled_net/minecraft/world/level/block")
+BLOCK_DIR = os.path.join(ROOT, "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/block")
 BLOCKS_JAVA = os.path.join(BLOCK_DIR, "Blocks.java")
 # 26.3 gap fill: classes and registrations 26.1 lacks (poplar, sulfur, …).
-BLOCK_DIR2 = os.path.join(ROOT, "minecraft_code2/decompiled_net/minecraft/world/level/block")
+BLOCK_DIR2 = os.path.join(ROOT, "minecraft_code_26.3-pre-2/decompiled_net/minecraft/world/level/block")
 BLOCKS_JAVA2 = os.path.join(BLOCK_DIR2, "Blocks.java")
 
 
@@ -182,7 +182,39 @@ def parse_registry():
                         ("registerBed", "BedBlock")):
             for m in re.finditer(fn + r'\(\s*Block\w*Ids\.([A-Z0-9_]+)', src2):
                 names.setdefault(m.group(1).lower(), cls)
+        # ColorCollection.registerBlocks / zipMap register a whole dyed family
+        # (the wool and concrete stairs and slabs, …) off one call;
+        # gen_block_hardness expands each into its sixteen registrations.
+        for _offset, fn, args, _field in color_collection_calls(src2):
+            slug = args[0].strip('"')
+            if fn in WRAPPER_CLASS:
+                names.setdefault(slug, WRAPPER_CLASS[fn])
+                continue
+            m = (re.search(r'(\w+)::new', args[1]) or
+                 re.search(r'\bnew\s+(\w+)\s*\(', args[1])) if len(args) >= 3 else None
+            names.setdefault(slug, m.group(1) if m else "Block")
     return names
+
+
+# The register* helpers that fix the block class (Blocks.java).
+WRAPPER_CLASS = {"registerSlab": "SlabBlock", "registerWall": "WallBlock",
+                 "registerStair": "StairBlock", "registerLegacyStair": "StairBlock",
+                 "registerBed": "BedBlock", "registerStainedGlass": "StainedGlassBlock"}
+
+
+def color_collection_calls(src):
+    """gen_block_hardness.color_collection_calls: every ColorCollection
+    registration in `src` expanded to [(offset, fn, args, field)], args[0]
+    being the colour's slug literal. Imported lazily with the repo root as the
+    working directory, which is what that module's input paths are relative to."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    cwd = os.getcwd()
+    os.chdir(ROOT)
+    try:
+        import gen_block_hardness as hard
+        return hard.color_collection_calls(src)
+    finally:
+        os.chdir(cwd)
 
 
 def our_slugs():
@@ -202,6 +234,74 @@ def main():
     uncond = unconditional_water_classes()
 
     registry = parse_registry()
+    # Engine-only blocks that copy a vanilla class (same rule as the
+    # ALIAS_EXACT rows in gen_block_states.py): The Hush's lantern_leaves is
+    # a LeavesBlock and so declares `waterlogged` exactly like oak_leaves.
+    # The second drop's cluster and lantern, plus the whisperwood/hushstone
+    # families whose classes (SlabBlock, StairBlock, FenceBlock, FenceGateBlock,
+    # TrapDoorBlock, WallBlock) all declare `waterlogged`; doors do not.
+    for engine_slug, vanilla in (("lantern_leaves", "oak_leaves"),
+                                 ("resonant_cluster", "amethyst_cluster"),
+                                 ("echo_lantern", "lantern"),
+                                 ("whisperwood_stairs", "oak_stairs"),
+                                 ("whisperwood_slab", "oak_slab"),
+                                 ("whisperwood_fence", "oak_fence"),
+                                 ("whisperwood_fence_gate", "oak_fence_gate"),
+                                 ("whisperwood_trapdoor", "oak_trapdoor"),
+                                 ("hushstone_stairs", "oak_stairs"),
+                                 ("hushstone_slab", "oak_slab"),
+                                 ("polished_hushstone_stairs", "oak_stairs"),
+                                 ("polished_hushstone_slab", "oak_slab"),
+                                 ("hushstone_brick_stairs", "oak_stairs"),
+                                 ("hushstone_brick_slab", "oak_slab"),
+                                 ("hushstone_brick_wall", "cobblestone_wall"),
+                                 # Aurelith (2026-09-22): the choirstone stairs/slabs/wall,
+                                 # the grate (WaterloggedTransparentBlock), the conduit
+                                 # (ChainBlock) and the lamp (LanternBlock) declare
+                                 # `waterlogged`; the river's resonant water is water
+                                 # unconditionally, bubble_column's rule.
+                                 ("polished_choirstone_stairs", "oak_stairs"),
+                                 ("polished_choirstone_slab", "oak_slab"),
+                                 ("choirstone_brick_stairs", "oak_stairs"),
+                                 ("choirstone_brick_slab", "oak_slab"),
+                                 ("choirstone_brick_wall", "cobblestone_wall"),
+                                 ("choirstone_tile_stairs", "oak_stairs"),
+                                 ("choirstone_tile_slab", "oak_slab"),
+                                 ("resonite_grate", "copper_grate"),
+                                 ("crystal_conduit", "iron_chain"),
+                                 ("choir_lamp", "lantern"),
+                                 ("resonant_water", "bubble_column"),
+                                 # Twilight Forest + The Aether (pass one): every leaves block
+                                 # is a LeavesBlock and declares `waterlogged` like oak_leaves.
+                                 # Critters/saplings alias end_rod/oak_sapling, which do not.
+                                 ("twilight_oak_leaves", "oak_leaves"),
+                                 ("canopy_leaves", "oak_leaves"),
+                                 ("tf_mangrove_leaves", "oak_leaves"),
+                                 ("dark_leaves", "oak_leaves"),
+                                 ("skyroot_leaves", "oak_leaves"),
+                                 ("golden_oak_leaves", "oak_leaves"),
+                                 # The Aether, pass two: the stairs/slab/wall/fence/gate/trapdoor
+                                 # families (StairBlock, SlabBlock, WallBlock, FenceBlock,
+                                 # FenceGateBlock, TrapDoorBlock all declare `waterlogged`).
+                                 ("holystone_stairs", "oak_stairs"), ("holystone_slab", "oak_slab"),
+                                 ("mossy_holystone_stairs", "oak_stairs"), ("mossy_holystone_slab", "oak_slab"),
+                                 ("holystone_brick_stairs", "oak_stairs"), ("holystone_brick_slab", "oak_slab"),
+                                 ("skyroot_stairs", "oak_stairs"), ("skyroot_slab", "oak_slab"),
+                                 ("icestone_stairs", "oak_stairs"), ("icestone_slab", "oak_slab"),
+                                 ("carved_stairs", "oak_stairs"), ("carved_slab", "oak_slab"),
+                                 ("angelic_stairs", "oak_stairs"), ("angelic_slab", "oak_slab"),
+                                 ("hellfire_stairs", "oak_stairs"), ("hellfire_slab", "oak_slab"),
+                                 ("holystone_wall", "cobblestone_wall"), ("mossy_holystone_wall", "cobblestone_wall"),
+                                 ("holystone_brick_wall", "cobblestone_wall"), ("icestone_wall", "cobblestone_wall"),
+                                 ("carved_wall", "cobblestone_wall"), ("angelic_wall", "cobblestone_wall"),
+                                 ("hellfire_wall", "cobblestone_wall"), ("skyroot_fence", "oak_fence"),
+                                 ("skyroot_fence_gate", "oak_fence_gate"), ("skyroot_trapdoor", "oak_trapdoor"),
+                                 # Twilight Forest, pass two: the castle stairs (StairBlock).
+                                 ("castle_brick_stairs", "oak_stairs"), ("worn_castle_brick_stairs", "oak_stairs"),
+                                 ("cracked_castle_brick_stairs", "oak_stairs"), ("mossy_castle_brick_stairs", "oak_stairs"),
+                                 ("encased_castle_brick_stairs", "oak_stairs"), ("bold_castle_brick_stairs", "oak_stairs")):
+        if vanilla in registry:
+            registry.setdefault(engine_slug, registry[vanilla])
     ours = our_slugs()
 
     waterloggable = sorted(

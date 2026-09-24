@@ -15,9 +15,10 @@ namespace Game {
     // INVISIBILITY on the illusioner itself, gated on not already having it.
     // The four mirror images the client draws while invisible
     // (clientSideIllusionOffsets, getIllusionOffsets) are pure render
-    // trickery — SKIPPED: effects do not sync to the client and the renderer
-    // has no multi-instance draw for one mob; the spell's server half (the
-    // effect, the cast timing, the spell id on the wire) is exact.
+    // trickery — the invisible flag reaches the client with the synched
+    // effect visuals; drawing the four copies is the renderer's business.
+    // The spell's server half (the effect, the cast timing, the spell id on
+    // the wire) is exact.
     class IllusionerMirrorSpellGoal : public SpellcasterUseSpellGoal {
     public:
         explicit IllusionerMirrorSpellGoal(Illusioner* illusioner);

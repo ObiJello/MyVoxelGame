@@ -9,6 +9,8 @@
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/EndCrystal.hpp"
+#include "common/entity/ArmorStand.hpp"
+#include "common/network/packets/game/ArmorStandDataS2CPacket.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
@@ -21,6 +23,9 @@
 #include "common/entity/projectile/ThrownTrident.hpp"
 #include "common/entity/projectile/EvokerFangs.hpp"
 #include "common/entity/projectile/AreaEffectCloud.hpp"
+#include "common/entity/LightningBolt.hpp"
+#include "client/renderer/environment/EnvironmentState.hpp"
+#include "platform/GameDirectory.hpp"
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/mobs/SulfurCube.hpp"
 #include "common/entity/mobs/Fish.hpp"
@@ -28,9 +33,12 @@
 #include "common/core/Mth.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/core/Log.hpp"
+#include "client/sound/ClientSounds.hpp"
+#include "client/sound/SoundInstance.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace Client {
 
@@ -44,12 +52,71 @@ namespace Client {
         if (g_clientMobManager) g_clientMobManager->SetVehicle(passengerId, vehicleId);
     }
 
+    void ClientLevelBridge::SetSkyFlashTime(int ticks) {
+        // MC ClientLevel.getSkyFlashTime answers 0 while the accessibility
+        // option "Hide Lightning Flashes" is on; refusing the write is the
+        // same thing for a counter that only ever lives two ticks.
+        if (Platform::g_gameSettings.GetHideLightningFlashes()) return;
+        Render::EnvironmentState::Get().SetSkyFlashTime(ticks);
+    }
+
+    // MC ClientLevel.playSeededSound: `if (except == minecraft.player)`. The
+    // local player is not a Game::Entity on this client, so only the
+    // item-behaviour player form can name it.
+    void ClientLevelBridge::PlaySeededSound(const Game::SoundExcept& except, const glm::dvec3& pos,
+                                            std::string_view event, Game::SoundSource source,
+                                            float volume, float pitch, int64_t seed) {
+        if (except.player) Sounds::PlayAt(pos, event, source, volume, pitch, false, seed);
+    }
+
+    void ClientLevelBridge::PlaySeededSoundFromEntity(const Game::SoundExcept& except,
+                                                      const Game::Entity& sourceEntity,
+                                                      std::string_view event, Game::SoundSource source,
+                                                      float volume, float pitch, int64_t seed) {
+        if (except.player) Sounds::PlayEntityBound(sourceEntity.GetId(), event, source, volume, pitch, seed);
+    }
+
+    void ClientLevelBridge::PlayLocalSound(const glm::dvec3& pos, std::string_view event,
+                                           Game::SoundSource source, float volume, float pitch,
+                                           bool distanceDelay) {
+        Sounds::PlayLocal(pos, event, source, volume, pitch, distanceDelay);
+    }
+
+    void ClientLevelBridge::PlayLocalSoundFromEntity(const Game::Entity& sourceEntity, std::string_view event,
+                                                     Game::SoundSource source, float volume, float pitch) {
+        Sounds::PlayEntityBound(sourceEntity.GetId(), event, source, volume, pitch,
+                                SoundInstance::UnseededSeed());
+    }
+
     namespace {
+
+        // ── OBEY_MOB_TRACE=1: new-mob position trace (diagnostic) ──────────
+        // For each mob's first 400 client ticks: every position the client
+        // is TOLD (spawn / move delta / sync / motion / vehicle), and every
+        // tick whose own result jumped more than 1.5 blocks or went
+        // non-finite. Hunting mobs that vanish or flick away right after a
+        // spawn egg; the hitbox going with them says it is the mirror's
+        // position, and this says which input put it there.
+        bool MobTraceOn() {
+            static const bool on = [] {
+                const char* v = std::getenv("OBEY_MOB_TRACE");
+                return v && *v && *v != '0';
+            }();
+            return on;
+        }
+        bool Traced(const Game::Mob& mob) { return MobTraceOn() && mob.tickCount < 400; }
+        void TraceMob(const char* what, int32_t id, const Game::Mob& mob, const glm::dvec3& value) {
+            Log::Info("[MobTrace] t=%d id=%d %s %s pos=(%.3f,%.3f,%.3f) value=(%.3f,%.3f,%.3f) ground=%d",
+                      mob.tickCount, id, std::string(mob.TypeInfo().slug).c_str(), what,
+                      mob.position.x, mob.position.y, mob.position.z,
+                      value.x, value.y, value.z, mob.onGround ? 1 : 0);
+        }
 
         // Flag bits shared with AddEntityS2CPacket / SetEntityDataS2CPacket.
         constexpr uint8_t kFlagBaby       = 0x01;
         constexpr uint8_t kFlagAggressive = 0x02;
         constexpr uint8_t kFlagOnFire     = 0x04;
+        constexpr uint8_t kFlagAgeLocked  = 0x08;   // MC AgeableMob.AGE_LOCKED
 
         std::unique_ptr<Game::Mob> CreateMobOfType(Game::EntityTypeId type,
                                                    Game::EntityLevel* level) {
@@ -69,6 +136,12 @@ namespace Client {
                 // projectile here does too.
                 case Game::EntityTypeId::EyeOfEnder:
                     return std::make_unique<Game::EyeOfEnder>(level);
+                // MC LightningBolt — the client copy runs its own flash
+                // timeline (sounds, sky flash, new seed per flash) off its own
+                // random, exactly as MC's client does; LightningBoltRenderer
+                // draws it (MobRenderer finds no model and skips it).
+                case Game::EntityTypeId::LightningBolt:
+                    return std::make_unique<Game::LightningBolt>(level);
                 case Game::EntityTypeId::Enderman: return std::make_unique<Game::Enderman>(level);
                 case Game::EntityTypeId::Husk:     return std::make_unique<Game::Husk>(level);
                 case Game::EntityTypeId::Drowned:  return std::make_unique<Game::Drowned>(level);
@@ -202,6 +275,8 @@ namespace Client {
                     return std::make_unique<Game::PrimedTnt>(level);
                 case Game::EntityTypeId::EndCrystal:
                     return std::make_unique<Game::EndCrystal>(level);
+                case Game::EntityTypeId::ArmorStand:
+                    return std::make_unique<Game::ArmorStand>(level);
                 case Game::EntityTypeId::EnderPearl:
                     return std::make_unique<Game::ThrownEnderpearl>(level);
                 default: break;
@@ -219,9 +294,27 @@ namespace Client {
             return Game::MakeGenericMob(type, level);
         }
 
-        void ApplyFlags(Game::Mob& mob, uint8_t flags) {
+        // `firstSight` — the spawn packet rather than a data update: the
+        // flags are the mob's initial state, not a change, so nothing that
+        // announces a change (the age-lock burst) may fire.
+        void ApplyFlags(Game::Mob& mob, uint8_t flags, bool firstSight) {
             mob.SetAggressive((flags & kFlagAggressive) != 0);
             mob.SetRemainingFireTicks((flags & kFlagOnFire) != 0 ? 20 : 0);
+
+            // The golden dandelion's lock. MC sends the lock/unlock burst
+            // from the server (sendParticles); here the flag flipping IS
+            // the event, and the ageable's own timer draws the burst.
+            {
+                const bool wantLocked = (flags & kFlagAgeLocked) != 0;
+                if (wantLocked != mob.IsAgeLocked()) {
+                    mob.SetAgeLocked(wantLocked);
+                    if (!firstSight) {
+                        if (auto* ageable = dynamic_cast<Game::AgeableMob*>(&mob)) {
+                            ageable->ArmAgeLockParticles();
+                        }
+                    }
+                }
+            }
 
             // Baby state changes the hitbox and the model scale, so it is
             // carried on the wire rather than inferred.
@@ -302,7 +395,8 @@ namespace Client {
         mob.yHeadRot = mob.yHeadRotO = yHeadRot;
         mob.yBodyRot = mob.yBodyRotO = yRot;
         mob.SetHealth(health);
-        ApplyFlags(mob, flags);
+        ApplyFlags(mob, flags, /*firstSight=*/true);
+        if (MobTraceOn()) TraceMob("SPAWN vel", id, mob, glm::dvec3(vel));
 
         mob.SetVariantByte(variantData);
 
@@ -338,6 +432,16 @@ namespace Client {
         }
 
         existing->interpSteps = 0;
+        // The interpolation targets start AT the spawn. A later rotation-only
+        // move arms interpSteps without carrying a position, and the tick
+        // then eases the position toward targetPosition — left at its
+        // default, that is the world origin: the mob slid to (0,0,0) in
+        // three ticks, vanishing (or flicking across the screen) until its
+        // first real position packet overwrote the target.
+        existing->targetPosition = pos;
+        existing->targetYRot     = yRot;
+        existing->targetXRot     = xRot;
+        existing->targetYHeadRot = yHeadRot;
         existing->renderPrevPosition = pos;
         existing->renderPrevYRot = yRot;
         existing->renderPrevXRot = xRot;
@@ -366,6 +470,8 @@ namespace Client {
             const glm::dvec3 base = (it == m_codecBase.end()) ? entry->mob->position : it->second;
             const glm::dvec3 target = base + delta;
             m_codecBase[id] = target;
+            if (Traced(*entry->mob)) TraceMob(it == m_codecBase.end() ? "MOVE(no base) target" : "MOVE target",
+                                              id, *entry->mob, target);
 
             const glm::dvec3 d = target - entry->mob->position;
             if (d.x * d.x + d.y * d.y + d.z * d.z > kSnapDistanceSq) {
@@ -384,18 +490,61 @@ namespace Client {
             entry->targetYRot = yRot;
             entry->targetXRot = xRot;
             entry->targetYHeadRot = yHeadRot;
-            if (entry->interpSteps == 0) entry->interpSteps = kInterpSteps;
+            if (entry->interpSteps == 0) {
+                // MC's rotation-only packet interpolates to the codec BASE
+                // (moveOrInterpolateTo(positionCodec.getBase(), ...)): the
+                // position the server last sent, which a pending position
+                // target already equals. Without this the steps armed here
+                // ease toward whatever targetPosition last held.
+                if (!hasPos) {
+                    const auto it = m_codecBase.find(id);
+                    entry->targetPosition = (it != m_codecBase.end()) ? it->second
+                                                                       : entry->mob->position;
+                }
+                entry->interpSteps = kInterpSteps;
+            }
         }
 
         entry->mob->onGround = onGround;
     }
 
     void ClientMobManager::Teleport(int32_t id, const glm::dvec3& pos, const glm::vec3& vel,
-                                    float yRot, float xRot, float yHeadRot, bool onGround) {
+                                    float yRot, float xRot, float yHeadRot, bool onGround,
+                                    bool snap) {
         ClientMob* entry = Find(id);
         if (!entry) return;
 
         m_codecBase[id] = pos;
+        if (Traced(*entry->mob)) TraceMob(snap ? "SYNC(snap) pos" : "SYNC pos", id, *entry->mob, pos);
+
+        if (snap) {
+            // A portal crossing: the body is already drawn emerging on the
+            // far side (the crossers pass), so the switch must be exact —
+            // no correction steps, no render lerp from the old spot, and
+            // the facing turned at once (the portal's rotation, not a turn
+            // the mob makes).
+            Game::Mob& mob = *entry->mob;
+            mob.position = pos;
+            mob.yRot = yRot;
+            mob.xRot = xRot;
+            mob.yHeadRot = yHeadRot;
+            mob.yBodyRot = yRot;
+            mob.SetOldPosAndRot();
+            entry->interpSteps = 0;
+            entry->targetPosition = pos;
+            entry->targetYRot = yRot;
+            entry->targetXRot = xRot;
+            entry->targetYHeadRot = yHeadRot;
+            entry->renderPrevPosition = pos;
+            entry->renderPrevYRot = yRot;
+            entry->renderPrevXRot = xRot;
+            entry->renderPrevYHeadRot = yHeadRot;
+            entry->renderPrevYBodyRot = yRot;
+            mob.velocity = glm::dvec3(vel);
+            mob.physicsParked = false;
+            mob.onGround = onGround;
+            return;
+        }
 
         const glm::dvec3 d = pos - entry->mob->position;
         if (d.x * d.x + d.y * d.y + d.z * d.z > kSnapDistanceSq) {
@@ -418,6 +567,7 @@ namespace Client {
 
     void ClientMobManager::SetMotion(int32_t id, const glm::vec3& vel) {
         if (ClientMob* entry = Find(id)) {
+            if (Traced(*entry->mob)) TraceMob("MOTION vel", id, *entry->mob, glm::dvec3(vel));
             entry->mob->velocity = glm::dvec3(vel);
             entry->mob->physicsParked = false;
         }
@@ -435,6 +585,26 @@ namespace Client {
             if (mob == except || mob->IsRemoved()) continue;
             if (mob->GetAABB().Intersects(box)) out.push_back(mob);
         }
+    }
+
+    void ClientMobManager::SetArmorStandData(const Network::ArmorStandDataS2CPacket& packet) {
+        ClientMob* entry = Find(packet.entityId);
+        if (!entry) return;
+        auto* stand = dynamic_cast<Game::ArmorStand*>(entry->mob.get());
+        if (!stand) return;
+        Game::ArmorStand::Pose pose;
+        pose.head     = packet.poses[0];
+        pose.body     = packet.poses[1];
+        pose.leftArm  = packet.poses[2];
+        pose.rightArm = packet.poses[3];
+        pose.leftLeg  = packet.poses[4];
+        pose.rightLeg = packet.poses[5];
+        stand->SetPose(pose);
+        static constexpr Game::EquipmentSlot kSlots[6] = {
+            Game::EquipmentSlot::MAINHAND, Game::EquipmentSlot::OFFHAND, Game::EquipmentSlot::FEET,
+            Game::EquipmentSlot::LEGS,     Game::EquipmentSlot::CHEST,   Game::EquipmentSlot::HEAD,
+        };
+        for (int i = 0; i < 6; ++i) stand->SetItemSlot(kSlots[i], packet.equipment[static_cast<size_t>(i)]);
     }
 
     void ClientMobManager::SetEndCrystalBeam(int32_t id, bool hasTarget,
@@ -456,7 +626,7 @@ namespace Client {
 
         Game::Mob& mob = *entry->mob;
         mob.SetHealth(health);
-        ApplyFlags(mob, flags);
+        ApplyFlags(mob, flags, /*firstSight=*/false);
 
         // The carried block (the sulfur cube's swallowed block) — a mirrored
         // value, applied every data packet; the falling block and TNT keep
@@ -522,6 +692,8 @@ namespace Client {
         // was already removed). The relation is re-announced with the rider,
         // so nothing is lost.
         if (ClientMob* entry = Find(passengerId)) {
+            if (Traced(*entry->mob)) TraceMob("VEHICLE id", passengerId, *entry->mob,
+                                              glm::dvec3(static_cast<double>(vehicleId)));
             entry->wantedVehicleId = vehicleId;
         }
     }
@@ -561,6 +733,9 @@ namespace Client {
         // pointers they hold go stale. Riders keep their wantedVehicleId; the
         // server's next data packet for them settles the truth.
         const auto it = m_mobs.find(id);
+        if (it != m_mobs.end() && it->second.mob && Traced(*it->second.mob)) {
+            TraceMob("REMOVE at", id, *it->second.mob, it->second.mob->position);
+        }
         if (it != m_mobs.end() && it->second.mob) {
             it->second.mob->EjectPassengers();
             it->second.mob->StopRiding();
@@ -685,6 +860,12 @@ namespace Client {
         m_pickCandidates.clear();
         const Game::IBlockAccess* blocks = m_level.Blocks();
         const size_t n = m_mobList.size();
+        PROFILE_PLOT("Mobs/Client", static_cast<int64_t>(n));
+        {
+            double minY = 1e9;
+            for (const ClientMob* e : m_mobList) if (e && e->mob) minY = std::min(minY, e->mob->position.y);
+            if (n) PROFILE_PLOT("Mobs/ClientMinY", minY);
+        }
         m_serialScratch.assign(n, nullptr);
         m_blockProxies.resize(n);
         std::atomic<size_t> lodUsed{0};
@@ -850,6 +1031,20 @@ namespace Client {
                 }
 
                 mob.Tick();
+
+                if (Traced(mob)) {
+                    const glm::dvec3 step = mob.position - entry.renderPrevPosition;
+                    const bool finite = std::isfinite(mob.position.x) && std::isfinite(mob.position.y) &&
+                                        std::isfinite(mob.position.z);
+                    if (!finite || glm::dot(step, step) > 1.5 * 1.5) {
+                        TraceMob(entry.interpSteps > 0 ? "TICK JUMP (interp) from" : "TICK JUMP (physics) from",
+                                 id, mob, entry.renderPrevPosition);
+                        Log::Info("[MobTrace]   vel=(%.3f,%.3f,%.3f) target=(%.3f,%.3f,%.3f) steps=%d vehicle=%d",
+                                  mob.velocity.x, mob.velocity.y, mob.velocity.z,
+                                  entry.targetPosition.x, entry.targetPosition.y, entry.targetPosition.z,
+                                  entry.interpSteps, mob.GetVehicle() ? mob.GetVehicle()->GetId() : -1);
+                    }
+                }
 
                 if (mob.IsOnFire()) mob.SetRemainingFireTicks(20);
 

@@ -20,6 +20,8 @@
 #include "common/inventory/MenuType.hpp"
 #include <string>
 
+namespace Game { class BrewingStandMenu; }
+
 namespace Render {
 
     class ContainerScreen : public AbstractContainerScreen {
@@ -58,6 +60,10 @@ namespace Render {
 
     private:
         TextureHandle EnsureBackground();
+        // MC BrewingStandScreen's moving parts (fuel bar, brew arrow,
+        // bubbles) over the brewing stand's panel.
+        void RenderBrewingStandProgress(GuiGraphics& g, const Game::BrewingStandMenu& menu,
+                                        int leftPos, int topPos);
 
         Layout        m_layout{"assets/textures/gui/container/generic_54.png",
                                176, 168, 8, 6, 8, 74};

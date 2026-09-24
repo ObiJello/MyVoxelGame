@@ -1,7 +1,9 @@
 // File: src/common/world/block/ExplosionTrigger.cpp
 #include "common/world/block/ExplosionTrigger.hpp"
 
-#include "common/core/SoundEvents.hpp"
+#include "common/core/JavaRandom.hpp"
+#include "common/sound/SoundEvents.hpp"
+#include "common/sound/SoundType.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/block/Direction.hpp"
@@ -35,6 +37,13 @@ namespace Game {
             return level.SetBlock(pos.x, pos.y, pos.z, next, World::UpdateFlags::All);
         }
 
+        // MC level.getRandom().nextFloat() * 0.1F + 0.9F — the door / gate
+        // pitch jitter. Explosions only run on the server, which has a random.
+        float JitterPitch(ILevelWrite& level) {
+            JavaRandom* r = level.Random();
+            return r ? r->NextFloat() * 0.1f + 0.9f : 1.0f;
+        }
+
     } // namespace
 
     bool ExplosionTriggerBlock(ILevelWrite& level, const glm::ivec3& pos,
@@ -58,7 +67,11 @@ namespace Game {
                                  NameHas(model, "blackstone") ? 20 : 30;
                 ticks->ScheduleTick(pos, id, hold);
             }
-            PlaySound("block.stone_button.click_on", pos);
+            // MC ButtonBlock.press(null) → playSound(null, pos, getSound(true),
+            // BLOCKS) — the block's BlockSetType click.
+            if (const BlockSetType* set = BlockSetTypeOf(id)) {
+                level.PlaySound(nullptr, pos, set->buttonClickOn, SoundSource::Blocks);
+            }
             return true;
         }
 
@@ -68,7 +81,9 @@ namespace Game {
             const BlockState next =
                 state.SetName(PropertyId::POWERED, nowOn ? "true" : "false");
             if (!WriteState(level, pos, next)) return false;
-            PlaySound("block.lever.click", pos);
+            // MC LeverBlock.playSound: LEVER_CLICK, 0.3, 0.6 on / 0.5 off.
+            level.PlaySound(nullptr, pos, SoundEvents::LEVER_CLICK, SoundSource::Blocks, 0.3f,
+                            nowOn ? 0.6f : 0.5f);
             return true;
         }
 
@@ -79,8 +94,11 @@ namespace Game {
             const BlockState next =
                 state.SetName(PropertyId::OPEN, wasOpen ? "false" : "true");
             if (!WriteState(level, pos, next)) return false;
-            PlaySound(wasOpen ? "block.fence_gate.close"
-                              : "block.fence_gate.open", pos);
+            // MC FenceGateBlock.onExplosionHit:138 — the WoodType's gate sound.
+            if (const WoodType* wood = WoodTypeOf(id)) {
+                level.PlaySound(nullptr, pos, wasOpen ? wood->fenceGateClose : wood->fenceGateOpen,
+                                SoundSource::Blocks, 1.0f, JitterPitch(level));
+            }
             return true;
         }
 
@@ -91,8 +109,11 @@ namespace Game {
             const BlockState next =
                 state.SetName(PropertyId::OPEN, wasOpen ? "false" : "true");
             if (!WriteState(level, pos, next)) return false;
-            PlaySound(wasOpen ? "block.wooden_trapdoor.close"
-                              : "block.wooden_trapdoor.open", pos);
+            // MC TrapDoorBlock.toggle → playSound(null, ..., opening).
+            if (const BlockSetType* set = BlockSetTypeOf(id)) {
+                level.PlaySound(nullptr, pos, wasOpen ? set->trapdoorClose : set->trapdoorOpen,
+                                SoundSource::Blocks, 1.0f, JitterPitch(level));
+            }
             return true;
         }
 
@@ -119,8 +140,11 @@ namespace Game {
                 upperState.GetValueByName("half") == "upper") {
                 WriteState(level, upper, upperState.SetName(PropertyId::OPEN, to));
             }
-            PlaySound(wasOpen ? "block.wooden_door.close"
-                              : "block.wooden_door.open", pos);
+            // MC DoorBlock.setOpen → playSound(null, ..., open).
+            if (const BlockSetType* set = BlockSetTypeOf(id)) {
+                level.PlaySound(nullptr, pos, wasOpen ? set->doorClose : set->doorOpen,
+                                SoundSource::Blocks, 1.0f, JitterPitch(level));
+            }
             return true;
         }
 
@@ -131,7 +155,8 @@ namespace Game {
             if (!WriteState(level, pos, state.SetName(PropertyId::LIT, "false"))) {
                 return false;
             }
-            PlaySound("block.candle.extinguish", pos);
+            // MC AbstractCandleBlock.extinguish:81.
+            level.PlaySound(nullptr, pos, SoundEvents::CANDLE_EXTINGUISH, SoundSource::Blocks, 1.0f, 1.0f);
             return true;
         }
 
@@ -139,10 +164,9 @@ namespace Game {
         //
         // The bell's swing lives on its block entity (BellBlockEntity's
         // `shaking`/`clickDirection`), which this engine does not carry, so
-        // only the sound site is real. Named here rather than omitted so the
-        // ring is a one-line addition the day that block entity exists.
+        // only the sound is real: MC attemptToRing:144, BELL_BLOCK at 2.0.
         if (model == "bell") {
-            PlaySound("block.bell.use", pos);
+            level.PlaySound(nullptr, pos, SoundEvents::BELL_BLOCK, SoundSource::Blocks, 2.0f, 1.0f);
             return false;
         }
 

@@ -149,7 +149,64 @@ namespace Render {
 
     // --- Text rendering ---
 
+    // MC's §n (underline) and §m (strikethrough) are rectangle "effects"
+    // the font draws alongside the glyphs (BakedGlyph.Effect): the underline
+    // one pixel below the glyph cell, the strikethrough through its middle,
+    // both spanning the styled run plus a pixel on the left. The font here
+    // knows only colours and bold, so the spans are measured and filled from
+    // this side; a drop shadow gets its own offset copy first, as in MC.
+    void GuiGraphics::DrawTextEffects(const std::string& text, int x, int y, uint32_t color, bool dropShadow) {
+        if (text.find("\xC2\xA7") == std::string::npos) return;
+        auto codeIs = [](char c, char lower) { return c == lower || c == static_cast<char>(lower - 32); };
+        bool underline = false, strike = false, bold = false;
+        uint32_t current = color;
+        int spanStartUnder = 0, spanStartStrike = 0;
+        int cursor = 0;
+        auto shadow = [](uint32_t c) { return (c & 0xFF000000u) | (((c >> 16) & 0xFF) / 4 << 16) | (((c >> 8) & 0xFF) / 4 << 8) | ((c & 0xFF) / 4); };
+        auto flush = [&](bool& flag, int start, int end, int lineY) {
+            if (!flag || end <= start) return;
+            if (dropShadow) Fill(x + start - 1 + 1, y + lineY + 1, x + end + 1, y + lineY + 2, shadow(current));
+            Fill(x + start - 1, y + lineY, x + end, y + lineY + 1, current);
+        };
+        for (size_t i = 0; i < text.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if (c == 0xC2 && i + 2 < text.size() + 1 && i + 1 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0xA7) {
+                const char code = i + 2 < text.size() ? text[i + 2] : '\0';
+                if (codeIs(code, 'n'))      { if (!underline) { underline = true; spanStartUnder = cursor; } }
+                else if (codeIs(code, 'm')) { if (!strike) { strike = true; spanStartStrike = cursor; } }
+                else if (codeIs(code, 'r')) {
+                    // MC StringRenderOutput: the underline sits on y+9..y+10,
+                    // the strikethrough on y+4.5..y+5.5.
+                    flush(underline, spanStartUnder, cursor, FontRenderer::LINE_HEIGHT);
+                    flush(strike, spanStartStrike, cursor, 4);
+                    underline = strike = bold = false;
+                    current = color;
+                } else if (codeIs(code, 'l')) {
+                    bold = true;   // widens the advance below
+                } else if (codeIs(code, 'o') || codeIs(code, 'k')) {
+                    // style codes: no effect on the effect spans
+                } else {
+                    const uint32_t fmt = FontRenderer::GetFormattingColor(code);
+                    if (fmt != 0) {
+                        // A colour change ends the current span in the old colour (MC restarts the run).
+                        flush(underline, spanStartUnder, cursor, FontRenderer::LINE_HEIGHT);
+                        flush(strike, spanStartStrike, cursor, 4);
+                        spanStartUnder = spanStartStrike = cursor;
+                        current = fmt;
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            if (c < 32 || c > 126) { cursor += 4; continue; }
+            cursor += (m_fontRenderer ? m_fontRenderer->GetCharWidth(c) : 5) + 1 + (bold ? 1 : 0);
+        }
+        flush(underline, spanStartUnder, cursor, FontRenderer::LINE_HEIGHT);
+        flush(strike, spanStartStrike, cursor, 4);
+    }
+
     void GuiGraphics::DrawString(const std::string& text, int x, int y, uint32_t color, bool dropShadow) {
+        DrawTextEffects(text, x, y, color, dropShadow);
         TextCommand cmd;
         cmd.text = text;
         cmd.x = static_cast<float>(x);
@@ -168,12 +225,15 @@ namespace Render {
     }
 
     void GuiGraphics::DrawStringWithBackdrop(const std::string& text, int x, int y, int width, uint32_t color) {
-        // Semi-transparent black backdrop behind text (MC style)
-        uint8_t alpha = (color >> 24) & 0xFF;
-        uint32_t backdropColor = (static_cast<uint32_t>(alpha) << 24); // Black with same alpha
-        Fill(x - 2, y - 2, x + width + 2, y + FontRenderer::LINE_HEIGHT + 1,
-             (backdropColor & 0xFF000000) | 0x00000000);
-        DrawString(text, x, y, color);
+        // MC GuiGraphics.textWithBackdrop: the backdrop is
+        // options.getBackgroundColor(0.0F) — which is the accessibility "Text
+        // Background" opacity ONLY when that option is set to "Everywhere";
+        // the default is "Chat", so the colour comes back as 0 and no
+        // backdrop is drawn (the check is `if (backgroundColor != 0)`). This
+        // engine has no such option, so the default is the whole story: the
+        // action bar and its kin are the shadowed text alone.
+        (void)width;
+        DrawString(text, x, y, color, /*dropShadow=*/true);
     }
 
     int GuiGraphics::GetStringWidth(const std::string& text) const {
@@ -884,8 +944,11 @@ namespace Render {
                         // sprite opaque (raw 0xFF.... from MC's Java int
                         // already has alpha=0xFF — see ClientItemLoader).
                         uint32_t tint = 0xFFFFFFFFu;
-                        if (i < item.layerTints.size() && item.layerTints[i] != 0) {
-                            tint = item.layerTints[i];
+                        // Per STACK: a "minecraft:potion" tint source answers
+                        // the stack's PotionContents colour.
+                        if (const uint32_t layerTint = Game::ResolveItemLayerTint(stack, i);
+                            layerTint != 0) {
+                            tint = layerTint;
                             // Force alpha=0xFF in case the JSON value lacked
                             // the high byte (MC's "minecraft:dye" tint type
                             // operates on RGB only — alpha comes from the

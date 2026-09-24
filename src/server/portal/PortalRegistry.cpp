@@ -189,24 +189,31 @@ namespace Game::Portal {
             const char* label;         // for fizzle log diagnostics ("vertical-up", "horizontal-east", …)
         };
 
-        // Build a candidate from primitives. `hitBlock` = the block the
-        // raycast hit (one of the two wall blocks). `normalI` = outward
-        // normal (toward the player). `extendI` = direction in which the
-        // portal's LONG axis extends (= the second wall block's offset).
-        // Both `normalI` and `extendI` are integer ±unit vectors with
-        // disjoint nonzero axes, so cross(extendI, normalI) is also a unit
+        // Build a candidate from primitives. `anchorBlock` = the wall block
+        // at the portal's BOTTOM (local -up) end. `normalI` = outward normal
+        // (toward the player). `upI` = the portal's up: the LONG axis, so the
+        // second wall block is anchor + up. Both are integer ±unit vectors
+        // with disjoint nonzero axes, so cross(upI, normalI) is also a unit
         // integer vector — used as the portal's `right` (short-axis basis).
-        PortalCandidate MakeCandidate(glm::ivec3 hitBlock,
+        //
+        // The orientation is FIXED by the caller; a candidate only ever
+        // differs by where the anchor sits (Portal 1 "bumps" a portal into
+        // a spot that fits, it never rotates it — a portal is never upside
+        // down or sideways). The old candidate set extended the strip in
+        // every direction and made that direction the portal's up, which is
+        // how a wall shot near a ceiling came out upside down and a floor
+        // shot near a wall came out facing the wrong way.
+        PortalCandidate MakeCandidate(glm::ivec3 anchorBlock,
                                       glm::ivec3 normalI,
-                                      glm::ivec3 extendI,
+                                      glm::ivec3 upI,
                                       const char* label) {
             PortalCandidate c;
-            c.wallA = hitBlock;
-            c.wallB = hitBlock + extendI;
-            c.airA  = hitBlock + normalI;
+            c.wallA = anchorBlock;
+            c.wallB = anchorBlock + upI;
+            c.airA  = anchorBlock + normalI;
             c.airB  = c.wallB + normalI;
             c.normal = glm::vec3(normalI);
-            c.upDir  = glm::vec3(extendI);
+            c.upDir  = glm::vec3(upI);
             c.right  = glm::cross(c.upDir, c.normal); // unit, perpendicular, right-handed
             // Origin = midpoint of the two wall block centers + half-block
             // outward (to land exactly on the wall face), + epsilon offset.
@@ -272,8 +279,16 @@ namespace Game::Portal {
         // 0.84375 — so its rim sits exactly on this surface's edge.
         // PortalRenderer's mesh extents are the OUTER border of the rim; the
         // hole edge sits at 1 / (1 + kOuterBorder) = 1 / 1.075 of them.
-        constexpr float kOvalHalfWidth  = 0.5f     / 1.075f;
-        constexpr float kOvalHalfHeight = 0.84375f / 1.075f;
+        //
+        // The mask is a 48-gon; INSCRIBED in the hole's ellipse its chords
+        // fall 1-2 mm short of the edge the rim shader cuts exactly, and
+        // that arc of bare wall showed as a sliver along the rim at some
+        // angles. Circumscribe it instead (1 / cos(pi/48)) and reach a
+        // little further, under the rim band's innermost flame, which is
+        // opaque there (outerMask is 1 at the hole edge).
+        constexpr float kOvalMaskOverlap = 1.022f;
+        constexpr float kOvalHalfWidth  = 0.5f     / 1.075f * kOvalMaskOverlap;
+        constexpr float kOvalHalfHeight = 0.84375f / 1.075f * kOvalMaskOverlap;
         Game::Immersive::PortalShape OvalShape() {
             Game::Immersive::PortalShape shape;
             shape.type = Game::Immersive::PortalShape::Type::Mesh;
@@ -675,43 +690,35 @@ namespace Game::Portal {
         }
 
         // Build the priority-ordered candidate list per face type. The
-        // user-visible rule is: the FIRST candidate that fits wins, so the
-        // ordering encodes user intent (vertical first on walls, player-
-        // aligned first on floors / ceilings, perpendicular fallback last).
+        // orientation is fixed (Portal 1: a wall portal is always upright,
+        // a floor or ceiling portal's up is the way the player faces, so
+        // you come out of it facing the way you aimed). What varies is the
+        // ANCHOR: the hit block is tried as the bottom cell first, then as
+        // the top cell — the portal is bumped along its own axis into the
+        // spot that fits, never rotated. The first candidate that fits wins.
         std::vector<PortalCandidate> candidates;
-        candidates.reserve(4);
+        candidates.reserve(2);
 
+        glm::ivec3 upI{0, 1, 0};
         if (IsVerticalWall(hit.face)) {
-            // Vertical wall basis: the two "extend" axes are world up/down
-            // (for 1×2) and the horizontal-perpendicular-to-wall axis (for
-            // 2×1, the user's "horizontal portal on the wall" fallback).
-            const glm::ivec3 worldUp  {0, 1, 0};
-            const glm::ivec3 worldDown{0, -1, 0};
-            // horizPerp = horizontal axis in the wall's plane. Two choices,
-            // ±, since we don't know which way the user expects the 2×1
-            // portal to extend — try both, +right first.
-            const glm::ivec3 horizPerp = glm::ivec3(glm::cross(
-                glm::vec3(worldUp), glm::vec3(normalI)));
-
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI, worldUp,    "vertical-up"));
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI, worldDown,  "vertical-down"));
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI,  horizPerp, "horizontal-+R"));
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI, -horizPerp, "horizontal--R"));
+            upI = glm::ivec3(0, 1, 0);
         } else if (IsFloor(hit.face) || IsCeiling(hit.face)) {
-            // Floor / ceiling: the portal lies flat. The "long" axis (upDir
-            // in portal-local space) is the player's primary facing snapped
-            // to NESW. Falls back to perpendicular if the player-aligned
-            // 1×2 strip doesn't have room.
+            // The player's primary facing snapped to NESW...
             const float yaw = player ? player->getYaw() : 0.0f;
-            const glm::ivec3 fwd = PlayerFacingHorizontal(yaw);
-            // sideways = cross(facing, normal) — unit horizontal perpendicular.
-            const glm::ivec3 side = glm::ivec3(glm::cross(
-                glm::vec3(fwd), glm::vec3(normalI)));
-
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI,  fwd,  "facing-forward"));
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI, -fwd,  "facing-backward"));
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI,  side, "facing-+side"));
-            candidates.push_back(MakeCandidate(hit.blockPos, normalI, -side, "facing--side"));
+            upI = PlayerFacingHorizontal(yaw);
+            // ...unless the other portal of this gun is a floor or ceiling
+            // portal too: then this one takes ITS facing. The link maps one
+            // portal's up onto the other's, so two flat portals facing the
+            // same way carry a player straight through with the heading
+            // kept; facing opposite ways they spun the player 180° on every
+            // trip (user request: no flip, a smooth fall-in/fly-out).
+            if (auto pairIt = m_pairs.find(gunId); pairIt != m_pairs.end()) {
+                const Portal& partner = color == PortalColor::Blue ? pairIt->second.orange : pairIt->second.blue;
+                if (partner.active && std::abs(partner.normal.y) > 0.5f) {
+                    const glm::ivec3 partnerUp = glm::ivec3(glm::round(partner.upDir));
+                    if (partnerUp != glm::ivec3(0) && partnerUp.y == 0) upI = partnerUp;
+                }
+            }
         } else {
             Log::Info("[PortalGun] Fizzle: invalid face %d", hit.face);
             BroadcastPortalFizzle(glm::dvec3(hit.hitPoint),
@@ -720,6 +727,8 @@ namespace Game::Portal {
                                   kFizzleBadSurface);
             return PlaceResult::Fizzled;
         }
+        candidates.push_back(MakeCandidate(hit.blockPos,       normalI, upI, "hit-is-bottom"));
+        candidates.push_back(MakeCandidate(hit.blockPos - upI, normalI, upI, "hit-is-top (bumped)"));
 
         // First candidate that validates wins. Logging the rejected ones
         // makes "why didn't my portal stick?" diagnosable in the server log.

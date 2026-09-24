@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "has_torchberries=true": {
+      "model": "minecraft:block/torchberry_plant_berries"
+    },
+    "has_torchberries=false": {
+      "model": "minecraft:block/torchberry_plant"
+    }
+  }
+}

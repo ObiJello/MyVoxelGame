@@ -1,6 +1,7 @@
 // File: src/server/level/ServerLevel.cpp
 
 #include "ServerLevel.hpp"
+#include "server/level/AurelithCities.hpp"
 
 #include "server/entity/ItemEntityManager.hpp"
 #include "server/entity/ExperienceOrbManager.hpp"
@@ -8,7 +9,11 @@
 #include "server/entity/FallingBlockStore.hpp"
 #include "server/entity/ServerEntityTracker.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
+#include "server/level/ChunkKeeper.hpp"
 #include "server/level/EndDragonFight.hpp"
+#include "server/level/SilentWardenBossBars.hpp"
+#include "server/level/HushStillness.hpp"
+#include "server/world/storage/anvil/SaveRoot.hpp"
 #include "server/session/PlayerSessionManager.hpp"
 #include "server/world/ChunkProvider.hpp"
 #include "server/world/MyTerrainGenerator.hpp"
@@ -18,6 +23,10 @@
 #include "server/world/tracking/SectionChangeAccumulator.hpp"
 
 #include "common/core/Log.hpp"
+#include "common/core/Assert.hpp"
+
+#include <filesystem>
+#include "common/core/Profiling_Tracy.hpp"
 
 namespace Server {
 
@@ -67,6 +76,26 @@ namespace Server {
         }
 
         m_tickets = std::make_unique<ChunkTicketManager>();
+        {
+            // Our own save has a data folder per dimension; an imported
+            // Minecraft world is read-only and keeps nothing.
+            std::filesystem::path dataDir, regionDir;
+            std::string reason;
+            if (!m_config.savePath.empty()) {
+                if (auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, reason)) {
+                    dataDir   = root->DataDir(m_config.dimension);
+                    regionDir = root->RegionDir(m_config.dimension);
+                }
+            }
+            m_keeper = std::make_shared<ChunkKeeper>(m_config.dimension, dataDir, regionDir,
+                                                     m_config.readOnly, m_tickets.get());
+            if (auto* provider = m_world->GetChunkProvider()) {
+                std::weak_ptr<ChunkKeeper> weak = m_keeper;
+                provider->SetChunkSavedCallback([weak](Game::Math::ChunkPos pos, const Game::Chunk& chunk) {
+                    if (auto keeper = weak.lock()) keeper->NoteChunkSaved(pos, ChunkHasRedstone(chunk));
+                });
+            }
+        }
         m_status  = std::make_unique<ChunkStatusManager>();
         m_items   = std::make_unique<ItemEntityManager>();
         m_orbs    = std::make_unique<ExperienceOrbManager>();
@@ -76,10 +105,14 @@ namespace Server {
         // queries — hence the explicit SetMobManager rather than a constructor
         // argument.
         m_mobLevel = std::make_unique<ServerLevelBridge>(m_world.get(), m_sessions);
+        // Pressure plates, tripwire and hoppers count what stands on them
+        // through the same bridge the mobs tick against.
+        m_world->SetEntityLevel(m_mobLevel.get());
         m_mobs     = std::make_unique<MobManager>(m_mobLevel.get());
         m_mobLevel->SetMobManager(m_mobs.get());
         // Drops and XP land in THIS dimension — see the setter's note.
         m_mobLevel->SetItemAndOrbManagers(m_items.get(), m_orbs.get());
+        m_mobLevel->SetPoiManager(&m_poi);
         m_fallingBlocks = std::make_unique<FallingBlockStore>(m_mobLevel.get(), m_mobs.get());
         m_mobTracker = std::make_unique<ServerEntityTracker>();
 
@@ -99,17 +132,44 @@ namespace Server {
             m_dragonFight = std::make_unique<EndDragonFight>(*this, m_sessions);
             m_mobLevel->SetDragonFight(m_dragonFight.get());
         }
+        // The Silent Warden's boss bar, every dimension (see the header).
+        m_wardenBossBars = std::make_unique<SilentWardenBossBars>(*this, m_sessions);
+        // The Hush's stillness (see the header). After the bridge, whose
+        // flag it drives.
+        if (m_config.dimension == Game::DimensionId::Hush) {
+            m_stillness = std::make_unique<HushStillness>(*this, m_sessions);
+            // Aurelith's cities (AurelithCities.hpp): after the bridge and
+            // the managers (the Unsung is raised through them); its SavedData
+            // beside the keeper's, in this dimension's data folder.
+            std::filesystem::path aurelithData;
+            std::string aurelithReason;
+            if (!m_config.savePath.empty() && !m_config.readOnly) {
+                if (auto root = Game::Anvil::SaveRoot::Open(m_config.savePath, aurelithReason)) {
+                    aurelithData = root->DataDir(m_config.dimension);
+                }
+            }
+            m_aurelith = std::make_unique<AurelithCities>(*this, m_sessions, aurelithData);
+        }
 
         worldSpawn = glm::vec3(0.5f, 67.0f, 0.5f);
     }
 
     ServerLevel::~ServerLevel() {
+        PROFILE_ZONE_N("Server.Level.Destroy");
         // Reverse construction order. The broadcaster reads the accumulator on
         // flush, and the mob manager reads the bridge, so both must go first.
         // The fight before the managers it reads — and detached from the
         // bridge first, so no dragon mid-destruction can reach a dead fight.
+        { PROFILE_ZONE_N("Server.Level.Managers");
         if (m_mobLevel) m_mobLevel->SetDragonFight(nullptr);
         m_dragonFight.reset();
+        if (m_wardenBossBars) m_wardenBossBars->RemoveAll();
+        m_wardenBossBars.reset();
+        // Before the bridge it writes to.
+        if (m_stillness) m_stillness->RemoveAll();
+        m_stillness.reset();
+        if (m_aurelith) { m_aurelith->Save(); m_aurelith->RemoveAll(); }
+        m_aurelith.reset();
         m_deltas.reset();
         m_changes.reset();
         m_mobTracker.reset();
@@ -124,16 +184,48 @@ namespace Server {
         if (m_tickets) m_tickets->Clear();
         m_status.reset();
         m_tickets.reset();
+        }
         if (m_world) {
+            PROFILE_ZONE_N("Server.Level.WorldShutdown");
             m_world->RequestStop();
             m_world->Shutdown();
         }
+        { PROFILE_ZONE_N("Server.Level.WorldDestroy");
         m_world.reset();
+        }
     }
 
     bool ServerLevel::InitializeChunkProvider() {
         if (!m_world) return false;
         return m_world->InitializeChunkProvider();
+    }
+
+    std::shared_ptr<Game::Chunk> ServerLevel::GetChunkBlocking(Game::Math::ChunkPos pos,
+                                                               int ticketTicks) {
+        ASSERT_SERVER_THREAD();
+        if (!m_world) return nullptr;
+
+        // Ticket first, as PortalTravel::EnsureExitAreaLoaded does: nothing
+        // may unload between the load and whatever the caller does with it.
+        if (m_tickets && ticketTicks > 0) {
+            m_tickets->AddTemporaryTicket(pos, ChunkTicketManager::ENTITY_TICKING_LEVEL, ticketTicks);
+        }
+
+        // Resident already: no disk, no generator, no re-entry into the
+        // terrain library.
+        if (auto resident = m_world->GetLoadedChunk(pos.x, pos.z)) return resident;
+
+        // A generator that is shutting down never completes a request, and
+        // ServerChunkCache::getChunk has no timeout of its own.
+        if (Game::MyTerrainGenerator* gen = TerrainGenerator(); gen && gen->IsAbortRequested()) {
+            return nullptr;
+        }
+
+        // The blocking load: ChunkProvider::GetChunk → disk, else
+        // MyTerrainGenerator::GenerateChunk → ServerChunkCache::getChunk's
+        // managedBlock loop. CompleteChunkLoad puts it in the cache, so
+        // World::IsChunkLoaded answers true from here on.
+        return m_world->GetChunk(pos.x, pos.z);
     }
 
     Game::MyTerrainGenerator* ServerLevel::TerrainGenerator() const {
@@ -149,9 +241,12 @@ namespace Server {
     // spawner treats the whole lava sea as "above sea level".
     int ServerLevel::SeaLevel() const {
         switch (m_config.dimension) {
-            case Game::DimensionId::Nether: return 32;
-            case Game::DimensionId::End:    return 0;
-            default:                        return 63;
+            case Game::DimensionId::Nether:    return 32;
+            case Game::DimensionId::End:       return 0;
+            case Game::DimensionId::Hush:      return 50;   // MyTerrainGenerator's hush settings
+            case Game::DimensionId::TwilightForest: return 0;    // twilight_noise_gen.json sea_level
+            case Game::DimensionId::Aether:    return -64;  // skylands.json sea_level (no sea)
+            case Game::DimensionId::Overworld: return 63;
         }
     }
 

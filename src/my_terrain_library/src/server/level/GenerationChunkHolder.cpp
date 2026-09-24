@@ -284,6 +284,18 @@ void GenerationChunkHolder::completeFuture(
     if (&status == &world::chunk::status::ChunkStatus::EMPTY) {
         m_emptyChunk.store(chunk, std::memory_order_release);
     }
+    // Record the step as done once its future is (below, before returning):
+    // done here too early would let a layer skip a still-pending future.
+    struct MarkCompleted {
+        std::atomic<const world::chunk::status::ChunkStatus*>& completed;
+        const world::chunk::status::ChunkStatus* status;
+        ~MarkCompleted() {
+            const world::chunk::status::ChunkStatus* current = completed.load(std::memory_order_acquire);
+            while ((current == nullptr || status->isAfter(*current))
+                   && !completed.compare_exchange_weak(current, status, std::memory_order_acq_rel)) {
+            }
+        }
+    } markCompleted{m_completedWork, &status};
 
     std::lock_guard<std::mutex> lock(m_futuresMutex);
 
@@ -348,7 +360,9 @@ bool GenerationChunkHolder::acquireStatusBump(const world::chunk::status::ChunkS
         return false;
     }
 
-    throw std::logic_error("Unexpected last startedWork status while trying to start");
+    throw std::logic_error("Unexpected last startedWork status: "
+                           + (previousStarted ? previousStarted->getName() : std::string("null"))
+                           + " while trying to start: " + status.getName());
 }
 
 bool GenerationChunkHolder::isStatusDisallowed(const world::chunk::status::ChunkStatus& status) const {

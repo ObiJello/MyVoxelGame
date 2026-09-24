@@ -14,6 +14,12 @@
 #include "data/worldgen/placement/NetherPlacements.h"
 #include "data/worldgen/features/EndFeatures.h"
 #include "data/worldgen/placement/EndPlacements.h"
+#include "data/worldgen/features/HushFeatures.h"
+#include "data/worldgen/placement/HushPlacements.h"
+#include "data/worldgen/features/AetherFeatures.h"
+#include "data/worldgen/placement/AetherPlacements.h"
+#include "data/worldgen/features/TwilightFeatures.h"
+#include "data/worldgen/placement/TwilightPlacements.h"
 #include <set>
 #include <iostream>
 #include <mutex>
@@ -911,6 +917,31 @@ void BiomeFeatureRegistry::setupLushCaves(const std::string& biomeKey) {
     addLushCavesVegetationFeatures(biomeKey);
 }
 
+void BiomeFeatureRegistry::setupSulfurCaves(const std::string& biomeKey) {
+    // Reference: 26.3 OverworldBiomes.java sulfurCaves()
+    globalOverworldGeneration(biomeKey);
+    addPlainGrass(biomeKey);
+    addDefaultOres(biomeKey);
+    addDefaultSoftDisks(biomeKey);
+    // BiomeDefaultFeatures.addSulfurCavesFeatures
+    addFeature(biomeKey, GenerationStep::LAKES, CavePlacements::ROOTED_SULFUR_SPRING);
+    addFeature(biomeKey, GenerationStep::LAKES, MiscOverworldPlacements::SULFUR_POOL);
+    addFeature(biomeKey, GenerationStep::UNDERGROUND_DECORATION, CavePlacements::SULFUR_SPIKE_CLUSTER);
+    addFeature(biomeKey, GenerationStep::UNDERGROUND_DECORATION, CavePlacements::SULFUR_SPIKE);
+}
+
+void BiomeFeatureRegistry::setupDappledForest(const std::string& biomeKey) {
+    // Reference: 26.3 OverworldBiomes.java dappledForest()
+    globalOverworldGeneration(biomeKey);
+    addDefaultOres(biomeKey);
+    addDefaultSoftDisks(biomeKey);
+    addFeature(biomeKey, GenerationStep::VEGETAL_DECORATION, VegetationPlacements::TREES_DAPPLED_FOREST);
+    // BiomeDefaultFeatures.addDappledForestVegetation
+    addFeature(biomeKey, GenerationStep::VEGETAL_DECORATION, VegetationPlacements::BROWN_MUSHROOM_DAPPLED_FOREST);
+    addFeature(biomeKey, GenerationStep::VEGETAL_DECORATION, VegetationPlacements::PATCH_RED_SHRUB);
+    addForestGrass(biomeKey);
+}
+
 void BiomeFeatureRegistry::setupDripstoneCaves(const std::string& biomeKey) {
     // Reference: OverworldBiomes.java dripstoneCaves()
     globalOverworldGeneration(biomeKey);
@@ -1116,6 +1147,929 @@ void BiomeFeatureRegistry::setupEndBarrensOrMidlands(const std::string& biomeKey
     }
 }
 
+// =============================================================================
+// The Hush biomes - engine-only dimension (DimensionId::Hush), no Java reference
+// Step assignments:
+//   meadows  UNDERGROUND_ORES: echo ore, resonite ore
+//            VEGETAL:          small crystal formations (rare), blooms
+//                              (meadow density), hush grass, moss, sparse
+//                              trees
+//   forest   UNDERGROUND_ORES: echo ore, resonite ore
+//            VEGETAL:          forest trees (large/normal mix), blooms,
+//                              hush grass, moss
+//   barrens  UNDERGROUND_ORES: dense echo ore, resonite ore
+//            VEGETAL:          crystal outcrops + small formations (the
+//                              crystal fields), surface clusters
+//   caverns  UNDERGROUND_ORES: echo ore, resonite ore, cavern resonite ore
+//            UNDERGROUND_DECORATION: resonant clusters, crystal clumps
+//            (the dripstone_caves slot: dripstone_cluster / pointed_dripstone
+//            are UNDERGROUND_DECORATION too)
+//   choir    LOCAL_MODIFICATIONS: sunken hushstone-brick ruins
+//            UNDERGROUND_ORES: echo ore, resonite ore
+//            VEGETAL:          kelp, sea pickles, shore grass
+//   deep     LOCAL_MODIFICATIONS: rope bridges over the chasms
+//            UNDERGROUND_ORES: echo ore, resonite ore
+//            UNDERGROUND_DECORATION: resonant stalactites (hanging formations)
+//            VEGETAL:          tall crystal formations, rim grass
+//   steppe   LOCAL_MODIFICATIONS: polished hushstone boulders (the
+//                              FOREST_ROCK step)
+//            UNDERGROUND_ORES: echo ore, resonite ore
+//            VEGETAL:          tall crystal formations, short hush grass,
+//                              scattered blooms
+// The crystal formations run first in VEGETAL, before the grass and blooms
+// that would otherwise sit on their mound or under their shards; each
+// biome has its own formation placement, so this adds no shared edge.
+// Shared placements keep the relative order the first four biomes gave them
+// (the feature sorter rejects a cycle): ORE_ECHO before ORE_RESONITE.
+// =============================================================================
+
+void BiomeFeatureRegistry::setupHushMeadows(const std::string& biomeKey) {
+    int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    addFeature(biomeKey, ores, HushPlacements::ORE_ECHO);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE);
+    addFeature(biomeKey, vegetal, HushPlacements::CRYSTAL_FORMATIONS_MEADOWS);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_RESONANCE_BLOOM_MEADOWS);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_HUSH_GRASS_MEADOWS);
+    addFeature(biomeKey, vegetal, HushPlacements::HUSH_MOSS_PATCH);
+    addFeature(biomeKey, vegetal, HushPlacements::WHISPERWOOD_SPARSE);
+}
+
+void BiomeFeatureRegistry::setupWhisperwoodForest(const std::string& biomeKey) {
+    int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    addFeature(biomeKey, ores, HushPlacements::ORE_ECHO);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE);
+    addFeature(biomeKey, vegetal, HushPlacements::WHISPERWOOD_FOREST);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_RESONANCE_BLOOM);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_HUSH_GRASS_FOREST);
+    addFeature(biomeKey, vegetal, HushPlacements::HUSH_MOSS_PATCH);
+}
+
+void BiomeFeatureRegistry::setupResonantBarrens(const std::string& biomeKey) {
+    int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    addFeature(biomeKey, ores, HushPlacements::ORE_ECHO_DENSE);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE);
+    addFeature(biomeKey, vegetal, HushPlacements::CRYSTAL_FORMATIONS_BARRENS);
+    addFeature(biomeKey, vegetal, HushPlacements::CRYSTAL_SHARDS_BARRENS);
+    addFeature(biomeKey, vegetal, HushPlacements::RESONANT_CLUSTER_SURFACE);
+}
+
+void BiomeFeatureRegistry::setupCrystalCaverns(const std::string& biomeKey) {
+    // The Hush's dripstone_caves band (OverworldBiomes.dripstoneCaves shape:
+    // the ores every biome gets, plus addDripstone's UNDERGROUND_DECORATION
+    // pair). The underground body stays hushstone; the caverns only add
+    // what grows on its surfaces.
+    int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    int underground = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    addFeature(biomeKey, ores, HushPlacements::ORE_ECHO);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE_CAVERNS);
+    addFeature(biomeKey, underground, HushPlacements::RESONANT_CLUSTERS);
+    addFeature(biomeKey, underground, HushPlacements::RESONANT_CRYSTAL_CLUMPS);
+}
+
+void BiomeFeatureRegistry::setupSunkenChoir(const std::string& biomeKey) {
+    // The warm_ocean / lukewarm_ocean shape at the Hush's scale: the ruins
+    // take the LOCAL_MODIFICATIONS slot (vanilla's ocean ruins are a
+    // structure; these are the small broken fragments), kelp and pickles the
+    // VEGETAL one.
+    int local = static_cast<int>(GenerationStep::Decoration::LOCAL_MODIFICATIONS);
+    int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    addFeature(biomeKey, local, HushPlacements::SUNKEN_RUINS);
+    addFeature(biomeKey, ores, HushPlacements::ORE_ECHO);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE);
+    addFeature(biomeKey, vegetal, HushPlacements::KELP_SUNKEN_CHOIR);
+    addFeature(biomeKey, vegetal, HushPlacements::SEA_PICKLE_SUNKEN_CHOIR);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_HUSH_GRASS_SHORE);
+}
+
+void BiomeFeatureRegistry::setupHollowDeep(const std::string& biomeKey) {
+    int local = static_cast<int>(GenerationStep::Decoration::LOCAL_MODIFICATIONS);
+    int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    int underground = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_DECORATION);
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    addFeature(biomeKey, local, HushPlacements::ROPE_BRIDGES);
+    addFeature(biomeKey, ores, HushPlacements::ORE_ECHO);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE);
+    addFeature(biomeKey, underground, HushPlacements::RESONANT_STALACTITES);
+    addFeature(biomeKey, vegetal, HushPlacements::CRYSTAL_FORMATIONS_RIM);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_HUSH_GRASS_RIM);
+}
+
+void BiomeFeatureRegistry::setupAuroraSteppe(const std::string& biomeKey) {
+    int local = static_cast<int>(GenerationStep::Decoration::LOCAL_MODIFICATIONS);
+    int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    addFeature(biomeKey, local, HushPlacements::HUSHSTONE_BOULDERS);
+    addFeature(biomeKey, ores, HushPlacements::ORE_ECHO);
+    addFeature(biomeKey, ores, HushPlacements::ORE_RESONITE);
+    addFeature(biomeKey, vegetal, HushPlacements::CRYSTAL_FORMATIONS_STEPPE);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_HUSH_GRASS_STEPPE);
+    addFeature(biomeKey, vegetal, HushPlacements::PATCH_RESONANCE_BLOOM_STEPPE);
+}
+
+// =============================================================================
+// The Aether biomes - data/aether/worldgen/biome/skyroot_*.json "features".
+// All four share one list; only the vegetal tree placement differs
+// (skyroot_{meadow,forest,grove,woodland}_trees). Per step, in JSON order:
+//   RAW_GENERATION          quicksoil_shelf
+//   LAKES                   water_lake
+//   UNDERGROUND_ORES        aether_dirt_ore, icestone_ore, ambrosium_ore,
+//                           zanite_ore, gravitite_ore_buried, gravitite_ore
+//   FLUID_SPRINGS           water_spring
+//   VEGETAL_DECORATION      <biome>_trees, holiday_tree, grass_patch,
+//                           tall_grass_patch, white_flower_patch,
+//                           purple_flower_patch, berry_bush_patch
+//   TOP_LAYER_MODIFICATION  crystal_island, cold_aercloud,
+//                           blue_aercloud, golden_aercloud
+// Every entry is present, so the FeatureSorter indices (and the feature
+// seeds) match the mod's.
+// =============================================================================
+void BiomeFeatureRegistry::setupAetherBiome(const std::string& biomeKey,
+                                            const PlacedFeature* trees) {
+    const int raw = static_cast<int>(GenerationStep::Decoration::RAW_GENERATION);
+    const int lakes = static_cast<int>(GenerationStep::Decoration::LAKES);
+    const int ores = static_cast<int>(GenerationStep::Decoration::UNDERGROUND_ORES);
+    const int springs = static_cast<int>(GenerationStep::Decoration::FLUID_SPRINGS);
+    const int vegetal = static_cast<int>(GenerationStep::Decoration::VEGETAL_DECORATION);
+    const int topLayer = static_cast<int>(GenerationStep::Decoration::TOP_LAYER_MODIFICATION);
+
+    addFeature(biomeKey, raw, AetherPlacements::QUICKSOIL_SHELF);
+
+    addFeature(biomeKey, lakes, AetherPlacements::WATER_LAKE);
+
+    addFeature(biomeKey, ores, AetherPlacements::AETHER_DIRT_ORE);
+    addFeature(biomeKey, ores, AetherPlacements::ICESTONE_ORE);
+    addFeature(biomeKey, ores, AetherPlacements::AMBROSIUM_ORE);
+    addFeature(biomeKey, ores, AetherPlacements::ZANITE_ORE);
+    addFeature(biomeKey, ores, AetherPlacements::GRAVITITE_ORE_BURIED);
+    addFeature(biomeKey, ores, AetherPlacements::GRAVITITE_ORE);
+
+    addFeature(biomeKey, springs, AetherPlacements::WATER_SPRING);
+
+    addFeature(biomeKey, vegetal, trees);
+    addFeature(biomeKey, vegetal, AetherPlacements::HOLIDAY_TREE);
+    addFeature(biomeKey, vegetal, AetherPlacements::GRASS_PATCH);
+    addFeature(biomeKey, vegetal, AetherPlacements::TALL_GRASS_PATCH);
+    addFeature(biomeKey, vegetal, AetherPlacements::WHITE_FLOWER_PATCH);
+    addFeature(biomeKey, vegetal, AetherPlacements::PURPLE_FLOWER_PATCH);
+    addFeature(biomeKey, vegetal, AetherPlacements::BERRY_BUSH_PATCH);
+
+    addFeature(biomeKey, topLayer, AetherPlacements::CRYSTAL_ISLAND);
+    addFeature(biomeKey, topLayer, AetherPlacements::COLD_AERCLOUD);
+    addFeature(biomeKey, topLayer, AetherPlacements::BLUE_AERCLOUD);
+    addFeature(biomeKey, topLayer, AetherPlacements::GOLDEN_AERCLOUD);
+}
+
+// =============================================================================
+// The Twilight Forest biomes - data/twilightforest/worldgen/biome/*.json
+// "features", every step in JSON order (generated from the JSON, so the
+// FeatureSorter indices — and with them every feature seed — match the mod).
+// TF placed features come from TwilightPlacements::get (built from the mod's
+// placed_feature JSON); a feature whose configured feature could not be
+// built (a block missing from the registry) is null and addFeature skips it.
+// Every one of the 22 biomes gets an entry, empty or not.
+// =============================================================================
+void BiomeFeatureRegistry::ensureBiomeEntry(const std::string& biomeKey) {
+    auto& biome = s_biomeFeatures[biomeKey];
+    if (biome.empty()) {
+        biome.resize(GenerationStep::DECORATION_COUNT);
+    }
+}
+
+void BiomeFeatureRegistry::setupTwilightBiomes() {
+    // Every placed feature by its placed_feature JSON id (TwilightPlacements
+    // builds them from data/twilightforest/worldgen/placed_feature/).
+    auto tf = [](const char* id) { return TwilightPlacements::get(id); };
+    {
+        const std::string biomeKey = "twilightforest:clearing";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:raspberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:blueberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_forest"));
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, VegetationPlacements::FLOWER_FOREST_FLOWERS);
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:dark_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_GRASS_NORMAL);
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/dark_forest_tree_mix"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/dark_forest_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/darkwood_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_grass"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_dead_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_pumpkins"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_mushglooms"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_brown_mushrooms"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_red_mushrooms"));
+    }
+    {
+        const std::string biomeKey = "twilightforest:dark_forest_center";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_GRASS_NORMAL);
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/dark_forest_tree_mix"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/dark_forest_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/darkwood_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_grass"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_dead_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_pumpkins"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_mushglooms"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_brown_mushrooms"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_red_mushrooms"));
+    }
+    {
+        const std::string biomeKey = "twilightforest:dense_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:raspberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:blueberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:blackberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_jungle"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_LARGE_FERN);
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer_alt"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/dense_canopy_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/vanilla_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/oak_bush_dense"));
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/forest_mega_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/mega_canopy_tree"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:dense_mushroom_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:blackberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_jungle"));
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer_alt"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:mycelium_blob"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/vanilla_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/large_twilight_oak_tree"));
+        addFeature(biomeKey, 9, VegetationPlacements::BROWN_MUSHROOM_NORMAL);
+        addFeature(biomeKey, 9, VegetationPlacements::RED_MUSHROOM_NORMAL);
+        addFeature(biomeKey, 9, VegetationPlacements::BROWN_MUSHROOM_TAIGA);
+        addFeature(biomeKey, 9, VegetationPlacements::RED_MUSHROOM_TAIGA);
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/vanilla_mushrooms"));
+        addFeature(biomeKey, 9, tf("twilightforest:mushroom/canopy_mushrooms_dense"));
+        addFeature(biomeKey, 9, tf("twilightforest:mushgloom_cluster"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/canopy_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/mega_canopy_tree"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:enchanted_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:dense_water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries_enchanted_forest"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries_enchanted_forest"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries_enchanted_forest"));
+        addFeature(biomeKey, 7, tf("twilightforest:essence_oreberries_enchanted_forest"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_GRASS_BADLANDS);
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:dense_ferns"));
+        addFeature(biomeKey, 9, tf("twilightforest:dense_large_ferns"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/enchanted_forest_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/dense_canopy_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:fiddlehead"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/canopy_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+        addFeature(biomeKey, 10, tf("twilightforest:enchanted_forest_vines"));
+    }
+    {
+        const std::string biomeKey = "twilightforest:final_plateau";
+        ensureBiomeEntry(biomeKey);
+    }
+    {
+        const std::string biomeKey = "twilightforest:fire_swamp";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:lava_lake"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_GRASS_TAIGA_2);
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/swampy_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/oak_bush"));
+        addFeature(biomeKey, 9, tf("twilightforest:fire_jet"));
+        addFeature(biomeKey, 9, tf("twilightforest:smoker"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE_SWAMP);
+        addFeature(biomeKey, 9, VegetationPlacements::VINES);
+        addFeature(biomeKey, 9, VegetationPlacements::BROWN_MUSHROOM_SWAMP);
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:firefly_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:blackberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_jungle"));
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer_alt"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/firefly_forest_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/vanilla_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/large_twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:lamppost_placer"));
+        addFeature(biomeKey, 9, tf("twilightforest:mushgloom_cluster"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_PUMPKIN);
+        addFeature(biomeKey, 9, VegetationPlacements::FLOWER_FOREST_FLOWERS);
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:blueberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_jungle"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_LARGE_FERN);
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer_alt"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/vanilla_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/large_twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/canopy_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/mega_canopy_tree"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:glacier";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:highlands";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:troll_roots"));
+        addFeature(biomeKey, 9, tf("twilightforest:blueberry_bushes"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_GRASS_TAIGA);
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_LARGE_FERN);
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/highlands_trees"));
+        addFeature(biomeKey, 9, MiscOverworldPlacements::FOREST_ROCK);
+        addFeature(biomeKey, 9, tf("twilightforest:sparse_mushglooms"));
+        addFeature(biomeKey, 9, tf("twilightforest:spruce_fallen_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:dark_ferns"));
+        addFeature(biomeKey, 9, tf("twilightforest:troll_mushglooms"));
+    }
+    {
+        const std::string biomeKey = "twilightforest:highlands_underground";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 7, tf("twilightforest:troll_roots"));
+        addFeature(biomeKey, 9, tf("twilightforest:troll_mushglooms"));
+    }
+    {
+        const std::string biomeKey = "twilightforest:lake";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, AquaticPlacements::SEAGRASS_DEEP);
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:mushroom_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:raspberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:blueberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:blackberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_jungle"));
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer_alt"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:mycelium_blob"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/vanilla_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/large_twilight_oak_tree"));
+        addFeature(biomeKey, 9, VegetationPlacements::BROWN_MUSHROOM_NORMAL);
+        addFeature(biomeKey, 9, VegetationPlacements::RED_MUSHROOM_NORMAL);
+        addFeature(biomeKey, 9, VegetationPlacements::BROWN_MUSHROOM_TAIGA);
+        addFeature(biomeKey, 9, VegetationPlacements::RED_MUSHROOM_TAIGA);
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/vanilla_mushrooms"));
+        addFeature(biomeKey, 9, tf("twilightforest:mushroom/canopy_mushrooms_sparse"));
+        addFeature(biomeKey, 9, tf("twilightforest:mushgloom_cluster"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/canopy_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/mega_canopy_tree"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:oak_savannah";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:water_lake"));
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_taiga_2"));
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:flower_placer"));
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/savannah_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/large_twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:default_fallen_logs"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/savannah_mega_oak_tree"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:snowy_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 1, tf("twilightforest:frozen_lake"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 9, tf("twilightforest:snowy_blueberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:maloberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/selector/snowy_forest_trees"));
+        addFeature(biomeKey, 9, tf("twilightforest:spruce_fallen_log"));
+        addFeature(biomeKey, 10, tf("twilightforest:snow_under_trees"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:spooky_forest";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 4, tf("twilightforest:graveyard"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_jungle"));
+        addFeature(biomeKey, 9, tf("twilightforest:mayapple"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/large_twilight_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/dead_canopy_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:pumpkin_lamppost"));
+        addFeature(biomeKey, 9, tf("twilightforest:tf_oak_fallen_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:canopy_fallen_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:webs"));
+        addFeature(biomeKey, 9, tf("twilightforest:fallen_leaves"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_PUMPKIN);
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_DEAD_BUSH);
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:stream";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:iron_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:gold_oreberries"));
+        addFeature(biomeKey, 7, tf("twilightforest:copper_oreberries"));
+        addFeature(biomeKey, 9, AquaticPlacements::SEAGRASS_NORMAL);
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:swamp";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 4, tf("twilightforest:druid_hut"));
+        addFeature(biomeKey, 4, tf("twilightforest:well_placer"));
+        addFeature(biomeKey, 4, tf("twilightforest:foundation"));
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_TALL_GRASS);
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_badlands"));
+        addFeature(biomeKey, 9, tf("twilightforest:patch_grass_savanna"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE);
+        addFeature(biomeKey, 9, tf("twilightforest:swamp_raspberry_bushes"));
+        addFeature(biomeKey, 9, tf("twilightforest:swamp_blackberry_bushes"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_GRASS_TAIGA_2);
+        addFeature(biomeKey, 9, tf("twilightforest:grove_ruins"));
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/mangrove_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/swampy_oak_tree"));
+        addFeature(biomeKey, 9, tf("twilightforest:tree/oak_bush"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_SUGAR_CANE_SWAMP);
+        addFeature(biomeKey, 9, VegetationPlacements::VINES);
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_DEAD_BUSH);
+        addFeature(biomeKey, 9, tf("twilightforest:mangrove_fallen_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:huge_lily_pad"));
+        addFeature(biomeKey, 9, tf("twilightforest:huge_water_lily"));
+        addFeature(biomeKey, 9, VegetationPlacements::PATCH_WATERLILY);
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+    {
+        const std::string biomeKey = "twilightforest:thornlands";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 9, tf("twilightforest:stone_circle"));
+        addFeature(biomeKey, 9, tf("twilightforest:outside_stalagmite"));
+        addFeature(biomeKey, 9, tf("twilightforest:monolith"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_stump"));
+        addFeature(biomeKey, 9, tf("twilightforest:hollow_log"));
+        addFeature(biomeKey, 9, tf("twilightforest:thorns"));
+    }
+    {
+        const std::string biomeKey = "twilightforest:underground";
+        ensureBiomeEntry(biomeKey);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_SAND);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_CLAY);
+        addFeature(biomeKey, 6, MiscOverworldPlacements::DISK_GRAVEL);
+        addFeature(biomeKey, 6, tf("twilightforest:wood_roots"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_coal_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_iron_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_gold_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_redstone_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_diamond_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_lapis_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:legacy_copper_ore"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_andesite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_diorite"));
+        addFeature(biomeKey, 6, tf("twilightforest:small_granite"));
+        addFeature(biomeKey, 7, tf("twilightforest:plant_roots"));
+        addFeature(biomeKey, 7, tf("twilightforest:torch_berries"));
+        addFeature(biomeKey, 10, MiscOverworldPlacements::FREEZE_TOP_LAYER);
+    }
+}
+
 void BiomeFeatureRegistry::bootstrap() {
     std::call_once(s_bootstrapOnce, []() {
         // Initialize feature registries first
@@ -1135,6 +2089,12 @@ void BiomeFeatureRegistry::bootstrap() {
         placement::NetherPlacements::bootstrap();
         features::EndFeatures::bootstrap();
         placement::EndPlacements::bootstrap();
+        features::HushFeatures::bootstrap();
+        placement::HushPlacements::bootstrap();
+        features::AetherFeatures::bootstrap();
+        placement::AetherPlacements::bootstrap();
+        features::TwilightFeatures::bootstrap();
+        placement::TwilightPlacements::bootstrap();
 
         // All overworld biomes in EXACT order from Java's biomeSource.possibleBiomes()
         // Reference: MultiNoiseBiomeSource.createFromPreset(OVERWORLD).possibleBiomes()
@@ -1181,18 +2141,20 @@ void BiomeFeatureRegistry::bootstrap() {
             "minecraft:frozen_river",             // 39
             "minecraft:river",                    // 40
             "minecraft:ice_spikes",               // 41
-            "minecraft:old_growth_pine_taiga",    // 42
-            "minecraft:sunflower_plains",         // 43
-            "minecraft:old_growth_birch_forest",  // 44
-            "minecraft:sparse_jungle",            // 45
-            "minecraft:bamboo_jungle",            // 46
-            "minecraft:eroded_badlands",          // 47
-            "minecraft:windswept_savanna",        // 48
-            "minecraft:cherry_grove",             // 49
-            "minecraft:frozen_peaks",             // 50
-            "minecraft:dripstone_caves",          // 51
-            "minecraft:lush_caves",               // 52
-            "minecraft:deep_dark"                 // 53
+            "minecraft:dappled_forest",           // 42 (26.3)
+            "minecraft:old_growth_pine_taiga",    // 43
+            "minecraft:sunflower_plains",         // 44
+            "minecraft:old_growth_birch_forest",  // 45
+            "minecraft:sparse_jungle",            // 46
+            "minecraft:bamboo_jungle",            // 47
+            "minecraft:eroded_badlands",          // 48
+            "minecraft:windswept_savanna",        // 49
+            "minecraft:cherry_grove",             // 50
+            "minecraft:frozen_peaks",             // 51
+            "minecraft:dripstone_caves",          // 52
+            "minecraft:lush_caves",               // 53
+            "minecraft:sulfur_caves",             // 54 (26.3)
+            "minecraft:deep_dark"                 // 55
         };
 
         s_biomeKeyOrder = overworldBiomes;
@@ -1318,40 +2280,46 @@ void BiomeFeatureRegistry::bootstrap() {
         // 41: ice_spikes
         setupPlains("minecraft:ice_spikes", false, true, true);
 
-        // 42: old_growth_pine_taiga
+        // 42: dappled_forest (26.3)
+        setupDappledForest("minecraft:dappled_forest");
+
+        // 43: old_growth_pine_taiga
         setupOldGrowthTaiga("minecraft:old_growth_pine_taiga", false);
 
-        // 43: sunflower_plains
+        // 44: sunflower_plains
         setupPlains("minecraft:sunflower_plains", true, false, false);
 
-        // 44: old_growth_birch_forest
+        // 45: old_growth_birch_forest
         setupForest("minecraft:old_growth_birch_forest", true, true, false);
 
-        // 45: sparse_jungle
+        // 46: sparse_jungle
         setupJungle("minecraft:sparse_jungle", false, true, false);
 
-        // 46: bamboo_jungle
+        // 47: bamboo_jungle
         setupJungle("minecraft:bamboo_jungle", true, false, true);
 
-        // 47: eroded_badlands (same as regular badlands)
+        // 48: eroded_badlands (same as regular badlands)
         setupBadlands("minecraft:eroded_badlands", false);
 
-        // 48: windswept_savanna
+        // 49: windswept_savanna
         setupSavanna("minecraft:windswept_savanna", true, false);
 
-        // 49: cherry_grove
+        // 50: cherry_grove
         setupMeadowOrCherryGrove("minecraft:cherry_grove", true);
 
-        // 50: frozen_peaks
+        // 51: frozen_peaks
         setupPeaks("minecraft:frozen_peaks", false);
 
-        // 51: dripstone_caves
+        // 52: dripstone_caves
         setupDripstoneCaves("minecraft:dripstone_caves");
 
-        // 52: lush_caves
+        // 53: lush_caves
         setupLushCaves("minecraft:lush_caves");
 
-        // 53: deep_dark
+        // 54: sulfur_caves (26.3)
+        setupSulfurCaves("minecraft:sulfur_caves");
+
+        // 55: deep_dark
         setupDeepDark("minecraft:deep_dark");
 
         // Nether biomes - registered in the map but NOT in s_biomeKeyOrder
@@ -1369,6 +2337,27 @@ void BiomeFeatureRegistry::bootstrap() {
         setupEndBarrensOrMidlands("minecraft:end_midlands");
         setupSmallEndIslands("minecraft:small_end_islands");
         setupEndBarrensOrMidlands("minecraft:end_barrens");
+
+        // The Hush biomes (engine-only; also NOT in s_biomeKeyOrder — the
+        // Hush generator builds its featuresPerStep from getHushBiomeKeys())
+        setupHushMeadows("minecraft:hush_meadows");
+        setupWhisperwoodForest("minecraft:whisperwood_forest");
+        setupResonantBarrens("minecraft:resonant_barrens");
+        setupCrystalCaverns("minecraft:crystal_caverns");
+        setupSunkenChoir("minecraft:sunken_choir");
+        setupHollowDeep("minecraft:hollow_deep");
+        setupAuroraSteppe("minecraft:aurora_steppe");
+
+        // The Aether biomes (also NOT in s_biomeKeyOrder — the Aether
+        // generator builds its featuresPerStep from getAetherBiomeKeys())
+        setupAetherBiome("aether:skyroot_meadow", AetherPlacements::SKYROOT_MEADOW_TREES);
+        setupAetherBiome("aether:skyroot_forest", AetherPlacements::SKYROOT_FOREST_TREES);
+        setupAetherBiome("aether:skyroot_grove", AetherPlacements::SKYROOT_GROVE_TREES);
+        setupAetherBiome("aether:skyroot_woodland", AetherPlacements::SKYROOT_WOODLAND_TREES);
+
+        // The Twilight Forest biomes (also NOT in s_biomeKeyOrder — the TF
+        // generator builds its featuresPerStep from getTwilightBiomeKeys())
+        setupTwilightBiomes();
 
         s_initialized.store(true, std::memory_order_release);
     });
@@ -1404,6 +2393,75 @@ const std::vector<std::string>& BiomeFeatureRegistry::getNetherBiomeKeys() {
         bootstrap();
     }
     return s_netherBiomeKeys;
+}
+
+const std::vector<std::string>& BiomeFeatureRegistry::getHushBiomeKeys() {
+    // MultiNoiseBiomeSource::buildHushParameters() order — keep the two in
+    // sync, this is the Hush possibleBiomes() order that seeds features.
+    static const std::vector<std::string> s_hushBiomeKeys = {
+        "minecraft:hush_meadows",
+        "minecraft:whisperwood_forest",
+        "minecraft:resonant_barrens",
+        "minecraft:crystal_caverns",
+        "minecraft:sunken_choir",
+        "minecraft:hollow_deep",
+        "minecraft:aurora_steppe"
+    };
+    if (!s_initialized.load(std::memory_order_acquire)) {
+        bootstrap();
+    }
+    return s_hushBiomeKeys;
+}
+
+const std::vector<std::string>& BiomeFeatureRegistry::getAetherBiomeKeys() {
+    // MultiNoiseBiomeSource::buildAetherParameters() first-appearance order
+    // (data/aether/dimension/the_aether.json) — keep the two in sync, this is
+    // the Aether possibleBiomes() order that seeds features.
+    static const std::vector<std::string> s_aetherBiomeKeys = {
+        "aether:skyroot_meadow",
+        "aether:skyroot_forest",
+        "aether:skyroot_grove",
+        "aether:skyroot_woodland"
+    };
+    if (!s_initialized.load(std::memory_order_acquire)) {
+        bootstrap();
+    }
+    return s_aetherBiomeKeys;
+}
+
+const std::vector<std::string>& BiomeFeatureRegistry::getTwilightBiomeKeys() {
+    // TF possibleBiomes() order (BiomeDensitySource.collectPossibleBiomes:
+    // biome_grid.json columns sorted by key, biome_layers ascending, first
+    // appearance kept) — the order that seeds every TF feature. The
+    // TwilightBiomeSource's possibleBiomes() must list the same keys.
+    static const std::vector<std::string> s_twilightBiomeKeys = {
+        "twilightforest:underground",
+        "twilightforest:clearing",
+        "twilightforest:dark_forest",
+        "twilightforest:dark_forest_center",
+        "twilightforest:dense_forest",
+        "twilightforest:dense_mushroom_forest",
+        "twilightforest:enchanted_forest",
+        "twilightforest:final_plateau",
+        "twilightforest:fire_swamp",
+        "twilightforest:firefly_forest",
+        "twilightforest:forest",
+        "twilightforest:glacier",
+        "twilightforest:highlands_underground",
+        "twilightforest:highlands",
+        "twilightforest:lake",
+        "twilightforest:mushroom_forest",
+        "twilightforest:oak_savannah",
+        "twilightforest:snowy_forest",
+        "twilightforest:spooky_forest",
+        "twilightforest:stream",
+        "twilightforest:swamp",
+        "twilightforest:thornlands"
+    };
+    if (!s_initialized.load(std::memory_order_acquire)) {
+        bootstrap();
+    }
+    return s_twilightBiomeKeys;
 }
 
 const std::vector<const PlacedFeature*>& BiomeFeatureRegistry::getFeaturesForStep(
@@ -1470,7 +2528,9 @@ bool BiomeFeatureRegistry::isKnownBiomeKey(const std::string& biomeKey) {
     // with no features in this port (vanilla gives it only
     // void_start_platform); getFeaturesForBiome returns empty for it.
     if (biomeKey == "minecraft:the_void") return true;
-    for (const auto& keys : {getAllBiomeKeys(), getNetherBiomeKeys(), getEndBiomeKeys()}) {
+    for (const auto& keys : {getAllBiomeKeys(), getNetherBiomeKeys(), getEndBiomeKeys(),
+                             getHushBiomeKeys(), getAetherBiomeKeys(),
+                             getTwilightBiomeKeys()}) {
         for (const auto& k : keys) {
             if (k == biomeKey) return true;
         }

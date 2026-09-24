@@ -1,0 +1,159 @@
+{
+  "animation": {
+    "frametime": 1,
+    "frames": [
+      {
+        "index": 0,
+        "time": 134
+      },
+      {
+        "index": 1,
+        "time": 3
+      },
+      {
+        "index": 2,
+        "time": 5
+      },
+      {
+        "index": 3,
+        "time": 209
+      },
+      {
+        "index": 2,
+        "time": 6
+      },
+      {
+        "index": 1,
+        "time": 3
+      },
+      {
+        "index": 0,
+        "time": 177
+      },
+      {
+        "index": 1,
+        "time": 3
+      },
+      {
+        "index": 2,
+        "time": 6
+      },
+      {
+        "index": 3,
+        "time": 308
+      },
+      {
+        "index": 2,
+        "time": 4
+      },
+      {
+        "index": 1,
+        "time": 2
+      },
+      {
+        "index": 0,
+        "time": 355
+      },
+      {
+        "index": 1,
+        "time": 3
+      },
+      {
+        "index": 2,
+        "time": 5
+      },
+      {
+        "index": 3,
+        "time": 341
+      },
+      {
+        "index": 2,
+        "time": 4
+      },
+      {
+        "index": 1,
+        "time": 2
+      },
+      {
+        "index": 0,
+        "time": 267
+      },
+      {
+        "index": 1,
+        "time": 3
+      },
+      {
+        "index": 2,
+        "time": 6
+      },
+      {
+        "index": 3,
+        "time": 338
+      },
+      {
+        "index": 2,
+        "time": 6
+      },
+      {
+        "index": 1,
+        "time": 2
+      },
+      {
+        "index": 0,
+        "time": 107
+      },
+      {
+        "index": 1,
+        "time": 5
+      },
+      {
+        "index": 0,
+        "time": 26
+      },
+      {
+        "index": 1,
+        "time": 2
+      },
+      {
+        "index": 0,
+        "time": 355
+      },
+      {
+        "index": 1,
+        "time": 6
+      },
+      {
+        "index": 0,
+        "time": 21
+      },
+      {
+        "index": 1,
+        "time": 4
+      },
+      {
+        "index": 0,
+        "time": 355
+      },
+      {
+        "index": 1,
+        "time": 5
+      },
+      {
+        "index": 2,
+        "time": 3
+      },
+      {
+        "index": 3,
+        "time": 284
+      },
+      {
+        "index": 2,
+        "time": 6
+      },
+      {
+        "index": 1,
+        "time": 3
+      }
+    ]
+  }
+}

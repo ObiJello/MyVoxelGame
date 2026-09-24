@@ -286,8 +286,28 @@ namespace Game {
         if (!write) return;
 
         const glm::ivec3 pos = hit.blockPos;
-        if (write->GetBlock(pos.x, pos.y, pos.z) != BlockID::Tnt) return;
+        const BlockState state = write->GetBlockState(pos.x, pos.y, pos.z);
+        if (state.Block() == BlockID::Air) return;
 
+        // MC BlockBehaviour.onProjectileHit(level, state, hit, projectile),
+        // dispatched through the block table. The face struck is recovered
+        // from the impact point: the hit result carries a location, not a
+        // face, and the target block scores by distance from the face's
+        // centre so it needs to know which one.
+        const glm::dvec3 local = hit.location - glm::dvec3(pos) - glm::dvec3(0.5);
+        Direction face;
+        const double ax = std::abs(local.x), ay = std::abs(local.y), az = std::abs(local.z);
+        if (ay >= ax && ay >= az)      face = local.y > 0.0 ? Direction::Up    : Direction::Down;
+        else if (ax >= az)             face = local.x > 0.0 ? Direction::East  : Direction::West;
+        else                           face = local.z > 0.0 ? Direction::South : Direction::North;
+
+        const Block& def = BlockRegistry::Get(state.Block());
+        if (def.onProjectileHit) {
+            def.onProjectileHit(*write, pos, state, hit.location, face, *this);
+            return;
+        }
+
+        if (state.Block() != BlockID::Tnt) return;
         // MC TntBlock.onProjectileHit: only a BURNING projectile lights it, and
         // the kill credit goes to whoever shot it.
         if (TntOnProjectileHit(*write, pos, this, GetOwner())) {
@@ -296,6 +316,5 @@ namespace Game {
                             World::UpdateFlags::All);
         }
     }
-
 
 } // namespace Game

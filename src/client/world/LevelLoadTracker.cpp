@@ -1,5 +1,7 @@
 // File: src/client/world/LevelLoadTracker.cpp
 #include "LevelLoadTracker.hpp"
+#include "client/renderer/mesh/SectionFade.hpp"
+#include "platform/GameDirectory.hpp"
 
 #include "ClientChunkManager.hpp"
 #include "../network/NetworkClient.hpp"
@@ -24,9 +26,12 @@ namespace Client {
         constexpr auto kClientWaitTimeout = std::chrono::seconds(30);
     }
 
-    void LevelLoadTracker::StartClientLoad() {
-        m_stage = Stage::WaitingForPlayerChunk;
-        m_timeoutAfter = std::chrono::steady_clock::now() + kClientWaitTimeout;
+    void LevelLoadTracker::StartClientLoad(int closeDelayMs) {
+        m_stage        = Stage::WaitingForPlayerChunk;
+        m_closeDelayMs = closeDelayMs;
+        m_readyAt      = {};
+        m_startedAt    = std::chrono::steady_clock::now();
+        m_timeoutAfter = m_startedAt + kClientWaitTimeout;
     }
 
     bool LevelLoadTracker::IsPlayerSectionCompiled(const glm::vec3& playerFeetPos) const {
@@ -68,7 +73,12 @@ namespace Client {
         // Testing builtOnce alone is what held a mid-air spawn for the whole
         // 30 s timeout — an all-air section is never compiled by design, so it
         // could never satisfy the only condition being checked.
-        return info->builtOnce || info->meshResolvedEmpty;
+        if (!(info->builtOnce || info->meshResolvedEmpty)) return false;
+        // MC's second half: `renderSection.getVisibility(now, fade) >= 0.3F`
+        // — the section is not just compiled but at least 30 % faded in
+        // (an all-air section never uploads and reads as fully visible).
+        const int32_t fadeMs = static_cast<int32_t>(Platform::g_gameSettings.GetChunkFadeInTime() * 1000.0f);
+        return ::Render::SectionFade::Visibility(info->fadeStartMs, ::Render::SectionFade::NowMs(), fadeMs) >= 0.3f;
     }
 
     // Why is the player's section not compiled? Answered from the tracker's
@@ -144,6 +154,11 @@ namespace Client {
         if (!ready) {
             return;
         }
+        // MC ClientLevelReady(readyAt) + isLevelReady: ready `closeDelayMs`
+        // after the section compiled — 500 ms for a brand-new world.
+        const auto now = std::chrono::steady_clock::now();
+        if (m_readyAt == std::chrono::steady_clock::time_point{}) m_readyAt = now;
+        if (now < m_readyAt + std::chrono::milliseconds(m_closeDelayMs)) return;
 
         // MC ClientPacketListener.notifyPlayerLoaded: one packet, no payload.
         // Sent even in singleplayer — the integrated server is reached over a
@@ -157,7 +172,8 @@ namespace Client {
         }
 
         m_stage = Stage::Ready;
-        Log::Info("[LevelLoadTracker] Level ready — player loaded");
+        Log::Info("[LevelLoadTracker] Level ready — player loaded, %.2f s after the load began",
+                  std::chrono::duration<float>(std::chrono::steady_clock::now() - m_startedAt).count());
     }
 
 } // namespace Client

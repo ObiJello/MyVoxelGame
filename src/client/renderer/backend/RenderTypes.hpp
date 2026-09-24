@@ -217,6 +217,17 @@ namespace Render {
         std::vector<VertexAttribute> attributes;
     };
 
+    // What the F3 overlay's system_specs entry prints (MC DeviceInfo):
+    // vendor, device name, backend + driver string, and the device class.
+    struct GpuDeviceInfo {
+        enum class Type { Other, Integrated, Discrete, Virtual, Cpu };
+        std::string vendorName;
+        std::string name;
+        std::string backendName;   // "OpenGL 3.3", "Vulkan 1.0 (MoltenVK)"
+        std::string driverInfo;    // GL_VERSION / Vulkan driver version
+        Type type = Type::Other;
+    };
+
     // Complete pipeline state description (replaces scattered GL state calls)
     struct PipelineState {
         // Depth
@@ -310,10 +321,10 @@ namespace Render {
     }
 
     // ========================================================================
-    // TERRAIN VERTEX LAYOUT (16 bytes per vertex)
+    // TERRAIN VERTEX LAYOUT (20 bytes per vertex)
     // ========================================================================
 
-    // Chunk-TERRAIN layout: the packed 16-byte TerrainVertex (see
+    // Chunk-TERRAIN layout: the packed 20-byte TerrainVertex (see
     // core/Vertex.hpp). Kept separate from GetBlockVertexLayout on purpose —
     // a dozen non-terrain renderers (entities, block entities, portals, GUI)
     // build 24-byte buffers against the block layout and must stay untouched.
@@ -323,11 +334,12 @@ namespace Render {
     // an integer attribute path.
     inline VertexLayout GetTerrainVertexLayout() {
         VertexLayout layout;
-        layout.stride = 16;
+        layout.stride = 20;
         layout.attributes = {
             {0, 4, 0,  true, AttribType::UShort},  // px py pz slot: 4 unorm16 at offset 0
             {1, 2, 8,  true, AttribType::UShort},  // u v (atlas uv, or tile corner + sprite id): 2 unorm16 at offset 8
             {2, 4, 12, true, AttribType::UByte},   // Color: 4 ubytes normalized at offset 12
+            {3, 4, 16, true, AttribType::UByte},   // Light: block8, sky8 (0..240), 2 reserved — offset 16
         };
         return layout;
     }

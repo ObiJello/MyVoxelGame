@@ -96,7 +96,12 @@ public:
      * Generate next long
      */
     int64_t nextLong() {
-        return (static_cast<int64_t>(next(32)) << 32) + next(32);
+        // BitRandomSource.nextLong: upper first. Kept as separate statements -
+        // the operands of + are unsequenced in C++.
+        const int32_t upper = next(32);
+        const int32_t lower = next(32);
+        const int64_t shifted = static_cast<int64_t>(static_cast<uint64_t>(static_cast<int64_t>(upper)) << 32);
+        return shifted + static_cast<int64_t>(lower);
     }
 
     bool nextBoolean() {
@@ -122,7 +127,11 @@ public:
      * Generate next double [0.0, 1.0)
      */
     double nextDouble() {
-        return ((static_cast<int64_t>(next(26)) << 27) + next(27)) / static_cast<double>(1LL << 53);
+        // BitRandomSource.nextDouble: upper first (see nextLong).
+        const int32_t upper = next(26);
+        const int32_t lower = next(27);
+        const int64_t combined = (static_cast<int64_t>(upper) << 27) + static_cast<int64_t>(lower);
+        return static_cast<double>(combined) * 1.1102230246251565E-16;
     }
 
     /**

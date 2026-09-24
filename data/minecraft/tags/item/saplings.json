@@ -11,6 +11,13 @@
     "minecraft:flowering_azalea",
     "minecraft:mangrove_propagule",
     "minecraft:cherry_sapling",
-    "minecraft:poplar_sapling"
+    "minecraft:poplar_sapling",
+    "minecraft:whisperwood_sapling",
+    "minecraft:twilight_oak_sapling",
+    "minecraft:canopy_sapling",
+    "minecraft:tf_mangrove_sapling",
+    "minecraft:darkwood_sapling",
+    "minecraft:skyroot_sapling",
+    "minecraft:golden_oak_sapling"
   ]
 }

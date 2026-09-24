@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "minecraft:block/locked_carved_stone"
+    }
+  }
+}

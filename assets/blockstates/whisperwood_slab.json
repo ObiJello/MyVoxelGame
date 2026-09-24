@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "type=bottom": {
+      "model": "minecraft:block/whisperwood_slab"
+    },
+    "type=double": {
+      "model": "minecraft:block/whisperwood_planks"
+    },
+    "type=top": {
+      "model": "minecraft:block/whisperwood_slab_top"
+    }
+  }
+}

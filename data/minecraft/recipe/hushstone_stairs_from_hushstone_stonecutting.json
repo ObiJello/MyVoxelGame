@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:hushstone",
+  "result": {
+    "count": 1,
+    "id": "minecraft:hushstone_stairs"
+  }
+}

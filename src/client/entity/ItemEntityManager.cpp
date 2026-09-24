@@ -94,6 +94,19 @@ namespace Client {
     }
 #endif
 
+    void ItemEntityManager::SpawnPickupAnim(const glm::dvec3& pos, const Game::ItemStack& stack,
+                                            uint32_t playerId) {
+        if (stack.IsEmpty()) return;
+        ItemPickupAnim anim;
+        anim.stack          = stack;
+        anim.bobOffs        = 0.0f;
+        anim.ageTicks       = 0.0f;
+        anim.startPos       = pos;
+        anim.targetPlayerId = playerId;
+        anim.life           = 0;
+        m_pickups.push_back(anim);
+    }
+
     void ItemEntityManager::TakeItem(int32_t itemId, uint32_t playerId, int32_t amount) {
         auto it = m_entities.find(itemId);
         if (it == m_entities.end()) return;   // never saw it; nothing to animate
@@ -127,7 +140,7 @@ namespace Client {
             const auto& players = g_remotePlayerManager->GetPlayers();
             auto it = players.find(playerId);
             if (it != players.end()) {
-                feet = glm::dvec3(it->second.position);
+                feet = it->second.position;
             }
             // A miss means the collector IS the local player (only remote
             // players are tracked here), so `feet` keeps its default. Same

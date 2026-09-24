@@ -138,7 +138,10 @@ namespace Game {
         // (EnderDragon::kDragonPart*), or -1 when the pick is not a dragon —
         // the dragon's own box is not pickable (MC parity), only its eight
         // part boxes are.
-        int32_t PickEntity(int* outDragonPart = nullptr) const;
+        // `outHit`, when given, receives the point where the pick ray
+        // enters the picked entity's box, in the coordinates of the level
+        // the entity is in (the far level for a pick through a portal).
+        int32_t PickEntity(int* outDragonPart = nullptr, glm::dvec3* outHit = nullptr) const;
 
         // MC Minecraft.crosshairPickEntity, reduced to what the attack
         // indicator needs: is there a LIVING thing under the crosshair right
@@ -224,6 +227,10 @@ namespace Game {
             // packet, so the server has no way to read either back. Loot
             // tables condition on the state (wheat drops wheat only at age=7).
             BlockState         destroyingBlockState;
+            // The face the dig started on (RaycastHit::hitFace, 0..5), or
+            // -1 when unknown. Sent with the dig packets so the server's
+            // vein mine knows which way "into the block" is.
+            int        destroyFace     = -1;
             int        lastSwingTick   = -1000;   // for MINE_SWING_TICKS pump
         };
         DigState digState;
@@ -273,13 +280,14 @@ namespace Game {
         // accumulation and no destroyTime gate (so bedrock/obsidian go in one
         // click). Mirrors MC's `instabuild` branches in
         // MultiPlayerGameMode.startDestroyBlock / continueDestroyBlock.
-        void CreativeDestroy(const glm::ivec3& pos);
+        void CreativeDestroy(const glm::ivec3& pos, int face = -1);
         // Returns the interaction sequence the packet was stamped with (0 if
         // nothing was sent) so a matching block prediction can be filed.
         // The entity pick along one ray in the BOUND level; PickEntity runs it
         // in the player's level and, past a portal, in the far level.
-        int32_t PickEntityAlong(const glm::vec3& origin, const glm::vec3& dir, float range,
-                                float blockLimit, int* outDragonPart) const;
+        int32_t PickEntityAlong(const glm::dvec3& origin, const glm::vec3& dir, float range,
+                                float blockLimit, int* outDragonPart,
+                                glm::dvec3* outHit = nullptr) const;
         // altInteract=true → left-click "use" semantics (PortalGun blue).
         // `dimension` stamps the packet with the clicked block's level;
         // absent, it is the level the crosshair's block is in.
@@ -309,6 +317,19 @@ namespace Game {
                                        glm::ivec3& outPos, BlockID& outBlock,
                                        BlockState& outState) const;
 
+        // What the fill tool places: the held block, or the fluid a held
+        // water / lava bucket pours (as its SOURCE block). Air when neither.
+        Game::BlockID HeldFillBlock() const;
+        // The cell a fill corner lands in for `hit`: a block placement's
+        // target for a block, a bucket pour's for a bucket (the cell in
+        // front of the clicked face, or the clicked cell when it is
+        // replaceable by fluid or, for water, waterloggable).
+        bool ComputeFillCorner(const RaycastHit& hit, glm::ivec3& outPos,
+                               Game::BlockState& outState) const;
+        // The fluid-side placement rule (MC BlockBehaviour.canBeReplaced(fluid)
+        // plus LiquidBlockContainer.canPlaceLiquid), shared by the corner
+        // and the air-cell checks.
+        bool FluidCanFill(Game::BlockState existing, Game::BlockID fluidBlock) const;
         // The fill tool's share of a right-click; true when it took the
         // click (a corner marked, a box sent) and nothing else should.
         bool HandleFillClick(const std::optional<RaycastHit>& hit);
@@ -355,9 +376,9 @@ namespace Game {
         // player can fire across long sight-lines, not just within the
         // melee-range raycast.
         struct PendingPortalProjectile {
-            glm::vec3 origin;       // spawn point (eye)
-            glm::vec3 direction;    // unit forward
-            glm::vec3 currentPos;   // advanced each tick
+            glm::dvec3 origin;      // spawn point (eye), double like every world position
+            glm::vec3  direction;   // unit forward
+            glm::dvec3 currentPos;  // advanced each tick
             float     age = 0.0f;
             bool      isOrange = false;
             int       hand = 0;

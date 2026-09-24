@@ -11,6 +11,7 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <optional>
 #include <string_view>
 
@@ -19,6 +20,7 @@
 #include "common/entity/RangedAttackMob.hpp"
 #include "common/entity/TamableAnimal.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -287,8 +289,8 @@ namespace Game {
     // leaves: canFlyToOwner), and the cookie poison-kill. Not modelled, each
     // named at its site: LandOnOwnersShoulderGoal (shoulder riding needs the
     // player render), the five-colour variant (needs per-variant textures;
-    // the wire byte exists but the renderer draws red_blue), the jukebox
-    // party dance, and the mob-sound imitation.
+    // the wire byte exists but the renderer draws red_blue) and the jukebox
+    // party dance.
     class Parrot : public Animal, public TamableAnimal {
     public:
         explicit Parrot(EntityLevel* level);
@@ -331,8 +333,13 @@ namespace Game {
 
         bool IsFlyingAnimal() const override { return true; }
 
-        // MC Parrot.aiStep — super, then calculateFlapping.
+        // MC Parrot.aiStep — the imitation roll, super, calculateFlapping.
         void AiStep() override;
+
+        // MC Parrot.getAmbientSound (a 1/1000 mob imitation outside
+        // peaceful) and getVoicePitch (no baby shift).
+        const char* GetAmbientSound() const override;
+        float GetVoicePitch() const override;
 
         // MC ParrotRenderer.extractRenderState: flapAngle =
         // (sin(lerp(flap)) + 1) * lerp(flapSpeed).
@@ -349,6 +356,11 @@ namespace Game {
             (void)dy; (void)onGroundNow;
         }
 
+        // MC Parrot.isFlapping / onFlap — PARROT_FLY every half flap-speed
+        // of flight distance.
+        bool IsFlapping() const override;
+        void OnFlap() override;
+
     private:
         // MC Parrot.calculateFlapping — the flap fields verbatim.
         void CalculateFlapping();
@@ -356,6 +368,7 @@ namespace Game {
         float m_flap = 0.0f, m_oFlap = 0.0f;
         float m_flapSpeed = 0.0f, m_oFlapSpeed = 0.0f;
         float m_flapping = 1.0f;
+        float m_nextFlap = 1.0f;
     };
 
     // MC animal/rabbit/Rabbit. MAX_HEALTH 3, MOVEMENT_SPEED 0.3,
@@ -369,7 +382,7 @@ namespace Game {
     // the variant system (every rabbit renders brown; the EVIL killer-bunny
     // branch with it), RaidGardenGoal (needs crops + mob griefing),
     // ClimbOnTopOfPowderSnowGoal (no powder snow), and the jump/sprint
-    // particles and sounds.
+    // particles.
     class Rabbit : public Animal {
     public:
         explicit Rabbit(EntityLevel* level);
@@ -471,8 +484,7 @@ namespace Game {
         uint8_t GetAnimStateByte() const override { return m_standing ? 1 : 0; }
         void    SetAnimStateByte(uint8_t v) override { m_standing = (v & 1) != 0; }
 
-        // MC PolarBear.playWarningSound — keeps MC's 40-tick cadence; the
-        // growl itself waits on the sound system.
+        // MC PolarBear.playWarningSound — the growl, at most every 40 ticks.
         void PlayWarningSound();
 
         // MC PolarBear.tick — the client-side 0..6 stand animation lerp.
@@ -622,6 +634,13 @@ namespace Game {
             ClearAngerReferenceTo(entity);
         }
 
+        // MC Wolf.getAmbientSound / getHurtSound off the classic sound set
+        // (the sound-variant registry is not modelled): angry growls, else a
+        // 1-in-3 pant (whine when tame and hurt), else the plain bark.
+        // (WOLF_ARMOR_DAMAGE waits on wolf armor.)
+        const char* GetAmbientSound() const override;
+        const char* GetHurtSound(MobDamageSource source) const override;
+
     private:
         void RegisterWolfGoals();
 
@@ -688,9 +707,15 @@ namespace Game {
     // item system), trust (rides the item layer; DefendTrustedTargetGoal and
     // the avoid-player trust exemption are inert with it), villages
     // (FoxStrollThroughVillageGoal, SeekShelterGoal's isVillage term), berry
-    // bushes (FoxEatBerriesGoal needs block-state AGE), and sounds.
+    // bushes (FoxEatBerriesGoal needs block-state AGE; its sniff and pick
+    // sounds with it). The eat/spit sounds ride the mouth-item loop.
     class Fox : public Animal {
     public:
+        // MC Fox.getAmbientSound (sleep / night screech / yip) and
+        // playAmbientSound (the screech at volume 2).
+        const char* GetAmbientSound() const override;
+        void PlayAmbientSound() override;
+
         // MC Fox.Variant.
         enum class Variant : uint8_t { Red = 0, Snow = 1 };
 
@@ -806,6 +831,13 @@ namespace Game {
     // sounds, and the 0.3 baby scale (the renderer's baby scale is global).
     class Turtle : public Animal {
     public:
+        // MC Turtle.getAmbientSound — TURTLE_AMBIENT_LAND for an adult ashore.
+        const char* GetAmbientSound() const override;
+
+        // MC Turtle.isPushedByFluid: false.
+        bool IsPushedByFluid() const override { return false; }
+
+    public:
         explicit Turtle(EntityLevel* level);
 
         static void CreateAttributes(AttributeMap& out);
@@ -896,6 +928,11 @@ namespace Game {
     // pickUpItem), and the sneeze slime-ball gift drop.
     class Panda : public Animal {
     public:
+        // MC Panda.playAttackSound (PANDA_BITE) and getAmbientSound
+        // (aggressive / worried / plain).
+        void PlayAttackSound() override;
+        const char* GetAmbientSound() const override;
+
         // MC Panda.Gene — ids verbatim; BROWN and WEAK are recessive.
         enum class Gene : uint8_t {
             Normal = 0, Lazy, Worried, Playful, Brown, Weak, Aggressive,
@@ -1086,8 +1123,8 @@ namespace Game {
     // players, hunting chickens and beached baby turtles, and the 2400-tick
     // despawn grace — and, the interaction system landed, trusting: fed fish
     // roll 1/3 setTrusting, and a trusting ocelot stops fleeing players
-    // (reassessTrustingGoals) and never scares off the tempt. Sounds still
-    // wait on the sound system.
+    // (reassessTrustingGoals) and never scares off the tempt. Its sounds are
+    // the generated row's.
     class Ocelot : public Animal {
     public:
         explicit Ocelot(EntityLevel* level);
@@ -1151,6 +1188,11 @@ namespace Game {
     // does not switch on it yet — the collar layer with it).
     class Cat : public Animal, public TamableAnimal {
     public:
+        // MC Cat.getAmbientSound / playEatingSound / hiss, classic sound set.
+        const char* GetAmbientSound() const override;
+        void PlayEatingSound() override;
+        void Hiss();
+
         static constexpr int kVariantCount = 11;
 
         explicit Cat(EntityLevel* level);
@@ -1352,11 +1394,26 @@ namespace Game {
         UseResult FedFood(LivingEntity& player, ItemStack& held);
         bool HandleEating(LivingEntity& player, const ItemStack& held);
 
-        // MC AbstractHorse.makeMad — rear up (the angry sound waits on the
-        // sound system).
-        void MakeMad() {
-            if (!IsStanding()) StandIfPossible();
-        }
+        // MC AbstractHorse.makeMad — rear up and voice the angry sound
+        // (server only).
+        void MakeMad();
+
+        // ── Sounds ────────────────────────────────────────────────────────
+        // MC AbstractHorse.getEatingSound / getAngrySound: null here; each
+        // equine names its own ("" = none).
+        virtual const char* GetEatingSound() const { return ""; }
+        virtual const char* GetAngrySound() const { return ""; }
+        // MC AbstractHorse.getAmbientStandSound — RandomStandGoal's rear.
+        const char* GetAmbientStandSound() const { return GetAmbientSound(); }
+
+        // MC AbstractHorse.playStepSound, unridden half: the wood clop on
+        // the wood sound types, else the hoof step; a snow layer on top
+        // wins. (The ridden gallop counter waits on riding.)
+        void PlayStepSound(const glm::ivec3& pos, BlockState state) override;
+
+        // MC AbstractHorse.causeFallDamage: HORSE_LAND past one block, then
+        // hurt + the block fall sound — no generic fall thud.
+        bool CauseFallDamage(double fallDist, float damageMultiplier) override;
 
         // ── Renderer inputs (MC HorseRenderer/extractRenderState) ─────────
         float GetEatAnim(float partialTick) const;
@@ -1365,6 +1422,10 @@ namespace Game {
 
     private:
         void RegisterHorseGoals();
+
+        // MC AbstractHorse.eating — the chew sound (the open-mouth flag's
+        // only reader is the skipped mouth ramp).
+        void Eating();
 
         // MC AbstractHorse.temper / tamed — see the taming block above.
         int  m_temper = 0;
@@ -1390,6 +1451,12 @@ namespace Game {
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<Horse>(m_level);
         }
+        const char* GetEatingSound() const override {
+            return IsBaby() ? SoundEvents::HORSE_EAT_BABY : SoundEvents::HORSE_EAT;
+        }
+        const char* GetAngrySound() const override {
+            return IsBaby() ? SoundEvents::HORSE_ANGRY_BABY : SoundEvents::HORSE_ANGRY;
+        }
     };
 
     class Donkey : public AbstractHorse {
@@ -1399,6 +1466,8 @@ namespace Game {
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<Donkey>(m_level);
         }
+        const char* GetEatingSound() const override { return SoundEvents::DONKEY_EAT; }
+        const char* GetAngrySound() const override { return SoundEvents::DONKEY_ANGRY; }
     };
 
     // MC mules are horse x donkey and infertile; same-species breeding is
@@ -1409,6 +1478,8 @@ namespace Game {
             : AbstractHorse(EntityTypeId::Mule, level) {}
         bool CanMate(const Animal&) const override { return false; }
         std::unique_ptr<Animal> CreateBaby() override { return nullptr; }
+        const char* GetEatingSound() const override { return SoundEvents::MULE_EAT; }
+        const char* GetAngrySound() const override { return SoundEvents::MULE_ANGRY; }
     };
 
     class SkeletonHorse : public AbstractHorse {
@@ -1425,6 +1496,16 @@ namespace Game {
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<SkeletonHorse>(m_level);
         }
+        // MC SkeletonHorse.getSwimSound / playSwimSound: wading hooves on
+        // the bottom (the ridden gallop-in-water counter waits on riding),
+        // the swim stroke otherwise, capped quiet.
+        const char* GetSwimSound() const override {
+            return onGround ? SoundEvents::SKELETON_HORSE_STEP_WATER : SoundEvents::SKELETON_HORSE_SWIM;
+        }
+    protected:
+        void PlaySwimSound(float volume) override {
+            AbstractHorse::PlaySwimSound(onGround ? 0.3f : std::min(0.1f, volume * 25.0f));
+        }
     };
 
     class ZombieHorse : public AbstractHorse {
@@ -1437,6 +1518,8 @@ namespace Game {
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<ZombieHorse>(m_level);
         }
+        const char* GetEatingSound() const override { return SoundEvents::ZOMBIE_HORSE_EAT; }
+        const char* GetAngrySound() const override { return SoundEvents::ZOMBIE_HORSE_ANGRY; }
     };
 
 } // namespace Game

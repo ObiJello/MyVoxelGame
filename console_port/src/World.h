@@ -1,0 +1,168 @@
+#pragma once
+#include <array>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "ContainerItems.h"
+#include "PotionEffects.h"
+namespace console {
+enum Block : std::uint8_t { Air=0, Stone=1, Grass=2, Dirt=3, Cobble=4, Planks=5,
+    Bedrock=7, Water=9, Lava=10, Sand=12, Log=17, Leaves=18, Glass=20, Sandstone=24,
+    Wool=35, Bricks=45, Obsidian=49, Ice=79, Fence=85, FenceGate=107, Mycelium=110, NetherFence=113 };
+constexpr std::array<Block,9> palette{Grass,Stone,Cobble,Planks,Log,Leaves,Sand,Glass,Bricks};
+constexpr std::array<Block,16> creativePalette{Grass,Stone,Cobble,Planks,Log,Leaves,Sand,Glass,Bricks,Fence,FenceGate,NetherFence,static_cast<Block>(130),static_cast<Block>(61),static_cast<Block>(118),static_cast<Block>(117)};
+const char* blockName(Block b);
+int textureTile(Block b, int face, int data=0);
+bool solid(Block b);
+bool validBlock(std::uint8_t b);
+struct Vec3 { double x=0,y=0,z=0; };
+struct Hit { bool hit=false; int x=0,y=0,z=0, px=0,py=0,pz=0; double distance=0; };
+struct SimulatedEntity {
+    std::wstring id;Vec3 position,velocity;int age=0;
+    bool native=false;int nativeChunkX=0,nativeChunkZ=0,recordIndex=-1;float yaw=0;
+    bool sheared=false;int woolColor=0,profession=0,catType=0,collarColor=14;
+    bool wolfTame=false,wolfAngry=false,sitting=false;
+    int slimeSize=1,jumpDelay=0;
+    int health=20,hurtTicks=0,deathTicks=0,invulnerableTicks=0,lastHurt=0,attackTicks=0;
+    int lastHurtByPlayerTicks=0;
+    Vec3 motionTarget{},swimDirection{};
+    int motionTimer=0,heightOffsetTimer=0;
+    double blazeHeightOffset=.5,squidPhase=0,squidPhaseSpeed=.15,squidSpeed=0;
+    float squidTentacleAngle=0;
+    double wanderX=0,wanderZ=0;int wanderTicks=0;
+};
+struct ExperienceOrbState {
+    Vec3 position,velocity;
+    int value=1,age=0,health=5,throwTime=0;
+    bool native=false;
+    int nativeChunkX=0,nativeChunkZ=0,recordIndex=-1;
+};
+struct HangingDecoration {
+    enum class Kind { Painting, ItemFrame } kind=Kind::Painting;
+    int tileX=0,tileY=0,tileZ=0,dir=0;
+    int nativeChunkX=0,nativeChunkZ=0,recordIndex=-1;
+    std::wstring motive;
+    int itemId=0,itemDamage=0,itemRotation=0;
+};
+struct SkullInfo {int type=0,rotation=0;};
+
+// Bounded resident window over the original finite console world.
+// Generation uses the original biome, density, surface, cave and canyon stages.
+class World {
+    struct State;
+    std::unique_ptr<State> state;
+    std::vector<std::array<int,3>> chestParts(int x,int y,int z)const;
+    void discardContainerData(int x,int y,int z,const wchar_t* id);
+    void ensureEnderChestData(int x,int y,int z);
+    void ensureFurnaceData(int x,int y,int z);
+    void tickFurnaces();
+    void ensureBrewingData(int x,int y,int z);
+    void tickBrewingStands();
+    void scheduleFluid(int x,int y,int z,int delay);
+    void activateFluidChunks();
+    void activateFluidChunk(int chunkX,int chunkZ);
+    void tickFluids();
+    void saveFluidTicks(class ChunkRecord& record,bool remove);
+    void loadFluidTicks(const class ChunkRecord& record);
+    void tickEntities();
+    void tickExperienceOrbs();
+    void spawnExperienceOrbs(Vec3 position,int reward);
+    void tickPlayerEffects();
+    void saveEntities(class ChunkRecord& record,bool remove);
+    void loadEntities(const class ChunkRecord& record);
+public:
+    static constexpr int width=128, height=256, depth=128, sea=63;
+    std::int64_t seed=0;
+    std::uint64_t revision=0;
+    World();
+    ~World();
+    World(const World&)=delete;
+    World& operator=(const World&)=delete;
+    void swapWith(World& other) noexcept;
+    std::vector<std::uint8_t> blockSnapshot()const;
+    void generate(std::int64_t seedValue,bool flat=false);
+    // Import the supplied tutorial terrain, schematics, tile records, and entities.
+    void generateTutorial(const std::filesystem::path& tutorialAssets);
+    void generateArchivedTutorial(const std::filesystem::path& tutorialAssets);
+    bool isTutorial()const;
+    bool isFlat()const;
+    int originX()const;
+    int originZ()const;
+    int worldMin()const;
+    int worldMax()const; // exclusive, in client coordinates
+    // Prepare at most chunkBudget missing chunks, then atomically move the window.
+    // Returns true when the visible window changes and its mesh needs rebuilding.
+    bool streamAround(Vec3 player,int chunkBudget=2);
+    bool streaming()const;
+    std::size_t residentChunks()const;
+    bool inside(int x,int y,int z) const;
+    Block get(int x,int y,int z) const;
+    bool set(int x,int y,int z,Block block);
+    bool canOpenChest(int x,int y,int z)const;
+    bool canOpenEnderChest(int x,int y,int z)const;
+    bool canOpenFurnace(int x,int y,int z)const;
+    bool canOpenBrewingStand(int x,int y,int z)const;
+    std::vector<ContainerItem> chestItems(int x,int y,int z)const;
+    std::vector<ContainerItem> enderChestItems()const;
+    std::vector<ContainerItem> furnaceItems(int x,int y,int z)const;
+    std::vector<ContainerItem> brewingItems(int x,int y,int z)const;
+    int brewingProgress(int x,int y,int z)const;
+    struct FurnaceState {int burn=0,cook=0,duration=200;};
+    FurnaceState furnaceState(int x,int y,int z)const;
+    std::vector<ContainerItem> carriedItems()const;
+    bool setCreativeHotbarItem(int slot,int id,int damage=0,int count=1);
+    bool swapCarriedSlots(int first,int second);
+    bool drinkPotion(int damage);
+    const std::vector<PotionEffect>& activePotionEffects()const;
+    int potionEffectDuration(int id)const;
+    double potionSpeedMultiplier()const;
+    int playerHealth()const;
+    int playerFoodLevel()const;
+    float playerSaturation()const;
+    int playerExperienceLevel()const;
+    int playerTotalExperience()const;
+    bool giveCreativeItem(int id,int damage=0);
+    bool transferChestItem(int x,int y,int z,int slot,bool take,int amount=-1);
+    bool transferEnderChestItem(int x,int y,int z,int slot,bool take,int amount=-1);
+    bool transferFurnaceItem(int x,int y,int z,int slot,bool take,int targetSlot=0,int amount=-1);
+    bool transferBrewingItem(int x,int y,int z,int slot,bool take,int targetSlot=0,int amount=-1);
+    bool breakBlock(int x,int y,int z);
+    bool useBlock(int x,int y,int z);
+    bool useCauldron(int x,int y,int z,int heldItemId);
+    bool placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw);
+    int getData(int x,int y,int z)const;
+    bool setData(int x,int y,int z,int data);
+    // Call after an accepted edit. Returns fizz locations for the future effects system.
+    // Raw set/setData deliberately remain no-update storage operations.
+    std::vector<Vec3> updateLiquidNeighbors(int x,int y,int z);
+    int skyLight(int x,int y,int z)const;
+    int blockLight(int x,int y,int z)const;
+    int renderLight(int x,int y,int z,bool liquid=false)const;
+    float skyDarken()const;
+    std::int64_t time()const;
+    float rainLevel()const;
+    float thunderLevel()const;
+    std::array<float,3> skyColour(int x,int z)const;
+    std::array<int,9> neighboringBiomes(int x,int z)const;
+    void tickTime();
+    void setPlayerPosition(Vec3 position);
+    bool spawnCreativeEgg(int entityId,Vec3 position);
+    bool attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach=6);
+    const std::vector<SimulatedEntity>& entities()const;
+    const std::vector<ExperienceOrbState>& experienceOrbs()const;
+    const std::vector<HangingDecoration>& hangingDecorations()const;
+    std::optional<SkullInfo> skullInfo(int x,int y,int z)const;
+    void setName(const std::string& name);
+    int surface(int x,int z) const;
+    Vec3 spawn() const;
+    bool collides(Vec3 feet) const;
+    bool collides(Vec3 feet,double width,double entityHeight) const;
+    Hit raycast(Vec3 origin, Vec3 direction, double reach=6) const;
+    void save(const std::filesystem::path& path);
+    bool load(const std::filesystem::path& path);
+};
+}

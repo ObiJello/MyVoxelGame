@@ -4,12 +4,19 @@
 #include "MobParticleSystem.hpp"
 #include "common/core/Features.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
+#include "../environment/EntityEnvironment.hpp"
+#include "common/world/lighting/LightCoords.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "client/world/ClientLevel.hpp"
 #include "client/world/ClientBlockAccess.hpp"
+#include "../texture/AtlasBuilder.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/PotentSulfurBlock.hpp"
+#include "common/world/fluid/FluidState.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 #include "client/portal/ClientImmersivePortals.hpp"
 #endif
@@ -18,6 +25,7 @@
 #include "stb_image.h"
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 
@@ -34,7 +42,7 @@ namespace Render {
     // backends (same trick as PortalParticleSystem).
     const char* MobParticleSystem::s_vertSource = R"(
 #version 330 core
-layout(location = 0) in vec3 aPos;    // world-space corner
+layout(location = 0) in vec3 aPos;    // render-space corner
 layout(location = 1) in vec2 aUV;
 layout(location = 2) in vec4 aColor;  // particle rCol/gCol/bCol/alpha
 
@@ -42,11 +50,13 @@ uniform mat4 uMVP;
 
 out vec2 vUV;
 out vec4 vColor;
+out vec3 vRenderPos;   // for the fog
 
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
     vUV = aUV;
     vColor = aColor;
+    vRenderPos = aPos;
 }
 )";
 
@@ -54,9 +64,22 @@ void main() {
 #version 330 core
 in vec2 vUV;
 in vec4 vColor;
+in vec3 vRenderPos;
 out vec4 FragColor;
 
 uniform sampler2D uSprite;
+// MC particle.fsh: the lightmap, then the fog — the terrain's fog, so a
+// particle fades into the Blindness black with everything else.
+uniform vec3 uEntityLight;    // the draw's lightmap colour (EntityEnvironment.hpp)
+uniform vec3  uCameraPos;     // render space
+uniform vec4  uFogColor;      // rgb, a = strength
+uniform vec4  uFogEnv;        // (envStart, envEnd, rdStart, rdEnd)
+
+float linearFog(float d, float s, float e) {
+    if (d <= s) return 0.0;
+    if (d >= e) return 1.0;
+    return (d - s) / (e - s);
+}
 
 void main() {
     vec4 s = texture(uSprite, vUV);
@@ -64,6 +87,13 @@ void main() {
     // MC's PARTICLE cutout threshold (alpha test 0.1) — applied to the
     // blended pass so fully transparent texels never write.
     if (c.a < 0.1) discard;
+    c.rgb *= uEntityLight;
+    vec3 fogDelta = vRenderPos - uCameraPos;
+    float sph = length(fogDelta);
+    float cyl = max(length(fogDelta.xz), abs(fogDelta.y));
+    float fogValue = max(linearFog(sph, uFogEnv.x, uFogEnv.y),
+                         linearFog(cyl, uFogEnv.z, uFogEnv.w));
+    c.rgb = mix(c.rgb, uFogColor.rgb, fogValue * uFogColor.a);
     FragColor = c;
 }
 )";
@@ -82,8 +112,10 @@ void main() {
         if (!g_renderBackend) return;
         DestroySlots();
         if (m_shader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_shader); m_shader = INVALID_SHADER; }
-        for (auto& t : m_textures) {
-            if (t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(t); t = INVALID_TEXTURE; }
+        for (int i = 0; i < kTextureCount; ++i) {
+            TextureHandle& t = m_textures[i];
+            if (t != INVALID_TEXTURE && IsOwnedTexture(i)) g_renderBackend->DestroyTexture(t);
+            t = INVALID_TEXTURE;
         }
         m_particles.clear();
         m_incoming.clear();
@@ -135,12 +167,35 @@ void main() {
             std::snprintf(path, sizeof(path), "assets/textures/particle/spell_%d.png", i);
             m_textures[kTexSpell0 + i] = load(path);
         }
+        // MC particles/pause_mob_growth.json and reset_mob_growth.json both
+        // name the one `glint` sprite.
+        m_textures[kTexGlint] = load("assets/textures/particle/glint.png");
+        // MC particles/flame.json: the one `flame` sprite.
+        m_textures[kTexFlame] = load("assets/textures/particle/flame.png");
+        // The potent sulfur geyser (26.3): particles/sulfur_bubbles.json names
+        // the one `bubble_white` sprite; noxious_gas, geyser_base, geyser_poof
+        // and geyser_plume.json list their eight frames _01.._08 ascending.
+        m_textures[kTexBubbleWhite] = load("assets/textures/particle/bubble_white.png");
+        const struct { int first; const char* name; } sheets[] = {
+            { kTexNoxiousGas0,  "noxious_gas"  },
+            { kTexGeyserBase0,  "geyser_base"  },
+            { kTexGeyserPoof0,  "geyser_poof"  },
+            { kTexGeyserPlume0, "geyser_plume" },
+        };
+        for (const auto& sheet : sheets) {
+            for (int i = 0; i < 8; ++i) {
+                std::snprintf(path, sizeof(path), "assets/textures/particle/%s_%02d.png", sheet.name, i + 1);
+                m_textures[sheet.first + i] = load(path);
+            }
+        }
     }
 
     void MobParticleSystem::ReloadTextures() {
         if (!g_renderBackend || m_shader == INVALID_SHADER) return;
-        for (TextureHandle& t : m_textures) {
-            if (t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(t); t = INVALID_TEXTURE; }
+        for (int i = 0; i < kTextureCount; ++i) {
+            TextureHandle& t = m_textures[i];
+            if (t != INVALID_TEXTURE && IsOwnedTexture(i)) g_renderBackend->DestroyTexture(t);
+            t = INVALID_TEXTURE;
         }
         LoadSprites();
     }
@@ -151,10 +206,11 @@ void main() {
         if (g_renderBackend->GetType() == BackendType::OpenGL) {
             m_shader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
         } else {
-            // Vulkan: precompiled SPIR-V (shaders/mob_particle_vk.*.spv),
-            // same push-constant block and block vertex layout as the rest
-            // of the VK pipeline — see PortalParticleSystem's note.
-            m_shader = g_renderBackend->CreateShaderFromFiles(
+            // Vulkan: precompiled SPIR-V (shaders/mob_particle_vk.*.spv) on
+            // the portal pipeline layout — the fragment shader reads the
+            // frame's fog from the Common UBO (EntityEnvironment.hpp); the
+            // block vertex layout as the rest of the VK pipeline.
+            m_shader = EntityEnvironment::CreateShader(
                 "shaders/mob_particle.vert", "shaders/mob_particle.frag");
         }
         if (m_shader == INVALID_SHADER) {
@@ -198,19 +254,40 @@ void main() {
 
     // ── Spawning — the MC particle constructors, constants verbatim ───────
 
-    // MC ParticleType.getOverrideLimiter() — true only for the types spawned
-    // through addAlwaysVisibleParticle. EXPLOSION_EMITTER is the one this
-    // engine spawns that way (LevelEventHandler:340); a distant blast keeps
-    // its fireball and loses only the debris.
+    // MC ParticleType.getOverrideLimiter(). EXPLOSION_EMITTER (spawned through
+    // addAlwaysVisibleParticle, LevelEventHandler:340) — a distant blast
+    // keeps its fireball and loses only the debris — and the four geyser
+    // types, which ParticleTypes registers with overrideLimiter true, so a
+    // plume shows from anywhere its seed was spawned.
     bool MobParticleSystem::OverridesParticleLimiter(Game::ParticleKind kind) {
-        return kind == Game::ParticleKind::ExplosionEmitter;
+        switch (kind) {
+            case Game::ParticleKind::ExplosionEmitter:
+            case Game::ParticleKind::Geyser:
+            case Game::ParticleKind::GeyserBase:
+            case Game::ParticleKind::GeyserPoof:
+            case Game::ParticleKind::GeyserPlume:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // The addAlwaysVisibleParticle callers: the explosion emitter, Potent-
+    // SulfurBlock.animateTick's SULFUR_BUBBLES and NoxiousGasCloudParticle's
+    // NOXIOUS_GAS. The latter two do NOT override the 32-block limiter
+    // (their types register overrideLimiter false); they only get the
+    // Minimal setting's reprieve.
+    bool MobParticleSystem::AlwaysShown(Game::ParticleKind kind) {
+        return kind == Game::ParticleKind::ExplosionEmitter ||
+               kind == Game::ParticleKind::SulfurBubbles ||
+               kind == Game::ParticleKind::NoxiousGas;
     }
 
     bool MobParticleSystem::ShouldSpawn(const Client::ClientLevelBridge::QueuedParticle& q,
                                         const glm::vec3& cameraPos) {
         using Game::ParticleStatus;
         const bool overrideLimiter = OverridesParticleLimiter(q.kind);
-        const bool alwaysShow = overrideLimiter;   // addAlwaysVisibleParticle
+        const bool alwaysShow = AlwaysShown(q.kind);   // addAlwaysVisibleParticle
 
         // calculateParticleLevel
         ParticleStatus status = m_particleStatus;
@@ -320,6 +397,60 @@ void main() {
                 p.hasPhysics = true;
                 break;
             }
+            case Game::ParticleKind::HushMist: {
+                // Aurelith's river mist (engine kind): a slow, faint violet
+                // puff hugging the water. One frame of the generic smoke
+                // sheet kept for life (a full one, 5..7), a quarter to a
+                // half of a block across at first, swelling as it drifts;
+                // the exact velocity the water hands it, damped; no
+                // collision (it is haze, not a thing).
+                p.spriteFrame = static_cast<uint8_t>(5 + rng.NextInt(3));
+                p.xd = q.vx; p.yd = q.vy; p.zd = q.vz;
+                p.quadSize = 0.55f + rng.NextFloat() * 0.45f;
+                const float br = 0.75f + rng.NextFloat() * 0.25f;
+                p.rCol = br * 0.62f; p.gCol = br * 0.42f; p.bCol = br * 1.0f;
+                p.alpha = 0.0f;
+                p.lifetime = 140 + rng.NextInt(80);
+                p.gravity = 0.0f;
+                p.hasPhysics = false;
+                break;
+            }
+            case Game::ParticleKind::VesperGlint: {
+                // A glint skimming the river's surface (engine kind): the
+                // glint sprite, tiny, pale violet-cyan, a short life that
+                // twinkles (the alpha is a fast flicker under a fade).
+                initQuadSize();
+                p.xd = q.vx; p.yd = q.vy; p.zd = q.vz;
+                p.quadSize = 0.035f + rng.NextFloat() * 0.035f;
+                const float cyan = rng.NextFloat();
+                p.rCol = 0.72f - 0.25f * cyan; p.gCol = 0.70f + 0.28f * cyan; p.bCol = 1.0f;
+                p.alpha = 0.0f;
+                p.lifetime = 20 + rng.NextInt(24);
+                p.gravity = 0.0f;
+                p.hasPhysics = false;
+                p.spriteFrame = static_cast<uint8_t>(rng.NextInt(256));   // the twinkle's phase
+                break;
+            }
+            case Game::ParticleKind::Flame: {
+                // MC FlameParticle → RisingParticle(level, x, y, z, xd, yd,
+                // zd, sprite): the 7-arg base (jittered, normalised
+                // velocity), damped to 1% plus the passed velocity, a +-0.05
+                // position jitter, friction 0.96, lifetime 8 / (r*0.8 + 0.2)
+                // + 4. FlameParticle.move skips collision (hasPhysics false).
+                randomizeVelocity(q.vx, q.vy, q.vz);
+                initQuadSize();
+                p.friction = 0.96f;
+                p.xd = p.xd * 0.009999999776482582 + q.vx;
+                p.yd = p.yd * 0.009999999776482582 + q.vy;
+                p.zd = p.zd * 0.009999999776482582 + q.vz;
+                p.x += static_cast<double>((rng.NextFloat() - rng.NextFloat()) * 0.05f);
+                p.y += static_cast<double>((rng.NextFloat() - rng.NextFloat()) * 0.05f);
+                p.z += static_cast<double>((rng.NextFloat() - rng.NextFloat()) * 0.05f);
+                p.lifetime = static_cast<int>(
+                    8.0 / (static_cast<double>(rng.NextFloat()) * 0.8 + 0.2)) + 4;
+                p.hasPhysics = false;
+                break;
+            }
             case Game::ParticleKind::Poof: {
                 // MC ExplodeParticle(level, x, y, z, xa, ya, za, sprites):
                 // 4-arg base (no velocity jitter), then ±0.05 jitter around
@@ -413,6 +544,284 @@ void main() {
                 p.rCol = q.r; p.gCol = q.g; p.bCol = q.b; p.alpha = q.a;
                 break;
             }
+            case Game::ParticleKind::HappyVillager: {
+                // MC SuspendedTownParticle.HappyVillagerProvider: the 7-arg
+                // base (jittered velocity), a 0.2..0.3 grey the provider
+                // overrides to white, quad × (rand*0.6+0.5), velocity damped
+                // to 2%, lifetime 20 / (rand*0.8 + 0.2); tick: 0.99 drag, no
+                // gravity, no collision (its move is a plain box shift).
+                randomizeVelocity(q.vx, q.vy, q.vz);
+                initQuadSize();
+                (void)rng.NextFloat();   // the base grey, overridden by setColor(1,1,1)
+                p.rCol = 1.0f; p.gCol = 1.0f; p.bCol = 1.0f;
+                p.quadSize *= rng.NextFloat() * 0.6f + 0.5f;
+                p.xd *= 0.02; p.yd *= 0.02; p.zd *= 0.02;
+                p.lifetime = static_cast<int>(20.0 / (static_cast<double>(rng.NextFloat()) * 0.8 + 0.2));
+                p.friction = 0.99f;
+                p.gravity = 0.0f;
+                p.hasPhysics = false;
+                break;
+            }
+            case Game::ParticleKind::PauseMobGrowth:
+            case Game::ParticleKind::ResetMobGrowth: {
+                // MC SimpleVerticalParticle(level, x, y, z, xa, ya, za,
+                // sprite, upwards): the 7-arg base draws and jitters a
+                // velocity, then the constructor overwrites it with the
+                // exact (xa, ya, za) — zero from AgeableMob — sets gravity
+                // 0, nudges yd by ±0.03 (down for PAUSE, up for RESET),
+                // scales the quad by rand*0.6+0.5 and lives 8 ticks.
+                // OPAQUE layer, physics on (the base default).
+                randomizeVelocity(q.vx, q.vy, q.vz);
+                initQuadSize();
+                p.xd = q.vx; p.yd = q.vy; p.zd = q.vz;
+                p.gravity = 0.0f;
+                p.yd += (q.kind == Game::ParticleKind::ResetMobGrowth) ? 0.03 : -0.03;
+                p.quadSize *= rng.NextFloat() * 0.6f + 0.5f;
+                p.lifetime = 8;
+                p.hasPhysics = true;
+                break;
+            }
+            case Game::ParticleKind::BlockMarker: {
+                // MC BlockMarker(level, x, y, z, state): the 4-arg
+                // SingleQuadParticle base (no velocity — the marker never
+                // moves; it draws the quad-size random all the same), then
+                // gravity 0, lifetime 80, hasPhysics false. getQuadSize is a
+                // constant 0.5 regardless of the base's roll.
+                initQuadSize();
+                p.gravity = 0.0f;
+                p.lifetime = 80;
+                p.hasPhysics = false;
+                p.quadSize = 0.5f;
+                // The sprite: getBlockStateModelSet().getParticleMaterial
+                // (state).sprite() — the state model's `particle` texture on
+                // the blocks atlas (item/barrier for a barrier, item/light_NN
+                // for a light at level NN).
+                const Game::BlockState state = Game::BlockState::FromRawId(q.blockState);
+                const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(state);
+                AtlasUVRect rect;
+                if (!g_atlasBuilder ||
+                    !g_atlasBuilder->GetUVRect(model.ResolveTexture("particle"), rect)) {
+                    return;   // no sprite for this state: nothing to show
+                }
+                p.u0 = rect.uvMin.x; p.v0 = rect.uvMin.y;
+                p.u1 = rect.uvMax.x; p.v1 = rect.uvMax.y;
+                break;
+            }
+            case Game::ParticleKind::HushMote: {
+                // The Hush's own: a soft glint (the golden-dandelion sprite,
+                // tinted cyan) that drifts on the exact velocity the sweep
+                // hands it, fades in and out over a 100..159-tick life, and
+                // never touches the collider. Modelled on MC's end-rod
+                // particle (SimpleAnimatedParticle: damped drift, colour
+                // fade) rather than ported from one — there is no vanilla
+                // counterpart for a biome-wide ambient mote at this scale.
+                initQuadSize();
+                p.xd = q.vx; p.yd = q.vy; p.zd = q.vz;
+                p.quadSize = 0.03f + rng.NextFloat() * 0.03f;
+                const float br = rng.NextFloat() * 0.4f + 0.6f;
+                if (q.r < 1.0f || q.g < 1.0f || q.b < 1.0f) {
+                    // Tinted (AddColorParticle): Aurelith's voice-coloured
+                    // motes — the Four Voices' colours, the discord's violet.
+                    p.rCol = br * q.r; p.gCol = br * q.g; p.bCol = br * q.b;
+                } else {
+                    p.rCol = br * 0.55f; p.gCol = br * 0.95f; p.bCol = br * 1.0f;
+                }
+                p.alpha = 0.0f;
+                p.lifetime = 100 + rng.NextInt(60);
+                p.gravity = 0.0f;
+                p.hasPhysics = false;
+                break;
+            }
+            case Game::ParticleKind::HushPortal: {
+                // MC PortalParticle(level, x, y, z, xd, yd, zd, sprite) — the
+                // nether portal's motes, recoloured for the Hush. Its
+                // Provider draws the sprite first (`sprite.get(random)`: ONE
+                // frame of particles/portal.json's generic_0..7, kept for
+                // life — not an age walk), the 4-arg SingleQuadParticle base
+                // draws the quad size, and the constructor then overwrites:
+                // the exact addParticle velocity (no jitter), quadSize
+                // 0.1·(rand·0.2+0.5), a brightness of rand·0.6+0.4 over the
+                // tint, and a 40..49-tick life. No physics: tick() is a
+                // closed curve back to the start (TickParticle), so the
+                // collider never has a say; false keeps it out of the loop.
+                //
+                // MC's tint is (0.9, 0.3, 1.0) — nether purple. The Hush's
+                // portal is sculk teal: #2BD4C0 = (0.17, 0.83, 0.75).
+                //
+                // MC also brightens the mote with age (getLightCoords adds
+                // block emission ramping by (age/lifetime)^4); this renderer
+                // has no lightmap and draws every particle fullbright (see
+                // the header), so the mote is simply bright from the start.
+                p.spriteFrame = static_cast<uint8_t>(rng.NextInt(8));
+                initQuadSize();
+                p.xd = q.vx; p.yd = q.vy; p.zd = q.vz;
+                p.xStart = p.x; p.yStart = p.y; p.zStart = p.z;
+                p.quadSize = 0.1f * (rng.NextFloat() * 0.2f + 0.5f);
+                const float br = rng.NextFloat() * 0.6f + 0.4f;
+                p.rCol = br * 0.17f; p.gCol = br * 0.83f; p.bCol = br * 0.75f;
+                p.lifetime = static_cast<int>(rng.NextFloat() * 10.0f) + 40;
+                p.gravity = 0.0f;
+                p.hasPhysics = false;
+                break;
+            }
+            case Game::ParticleKind::AetherPortal:
+            case Game::ParticleKind::Portal: {
+                // MC PortalParticle again, exactly as HushPortal above — one
+                // random frame of the generic sheet, the addParticle velocity
+                // verbatim, quadSize 0.1·(rand·0.2+0.5), brightness
+                // rand·0.6+0.4 over the tint, a 40..49-tick life, no physics.
+                // The tints: vanilla PORTAL's (0.9, 0.3, 1.0) for the
+                // twilight pool (TFPortalBlock.animateTick), and the Aether's
+                // AETHER_PORTAL pale blue (0.6, 0.8, 1.0).
+                p.spriteFrame = static_cast<uint8_t>(rng.NextInt(8));
+                initQuadSize();
+                p.xd = q.vx; p.yd = q.vy; p.zd = q.vz;
+                p.xStart = p.x; p.yStart = p.y; p.zStart = p.z;
+                p.quadSize = 0.1f * (rng.NextFloat() * 0.2f + 0.5f);
+                const float br = rng.NextFloat() * 0.6f + 0.4f;
+                if (q.kind == Game::ParticleKind::AetherPortal) {
+                    p.rCol = br * 0.6f; p.gCol = br * 0.8f; p.bCol = br * 1.0f;
+                } else {
+                    p.rCol = br * 0.9f; p.gCol = br * 0.3f; p.bCol = br * 1.0f;
+                }
+                p.lifetime = static_cast<int>(rng.NextFloat() * 10.0f) + 40;
+                p.gravity = 0.0f;
+                p.hasPhysics = false;
+                break;
+            }
+            case Game::ParticleKind::SulfurBubbles: {
+                // MC SulfurBubbleParticle(level, x, y, z, xa, za, sprite) —
+                // its Provider hands (xAux, yAux) in as (xa, za). The 4-arg
+                // SingleQuadParticle base: no velocity jitter, the quad size
+                // drawn and then replaced. Rises on negative gravity through
+                // 0.85 friction for (at most) three blocks; the tick removes
+                // it once it leaves the water, tops out or stops rising, so
+                // the lifetime is effectively forever.
+                initQuadSize();
+                p.gravity = -0.04f;
+                p.friction = 0.85f;
+                p.bbWidth = p.bbHeight = 0.02f;   // setSize(0.02F, 0.02F)
+                p.xd = q.vx * 0.20000000298023224 +
+                       static_cast<double>((rng.NextFloat() * 2.0f - 1.0f) * 0.02f);
+                p.zd = q.vy * 0.20000000298023224 +
+                       static_cast<double>((rng.NextFloat() * 2.0f - 1.0f) * 0.02f);
+                p.sizeMin = 0.02f + 0.02f * rng.NextFloat();   // sizeStart
+                p.quadSize = p.sizeMin;
+                p.lifetime = INT_MAX;
+                p.yStart = p.y;              // yStart = yo
+                p.yEnd = p.y + 4.0 - 1.0;
+                p.yPrev = p.y;
+                break;
+            }
+            case Game::ParticleKind::NoxiousGas: {
+                // MC NoxiousGasParticle → BaseAshSmokeParticle(level, x, y, z,
+                // 0.1, 0.1, 0.1, xa, ya, za, 3.0, sprites, 0.3, 5, -0.02,
+                // true); then white, a lifetime of 6 / (r·0.5 + 0.5) · scale
+                // and a fade over its second half (TickParticle).
+                constexpr float scale = 3.0f;
+                randomizeVelocity(0.0, 0.0, 0.0);
+                initQuadSize();
+                p.friction = 0.96f;
+                p.gravity = -0.02f;
+                p.speedUpWhenYMotionIsBlocked = true;
+                p.xd *= 0.1; p.yd *= 0.1; p.zd *= 0.1;
+                p.xd += q.vx; p.yd += q.vy; p.zd += q.vz;
+                (void)rng.NextFloat();   // the base's colorRandom grey, overridden below
+                p.quadSize *= 0.75f * scale;
+                p.lifetime = std::max(static_cast<int>(
+                    5.0 / (static_cast<double>(rng.NextFloat()) * 0.8 + 0.2) *
+                    static_cast<double>(scale)), 1);
+                p.hasPhysics = true;
+                p.rCol = 1.0f; p.gCol = 1.0f; p.bCol = 1.0f;
+                p.lifetime = static_cast<int>(
+                    6.0 / (static_cast<double>(rng.NextFloat()) * 0.5 + 0.5) *
+                    static_cast<double>(scale));
+                p.fadeStart = static_cast<float>(p.lifetime) / 2.0f;
+                break;
+            }
+            case Game::ParticleKind::NoxiousGasCloud: {
+                // MC NoxiousGasCloudParticle: an unrendered 20-tick seed at
+                // rest (the 4-arg base), puffing NOXIOUS_GAS (TickParticle).
+                p.lifetime = 20;
+                p.hasPhysics = false;
+                break;
+            }
+            case Game::ParticleKind::Geyser: {
+                // MC GeyserEruptionParticle: an unrendered 20-tick seed at
+                // rest that throws the base, the plume and the poof
+                // (TickParticle). GeyserParticleOptions.waterBlocks rides vx.
+                p.lifetime = 20;
+                p.waterBlocks = static_cast<int>(q.vx);
+                p.hasPhysics = false;
+                break;
+            }
+            case Game::ParticleKind::GeyserBase:
+            case Game::ParticleKind::GeyserPoof: {
+                // MC GeyserBaseParticle's Provider: ±0.25 around the seed,
+                // 0.2 up. Then BaseAshSmokeParticle(level, x, y, z, burst,
+                // burst, burst, xa, ya, za, size, sprites, 0.0, 0, 0.0, true)
+                // with burst = base + 0.25·water (base 1.5 for GEYSER_BASE,
+                // 2.0 for GEYSER_POOF) and size = 3 + 0.125·water; then
+                // white, friction 0.725, only ever rising (|yd|), 20..25
+                // ticks. The seed forwards its own velocity, which is zero.
+                p.x += static_cast<double>((rng.NextFloat() - 0.5f) * 0.5f);
+                p.y += static_cast<double>((rng.NextFloat() - 0.5f) * 0.5f) + 0.20000000298023224;
+                p.z += static_cast<double>((rng.NextFloat() - 0.5f) * 0.5f);
+                const int water = static_cast<int>(q.vx);
+                const float burstBase = q.kind == Game::ParticleKind::GeyserPoof ? 2.0f : 1.5f;
+                const float burst = burstBase + 0.25f * static_cast<float>(water);
+                const float size = 3.0f + 0.125f * static_cast<float>(water);
+                randomizeVelocity(0.0, 0.0, 0.0);
+                initQuadSize();
+                p.friction = 0.96f;
+                p.gravity = 0.0f;
+                p.speedUpWhenYMotionIsBlocked = true;
+                p.xd *= static_cast<double>(burst);
+                p.yd *= static_cast<double>(burst);
+                p.zd *= static_cast<double>(burst);
+                (void)rng.NextFloat();   // colorRandom 0: a black base, overridden below
+                p.quadSize *= 0.75f * size;
+                (void)rng.NextFloat();   // maxLifetime 0: lifetime max(0, 1), replaced below
+                p.hasPhysics = true;
+                p.friction = 0.725f;
+                p.rCol = 1.0f; p.gCol = 1.0f; p.bCol = 1.0f;
+                p.yd = std::abs(p.yd);
+                const float lifetimeFactor = 0.8f + 0.2f * rng.NextFloat();
+                p.lifetime = static_cast<int>(25.0f * lifetimeFactor);
+                break;
+            }
+            case Game::ParticleKind::GeyserPlume: {
+                // MC GeyserPlumeParticle's Provider: ±0.1 across, 0..1 up.
+                // Then the 8-arg SingleQuadParticle base (a jittered
+                // velocity, the quad size drawn), and: a plume 5 blocks per
+                // water block tall, driven up by an initial propulsion
+                // (negative gravity) that TickParticle turns into a
+                // growing pull as it climbs, a slight horizontal spray,
+                // friction 1, and a quad growing from minSize to maxSize.
+                p.x += static_cast<double>((rng.NextFloat() - 0.5f) * 0.2f);
+                p.y += static_cast<double>(rng.NextFloat());
+                p.z += static_cast<double>((rng.NextFloat() - 0.5f) * 0.2f);
+                const int water = static_cast<int>(q.vx);
+                randomizeVelocity(0.0, 0.0, 0.0);
+                initQuadSize();
+                const int plumeHeight = 5 * std::max(1, water);
+                p.hasPhysics = true;
+                p.speedUpWhenYMotionIsBlocked = true;
+                p.lifetime = plumeHeight * 5;
+                p.yd = 0.0;
+                p.yStart = p.y;
+                p.yEnd = p.yStart + static_cast<double>(plumeHeight) - 1.0;
+                p.sprayX = (rng.NextFloat() - 0.5f) * 0.2f;
+                p.sprayZ = (rng.NextFloat() - 0.5f) * 0.2f;
+                p.friction = 1.0f;
+                p.propulsion = (water == 1 ? 1.5f : 1.0f) * static_cast<float>(plumeHeight) * 1.45f;
+                p.gravity = -p.propulsion;
+                const float initiallyRandomizedSize = p.quadSize * 0.75f;
+                p.sizeMin = initiallyRandomizedSize * (2.0f + static_cast<float>(plumeHeight) / 8.0f);
+                p.sizeMax = initiallyRandomizedSize * (3.0f + static_cast<float>(plumeHeight) / 8.0f);
+                p.quadSize = p.sizeMin;
+                break;
+            }
         }
 
         p.xo = p.x; p.yo = p.y; p.zo = p.z;
@@ -433,10 +842,12 @@ void main() {
         if (p.hasPhysics && blocks != nullptr &&
             (xa != 0.0 || ya != 0.0 || za != 0.0) &&
             xa * xa + ya * ya + za * za < 10000.0) {
-            // Particle AABB: setSize(0.2, 0.2) around (x, y feet, z).
+            // Particle AABB: setSize(bbWidth, bbHeight) around (x, y feet,
+            // z) — 0.2 × 0.2 for all but the sulfur bubble.
+            const double hw = static_cast<double>(p.bbWidth) * 0.5;
             Game::AABBd box;
-            box.min = glm::dvec3(p.x - 0.1, p.y, p.z - 0.1);
-            box.max = glm::dvec3(p.x + 0.1, p.y + 0.2, p.z + 0.1);
+            box.min = glm::dvec3(p.x - hw, p.y, p.z - hw);
+            box.max = glm::dvec3(p.x + hw, p.y + static_cast<double>(p.bbHeight), p.z + hw);
 
             Game::AABBd region = box;
             region.min += glm::dvec3(std::min(xa, 0.0), std::min(ya, 0.0),
@@ -510,6 +921,56 @@ void main() {
             return;
         }
 
+        if (p.kind == Game::ParticleKind::NoxiousGasCloud ||
+            p.kind == Game::ParticleKind::Geyser) {
+            // The 26.3 seeds (NoRenderParticle at rest): Particle.tick ages
+            // them out at the lifetime, and their own tick runs after it
+            // regardless — the removing tick emits too, as MC's does.
+            if (p.age++ >= p.lifetime) p.removed = true;
+            if (p.kind == Game::ParticleKind::NoxiousGasCloud) {
+                // MC NoxiousGasCloudParticle.tick: every other tick, a random
+                // point up to 3 blocks out from the source cell's centre and
+                // a quarter block down; a NOXIOUS_GAS puff there when the gas
+                // can reach it (addAlwaysVisibleParticle).
+                if (p.age % 2 == 0 && blocks) {
+                    const glm::ivec3 source(static_cast<int>(std::floor(p.x)),
+                                            static_cast<int>(std::floor(p.y)),
+                                            static_cast<int>(std::floor(p.z)));
+                    glm::dvec3 dir(static_cast<double>(m_rng.NextFloat() - 0.5f), 0.0,
+                                   static_cast<double>(m_rng.NextFloat() - 0.5f));
+                    const double length = std::sqrt(dir.x * dir.x + dir.z * dir.z);
+                    dir = length < static_cast<double>(1.0e-5f) ? glm::dvec3(0.0) : dir / length;
+                    const float distance = m_rng.NextFloat() * 3.0f;
+                    const glm::dvec3 spawn =
+                        glm::dvec3(source.x + 0.5, source.y + 0.5, source.z + 0.5) +
+                        dir * static_cast<double>(distance) - glm::dvec3(0.0, 0.25, 0.0);
+                    if (Game::PotentSulfur::CanBeReachedByNoxiousGas(*blocks, source, spawn)) {
+                        emitterSpawns.push_back({Game::ParticleKind::NoxiousGas,
+                                                 spawn.x, spawn.y, spawn.z, 0.0, 0.0, 0.0,
+                                                 1.0f, 1.0f, 1.0f, 1.0f});
+                    }
+                }
+            } else {
+                // MC GeyserEruptionParticle.tick: two GEYSER_BASE every other
+                // tick, waterBlocks + 2 GEYSER_PLUME every tick, twenty
+                // GEYSER_POOF every tenth — all from the seed's position,
+                // carrying its water column (vx) and its zero velocity.
+                const double water = static_cast<double>(p.waterBlocks);
+                auto emit = [&](Game::ParticleKind kind) {
+                    emitterSpawns.push_back({kind, p.x, p.y, p.z, water, 0.0, 0.0,
+                                             1.0f, 1.0f, 1.0f, 1.0f});
+                };
+                if (p.age % 2 == 0) {
+                    for (int i = 0; i < 2; ++i) emit(Game::ParticleKind::GeyserBase);
+                }
+                for (int i = 0; i < p.waterBlocks + 2; ++i) emit(Game::ParticleKind::GeyserPlume);
+                if (p.age % 10 == 0) {
+                    for (int i = 0; i < 20; ++i) emit(Game::ParticleKind::GeyserPoof);
+                }
+            }
+            return;
+        }
+
         if (p.age++ >= p.lifetime) {
             p.removed = true;
             return;
@@ -517,6 +978,63 @@ void main() {
 
         if (p.kind == Game::ParticleKind::Explosion) {
             // MC HugeExplosionParticle.tick: ages, never moves.
+            return;
+        }
+
+        if (p.kind == Game::ParticleKind::HushMote) {
+            // Damped drift with a slow bob, no collision; alpha rises over
+            // the first eighth of the life and falls over the last quarter.
+            p.x += p.xd; p.y += p.yd; p.z += p.zd;
+            p.xd *= 0.985; p.yd *= 0.985; p.zd *= 0.985;
+            p.yd += 0.00015 * std::sin(static_cast<double>(p.age) * 0.12);
+            const float t = static_cast<float>(p.age) / static_cast<float>(p.lifetime);
+            p.alpha = std::clamp(std::min(t * 8.0f, (1.0f - t) * 4.0f), 0.0f, 0.9f);
+            return;
+        }
+
+        if (p.kind == Game::ParticleKind::HushMist) {
+            // Drifts with the current, a very slow lift, a lazy sideways
+            // wander; faint throughout (at most ~0.2), in over the first
+            // fifth, out over the last half.
+            p.x += p.xd; p.y += p.yd; p.z += p.zd;
+            p.xd *= 0.992; p.zd *= 0.992; p.yd *= 0.98;
+            const double wander = static_cast<double>(p.age) * 0.035 + p.spriteFrame;
+            p.xd += 0.0004 * std::sin(wander);
+            p.zd += 0.0004 * std::cos(wander * 0.8);
+            const float t = static_cast<float>(p.age) / static_cast<float>(p.lifetime);
+            p.alpha = 0.2f * std::clamp(std::min(t * 5.0f, (1.0f - t) * 2.0f), 0.0f, 1.0f);
+            return;
+        }
+
+        if (p.kind == Game::ParticleKind::VesperGlint) {
+            // Skims, slowing; twinkles — a quick flicker (seeded phase)
+            // under a fade in and out.
+            p.x += p.xd; p.y += p.yd; p.z += p.zd;
+            p.xd *= 0.96; p.yd *= 0.9; p.zd *= 0.96;
+            const float t = static_cast<float>(p.age) / static_cast<float>(p.lifetime);
+            const float twinkle = 0.55f + 0.45f * std::sin(static_cast<float>(p.age) * 1.7f
+                                                           + static_cast<float>(p.spriteFrame) * 0.1f);
+            p.alpha = std::clamp(std::min(t * 6.0f, (1.0f - t) * 3.0f), 0.0f, 1.0f) * twinkle;
+            return;
+        }
+
+        if (p.kind == Game::ParticleKind::HushPortal ||
+            p.kind == Game::ParticleKind::AetherPortal ||
+            p.kind == Game::ParticleKind::Portal) {
+            // MC PortalParticle.tick: no motion integration at all — no
+            // gravity, no friction, no move(). The position is a closed
+            // curve from the spawn point: with a = age/lifetime,
+            //     pos = 1 - (-a + 2a²)
+            //     x = xStart + xd·pos,  y = yStart + yd·pos + (1 - a),  z = …
+            // so the mote shoots out along its velocity (pos peaks at 1.125
+            // a quarter of the way in), is drawn back to where it started
+            // by the end, and rises one block over its life on the way.
+            const float a = static_cast<float>(p.age) / static_cast<float>(p.lifetime);
+            float pos = -a + a * a * 2.0f;
+            pos = 1.0f - pos;
+            p.x = p.xStart + p.xd * static_cast<double>(pos);
+            p.y = p.yStart + p.yd * static_cast<double>(pos) + static_cast<double>(1.0f - a);
+            p.z = p.zStart + p.zd * static_cast<double>(pos);
             return;
         }
 
@@ -549,6 +1067,57 @@ void main() {
         if (p.onGround) {
             p.xd *= 0.7;
             p.zd *= 0.7;
+        }
+
+        // The subclass halves that run after super.tick().
+        if (p.kind == Game::ParticleKind::SulfurBubbles) {
+            // MC SulfurBubbleParticle.tick: gone once out of the water
+            // (the cell it is in no longer a water source), at the top of
+            // its three blocks, or when it stopped rising; else a
+            // horizontal wiggle, a second, sideways-only move, and a quad
+            // growing towards 0.15 with the climb.
+            const bool inWater = blocks &&
+                Game::GetFluidState(*blocks, static_cast<int>(std::floor(p.x)),
+                                    static_cast<int>(std::floor(p.y)),
+                                    static_cast<int>(std::floor(p.z)))
+                    .IsSourceOf(Game::FluidType::Water);
+            if (!p.removed && !inWater) p.removed = true;
+            if (!p.removed && p.y >= p.yEnd) p.removed = true;
+            if (!p.removed && p.y <= p.yPrev) p.removed = true;
+            const auto wiggle = [&]() {
+                return static_cast<double>(m_rng.NextFloat() * 0.003f *
+                                           static_cast<float>(m_rng.NextBool() ? 1 : -1)) * 0.5;
+            };
+            p.xd += wiggle();
+            p.zd += wiggle();
+            MoveParticle(p, p.xd, 0.0, p.zd, blocks);
+            const float travelProgress = static_cast<float>((p.y - p.yStart) / (p.yEnd - p.yStart));
+            p.quadSize = p.sizeMin + travelProgress * (0.15f - p.sizeMin);
+            p.yPrev = p.y;
+        } else if (p.kind == Game::ParticleKind::GeyserPlume) {
+            // MC GeyserPlumeParticle.tick: once it falls, passes the top or
+            // stalls, five more ticks with no friction left; the pull grows
+            // with the cube of the climb, the spray with the climb, the quad
+            // from minSize to maxSize.
+            if (!p.done && (p.yd < 0.0 || p.y > p.yEnd || p.y == p.yo)) {
+                p.lifetime = std::min(p.lifetime, p.age + 5);
+                p.friction = 0.0f;
+                p.done = true;
+            }
+            const double yProgressLinear = std::clamp((p.y - p.yStart) / (p.yEnd - p.yStart), 0.0, 1.0);
+            const double yProgressExponential = std::pow(yProgressLinear, 3.0);
+            p.gravity = p.propulsion * static_cast<float>(yProgressExponential) * 0.12f;
+            p.xd = yProgressLinear * static_cast<double>(p.sprayX);
+            p.zd = yProgressLinear * static_cast<double>(p.sprayZ);
+            p.quadSize = p.sizeMin + static_cast<float>(yProgressLinear *
+                                                        static_cast<double>(p.sizeMax - p.sizeMin));
+        } else if (p.kind == Game::ParticleKind::NoxiousGas) {
+            // MC NoxiousGasParticle.tick: fades out over the second half.
+            if (static_cast<float>(p.age) > p.fadeStart) {
+                const float framesSinceFadeOutStart = static_cast<float>(p.age) - p.fadeStart;
+                p.alpha = (static_cast<float>(p.lifetime) - framesSinceFadeOutStart) /
+                          static_cast<float>(p.lifetime);
+            }
         }
     }
 
@@ -706,7 +1275,41 @@ void main() {
                 // same ascending walk the smoke family does in reverse. Listed
                 // descending here for the same reason: the sheet's JSON order.
                 return kTexGeneric0 + (7 - a * 7 / life);
+            case Game::ParticleKind::BlockMarker:
+                return kTexAtlas;
+            case Game::ParticleKind::PauseMobGrowth:
+            case Game::ParticleKind::ResetMobGrowth:
+            case Game::ParticleKind::HushMote:
+            case Game::ParticleKind::VesperGlint:
+            case Game::ParticleKind::HappyVillager:   // particles/happy_villager.json → glint
+                return kTexGlint;
+            case Game::ParticleKind::HushMist:
+                // One full puff of the generic sheet, kept for life.
+                return kTexGeneric0 + std::min<int>(p.spriteFrame, 7);
+            case Game::ParticleKind::HushPortal:
+            case Game::ParticleKind::AetherPortal:
+            case Game::ParticleKind::Portal:
+                // MC particles/portal.json is the generic_0..7 sheet too, and
+                // PortalParticle's Provider picks one frame at random for
+                // the mote's whole life (SpriteSet.get(random)) — no walk.
+                return kTexGeneric0 + std::min<int>(p.spriteFrame, 7);
+            case Game::ParticleKind::Flame:
+                return kTexFlame;
+            case Game::ParticleKind::SulfurBubbles:
+                return kTexBubbleWhite;
+            // The geyser sheets (setSpriteFromAge; their JSONs list _01.._08
+            // ascending).
+            case Game::ParticleKind::NoxiousGas:
+                return kTexNoxiousGas0 + a * 7 / life;
+            case Game::ParticleKind::GeyserBase:
+                return kTexGeyserBase0 + a * 7 / life;
+            case Game::ParticleKind::GeyserPoof:
+                return kTexGeyserPoof0 + a * 7 / life;
+            case Game::ParticleKind::GeyserPlume:
+                return kTexGeyserPlume0 + a * 7 / life;
             case Game::ParticleKind::ExplosionEmitter:
+            case Game::ParticleKind::NoxiousGasCloud:
+            case Game::ParticleKind::Geyser:
                 return -1;   // NoRenderParticle
         }
         return -1;
@@ -720,6 +1323,9 @@ void main() {
             case Game::ParticleKind::Smoke:
             case Game::ParticleKind::LargeSmoke:
             case Game::ParticleKind::FallingDust:
+            case Game::ParticleKind::NoxiousGas:     // BaseAshSmokeParticle
+            case Game::ParticleKind::GeyserBase:     // BaseAshSmokeParticle
+            case Game::ParticleKind::GeyserPoof:     // BaseAshSmokeParticle
                 // MC HeartParticle / BaseAshSmokeParticle / FallingDustParticle
                 // all share getQuadSize: ramp in over the first 1/32 of the
                 // lifetime, so a particle fades IN rather than popping.
@@ -727,6 +1333,29 @@ void main() {
                        std::clamp((static_cast<float>(p.age) + partialTick) /
                                       static_cast<float>(p.lifetime) * 32.0f,
                                   0.0f, 1.0f);
+            case Game::ParticleKind::HushPortal:
+            case Game::ParticleKind::AetherPortal:
+            case Game::ParticleKind::Portal: {
+                // MC PortalParticle.getQuadSize: s = 1 - (1 - t)² — the mote
+                // starts at nothing and swells to its full size as it is
+                // drawn back home, fastest at the start.
+                float s = (static_cast<float>(p.age) + partialTick) / static_cast<float>(p.lifetime);
+                s = 1.0f - s;
+                s *= s;
+                s = 1.0f - s;
+                return p.quadSize * s;
+            }
+            case Game::ParticleKind::HushMist: {
+                // Swells by half again over its life as it thins.
+                const float t = (static_cast<float>(p.age) + partialTick) / static_cast<float>(p.lifetime);
+                return p.quadSize * (1.0f + 0.5f * t);
+            }
+            case Game::ParticleKind::Flame: {
+                // MC FlameParticle.getQuadSize: shrinks to half by the end,
+                // quadratically.
+                const float t = (static_cast<float>(p.age) + partialTick) / static_cast<float>(p.lifetime);
+                return p.quadSize * (1.0f - t * t * 0.5f);
+            }
             default:
                 return p.quadSize;
         }
@@ -737,9 +1366,13 @@ void main() {
                                    const glm::vec3& cameraPos,
                                    Game::DimensionId dimension) {
         PROFILE_ZONE_N("MobParticles.Render");
-        (void)cameraPos;
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         if (m_particles.empty()) return;
+
+        // The blocks atlas, for the block marker. Fetched per draw because a
+        // resource-pack reload rebuilds it under a new handle.
+        m_textures[kTexAtlas] = g_atlasBuilder ? g_atlasBuilder->GetBackendTextureHandle()
+                                               : INVALID_TEXTURE;
 
         struct Vert {
             float x, y, z;
@@ -751,9 +1384,26 @@ void main() {
         const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
         const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
 
-        // Bucket vertices per sprite texture so each texture is one draw.
-        static thread_local std::vector<Vert> buckets[kTextureCount];
+        // Bucket vertices per sprite texture so each texture is one draw —
+        // twice over: [tex * 2] the particles lit by the sky, [tex * 2 + 1]
+        // the ones MC lights fully (Particle.getLightCoords overrides —
+        // HugeExplosionParticle's FULL_BRIGHT, PortalParticle's block light
+        // ramping to 15; the portal motes share generic_* with the smoke, so
+        // the split cannot follow the texture).
+        static thread_local std::vector<Vert> buckets[kTextureCount * 2];
         for (auto& b : buckets) b.clear();
+        const auto fullBright = [](const auto& particle, int texIdx) {
+            // FlameParticle.getLightCoords: addSmoothBlockEmission ramps the
+            // block light to 15 over the life — lit from the first frame.
+            return (texIdx >= kTexExplosion0 && texIdx < kTexExplosion0 + 16) ||
+                   particle.kind == Game::ParticleKind::Flame ||
+                   particle.kind == Game::ParticleKind::Portal ||
+                   particle.kind == Game::ParticleKind::HushPortal ||
+                   particle.kind == Game::ParticleKind::AetherPortal ||
+                   // The river's own light: its mist and glints glow.
+                   particle.kind == Game::ParticleKind::HushMist ||
+                   particle.kind == Game::ParticleKind::VesperGlint;
+        };
 
         const float pt = m_partialTick;
         for (const auto& p : m_particles) {
@@ -762,22 +1412,35 @@ void main() {
             if (texIdx < 0 || texIdx >= kTextureCount) continue;
             if (m_textures[texIdx] == INVALID_TEXTURE) continue;
 
-            // MC SingleQuadParticle.extractRotatedQuad: lerp(xo → x).
-            const float px = static_cast<float>(
-                p.xo + (p.x - p.xo) * static_cast<double>(pt));
-            const float py = static_cast<float>(
-                p.yo + (p.y - p.yo) * static_cast<double>(pt));
-            const float pz = static_cast<float>(
-                p.zo + (p.z - p.zo) * static_cast<double>(pt));
+            // MC SingleQuadParticle.extractRotatedQuad: lerp(xo → x), in
+            // double, then the view's render origin comes off before the
+            // narrowing to float (RenderOrigin.hpp) — MC subtracts the
+            // camera position at exactly this point for the same reason.
+            const glm::dvec3 interp(p.xo + (p.x - p.xo) * static_cast<double>(pt),
+                                    p.yo + (p.y - p.yo) * static_cast<double>(pt),
+                                    p.zo + (p.z - p.zo) * static_cast<double>(pt));
             const float size = QuadSizeFor(p, pt);
             if (size <= 0.0f) continue;
 
-            const uint8_t r = static_cast<uint8_t>(std::clamp(p.rCol, 0.0f, 1.0f) * 255.0f);
-            const uint8_t g = static_cast<uint8_t>(std::clamp(p.gCol, 0.0f, 1.0f) * 255.0f);
-            const uint8_t b = static_cast<uint8_t>(std::clamp(p.bCol, 0.0f, 1.0f) * 255.0f);
+            // MC Particle.getLightCoords: the light at the particle's cell
+            // (the full-bright kinds: block light 15 — the explosion's
+            // FULL_BRIGHT sky 15 as well), times the lightmap. Every
+            // particle of a bucket shares one draw, so each carries its own
+            // light in its vertex colour (the draw's uEntityLight is 1).
+            glm::vec3 light;
+            {
+                namespace LC = Game::Lighting::LightCoords;
+                const bool explosion = texIdx >= kTexExplosion0 && texIdx < kTexExplosion0 + 16;
+                int packed = explosion ? LC::kFullBright : EntityEnvironment::PackedLightAt(interp);
+                if (!explosion && fullBright(p, texIdx)) packed = LC::WithBlock(packed, 15);
+                light = EntityEnvironment::LightColor(packed);
+            }
+            const uint8_t r = static_cast<uint8_t>(std::clamp(p.rCol * light.r, 0.0f, 1.0f) * 255.0f);
+            const uint8_t g = static_cast<uint8_t>(std::clamp(p.gCol * light.g, 0.0f, 1.0f) * 255.0f);
+            const uint8_t b = static_cast<uint8_t>(std::clamp(p.bCol * light.b, 0.0f, 1.0f) * 255.0f);
             const uint8_t a = static_cast<uint8_t>(std::clamp(p.alpha, 0.0f, 1.0f) * 255.0f);
 
-            const glm::vec3 center(px, py, pz);
+            const glm::vec3 center = Render::ToRender(interp);   // render space
             // MC SingleQuadParticle.render rotates the billboard about the
             // VIEW axis by `roll` when the particle has one. Only falling dust
             // does today, and it is what makes the dust tumble as it drifts
@@ -793,18 +1456,25 @@ void main() {
             }
             right *= size;
             up    *= size;
-            const glm::vec3 c0 = center - right - up;   // uv (0,1)
-            const glm::vec3 c1 = center + right - up;   // uv (1,1)
-            const glm::vec3 c2 = center + right + up;   // uv (1,0)
-            const glm::vec3 c3 = center - right + up;   // uv (0,0)
+            // MC's quad: corner (+1,·) takes u0 and (-1,·) takes u1, and
+            // MC's camera basis maps local +X to the camera's LEFT
+            // (Camera.left = rotation * (1,0,0)) — so the sprite's u0 edge
+            // is on the viewer's left, same as here with `right` = camera
+            // right. v0 is the top row. The rectangle is the whole texture
+            // for the one-file sprites and an atlas cell for the block
+            // marker.
+            const glm::vec3 c0 = center - right - up;   // uv (u0,v1)
+            const glm::vec3 c1 = center + right - up;   // uv (u1,v1)
+            const glm::vec3 c2 = center + right + up;   // uv (u1,v0)
+            const glm::vec3 c3 = center - right + up;   // uv (u0,v0)
 
-            auto& verts = buckets[texIdx];
-            verts.push_back({c0.x, c0.y, c0.z, 0.0f, 1.0f, r, g, b, a});
-            verts.push_back({c1.x, c1.y, c1.z, 1.0f, 1.0f, r, g, b, a});
-            verts.push_back({c2.x, c2.y, c2.z, 1.0f, 0.0f, r, g, b, a});
-            verts.push_back({c0.x, c0.y, c0.z, 0.0f, 1.0f, r, g, b, a});
-            verts.push_back({c2.x, c2.y, c2.z, 1.0f, 0.0f, r, g, b, a});
-            verts.push_back({c3.x, c3.y, c3.z, 0.0f, 0.0f, r, g, b, a});
+            auto& verts = buckets[texIdx * 2 + (fullBright(p, texIdx) ? 1 : 0)];
+            verts.push_back({c0.x, c0.y, c0.z, p.u0, p.v1, r, g, b, a});
+            verts.push_back({c1.x, c1.y, c1.z, p.u1, p.v1, r, g, b, a});
+            verts.push_back({c2.x, c2.y, c2.z, p.u1, p.v0, r, g, b, a});
+            verts.push_back({c0.x, c0.y, c0.z, p.u0, p.v1, r, g, b, a});
+            verts.push_back({c2.x, c2.y, c2.z, p.u1, p.v0, r, g, b, a});
+            verts.push_back({c3.x, c3.y, c3.z, p.u0, p.v0, r, g, b, a});
         }
 
         size_t totalVerts = 0;
@@ -830,11 +1500,17 @@ void main() {
         const glm::mat4 mvp = projection * view;
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
         g_renderBackend->SetUniformInt(m_shader, "uSprite", 0);
+        // The frame's fog, measured from this view's eye (render space).
+        EntityEnvironment::ApplyWorld(m_shader, glm::dvec3(cameraPos));
+        // Each particle's light is in its vertex colour (see the build
+        // above); the draw's own is 1.
+        EntityEnvironment::SetEntityLight(m_shader, glm::vec3(1.0f));
 
         // MC SingleQuadParticle.Layer — the particle engine draws OPAQUE and
         // TRANSLUCENT as two separate passes with different pipeline state,
         // and nearly every particle is OPAQUE (heart, poof, smoke, explode,
-        // huge explosion, falling dust); only the spell swirl is translucent.
+        // huge explosion, falling dust, the geyser); only the spell swirl and
+        // the noxious gas are translucent.
         //
         // The OPAQUE pass writes depth and does NOT blend: the 0.1 alpha
         // cutout in the shader is what shapes the sprite, so blending buys
@@ -856,12 +1532,13 @@ void main() {
             g_renderBackend->SetPipelineState(s);
 
             uint32_t first = 0;
-            for (int t = 0; t < kTextureCount; ++t) {
-                const auto& b = buckets[t];
+            for (int bi = 0; bi < kTextureCount * 2; ++bi) {
+                const auto& b = buckets[bi];
                 if (b.empty()) continue;
-                // Buckets are per TEXTURE, and the spell sheet is the only
-                // translucent one — so the layer split falls out of the
-                // texture split with no extra bucketing.
+                const int t = bi / 2;
+                // Buckets are per TEXTURE, and the spell and noxious gas
+                // sheets are the only translucent ones — so the layer split
+                // falls out of the texture split with no extra bucketing.
                 if (IsTranslucentTexture(t) != !opaquePass) {
                     first += static_cast<uint32_t>(b.size());
                     continue;

@@ -1,6 +1,7 @@
 // File: src/client/renderer/mesh/BlockHighlight.cpp
 #include "BlockHighlight.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
 #include "common/core/Log.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include <glm/gtc/matrix_transform.hpp>
@@ -189,9 +190,12 @@ void main() {
         // scale it by (shapeMax - shapeMin) so it outlines the shape's actual
         // bounds. Full-cube blocks (shapeMin=0, shapeMax=1) reduce to the old
         // identity-scaled cube at integer position — no regression.
+        // The translation is RENDER space (camera-relative, see
+        // RenderOrigin.hpp): the block minus the view's origin, exact in
+        // double; RenderOriented's callers build such a model themselves.
         const glm::vec3 size = shapeMax - shapeMin;
         glm::mat4 model = glm::translate(glm::mat4(1.0f),
-            glm::vec3(blockPos) + shapeMin);
+            Render::ToRender(glm::dvec3(blockPos)) + shapeMin);
         model = glm::scale(model, size);
         RenderOriented(model, projectionMatrix, viewMatrix);
     }

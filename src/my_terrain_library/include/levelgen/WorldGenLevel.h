@@ -191,6 +191,17 @@ public:
         (void)blockName;
         (void)delay;
     }
+
+    /**
+     * WorldGenerationContext.of(level).seaLevel(): the chunk generator's sea
+     * level (VerticalAnchor.seaLevel() resolves against it). Stamped by
+     * ChunkGenerator::applyBiomeDecoration before any feature runs.
+     */
+    int getSeaLevel() const { return m_seaLevel; }
+    void setSeaLevel(int seaLevel) { m_seaLevel = seaLevel; }
+
+private:
+    int m_seaLevel = 63;
 };
 
 } // namespace levelgen

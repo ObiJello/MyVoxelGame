@@ -6,6 +6,7 @@
 
 #include "PortalCameraTransform.hpp"
 #include "common/core/Mth.hpp"
+#include "../core/RenderOrigin.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -60,15 +61,18 @@ namespace Render::PortalTransform {
         // World plane: outward normal = +dst.normal (points into the room
         // the player wants to see); contains the portal origin.
         // worldPlane = (n.x, n.y, n.z, -dot(n, p)).
-        const glm::vec3 nWorld = glm::normalize(dstPortal.normal);
-        const glm::vec3 pWorld = glm::vec3(dstPortal.origin);
-        const glm::vec4 worldPlane(nWorld, -glm::dot(nWorld, pWorld));
+        // Built in double and expressed in the virtual camera's RENDER space
+        // (RenderOrigin.hpp — the caller has made that camera's origin
+        // current), because `virtualView` is a render-space view.
+        const glm::dvec3 nWorld = glm::normalize(glm::dvec3(dstPortal.normal));
+        const glm::dvec4 worldPlane(nWorld, -glm::dot(nWorld, dstPortal.origin));
+        const glm::vec4 renderPlane = Render::PlaneToRender(worldPlane);
 
-        // To eye space: P_eye = transpose(inverse(view)) · P_world.
+        // To eye space: P_eye = transpose(inverse(view)) · P_render.
         // (Plane equations transform by the inverse-transpose of the same
         // matrix used to transform points.)
         const glm::mat4 invViewT = glm::transpose(glm::inverse(virtualView));
-        glm::vec4 c = invViewT * worldPlane;
+        glm::vec4 c = invViewT * renderPlane;
 
         // The portal renderer always wants the camera looking AT the scene
         // through the plane (positive side = visible side). If the eye lies
@@ -210,10 +214,14 @@ namespace Render::PortalTransform {
         }
 
         Camera virt = orig;                     // inherit fov etc.
-        virt.position = glm::vec3(newPos);
+        virt.position = newPos;
         virt.yaw      = newYawDeg;
         virt.pitch    = newPitchDeg;
         virt.roll     = rollDeg;
+        // Its own render origin (RenderOrigin.hpp): the far side is drawn
+        // relative to the virtual camera's block position, so a view into
+        // a place 300,000 blocks away is as exact as the main view.
+        virt.renderOrigin = Render::RenderOriginFor(newPos);
 
         // CRITICAL: compose the view matrix directly from M, bypassing the
         // yaw/pitch/roll path. The lookAt-from-yaw/pitch path is unstable
@@ -230,8 +238,12 @@ namespace Render::PortalTransform {
         // camera were viewing P_src = M^-1 · P_dst. So:
         //     V_virt(P_dst) = V_orig(M^-1 · P_dst) = V_orig · M^-1 · P_dst
         // → V_virt = V_orig · M^-1.
+        //
+        // Both views are camera-relative, so the bridge between the two
+        // render spaces goes with it — built in double (FarRenderView).
         const glm::mat4 origView = orig.GetViewMatrix();
-        virt.viewOverride    = origView * glm::mat4(glm::inverse(M));
+        virt.viewOverride    = Render::FarRenderView(origView, glm::inverse(M),
+                                                     orig.renderOrigin, virt.renderOrigin);
         virt.hasViewOverride = true;
         return virt;
     }

@@ -76,6 +76,9 @@ namespace Render {
         m_slabs.clear();
         m_regions.clear();
         m_pendingFrees.clear();
+        m_usedVertexUnits = 0;
+        m_usedIndices = 0;
+        m_uploadFailed = false;
         m_frameCounter = 0;
         m_slabVertexCapacity = 0;
         m_slabIndexCapacity = 0;
@@ -95,9 +98,22 @@ namespace Render {
         }
 
         if (m_slabs.size() >= kMaxSlabs) {
-            // The origin-table buffer is sized for kMaxSlabs (2 GB of vertex
-            // data at the opaque slab size — never reached in practice).
-            Log::Error("ChunkMegaBuffer: slab limit (%u) reached; section not uploaded", kMaxSlabs);
+            // The origin-table buffer is sized for kMaxSlabs. Reached when
+            // parked meshes (the chunk retention cache) and live ones add up
+            // past it — a far /tp parks a whole render distance of terrain.
+            // The caller re-dirties the section and the chunk manager frees
+            // parked meshes (ConsumeUploadFailed); one line per interval.
+            m_uploadFailed = true;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - m_lastLimitLog >= std::chrono::seconds(5)) {
+                Log::Error("ChunkMegaBuffer: slab limit (%u) reached; section not uploaded "
+                           "(%u more since the last report) — dropping parked meshes to make room",
+                           kMaxSlabs, m_suppressedLimitLogs);
+                m_lastLimitLog = now;
+                m_suppressedLimitLogs = 0;
+            } else {
+                ++m_suppressedLimitLogs;
+            }
             return UINT32_MAX;
         }
 
@@ -181,7 +197,8 @@ namespace Render {
     bool ChunkMegaBuffer::UploadSection(const MegaBufferSectionKey& key,
                                          const float* vertexData, size_t vertexCount,
                                          const uint16_t* indexData, size_t indexCount,
-                                         const uint32_t* faceMap, size_t faceMapTexels) {
+                                         const uint32_t* faceMap, size_t faceMapTexels,
+                                       int32_t fadeStartMs) {
         PROFILE_ZONE;
         if (vertexCount == 0 || indexCount == 0) return false;
         if (!vertexData || !indexData) return false;
@@ -195,7 +212,7 @@ namespace Render {
         // Try to fit in an existing slab (last first — most likely to have space)
         for (int i = static_cast<int>(m_slabs.size()) - 1; i >= 0; i--) {
             if (TryUploadToSlab(static_cast<uint32_t>(i), key, vertexData, vertexCount, indexData, indexCount,
-                                faceMap, faceMapTexels))
+                                faceMap, faceMapTexels, fadeStartMs))
                 return true;
         }
 
@@ -203,7 +220,7 @@ namespace Render {
         uint32_t newSlab = AllocateSlab();
         if (newSlab == UINT32_MAX) return false;
         return TryUploadToSlab(newSlab, key, vertexData, vertexCount, indexData, indexCount,
-                               faceMap, faceMapTexels);
+                               faceMap, faceMapTexels, fadeStartMs);
     }
 
     bool ChunkMegaBuffer::AllocSlot(Slab& slab, uint16_t& outSlot) {
@@ -226,7 +243,8 @@ namespace Render {
     bool ChunkMegaBuffer::TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                                            const float* vertexData, size_t vertexCount,
                                            const uint16_t* indexData, size_t indexCount,
-                                           const uint32_t* faceMap, size_t faceMapTexels) {
+                                           const uint32_t* faceMap, size_t faceMapTexels,
+                                           int32_t fadeStartMs) {
         if (!g_renderBackend) return false;
         Slab& slab = m_slabs[slabIndex];
 
@@ -236,8 +254,13 @@ namespace Render {
         if (!AllocSlot(slab, slot)) return false;
 
         // Vertex allocation: the vertices plus the face-map records behind
-        // them, in whole vertex-stride units (see Region::allocUnits).
-        const size_t faceMapUnits = (faceMapTexels + kWordsPerUnit - 1) / kWordsPerUnit;   // faceMapTexels = uint32 words
+        // them, in whole vertex-stride units (see Region::allocUnits). The
+        // records must start on an 8-byte texel; a 20-byte vertex run ends
+        // on a 4-byte boundary, so a face-mapped region reserves one spare
+        // unit for the (0 or 4 byte) pad.
+        const size_t faceMapUnits = faceMapTexels > 0
+            ? (faceMapTexels + kWordsPerUnit - 1) / kWordsPerUnit + 1       // faceMapTexels = uint32 words
+            : 0;
         const size_t allocUnits = vertexCount + faceMapUnits;
         size_t vertexOffset = 0;
         if (!AllocRegion(slab.freeVertexBlocks, slab.vertexHighWater, slab.vboCapacity, allocUnits, vertexOffset)) {
@@ -258,14 +281,18 @@ namespace Render {
             }
         }
 
-        // The section's origin, one vec4 row the vertex shader adds back to
-        // every vertex's section-relative position. Written before the
+        // The section's origin, one ivec4 row the vertex shader adds back to
+        // every vertex's section-relative position — after subtracting the
+        // view's render origin from it in integer arithmetic (camera-
+        // relative rendering, RenderOrigin.hpp). Written before the
         // vertices that reference it. The row is either brand new or was
         // retired kFreeDelayFrames ago, so no in-flight frame reads it.
         if (m_originsUbo != INVALID_BUFFER) {
-            const glm::vec4 origin(static_cast<float>(key.chunkPos.x * 16),
-                                   static_cast<float>(Config::MinY + key.sectionY * 16),
-                                   static_cast<float>(key.chunkPos.z * 16), 0.0f);
+            // .w: the section's first-upload time, the fade-in's start
+            // (SectionFade.hpp); the shader compares it with uFadeNowMs.
+            const glm::ivec4 origin(key.chunkPos.x * 16,
+                                    Config::MinY + key.sectionY * 16,
+                                    key.chunkPos.z * 16, fadeStartMs);
             g_renderBackend->UpdateBufferUnsynchronized(m_originsUbo,
                                           slabIndex * kSlotBytes + slot * kOriginEntryBytes,
                                           kOriginEntryBytes, &origin);
@@ -279,20 +306,23 @@ namespace Render {
         // precedes.
         {
             const size_t vertexWords = vertexCount * (VERTEX_STRIDE / sizeof(uint32_t));
-            const size_t words = (vertexCount + faceMapUnits) * (VERTEX_STRIDE / sizeof(uint32_t));
-            m_vertexScratch.resize(words);
+            const size_t words = allocUnits * (VERTEX_STRIDE / sizeof(uint32_t));
+            m_vertexScratch.assign(words, 0u);          // pads and spare unit zeroed
             std::memcpy(m_vertexScratch.data(), vertexData, vertexCount * VERTEX_STRIDE);
-            const uint32_t recordBase = static_cast<uint32_t>((vertexOffset + vertexCount) * kRecordsPerUnit);
+            // First record texel: the slab byte just past the vertices,
+            // rounded up to a texel.
+            const size_t vertexEndByte = (vertexOffset + vertexCount) * VERTEX_STRIDE;
+            const size_t recordByte = (vertexEndByte + kRecordBytes - 1) / kRecordBytes * kRecordBytes;
+            const uint32_t recordBase = static_cast<uint32_t>(recordByte / kRecordBytes);
             auto* verts = reinterpret_cast<TerrainVertex*>(m_vertexScratch.data());
             for (size_t i = 0; i < vertexCount; ++i) {
-                verts[i].slot = static_cast<uint16_t>((verts[i].slot & TerrainVertex::kFlagMask) | slot);
+                verts[i].slot = static_cast<uint16_t>(
+                    (verts[i].slot & (TerrainVertex::kFlagMask | TerrainVertex::kNormalMask)) | slot);
                 if (verts[i].slot & TerrainVertex::kMapFlag) verts[i].packedColor += recordBase;
             }
             if (faceMapTexels > 0) {
-                std::memcpy(m_vertexScratch.data() + vertexWords, faceMap, faceMapTexels * sizeof(uint32_t));
-                // Pad the last unit so no stale scratch reaches the GPU.
-                std::fill(m_vertexScratch.begin() + static_cast<std::ptrdiff_t>(vertexWords + faceMapTexels),
-                          m_vertexScratch.end(), 0u);
+                const size_t recordWord = vertexWords + (recordByte - vertexEndByte) / sizeof(uint32_t);
+                std::memcpy(m_vertexScratch.data() + recordWord, faceMap, faceMapTexels * sizeof(uint32_t));
             }
         }
         // Unsynchronised on purpose, on both backends. Every range written
@@ -347,6 +377,8 @@ namespace Render {
         region.sectionIbo   = sectionIbo;
         m_regions[key] = region;
         slab.sectionCount++;
+        m_usedVertexUnits += allocUnits;
+        m_usedIndices += m_perSectionIndexBuffers ? 0 : indexCount;
         return true;
     }
 
@@ -396,6 +428,8 @@ namespace Render {
         if (it == m_regions.end()) return;
 
         const Region& region = it->second;
+        m_usedVertexUnits -= std::min(m_usedVertexUnits, region.allocUnits);
+        if (region.sectionIbo == INVALID_BUFFER) m_usedIndices -= std::min(m_usedIndices, region.indexCount);
         // Per-section IBO is owned by the region, so it dies with it. Nothing was
         // reserved in the slab index free-list in that mode, so do not hand a
         // never-allocated range back to it.
@@ -416,6 +450,7 @@ namespace Render {
             // The parked range still holds live-looking indices until retire
             // zeroes it; the renderer must not bridge a merged draw across it.
             if (!m_perSectionIndexBuffers) slab.hotRangesDirty = true;
+            if (region.noBridge != 0) slab.parkedIndexRanges.erase(region.indexOffset);
             if (slab.sectionCount > 0) slab.sectionCount--;
         }
         m_regions.erase(it);
@@ -517,10 +552,49 @@ namespace Render {
         slab.hotRangesDirty = false;
     }
 
+    void ChunkMegaBuffer::SetSectionNoBridge(const MegaBufferSectionKey& key, uint8_t reason, bool on) {
+        auto it = m_regions.find(key);
+        if (it == m_regions.end()) return;
+        Region& region = it->second;
+        const uint8_t before = region.noBridge;
+        region.noBridge = on ? static_cast<uint8_t>(before | reason) : static_cast<uint8_t>(before & ~reason);
+        if ((before != 0) == (region.noBridge != 0)) return;   // fenced-ness unchanged
+        if (region.slabIndex >= m_slabs.size() || region.indexCount == 0 ||
+            region.sectionIbo != INVALID_BUFFER) {
+            return;   // per-section IBOs are never bridged
+        }
+        auto& ranges = m_slabs[region.slabIndex].parkedIndexRanges;
+        if (region.noBridge != 0) ranges[region.indexOffset] = region.indexCount;
+        else                      ranges.erase(region.indexOffset);
+    }
+
+    std::vector<std::vector<ChunkMegaBuffer::DebugRegionRef>> ChunkMegaBuffer::DebugRegionsBySlab() const {
+        std::vector<std::vector<DebugRegionRef>> out(m_slabs.size());
+        for (const auto& [key, region] : m_regions) {
+            if (region.slabIndex >= out.size() || region.indexCount == 0) continue;
+            out[region.slabIndex].push_back({region.indexOffset, region.indexCount, key});
+        }
+        for (auto& slab : out) {
+            std::sort(slab.begin(), slab.end(),
+                      [](const DebugRegionRef& a, const DebugRegionRef& b) { return a.indexOffset < b.indexOffset; });
+        }
+        return out;
+    }
+
     bool ChunkMegaBuffer::IsIndexGapDrawable(uint32_t slabIndex, size_t gapBegin, size_t gapEnd) const {
         if (gapEnd <= gapBegin) return true;               // no gap at all
         if (slabIndex >= m_slabs.size()) return false;
         Slab& slab = m_slabs[slabIndex];
+        // A fenced section in the gap (SetSectionNoBridge): terrain of an
+        // unloaded chunk, or of one outside the rendered view — never to be
+        // drawn. Same disjoint-and-sorted argument as the hot ranges below.
+        if (!slab.parkedIndexRanges.empty()) {
+            auto p = slab.parkedIndexRanges.lower_bound(gapEnd);   // first starting at/after the end
+            if (p != slab.parkedIndexRanges.begin()) {
+                --p;
+                if (p->first + p->second > gapBegin) return false;
+            }
+        }
         if (slab.hotRangesDirty) RefreshHotRanges(slab, slabIndex);
         if (slab.hotIndexRanges.empty()) return true;
 
@@ -607,9 +681,10 @@ namespace Render {
                 // Deferred: the slab emptied this frame, but the PREVIOUS
                 // frame's command stream may still reference these buffers.
                 // GL's default is an immediate delete (driver refcounts
-                // pending commands); Vulkan queues the handles on the
-                // current frame's deletion queue and frees them after its
-                // fence — destroying immediately there is use-after-free.
+                // pending commands); Vulkan queues the handles behind the
+                // fence of the last submitted frame (this runs before
+                // BeginFrame, see VKBackend::DeletionSlot) — destroying
+                // immediately there is use-after-free.
                 if (slab.faceMapTex != INVALID_TEXTURE) g_renderBackend->DeferredDestroyTexture(slab.faceMapTex);
                 if (slab.vbo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.vbo);
                 if (slab.ibo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.ibo);

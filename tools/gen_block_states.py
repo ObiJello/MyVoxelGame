@@ -58,7 +58,7 @@ BLOCKS THAT POSTDATE THE VENDORED DATA
 --------------------------------------
 65 rows in BlockDefs.inc are newer than this copy of minecraft-data — the
 1.21.9 Copper Age set, the shelves, the oxidised lightning rods.
-`minecraft_code/decompiled_net/` IS that newer version, so the property sets
+`minecraft_code_26.1-snapshot-1/decompiled_net/` IS that newer version, so the property sets
 are in the repo; they just are not in `blocks.json`.
 
 `Blocks.java` shows what class registers each one, and six of the eight
@@ -125,6 +125,9 @@ ALIAS_EXACT = {
     "iron_chain":        "chain",
     "copper_torch":      "torch",
     "copper_wall_torch": "wall_torch",
+    # engine blocks (redstone_plus): the zero-delay torch shares the redstone torch's states
+    "blue_redstone_torch":      "redstone_torch",
+    "blue_redstone_wall_torch": "redstone_wall_torch",
     # 26.2/26.3 blocks (2026-09-05) — the upstream data is 1.21.6, so every
     # one of them copies the older block MC registers with the same class.
     "cinnabar": "stone", "chiseled_cinnabar": "stone", "polished_cinnabar": "stone",
@@ -140,10 +143,219 @@ ALIAS_EXACT = {
     "poplar_sapling": "oak_sapling", "potted_poplar_sapling": "potted_oak_sapling",
     "orange_poplar_leaves": "oak_leaves", "red_poplar_leaves": "oak_leaves",
     "yellow_poplar_leaves": "oak_leaves",
+    # The Hush (engine dimension, 2026-09-21). Each property set MUST equal
+    # the terrain library's block class for the same id (Blocks.cpp
+    # bootstrap) or generated chunks unpack to air.
+    "hushstone": "stone", "polished_hushstone": "stone",
+    "hushstone_bricks": "stone_bricks",
+    "sculk_loam": "dirt",
+    "echo_ore": "lapis_ore",
+    "resonant_crystal": "amethyst_block",
+    "whisperwood_planks": "oak_planks",
+    "hush_moss": "moss_block",
+    "resonance_bloom": "dandelion",            # BushBlock: no properties
+    "whisperwood_log": "oak_log",              # RotatedPillarBlock: axis x/y/z
+    "lantern_leaves": "oak_leaves",            # LeavesBlock: distance/persistent/waterlogged
+    "hush_portal": "nether_portal",            # HORIZONTAL_AXIS: axis x/z
+    # The Hush, second drop (2026-09-22). The whisperwood stairs/slab/fence/
+    # fence_gate/door/trapdoor and the hushstone stairs/slabs/wall resolve
+    # through ALIAS_SUFFIX below (oak_* / cobblestone_wall); these are the
+    # ones no suffix covers.
+    "stripped_whisperwood_log": "stripped_oak_log",   # RotatedPillarBlock: axis
+    "whisperwood_sapling": "oak_sapling",             # SaplingBlock: stage 0/1
+    "cracked_hushstone_bricks": "stone",
+    "chiseled_hushstone_bricks": "stone",
+    "hush_grass": "short_grass",                      # BushBlock: no properties
+    "resonant_cluster": "amethyst_cluster",           # facing (6) + waterlogged
+    "resonite_ore": "lapis_ore",
+    "resonite_block": "iron_block",
+    "echo_lantern": "lantern",                        # hanging + waterlogged
+    "echo_core": "stone",
+    # The Choir Hall puzzle (2026-09-22): the chime has redstone_lamp's single
+    # `lit` (SingleBoolBlockImpl LIT in Blocks.cpp); the altar is a plain cube.
+    "resonant_chime": "redstone_lamp",
+    "choir_altar": "stone",
+    # The tools of the deep (2026-09-22): the echo heart is a beacon-class
+    # cube (no properties). hanging_whisperfruit is in EXPLICIT (age 0..2 and
+    # nothing else — no vanilla block has exactly that set).
+    "echo_heart": "beacon",
+    # The Hush lighthouse (2026-09-22): the lamp is a beacon-class cube with a
+    # block entity (createSimpleBlock in Blocks.cpp: no properties).
+    "hush_lighthouse_lamp": "beacon",
+    # Aurelith, the Lantern City (2026-09-22). The choirstone stairs/slabs/
+    # wall resolve through ALIAS_SUFFIX (oak_stairs / oak_slab /
+    # cobblestone_wall); these are the rest. Each class is the one Blocks.cpp
+    # registers for the same id.
+    "choirstone": "stone", "polished_choirstone": "stone",
+    "choirstone_bricks": "stone_bricks",
+    "cracked_choirstone_bricks": "stone", "chiseled_choirstone": "stone",
+    "choirstone_tiles": "stone",
+    "choirstone_pillar": "quartz_pillar",               # RotatedPillarBlock: axis
+    "stave_stone": "stone",
+    "nightglass": "tinted_glass",                       # TintedGlassBlock: no properties
+    "resonite_grate": "copper_grate",                   # WaterloggedTransparentBlock: waterlogged
+    "cyan_lumen_panel": "sea_lantern", "violet_lumen_panel": "sea_lantern",
+    "amber_lumen_panel": "sea_lantern",
+    "lumen_strip": "quartz_pillar",                     # RotatedPillarBlock: the band runs along axis
+    "crystal_conduit": "chain",                         # ChainBlock: axis + waterlogged
+    "choir_lamp": "lantern",                            # LanternBlock: hanging + waterlogged
+    # The river Vesper's water: an always-water block with NO properties (its
+    # fluid state is a water source unconditionally, bubble_column's rule in
+    # gen_waterlogged.py; it never flows, so it has no `level`).
+    "resonant_water": "stone",
+    "resonance_engine": "beacon",                       # block entity, no properties
+    "voice_beacon": "carved_pumpkin",                   # facing n/s/w/e = the voice
+    # Aurelith, reawakening the Heart (2026-09-22). The dormant city's dim
+    # lights have their lit twins' classes; the chord socket is a
+    # stonecutter-class block (HORIZONTAL_FACING only), the pedestal a plain
+    # block, the choir cabinet a barrel (FACING 6-way + OPEN).
+    "dim_cyan_lumen_panel": "sea_lantern", "dim_violet_lumen_panel": "sea_lantern",
+    "dim_amber_lumen_panel": "sea_lantern",
+    "dim_lumen_strip": "quartz_pillar",
+    "dim_stave_stone": "stone",
+    "dim_choir_lamp": "lantern",
+    "chord_socket": "stonecutter",
+    "voice_pedestal": "stone",
+    "choir_cabinet": "barrel",
+    # Aurelith's flickering windows (2026-09-22): sea-lantern-class cubes.
+    "guttering_amber_window": "sea_lantern",
+    "waking_amber_window": "sea_lantern",
+    "restless_amber_window": "sea_lantern",
+    "guttering_cyan_window": "sea_lantern",
+    "waking_cyan_window": "sea_lantern",
+    "guttering_violet_window": "sea_lantern",
+    "waking_violet_window": "sea_lantern",
+    # ── Twilight Forest + The Aether (pass one, docs/mod-ports.md). Same rule
+    # as the Hush: the property set of each alias MUST equal the terrain
+    # library's class for that id (Blocks.cpp) or generated chunks unpack to
+    # air. Each row names the mod class it stands in for; where the mod class
+    # carries a property no vanilla block shares, it is DROPPED in pass one:
+    #   * The Aether's `double_drops` (AetherBlockStateProperties.DOUBLE_DROPS,
+    #     on its grass/dirt/holystone/quicksoil/aerclouds/ores/logs/leaves/
+    #     bushes) — the "placed by worldgen, drops twice" marker; pass two.
+    #   * TF's twilight_portal `is_one_way` (TFPortalBlock.DISALLOW_RETURN).
+    #   * TF's PatchBlock north/east/south/west connection booleans (clover
+    #     and moss patch) — no vanilla block has exactly that set.
+    #   * TF's torchberry_plant `has_torchberries` (TorchberryPlantBlock) —
+    #     the plant is always lit and always drops berries in pass one.
+    #   * TF's moonworm `waterlogged` and tf_mangrove_sapling `waterlogged`
+    #     (MoonwormBlock, MangroveSaplingBlock implement SimpleWaterloggedBlock).
+    # TF logs/stripped logs: RotatedPillarBlock (axis).
+    "twilight_oak_log": "oak_log", "canopy_log": "oak_log",
+    "tf_mangrove_log": "oak_log", "dark_log": "oak_log",
+    "stripped_twilight_oak_log": "stripped_oak_log", "stripped_canopy_log": "stripped_oak_log",
+    "stripped_tf_mangrove_log": "stripped_oak_log", "stripped_dark_log": "stripped_oak_log",
+    # TintedParticleLeavesBlock / DarkLeavesBlock: LeavesBlock (distance/persistent/waterlogged).
+    "twilight_oak_leaves": "oak_leaves", "canopy_leaves": "oak_leaves",
+    "tf_mangrove_leaves": "oak_leaves", "dark_leaves": "oak_leaves",
+    "twilight_oak_planks": "oak_planks", "canopy_planks": "oak_planks",
+    "tf_mangrove_planks": "oak_planks", "dark_planks": "oak_planks",
+    # SaplingBlock (stage); MangroveSaplingBlock's waterlogged dropped (above).
+    "twilight_oak_sapling": "oak_sapling", "canopy_sapling": "oak_sapling",
+    "tf_mangrove_sapling": "oak_sapling", "darkwood_sapling": "oak_sapling",
+    # Plain Block subclasses with no properties: HardenedDarkLeavesBlock,
+    # Block (root, mazestone family), LiverootBlock, HedgeBlock, AuroraBrickBlock.
+    "hardened_dark_leaves": "stone", "root": "stone", "liveroot_block": "stone",
+    "hedge": "stone",
+    "mazestone": "stone", "mazestone_brick": "stone", "cracked_mazestone": "stone",
+    "mossy_mazestone": "stone", "mazestone_mosaic": "stone", "mazestone_border": "stone",
+    "aurora_block": "stone",
+    # CritterBlock: DirectionalBlock.FACING (6-way, default up) — EndRodBlock's set.
+    "firefly": "end_rod", "cicada": "end_rod", "moonworm": "end_rod",
+    # MushgloomBlock (MushroomBlock), MayappleBlock / TorchberryPlantBlock (TFPlantBlock): no properties.
+    "mushgloom": "dandelion", "mayapple": "dandelion", "torchberry_plant": "dandelion",
+    "fiddlehead": "short_grass",                      # FiddleheadBlock (TFPlantBlock, replaceable)
+    "clover_patch": "moss_carpet", "moss_patch": "moss_carpet",   # PatchBlock, NESW dropped
+    # FallenLeavesBlock: BlockStateProperties.LAYERS (1..8, default 1) and
+    # nothing else — exactly SnowLayerBlock's set, so it aliases `snow`.
+    "fallen_leaves": "snow",
+    "twilight_portal": "stone",                       # TFPortalBlock, is_one_way dropped
+    # The Aether. AetherGrassBlock: GrassBlock (snowy) + double_drops dropped.
+    "aether_grass_block": "grass_block",
+    # AetherDoubleDropBlock / QuicksoilBlock / AercloudBlock / BlueAercloudBlock /
+    # IcestoneBlock / AetherDoubleDropsOreBlock / DropExperienceBlock /
+    # FloatingBlock / Block: no properties once double_drops is dropped.
+    "aether_dirt": "stone", "quicksoil": "stone", "holystone": "stone",
+    "mossy_holystone": "stone", "holystone_bricks": "stone",
+    "cold_aercloud": "stone", "blue_aercloud": "stone", "golden_aercloud": "stone",
+    "icestone": "stone", "ambrosium_ore": "stone", "zanite_ore": "stone",
+    "gravitite_ore": "stone",
+    # AetherLogBlock: RotatedPillarBlock (axis) + double_drops dropped.
+    "skyroot_log": "oak_log", "golden_oak_log": "oak_log",
+    "stripped_skyroot_log": "stripped_oak_log",
+    # AetherDoubleDropsLeaves / LeavesWithParticlesBlock: LeavesBlock + double_drops dropped.
+    "skyroot_leaves": "oak_leaves", "golden_oak_leaves": "oak_leaves",
+    "skyroot_planks": "oak_planks",
+    "skyroot_sapling": "oak_sapling", "golden_oak_sapling": "oak_sapling",
+    "aether_portal": "nether_portal",                 # AetherPortalBlock: HORIZONTAL_AXIS x/z
+    "berry_bush": "stone", "berry_bush_stem": "stone",  # AetherBushBlock + double_drops dropped
+    "white_flower": "dandelion", "purple_flower": "dandelion",  # AetherFlowerBlock (FlowerBlock)
+    # ── The Aether, pass two. The stairs/slab/wall/fence/fence_gate/door/
+    # trapdoor/button/pressure_plate rows resolve through ALIAS_SUFFIX below
+    # (StairBlock, SlabBlock, WallBlock/IcestoneWallBlock, FenceBlock, …, the
+    # same classes vanilla uses); these are the ones no suffix covers.
+    # AetherLogBlock (skyroot/golden oak wood) and RotatedPillarBlock
+    # (stripped skyroot wood, the dungeon pillar): axis, double_drops dropped.
+    "skyroot_wood": "oak_wood", "golden_oak_wood": "oak_wood",
+    "stripped_skyroot_wood": "stripped_oak_wood",
+    "pillar": "oak_log",
+    "pillar_top": "end_rod",                          # FacingPillarBlock: DirectionalBlock.FACING, default up
+    # TorchBlock / WallTorchBlock (AetherBlocks.AMBROSIUM_TORCH copies Blocks.TORCH).
+    "ambrosium_torch": "torch", "ambrosium_wall_torch": "wall_torch",
+    # HalfTransparentBlock (AerogelBlock) / TransparentBlock (QuicksoilGlassBlock)
+    # and plain Blocks: no properties.
+    "aerogel": "glass", "quicksoil_glass": "glass",
+    "ambrosium_block": "stone", "zanite_block": "stone",
+    "enchanted_gravitite": "stone",                   # FloatingBlock(powered=true)
+    # The dungeon families. Block (carved/sentry/angelic/hellfire, their
+    # lights and locked twins), TrappedBlock: no properties. DoorwayBlock's
+    # `invisible` and TreasureDoorwayBlock's horizontal `facing` are DROPPED
+    # for now (the doorway blockstates ignore facing: one model per block).
+    "carved_stone": "stone", "sentry_stone": "stone",
+    "angelic_stone": "stone", "light_angelic_stone": "stone",
+    "hellfire_stone": "stone", "light_hellfire_stone": "stone",
+    "locked_carved_stone": "stone", "locked_sentry_stone": "stone",
+    "locked_angelic_stone": "stone", "locked_light_angelic_stone": "stone",
+    "locked_hellfire_stone": "stone", "locked_light_hellfire_stone": "stone",
+    "trapped_carved_stone": "stone", "trapped_sentry_stone": "stone",
+    "trapped_angelic_stone": "stone", "trapped_light_angelic_stone": "stone",
+    "trapped_hellfire_stone": "stone", "trapped_light_hellfire_stone": "stone",
+    "boss_doorway_carved_stone": "stone", "boss_doorway_sentry_stone": "stone",
+    "boss_doorway_angelic_stone": "stone", "boss_doorway_light_angelic_stone": "stone",
+    "boss_doorway_hellfire_stone": "stone", "boss_doorway_light_hellfire_stone": "stone",
+    "treasure_doorway_carved_stone": "stone", "treasure_doorway_sentry_stone": "stone",
+    "treasure_doorway_angelic_stone": "stone", "treasure_doorway_light_angelic_stone": "stone",
+    "treasure_doorway_hellfire_stone": "stone", "treasure_doorway_light_hellfire_stone": "stone",
+    # ── Twilight Forest, pass two. Castle stairs resolve through ALIAS_SUFFIX.
+    # Block (towerwood family — InfestedTowerwoodBlock too, castle bricks and
+    # rune bricks, deadrock, the storage blocks): no properties.
+    **{s: "stone" for s in (
+        "towerwood", "encased_towerwood", "cracked_towerwood", "mossy_towerwood",
+        "infested_towerwood", "castle_brick", "worn_castle_brick", "cracked_castle_brick",
+        "castle_roof_tile", "mossy_castle_brick", "thick_castle_brick",
+        "encased_castle_brick_tile", "bold_castle_brick_tile",
+        "pink_castle_rune_brick", "blue_castle_rune_brick", "yellow_castle_rune_brick",
+        "violet_castle_rune_brick", "deadrock", "cracked_deadrock", "weathered_deadrock",
+        "ironwood_block", "steeleaf_block", "knightmetal_block", "fiery_block")},
+    # TrollsteinnBlock's six per-face `lit` booleans (named down/up/north/…)
+    # are DROPPED: the block is always its unlit self for now.
+    "trollsteinn": "stone",
+    # RotatedPillarBlock (axis).
+    "encased_castle_brick_pillar": "oak_log", "bold_castle_brick_pillar": "oak_log",
+    "cinder_log": "oak_log", "cinder_wood": "oak_wood",
+    # ThornsBlock / BurntThornsBlock: ConnectableRotatedPillarBlock's axis +
+    # six connection booleans + waterlogged. Axis kept; connections and
+    # waterlogged DROPPED (the model is the axis pillar alone).
+    "brown_thorns": "oak_log", "green_thorns": "oak_log", "burnt_thorns": "oak_log",
+    "huge_water_lily": "lily_pad",                    # HugeWaterLilyBlock (LilyPadBlock)
+    "uncrafting_table": "stone_pressure_plate",       # UncraftingTableBlock: POWERED only
 }
 # Generic family suffixes for the same additions: only consulted when the
 # upstream row is missing, so they never override a 1.21.6 block. Order
-# matters — the more specific sign/fence forms come first.
+# matters — the more specific sign/fence forms come first. 26.3's dyed wool
+# and concrete stairs and slabs (Blocks.WOOL_STAIRS / WOOL_SLAB /
+# CONCRETE_STAIRS / CONCRETE_SLAB — registerStair / registerSlab, so
+# StairBlock / SlabBlock) resolve through `_stairs` / `_slab` here.
 ALIAS_SUFFIX += [
     ("_wall_hanging_sign", "oak_wall_hanging_sign"),
     ("_hanging_sign",      "oak_hanging_sign"),
@@ -175,14 +387,33 @@ EXPLICIT = {
         ("waterlogged", "bool", ["true", "false"],                             "false"),
     ],
     # CopperGolemStatueBlock.java:66 + :61
-    # 26.3 PotentSulfurBlock: BlockStateProperties.POTENT_SULFUR_STATE.
+    # 26.3 PotentSulfurBlock: BlockStateProperties.POTENT_SULFUR_STATE, which
+    # is EnumProperty.create("potent_sulfur_state", PotentSulfurState.class)
+    # (BlockStateProperties.java:246) — the NAME is what saves and the
+    # terrain library's sulfur_pool feature carry, so it must be this one.
     "potent_sulfur": [
-        ("state", "enum", ["dry", "wet", "dormant", "erupting", "continuous"], "dry"),
+        ("potent_sulfur_state", "enum", ["dry", "wet", "dormant", "erupting", "continuous"], "dry"),
     ],
     # 26.3 ShelfMushroomBlock: builder.add(FACING, AGE) with AGE_1.
     "shelf_mushroom": [
         ("age",    "int",  ["0", "1"],                          "0"),
         ("facing", "enum", ["north", "south", "west", "east"], "north"),
+    ],
+    # Engine block (redstone_plus): RedstoneComponents.cpp "DisplayBlock". Three colour bits, the
+    # check output, and the two operations (north&west, south&east); see the block comment there.
+    "display_block": [
+        ("blue",    "bool", ["true", "false"], "false"),
+        ("green",   "bool", ["true", "false"], "false"),
+        ("op_nw",   "enum", ["none", "set_r", "set_g", "set_b", "clear_r", "clear_g", "clear_b", "show_r", "show_g", "show_b", "check_r", "check_g", "check_b", "latch"], "none"),
+        ("op_se",   "enum", ["none", "set_r", "set_g", "set_b", "clear_r", "clear_g", "clear_b", "show_r", "show_g", "show_b", "check_r", "check_g", "check_b", "latch"], "none"),
+        ("powered", "bool", ["true", "false"], "false"),
+        ("red",     "bool", ["true", "false"], "false"),
+    ],
+    # Engine block (The Hush): hanging_whisperfruit — cocoa's AGE_2 without
+    # its facing (it hangs straight down from lantern leaves). The terrain
+    # library registers it as SingleIntBlockImpl(AGE_2, 0) (Blocks.cpp).
+    "hanging_whisperfruit": [
+        ("age", "int", ["0", "1", "2"], "0"),
     ],
     "*copper_golem_statue": [
         ("copper_golem_pose", "enum", ["standing", "sitting", "running", "star"], "standing"),
@@ -397,7 +628,7 @@ def main():
                         f"{slug}: no upstream row, no alias and no explicit property set.\n"
                         f"  Add it to ALIAS_SUFFIX/ALIAS_EXACT if MC registers it with a class\n"
                         f"  an older block already uses, or to EXPLICIT with its\n"
-                        f"  createBlockStateDefinition list from minecraft_code/.")
+                        f"  createBlockStateDefinition list from minecraft_code_26.1-snapshot-1/.")
                 refs, count, default_index = build_explicit(intern_property, slug, props)
                 block_rows.append((slug, refs, default_index, count))
                 total_states += count

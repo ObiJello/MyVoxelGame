@@ -26,6 +26,9 @@
 #include "SkullBlockRenderer.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
+#include "../entity/EntityLighting.hpp"
+#include "BlockEntityShader.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "client/world/ClientBlockAccess.hpp"
@@ -33,6 +36,7 @@
 
 #include "stb_image.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -50,36 +54,6 @@ namespace Render {
             uint8_t r, g, b, a;
         };
         static_assert(sizeof(CubeVert) == 24, "match GetBlockVertexLayout");
-
-        // Same shape as ChestRenderer's shader, but the UV divisor is a
-        // uniform: skull sheets come in 64×32 (mob heads), 64×64 (humanoid +
-        // piglin) and 256×256 (dragon), where the chest atlas is always 64².
-        constexpr const char* kVS = R"GLSL(
-#version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec2 aUV;     // in texture-pixel coords
-layout(location=2) in vec4 aColor;
-uniform mat4 uMVP;
-out vec2 vUV;
-out vec4 vColor;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV;
-    vColor = aColor;
-}
-)GLSL";
-        constexpr const char* kFS = R"GLSL(
-#version 330 core
-in vec2 vUV;
-in vec4 vColor;
-out vec4 FragColor;
-uniform sampler2D uTex;
-void main() {
-    vec4 t = texture(uTex, vUV);
-    if (t.a < 0.1) discard;
-    FragColor = t * vColor;
-}
-)GLSL";
 
         // MC SkullBlockRenderer.SKIN_BY_TYPE, plus each sheet's dimensions
         // (needed for the UV divide — MC bakes them into the LayerDefinition).
@@ -115,10 +89,19 @@ void main() {
         // horizontally with its geometry. (MC also reverses the polygon's
         // vertex order, but that only flips winding and this renderer draws
         // skulls uncullled — entityCutoutNoCull — so it is dropped.)
+        //
+        // `lighting` is the draw's pose ahead of the part (flip · rotation,
+        // see Render) and the level's light set: each face is shaded with MC's
+        // world-space entity lighting through outer · xform (EntityLighting.hpp).
+        struct FaceLighting {
+            glm::mat4 outer{1.0f};
+            EntityLighting::LightSet set = EntityLighting::LightSet::Default;
+        };
+
         void AddCube(std::vector<CubeVert>& verts, std::vector<uint32_t>& idx,
                      glm::vec3 from, glm::vec3 to,
                      float xTexOffs, float yTexOffs, float w, float h, float d,
-                     const glm::mat4& xform, bool mirror) {
+                     const glm::mat4& xform, bool mirror, const FaceLighting& lighting) {
             float minX = from.x, minY = from.y, minZ = from.z;
             float maxX = to.x,   maxY = to.y,   maxZ = to.z;
             if (mirror) std::swap(minX, maxX);
@@ -142,19 +125,23 @@ void main() {
             const float v1 = yTexOffs + d;
             const float v2 = yTexOffs + d + h;
 
-            // Directional shade, chest-renderer style. The mesh is y-down and
-            // the draw matrix applies scale(-1,-1,1), so the model-space minY
-            // faces UP in the world: the "DOWN" polygon gets the top shade and
-            // vice versa. NORTH keeps north (z is not flipped). Rotated parts
-            // (piglin ears, dragon jaw) take the same per-face constants as an
-            // approximation, exactly as the campfire food quads do.
-            auto shade = [](float s) -> uint8_t {
-                return static_cast<uint8_t>(s * 255.0f);
+            // Per-face shade from the face's WORLD normal. Model normals are
+            // ModelPart.Polygon's directions in MC model space (Y down); the
+            // draw's scale(-1,-1,1), its rotation and the part pose (ears,
+            // jaw, the dragon's 0.75 scale) all go through the normal matrix.
+            // A mirrored cube swaps minX/maxX, and MC's Polygon.mirrorFacing
+            // turns the X normals with it.
+            const glm::mat3 normalMat = EntityLighting::NormalMatrix(lighting.outer * xform);
+            const float mx = mirror ? -1.0f : 1.0f;
+            auto shade = [&](const glm::vec3& modelNormal) -> uint8_t {
+                return EntityLighting::ShadeByte(normalMat * modelNormal, lighting.set);
             };
-            const uint8_t S_TOP    = shade(1.00f);   // model DOWN → world up
-            const uint8_t S_BOTTOM = shade(0.50f);   // model UP   → world down
-            const uint8_t S_NS     = shade(0.80f);
-            const uint8_t S_EW     = shade(0.60f);
+            const uint8_t S_DOWN  = shade({ 0, -1,  0});
+            const uint8_t S_UP    = shade({ 0,  1,  0});
+            const uint8_t S_WEST  = shade({-mx, 0,  0});
+            const uint8_t S_EAST  = shade({ mx, 0,  0});
+            const uint8_t S_NORTH = shade({ 0,  0, -1});
+            const uint8_t S_SOUTH = shade({ 0,  0,  1});
 
             // MC ModelPart.Polygon ctor verbatim: vertex 0 takes the HIGH u.
             auto emit = [&](const glm::vec3 q[4], float U0, float V0, float U1, float V1, uint8_t sh) {
@@ -173,22 +160,22 @@ void main() {
 
             // DOWN  — [l1, l0, t0, t1]   uv (u1..u2, v0..v1)
             { const glm::vec3 q[4] = {l1, l0, t0, t1};
-              emit(q, u1, v0, u2,  v1, S_TOP); }
+              emit(q, u1, v0, u2,  v1, S_DOWN); }
             // UP    — [t2, t3, l3, l2]   uv (u2..u22, v1..v0) — v-flipped per MC
             { const glm::vec3 q[4] = {t2, t3, l3, l2};
-              emit(q, u2, v1, u22, v0, S_BOTTOM); }
+              emit(q, u2, v1, u22, v0, S_UP); }
             // WEST  — [t0, l0, l3, t3]   uv (u0..u1, v1..v2)
             { const glm::vec3 q[4] = {t0, l0, l3, t3};
-              emit(q, u0, v1, u1,  v2, S_EW); }
+              emit(q, u0, v1, u1,  v2, S_WEST); }
             // NORTH — [t1, t0, t3, t2]   uv (u1..u2, v1..v2)
             { const glm::vec3 q[4] = {t1, t0, t3, t2};
-              emit(q, u1, v1, u2,  v2, S_NS); }
+              emit(q, u1, v1, u2,  v2, S_NORTH); }
             // EAST  — [l1, t1, t2, l2]   uv (u2..u3, v1..v2)
             { const glm::vec3 q[4] = {l1, t1, t2, l2};
-              emit(q, u2, v1, u3,  v2, S_EW); }
+              emit(q, u2, v1, u3,  v2, S_EAST); }
             // SOUTH — [l0, l1, l2, l3]   uv (u3..u4, v1..v2)
             { const glm::vec3 q[4] = {l0, l1, l2, l3};
-              emit(q, u3, v1, u4,  v2, S_NS); }
+              emit(q, u3, v1, u4,  v2, S_SOUTH); }
         }
 
         // Wall-skull FACING → MC state.rotationDegrees:
@@ -243,23 +230,33 @@ void main() {
     bool SkullBlockRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
-            // VKBackend cannot compile GLSL source; it loads the shared
-            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
-            // rewrites the .vert/.frag names). GL keeps the inline source.
-            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
-                                                     "shaders/blockentity.frag")
-            : g_renderBackend->CreateShader(kVS, kFS);
+        // The shared block-entity shader (BlockEntityShader.hpp): lit and
+        // fogged like the terrain, on both backends.
+        m_shader = BlockEntityShader::Create();
         if (m_shader == INVALID_SHADER) {
             Log::Error("[SkullRenderer] shader compile failed");
             return false;
         }
 
+        // Each kind's mesh holds one copy per lighting (see the header): the
+        // 16 rotation segments × 2 light sets, each shaded through the pose
+        // Render builds for that segment — scale(-1,-1,1) · rotY(seg·22.5°).
         auto build = [&](int kind, auto&& emit) {
             std::vector<CubeVert> verts;
             std::vector<uint32_t> idx;
-            verts.reserve(7 * 24); idx.reserve(7 * 36);
-            emit(verts, idx);
+            verts.reserve(7 * 24 * kLightingCount); idx.reserve(7 * 36 * kLightingCount);
+            for (int lighting = 0; lighting < kLightingCount; ++lighting) {
+                FaceLighting fl;
+                const int segment = lighting / 2;
+                fl.outer = glm::scale(glm::mat4(1.0f), glm::vec3(-1.0f, -1.0f, 1.0f));
+                fl.outer = glm::rotate(fl.outer, glm::radians(22.5f * static_cast<float>(segment)),
+                                       glm::vec3(0, 1, 0));
+                fl.set = (lighting % 2) ? EntityLighting::LightSet::Nether
+                                        : EntityLighting::LightSet::Default;
+                // AddCube indexes from verts.size(): each copy's indices
+                // already address its own vertices.
+                emit(verts, idx, fl);
+            }
             // AddCube emits pixel-space UVs; each kind's sheet size differs
             // (64x32 .. 256x256), so normalize per kind here instead of the
             // old uTexSize uniform — one shared shader serves every sheet.
@@ -273,15 +270,15 @@ void main() {
                 idx.size() * sizeof(uint32_t), idx.data());
             m_mesh[kind] = g_renderBackend->CreateMesh(m_vb[kind], m_ib[kind],
                                                        GetBlockVertexLayout());
-            m_indexCount[kind] = static_cast<uint32_t>(idx.size());
+            m_indexCount[kind] = static_cast<uint32_t>(idx.size() / kLightingCount);
         };
 
         const glm::mat4 I(1.0f);
 
         // SkullModel.createHeadModel: one 8×8×8 cube, texOffs(0,0),
         // addBox(-4, -8, -4, 8, 8, 8) at PartPose.ZERO.
-        auto mobHead = [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i) {
-            AddCube(v, i, {-4, -8, -4}, {4, 0, 4}, 0, 0, 8, 8, 8, I, false);
+        auto mobHead = [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i, const FaceLighting& fl) {
+            AddCube(v, i, {-4, -8, -4}, {4, 0, 4}, 0, 0, 8, 8, 8, I, false, fl);
         };
         build(kSkeleton,       mobHead);
         build(kWitherSkeleton, mobHead);
@@ -289,10 +286,10 @@ void main() {
 
         // SkullModel.createHumanoidHeadLayer: the head plus the "hat" overlay
         // — same 8×8×8 box grown by CubeDeformation(0.25), texOffs(32,0).
-        auto humanoidHead = [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i) {
-            AddCube(v, i, {-4, -8, -4}, {4, 0, 4}, 0, 0, 8, 8, 8, I, false);
+        auto humanoidHead = [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i, const FaceLighting& fl) {
+            AddCube(v, i, {-4, -8, -4}, {4, 0, 4}, 0, 0, 8, 8, 8, I, false, fl);
             AddCube(v, i, {-4.25f, -8.25f, -4.25f}, {4.25f, 0.25f, 4.25f},
-                    32, 0, 8, 8, 8, I, false);
+                    32, 0, 8, 8, 8, I, false, fl);
         };
         build(kPlayer, humanoidHead);
         build(kZombie, humanoidHead);
@@ -305,17 +302,17 @@ void main() {
         //   leftEar.zRot  = -(cos(0) + 2.5) * 0.2 = -0.7
         //   rightEar.zRot = +(cos(0) + 2.5) * 0.2 = +0.7
         // so ±0.7 rad is what gets baked.
-        build(kPiglin, [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i) {
-            AddCube(v, i, {-5, -8, -4}, {5, 0, 4},  0, 0, 10, 8, 8, I, false);
-            AddCube(v, i, {-2, -4, -5}, {2, 0, -4}, 31, 1, 4, 4, 1, I, false);
-            AddCube(v, i, { 2, -2, -5}, {3, 0, -4},  2, 4, 1, 2, 1, I, false);
-            AddCube(v, i, {-3, -2, -5}, {-2, 0, -4}, 2, 0, 1, 2, 1, I, false);
+        build(kPiglin, [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i, const FaceLighting& fl) {
+            AddCube(v, i, {-5, -8, -4}, {5, 0, 4},  0, 0, 10, 8, 8, I, false, fl);
+            AddCube(v, i, {-2, -4, -5}, {2, 0, -4}, 31, 1, 4, 4, 1, I, false, fl);
+            AddCube(v, i, { 2, -2, -5}, {3, 0, -4},  2, 4, 1, 2, 1, I, false, fl);
+            AddCube(v, i, {-3, -2, -5}, {-2, 0, -4}, 2, 0, 1, 2, 1, I, false, fl);
             glm::mat4 leftEar = glm::translate(I, {4.5f, -6.0f, 0.0f});
             leftEar = glm::rotate(leftEar, -0.7f, glm::vec3(0, 0, 1));
-            AddCube(v, i, {0, 0, -2}, {1, 5, 2}, 51, 6, 1, 5, 4, leftEar, false);
+            AddCube(v, i, {0, 0, -2}, {1, 5, 2}, 51, 6, 1, 5, 4, leftEar, false, fl);
             glm::mat4 rightEar = glm::translate(I, {-4.5f, -6.0f, 0.0f});
             rightEar = glm::rotate(rightEar, 0.7f, glm::vec3(0, 0, 1));
-            AddCube(v, i, {-1, 0, -2}, {0, 5, 2}, 39, 6, 1, 5, 4, rightEar, false);
+            AddCube(v, i, {-1, 0, -2}, {0, 5, 2}, 39, 6, 1, 5, 4, rightEar, false, fl);
         });
 
         // DragonHeadModel.createHeadLayer. The head part sits at
@@ -323,18 +320,18 @@ void main() {
         // at offset(0, 4, -8). setupAnim at animationPos = 0 leaves the jaw at
         // xRot = (sin(0) + 1) * 0.2 = 0.2 rad. The two "scale" spikes and the
         // left nostril are authored under .mirror(true).
-        build(kDragon, [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i) {
+        build(kDragon, [&](std::vector<CubeVert>& v, std::vector<uint32_t>& i, const FaceLighting& fl) {
             glm::mat4 head = glm::translate(I, {0.0f, -7.986666f, 0.0f});
             head = glm::scale(head, glm::vec3(0.75f));
-            AddCube(v, i, {-6, -1, -24}, {6, 4, -8},   176, 44, 12, 5, 16, head, false);
-            AddCube(v, i, {-8, -8, -10}, {8, 8, 6},    112, 30, 16, 16, 16, head, false);
-            AddCube(v, i, {-5, -12, -4}, {-3, -8, 2},    0, 0, 2, 4, 6, head, true);
-            AddCube(v, i, {-5, -3, -22}, {-3, -1, -18}, 112, 0, 2, 2, 4, head, true);
-            AddCube(v, i, { 3, -12, -4}, {5, -8, 2},     0, 0, 2, 4, 6, head, false);
-            AddCube(v, i, { 3, -3, -22}, {5, -1, -18},  112, 0, 2, 2, 4, head, false);
+            AddCube(v, i, {-6, -1, -24}, {6, 4, -8},   176, 44, 12, 5, 16, head, false, fl);
+            AddCube(v, i, {-8, -8, -10}, {8, 8, 6},    112, 30, 16, 16, 16, head, false, fl);
+            AddCube(v, i, {-5, -12, -4}, {-3, -8, 2},    0, 0, 2, 4, 6, head, true, fl);
+            AddCube(v, i, {-5, -3, -22}, {-3, -1, -18}, 112, 0, 2, 2, 4, head, true, fl);
+            AddCube(v, i, { 3, -12, -4}, {5, -8, 2},     0, 0, 2, 4, 6, head, false, fl);
+            AddCube(v, i, { 3, -3, -22}, {5, -1, -18},  112, 0, 2, 2, 4, head, false, fl);
             glm::mat4 jaw = glm::translate(head, {0.0f, 4.0f, -8.0f});
             jaw = glm::rotate(jaw, 0.2f, glm::vec3(1, 0, 0));
-            AddCube(v, i, {-6, 0, -16}, {6, 4, 0}, 176, 65, 12, 4, 16, jaw, false);
+            AddCube(v, i, {-6, 0, -16}, {6, 4, 0}, 176, 65, 12, 4, 16, jaw, false, fl);
         });
 
         m_geomBuilt = true;
@@ -395,7 +392,7 @@ void main() {
                                     float /*partialTick*/,
                                     const glm::mat4& proj,
                                     const glm::mat4& view,
-                                    const glm::vec3& /*cameraPos*/) {
+                                    const glm::vec3& cameraPos) {
         PROFILE_ZONE_N("BE.Skull");
         if (!m_geomBuilt || !g_renderBackend) return;
 
@@ -436,8 +433,10 @@ void main() {
             }
         }
 
-        // MC submitSkull's pose stack, in order (see file header).
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(pos) + offset);
+        // MC submitSkull's pose stack, in order (see file header). The
+        // translation is render-space (the block minus the view's origin,
+        // subtracted in double) — see RenderOrigin.hpp.
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), Render::ToRender(glm::dvec3(pos)) + offset);
         model = glm::scale(model, glm::vec3(-1.0f, -1.0f, 1.0f));
         model = glm::rotate(model, glm::radians(rotDeg), glm::vec3(0, 1, 0));
         model = glm::scale(model, glm::vec3(1.0f / 16.0f));
@@ -456,7 +455,16 @@ void main() {
         g_renderBackend->BindTexture(tex, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", proj * view * model);
         g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.1f);
-        g_renderBackend->DrawIndexed(m_mesh[kind], m_indexCount[kind]);
+        // The skull's light (its cell's, MC LevelRenderer.getLightCoords)
+        // and the frame's fog.
+        BlockEntityShader::ApplyWorld(m_shader, model, cameraPos, pos);
+        // The copy lit for this rotation segment (wall heads land on 0/4/8/12)
+        // and the drawn level's light set.
+        const int segment = static_cast<int>(std::lround(rotDeg / 22.5f)) & 15;
+        const int lighting = segment * 2 +
+            (EntityLighting::Current() == EntityLighting::LightSet::Nether ? 1 : 0);
+        g_renderBackend->DrawIndexed(m_mesh[kind], m_indexCount[kind],
+                                     m_indexCount[kind] * static_cast<uint32_t>(lighting));
         g_renderBackend->UnbindMesh();
     }
 

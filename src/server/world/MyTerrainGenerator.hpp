@@ -12,19 +12,14 @@
 #endif
 
 // Terrain library includes
-#include "levelgen/NoiseRegistry.h"
-#include "levelgen/DensityFunctionRegistry.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/NoiseGeneratorSettings.h"
-#include "levelgen/NoiseRouterData.h"
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/FlatLevelSource.h"
 #include "levelgen/structure/ChunkGeneratorStructureState.h"
-#include "levelgen/FluidPicker.h"
-#include "levelgen/SurfaceSystem.h"
-#include "levelgen/SurfaceRuleData.h"
 #include "levelgen/placement/PlacedFeature.h"
 #include "world/ProtoChunk.h"
+#include "world/level/chunk/storage/ChunkStorageBackend.h"
 #include "common/core/ThreadPriority.hpp"
 #include "world/level/block/Blocks.h"
 #include "world/biome/MultiNoiseBiomeSource.h"
@@ -32,6 +27,8 @@
 
 // Server-level includes (the async pipeline)
 #include "server/level/ServerChunkCache.h"
+#include "server/level/ChunkHolder.h"
+#include "server/level/DistanceManager.h"
 #include "util/TerrainProfiling.h"
 
 #include <algorithm>
@@ -41,6 +38,7 @@
 #include <queue>
 #include <atomic>
 #include <functional>
+#include <vector>
 
 namespace Game {
 
@@ -65,7 +63,7 @@ namespace Game {
 
         // MC parity: Util.maxAllowedExecutorThreads() is
         //   clamp(availableProcessors - 1, 1, getMaxThreads())
-        // (minecraft_code/decompiled_net/minecraft/util/Util.java:177).
+        // (minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/util/Util.java:177).
         // The -1 matters — it leaves a core for the thread waiting on the result.
         // We previously took hardware_concurrency() flat, which on a 10-core M4
         // put 10 worldgen threads on top of 4 ServerWorkers, 3 MeshWorkers, the
@@ -341,11 +339,34 @@ namespace Game {
         template <class Clock, class Duration>
         bool waitForTasks(const std::chrono::time_point<Clock, Duration>& deadline) {
             std::unique_lock<std::mutex> lock(m_mutex);
-            return m_cv.wait_until(lock, deadline, [this] { return !m_tasks.empty(); });
+            // The wake request is part of the predicate: a bare notify_all
+            // is a spurious wakeup to wait_until and it goes straight back
+            // to sleep, which is what left IntegratedServer::Stop waiting
+            // out the remainder of a 50 ms tick on every world exit.
+            const bool woken = m_cv.wait_until(
+                lock, deadline, [this] { return !m_tasks.empty() || m_wakeRequested; });
+            // The park that returns consumes the wake — MC LockSupport's
+            // permit: one unpark ends one park. A request left standing
+            // turned every later park into an instant return; since the
+            // generator wakes on every chunk request and completion, the
+            // server thread spun through its whole idle window (profile
+            // 2026-09-23: 5.3M parks at 135 ns, and the pump behind them,
+            // over a 3-minute run).
+            m_wakeRequested = false;
+            return woken;
         }
 
-        // Wake anything parked in waitForTasks (shutdown).
-        void wakeAll() { m_cv.notify_all(); }
+        // Wake the park in waitForTasks: a new request or completion, or
+        // shutdown. A permit, not a state — a wake that lands before the park
+        // is entered makes that one park return at once (Stop relies on it;
+        // the stop itself is the caller's flag, re-checked after the park).
+        void wakeAll() {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_wakeRequested = true;
+            }
+            m_cv.notify_all();
+        }
 
         void runPendingTasks() {
             std::queue<Task> tasksToRun;
@@ -394,6 +415,7 @@ namespace Game {
         std::queue<Task> m_tasks;
         mutable std::mutex m_mutex;   // mutable so hasPendingTasks() can be const
         std::condition_variable m_cv;
+        bool m_wakeRequested = false;   // one-shot permit; see wakeAll / waitForTasks
     };
 
     /**
@@ -419,6 +441,21 @@ namespace Game {
         void RequestAbort() override;
         bool IsAbortRequested() const override;
 
+        // Where the library keeps chunks it has not finished (MC saves every
+        // proto chunk it unloads and reads it back): the world's region
+        // files, through the game's AnvilChunkIo, written in `dataVersion`.
+        // Call before Initialize. Without it (a read-only world) the library
+        // keeps partly generated chunks in memory instead.
+        void SetLibraryChunkStorage(
+            std::shared_ptr<minecraft::world::level::chunk::storage::ChunkStorageBackend> storage,
+            int dataVersion) {
+            m_libraryStorage = std::move(storage);
+            m_libraryDataVersion = dataVersion;
+        }
+
+        // The world clock, for the saved chunks' LastUpdate. Any thread.
+        void SetLibraryGameTime(int64_t gameTime);
+
         // MC ChunkGenerator's ChunkGeneratorStructureState — where the
         // structure placements and, for strongholds, the precomputed ring
         // positions live. Null before Initialize.
@@ -443,9 +480,11 @@ namespace Game {
         int SurfaceHeightAt(int blockX, int blockZ) const;
         minecraft::levelgen::RandomState*    GetRandomState()   const { return m_randomState; }
         minecraft::world::biome::BiomeSource* GetBiomeSource()  const { return m_biomeSource.get(); }
+        const minecraft::levelgen::ChunkGenerator* GetChunkGenerator() const { return m_generator; }
 
-        // MC MinecraftServer.setInitialSpawn(): climate SpawnFinder picks the
-        // (x, z) region, then a spiral over the surrounding chunks finds the
+        // MC MinecraftServer.setInitialSpawn(): the generator's origin (the
+        // spawn-target climate search) picks the region, then a spiral over
+        // the surrounding chunks finds the
         // first dry-land column (surface above sea level) via getBaseHeight.
         // Self-initializes the generator if needed (safe on server thread).
         glm::ivec3 FindSpawnPosition() override;
@@ -488,9 +527,17 @@ namespace Game {
         // === Non-blocking async API (must be called from server thread) ===
 
         // Request chunk generation without blocking. Returns true if request was queued.
-        // The completion lands in the sink (TakeCompletions) from whatever
-        // thread finishes the last step.
+        // Adds the request's GENERATION_REQUEST ticket and nothing else, as
+        // MC's player tickets do: the distance manager propagates every ticket
+        // added meanwhile in its next pass (PumpOneTask, TickLibrary), and
+        // AttachPendingRequests then hooks each request onto its holder. The
+        // completion lands in the sink (TakeCompletions) from whatever thread
+        // finishes the last step — a failed one included, so every accepted
+        // request produces exactly one completion.
         bool RequestChunkGeneration(Math::ChunkPos position);
+        // MC DistanceManager.PLAYER_TICKET_LEVEL (ENTITY_TICKING, 31): the level
+        // of every request's GENERATION_REQUEST ticket.
+        static int RequestTicketLevel();
 
         // ── Ticket-driven request path (MC ChunkMap model, 2026-08-30) ──
         // Any thread: a chunk the disk did not have. Server thread drains with
@@ -503,12 +550,54 @@ namespace Game {
             minecraft::world::IChunk* chunk = nullptr;   // null = generation failed
         };
         void TakeCompletions(std::vector<Completion>& out);
+        // Requests whose ENTITY_TICKING future has completed — the 5x5 around
+        // the chunk is FULL — or failed (the ticket went). MC's
+        // DistanceManager.ticketsToRelease: that is when a player ticket stops
+        // counting against ThrottlingChunkTaskDispatcher's in-execution limit.
+        // Exactly one per accepted request, like the completion.
+        void TakeReleases(std::vector<Math::ChunkPos>& out);
+        // Chunks the library announced ready to send (MC ChunkMap.
+        // onChunkReadyToSend: the chunk and its 3x3 are FULL), whichever
+        // request's ticket made them so. Each arrives PINNED: the caller
+        // converts it (and UnpinReady after) or UnpinReadys it. Server thread.
+        void TakeReady(std::vector<Completion>& out);
+        // A request or a completion is waiting for the server thread — the
+        // cheap test that lets ServiceGenerationQueues skip a pass.
+        bool HasQueuedWork();
+
+        // Server thread: let go of a generation request — it failed, or the
+        // chunk has left every player's view (IntegratedServer::
+        // CancelLoadIfUnwanted, SweepRequestTickets). Removes the request's
+        // GENERATION_REQUEST ticket (added by RequestChunkGeneration), after
+        // which the holder and its pyramid can unload once nothing else wants
+        // them; a request still generating fails its future (MC: a chunk
+        // whose ticket goes is cancelled), and that completion arrives
+        // through TakeCompletions like any other. Idempotent.
+        void ReleaseGenerationRequest(Math::ChunkPos position);
+
+        // Server thread: check up to `maxChecks` held request tickets and
+        // release each one `stillWanted` says no to. A ticket outlives its
+        // request on purpose — it is MC's PLAYER_LOADING ticket, held while
+        // the chunk is in a player's view — so the generation neighbourhood
+        // around the view stays resident instead of being freed and
+        // regenerated between neighbouring requests. Chunks leaving a view
+        // release theirs directly; this sweep catches whatever left without
+        // a leave event. Walks a snapshot, a slice per call. Returns releases.
+        size_t SweepRequestTickets(const std::function<bool(Math::ChunkPos)>& stillWanted,
+                                   size_t maxChecks);
 
         // Any thread: library chunk -> game chunk. The holder must stay alive
-        // until this returns (nothing unloads yet; see PinConversion for when
-        // it does).
+        // until this returns: the pin taken when the request attached
+        // (PinConversion) keeps processUnloads off it until the caller unpins.
         std::shared_ptr<Chunk> ConvertCompletedChunk(minecraft::world::IChunk* chunk,
                                                      Math::ChunkPos position);
+
+        // Any thread, after a conversion the game kept: the game owns this
+        // FULL chunk now (it saves it, and a later load reads that save), so
+        // the library's copy of its blocks can go once nothing else will read
+        // them — see ChunkMap::releaseHandedOffChunks. Drained on the server
+        // thread by TickLibrary.
+        void NoteHandedOff(Math::ChunkPos position);
         // MC DistanceManager player tickets: one radius ticket per viewer at
         // their chunk, so ticket levels form a distance gradient and the
         // library generates nearest-first. Server thread.
@@ -518,13 +607,18 @@ namespace Game {
         void PinConversion(Math::ChunkPos position);
         void UnpinConversion(Math::ChunkPos position);
         bool IsConversionPinned(Math::ChunkPos position) const;
+        // The ready path's own pins (TakeReady), counted: a chunk can be
+        // announced again after a demotion while its first announcement is
+        // still being handled, and a request's pin must not be lifted by it.
+        void PinReady(Math::ChunkPos position);
+        void UnpinReady(Math::ChunkPos position);
 
         // Run ONE unit of the chunk pipeline. Returns true if work was done, so
         // the caller can loop until either the pipeline is idle or its own
         // deadline expires.
         //
         // Direct port of MC ServerChunkCache.MainThreadExecutor.pollTask
-        // (minecraft_code/.../server/level/ServerChunkCache.java:583):
+        // (minecraft_code_26.1-snapshot-1/.../server/level/ServerChunkCache.java:583):
         //
         //     protected boolean pollTask() {
         //        if (ServerChunkCache.this.runDistanceManagerUpdates()) return true;
@@ -545,20 +639,25 @@ namespace Game {
         // which the terrain library treats as main-thread-only.
         bool PumpOneTask();
 
+        // Hook every request whose ticket the last distance-manager pass has
+        // propagated onto its holder's FULL future (MC: getChunkFutureMainThread
+        // without loadOrGenerate — the ticket is already there). Runs after
+        // each pass, so the requests issued in a batch share ONE propagation;
+        // attaching each on its own ran a whole pass per chunk. Server thread.
+        // Returns true if any request was attached or failed.
+        bool AttachPendingRequests();
+
         // Park until the pipeline has work or `deadline` passes (MC
         // BlockableEventLoop.waitForTasks). Server thread only.
         bool WaitForPipelineWork(std::chrono::steady_clock::time_point deadline) {
             return m_mainThreadExecutor && m_mainThreadExecutor->waitForTasks(deadline);
         }
-
-        // Drop the cached NoiseChunk of every holder that is not FULL and has
-        // no generation task in flight. See the .cpp for why. Server thread.
-        // Returns how many were released.
-        // Budgeted like MC ChunkMap.processUnloads: candidates are collected
-        // on a rescan (every ~100 calls), then freed a few at a time until
-        // `deadline` passes, with a small floor so a late tick still makes
-        // progress. Freeing 800 in one tick measured 850 ms (2026-08-29).
-        size_t ReleaseIdleNoiseChunks(std::chrono::steady_clock::time_point deadline);
+        // Break the park above from another thread: IntegratedServer::Stop
+        // calls it after raising the stop flag so the server thread's last
+        // tick ends now rather than at its deadline.
+        void WakePipeline() {
+            if (m_mainThreadExecutor) m_mainThreadExecutor->wakeAll();
+        }
 
         // Once per server tick (MC ServerChunkCache.tick): expire stale
         // tickets, propagate levels, and destroy holders nobody's ticket
@@ -572,6 +671,19 @@ namespace Game {
         // expire because nothing calls its tick()). Diagnostics; server thread.
         size_t LibraryChunkCount() const {
             return m_chunkCache ? m_chunkCache->getChunkMap().size() : 0;
+        }
+        // Every holder by latest status: FULL, before TERRAIN, the explored
+        // edge [TERRAIN, FULL) — saved and freed once unwanted, or kept for
+        // good in a world without storage — and holders with no chunk yet.
+        // Walks the whole map — a diagnostic for the periodic memory report,
+        // not a per-tick call. Server thread.
+        struct HolderStatusCounts { size_t noChunk = 0, beforeTerrain = 0, edgeBand = 0, full = 0, wanted = 0; };
+        HolderStatusCounts LibraryHolderStatusCounts() const;
+
+        // Holders queued for ChunkMap::processUnloads (ticket level dropped
+        // past MAX). One lock, no walk — cheap enough for a per-second report.
+        size_t LibraryPendingUnloadCount() const {
+            return m_chunkCache ? m_chunkCache->getChunkMap().pendingUnloadCount() : 0;
         }
 
         // Check if a chunk is ready (fully generated). Non-blocking. Must call from server thread.
@@ -587,13 +699,8 @@ namespace Game {
         bool m_initialized = false;
 
         // Terrain library components
-        minecraft::levelgen::NoiseGeneratorSettings* m_settings = nullptr;
+        std::shared_ptr<minecraft::levelgen::NoiseGeneratorSettings> m_settings;
         minecraft::levelgen::RandomState* m_randomState = nullptr;
-        // Value storage behind the ClimateParameterPoint* list handed to
-        // m_settings (the spawn-target climates for Climate::SpawnFinder).
-        // Must outlive m_settings/m_randomState — freed together in Shutdown.
-        std::vector<minecraft::world::biome::Climate::ParameterPoint> m_spawnTargetStorage;
-        minecraft::levelgen::FluidPicker* m_fluidPicker = nullptr;
         // Base type: default/amplified/large_biomes/single_biome are
         // NoiseBasedChunkGenerator, flat is FlatLevelSource.
         minecraft::levelgen::ChunkGenerator* m_generator = nullptr;
@@ -631,6 +738,8 @@ namespace Game {
         struct CompletionSink {
             std::mutex mutex;
             std::vector<Completion> completions;
+            std::vector<Math::ChunkPos> releases;   // see TakeReleases
+            std::vector<Completion> ready;          // see TakeReady
             bool closed = false;
             std::function<void()> wake;   // pokes the server thread's park
         };
@@ -641,19 +750,27 @@ namespace Game {
         std::vector<Math::ChunkPos> m_requests;
         mutable std::mutex m_pinMutex;
         std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_pinned;
-
-        std::vector<int64_t> m_noiseReleaseQueue;   // holder keys awaiting release
-        // key -> consecutive rescans (5 s apart) seen idle. A ring chunk that
-        // is still being advanced by nearby tasks is idle only between two
-        // tasks; releasing its NoiseChunk then costs a ~10 ms rebuild per
-        // layer, which made the last rim chunks of an area take a minute.
-        std::unordered_map<int64_t, int> m_noiseIdleScans;
-        int                  m_noiseReleaseRescan = 0;
+        std::unordered_map<Math::ChunkPos, int, Math::ChunkPosHash> m_readyPins;
+        // Requests holding a GENERATION_REQUEST ticket. Server thread only,
+        // like the ticket storage itself.
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_requestTickets;
+        std::vector<Math::ChunkPos> m_ticketSweep;   // snapshot SweepRequestTickets walks
+        size_t m_ticketSweepCursor = 0;
+        // Requests whose ticket is added but not yet propagated, in request
+        // order (AttachPendingRequests). Server thread only.
+        std::vector<Math::ChunkPos> m_awaitingAttach;
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_awaitingAttachSet;
+        // Converted chunks the game kept (NoteHandedOff), for the library to
+        // release once safe. Any thread in, server thread out.
+        std::mutex m_handedOffMutex;
+        std::vector<Math::ChunkPos> m_handedOff;
 
         std::unique_ptr<SharedExecutorLease> m_backgroundLease;
         std::unique_ptr<BackgroundExecutor> m_decorationPool;   // OBEY_DECO_THREADS=n: elevated-QoS decoration threads
         std::unique_ptr<MainThreadExecutor> m_mainThreadExecutor;
         std::unique_ptr<minecraft::server::level::ServerChunkCache> m_chunkCache;
+        std::shared_ptr<minecraft::world::level::chunk::storage::ChunkStorageBackend> m_libraryStorage;
+        int m_libraryDataVersion = 0;
 
         // Target chunk status for generation
         const minecraft::world::chunk::status::ChunkStatus* m_targetStatus = nullptr;

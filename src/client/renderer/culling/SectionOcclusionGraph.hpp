@@ -61,6 +61,21 @@ namespace Render {
             uint8_t  emitted = 0;
         };
 
+        // A queued propagation source (MC GraphEvents.sectionsToPropagateFrom),
+        // in world coordinates so it survives a change of graph anchor.
+        // `mayRequestRebuild`: a source that falls outside the live graph
+        // (neither it nor a neighbour is a node) asks for a full rebuild only
+        // when it is a block EDIT. Streaming noise — chunk arrivals, border
+        // re-dirties, light updates, remeshes — lands outside the graph all
+        // the time while chunks load; MC drops those events, and turning each
+        // into a full rebuild replaced the incrementally-grown list ~4x a
+        // second with a stricter one (the vanish-while-loading flicker).
+        struct PendingSource {
+            Game::Math::ChunkPos chunkPos;
+            int sectionY;
+            bool mayRequestRebuild = true;
+        };
+
         // One BFS request: input snapshot + identity tokens + output.
         struct BfsJob {
             // --- Input (filled by BuildInput on the main thread) ---
@@ -95,6 +110,7 @@ namespace Render {
             int keyCx = 0, keyCz = 0, keySy = 0;  // camera section this was built for
             uint64_t worldVersion = 0;             // staleness tracking
             uint64_t eraseToken = 0;               // pointer-safety: mismatched results are discarded
+            uint64_t propagationEpoch = 0;         // ChunkRenderer's event epoch at snapshot time
             // Built for a view THROUGH a portal (seeded at the far surface,
             // see ChunkRenderer::SetPortalViewSeed). Its result fills a
             // reachable slot like any other, but its grid is never adopted
@@ -121,6 +137,15 @@ namespace Render {
             // diameter^2 * SECTIONS_PER_CHUNK, same indexing as `cells`.
             std::vector<GridNodeOut> nodes;
             uint32_t generation = 0;   // value in nodes[] that means "visited"
+
+            // Propagation sources scheduled while this job was in flight — MC's
+            // nextSectionsToPropagateFrom, the queue its scheduleFullUpdate
+            // hands to the new GraphState. The snapshot was taken before these
+            // sections changed, so they must be replayed against THIS job's
+            // grid once it becomes the live graph (AdoptGraph). Filled by
+            // TryCollect for a main-view async job; empty otherwise.
+            std::vector<PendingSource> propagateDuringFlight;
+            bool flightEventsRecorded = false;
         };
 
         // Fill a job's input snapshot from ClientChunkManager state.
@@ -158,7 +183,8 @@ namespace Render {
 
         // A section's mesh just became available — MC's
         // GraphEvents.sectionsToPropagateFrom. Cheap; safe to call per upload.
-        void SchedulePropagationFrom(Game::Math::ChunkPos chunkPos, int sectionY);
+        void SchedulePropagationFrom(Game::Math::ChunkPos chunkPos, int sectionY,
+                                     bool mayRequestRebuild = true);
 
         // Adopt a completed full-rebuild job's grid as the live graph.
         // Call right after taking ownership of the job's result.
@@ -195,6 +221,17 @@ namespace Render {
         // Diagnostics: queued-but-undrained propagation sources.
         size_t PendingSourceCount() const { return m_propagateFrom.size(); }
 
+        // The live graph's record of one section, for the F3 renderers
+        // (chunk_section_paths draws the BFS arrival directions). Main thread
+        // only. False when the section is outside the graph or was not
+        // reached in the current generation.
+        struct DebugNode {
+            uint8_t sourceDirections = 0;   // faces the BFS entered through
+            uint8_t directions = 0;         // MC Node.directions (path history)
+            int     step = 0;               // Manhattan section distance from the camera
+        };
+        bool DebugNodeAt(int chunkX, int chunkZ, int sectionY, DebugNode& out) const;
+
     private:
         const Client::ClientChunkManager* m_chunks = nullptr;
 
@@ -228,8 +265,16 @@ namespace Render {
 
         // MC's GraphEvents.sectionsToPropagateFrom. Main-thread only: mesh
         // uploads and PrepareVisibleSections both run there.
-        struct PendingSource { Game::Math::ChunkPos chunkPos; int sectionY; };
         std::vector<PendingSource> m_propagateFrom;
+        // MC's nextSectionsToPropagateFrom: while a MAIN-view full rebuild is
+        // in flight, every source is recorded here as well as in
+        // m_propagateFrom. The live (old) graph drains m_propagateFrom; this
+        // copy rides out with the job (TryCollect) and becomes the new
+        // graph's queue on adoption. Without it, a section that changed after
+        // the job's snapshot had its event consumed by the old graph and the
+        // new graph never heard of it — see AdoptGraph.
+        std::vector<PendingSource> m_nextPropagateFrom;
+        bool m_recordingNext = false;
         bool m_fullRebuildRequested = false;
         Scratch m_partialScratch;
 

@@ -29,7 +29,7 @@ namespace Game {
     // system, and the tag's contents are exactly what the registration form in
     // Items.java already tells us, so the kind rides along on this row.
     enum class WeaponKind : uint8_t {
-        Other = 0, Sword, Axe, Pickaxe, Shovel, Hoe, Trident, Mace
+        Other = 0, Sword, Axe, Pickaxe, Shovel, Hoe, Trident, Mace, Spear
     };
 
     struct ItemAttributeRow {
@@ -39,8 +39,26 @@ namespace Game {
         WeaponKind kind;
     };
 
-    inline constexpr int kItemAttributeCount = 37;
+    inline constexpr int kItemAttributeCount = 85;
     extern const ItemAttributeRow kItemAttributes[kItemAttributeCount];
+
+    // MC's per-piece armour modifiers (ArmorMaterial.createAttributes): the
+    // ARMOR points of that piece, the material's ARMOR_TOUGHNESS and its
+    // KNOCKBACK_RESISTANCE, all ADD_VALUE on the piece's own slot group —
+    // what "When on Head: +2 Armor" in the tooltip reads. Wolf and horse
+    // armour are ArmorType.BODY ("When equipped:").
+    enum class ArmorSlotGroup : uint8_t { Head, Chest, Legs, Feet, Body };
+
+    struct ItemArmorRow {
+        std::string_view slug;
+        ArmorSlotGroup   slot;
+        float            armor;                 // ADD_VALUE onto ARMOR
+        float            armorToughness;        // ADD_VALUE onto ARMOR_TOUGHNESS
+        float            knockbackResistance;   // ADD_VALUE onto KNOCKBACK_RESISTANCE (0 = no modifier)
+    };
+
+    inline constexpr int kItemArmorCount = 62;
+    extern const ItemArmorRow kItemArmorAttributes[kItemArmorCount];
 
     // Resolves slugs to ItemIDs once at startup, like the recipe and mob-food
     // tables. Safe to call more than once.
@@ -52,6 +70,15 @@ namespace Game {
     void GetItemAttackAttributes(uint32_t itemId, float& outDamage, float& outSpeed);
 
     WeaponKind GetWeaponKind(uint32_t itemId);
+
+    // Whether the item carries main-hand attack modifiers AT ALL — the
+    // tooltip's question. A diamond hoe's modifiers are (0, 0) and still
+    // print " 1 Attack Damage" / " 4 Attack Speed" in vanilla, so "both
+    // zero" cannot mean "no weapon".
+    bool HasItemAttackAttributes(uint32_t itemId);
+
+    // The armour row for an item, or null for anything that is not armour.
+    const ItemArmorRow* GetItemArmorAttributes(uint32_t itemId);
 
     // MC ItemTags.SWORDS — the sweep attack's gate (Player.isSweepAttack).
     inline bool IsSwordItem(uint32_t itemId) {

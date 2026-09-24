@@ -3,9 +3,12 @@
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/EndCrystal.hpp"
+#include "common/entity/ArmorStand.hpp"
 #include "common/world/block/FallingBlock.hpp"
 
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
+#include "server/world/storage/anvil/VillagerNbt.hpp"
+#include "common/entity/npc/Villager.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/entity/Animal.hpp"
@@ -38,6 +41,10 @@
 #include "common/entity/projectile/Projectile.hpp"
 #include "common/entity/projectile/ShulkerBullet.hpp"
 #include "common/entity/projectile/ThrownTrident.hpp"
+#include "common/entity/projectile/ThrowableProjectile.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/entity/ModMobNbt.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -176,6 +183,8 @@ namespace Game::Anvil {
             w.Int   ("PortalCooldown", e.portal.GetCooldown());
             WriteUuid(w, "UUID", e.GetUuid());
             if (e.IsNoGravity()) w.Bool("NoGravity", true);
+            // MC Entity.saveWithoutId: "Silent" only when set.
+            if (e.IsSilent()) w.Bool("Silent", true);
         }
 
         void ReadEntityBase(const CT& tag, Entity& e) {
@@ -198,6 +207,7 @@ namespace Game::Anvil {
             e.onGround = tag.GetValue<int8_t>("OnGround", 0) != 0;
             e.SetInvulnerable(tag.GetValue<int8_t>("Invulnerable", 0) != 0);
             e.SetNoGravity(tag.GetValue<int8_t>("NoGravity", 0) != 0);
+            e.SetSilent(tag.GetValue<int8_t>("Silent", 0) != 0);
             // Without this an entity saved mid-portal reloads with a zero
             // cooldown and teleports straight back on its first tick.
             e.portal.SetCooldown(tag.GetValue<int32_t>("PortalCooldown", 0));
@@ -229,11 +239,9 @@ namespace Game::Anvil {
             w.Int   ("duration",  e.duration);
             w.Bool  ("ambient",   e.ambient);
             w.Bool  ("show_particles", e.visible);
-            // MC's showIcon is a separate field that DEFAULTS to showParticles
-            // (Details::create). The engine models only the one flag, so
-            // writing it for both is the faithful reduction rather than a
-            // guess.
-            w.Bool  ("show_icon", e.visible);
+            // MC Details.show_icon — its own field (defaults to
+            // show_particles when absent, Details::create).
+            w.Bool  ("show_icon", e.showIcon);
             if (e.hiddenEffect) {
                 w.BeginCompound("hidden_effect");
                 WriteEffectBody(w, *e.hiddenEffect);
@@ -262,6 +270,9 @@ namespace Game::Anvil {
             out.duration  = tag.GetValue<int32_t>("duration", 0);
             out.ambient   = tag.GetValue<int8_t>("ambient", 0) != 0;
             out.visible   = tag.GetValue<int8_t>("show_particles", 1) != 0;
+            // Details::create: show_icon.orElse(showParticles).
+            out.showIcon  = tag.HasTag("show_icon")
+                ? tag.GetValue<int8_t>("show_icon", 1) != 0 : out.visible;
 
             if (auto hidden = As<CT>(tag.GetTag("hidden_effect"))) {
                 auto nested = std::make_unique<MobEffectInstance>();
@@ -347,10 +358,15 @@ namespace Game::Anvil {
             }
             // A real 1.21 pig carries an empty Brain compound; matching it
             // keeps third-party tools from flagging the entity as malformed.
-            w.BeginCompound("Brain");
-            w.BeginCompound("memories");
-            w.EndCompound();
-            w.EndCompound();
+            // The villager saves its claims (home, job site, bell) there.
+            if (const auto* villager = dynamic_cast<const Villager*>(&l)) {
+                WriteVillagerBrain(w, *villager);
+            } else {
+                w.BeginCompound("Brain");
+                w.BeginCompound("memories");
+                w.EndCompound();
+                w.EndCompound();
+            }
 
             // MC omits the key entirely when there are none, and an empty
             // list would have to name an element type it has no basis to pick.
@@ -444,18 +460,29 @@ namespace Game::Anvil {
             }
         }
 
-        // ── Animal / ageable ────────────────────────────────────────────────
+        // ── Ageable / animal ────────────────────────────────────────────────
 
-        void WriteAnimalLayer(Nbt::Writer& w, const Animal& a) {
+        // MC AgeableMob.addAdditionalSaveData: Age, ForcedAge, AgeLocked —
+        // for every AgeableMob (the dolphin and the villager included), not
+        // only the animals, which is where the age used to be written.
+        void WriteAgeableLayer(Nbt::Writer& w, const AgeableMob& a) {
             w.Int("Age",       a.GetAge());
             w.Int("ForcedAge", a.GetForcedAge());
+            w.Bool("AgeLocked", a.IsAgeLocked());
+        }
+
+        void ReadAgeableLayer(const CT& tag, AgeableMob& a) {
+            a.SetAge      (tag.GetValue<int32_t>("Age", 0));
+            a.SetForcedAge(tag.GetValue<int32_t>("ForcedAge", 0));
+            a.SetAgeLocked(tag.GetValue<int8_t>("AgeLocked", 0) != 0);
+        }
+
+        void WriteAnimalLayer(Nbt::Writer& w, const Animal& a) {
             w.Int("InLove",    a.GetInLoveTicks());
             WriteRef(w, "LoveCause", a.LoveCauseRef());
         }
 
         void ReadAnimalLayer(const CT& tag, Animal& a) {
-            a.SetAge      (tag.GetValue<int32_t>("Age", 0));
-            a.SetForcedAge(tag.GetValue<int32_t>("ForcedAge", 0));
             // SetInLoveTicks, never SetInLove: the latter hardcodes 600 ticks
             // and broadcasts the heart-particle event, so loading through it
             // would reset every timer and spray hearts across the world.
@@ -616,6 +643,23 @@ namespace Game::Anvil {
             // Without it a trident that has already dealt its damage becomes
             // able to hit again on the tick it loads.
             w.Int   ("obey_in_ground_time", a.GetInGroundTime());
+            // MC Arrow's potion lives on its pickup stack ("item"). Written
+            // only for a tipped shot — a plain arrow's item is the default
+            // vanilla assumes when the key is absent.
+            if (!a.GetPotionContents().IsEmpty() && a.GetType() == EntityTypeId::Arrow) {
+                // A bow-fired tipped arrow carries a tipped_arrow (whose
+                // default scale is the 0.125); a stray's or bogged's carries
+                // a plain arrow with the effect added (scale 1.0).
+                const float scale = a.GetPotionDurationScale();
+                ItemStack pickup(scale == 0.125f ? Items::TippedArrow : Items::Arrow, 1);
+                pickup.components.set(DataComponents::POTION_CONTENTS, a.GetPotionContents());
+                if (scale != 0.125f && scale != 1.0f) {
+                    pickup.components.set(DataComponents::POTION_DURATION_SCALE, scale);
+                }
+                w.BeginCompound("item");
+                WriteItemStackBody(w, pickup);
+                w.EndCompound();
+            }
         }
 
         void ReadArrowLayer(const CT& tag, Arrow& a) {
@@ -625,8 +669,49 @@ namespace Game::Anvil {
             a.SetInGround    (tag.GetValue<int8_t>("inGround", 0) != 0);
             a.SetBaseDamage  (tag.GetValue<double>("damage", Arrow::kArrowBaseDamage));
             a.SetInGroundTime(tag.GetValue<int32_t>("obey_in_ground_time", 0));
+            if (auto item = As<CT>(tag.GetTag("item"))) {
+                const ItemStack pickup = ReadItemStack(*item);
+                if (!pickup.IsEmpty()) a.SetPotionFromPickupStack(pickup);
+            }
         }
 
+    } // namespace
+
+    // ── mod mob fields ──────────────────────────────────────────────────────
+
+    namespace {
+        // Mob::SaveModNbt / LoadModNbt over this file's writer and parsed
+        // compound (ModMobNbt.hpp).
+        class ModNbtWriterAdapter final : public ModNbtOut {
+        public:
+            explicit ModNbtWriterAdapter(Nbt::Writer& w) : m_w(w) {}
+            void Byte(std::string_view name, int8_t v) override { m_w.Byte(name, v); }
+            void Int(std::string_view name, int32_t v) override { m_w.Int(name, v); }
+            void Float(std::string_view name, float v) override { m_w.Float(name, v); }
+            void String(std::string_view name, std::string_view v) override { m_w.String(name, v); }
+        private:
+            Nbt::Writer& m_w;
+        };
+
+        class ModNbtTagAdapter final : public ModNbtIn {
+        public:
+            explicit ModNbtTagAdapter(const ::World::NBTTagCompound& tag) : m_tag(tag) {}
+            bool Has(const std::string& name) const override { return m_tag.HasTag(name); }
+            int8_t Byte(const std::string& name, int8_t def) const override {
+                return m_tag.GetValue<int8_t>(name, def);
+            }
+            int32_t Int(const std::string& name, int32_t def) const override {
+                return m_tag.GetValue<int32_t>(name, def);
+            }
+            float Float(const std::string& name, float def) const override {
+                return m_tag.GetValue<float>(name, def);
+            }
+            std::string String(const std::string& name, const std::string& def) const override {
+                return m_tag.GetValue<std::string>(name, def);
+            }
+        private:
+            const ::World::NBTTagCompound& m_tag;
+        };
     } // namespace
 
     // ── type names ──────────────────────────────────────────────────────────
@@ -681,6 +766,7 @@ namespace Game::Anvil {
         WriteLiving(w, mob);
         WriteMobLayer(w, mob);
 
+        if (const auto* ageable = dynamic_cast<const AgeableMob*>(&mob)) WriteAgeableLayer(w, *ageable);
         if (const auto* animal = dynamic_cast<const Animal*>(&mob)) WriteAnimalLayer(w, *animal);
         if (const auto* tamable = dynamic_cast<const TamableAnimal*>(&mob)) WriteTamable(w, *tamable);
         if (const auto* neutral = dynamic_cast<const NeutralMob*>(&mob)) {
@@ -765,6 +851,13 @@ namespace Game::Anvil {
                     w.Int ("InWaterTime", z->GetInWaterTime());
                     w.Int ("DrownedConversionTime", z->GetDrownedConversionTime());
                 }
+                if (const auto* zv = dynamic_cast<const ZombieVillager*>(&mob)) {
+                    WriteZombieVillagerNbt(w, *zv);
+                }
+                break;
+            // MC Villager / AbstractVillager (VillagerNbt.hpp).
+            case EntityTypeId::Villager:
+                if (const auto* v = dynamic_cast<const Villager*>(&mob)) WriteVillagerNbt(w, *v);
                 break;
             case EntityTypeId::Fox:
                 if (const auto* f = dynamic_cast<const Fox*>(&mob)) {
@@ -963,6 +1056,51 @@ namespace Game::Anvil {
                     w.Int("DragonDeathTime", d->deathTime);
                 }
                 break;
+            case EntityTypeId::ArmorStand:
+                if (const auto* a = dynamic_cast<const ArmorStand*>(&mob)) {
+                    // MC ArmorStand.addAdditionalSaveData, plus the engine's
+                    // Invisible (MC's is Entity's shared flag byte).
+                    w.Bool("Invisible", a->IsInvisible());
+                    w.Bool("Small", a->IsSmall());
+                    w.Bool("ShowArms", a->ShowArms());
+                    w.Int ("DisabledSlots", a->GetDisabledSlots());
+                    w.Bool("NoBasePlate", !a->ShowBasePlate());
+                    if (a->IsMarker()) w.Bool("Marker", true);
+                    // ArmorStandPose.CODEC: six float triples, degrees.
+                    w.BeginCompound("Pose");
+                    const auto rot = [&](const char* name, const glm::vec3& r) {
+                        auto list = w.BeginList(name, Nbt::TagType::Float);
+                        w.ListFloat(list, r.x);
+                        w.ListFloat(list, r.y);
+                        w.ListFloat(list, r.z);
+                        w.EndList(list);
+                    };
+                    const ArmorStand::Pose& pose = a->GetPose();
+                    rot("Head",     pose.head);
+                    rot("Body",     pose.body);
+                    rot("LeftArm",  pose.leftArm);
+                    rot("RightArm", pose.rightArm);
+                    rot("LeftLeg",  pose.leftLeg);
+                    rot("RightLeg", pose.rightLeg);
+                    w.EndCompound();
+                    // MC EntityEquipment's codec (1.21.5+): "equipment", one
+                    // compound per non-empty slot, keyed by the slot's name.
+                    w.BeginCompound("equipment");
+                    static constexpr std::pair<const char*, EquipmentSlot> kSlots[6] = {
+                        {"mainhand", EquipmentSlot::MAINHAND}, {"offhand", EquipmentSlot::OFFHAND},
+                        {"feet", EquipmentSlot::FEET},         {"legs", EquipmentSlot::LEGS},
+                        {"chest", EquipmentSlot::CHEST},       {"head", EquipmentSlot::HEAD},
+                    };
+                    for (const auto& [name, slot] : kSlots) {
+                        const ItemStack& stack = a->GetItemBySlot(slot);
+                        if (stack.IsEmpty()) continue;
+                        w.BeginCompound(name);
+                        WriteItemStackBody(w, stack);
+                        w.EndCompound();
+                    }
+                    w.EndCompound();
+                }
+                break;
             case EntityTypeId::EndCrystal:
                 if (const auto* c = dynamic_cast<const EndCrystal*>(&mob)) {
                     // MC stores beam_target with BlockPos.CODEC — an int
@@ -1031,6 +1169,16 @@ namespace Game::Anvil {
                     w.Double("TZD", d.z);
                 }
                 break;
+            case EntityTypeId::SplashPotion:
+                // MC ThrowableItemProjectile.addAdditionalSaveData: "Item".
+                // The item is what makes a thrown potion lingering here (see
+                // ThrownSplashPotion), so it has to survive the save.
+                if (const auto* p = dynamic_cast<const ThrownSplashPotion*>(&mob)) {
+                    w.BeginCompound("Item");
+                    WriteItemStackBody(w, p->GetItem());
+                    w.EndCompound();
+                }
+                break;
             case EntityTypeId::EyeOfEnder:
                 if (const auto* e = dynamic_cast<const EyeOfEnder*>(&mob)) {
                     w.BeginCompound("Item");
@@ -1088,10 +1236,22 @@ namespace Game::Anvil {
                     w.Float("RadiusOnUse",         c->GetRadiusOnUse());
                     w.Float("RadiusPerTick",       c->GetRadiusPerTick());
                     w.Float("potion_duration_scale", c->GetPotionDurationScale());
+                    // MC AreaEffectCloud: potion_contents, omitted when EMPTY.
+                    if (!c->GetPotionContents().IsEmpty()) {
+                        w.BeginCompound("potion_contents");
+                        WritePotionContentsBody(w, c->GetPotionContents());
+                        w.EndCompound();
+                    }
                 }
                 break;
             default:
                 break;
+        }
+
+        // The mod mobs' own fields (Mob::SaveModNbt, ModMobNbt.hpp).
+        {
+            ModNbtWriterAdapter modOut(w);
+            mob.SaveModNbt(modOut);
         }
 
         // Riders are NESTED, never stored as siblings — vanilla's
@@ -1150,6 +1310,7 @@ namespace Game::Anvil {
         ReadLiving(tag, mob);
         ReadMobLayer(tag, mob);
 
+        if (auto* ageable = dynamic_cast<AgeableMob*>(&mob)) ReadAgeableLayer(tag, *ageable);
         if (auto* animal = dynamic_cast<Animal*>(&mob)) ReadAnimalLayer(tag, *animal);
         if (auto* tamable = dynamic_cast<TamableAnimal*>(&mob)) ReadTamable(tag, *tamable);
         if (auto* neutral = dynamic_cast<NeutralMob*>(&mob)) ReadNeutral(tag, *neutral);
@@ -1223,6 +1384,11 @@ namespace Game::Anvil {
                     z->SetDrownedConversionTime(
                         tag.GetValue<int32_t>("DrownedConversionTime", -1));
                 }
+                if (auto* zv = dynamic_cast<ZombieVillager*>(&mob)) ReadZombieVillagerNbt(tag, *zv);
+                break;
+            // MC Villager / AbstractVillager (VillagerNbt.hpp).
+            case EntityTypeId::Villager:
+                if (auto* v = dynamic_cast<Villager*>(&mob)) ReadVillagerNbt(tag, *v);
                 break;
             case EntityTypeId::Fox:
                 if (auto* f = dynamic_cast<Fox*>(&mob)) {
@@ -1409,6 +1575,45 @@ namespace Game::Anvil {
                     d->deathTime = tag.GetValue<int32_t>("DragonDeathTime", 0);
                 }
                 break;
+            case EntityTypeId::ArmorStand:
+                if (auto* a = dynamic_cast<ArmorStand*>(&mob)) {
+                    // MC ArmorStand.readAdditionalSaveData.
+                    a->SetInvisible  (tag.GetValue<int8_t>("Invisible", 0) != 0);
+                    a->SetSmall      (tag.GetValue<int8_t>("Small", 0) != 0);
+                    a->SetShowArms   (tag.GetValue<int8_t>("ShowArms", 0) != 0);
+                    a->SetDisabledSlots(tag.GetValue<int32_t>("DisabledSlots", 0));
+                    a->SetNoBasePlate(tag.GetValue<int8_t>("NoBasePlate", 0) != 0);
+                    a->SetMarker     (tag.GetValue<int8_t>("Marker", 0) != 0);
+                    ArmorStand::Pose pose;   // each part keeps its default when absent
+                    if (auto p = As<CT>(tag.GetTag("Pose"))) {
+                        const auto rot = [&](const char* name, glm::vec3& out) {
+                            auto list = As<LT>(p->GetTag(name));
+                            if (!list || list->value.size() != 3) return;
+                            for (int i = 0; i < 3; ++i) {
+                                auto f = As<::World::NBTTagFloat>(list->value[static_cast<size_t>(i)]);
+                                out[i] = f ? f->value : 0.0f;
+                            }
+                        };
+                        rot("Head",     pose.head);
+                        rot("Body",     pose.body);
+                        rot("LeftArm",  pose.leftArm);
+                        rot("RightArm", pose.rightArm);
+                        rot("LeftLeg",  pose.leftLeg);
+                        rot("RightLeg", pose.rightLeg);
+                    }
+                    a->SetPose(pose);
+                    if (auto eq = As<CT>(tag.GetTag("equipment"))) {
+                        static constexpr std::pair<const char*, EquipmentSlot> kSlots[6] = {
+                            {"mainhand", EquipmentSlot::MAINHAND}, {"offhand", EquipmentSlot::OFFHAND},
+                            {"feet", EquipmentSlot::FEET},         {"legs", EquipmentSlot::LEGS},
+                            {"chest", EquipmentSlot::CHEST},       {"head", EquipmentSlot::HEAD},
+                        };
+                        for (const auto& [name, slot] : kSlots) {
+                            if (auto it = As<CT>(eq->GetTag(name))) a->SetItemSlot(slot, ReadItemStack(*it));
+                        }
+                    }
+                }
+                break;
             case EntityTypeId::EndCrystal:
                 if (auto* c = dynamic_cast<EndCrystal*>(&mob)) {
                     if (auto arr = As<::World::NBTTagIntArray>(tag.GetTag("beam_target"));
@@ -1479,6 +1684,13 @@ namespace Game::Anvil {
                                                  tag.GetValue<double>("TZD", 0.0)));
                 }
                 break;
+            case EntityTypeId::SplashPotion:
+                if (auto* p = dynamic_cast<ThrownSplashPotion*>(&mob)) {
+                    if (auto item = As<CT>(tag.GetTag("Item"))) {
+                        p->SetItem(ReadItemStack(*item));
+                    }
+                }
+                break;
             case EntityTypeId::EyeOfEnder:
                 if (auto* e = dynamic_cast<EyeOfEnder*>(&mob)) {
                     if (auto item = As<CT>(tag.GetTag("Item"))) {
@@ -1542,10 +1754,19 @@ namespace Game::Anvil {
                     c->SetRadiusOnUse(tag.GetValue<float>("RadiusOnUse", 0.0f));
                     c->SetRadiusPerTick(tag.GetValue<float>("RadiusPerTick", 0.0f));
                     c->SetPotionDurationScale(tag.GetValue<float>("potion_duration_scale", 1.0f));
+                    if (auto contents = tag.GetTag("potion_contents")) {
+                        c->SetPotionContents(ReadPotionContents(*contents));
+                    }
                 }
                 break;
             default:
                 break;
+        }
+
+        // The mod mobs' own fields (Mob::LoadModNbt, ModMobNbt.hpp).
+        {
+            ModNbtTagAdapter modIn(tag);
+            mob.LoadModNbt(modIn);
         }
     }
 
@@ -1642,6 +1863,34 @@ namespace Game::Anvil {
         out.age      = tag.GetValue<int16_t>("Age", 0);
         ReadUuid(tag, "UUID", out.uuid);
         return true;
+    }
+
+    // ── Player effect list (PlayerDataStore) ───────────────────────────────
+    // The same MobEffectInstance.CODEC list LivingEntity writes, for the
+    // player file, which ServerPlayer (not a LivingEntity) writes itself.
+    void WriteActiveEffects(Nbt::Writer& w, const std::vector<MobEffectInstance>& effects) {
+        if (effects.empty()) return;   // MC omits the key when there are none
+        auto list = w.BeginList("active_effects", Nbt::TagType::Compound);
+        for (const auto& e : effects) {
+            w.ListCompoundBegin(list);
+            WriteEffectBody(w, e);
+            w.ListCompoundEnd(list);
+        }
+        w.EndList(list);
+    }
+
+    std::vector<MobEffectInstance> ReadActiveEffects(const ::World::NBTTagCompound& tag) {
+        std::vector<MobEffectInstance> restored;
+        if (auto list = As<LT>(tag.GetTag("active_effects"))) {
+            restored.reserve(list->value.size());
+            for (const auto& elem : list->value) {
+                auto c = As<CT>(elem);
+                if (!c) continue;
+                MobEffectInstance inst{};
+                if (ReadEffectBody(*c, inst)) restored.push_back(std::move(inst));
+            }
+        }
+        return restored;
     }
 
 } // namespace Game::Anvil

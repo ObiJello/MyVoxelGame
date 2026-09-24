@@ -6,6 +6,14 @@
     "minecraft:netherite_pickaxe",
     "minecraft:wooden_pickaxe",
     "minecraft:iron_pickaxe",
-    "minecraft:copper_pickaxe"
+    "minecraft:copper_pickaxe",
+    "minecraft:skyroot_pickaxe",
+    "minecraft:holystone_pickaxe",
+    "minecraft:zanite_pickaxe",
+    "minecraft:gravitite_pickaxe",
+    "minecraft:ironwood_pickaxe",
+    "minecraft:steeleaf_pickaxe",
+    "minecraft:knightmetal_pickaxe",
+    "minecraft:fiery_pickaxe"
   ]
 }

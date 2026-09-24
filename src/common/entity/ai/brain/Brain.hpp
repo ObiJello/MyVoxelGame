@@ -36,6 +36,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace Game {
@@ -116,10 +117,22 @@ namespace Game {
         void AddActivityAndRemoveMemoryWhenStopped(
             Activity activity, int priorityOfFirstBehavior,
             std::vector<BehaviorPtr> behaviors, MemoryModule memory);
+        // MC addActivityWithConditions over an explicit (priority, behaviour)
+        // list — the shape VillagerGoalPackages returns, where several
+        // behaviours share one priority and the numbers are not consecutive
+        // (the core package runs 0,0,0,…,1,2,3,5,6,7,8,10,10,10,10).
+        using PrioritizedBehavior = std::pair<int, BehaviorPtr>;
+        void AddActivityWithPriorities(Activity activity,
+                                       std::vector<PrioritizedBehavior> behaviors,
+                                       std::vector<MemoryCondition> conditions = {});
 
         // MC's activity switch. The FIRST activity whose requirements are met
         // wins; nothing changes when none do.
         void SetActiveActivityToFirstValid(const std::vector<Activity>& activities);
+        // MC Brain.setActiveActivityIfPossible: the activity when its memory
+        // requirements hold, otherwise the default one. The villager's
+        // schedule, its panic trigger and its bell reaction switch this way.
+        void SetActiveActivityIfPossible(Activity activity);
         void UseDefaultActivity() { SetActiveActivity(m_defaultActivity); }
         bool IsActive(Activity activity) const;
         std::optional<Activity> GetActiveNonCoreActivity() const;

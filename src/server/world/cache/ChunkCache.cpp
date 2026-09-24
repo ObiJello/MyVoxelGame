@@ -1,6 +1,7 @@
 // File: src/server/world/cache/ChunkCache.cpp
 #include "ChunkCache.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "common/core/DeferredDispose.hpp"
 #include <vector>
 
 namespace Game {
@@ -20,7 +21,28 @@ namespace Game {
     ChunkCache::~ChunkCache() {
         Log::Debug("ChunkCache destructor: saving %zu dirty chunks", GetDirtyChunks().size());
         SaveAllDirty();
-        Clear();
+        // The map's destruction — every resident chunk with its sections
+        // and block entities — was 25-30 ms of the leave-to-title gap. It
+        // is pure deallocation, so the containers go to the background
+        // disposer whole; nothing else references a chunk the cache alone
+        // still holds (the provider drained and closed the saver first).
+        std::unordered_map<Math::ChunkPos, ChunkCacheEntry, Math::ChunkPosHash> cache;
+        std::list<Math::ChunkPos> order;
+        std::unordered_map<Math::ChunkPos, std::list<Math::ChunkPos>::iterator, Math::ChunkPosHash> iterators;
+        {
+            std::lock_guard<std::mutex> lock(m_cacheMutex);
+            cache.swap(m_cache);
+            order.swap(m_accessOrder);
+            iterators.swap(m_accessIterators);
+            m_stats.currentSize = 0;
+            m_stats.dirtyChunks = 0;
+        }
+        Core::DeferredDispose::Run([cache = std::move(cache), order = std::move(order),
+                                    iterators = std::move(iterators)]() mutable {
+            iterators.clear();
+            order.clear();
+            cache.clear();
+        });
     }
 
     ChunkCache::ChunkCache(ChunkCache&& other) noexcept {
@@ -58,6 +80,19 @@ namespace Game {
         // shorter critical section beats a "cheaper" lock that is not cheap.
         if (m_cache.size() >= EvictionWatermark()) UpdateAccess(position);
         return it->second.chunk;
+    }
+
+    void ChunkCache::GrowMaxSize(size_t maxSize) {
+        std::lock_guard<std::mutex> lock(m_cacheMutex);
+        if (maxSize <= m_config.maxSize) return;
+        Log::Info("ChunkCache capacity %zu -> %zu chunks", m_config.maxSize, maxSize);
+        m_config.maxSize = maxSize;
+        m_stats.maxSize = maxSize;
+    }
+
+    size_t ChunkCache::MaxSize() const {
+        std::lock_guard<std::mutex> lock(m_cacheMutex);
+        return m_config.maxSize;
     }
 
     void ChunkCache::Put(Math::ChunkPos position, std::shared_ptr<Chunk> chunk) {
@@ -162,6 +197,15 @@ namespace Game {
 
             if (!wasDirty) {
                 m_stats.dirtyChunks++;
+                m_eagerSaveQueue.push_back(position);
+                // A server that never has spare time never drains this; keep
+                // it bounded by rebuilding it from what is actually dirty.
+                if (m_eagerSaveQueue.size() > 4 * m_cache.size() + 1024) {
+                    m_eagerSaveQueue.clear();
+                    for (const auto& [pos, entry] : m_cache) {
+                        if (entry.isDirty) m_eagerSaveQueue.push_back(pos);
+                    }
+                }
                 Log::Debug("Marked chunk (%d, %d) as dirty", position.x, position.z);
             }
         }
@@ -187,7 +231,7 @@ namespace Game {
         return dirtyChunks;
     }
 
-    void ChunkCache::SaveAllDirty() {
+    void ChunkCache::SaveAllDirty(bool wait) {
         if (!m_chunkSaver) {
             // Expected on read-only worlds, where ChunkProvider deliberately
             // never builds a saver — not a warning, and this runs on every
@@ -196,7 +240,7 @@ namespace Game {
             return;
         }
 
-        std::vector<std::shared_ptr<const Chunk>> chunksToSave;
+        std::vector<std::shared_ptr<Chunk>> chunksToSave;
         std::vector<Math::ChunkPos> dirtyPositions;
 
         // Collect dirty chunks
@@ -211,27 +255,132 @@ namespace Game {
         }
 
         if (chunksToSave.empty()) {
+            if (!wait) PollInflightSaves();
             return;
         }
 
         Log::Debug("Saving %zu dirty chunks", chunksToSave.size());
 
-        // Save chunks
-        auto results = m_chunkSaver->SaveChunks(chunksToSave);
+        if (!wait) {
+            // MC autosave: snapshot each chunk and hand it to the IO thread;
+            // never wait for the disk. This used to block until every write
+            // had landed, with the compression on this thread too — 13 s
+            // for ~15,000 fresh chunks on the pause-save (2026-09-23).
+            PollInflightSaves();
+            size_t queued = 0;
+            for (size_t i = 0; i < chunksToSave.size(); ++i) {
+                if (QueueBackgroundSave(dirtyPositions[i], chunksToSave[i])) ++queued;
+            }
+            Log::Debug("Queued %zu of %zu dirty chunks for background save", queued, chunksToSave.size());
+            return;
+        }
+
+        if (m_onSaved) {
+            for (size_t i = 0; i < chunksToSave.size(); ++i) m_onSaved(dirtyPositions[i], *chunksToSave[i]);
+        }
+
+        // Save chunks — flush: no write cooldown (MC saveAllChunks(true)).
+        // The cooldown answers "skipped" as success-with-0-bytes, and that
+        // used to clear the dirty flag, so a chunk written by an autosave and
+        // edited within the next 10 s lost the edit on quit.
+        std::vector<std::future<ChunkSaveResult>> futures;
+        futures.reserve(chunksToSave.size());
+        for (const auto& chunk : chunksToSave) futures.push_back(m_chunkSaver->SaveChunkNowAsync(*chunk));
 
         size_t savedCount = 0;
-        for (size_t i = 0; i < results.size(); ++i) {
-            if (results[i].success) {
+        for (size_t i = 0; i < futures.size(); ++i) {
+            const ChunkSaveResult result = futures[i].get();
+            if (result.success) {
                 ClearDirtyFlag(dirtyPositions[i]);
                 savedCount++;
             } else {
                 Log::Warning("Failed to save chunk (%d, %d): %s",
                            dirtyPositions[i].x, dirtyPositions[i].z,
-                           results[i].errorMessage.c_str());
+                           result.errorMessage.c_str());
             }
         }
 
         Log::Debug("Successfully saved %zu out of %zu dirty chunks", savedCount, chunksToSave.size());
+    }
+
+    bool ChunkCache::QueueBackgroundSave(Math::ChunkPos pos, const std::shared_ptr<Chunk>& chunk) {
+        if (!chunk) return false;
+        ClearDirtyFlag(pos);
+        if (m_onSaved) m_onSaved(pos, *chunk);
+        std::future<ChunkSaveResult> future = m_chunkSaver->SaveChunkAsync(*chunk);
+        if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            // Answered on the spot: the write cooldown skipped it (success,
+            // 0 bytes) or serialising failed. Either way nothing will be
+            // written — the chunk stays dirty for a later save.
+            const ChunkSaveResult result = future.get();
+            if (!result.success || result.bytesWritten == 0) {
+                MarkDirty(pos);
+                if (!result.success) {
+                    Log::Warning("Failed to save chunk (%d, %d): %s", pos.x, pos.z,
+                                 result.errorMessage.c_str());
+                }
+                return false;
+            }
+            return true;
+        }
+        std::lock_guard<std::mutex> lock(m_inflightMutex);
+        m_inflightSaves.emplace_back(pos, std::move(future));
+        return true;
+    }
+
+    void ChunkCache::PollInflightSaves() {
+        std::vector<Math::ChunkPos> failed;
+        {
+            std::lock_guard<std::mutex> lock(m_inflightMutex);
+            size_t keep = 0;
+            for (size_t i = 0; i < m_inflightSaves.size(); ++i) {
+                auto& entry = m_inflightSaves[i];
+                if (entry.second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                    if (keep != i) m_inflightSaves[keep] = std::move(entry);
+                    ++keep;
+                    continue;
+                }
+                const ChunkSaveResult result = entry.second.get();
+                if (!result.success) {
+                    Log::Warning("Failed to save chunk (%d, %d): %s", entry.first.x, entry.first.z,
+                                 result.errorMessage.c_str());
+                    failed.push_back(entry.first);
+                }
+            }
+            m_inflightSaves.resize(keep);
+        }
+        for (const auto& pos : failed) MarkDirty(pos);   // retried by a later save
+    }
+
+    size_t ChunkCache::SaveSomeDirty(size_t maxChunks, std::chrono::steady_clock::time_point deadline) {
+        if (!m_chunkSaver || maxChunks == 0) return 0;
+        PollInflightSaves();
+        static constexpr size_t kMaxInflightWrites = 128;   // MC activeChunkWrites < 128
+        size_t queued = 0;
+        size_t budget;
+        {
+            std::lock_guard<std::mutex> lock(m_cacheMutex);
+            budget = m_eagerSaveQueue.size();   // a chunk re-queued below waits for the next call
+        }
+        while (queued < maxChunks && budget-- > 0 && std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lock(m_inflightMutex);
+                if (m_inflightSaves.size() >= kMaxInflightWrites) break;
+            }
+            Math::ChunkPos pos{0, 0};
+            std::shared_ptr<Chunk> chunk;
+            {
+                std::lock_guard<std::mutex> lock(m_cacheMutex);
+                if (m_eagerSaveQueue.empty()) break;
+                pos = m_eagerSaveQueue.front();
+                m_eagerSaveQueue.pop_front();
+                const auto it = m_cache.find(pos);
+                if (it == m_cache.end() || !it->second.isDirty || !it->second.chunk) continue;   // stale entry
+                chunk = it->second.chunk;
+            }
+            if (QueueBackgroundSave(pos, chunk)) ++queued;
+        }
+        return queued;
     }
 
     void ChunkCache::ClearDirtyFlag(Math::ChunkPos position) {
@@ -251,6 +400,7 @@ namespace Game {
         SaveAllDirty();
 
         std::lock_guard<std::mutex> lock(m_cacheMutex);
+        m_eagerSaveQueue.clear();
         m_cache.clear();
         m_accessOrder.clear();
         m_accessIterators.clear();
@@ -317,6 +467,19 @@ namespace Game {
         }
 
         return positions;
+    }
+
+    std::vector<std::pair<Math::ChunkPos, std::shared_ptr<Chunk>>>
+    ChunkCache::GetChunksWithBlockEntities() const {
+        std::lock_guard<std::mutex> lock(m_cacheMutex);
+
+        std::vector<std::pair<Math::ChunkPos, std::shared_ptr<Chunk>>> out;
+        for (const auto& [pos, entry] : m_cache) {
+            if (entry.chunk && !entry.chunk->GetAllBlockEntities().empty()) {
+                out.emplace_back(pos, entry.chunk);
+            }
+        }
+        return out;
     }
 
     // === DEBUGGING ===

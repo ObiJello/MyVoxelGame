@@ -130,6 +130,9 @@ namespace Client {
 
                             // Create ClientConnection
                             m_connection = std::make_shared<ClientConnection>(std::move(*socket), this);
+                            // Before Start(): no PLAY packet may be decoded
+                            // the heavy way (see SetLightweightDecode).
+                            if (m_lightweightDecode) m_connection->SetLightweightDecode(true);
                             m_connection->Start();
                             // MC ClientPacketListener holds `this.connection`;
                             // the handler needs it to reach connection-owned

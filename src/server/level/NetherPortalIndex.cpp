@@ -1,6 +1,6 @@
 // File: src/server/level/NetherPortalIndex.cpp
 //
-// Line references are to minecraft_code/decompiled_net/minecraft/world/level/
+// Line references are to minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/
 // portal/PortalForcer.java.
 
 #include "NetherPortalIndex.hpp"
@@ -22,6 +22,14 @@ namespace Server {
 
     void NetherPortalIndex::Remove(const glm::ivec3& pos) {
         m_positions.erase(pos);
+    }
+
+    std::vector<glm::ivec3> NetherPortalIndex::InChunk(Game::Math::ChunkPos chunkPos) const {
+        std::vector<glm::ivec3> out;
+        for (const glm::ivec3& p : m_positions) {
+            if ((p.x >> 4) == chunkPos.x && (p.z >> 4) == chunkPos.z) out.push_back(p);
+        }
+        return out;
     }
 
     void NetherPortalIndex::NoteChunkLoaded(Game::Math::ChunkPos chunkPos,
@@ -52,7 +60,7 @@ namespace Server {
             if (!states.IsGlobalPalette()) {
                 bool mayContain = false;
                 for (uint32_t raw : states.Palette()) {
-                    if (Game::BlockState::FromRawId(raw).Is(Game::BlockID::NetherPortal)) {
+                    if (Game::BlockState::FromRawId(raw).Is(m_portalBlock)) {
                         mayContain = true;
                         break;
                     }
@@ -65,7 +73,7 @@ namespace Server {
             for (int y = 0; y < 16; ++y) {
                 for (int z = 0; z < 16; ++z) {
                     for (int x = 0; x < 16; ++x) {
-                        if (section->GetBlockID(x, y, z) != Game::BlockID::NetherPortal) {
+                        if (section->GetBlockID(x, y, z) != m_portalBlock) {
                             continue;
                         }
                         m_positions.insert(glm::ivec3(chunkPos.x * 16 + x,
@@ -106,7 +114,7 @@ namespace Server {
             // it, so an unloaded position is trusted rather than culled.
             const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
             if (world.IsChunkLoaded(cp.x, cp.z) &&
-                world.GetBlock(pos.x, pos.y, pos.z) != Game::BlockID::NetherPortal) {
+                world.GetBlock(pos.x, pos.y, pos.z) != m_portalBlock) {
                 stale.push_back(pos);
                 continue;
             }

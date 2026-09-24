@@ -1,6 +1,6 @@
 // File: src/server/level/StrongholdLocate.cpp
 //
-// References: minecraft_code/decompiled_net/minecraft/world/level/chunk/
+// References: minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/chunk/
 // ChunkGenerator.java (findNearestMapStructure / getNearestGeneratedStructure)
 // and data/minecraft/worldgen/structure_set/strongholds.json.
 

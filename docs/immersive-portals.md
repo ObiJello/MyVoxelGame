@@ -15,6 +15,29 @@ Server toggle: `immersivePortals` in the world's `level.dat`
 a new world). Off = vanilla purple nether portals, vanilla gun; the code for
 both stays compiled in.
 
+The rule is the **nether's** switch only (`Portals::FamilyIsImmersive`,
+`PortalState.hpp`). The other portals are always vanilla block portals, and
+nothing about them changes when it flips:
+
+| Portal | Mode, whatever the rule says |
+|---|---|
+| Nether (obsidian, fire) | follows the rule |
+| Hush (reinforced deepslate, echo shard) | always `hush_portal` blocks |
+| Aether (glowstone, water bucket) | always `aether_portal` blocks |
+| Twilight Forest (flower-ringed pool, diamond) | always `twilight_portal` blocks — not a frame family, never reads the rule |
+
+Turning the rule off fills and parks only nether frames (and command
+portals/mirrors; gun surfaces are dropped and rebuilt). Hush and Aether
+frames are vanilla rectangles (PortalShape, up to 21×21 inside), crossed by
+standing in the blocks (PortalTravel / PortalForcer), never adopted as
+immersive portals on chunk load.
+Worlds from before this: any Hush/Aether immersive record (live, or parked in
+`immersive_portals_disabled.json` by an older build — restored at open) is
+converted before the server's first tick
+(`IntegratedServer::ConvertVanillaFamilyPortals`): both frames of the pair
+have their chunks loaded and are lit with the family's portal blocks, then
+the cluster's records are removed.
+
 All eight phases were written in one pass on 2026-09-01 **without a build**;
 the gates below are what to test, in order, once it compiles.
 
@@ -98,6 +121,24 @@ tracker announced the removal. `OnClientPortalTeleport` sends the mobs that
 targeted the player to the portal (`Chase` records); on arrival they retarget
 the player's view in the new level.
 
+Gun portals sit on a wall or a floor, so a mob needs the wall opened for it
+the way the client opens it for the player: `MobPortalCollision` (per
+`ServerLevelBridge`, refreshed in `IntegratedServer::TickMobs` before the
+mobs move) is the server's `PortalCollisionProvider` — carried on the level's
+`PhysicsContext`, which takes precedence over the process-wide hooks — and
+makes the cells behind a gun surface non-solid for a body that fits the 1×2
+opening (`Portal::BoxFitsOpening`, shared with the client's collision and
+with `TickMobs`' crossing gate, so only a mob that fits a 2×1 goes through).
+Passthrough only; gun portals have no far-side solidity on either side.
+Mobs move through `MoveEntity`, whose `CollectBlockColliders` takes the
+mover's box and asks the context's provider (never the global player hook)
+per cell. The pathfinder still sees the wall as solid, so a chasing or
+tempted mob's path ends at the face; from there `TickChases` drives it
+straight in on its move control (`WalkIntoGunPortal`) until its eye crosses.
+`MoveMob` applies the gun's arrival rules (feet on the opening's bottom edge
+for a wall exit, head under the ceiling, feet on a floor surface) and the
+floor-exit fling.
+
 ### Collision — `src/client/portal/ImmersivePortalCollision.hpp`
 
 Two physics hooks (`SetPortalPassthroughFn`, `SetPortalExtraSolidFn`): cells
@@ -154,6 +195,7 @@ feature status and test walk.
    the fire vanishes and the far side appears in the hole after the Nether
    chunks load; walk through. Break a frame block: both sides vanish.
    `/gamerule immersive_portals false` + relog: vanilla purple portals.
+   A lit Hush or Aether frame stays see-through through both flips.
 5. **Phase 7** — throw an item through; drop XP through; let a zombie chase
    you through; place a `/portal make_full` with a floor on the far side and
    a pit on the near side, walk onto it: you stand on the far floor; break

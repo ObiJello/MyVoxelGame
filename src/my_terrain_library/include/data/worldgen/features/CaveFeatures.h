@@ -60,6 +60,9 @@ public:
     static levelgen::ConfiguredFeature* DRIPSTONE_CLUSTER;
     static levelgen::ConfiguredFeature* LARGE_DRIPSTONE;
     static levelgen::ConfiguredFeature* POINTED_DRIPSTONE;
+    // 26.3 sulfur caves: the dripstone features grown from sulfur
+    static levelgen::ConfiguredFeature* SULFUR_SPIKE_CLUSTER;
+    static levelgen::ConfiguredFeature* SULFUR_SPIKE;
 
     // =========================================================================
     // UNDERWATER - Reference: CaveFeatures.java line 65
@@ -75,6 +78,7 @@ public:
     // AZALEA - Reference: CaveFeatures.java line 67
     // =========================================================================
     static levelgen::ConfiguredFeature* ROOTED_AZALEA_TREE;
+    static levelgen::ConfiguredFeature* ROOTED_SULFUR_SPRING;   // 26.3
 
     // =========================================================================
     // CAVE VINES - Reference: CaveFeatures.java lines 68-69

@@ -6,6 +6,12 @@
     "minecraft:netherite_hoe",
     "minecraft:wooden_hoe",
     "minecraft:iron_hoe",
-    "minecraft:copper_hoe"
+    "minecraft:copper_hoe",
+    "minecraft:skyroot_hoe",
+    "minecraft:holystone_hoe",
+    "minecraft:zanite_hoe",
+    "minecraft:gravitite_hoe",
+    "minecraft:ironwood_hoe",
+    "minecraft:steeleaf_hoe"
   ]
 }

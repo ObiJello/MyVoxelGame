@@ -420,6 +420,131 @@ private:
 };
 
 //=============================================================================
+// OffsetPlacement (26.3) - per-axis offset: x, then y, then z sampled
+// Reference: 26.3 OffsetPlacement.java (RandomOffsetPlacement.of(xz, y) is
+// the x == z case; OffsetPlacement.of(direction) needs independent axes)
+//=============================================================================
+
+class OffsetPlacement : public PlacementModifier {
+private:
+    const carver::IntProvider* m_x;
+    const carver::IntProvider* m_y;
+    const carver::IntProvider* m_z;
+
+public:
+    OffsetPlacement(const carver::IntProvider* x, const carver::IntProvider* y, const carver::IntProvider* z)
+        : m_x(x), m_y(y), m_z(z) {}
+
+    void appendPositions(
+        PlacementContext& /*context*/,
+        WorldgenRandom& random,
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
+    ) override {
+        const int32_t dx = m_x->sample(random);
+        const int32_t dy = m_y->sample(random);
+        const int32_t dz = m_z->sample(random);
+        out.push_back(origin.offset(dx, dy, dz));
+    }
+
+    std::string getTypeName() const override { return "OffsetPlacement"; }
+};
+
+//=============================================================================
+// RandomlySelectedPlacement (26.3) - applies one of its modifiers, picked by
+// Util.getRandom (nextInt(size))
+// Reference: 26.3 RandomlySelectedPlacement.java
+//=============================================================================
+
+class RandomlySelectedPlacement : public PlacementModifier {
+private:
+    std::vector<PlacementModifier*> m_placements;
+
+public:
+    explicit RandomlySelectedPlacement(std::vector<PlacementModifier*> placements)
+        : m_placements(std::move(placements)) {}
+
+    void appendPositions(
+        PlacementContext& context,
+        WorldgenRandom& random,
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
+    ) override {
+        PlacementModifier* chosen =
+            m_placements[static_cast<size_t>(random.nextInt(static_cast<int32_t>(m_placements.size())))];
+        chosen->appendPositions(context, random, origin, out);
+    }
+
+    std::string getTypeName() const override { return "RandomlySelectedPlacement"; }
+};
+
+//=============================================================================
+// RandomChancePlacement (26.3) - passes with nextFloat() < chance
+// Reference: 26.3 RandomChancePlacement.java
+//=============================================================================
+
+class RandomChancePlacement : public PlacementFilter {
+private:
+    float m_chance;
+
+public:
+    explicit RandomChancePlacement(float chance) : m_chance(chance) {}
+
+    std::string getTypeName() const override { return "RandomChancePlacement"; }
+
+protected:
+    bool shouldPlace(PlacementContext& /*context*/, WorldgenRandom& random, const core::BlockPos& /*origin*/) override {
+        return random.nextFloat() < m_chance;
+    }
+};
+
+//=============================================================================
+// CuboidPlacement (26.3) - the positions of a random box from the origin
+// Reference: 26.3 feature/CuboidPlacement.java: draws the y size, then the
+// x and z sizes, and emits x-major, then y, then z; without edges the 12
+// edges are skipped, without interior only the shell remains.
+//=============================================================================
+
+class CuboidPlacement : public PlacementModifier {
+private:
+    const carver::IntProvider* m_xzSize;
+    const carver::IntProvider* m_ySize;
+    bool m_includeEdges;
+    bool m_includeInterior;
+
+public:
+    CuboidPlacement(const carver::IntProvider* xzSize, const carver::IntProvider* ySize,
+                    bool includeEdges, bool includeInterior)
+        : m_xzSize(xzSize), m_ySize(ySize), m_includeEdges(includeEdges), m_includeInterior(includeInterior) {}
+
+    void appendPositions(
+        PlacementContext& /*context*/,
+        WorldgenRandom& random,
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
+    ) override {
+        const int height = m_ySize->sample(random);
+        const int width = m_xzSize->sample(random);
+        const int length = m_xzSize->sample(random);
+        for (int x = 0; x <= width; ++x) {
+            for (int y = 0; y <= height; ++y) {
+                for (int z = 0; z <= length; ++z) {
+                    const bool xEdge = x == 0 || x == width;
+                    const bool yEdge = y == 0 || y == height;
+                    const bool zEdge = z == 0 || z == length;
+                    const bool onEdge = (xEdge && yEdge) || (zEdge && yEdge) || (xEdge && zEdge);
+                    if (!m_includeEdges && onEdge) continue;
+                    if (!m_includeInterior && !xEdge && !yEdge && !zEdge) continue;
+                    out.push_back(origin.offset(x, y, z));
+                }
+            }
+        }
+    }
+
+    std::string getTypeName() const override { return "CuboidPlacement"; }
+};
+
+//=============================================================================
 // RandomOffsetPlacement - Random XZ and Y offset
 // Reference: RandomOffsetPlacement.java
 //=============================================================================

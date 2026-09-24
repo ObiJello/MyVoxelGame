@@ -37,8 +37,68 @@ namespace Game::Anvil {
         return SaveRoot::Open(path.string(), reason);
     }
 
+    namespace {
+
+        // Builds before 2026-09-09 appended the dimension sub-folder twice, so
+        // a Nether written by them lives at DIM-1/DIM-1/{region,entities,...}
+        // rather than DIM-1/{region,entities,...}. Minecraft's file fixer
+        // moves DIM-1/region into the new layout and then fails to delete
+        // DIM-1 because the stray folder is still inside it, and this engine
+        // now reads DIM-1/region — so without this the player's Nether and End
+        // would silently regenerate. Files are moved individually so a world
+        // that was already partly played in the fixed layout keeps both sets;
+        // a region file present in both places keeps the outer (newer) one.
+        void LiftNestedDimensionFolder(const SaveRoot& root, DimensionId dim) {
+            const std::string_view sub = DimensionSaveSubdir(dim);
+            if (sub.empty()) return;
+
+            const std::filesystem::path outer  = root.Dimension(dim);
+            const std::filesystem::path nested = outer / std::filesystem::path(sub);
+
+            std::error_code ec;
+            if (!std::filesystem::is_directory(nested, ec)) return;
+
+            size_t moved = 0, kept = 0;
+            for (const auto& kindDir : std::filesystem::directory_iterator(nested, ec)) {
+                if (!kindDir.is_directory(ec)) continue;
+                const std::filesystem::path target = outer / kindDir.path().filename();
+                std::filesystem::create_directories(target, ec);
+                for (const auto& file : std::filesystem::directory_iterator(kindDir.path(), ec)) {
+                    const std::filesystem::path dest = target / file.path().filename();
+                    if (std::filesystem::exists(dest, ec)) { ++kept; continue; }
+                    std::filesystem::rename(file.path(), dest, ec);
+                    if (ec) {
+                        Log::Warning("[Anvil] could not lift %s out of %s: %s",
+                                     file.path().filename().string().c_str(),
+                                     nested.string().c_str(), ec.message().c_str());
+                        ec.clear();
+                        ++kept;
+                    } else {
+                        ++moved;
+                    }
+                }
+                // Only an emptied kind folder goes away; anything we could not
+                // move stays where a person can still find it.
+                std::filesystem::remove(kindDir.path(), ec);
+                ec.clear();
+            }
+            std::filesystem::remove(nested, ec);   // succeeds only when empty
+            ec.clear();
+
+            if (moved || kept) {
+                Log::Info("[Anvil] lifted %zu file(s) from %s to %s (%zu left behind)",
+                          moved, nested.string().c_str(), outer.string().c_str(), kept);
+            }
+        }
+
+    } // namespace
+
     bool EnsureDirectories(const SaveRoot& root, std::string& error) {
         std::error_code ec;
+
+        for (const DimensionId dim : Game::kAllDimensions) {
+            LiftNestedDimensionFolder(root, dim);   // no-op for the overworld
+        }
 
         auto make = [&](const std::filesystem::path& p) {
             std::filesystem::create_directories(p, ec);
@@ -52,7 +112,7 @@ namespace Game::Anvil {
         if (!make(root.Root())) return false;
         if (!make(root.PlayerDataDir())) return false;
 
-        for (const DimensionId dim : {DimensionId::Overworld, DimensionId::Nether, DimensionId::End}) {
+        for (const DimensionId dim : Game::kAllDimensions) {
             if (!make(root.RegionDir(dim)))   return false;
             if (!make(root.EntitiesDir(dim))) return false;
             if (!make(root.PoiDir(dim)))      return false;

@@ -7,6 +7,8 @@
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include <array>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <atomic>
@@ -20,6 +22,10 @@ namespace Game {
 }
 
 namespace Threading {
+
+    // Chunk positions chunk work is ordered against, one list per dimension
+    // (index = Game::DimensionSlot).
+    using ChunkLoadAnchors = std::array<std::vector<Game::Math::ChunkPos>, Game::kDimensionCount>;
 
     // Forward declarations
     class IChunkGenerator;
@@ -112,8 +118,9 @@ namespace Threading {
         // CONFIGURATION
         // ========================================================================
 
-        // Refresh the player positions DequeueJob prioritises against.
-        void SetAnchors(std::vector<Game::Math::ChunkPos> anchors);
+        // Refresh the player positions DequeueJob prioritises against, per
+        // dimension (index = Game::DimensionSlot).
+        void SetAnchors(ChunkLoadAnchors anchors);
 
         void SetWorkerCount(size_t count);
         size_t GetWorkerCount() const { return m_workerThreads.size(); }
@@ -161,19 +168,29 @@ namespace Threading {
         std::atomic<bool> m_running{false};
         size_t m_workerCount;
 
-        // Player chunk positions, refreshed each server tick. DequeueJob picks
-        // the queued chunk nearest to any of them — MC re-evaluates its queue
-        // level at poll time for the same reason: the players move, so a key
-        // fixed at submit time is stale by the time the job is taken.
+        // Player chunk positions, refreshed each server tick: what a chunk
+        // job's distance bucket is measured against. Swapped whole, so a
+        // reader copies one pointer under the mutex, never the lists.
         mutable std::mutex m_anchorMutex;
-        std::vector<Game::Math::ChunkPos> m_anchors;
+        std::shared_ptr<const ChunkLoadAnchors> m_anchors;
+        std::shared_ptr<const ChunkLoadAnchors> AnchorsSnapshot() const;
 
-        // Job queue
+        // Job queue — MC ChunkTaskPriorityQueue: chunk jobs sit in buckets by
+        // their distance to the nearest player (MC: by queue level), FIFO
+        // within a bucket, and a worker takes from the nearest non-empty
+        // bucket. It replaced one vector that every DequeueJob scanned whole,
+        // measuring each job against every player, while holding both queue
+        // locks: at 26,000 queued loads and 50 players a scan took 1-4 ms,
+        // and the server thread's submits and cancels waited behind it — a
+        // 0.9-1.8 s watch-set phase when 50 players joined at once (Tracy,
+        // 2026-09-24). Everything else (saves, world I/O) is FIFO and served
+        // first, as before.
+        static constexpr int kDistanceBuckets = 64;   // Chebyshev chunks; the last also holds "no player in that dimension"
+        int DistanceBucket(const ServerJob& job, const ChunkLoadAnchors* anchors) const;
         mutable std::mutex m_jobQueueMutex;
-        // Vector, not a queue: DequeueJob selects by distance to the nearest
-        // player rather than by insertion order (MC ChunkTaskDispatcher's
-        // queue-level priority), so there is no FIFO order to preserve.
-        std::vector<ServerJob> m_jobQueue;
+        std::deque<ServerJob> m_otherJobs;
+        std::array<std::deque<ServerJob>, kDistanceBuckets> m_chunkBuckets;
+        size_t m_chunkJobCount = 0;
         std::condition_variable m_jobCondition;
 
         // Job cancellation via generation IDs, ONE MAP PER DIMENSION (indexed
@@ -247,12 +264,15 @@ namespace Threading {
     bool SubmitServerChunkLoading(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
                                   int priority = 0);
 
-    // Player chunk positions the pool orders queued chunk work against.
-    //
-    // Deliberately NOT per-dimension: the anchors only order the queue, and a
-    // chunk in another dimension at the same x/z is exactly as urgent as this
-    // one — both are somewhere a player is standing.
-    void SetServerChunkLoadAnchors(std::vector<Game::Math::ChunkPos> anchors);
+    // Player chunk positions the pool orders queued chunk work against, per
+    // dimension. They used to be one shared list, on the theory that a chunk
+    // at the same x/z in another dimension is equally urgent — but the list
+    // also carries portal far sides, whose centres are in the FAR dimension's
+    // coordinates (an Overworld portal at x=800 loads the Nether around
+    // x=100). Measured against every anchor regardless of dimension, a job
+    // was "near" a player it was nowhere near, and a level's load order
+    // stopped being nearest-first around the player actually in it.
+    void SetServerChunkLoadAnchors(ChunkLoadAnchors anchors);
     void SubmitServerChunkSaving(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
                                  std::shared_ptr<Game::Chunk> chunk, int priority = 0);
 

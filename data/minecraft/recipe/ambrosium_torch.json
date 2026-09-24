@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "/": "minecraft:skyroot_stick",
+    "A": "minecraft:ambrosium_shard"
+  },
+  "pattern": [
+    "A",
+    "/"
+  ],
+  "result": {
+    "count": 4,
+    "id": "minecraft:ambrosium_torch"
+  }
+}

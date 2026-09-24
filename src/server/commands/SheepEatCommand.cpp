@@ -35,10 +35,11 @@ namespace Server {
 
     } // namespace
 
-    void SheepEatCommand::Execute(ServerPlayer& sender,
+    void SheepEatCommand::Execute(const CommandSourceStack& source,
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
                                   PlayerSessionManager& /*sessionManager*/) {
+        ServerPlayer& sender = *source.sender;
         if (!g_integratedServer) {
             connection.SendChatMessage("No server", 1);
             return;

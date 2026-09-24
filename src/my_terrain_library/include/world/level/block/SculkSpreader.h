@@ -91,7 +91,9 @@ private:
     std::optional<std::set<core::Direction>> m_facings;
 
     static std::vector<core::Vec3i> getRandomizedNonCornerNeighbourOffsets(levelgen::WorldgenRandom& random);
-    static core::BlockPos* getValidMovementPos(levelgen::WorldGenLevel* level, const core::BlockPos& pos, levelgen::WorldgenRandom& random);
+    static core::BlockPos* getValidMovementPos(levelgen::WorldGenLevel* level, const core::BlockPos& pos,
+                                               levelgen::WorldgenRandom& random, const core::BlockPos& originPos,
+                                               const SculkSpreader& spreader);
     static bool isMovementUnobstructed(levelgen::WorldGenLevel* level, const core::BlockPos& from, const core::BlockPos& to);
     static bool isUnobstructed(levelgen::WorldGenLevel* level, const core::BlockPos& from, core::Direction direction);
 };

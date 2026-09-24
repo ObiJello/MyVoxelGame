@@ -1,0 +1,252 @@
+{
+  "music.hush.meadows": {
+    "sounds": [
+      {
+        "name": "music.overworld.deep_dark",
+        "type": "event"
+      },
+      {
+        "name": "music.nether.soul_sand_valley",
+        "type": "event"
+      }
+    ]
+  },
+  "music.hush.forest": {
+    "sounds": [
+      {
+        "name": "music.overworld.deep_dark",
+        "type": "event"
+      },
+      {
+        "name": "music.nether.warped_forest",
+        "type": "event"
+      }
+    ]
+  },
+  "music.hush.barrens": {
+    "sounds": [
+      {
+        "name": "music.overworld.deep_dark",
+        "type": "event"
+      },
+      {
+        "name": "music.nether.basalt_deltas",
+        "type": "event"
+      }
+    ]
+  },
+  "music.hush.caverns": {
+    "sounds": [
+      {
+        "name": "music.overworld.deep_dark",
+        "type": "event"
+      },
+      {
+        "name": "music.overworld.dripstone_caves",
+        "type": "event"
+      }
+    ]
+  },
+  "music.hush.choir": {
+    "sounds": [
+      {
+        "name": "music.overworld.deep_dark",
+        "type": "event"
+      },
+      {
+        "name": "music.under_water",
+        "type": "event"
+      }
+    ]
+  },
+  "music.hush.deep": {
+    "sounds": [
+      {
+        "name": "music.overworld.deep_dark",
+        "type": "event"
+      }
+    ]
+  },
+  "music.hush.steppe": {
+    "sounds": [
+      {
+        "name": "music.overworld.deep_dark",
+        "type": "event"
+      },
+      {
+        "name": "music.overworld.frozen_peaks",
+        "type": "event"
+      }
+    ]
+  },
+  "ambient.hush.mood": {
+    "subtitle": "subtitles.ambient.cave",
+    "sounds": [
+      {
+        "name": "ambient.cave",
+        "type": "event",
+        "pitch": 0.8
+      }
+    ]
+  },
+  "ambient.hush.meadows.loop": {
+    "sounds": [
+      {
+        "name": "ambient.soul_sand_valley.loop",
+        "type": "event",
+        "volume": 0.5,
+        "pitch": 0.85
+      }
+    ]
+  },
+  "ambient.hush.meadows.additions": {
+    "sounds": [
+      {
+        "name": "block.amethyst_block.chime",
+        "type": "event",
+        "volume": 1.5,
+        "pitch": 0.6
+      },
+      {
+        "name": "ambient.soul_sand_valley.additions",
+        "type": "event",
+        "volume": 0.4,
+        "pitch": 0.8
+      }
+    ]
+  },
+  "ambient.hush.forest.loop": {
+    "sounds": [
+      {
+        "name": "ambient.warped_forest.loop",
+        "type": "event",
+        "volume": 0.6,
+        "pitch": 0.8
+      }
+    ]
+  },
+  "ambient.hush.forest.additions": {
+    "sounds": [
+      {
+        "name": "ambient.warped_forest.additions",
+        "type": "event",
+        "volume": 0.5,
+        "pitch": 0.8
+      }
+    ]
+  },
+  "ambient.hush.barrens.loop": {
+    "sounds": [
+      {
+        "name": "ambient.basalt_deltas.loop",
+        "type": "event",
+        "volume": 0.4,
+        "pitch": 0.7
+      }
+    ]
+  },
+  "ambient.hush.barrens.additions": {
+    "sounds": [
+      {
+        "name": "ambient.basalt_deltas.additions",
+        "type": "event",
+        "volume": 0.4,
+        "pitch": 0.7
+      },
+      {
+        "name": "block.amethyst_block.chime",
+        "type": "event",
+        "volume": 1.5,
+        "pitch": 0.5
+      }
+    ]
+  },
+  "ambient.hush.caverns.additions": {
+    "sounds": [
+      {
+        "name": "block.amethyst_block.chime",
+        "type": "event",
+        "volume": 2.0,
+        "pitch": 0.8
+      },
+      {
+        "name": "block.amethyst_block.resonate",
+        "type": "event",
+        "volume": 0.4,
+        "pitch": 0.7
+      }
+    ]
+  },
+  "ambient.hush.choir.loop": {
+    "sounds": [
+      {
+        "name": "ambient.soul_sand_valley.loop",
+        "type": "event",
+        "volume": 0.45,
+        "pitch": 0.7
+      }
+    ]
+  },
+  "ambient.hush.choir.additions": {
+    "sounds": [
+      {
+        "name": "block.bell.resonate",
+        "type": "event",
+        "volume": 0.25,
+        "pitch": 0.5
+      },
+      {
+        "name": "ambient.underwater.loop.additions",
+        "type": "event",
+        "volume": 0.5,
+        "pitch": 0.8
+      }
+    ]
+  },
+  "ambient.hush.deep.loop": {
+    "sounds": [
+      {
+        "name": "ambient.crimson_forest.loop",
+        "type": "event",
+        "volume": 0.4,
+        "pitch": 0.6
+      }
+    ]
+  },
+  "ambient.hush.deep.additions": {
+    "sounds": [
+      {
+        "name": "ambient.soul_sand_valley.additions",
+        "type": "event",
+        "volume": 0.5,
+        "pitch": 0.7
+      },
+      {
+        "name": "block.sculk_sensor.clicking",
+        "type": "event",
+        "volume": 0.6,
+        "pitch": 0.6
+      }
+    ]
+  },
+  "ambient.hush.steppe.loop": {
+    "sounds": [
+      {
+        "name": "ambient.soul_sand_valley.loop",
+        "type": "event",
+        "volume": 0.35,
+        "pitch": 1.1
+      }
+    ]
+  },
+  "ambient.hush.steppe.additions": {
+    "sounds": [
+      {
+        "name": "block.amethyst_block.chime",
+        "type": "event",
+        "volume": 1.2,
+        "pitch": 1.2
+      }
+    ]
+  }
+}

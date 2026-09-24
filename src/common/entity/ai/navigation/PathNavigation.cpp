@@ -155,6 +155,38 @@ namespace Game {
         return path;
     }
 
+    std::optional<Path> PathNavigation::CreatePath(const std::vector<glm::ivec3>& targets,
+                                                  int reachRange) {
+        PROFILE_ZONE_N("Nav.CreatePathMulti");
+        if (targets.empty()) return std::nullopt;
+        if (!m_pathFinder) {
+            // Same lazy build as the single-target form.
+            const int maxVisited = static_cast<int>(
+                std::floor(m_mob->Attributes().GetBaseValue(Attribute::FollowRange) * 16.0));
+            m_pathFinder = CreatePathFinder(std::max(1, maxVisited));
+            m_pathFinder->GetNodeEvaluator().SetCanFloat(m_canFloat);
+            m_pathFinder->GetNodeEvaluator().SetCanOpenDoors(m_canOpenDoors);
+        }
+        constexpr double kMinBuildY = -64.0;
+        if (m_mob->position.y < kMinBuildY) return std::nullopt;
+        if (!CanUpdatePath()) return std::nullopt;
+        // MC: keep the live path when its target is one of the asked-for set.
+        if (m_path && !m_path->IsDone() && m_targetPos &&
+            std::find(targets.begin(), targets.end(), *m_targetPos) != targets.end()) {
+            return m_path;
+        }
+        std::optional<Path> path = m_pathFinder->FindPath(
+            m_level->Blocks(), m_mob, targets,
+            static_cast<float>(GetMaxPathLength()), reachRange,
+            m_maxVisitedNodesMultiplier);
+        if (path) {
+            m_targetPos = path->GetTarget();
+            m_reachRange = reachRange;
+            ResetStuckTimeout();
+        }
+        return path;
+    }
+
     std::optional<Path> PathNavigation::CreatePath(const Entity& target, int reachRange) {
         return CreatePath(target.BlockPosition(), reachRange);
     }

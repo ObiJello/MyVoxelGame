@@ -54,25 +54,34 @@ namespace Game {
             return false;
         }
 
-        // 2. Block light vs the dimension's limit (0 in the overworld). No
-        //    light engine here means block light is always 0, so this never
-        //    rejects yet — it will start working the day torches emit light,
-        //    with no change needed at this call site.
-        constexpr int kOverworldBlockLightLimit = 0;
-        constexpr int kBlockLight = 0;
-        if (kOverworldBlockLightLimit < 15 && kBlockLight > kOverworldBlockLightLimit) {
+        // The dimension type's two spawn-light fields (26.x dimension_type
+        // JSON): monster_spawn_block_light_limit and monster_spawn_light_level.
+        // Overworld (and the engine's overworld-like dimensions): 0 and
+        // UniformInt(0, 7). Nether: 15 and the constant 7. End: 0 and the
+        // constant 15. A constant draws no random number — MC's
+        // ConstantInt.sample never touches the RandomSource.
+        int blockLightLimit = 0;
+        int constantLightLevel = -1;             // -1: UniformInt(0, 7)
+        switch (level.Dimension()) {
+            case DimensionId::Nether: blockLightLimit = 15; constantLightLevel = 7;  break;
+            case DimensionId::End:    blockLightLimit = 0;  constantLightLevel = 15; break;
+            default: break;
+        }
+
+        // 2. Block light vs the dimension's limit — a torch-lit cave stops
+        //    spawning here.
+        if (blockLightLimit < 15 && level.GetBlockBrightness(pos.x, pos.y, pos.z) > blockLightLimit) {
             return false;
         }
 
-        // 3. Effective brightness vs a UniformInt(0, 7) sample — the overworld
-        //    dimension type's monster_spawn_light_level. Thunder subtracts 10
-        //    instead of the usual skyDarken, which is what lets mobs spawn on
-        //    the surface during a daytime storm.
+        // 3. Effective brightness vs the dimension's light-level sample.
+        //    Thunder subtracts 10 instead of the usual skyDarken, which is what
+        //    lets mobs spawn on the surface during a daytime storm.
         const int brightness = level.IsThundering()
             ? level.GetMaxLocalRawBrightness(pos.x, pos.y, pos.z, 10)
             : level.GetMaxLocalRawBrightness(pos.x, pos.y, pos.z);
 
-        return brightness <= rng.NextInt(8);
+        return brightness <= (constantLightLevel >= 0 ? constantLightLevel : rng.NextInt(8));
     }
 
     bool Monster::CheckMonsterSpawnRules(EntityLevel& level, SpawnReason reason,

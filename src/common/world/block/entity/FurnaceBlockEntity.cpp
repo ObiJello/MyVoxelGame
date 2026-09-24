@@ -1,5 +1,6 @@
 // File: src/common/world/block/entity/FurnaceBlockEntity.cpp
 #include "FurnaceBlockEntity.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/level/World.hpp"
@@ -7,6 +8,33 @@
 #include <string>
 
 namespace Game {
+
+    bool FurnaceBlockEntity::CanPlaceItem(int slot, const ItemStack& stack) const {
+        if (slot == SLOT_RESULT) return false;
+        if (slot != SLOT_FUEL) return true;
+        const ItemStack& fuel = GetItem(SLOT_FUEL);
+        return RecipeManager::GetFuelBurnTime(stack) > 0 ||
+               (stack.itemId == Items::Bucket && fuel.itemId == Items::Bucket);
+    }
+
+    void FurnaceBlockEntity::GetSlotsForFace(Direction face, std::vector<int>& out) const {
+        out.clear();
+        if (face == Direction::Down)      { out = {SLOT_RESULT, SLOT_FUEL}; }
+        else if (face == Direction::Up)   { out = {SLOT_INPUT}; }
+        else                              { out = {SLOT_FUEL}; }
+    }
+
+    bool FurnaceBlockEntity::CanPlaceItemThroughFace(int slot, const ItemStack& stack, Direction, bool) const {
+        return CanPlaceItem(slot, stack);
+    }
+
+    bool FurnaceBlockEntity::CanTakeItemThroughFace(int slot, const ItemStack& stack, Direction face) const {
+        // ItemTags.FURNACE_FUEL_BOTTOM_TAKEABLE: bucket, water bucket.
+        if (face == Direction::Down && slot == SLOT_FUEL) {
+            return stack.itemId == Items::Bucket || stack.itemId == Items::WaterBucket;
+        }
+        return true;
+    }
 
     bool FurnaceBlockEntity::CanBurn(const CookingRecipe* recipe) const {
         // MC AbstractFurnaceBlockEntity.canBurn (line 300-ish): no recipe, or

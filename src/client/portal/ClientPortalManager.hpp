@@ -155,13 +155,16 @@ namespace Client {
         //   • Clip the ghost so only the "emerged" half (on +dstNormal
         //     side of the destination plane) is visible.
         // valid = false → not straddling, skip the ghost render.
+        // DOUBLE throughout: the transform's translation and the planes' w
+        // are world-sized, and the renderer bridges them into its render
+        // space in double (PlayerRenderer::RenderSingle, RenderOrigin.hpp).
         struct GhostInfo {
-            bool      valid = false;
-            glm::mat4 transform{1.0f};
-            glm::vec4 exitClipPlane{0.0f};   // (n.xyz, -dot(n, dstOrigin))
-            glm::vec4 entryClipPlane{0.0f};  // (n.xyz, -dot(n, srcOrigin))
+            bool       valid = false;
+            glm::dmat4 transform{1.0};
+            glm::dvec4 exitClipPlane{0.0};   // (n.xyz, -dot(n, dstOrigin))
+            glm::dvec4 entryClipPlane{0.0};  // (n.xyz, -dot(n, srcOrigin))
         };
-        GhostInfo GetStraddlingGhost(const glm::vec3& playerPos,
+        GhostInfo GetStraddlingGhost(const glm::dvec3& playerPos,
                                      float playerHeight) const;
 
         // Client-side teleport prediction (#3 follow-up). The server
@@ -193,15 +196,15 @@ namespace Client {
         // packet (when it eventually arrives) will be a no-op since
         // both sides compute the same destination.
         struct TeleportPrediction {
-            bool      valid = false;
-            glm::vec3 newFeet{0.0f};
-            glm::vec3 newVelocity{0.0f};
-            float     newYawDeg   = 0.0f;
-            float     newPitchDeg = 0.0f;
+            bool       valid = false;
+            glm::dvec3 newFeet{0.0};      // double: the player's position is
+            glm::vec3  newVelocity{0.0f};
+            float      newYawDeg   = 0.0f;
+            float      newPitchDeg = 0.0f;
         };
-        TeleportPrediction CheckEyeCrossing(const glm::vec3& prevEye,
-                                            const glm::vec3& currEye,
-                                            const glm::vec3& currFeet,
+        TeleportPrediction CheckEyeCrossing(const glm::dvec3& prevEye,
+                                            const glm::dvec3& currEye,
+                                            const glm::dvec3& currFeet,
                                             const glm::vec3& currVel,
                                             float currYawDeg,
                                             float currPitchDeg,

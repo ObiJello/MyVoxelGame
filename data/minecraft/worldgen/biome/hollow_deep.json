@@ -1,0 +1,119 @@
+{
+  "attributes": {
+    "minecraft:audio/ambient_sounds": {
+      "additions": {
+        "sound": "obeycraft:ambient.hush.deep.additions",
+        "tick_chance": 0.0111
+      },
+      "loop": "obeycraft:ambient.hush.deep.loop",
+      "mood": {
+        "block_search_extent": 8,
+        "offset": 2.0,
+        "sound": "obeycraft:ambient.hush.mood",
+        "tick_delay": 6000
+      }
+    },
+    "minecraft:audio/background_music": {
+      "default": {
+        "max_delay": 24000,
+        "min_delay": 12000,
+        "sound": "obeycraft:music.hush.deep"
+      }
+    },
+    "minecraft:visual/sky_color": "#040e12"
+  },
+  "carvers": [
+    "minecraft:cave",
+    "minecraft:cave_extra_underground",
+    "minecraft:canyon"
+  ],
+  "downfall": 0.4,
+  "effects": {
+    "fog_color": "#081e22",
+    "foliage_color": "#365f5a",
+    "grass_color": "#44706b",
+    "water_color": "#0c3438",
+    "water_fog_color": "#082a2e"
+  },
+  "features": [
+    [],
+    [],
+    [
+      "minecraft:rope_bridges"
+    ],
+    [],
+    [],
+    [],
+    [
+      "minecraft:ore_echo",
+      "minecraft:ore_resonite"
+    ],
+    [
+      "minecraft:resonant_stalactites"
+    ],
+    [],
+    [
+      "minecraft:patch_hush_grass_rim",
+      "minecraft:crystal_spires_rim"
+    ],
+    []
+  ],
+  "has_precipitation": false,
+  "spawn_costs": {},
+  "spawners": {
+    "ambient": [
+      {
+        "type": "minecraft:bat",
+        "maxCount": 8,
+        "minCount": 8,
+        "weight": 10
+      },
+      {
+        "type": "minecraft:lumen_moth",
+        "maxCount": 3,
+        "minCount": 2,
+        "weight": 8
+      }
+    ],
+    "axolotls": [],
+    "creature": [
+      {
+        "type": "minecraft:crystal_golem",
+        "maxCount": 2,
+        "minCount": 1,
+        "weight": 15
+      }
+    ],
+    "misc": [],
+    "monster": [
+      {
+        "type": "minecraft:enderman",
+        "maxCount": 4,
+        "minCount": 1,
+        "weight": 10
+      },
+      {
+        "type": "minecraft:skeleton",
+        "maxCount": 4,
+        "minCount": 2,
+        "weight": 10
+      },
+      {
+        "type": "minecraft:echo_wraith",
+        "maxCount": 2,
+        "minCount": 1,
+        "weight": 40
+      },
+      {
+        "type": "minecraft:echo_mimic",
+        "maxCount": 1,
+        "minCount": 1,
+        "weight": 10
+      }
+    ],
+    "underground_water_creature": [],
+    "water_ambient": [],
+    "water_creature": []
+  },
+  "temperature": 0.5
+}

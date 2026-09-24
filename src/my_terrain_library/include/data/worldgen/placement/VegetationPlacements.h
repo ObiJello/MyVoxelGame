@@ -91,6 +91,8 @@ public:
     // BUSH - Reference: VegetationPlacements.java line 62
     // =========================================================================
     static const PlacedFeature* PATCH_BUSH;
+    static const PlacedFeature* PATCH_RED_SHRUB;                 // 26.3
+    static const PlacedFeature* BROWN_MUSHROOM_DAPPLED_FOREST;   // 26.3
 
     // =========================================================================
     // LEAF LITTER - Reference: VegetationPlacements.java line 63
@@ -173,6 +175,7 @@ public:
     static const PlacedFeature* TREES_WATER;
     static const PlacedFeature* TREES_BIRCH_AND_OAK_LEAF_LITTER;
     static const PlacedFeature* TREES_SPARSE_JUNGLE;
+    static const PlacedFeature* TREES_DAPPLED_FOREST;   // 26.3
     static const PlacedFeature* TREES_OLD_GROWTH_SPRUCE_TAIGA;
     static const PlacedFeature* TREES_OLD_GROWTH_PINE_TAIGA;
     static const PlacedFeature* TREES_JUNGLE;

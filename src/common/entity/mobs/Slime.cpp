@@ -39,6 +39,10 @@ namespace Game {
                 // difference between an idle slime and an angry one.
                 if (m_aggressive) m_jumpDelay /= 3;
                 m_slime->GetJumpControl().Jump();
+                if (m_slime->DoPlayJumpSound()) {
+                    m_slime->PlaySound(m_slime->GetJumpSound(), m_slime->GetSoundVolume(),
+                                       m_slime->GetCubeSoundPitch());
+                }
             } else {
                 // Grounded between hops: a slime does not slide.
                 m_slime->SetXxa(0.0f);
@@ -133,6 +137,29 @@ namespace Game {
         }
     }
 
+    const char* Slime::GetHurtSound(MobDamageSource) const {
+        return IsTiny() ? SoundEvents::SLIME_HURT_SMALL : SoundEvents::SLIME_HURT;
+    }
+
+    const char* Slime::GetDeathSound() const {
+        return IsTiny() ? SoundEvents::SLIME_DEATH_SMALL : SoundEvents::SLIME_DEATH;
+    }
+
+    const char* Slime::GetSquishSound() const {
+        return IsTiny() ? SoundEvents::SLIME_SQUISH_SMALL : SoundEvents::SLIME_SQUISH;
+    }
+
+    const char* Slime::GetJumpSound() const {
+        return IsTiny() ? SoundEvents::SLIME_JUMP_SMALL : SoundEvents::SLIME_JUMP;
+    }
+
+    float Slime::GetCubeSoundPitch() const {
+        if (!m_level) return 1.0f;
+        JavaRandom& rng = m_level->Random();
+        const float adjuster = IsTiny() ? 1.4f : 0.8f;
+        return ((rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f) * adjuster;
+    }
+
     void Slime::Tick() {
         // MC ticks the squish spring BEFORE super.tick so the landing below
         // overwrites the fresh lerp, not last tick's.
@@ -142,7 +169,13 @@ namespace Game {
         Mob::Tick();
 
         if (onGround && !m_wasOnGround) {
-            // Landing: full squash. (MC also bursts slime particles here.)
+            // Landing: the squish, then full squash. (MC also bursts slime
+            // particles here.)
+            if (m_level) {
+                JavaRandom& rng = m_level->Random();
+                PlaySound(GetSquishSound(), GetSoundVolume(),
+                          ((rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f) / 0.8f);
+            }
             m_targetSquish = -0.5f;
         } else if (!onGround && m_wasOnGround) {
             m_targetSquish = 1.0f;

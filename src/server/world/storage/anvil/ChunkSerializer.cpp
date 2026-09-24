@@ -1,5 +1,11 @@
 // File: src/server/world/storage/anvil/ChunkSerializer.cpp
 #include "server/world/storage/anvil/ChunkSerializer.hpp"
+#include "server/world/storage/anvil/NbtScan.hpp"
+#include "common/world/lighting/ChunkLight.hpp"
+#include <array>
+#include <cstddef>
+#include <cstring>
+#include <memory>
 
 #include "server/world/storage/anvil/BlockEntityNbt.hpp"
 #include "server/world/storage/anvil/PaletteCodec.hpp"
@@ -12,12 +18,20 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/world/chunk/ChunkSection.hpp"
+#include "common/world/fluid/FluidState.hpp"
 
 #include <string>
 
 namespace Game::Anvil {
 
     namespace {
+
+        // Revision of the light engine that wrote a chunk's light. A chunk
+        // stamped with an older one is relit on load rather than trusted.
+        //   2 — air no longer dampens sky light (every open column's sky
+        //       source used to sit at the top of its highest non-empty
+        //       section, darkening everything below it).
+        constexpr int32_t kObeyLightVersion = 2;
 
         // ── Palette entry naming ────────────────────────────────────────────
 
@@ -131,11 +145,17 @@ namespace Game::Anvil {
         // the block's DEFAULT state and apply only the properties supplied,
         // silently skipping names and values this build does not model.
         uint32_t ResolveBlockStateEntry(const NBTTagCompound& entry) {
-            auto nameTag = std::dynamic_pointer_cast<NBTTagString>(entry.GetTag("Name"));
+            // 26.3 renamed the block-state keys (BlockStateFieldNamesFix:
+            // Name -> id, Properties -> properties); a world saved by 26.3
+            // uses the new ones.
+            auto nameTag = std::dynamic_pointer_cast<NBTTagString>(entry.GetTag("id"));
+            if (!nameTag) nameTag = std::dynamic_pointer_cast<NBTTagString>(entry.GetTag("Name"));
             if (!nameTag) return BlockState{}.RawId();
 
             std::unordered_map<std::string, std::string> props;
-            if (auto p = AsCompound(entry.GetTag("Properties"))) {
+            auto propsTag = entry.GetTag("properties");
+            if (!propsTag) propsTag = entry.GetTag("Properties");
+            if (auto p = AsCompound(propsTag)) {
                 for (const auto& [k, v] : p->value) {
                     if (auto s = std::dynamic_pointer_cast<NBTTagString>(v)) props[k] = s->value;
                 }
@@ -167,31 +187,61 @@ namespace Game::Anvil {
         w.Int ("yPos",          kMinSectionY);      // MIN SECTION index, not a block Y
         w.Int ("zPos",          chunk.pos.z);
         w.Long("LastUpdate",    0);
-        w.Long("InhabitedTime", 0);
+        w.Long("InhabitedTime", chunk.InhabitedTime());
         // The ONE hard requirement: SerializableChunkData.parse returns null on
         // an empty Status, and the chunk then counts as absent entirely.
         w.String("Status", kStatusFull);
         w.Long("ObeyModStamp", static_cast<int64_t>(chunk.ModStamp()));   // see Chunk::modStamp
 
         {
+            // SerializableChunkData.copyOf: every LIGHT section (one past each
+            // end of the world), with its block_states/biomes when it is a
+            // world section and its BlockLight/SkyLight when that layer is not
+            // empty (DataLayer.isEmpty: homogeneous zero). A section tag with
+            // nothing in it is not written.
+            const Lighting::ChunkLight& light = chunk.light;
+            const bool writeLight = light.lightCorrect;
+            std::array<int8_t, Lighting::DataLayer::kSize> bytes{};
             auto sections = w.BeginList("sections", Nbt::TagType::Compound);
-            for (int i = 0; i < Chunk::SECTION_COUNT; ++i) {
-                const ChunkSection* section = chunk.GetSection(i);
-                if (!section) continue;             // never null in practice
+            for (int li = 0; li < Lighting::kLightSectionCount; ++li) {
+                const int i = li - 1;                               // block section index
+                const ChunkSection* section =
+                    (i >= 0 && i < Chunk::SECTION_COUNT) ? chunk.GetSection(i) : nullptr;
+                const Lighting::DataLayer& blockLight = light.block[static_cast<size_t>(li)];
+                const Lighting::DataLayer& skyLight = light.sky[static_cast<size_t>(li)];
+                const bool hasBlockLight = writeLight && !blockLight.IsEmpty();
+                const bool hasSkyLight = writeLight && !skyLight.IsEmpty();
+                if (!section && !hasBlockLight && !hasSkyLight) continue;
 
                 w.ListCompoundBegin(sections);
-                WriteStateContainer(w, section->States());
-                WriteBiomeContainer(w, section->Biomes());
+                if (section) {
+                    WriteStateContainer(w, section->States());
+                    WriteBiomeContainer(w, section->Biomes());
+                }
+                if (hasBlockLight) {
+                    blockLight.CopyTo(reinterpret_cast<uint8_t*>(bytes.data()));
+                    w.ByteArray("BlockLight", bytes.data(), bytes.size());
+                }
+                if (hasSkyLight) {
+                    skyLight.CopyTo(reinterpret_cast<uint8_t*>(bytes.data()));
+                    w.ByteArray("SkyLight", bytes.data(), bytes.size());
+                }
                 // Y is written LAST and as a signed byte, matching vanilla.
-                w.Byte("Y", static_cast<int8_t>(i + kMinSectionY));
+                w.Byte("Y", static_cast<int8_t>(Lighting::kMinLightSectionY + li));
                 w.ListCompoundEnd(sections);
             }
             w.EndList(sections);
         }
 
-        // isLightOn is deliberately ABSENT. Vanilla writes it only when true,
-        // and its absence tells Minecraft to relight the chunk on load — which
-        // is correct, because we do not compute vanilla-identical light.
+        // MC writes isLightOn only when true: the light above is a finished
+        // lighting of this chunk and Minecraft (and this engine) trust it on
+        // load instead of relighting.
+        if (chunk.light.lightCorrect) {
+            w.Bool("isLightOn", true);
+            // ObeyCraft extension: which revision of this engine's light
+            // engine wrote the light (see kObeyLightVersion).
+            w.Int("ObeyLightVersion", kObeyLightVersion);
+        }
 
         {
             auto list = w.BeginList("block_entities", Nbt::TagType::Compound);
@@ -207,24 +257,71 @@ namespace Game::Anvil {
         // every pending appointment firing at once. `p` is the SIGNED
         // TickPriority value (-3..3), because MC's codec is
         // Codec.INT.xmap(byValue, getValue) and not an ordinal.
+        //
+        // Water and lava appointments ride the same queue in this engine
+        // (FlowingFluid.hpp) but are MC's LevelTicks<Fluid>, so they are
+        // split out into `fluid_ticks` here and named by the FLUID the cell
+        // holds right now — `minecraft:water` for a source, `flowing_water`
+        // otherwise — because vanilla's tickFluid fires only when
+        // `fluidState.is(type)` still holds.
         {
-            auto l = w.BeginList("block_ticks", Nbt::TagType::Compound);
-            for (const SavedTick& t : chunk.BlockTicks().Pack(gameTime)) {
+            const std::vector<SavedTick> packed = chunk.BlockTicks().Pack(gameTime);
+            auto writeTick = [&](auto& l, const SavedTick& t, const std::string& name) {
                 w.ListCompoundBegin(l);
-                w.String("i", BlockName(t.type));
+                w.String("i", name);
                 w.Int("x", t.pos.x);
                 w.Int("y", t.pos.y);
                 w.Int("z", t.pos.z);
                 w.Int("t", t.delay);
                 w.Int("p", static_cast<int32_t>(t.priority));
                 w.ListCompoundEnd(l);
+            };
+            auto isFluidTick = [](const SavedTick& t) {
+                return t.type == BlockID::Water || t.type == BlockID::Lava;
+            };
+            {
+                auto l = w.BeginList("block_ticks", Nbt::TagType::Compound);
+                for (const SavedTick& t : packed) {
+                    if (isFluidTick(t)) continue;
+                    writeTick(l, t, BlockName(t.type));
+                }
+                w.EndList(l);
+            }
+            {
+                auto l = w.BeginList("fluid_ticks", Nbt::TagType::Compound);
+                for (const SavedTick& t : packed) {
+                    if (!isFluidTick(t)) continue;
+                    const int localX = t.pos.x & 15;
+                    const int localZ = t.pos.z & 15;
+                    const FluidState fluid = FluidStateOf(BlockStates::FromIndex(
+                        chunk.GetBlock(localX, t.pos.y, localZ),
+                        chunk.GetBlockState(localX, t.pos.y, localZ)));
+                    const bool lava = t.type == BlockID::Lava;
+                    const std::string name = fluid.IsSource()
+                        ? (lava ? "minecraft:lava" : "minecraft:water")
+                        : (lava ? "minecraft:flowing_lava" : "minecraft:flowing_water");
+                    writeTick(l, t, name);
+                }
+                w.EndList(l);
+            }
+        }
+        {
+            // SerializableChunkData.packOffsets: one short list per section
+            // (Chunk::postProcessing), written only while cells are pending.
+            auto l = w.BeginList("PostProcessing", Nbt::TagType::List);
+            if (chunk.HasPostProcessing()) {
+                for (int i = 0; i < Chunk::SECTION_COUNT; ++i) {
+                    auto section = w.ListListBegin(l, Nbt::TagType::Short);
+                    if (i < static_cast<int>(chunk.postProcessing.size())) {
+                        for (int16_t packed : chunk.postProcessing[static_cast<size_t>(i)]) {
+                            w.ListShort(section, packed);
+                        }
+                    }
+                    w.EndList(section);
+                }
             }
             w.EndList(l);
         }
-        // No fluid simulation yet, so this list is genuinely always empty —
-        // unlike block_ticks, which was empty only because nothing produced it.
-        { auto l = w.BeginList("fluid_ticks",    Nbt::TagType::Compound); w.EndList(l); }
-        { auto l = w.BeginList("PostProcessing", Nbt::TagType::List);     w.EndList(l); }
 
         // Heightmaps: emit ONLY what we actually filled.
         //
@@ -244,12 +341,48 @@ namespace Game::Anvil {
         }
         w.EndCompound();
 
-        // Empty is legal, and this is the shape vanilla emits — MCA Selector
-        // and Amulet both expect the two sub-compounds to exist.
-        w.BeginCompound("structures");
-        w.BeginCompound("starts");     w.EndCompound();
-        w.BeginCompound("References"); w.EndCompound();
-        w.EndCompound();
+        // The terrain library's own compound when the chunk carries one
+        // (references, and the starts begun here — Chunk::structuresNbt).
+        // Otherwise empty, which is legal and the shape vanilla emits — MCA
+        // Selector and Amulet both expect the two sub-compounds to exist.
+        if (chunk.structuresNbt && !chunk.structuresNbt->empty()) {
+            w.EmbedCompound("structures", *chunk.structuresNbt);
+        } else {
+            w.BeginCompound("structures");
+            w.BeginCompound("starts");     w.EndCompound();
+            w.BeginCompound("References"); w.EndCompound();
+            w.EndCompound();
+        }
+
+        // ObeyCraft extension: the structure boxes the natural spawner's
+        // spawn_overrides and fortress rule read (Chunk::structureSpawnAreas).
+        // Vanilla keeps these as the "structures" starts above, which this
+        // engine does not serialise; an unknown key is ignored by Minecraft.
+        // Omitted when empty, which is almost every chunk.
+        if (!chunk.structureSpawnAreas.empty()) {
+            auto areas = w.BeginList("ObeyStructureSpawns", Nbt::TagType::Compound);
+            for (const StructureSpawnArea& area : chunk.structureSpawnAreas) {
+                w.ListCompoundBegin(areas);
+                w.String("structure", area.structure);
+                const int32_t box[6] = {area.startMin.x, area.startMin.y, area.startMin.z,
+                                        area.startMax.x, area.startMax.y, area.startMax.z};
+                w.IntArray("box", box, 6);
+                auto pieces = w.BeginList("pieces", Nbt::TagType::Compound);
+                for (const StructureSpawnArea::Piece& piece : area.pieces) {
+                    w.ListCompoundBegin(pieces);
+                    const int32_t pieceBox[6] = {piece.min.x, piece.min.y, piece.min.z,
+                                                 piece.max.x, piece.max.y, piece.max.z};
+                    w.IntArray("box", pieceBox, 6);
+                    if (!piece.templateId.empty()) w.String("template", piece.templateId);
+                    if (piece.rotation != 0) w.Byte("rot", static_cast<int8_t>(piece.rotation));
+                    if (!piece.pieceType.empty()) w.String("type", piece.pieceType);
+                    w.ListCompoundEnd(pieces);
+                }
+                w.EndList(pieces);
+                w.ListCompoundEnd(areas);
+            }
+            w.EndList(areas);
+        }
 
         w.EndRootCompound();
 
@@ -318,7 +451,30 @@ namespace Game::Anvil {
                          expected.x, expected.z, xPos, zPos);
         }
         out.pos = expected;
+        // Kept verbatim for the next save and for the terrain library, which
+        // reads its structure starts and references back from it.
+        {
+            size_t begin = 0, end = 0;
+            if (NbtScan::FindRootTag(nbt, "structures", NbtScan::kCompound, begin, end)) {
+                out.structuresNbt = std::make_shared<const std::vector<uint8_t>>(
+                    nbt.begin() + static_cast<std::ptrdiff_t>(begin),
+                    nbt.begin() + static_cast<std::ptrdiff_t>(end));
+            }
+        }
         out.modStamp.store(static_cast<uint64_t>(rootC->GetValue<int64_t>("ObeyModStamp", 0)), std::memory_order_relaxed);
+        out.inhabitedTime.store(rootC->GetValue<int64_t>("InhabitedTime", 0), std::memory_order_relaxed);
+
+        // MC SerializableChunkData: `isLightOn` says the saved light is a
+        // finished lighting to be trusted; without it the chunk is relit
+        // (ChunkProvider::CompleteChunkLoad).
+        // A chunk this engine wrote (it carries ObeyModStamp) is trusted only
+        // when its light came from the current light engine revision; one
+        // Minecraft wrote carries no Obey tags and MC's own light is trusted.
+        const bool writtenByEngine = rootC->GetTag("ObeyModStamp") != nullptr;
+        const bool lightOn = rootC->GetValue<int8_t>("isLightOn", 0) != 0 &&
+            (!writtenByEngine || rootC->GetValue<int32_t>("ObeyLightVersion", 0) >= kObeyLightVersion);
+        std::array<bool, Lighting::kLightSectionCount> skyPresent{};
+        out.light.Reset();
 
         auto sections = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("sections"));
         if (sections) {
@@ -328,10 +484,24 @@ namespace Game::Anvil {
 
                 const int sectionY = sec->GetValue<int8_t>("Y", 0);
                 const int index    = sectionY - kMinSectionY;
+
+                // Light first: it exists one section past each end of the
+                // build range too (vanilla's light-only sections).
+                const int li = sectionY - Lighting::kMinLightSectionY;
+                if (lightOn && li >= 0 && li < Lighting::kLightSectionCount) {
+                    auto readLayer = [&](const char* key, Lighting::DataLayer& dstLayer) {
+                        auto arr = std::dynamic_pointer_cast<::World::NBTTagByteArray>(sec->GetTag(key));
+                        if (!arr || arr->value.size() != static_cast<size_t>(Lighting::DataLayer::kSize)) return false;
+                        dstLayer = Lighting::DataLayer::FromBytes(reinterpret_cast<const uint8_t*>(arr->value.data()));
+                        dstLayer.Compact();
+                        return true;
+                    };
+                    readLayer("BlockLight", out.light.block[static_cast<size_t>(li)]);
+                    skyPresent[static_cast<size_t>(li)] = readLayer("SkyLight", out.light.sky[static_cast<size_t>(li)]);
+                }
+
                 if (index < 0 || index >= Chunk::SECTION_COUNT) {
-                    // Vanilla emits light-only sections one below and one above
-                    // the build range; they carry no block_states and are not
-                    // ours to store.
+                    // Light-only sections carry no block_states.
                     continue;
                 }
                 ChunkSection* dst = out.GetSection(index);
@@ -384,6 +554,32 @@ namespace Game::Anvil {
             }
         }
 
+        // Sky layers the save left out: MC stores sky data only up to a
+        // column's top non-empty section and derives the rest
+        // (SkyLightSectionStorage.createDataLayer): nothing above -> all 15;
+        // otherwise the lowest row of the nearest stored layer above,
+        // repeated (repeatFirstLayer). Missing block layers are simply 0.
+        if (lightOn) {
+            for (int li = Lighting::kLightSectionCount - 1; li >= 0; --li) {
+                if (skyPresent[static_cast<size_t>(li)]) continue;
+                Lighting::DataLayer& layer = out.light.sky[static_cast<size_t>(li)];
+                if (li == Lighting::kLightSectionCount - 1) { layer = Lighting::DataLayer(15); continue; }
+                const Lighting::DataLayer& above = out.light.sky[static_cast<size_t>(li + 1)];
+                if (above.IsDefinitelyHomogeneous()) { layer = Lighting::DataLayer(above.DefaultValue()); continue; }
+                std::array<uint8_t, Lighting::DataLayer::kSize> repeated{};
+                for (int y = 0; y < 16; ++y) {
+                    std::memcpy(repeated.data() + y * Lighting::DataLayer::kLayerSize, above.RawData(),
+                                Lighting::DataLayer::kLayerSize);
+                }
+                layer = Lighting::DataLayer::FromBytes(repeated.data());
+                layer.Compact();
+            }
+            // The sky source heightmap is not saved (MC rebuilds it in the
+            // LevelChunk constructor either): recompute from the blocks.
+            out.light.skySources.FillFrom(out);
+            out.light.lightCorrect = true;
+        }
+
         // Block entities LAST: each is validated against the block actually
         // sitting under it, which is only known once the sections are decoded.
         if (auto list = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("block_entities"))) {
@@ -401,38 +597,99 @@ namespace Game::Anvil {
             }
         }
 
-        // Scheduled block ticks. Read AFTER the sections, like the block
-        // entities above, so an appointment naming a block this build does not
-        // model can be spotted and dropped rather than resurrected as air.
-        if (auto list = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("block_ticks"))) {
-            std::vector<SavedTick> saved;
-            saved.reserve(list->value.size());
+        // MC LevelChunk.postProcessing (see the writer): list i is section i.
+        if (auto list = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("PostProcessing"))) {
+            for (size_t i = 0; i < list->value.size() && i < static_cast<size_t>(Chunk::SECTION_COUNT); ++i) {
+                auto section = std::dynamic_pointer_cast<NBTTagList>(list->value[i]);
+                if (!section || section->value.empty()) continue;
+                if (out.postProcessing.empty()) out.postProcessing.resize(Chunk::SECTION_COUNT);
+                for (const auto& element : section->value) {
+                    if (auto packed = std::dynamic_pointer_cast<::World::NBTTagShort>(element)) {
+                        out.postProcessing[i].push_back(packed->value);
+                    }
+                }
+            }
+        }
+
+        // ObeyCraft extension: structure spawn areas (see the writer).
+        if (auto list = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("ObeyStructureSpawns"))) {
+            auto readBox = [](const NBTTagCompound& c, glm::ivec3& lo, glm::ivec3& hi) {
+                auto arr = std::dynamic_pointer_cast<::World::NBTTagIntArray>(c.GetTag("box"));
+                if (!arr || arr->value.size() != 6) return false;
+                lo = glm::ivec3(arr->value[0], arr->value[1], arr->value[2]);
+                hi = glm::ivec3(arr->value[3], arr->value[4], arr->value[5]);
+                return true;
+            };
             for (const auto& element : list->value) {
                 auto entry = AsCompound(element);
                 if (!entry) continue;
-                auto nameTag = std::dynamic_pointer_cast<NBTTagString>(entry->GetTag("i"));
-                if (!nameTag) continue;
-
-                // Only the BLOCK matters here — a scheduled tick names a block,
-                // not a state (MC keys ScheduledTick on Block). Resolving with
-                // an empty property map gives the default state, whose Block()
-                // is exactly what we want.
-                const NbtBlockState resolved =
-                    BlockStateRegistry::CreateBlockState(nameTag->value, {});
-                const BlockID type = resolved.resolvedId;
-                // An unknown name resolves to air. Dropping it is the same rule
-                // the palette reader applies, and keeping it would schedule a
-                // tick that can never match its cell.
-                if (type == BlockID::Air) continue;
-
-                saved.push_back(SavedTick{
-                    type,
-                    glm::ivec3{entry->GetValue<int32_t>("x", 0),
-                               entry->GetValue<int32_t>("y", 0),
-                               entry->GetValue<int32_t>("z", 0)},
-                    entry->GetValue<int32_t>("t", 0),
-                    TickPriorityByValue(entry->GetValue<int32_t>("p", 0))});
+                StructureSpawnArea area;
+                area.structure = entry->GetValue<std::string>("structure", "");
+                if (area.structure.empty() || !readBox(*entry, area.startMin, area.startMax)) continue;
+                if (auto pieces = std::dynamic_pointer_cast<NBTTagList>(entry->GetTag("pieces"))) {
+                    for (const auto& p : pieces->value) {
+                        auto pc = AsCompound(p);
+                        if (!pc) continue;
+                        StructureSpawnArea::Piece piece;
+                        if (!readBox(*pc, piece.min, piece.max)) continue;
+                        piece.templateId = pc->GetValue<std::string>("template", "");
+                        piece.rotation = static_cast<uint8_t>(pc->GetValue<int8_t>("rot", 0) & 3);
+                        piece.pieceType = pc->GetValue<std::string>("type", "");
+                        area.pieces.push_back(std::move(piece));
+                    }
+                }
+                out.structureSpawnAreas.push_back(std::move(area));
             }
+        }
+
+        // Scheduled block ticks. Read AFTER the sections, like the block
+        // entities above, so an appointment naming a block this build does not
+        // model can be spotted and dropped rather than resurrected as air.
+        {
+            std::vector<SavedTick> saved;
+            auto readTicks = [&](const char* key, bool fluidList) {
+                auto list = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag(key));
+                if (!list) return;
+                saved.reserve(saved.size() + list->value.size());
+                for (const auto& element : list->value) {
+                    auto entry = AsCompound(element);
+                    if (!entry) continue;
+                    auto nameTag = std::dynamic_pointer_cast<NBTTagString>(entry->GetTag("i"));
+                    if (!nameTag) continue;
+
+                    BlockID type = BlockID::Air;
+                    if (fluidList) {
+                        // MC's fluid registry ids. Source and flowing collapse
+                        // onto the one block that carries the fluid here; the
+                        // tick runner re-derives which it is from the cell.
+                        const std::string& n = nameTag->value;
+                        if (n == "minecraft:water" || n == "minecraft:flowing_water") type = BlockID::Water;
+                        else if (n == "minecraft:lava" || n == "minecraft:flowing_lava") type = BlockID::Lava;
+                    } else {
+                        // Only the BLOCK matters here — a scheduled tick names a
+                        // block, not a state (MC keys ScheduledTick on Block).
+                        // Resolving with an empty property map gives the default
+                        // state, whose Block() is exactly what we want.
+                        const NbtBlockState resolved =
+                            BlockStateRegistry::CreateBlockState(nameTag->value, {});
+                        type = resolved.resolvedId;
+                    }
+                    // An unknown name resolves to air. Dropping it is the same
+                    // rule the palette reader applies, and keeping it would
+                    // schedule a tick that can never match its cell.
+                    if (type == BlockID::Air) continue;
+
+                    saved.push_back(SavedTick{
+                        type,
+                        glm::ivec3{entry->GetValue<int32_t>("x", 0),
+                                   entry->GetValue<int32_t>("y", 0),
+                                   entry->GetValue<int32_t>("z", 0)},
+                        entry->GetValue<int32_t>("t", 0),
+                        TickPriorityByValue(entry->GetValue<int32_t>("p", 0))});
+                }
+            };
+            readTicks("block_ticks", false);
+            readTicks("fluid_ticks", true);
             if (!saved.empty()) {
                 // Sub-tick order restarts from 0 for a freshly loaded chunk.
                 // MC does the same (SavedTick.unpack takes the world's counter,

@@ -1,0 +1,39 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "equipment",
+  "group": "fiery_leggings",
+  "ingredients": [
+    "minecraft:iron_leggings",
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ]
+  ],
+  "result": {
+    "id": "minecraft:fiery_leggings"
+  }
+}

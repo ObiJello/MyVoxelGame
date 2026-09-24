@@ -1,15 +1,22 @@
 // File: src/client/renderer/gui/AbstractContainerScreen.cpp
 #include "AbstractContainerScreen.hpp"
+#include "platform/GameDirectory.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/entity/GeneratedItemAttributes.hpp"
 #include "GuiGraphics.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 #include "FontRenderer.hpp"
 #include "common/world/enchantment/Enchantment.hpp"
 #include "common/world/enchantment/ItemEnchantments.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/text/Language.hpp"
+#include "common/text/TextComponent.hpp"
 #include "client/entity/Player.hpp"
+#include "common/entity/Item.hpp"        // IsSameItemSameComponents (Ctrl+Shift+Q)
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -84,10 +91,20 @@ namespace Render {
         if (Game::AbstractContainerMenu* menu = CurrentMenu()) menu->containerId = id;
     }
 
+    namespace {
+        // Bumped whenever the server writes into the open menu's slots —
+        // what a screen that is not a slot grid (the lectern's book view)
+        // polls to learn its contents changed (MC ContainerListener.slotChanged).
+        uint32_t s_containerContentRevision = 0;
+    }
+
+    uint32_t ContainerContentRevision() { return s_containerContentRevision; }
+
     void ApplyContainerSlot(int menuIndex, const Game::ItemStack& stack) {
         Game::AbstractContainerMenu* menu = CurrentMenu();
         if (!menu || !menu->IsValidSlotIndex(menuIndex)) return;
         menu->GetSlot(menuIndex).Set(stack);
+        ++s_containerContentRevision;
     }
 
     void ApplyContainerData(uint32_t containerId, uint16_t index, int32_t value) {
@@ -101,6 +118,7 @@ namespace Render {
         if (!menu) return;
         const int count = std::min(static_cast<int>(slots.size()), menu->SlotCount());
         for (int i = 0; i < count; ++i) menu->GetSlot(i).Set(slots[i]);
+        ++s_containerContentRevision;
     }
 
     Game::MenuType ClientContainerMenuType() { return s_openMenuType; }
@@ -310,10 +328,36 @@ namespace Render {
             return true;
         }
 
-        // Q: drop. Ctrl+Q drops the whole stack (MC button 1).
+        // Q: drop. Ctrl+Q drops the whole stack (MC button 1). Ctrl+Shift+Q
+        // (no vanilla counterpart) drops every stack of the hovered item
+        // from the player's inventory: one stack-THROW per matching slot,
+        // queued together so they predict and send as one batch. Only the
+        // player's own slots take part — a chest's contents stay put — and
+        // "the same item" means id and components, so an enchanted pickaxe
+        // does not take the plain ones with it.
         if (m_hoveredSlot >= 0 && glfwKey == GLFW_KEY_Q) {
-            uint8_t button = (glfwMods & GLFW_MOD_CONTROL) ? 1 : 0;
-            QueueClick(Network::ContainerInput::THROW, (int16_t)m_hoveredSlot, button);
+            const bool ctrl  = (glfwMods & GLFW_MOD_CONTROL) != 0;
+            const bool shift = (glfwMods & GLFW_MOD_SHIFT) != 0;
+            if (ctrl && shift) {
+                Game::AbstractContainerMenu* menu = Menu();
+                // THROW needs an empty cursor (HandleThrow refuses otherwise),
+                // so with something carried nothing would happen anyway.
+                if (menu && Carried().IsEmpty()) {
+                    // A copy: the hovered slot empties as its own click predicts.
+                    const Game::ItemStack kind = menu->GetSlot(m_hoveredSlot).GetItem();
+                    const Game::IContainer* playerInventory = &menu->getInventory();
+                    if (!kind.IsEmpty()) {
+                        for (int i = 0; i < menu->SlotCount(); ++i) {
+                            const Game::Slot& s = menu->GetSlot(i);
+                            if (s.container != playerInventory) continue;
+                            if (!Game::IsSameItemSameComponents(s.GetItem(), kind)) continue;
+                            QueueClick(Network::ContainerInput::THROW, (int16_t)i, 1);
+                        }
+                    }
+                }
+                return true;
+            }
+            QueueClick(Network::ContainerInput::THROW, (int16_t)m_hoveredSlot, ctrl ? 1 : 0);
             return true;
         }
 
@@ -368,6 +412,28 @@ namespace Render {
         // Middle click → CLONE (creative).
         if (glfwButton == GLFW_MOUSE_BUTTON_MIDDLE) {
             QueueClick(Network::ContainerInput::CLONE, (int16_t)hit, 0);
+            return;
+        }
+
+        // Ctrl+Shift+left click → QUICK_MOVE of every stack of the hovered
+        // item on the hovered slot's side (MC's shift+double-click: same
+        // container, same item and components), the hovered one first.
+        // Works both ways — inventory into a chest, or a chest's stacks
+        // out — as one predicted batch.
+        const bool ctrl = (mods & GLFW_MOD_CONTROL) != 0;
+        if (shift && ctrl && glfwButton == GLFW_MOUSE_BUTTON_LEFT) {
+            const Game::ItemStack kind = menu->GetSlot(hit).GetItem();   // a copy: the slot empties as it predicts
+            if (!kind.IsEmpty()) {
+                const Game::IContainer* side = menu->GetSlot(hit).container;
+                QueueClick(Network::ContainerInput::QUICK_MOVE, (int16_t)hit, 0);
+                for (int i = 0; i < menu->SlotCount(); ++i) {
+                    if (i == hit) continue;
+                    const Game::Slot& s = menu->GetSlot(i);
+                    if (s.container != side) continue;
+                    if (!Game::IsSameItemSameComponents(s.GetItem(), kind)) continue;
+                    QueueClick(Network::ContainerInput::QUICK_MOVE, (int16_t)i, 0);
+                }
+            }
             return;
         }
 
@@ -606,14 +672,9 @@ namespace Render {
         //   → ITEM_NAME (data-driven base name)
         //   → registry display name,
         // coloured by the RARITY component (Rarity.color(), WHITE default).
-        std::string name;
-        if (auto custom = stack.get(Game::DataComponents::CUSTOM_NAME)) {
-            name = *custom;
-        } else if (auto itemName = stack.get(Game::DataComponents::ITEM_NAME)) {
-            name = *itemName;
-        } else {
-            name = Game::ItemRegistry::Get(stack.itemId).name;
-        }
+        // (PotionItem / TippedArrowItem.getName answer from POTION_CONTENTS —
+        // "Potion of Swiftness" — inside GetItemStackItemName.)
+        std::string name = Game::GetItemStackHoverName(stack);
         if (name.empty()) return;
         const uint32_t nameColor = Game::RarityColorARGB(
             stack.get(Game::DataComponents::RARITY).value_or(Game::Rarity::COMMON));
@@ -625,6 +686,39 @@ namespace Render {
         struct Line { std::string text; uint32_t color; };
         std::vector<Line> lines;
         lines.push_back({name, nameColor});
+
+        // WRITTEN_BOOK_CONTENT — WrittenBookContent.addToTooltip: "by
+        // <author>" when the author is not blank, then the generation
+        // ("Original", "Copy of original", …), both grey. MC's order puts it
+        // ahead of POTION_CONTENTS (ItemStack.addDetailsToTooltip).
+        if (auto book = stack.get(Game::DataComponents::WRITTEN_BOOK_CONTENT)) {
+            const bool blankAuthor = book->author.find_first_not_of(" \t\r\n") == std::string::npos;
+            if (!blankAuthor) {
+                lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
+                                     "book.byAuthor", {Game::Text::Component::Literal(book->author)})),
+                                 0xFFAAAAAAu});   // GRAY
+            }
+            lines.push_back({Game::Language::Get("book.generation." + std::to_string(book->generation)),
+                             0xFFAAAAAAu});       // GRAY
+        }
+
+        // POTION_CONTENTS — PotionContents.addToTooltip: every effect with
+        // its potency and (scaled) duration, "No Effects" for none, and the
+        // "When Applied:" attribute lines. Scaled by the stack's
+        // POTION_DURATION_SCALE (a lingering potion shows 1/4, a tipped
+        // arrow 1/8 of the potion's durations).
+        if (auto potion = stack.get(Game::DataComponents::POTION_CONTENTS)) {
+            std::vector<Game::PotionTooltipLine> potionLines;
+            Game::AddPotionTooltip(potion->GetAllEffects(), potionLines,
+                                   stack.get(Game::DataComponents::POTION_DURATION_SCALE).value_or(1.0f));
+            for (auto& l : potionLines) lines.push_back({std::move(l.text), l.colorARGB});
+        }
+
+        // JUKEBOX_PLAYABLE — JukeboxPlayable.addToTooltip: the song's
+        // description in grey ("C418 - 13"), before the enchantment lines.
+        if (const std::string& song = Game::ItemRegistry::Get(stack.itemId).jukeboxSongDescription; !song.empty()) {
+            lines.push_back({song, 0xFFAAAAAAu});   // GRAY
+        }
 
         if (auto stored = stack.get(Game::DataComponents::STORED_ENCHANTMENTS)) {
             std::vector<Game::Enchantment::FormattedLine> ench;
@@ -662,6 +756,102 @@ namespace Render {
                                      + " x" + std::to_string(inner.count),
                                  0xFFAAAAAAu});   // GRAY
             }
+        }
+
+        // MC ItemStack.addAttributeTooltips — shown on EVERY tooltip, not only
+        // advanced ones: a blank line, "When in Main Hand:" in grey, then the
+        // player's base value plus the weapon's modifier in dark green
+        // (AttributeModifierDisplay.Default: BASE_ATTACK_DAMAGE/SPEED read as
+        // "equals", so an iron sword says " 6 Attack Damage", " 1.6 Attack
+        // Speed"). Only weapons carry modifiers here (GeneratedItemAttributes);
+        // this engine has no armor/toughness values on its armor items, so
+        // those lines cannot be produced yet.
+        {
+            // MC ATTRIBUTE_MODIFIER_FORMAT = DecimalFormat("#.##").
+            auto fmt = [](double v) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.2f", v);
+                std::string t = buf;
+                while (!t.empty() && t.back() == '0') t.pop_back();
+                if (!t.empty() && t.back() == '.') t.pop_back();
+                return t;
+            };
+            // Weapons and tools: every item registered with attack modifiers,
+            // INCLUDING the ones whose modifier is zero (a diamond hoe adds
+            // 0 to both and still lists " 1 Attack Damage" / " 4 Attack
+            // Speed" in vanilla).
+            if (Game::HasItemAttackAttributes(stack.itemId)) {
+                float dmg = 0.0f, spd = 0.0f;
+                Game::GetItemAttackAttributes(stack.itemId, dmg, spd);
+                lines.push_back({"", 0xFFFFFFFFu});
+                lines.push_back({"When in Main Hand:", 0xFFAAAAAAu});   // GRAY
+                lines.push_back({" " + fmt(dmg + Game::kPlayerBaseAttackDamage) + " Attack Damage", 0xFF00AA00u});   // DARK_GREEN
+                lines.push_back({" " + fmt(spd + Game::kPlayerBaseAttackSpeed) + " Attack Speed", 0xFF00AA00u});
+            }
+            // Armour (ArmorMaterial.createAttributes): ADD_VALUE modifiers
+            // that are not base values, so they print as "+N …" in BLUE
+            // (attribute.getStyle(true)); a zero modifier prints nothing
+            // (Default.apply: only amount > 0 or < 0 gets a line), and
+            // knockback resistance is shown times ten.
+            if (const Game::ItemArmorRow* armor = Game::GetItemArmorAttributes(stack.itemId)) {
+                const char* header = "When equipped:";
+                switch (armor->slot) {
+                    case Game::ArmorSlotGroup::Head:  header = "When on Head:";  break;
+                    case Game::ArmorSlotGroup::Chest: header = "When on Chest:"; break;
+                    case Game::ArmorSlotGroup::Legs:  header = "When on Legs:";  break;
+                    case Game::ArmorSlotGroup::Feet:  header = "When on Feet:";  break;
+                    case Game::ArmorSlotGroup::Body:  header = "When equipped:"; break;
+                }
+                lines.push_back({"", 0xFFFFFFFFu});
+                lines.push_back({header, 0xFFAAAAAAu});   // GRAY
+                constexpr uint32_t kBlue = 0xFF5555FFu;
+                if (armor->armor > 0.0f)               lines.push_back({"+" + fmt(armor->armor) + " Armor", kBlue});
+                if (armor->armorToughness > 0.0f)      lines.push_back({"+" + fmt(armor->armorToughness) + " Armor Toughness", kBlue});
+                if (armor->knockbackResistance > 0.0f) lines.push_back({"+" + fmt(armor->knockbackResistance * 10.0) + " Knockback Resistance", kBlue});
+            }
+        }
+
+        // SUSPICIOUS_STEW_EFFECTS — SuspiciousStewEffects.addToTooltip lists
+        // its effects only when flag.isCreative() (the creative player's
+        // tooltip); a survival player sees a plain stew.
+        if (auto stew = stack.get(Game::DataComponents::SUSPICIOUS_STEW_EFFECTS)) {
+            if (m_player && m_player->IsCreative()) {
+                std::vector<Game::MobEffectInstance> effects;
+                for (const auto& e : stew->effects) effects.push_back(e.CreateEffectInstance());
+                std::vector<Game::PotionTooltipLine> stewLines;
+                Game::AddPotionTooltip(effects, stewLines, 1.0f);
+                for (auto& l : stewLines) lines.push_back({std::move(l.text), l.colorARGB});
+            }
+        }
+
+        // F3+H — MC ItemStack.getTooltipLines with TooltipFlag.ADVANCED: the
+        // registry name in dark grey and the component count.
+        if (Platform::g_gameSettings.GetAdvancedItemTooltips()) {
+            std::string slug;
+            if (stack.itemId >= Game::PURE_ITEM_BASE) {
+                const size_t idx = static_cast<size_t>(stack.itemId - Game::PURE_ITEM_BASE);
+                if (idx < Game::kPureItemTableSize) slug = Game::kPureItemTable[idx].slug;
+            } else {
+                slug = Game::BlockRegistry::Get(static_cast<Game::BlockID>(stack.itemId)).registrySlug;
+            }
+            // The registry path only — vanilla prints "minecraft:stone"; the
+            // namespace is dropped here by request.
+            if (!slug.empty()) lines.push_back({slug, 0xFF555555u});   // DARK_GRAY
+            // MC counts the stack's WHOLE component map — the item's defaults
+            // plus the stack's patch — so a plain stone block says
+            // "13 component(s)": DataComponents.COMMON_ITEM_COMPONENTS (eleven:
+            // max_stack_size, lore, enchantments, repair_cost, use_effects,
+            // attribute_modifiers, rarity, break_sound, tooltip_display,
+            // attack_animation, interact_animation) plus the item_name and
+            // item_model every item gets. This engine keeps only the
+            // components it uses on an item's defaults (equippable, tool,
+            // food…), so the count is vanilla's common set plus those plus
+            // the stack's own entries.
+            constexpr size_t kVanillaCommonComponents = 13;
+            const size_t count = kVanillaCommonComponents +
+                                 Game::ItemRegistry::Get(stack.itemId).defaultComponents.size() +
+                                 stack.components.size();
+            lines.push_back({std::to_string(count) + " component(s)", 0xFF555555u});
         }
 
         // Layout: 10-px line spacing matches MC's GuiGraphics tooltip spacing.

@@ -121,6 +121,133 @@ namespace Render {
         return true;
     }
 
+    // ── Armor stand ────────────────────────────────────────────────────────
+
+    ArmorStandArmorModel::ArmorStandArmorModel(float grow) {
+        m_texWidth = 64.0f;
+        m_texHeight = 32.0f;
+        // MC HumanoidModel.createMesh(g, 0) with ArmorStandArmorModel.
+        // createBaseMesh's replacements: head at y+1, legs at y 11 and g-0.1.
+        m_head = m_root.AddChild("head", PartPose::Offset(0.0f, 1.0f, 0.0f));
+        AddBox(m_head, 0, 0, -4.0f, -8.0f, -4.0f, 8.0f, 8.0f, 8.0f, grow);
+        m_hat = m_head->AddChild("hat", PartPose::Zero());
+        AddBox(m_hat, 32, 0, -4.0f, -8.0f, -4.0f, 8.0f, 8.0f, 8.0f, grow + 0.5f);
+        m_body = m_root.AddChild("body", PartPose::Offset(0.0f, 0.0f, 0.0f));
+        AddBox(m_body, 16, 16, -4.0f, 0.0f, -2.0f, 8.0f, 12.0f, 4.0f, grow);
+        m_rightArm = m_root.AddChild("right_arm", PartPose::Offset(-5.0f, 2.0f, 0.0f));
+        AddBox(m_rightArm, 40, 16, -3.0f, -2.0f, -2.0f, 4.0f, 12.0f, 4.0f, grow);
+        m_leftArm = m_root.AddChild("left_arm", PartPose::Offset(5.0f, 2.0f, 0.0f));
+        AddBox(m_leftArm, 40, 16, -1.0f, -2.0f, -2.0f, 4.0f, 12.0f, 4.0f, grow, true);
+        m_rightLeg = m_root.AddChild("right_leg", PartPose::Offset(-1.9f, 11.0f, 0.0f));
+        AddBox(m_rightLeg, 0, 16, -2.0f, 0.0f, -2.0f, 4.0f, 12.0f, 4.0f, grow - 0.1f);
+        m_leftLeg = m_root.AddChild("left_leg", PartPose::Offset(1.9f, 11.0f, 0.0f));
+        AddBox(m_leftLeg, 0, 16, -2.0f, 0.0f, -2.0f, 4.0f, 12.0f, 4.0f, grow - 0.1f, true);
+        m_root.ResetPose();
+    }
+
+    void ArmorStandArmorModel::ApplyPoses(const EntityRenderState& state) {
+        const ArmorStandRenderState& s = state.armorStand;
+        const auto set = [](ModelPart* part, const glm::vec3& deg) {
+            if (!part) return;
+            part->xRot = kDegToRad * deg.x;
+            part->yRot = kDegToRad * deg.y;
+            part->zRot = kDegToRad * deg.z;
+        };
+        set(m_head,     s.headPose);
+        set(m_body,     s.bodyPose);
+        set(m_leftArm,  s.leftArmPose);
+        set(m_rightArm, s.rightArmPose);
+        set(m_leftLeg,  s.leftLegPose);
+        set(m_rightLeg, s.rightLegPose);
+    }
+
+    void ArmorStandArmorModel::SetupAnim(const EntityRenderState& state) {
+        // MC HumanoidModel.setupAnim runs first and every part it touches is
+        // then overwritten by the poses, so only the poses remain.
+        m_root.ResetPose();
+        ApplyPoses(state);
+    }
+
+    void ArmorStandArmorModel::ShowPartsForSlot(int equipmentSlot) {
+        // Game::EquipmentSlot: FEET 2, LEGS 3, CHEST 4, HEAD 5.
+        const bool head  = equipmentSlot == 5;
+        const bool chest = equipmentSlot == 4;
+        const bool legs  = equipmentSlot == 3;
+        const bool feet  = equipmentSlot == 2;
+        if (m_head)     m_head->visible     = head;
+        if (m_hat)      m_hat->visible      = head;
+        if (m_body)     m_body->visible     = chest || legs;
+        if (m_rightArm) m_rightArm->visible = chest;
+        if (m_leftArm)  m_leftArm->visible  = chest;
+        if (m_rightLeg) m_rightLeg->visible = legs || feet;
+        if (m_leftLeg)  m_leftLeg->visible  = legs || feet;
+    }
+
+    ArmorStandModel::ArmorStandModel() {
+        m_texWidth = 64.0f;
+        m_texHeight = 64.0f;
+        // MC ArmorStandModel.createBodyLayer, verbatim. addOrReplaceChild
+        // replaces HumanoidModel's parts whole, so the head has no hat.
+        m_head = m_root.AddChild("head", PartPose::Offset(0.0f, 1.0f, 0.0f));
+        AddBox(m_head, 0, 0, -1.0f, -7.0f, -1.0f, 2.0f, 7.0f, 2.0f);
+        m_body = m_root.AddChild("body", PartPose::Zero());
+        AddBox(m_body, 0, 26, -6.0f, 0.0f, -1.5f, 12.0f, 3.0f, 3.0f);
+        m_rightArm = m_root.AddChild("right_arm", PartPose::Offset(-5.0f, 2.0f, 0.0f));
+        AddBox(m_rightArm, 24, 0, -2.0f, -2.0f, -1.0f, 2.0f, 12.0f, 2.0f);
+        m_leftArm = m_root.AddChild("left_arm", PartPose::Offset(5.0f, 2.0f, 0.0f));
+        AddBox(m_leftArm, 32, 16, 0.0f, -2.0f, -1.0f, 2.0f, 12.0f, 2.0f, 0.0f, true);
+        m_rightLeg = m_root.AddChild("right_leg", PartPose::Offset(-1.9f, 12.0f, 0.0f));
+        AddBox(m_rightLeg, 8, 0, -1.0f, 0.0f, -1.0f, 2.0f, 11.0f, 2.0f);
+        m_leftLeg = m_root.AddChild("left_leg", PartPose::Offset(1.9f, 12.0f, 0.0f));
+        AddBox(m_leftLeg, 40, 16, -1.0f, 0.0f, -1.0f, 2.0f, 11.0f, 2.0f, 0.0f, true);
+        m_rightBodyStick = m_root.AddChild("right_body_stick", PartPose::Zero());
+        AddBox(m_rightBodyStick, 16, 0, -3.0f, 3.0f, -1.0f, 2.0f, 7.0f, 2.0f);
+        m_leftBodyStick = m_root.AddChild("left_body_stick", PartPose::Zero());
+        AddBox(m_leftBodyStick, 48, 16, 1.0f, 3.0f, -1.0f, 2.0f, 7.0f, 2.0f);
+        m_shoulderStick = m_root.AddChild("shoulder_stick", PartPose::Zero());
+        AddBox(m_shoulderStick, 0, 48, -4.0f, 10.0f, -1.0f, 8.0f, 2.0f, 2.0f);
+        m_basePlate = m_root.AddChild("base_plate", PartPose::Offset(0.0f, 12.0f, 0.0f));
+        AddBox(m_basePlate, 0, 32, -6.0f, 11.0f, -6.0f, 12.0f, 1.0f, 12.0f);
+        m_root.ResetPose();
+    }
+
+    void ArmorStandModel::SetupAnim(const EntityRenderState& state) {
+        // MC ArmorStandModel.setupAnim: the poses (super), then the plate
+        // squared to the world, the arms and plate shown or not, and the
+        // three sticks turned with the body.
+        ArmorStandArmorModel::SetupAnim(state);
+        const ArmorStandRenderState& s = state.armorStand;
+        m_basePlate->yRot = kDegToRad * -s.entityYaw;
+        m_leftArm->visible = s.showArms;
+        m_rightArm->visible = s.showArms;
+        m_basePlate->visible = s.showBasePlate;
+        for (ModelPart* stick : { m_rightBodyStick, m_leftBodyStick, m_shoulderStick }) {
+            stick->xRot = kDegToRad * s.bodyPose.x;
+            stick->yRot = kDegToRad * s.bodyPose.y;
+            stick->zRot = kDegToRad * s.bodyPose.z;
+        }
+    }
+
+    bool ArmorStandModel::RightHandMatrix(glm::mat4& out) const {
+        if (!m_rightArm) return false;
+        // MC HumanoidModel.translateToHand: root, then the arm — no shove.
+        out = m_root.LocalMatrix() * m_rightArm->LocalMatrix();
+        return true;
+    }
+
+    bool ArmorStandModel::LeftHandMatrix(glm::mat4& out) const {
+        if (!m_leftArm) return false;
+        out = m_root.LocalMatrix() * m_leftArm->LocalMatrix();
+        return true;
+    }
+
+    bool ArmorStandModel::HeadMatrix(glm::mat4& out) const {
+        if (!m_head) return false;
+        // MC HeadedModel.translateToHead: root, then the head part.
+        out = m_root.LocalMatrix() * m_head->LocalMatrix();
+        return true;
+    }
+
     void HumanoidModel::SetupAnim(const EntityRenderState& state) {
         m_root.ResetPose();
 
@@ -965,61 +1092,44 @@ namespace Render {
     ArrowModel::ArrowModel() {
         m_texWidth = 32.0f;
         m_texHeight = 32.0f;
+        // MC ArrowModel.createBodyLayer, verbatim: the whole mesh scaled
+        // 0.9 (LayerDefinition.create(mesh.transformed(pose.scaled(0.9)))).
+        PartPose rootPose = PartPose::Zero();
+        rootPose.xScale = rootPose.yScale = rootPose.zScale = 0.9f;
+        m_arrow = m_root.AddChild("arrow", rootPose);
 
-        // MC arrow units are 0.05625 blocks; the model pipeline is 1/16
-        // blocks per pixel, so one arrow unit is 0.9 model pixels.
-        constexpr float u = 0.9f;
+        // back: texOffs(0,0).addBox(0, -2.5, -2.5, 0, 5, 5) at (-11, 0, 0),
+        // rolled 45° about X, .withScale(0.8). A zero-width box: its two
+        // X faces are the fletching's two halves of the art (0..5 and
+        // 5..10 across, rows 5..10), one per side.
+        PartPose backPose = PartPose::OffsetAndRotation(-11.0f, 0.0f, 0.0f, 0.7853982f, 0.0f, 0.0f);
+        backPose.xScale = backPose.yScale = backPose.zScale = 0.8f;
+        ModelPart* back = m_arrow->AddChild("back", backPose);
+        AddBox(back, 0.0f, 0.0f, 0.0f, -2.5f, -2.5f, 0.0f, 5.0f, 5.0f);
 
-        // Two nested parts because ModelPart's rotation order is Z-Y-X with X
-        // innermost: the pitch (X rotation, set per frame) must wrap the fixed
-        // 90-degree yaw that turns the +X shaft into the renderer's -Z
-        // "forward", or it would roll the shaft instead of tilting it.
-        m_pivot = m_root.AddChild("pivot", PartPose::Offset(0.0f, 22.0f, 0.0f));
-        ModelPart* yaw = m_pivot->AddChild("yaw",
-            PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f,
-                                        0.0f, kPi * 0.5f, 0.0f));
-
-        // Each flat plane needs a flipped twin: a zero-thickness box maps only
-        // one face onto the artwork, and the twin (rotated a half-turn) shows
-        // the same texels from the other side.
-        const auto flatPair = [&](const char* name, float rotAxisX,
-                                  float texX, float texY,
-                                  float ox, float oy, float oz,
-                                  float sx, float sy, float sz) {
-            ModelPart* front = yaw->AddChild(name, PartPose::Zero());
-            AddBox(front, texX, texY, ox, oy, oz, sx, sy, sz);
-            ModelPart* back = yaw->AddChild(std::string(name) + "_back",
-                PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f,
-                                            rotAxisX ? kPi : 0.0f, 0.0f,
-                                            rotAxisX ? 0.0f : kPi));
-            AddBox(back, texX, texY, ox, oy, oz, sx, sy, sz);
+        // cross: texOffs(0,0).addBox(-12, -2, 0, 16, 4, 0, NONE, 1.0, 0.8):
+        // the shaft plane, its UVs over a texture 0.8 as tall so the 4-pixel
+        // plane reads the 16×5 shaft strip at rows 0..5. Twice, at 45° and
+        // 135° about X.
+        const auto cross = [&](const char* name, float xRot) {
+            ModelPart* p = m_arrow->AddChild(name, PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f, xRot, 0.0f, 0.0f));
+            AddBox(p, 0.0f, 0.0f, -12.0f, -2.0f, 0.0f, 16.0f, 4.0f, 0.0f);
+            p->cubes.back().texScaleU = 1.0f;
+            p->cubes.back().texScaleV = 0.8f;
         };
-
-        // Horizontal shaft plane: 16x5 units in XZ. texOffs (-4.5, 5) lands
-        // the box's TOP face on the shaft strip at (0,5)-(16,10).
-        flatPair("shaft_h", 1.0f, -4.5f, 5.0f,
-                 -7.0f * u, 0.0f, -2.5f * u, 16.0f * u, 0.0f, 5.0f * u);
-
-        // Vertical shaft plane: 16x5 units in XY. texOffs (0,5) lands the
-        // NORTH face on the same strip.
-        flatPair("shaft_v", 0.0f, 0.0f, 5.0f,
-                 -7.0f * u, -2.5f * u, 0.0f, 16.0f * u, 5.0f * u, 0.0f);
-
-        // Tail cross (the fletching): a 5x5-unit YZ plane at the tail. A
-        // zero-WIDTH box's east/west faces are the D x H side pair; texOffs
-        // (0, -4.5) puts the west face on the 5x5 fletching art at (0,0).
-        flatPair("back", 0.0f, 0.0f, -4.5f,
-                 -7.0f * u, -2.5f * u, -2.5f * u, 0.0f, 5.0f * u, 5.0f * u);
-
+        cross("cross_1", 0.7853982f);
+        cross("cross_2", 2.3561945f);
         m_root.ResetPose();
     }
 
     void ArrowModel::SetupAnim(const EntityRenderState& state) {
         m_root.ResetPose();
-        // The arrow's xRot is atan2(vy, horizontal) — positive climbing.
-        // Model pitch is positive nose-down, hence the sign flip.
-        m_pivot->zRot = 0.0f;
-        m_pivot->xRot = -state.xRot * kDegToRad;
+        // MC ArrowModel.setupAnim: a fresh hit's shake rolls the whole
+        // arrow about its shaft.
+        if (state.arrowShake > 0.0f) {
+            const float pow = -std::sin(state.arrowShake * 3.0f) * state.arrowShake;
+            m_arrow->zRot += pow * kDegToRad;
+        }
     }
 
     // ── EvokerFangsModel ───────────────────────────────────────────────────

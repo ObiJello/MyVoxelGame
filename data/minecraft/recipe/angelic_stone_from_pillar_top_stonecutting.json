@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:pillar_top",
+  "result": {
+    "count": 1,
+    "id": "minecraft:angelic_stone"
+  }
+}

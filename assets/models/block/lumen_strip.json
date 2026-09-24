@@ -1,0 +1,7 @@
+{
+  "parent": "minecraft:block/cube_column",
+  "textures": {
+    "end": "minecraft:block/lumen_strip_top",
+    "side": "minecraft:block/lumen_strip"
+  }
+}

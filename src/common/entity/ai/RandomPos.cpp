@@ -1,5 +1,7 @@
 // File: src/common/entity/ai/RandomPos.cpp
 #include "common/entity/ai/RandomPos.hpp"
+
+#include <functional>
 #include "common/entity/Mob.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
@@ -148,6 +150,29 @@ namespace Game::RandomPos {
         // MC RandomPos.generateRandomPos — 10 rolls, keep the highest-scoring.
         // The result is the BOTTOM CENTRE of the chosen block, which matters:
         // aiming at the corner makes a mob drift diagonally on every wander.
+        template <typename Generator>
+        std::optional<glm::dvec3> BestOfScored(Generator&& generate,
+                                               const std::function<double(const glm::ivec3&)>& scoring) {
+            double bestWeight = -std::numeric_limits<double>::infinity();
+            glm::ivec3 bestPos(0);
+            bool found = false;
+
+            for (int i = 0; i < kAttempts; ++i) {
+                glm::ivec3 candidate;
+                if (!generate(candidate)) continue;
+
+                const double weight = scoring(candidate);
+                if (weight > bestWeight) {
+                    bestWeight = weight;
+                    bestPos = candidate;
+                    found = true;
+                }
+            }
+
+            if (!found) return std::nullopt;
+            return glm::dvec3(bestPos.x + 0.5, bestPos.y, bestPos.z + 0.5);
+        }
+
         template <typename Generator>
         std::optional<glm::dvec3> BestOf(PathfinderMob& mob, Generator&& generate) {
             double bestWeight = -std::numeric_limits<double>::infinity();
@@ -344,12 +369,19 @@ namespace Game::RandomPos {
     }
 
     std::optional<glm::dvec3> GetLandPos(PathfinderMob& mob, int horizontalDist, int verticalDist) {
+        return GetLandPos(mob, horizontalDist, verticalDist, [&mob](const glm::ivec3& p) {
+            return static_cast<double>(mob.GetWalkTargetValue(p));
+        });
+    }
+
+    std::optional<glm::dvec3> GetLandPos(PathfinderMob& mob, int horizontalDist, int verticalDist,
+                                         const std::function<double(const glm::ivec3&)>& scoring) {
         if (!mob.Level()) return std::nullopt;
         JavaRandom& rng = mob.Level()->Random();
         const IBlockAccess* blocks = mob.Level()->Blocks();
         const bool restrict = MobRestricted(mob, horizontalDist);
 
-        return BestOf(mob, [&](glm::ivec3& out) {
+        return BestOfScored([&](glm::ivec3& out) {
             const glm::ivec3 dir = GenerateRandomDirection(rng, horizontalDist, verticalDist);
 
             // MC LandRandomPos.generateRandomPosTowardDirection: the limits /
@@ -379,7 +411,7 @@ namespace Game::RandomPos {
 
             out = candidate;
             return true;
-        });
+        }, scoring);
     }
 
 } // namespace Game::RandomPos

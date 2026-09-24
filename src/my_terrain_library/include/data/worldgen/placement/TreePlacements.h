@@ -102,6 +102,13 @@ public:
     // =========================================================================
     static const PlacedFeature* FALLEN_OAK_TREE;
     static const PlacedFeature* FALLEN_BIRCH_TREE;
+    static const PlacedFeature* RED_POPLAR;
+    static const PlacedFeature* ORANGE_POPLAR;
+    static const PlacedFeature* YELLOW_POPLAR;
+    static const PlacedFeature* RED_POPLAR_LEAF_LITTER;
+    static const PlacedFeature* ORANGE_POPLAR_LEAF_LITTER;
+    static const PlacedFeature* YELLOW_POPLAR_LEAF_LITTER;
+    static const PlacedFeature* FALLEN_POPLAR_TREE;
     static const PlacedFeature* FALLEN_SUPER_BIRCH_TREE;
     static const PlacedFeature* FALLEN_SPRUCE_TREE;
     static const PlacedFeature* FALLEN_JUNGLE_TREE;

@@ -3,6 +3,9 @@
 #include "ShulkerBoxRenderer.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
+#include "../entity/EntityLighting.hpp"
+#include "BlockEntityShader.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/Direction.hpp"
@@ -26,35 +29,6 @@ namespace Render {
         };
         static_assert(sizeof(CubeVert) == 24, "match GetBlockVertexLayout");
 
-        // Same pair as ChestRenderer: the [0,64] -> [0,1] UV divide is baked
-        // into the mesh at build time so the shaders take normalized UVs.
-        constexpr const char* kVS = R"GLSL(
-#version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec2 aUV;     // in 64-px atlas coords
-layout(location=2) in vec4 aColor;
-uniform mat4 uMVP;
-out vec2 vUV;
-out vec4 vColor;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV;
-    vColor = aColor;
-}
-)GLSL";
-        constexpr const char* kFS = R"GLSL(
-#version 330 core
-in vec2 vUV;
-in vec4 vColor;
-out vec4 FragColor;
-uniform sampler2D uTex;
-void main() {
-    vec4 t = texture(uTex, vUV);
-    if (t.a < 0.05) discard;
-    FragColor = t * vColor;
-}
-)GLSL";
-
         // Identical to ChestRenderer's AddCube — MC ModelPart.Cube's six faces
         // with its exact UV layout, including the quirk that vertex 0 takes the
         // HIGH u (getting that backwards mirrors every face horizontally).
@@ -63,9 +37,20 @@ void main() {
         // only users, and hoisting it into a common header would mean exporting
         // CubeVert and the vertex layout assumption along with it. If a third
         // entity-model renderer appears, that is the moment to lift all three.
+        //
+        // `lighting` picks the per-face shade: null = the item form's
+        // block-model face table (unchanged icon look); otherwise MC's
+        // world-space entity lighting through the part's normal matrix
+        // (EntityLighting.hpp).
+        struct FaceLighting {
+            glm::mat3 normalMat{1.0f};
+            EntityLighting::LightSet set = EntityLighting::LightSet::Default;
+        };
+
         void AddCube(std::vector<CubeVert>& verts, std::vector<uint32_t>& idx,
                      glm::vec3 from, glm::vec3 to,
-                     float xTexOffs, float yTexOffs, float w, float h, float d) {
+                     float xTexOffs, float yTexOffs, float w, float h, float d,
+                     const FaceLighting* lighting) {
             const float minX = from.x, minY = from.y, minZ = from.z;
             const float maxX = to.x,   maxY = to.y,   maxZ = to.z;
             const glm::vec3 t0(minX, minY, minZ), t1(maxX, minY, minZ);
@@ -83,13 +68,19 @@ void main() {
             const float v1 = yTexOffs + d;
             const float v2 = yTexOffs + d + h;
 
-            auto shade = [](float s) -> uint8_t {
-                return static_cast<uint8_t>(s * 255.0f);
+            // Model normals are ModelPart.Polygon's directions in MC model
+            // space; PartMatrix's scale(1,-1,-1) and facing turn are carried
+            // by the normal matrix.
+            auto shade = [&](const glm::vec3& modelNormal, float itemShade) -> uint8_t {
+                if (!lighting) return static_cast<uint8_t>(itemShade * 255.0f);
+                return EntityLighting::ShadeByte(lighting->normalMat * modelNormal, lighting->set);
             };
-            const uint8_t S_UP   = shade(1.00f);
-            const uint8_t S_DOWN = shade(0.50f);
-            const uint8_t S_NS   = shade(0.80f);
-            const uint8_t S_EW   = shade(0.60f);
+            const uint8_t S_UP    = shade({ 0, 1, 0}, 1.00f);
+            const uint8_t S_DOWN  = shade({ 0,-1, 0}, 0.50f);
+            const uint8_t S_NORTH = shade({ 0, 0,-1}, 0.80f);
+            const uint8_t S_SOUTH = shade({ 0, 0, 1}, 0.80f);
+            const uint8_t S_WEST  = shade({-1, 0, 0}, 0.60f);
+            const uint8_t S_EAST  = shade({ 1, 0, 0}, 0.60f);
 
             auto emit = [&](const glm::vec3 q[4], float U0, float V0, float U1, float V1, uint8_t sh) {
                 const uint32_t base = static_cast<uint32_t>(verts.size());
@@ -112,10 +103,10 @@ void main() {
 
             emit(fDown,  u1,  v0, u2,  v1, S_DOWN);
             emit(fUp,    u2,  v1, u22, v0, S_UP);
-            emit(fNorth, u1,  v1, u2,  v2, S_NS);
-            emit(fSouth, u3,  v1, u4,  v2, S_NS);
-            emit(fWest,  u0,  v1, u1,  v2, S_EW);
-            emit(fEast,  u2,  v1, u3,  v2, S_EW);
+            emit(fNorth, u1,  v1, u2,  v2, S_NORTH);
+            emit(fSouth, u3,  v1, u4,  v2, S_SOUTH);
+            emit(fWest,  u0,  v1, u1,  v2, S_WEST);
+            emit(fEast,  u2,  v1, u3,  v2, S_EAST);
         }
 
         // MC Direction.getRotation() (Direction.java:138-150). Ordinals match
@@ -164,13 +155,9 @@ void main() {
     bool ShulkerBoxRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
-            // VKBackend cannot compile GLSL source; it loads the shared
-            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
-            // rewrites the .vert/.frag names). GL keeps the inline source.
-            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
-                                                     "shaders/blockentity.frag")
-            : g_renderBackend->CreateShader(kVS, kFS);
+        // The shared block-entity shader (BlockEntityShader.hpp): lit and
+        // fogged like the terrain, on both backends.
+        m_shader = BlockEntityShader::Create();
         if (m_shader == INVALID_SHADER) {
             Log::Error("[ShulkerBoxRenderer] shader compile failed");
             return false;
@@ -187,12 +174,29 @@ void main() {
         // and reproducing it in the matrix means AddCube's UV layout stays
         // untouched. Bake the flip into the vertices instead and the world-up
         // face silently samples the atlas's DOWN region.
+        //
+        // Each part's mesh holds one copy per lighting (see the header):
+        // copy 0 the item form, then 6 facings × 2 light sets, the shade
+        // taken through that facing's closed-box PartMatrix.
         auto build = [&](Part p, glm::vec3 from, glm::vec3 to,
                          float tx, float ty, float w, float h, float d) {
             std::vector<CubeVert> verts;
             std::vector<uint32_t> idx;
-            verts.reserve(24); idx.reserve(36);
-            AddCube(verts, idx, from, to, tx, ty, w, h, d);
+            verts.reserve(24 * kLightingCount); idx.reserve(36 * kLightingCount);
+            for (int lighting = 0; lighting < kLightingCount; ++lighting) {
+                if (lighting == kItemLighting) {
+                    AddCube(verts, idx, from, to, tx, ty, w, h, d, nullptr);
+                    continue;
+                }
+                FaceLighting fl;
+                const auto facing = static_cast<Game::Direction>((lighting - 1) / 2);
+                fl.normalMat = EntityLighting::NormalMatrix(PartMatrix(p == kLid, facing, 0.0f));
+                fl.set = ((lighting - 1) % 2) ? EntityLighting::LightSet::Nether
+                                              : EntityLighting::LightSet::Default;
+                // AddCube indexes from verts.size(): each copy's indices
+                // already address its own vertices.
+                AddCube(verts, idx, from, to, tx, ty, w, h, d, &fl);
+            }
             // Normalize the 64-px sheet UVs; see ChestRenderer::Initialize.
             for (auto& vert : verts) { vert.u /= 64.0f; vert.v /= 64.0f; }
             m_vb[p] = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
@@ -200,7 +204,7 @@ void main() {
             m_ib[p] = g_renderBackend->CreateBuffer(BufferUsage::Index,
                 idx.size() * sizeof(uint32_t), idx.data());
             m_mesh[p] = g_renderBackend->CreateMesh(m_vb[p], m_ib[p], GetBlockVertexLayout());
-            m_indexCount[p] = static_cast<uint32_t>(idx.size());
+            m_indexCount[p] = static_cast<uint32_t>(idx.size() / kLightingCount);
         };
 
         // base: texOffs(0, 28) addBox(-8, -8, -8, 16, 8, 16)
@@ -323,7 +327,7 @@ void main() {
                                     float /*partialTick*/,
                                     const glm::mat4& proj,
                                     const glm::mat4& view,
-                                    const glm::vec3& /*cameraPos*/) {
+                                    const glm::vec3& cameraPos) {
         PROFILE_ZONE_N("BE.ShulkerBox");
         if (!m_geomBuilt || !g_renderBackend) return;
 
@@ -343,7 +347,9 @@ void main() {
         // the box is drawn closed — the same place ChestRenderer's lid is.
         const float progress = 0.0f;
 
-        const glm::mat4 toWorld = glm::translate(glm::mat4(1.0f), glm::vec3(p));
+        // "toWorld" lands the box in RENDER space (camera-relative, see
+        // RenderOrigin.hpp): the block minus the view's origin, in double.
+        const glm::mat4 toWorld = glm::translate(glm::mat4(1.0f), Render::ToRender(glm::dvec3(p)));
 
         PipelineState s;
         s.depthTestEnabled  = true;
@@ -357,15 +363,24 @@ void main() {
         g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
 
         for (int part = 0; part < kPartCount; ++part) {
-            const glm::mat4 mvp = proj * view * toWorld *
-                                  PartMatrix(part == kLid, facing, progress);
+            const glm::mat4 model = toWorld * PartMatrix(part == kLid, facing, progress);
+            const glm::mat4 mvp = proj * view * model;
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
-            g_renderBackend->DrawIndexed(m_mesh[part], m_indexCount[part]);
+            // The box's light (its cell's) and the frame's fog.
+            BlockEntityShader::ApplyWorld(m_shader, model, cameraPos, p);
+            // The copy lit for this facing and the drawn level's light set.
+            // Exact while the lid is closed (progress is always 0 here); an
+            // opening lid's 270° spin would need the shade per frame.
+            const int lighting = WorldLighting(
+                facing, EntityLighting::Current() == EntityLighting::LightSet::Nether);
+            g_renderBackend->DrawIndexed(m_mesh[part], m_indexCount[part],
+                                         m_indexCount[part] * static_cast<uint32_t>(lighting));
         }
         g_renderBackend->UnbindMesh();
     }
 
-    void ShulkerBoxRenderer::RenderBEWLR(Game::BlockID blockId, const glm::mat4& mvp) {
+    void ShulkerBoxRenderer::RenderBEWLR(Game::BlockID blockId, const glm::mat4& mvp,
+                                         const BEWLRLight& light) {
         if (!m_geomBuilt || !g_renderBackend) return;
         TextureHandle tex = LoadColourTexture(TextureStemForBlock(blockId));
         if (tex == INVALID_TEXTURE) return;
@@ -401,10 +416,12 @@ void main() {
         g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
 
         for (int part = 0; part < kPartCount; ++part) {
-            const glm::mat4 m = mvp * toItem *
-                                PartMatrix(part == kLid, Game::Direction::Up, 0.0f);
+            const glm::mat4 meshToItem = toItem * PartMatrix(part == kLid, Game::Direction::Up, 0.0f);
+            const glm::mat4 m = mvp * meshToItem;
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", m);
-            g_renderBackend->DrawIndexed(m_mesh[part], m_indexCount[part]);
+            BlockEntityShader::ApplyItem(m_shader, light, meshToItem);
+            g_renderBackend->DrawIndexed(m_mesh[part], m_indexCount[part],
+                                         m_indexCount[part] * static_cast<uint32_t>(kItemLighting));
         }
         g_renderBackend->UnbindMesh();
     }

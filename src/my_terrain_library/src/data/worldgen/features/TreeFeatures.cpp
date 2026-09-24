@@ -56,6 +56,9 @@ using levelgen::feature::treedecorators::LeaveVineDecorator;
 using levelgen::feature::treedecorators::AttachedToLeavesDecorator;
 using levelgen::feature::treedecorators::BeehiveDecorator;
 using levelgen::feature::trunkplacers::UpwardsBranchingTrunkPlacer;
+using levelgen::feature::trunkplacers::PoplarTrunkPlacer;
+using levelgen::feature::foliageplacers::PoplarFoliagePlacer;
+using levelgen::feature::treedecorators::ShelfMushroomDecorator;
 using levelgen::feature::foliageplacers::RandomSpreadFoliagePlacer;
 using levelgen::feature::rootplacers::MangroveRootPlacer;
 using levelgen::feature::rootplacers::AboveRootPlacement;
@@ -113,6 +116,9 @@ ConfiguredFeature* TreeFeatures::BIRCH_BEES_002 = nullptr;
 ConfiguredFeature* TreeFeatures::FANCY_OAK_BEES_0002_LEAF_LITTER = nullptr;
 ConfiguredFeature* TreeFeatures::FANCY_OAK_BEES_002 = nullptr;
 ConfiguredFeature* TreeFeatures::FANCY_OAK_BEES = nullptr;
+ConfiguredFeature* TreeFeatures::OAK_BEES_005 = nullptr;
+ConfiguredFeature* TreeFeatures::BIRCH_BEES_005 = nullptr;
+ConfiguredFeature* TreeFeatures::FANCY_OAK_BEES_005 = nullptr;
 ConfiguredFeature* TreeFeatures::SUPER_BIRCH_BEES_0002 = nullptr;
 ConfiguredFeature* TreeFeatures::SUPER_BIRCH_BEES = nullptr;
 
@@ -121,6 +127,15 @@ ConfiguredFeature* TreeFeatures::FALLEN_OAK = nullptr;
 ConfiguredFeature* TreeFeatures::FALLEN_OAK_TREE = nullptr;
 ConfiguredFeature* TreeFeatures::FALLEN_BIRCH = nullptr;
 ConfiguredFeature* TreeFeatures::FALLEN_BIRCH_TREE = nullptr;
+
+// 26.3 dappled forest poplars
+ConfiguredFeature* TreeFeatures::RED_POPLAR = nullptr;
+ConfiguredFeature* TreeFeatures::ORANGE_POPLAR = nullptr;
+ConfiguredFeature* TreeFeatures::YELLOW_POPLAR = nullptr;
+ConfiguredFeature* TreeFeatures::RED_POPLAR_LEAF_LITTER = nullptr;
+ConfiguredFeature* TreeFeatures::ORANGE_POPLAR_LEAF_LITTER = nullptr;
+ConfiguredFeature* TreeFeatures::YELLOW_POPLAR_LEAF_LITTER = nullptr;
+ConfiguredFeature* TreeFeatures::FALLEN_POPLAR_TREE = nullptr;
 ConfiguredFeature* TreeFeatures::FALLEN_SUPER_BIRCH_TREE = nullptr;
 ConfiguredFeature* TreeFeatures::FALLEN_SPRUCE_TREE = nullptr;
 ConfiguredFeature* TreeFeatures::FALLEN_JUNGLE_TREE = nullptr;
@@ -205,6 +220,36 @@ TreeConfigurationBuilder TreeFeatures::createBirch() {
     // Reference: TreeFeatures.java createBirch line 153-154
     // BIRCH: StraightTrunkPlacer(5, 2, 0), BlobFoliagePlacer(2, 0, 3), TwoLayersFeatureSize(1, 0, 1)
     return createStraightBlobTree("minecraft:birch_log", "minecraft:birch_leaves", 5, 2, 0, 2).ignoreVines();
+}
+
+TreeConfigurationBuilder TreeFeatures::createPoplar(const std::string& leavesBlock) {
+    // Reference: 26.3 TreeFeatures.createPoplar - POPLAR_LOG,
+    // PoplarTrunkPlacer(7, 4, 0, ConstantInt(4), UniformInt(1, 4)),
+    // PoplarFoliagePlacer(WeightedListInt{5:5, 6:5, 7:1, 8:1}, ConstantInt(0),
+    // UniformInt(5, 6), 0.15), TwoLayersFeatureSize(1, 0, 2), ignoreVines
+    auto trunkProvider = BlockStateProvider::simple("minecraft:poplar_log");
+    auto foliageProvider = BlockStateProvider::simple(leavesBlock);
+    s_providers.push_back(trunkProvider);
+    s_providers.push_back(foliageProvider);
+
+    auto trunkPlacer = std::make_shared<PoplarTrunkPlacer>(7, 4, 0, constantInt(4), uniformInt(1, 4));
+    s_trunkPlacers.push_back(trunkPlacer);
+
+    auto radius = levelgen::carver::WeightedListInt::builder()
+        .add(std::make_shared<levelgen::carver::ConstantInt>(5), 5)
+        .add(std::make_shared<levelgen::carver::ConstantInt>(6), 5)
+        .add(std::make_shared<levelgen::carver::ConstantInt>(7), 1)
+        .add(std::make_shared<levelgen::carver::ConstantInt>(8), 1)
+        .buildShared();
+    s_intProviders.push_back(radius);
+    auto foliagePlacer = std::make_shared<PoplarFoliagePlacer>(radius, constantInt(0), uniformInt(5, 6), 0.15f);
+    s_foliagePlacers.push_back(foliagePlacer);
+
+    auto featureSize = std::make_shared<TwoLayersFeatureSize>(1, 0, 2);
+    s_featureSizes.push_back(featureSize);
+
+    return TreeConfigurationBuilder(trunkProvider, trunkPlacer, foliageProvider, foliagePlacer, featureSize)
+        .ignoreVines();
 }
 
 TreeConfigurationBuilder TreeFeatures::createSuperBirch() {
@@ -1144,6 +1189,48 @@ void TreeFeatures::bootstrap() {
     }
 
     // =========================================================================
+    // 26.3 POPLARS (TreeFeatures.java RED/ORANGE/YELLOW_POPLAR[_LEAF_LITTER]):
+    // createPoplar(leaves) with ShelfMushroomDecorator(0.4); the leaf-litter
+    // variants add sparseLeafLitter and thickLeafLitter first.
+    // =========================================================================
+    {
+        auto shelfMushroom = std::make_shared<ShelfMushroomDecorator>(0.4f);
+        s_decorators.push_back(shelfMushroom);
+        struct PoplarVariant {
+            const char* leaves;
+            ConfiguredFeature** plain;
+            ConfiguredFeature** leafLitter;
+        };
+        const PoplarVariant variants[] = {
+            {"minecraft:red_poplar_leaves", &RED_POPLAR, &RED_POPLAR_LEAF_LITTER},
+            {"minecraft:orange_poplar_leaves", &ORANGE_POPLAR, &ORANGE_POPLAR_LEAF_LITTER},
+            {"minecraft:yellow_poplar_leaves", &YELLOW_POPLAR, &YELLOW_POPLAR_LEAF_LITTER},
+        };
+        for (const PoplarVariant& variant : variants) {
+            {
+                auto builder = createPoplar(variant.leaves);
+                builder.decorators({shelfMushroom});
+                auto config = std::make_unique<TreeConfiguration>(builder.build());
+                auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
+                    s_treeFeature.get(), *config);
+                *variant.plain = feature.get();
+                s_configs.push_back(std::move(config));
+                s_features.push_back(std::move(feature));
+            }
+            {
+                auto builder = createPoplar(variant.leaves);
+                builder.decorators({sparseLeafLitter, thickLeafLitter, shelfMushroom});
+                auto config = std::make_unique<TreeConfiguration>(builder.build());
+                auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
+                    s_treeFeature.get(), *config);
+                *variant.leafLitter = feature.get();
+                s_configs.push_back(std::move(config));
+                s_features.push_back(std::move(feature));
+            }
+        }
+    }
+
+    // =========================================================================
     // BEES + LEAF LITTER TREE VARIANTS
     // Reference: TreeFeatures.java lines 213, 217, 220
     // These have beehive decorator (0.002F) + leaf litter decorators
@@ -1160,6 +1247,10 @@ void TreeFeatures::bootstrap() {
     // Create beehive005 decorator (5% chance)
     auto beehive005 = std::make_shared<treedecorators::BeehiveDecorator>(0.05f);
     s_decorators.push_back(beehive005);
+
+    // Create beehive decorator (always) - TreeFeatures.java `beehive`
+    auto beehive = std::make_shared<treedecorators::BeehiveDecorator>(1.0f);
+    s_decorators.push_back(beehive);
 
     // OAK_BEES_0002_LEAF_LITTER
     // Reference: createOak().decorators(List.of(beehive0002, sparseLeafLitter, thickLeafLitter))
@@ -1292,6 +1383,37 @@ void TreeFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
+    // FALLEN_POPLAR_TREE (26.3 TreeFeatures.createFallenPoplar):
+    // POPLAR_LOG, UniformInt(4, 7), log decorators
+    // AttachedToLogsDecorator(0.1, brown_mushroom, [UP]) then
+    // ShelfMushroomDecorator(0.8); no stump decorators.
+    {
+        auto poplarLogProvider = std::make_shared<SimpleStateProvider>(
+            minecraft::world::level::block::Blocks::POPLAR_LOG->defaultBlockState());
+        s_providers.push_back(poplarLogProvider);
+        auto brownMushroomProvider = std::make_shared<SimpleStateProvider>(
+            minecraft::world::level::block::Blocks::BROWN_MUSHROOM->defaultBlockState());
+        s_providers.push_back(brownMushroomProvider);
+        auto brownMushroomOnLog = std::make_shared<AttachedToLogsDecorator>(
+            0.1f, brownMushroomProvider, std::vector<core::Direction>{core::Direction::UP});
+        s_decorators.push_back(brownMushroomOnLog);
+        auto shelfMushroomOnLog = std::make_shared<ShelfMushroomDecorator>(0.8f);
+        s_decorators.push_back(shelfMushroomOnLog);
+
+        auto logLength = std::make_shared<util::UniformInt>(4, 7);
+        auto config = std::make_unique<FallenTreeConfiguration>(
+            poplarLogProvider,
+            logLength,
+            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{},
+            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{brownMushroomOnLog, shelfMushroomOnLog}
+        );
+        auto feature = std::make_unique<ConfiguredFeatureImpl<FallenTreeConfiguration, FallenTreeFeature>>(
+            s_fallenTreeFeature.get(), *config);
+        FALLEN_POPLAR_TREE = feature.get();
+        s_fallenTreeConfigs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
+    }
+
     // =========================================================================
     // ADDITIONAL BEES VARIANTS
     // Reference: TreeFeatures.java
@@ -1336,11 +1458,29 @@ void TreeFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
-    // FANCY_OAK_BEES - fancy oak with 5% bee chance
-    // Reference: createFancyOak().decorators(List.of(beehive005))
+    // OAK_BEES_005 / FANCY_OAK_BEES_005 / BIRCH_BEES_005 - 5% bee chance
+    // Reference: 26.3 TreeFeatures.java lines 235, 239, 242
+    auto beeTree = [&](TreeConfigurationBuilder builder,
+                       std::shared_ptr<treedecorators::TreeDecorator> decorator) -> ConfiguredFeature* {
+        builder.decorators({decorator});
+        auto config = std::make_unique<TreeConfiguration>(builder.build());
+        auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
+            s_treeFeature.get(), *config);
+        ConfiguredFeature* raw = feature.get();
+        s_configs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
+        return raw;
+    };
+    OAK_BEES_005 = beeTree(createOak(), beehive005);
+    BIRCH_BEES_005 = beeTree(createBirch(), beehive005);
+    FANCY_OAK_BEES_005 = beeTree(createFancyOak(), beehive005);
+
+    // FANCY_OAK_BEES - fancy oak that always gets a hive
+    // Reference: 26.3 TreeFeatures.java line 243: decorators(List.of(beehive)),
+    // beehive = new BeehiveDecorator(1.0F)
     {
         auto builder = createFancyOak();
-        builder.decorators({beehive005});
+        builder.decorators({beehive});
         auto config = std::make_unique<TreeConfiguration>(builder.build());
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);
@@ -1362,11 +1502,11 @@ void TreeFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
-    // SUPER_BIRCH_BEES - super birch with 5% bee chance
-    // Reference: createSuperBirch().decorators(List.of(beehive005))
+    // SUPER_BIRCH_BEES - super birch that always gets a hive
+    // Reference: 26.3 TreeFeatures.java line 227: decorators(List.of(beehive))
     {
         auto builder = createSuperBirch();
-        builder.decorators({beehive005});
+        builder.decorators({beehive});
         auto config = std::make_unique<TreeConfiguration>(builder.build());
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);

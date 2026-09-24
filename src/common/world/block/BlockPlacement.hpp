@@ -79,6 +79,31 @@ namespace Game {
     // Does this block carry a segment count at all?
     bool IsSegmentedBlock(BlockID id);
 
+    // ── Signs (MC SignBlock family) ─────────────────────────────────────
+    // "*_sign" that is not a wall or hanging variant, etc. Each wood has the
+    // four: <wood>_sign, <wood>_wall_sign, <wood>_hanging_sign,
+    // <wood>_wall_hanging_sign.
+    bool IsSignBlock(BlockID id);               // any of the four
+    bool IsStandingSignBlock(BlockID id);
+    bool IsWallSignBlock(BlockID id);
+    bool IsCeilingHangingSignBlock(BlockID id);
+    bool IsWallHangingSignBlock(BlockID id);
+    // MC StandingAndWallBlockItem: the sign item is the standing block; a
+    // click on a side face places the wall variant (attachment DOWN — the
+    // plain sign — or UP for the hanging sign, whose "standing" form hangs
+    // from the ceiling). Same stage as SkullPlacementBlock, on both sides.
+    BlockID SignPlacementBlock(BlockID held, Direction clickedFace);
+    // The block's yaw for text and the front/back test — MC SignBlock
+    // .getYRotationDegrees: rotation*22.5 for the 16-way blocks, facing
+    // .toYRot for the wall ones.
+    float SignYawDegrees(BlockState state);
+
+    // ── Trapdoors (MC TrapDoorBlock) ────────────────────────────────────
+    // Every "*_trapdoor" block. Opened by hand unless iron (BlockSetType
+    // .canOpenByHand: false for IRON only — copper opens by hand).
+    bool IsTrapdoorBlock(BlockID id);
+    bool IsHandOpenableTrapdoor(BlockID id);
+
     // ── Doors (MC DoorBlock) ────────────────────────────────────────────
     // Every "*_door" block: two cells tall, placed as a lower and an upper
     // half, opened by hand unless iron.
@@ -88,9 +113,15 @@ namespace Game {
     // `pos`, from the walls beside it and, when they say nothing, which side
     // of the cell the click landed on. `state` carries the facing already.
     BlockState DoorPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
-                                  BlockState state, const glm::vec3& clickWorld);
+                                  BlockState state, const glm::dvec3& clickWorld);
     // The upper half that goes above a lower half of `lower`.
     BlockState DoorUpperState(BlockState lower);
+
+    // MC StandingAndWallBlockItem for the torches: the wall variant when a
+    // side face was clicked and that wall can hold it, else the standing
+    // block. Shared by the server and the client's prediction.
+    BlockID TorchPlacementBlock(const IBlockAccess& level, BlockID held, const glm::ivec3& pos,
+                                Direction clickedFace);
 
     // 1..4, or 0 when `id` isn't segmented.
     int SegmentAmountOf(BlockState state);
@@ -190,6 +221,23 @@ namespace Game {
     // placement paths check twice: the cheap state-free gate first, then this
     // once they know what they are about to write.
     bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockState state);
+
+    // MC LadderBlock.canSurvive for a ladder facing `facing`: the block
+    // behind it has a sturdy face toward it. Placement walks the candidate
+    // facings with this.
+    bool LadderCanSurvive(const IBlockAccess& level, const glm::ivec3& pos, Direction facing);
+
+    // MC AmethystClusterBlock family: amethyst_cluster, the three buds and
+    // The Hush's resonant_cluster. FACING is the direction the cluster
+    // points; it is held by the block BEHIND it.
+    bool IsAmethystClusterBlock(BlockID id);
+    // AmethystClusterBlock.canSurvive: the support's face toward the cluster
+    // is sturdy. BlockBehaviors wires the matching updateShape on it.
+    bool AmethystClusterCanSurvive(const IBlockAccess& level, const glm::ivec3& pos,
+                                   BlockState state);
+
+    // MC SaplingBlock: any in-ground "*_sapling" (not potted, not bamboo's).
+    bool IsSaplingBlock(BlockID id);
 
     // True when CanSurviveAt/CanSurviveOn reproduce this block's MC canSurvive
     // rule, rather than falling through to "no modelled rule, allow anything".

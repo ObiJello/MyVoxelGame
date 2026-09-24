@@ -1,0 +1,7 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:worn_castle_brick",
+  "result": {
+    "id": "minecraft:thick_castle_brick"
+  }
+}

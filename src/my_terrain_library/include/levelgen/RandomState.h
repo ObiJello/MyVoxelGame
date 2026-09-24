@@ -1,108 +1,73 @@
 #pragma once
 
-#include "world/biome/Climate.h"
-#include "levelgen/NoiseRouter.h"
-#include "random/PositionalRandomFactory.h"
+#include "levelgen/NoiseGeneratorSettings.h"
+#include "levelgen/density/terrain/RandomState.h"
 #include "random/AnyPositionalRandomFactory.h"
-#include "synth/NormalNoise.h"
-#include <unordered_map>
-#include <string>
+#include "world/biome/Climate.h"
+
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 
-// Forward declarations
-namespace minecraft {
-    class XoroshiroPositionalRandomFactory;
-    namespace levelgen {
-        class NoiseGeneratorSettings;
-        class SurfaceSystem;
-    }
-}
-
-// Reference: net/minecraft/world/level/levelgen/RandomState.java
+// Reference: levelgen.RandomState (26.3) - everything seeded for one world and
+// one NoiseGeneratorSettings. The density side (noise instances, the density
+// function compiler, buffer pools) is density::RandomState; this class adds
+// what Java's RandomState also owns: the MaterialSystem and the climate
+// samplers, plus stable pointers to the positional randoms for the engine's
+// callers.
 
 namespace minecraft {
 namespace levelgen {
 
-/**
- * RandomState - Manages random number generation and noise routing for world generation
- *
- * In Minecraft, this class:
- * - Creates and manages noise instances
- * - Provides the NoiseRouter for terrain generation
- * - Manages aquifer and ore RNGs
- * - Wires up all density functions
- *
- * Reference: RandomState.java lines 17-149
- */
+namespace material {
+class MaterialSystem;
+}
+
 class RandomState {
-private:
-    // Reference: RandomState.java line 18
-    minecraft::random::AnyPositionalRandomFactory* m_random;
-
-    // Reference: RandomState.java line 20
-    NoiseRouter* m_router;
-
-    // Reference: RandomState.java line 21
-    minecraft::world::biome::Climate::Sampler* m_sampler;
-
-    // Reference: RandomState.java line 22
-    SurfaceSystem* m_surfaceSystem;
-
-    // Reference: RandomState.java line 23
-    minecraft::random::AnyPositionalRandomFactory* m_aquiferRandom;
-
-    // Reference: RandomState.java line 24
-    minecraft::random::AnyPositionalRandomFactory* m_oreRandom;
-
-    // Reference: RandomState.java line 25
-    // Map of noise name -> NormalNoise instance
-    std::unordered_map<std::string, NormalNoise*> m_noiseInstances;
-    mutable std::mutex m_noiseInstancesMutex;
-
-    // Reference: RandomState.java line 26
-    // Map of identifier -> PositionalRandomFactory
-    std::unordered_map<std::string, random::AnyPositionalRandomFactory*> m_positionalRandoms;
-    mutable std::mutex m_positionalRandomsMutex;
-
 public:
-    /**
-     * Create RandomState from settings and seed
-     * Reference: RandomState.java lines 32-34
-     */
-    static RandomState* create(NoiseGeneratorSettings* settings, int64_t seed);
-
-    /**
-     * Constructor
-     * Reference: RandomState.java lines 36-120
-     */
-    RandomState(NoiseGeneratorSettings* settings, int64_t seed);
-
-    /**
-     * Destructor - clean up all allocated resources
-     */
+    RandomState(std::shared_ptr<const NoiseGeneratorSettings> settings, int64_t seed);
     ~RandomState();
 
-    /**
-     * Get or create a noise instance by name
-     * Reference: RandomState.java lines 122-124
-     */
-    NormalNoise* getOrCreateNoise(const std::string& noiseName);
+    RandomState(const RandomState&) = delete;
+    RandomState& operator=(const RandomState&) = delete;
 
-    /**
-     * Get or create a positional random factory by identifier
-     * Reference: RandomState.java lines 126-128
-     */
-    minecraft::random::AnyPositionalRandomFactory* getOrCreateRandomFactory(const std::string& identifier);
+    static RandomState* create(std::shared_ptr<const NoiseGeneratorSettings> settings, int64_t seed) {
+        return new RandomState(std::move(settings), seed);
+    }
 
-    // Accessors (Reference: RandomState.java lines 130-148)
-    NoiseRouter* router() const { return m_router; }
-    minecraft::world::biome::Climate::Sampler* sampler() const { return m_sampler; }
-    SurfaceSystem* surfaceSystem() const { return m_surfaceSystem; }
-    minecraft::random::AnyPositionalRandomFactory* aquiferRandom() const { return m_aquiferRandom; }
-    minecraft::random::AnyPositionalRandomFactory* oreRandom() const { return m_oreRandom; }
-    minecraft::random::AnyPositionalRandomFactory* random() const { return m_random; }
+    density::RandomState& density() { return *m_density; }
+    const NoiseGeneratorSettings& settings() const { return *m_settings; }
 
+    // RandomState.createClimateSampler(context). The context must outlive
+    // the sampler.
+    world::biome::Climate::Sampler createClimateSampler(density::SamplerContext& context);
+    // A sampler over SamplerContext.EMPTY_UNCACHED (no caches, the global
+    // arena): what createUncachedResolver uses; safe on any thread.
+    world::biome::Climate::Sampler* sampler() { return &m_uncachedSampler; }
+
+    // RandomState.surfaceSystem() (26.3's MaterialSystem).
+    material::MaterialSystem* surfaceSystem() { return m_materialSystem.get(); }
+
+    // WorldgenRandom.Algorithm.newInstance(seed).forkPositional().
+    random::AnyPositionalRandomFactory* random() { return &m_random; }
+    // getOrCreateRandomFactory(name): random.fromHashOf(name).forkPositional(),
+    // one per name, at a stable address.
+    random::AnyPositionalRandomFactory* getOrCreateRandomFactory(const std::string& name);
+
+    int64_t seed() const { return m_seed; }
+
+private:
+    std::shared_ptr<const NoiseGeneratorSettings> m_settings;
+    int64_t m_seed;
+    std::unique_ptr<density::RandomState> m_density;
+    random::AnyPositionalRandomFactory m_random;
+    world::biome::Climate::Sampler m_uncachedSampler;
+    std::unique_ptr<material::MaterialSystem> m_materialSystem;
+
+    std::mutex m_factoryMutex;
+    std::unordered_map<std::string, std::unique_ptr<random::AnyPositionalRandomFactory>> m_factories;
 };
 
 } // namespace levelgen

@@ -70,6 +70,8 @@ const PlacedFeature* VegetationPlacements::PATCH_TALL_GRASS_2 = nullptr;
 const PlacedFeature* VegetationPlacements::PATCH_TALL_GRASS = nullptr;
 const PlacedFeature* VegetationPlacements::PATCH_LARGE_FERN = nullptr;
 const PlacedFeature* VegetationPlacements::PATCH_BUSH = nullptr;
+const PlacedFeature* VegetationPlacements::PATCH_RED_SHRUB = nullptr;
+const PlacedFeature* VegetationPlacements::BROWN_MUSHROOM_DAPPLED_FOREST = nullptr;
 
 // Leaf litter (line 63)
 const PlacedFeature* VegetationPlacements::PATCH_LEAF_LITTER = nullptr;
@@ -138,6 +140,7 @@ const PlacedFeature* VegetationPlacements::TREES_WINDSWEPT_HILLS = nullptr;
 const PlacedFeature* VegetationPlacements::TREES_WATER = nullptr;
 const PlacedFeature* VegetationPlacements::TREES_BIRCH_AND_OAK_LEAF_LITTER = nullptr;
 const PlacedFeature* VegetationPlacements::TREES_SPARSE_JUNGLE = nullptr;
+const PlacedFeature* VegetationPlacements::TREES_DAPPLED_FOREST = nullptr;
 const PlacedFeature* VegetationPlacements::TREES_OLD_GROWTH_SPRUCE_TAIGA = nullptr;
 const PlacedFeature* VegetationPlacements::TREES_OLD_GROWTH_PINE_TAIGA = nullptr;
 const PlacedFeature* VegetationPlacements::TREES_JUNGLE = nullptr;
@@ -786,6 +789,34 @@ void VegetationPlacements::bootstrap() {
     }
 
     // =========================================================================
+    // 26.3: PATCH_RED_SHRUB - RED_SHRUB with InSquarePlacement.spread(),
+    // HEIGHTMAP_WORLD_SURFACE, BiomeFilter.biome(), CountPlacement.of(8),
+    // OffsetPlacement.ofTriangle(7, 3),
+    // BlockPredicateFilter.forPredicate(ONLY_IN_AIR_PREDICATE)
+    // =========================================================================
+    {
+        static levelgen::carver::TrapezoidInt s_redShrubXz = levelgen::carver::TrapezoidInt::triangle(7);
+        static levelgen::carver::TrapezoidInt s_redShrubY = levelgen::carver::TrapezoidInt::triangle(3);
+        static RandomOffsetPlacement s_redShrubOffset = RandomOffsetPlacement::of(&s_redShrubXz, &s_redShrubY);
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(levelgen::blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE));
+        PATCH_RED_SHRUB = createPlaced(
+            VegetationFeatures::RED_SHRUB,
+            { &InSquarePlacement::spread(), heightmapWorldSurface(), &BiomeFilter::biome(), countOf(8),
+              &s_redShrubOffset, &s_blockPredicateFilters.back() },
+            "PATCH_RED_SHRUB"
+        );
+    }
+
+    // =========================================================================
+    // 26.3: BROWN_MUSHROOM_DAPPLED_FOREST - getMushroomPlacement(2, null)
+    // =========================================================================
+    BROWN_MUSHROOM_DAPPLED_FOREST = createPlaced(
+        VegetationFeatures::PATCH_BROWN_MUSHROOM,
+        getMushroomPlacement(2, nullptr),
+        "BROWN_MUSHROOM_DAPPLED_FOREST"
+    );
+
+    // =========================================================================
     // Line 260: BROWN_MUSHROOM_NORMAL
     // getMushroomPlacement(256, null)
     // =========================================================================
@@ -1295,6 +1326,16 @@ void VegetationPlacements::bootstrap() {
             "TREES_SPARSE_JUNGLE"
         );
     }
+
+    // =========================================================================
+    // 26.3: TREES_DAPPLED_FOREST - CountPlacement.of(6), InSquarePlacement.spread(),
+    // treeThreshold, HEIGHTMAP_OCEAN_FLOOR, BiomeFilter.biome()
+    // =========================================================================
+    TREES_DAPPLED_FOREST = createPlaced(
+        VegetationFeatures::TREES_DAPPLED_FOREST,
+        treePlacement(countOf(6)),
+        "TREES_DAPPLED_FOREST"
+    );
 
     // =========================================================================
     // Line 303: TREES_OLD_GROWTH_SPRUCE_TAIGA

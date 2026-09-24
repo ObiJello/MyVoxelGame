@@ -13,6 +13,7 @@
 
 #include "common/entity/Mob.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -26,6 +27,13 @@ namespace Game {
     void HandleWaterAnimalAirSupply(class Mob& mob, int preTickAirSupply);
 
     class Fish : public PathfinderMob {
+    public:
+        // MC WaterAnimal.isPushedByFluid: false — a fish holds its place in a current.
+        bool IsPushedByFluid() const override { return false; }
+        // MC WaterAnimal.checkSpawnObstruction: level.isUnobstructed(this) only — the
+        // base's no-liquid half would refuse every underwater spawn.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
+
     public:
         Fish(EntityTypeId type, EntityLevel* level);
 
@@ -208,7 +216,18 @@ namespace Game {
     // adult makes one (getBreedOffspring). Dolphins still do not breed.
     class Dolphin : public AgeableMob {
     public:
+        // MC AgeableWaterCreature.isPushedByFluid: false.
+        bool IsPushedByFluid() const override { return false; }
+        // MC AgeableWaterCreature.checkSpawnObstruction: level.isUnobstructed(this) only — the
+        // base's no-liquid half would refuse every underwater spawn.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
+
+    public:
         explicit Dolphin(EntityLevel* level);
+
+        // MC Dolphin.playAttackSound. (DOLPHIN_EAT / DOLPHIN_PLAY ride fish
+        // feeding and the item-play goal, neither modelled.)
+        void PlayAttackSound() override { PlaySound(SoundEvents::DOLPHIN_ATTACK, 1.0f, 1.0f); }
 
         // MC Dolphin.finalizeSpawn: full air, level pitch, then the
         // AgeableMobGroupData(0.1F) pack roll.
@@ -274,6 +293,13 @@ namespace Game {
     // 0.5 x 0.5 (BABY_DIMENSIONS) and the ink burst shrinks with it.
     class Squid : public AgeableMob {
     public:
+        // MC AgeableWaterCreature.isPushedByFluid: false.
+        bool IsPushedByFluid() const override { return false; }
+        // MC AgeableWaterCreature.checkSpawnObstruction: level.isUnobstructed(this) only — the
+        // base's no-liquid half would refuse every underwater spawn.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
+
+    public:
         Squid(EntityTypeId type, EntityLevel* level);
 
         std::shared_ptr<SpawnGroupData>
@@ -334,6 +360,10 @@ namespace Game {
     class AbstractNautilus : public GenericAnimal {
     public:
         AbstractNautilus(EntityTypeId type, EntityLevel* level);
+
+        // MC AbstractNautilus.checkSpawnObstruction: level.isUnobstructed(this) only — the
+        // base's no-liquid half would refuse every underwater spawn.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
 
         // MC AbstractNautilus.getWalkTargetValue — flat 0 (water is home).
         float GetWalkTargetValue(const glm::ivec3&) const override { return 0.0f; }

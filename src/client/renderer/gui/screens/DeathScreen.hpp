@@ -46,5 +46,8 @@ namespace Render {
     // True once when the Respawn button was pressed — PlatformMain drains
     // this and sends PlayerAction::PERFORM_RESPAWN.
     bool ConsumeDeathRespawnRequest();
+    // immediate_respawn: no screen, the same PERFORM_RESPAWN request as the
+    // button would have made.
+    void RequestImmediateRespawn();
 
 } // namespace Render

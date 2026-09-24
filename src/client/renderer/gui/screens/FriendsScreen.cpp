@@ -6,10 +6,38 @@
 #include "common/core/Log.hpp"
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cstdio>
+#include <ctime>
 
 namespace Render {
 
     namespace {
+        // "just now" / "5 minutes ago" / "3 hours ago" / "yesterday" /
+        // "6 days ago" / "3 weeks ago" / "2 months ago" / "a year ago",
+        // from a Unix time the service stamped. Coarse on purpose: the
+        // roster rows are rebuilt on each push, not every frame, so a
+        // seconds figure would read as stuck.
+        std::string FormatTimeAgo(int64_t whenUnix) {
+            const int64_t now = static_cast<int64_t>(std::time(nullptr));
+            int64_t secs = now - whenUnix;
+            if (secs < 0) secs = 0;
+            char buf[48];
+            const auto plural = [&](int64_t n, const char* unit) {
+                std::snprintf(buf, sizeof(buf), "%lld %s%s ago",
+                              static_cast<long long>(n), unit, n == 1 ? "" : "s");
+                return std::string(buf);
+            };
+            if (secs < 60)    return "just now";
+            if (secs < 3600)  return plural(secs / 60, "minute");
+            if (secs < 86400) return plural(secs / 3600, "hour");
+            const int64_t days = secs / 86400;
+            if (days == 1)    return "yesterday";
+            if (days < 7)     return plural(days, "day");
+            if (days < 30)    return plural(days / 7, "week");
+            if (days < 365)   return plural(days / 30, "month");
+            return days / 365 == 1 ? std::string("a year ago") : plural(days / 365, "year");
+        }
+
         // Inline mini-button geometry inside 36px rows.
         constexpr int MINI_W = 52;
         constexpr int MINI_H = 16;
@@ -85,11 +113,28 @@ namespace Render {
             if (inMini(leftBtnX))  { if (onAccept)  onAccept(row);  return; }
             if (inMini(rightBtnX)) { if (onDecline) onDecline(row); return; }
         } else if (row.kind == Row::Kind::Invite) {
-            if (inMini(rightBtnX)) { if (onInviteJoin) onInviteJoin(row); return; }
+            if (inMini(rightBtnX)) {
+                if (InviteJoinDisabled(row)) return;   // greyed out: not joinable
+                if (onInviteJoin) onInviteJoin(row);
+                return;
+            }
         } else if (row.kind == Row::Kind::Friend) {
             m_selected = idx;
             if (onSelectionChanged) onSelectionChanged();
         }
+    }
+
+    const std::vector<std::string>* FriendListWidget::TooltipAt(double mx, double my) {
+        const int idx = RowAt(mx, my);
+        if (idx < 0 || idx >= static_cast<int>(m_rows.size())) return nullptr;
+        const Row& row = m_rows[static_cast<size_t>(idx)];
+        if (!InviteJoinDisabled(row)) return nullptr;
+        const int rowX = m_x + (m_width - ROW_W) / 2;
+        const int top = RowTop(idx);
+        const int miniY = top + (ROW_H - 4 - MINI_H) / 2;
+        const int rightBtnX = rowX + ROW_W - MINI_W - 4;
+        const bool over = mx >= rightBtnX && mx < rightBtnX + MINI_W && my >= miniY && my < miniY + MINI_H;
+        return over ? &m_joinOffTip : nullptr;
     }
 
     bool FriendListWidget::OnScroll(double deltaY) {
@@ -141,12 +186,13 @@ namespace Render {
             const int miniY = top + (ROW_H - 4 - MINI_H) / 2;
             const int rightBtnX = rowX + ROW_W - MINI_W - 4;
             const int leftBtnX  = rightBtnX - MINI_W - 4;
-            auto miniButton = [&](int x, const char* label, bool hovered) {
-                g.BlitSprite(hovered ? "widget/button_highlighted" : "widget/button",
+            auto miniButton = [&](int x, const char* label, bool hovered, bool enabled = true) {
+                g.BlitSprite(!enabled ? "widget/button_disabled"
+                           : hovered  ? "widget/button_highlighted" : "widget/button",
                              x, miniY, MINI_W, MINI_H);
                 g.DrawCenteredString(label, x + MINI_W / 2,
                                      miniY + (MINI_H - FontRenderer::LINE_HEIGHT) / 2 + 1,
-                                     0xFFFFFFFF);
+                                     enabled ? 0xFFFFFFFF : 0xFFA0A0A0);
             };
             auto hoverMini = [&](int x) {
                 return mouseX >= x && mouseX < x + MINI_W &&
@@ -156,7 +202,7 @@ namespace Render {
                 miniButton(leftBtnX, "Accept", hoverMini(leftBtnX));
                 miniButton(rightBtnX, "Decline", hoverMini(rightBtnX));
             } else if (row.kind == Row::Kind::Invite) {
-                miniButton(rightBtnX, "Join", hoverMini(rightBtnX));
+                miniButton(rightBtnX, "Join", hoverMini(rightBtnX), !InviteJoinDisabled(row));
             }
         }
         g.DisableScissor();
@@ -237,6 +283,11 @@ namespace Render {
             banner.kind = Row::Kind::Invite;
             banner.title = invite.fromName + " invited you";
             banner.line2 = "to '" + invite.world + "'";
+            // The inviting host's live presence, for the Join button's
+            // joinable state (an invite outlives a Joinable-off flip).
+            for (const auto& f : roster.friends) {
+                if (f.id == invite.fromId) { banner.presence = f.presence; break; }
+            }
             banner.line2Color = kAqua;
             banner.invite = invite;
             rows.push_back(std::move(banner));
@@ -265,8 +316,10 @@ namespace Render {
             row.presence = e.presence;
             switch (e.presence.state) {
                 case Client::FriendPresence::State::Hosting:
-                    row.line2 = "Hosting '" + e.presence.world + "'";
+                    row.line2 = "Playing '" + e.presence.world + "'";
                     row.line2Color = kGreen;
+                    // World Options → Joinable off: still shown, not joinable.
+                    if (!e.presence.joinable) row.line3 = "Joining is off";
                     break;
                 case Client::FriendPresence::State::Playing:
                     row.line2 = "Playing on " + e.presence.world;
@@ -277,7 +330,9 @@ namespace Render {
                     row.line2Color = kGreen;
                     break;
                 default:
-                    row.line2 = "Offline";
+                    row.line2 = e.presence.lastOnline > 0
+                                    ? "Last online " + FormatTimeAgo(e.presence.lastOnline)
+                                    : "Offline";
                     row.line2Color = kDarker;
                     break;
             }
@@ -306,8 +361,13 @@ namespace Render {
                 Client::FriendPresence::State::Hosting;
 
         if (m_joinButton) {
-            m_joinButton->active = connected && sel &&
+            const bool hostingSel = connected && sel &&
                 sel->presence.state == Client::FriendPresence::State::Hosting;
+            m_joinButton->active = hostingSel && sel->presence.joinable;
+            // Hosting with Joinable off: the world is listed, the door is shut.
+            m_joinButton->SetTooltip(hostingSel && !sel->presence.joinable
+                                         ? std::vector<std::string>{"Join is off."}
+                                         : std::vector<std::string>{});
         }
         if (m_inviteButton) {
             m_inviteButton->active = connected && hosting && sel &&

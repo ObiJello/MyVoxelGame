@@ -49,8 +49,13 @@ namespace Game {
     // would be a bug regardless of what happens to the mutex.
     Chunk::Chunk(Chunk&& other) noexcept
         : pos(other.pos)
+        , worldgenEntities(std::move(other.worldgenEntities))
+        , structureSpawnAreas(std::move(other.structureSpawnAreas))
+        , structuresNbt(std::move(other.structuresNbt))
+        , postProcessing(std::move(other.postProcessing))
         , sections(std::move(other.sections))
         , onSectionDirty(std::move(other.onSectionDirty))
+        , light(std::move(other.light))
         , m_blockEntities(std::move(other.m_blockEntities))
         , m_blockTicks(std::move(other.m_blockTicks))
         , m_heightmaps(other.m_heightmaps)
@@ -59,8 +64,13 @@ namespace Game {
     Chunk& Chunk::operator=(Chunk&& other) noexcept {
         if (this == &other) return *this;
         pos                = other.pos;
+        worldgenEntities   = std::move(other.worldgenEntities);
+        structureSpawnAreas = std::move(other.structureSpawnAreas);
+        structuresNbt      = std::move(other.structuresNbt);
+        postProcessing     = std::move(other.postProcessing);
         sections           = std::move(other.sections);
         onSectionDirty     = std::move(other.onSectionDirty);
+        light              = std::move(other.light);
         m_blockEntities    = std::move(other.m_blockEntities);
         m_blockTicks       = std::move(other.m_blockTicks);
         m_heightmaps       = other.m_heightmaps;

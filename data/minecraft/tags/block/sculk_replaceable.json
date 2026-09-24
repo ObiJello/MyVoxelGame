@@ -1,7 +1,7 @@
 {
   "values": [
     "#minecraft:base_stone_overworld",
-    "#minecraft:dirt",
+    "#minecraft:substrate_overworld",
     "#minecraft:terracotta",
     "#minecraft:nylium",
     "#minecraft:base_stone_nether",
@@ -17,7 +17,6 @@
     "minecraft:end_stone",
     "minecraft:red_sandstone",
     "minecraft:sandstone",
-    "#minecraft:substrate_overworld",
     "minecraft:sulfur",
     "minecraft:cinnabar"
   ]

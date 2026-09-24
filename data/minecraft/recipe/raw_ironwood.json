@@ -1,0 +1,13 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "minecraft:liveroot",
+    "minecraft:raw_iron",
+    "minecraft:gold_nugget"
+  ],
+  "result": {
+    "count": 2,
+    "id": "minecraft:raw_ironwood"
+  }
+}

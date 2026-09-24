@@ -56,18 +56,29 @@ namespace Game {
         return TierLevel(tool.tier) >= TierLevel(target.minTier);
     }
 
-    float GetPlayerDestroySpeed(ItemID held, const Block& target, bool onGround) {
+    float GetPlayerDestroySpeed(ItemID held, const Block& target, bool onGround,
+                                float effectMultiplier, bool eyeInWater) {
         float speed = GetItemDestroySpeed(held, target);
-        // TODO: efficiency enchant, haste / mining-fatigue effects, attribute.
-        // TODO: submerged (in-water) ÷5 once water is mining-aware.
+        // TODO: efficiency enchant (MINING_EFFICIENCY). BLOCK_BREAK_SPEED is
+        // 1.0 for every player (no source modifies it here).
+        // Player.getDestroySpeed's two effect steps (MobEffectUtil
+        // .hasDigSpeed → ×(1 + (amp + 1) · 0.2); MINING_FATIGUE → ×0.3^(amp + 1)),
+        // folded by the caller into one factor.
+        speed *= effectMultiplier;
+        // MC: `if (isEyeInFluid(WATER)) speed *= SUBMERGED_MINING_SPEED` — the
+        // attribute's base is 0.2 (AQUA_AFFINITY would raise it to 1.0; no
+        // enchantments exist to do so).
+        if (eyeInWater) speed *= 0.2f;
         if (!onGround) speed /= 5.0f;
         return speed;
     }
 
-    float GetDestroyProgressPerTick(ItemID held, const Block& target, bool onGround) {
+    float GetDestroyProgressPerTick(ItemID held, const Block& target, bool onGround,
+                                    float effectMultiplier, bool eyeInWater) {
         if (target.destroyTime < 0.0f) return 0.0f;       // unbreakable
         if (target.destroyTime <= 0.0f) return 1.0f;      // instant break
-        const float playerSpeed = GetPlayerDestroySpeed(held, target, onGround);
+        const float playerSpeed = GetPlayerDestroySpeed(held, target, onGround, effectMultiplier,
+                                                        eyeInWater);
         const float modifier = HasCorrectToolForDrops(held, target) ? 30.0f : 100.0f;
         return playerSpeed / target.destroyTime / modifier;
     }

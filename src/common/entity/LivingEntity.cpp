@@ -1,5 +1,9 @@
 // File: src/common/entity/LivingEntity.cpp
 #include "common/entity/LivingEntity.hpp"
+#include "common/world/block/BlockBounce.hpp"
+#include "common/world/block/BlockFriction.hpp"
+#include "common/core/Profiling_Tracy.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/entity/projectile/Projectile.hpp"
 #include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -7,6 +11,9 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/Blocks.hpp"
+#include "common/sound/EntitySounds.hpp"
+#include "common/sound/SoundEvents.hpp"
+#include "common/sound/SoundType.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -27,21 +34,6 @@ namespace Game {
         constexpr int    kDeathDuration       = 20;
         constexpr double kFluidJumpImpulse    = 0.04;
         constexpr int    kJumpDelay           = 10;
-    }
-
-    float GetBlockFriction(BlockID id) {
-        // MC Blocks.java: the default is 0.6 and only a handful override it.
-        switch (id) {
-            case BlockID::Ice:
-            case BlockID::PackedIce:
-                return 0.98f;
-            case BlockID::BlueIce:
-                return 0.989f;
-            case BlockID::SlimeBlock:
-                return 0.8f;
-            default:
-                return 0.6f;
-        }
     }
 
     LivingEntity::LivingEntity(EntityTypeId type, EntityLevel* level)
@@ -73,120 +65,264 @@ namespace Game {
     // ── Status effects ─────────────────────────────────────────────────────
 
     MobEffectInstance* LivingEntity::FindEffect(MobEffectId effect) {
-        for (MobEffectInstance& e : m_activeEffects) {
+        for (MobEffectInstance& e : EffectStorage()) {
             if (e.effect == effect) return &e;
         }
         return nullptr;
     }
 
     const MobEffectInstance* LivingEntity::GetEffect(MobEffectId effect) const {
-        for (const MobEffectInstance& e : m_activeEffects) {
-            if (e.effect == effect) return &e;
-        }
-        return nullptr;
+        return FindEffectIn(EffectStorage(), effect);
     }
 
     bool LivingEntity::CanBeAffected(const MobEffectInstance& effect) const {
-        // MC LivingEntity.canBeAffected: the IGNORES_POISON_AND_REGEN tag is
-        // the #undead set — the same membership as inverted heal-and-harm.
-        // (The INFESTED/OOZING immunities guard effects this port has none of.)
+        // MC LivingEntity.canBeAffected, in its order. The tags are one type
+        // each in vanilla data: #immune_to_infested = silverfish,
+        // #immune_to_oozing = slime; IGNORES_POISON_AND_REGEN is the #undead
+        // set — the same membership as inverted heal-and-harm.
+        if (GetType() == EntityTypeId::Silverfish) return effect.effect != MobEffectId::Infested;
+        if (GetType() == EntityTypeId::Slime)      return effect.effect != MobEffectId::Oozing;
         if (!IsInvertedHealAndHarm()) return true;
         return effect.effect != MobEffectId::Regeneration &&
                effect.effect != MobEffectId::Poison;
     }
 
+    double LivingEntity::GetVisibilityPercent(const Entity* targetingEntity) const {
+        // MC LivingEntity.getVisibilityPercent, in its order. isInvisible()
+        // is the shared flag MC's updateInvisibilityStatus derives from the
+        // INVISIBILITY effect; on the server that is the effect itself.
+        double visibilityPercent = 1.0;
+        if (IsDiscrete()) visibilityPercent *= 0.8;
+        if (HasEffect(MobEffectId::Invisibility)) {
+            float coverPercentage = GetArmorCoverPercentage();
+            if (coverPercentage < 0.1f) coverPercentage = 0.1f;
+            visibilityPercent *= 0.7 * static_cast<double>(coverPercentage);
+        }
+        if (targetingEntity) {
+            visibilityPercent *= GetEquipmentVisibilityFactor(targetingEntity);
+        }
+        return std::clamp(visibilityPercent, 0.0, 10.0);
+    }
+
     bool LivingEntity::AddEffect(MobEffectInstance effect, Entity* source) {
-        // MC LivingEntity.addEffect(newEffect, source). `source` is kept for
-        // signature parity — MC uses it for packet attribution only.
-        (void)source;
+        // MC LivingEntity.addEffect(newEffect, source).
         if (!CanBeAffected(effect)) return false;
 
-        MobEffectInstance* existing = FindEffect(effect.effect);
+        const MobEffectId id = effect.effect;
+        const int amplifier = effect.amplifier;
+        MobEffectInstance* existing = FindEffect(id);
         bool changed = false;
         if (!existing) {
-            m_activeEffects.push_back(std::move(effect));
-            OnEffectAdded(m_activeEffects.back());
+            std::vector<MobEffectInstance>& effects = EffectStorage();
+            effects.push_back(std::move(effect));
+            OnEffectAdded(effects.back(), source);
             changed = true;
+            // MC newEffect.onEffectAdded(this) → MobEffect.onEffectAdded: the
+            // soundOnAdded (BAD_OMEN / TRIAL_OMEN / RAID_OMEN chimes) at the
+            // mob's feet, volume 1, pitch 1, through the level's playSound.
+            if (m_level && !m_level->IsClientSide()) {
+                if (const char* sound = GetEffectSoundOnAdded(id)) {
+                    m_level->PlaySound(nullptr, position, sound, GetSoundSource(), 1.0f, 1.0f);
+                }
+            }
         } else if (existing->Update(effect)) {
-            OnEffectUpdated(*existing, /*refreshAttributes=*/true);
+            OnEffectUpdated(*existing, /*refreshAttributes=*/true, source);
             changed = true;
         }
-        // MC also runs MobEffect.onEffectStarted / onEffectAdded here — sound
-        // and BadOmen machinery; nothing in this effect set implements either.
+        // MC: newEffect.onEffectStarted(this) — on EVERY call, landed or not,
+        // with the NEW instance's amplifier (ABSORPTION's top-up).
+        if (m_level && !m_level->IsClientSide()) OnEffectStarted(*this, id, amplifier);
         return changed;
     }
 
+    void LivingEntity::ForceAddEffect(MobEffectInstance effect, Entity* source) {
+        // MC LivingEntity.forceAddEffect: activeEffects.put, the previous
+        // instance's blend state carried over.
+        if (!CanBeAffected(effect)) return;
+        if (MobEffectInstance* existing = FindEffect(effect.effect)) {
+            effect.CopyBlendState(*existing);
+            *existing = MobEffectInstance(effect);
+            existing->CopyBlendState(effect);
+            OnEffectUpdated(*existing, /*refreshAttributes=*/true, source);
+        } else {
+            std::vector<MobEffectInstance>& effects = EffectStorage();
+            effects.push_back(std::move(effect));
+            OnEffectAdded(effects.back(), source);
+        }
+    }
+
     bool LivingEntity::RemoveEffect(MobEffectId effect) {
-        for (size_t i = 0; i < m_activeEffects.size(); ++i) {
-            if (m_activeEffects[i].effect != effect) continue;
-            MobEffectInstance removed = std::move(m_activeEffects[i]);
-            m_activeEffects.erase(m_activeEffects.begin() +
-                                  static_cast<ptrdiff_t>(i));
+        // MC removeEffect → removeEffectNoUpdate + onEffectsRemoved.
+        std::vector<MobEffectInstance>& effects = EffectStorage();
+        for (size_t i = 0; i < effects.size(); ++i) {
+            if (effects[i].effect != effect) continue;
+            MobEffectInstance removed = std::move(effects[i]);
+            effects.erase(effects.begin() + static_cast<ptrdiff_t>(i));
             OnEffectRemoved(removed);
+            RefreshEffectAttributes();
             return true;
         }
         return false;
     }
 
     bool LivingEntity::RemoveAllEffects() {
-        if (m_activeEffects.empty()) return false;
-        std::vector<MobEffectInstance> removed = std::move(m_activeEffects);
-        m_activeEffects.clear();
+        // MC removeAllEffects: false on the client and on an empty map.
+        if (m_level && m_level->IsClientSide()) return false;
+        std::vector<MobEffectInstance>& effects = EffectStorage();
+        if (effects.empty()) return false;
+        std::vector<MobEffectInstance> removed = std::move(effects);
+        effects.clear();
         for (const MobEffectInstance& e : removed) OnEffectRemoved(e);
+        RefreshEffectAttributes();
         return true;
     }
 
     void LivingEntity::RestoreEffects(std::vector<MobEffectInstance> effects) {
         // Drop the modifiers the old set installed before replacing it, so a
         // reload onto an entity that already had effects cannot stack them.
-        for (const auto& e : m_activeEffects) {
+        std::vector<MobEffectInstance>& storage = EffectStorage();
+        for (const auto& e : storage) {
             RemoveEffectAttributeModifiers(m_attributes, e.effect);
         }
-        m_activeEffects = std::move(effects);
-        for (const auto& e : m_activeEffects) {
+        storage = std::move(effects);
+        for (const auto& e : storage) {
             AddEffectAttributeModifiers(m_attributes, e.effect, e.amplifier);
         }
+        m_effectsDirty = true;   // MC readAdditionalSaveData sets effectsDirty
     }
 
-    void LivingEntity::OnEffectAdded(const MobEffectInstance& effect) {
+    void LivingEntity::TriggerOnDeathMobEffects(RemovalReason reason) {
+        // MC triggerOnDeathMobEffects: each effect's onMobRemoved, then clear
+        // — WITHOUT onEffectsRemoved (the entity is going away; MC sends no
+        // remove packets either, the client drops the whole entity).
+        if (!m_level || m_level->IsClientSide()) return;
+        std::vector<MobEffectInstance> effects = EffectStorage();   // copies: a hook may spawn
+        for (const MobEffectInstance& e : effects) {
+            OnEffectMobRemoved(*this, e.effect, e.amplifier, reason);
+        }
+        EffectStorage().clear();
+        m_effectsDirty = true;
+    }
+
+    void LivingEntity::OnEffectAdded(const MobEffectInstance& effect, Entity* source) {
+        // MC onEffectAdded: server side only.
+        (void)source;
+        if (m_level && m_level->IsClientSide()) return;
+        m_effectsDirty = true;
         AddEffectAttributeModifiers(m_attributes, effect.effect, effect.amplifier);
-        // Client sync (ClientboundUpdateMobEffectPacket) is the documented
-        // follow-up; nothing renders an effect yet.
     }
 
     void LivingEntity::OnEffectUpdated(const MobEffectInstance& effect,
-                                       bool refreshAttributes) {
+                                       bool refreshAttributes, Entity* source) {
+        (void)source;
+        if (m_level && m_level->IsClientSide()) return;
+        m_effectsDirty = true;
         if (refreshAttributes) {
             RemoveEffectAttributeModifiers(m_attributes, effect.effect);
             AddEffectAttributeModifiers(m_attributes, effect.effect, effect.amplifier);
+            RefreshEffectAttributes();
         }
     }
 
     void LivingEntity::OnEffectRemoved(const MobEffectInstance& effect) {
+        if (m_level && m_level->IsClientSide()) return;
+        m_effectsDirty = true;
         RemoveEffectAttributeModifiers(m_attributes, effect.effect);
     }
 
-    void LivingEntity::TickEffects() {
-        // Server-only: the client's mob copies never hold an effect (no sync
-        // exists), and MC's client branch is particle spawning anyway.
-        if (!m_level || m_level->IsClientSide()) return;
+    void LivingEntity::RefreshEffectAttributes() {
+        // MC refreshDirtyAttributes → onAttributeUpdated: a lowered
+        // MAX_HEALTH clamps health (HEALTH_BOOST running out), a lowered
+        // MAX_ABSORPTION clamps the absorption hearts (ABSORPTION ending).
+        const float maxHealth = GetMaxHealth();
+        if (GetHealth() > maxHealth) SetHealth(maxHealth);
+        const float maxAbsorption = GetMaxAbsorption();
+        if (GetAbsorptionAmount() > maxAbsorption) SetAbsorptionAmount(maxAbsorption);
+    }
 
-        for (size_t i = 0; i < m_activeEffects.size();) {
+    const EffectVisuals& LivingEntity::GetEffectVisuals() const {
+        // MC updateDirtyEffects, pulled lazily by whoever syncs. The client's
+        // copy is never dirty — it is whatever the server last sent.
+        if (m_effectsDirty && !(m_level && m_level->IsClientSide())) {
+            m_effectVisuals = EffectVisuals::FromEffects(
+                EffectStorage(), HasEffect(MobEffectId::Glowing));
+            m_effectsDirty = false;
+        }
+        return m_effectVisuals;
+    }
+
+    bool LivingEntity::IsCurrentlyGlowing() const {
+        if (m_level && !m_level->IsClientSide()) return HasEffect(MobEffectId::Glowing);
+        return m_effectVisuals.Glowing();
+    }
+
+    void LivingEntity::TickEffects() {
+        if (!m_level) return;
+        if (m_level->IsClientSide()) {
+            // MC tickEffects, client branch: count the (predicted) effects
+            // down and roll the ambient swirl from the synched particles.
+            // Client mobs hold no effect list; the local player's list lives
+            // on ClientPlayer.
+            for (MobEffectInstance& e : EffectStorage()) e.TickClient();
+            if (!IsRemoved()) {
+                SpawnEffectParticles(*m_level, m_effectVisuals, position,
+                                     GetBbWidth(), GetBbHeight());
+            }
+            return;
+        }
+
+        // MC tickEffects, server branch: MobEffectInstance.tickServer per
+        // effect over the LIVE map. The apply step is run here rather than
+        // inside TickServer because it can change the list under the loop —
+        // a killing WITHER / INSTANT_DAMAGE tick spends a totem, whose
+        // clear-all empties it — and an instance ticked in place would then
+        // be written after it was freed. MC walks the map with an iterator
+        // and swallows the ConcurrentModificationException: a structural
+        // change ends the pass, the in-flight instance having already ticked
+        // down if it is still in the map. That is reproduced exactly.
+        std::vector<MobEffectInstance>& effects = EffectStorage();
+        for (size_t i = 0; i < effects.size();) {
+            const MobEffectId id = effects[i].effect;
+            bool keep = effects[i].HasRemainingDuration();
+            if (keep) {
+                const int amplifier = effects[i].amplifier;
+                const int cadence = effects[i].CadenceTickCount(tickCount);
+                if (ShouldApplyEffectTickThisTick(id, cadence, amplifier)) {
+                    const size_t sizeBefore = effects.size();
+                    keep = ApplyEffectTick(*this, id, amplifier);
+                    if (effects.size() != sizeBefore || i >= effects.size() ||
+                        effects[i].effect != id) {
+                        if (keep) {
+                            if (MobEffectInstance* still = FindEffect(id)) {
+                                bool surfaced = false;
+                                still->FinishServerTick(surfaced);
+                                if (surfaced) OnEffectUpdated(*still, true, nullptr);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
             bool downgraded = false;
-            if (!m_activeEffects[i].TickServer(*this, downgraded)) {
-                MobEffectInstance removed = std::move(m_activeEffects[i]);
-                m_activeEffects.erase(m_activeEffects.begin() +
-                                      static_cast<ptrdiff_t>(i));
+            if (keep) keep = effects[i].FinishServerTick(downgraded);
+            if (!keep) {
+                MobEffectInstance removed = std::move(effects[i]);
+                effects.erase(effects.begin() + static_cast<ptrdiff_t>(i));
                 OnEffectRemoved(removed);
+                RefreshEffectAttributes();
             } else {
                 // MC's onEffectUpdate runnable: a hidden effect surfacing must
                 // re-fold the attribute modifiers at the new amplifier.
-                if (downgraded) OnEffectUpdated(m_activeEffects[i], true);
+                if (downgraded) {
+                    OnEffectUpdated(effects[i], true, nullptr);
+                } else if (effects[i].duration % 600 == 0) {
+                    // MC: every 30 s an unchanged effect is re-sent (the
+                    // client's countdown drifts from the server's).
+                    OnEffectUpdated(effects[i], false, nullptr);
+                }
                 ++i;
             }
         }
-        // Death does NOT clear effects: MC clears them only through a player's
-        // respawn, and a dying mob is removed with its map intact.
     }
 
     float LivingEntity::GetJumpBoostPower() const {
@@ -261,8 +397,10 @@ namespace Game {
         // FATIGUE adds (1 + amp) * 2 — the visibly sluggish arm an elder
         // guardian's aura gives everything it touches.
         int swingDuration = 6;
-        if (const MobEffectInstance* haste = GetEffect(MobEffectId::Haste)) {
-            swingDuration -= 1 + haste->amplifier;
+        if (HasDigSpeed(EffectStorage())) {
+            // MobEffectUtil.hasDigSpeed: HASTE or CONDUIT_POWER, the larger
+            // of the two amplifiers.
+            swingDuration -= 1 + GetDigSpeedAmplification(EffectStorage());
         } else if (const MobEffectInstance* fatigue =
                        GetEffect(MobEffectId::MiningFatigue)) {
             swingDuration += (1 + fatigue->amplifier) * 2;
@@ -315,14 +453,17 @@ namespace Game {
     }
 
     void LivingEntity::Travel(const glm::dvec3& input) {
+        PROFILE_ZONE_N("Living.Travel");
         // MC LivingEntity.travel dispatches to travelInFluid / travelFallFlying
-        // / travelInAir. Fluid travel is folded into the air path below rather
-        // than ported separately: this engine has no fluid height or flow, so
-        // MC's water branch (which is built entirely on getFluidHeight and
-        // getFluidFallingAdjustedMovement) has no inputs to read. What IS
-        // modelled is the part players notice — swimming mobs sink slowly and
-        // move at reduced speed — via the drag values below.
-        const bool inFluid = IsInWater() || IsInLava();
+        // / travelInAir; the fluid branch is below, the air path follows.
+        //
+        // shouldTravelInFluid(getFluidState(blockPosition())): in a liquid,
+        // affected by fluids, and not standing on this one (the strider).
+        bool travelInFluid = false;
+        if (IsInLiquid() && IsAffectedByFluids() && m_level && m_level->Blocks()) {
+            const glm::ivec3 bp = BlockPosition();
+            travelInFluid = !CanStandOnFluid(GetFluidState(*m_level->Blocks(), bp));
+        }
 
         // MC Entity.getBlockPosBelowThatAffectsMyMovement -> getOnPos(0.500001F)
         // — half a block down (plus an epsilon so an exact block boundary
@@ -334,7 +475,9 @@ namespace Game {
 
         float blockFriction = 1.0f;
         if (onGround && m_level && m_level->Blocks()) {
-            blockFriction = GetBlockFriction(m_level->Blocks()->GetBlock(belowX, belowY, belowZ));
+            // Motion-aware: quicksoil is FrictionCapped (BlockFriction.hpp).
+            blockFriction = GetBlockFriction(m_level->Blocks()->GetBlock(belowX, belowY, belowZ),
+                                             velocity);
             // MC 26.3: computeModifiedFriction(friction, FRICTION_MODIFIER) —
             // the modifier scales how far the block is from frictionless,
             // 1.0 (every mob but the sulfur cube's archetypes) is identity.
@@ -342,37 +485,66 @@ namespace Game {
                 blockFriction, static_cast<float>(GetAttributeValue(Attribute::FrictionModifier)));
         }
 
-        if (inFluid) {
-            const double oldY = position.y;
-            if (IsInLava() && !IsInWater()) {
-                // MC travelInLava: 0.02 acceleration, horizontal drag 0.5,
-                // vertical 0.8 (the shallow branch — with no fluid-height
-                // model the ≤0.4-deep constants stand in for both; the deep
-                // branch differs only in vertical drag 0.5), then a QUARTER
-                // gravity — lava is four times as sticky downward as water.
-                MoveRelative(0.02f, input);
-                Move(velocity);
-                velocity.x *= 0.5;
-                velocity.z *= 0.5;
-                velocity.y *= 0.8;
-                if (!IsCreative() && !IsNoGravity()) velocity.y -= GetEffectiveGravity() / 4.0;
-            } else {
-                // MC travelInWater: horizontal drag 0.8 (0.9 sprinting), a fixed
-                // 0.02 acceleration, and gravity reduced to a sixteenth —
-                // gated on !isSprinting(), so a sprint-swimming mob does not
-                // sink at all.
-                const float waterDrag = IsSprinting() ? 0.9f : 0.8f;
-                MoveRelative(0.02f, input);
-                Move(velocity);
-                velocity.x *= waterDrag;
-                velocity.z *= waterDrag;
-                velocity.y *= 0.8;
-                // MC travelInFluid also reads getEffectiveGravity(), so SLOW_FALLING
-                // slows a sinking mob in water exactly as it does in air.
-                if (!IsSprinting() && !IsCreative() && !IsNoGravity()) {
-                    velocity.y -= GetEffectiveGravity() / 16.0;
+        if (travelInFluid) {
+            // MC travelInFluid: isFalling, oldY and the base gravity are
+            // captured BEFORE the move.
+            const bool   isFalling   = velocity.y <= 0.0;
+            const double oldY        = position.y;
+            const double baseGravity = (IsCreative() || IsNoGravity()) ? 0.0 : GetEffectiveGravity();
+
+            // MC getFluidFallingAdjustedMovement: gravity at a sixteenth,
+            // with the -0.003 snap that stops a sinking mob jittering at
+            // the point where the drag and the gravity term cancel. Off
+            // entirely while sprinting (a sprint-swimming mob does not sink).
+            const auto fluidFallingAdjusted = [&](glm::dvec3 movement) {
+                if (baseGravity != 0.0 && !IsSprinting()) {
+                    double yd;
+                    if (isFalling && std::abs(movement.y - 0.005) >= 0.003 &&
+                        std::abs(movement.y - baseGravity / 16.0) < 0.003) {
+                        yd = -0.003;
+                    } else {
+                        yd = movement.y - baseGravity / 16.0;
+                    }
+                    movement.y = yd;
                 }
+                return movement;
+            };
+
+            if (IsInWater()) {
+                // MC travelInWater. Not carried: WATER_MOVEMENT_EFFICIENCY
+                // (depth strider) — no such attribute here. DOLPHINS_GRACE
+                // replaces the slow-down outright.
+                float slowDown = IsSprinting() ? 0.9f : 0.8f;   // getWaterSlowDown
+                if (HasEffect(MobEffectId::DolphinsGrace)) slowDown = 0.96f;
+                const float speed    = 0.02f;
+                MoveRelative(speed, input);
+                Move(velocity);
+                glm::dvec3 movement = velocity;
+                // `horizontalCollision && onClimbable()` → y = 0.2: a ladder
+                // in water is still a ladder. No climbable model here.
+                movement.x *= slowDown;
+                movement.y *= 0.800000011920929;
+                movement.z *= slowDown;
+                velocity = fluidFallingAdjusted(movement);
+            } else {
+                // MC travelInLava: 0.02 acceleration, then either the shallow
+                // branch (drag 0.5/0.8/0.5 and the sixteenth-gravity
+                // adjustment) or the deep one (everything halved), then a
+                // QUARTER gravity on top — lava is four times as sticky
+                // downward as water.
+                MoveRelative(0.02f, input);
+                Move(velocity);
+                if (IsInShallowFluid(FluidType::Lava)) {
+                    velocity.x *= 0.5;
+                    velocity.y *= 0.800000011920929;
+                    velocity.z *= 0.5;
+                    velocity = fluidFallingAdjusted(velocity);
+                } else {
+                    velocity *= 0.5;
+                }
+                if (baseGravity != 0.0) velocity.y -= baseGravity / 4.0;
             }
+
             // MC jumpOutOfFluid, called from both fluid travels: a swimming
             // mob pressed against a bank (horizontalCollision) whose body
             // would fit 0.6 above pops out with vy=0.3 — without it nothing
@@ -472,15 +644,21 @@ namespace Game {
     void LivingEntity::RestituteMovementAfterCollisions(const glm::dvec3& preMove,
                                                         const glm::dvec3& moved,
                                                         float airDrag) {
-        // MC 26.3 Entity.restituteMovementAfterCollisions, the ENTITY-bounciness
-        // half: a collided axis keeps -v * restitution instead of the zero
-        // Move() left there. (MC's other half, the block's own restitution —
-        // the slime block — lives with the block code here, as before.)
-        // `preMove` is MC's currentMovement (deltaMovement before the move),
-        // `moved` the movement that actually happened. Nothing to do for the
-        // whole world but a sulfur cube wearing a block: bounciness is 0.
-        const double restitution = GetEntityBounciness();
-        if (restitution <= 0.0) return;
+        // MC 26.3 Entity.restituteMovementAfterCollisions, both halves: the
+        // ENTITY's bounciness (a sulfur cube wearing a block) on every
+        // collided axis, and on a landing the BLOCK's bounceRestitution too
+        // (a bed, a slime block, a shelf mushroom — BlockBounce.hpp), the
+        // larger of the two winning. A collided axis keeps -v * restitution
+        // instead of the zero Move() left there. `preMove` is MC's
+        // currentMovement (deltaMovement before the move), `moved` the
+        // movement that actually happened.
+        //
+        // isSuppressingBounce is isShiftKeyDown: a crouching entity neither
+        // bounces off a block nor by itself. This is a LivingEntity, so the
+        // block's number is taken whole (Entity.getBlockBounciness's ×0.8 is
+        // for items and TNT, which do not come through here).
+        const bool suppressing = GetPose() == Pose::Crouching;
+        double restitution = suppressing ? 0.0 : GetEntityBounciness();
         const bool xCollision = preMove.x != 0.0 && velocity.x == 0.0;
         const bool zCollision = preMove.z != 0.0 && velocity.z == 0.0;
         if (!verticalCollision && !xCollision && !zCollision) return;
@@ -488,22 +666,38 @@ namespace Game {
         glm::dvec3 after = velocity;
         if (xCollision) after.x = -preMove.x * restitution;
         if (zCollision) after.z = -preMove.z * restitution;
+        bool bounced = restitution > 0.0 && (xCollision || zCollision);
 
         if (verticalCollision) {
-            // verticalCollisionBelow: a landing keeps its bounce only when it
-            // came in faster than one tick of gravity — a resting cube does
-            // not vibrate on the floor.
             double r = restitution;
-            if (preMove.y < 0.0 && !(-preMove.y > GetEffectiveGravity())) r = 0.0;
+            if (preMove.y < 0.0) {
+                // verticalCollisionBelow: the block landed on (getOnPos(0.2))
+                // joins in, unless it is honey (SUPPRESSES_BOUNCE), and the
+                // whole bounce is off below one tick of gravity — a resting
+                // mob does not vibrate on the floor.
+                double blockRestitution = 0.0;
+                bool blockSuppresses = false;
+                if (const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr) {
+                    const glm::ivec3 p = BlockPosition();
+                    const BlockID landedOn = blocks->GetBlock(
+                        p.x, static_cast<int>(std::floor(position.y - 0.2)), p.z);
+                    blockSuppresses  = SuppressesBounce(landedOn);
+                    blockRestitution = BounceRestitution(landedOn);
+                }
+                r = (-preMove.y > GetEffectiveGravity() && !suppressing && !blockSuppresses)
+                        ? std::max(r, blockRestitution) : 0.0;
+            }
             double gravityCompensation = 0.0;
             double effectiveDrag = 1.0;
             if (r > 0.0 && preMove.y != 0.0) {
                 const double portionWithMovement = moved.y / preMove.y;
                 gravityCompensation = portionWithMovement * GetEffectiveGravity();
                 effectiveDrag = 1.0 + (static_cast<double>(airDrag) - 1.0) * portionWithMovement;
+                bounced = true;
             }
             after.y = (gravityCompensation - preMove.y) * effectiveDrag * r;
         }
+        if (!bounced) return;   // nothing to restitute: Move()'s zeros stand
         velocity = after;
         needsSync = true;
     }
@@ -524,8 +718,68 @@ namespace Game {
 
         const int damage = CalculateFallDamage(fallDist, damageMultiplier);
         if (damage <= 0) return false;
+        // MC LivingEntity.causeFallDamage: the fall-damage thud (big above 4)
+        // and the landed-on block's fall sound, then the hurt. A player's
+        // are its client's own (the player half of the sound port).
+        if (!IsPlayer()) {
+            const FallSounds sounds = GetFallSounds();
+            PlaySound(damage > 4 ? sounds.big : sounds.small, 1.0f, 1.0f);
+            PlayBlockFallSound();
+        }
         Hurt(MobDamageSource::Fall, static_cast<float>(damage), nullptr);
         return true;
+    }
+
+    // ── Sound ───────────────────────────────────────────────────────────────
+
+    const char* LivingEntity::GetHurtSound(MobDamageSource source) const {
+        (void)source;
+        return PickSound(EntitySoundsOf(GetType()).hurt, *this);
+    }
+
+    const char* LivingEntity::GetDeathSound() const {
+        return PickSound(EntitySoundsOf(GetType()).death, *this);
+    }
+
+    float LivingEntity::GetSoundVolume() const {
+        return EntitySoundsOf(GetType()).soundVolume;
+    }
+
+    float LivingEntity::GetVoicePitch() const {
+        if (!m_level) return 1.0f;
+        JavaRandom& rng = m_level->Random();
+        const float spread = (rng.NextFloat() - rng.NextFloat()) * 0.2f;
+        return IsBaby() ? spread + 1.5f : spread + 1.0f;
+    }
+
+    void LivingEntity::MakeSound(const char* event) {
+        if (event && event[0]) PlaySound(event, GetSoundVolume(), GetVoicePitch());
+    }
+
+    LivingEntity::FallSounds LivingEntity::GetFallSounds() const {
+        return {SoundEvents::GENERIC_SMALL_FALL, SoundEvents::GENERIC_BIG_FALL};
+    }
+
+    void LivingEntity::PlayBlockFallSound() {
+        if (IsSilent() || !m_level) return;
+        const IBlockAccess* blocks = m_level->Blocks();
+        if (!blocks) return;
+        const int x = static_cast<int>(std::floor(position.x));
+        const int y = static_cast<int>(std::floor(position.y - 0.20000000298023224));
+        const int z = static_cast<int>(std::floor(position.z));
+        const BlockState state = blocks->GetBlockState(x, y, z);
+        if (state.Block() == BlockID::Air) return;
+        const SoundType& type = SoundTypeOf(state);
+        PlaySound(type.GetFallSound(), type.GetVolume() * 0.5f, type.GetPitch() * 0.75f);
+    }
+
+    void LivingEntity::PlayItemBreakSound(const char* breakSound) {
+        // MC: level.playLocalSound — the client of whoever sees it; the
+        // server's copy is silent (EntityLevel's server bridge ignores local
+        // sounds), exactly as vanilla's ServerLevel.playLocalSound.
+        if (!breakSound || !breakSound[0] || IsSilent() || !m_level) return;
+        JavaRandom& rng = m_level->Random();
+        m_level->PlayLocalSound(position, breakSound, GetSoundSource(), 0.8f, 0.8f + rng.NextFloat() * 0.4f, false);
     }
 
     void LivingEntity::UpdateWalkAnimation(float distance) {
@@ -546,6 +800,7 @@ namespace Game {
     }
 
     void LivingEntity::AiStep() {
+        PROFILE_ZONE_N("Living.AiStep");
         if (m_noJumpDelay > 0) --m_noJumpDelay;
 
         // ── Motion deadzone (MC LivingEntity.aiStep) ───────────────────────
@@ -572,13 +827,27 @@ namespace Game {
             ServerAiStep();
         }
 
-        // ── Jump ───────────────────────────────────────────────────────────
-        if (jumping) {
-            if (IsInLiquid()) {
-                velocity.y += kFluidJumpImpulse;
-            } else if (onGround && m_noJumpDelay == 0) {
-                JumpFromGround();
-                m_noJumpDelay = kJumpDelay;
+        // ── Jump (MC aiStep's "jump" block) ────────────────────────────────
+        //
+        // The fluid height decides between swimming up (jumpInLiquid, +0.04
+        // a tick) and a real jump off the floor: wading ankle-deep on the
+        // ground is still a jump, and so is standing in shallow lava. Deep
+        // enough (past getFluidJumpThreshold) or off the floor, it is a swim.
+        if (jumping && IsAffectedByFluids()) {
+            const double fluidHeight = IsInLava() ? GetFluidHeight(FluidType::Lava)
+                                                  : GetFluidHeight(FluidType::Water);
+            const bool   inWaterAndHasFluidHeight = IsInWater() && fluidHeight > 0.0;
+            const double fluidJumpThreshold = GetFluidJumpThreshold();
+            if (inWaterAndHasFluidHeight && (!onGround || fluidHeight > fluidJumpThreshold)) {
+                velocity.y += kFluidJumpImpulse;                       // jumpInLiquid(WATER)
+            } else if (!IsInLava() || (onGround && IsInShallowFluid(FluidType::Lava))) {
+                if ((onGround || (inWaterAndHasFluidHeight && fluidHeight <= fluidJumpThreshold)) &&
+                    m_noJumpDelay == 0) {
+                    JumpFromGround();
+                    m_noJumpDelay = kJumpDelay;
+                }
+            } else {
+                velocity.y += kFluidJumpImpulse;                       // jumpInLiquid(LAVA)
             }
         } else {
             m_noJumpDelay = 0;
@@ -611,6 +880,7 @@ namespace Game {
     }
 
     void LivingEntity::PushEntities() {
+        PROFILE_ZONE_N("Living.PushEntities");
         if (!m_level) return;
         std::vector<Entity*> list;
         m_level->GetEntitiesInBox(GetAABB(), this, list);
@@ -620,17 +890,19 @@ namespace Game {
         std::erase_if(list, [](Entity* e) { return !e->IsPushable(); });
         if (list.empty()) return;
 
-        // MC MAX_ENTITY_CRAMMING (default 24): with more than 23 pushable
+        // MC max_entity_cramming (default 24): with more than max-1 pushable
         // non-passenger neighbours, 6.0 cramming damage on a 1-in-4 roll per
-        // tick — the overcrowding valve cramming farms are built on.
-        constexpr int kMaxEntityCramming = 24;
-        if (static_cast<int>(list.size()) > kMaxEntityCramming - 1 &&
+        // tick — the overcrowding valve cramming farms are built on. Zero
+        // turns it off (LivingEntity.pushEntities: `if (maxCramming > 0 ...`).
+        const int maxEntityCramming = Rules::GetInt(Rules::Id::MaxEntityCramming);
+        if (maxEntityCramming > 0 &&
+            static_cast<int>(list.size()) > maxEntityCramming - 1 &&
             m_level->Random().NextInt(4) == 0) {
             int count = 0;
             for (Entity* e : list) {
                 if (!e->IsPassenger()) ++count;
             }
-            if (count > kMaxEntityCramming - 1) {
+            if (count > maxEntityCramming - 1) {
                 Hurt(MobDamageSource::Cramming, 6.0f, nullptr);
             }
         }
@@ -696,11 +968,10 @@ namespace Game {
         // MC LivingEntity.baseTick, the isEyeInFluid(WATER) block. Bubble
         // columns (which exempt the eye block) do not exist in this engine.
         if (IsEyeInWater()) {
-            // MC MobEffectUtil.hasWaterBreathing: WATER_BREATHING or
-            // CONDUIT_POWER (no conduits here) or BREATH_OF_THE_NAUTILUS
-            // (no nautilus trinket system).
+            // MC MobEffectUtil.hasWaterBreathing: WATER_BREATHING,
+            // CONDUIT_POWER or BREATH_OF_THE_NAUTILUS.
             const bool canDrownInWater =
-                !CanBreatheUnderwater() && !HasEffect(MobEffectId::WaterBreathing);
+                !CanBreatheUnderwater() && !HasWaterBreathing(EffectStorage());
             if (canDrownInWater) {
                 SetAirSupply(DecreaseAirSupply(GetAirSupply()));
                 if (ShouldTakeDrowningDamage()) {
@@ -709,10 +980,11 @@ namespace Game {
                     // bubble particles; no particle system to land them in.
                     Hurt(MobDamageSource::Drown, 2.0f, nullptr);
                 }
-            } else if (GetAirSupply() < GetMaxAirSupply()) {
-                // MC's shouldEffectsRefillAirsupply gate is about the
-                // nautilus-breath effect only; without it this is
-                // unconditional, as in vanilla.
+            } else if (GetAirSupply() < GetMaxAirSupply() &&
+                       ShouldEffectsRefillAirSupply(EffectStorage())) {
+                // MC shouldEffectsRefillAirsupply: BREATH_OF_THE_NAUTILUS
+                // holds the breath without refilling it, unless water
+                // breathing or conduit power is also present.
                 SetAirSupply(IncreaseAirSupply(GetAirSupply()));
             }
             // MC: dismount from a vehicle that dismountsUnderwater() — no
@@ -754,11 +1026,13 @@ namespace Game {
         TickCombatTimers();
 
         // Fire damage: 1.0 every 20 ticks while burning. Fire-immune types
-        // (blaze, zombified piglin) shed the ticks without the damage.
+        // (blaze, zombified piglin) shed the ticks without the damage. MC
+        // Entity.baseTick skips the on-fire tick while in lava — the lava
+        // itself is already dealing its 4 through lavaHurt.
         if (m_remainingFireTicks > 0 && IsEffectiveAi() && tickCount % 20 == 0) {
             if (FireImmune()) {
                 m_remainingFireTicks = 0;
-            } else {
+            } else if (!IsInLava()) {
                 Hurt(MobDamageSource::Fire, 1.0f, nullptr);
             }
         }
@@ -860,8 +1134,14 @@ namespace Game {
             source == MobDamageSource::Magic || source == MobDamageSource::Wither;
         if (!bypassesArmor) amount = GetDamageAfterArmorAbsorb(source, amount);
         amount = GetDamageAfterMagicAbsorb(source, amount, attacker);
+        // MC actuallyHurt: the absorption hearts (ABSORPTION's) soak the hit
+        // first; whatever gets through comes off health.
+        const float originalDamage = amount;
+        amount = std::max(amount - GetAbsorptionAmount(), 0.0f);
+        SetAbsorptionAmountClamped(GetAbsorptionAmount() - (originalDamage - amount));
         if (amount <= 0.0f) return;
         SetHealth(m_health - amount);
+        SetAbsorptionAmountClamped(GetAbsorptionAmount() - amount);
     }
 
     bool LivingEntity::HurtFrom(MobDamageSource source, float amount, Entity* causingEntity,
@@ -873,16 +1153,45 @@ namespace Game {
         return hit;
     }
 
+    void LivingEntity::LavaHurt() {
+        // MC Entity.lavaHurt: `if (!fireImmune()) hurtServer(lava, 4.0F)`
+        // — the hurt cooldown inside Hurt is what spaces the hits.
+        if (FireImmune()) return;
+        if (!m_level || m_level->IsClientSide()) return;
+        // ...and a landed hit sizzles (GENERIC_BURN, 0.4, 2.0..2.4).
+        if (Hurt(MobDamageSource::Lava, 4.0f, nullptr) && !IsSilent()) {
+            m_level->PlaySound(nullptr, position, SoundEvents::GENERIC_BURN, GetSoundSource(),
+                               0.4f, 2.0f + m_level->Random().NextFloat() * 0.4f);
+        }
+    }
+
+    bool LivingEntity::IsFireDamage(MobDamageSource source) const {
+        // DamageTypeTags.IS_FIRE over this engine's sources. The fireball
+        // damage types (DamageSources.fireball) arrive here as a Projectile
+        // hit whose DIRECT entity is the fireball (Projectile::DealHitDamage
+        // → HurtFrom), so they are recognised by that entity's type. (hot
+        // floor and campfire have no damage source in this engine.)
+        if (source == MobDamageSource::Fire || source == MobDamageSource::Lava) return true;
+        if (source == MobDamageSource::Projectile && m_hurtDirectEntity) {
+            const EntityTypeId t = m_hurtDirectEntity->GetType();
+            return t == EntityTypeId::SmallFireball || t == EntityTypeId::Fireball;
+        }
+        return false;
+    }
+
     bool LivingEntity::Hurt(MobDamageSource source, float amount, Entity* attacker) {
         if (IsRemoved() || IsDeadOrDying()) return false;
         if (amount < 0.0f) amount = 0.0f;
 
-        // MC LivingEntity.hurtServer step 1 (isInvulnerableTo): FIRE_RESISTANCE
-        // blanks every IS_FIRE source outright — no i-frames consumed, no
-        // knockback, no hurt flash.
-        if (source == MobDamageSource::Fire &&
-            HasEffect(MobEffectId::FireResistance)) {
-            return false;
+        // MC LivingEntity.hurtServer: isInvulnerableTo refuses an IS_FIRE
+        // source on a fireImmune() type, then FIRE_RESISTANCE blanks every
+        // IS_FIRE source outright — no i-frames consumed, no knockback, no
+        // hurt flash. #is_fire holds on_fire, in_fire, lava AND the two
+        // fireball impacts (a blaze's small fireball, a ghast's large one) —
+        // which is why fire resistance shrugs off a blaze volley.
+        if (IsFireDamage(source)) {
+            if (FireImmune()) return false;
+            if (HasEffect(MobEffectId::FireResistance)) return false;
         }
 
         // MC hurtServer: `this.noActionTime = 0;` on every accepted hit — a
@@ -952,8 +1261,26 @@ namespace Game {
             }
         }
 
+        // MC hurtServer: the death cry (on a full hit) then die(), or the
+        // hurt sound. Server-side makeSound → Entity.playSound → everyone
+        // near. A player's own voice belongs to the player half of the port
+        // (MC Player.getHurtSound / LocalPlayer), so a player view is quiet.
+        const bool voiced = m_level && !m_level->IsClientSide() && !IsPlayer();
         if (IsDeadOrDying()) {
+            if (voiced && tookFullDamage) MakeSound(GetDeathSound());
             Die(source, attacker);
+        } else if (voiced && tookFullDamage) {
+            PlayHurtSound(source);
+        }
+
+        // MC hurtServer: on a successful hit every active effect hears about
+        // it (MobEffect.onMobHurt — INFESTED's silverfish). Over a copy: a
+        // spawned silverfish must not invalidate the iteration.
+        if (m_level && !m_level->IsClientSide() && !EffectStorage().empty()) {
+            const std::vector<MobEffectInstance> effects = EffectStorage();
+            for (const MobEffectInstance& e : effects) {
+                OnEffectMobHurt(*this, e.effect, e.amplifier);
+            }
         }
 
         return true;
@@ -1002,7 +1329,10 @@ namespace Game {
     }
 
     void LivingEntity::HandleEntityEvent(uint8_t id) {
-        if (id == 60) {
+        // 60: LivingEntity's death poof. 20: MC Mob.handleEntityEvent's
+        // spawnAnim — a monster spawner's new mob arrives in the same puff
+        // (only mobs are ever sent it).
+        if (id == 60 || id == 20) {
             MakePoofParticles();
         } else if (id == kEntityEventSwing) {
             // The server's melee whack (MC's Animate packet stand-in) — run
@@ -1041,6 +1371,8 @@ namespace Game {
         // event 60 (poof particles) as it goes.
         if (deathTime >= kDeathDuration && m_level && !m_level->IsClientSide() && !IsRemoved()) {
             m_level->BroadcastEntityEvent(*this, 60);
+            // MC LivingEntity.remove(KILLED) → triggerOnDeathMobEffects.
+            TriggerOnDeathMobEffects(RemovalReason::Killed);
             Remove(RemovalReason::Killed);
         }
     }

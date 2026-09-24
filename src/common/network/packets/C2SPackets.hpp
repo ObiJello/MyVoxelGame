@@ -315,6 +315,65 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    class SignUpdateC2SPacketImpl : public IC2SPacket {
+    private:
+        SignUpdateC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit SignUpdateC2SPacketImpl(SignUpdateC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onSignUpdateC2S(m_data); }
+        const SignUpdateC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::SignUpdateC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ServerboundEditBookPacket (BookPackets.hpp).
+    class EditBookC2SPacketImpl : public IC2SPacket {
+    private:
+        EditBookC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit EditBookC2SPacketImpl(EditBookC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onEditBookC2S(m_data); }
+        const EditBookC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::EditBookC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ServerboundContainerButtonClickPacket (BookPackets.hpp).
+    class ContainerButtonClickC2SPacketImpl : public IC2SPacket {
+    private:
+        ContainerButtonClickC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ContainerButtonClickC2SPacketImpl(ContainerButtonClickC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onContainerButtonClickC2S(m_data); }
+        const ContainerButtonClickC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::ContainerButtonClickC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ServerboundSelectTradePacket (MerchantPackets.hpp).
+    class SelectTradeC2SPacketImpl : public IC2SPacket {
+    private:
+        SelectTradeC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit SelectTradeC2SPacketImpl(SelectTradeC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onSelectTradeC2S(m_data); }
+        const SelectTradeC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::SelectTradeC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class PickItemC2SPacketImpl : public IC2SPacket {
     private:
         PickItemC2SPacket m_data;

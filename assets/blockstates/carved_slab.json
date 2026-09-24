@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "type=bottom": {
+      "model": "minecraft:block/carved_slab"
+    },
+    "type=double": {
+      "model": "minecraft:block/carved_stone"
+    },
+    "type=top": {
+      "model": "minecraft:block/carved_slab_top"
+    }
+  }
+}

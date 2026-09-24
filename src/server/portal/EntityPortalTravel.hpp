@@ -130,6 +130,12 @@ namespace Server {
         bool MoveMob(ServerLevel& from, Game::Mob& mob, const Game::Immersive::Portal& portal,
                      int64_t serverTick);
         void SendMobToPortal(Game::Mob& mob, const Game::Immersive::Portal& portal) const;
+        // The last stretch into a gun portal, past where a path can end
+        // (the wall's face): true while the mob is being driven in.
+        bool WalkIntoGunPortal(Game::Mob& mob, const Game::Immersive::Portal& portal) const;
+        // The stretch out of the exit surface after a crossing: true while
+        // the mob is being driven clear of it.
+        bool WalkOutOfGunPortal(Game::Mob& mob, const Game::Immersive::Portal& exit) const;
 
         // The nearest teleportable surface pierced by the segment, if any.
         static const Game::Immersive::Portal* FindCrossing(

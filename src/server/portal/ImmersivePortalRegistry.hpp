@@ -114,6 +114,23 @@ namespace Server {
         // when something changed since the last save.
         bool Load();
         bool Save();
+
+        // /gamerule immersive_portals false: park every non-global portal
+        // the rule governs that is not a gun surface (nether portals,
+        // command portals, mirrors…) in
+        // <save>/data/immersive_portals_disabled.json and remove it from the
+        // world (removal is broadcast); gun surfaces are simply removed —
+        // PortalRegistry::RebuildImmersive re-derives them from the gun
+        // pairs. Hush and Aether frame portals are not the rule's
+        // (Portals::FamilyIsImmersive) and are never parked. `true` later:
+        // RestoreStashed adds them back with their ids, so bi-way links
+        // survive, and deletes the file. `ruleExemptOnly` restores only the
+        // records the rule does not govern — hush/aether portals parked by
+        // an older build, brought back at world open whatever the rule says
+        // — and leaves the rest parked. Returns counts.
+        size_t StashAll();
+        size_t RestoreStashed(bool ruleExemptOnly = false);
+        bool   HasStash() const;
         bool IsDirty() const { return m_dirty; }
 
     private:
@@ -151,6 +168,7 @@ namespace Server {
         void BroadcastRemove(const Portal& portal) const;
 
         std::string SavePath() const;
+        std::string StashPath() const;
 
         IntegratedServer& m_server;
         PortalId          m_nextId = 1;

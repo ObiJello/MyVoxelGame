@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "redstone",
+  "ingredients": [
+    "minecraft:holystone"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:holystone_button"
+  }
+}

@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include "VKBackend.hpp"
+#include <cstdio>
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "platform/GameDirectory.hpp"
@@ -144,9 +145,10 @@ namespace Render {
         if (m_device == VK_NULL_HANDLE) return;
 
         vkDeviceWaitIdle(m_device);
+        ReclaimDetachedSubmits(/*waitAll=*/true);
         // Persist the pipeline cache first: everything below is destruction
         // and none of it can add to the cache.
-        SavePipelineCache();
+        SavePipelineCache(/*synchronous=*/true);
         DestroyIndirectRing();
 
         // Flush all deferred deletion queues before destroying resources
@@ -160,6 +162,20 @@ namespace Render {
 
         DestroyTexStaging();
         m_pendingTextureUpdates.clear();
+
+        // Render targets: their framebuffers and depth images here; the
+        // colour images go with their texture entries below.
+        for (auto& [h, rt] : m_renderTargets) {
+            if (rt.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(m_device, rt.framebuffer, nullptr);
+            if (rt.depthView != VK_NULL_HANDLE)   vkDestroyImageView(m_device, rt.depthView, nullptr);
+            if (rt.depthImage != VK_NULL_HANDLE)  vkDestroyImage(m_device, rt.depthImage, nullptr);
+            if (rt.depthMemory != VK_NULL_HANDLE) vkFreeMemory(m_device, rt.depthMemory, nullptr);
+        }
+        m_renderTargets.clear();
+        if (m_targetRenderPass != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(m_device, m_targetRenderPass, nullptr);
+            m_targetRenderPass = VK_NULL_HANDLE;
+        }
 
         // Destroy all user resources
         for (auto& [h, mesh] : m_meshes) { /* No VK objects to destroy */ }
@@ -222,9 +238,14 @@ namespace Render {
         if (m_imguiDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
 
         CleanupSwapchain();
+        DestroyReadback(/*waitForGpu=*/false);   // the device is idle by here
         if (m_renderPass != VK_NULL_HANDLE) {
             vkDestroyRenderPass(m_device, m_renderPass, nullptr);
             m_renderPass = VK_NULL_HANDLE;
+        }
+        if (m_renderPassLoad != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(m_device, m_renderPassLoad, nullptr);
+            m_renderPassLoad = VK_NULL_HANDLE;
         }
 
         DestroyRenderFinishedSemaphores();
@@ -275,12 +296,14 @@ namespace Render {
         }
         }
 
+        ReclaimDetachedSubmits(/*waitAll=*/false);
+
         // Flush deferred deletions for this frame slot — GPU is done with these resources
         { PROFILE_ZONE_N("Vk.DeferredDelete");
         for (auto& del : m_deletionQueues[m_currentFrame]) {
             // Queued in dependency order by the caller (a buffer-texture
             // view before its buffer); processed in that order.
-            if (del.texture != INVALID_TEXTURE) DestroyTexture(del.texture);
+            if (del.texture != INVALID_TEXTURE) DestroyTextureImpl(del.texture, /*forceWait=*/false);
             if (del.buffer != INVALID_BUFFER) DestroyBuffer(del.buffer);
             if (del.mesh != INVALID_MESH) DestroyMesh(del.mesh);
         }
@@ -392,6 +415,7 @@ namespace Render {
         }
 
         vkCmdBeginRenderPass(m_commandBuffers[m_currentFrame], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        m_activeTarget = INVALID_RENDER_TARGET;   // the frame's own pass is recording
 
         // Reset per-frame state (each command buffer starts with nothing bound)
         m_currentPipeline = VK_NULL_HANDLE;
@@ -435,6 +459,9 @@ namespace Render {
     void VKBackend::EndFrame(GLFWwindow* window) {
         PROFILE_ZONE_N("Vk.EndFrame");
         if (!m_frameActive) return; // BeginFrame failed — skip submit/present
+        // A render target left bound: back to the frame's pass, so the
+        // swapchain image ends the frame in PRESENT_SRC.
+        if (m_activeTarget != INVALID_RENDER_TARGET) BindRenderTarget(INVALID_RENDER_TARGET);
         m_frameActive = false;
 
         // End render pass
@@ -509,7 +536,7 @@ namespace Render {
         // session does not throw away what this session compiled. Shutdown
         // saves whatever is left.
         if (m_pipelinesSinceSave > 0 && m_frameNumber - m_lastPipelineFrame > 300) {
-            SavePipelineCache();
+            SavePipelineCache(/*synchronous=*/false);
         }
     }
 
@@ -546,7 +573,7 @@ namespace Render {
         }
         VkClearRect rect{};
         rect.rect.offset = {0, 0};
-        rect.rect.extent = m_swapchainExtent;
+        rect.rect.extent = ActiveExtent();   // the bound render target's, if one is
         rect.baseArrayLayer = 0;
         rect.layerCount = 1;
         vkCmdClearAttachments(m_commandBuffers[m_currentFrame],
@@ -554,7 +581,170 @@ namespace Render {
     }
 
     void VKBackend::SetViewport(int x, int y, int width, int height) {
-        // Dynamic viewport is set in BeginFrame; this could update for sub-viewports
+        if (!m_frameActive) return;
+        // GL's convention (x, y from the bottom-left edge) on a y-down image:
+        // the same flipped viewport BeginFrame sets for the whole frame, so
+        // a full-size call reproduces the default exactly. Viewport is
+        // dynamic state on every pipeline.
+        // The flip is about the height of the pass recording now — a
+        // bound render target's, or the swapchain's.
+        VkViewport viewport{};
+        viewport.x        = static_cast<float>(x);
+        viewport.y        = static_cast<float>(static_cast<int>(ActiveExtent().height) - y);
+        viewport.width    = static_cast<float>(width);
+        viewport.height   = -static_cast<float>(height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(m_commandBuffers[m_currentFrame], 0, 1, &viewport);
+    }
+
+    void VKBackend::DestroyReadback(bool waitForGpu) {
+        if (m_readback.buffer == VK_NULL_HANDLE && m_readback.memory == VK_NULL_HANDLE) {
+            m_readback = BackbufferReadback{};
+            return;
+        }
+        // An untaken request may still be copying; the buffer cannot go
+        // while it is.
+        if (waitForGpu) vkQueueWaitIdle(m_graphicsQueue);
+        if (m_readback.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_device, m_readback.buffer, nullptr);
+        if (m_readback.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, m_readback.memory, nullptr);
+        m_readback = BackbufferReadback{};
+    }
+
+    bool VKBackend::RequestBackbufferReadback(int x, int y, int w, int h) {
+        if (!m_frameActive || !m_swapchainTransferSrc || m_renderPassLoad == VK_NULL_HANDLE) return false;
+        DestroyReadback(/*waitForGpu=*/true);
+
+        // Clamp to the image. The rectangle is bottom-left based (the
+        // SetViewport convention); the image's rows run top-down.
+        const int sw = static_cast<int>(m_swapchainExtent.width);
+        const int sh = static_cast<int>(m_swapchainExtent.height);
+        x = std::clamp(x, 0, sw);
+        y = std::clamp(y, 0, sh);
+        w = std::clamp(w, 0, sw - x);
+        h = std::clamp(h, 0, sh - y);
+        if (w <= 0 || h <= 0) return false;
+
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * static_cast<VkDeviceSize>(h) * 4u;
+        if (!CreateVkBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            m_readback.buffer, m_readback.memory)) {
+            m_readback = BackbufferReadback{};
+            return false;
+        }
+
+        VkCommandBuffer cmd   = m_commandBuffers[m_currentFrame];
+        VkImage         image = m_swapchainImages[m_currentImageIndex];
+
+        // Out of the frame's pass: its finalLayout puts the image in
+        // PRESENT_SRC. Copy from there, then leave it as a colour attachment
+        // for the resumed pass.
+        vkCmdEndRenderPass(cmd);
+
+        VkImageMemoryBarrier toSrc{};
+        toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toSrc.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.image = image;
+        toSrc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        toSrc.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+        VkBufferImageCopy region{};
+        region.bufferOffset      = 0;
+        region.bufferRowLength   = 0;   // tightly packed
+        region.bufferImageHeight = 0;
+        region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageOffset       = {x, sh - y - h, 0};
+        region.imageExtent       = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_readback.buffer, 1, &region);
+
+        VkImageMemoryBarrier toColor = toSrc;
+        toColor.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        toColor.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &toColor);
+
+        // Resume the frame, keeping what it has drawn so far.
+        VkRenderPassBeginInfo resume{};
+        resume.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        resume.renderPass = m_renderPassLoad;
+        resume.framebuffer = m_framebuffers[m_currentImageIndex];
+        resume.renderArea.offset = {0, 0};
+        resume.renderArea.extent = m_swapchainExtent;
+        std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
+        clearValues[0].color = m_clearColor;
+        clearValues[1].depthStencil = {1.0f, 0};
+        resume.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        resume.pClearValues = clearValues.data();
+        vkCmdBeginRenderPass(cmd, &resume, VK_SUBPASS_CONTENTS_INLINE);
+
+        // Back to the frame's default viewport and scissor; the caller sets
+        // its own again if it wants something else.
+        SetViewport(0, 0, sw, sh);
+        ClearScissorRect();
+
+        m_readback.width       = w;
+        m_readback.height      = h;
+        m_readback.frameSlot   = m_currentFrame;
+        m_readback.frameNumber = m_frameNumber;
+        m_readback.pending     = true;
+        return true;
+    }
+
+    void VKBackend::SetTextureAnisotropy(TextureHandle handle, float maxAnisotropy) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+        float value = m_anisotropySupported ? maxAnisotropy : 1.0f;
+        value = std::clamp(value, 1.0f, std::max(1.0f, m_deviceProperties.limits.maxSamplerAnisotropy));
+        if (it->second.maxAnisotropy == value) return;
+        it->second.maxAnisotropy = value;
+        RecreateSamplerFromCache(m_device, it->second);
+    }
+
+    bool VKBackend::TakeBackbufferReadback(std::vector<uint8_t>& outRgba, int& outW, int& outH) {
+        if (!m_readback.pending) return false;
+        // The copy rode the requesting frame's command buffer; its fence is
+        // the proof it has executed — but only until a later frame reuses
+        // the slot: BeginFrame waits on that fence and RESETS it before
+        // recording the new frame, so from then on the fence belongs to a
+        // frame not yet submitted, and waiting on it here would sit out the
+        // whole timeout (one frame every two seconds, as it did). The
+        // reuse itself is the proof then: the wait that reset the fence
+        // was the copy completing.
+        const bool slotReused = m_frameNumber - m_readback.frameNumber >= static_cast<uint64_t>(MAX_FRAMES_IN_FLIGHT);
+        if (!slotReused) {
+            vkWaitForFences(m_device, 1, &m_inFlightFences[m_readback.frameSlot], VK_TRUE, 2'000'000'000);
+        }
+
+        const size_t bytes = static_cast<size_t>(m_readback.width) * static_cast<size_t>(m_readback.height) * 4u;
+        void* mapped = nullptr;
+        if (vkMapMemory(m_device, m_readback.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            DestroyReadback(/*waitForGpu=*/false);
+            return false;
+        }
+        outRgba.resize(bytes);
+        std::memcpy(outRgba.data(), mapped, bytes);
+        vkUnmapMemory(m_device, m_readback.memory);
+
+        // The swapchain is BGRA on every platform this ships on; the
+        // contract is RGBA with a solid alpha.
+        const bool bgra = m_swapchainFormat == VK_FORMAT_B8G8R8A8_UNORM ||
+                          m_swapchainFormat == VK_FORMAT_B8G8R8A8_SRGB;
+        for (size_t i = 0; i + 3 < bytes; i += 4) {
+            if (bgra) std::swap(outRgba[i], outRgba[i + 2]);
+            outRgba[i + 3] = 255;
+        }
+        outW = m_readback.width;
+        outH = m_readback.height;
+        DestroyReadback(/*waitForGpu=*/false);
+        return true;
     }
 
     void VKBackend::SetScissorRect(int x, int y, int w, int h) {
@@ -564,8 +754,9 @@ namespace Render {
         VkRect2D r{};
         r.offset.x = std::max(0, x);
         r.offset.y = std::max(0, y);
-        const int maxW = static_cast<int>(m_swapchainExtent.width)  - r.offset.x;
-        const int maxH = static_cast<int>(m_swapchainExtent.height) - r.offset.y;
+        const VkExtent2D ext = ActiveExtent();
+        const int maxW = static_cast<int>(ext.width)  - r.offset.x;
+        const int maxH = static_cast<int>(ext.height) - r.offset.y;
         r.extent.width  = static_cast<uint32_t>(std::clamp(w, 0, std::max(0, maxW)));
         r.extent.height = static_cast<uint32_t>(std::clamp(h, 0, std::max(0, maxH)));
         vkCmdSetScissor(m_commandBuffers[m_currentFrame], 0, 1, &r);
@@ -573,10 +764,11 @@ namespace Render {
 
     void VKBackend::ClearScissorRect() {
         if (!m_frameActive) return;
-        // Back to the whole framebuffer — matches what BeginFrame installs.
+        // Back to the whole framebuffer — matches what BeginFrame installs
+        // (or the whole bound render target).
         VkRect2D r{};
         r.offset = {0, 0};
-        r.extent = m_swapchainExtent;
+        r.extent = ActiveExtent();
         vkCmdSetScissor(m_commandBuffers[m_currentFrame], 0, 1, &r);
     }
 
@@ -756,19 +948,34 @@ namespace Render {
         m_buffers.erase(it);
     }
 
+    uint32_t VKBackend::DeletionSlot() const {
+        // A slot's queue is flushed by BeginFrame right after that slot's
+        // fence passes, i.e. once the frame LAST SUBMITTED FROM THAT SLOT has
+        // finished. Inside BeginFrame..EndFrame the frame being recorded is
+        // the last possible reader, and it will be submitted from the current
+        // slot. Between frames (chunk uploads, slab compaction, screen
+        // teardown all run before BeginFrame) the current slot belongs to the
+        // frame that has NOT started yet; its fence guards a frame that is
+        // two behind, so queueing there frees the resource while the frame
+        // just submitted — from the previous slot — is still executing on the
+        // GPU. That was a device loss on Apple GPUs.
+        if (m_frameActive) return m_currentFrame;
+        return (m_currentFrame + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
     void VKBackend::DeferredDestroyBuffer(BufferHandle handle) {
         if (handle == INVALID_BUFFER) return;
-        m_deletionQueues[m_currentFrame].push_back({handle, INVALID_MESH});
+        m_deletionQueues[DeletionSlot()].push_back({handle, INVALID_MESH});
     }
 
     void VKBackend::DeferredDestroyMesh(MeshHandle handle) {
         if (handle == INVALID_MESH) return;
-        m_deletionQueues[m_currentFrame].push_back({INVALID_BUFFER, handle});
+        m_deletionQueues[DeletionSlot()].push_back({INVALID_BUFFER, handle});
     }
 
     void VKBackend::DeferredDestroyTexture(TextureHandle handle) {
         if (handle == INVALID_TEXTURE) return;
-        m_deletionQueues[m_currentFrame].push_back({INVALID_BUFFER, INVALID_MESH, handle});
+        m_deletionQueues[DeletionSlot()].push_back({INVALID_BUFFER, INVALID_MESH, handle});
     }
 
     // ========================================================================
@@ -777,6 +984,20 @@ namespace Render {
 
     TextureHandle VKBackend::CreateTexture2D(int width, int height,
                                             TextureFormat format, const void* data) {
+        return CreateTexture2DImpl(width, height, format, data, 1);
+    }
+
+    TextureHandle VKBackend::CreateEmptyTexture2D(int width, int height,
+                                                 TextureFormat format, int maxLevel) {
+        // The chain is baked into the image here, so the caller's levels
+        // exist without the rebuild (and device-wide wait) that
+        // ReserveTextureMipLevels would otherwise do a moment later.
+        return CreateTexture2DImpl(width, height, format, nullptr,
+                                   static_cast<uint32_t>(std::max(0, maxLevel)) + 1u);
+    }
+
+    TextureHandle VKBackend::CreateTexture2DImpl(int width, int height, TextureFormat format,
+                                                const void* data, uint32_t mipLevels) {
         // Mid-game callers exist (a mob type's texture the first time one
         // is seen, an item icon the first time it is in the hotbar), and
         // each is a GPU drain; the zone is how a capture names them.
@@ -790,14 +1011,16 @@ namespace Render {
 
         VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * bytesPerPixel;
 
-        // Create staging buffer
-        VkBuffer stagingBuffer;
-        VkDeviceMemory stagingMemory;
-        CreateVkBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                      stagingBuffer, stagingMemory);
-
+        // Staging buffer — only with data to upload. An EMPTY texture (a
+        // render target's colour, a panorama face filled tile by tile
+        // later) used to allocate and copy a full image's worth of garbage
+        // anyway: for a 33 MB face that was a real hitch, six times over.
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
         if (data) {
+            CreateVkBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          stagingBuffer, stagingMemory);
             void* mapped;
             vkMapMemory(m_device, stagingMemory, 0, imageSize, 0, &mapped);
             std::memcpy(mapped, data, imageSize);
@@ -807,30 +1030,33 @@ namespace Render {
         // Create image
         VkImage image;
         VkDeviceMemory imageMemory;
-        CreateVkImage(width, height, 1, vkFormat, VK_IMAGE_TILING_OPTIMAL,
+        CreateVkImage(width, height, mipLevels, vkFormat, VK_IMAGE_TILING_OPTIMAL,
                      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, image, imageMemory);
 
-        // Transition + copy
         // Transition + copy + transition in ONE submit: three separate
         // single-time submits were three full queue drains per texture.
+        // Every level is parked in SHADER_READ_ONLY; the ones not uploaded
+        // yet hold undefined data, which is legal to sample and which the
+        // caller overwrites (see ReserveTextureMipLevels).
         {
             VkCommandBuffer cmd = BeginSingleTimeCommands();
             RecordImageLayoutTransition(cmd, image, vkFormat, VK_IMAGE_LAYOUT_UNDEFINED,
-                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-            RecordCopyBufferToImage(cmd, stagingBuffer, image, width, height);
+                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipLevels);
+            if (data) RecordCopyBufferToImage(cmd, stagingBuffer, image, width, height);
             RecordImageLayoutTransition(cmd, image, vkFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
-            EndSingleTimeCommands(cmd);
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, mipLevels);
+            // Detached: the staging buffer is freed when the copy's fence
+            // signals, and the queue order puts the copy before this
+            // frame's draws.
+            EndSingleTimeCommandsDetached(cmd, stagingBuffer, stagingMemory);
         }
 
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-
         // Create image view
-        VkImageView imageView = CreateImageView(image, vkFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+        VkImageView imageView = CreateImageView(image, vkFormat, VK_IMAGE_ASPECT_COLOR_BIT, mipLevels);
 
-        // Create sampler
+        // Create sampler (maxLod 0: level 0 only until a SetTextureFilter
+        // rebuilds it against the full chain, as the mip upload path does)
         VkSamplerCreateInfo samplerInfo{};
         samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
         samplerInfo.magFilter = VK_FILTER_NEAREST;
@@ -882,10 +1108,11 @@ namespace Render {
 
         uint32_t handle = AllocHandle();
         m_textures[handle] = {image, imageMemory, imageView, sampler, descriptorSet,
-                             width, height, 1, static_cast<size_t>(imageSize)};
+                             width, height, mipLevels, static_cast<size_t>(imageSize)};
         // Remembered so ReserveTextureMipLevels can rebuild the image later —
         // Vulkan fixes an image's mip count at creation.
         m_textures[handle].format = vkFormat;
+        m_textures[handle].lastUsedFrame = m_frameNumber;   // the creation's detached submit
 
         m_memStats.textureMemory += imageSize;
         m_memStats.totalAllocated += imageSize;
@@ -900,6 +1127,7 @@ namespace Render {
                                    int width, int height, const void* data) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end() || !data) return;
+        it->second.lastUsedFrame = m_frameNumber;
         QueueTextureUpdate(it->second.image, 0, x, y, width, height, data);
     }
 
@@ -1011,8 +1239,10 @@ namespace Render {
             barriers[i].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
             barriers[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         }
+        // Vertex stage too: the lightmap is read by the terrain VERTEX shader.
         vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
             0, 0, nullptr, 0, nullptr,
             static_cast<uint32_t>(barriers.size()), barriers.data());
 
@@ -1038,7 +1268,8 @@ namespace Render {
             barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         }
         vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             0, 0, nullptr, 0, nullptr,
             static_cast<uint32_t>(barriers.size()), barriers.data());
 
@@ -1061,8 +1292,8 @@ namespace Render {
         info.addressModeU            = tex.addressModeU;
         info.addressModeV            = tex.addressModeV;
         info.addressModeW            = tex.addressModeV; // mirror V for 2D textures
-        info.anisotropyEnable        = VK_FALSE;
-        info.maxAnisotropy           = 1.0f;
+        info.anisotropyEnable        = tex.maxAnisotropy > 1.0f ? VK_TRUE : VK_FALSE;
+        info.maxAnisotropy           = std::max(1.0f, tex.maxAnisotropy);
         info.borderColor             = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
         info.unnormalizedCoordinates = VK_FALSE;
         info.compareEnable           = VK_FALSE;
@@ -1225,11 +1456,17 @@ namespace Render {
 
     void VKBackend::UploadTextureMipLevel(TextureHandle handle, int level,
                                           int width, int height, const void* data) {
+        UploadTextureRegionNow(handle, level, 0, 0, width, height, data);
+    }
+
+    void VKBackend::UploadTextureRegionNow(TextureHandle handle, int level, int x, int y,
+                                           int width, int height, const void* data) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end() || !data) return;
         VKTextureInfo& tex = it->second;
         if (level < 0 || static_cast<uint32_t>(level) >= tex.mipLevels) return;
-        if (width <= 0 || height <= 0) return;
+        if (width <= 0 || height <= 0 || x < 0 || y < 0) return;
+        tex.lastUsedFrame = m_frameNumber;   // the detached copy rides this frame's window
 
         const VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;
 
@@ -1269,6 +1506,7 @@ namespace Render {
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.mipLevel   = static_cast<uint32_t>(level);
         region.imageSubresource.layerCount = 1;
+        region.imageOffset = { x, y, 0 };
         region.imageExtent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
         vkCmdCopyBufferToImage(cmd, staging, tex.image,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -1281,10 +1519,9 @@ namespace Render {
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-        EndSingleTimeCommands(cmd);
-
-        vkDestroyBuffer(m_device, staging, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
+        // Detached: the caller's pixels are already in the staging buffer,
+        // which is freed when the copy's fence signals.
+        EndSingleTimeCommandsDetached(cmd, staging, stagingMemory);
     }
 
     void VKBackend::UpdateTexture2DLevel(TextureHandle handle, int level, int x, int y,
@@ -1292,6 +1529,7 @@ namespace Render {
         auto it = m_textures.find(handle);
         if (it == m_textures.end() || !data) return;
         if (level < 0 || static_cast<uint32_t>(level) >= it->second.mipLevels) return;
+        it->second.lastUsedFrame = m_frameNumber;
 
         // Same deferred path as UpdateTexture2D: animated sprites call this
         // mid-frame, so the copy has to ride the frame's command buffer rather
@@ -1300,10 +1538,19 @@ namespace Render {
     }
 
     void VKBackend::DestroyTexture(TextureHandle handle) {
+        DestroyTextureImpl(handle, /*forceWait=*/true);
+    }
+
+    void VKBackend::DestroyTextureImpl(TextureHandle handle, bool forceWait) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end()) return;
 
-        vkDeviceWaitIdle(m_device);
+        // At a deferred flush m_frameNumber names the frame that may still
+        // be on the GPU (the one before it has just passed its fence), so
+        // a texture last used before that frame needs no wait. Six 48 MB
+        // panorama faces released on the join's hand-over frame were six
+        // full drains — a visible hitch at the landing.
+        if (forceWait || it->second.lastUsedFrame >= m_frameNumber) vkDeviceWaitIdle(m_device);
 
         // Drop anything still queued against this image — the next flush would
         // otherwise record a copy into freed memory. Reachable via
@@ -1331,6 +1578,7 @@ namespace Render {
         if (slot < kMaxTextureSlots) {
             m_boundTextures[slot] = handle;
         }
+        if (auto it = m_textures.find(handle); it != m_textures.end()) it->second.lastUsedFrame = m_frameNumber;
         // Maintain the legacy single-texture alias for any code path that
         // still reads m_boundTexture directly (block draw paths bind the
         // texture's per-texture descriptor set using this).
@@ -1490,11 +1738,27 @@ namespace Render {
             // push-constant slot — its model matrix arrives per instance.
             const glm::mat4 vkMVP = kVkZCorrect * value;
             m_pushConstants.uMVP    = vkMVP;
-            m_commonUBOData.uMVP    = vkMVP;
-            m_commonUBODirty = true;
+            // The UBO copy is dirty only for shaders that read it — see
+            // m_commonMatricesDirty.
+            if (m_commonUBOData.uMVP != vkMVP) {
+                m_commonUBOData.uMVP = vkMVP;
+                m_commonMatricesDirty = true;
+            }
         } else if (NameIs(name, "uModel")) {
-            m_commonUBOData.uModel  = value;
-            m_commonUBODirty = true;
+            if (m_commonUBOData.uModel != value) {
+                m_commonUBOData.uModel = value;
+                m_commonMatricesDirty = true;
+            }
+        } else if (NameIs(name, "uLocalToRender")) {
+            // The block-entity shader's model -> render-space matrix (its
+            // fog needs the fragment's render-space position). Affine, so
+            // its three ROWS fit the three push-constant vec4s that shader
+            // has no other use for (uColor / uUVRange / uScalars) — one
+            // model matrix per block entity would otherwise burn a Common
+            // UBO slot per draw. blockentity_vk.vert rebuilds it.
+            m_pushConstants.uColor   = glm::vec4(value[0][0], value[1][0], value[2][0], value[3][0]);
+            m_pushConstants.uUVRange = glm::vec4(value[0][1], value[1][1], value[2][1], value[3][1]);
+            m_pushConstants.uScalars = glm::vec4(value[0][2], value[1][2], value[2][2], value[3][2]);
         } else if (name.rfind("uBones[", 0) == 0) {
             // "uBones[N]" — parse N, write into BonesUBO.
             const size_t lbracket = 7;            // length of "uBones["
@@ -1520,8 +1784,10 @@ namespace Render {
             // them here keeps the chunk + player shaders from needing
             // a UBO descriptor for one tiny vec4.
             m_pushConstants.uColor  = value;
-            m_commonUBOData.uTint   = value;
-            m_commonUBODirty = true;
+            if (m_commonUBOData.uTint != value) {
+                m_commonUBOData.uTint = value;
+                m_commonUBODirty = true;
+            }
         } else if (NameIs(name, "uEntityClipPlane")) {
             // The entity shaders' portal clip plane. Their uColor slot is the
             // hurt overlay, so the plane rides in the uUVRange slot, which
@@ -1532,18 +1798,28 @@ namespace Render {
             // CommonUBO fields, NOT aliased onto uTint: block shaders need
             // uPortalClipPlane (which lives in the uColor/uTint slot) and
             // fog uniforms simultaneously.
-            m_commonUBOData.uFogColor = value;
-            m_commonUBODirty = true;
+            //
+            // The fog fields are set by every world renderer, often per
+            // draw (a block entity re-sends the frame's fog for each one);
+            // only a real change costs a fresh UBO slot.
+            if (m_commonUBOData.uFogColor != value) {
+                m_commonUBOData.uFogColor = value;
+                m_commonUBODirty = true;
+            }
         } else if (NameIs(name, "uFogEnv")) {
-            m_commonUBOData.uFogEnv = value;
-            m_commonUBODirty = true;
+            if (m_commonUBOData.uFogEnv != value) {
+                m_commonUBOData.uFogEnv = value;
+                m_commonUBODirty = true;
+            }
         } else if (NameIs(name, "uOverlayColor")) {
             // MC's entity overlay — the primed-TNT white flash. Its own UBO
             // field rather than an alias onto uTint, because the block shaders
             // need uPortalClipPlane (which lives in the uColor/uTint slot) at
             // the same time.
-            m_commonUBOData.uOverlayColor = value;
-            m_commonUBODirty = true;
+            if (m_commonUBOData.uOverlayColor != value) {
+                m_commonUBOData.uOverlayColor = value;
+                m_commonUBODirty = true;
+            }
         }
     }
     void VKBackend::SetUniformVec3(ShaderHandle, const std::string& name, const glm::vec3& value) {
@@ -1565,11 +1841,28 @@ namespace Render {
             m_commonUBOData.uTint           = glm::vec4(value, m_commonUBOData.uTint.a);
             m_commonUBODirty = true;
         } else if (NameIs(name, "uCameraPos")) {
-            m_commonUBOData.uCamPosBright   = glm::vec4(value, m_commonUBOData.uCamPosBright.w);
-            m_commonUBODirty = true;
+            const glm::vec4 v(value, m_commonUBOData.uCamPosBright.w);
+            if (m_commonUBOData.uCamPosBright != v) {
+                m_commonUBOData.uCamPosBright = v;
+                m_commonUBODirty = true;
+            }
         } else if (NameIs(name, "uFogColor")) {
-            m_commonUBOData.uFogColor       = glm::vec4(value, m_commonUBOData.uFogColor.a);
-            m_commonUBODirty = true;
+            const glm::vec4 v(value, m_commonUBOData.uFogColor.a);
+            if (m_commonUBOData.uFogColor != v) {
+                m_commonUBOData.uFogColor = v;
+                m_commonUBODirty = true;
+            }
+        } else if (NameIs(name, "uEntityLight") || NameIs(name, "uDrawLight")) {
+            // The per-draw lightmap colour of the entity- and block-family
+            // shaders (EntityEnvironment.hpp): push constants uScalars.xyz,
+            // so a light change between draws never burns a UBO slot.
+            m_pushConstants.uScalars = glm::vec4(value, m_pushConstants.uScalars.w);
+        } else if (NameIs(name, "uBlockEntityLight")) {
+            // blockentity_vk: its uScalars hold uLocalToRender's rows, so the
+            // colour rides uScreenSize.xy (r, g) and uLineWidth (b) — no line
+            // shader shares a draw with it.
+            m_pushConstants.uScreenSize = glm::vec2(value.r, value.g);
+            m_pushConstants.uLineWidth  = value.b;
         }
     }
     void VKBackend::SetUniformVec2(ShaderHandle, const std::string& name, const glm::vec2& value) {
@@ -1585,6 +1878,14 @@ namespace Render {
             m_pushConstants.uUVRange.z = value.x; m_pushConstants.uUVRange.w = value.y;
             m_commonUBOData.uUVRange.z = value.x; m_commonUBOData.uUVRange.w = value.y;
             m_commonUBODirty = true;
+        } else if (NameIs(name, "uInSize")) {
+            // The entity-outline post passes' input size (MC SamplerInfo
+            // InSize) — push constants only, like uScreenSize.
+            m_pushConstants.uScreenSize = value;
+        } else if (NameIs(name, "uBlurDir")) {
+            // entity_outline_box_blur's BlurDir.
+            m_pushConstants.uUVRange.x = value.x;
+            m_pushConstants.uUVRange.y = value.y;
         }
     }
     void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
@@ -1609,8 +1910,32 @@ namespace Render {
         else if (NameIs(name, "uHasSprite"))      { m_commonUBOData.uScalarsD.x = value; m_commonUBODirty = true; }
         else if (NameIs(name, "uUseSkin"))        { m_commonUBOData.uScalarsD.y = value; m_commonUBODirty = true; }
         else if (NameIs(name, "uUseTextures"))    { m_commonUBOData.uScalarsD.z = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uSkyBrightness"))  { m_commonUBOData.uCamPosBright.w = value; m_commonUBODirty = true; }
+        else if (NameIs(name, "uSkyBrightness"))  {
+            if (m_commonUBOData.uCamPosBright.w != value) { m_commonUBOData.uCamPosBright.w = value; m_commonUBODirty = true; }
+        }
+        // The per-draw lightmap stand-in of the entity / particle / stick-
+        // figure shaders (EntityEnvironment.hpp) — a push constant, so a batch
+        // switching between lit and emissive never burns a UBO slot.
+        else if (NameIs(name, "uEntityLight") || NameIs(name, "uDrawLight")) {
+            m_pushConstants.uScalars = glm::vec4(value, value, value, m_pushConstants.uScalars.w);
+        }
+        // The block-entity shader's light: its uScalars are taken by
+        // uLocalToRender's rows, so it rides the uLineWidth slot (no line
+        // shader shares a draw with it).
+        else if (NameIs(name, "uBlockEntityLight")) {
+            m_pushConstants.uScreenSize = glm::vec2(value, value);
+            m_pushConstants.uLineWidth  = value;
+        }
     }
+    void VKBackend::SetUniformIVec3(ShaderHandle, const std::string& name, const glm::ivec3& value) {
+        if (NameIs(name, "uRenderOrigin")) {
+            // .w carries uFadeNowMs (the chunk fade clock); a view's origin
+            // change must not zero it.
+            m_commonUBOData.uRenderOrigin = glm::ivec4(value, m_commonUBOData.uRenderOrigin.w);
+            m_commonUBODirty = true;
+        }
+    }
+
     void VKBackend::SetUniformInt(ShaderHandle, const std::string& name, int value) {
         // Texture-sampler bindings come through as integers (legacy
         // GL pattern). Vulkan binds textures via descriptor sets, so
@@ -1618,6 +1943,14 @@ namespace Render {
         // float path's uUseTextures slot etc.
         if (NameIs(name, "uUseTextures")) {
             m_commonUBOData.uScalarsD.z = (float)value;
+            m_commonUBODirty = true;
+        } else if (NameIs(name, "uFadeNowMs")) {
+            // Chunk fade-in clock (SectionFade.hpp): terrain_vk.vert reads
+            // U.uRenderOrigin_.w; the fade length rides uScalarsC.z.
+            m_commonUBOData.uRenderOrigin.w = value;
+            m_commonUBODirty = true;
+        } else if (NameIs(name, "uFadeMs")) {
+            m_commonUBOData.uScalarsC.z = (float)value;
             m_commonUBODirty = true;
         } else if (NameIs(name, "uHasSprite")) {
             // PortalParticleSystem uses uHasSprite to select between the
@@ -2334,6 +2667,42 @@ namespace Render {
         return true;
     }
 
+    GpuDeviceInfo VKBackend::GetDeviceInfo() const {
+        GpuDeviceInfo info;
+        info.backendName = GetName();
+        if (m_physicalDevice == VK_NULL_HANDLE) return info;
+        const VkPhysicalDeviceProperties& p = m_deviceProperties;
+        info.name = p.deviceName;
+        switch (p.vendorID) {
+            case 0x1002: info.vendorName = "AMD"; break;
+            case 0x10DE: info.vendorName = "NVIDIA"; break;
+            case 0x8086: info.vendorName = "Intel"; break;
+            case 0x106B: info.vendorName = "Apple"; break;
+            case 0x13B5: info.vendorName = "ARM"; break;
+            case 0x5143: info.vendorName = "Qualcomm"; break;
+            case 0x1010: info.vendorName = "ImgTec"; break;
+            default: {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "0x%04X", p.vendorID);
+                info.vendorName = buf;
+                break;
+            }
+        }
+        switch (p.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: info.type = GpuDeviceInfo::Type::Integrated; break;
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   info.type = GpuDeviceInfo::Type::Discrete;   break;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    info.type = GpuDeviceInfo::Type::Virtual;    break;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:            info.type = GpuDeviceInfo::Type::Cpu;        break;
+            default:                                     info.type = GpuDeviceInfo::Type::Other;      break;
+        }
+        char driver[96];
+        std::snprintf(driver, sizeof(driver), "driver %u.%u.%u, api %u.%u.%u",
+                      VK_VERSION_MAJOR(p.driverVersion), VK_VERSION_MINOR(p.driverVersion), VK_VERSION_PATCH(p.driverVersion),
+                      VK_VERSION_MAJOR(p.apiVersion), VK_VERSION_MINOR(p.apiVersion), VK_VERSION_PATCH(p.apiVersion));
+        info.driverInfo = driver;
+        return info;
+    }
+
     bool VKBackend::CreateLogicalDevice() {
         std::set<uint32_t> uniqueQueueFamilies = {
             m_queueFamilies.graphicsFamily.value(),
@@ -2369,6 +2738,10 @@ namespace Render {
             m_depthClampSupported = supported.depthClamp == VK_TRUE;
             deviceFeatures.depthClamp = supported.depthClamp;
             deviceFeatures.multiDrawIndirect = supported.multiDrawIndirect;
+            // Anisotropic filtering (SetTextureAnisotropy) — a feature the
+            // device has to be created with.
+            deviceFeatures.samplerAnisotropy = supported.samplerAnisotropy;
+            m_anisotropySupported = supported.samplerAnisotropy == VK_TRUE;
             if (std::getenv("OBEY_VK_NO_INDIRECT")) m_multiDrawIndirect = false;   // A/B switch
             Log::Info("[VKBackend] multiDrawIndirect: %s", m_multiDrawIndirect ? "yes" : "no");
         }
@@ -2450,6 +2823,12 @@ namespace Render {
         createInfo.imageExtent = extent;
         createInfo.imageArrayLayers = 1;
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // The panorama capture copies the colour image back to the host
+        // (RequestBackbufferReadback); every surface this ships on allows it,
+        // but the capability is checked rather than assumed.
+        m_swapchainTransferSrc =
+            (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+        if (m_swapchainTransferSrc) createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         uint32_t queueFamilyIndices[] = {
             m_queueFamilies.graphicsFamily.value(),
@@ -2518,20 +2897,36 @@ namespace Render {
     }
 
     bool VKBackend::CreateRenderPass() {
+        if (!CreateRenderPassVariant(false, m_renderPass)) return false;
+        if (!CreateRenderPassVariant(true, m_renderPassLoad)) {
+            // The read-back is optional; the frame pass is not.
+            Log::Warning("VKBackend: could not create the load-op render pass — backbuffer read-back disabled");
+            m_renderPassLoad = VK_NULL_HANDLE;
+        }
+        return true;
+    }
+
+    // `loadContents`: the variant a frame resumes into after a mid-frame
+    // read-back (RequestBackbufferReadback) — LOAD instead of CLEAR on every
+    // attachment, and initial layouts matching where the interrupted frame
+    // leaves the images. Attachments are otherwise identical, which is what
+    // keeps every pipeline compatible with both passes.
+    bool VKBackend::CreateRenderPassVariant(bool loadContents, VkRenderPass& out) {
         VkAttachmentDescription colorAttachment{};
         colorAttachment.format = m_swapchainFormat;
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.loadOp = loadContents ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.initialLayout = loadContents ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                     : VK_IMAGE_LAYOUT_UNDEFINED;
         colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
         VkAttachmentDescription depthAttachment{};
         depthAttachment.format = m_depthFormat;
         depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.loadOp = loadContents ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         // Stencil load: clear at render-pass start so each frame begins with
         // stencil = 0. (Without this, the portal renderer's "stencil ==
@@ -2539,9 +2934,10 @@ namespace Render {
         // and either fail to mark or mask the wrong region.) Don't bother
         // storing — Phase 7's recursive passes ALL run within one render
         // pass, so stencil never needs to survive the swap.
-        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.stencilLoadOp = loadContents ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttachment.initialLayout = loadContents ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                                     : VK_IMAGE_LAYOUT_UNDEFINED;
         depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
@@ -2574,7 +2970,7 @@ namespace Render {
         renderPassInfo.dependencyCount = 1;
         renderPassInfo.pDependencies = &dependency;
 
-        return vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_renderPass) == VK_SUCCESS;
+        return vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &out) == VK_SUCCESS;
     }
 
     bool VKBackend::CreateFramebuffers() {
@@ -2595,6 +2991,415 @@ namespace Render {
                 return false;
         }
         return true;
+    }
+
+    // ========================================================================
+    // OFFSCREEN RENDER TARGETS (see the note at m_renderTargets)
+    // ========================================================================
+
+    VkExtent2D VKBackend::ActiveExtent() const {
+        if (m_activeTarget != INVALID_RENDER_TARGET) {
+            auto it = m_renderTargets.find(m_activeTarget);
+            if (it != m_renderTargets.end()) {
+                return { static_cast<uint32_t>(it->second.width), static_cast<uint32_t>(it->second.height) };
+            }
+        }
+        return m_swapchainExtent;
+    }
+
+    bool VKBackend::CreateTargetRenderPass() {
+        // The frame pass's attachments, subpass and dependency, with LOAD
+        // everywhere and the colour and depth STORED (a target's contents
+        // are what it exists for). Everything that makes two passes
+        // compatible is identical to CreateRenderPassVariant's, so the
+        // frame's pipelines draw here as they are.
+        VkAttachmentDescription color{};
+        color.format         = m_swapchainFormat;
+        color.samples        = VK_SAMPLE_COUNT_1_BIT;
+        color.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        color.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color.finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentDescription depth{};
+        depth.format         = m_depthFormat;
+        depth.samples        = VK_SAMPLE_COUNT_1_BIT;
+        depth.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        depth.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depth.initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount    = 1;
+        subpass.pColorAttachments       = &colorRef;
+        subpass.pDepthStencilAttachment = &depthRef;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass    = 0;
+        dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        std::array<VkAttachmentDescription, 2> attachments = {color, depth};
+        VkRenderPassCreateInfo info{};
+        info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        info.attachmentCount = static_cast<uint32_t>(attachments.size());
+        info.pAttachments    = attachments.data();
+        info.subpassCount    = 1;
+        info.pSubpasses      = &subpass;
+        info.dependencyCount = 1;
+        info.pDependencies   = &dependency;
+        return vkCreateRenderPass(m_device, &info, nullptr, &m_targetRenderPass) == VK_SUCCESS;
+    }
+
+    bool VKBackend::CreateTargetImages(VKRenderTargetInfo& rt) {
+        const uint32_t w = static_cast<uint32_t>(rt.width);
+        const uint32_t h = static_cast<uint32_t>(rt.height);
+        if (!CreateVkImage(w, h, 1, m_swapchainFormat, VK_IMAGE_TILING_OPTIMAL,
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                               VK_IMAGE_USAGE_TRANSFER_DST_BIT,   // the creation-time clear
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, rt.colorImage, rt.colorMemory)) {
+            return false;
+        }
+        rt.colorView = CreateImageView(rt.colorImage, m_swapchainFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+        if (!CreateVkImage(w, h, 1, m_depthFormat, VK_IMAGE_TILING_OPTIMAL,
+                           VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, rt.depthImage, rt.depthMemory)) {
+            return false;
+        }
+        VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        if (DepthFormatHasStencil(m_depthFormat)) depthAspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        rt.depthView = CreateImageView(rt.depthImage, m_depthFormat, depthAspect, 1);
+        if (rt.colorView == VK_NULL_HANDLE || rt.depthView == VK_NULL_HANDLE) return false;
+
+        // Park both images in the layouts the target pass expects: colour
+        // sampleable (cleared to transparent black so a target sampled
+        // before it is ever drawn reads nothing), depth as an attachment.
+        VkCommandBuffer cmd = BeginSingleTimeCommands();
+        VkImageMemoryBarrier toDst{};
+        toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.image = rt.colorImage;
+        toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        toDst.srcAccessMask = 0;
+        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toDst);
+        const VkClearColorValue zero{{0.0f, 0.0f, 0.0f, 0.0f}};
+        const VkImageSubresourceRange colorRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, rt.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &colorRange);
+        VkImageMemoryBarrier toRead = toDst;
+        toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toRead);
+        VkImageMemoryBarrier depthBarrier{};
+        depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        depthBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        depthBarrier.image = rt.depthImage;
+        depthBarrier.subresourceRange = {depthAspect, 0, 1, 0, 1};
+        depthBarrier.srcAccessMask = 0;
+        depthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &depthBarrier);
+        EndSingleTimeCommands(cmd);
+
+        std::array<VkImageView, 2> views = {rt.colorView, rt.depthView};
+        VkFramebufferCreateInfo fbInfo{};
+        fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbInfo.renderPass      = m_targetRenderPass;
+        fbInfo.attachmentCount = static_cast<uint32_t>(views.size());
+        fbInfo.pAttachments    = views.data();
+        fbInfo.width           = w;
+        fbInfo.height          = h;
+        fbInfo.layers          = 1;
+        if (vkCreateFramebuffer(m_device, &fbInfo, nullptr, &rt.framebuffer) != VK_SUCCESS) return false;
+
+        // The colour image as an ordinary texture: same entry, new image.
+        auto texIt = m_textures.find(rt.colorTexture);
+        if (texIt != m_textures.end()) {
+            VKTextureInfo& tex = texIt->second;
+            tex.image     = rt.colorImage;
+            tex.memory    = rt.colorMemory;
+            tex.imageView = rt.colorView;
+            tex.width     = rt.width;
+            tex.height    = rt.height;
+            tex.mipLevels = 1;
+            tex.format    = m_swapchainFormat;
+            tex.memorySize = static_cast<size_t>(w) * h * 4u;
+            tex.lastUsedFrame = m_frameNumber;
+            if (tex.descriptorSet != VK_NULL_HANDLE) {
+                VkDescriptorImageInfo imageInfo{};
+                imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                imageInfo.imageView   = rt.colorView;
+                imageInfo.sampler     = tex.sampler;
+                VkWriteDescriptorSet write{};
+                write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet          = tex.descriptorSet;
+                write.dstBinding      = 0;
+                write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                write.descriptorCount = 1;
+                write.pImageInfo      = &imageInfo;
+                vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+            }
+        }
+        return true;
+    }
+
+    void VKBackend::DestroyTargetImages(VKRenderTargetInfo& rt) {
+        if (rt.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(m_device, rt.framebuffer, nullptr);
+        if (rt.depthView != VK_NULL_HANDLE)   vkDestroyImageView(m_device, rt.depthView, nullptr);
+        if (rt.depthImage != VK_NULL_HANDLE)  vkDestroyImage(m_device, rt.depthImage, nullptr);
+        if (rt.depthMemory != VK_NULL_HANDLE) vkFreeMemory(m_device, rt.depthMemory, nullptr);
+        if (rt.colorView != VK_NULL_HANDLE)   vkDestroyImageView(m_device, rt.colorView, nullptr);
+        if (rt.colorImage != VK_NULL_HANDLE)  vkDestroyImage(m_device, rt.colorImage, nullptr);
+        if (rt.colorMemory != VK_NULL_HANDLE) vkFreeMemory(m_device, rt.colorMemory, nullptr);
+        rt.framebuffer = VK_NULL_HANDLE;
+        rt.depthView = VK_NULL_HANDLE;   rt.depthImage = VK_NULL_HANDLE;  rt.depthMemory = VK_NULL_HANDLE;
+        rt.colorView = VK_NULL_HANDLE;   rt.colorImage = VK_NULL_HANDLE;  rt.colorMemory = VK_NULL_HANDLE;
+        // The texture entry keeps its sampler and descriptor set for the
+        // next images; it no longer owns any image.
+        auto texIt = m_textures.find(rt.colorTexture);
+        if (texIt != m_textures.end()) {
+            texIt->second.image = VK_NULL_HANDLE;
+            texIt->second.memory = VK_NULL_HANDLE;
+            texIt->second.imageView = VK_NULL_HANDLE;
+        }
+    }
+
+    RenderTargetHandle VKBackend::CreateRenderTarget(const RenderTargetDesc& desc) {
+        if (desc.width <= 0 || desc.height <= 0 || m_device == VK_NULL_HANDLE) return INVALID_RENDER_TARGET;
+        // Colour is always the swapchain's format (the compatibility the
+        // whole scheme rests on) — an 8-bit UNORM target, which is all the
+        // entity outline asks for. An HDR request is not honoured.
+        if (desc.colorFormat != TextureFormat::RGBA8) {
+            Log::Warning("VKBackend: render target format %d not supported — using the swapchain's 8-bit format",
+                         static_cast<int>(desc.colorFormat));
+        }
+        if (m_targetRenderPass == VK_NULL_HANDLE && !CreateTargetRenderPass()) {
+            Log::Error("VKBackend: could not create the render-target pass");
+            return INVALID_RENDER_TARGET;
+        }
+
+        // The texture entry the colour image is sampled through: a linear,
+        // clamped sampler (post passes sample between texels) and its own
+        // descriptor set; the image is filled in by CreateTargetImages.
+        VKTextureInfo tex{};
+        tex.magFilter = VK_FILTER_LINEAR;
+        tex.minFilter = VK_FILTER_LINEAR;
+        tex.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        tex.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        tex.mipLevels = 1;
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter    = VK_FILTER_LINEAR;
+        samplerInfo.minFilter    = VK_FILTER_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.maxAnisotropy = 1.0f;
+        samplerInfo.borderColor  = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        samplerInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        if (vkCreateSampler(m_device, &samplerInfo, nullptr, &tex.sampler) != VK_SUCCESS) return INVALID_RENDER_TARGET;
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool     = m_descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts        = &m_textureDescriptorLayout;
+        if (vkAllocateDescriptorSets(m_device, &allocInfo, &tex.descriptorSet) != VK_SUCCESS) {
+            vkDestroySampler(m_device, tex.sampler, nullptr);
+            Log::Error("VKBackend: descriptor pool exhausted — render target not created");
+            return INVALID_RENDER_TARGET;
+        }
+        const TextureHandle texHandle = AllocHandle();
+        m_textures[texHandle] = tex;
+        m_memStats.textureCount++;
+
+        VKRenderTargetInfo rt;
+        rt.width = desc.width;
+        rt.height = desc.height;
+        rt.colorTexture = texHandle;
+        if (!CreateTargetImages(rt)) {
+            DestroyTargetImages(rt);
+            vkDestroySampler(m_device, m_textures[texHandle].sampler, nullptr);
+            m_textures.erase(texHandle);
+            m_memStats.textureCount--;
+            Log::Error("VKBackend: render target %dx%d could not be created", desc.width, desc.height);
+            return INVALID_RENDER_TARGET;
+        }
+        m_memStats.textureMemory  += m_textures[texHandle].memorySize;
+        m_memStats.totalAllocated += m_textures[texHandle].memorySize;
+        const RenderTargetHandle handle = AllocHandle();
+        m_renderTargets[handle] = rt;
+        return handle;
+    }
+
+    void VKBackend::DestroyRenderTarget(RenderTargetHandle handle) {
+        auto it = m_renderTargets.find(handle);
+        if (it == m_renderTargets.end()) return;
+        if (m_activeTarget == handle) BindRenderTarget(INVALID_RENDER_TARGET);
+        vkDeviceWaitIdle(m_device);
+        const TextureHandle texHandle = it->second.colorTexture;
+        DestroyTargetImages(it->second);
+        auto texIt = m_textures.find(texHandle);
+        if (texIt != m_textures.end()) {
+            if (texIt->second.sampler != VK_NULL_HANDLE) vkDestroySampler(m_device, texIt->second.sampler, nullptr);
+            m_memStats.textureMemory  -= texIt->second.memorySize;
+            m_memStats.totalAllocated -= texIt->second.memorySize;
+            m_memStats.textureCount--;
+            m_textures.erase(texIt);
+        }
+        m_renderTargets.erase(it);
+    }
+
+    void VKBackend::ResizeRenderTarget(RenderTargetHandle handle, int w, int h) {
+        if (w <= 0 || h <= 0) return;
+        auto it = m_renderTargets.find(handle);
+        if (it == m_renderTargets.end()) return;
+        if (it->second.width == w && it->second.height == h) return;
+        if (m_activeTarget == handle) BindRenderTarget(INVALID_RENDER_TARGET);
+        // A frame in flight may still sample or draw into the old images.
+        vkDeviceWaitIdle(m_device);
+        auto texIt = m_textures.find(it->second.colorTexture);
+        const size_t oldBytes = texIt != m_textures.end() ? texIt->second.memorySize : 0;
+        DestroyTargetImages(it->second);
+        it->second.width = w;
+        it->second.height = h;
+        if (!CreateTargetImages(it->second)) {
+            Log::Error("VKBackend: render target resize to %dx%d failed", w, h);
+            DestroyTargetImages(it->second);
+            return;
+        }
+        texIt = m_textures.find(it->second.colorTexture);
+        if (texIt != m_textures.end()) {
+            m_memStats.textureMemory  += texIt->second.memorySize - oldBytes;
+            m_memStats.totalAllocated += texIt->second.memorySize - oldBytes;
+        }
+    }
+
+    TextureHandle VKBackend::GetRenderTargetColorTexture(RenderTargetHandle handle) const {
+        auto it = m_renderTargets.find(handle);
+        return it != m_renderTargets.end() ? it->second.colorTexture : INVALID_TEXTURE;
+    }
+
+    void VKBackend::SuspendActivePass(VkCommandBuffer cmd) {
+        vkCmdEndRenderPass(cmd);
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        auto rtIt = m_activeTarget != INVALID_RENDER_TARGET ? m_renderTargets.find(m_activeTarget)
+                                                            : m_renderTargets.end();
+        if (rtIt != m_renderTargets.end()) {
+            // A target's colour, from attachment to sampled: what was just
+            // drawn is read by the next pass's fragment shaders.
+            barrier.image = rtIt->second.colorImage;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        } else {
+            // The frame's pass leaves the swapchain image in PRESENT_SRC
+            // (its finalLayout); m_renderPassLoad resumes it from
+            // COLOR_ATTACHMENT_OPTIMAL.
+            barrier.image = m_swapchainImages[m_currentImageIndex];
+            barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+    }
+
+    void VKBackend::BindRenderTarget(RenderTargetHandle handle) {
+        if (!m_frameActive || handle == m_activeTarget) return;
+        auto rtIt = handle != INVALID_RENDER_TARGET ? m_renderTargets.find(handle) : m_renderTargets.end();
+        if (handle != INVALID_RENDER_TARGET && rtIt == m_renderTargets.end()) return;
+        if (handle == INVALID_RENDER_TARGET && m_renderPassLoad == VK_NULL_HANDLE) return;
+        if (rtIt != m_renderTargets.end() && rtIt->second.framebuffer == VK_NULL_HANDLE) return;
+
+        VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
+        SuspendActivePass(cmd);
+
+        std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
+        clearValues[0].color = m_clearColor;
+        clearValues[1].depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderArea.offset = {0, 0};
+        begin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        begin.pClearValues = clearValues.data();
+        if (rtIt != m_renderTargets.end()) {
+            VKRenderTargetInfo& rt = rtIt->second;
+            // Sampled -> attachment, after whatever read it last.
+            VkImageMemoryBarrier toAttachment{};
+            toAttachment.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toAttachment.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            toAttachment.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            toAttachment.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toAttachment.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toAttachment.image = rt.colorImage;
+            toAttachment.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            toAttachment.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            toAttachment.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &toAttachment);
+            begin.renderPass  = m_targetRenderPass;
+            begin.framebuffer = rt.framebuffer;
+            begin.renderArea.extent = { static_cast<uint32_t>(rt.width), static_cast<uint32_t>(rt.height) };
+            if (auto texIt = m_textures.find(rt.colorTexture); texIt != m_textures.end()) {
+                texIt->second.lastUsedFrame = m_frameNumber;
+            }
+        } else {
+            begin.renderPass  = m_renderPassLoad;
+            begin.framebuffer = m_framebuffers[m_currentImageIndex];
+            begin.renderArea.extent = m_swapchainExtent;
+        }
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        m_activeTarget = handle;
+
+        // A new render pass instance: re-record every binding on the next
+        // draw rather than trust state carried across the boundary (a new
+        // Metal encoder on MoltenVK).
+        m_currentPipeline = VK_NULL_HANDLE;
+        ResetRecordedBindings();
+
+        // Default viewport and scissor for the new pass, as GL's
+        // BindRenderTarget sets the viewport to the target's size. The
+        // caller re-sets its own on returning to the frame.
+        const VkExtent2D ext = ActiveExtent();
+        SetViewport(0, 0, static_cast<int>(ext.width), static_cast<int>(ext.height));
+        ClearScissorRect();
+
+        // The frame's depth and stencil were not stored (see the note at
+        // m_renderTargets): give what follows an empty, defined buffer.
+        if (handle == INVALID_RENDER_TARGET) Clear(false, true, DepthFormatHasStencil(m_depthFormat));
     }
 
     bool VKBackend::CreateCommandPool() {
@@ -2684,7 +3489,10 @@ namespace Render {
         binding.binding = 0;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // Vertex as well: the terrain vertex shader samples the lightmap
+        // (texture slot 3, set 5 of the portal layout) per vertex, as MC's
+        // terrain.vsh does. Every texture's set shares this one layout.
+        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2909,16 +3717,19 @@ namespace Render {
         //         buffer is bound; shaders that do not declare set 3 ignore it.
         // set=4 = a uniform texel buffer (RenderBackend::CreateBufferTexture,
         //         bound through texture slot 2): the terrain face map.
-        VkDescriptorSetLayout sets[5] = { m_textureDescriptorLayout,
+        // set=5 = the texture bound at slot 3: the lightmap, which the
+        //         terrain vertex shader samples (Render::Lightmap).
+        VkDescriptorSetLayout sets[6] = { m_textureDescriptorLayout,
                                           m_portalDescriptorLayout,
                                           m_textureDescriptorLayout,
                                           m_uniformBlockLayout,
-                                          m_texelBufferLayout };
+                                          m_texelBufferLayout,
+                                          m_textureDescriptorLayout };
 
         VkPipelineLayoutCreateInfo info{};
         info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         info.setLayoutCount         = (m_uniformBlockLayout == VK_NULL_HANDLE) ? 3
-                                    : (m_texelBufferLayout == VK_NULL_HANDLE) ? 4 : 5;
+                                    : (m_texelBufferLayout == VK_NULL_HANDLE) ? 4 : 6;
         info.pSetLayouts            = sets;
         info.pushConstantRangeCount = 1;
         info.pPushConstantRanges    = &pushConstant;
@@ -3046,7 +3857,12 @@ namespace Render {
         // never touch bones and rarely change the common block — from
         // exhausting the ring and silently mis-binding later draws (the held
         // item, drawn last in the frame, was the one that vanished).
-        const bool needCommon = m_commonUBODirty || !fb.haveCommonSlot;
+        // The matrices only count for a shader that reads them from the
+        // UBO: the entity / block-entity / particle shaders take uMVP from
+        // the push constants, and a per-draw MVP must not cost them a slot.
+        const bool readsMatrices = !m_boundShaderInfo || !m_boundShaderInfo->ignoresCommonMatrices;
+        const bool needCommon = m_commonUBODirty || (m_commonMatricesDirty && readsMatrices) ||
+                                !fb.haveCommonSlot;
         const bool needBones  = m_bonesUBODirty  || !fb.haveBonesSlot;
 
         if ((needCommon && fb.commonWriteSlot >= kCommonSlotCount) ||
@@ -3069,6 +3885,7 @@ namespace Render {
             std::memcpy(fb.commonMapped + fb.lastCommonOffset, &m_commonUBOData, sizeof(CommonUBO));
             fb.haveCommonSlot = true;
             m_commonUBODirty  = false;
+            m_commonMatricesDirty = false;   // the slot holds the current matrices too
         }
         if (needBones) {
             const uint32_t slot = fb.bonesWriteSlot++;
@@ -3116,6 +3933,17 @@ namespace Render {
                 }
             }
         }
+        // The lightmap (set 5): whatever 2D texture is in slot 3. Only the
+        // terrain shaders declare the set; binding it for others is harmless.
+        if (m_texelBufferLayout != VK_NULL_HANDLE && m_boundTextures[3] != INVALID_TEXTURE) {
+            auto lmIt = m_textures.find(m_boundTextures[3]);
+            if (lmIt != m_textures.end() && lmIt->second.bufferView == VK_NULL_HANDLE &&
+                lmIt->second.descriptorSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_portalPipelineLayout, 5, 1, &lmIt->second.descriptorSet,
+                                        0, nullptr);
+            }
+        }
         return true;
     }
 
@@ -3130,6 +3958,11 @@ namespace Render {
         // mat4-as-four-vec4 columns here.
         auto it = m_shaders.find(shader);
         if (it != m_shaders.end()) it->second.instanceLayout = layout;
+    }
+
+    void VKBackend::SetShaderIgnoresCommonMatrices(ShaderHandle shader) {
+        auto it = m_shaders.find(shader);
+        if (it != m_shaders.end()) it->second.ignoresCommonMatrices = true;
     }
 
     ShaderHandle VKBackend::CreateShaderFromFilesPortal(const std::string& vertexPath,
@@ -3213,43 +4046,6 @@ namespace Render {
         return blob;
     }
 
-    void VKBackend::SavePipelineCache() {
-        if (m_pipelineCache == VK_NULL_HANDLE || m_pipelineCacheFile.empty()) return;
-        m_pipelinesSinceSave = 0;
-
-        size_t size = 0;
-        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, nullptr) != VK_SUCCESS || size == 0) return;
-        std::vector<char> blob(size);
-        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, blob.data()) != VK_SUCCESS) return;
-        blob.resize(size);
-
-        // Write to a sibling and rename so a crash mid-write cannot leave a
-        // truncated file that the next launch would hand to the driver.
-        std::error_code ec;
-        const std::filesystem::path path(m_pipelineCacheFile);
-        std::filesystem::create_directories(path.parent_path(), ec);
-        const std::filesystem::path tmp = path.string() + ".tmp";
-        {
-            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-            if (!out.is_open()) {
-                Log::Warning("VKBackend: cannot write pipeline cache to %s", tmp.string().c_str());
-                return;
-            }
-            out.write(blob.data(), static_cast<std::streamsize>(blob.size()));
-            if (!out.good()) {
-                Log::Warning("VKBackend: pipeline cache write failed (%s)", tmp.string().c_str());
-                return;
-            }
-        }
-        std::filesystem::rename(tmp, path, ec);
-        if (ec) {
-            Log::Warning("VKBackend: pipeline cache rename failed: %s", ec.message().c_str());
-            return;
-        }
-        Log::Info("VKBackend: pipeline cache saved (%zu bytes, %zu pipelines)", blob.size(), m_pipelines.size());
-        SavePipelineManifest();
-    }
-
     // ── Pipeline manifest + warm-up ──────────────────────────────────────
     // Two files, same format. Header `vkpm2 <sizeof(PipelineState)> <game
     // version>`, then one line per pipeline: `<vert path>\t<frag path>\t<state
@@ -3313,28 +4109,91 @@ namespace Render {
         }
     }
 
-    void VKBackend::SavePipelineManifest() {
-        if (m_pipelineManifestFile.empty()) return;
-        // Union with what this version already wrote: a session that never
-        // visits the End must not forget the End's pipelines.
-        std::set<std::string> lines = ReadManifest(m_pipelineManifestFile, /*requireVersion=*/true);
+    void VKBackend::SavePipelineCache(bool synchronous) {
+        if (m_pipelineCache == VK_NULL_HANDLE || m_pipelineCacheFile.empty()) return;
+        m_pipelinesSinceSave = 0;
+
+        size_t size = 0;
+        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, nullptr) != VK_SUCCESS || size == 0) return;
+        std::vector<char> blob(size);
+        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, blob.data()) != VK_SUCCESS) return;
+        blob.resize(size);
+
+        // Everything the writer needs, gathered here where the maps are
+        // ours: the blob, the manifest lines, the paths, the count to log.
+        std::vector<std::string> lines = PipelineManifestLines();
+        const std::string cacheFile    = m_pipelineCacheFile;
+        const std::string manifestFile = m_pipelineManifestFile;
+        const size_t      pipelineCount = m_pipelines.size();
+
+        auto write = [blob = std::move(blob), lines = std::move(lines), cacheFile, manifestFile, pipelineCount]() {
+            PROFILE_ZONE_N("Vk.WritePipelineCache");
+            // Write to a sibling and rename so a crash mid-write cannot leave a
+            // truncated file that the next launch would hand to the driver.
+            std::error_code ec;
+            const std::filesystem::path path(cacheFile);
+            std::filesystem::create_directories(path.parent_path(), ec);
+            const std::filesystem::path tmp = path.string() + ".tmp";
+            {
+                std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+                if (!out.is_open()) {
+                    Log::Warning("VKBackend: cannot write pipeline cache to %s", tmp.string().c_str());
+                    return;
+                }
+                out.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+                if (!out.good()) {
+                    Log::Warning("VKBackend: pipeline cache write failed (%s)", tmp.string().c_str());
+                    return;
+                }
+            }
+            std::filesystem::rename(tmp, path, ec);
+            if (ec) {
+                Log::Warning("VKBackend: pipeline cache rename failed: %s", ec.message().c_str());
+                return;
+            }
+            Log::Info("VKBackend: pipeline cache saved (%zu bytes, %zu pipelines)", blob.size(), pipelineCount);
+
+            // The manifest: union with what this version already wrote — a
+            // session that never visits the End must not forget the End's
+            // pipelines.
+            if (manifestFile.empty()) return;
+            std::set<std::string> all = ReadManifest(manifestFile, /*requireVersion=*/true);
+            all.insert(lines.begin(), lines.end());
+            const std::filesystem::path mpath(manifestFile);
+            std::filesystem::create_directories(mpath.parent_path(), ec);
+            const std::filesystem::path mtmp = mpath.string() + ".tmp";
+            {
+                std::ofstream out(mtmp, std::ios::trunc);
+                if (!out.is_open()) return;
+                out << ManifestHeader() << "\n";
+                for (const auto& l : all) out << l << "\n";
+            }
+            std::filesystem::rename(mtmp, mpath, ec);
+        };
+
+        // One writer at a time: the previous save's thread is joined before
+        // the next starts (it wrote kilobytes; it is long done), and a
+        // synchronous save joins it and then writes inline.
+        if (m_pipelineCacheWriter.joinable()) m_pipelineCacheWriter.join();
+        if (synchronous) {
+            write();
+        } else {
+            m_pipelineCacheWriter = std::thread([w = std::move(write)]() mutable {
+                PROFILE_THREAD("PipelineCacheWriter");
+                w();
+            });
+        }
+    }
+
+    std::vector<std::string> VKBackend::PipelineManifestLines() const {
+        std::vector<std::string> lines;
         for (const auto& [key, rec] : m_pipelines) {
             auto it = m_shaders.find(rec.shader);
             if (it == m_shaders.end() || it->second.vertPath.empty()) continue;
-            lines.insert(it->second.vertPath + "\t" + it->second.fragPath + "\t" +
-                         HexOf(&rec.state, sizeof(PipelineState)));
+            lines.push_back(it->second.vertPath + "\t" + it->second.fragPath + "\t" +
+                            HexOf(&rec.state, sizeof(PipelineState)));
         }
-        std::error_code ec;
-        const std::filesystem::path path(m_pipelineManifestFile);
-        std::filesystem::create_directories(path.parent_path(), ec);
-        const std::filesystem::path tmp = path.string() + ".tmp";
-        {
-            std::ofstream out(tmp, std::ios::trunc);
-            if (!out.is_open()) return;
-            out << ManifestHeader() << "\n";
-            for (const auto& l : lines) out << l << "\n";
-        }
-        std::filesystem::rename(tmp, path, ec);
+        return lines;
     }
 
     void VKBackend::WarmPipelines() {
@@ -3443,7 +4302,23 @@ namespace Render {
                 vkDestroyRenderPass(m_device, m_renderPass, nullptr);
                 m_renderPass = VK_NULL_HANDLE;
             }
+            if (m_renderPassLoad != VK_NULL_HANDLE) {
+                vkDestroyRenderPass(m_device, m_renderPassLoad, nullptr);
+                m_renderPassLoad = VK_NULL_HANDLE;
+            }
             CreateRenderPass();
+            // Render targets share the attachment formats (so the pipelines
+            // stay compatible with their pass): new pass, new images.
+            if (m_targetRenderPass != VK_NULL_HANDLE) {
+                vkDestroyRenderPass(m_device, m_targetRenderPass, nullptr);
+                m_targetRenderPass = VK_NULL_HANDLE;
+                if (CreateTargetRenderPass()) {
+                    for (auto& [h, rt] : m_renderTargets) {
+                        DestroyTargetImages(rt);
+                        CreateTargetImages(rt);
+                    }
+                }
+            }
             RebuildAllPipelines();
             Log::Info("VKBackend: Swapchain recreated with new attachment formats (render pass + pipelines rebuilt)");
         } else {
@@ -3729,6 +4604,47 @@ namespace Render {
         vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmd);
+    }
+
+    void VKBackend::EndSingleTimeCommandsDetached(VkCommandBuffer cmd, VkBuffer staging, VkDeviceMemory memory) {
+        PROFILE_ZONE_N("Vk.SingleTimeSubmitDetached");
+        vkEndCommandBuffer(cmd);
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        if (vkCreateFence(m_device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+            // No fence: fall back to the draining form.
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &cmd;
+            vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            vkQueueWaitIdle(m_graphicsQueue);
+            vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmd);
+            if (staging != VK_NULL_HANDLE) vkDestroyBuffer(m_device, staging, nullptr);
+            if (memory  != VK_NULL_HANDLE) vkFreeMemory(m_device, memory, nullptr);
+            return;
+        }
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &cmd;
+        vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, fence);
+        m_detachedSubmits.push_back({fence, cmd, staging, memory});
+    }
+
+    void VKBackend::ReclaimDetachedSubmits(bool waitAll) {
+        if (m_detachedSubmits.empty()) return;
+        std::vector<DetachedSubmit> keep;
+        for (DetachedSubmit& d : m_detachedSubmits) {
+            if (waitAll) vkWaitForFences(m_device, 1, &d.fence, VK_TRUE, UINT64_MAX);
+            if (vkGetFenceStatus(m_device, d.fence) != VK_SUCCESS) { keep.push_back(d); continue; }
+            vkDestroyFence(m_device, d.fence, nullptr);
+            vkFreeCommandBuffers(m_device, m_commandPool, 1, &d.cmd);
+            if (d.staging != VK_NULL_HANDLE) vkDestroyBuffer(m_device, d.staging, nullptr);
+            if (d.memory  != VK_NULL_HANDLE) vkFreeMemory(m_device, d.memory, nullptr);
+        }
+        m_detachedSubmits.swap(keep);
     }
 
     void VKBackend::TransitionImageLayout(VkImage image, VkFormat format,

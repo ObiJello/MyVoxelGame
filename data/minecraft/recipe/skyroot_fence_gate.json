@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "redstone",
+  "group": "wooden_fence_gate",
+  "key": {
+    "/": "minecraft:skyroot_stick",
+    "M": "minecraft:skyroot_planks"
+  },
+  "pattern": [
+    "/M/",
+    "/M/"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:skyroot_fence_gate"
+  }
+}

@@ -9,7 +9,7 @@
 // because it needs the dimension array, the stronghold locate and the entity
 // type, none of which the spawn-egg bridge has any business including.
 //
-// Reference: minecraft_code/decompiled_net/minecraft/world/item/EnderEyeItem.java:85-101.
+// Reference: minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/item/EnderEyeItem.java:85-101.
 
 #include "ServerLevel.hpp"
 #include "StrongholdLocate.hpp"
@@ -109,6 +109,38 @@ namespace Game {
                                  0.0f, 1.5f, 1.0f);
 
         return level->Mobs()->Add(std::move(pearl)) != 0;
+    }
+
+    bool ThrowPotion(int dimensionId, IUsePlayer& player, const ItemStack& stack) {
+        // The pearl's resolution chain: server level, the player's entity
+        // VIEW as the owner (instant effects and kill credit are attributed
+        // to it).
+        auto* server = Server::g_integratedServer.get();
+        if (!server) return false;
+
+        Server::ServerLevel* level =
+            server->GetLevel(Game::DimensionFromRaw(dimensionId));
+        if (!level || !level->Mobs() || !level->MobLevel()) return false;
+
+        auto* serverPlayer = dynamic_cast<Server::ServerPlayer*>(&player);
+        if (!serverPlayer) return false;
+        auto* sessions = server->GetSessionManager();
+        auto session = sessions
+            ? sessions->GetSession(serverPlayer->getPlayerId()) : nullptr;
+        Server::PlayerEntityView* view = session
+            ? level->MobLevel()->GetPlayerView(session->GetConnectionId())
+            : nullptr;
+        if (!view) return false;
+
+        auto potion = std::make_unique<ThrownSplashPotion>(level->MobLevel());
+        potion->SetItem(stack);
+        potion->SetOwnerAndPosition(*view);
+        // spawnProjectileFromRotation(…, -20.0F, 0.5F, 1.0F): the throw
+        // pitches 20 degrees above the look, power 0.5, inaccuracy 1.0.
+        potion->ShootFromRotation(*view, player.getPitch(), player.getYaw(),
+                                  -20.0f, 0.5f, 1.0f);
+
+        return level->Mobs()->Add(std::move(potion)) != 0;
     }
 
 } // namespace Game

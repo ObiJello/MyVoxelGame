@@ -1,4 +1,5 @@
 #include "world/biome/OverworldBiomeBuilder.h"
+#include "levelgen/TerrainProvider.h"
 
 namespace minecraft {
 namespace world {
@@ -70,7 +71,7 @@ OverworldBiomeBuilder::OverworldBiomeBuilder()
 
     // Middle biomes variant - Reference: OverworldBiomeBuilder.java line 72
     m_middleBiomesVariant[0][0] = BiomeKeys::ICE_SPIKES; m_middleBiomesVariant[0][1] = ""; m_middleBiomesVariant[0][2] = BiomeKeys::SNOWY_TAIGA; m_middleBiomesVariant[0][3] = ""; m_middleBiomesVariant[0][4] = "";
-    m_middleBiomesVariant[1][0] = ""; m_middleBiomesVariant[1][1] = ""; m_middleBiomesVariant[1][2] = ""; m_middleBiomesVariant[1][3] = ""; m_middleBiomesVariant[1][4] = BiomeKeys::OLD_GROWTH_PINE_TAIGA;
+    m_middleBiomesVariant[1][0] = BiomeKeys::DAPPLED_FOREST; m_middleBiomesVariant[1][1] = ""; m_middleBiomesVariant[1][2] = ""; m_middleBiomesVariant[1][3] = ""; m_middleBiomesVariant[1][4] = BiomeKeys::OLD_GROWTH_PINE_TAIGA;
     m_middleBiomesVariant[2][0] = BiomeKeys::SUNFLOWER_PLAINS; m_middleBiomesVariant[2][1] = ""; m_middleBiomesVariant[2][2] = ""; m_middleBiomesVariant[2][3] = BiomeKeys::OLD_GROWTH_BIRCH_FOREST; m_middleBiomesVariant[2][4] = "";
     m_middleBiomesVariant[3][0] = ""; m_middleBiomesVariant[3][1] = ""; m_middleBiomesVariant[3][2] = BiomeKeys::PLAINS; m_middleBiomesVariant[3][3] = BiomeKeys::SPARSE_JUNGLE; m_middleBiomesVariant[3][4] = BiomeKeys::BAMBOO_JUNGLE;
     m_middleBiomesVariant[4][0] = ""; m_middleBiomesVariant[4][1] = ""; m_middleBiomesVariant[4][2] = ""; m_middleBiomesVariant[4][3] = ""; m_middleBiomesVariant[4][4] = "";
@@ -119,16 +120,6 @@ void OverworldBiomeBuilder::addBiomes(std::function<void(const std::pair<Climate
     addOffCoastBiomes(consumer);
     addInlandBiomes(consumer);
     addUndergroundBiomes(consumer);
-}
-
-// Reference: OverworldBiomeBuilder.java lines 411-413
-bool OverworldBiomeBuilder::isDeepDarkRegion(
-    const density::DensityFunction* erosion,
-    const density::DensityFunction* depth,
-    const density::DensityFunction::FunctionContext& context
-) {
-    return erosion->compute(context) < static_cast<double>(EROSION_DEEP_DARK_DRYNESS_THRESHOLD) &&
-           depth->compute(context) > static_cast<double>(DEPTH_DEEP_DARK_DRYNESS_THRESHOLD);
 }
 
 // Reference: OverworldBiomeBuilder.java lines 120-129
@@ -345,6 +336,7 @@ void OverworldBiomeBuilder::addValleys(std::function<void(const std::pair<Climat
 void OverworldBiomeBuilder::addUndergroundBiomes(std::function<void(const std::pair<Climate::ParameterPoint, BiomeKey>&)> consumer) const {
     addUndergroundBiome(consumer, m_fullRange, m_fullRange, Climate::Parameter::span(0.8F, 1.0F), m_fullRange, m_fullRange, 0.0F, BiomeKeys::DRIPSTONE_CAVES);
     addUndergroundBiome(consumer, m_fullRange, Climate::Parameter::span(0.7F, 1.0F), m_fullRange, m_fullRange, m_fullRange, 0.0F, BiomeKeys::LUSH_CAVES);
+    addUndergroundBiome(consumer, m_fullRange, m_fullRange, Climate::Parameter::span(m_coastContinentalness, m_inlandContinentalness), Climate::Parameter::span(m_erosions[5], m_erosions[6]), Climate::Parameter::span(-1.1F, -0.85F), 0.0F, BiomeKeys::SULFUR_CAVES);
     addBottomBiome(consumer, m_fullRange, m_fullRange, m_fullRange, Climate::Parameter::span(m_erosions[0], m_erosions[1]), m_fullRange, 0.0F, BiomeKeys::DEEP_DARK);
 }
 
@@ -466,3 +458,46 @@ void OverworldBiomeBuilder::addBottomBiome(
 } // namespace biome
 } // namespace world
 } // namespace minecraft
+
+namespace minecraft { namespace world { namespace biome {
+
+// ── F3 debug strings — OverworldBiomeBuilder.java:432-481 ─────────────────
+
+std::string OverworldBiomeBuilder::getDebugStringForPeaksAndValleys(double peaksAndValleys) {
+    if (peaksAndValleys < static_cast<double>(minecraft::levelgen::TerrainProvider::peaksAndValleys(0.05F))) return "Valley";
+    if (peaksAndValleys < static_cast<double>(minecraft::levelgen::TerrainProvider::peaksAndValleys(0.26666668F))) return "Low";
+    if (peaksAndValleys < static_cast<double>(minecraft::levelgen::TerrainProvider::peaksAndValleys(0.4F))) return "Mid";
+    return peaksAndValleys < static_cast<double>(minecraft::levelgen::TerrainProvider::peaksAndValleys(0.56666666F)) ? "High" : "Peak";
+}
+
+std::string OverworldBiomeBuilder::getDebugStringForContinentalness(double continentalness) const {
+    const double q = static_cast<double>(Climate::quantizeCoord(static_cast<float>(continentalness)));
+    if (q < static_cast<double>(m_mushroomFieldsContinentalness.max())) return "Mushroom fields";
+    if (q < static_cast<double>(m_deepOceanContinentalness.max())) return "Deep ocean";
+    if (q < static_cast<double>(m_oceanContinentalness.max())) return "Ocean";
+    if (q < static_cast<double>(m_coastContinentalness.max())) return "Coast";
+    if (q < static_cast<double>(m_nearInlandContinentalness.max())) return "Near inland";
+    return q < static_cast<double>(m_midInlandContinentalness.max()) ? "Mid inland" : "Far inland";
+}
+
+std::string OverworldBiomeBuilder::getDebugStringForNoiseValue(double noiseValue, const Climate::Parameter* array, size_t count) {
+    const double q = static_cast<double>(Climate::quantizeCoord(static_cast<float>(noiseValue)));
+    for (size_t i = 0; i < count; ++i) {
+        if (q < static_cast<double>(array[i].max())) return std::to_string(i);
+    }
+    return "?";
+}
+
+std::string OverworldBiomeBuilder::getDebugStringForErosion(double erosion) const {
+    return getDebugStringForNoiseValue(erosion, m_erosions, 7);
+}
+
+std::string OverworldBiomeBuilder::getDebugStringForTemperature(double temperature) const {
+    return getDebugStringForNoiseValue(temperature, m_temperatures, 5);
+}
+
+std::string OverworldBiomeBuilder::getDebugStringForHumidity(double humidity) const {
+    return getDebugStringForNoiseValue(humidity, m_humidities, 5);
+}
+
+}}} // namespace minecraft::world::biome

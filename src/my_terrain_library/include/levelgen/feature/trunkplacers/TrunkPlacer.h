@@ -494,6 +494,40 @@ private:
     }
 };
 
+/**
+ * PoplarTrunkPlacer - 26.3 trunkplacers/PoplarTrunkPlacer.java: a straight
+ * trunk with a ring of 1-4 sideways branch logs one block below the foliage.
+ */
+class PoplarTrunkPlacer : public TrunkPlacer {
+private:
+    std::shared_ptr<carver::IntProvider> m_trunkHeightAboveBranches;
+    std::shared_ptr<carver::IntProvider> m_branchAmount;
+
+public:
+    PoplarTrunkPlacer(
+        int baseHeight,
+        int heightRandA,
+        int heightRandB,
+        std::shared_ptr<carver::IntProvider> trunkHeightAboveBranches,
+        std::shared_ptr<carver::IntProvider> branchAmount
+    )
+        : TrunkPlacer(baseHeight, heightRandA, heightRandB)
+        , m_trunkHeightAboveBranches(std::move(trunkHeightAboveBranches))
+        , m_branchAmount(std::move(branchAmount))
+    {}
+
+    std::vector<foliageplacers::FoliageAttachment> placeTrunk(
+        LevelReader& level,
+        TrunkSetter trunkSetter,
+        WorldgenRandom& random,
+        int treeHeight,
+        const core::BlockPos& origin,
+        std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+        std::shared_ptr<stateproviders::BlockStateProvider> dirtProvider,
+        bool forceDirt
+    ) override;
+};
+
 } // namespace trunkplacers
 } // namespace feature
 } // namespace levelgen

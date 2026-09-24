@@ -6,6 +6,12 @@
     "minecraft:golden_boots",
     "minecraft:iron_boots",
     "minecraft:diamond_boots",
-    "minecraft:netherite_boots"
+    "minecraft:netherite_boots",
+    "minecraft:zanite_boots",
+    "minecraft:gravitite_boots",
+    "minecraft:ironwood_boots",
+    "minecraft:steeleaf_boots",
+    "minecraft:knightmetal_boots",
+    "minecraft:fiery_boots"
   ]
 }

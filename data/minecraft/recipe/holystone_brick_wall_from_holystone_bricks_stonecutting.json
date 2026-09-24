@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:holystone_bricks",
+  "result": {
+    "count": 1,
+    "id": "minecraft:holystone_brick_wall"
+  }
+}

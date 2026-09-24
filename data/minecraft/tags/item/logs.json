@@ -2,6 +2,11 @@
   "values": [
     "#minecraft:logs_that_burn",
     "#minecraft:crimson_stems",
-    "#minecraft:warped_stems"
+    "#minecraft:warped_stems",
+    "minecraft:skyroot_wood",
+    "minecraft:golden_oak_wood",
+    "minecraft:stripped_skyroot_wood",
+    "minecraft:cinder_log",
+    "minecraft:cinder_wood"
   ]
 }

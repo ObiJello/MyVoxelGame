@@ -85,6 +85,10 @@ struct StructurePieceData {
     bool rigidProjection = false;   // element projection == "rigid"
     int groundLevelDelta = 0;
     std::vector<std::array<int, 4>> junctions;  // sourceX, sourceGroundY, sourceZ, deltaY
+    // Twilight Forest structures/UtilityPiece.allowFeatures: the piece never
+    // blocks decoration (twilightforest:no_structure skips it). Vanilla
+    // pieces leave it false; nothing else reads it.
+    bool allowFeatures = false;
 };
 
 class StructurePieceBehavior;

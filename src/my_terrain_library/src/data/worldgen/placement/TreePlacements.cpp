@@ -79,6 +79,13 @@ const PlacedFeature* TreePlacements::FANCY_OAK_LEAF_LITTER = nullptr;
 // Fallen trees
 const PlacedFeature* TreePlacements::FALLEN_OAK_TREE = nullptr;
 const PlacedFeature* TreePlacements::FALLEN_BIRCH_TREE = nullptr;
+const PlacedFeature* TreePlacements::RED_POPLAR = nullptr;
+const PlacedFeature* TreePlacements::ORANGE_POPLAR = nullptr;
+const PlacedFeature* TreePlacements::YELLOW_POPLAR = nullptr;
+const PlacedFeature* TreePlacements::RED_POPLAR_LEAF_LITTER = nullptr;
+const PlacedFeature* TreePlacements::ORANGE_POPLAR_LEAF_LITTER = nullptr;
+const PlacedFeature* TreePlacements::YELLOW_POPLAR_LEAF_LITTER = nullptr;
+const PlacedFeature* TreePlacements::FALLEN_POPLAR_TREE = nullptr;
 const PlacedFeature* TreePlacements::FALLEN_SUPER_BIRCH_TREE = nullptr;
 const PlacedFeature* TreePlacements::FALLEN_SPRUCE_TREE = nullptr;
 const PlacedFeature* TreePlacements::FALLEN_JUNGLE_TREE = nullptr;
@@ -127,6 +134,7 @@ void TreePlacements::bootstrap() {
     BlockState* oakSapling = world::level::block::Blocks::getDefaultState("minecraft:oak_sapling");
     BlockState* spruceSapling = world::level::block::Blocks::getDefaultState("minecraft:spruce_sapling");
     BlockState* birchSapling = world::level::block::Blocks::getDefaultState("minecraft:birch_sapling");
+    BlockState* poplarSapling = world::level::block::Blocks::getDefaultState("minecraft:poplar_sapling");
     BlockState* jungleSapling = world::level::block::Blocks::getDefaultState("minecraft:jungle_sapling");
     BlockState* acaciaSapling = world::level::block::Blocks::getDefaultState("minecraft:acacia_sapling");
     BlockState* cherrySapling = world::level::block::Blocks::getDefaultState("minecraft:cherry_sapling");
@@ -279,6 +287,15 @@ void TreePlacements::bootstrap() {
     DARK_OAK_LEAF_LITTER = createPlaced(TreeFeatures::DARK_OAK_LEAF_LITTER, filteredByBlockSurvival(darkOakSapling), "DARK_OAK_LEAF_LITTER");
     BIRCH_LEAF_LITTER = createPlaced(TreeFeatures::BIRCH_LEAF_LITTER, filteredByBlockSurvival(birchSapling), "BIRCH_LEAF_LITTER");
     FANCY_OAK_LEAF_LITTER = createPlaced(TreeFeatures::FANCY_OAK_LEAF_LITTER, filteredByBlockSurvival(oakSapling), "FANCY_OAK_LEAF_LITTER");
+
+    // 26.3 poplars - Reference: TreePlacements.java RED_POPLAR ... FALLEN_POPLAR_TREE
+    RED_POPLAR = createPlaced(TreeFeatures::RED_POPLAR, filteredByBlockSurvival(poplarSapling), "RED_POPLAR");
+    ORANGE_POPLAR = createPlaced(TreeFeatures::ORANGE_POPLAR, filteredByBlockSurvival(poplarSapling), "ORANGE_POPLAR");
+    YELLOW_POPLAR = createPlaced(TreeFeatures::YELLOW_POPLAR, filteredByBlockSurvival(poplarSapling), "YELLOW_POPLAR");
+    RED_POPLAR_LEAF_LITTER = createPlaced(TreeFeatures::RED_POPLAR_LEAF_LITTER, filteredByBlockSurvival(poplarSapling), "RED_POPLAR_LEAF_LITTER");
+    ORANGE_POPLAR_LEAF_LITTER = createPlaced(TreeFeatures::ORANGE_POPLAR_LEAF_LITTER, filteredByBlockSurvival(poplarSapling), "ORANGE_POPLAR_LEAF_LITTER");
+    YELLOW_POPLAR_LEAF_LITTER = createPlaced(TreeFeatures::YELLOW_POPLAR_LEAF_LITTER, filteredByBlockSurvival(poplarSapling), "YELLOW_POPLAR_LEAF_LITTER");
+    FALLEN_POPLAR_TREE = createPlaced(TreeFeatures::FALLEN_POPLAR_TREE, filteredByBlockSurvival(poplarSapling), "FALLEN_POPLAR_TREE");
 
     // =========================================================================
     // FALLEN TREES - Reference: Java lines 143-147

@@ -150,9 +150,10 @@ struct Parser {
             int tag = r.u8();
             if (tag == 0) break;
             std::string name = r.str();
-            if (tag == 8 && name == "Name") {
+            // 26.3 block-state keys are id / properties (26.1: Name / Properties)
+            if (tag == 8 && (name == "Name" || name == "id")) {
                 ps.name = r.str();
-            } else if (tag == 10 && name == "Properties") {
+            } else if (tag == 10 && (name == "Properties" || name == "properties")) {
                 for (;;) {
                     int pt = r.u8();
                     if (pt == 0) break;

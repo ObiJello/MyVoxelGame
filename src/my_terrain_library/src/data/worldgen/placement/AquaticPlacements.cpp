@@ -45,18 +45,41 @@ static std::deque<HeightmapPlacement> s_heightmapPlacements;
 static std::deque<NoiseBasedCountPlacement> s_noiseCountPlacements;
 static std::deque<RarityFilter> s_rarityFilters;
 
+static std::deque<BlockPredicateFilter> s_filters;
+static std::deque<RandomOffsetPlacement> s_offsets;
+static levelgen::carver::TrapezoidInt s_triangle7 = levelgen::carver::TrapezoidInt::triangle(7);
+static levelgen::carver::TrapezoidInt s_triangle0 = levelgen::carver::TrapezoidInt::triangle(0);
+
+// OffsetPlacement.ofTriangle(7, 0): x, y (two nextInt(1) draws), z
+static PlacementModifier* offsetTriangle7x0() {
+    s_offsets.push_back(RandomOffsetPlacement::of(&s_triangle7, &s_triangle0));
+    return &s_offsets.back();
+}
+
+static PlacementModifier* heightmapOceanFloor() {
+    // PlacementUtils.HEIGHTMAP_OCEAN_FLOOR
+    s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR));
+    return &s_heightmapPlacements.back();
+}
+
+static PlacementModifier* waterFilter() {
+    s_filters.push_back(BlockPredicateFilter::forPredicate(
+        levelgen::blockpredicates::BlockPredicate::matchesBlocks(std::vector<std::string>{"minecraft:water"})));
+    return &s_filters.back();
+}
+
 std::vector<PlacementModifier*> AquaticPlacements::seagrassPlacement(int count) {
-    // Reference: AquaticPlacements.java line 33-35
-    // InSquarePlacement.spread(), HEIGHTMAP_TOP_SOLID, CountPlacement.of(count), BiomeFilter.biome()
-
+    // 26.3 AquaticPlacements.seagrassPlacement: InSquarePlacement.spread(),
+    // CountPlacement.of(count), OffsetPlacement.ofTriangle(7, 0),
+    // HEIGHTMAP_OCEAN_FLOOR, BlockPredicateFilter(water), BiomeFilter.biome()
     s_countPlacements.push_back(CountPlacement::of(count));
-    // Use OCEAN_FLOOR for underwater placement (HEIGHTMAP_TOP_SOLID equivalent for ocean floor)
-    s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
-
+    PlacementModifier* countPlacement = &s_countPlacements.back();
     return {
         &InSquarePlacement::spread(),
-        &s_heightmapPlacements.back(),
-        &s_countPlacements.back(),
+        countPlacement,
+        offsetTriangle7x0(),
+        heightmapOceanFloor(),
+        waterFilter(),
         &BiomeFilter::biome()
     };
 }
@@ -141,55 +164,47 @@ void AquaticPlacements::bootstrap() {
     // Reference: AquaticPlacements.java lines 55-56
     // =========================================================================
 
-    // KELP_COLD - NoiseBasedCountPlacement(120, 80.0, 0.0)
-    // Reference: AquaticPlacements.java line 55
+    // 26.3: KELP_COLD / KELP_WARM - NoiseBasedCountPlacement(120 / 80, 80.0,
+    // 0.0), InSquarePlacement.spread(), HEIGHTMAP_OCEAN_FLOOR, kelp filter
+    // (water, water above, sturdy face below, not #cannot_support_kelp below),
+    // BiomeFilter.biome()
     {
+        using levelgen::blockpredicates::BlockPredicate;
+        s_filters.push_back(BlockPredicateFilter::forPredicate(BlockPredicate::allOf({
+            BlockPredicate::matchesBlocks(std::vector<std::string>{"minecraft:water"}),
+            BlockPredicate::matchesBlocks(core::Vec3i(0, 1, 0), std::vector<std::string>{"minecraft:water"}),
+            BlockPredicate::hasSturdyFace(core::Vec3i(0, -1, 0), core::Direction::UP),
+            BlockPredicate::not_(BlockPredicate::matchesTag(core::Vec3i(0, -1, 0), "minecraft:cannot_support_kelp"))})));
+        PlacementModifier* kelpFilter = &s_filters.back();
+
         s_noiseCountPlacements.push_back(NoiseBasedCountPlacement::of(120, 80.0, 0.0));
-        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
+        PlacementModifier* coldCount = &s_noiseCountPlacements.back();
+        KELP_COLD = createPlaced(AquaticFeatures::KELP,
+            {coldCount, &InSquarePlacement::spread(), heightmapOceanFloor(), kelpFilter, &BiomeFilter::biome()},
+            "KELP_COLD");
 
-        std::vector<PlacementModifier*> modifiers = {
-            &s_noiseCountPlacements.back(),
-            &InSquarePlacement::spread(),
-            &s_heightmapPlacements.back(),
-            &BiomeFilter::biome()
-        };
-
-        KELP_COLD = createPlaced(AquaticFeatures::KELP, modifiers, "KELP_COLD");
-    }
-
-    // KELP_WARM - NoiseBasedCountPlacement(80, 80.0, 0.0)
-    // Reference: AquaticPlacements.java line 56
-    {
         s_noiseCountPlacements.push_back(NoiseBasedCountPlacement::of(80, 80.0, 0.0));
-        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
-
-        std::vector<PlacementModifier*> modifiers = {
-            &s_noiseCountPlacements.back(),
-            &InSquarePlacement::spread(),
-            &s_heightmapPlacements.back(),
-            &BiomeFilter::biome()
-        };
-
-        KELP_WARM = createPlaced(AquaticFeatures::KELP, modifiers, "KELP_WARM");
+        PlacementModifier* warmCount = &s_noiseCountPlacements.back();
+        KELP_WARM = createPlaced(AquaticFeatures::KELP,
+            {warmCount, &InSquarePlacement::spread(), heightmapOceanFloor(), kelpFilter, &BiomeFilter::biome()},
+            "KELP_WARM");
     }
 
     // =========================================================================
-    // SEA PICKLE
-    // Reference: AquaticPlacements.java line 54
-    // RarityFilter.onAverageOnceEvery(16), InSquarePlacement.spread(), HEIGHTMAP_TOP_SOLID, BiomeFilter.biome()
+    // SEA PICKLE (26.3): RarityFilter.onAverageOnceEvery(16),
+    // InSquarePlacement.spread(), CountPlacement.of(20),
+    // OffsetPlacement.ofTriangle(7, 0), HEIGHTMAP_OCEAN_FLOOR,
+    // BlockPredicateFilter(water), BiomeFilter.biome()
     // =========================================================================
     {
         s_rarityFilters.push_back(RarityFilter::onAverageOnceEvery(16));
-        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
-
-        std::vector<PlacementModifier*> modifiers = {
-            &s_rarityFilters.back(),
-            &InSquarePlacement::spread(),
-            &s_heightmapPlacements.back(),
-            &BiomeFilter::biome()
-        };
-
-        SEA_PICKLE = createPlaced(AquaticFeatures::SEA_PICKLE, modifiers, "SEA_PICKLE");
+        PlacementModifier* rarity = &s_rarityFilters.back();
+        s_countPlacements.push_back(CountPlacement::of(20));
+        PlacementModifier* count = &s_countPlacements.back();
+        SEA_PICKLE = createPlaced(AquaticFeatures::SEA_PICKLE,
+            {rarity, &InSquarePlacement::spread(), count, offsetTriangle7x0(), heightmapOceanFloor(), waterFilter(),
+             &BiomeFilter::biome()},
+            "SEA_PICKLE");
     }
 
     // =========================================================================

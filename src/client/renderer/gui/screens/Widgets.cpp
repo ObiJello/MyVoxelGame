@@ -1,6 +1,7 @@
 // File: src/client/renderer/gui/screens/Widgets.cpp
 #include "Widgets.hpp"
 #include "client/input/Input.hpp"
+#include "client/sound/ClientSounds.hpp"
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
 #include <GLFW/glfw3.h>
@@ -37,6 +38,10 @@ namespace Render {
         g.DrawCenteredString(label, m_x + m_width / 2,
                              m_y + (m_height - FontRenderer::LINE_HEIGHT) / 2 + 1,
                              ApplyAlpha(color, m_alpha));
+    }
+
+    void AbstractWidget::PlayDownSound() {
+        Client::Sounds::PlayButtonClick();
     }
 
     // ── Button ──────────────────────────────────────────────────────────────
@@ -97,7 +102,9 @@ namespace Render {
 
     void SliderButton::OnClick(double mouseX, double) { SetValueFromMouse(mouseX); }
     void SliderButton::OnDrag(double mouseX, double)  { SetValueFromMouse(mouseX); }
-    void SliderButton::OnRelease(double, double)      {}
+    // MC AbstractSliderButton.onRelease: the click sounds when the handle is
+    // let go, not when it is grabbed.
+    void SliderButton::OnRelease(double, double)      { PlayDownSound(); }
 
     bool SliderButton::KeyPressed(int glfwKey, int glfwMods) {
         double step = m_keyStep > 0.0 ? m_keyStep
@@ -120,6 +127,7 @@ namespace Render {
     }
 
     void CycleButton::OnClick(double, double) {
+        PlayDownSound();   // MC CycleButton is an AbstractButton
         // MC CycleButton.onClick: shift-click cycles backwards. We can't see
         // modifiers here, so Screen passes shift via KeyPressed path only;
         // plain click always advances (backwards cycling still available via
@@ -128,6 +136,10 @@ namespace Render {
     }
 
     bool CycleButton::KeyPressed(int glfwKey, int) {
+        // AbstractButton.keyPressed: enter / space press it with the click.
+        if (glfwKey == GLFW_KEY_ENTER || glfwKey == GLFW_KEY_KP_ENTER || glfwKey == GLFW_KEY_SPACE) {
+            PlayDownSound();
+        }
         if (glfwKey == GLFW_KEY_ENTER || glfwKey == GLFW_KEY_KP_ENTER ||
             glfwKey == GLFW_KEY_SPACE || glfwKey == GLFW_KEY_RIGHT) {
             Cycle(+1);
@@ -221,6 +233,10 @@ namespace Render {
     }
 
     void EditBox::RenderWidget(GuiGraphics& g, int, int, float) {
+        if (m_autoGrow) {
+            // 4 px padding each side plus room for the end-of-text caret.
+            m_width = std::max(m_baseWidth, g.GetStringWidth(m_text) + 8 + 6);
+        }
         const char* sprite = m_focused ? "widget/text_field_highlighted"
                                        : "widget/text_field";
         g.BlitSprite(sprite, m_x, m_y, m_width, m_height, ApplyAlpha(0xFFFFFFFF, m_alpha));
@@ -233,7 +249,7 @@ namespace Render {
             return;
         }
 
-        g.DrawString(m_text, textX, textY, ApplyAlpha(0xFFE0E0E0, m_alpha));
+        g.DrawString(m_text, textX, textY, ApplyAlpha(m_textColor, m_alpha));
 
         // Caret: 300ms blink cycle, only while focused (MC EditBox).
         if (m_focused) {
@@ -435,6 +451,23 @@ namespace Render {
 
     bool OptionsList::KeyPressed(int glfwKey, int glfwMods) {
         return m_focusedChild && m_focusedChild->KeyPressed(glfwKey, glfwMods);
+    }
+
+    bool OptionsList::CharTyped(unsigned int codepoint) {
+        // An EditBox in a row (World Options' port field) types through the
+        // same focused child the keys reach.
+        return m_focusedChild && m_focusedChild->CharTyped(codepoint);
+    }
+
+    // ── LockIconButton ──────────────────────────────────────────────────────
+
+    void LockIconButton::RenderWidget(GuiGraphics& g, int, int, float) {
+        // MC LockIconButton.Icon: locked/unlocked × normal/hover/disabled.
+        const char* base = m_locked ? "widget/locked_button" : "widget/unlocked_button";
+        std::string sprite = base;
+        if (!active) sprite += "_disabled";
+        else if (m_hovered || m_focused) sprite += "_highlighted";
+        g.BlitSprite(sprite, m_x, m_y, m_width, m_height, ApplyAlpha(0xFFFFFFFF, m_alpha));
     }
 
     void OptionsList::RenderWidget(GuiGraphics& g, int mouseX, int mouseY, float partialTick) {

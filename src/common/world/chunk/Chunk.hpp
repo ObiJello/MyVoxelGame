@@ -8,10 +8,12 @@
 #include "../math/WorldCoordinates.hpp"
 #include "../block/Blocks.hpp"
 #include "../ticks/LevelChunkTicks.hpp"
+#include "../lighting/ChunkLight.hpp"
 #include <glm/glm.hpp>
 #include <array>
 #include <memory>
 #include <shared_mutex>
+#include <string>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -36,10 +38,92 @@ namespace Game {
         }
     };
 
+    // MC ProtoChunk.entities — one entity placed by world generation (a
+    // structure template's villager, a swamp hut's witch, a mansion's
+    // vindicator), carried on the chunk until the server adds it to the
+    // level. `nbt` is the entity's saved compound as uncompressed binary NBT
+    // (a named root compound: id, Pos, Rotation, and whatever else the
+    // template or piece wrote). `finalizeSpawn` is MC's
+    // Mob.finalizeSpawn(STRUCTURE) — Java runs it at placement on the live
+    // entity; here it runs when the mob is built (see StructureEntitySpawner).
+    struct WorldgenEntity {
+        std::vector<uint8_t> nbt;
+        bool finalizeSpawn = false;
+    };
+
+    // The structure boxes MC's spawn_overrides test (ChunkGenerator.getMobsAt
+    // over StructureManager.getAllStructuresAt) and the nether-fortress
+    // special case (NaturalSpawner.isInNetherFortressBounds). MC keeps the
+    // structure starts themselves; this engine keeps, per chunk, only what
+    // those two tests read: for every start of a structure with
+    // spawn_overrides that reaches this chunk, its union box and the piece
+    // boxes over this column (a jigsaw piece with its template id, which the
+    // engine's piece-scoped overrides filter on). Inclusive min/max corners.
+    struct StructureSpawnArea {
+        struct Piece {
+            glm::ivec3 min{0};
+            glm::ivec3 max{0};
+            std::string templateId;
+            // The template's Rotation ordinal (0 NONE, 1 CLOCKWISE_90,
+            // 2 CLOCKWISE_180, 3 COUNTERCLOCKWISE_90), pivot at its origin
+            // — what maps a template-local box onto `min`/`max`.
+            uint8_t rotation = 0;
+            // The piece's StructurePieceType id — what the Twilight Forest's
+            // controlled spawns key a piece's spawn index on.
+            std::string pieceType;
+        };
+        std::string structure;
+        glm::ivec3 startMin{0};
+        glm::ivec3 startMax{0};
+        std::vector<Piece> pieces;
+    };
+
     class Chunk {
     public:
         // Chunk position in world chunk coordinates
         Math::ChunkPos pos{0, 0};
+
+        // MC ProtoChunk.getEntities -> ServerLevel.addWorldGenChunkEntities.
+        // Filled ONLY by the generator (MyTerrainGenerator::ConvertLibChunk)
+        // and drained exactly once, by ChunkProvider::TakeWorldgenEntities
+        // when the level first claims the chunk's entities. Never saved: a
+        // chunk read back from disk has its mobs in entities/*.mca instead,
+        // which is what keeps structure mobs from spawning twice. Guarded by
+        // the content lock (LockExclusive to drain).
+        std::vector<WorldgenEntity> worldgenEntities;
+
+        // See StructureSpawnArea. Written by the generator, saved and loaded
+        // with the chunk (Anvil key "ObeyStructureSpawns"), read by the
+        // natural spawner. Never changes once the chunk is published.
+        std::vector<StructureSpawnArea> structureSpawnAreas;
+
+        // The terrain library's "structures" compound for this chunk — MC's
+        // SerializableChunkData "structures": structure references, and the
+        // starts begun here (under "obeycraft:starts"; see
+        // docs/terrain-library-persistence.md). Encoded NBT payload (the
+        // compound's entries and closing End byte), carried through
+        // unchanged: filled at conversion, written back by the Anvil
+        // serializer, kept from the file on load. The library reads it back
+        // when it needs this chunk as a neighbour, so a structure begun here
+        // finishes where it started. Null writes the empty compounds vanilla
+        // emits. Never changes once the chunk is published.
+        std::shared_ptr<const std::vector<uint8_t>> structuresNbt;
+
+        // MC LevelChunk.postProcessing: cells worldgen marked for an update
+        // once the chunk starts ticking (LevelChunk.postProcessGeneration) —
+        // aquifer and cave-edge fluids that must start flowing, soul sand and
+        // magma under water (bubble columns), mushrooms that check their
+        // footing. One list per block section (index 0 = the lowest), each
+        // cell packed x | y << 4 | z << 8 (ProtoChunk.packOffsetCoordinates).
+        // Filled at conversion, saved as "PostProcessing", drained once by
+        // World::PostProcessGeneration. Guarded by the content lock.
+        std::vector<std::vector<int16_t>> postProcessing;
+        bool HasPostProcessing() const {
+            for (const auto& section : postProcessing) {
+                if (!section.empty()) return true;
+            }
+            return false;
+        }
 
         // Modification stamp for the client's retention cache: bumped by every
         // SetBlock/SetBlockEntity, persisted in the Anvil tag "ObeyModStamp",
@@ -48,6 +132,14 @@ namespace Game {
         // ChunkUnchangedS2C instead of ~20 KB of sections, and the client
         // revives its parked meshes (instant revisit). 1 = fresh generation.
         std::atomic<uint64_t> modStamp{1};
+        // MC ChunkAccess.inhabitedTime: ticks this chunk has been inside a
+        // player's block-ticking range (ServerChunkCache.tickChunks bumps
+        // every ticking chunk by the game-time delta). Saved as the Anvil
+        // "InhabitedTime" long; it drives the local difficulty's local half
+        // (DifficultyInstance) and the F3 screen's Local Difficulty line.
+        std::atomic<int64_t> inhabitedTime{0};
+        int64_t InhabitedTime() const { return inhabitedTime.load(std::memory_order_relaxed); }
+        void IncrementInhabitedTime(int64_t delta) { inhabitedTime.fetch_add(delta, std::memory_order_relaxed); }
         uint64_t ModStamp() const { return modStamp.load(std::memory_order_relaxed); }
         void BumpModStamp() { modStamp.fetch_add(1, std::memory_order_relaxed); }
 
@@ -56,6 +148,17 @@ namespace Game {
 
         // Callback for notifying when a section becomes dirty
         std::function<void(int sectionIndex)> onSectionDirty;
+
+        // === LIGHT ===
+        //
+        // Sky and block light, 26 light sections (one past each end of the
+        // world), plus the sky-source heightmap — see Lighting/ChunkLight.hpp.
+        // Server: written by the light engine (initial lighting on the worker
+        // that built or loaded the chunk, then the level's LevelLightEngine on
+        // the server thread, which holds this chunk's exclusive content lock
+        // while it writes), read by gameplay, the chunk packet and the saver.
+        // Client: replaced wholesale from ChunkDataS2C / LightUpdateS2C.
+        Lighting::ChunkLight light;
 
         // === BIOMES ===
         //
@@ -318,6 +421,11 @@ namespace Game {
             // would show up as mobs spawning at the world floor.
             cloned->m_heightmaps = this->m_heightmaps;
             cloned->m_heightmapsPrimed = this->m_heightmapsPrimed;
+            // Light layers share their arrays copy-on-write (DataLayer).
+            cloned->light = this->light;
+            cloned->inhabitedTime.store(this->inhabitedTime.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            cloned->structuresNbt = this->structuresNbt;
+            cloned->postProcessing = this->postProcessing;
 
             // Block entities and scheduled ticks are deliberately NOT cloned.
             // A clone is a snapshot of BLOCK CONTENT for the mesher; copying

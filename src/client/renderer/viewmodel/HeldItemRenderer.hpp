@@ -49,6 +49,22 @@ namespace Render {
         // renders the hand inside the same bobbed pose as the level.
         void SetViewTilt(const glm::mat4& tilt) { m_viewTilt = tilt; }
 
+        // Where the hand's light is read (MC renderHandsWithItems takes
+        // EntityRenderDispatcher.getPackedLightCoords(player): the light at
+        // the player's eye). Set each frame with the camera's world eye.
+        void SetLightProbe(const glm::dvec3& eyeWorld) { m_lightProbe = eyeWorld; m_hasLightProbe = true; }
+        // The lightmap colour the hand is drawn with this frame (the portal
+        // gun viewmodel takes it too).
+        glm::vec3 HandLight() const;
+
+        // The view was REWRITTEN by the game, not turned by the player — a
+        // portal crossing rotating the camera through the portal, a
+        // teleport. Carry the lagging bob copies along by the same delta so
+        // the sway stays whatever it was: without this the next tick reads
+        // the whole rotation as one violent flick, and the hand flings
+        // across the screen just as the world is meant to look continuous.
+        void OnViewRewritten(float deltaPitchDeg, float deltaYawDeg);
+
         // Per-frame draw of both hands. partialTick is the 0..1 fraction
         // between the previous and next game tick (matches MC's
         // `partialTickTime`). walkDistance is the player's accumulated
@@ -108,6 +124,8 @@ namespace Render {
         // level's bobbed pose in vanilla, so it leans and spins with the world
         // rather than staying pinned to the screen. Identity when unhurt.
         glm::mat4 m_viewTilt {1.0f};
+        glm::dvec3 m_lightProbe {0.0};
+        bool       m_hasLightProbe = false;
 
         bool m_firstTick = true;
 

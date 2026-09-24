@@ -56,10 +56,17 @@ namespace Render {
         ShaderHandle m_shader = INVALID_SHADER;
         bool         m_geomBuilt = false;
 
+        // Each kind's mesh holds one copy of its geometry per lighting, back to
+        // back; a draw picks one with DrawIndexed's index offset. MC lights
+        // the head from fixed WORLD directions (EntityLighting.hpp), so the
+        // shade depends on the 16-segment rotation and the dimension's light
+        // set: copy = segment * 2 + nether.
+        static constexpr int kLightingCount = 16 * 2;
+
         std::array<BufferHandle,  kKindCount> m_vb{};
         std::array<BufferHandle,  kKindCount> m_ib{};
         std::array<MeshHandle,    kKindCount> m_mesh{};
-        std::array<uint32_t,      kKindCount> m_indexCount{};
+        std::array<uint32_t,      kKindCount> m_indexCount{};   // ONE lighting's copy
         std::array<TextureHandle, kKindCount> m_tex{};
         int m_packGeneration = -1;   // Resources::CacheStale
         std::array<bool,          kKindCount> m_texTried{};

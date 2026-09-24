@@ -246,9 +246,9 @@ namespace Game {
 
     BlockState StairsUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                  BlockState state, Direction toNeighbour) {
-        // MC schedules a water tick here when WATERLOGGED. There are no fluid
-        // ticks in this engine — waterlogging is a static flag on the state —
-        // so that half of updateShape has nothing to do.
+        // MC schedules a water tick here when WATERLOGGED. That line is shared
+        // by every SimpleWaterloggedBlock, so World::ExecuteShapeUpdate books
+        // it once for all of them; only the shape half lives here.
         if (!IsHorizontal(toNeighbour)) return state;
         return StairsWorldPlacementState(level, pos, state);
     }

@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:carved_stone",
+  "result": {
+    "count": 1,
+    "id": "minecraft:carved_wall"
+  }
+}

@@ -10,6 +10,7 @@
 #include "server/level/ServerLevel.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <future>
 #include <limits>
 
@@ -241,7 +242,9 @@ namespace Threading {
     void ServerWorkerPool::CancelAllJobs() {
         {
             std::lock_guard<std::mutex> lock(m_jobQueueMutex);
-            m_jobQueue.clear();
+            m_otherJobs.clear();
+            for (auto& bucket : m_chunkBuckets) bucket.clear();
+            m_chunkJobCount = 0;
         }
 
         {
@@ -256,7 +259,7 @@ namespace Threading {
 
     size_t ServerWorkerPool::GetPendingJobCount() const {
         std::lock_guard<std::mutex> lock(m_jobQueueMutex);
-        return m_jobQueue.size();
+        return m_otherJobs.size() + m_chunkJobCount;
     }
 
     size_t ServerWorkerPool::GetActiveJobCount() const {
@@ -484,7 +487,37 @@ namespace Threading {
         }
     }
 
+    std::shared_ptr<const ChunkLoadAnchors> ServerWorkerPool::AnchorsSnapshot() const {
+        std::lock_guard<std::mutex> lock(m_anchorMutex);
+        return m_anchors;
+    }
+
+    // MC ChunkTaskDispatcher files each task under its chunk's queue level,
+    // a distance from the players (the ticket levels). Ours is the Chebyshev
+    // distance to the nearest player in the job's own dimension —
+    // coordinates are not comparable across levels. A dimension nobody
+    // anchors (only a force-loaded ring, say) goes last, which is also what
+    // MC's queue levels do.
+    int ServerWorkerPool::DistanceBucket(const ServerJob& job, const ChunkLoadAnchors* anchors) const {
+        int best = kDistanceBuckets - 1;
+        if (!anchors) return best;
+        for (const auto& anchor : (*anchors)[Game::DimensionSlot(job.dimension)]) {
+            const int d = std::max(std::abs(job.chunkPos.x - anchor.x), std::abs(job.chunkPos.z - anchor.z));
+            best = std::min(best, d);
+        }
+        return std::min(best, kDistanceBuckets - 1);
+    }
+
     bool ServerWorkerPool::EnqueueJob(ServerJob&& job) {
+        const bool chunkJob = job.type == ServerJobType::CHUNK_GENERATION ||
+                              job.type == ServerJobType::CHUNK_LOADING;
+        // The bucket is worked out before the lock: O(players), nothing shared.
+        int bucket = 0;
+        if (chunkJob) {
+            const std::shared_ptr<const ChunkLoadAnchors> anchors = AnchorsSnapshot();
+            bucket = DistanceBucket(job, anchors.get());
+        }
+
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
 
         // No capacity limit, matching MC: ChunkTaskDispatcher holds one task per
@@ -497,76 +530,94 @@ namespace Threading {
         // and the requester treats "requested, no result yet" as permanently in
         // flight, so the chunk needed an out-of-band retry list to come back at
         // all. Accepting the job removes that entire failure mode.
-        m_jobQueue.push_back(std::move(job));
+        if (chunkJob) {
+            m_chunkBuckets[bucket].push_back(std::move(job));
+            ++m_chunkJobCount;
+        } else {
+            m_otherJobs.push_back(std::move(job));
+        }
         lock.unlock();
         m_jobCondition.notify_one();
         return true;
     }
 
-    // Port of MC ChunkTaskDispatcher's priority ordering, which submits every
-    // generation task with `() -> center.getQueueLevel()` — a key re-evaluated
-    // at poll time rather than fixed at submit time, because the thing it
-    // measures (distance from a player) moves.
-    //
-    // Ours reads the same way: the job whose chunk is nearest to any player is
-    // taken next. Sorting at SUBMIT time instead would be stale the moment the
-    // player walked, and would order a burst of a thousand requests by where
-    // the player was when the burst began.
-    //
-    // Linear scan under the lock, exactly like ClientWorkerPool::PollNearestLocked
-    // (the in-repo port of CompileTaskDynamicQueue.poll). Polls are bounded by
-    // worker throughput, so this is a few hundred distance computations a second.
+    // MC ChunkTaskPriorityQueue.pop: the first task of the lowest non-empty
+    // level. The players move, so a job's bucket can go stale; MC re-files a
+    // chunk's tasks when its level changes (resortChunkTasks), we re-check
+    // the job being taken: one that has fallen behind — a player flew away
+    // from it — is re-filed at its current distance and the next is tried.
+    // A job that got NEARER stays where it is and simply comes up in turn
+    // (FIFO within a bucket ages it forward). Cancelled jobs leave as they
+    // surface: CancelChunkJobs only bumps the chunk's generation.
     bool ServerWorkerPool::DequeueJob(ServerJob& job) {
+        // Re-files per take, bounded: a whole bucket of stale entries must
+        // not become a scan again.
+        constexpr int kMaxRefiles = 16;
+        constexpr int kRefileSlack = 2;   // chunks of drift tolerated before re-filing
+
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
+        std::shared_ptr<const ChunkLoadAnchors> anchors;
+        int refiles = 0;
 
-        m_jobCondition.wait(lock, [this] { return !m_jobQueue.empty() || !m_running.load(); });
-
-        if (m_jobQueue.empty()) {
-            return false;
-        }
-
-        std::vector<Game::Math::ChunkPos> anchors;
-        {
-            std::lock_guard<std::mutex> anchorLock(m_anchorMutex);
-            anchors = m_anchors;
-        }
-
-        size_t best = 0;
-        int64_t bestKey = std::numeric_limits<int64_t>::max();
-        for (size_t i = 0; i < m_jobQueue.size(); ++i) {
-            const ServerJob& candidate = m_jobQueue[i];
+        for (;;) {
+            m_jobCondition.wait(lock, [this] {
+                return !m_otherJobs.empty() || m_chunkJobCount > 0 || !m_running.load();
+            });
+            if (m_otherJobs.empty() && m_chunkJobCount == 0) {
+                return false;   // shutdown
+            }
 
             // Saves and world I/O carry no meaningful position; run them ahead
             // of terrain so they cannot be starved behind a streaming burst.
-            int64_t key = -1;
-            if (candidate.type == ServerJobType::CHUNK_GENERATION ||
-                candidate.type == ServerJobType::CHUNK_LOADING) {
-                key = std::numeric_limits<int64_t>::max();
-                for (const auto& anchor : anchors) {
-                    const int64_t dx = candidate.chunkPos.x - anchor.x;
-                    const int64_t dz = candidate.chunkPos.z - anchor.z;
-                    key = std::min(key, dx * dx + dz * dz);
+            if (!m_otherJobs.empty()) {
+                job = std::move(m_otherJobs.front());
+                m_otherJobs.pop_front();
+                return true;
+            }
+
+            int bucket = 0;
+            while (m_chunkBuckets[bucket].empty()) ++bucket;   // m_chunkJobCount > 0
+            ServerJob candidate = std::move(m_chunkBuckets[bucket].front());
+            m_chunkBuckets[bucket].pop_front();
+            --m_chunkJobCount;
+
+            bool stale = false;
+            {
+                // Queue lock, then cancel lock — CancelChunkJobs takes only
+                // the latter, so the order cannot deadlock.
+                std::lock_guard<std::mutex> cancelLock(m_cancelMutex);
+                const auto& generations = m_chunkGenerations[Game::DimensionSlot(candidate.dimension)];
+                const auto it = generations.find(candidate.chunkPos);
+                stale = it != generations.end() && candidate.generationId != it->second;
+            }
+            if (stale) {
+                m_stats.jobsCancelled.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            if (refiles < kMaxRefiles) {
+                if (!anchors) {
+                    // The anchor mutex is never held around the queue lock
+                    // elsewhere, so taking it here is safe.
+                    anchors = AnchorsSnapshot();
+                }
+                const int now = DistanceBucket(candidate, anchors.get());
+                if (now > bucket + kRefileSlack) {
+                    ++refiles;
+                    m_chunkBuckets[now].push_back(std::move(candidate));
+                    ++m_chunkJobCount;
+                    continue;
                 }
             }
-            if (key < bestKey) {
-                bestKey = key;
-                best = i;
-            }
+            job = std::move(candidate);
+            return true;
         }
-
-        job = std::move(m_jobQueue[best]);
-        // Swap-and-pop: selection is purely by key, so the container has no
-        // meaningful order to preserve.
-        if (best != m_jobQueue.size() - 1) {
-            m_jobQueue[best] = std::move(m_jobQueue.back());
-        }
-        m_jobQueue.pop_back();
-        return true;
     }
 
-    void ServerWorkerPool::SetAnchors(std::vector<Game::Math::ChunkPos> anchors) {
+    void ServerWorkerPool::SetAnchors(ChunkLoadAnchors anchors) {
+        auto snapshot = std::make_shared<const ChunkLoadAnchors>(std::move(anchors));
         std::lock_guard<std::mutex> lock(m_anchorMutex);
-        m_anchors = std::move(anchors);
+        m_anchors = std::move(snapshot);
     }
 
     void ServerWorkerPool::SendChunkGenResult(Game::DimensionId dimension,
@@ -626,7 +677,7 @@ namespace Threading {
         }
     }
 
-    void SetServerChunkLoadAnchors(std::vector<Game::Math::ChunkPos> anchors) {
+    void SetServerChunkLoadAnchors(ChunkLoadAnchors anchors) {
         if (g_serverWorkerPool) {
             g_serverWorkerPool->SetAnchors(std::move(anchors));
         }

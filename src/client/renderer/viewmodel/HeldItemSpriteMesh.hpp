@@ -7,6 +7,7 @@
 #pragma once
 
 #include "../backend/RenderTypes.hpp"
+#include "common/entity/Item.hpp"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -68,11 +69,33 @@ namespace Render {
         static const Entry* GetOrBuild(const std::string& spriteName,
                                        uint32_t tintARGB = 0);
 
+        // Every sprite layer of an item stack, each with its own tint — MC
+        // ItemModelGenerator emits one quad set per textures.layerN, later
+        // layers over earlier, each tinted by its tint source. A spawn egg is
+        // a tinted base plus tinted spots; a potion a tinted liquid under an
+        // untinted bottle. The layers are composited into one sprite and
+        // extruded once, which reads the same from every side for these
+        // stacked-in-one-silhouette sprites. Single-layer items go through
+        // GetOrBuild unchanged (same cache entries as before).
+        static const Entry* GetOrBuildForStack(const Game::ItemStack& stack);
+
         // Release every cached mesh + buffer. Called from the renderer's
         // Shutdown so we don't leak GPU handles after backend tear-down.
         static void ClearCache();
 
     private:
+        // Extrude an RGBA image already in memory (row-major, top-left
+        // origin); appends to verts/idx. `label` names it in warnings.
+        static bool BuildGeometryFromPixels(const unsigned char* pixels, int w, int h,
+                                            uint32_t tintARGB, const std::string& label,
+                                            std::vector<Vertex>& verts,
+                                            std::vector<uint32_t>& idx);
+        // Upload built geometry + its sampling texture into `e`.
+        static bool Upload(Entry& e, const std::vector<Vertex>& verts,
+                           const std::vector<uint32_t>& idx,
+                           const unsigned char* texPixels, int texW, int texH,
+                           const std::string& label);
+
         // Cache key is the sprite path passed to GetOrBuild, suffixed with the
         // tint when there is one. The bare name is still the key for untinted
         // items — the same key GuiGraphics::LoadItemTexture uses, so we keep

@@ -1,0 +1,27 @@
+set(CONSOLE_BIOME_MODULES
+  AddIslandLayer
+  AddMushroomIslandLayer
+  AddSnowLayer
+  BiomeInitLayer
+  DownfallLayer
+  DownfallMixerLayer
+  FlatLayer
+  FuzzyZoomLayer
+  IntCache
+  IslandLayer
+  Layer
+  RiverInitLayer
+  RiverLayer
+  RiverMixerLayer
+  ShoreLayer
+  SmoothLayer
+  SmoothZoomLayer
+  TemperatureLayer
+  TemperatureMixerLayer
+  VoronoiZoom
+  ZoomLayer
+  GrowMushroomIslandLayer
+  RegionHillsLayer
+  SwampRiversLayer
+  LevelType
+)

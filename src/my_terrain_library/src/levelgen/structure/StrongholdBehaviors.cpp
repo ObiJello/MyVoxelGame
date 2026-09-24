@@ -1,4 +1,5 @@
 #include "levelgen/structure/PieceBehaviors.h"
+#include "nbt/AllTags.h"
 
 #include "levelgen/structure/OrientedPieceBehavior.h"
 #include "levelgen/WorldGenLevel.h"
@@ -254,6 +255,13 @@ public:
             m_hasPlacedChest = true;
             createChest(level, chunkBB, random, 3, 2, 3, "minecraft:chests/stronghold_corridor");
         }
+    }
+
+public:
+    // Reference: StrongholdPieces.ChestCorridor "Chest".
+    void saveState(nbt::CompoundTag& tag) const override { tag.putBoolean("Chest", m_hasPlacedChest); }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_hasPlacedChest = tag.getBooleanOr("Chest", m_hasPlacedChest);
     }
 
 private:
@@ -761,6 +769,13 @@ public:
                 }
             }
         }
+    }
+
+public:
+    // Reference: StrongholdPieces.PortalRoom "Mob".
+    void saveState(nbt::CompoundTag& tag) const override { tag.putBoolean("Mob", m_hasPlacedSpawner); }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_hasPlacedSpawner = tag.getBooleanOr("Mob", m_hasPlacedSpawner);
     }
 
 private:

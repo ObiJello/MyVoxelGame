@@ -6,6 +6,14 @@
     "minecraft:netherite_sword",
     "minecraft:wooden_sword",
     "minecraft:iron_sword",
-    "minecraft:copper_sword"
+    "minecraft:copper_sword",
+    "minecraft:skyroot_sword",
+    "minecraft:holystone_sword",
+    "minecraft:zanite_sword",
+    "minecraft:gravitite_sword",
+    "minecraft:ironwood_sword",
+    "minecraft:steeleaf_sword",
+    "minecraft:knightmetal_sword",
+    "minecraft:fiery_sword"
   ]
 }

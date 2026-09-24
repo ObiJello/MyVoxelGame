@@ -1,10 +1,10 @@
 // File: src/common/entity/ai/goals/DolphinGoals.hpp
 //
 // MC animal/dolphin/Dolphin.java's goal set — the top-level DolphinJumpGoal
-// and TryFindWaterGoal ported whole, plus the nested goals whose systems
-// (air supply, structures-as-treasure, boats, mob-held items, the
-// DOLPHINS_GRACE effect) this port does not have, each declared with the
-// gate that keeps it honest.
+// and TryFindWaterGoal ported whole, the player escort (DOLPHINS_GRACE)
+// too, plus the nested goals whose systems (structures-as-treasure, boats,
+// mob-held items) this port does not have, each declared with the gate that
+// keeps it honest.
 #pragma once
 
 #include "common/entity/ai/goals/BasicGoals.hpp"
@@ -94,18 +94,27 @@ namespace Game {
         Dolphin* m_dolphin;
     };
 
-    // MC Dolphin.DolphinSwimWithPlayerGoal — escort a SWIMMING player and
-    // grant DOLPHINS_GRACE. Neither the player swim pose nor the effect
-    // exists in this port; MC's own `player.isSwimming()` gate never opens.
+    // MC Dolphin.DolphinSwimWithPlayerGoal — escort the nearest SWIMMING
+    // player within 10 blocks (SWIM_WITH_PLAYER_TARGETING: non-combat, no
+    // line of sight, invisibility still scales the range) and grant
+    // DOLPHINS_GRACE for 5 s on the start and on a 1-in-6 roll every tick
+    // while they keep swimming. A player "swims" as the client does it: a
+    // sprint with the eye under water (PlayerEntityView::IsSwimming).
     class DolphinSwimWithPlayerGoal : public Goal {
     public:
-        DolphinSwimWithPlayerGoal(Dolphin* dolphin, double speedModifier)
-            : m_dolphin(dolphin) { (void)speedModifier; }
-        bool CanUse() override { return false; }
+        DolphinSwimWithPlayerGoal(Dolphin* dolphin, double speedModifier);
+        bool CanUse() override;
+        bool CanContinueToUse() override;
+        void Start() override;
+        void Stop() override;
+        void Tick() override;
+        void ClearReferenceTo(const Entity* entity) override;
         const char* Name() const override { return "DolphinSwimWithPlayerGoal"; }
 
     private:
-        Dolphin* m_dolphin;
+        Dolphin*      m_dolphin;
+        double        m_speedModifier;
+        LivingEntity* m_player = nullptr;
     };
 
     // MC Dolphin.PlayWithItemsGoal — toss floating ItemEntities around. Mob

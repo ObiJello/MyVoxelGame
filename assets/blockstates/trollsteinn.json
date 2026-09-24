@@ -1,0 +1,44 @@
+{
+  "multipart": [
+    {
+      "apply": {
+        "model": "minecraft:block/trollsteinn"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/trollsteinn",
+        "uvlock": true,
+        "y": 90
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/trollsteinn",
+        "uvlock": true,
+        "y": 180
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/trollsteinn",
+        "uvlock": true,
+        "y": 270
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/trollsteinn",
+        "uvlock": true,
+        "x": 270
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/trollsteinn",
+        "uvlock": true,
+        "x": 90
+      }
+    }
+  ]
+}

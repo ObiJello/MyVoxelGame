@@ -1,0 +1,350 @@
+{
+  "type": "minecraft:jigsaw",
+  "biomes": "#minecraft:has_structure/aurelith",
+  "max_distance_from_center": {
+    "horizontal": 128,
+    "vertical": 160
+  },
+  "size": 7,
+  "spawn_overrides": {
+    "monster": {
+      "bounding_box": "full",
+      "spawns": [],
+      "obeycraft:districts": [
+        {
+          "name": "archive_of_echoes",
+          "areas": [
+            {
+              "template": "minecraft:aurelith/u_1_1",
+              "box": [
+                26,
+                2,
+                19,
+                31,
+                64,
+                19
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_1",
+              "box": [
+                24,
+                2,
+                20,
+                31,
+                64,
+                20
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_1",
+              "box": [
+                23,
+                2,
+                21,
+                31,
+                64,
+                21
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_1",
+              "box": [
+                22,
+                2,
+                22,
+                31,
+                64,
+                22
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_1",
+              "box": [
+                21,
+                2,
+                23,
+                31,
+                64,
+                23
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_1",
+              "box": [
+                20,
+                2,
+                24,
+                31,
+                64,
+                25
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_1",
+              "box": [
+                19,
+                2,
+                26,
+                31,
+                64,
+                31
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_2",
+              "box": [
+                19,
+                2,
+                0,
+                31,
+                64,
+                0
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_2",
+              "box": [
+                20,
+                2,
+                1,
+                31,
+                64,
+                2
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_2",
+              "box": [
+                21,
+                2,
+                3,
+                31,
+                64,
+                3
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_2",
+              "box": [
+                22,
+                2,
+                4,
+                31,
+                64,
+                4
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_2",
+              "box": [
+                23,
+                2,
+                5,
+                31,
+                64,
+                5
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_2",
+              "box": [
+                24,
+                2,
+                6,
+                31,
+                64,
+                6
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_1_2",
+              "box": [
+                26,
+                2,
+                7,
+                31,
+                64,
+                7
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_1",
+              "box": [
+                0,
+                2,
+                19,
+                0,
+                64,
+                19
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_1",
+              "box": [
+                0,
+                2,
+                20,
+                2,
+                64,
+                20
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_1",
+              "box": [
+                0,
+                2,
+                21,
+                3,
+                64,
+                21
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_1",
+              "box": [
+                0,
+                2,
+                22,
+                4,
+                64,
+                22
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_1",
+              "box": [
+                0,
+                2,
+                23,
+                5,
+                64,
+                23
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_1",
+              "box": [
+                0,
+                2,
+                24,
+                6,
+                64,
+                25
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_1",
+              "box": [
+                0,
+                2,
+                26,
+                7,
+                64,
+                31
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_2",
+              "box": [
+                0,
+                2,
+                0,
+                7,
+                64,
+                0
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_2",
+              "box": [
+                0,
+                2,
+                1,
+                6,
+                64,
+                2
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_2",
+              "box": [
+                0,
+                2,
+                3,
+                5,
+                64,
+                3
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_2",
+              "box": [
+                0,
+                2,
+                4,
+                4,
+                64,
+                4
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_2",
+              "box": [
+                0,
+                2,
+                5,
+                3,
+                64,
+                5
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_2",
+              "box": [
+                0,
+                2,
+                6,
+                2,
+                64,
+                6
+              ]
+            },
+            {
+              "template": "minecraft:aurelith/u_2_2",
+              "box": [
+                0,
+                2,
+                7,
+                0,
+                64,
+                7
+              ]
+            }
+          ],
+          "spawns": [
+            {
+              "type": "minecraft:echo_mimic",
+              "maxCount": 2,
+              "minCount": 1,
+              "weight": 1
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "start_height": {
+    "absolute": -1
+  },
+  "start_pool": "minecraft:aurelith/start",
+  "project_start_to_heightmap": "WORLD_SURFACE_WG",
+  "step": "surface_structures",
+  "terrain_adaptation": "beard_box",
+  "use_expansion_hack": false,
+  "level_site": {
+    "radius": 100,
+    "max_spread": 24
+  }
+}

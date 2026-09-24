@@ -19,13 +19,13 @@ import os
 import re
 import sys
 
-MC = "minecraft_code/decompiled_net/minecraft"
+MC = "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft"
 ENT_DIR = os.path.join(MC, "world/entity")
 REN_DIR = os.path.join(MC, "client/renderer/entity")
 # The 26.3 decompile fills GAPS only: a class, renderer or default-attribute
 # row that 26.1 lacks is read from here (the sulfur cube); anything both trees
 # have keeps its 26.1 reading, like every other generator.
-MC2 = "minecraft_code2/decompiled_net/minecraft"
+MC2 = "minecraft_code_26.3-pre-2/decompiled_net/minecraft"
 ENT_DIR2 = os.path.join(MC2, "world/entity")
 REN_DIR2 = os.path.join(MC2, "client/renderer/entity")
 TYPES_HPP = "src/common/entity/GeneratedEntityTypes.hpp"
@@ -48,6 +48,14 @@ PROJECTILES = {
     "evoker_fangs", "area_effect_cloud", "eye_of_ender", "falling_block",
     "tnt", "end_crystal", "ender_pearl",
 }
+
+# Engine-only mobs (2026-09-22: The Hush — docs/the-hush.md). No MC class to
+# read, so no def row: each is a hand-written class over a vanilla one
+# (Hushling over PathfinderMob with endermite numbers, EchoWraith over Vex,
+# SilentWarden over Warden — src/common/entity/mobs/HushMobs.hpp) and is
+# promoted in MakeGenericMob BEFORE the def lookup. The renderer names their
+# textures and meshes explicitly for the same reason.
+ENGINE_ONLY = {"hushling", "echo_wraith", "silent_warden"}
 
 # MC attribute -> our Attribute enum. Anything not listed has no effect in this
 # engine yet (armour, luck, jump strength …) and is dropped rather than faked.
@@ -747,7 +755,7 @@ def main():
     item_ids = load_item_identifiers()
     rows, notex, unparsed, noattr, unknown_food = [], [], [], [], []
     for slug in slugs:
-        if slug in HAND_WRITTEN or slug in PROJECTILES:
+        if slug in HAND_WRITTEN or slug in PROJECTILES or slug in ENGINE_ONLY:
             continue
 
         # The entity's OWN class, from its `Class::new` in EntityType.java —

@@ -1,0 +1,16 @@
+{
+  "model": {
+    "type": "minecraft:model",
+    "model": "minecraft:item/lumen_moth_spawn_egg",
+    "tints": [
+      {
+        "type": "minecraft:constant",
+        "value": -14726586
+      },
+      {
+        "type": "minecraft:constant",
+        "value": -1507408
+      }
+    ]
+  }
+}

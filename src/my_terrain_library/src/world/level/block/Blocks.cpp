@@ -3,6 +3,7 @@
 #include "world/level/block/blocks/BuddingAmethystBlock.h"
 #include "levelgen/blockpredicates/BlockPredicate.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
+#include <mutex>
 
 namespace minecraft {
 namespace world {
@@ -27,7 +28,7 @@ protected:
     bool mayPlaceOn(BlockState* stateBelow) const override {
         return minecraft::levelgen::blockpredicates::matchesBlockTagName(
             stateBelow,
-            "minecraft:dry_vegetation_may_place_on"
+            "minecraft:supports_dry_vegetation"
         );
     }
 };
@@ -80,9 +81,8 @@ public:
         }
         BlockState* below = level.getBlockState(pos.below());
         if (!below) return false;
-        return bp::matchesBlockTagName(below, "minecraft:dirt") ||
-               below->getIdentifier() == "minecraft:farmland" ||
-               below->getIdentifier() == "minecraft:clay";
+        // 26.3: BlockTags.SUPPORTS_MANGROVE_PROPAGULE (#supports_vegetation + clay)
+        return bp::matchesBlockTagName(below, "minecraft:supports_mangrove_propagule");
     }
 
 protected:
@@ -111,6 +111,23 @@ protected:
     }
 };
 
+// Reference: BaseCoralPlantTypeBlock (coral plants and fans) - WATERLOGGED
+// (true); canSurvive: the block below is face-sturdy UP.
+class CoralPlantBlockImpl : public WaterloggedDefaultTrueBlockImpl {
+public:
+    explicit CoralPlantBlockImpl(const Properties& properties) : WaterloggedDefaultTrueBlockImpl(properties) {}
+
+    bool canSurvive(
+        BlockState* /*state*/,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const override {
+        const core::BlockPos below = pos.below();
+        BlockState* belowState = level.getBlockState(below);
+        return belowState && belowState->isFaceSturdy(level, below, core::Direction::UP);
+    }
+};
+
 // Reference: BaseCoralWallFanBlock - HORIZONTAL_FACING (north) + WATERLOGGED (true).
 class CoralWallFanBlockImpl : public Block {
 public:
@@ -122,6 +139,20 @@ public:
             defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, true);
             registerDefaultState(defaultState);
         }
+    }
+
+    // BaseCoralWallFanBlock.canSurvive: the block it hangs on is face-sturdy
+    // toward it.
+    bool canSurvive(
+        BlockState* state,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const override {
+        if (!state) return false;
+        const core::Direction facing = state->getValueOrElse(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+        const core::BlockPos relativePos = pos.relative(core::getOpposite(facing));
+        BlockState* relativeState = level.getBlockState(relativePos);
+        return relativeState && relativeState->isFaceSturdy(level, relativePos, facing);
     }
 
 protected:
@@ -142,6 +173,19 @@ public:
             defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, true);
             registerDefaultState(defaultState);
         }
+    }
+
+    // SeaPickleBlock.canSurvive -> mayPlaceOn(below): a non-empty collision
+    // face UP or a face-sturdy UP; the sturdy-face table covers the seabed
+    // blocks worldgen produces.
+    bool canSurvive(
+        BlockState* /*state*/,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const override {
+        const core::BlockPos below = pos.below();
+        BlockState* belowState = level.getBlockState(below);
+        return belowState && belowState->isFaceSturdy(level, below, core::Direction::UP);
     }
 
 protected:
@@ -307,8 +351,8 @@ public:
             return true;
         }
 
-        if (!minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:dirt") &&
-            !minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:sand")) {
+        // 26.3 SugarCaneBlock.canSurvive: BlockTags.SUPPORTS_SUGAR_CANE
+        if (!minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:supports_sugar_cane")) {
             return false;
         }
 
@@ -443,6 +487,105 @@ private:
             AGE = BlockStateProperties::AGE_2;
             FACING = BlockStateProperties::HORIZONTAL_FACING;
         }
+    }
+};
+
+// Reference: 26.3 ShelfMushroomBlock - FACING (horizontal) + AGE (0-1),
+// default north / 0. Worldgen (ShelfMushroomDecorator) sets both.
+class ShelfMushroomBlockImpl : public Block {
+public:
+    static inline IntegerProperty* AGE = nullptr;
+    static inline DirectionProperty* FACING = nullptr;
+
+    explicit ShelfMushroomBlockImpl(const Block::Properties& properties)
+        : Block(Block::Properties(properties).noOcclusion()) {
+        initializeProperties();
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*AGE, 0);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        initializeProperties();
+        builder.add(FACING, AGE);
+    }
+
+private:
+    static void initializeProperties() {
+        if (!AGE) {
+            BlockStateProperties::initialize();
+            AGE = BlockStateProperties::AGE_1;
+            FACING = BlockStateProperties::HORIZONTAL_FACING;
+        }
+    }
+};
+
+// Reference: 26.3 PotentSulfurBlock - STATE (dry/wet/dormant/erupting/
+// continuous), default dry. Worldgen places it wet (sulfur_pool).
+class PotentSulfurBlockImpl : public Block {
+public:
+    explicit PotentSulfurBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::POTENT_SULFUR_STATE,
+                state::properties::PotentSulfurState(state::properties::PotentSulfurState::DRY));
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::POTENT_SULFUR_STATE);
+    }
+};
+
+// Reference: SeagrassBlock - mayPlaceOn: face-sturdy UP and not
+// #cannot_support_seagrass.
+class SeagrassBlockImpl : public BushBlock {
+public:
+    explicit SeagrassBlockImpl(const Properties& properties) : BushBlock(properties) {}
+
+protected:
+    bool mayPlaceOn(BlockState* stateBelow, const minecraft::levelgen::WorldGenLevel& level,
+                    const core::BlockPos& belowPos) const override {
+        return stateBelow && stateBelow->isFaceSturdy(level, belowPos, core::Direction::UP)
+            && !minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:cannot_support_seagrass");
+    }
+};
+
+// Reference: TallSeagrassBlock - the lower half needs seagrass ground and a
+// full water source at its own position; the upper half sits on the lower.
+class TallSeagrassBlockImpl : public DoublePlantBlock {
+public:
+    explicit TallSeagrassBlockImpl(const Properties& properties) : DoublePlantBlock(properties) {}
+
+    bool canSurvive(
+        BlockState* state,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const override {
+        if (!state) return false;
+        if (state->getValue(*HALF) == state::properties::DoubleBlockHalf::upper()) {
+            BlockState* belowState = level.getBlockState(pos.below());
+            return belowState && belowState->is(this)
+                && belowState->getValue(*HALF) == state::properties::DoubleBlockHalf::lower();
+        }
+        BlockState* here = level.getBlockState(pos);
+        return BushBlock::canSurvive(state, level, pos) && here && here->hasSourceWaterFluid();
+    }
+
+protected:
+    bool mayPlaceOn(BlockState* stateBelow, const minecraft::levelgen::WorldGenLevel& level,
+                    const core::BlockPos& belowPos) const override {
+        return stateBelow && stateBelow->isFaceSturdy(level, belowPos, core::Direction::UP)
+            && !minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:cannot_support_seagrass");
     }
 };
 
@@ -1381,6 +1524,30 @@ protected:
 };
 
 // Reference: LanternBlock.java - HANGING (false), WATERLOGGED (false).
+// Reference: 26.3 CopperGolemStatueBlock - FACING (horizontal, north), POSE
+// (standing), WATERLOGGED (false).
+class CopperGolemStatueBlockImpl : public Block {
+public:
+    explicit CopperGolemStatueBlockImpl(const Properties& properties) : Block(properties) {
+        rebuildStateDefinition();
+        BlockState* defaultState = getStateDefinition().any();
+        if (defaultState) {
+            defaultState = defaultState->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH);
+            defaultState = defaultState->setValue(*BlockStateProperties::COPPER_GOLEM_POSE,
+                state::properties::CopperGolemPose(state::properties::CopperGolemPose::STANDING));
+            defaultState = defaultState->setValue(*BlockStateProperties::WATERLOGGED, false);
+            registerDefaultState(defaultState);
+        }
+    }
+
+protected:
+    void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
+        BlockStateProperties::initialize();
+        builder.add(BlockStateProperties::HORIZONTAL_FACING, BlockStateProperties::COPPER_GOLEM_POSE,
+                    BlockStateProperties::WATERLOGGED);
+    }
+};
+
 class LanternBlockImpl : public Block {
 public:
     explicit LanternBlockImpl(const Properties& properties) : Block(properties) {
@@ -1666,7 +1833,7 @@ public:
     ) const override {
         BlockState* below = level.getBlockState(pos.below());
         if (::minecraft::levelgen::blockpredicates::matchesBlockTagName(
-                below, "minecraft:mushroom_grow_block")) {
+                below, "minecraft:overrides_mushroom_light_requirement")) {
             return true;
         }
         // Java fallback: getRawBrightness(pos, 0) < 13 && mayPlaceOn
@@ -1789,7 +1956,7 @@ public:
     ) const override {
         BlockState* below = level.getBlockState(pos.below());
         return below && minecraft::levelgen::blockpredicates::matchesBlockTagName(
-            below, "minecraft:bamboo_plantable_on");
+            below, "minecraft:supports_bamboo");
     }
 
 protected:
@@ -1863,6 +2030,18 @@ Block* minecraft::world::level::block::Blocks::SNOW = nullptr;
 Block* minecraft::world::level::block::Blocks::AMETHYST_BLOCK = nullptr;
 Block* minecraft::world::level::block::Blocks::BUDDING_AMETHYST = nullptr;
 Block* minecraft::world::level::block::Blocks::CALCITE = nullptr;
+Block* minecraft::world::level::block::Blocks::SULFUR = nullptr;
+Block* minecraft::world::level::block::Blocks::CINNABAR = nullptr;
+Block* minecraft::world::level::block::Blocks::SULFUR_SPIKE = nullptr;
+Block* minecraft::world::level::block::Blocks::POTENT_SULFUR = nullptr;
+Block* minecraft::world::level::block::Blocks::SHELF_MUSHROOM = nullptr;
+Block* minecraft::world::level::block::Blocks::RED_SHRUB = nullptr;
+Block* minecraft::world::level::block::Blocks::POPLAR_SAPLING = nullptr;
+LeavesBlock* minecraft::world::level::block::Blocks::RED_POPLAR_LEAVES = nullptr;
+LeavesBlock* minecraft::world::level::block::Blocks::ORANGE_POPLAR_LEAVES = nullptr;
+LeavesBlock* minecraft::world::level::block::Blocks::YELLOW_POPLAR_LEAVES = nullptr;
+RotatedPillarBlock* minecraft::world::level::block::Blocks::POPLAR_LOG = nullptr;
+RotatedPillarBlock* minecraft::world::level::block::Blocks::STRIPPED_POPLAR_LOG = nullptr;
 Block* minecraft::world::level::block::Blocks::SMOOTH_BASALT = nullptr;
 Block* minecraft::world::level::block::Blocks::SMALL_AMETHYST_BUD = nullptr;
 Block* minecraft::world::level::block::Blocks::MEDIUM_AMETHYST_BUD = nullptr;
@@ -2450,6 +2629,462 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     createSimpleBlock("minecraft:blackstone");
     createSimpleBlock("minecraft:crimson_nylium");
     createSimpleBlock("minecraft:end_stone");
+    // The Hush (engine dimension). The block CLASS chosen here fixes each
+    // block's property set, and it must match the engine's alias in
+    // tools/gen_block_states.py ALIAS_EXACT (simple cube -> stone/dirt
+    // class, log -> oak_log, leaves -> oak_leaves, bush -> dandelion):
+    // a mismatch makes the generated chunk's states unpack to air.
+    // hush_portal is deliberately absent — nothing generates it.
+    createSimpleBlock("minecraft:hushstone");
+    createSimpleBlock("minecraft:polished_hushstone");
+    createSimpleBlock("minecraft:hushstone_bricks");
+    createSimpleBlock("minecraft:sculk_loam");
+    createSimpleBlock("minecraft:echo_ore");
+    createSimpleBlock("minecraft:resonant_crystal");
+    createSimpleBlock("minecraft:hush_moss");
+    createSimpleBlock("minecraft:whisperwood_planks");
+    createLogBlock("minecraft:whisperwood_log");
+    createLeavesBlock("minecraft:lantern_leaves");
+    createBushBlock("minecraft:resonance_bloom", false);
+    // The Hush, second drop (2026-09-22): the building sets, the sapling, the
+    // cavern crystals and the vault heart. Same rule as above: the class here
+    // is the engine's ALIAS_EXACT / ALIAS_SUFFIX row (stripped_oak_log,
+    // oak_sapling, short_grass, amethyst_cluster, lantern, oak_stairs/slab/
+    // fence/fence_gate/door/trapdoor, cobblestone_wall, stone/lapis_ore/
+    // iron_block cubes). Structure templates and processors reference the
+    // stairs/slab/wall variants by name, which is why every one is registered
+    // even though no feature places them.
+    createLogBlock("minecraft:stripped_whisperwood_log");
+    createSimpleBlock("minecraft:cracked_hushstone_bricks");
+    createSimpleBlock("minecraft:chiseled_hushstone_bricks");
+    createSimpleBlock("minecraft:resonite_ore");
+    createSimpleBlock("minecraft:resonite_block");
+    createSimpleBlock("minecraft:echo_core");
+    createBushBlock("minecraft:hush_grass");            // replaceable, like short_grass
+    {
+        // SaplingBlockImpl (STAGE), exactly what createSapling below builds —
+        // that helper is a lambda declared later in this function.
+        Block::Properties props;
+        props.setId("minecraft:whisperwood_sapling").replaceableByTrees();
+        registerBlock("minecraft:whisperwood_sapling", new SaplingBlockImpl(props));
+    }
+    {
+        // AmethystClusterBlock: FACING + WATERLOGGED, same flags as amethyst_cluster.
+        Block::Properties props;
+        props.setId("minecraft:resonant_cluster").forceSolidOn().noOcclusion();
+        registerBlock("minecraft:resonant_cluster", new AmethystClusterBlock(props));
+    }
+    {
+        // LanternBlockImpl: HANGING + WATERLOGGED.
+        Block::Properties props;
+        props.setId("minecraft:echo_lantern").noOcclusion();
+        registerBlock("minecraft:echo_lantern", new LanternBlockImpl(props));
+    }
+    // The Choir Hall puzzle (2026-09-22): the chime carries redstone_lamp's
+    // single LIT (the engine's ALIAS_EXACT row), the altar is a plain cube.
+    // Structure templates place both, so both must resolve here.
+    {
+        Block::Properties props;
+        props.setId("minecraft:resonant_chime");
+        registerBlock("minecraft:resonant_chime",
+                      new SingleBoolBlockImpl(props, BlockStateProperties::LIT));
+    }
+    createSimpleBlock("minecraft:choir_altar");
+    // The tools of the deep (2026-09-22): the whisperfruit is placed by the
+    // whisperwood trees' AttachedToLeavesDecorator (HushFeatures), so it must
+    // resolve here; AGE_2 alone, matching the engine's EXPLICIT row in
+    // tools/gen_block_states.py. The echo heart is player-made only, but a
+    // plain cube row keeps the two block tables in step.
+    {
+        Block::Properties props;
+        props.setId("minecraft:hanging_whisperfruit").noOcclusion();
+        registerBlock("minecraft:hanging_whisperfruit",
+                      new SingleIntBlockImpl(props, BlockStateProperties::AGE_2, 0));
+    }
+    createSimpleBlock("minecraft:echo_heart");
+    // The Hush Lighthouse (2026-09-22): its rotating lamp is a beacon-class
+    // cube (no properties, the engine's ALIAS_EXACT row) that carries a
+    // block entity (BlockState::computeHasBlockEntity; the template's {id}
+    // nbt becomes the payload in TemplateEngine::blockEntityPayloadFor). The
+    // lantern room is glazed in cyan stained glass, which nothing registered
+    // until then (a plain no-occlusion cube, as every stained glass here).
+    createSimpleBlock("minecraft:hush_lighthouse_lamp");
+    createNoOcclusionBlock("minecraft:cyan_stained_glass");
+    for (const char* stairs : {"minecraft:whisperwood_stairs", "minecraft:hushstone_stairs",
+                               "minecraft:polished_hushstone_stairs",
+                               "minecraft:hushstone_brick_stairs"}) {
+        Block::Properties props;
+        props.setId(stairs).noOcclusion();
+        registerBlock(stairs, new StairBlockImpl(props));
+    }
+    for (const char* slab : {"minecraft:whisperwood_slab", "minecraft:hushstone_slab",
+                             "minecraft:polished_hushstone_slab",
+                             "minecraft:hushstone_brick_slab"}) {
+        Block::Properties props;
+        props.setId(slab).noOcclusion();
+        registerBlock(slab, new SlabBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:whisperwood_fence").noOcclusion();
+        registerBlock("minecraft:whisperwood_fence", new FenceBlock(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:whisperwood_fence_gate").noOcclusion();
+        registerBlock("minecraft:whisperwood_fence_gate", new FenceGateBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:whisperwood_door").noOcclusion();
+        registerBlock("minecraft:whisperwood_door", new DoorBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:whisperwood_trapdoor").noOcclusion();
+        registerBlock("minecraft:whisperwood_trapdoor", new TrapDoorBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:hushstone_brick_wall").noOcclusion();
+        registerBlock("minecraft:hushstone_brick_wall", new WallBlockImpl(props));
+    }
+    // Aurelith, the Lantern City (2026-09-22): every block the city's
+    // templates place. Same rule as the Hush above — the class fixes the
+    // property set and must equal the engine's alias in
+    // tools/gen_block_states.py (stone / stone_bricks / quartz_pillar /
+    // tinted_glass / copper_grate / sea_lantern / chain / lantern / beacon /
+    // carved_pumpkin, and the oak_stairs / oak_slab / cobblestone_wall
+    // suffix rows). The resonance engine and the voice beacon carry block
+    // entities (BlockState::computeHasBlockEntity; payloads in
+    // TemplateEngine::blockEntityPayloadFor). resonant_water is a plain
+    // non-occluding cube to the library: nothing here flows or ticks it; the
+    // engine treats it as always-water (docs/fluids.md).
+    for (const char* cube : {"minecraft:choirstone", "minecraft:polished_choirstone",
+                             "minecraft:choirstone_bricks", "minecraft:cracked_choirstone_bricks",
+                             "minecraft:chiseled_choirstone", "minecraft:choirstone_tiles",
+                             "minecraft:stave_stone", "minecraft:cyan_lumen_panel",
+                             "minecraft:violet_lumen_panel", "minecraft:amber_lumen_panel",
+                             "minecraft:resonance_engine"}) {
+        createSimpleBlock(cube);
+    }
+    createLogBlock("minecraft:choirstone_pillar");     // RotatedPillarBlock: AXIS
+    createLogBlock("minecraft:lumen_strip");           // RotatedPillarBlock: AXIS
+    createNoOcclusionBlock("minecraft:nightglass");
+    createNoOcclusionBlock("minecraft:resonant_water");
+    for (const char* stairs : {"minecraft:polished_choirstone_stairs",
+                               "minecraft:choirstone_brick_stairs",
+                               "minecraft:choirstone_tile_stairs"}) {
+        Block::Properties props;
+        props.setId(stairs).noOcclusion();
+        registerBlock(stairs, new StairBlockImpl(props));
+    }
+    for (const char* slab : {"minecraft:polished_choirstone_slab",
+                             "minecraft:choirstone_brick_slab",
+                             "minecraft:choirstone_tile_slab"}) {
+        Block::Properties props;
+        props.setId(slab).noOcclusion();
+        registerBlock(slab, new SlabBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:choirstone_brick_wall").noOcclusion();
+        registerBlock("minecraft:choirstone_brick_wall", new WallBlockImpl(props));
+    }
+    {
+        // WaterloggedTransparentBlock (copper grate's class): WATERLOGGED only.
+        Block::Properties props;
+        props.setId("minecraft:resonite_grate").noOcclusion();
+        registerBlock("minecraft:resonite_grate",
+                      new SingleBoolBlockImpl(props, BlockStateProperties::WATERLOGGED));
+    }
+    {
+        // ChainBlock: AXIS + WATERLOGGED, as iron_chain.
+        Block::Properties props;
+        props.setId("minecraft:crystal_conduit").forceSolidOn().noOcclusion();
+        registerBlock("minecraft:crystal_conduit", new ChainBlockImpl(props));
+    }
+    {
+        // LanternBlock: HANGING + WATERLOGGED, as echo_lantern.
+        Block::Properties props;
+        props.setId("minecraft:choir_lamp").noOcclusion();
+        registerBlock("minecraft:choir_lamp", new LanternBlockImpl(props));
+    }
+    {
+        // CarvedPumpkinBlock's set (HORIZONTAL FACING only), the class the
+        // library registers carved_pumpkin with: the facing picks the voice.
+        Block::Properties props;
+        props.setId("minecraft:voice_beacon");
+        registerBlock("minecraft:voice_beacon", new WallTorchBlockImpl(props));
+    }
+    // Aurelith, reawakening the Heart (2026-09-22). The dormant city's dim
+    // lights take their lit twins' classes (the engine swaps one for the
+    // other, properties kept); the chord socket is a stonecutter-class
+    // HORIZONTAL_FACING block, the voice pedestal a plain non-occluding
+    // block, the choir cabinet a barrel (FACING + OPEN). The three quest
+    // blocks carry block entities (BlockState::computeHasBlockEntity;
+    // payloads in TemplateEngine::blockEntityPayloadFor).
+    for (const char* cube : {"minecraft:dim_cyan_lumen_panel", "minecraft:dim_violet_lumen_panel",
+                             "minecraft:dim_amber_lumen_panel", "minecraft:dim_stave_stone"}) {
+        createSimpleBlock(cube);
+    }
+    createLogBlock("minecraft:dim_lumen_strip");       // RotatedPillarBlock: AXIS
+    {
+        Block::Properties props;
+        props.setId("minecraft:dim_choir_lamp").noOcclusion();
+        registerBlock("minecraft:dim_choir_lamp", new LanternBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:chord_socket").noOcclusion();
+        registerBlock("minecraft:chord_socket", new WallTorchBlockImpl(props));
+    }
+    createNoOcclusionBlock("minecraft:voice_pedestal");
+    {
+        Block::Properties props;
+        props.setId("minecraft:choir_cabinet");
+        registerBlock("minecraft:choir_cabinet", new BarrelBlockImpl(props));
+    }
+    // Aurelith's flickering windows (2026-09-22): sea-lantern-class cubes with
+    // no properties, placed in the city's lit windows; the flicker is their
+    // textures' frame schedules.
+    for (const char* window : {"minecraft:guttering_amber_window", "minecraft:waking_amber_window",
+                               "minecraft:restless_amber_window", "minecraft:guttering_cyan_window",
+                               "minecraft:waking_cyan_window", "minecraft:guttering_violet_window",
+                               "minecraft:waking_violet_window"}) {
+        createSimpleBlock(window);
+    }
+    // Twilight Forest + The Aether (pass one, docs/mod-ports.md). Same rule as
+    // the Hush above: the class chosen here fixes each block's property set
+    // and must match the engine's alias in tools/gen_block_states.py
+    // ALIAS_EXACT (log -> oak_log, leaves -> oak_leaves, sapling ->
+    // oak_sapling, plant -> dandelion/short_grass, patch -> moss_carpet,
+    // fallen leaves -> snow, aether grass -> grass_block, cubes -> stone),
+    // or generated chunks unpack to air. The mods' extra properties (the
+    // Aether's double_drops, TF's is_one_way / patch connections /
+    // has_torchberries / waterlogged critters) are dropped in pass one, on
+    // BOTH sides. The two portals are deliberately absent — nothing
+    // generates them. The critters (firefly/cicada/moonworm) are registered
+    // beside end_rod further down: they need its local EndRodBlockImpl class.
+    for (const char* log : {"minecraft:twilight_oak_log", "minecraft:canopy_log",
+                            "minecraft:tf_mangrove_log", "minecraft:dark_log",
+                            "minecraft:stripped_twilight_oak_log", "minecraft:stripped_canopy_log",
+                            "minecraft:stripped_tf_mangrove_log", "minecraft:stripped_dark_log",
+                            "minecraft:skyroot_log", "minecraft:golden_oak_log",
+                            "minecraft:stripped_skyroot_log"}) {
+        createLogBlock(log);                                  // RotatedPillarBlock: AXIS
+    }
+    for (const char* leaves : {"minecraft:twilight_oak_leaves", "minecraft:canopy_leaves",
+                               "minecraft:tf_mangrove_leaves", "minecraft:dark_leaves",
+                               "minecraft:skyroot_leaves", "minecraft:golden_oak_leaves"}) {
+        createLeavesBlock(leaves);                            // distance/persistent/waterlogged
+    }
+    for (const char* planks : {"minecraft:twilight_oak_planks", "minecraft:canopy_planks",
+                               "minecraft:tf_mangrove_planks", "minecraft:dark_planks",
+                               "minecraft:skyroot_planks"}) {
+        createSimpleBlock(planks);
+    }
+    for (const char* sapling : {"minecraft:twilight_oak_sapling", "minecraft:canopy_sapling",
+                                "minecraft:tf_mangrove_sapling", "minecraft:darkwood_sapling",
+                                "minecraft:skyroot_sapling", "minecraft:golden_oak_sapling"}) {
+        // SaplingBlockImpl (STAGE), as whisperwood_sapling above.
+        Block::Properties props;
+        props.setId(sapling).replaceableByTrees();
+        registerBlock(sapling, new SaplingBlockImpl(props));
+    }
+    // Property-less cubes (stone-class in the engine).
+    for (const char* cube : {"minecraft:root", "minecraft:liveroot_block", "minecraft:hedge",
+                             "minecraft:mazestone", "minecraft:mazestone_brick",
+                             "minecraft:cracked_mazestone", "minecraft:mossy_mazestone",
+                             "minecraft:mazestone_mosaic", "minecraft:mazestone_border",
+                             "minecraft:aurora_block",
+                             "minecraft:aether_dirt", "minecraft:quicksoil",
+                             "minecraft:holystone", "minecraft:mossy_holystone",
+                             "minecraft:holystone_bricks", "minecraft:icestone",
+                             "minecraft:ambrosium_ore", "minecraft:zanite_ore",
+                             "minecraft:gravitite_ore"}) {
+        createSimpleBlock(cube);
+    }
+    // Property-less, but see-through: HardenedDarkLeavesBlock (a leaves
+    // model), the three AercloudBlocks (HalfTransparentBlock, noOcclusion)
+    // and the Aether's berry bush and its stem (AetherBushBlock, noOcclusion).
+    for (const char* clear : {"minecraft:hardened_dark_leaves",
+                              "minecraft:cold_aercloud", "minecraft:blue_aercloud",
+                              "minecraft:golden_aercloud",
+                              "minecraft:berry_bush", "minecraft:berry_bush_stem"}) {
+        createNoOcclusionBlock(clear);
+    }
+    // BushBlock (no properties). Only the fiddlehead is `.replaceable()` in
+    // TFBlocks; flowers, the mushgloom, mayapple and torchberry plant are not.
+    createBushBlock("minecraft:mushgloom", false);
+    createBushBlock("minecraft:mayapple", false);
+    createBushBlock("minecraft:torchberry_plant", false);
+    createBushBlock("minecraft:fiddlehead");
+    createBushBlock("minecraft:white_flower", false);
+    createBushBlock("minecraft:purple_flower", false);
+    // moss_carpet's class (CarpetBlock, no properties).
+    createCarpetBlock("minecraft:clover_patch");
+    createCarpetBlock("minecraft:moss_patch");
+    {
+        // FallenLeavesBlock: LAYERS only — SnowLayerBlock's property set.
+        Block::Properties props;
+        props.setId("minecraft:fallen_leaves").noCollission().replaceable();
+        registerBlock("minecraft:fallen_leaves", new SnowLayerBlockImpl(props));
+    }
+    {
+        // AetherGrassBlock extends GrassBlock: SNOWY, like grass_block above.
+        Block::Properties props;
+        props.setId("minecraft:aether_grass_block");
+        registerBlock("minecraft:aether_grass_block", new SnowyDirtBlockImpl(props));
+    }
+    // The Aether, pass two: building sets, storage blocks, torch, aerogel,
+    // quicksoil glass and the dungeon families. Same rule again — each class
+    // is the engine alias's (gen_block_states.py ALIAS_EXACT / ALIAS_SUFFIX):
+    // StairBlock / SlabBlock / WallBlock / FenceBlock / FenceGateBlock /
+    // DoorBlock / TrapDoorBlock as vanilla, buttons LeverBlock's set, plates
+    // POWERED, the torch property-less and its wall twin HORIZONTAL_FACING,
+    // woods and the pillar AXIS, cubes property-less. The dungeon structures
+    // place these by name, which is why every variant is registered. The
+    // pillar top (end_rod's FACING) is registered beside end_rod below.
+    for (const char* stairs : {"minecraft:holystone_stairs", "minecraft:mossy_holystone_stairs",
+                               "minecraft:holystone_brick_stairs", "minecraft:skyroot_stairs",
+                               "minecraft:icestone_stairs", "minecraft:carved_stairs",
+                               "minecraft:angelic_stairs", "minecraft:hellfire_stairs"}) {
+        Block::Properties props;
+        props.setId(stairs).noOcclusion();
+        registerBlock(stairs, new StairBlockImpl(props));
+    }
+    for (const char* slab : {"minecraft:holystone_slab", "minecraft:mossy_holystone_slab",
+                             "minecraft:holystone_brick_slab", "minecraft:skyroot_slab",
+                             "minecraft:icestone_slab", "minecraft:carved_slab",
+                             "minecraft:angelic_slab", "minecraft:hellfire_slab"}) {
+        Block::Properties props;
+        props.setId(slab).noOcclusion();
+        registerBlock(slab, new SlabBlockImpl(props));
+    }
+    for (const char* wall : {"minecraft:holystone_wall", "minecraft:mossy_holystone_wall",
+                             "minecraft:holystone_brick_wall", "minecraft:icestone_wall",
+                             "minecraft:carved_wall", "minecraft:angelic_wall",
+                             "minecraft:hellfire_wall"}) {
+        Block::Properties props;
+        props.setId(wall).noOcclusion();
+        registerBlock(wall, new WallBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:skyroot_fence").noOcclusion();
+        registerBlock("minecraft:skyroot_fence", new FenceBlock(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:skyroot_fence_gate").noOcclusion();
+        registerBlock("minecraft:skyroot_fence_gate", new FenceGateBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:skyroot_door").noOcclusion();
+        registerBlock("minecraft:skyroot_door", new DoorBlockImpl(props));
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:skyroot_trapdoor").noOcclusion();
+        registerBlock("minecraft:skyroot_trapdoor", new TrapDoorBlockImpl(props));
+    }
+    for (const char* button : {"minecraft:skyroot_button", "minecraft:holystone_button"}) {
+        Block::Properties props;
+        props.setId(button).noCollission();
+        registerBlock(button, new LeverBlockImpl(props));
+    }
+    for (const char* plate : {"minecraft:skyroot_pressure_plate",
+                              "minecraft:holystone_pressure_plate"}) {
+        Block::Properties props;
+        props.setId(plate).noCollission();
+        registerBlock(plate, new SingleBoolBlockImpl(props, BlockStateProperties::POWERED));
+    }
+    for (const char* pillar : {"minecraft:skyroot_wood", "minecraft:golden_oak_wood",
+                               "minecraft:stripped_skyroot_wood", "minecraft:pillar"}) {
+        createLogBlock(pillar);                               // RotatedPillarBlock: AXIS
+    }
+    createNoCollisionBlock("minecraft:ambrosium_torch");
+    {
+        Block::Properties props;
+        props.setId("minecraft:ambrosium_wall_torch").noCollission();
+        registerBlock("minecraft:ambrosium_wall_torch", new WallTorchBlockImpl(props));
+    }
+    createNoOcclusionBlock("minecraft:aerogel");
+    createNoOcclusionBlock("minecraft:quicksoil_glass");
+    for (const char* cube : {"minecraft:ambrosium_block", "minecraft:zanite_block",
+                             "minecraft:enchanted_gravitite",
+                             "minecraft:carved_stone", "minecraft:sentry_stone",
+                             "minecraft:angelic_stone", "minecraft:light_angelic_stone",
+                             "minecraft:hellfire_stone", "minecraft:light_hellfire_stone",
+                             "minecraft:locked_carved_stone", "minecraft:locked_sentry_stone",
+                             "minecraft:locked_angelic_stone", "minecraft:locked_light_angelic_stone",
+                             "minecraft:locked_hellfire_stone", "minecraft:locked_light_hellfire_stone",
+                             "minecraft:trapped_carved_stone", "minecraft:trapped_sentry_stone",
+                             "minecraft:trapped_angelic_stone", "minecraft:trapped_light_angelic_stone",
+                             "minecraft:trapped_hellfire_stone", "minecraft:trapped_light_hellfire_stone",
+                             "minecraft:boss_doorway_carved_stone", "minecraft:boss_doorway_sentry_stone",
+                             "minecraft:boss_doorway_angelic_stone",
+                             "minecraft:boss_doorway_light_angelic_stone",
+                             "minecraft:boss_doorway_hellfire_stone",
+                             "minecraft:boss_doorway_light_hellfire_stone",
+                             "minecraft:treasure_doorway_carved_stone",
+                             "minecraft:treasure_doorway_sentry_stone",
+                             "minecraft:treasure_doorway_angelic_stone",
+                             "minecraft:treasure_doorway_light_angelic_stone",
+                             "minecraft:treasure_doorway_hellfire_stone",
+                             "minecraft:treasure_doorway_light_hellfire_stone"}) {
+        createSimpleBlock(cube);
+    }
+    // Twilight Forest, pass two: towerwood, the castle family, deadrock,
+    // trollsteinn, thorns, the huge water lily, the uncrafting table, cinder
+    // wood and the storage blocks. Classes per the engine alias again: cubes
+    // property-less (trollsteinn's per-face `lit` flags dropped), pillars and
+    // thorns AXIS (the thorns' connections and waterlogged dropped), the
+    // castle stairs StairBlock, the lily a property-less no-collision plant,
+    // the uncrafting table POWERED. The dark tower / final castle / highlands
+    // landmarks reference these by name.
+    for (const char* cube : {"minecraft:towerwood", "minecraft:encased_towerwood",
+                             "minecraft:cracked_towerwood", "minecraft:mossy_towerwood",
+                             "minecraft:infested_towerwood",
+                             "minecraft:castle_brick", "minecraft:worn_castle_brick",
+                             "minecraft:cracked_castle_brick", "minecraft:castle_roof_tile",
+                             "minecraft:mossy_castle_brick", "minecraft:thick_castle_brick",
+                             "minecraft:encased_castle_brick_tile", "minecraft:bold_castle_brick_tile",
+                             "minecraft:pink_castle_rune_brick", "minecraft:blue_castle_rune_brick",
+                             "minecraft:yellow_castle_rune_brick", "minecraft:violet_castle_rune_brick",
+                             "minecraft:deadrock", "minecraft:cracked_deadrock",
+                             "minecraft:weathered_deadrock", "minecraft:trollsteinn",
+                             "minecraft:ironwood_block", "minecraft:steeleaf_block"}) {
+        createSimpleBlock(cube);
+    }
+    for (const char* clear : {"minecraft:knightmetal_block", "minecraft:fiery_block"}) {
+        createNoOcclusionBlock(clear);                        // lattice / shell models
+    }
+    for (const char* pillar : {"minecraft:encased_castle_brick_pillar",
+                               "minecraft:bold_castle_brick_pillar",
+                               "minecraft:cinder_log", "minecraft:cinder_wood",
+                               "minecraft:brown_thorns", "minecraft:green_thorns",
+                               "minecraft:burnt_thorns"}) {
+        createLogBlock(pillar);                               // RotatedPillarBlock: AXIS
+    }
+    for (const char* stairs : {"minecraft:castle_brick_stairs", "minecraft:worn_castle_brick_stairs",
+                               "minecraft:cracked_castle_brick_stairs",
+                               "minecraft:mossy_castle_brick_stairs",
+                               "minecraft:encased_castle_brick_stairs",
+                               "minecraft:bold_castle_brick_stairs"}) {
+        Block::Properties props;
+        props.setId(stairs).noOcclusion();
+        registerBlock(stairs, new StairBlockImpl(props));
+    }
+    createNoCollisionBlock("minecraft:huge_water_lily");
+    {
+        Block::Properties props;
+        props.setId("minecraft:uncrafting_table");
+        registerBlock("minecraft:uncrafting_table",
+                      new SingleBoolBlockImpl(props, BlockStateProperties::POWERED));
+    }
     createSimpleBlock("minecraft:nether_wart_block");
     createSimpleBlock("minecraft:netherrack");
     createSimpleBlock("minecraft:soul_sand");
@@ -2466,6 +3101,14 @@ void minecraft::world::level::block::Blocks::bootstrap() {
         props.setId("minecraft:pointed_dripstone").noOcclusion();
         POINTED_DRIPSTONE = new PointedDripstoneBlockImpl(props);
         registerBlock("minecraft:pointed_dripstone", POINTED_DRIPSTONE);
+    }
+    {
+        // 26.3 SulfurSpikeBlock extends SpeleothemBlock: pointed dripstone's
+        // states (tip direction, thickness, waterlogged).
+        Block::Properties props;
+        props.setId("minecraft:sulfur_spike").noOcclusion();
+        SULFUR_SPIKE = new PointedDripstoneBlockImpl(props);
+        registerBlock("minecraft:sulfur_spike", SULFUR_SPIKE);
     }
     SANDSTONE = createSimpleBlock("minecraft:sandstone");
 
@@ -2525,6 +3168,15 @@ void minecraft::world::level::block::Blocks::bootstrap() {
         registerBlock("minecraft:budding_amethyst", BUDDING_AMETHYST);
     }
     CALCITE = createSimpleBlock("minecraft:calcite");
+    SULFUR = createSimpleBlock("minecraft:sulfur");
+    CINNABAR = createSimpleBlock("minecraft:cinnabar");
+    {
+        // 26.3 PotentSulfurBlock (Properties.ofFullCopy(SULFUR))
+        Block::Properties props;
+        props.setId("minecraft:potent_sulfur");
+        POTENT_SULFUR = new PotentSulfurBlockImpl(props);
+        registerBlock("minecraft:potent_sulfur", POTENT_SULFUR);
+    }
     SMOOTH_BASALT = createSimpleBlock("minecraft:smooth_basalt");
     {
         Block::Properties props;
@@ -2682,6 +3334,14 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     SHORT_DRY_GRASS = createDryVegetationBlock("minecraft:short_dry_grass");
     TALL_DRY_GRASS = createDryVegetationBlock("minecraft:tall_dry_grass");
     BUSH = createBushBlock("minecraft:bush");
+    // 26.3 RED_SHRUB: a BushBlock with Properties.replaceable()
+    RED_SHRUB = createBushBlock("minecraft:red_shrub");
+    {
+        Block::Properties props;
+        props.setId("minecraft:shelf_mushroom");
+        SHELF_MUSHROOM = new ShelfMushroomBlockImpl(props);
+        registerBlock("minecraft:shelf_mushroom", SHELF_MUSHROOM);
+    }
 
     // =========================================================================
     // Flowers (no collision)
@@ -2798,12 +3458,17 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     // Ocean vegetation
     // Reference: Used in ocean biome features
     // =========================================================================
-    SEAGRASS = createReplaceableByTreesBlock("minecraft:seagrass");
+    {
+        Block::Properties props;
+        props.setId("minecraft:seagrass").noCollission().replaceable().replaceableByTrees();
+        SEAGRASS = new SeagrassBlockImpl(props);
+        registerBlock("minecraft:seagrass", SEAGRASS);
+    }
     {
         // Reference: Blocks.java - TallSeagrassBlock extends DoublePlantBlock (HALF property)
         Block::Properties props;
         props.setId("minecraft:tall_seagrass").noCollission().replaceable().replaceableByTrees();
-        TALL_SEAGRASS = new DoublePlantBlock(props);
+        TALL_SEAGRASS = new TallSeagrassBlockImpl(props);
         registerBlock("minecraft:tall_seagrass", TALL_SEAGRASS);
     }
     {
@@ -2817,9 +3482,11 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     {
         // Reference: Blocks.java bamboo - forceSolidOn() => blocksMotion TRUE
         // (updates live OCEAN_FLOOR/MOTION_BLOCKING heightmaps), but its
-        // dynamic thin shape is never face-full/sturdy (vines can't attach).
+        // dynamic thin shape is never face-full/sturdy (vines can't attach),
+        // and noOcclusion() keeps it from being solid-render (leaf litter and
+        // other PlaceOnGround decorations never sit on a bamboo top).
         Block::Properties props;
-        props.setId("minecraft:bamboo");
+        props.setId("minecraft:bamboo").forceSolidOn().noOcclusion();
         BAMBOO = new BambooStalkBlockImpl(props);
         registerBlock("minecraft:bamboo", BAMBOO);
     }
@@ -2843,11 +3510,11 @@ void minecraft::world::level::block::Blocks::bootstrap() {
 
             Block::Properties plantProps;
             plantProps.setId("minecraft:" + std::string(type) + "_coral").noCollission();
-            registerBlock(plantProps.getIdentifier(), new WaterloggedDefaultTrueBlockImpl(plantProps));
+            registerBlock(plantProps.getIdentifier(), new CoralPlantBlockImpl(plantProps));
 
             Block::Properties fanProps;
             fanProps.setId("minecraft:" + std::string(type) + "_coral_fan").noCollission();
-            registerBlock(fanProps.getIdentifier(), new WaterloggedDefaultTrueBlockImpl(fanProps));
+            registerBlock(fanProps.getIdentifier(), new CoralPlantBlockImpl(fanProps));
 
             Block::Properties wallFanProps;
             wallFanProps.setId("minecraft:" + std::string(type) + "_coral_wall_fan").noCollission();
@@ -2903,6 +3570,7 @@ void minecraft::world::level::block::Blocks::bootstrap() {
         DARK_OAK_SAPLING = darkOakSapling;
     }
     PALE_OAK_SAPLING = createSapling("minecraft:pale_oak_sapling");
+    POPLAR_SAPLING = createSapling("minecraft:poplar_sapling");
     {
         // Reference: MangrovePropaguleBlock - AGE_4 (0), STAGE (0), HANGING
         // (false), WATERLOGGED (false); not replaceable.
@@ -3197,6 +3865,19 @@ void minecraft::world::level::block::Blocks::bootstrap() {
         Block::Properties rodProps;
         rodProps.setId("minecraft:end_rod").noOcclusion();
         registerBlock("minecraft:end_rod", new EndRodBlockImpl(rodProps));
+        // Twilight Forest critters (pass one): TF CritterBlock is a 6-way
+        // DirectionalBlock.FACING (default UP) — EndRodBlock's property set,
+        // so they share its class. MoonwormBlock's waterlogged is dropped.
+        for (const char* critter : {"minecraft:firefly", "minecraft:cicada", "minecraft:moonworm"}) {
+            Block::Properties critterProps;
+            critterProps.setId(critter).noOcclusion().noCollission();
+            registerBlock(critter, new EndRodBlockImpl(critterProps));
+        }
+        // The Aether's pillar top (FacingPillarBlock extends DirectionalBlock:
+        // FACING, default UP) — the same property set, a full cube.
+        Block::Properties pillarTopProps;
+        pillarTopProps.setId("minecraft:pillar_top");
+        registerBlock("minecraft:pillar_top", new EndRodBlockImpl(pillarTopProps));
     }
     {
         // EnderChestBlock: HORIZONTAL_FACING (north) + WATERLOGGED (false).
@@ -3270,33 +3951,33 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     createLogBlock("minecraft:crimson_stem");
     createLogBlock("minecraft:warped_stem");
     createSimpleBlock("minecraft:shroomlight");
-    // Nether plants - Reference: Blocks.java:2161-2177. RootsBlock/FungusBlock/
-    // NetherSproutsBlock are propertyless, noCollision; canSurvive = mayPlaceOn
-    // below in #nylium || soul_soil || (#dirt || farmland via VegetationBlock).
-    // (FungusBlock also lists mycelium explicitly, but mycelium is in #dirt.)
+    // Nether plants - Reference: 26.3 Blocks.java (NetherRootsBlock,
+    // NetherFungusBlock, NetherSproutsBlock): propertyless, noCollision;
+    // canSurvive = the block below is in the plant's SUPPORTS_* tag.
     {
         class NetherPlantBlockImpl : public BushBlock {
         public:
-            explicit NetherPlantBlockImpl(const Properties& properties) : BushBlock(properties) {}
+            NetherPlantBlockImpl(const Properties& properties, std::string supportTag)
+                : BushBlock(properties), m_supportTag(std::move(supportTag)) {}
         protected:
             bool mayPlaceOn(BlockState* stateBelow) const override {
-                return ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
-                           stateBelow, "minecraft:nylium") ||
-                       (stateBelow && stateBelow->getIdentifier() == "minecraft:soul_soil") ||
-                       BushBlock::mayPlaceOn(stateBelow);
+                return ::minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, m_supportTag);
             }
+        private:
+            std::string m_supportTag;
         };
+        struct NetherPlant { const char* name; const char* supportTag; bool replaceable; };
         // roots + sprouts are .replaceable() in Java; fungus is NOT.
-        for (const char* name : {"minecraft:crimson_roots", "minecraft:warped_roots",
-                                 "minecraft:nether_sprouts"}) {
+        for (const NetherPlant& plant : {
+                 NetherPlant{"minecraft:crimson_roots", "minecraft:supports_crimson_roots", true},
+                 NetherPlant{"minecraft:warped_roots", "minecraft:supports_warped_roots", true},
+                 NetherPlant{"minecraft:nether_sprouts", "minecraft:supports_nether_sprouts", true},
+                 NetherPlant{"minecraft:crimson_fungus", "minecraft:supports_crimson_fungus", false},
+                 NetherPlant{"minecraft:warped_fungus", "minecraft:supports_warped_fungus", false}}) {
             Block::Properties plantProps;
-            plantProps.setId(name).noCollission().replaceable();
-            registerBlock(name, new NetherPlantBlockImpl(plantProps));
-        }
-        for (const char* name : {"minecraft:crimson_fungus", "minecraft:warped_fungus"}) {
-            Block::Properties plantProps;
-            plantProps.setId(name).noCollission();
-            registerBlock(name, new NetherPlantBlockImpl(plantProps));
+            plantProps.setId(plant.name).noCollission();
+            if (plant.replaceable) plantProps.replaceable();
+            registerBlock(plant.name, new NetherPlantBlockImpl(plantProps, plant.supportTag));
         }
     }
     createNoCollisionBlock("minecraft:weeping_vines_plant");
@@ -3642,6 +4323,50 @@ void minecraft::world::level::block::Blocks::bootstrap() {
             Block::Properties props;
             props.setId(banner).noCollission();
             registerBlock(banner, new WallTorchBlockImpl(props));
+        }
+        // 26.3 abandoned camp palettes (data/minecraft/structure/abandoned_camp).
+        for (const char* fence : {"minecraft:bamboo_fence", "minecraft:cherry_fence",
+                                  "minecraft:pale_oak_fence", "minecraft:poplar_fence"}) {
+            Block::Properties props;
+            props.setId(fence).noOcclusion();
+            registerBlock(fence, new FenceBlock(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:oxidized_copper_chest").noOcclusion();
+            registerBlock("minecraft:oxidized_copper_chest", new ChestBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:oxidized_copper_golem_statue").noOcclusion();
+            registerBlock("minecraft:oxidized_copper_golem_statue", new CopperGolemStatueBlockImpl(props));
+        }
+        {
+            Block::Properties props;
+            props.setId("minecraft:oxidized_copper_lantern").noOcclusion();
+            registerBlock("minecraft:oxidized_copper_lantern", new LanternBlockImpl(props));
+        }
+        createSimpleBlock("minecraft:resin_block");
+        {
+            Block::Properties props;
+            props.setId("minecraft:straw_bed").noOcclusion();
+            registerBlock("minecraft:straw_bed", new BedBlockImpl(props));
+        }
+        // 26.3 Blocks.WOOL_STAIRS / WOOL_SLABS / CONCRETE_STAIRS /
+        // CONCRETE_SLABS: one of each per dye colour.
+        for (const char* color : {"white", "orange", "magenta", "light_blue", "yellow", "lime",
+                                  "pink", "gray", "light_gray", "cyan", "purple", "blue",
+                                  "brown", "green", "red", "black"}) {
+            for (const char* material : {"wool", "concrete"}) {
+                const std::string stairs = std::string("minecraft:") + color + "_" + material + "_stairs";
+                const std::string slab = std::string("minecraft:") + color + "_" + material + "_slab";
+                Block::Properties stairProps;
+                stairProps.setId(stairs).noOcclusion();
+                registerBlock(stairs, new StairBlockImpl(stairProps));
+                Block::Properties slabProps;
+                slabProps.setId(slab).noOcclusion();
+                registerBlock(slab, new SlabBlockImpl(slabProps));
+            }
         }
         // ALL 16 glazed terracottas carry HORIZONTAL_FACING
         // (GlazedTerracottaBlock). purple was once a propertyless simple
@@ -4061,6 +4786,10 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     MANGROVE_LEAVES = createLeavesBlock("minecraft:mangrove_leaves");
     CHERRY_LEAVES = createLeavesBlock("minecraft:cherry_leaves");
     PALE_OAK_LEAVES = createLeavesBlock("minecraft:pale_oak_leaves");
+    // 26.3 UntintedParticleLeavesBlock: plain leaves states
+    RED_POPLAR_LEAVES = createLeavesBlock("minecraft:red_poplar_leaves");
+    ORANGE_POPLAR_LEAVES = createLeavesBlock("minecraft:orange_poplar_leaves");
+    YELLOW_POPLAR_LEAVES = createLeavesBlock("minecraft:yellow_poplar_leaves");
 
     // =========================================================================
     // Logs
@@ -4074,6 +4803,7 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     MANGROVE_LOG = createLogBlock("minecraft:mangrove_log");
     CHERRY_LOG = createLogBlock("minecraft:cherry_log");
     PALE_OAK_LOG = createLogBlock("minecraft:pale_oak_log");
+    POPLAR_LOG = createLogBlock("minecraft:poplar_log");
 
     // =========================================================================
     // Stripped logs
@@ -4087,6 +4817,7 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     STRIPPED_MANGROVE_LOG = createLogBlock("minecraft:stripped_mangrove_log");
     STRIPPED_CHERRY_LOG = createLogBlock("minecraft:stripped_cherry_log");
     STRIPPED_PALE_OAK_LOG = createLogBlock("minecraft:stripped_pale_oak_log");
+    STRIPPED_POPLAR_LOG = createLogBlock("minecraft:stripped_poplar_log");
 
     s_initialized = true;
 }
@@ -4103,6 +4834,61 @@ Block* minecraft::world::level::block::Blocks::getBlock(const std::string& name)
 BlockState* minecraft::world::level::block::Blocks::getDefaultState(const std::string& name) {
     Block* block = getBlock(name);
     return block ? block->defaultBlockState() : nullptr;
+}
+
+BlockState* minecraft::world::level::block::Blocks::resolveState(
+    const std::string& name, const std::map<std::string, std::string>& properties) {
+    static std::mutex s_cacheMutex;
+    static std::unordered_map<std::string, BlockState*> s_cache;
+    std::string key = name;
+    for (const auto& [property, value] : properties) {
+        key += '|';
+        key += property;
+        key += '=';
+        key += value;
+    }
+    {
+        std::lock_guard<std::mutex> lock(s_cacheMutex);
+        auto it = s_cache.find(key);
+        if (it != s_cache.end()) return it->second;
+    }
+
+    BlockState* resolved = nullptr;
+    if (Block* block = getBlock(name)) {
+        BlockState* fallback = block->defaultBlockState();
+        resolved = fallback;
+        if (!properties.empty() && fallback != nullptr) {
+            // Most given values taken, then most defaults kept elsewhere: an
+            // exact match when the values are valid, MC's partial decode (the
+            // default for a value the block does not take) otherwise.
+            const auto defaults = fallback->getProperties();
+            int bestGiven = -1;
+            int bestDefaults = -1;
+            for (BlockState* candidate : block->getStateDefinition().getPossibleStates()) {
+                int given = 0;
+                int kept = 0;
+                for (const auto& [property, value] : candidate->getProperties()) {
+                    auto it = properties.find(property);
+                    if (it != properties.end() && it->second == value) {
+                        ++given;
+                    } else {
+                        auto def = defaults.find(property);
+                        if (def != defaults.end() && def->second == value) ++kept;
+                    }
+                }
+                if (given > bestGiven || (given == bestGiven && kept > bestDefaults)) {
+                    bestGiven = given;
+                    bestDefaults = kept;
+                    resolved = candidate;
+                }
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(s_cacheMutex);
+        s_cache.emplace(key, resolved);
+    }
+    return resolved;
 }
 
 } // namespace block

@@ -1,0 +1,30 @@
+{
+  "variants": {
+    "": [
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_0"
+      },
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_1"
+      },
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_2"
+      },
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_3"
+      },
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_4"
+      },
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_5"
+      },
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_6"
+      },
+      {
+        "model": "minecraft:block/violet_castle_rune_brick_7"
+      }
+    ]
+  }
+}

@@ -82,6 +82,15 @@ struct TicketType {
     static const TicketType PORTAL;             // timeout=300, flags=15 (PERSIST | LOADING | SIMULATION | KEEP_DIMENSION_ACTIVE)
     static const TicketType ENDER_PEARL;        // timeout=40, flags=14 (LOADING | SIMULATION | KEEP_DIMENSION_ACTIVE)
     static const TicketType UNKNOWN;            // timeout=1, flags=18 (LOADING | CAN_EXPIRE_IF_UNLOADED)
+
+    // Not vanilla: the embedder's registration, as a mod adds a TicketType.
+    // Holds one asynchronous generation request at FULL for exactly as long
+    // as the request lives — the embedder adds it with the request and
+    // removes it when the result is taken or the request is dropped. UNKNOWN
+    // cannot do this: it expires after one tick, which is right for Java's
+    // blocking getChunk (it completes inside the tick) and wrong for a
+    // request that spans hundreds of them.
+    static const TicketType GENERATION_REQUEST; // timeout=0, flags=2 (LOADING)
 };
 
 // Static definitions (defined in cpp file)

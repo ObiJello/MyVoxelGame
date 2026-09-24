@@ -1,0 +1,8 @@
+{
+  "block.twilightforest.portal.whoosh": {
+    "sounds": [
+      { "name": "minecraft:block.portal.ambient", "type": "event" }
+    ],
+    "subtitle": "subtitles.twilightforest.block.portal.whoosh"
+  }
+}

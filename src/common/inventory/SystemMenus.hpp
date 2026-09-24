@@ -69,12 +69,11 @@ namespace Game {
     };
 
     // ── Brewing stand (MC BrewingStandMenu) ───────────────────────────────
-    // Slots: 0..2 bottles, 3 ingredient, 4 fuel (blaze powder).
-    //
-    // The brewing itself needs potion recipes, which MC keeps in CODE
-    // (PotionBrewing.java builds its mixes at bootstrap) rather than in data/,
-    // and a POTION_CONTENTS component to carry the result. Neither exists here,
-    // so the stand opens, holds its five items, tracks fuel, and brews nothing.
+    // Slots: 0..2 bottles (PotionSlot — brewing potion inputs, max 1 each),
+    // 3 ingredient (IngredientsSlot — a brewing reagent), 4 fuel (FuelSlot —
+    // BREWING_FUEL, i.e. blaze powder). Data: the stand's four counters —
+    // brew time, fuel uses, total brew time, total fuel uses — read straight
+    // through from the BrewingStandBlockEntity, which does the brewing.
     class BrewingStandMenu : public AbstractContainerMenu {
     public:
         static constexpr int SLOT_BOTTLE_0  = 0;
@@ -82,17 +81,27 @@ namespace Game {
         static constexpr int SLOT_FUEL      = 4;
         static constexpr int CONTAINER_END  = 5;
         static constexpr int MAIN_BEGIN     = 5;
+        static constexpr int HOTBAR_BEGIN   = 32;
         static constexpr int SLOT_COUNT     = 41;
 
-        static constexpr int DATA_BREW_TIME = 0;
-        static constexpr int DATA_FUEL      = 1;
-        static constexpr int DATA_COUNT     = 2;
+        static constexpr int DATA_BREW_TIME       = 0;
+        static constexpr int DATA_FUEL            = 1;
+        static constexpr int DATA_TOTAL_BREW_TIME = 2;
+        static constexpr int DATA_TOTAL_FUEL      = 3;
+        static constexpr int DATA_COUNT           = 4;
 
-        BrewingStandMenu(Inventory* playerInventory, IContainer* container);
+        BrewingStandMenu(Inventory* playerInventory, BrewingStandBlockEntity* stand);
         explicit BrewingStandMenu(Inventory* playerInventory);   // client
 
         void QuickMoveStack(int slotIndex, ContainerClickResult& result) override;
         int  MenuIndexForInventorySlot(int inventoryIndex) const override;
+
+        // MC getFuel / getTotalFuel / getBrewingTicks / getTotalBrewingTicks —
+        // what BrewingStandScreen.renderBg reads.
+        int GetFuel() const;
+        int GetTotalFuel() const;
+        int GetBrewingTicks() const;
+        int GetTotalBrewingTicks() const;
 
     private:
         void BuildSlots(Inventory* playerInventory, IContainer* container);

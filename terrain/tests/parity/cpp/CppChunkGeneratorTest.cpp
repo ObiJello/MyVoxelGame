@@ -11,8 +11,8 @@
  *   ServerChunkCache -> ChunkMap -> DistanceManager -> ChunkGenerationTask
  *                    -> ChunkTaskDispatcher -> Worker Threads
  *
- * Phases: 0=EMPTY, 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS, 3=BIOMES, 4=NOISE,
- *         5=SURFACE, 6=CARVERS, 7=FEATURES, 8=INITIALIZE_LIGHT, 9=LIGHT, 10=SPAWN, 11=FULL
+ * Phases (26.3 ChunkStatus): 0=EMPTY, 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS,
+ *         3=BIOMES, 4=TERRAIN, 5=FEATURES, 6=INITIALIZE_LIGHT, 7=LIGHT, 8=SPAWN, 9=FULL
  *
  * Usage:
  *   chunk_generator_test --radius 5 [--center 0 0] [--phases all] [--output file] [--seed 12345]
@@ -45,6 +45,8 @@
 
 // Server-level includes (the async pipeline)
 #include "server/level/ServerChunkCache.h"
+#include "world/level/chunk/storage/RegionFileStorage.h"
+#include "world/level/chunk/storage/SerializableChunkData.h"
 #include "server/level/ChunkMap.h"
 #include "server/level/DistanceManager.h"
 #include "server/level/ChunkHolder.h"
@@ -57,20 +59,15 @@
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/NoiseGeneratorSettings.h"
-#include "levelgen/NoiseRouterData.h"
 #include "levelgen/WorldGenTweaks.h"
 #include "external/json.hpp"
 #include "levelgen/FlatLevelSource.h"
 #include "world/biome/FixedBiomeSource.h"
-#include "levelgen/NoiseRegistry.h"
-#include "levelgen/NoiseSettings.h"
-#include "levelgen/DensityFunctionRegistry.h"
-#include "levelgen/SurfaceSystem.h"
-#include "levelgen/SurfaceRuleData.h"
-#include "levelgen/FluidPicker.h"
 #include "levelgen/Heightmap.h"
 #include "levelgen/blockpredicates/BlockPredicate.h"
 #include "levelgen/placement/PlacedFeature.h"
+#include "levelgen/FeatureSorter.h"
+#include "data/worldgen/BiomeFeatureRegistry.h"
 
 // World includes
 #include "world/ProtoChunk.h"
@@ -100,7 +97,7 @@ static const minecraft::world::chunk::status::ChunkStatus* targetStatus = nullpt
 static bool generateStructures = true;
 static bool partialStructuresAck = false;  // --partial-structures
 static bool dumpBlockEntities = false;     // --dump-block-entities (E lines)
-static std::string phasesDescription = "all (0-11)";
+static std::string phasesDescription = "all (0-9)";
 
 static std::optional<minecraft::core::BlockPos> getOverworldRespawnPos(
     ::world::IChunk* chunk,
@@ -189,20 +186,22 @@ static std::optional<minecraft::core::BlockPos> getSpawnPosInChunk(
 
 static void prepareInitialSpawn(
     minecraft::server::level::ServerChunkCache& chunkCache,
+    minecraft::levelgen::ChunkGenerator* generator,
     minecraft::levelgen::RandomState* randomState,
     const std::function<bool()>& pumpMainThreadTasks,
     bool verbose
 ) {
-    if (randomState == nullptr || randomState->sampler() == nullptr) {
+    if (randomState == nullptr) {
         return;
     }
 
-    minecraft::core::BlockPos spawnSuggestion = randomState->sampler()->findSpawnPosition();
-    minecraft::world::ChunkPos spawnChunk(spawnSuggestion.getX() >> 4, spawnSuggestion.getZ() >> 4);
+    // ServerLevel.setInitialSpawn (26.3): generator.getOrigin(randomState).
+    auto* noiseGenerator = dynamic_cast<minecraft::levelgen::NoiseBasedChunkGenerator*>(generator);
+    minecraft::world::ChunkPos spawnChunk = noiseGenerator != nullptr
+        ? noiseGenerator->getOrigin(randomState)
+        : minecraft::world::ChunkPos(0, 0);
 
     if (verbose) {
-        std::cout << "  Initial spawn suggestion: (" << spawnSuggestion.getX() << ", "
-                  << spawnSuggestion.getY() << ", " << spawnSuggestion.getZ() << ")" << std::endl;
         std::cout << "  Spawn search chunk: (" << spawnChunk.x() << ", " << spawnChunk.z() << ")" << std::endl;
     }
 
@@ -382,13 +381,9 @@ private:
 class WorldGenSetup {
 public:
     minecraft::world::BlockRegistry* registry = nullptr;
-    minecraft::levelgen::NoiseGeneratorSettings* settings = nullptr;
+    std::shared_ptr<minecraft::levelgen::NoiseGeneratorSettings> settings;
     minecraft::levelgen::RandomState* randomState = nullptr;
-    minecraft::levelgen::RuleSource* surfaceRules = nullptr;
-    minecraft::levelgen::FluidPicker* fluidPicker = nullptr;
     std::unique_ptr<minecraft::world::biome::BiomeSource> biomeSource;
-    std::vector<minecraft::world::biome::Climate::ParameterPoint> spawnTargetValues;
-    std::vector<minecraft::levelgen::ClimateParameterPoint*> spawnTargetPointers;
     // NoiseBasedChunkGenerator for noise world types, FlatLevelSource for flat.
     minecraft::levelgen::ChunkGenerator* generator = nullptr;
     minecraft::BlockState* airBlock = nullptr;
@@ -413,111 +408,33 @@ public:
         registry->registerBlock(minecraft::world::level::block::Blocks::GRAVEL->defaultBlockState());
         registry->registerBlock(minecraft::world::level::block::Blocks::TUFF->defaultBlockState());
 
-        if (verbose) std::cout << "  Bootstrapping NoiseRegistry..." << std::endl;
-        minecraft::levelgen::NoiseRegistry::bootstrap();
-
-        if (verbose) std::cout << "  Bootstrapping DensityFunctionRegistry..." << std::endl;
-        minecraft::levelgen::DensityFunctionRegistry::bootstrap(SEED);
-
-        if (verbose) std::cout << "  Initializing SurfaceRuleData..." << std::endl;
-        minecraft::levelgen::SurfaceRuleData::initialize();
-
-        // ---- Dimension seam (C2): everything below differs per dimension.
-        // Reference: the noise_settings JSONs (overworld/nether/end) +
-        // NoiseRouterData / SurfaceRuleData / biome-source factories.
-        minecraft::levelgen::NoiseRouter* router = nullptr;
-        minecraft::levelgen::NoiseSettings noiseSettings =
-            minecraft::levelgen::NoiseSettings::OVERWORLD_NOISE_SETTINGS;
+        // ---- Dimension seam: the noise_settings entry (worldgen/noise_settings,
+        // decoded like a world load does) and the biome source.
+        std::string settingsKey = "minecraft:overworld";
         if (g_dimension == "nether") {
-            if (verbose) std::cout << "  Building nether NoiseRouter..." << std::endl;
-            router = minecraft::levelgen::NoiseRouterData::nether();
+            settingsKey = "minecraft:nether";
             biomeSource = minecraft::world::biome::MultiNoiseBiomeSource::createNether();
-            noiseSettings = minecraft::levelgen::NoiseSettings::NETHER_NOISE_SETTINGS;
         } else if (g_dimension == "end") {
-            if (verbose) std::cout << "  Building end NoiseRouter..." << std::endl;
-            router = minecraft::levelgen::NoiseRouterData::end();
+            settingsKey = "minecraft:end";
             biomeSource = std::make_unique<minecraft::world::biome::TheEndBiomeSource>(SEED);
-            noiseSettings = minecraft::levelgen::NoiseSettings::END_NOISE_SETTINGS;
         } else {
-            // Reference: NoiseGeneratorSettings.overworld(ctx, amplified,
-            // large) - large_biomes/amplified differ ONLY in the router.
-            const bool largeBiomes = (g_worldType == "large_biomes");
-            const bool amplified = (g_worldType == "amplified");
-            if (verbose) std::cout << "  Building overworld NoiseRouter (large="
-                                   << largeBiomes << " amplified=" << amplified
-                                   << ")..." << std::endl;
-            router = minecraft::levelgen::NoiseRouterData::overworld(largeBiomes, amplified);
+            // WorldPresets: large_biomes / amplified select their own
+            // noise_settings; single_biome_surface and flat keep overworld.
+            if (g_worldType == "large_biomes") settingsKey = "minecraft:large_biomes";
+            if (g_worldType == "amplified") settingsKey = "minecraft:amplified";
             if (g_worldType == "single_biome_surface") {
-                // Reference: WorldPresets SINGLE_BIOME_SURFACE.
-                biomeSource = std::make_unique<minecraft::world::biome::FixedBiomeSource>(
-                    g_singleBiome);
+                biomeSource = std::make_unique<minecraft::world::biome::FixedBiomeSource>(g_singleBiome);
             } else if (g_worldType != "flat") {
                 biomeSource = minecraft::world::biome::MultiNoiseBiomeSource::createOverworld();
             }
             // flat: the FlatLevelSource owns its own FixedBiomeSource; the
             // RandomState here plays dummy()'s role (nothing samples it).
         }
-
-        spawnTargetValues = biomeSource ? biomeSource->getSpawnTarget()
-                                        : std::vector<minecraft::world::biome::Climate::ParameterPoint>{};
-        spawnTargetPointers.clear();
-        spawnTargetPointers.reserve(spawnTargetValues.size());
-        for (auto& point : spawnTargetValues) {
-            spawnTargetPointers.push_back(
-                reinterpret_cast<minecraft::levelgen::ClimateParameterPoint*>(&point)
-            );
-        }
-
-        if (verbose) std::cout << "  Creating NoiseGeneratorSettings..." << std::endl;
-        if (g_dimension == "nether") {
-            // nether.json: sea_level 32, netherrack/lava, no mob-gen disable,
-            // aquifers/ore veins OFF, legacy_random_source TRUE.
-            settings = new minecraft::levelgen::NoiseGeneratorSettings(
-                noiseSettings,
-                minecraft::world::level::block::Blocks::getDefaultState("minecraft:netherrack"),
-                minecraft::world::level::block::Blocks::LAVA->defaultBlockState(),
-                *router, nullptr, spawnTargetPointers, 32, false, false, false, true
-            );
-        } else if (g_dimension == "end") {
-            // end.json: sea_level 0, end_stone/air, aquifers/ore veins OFF,
-            // legacy_random_source TRUE.
-            settings = new minecraft::levelgen::NoiseGeneratorSettings(
-                noiseSettings,
-                minecraft::world::level::block::Blocks::getDefaultState("minecraft:end_stone"),
-                minecraft::world::level::block::Blocks::AIR->defaultBlockState(),
-                *router, nullptr, spawnTargetPointers, 0, false, false, false, true
-            );
-        } else {
-            settings = new minecraft::levelgen::NoiseGeneratorSettings(
-                noiseSettings,
-                minecraft::world::level::block::Blocks::STONE->defaultBlockState(),
-                minecraft::world::level::block::Blocks::WATER->defaultBlockState(),
-                *router, nullptr, spawnTargetPointers, 63, false, true, true, false
-            );
-        }
+        if (verbose) std::cout << "  Loading " << settingsKey << "..." << std::endl;
+        settings = minecraft::levelgen::NoiseGeneratorSettings::load(settingsKey);
 
         if (verbose) std::cout << "  Creating RandomState..." << std::endl;
         randomState = minecraft::levelgen::RandomState::create(settings, SEED);
-
-        if (verbose) std::cout << "  Creating surface rules + FluidPicker..." << std::endl;
-        if (g_dimension == "nether") {
-            surfaceRules = minecraft::levelgen::SurfaceRuleData::nether();
-            // Reference: NoiseBasedChunkGenerator lava picker for the nether.
-            fluidPicker = new minecraft::levelgen::SeaLevelFluidPicker(
-                32, minecraft::world::level::block::Blocks::LAVA->defaultBlockState());
-        } else if (g_dimension == "end") {
-            surfaceRules = minecraft::levelgen::SurfaceRuleData::end();
-            // (0, AIR): sea level 0 with an air "fluid".
-            fluidPicker = new minecraft::levelgen::SeaLevelFluidPicker(
-                0, minecraft::world::level::block::Blocks::AIR->defaultBlockState());
-        } else {
-            surfaceRules = minecraft::levelgen::SurfaceRuleData::overworld();
-            fluidPicker = new minecraft::levelgen::OverworldFluidPicker(
-                63, -54,
-                minecraft::world::level::block::Blocks::WATER->defaultBlockState(),
-                minecraft::world::level::block::Blocks::LAVA->defaultBlockState()
-            );
-        }
 
         if (g_worldType == "flat") {
             // Reference: WorldPresets FLAT - FlatLevelSource with the chosen
@@ -539,12 +456,7 @@ public:
             generator = flatGenerator;
         } else {
             if (verbose) std::cout << "  Creating NoiseBasedChunkGenerator..." << std::endl;
-            // The generator's fill block is the dimension default_block.
-            minecraft::BlockState* fillBlock = settings->defaultBlock();
-            auto* noiseGenerator = new minecraft::levelgen::NoiseBasedChunkGenerator(
-                settings, randomState->surfaceSystem(), surfaceRules,
-                fillBlock, airBlock, fluidPicker, nullptr
-            );
+            auto* noiseGenerator = new minecraft::levelgen::NoiseBasedChunkGenerator(settings);
             noiseGenerator->setBiomeSource(biomeSource.get());
             generator = noiseGenerator;
         }
@@ -555,7 +467,6 @@ public:
     ~WorldGenSetup() {
         delete generator;
         delete randomState;
-        delete settings;
         delete registry;
     }
 };
@@ -567,6 +478,10 @@ void printUsage(const char* programName) {
     std::cerr << "Options:\n";
     std::cerr << "  --radius <n>       Radius of chunks to generate\n";
     std::cerr << "  --single <x> <z>   Generate single chunk with detailed per-block output\n";
+    std::cerr << "  --storage <dir>    Read and write chunks in <dir>/region (persistence round trip)\n";
+    std::cerr << "  --save-all         With --storage: save every proto chunk before exiting\n";
+    std::cerr << "  --bench-save-copy  Time SerializableChunkData::copyOf / write on every proto chunk\n";
+    std::cerr << "  --request-limit <n> Request only the first n chunks of the raster order\n";
     std::cerr << "  --center <x> <z>   Center chunk position (default: 0 0)\n";
     std::cerr << "  --output <file>    Output file path\n";
     std::cerr << "  --feature-log <f>  Log each feature placement to file\n";
@@ -582,22 +497,23 @@ void printUsage(const char* programName) {
     std::cerr << "  --quiet            Suppress progress output\n";
     std::cerr << "\n";
     std::cerr << "Phase specifications: \"all\", or A-B where A is 0 (EMPTY start,\n";
-    std::cerr << "structures ON - NOT YET SUPPORTED in C++) or 3 (BIOMES start, structures\n";
-    std::cerr << "off) and B is 1..7 (>= 3 when A is 3). Examples:\n";
-    std::cerr << "  3-7    BIOMES->FEATURES, no structures (canonical parity spec)\n";
-    std::cerr << "  3-5    BIOMES->SURFACE, no structures\n";
-    std::cerr << "  all    Complete generation (0-11, EMPTY->FULL)\n";
+    std::cerr << "structures ON) or 3 (BIOMES start, structures off) and B is 1..5\n";
+    std::cerr << "(>= 3 when A is 3). Examples:\n";
+    std::cerr << "  3-5    BIOMES->FEATURES, no structures (canonical parity spec)\n";
+    std::cerr << "  3-4    BIOMES->TERRAIN, no structures\n";
+    std::cerr << "  0-5    EMPTY->FEATURES with structures\n";
+    std::cerr << "  all    Complete generation (0-9, EMPTY->FULL)\n";
     std::cerr << "\n";
-    std::cerr << "Phases: 0=EMPTY, 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS, 3=BIOMES, 4=NOISE,\n";
-    std::cerr << "        5=SURFACE, 6=CARVERS, 7=FEATURES, 8=INITIALIZE_LIGHT, 9=LIGHT, 10=SPAWN, 11=FULL\n";
+    std::cerr << "Phases (26.3): 0=EMPTY, 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS, 3=BIOMES, 4=TERRAIN,\n";
+    std::cerr << "        5=FEATURES, 6=INITIALIZE_LIGHT, 7=LIGHT, 8=SPAWN, 9=FULL\n";
 }
 
 void configurePhases(const std::string& phases) {
     // Reference: MinecraftAsyncChunkTest.java configurePhaseSpec() - must stay
     // semantically identical.
-    // Phases: 0=EMPTY, 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS, 3=BIOMES, 4=NOISE,
-    //         5=SURFACE, 6=CARVERS, 7=FEATURES, 8=INITIALIZE_LIGHT, 9=LIGHT, 10=SPAWN, 11=FULL
-    // Accepted: "all", or "A-B" with A in {0,3} (0 = structures ON) and B in 1..7
+    // Phases (MC 26.3's statuses): 0=EMPTY, 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS,
+    //         3=BIOMES, 4=TERRAIN, 5=FEATURES, 6=INITIALIZE_LIGHT, 7=LIGHT, 8=SPAWN, 9=FULL
+    // Accepted: "all", or "A-B" with A in {0,3} (0 = structures ON) and B in 1..5
     // (B >= 3 when A is 3). An unrecognized spec must fail loudly: silently
     // mapping it to "all" runs the racy FULL pipeline and produces
     // nondeterministic dumps.
@@ -608,9 +524,9 @@ void configurePhases(const std::string& phases) {
     if (phases == "all") {
         targetStatus = &ChunkStatus::FULL;
         generateStructures = true;
-        phasesDescription = "all (0-11, complete generation)";
+        phasesDescription = "all (0-9, complete generation)";
     } else if (phases.size() == 3 && (phases[0] == '0' || phases[0] == '3') && phases[1] == '-'
-               && phases[2] >= '1' && phases[2] <= '7') {
+               && phases[2] >= '1' && phases[2] <= '5') {
         start = phases[0] - '0';
         end = phases[2] - '0';
         if (start == 3 && end < 3) {
@@ -618,14 +534,12 @@ void configurePhases(const std::string& phases) {
                       << end << " precedes start phase 3\n";
             std::exit(2);
         }
-        static const ChunkStatus* endStatuses[8] = {
+        static const ChunkStatus* endStatuses[6] = {
             nullptr, &ChunkStatus::STRUCTURE_STARTS, &ChunkStatus::STRUCTURE_REFERENCES,
-            &ChunkStatus::BIOMES, &ChunkStatus::NOISE, &ChunkStatus::SURFACE,
-            &ChunkStatus::CARVERS, &ChunkStatus::FEATURES
+            &ChunkStatus::BIOMES, &ChunkStatus::TERRAIN, &ChunkStatus::FEATURES
         };
-        static const char* endNames[8] = {
-            nullptr, "STRUCTURE_STARTS", "STRUCTURE_REFS", "BIOMES", "NOISE",
-            "SURFACE", "CARVERS", "FEATURES"
+        static const char* endNames[6] = {
+            nullptr, "STRUCTURE_STARTS", "STRUCTURE_REFS", "BIOMES", "TERRAIN", "FEATURES"
         };
         targetStatus = endStatuses[end];
         generateStructures = (start == 0);
@@ -633,7 +547,7 @@ void configurePhases(const std::string& phases) {
             + ", " + (generateStructures ? "with structures" : "no structures") + ")";
     } else {
         std::cerr << "Error: unknown --phases spec '" << phases
-                  << "' (valid: all, or A-B with A in {0,3}, B in 1..7, e.g. 3-7, 0-2, 3-5)\n";
+                  << "' (valid: all, or A-B with A in {0,3}, B in 1..5, e.g. 3-5, 0-2, 3-4)\n";
         std::exit(2);
     }
 
@@ -778,8 +692,8 @@ void writeCanonicalChunk(std::ostream& out, world::IChunk* chunk, int chunkX, in
         }
     }
 
-    // H lines require target >= NOISE (heightmaps are a NOISE-phase product).
-    if (!targetStatus->isOrAfter(ChunkStatusT::NOISE)) return;
+    // H lines require target >= TERRAIN (the worldgen heightmaps are written by TERRAIN).
+    if (!targetStatus->isOrAfter(ChunkStatusT::TERRAIN)) return;
     struct { const char* label; minecraft::levelgen::Heightmap::Types type; } heightmapTypes[] = {
         {"WS", minecraft::levelgen::Heightmap::Types::WORLD_SURFACE_WG},
         {"OF", minecraft::levelgen::Heightmap::Types::OCEAN_FLOOR_WG},
@@ -881,6 +795,14 @@ int main(int argc, char* argv[]) {
     std::string phases = "all";
     bool traceModifiers = false;
     bool dumpFull = false;
+    std::string featureOrderPath;  // --dump-feature-order <file>: featuresPerStep, then exit
+    // Persistence round trip (a server restart): --storage keeps chunks in
+    // <dir>/region; --save-all writes every proto before exiting;
+    // --request-limit stops after the first N chunks of the raster order.
+    std::string storageDir;
+    bool saveAll = false;
+    bool benchSaveCopy = false;
+    int requestLimit = -1;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -919,6 +841,8 @@ int main(int argc, char* argv[]) {
             partialStructuresAck = true;
         } else if (arg == "--dump-block-entities") {
             dumpBlockEntities = true;
+        } else if (arg == "--dump-feature-order" && i + 1 < argc) {
+            featureOrderPath = argv[++i];
         } else if (arg == "--dimension" && i + 1 < argc) {
             g_dimension = argv[++i];
             if (g_dimension == "overworld") {
@@ -943,6 +867,14 @@ int main(int argc, char* argv[]) {
             g_flatLayers = argv[++i];
         } else if (arg == "--single-biome" && i + 1 < argc) {
             g_singleBiome = argv[++i];
+        } else if (arg == "--storage" && i + 1 < argc) {
+            storageDir = argv[++i];
+        } else if (arg == "--bench-save-copy") {
+            benchSaveCopy = true;
+        } else if (arg == "--save-all") {
+            saveAll = true;
+        } else if (arg == "--request-limit" && i + 1 < argc) {
+            requestLimit = std::atoi(argv[++i]);
         } else if (arg == "--help" || arg == "-h") {
             printUsage(argv[0]);
             return 0;
@@ -1073,6 +1005,45 @@ int main(int argc, char* argv[]) {
         std::cout << "Step 1: Bootstrapping..." << std::endl;
         minecraft::world::level::block::Blocks::bootstrap();
 
+        // --dump-feature-order: the FeatureSorter result for the dimension,
+        // "<step> <globalIndex> <placed feature>" per line - the Java
+        // harness's --dump-feature-order format (compare the two files).
+        if (!featureOrderPath.empty()) {
+            using minecraft::data::worldgen::BiomeFeatureRegistry;
+            BiomeFeatureRegistry::bootstrap();
+            const std::vector<std::string>& biomeKeys =
+                g_dimension == "nether" ? BiomeFeatureRegistry::getNetherBiomeKeys()
+                : g_dimension == "end" ? BiomeFeatureRegistry::getEndBiomeKeys()
+                : BiomeFeatureRegistry::getAllBiomeKeys();
+            auto steps = minecraft::levelgen::FeatureSorter::buildFeaturesPerStep<std::string>(
+                biomeKeys,
+                [](const std::string& biomeKey) {
+                    std::vector<std::vector<minecraft::levelgen::placement::PlacedFeature*>> result;
+                    for (const auto& stepFeatures : BiomeFeatureRegistry::getFeaturesForBiome(biomeKey)) {
+                        std::vector<minecraft::levelgen::placement::PlacedFeature*> step;
+                        for (const auto* feature : stepFeatures) {
+                            step.push_back(const_cast<minecraft::levelgen::placement::PlacedFeature*>(feature));
+                        }
+                        result.push_back(std::move(step));
+                    }
+                    return result;
+                },
+                true);
+            std::ofstream out(featureOrderPath);
+            out << "# possibleBiomes:";
+            for (const auto& key : biomeKeys) out << ' ' << key;
+            out << '\n';
+            for (size_t step = 0; step < steps.size(); ++step) {
+                for (size_t index = 0; index < steps[step].features.size(); ++index) {
+                    std::string name = steps[step].features[index]->getName();
+                    if (name.find(':') == std::string::npos) name = "minecraft:" + name;
+                    out << step << ' ' << index << ' ' << name << '\n';
+                }
+            }
+            std::cout << "Feature order written to " << featureOrderPath << std::endl;
+            return 0;
+        }
+
         // Configure phases AFTER bootstrap (ChunkStatus requires initialization)
         configurePhases(phases);
         std::cout << "  Phase config: " << phasesDescription << std::endl;
@@ -1099,6 +1070,7 @@ int main(int argc, char* argv[]) {
             SEED,
             backgroundExecutor.getExecutor(),
             mainThreadExecutor.getExecutor(),
+            nullptr,   // lane executor: share the background pool, as the game does
             worldGen.registry,
             worldGen.airBlock,
             worldGen.stoneBlock,
@@ -1145,6 +1117,18 @@ int main(int argc, char* argv[]) {
             std::cout << "  Structure state injected (PARTIAL structure support)." << std::endl;
         }
 
+        if (!storageDir.empty()) {
+            // The ChunkMap reads saved chunks back and (with --save-all)
+            // writes protos, exactly as the game's storage does.
+            minecraft::world::level::chunk::storage::RegionStorageInfo storageInfo(
+                "parity", g_dimension, "chunk");
+            chunkCache.getChunkMap().setChunkStorage(
+                std::make_shared<minecraft::world::level::chunk::storage::RegionFileStorage>(
+                    storageInfo, storageDir + "/region", true),
+                minecraft::world::level::chunk::storage::ChunkSerializer::DATA_VERSION);
+            std::cout << "  Chunk storage: " << storageDir << "/region" << std::endl;
+        }
+
         // Step 4.5 (spawn preparation) is deliberately SKIPPED, mirroring the
         // Java harness: spawn-area pregeneration runs FEATURES steps for
         // adjacent chunks in parallel, making cross-chunk features (clay/moss
@@ -1174,6 +1158,7 @@ int main(int argc, char* argv[]) {
             // Radius mode
             for (int z = -radius; z <= radius; z++) {
                 for (int x = -radius; x <= radius; x++) {
+                    if (requestLimit >= 0 && completed >= requestLimit) break;
                     int cx = centerX + x;
                     int cz = centerZ + z;
 
@@ -1214,6 +1199,49 @@ int main(int argc, char* argv[]) {
 
         std::cout << std::endl;
         std::cout << "All chunks generated!" << std::endl;
+
+        if (benchSaveCopy) {
+            // The server-thread half of a save (ChunkMap::save -> copyOf) and
+            // the I/O-thread half (write), timed separately over every proto.
+            auto& chunkMap = chunkCache.getChunkMap();
+            std::vector<minecraft::world::ProtoChunk*> protos;
+            chunkMap.forEachHolder([&](minecraft::server::level::ChunkHolder& holder) {
+                if (auto* proto = dynamic_cast<minecraft::world::ProtoChunk*>(holder.getLatestChunk())) {
+                    if (proto->getPersistedStatus() != nullptr &&
+                        proto->getPersistedStatus()->getChunkType() != minecraft::world::chunk::status::ChunkType::LEVELCHUNK) {
+                        protos.push_back(proto);
+                    }
+                }
+            });
+            double copyMs = 0.0, writeMs = 0.0;
+            for (auto* proto : protos) {
+                const auto t0 = std::chrono::steady_clock::now();
+                auto data = minecraft::world::level::chunk::storage::SerializableChunkData::copyOf(*proto, 0);
+                const auto t1 = std::chrono::steady_clock::now();
+                auto tag = data->write(4764);
+                const auto t2 = std::chrono::steady_clock::now();
+                copyMs += std::chrono::duration<double, std::milli>(t1 - t0).count();
+                writeMs += std::chrono::duration<double, std::milli>(t2 - t1).count();
+            }
+            std::cout << "Save cost over " << protos.size() << " proto chunks: copyOf "
+                      << (protos.empty() ? 0.0 : copyMs / protos.size()) << " ms each (server thread), write "
+                      << (protos.empty() ? 0.0 : writeMs / protos.size()) << " ms each (I/O thread)" << std::endl;
+        }
+
+        if (saveAll) {
+            // Let any generation still in flight settle, then MC's shutdown
+            // save (ChunkMap.saveAllChunks(true)).
+            auto& chunkMap = chunkCache.getChunkMap();
+            while (chunkMap.pendingGenerationTaskCount() > 0) {
+                if (mainThreadExecutor.hasPendingTasks()) {
+                    mainThreadExecutor.runPendingTasks();
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
+            chunkMap.saveAllChunks(true, [](int64_t) { return true; });
+            std::cout << "Saved all proto chunks to " << storageDir << std::endl;
+        }
 
         if (!tracePlacementsPath.empty()) {
             std::cout << "Tracing structure placements..." << std::endl;

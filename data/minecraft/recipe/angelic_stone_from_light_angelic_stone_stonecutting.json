@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:light_angelic_stone",
+  "result": {
+    "count": 1,
+    "id": "minecraft:angelic_stone"
+  }
+}

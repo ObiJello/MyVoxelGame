@@ -1,0 +1,522 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "bonus_rolls": 0.0,
+      "rolls": {
+        "type": "minecraft:uniform",
+        "min": 2.0,
+        "max": 4.0
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:paper",
+          "weight": 8,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 7.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:book",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_shard",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:disc_fragment_5",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:glow_ink_sac",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonant_crystal",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:book",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            },
+            {
+              "function": "minecraft:enchant_randomly",
+              "options": "#minecraft:on_random_loot"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:recovery_compass",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bonus_rolls": 0.0,
+      "rolls": 1.0,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 1,
+          "functions": [
+            {
+              "function": "minecraft:set_count",
+              "count": 1.0,
+              "add": false
+            },
+            {
+              "function": "minecraft:set_book_cover",
+              "title": "Hymnal of the Sunken Choir",
+              "author": "Wren of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                [
+                  "",
+                  {
+                    "text": "Hymnal of the Sunken Choir",
+                    "bold": true,
+                    "color": "dark_aqua"
+                  },
+                  {
+                    "text": "\n\nCopied in the water-library of the Sunken Choir, in the 1104th year of the Chord.",
+                    "italic": true,
+                    "color": "dark_gray"
+                  }
+                ],
+                [
+                  "",
+                  {
+                    "text": "I. For the Lighting of Lanterns",
+                    "color": "dark_purple"
+                  },
+                  "\n\nHold the note, and the crystal wakes.\nHold it long, and the crystal keeps it.\nWhat is sung is never lost."
+                ],
+                [
+                  "",
+                  {
+                    "text": "II. For the Crossing of Water",
+                    "color": "dark_purple"
+                  },
+                  "\n\nThe Vesper carries our voices out to the Shallows. Sing low over deep water, so that the deep water knows you."
+                ],
+                [
+                  "",
+                  {
+                    "text": "III. For the Four Voices",
+                    "color": "dark_purple"
+                  },
+                  "\n\nSoprano keeps watch.\nAlto welcomes.\nTenor carries.\nBass holds.\nAnd the Heart holds all of us."
+                ],
+                [
+                  "",
+                  {
+                    "text": "IV. For Those Who Rest",
+                    "color": "dark_purple"
+                  },
+                  "\n\nRest is not an ending. A silence in the music is still the music. We sing around the rest, and it becomes part of the song."
+                ],
+                [
+                  "",
+                  {
+                    "text": "(The last hymn is water-stained. Only its refrain can still be read.)",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  "\n\nListen first.\nListen first.\nListen, and you are never alone in the Hush."
+                ]
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 1,
+          "functions": [
+            {
+              "function": "minecraft:set_count",
+              "count": 1.0,
+              "add": false
+            },
+            {
+              "function": "minecraft:set_book_cover",
+              "title": "On the Silent Warden",
+              "author": "Wren of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                [
+                  "",
+                  {
+                    "text": "On the Silent Warden",
+                    "bold": true,
+                    "color": "dark_aqua"
+                  },
+                  {
+                    "text": "\n\nAs recorded by the Listeners in the 1131st year of the Chord.",
+                    "italic": true,
+                    "color": "dark_gray"
+                  }
+                ],
+                "The Wardens were grown in the song to hear a false note and silence it. They have no eyes. They never needed eyes: they see by listening, as we are taught to.",
+                "In the years of the Souring the tuners heard a second note under ours. So the Keeper chose one Warden, the oldest and the stillest, to guard the vaults.",
+                "It was told: let nothing pass that is not the Chord. It bowed its great head and went down into the dark beneath the echo cores, and it did not come back up.",
+                "They call it the Silent Warden because it does not cry out when it hunts. The others roar. This one only listens, and waits, and is never wrong.",
+                [
+                  "",
+                  {
+                    "text": "If you read this in the Hush, do not break what it guards.",
+                    "color": "dark_red"
+                  },
+                  "\n\nIt is not cruel. It is keeping a promise that no one is left to release it from."
+                ]
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 1,
+          "functions": [
+            {
+              "function": "minecraft:set_count",
+              "count": 1.0,
+              "add": false
+            },
+            {
+              "function": "minecraft:set_book_cover",
+              "title": "The First Listening",
+              "author": "Wren of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                [
+                  "",
+                  {
+                    "text": "The First Listening",
+                    "bold": true,
+                    "color": "dark_aqua"
+                  },
+                  {
+                    "text": "\n\nThe oldest story of the Choir, as it is told to small voices.",
+                    "italic": true,
+                    "color": "dark_gray"
+                  }
+                ],
+                "Before the Choir, before the Heart, there were only caves in the deep dark of the world above, and people who were afraid of the quiet.",
+                "One of them sang into a hollow of amethyst to keep up her courage. The stone sang back, brighter than she had sung. She sang again, and again it answered.",
+                "She called the others, and they listened a long while. That night they learned the first truth: stone takes a held note, and remembers it.",
+                "So the listening became singing, and the singing became building. We raised halls tuned like instruments. The world above calls them the ancient cities.",
+                "In one of them the tuners set deepslate in a frame and struck it with a frozen echo. It opened onto a world where no sound ever fades.\n\nWe named it the Hush."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 1,
+          "functions": [
+            {
+              "function": "minecraft:set_count",
+              "count": 1.0,
+              "add": false
+            },
+            {
+              "function": "minecraft:set_book_cover",
+              "title": "Resonance: A Treatise",
+              "author": "Wren of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                [
+                  "",
+                  {
+                    "text": "Resonance: A Treatise",
+                    "bold": true,
+                    "color": "dark_aqua"
+                  },
+                  {
+                    "text": "\n\nOn the nature of the held note. For students of the Tuners.",
+                    "italic": true,
+                    "color": "dark_gray"
+                  }
+                ],
+                [
+                  "",
+                  {
+                    "text": "I. Sound is a shape.",
+                    "color": "dark_purple"
+                  },
+                  "\n\nA note held long and pure enough shapes whatever hears it. Stone is sung smooth, crystal grows along the chord, water learns to glow."
+                ],
+                [
+                  "",
+                  {
+                    "text": "II. Light is song made visible.",
+                    "color": "dark_purple"
+                  },
+                  "\n\nA lantern does not burn. It remembers a note and lets it go slowly, as a lung lets go of a breath."
+                ],
+                [
+                  "",
+                  {
+                    "text": "III. On echo shards.",
+                    "color": "dark_purple"
+                  },
+                  "\n\nA shard is an echo so pure it set solid: the note, frozen. That is why a shard opens a gate. A gate is only a note held open."
+                ],
+                [
+                  "",
+                  {
+                    "text": "IV. On resonite.",
+                    "color": "dark_purple"
+                  },
+                  "\n\nOre that lay in the song for centuries carries a chord without tiring. Make conduits of it, and cages for lanterns. Never for voices."
+                ],
+                [
+                  "",
+                  {
+                    "text": "V. On the Heart.",
+                    "color": "dark_purple"
+                  },
+                  "\n\nThe Heart holds one note, the Undying Chord, and all Aurelith hangs from it: lanterns, river, gates. Tune it gently. Everything listens."
+                ]
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 1,
+          "functions": [
+            {
+              "function": "minecraft:set_count",
+              "count": 1.0,
+              "add": false
+            },
+            {
+              "function": "minecraft:set_book_cover",
+              "title": "Litany of the Chimes",
+              "author": "Wren of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                [
+                  "",
+                  {
+                    "text": "Litany of the Chimes",
+                    "bold": true,
+                    "color": "dark_aqua"
+                  },
+                  {
+                    "text": "\n\nSaid at the Choir Hall, at the rites of the conductors.",
+                    "italic": true,
+                    "color": "dark_gray"
+                  }
+                ],
+                "Six chimes stand in a ring about the altar, and the conductor lays a frozen echo upon it. Then the altar sings, and the chimes light one by one.",
+                "Answer the altar note for note, each chime in the order it was sung, before the echo fades. A wrong note, and the song must begin again.",
+                [
+                  "",
+                  {
+                    "text": "Conductor:",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  " What is sung?\n",
+                  {
+                    "text": "Choir:",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  " Is never lost.\n",
+                  {
+                    "text": "Conductor:",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  " Who holds the note?\n",
+                  {
+                    "text": "Choir:",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  " Every voice a lantern.\n",
+                  {
+                    "text": "Conductor:",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  " Listen first.\n",
+                  {
+                    "text": "Choir:",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  " We are listening."
+                ],
+                [
+                  "",
+                  {
+                    "text": "(Added in another hand, after the Rest:)",
+                    "italic": true,
+                    "color": "dark_gray"
+                  },
+                  "\n\nDo not sing the litany at the Hall. The conductor is gone, but the altar is still answered. Something rises to finish the song."
+                ]
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 1,
+          "functions": [
+            {
+              "function": "minecraft:set_count",
+              "count": 1.0,
+              "add": false
+            },
+            {
+              "function": "minecraft:set_book_cover",
+              "title": "Where the Sculk Began",
+              "author": "Wren of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                [
+                  "",
+                  {
+                    "text": "Where the Sculk Began",
+                    "bold": true,
+                    "color": "dark_aqua"
+                  },
+                  {
+                    "text": "\n\nWritten after the Great Rest, by one who did not walk in the Last Procession.",
+                    "italic": true,
+                    "color": "dark_gray"
+                  }
+                ],
+                "In C. 1147 Ysolde stood at the Podium and silenced the Heart. I heard the Chord end. I had heard it every day of my life. The quiet after it was enormous.",
+                "The Procession left through the gates that night. I stayed to finish the copying. I told myself it was for the books.",
+                "On the ninth day something dark and soft was growing in the Heart's shadow, on the stones where the Chord had been loudest. It had small bright mouths. It was listening.",
+                "It is not rot, and it is not stone. It grows toward any sound. I think it is the Hush itself, listening for the song that stopped. It does not know the song is gone.",
+                "It has reached the Shallows. It has gone through the gates, into the deep dark of the world above. The Wardens did not stop it. It is not a false note. It is no note at all.",
+                "The lanterns still burn. Ysolde still stands at the Podium, though the sculk has her now, and she has begun, very softly, to sing again.\n\nI am going to listen."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "random_sequence": "minecraft:chests/sunken_library"
+}

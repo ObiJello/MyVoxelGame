@@ -16,9 +16,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <glm/glm.hpp>
 #include "common/world/level/DimensionId.hpp"
+#include "common/world/biome/Biomes.hpp"
 
 namespace Render {
 
@@ -34,7 +36,16 @@ namespace Render {
         glm::vec4 sunriseColor{1, 1, 1, 0};      // sunrise/sunset glow (a = fade)
         glm::vec4 cloudColor{1, 1, 1, 0.8f};     // clouds tint (a = base 0.8)
         float starBrightness = 0.0f;             // 0..0.5
-        float skyBrightness = 1.0f;              // terrain dim, 0.26666668..1
+        // The pre-light-engine terrain dim (MC SKY_LIGHT_LEVEL / 15,
+        // 0.26666668..1). Still what OBEY_LIGHT=0 draws with and what the sky
+        // and HUD passes read; the world itself is lit through the lightmap.
+        float skyBrightness = 1.0f;
+
+        // MC's lightmap inputs from the environment attributes (Lightmap.hpp):
+        float     skyLightFactor = 1.0f;         // SKY_LIGHT_FACTOR (day 1 .. night 0.24)
+        glm::vec3 skyLightColor{1.0f};           // SKY_LIGHT_COLOR (white .. #7a7aff)
+        glm::vec3 ambientLightColor{10.0f / 255.0f};   // AMBIENT_LIGHT_COLOR (dimension)
+        glm::vec3 blockLightTint{1.0f, 216.0f / 255.0f, 140.0f / 255.0f};   // BLOCK_LIGHT_TINT #ffd88c
 
         // Fog distances in blocks (MC FogData). rd* pushed to 1e9 when the
         // fog video option is off; skyEnd/cloudEnd always live (horizon fade).
@@ -44,7 +55,34 @@ namespace Render {
         float fogRdEnd = 1e9f;
         float fogSkyEnd = 512.0f;
         float fogCloudEnd = 2048.0f;
+
+        // Sun and moon opacity. 1 everywhere but the Aether, whose sky fades
+        // them in and out around dusk and dawn (AetherSkyRenderEffects
+        // .drawCelestialBodies).
+        float sunAlpha = 1.0f;
+        float moonAlpha = 1.0f;
+        // Bottom of the cloud layer, world Y — MC CLOUD_HEIGHT (overworld
+        // 192.33). The Aether's clouds float under its islands at 9.83
+        // (AetherSkyRenderEffects cloudLevel 9.5 + renderClouds' 0.33).
+        float cloudBottomY = 192.33f;
+
+        // The Hush's aurora ribbons, 0..1 (AuroraRenderer draws them in the
+        // Hush's sky pass). Composed by HushAtmosphere; 0 everywhere else.
+        float auroraStrength = 0.0f;
     };
+
+    // Which dimension's sky-and-fog rules compose the frame, beyond the
+    // flags below (skybox override, constant ambient, fixed night): the two
+    // ported mods' dimensions bring their own composition.
+    //   Vanilla         MC's DAY timeline + AtmosphericFogEnvironment
+    //   TwilightForest  TF 4.9 on MC 26.1: the dimension's attributes (no
+    //                   DAY timeline — "#minecraft:universal"), the biomes'
+    //                   fog/sky colours blended around the camera, and
+    //                   FogHandler's dusk dimming (TwilightForestRenderInfo)
+    //   Aether          The Aether 1.5.10 on MC 1.21.1: AetherSkyRenderEffects
+    //                   (sky, sunrise, clouds, sun/moon fade) over the 1.21.1
+    //                   FogRenderer with DimensionClientHooks' fog changes
+    enum class Atmosphere : uint8_t { Vanilla, TwilightForest, Aether };
 
     class EnvironmentState {
     public:
@@ -116,6 +154,42 @@ namespace Render {
         // static skybox in the OVERWORLD should still get night.
         void SetConstantAmbientLight(bool on) { m_constantAmbientLight = on; }
 
+        // MC DimensionType.fixedTime on a dimension that HAS a sky (the
+        // Hush; vanilla only fixes the clock where the sky is NONE or END).
+        // The server pins the Hush's clock at midnight (DimensionFixedTime),
+        // but the client's one clock is the Overworld's — TimeUpdateS2C
+        // carries a single dayTime for the session — so the frame is pinned
+        // here instead: the terrain sits at the Overworld's night floor, the
+        // stars are fully out and there is no sunrise glow, whatever the
+        // Overworld's time is. Set together with the constant ambient light
+        // (SkyRenderer::ApplyDimensionSky); the fixed night refines "no
+        // cycle" from noon to midnight.
+        void SetFixedNight(bool on) { m_fixedNight = on; }
+
+        // The dimension whose AMBIENT_LIGHT_COLOR and sky light colour the
+        // lightmap uses (set with the rest by SkyRenderer::ApplyDimensionSky).
+        void SetLightDimension(Game::DimensionId dimension) { m_lightDimension = dimension; }
+
+        // The mod dimensions' own sky and fog (see Atmosphere). Set by
+        // SkyRenderer::ApplyDimensionSky with the other dimension rules.
+        void SetAtmosphere(Atmosphere atmosphere) { m_atmosphere = atmosphere; }
+        Atmosphere GetAtmosphere() const { return m_atmosphere; }
+
+        // Where the camera is, for the per-biome attributes the Twilight
+        // Forest blends around it (MC EnvironmentAttributeProbe samples the
+        // biomes around Camera.position). Set every frame BEFORE UpdateFrame.
+        void SetCameraPosition(const glm::dvec3& position) {
+            m_cameraPos = position;
+            m_hasCameraPos = true;
+        }
+
+        // The Aether's AetherTimeAttachment.isEternalDay: true (the clock
+        // held at noon) until the Sun Spirit is defeated — which this port
+        // has no boss for yet, so it stays true. Cleared, the Aether's sky
+        // runs on its own 72,000-tick day (three Overworld days, the mod's
+        // default AetherTimeAttachment.getTicksPerDay) off the client clock.
+        void SetAetherEternalDay(bool on) { m_aetherEternalDay = on; }
+
         // Weather strengths, MC Level.getRainLevel / getThunderLevel (0..1,
         // thunder never above rain). The engine has no weather system yet
         // (World::IsRainingAt is a constant false), so nothing sets these
@@ -128,9 +202,45 @@ namespace Render {
         float RainLevel() const    { return m_rainLevel; }
         float ThunderLevel() const { return m_thunderLevel; }
 
+        // MC ClientLevel.skyFlashTime — set to 2 by a flashing LightningBolt
+        // (ClientLevelBridge::SetSkyFlashTime, which also honours "Hide
+        // Lightning Flashes"), counted down in TickClient. While it is
+        // positive UpdateFrame applies ClientLevel's two environment layers:
+        // SKY_COLOR lerped 0.22 toward (0.8, 0.8, 1.0) — the fog follows,
+        // since it is blended toward the sky colour — and SKY_LIGHT_FACTOR
+        // forced to 1 (skyBrightness, the terrain's day/night dim).
+        void SetSkyFlashTime(int ticks) { m_skyFlashTime = ticks; }
+        int  SkyFlashTime() const { return m_skyFlashTime; }
+
+        // MC FogRenderer's fluid fog (WaterFogEnvironment / LavaFogEnvironment).
+        // `fluid` is Camera.getFluidInCamera: 0 none, 1 water, 2 lava.
+        // `biomeAtEye` supplies the biome's WATER_FOG_COLOR; `spectator`
+        // picks lava's see-through variant. Set every frame BEFORE
+        // UpdateFrame; TickClient runs LocalPlayer's waterVisionTime off it.
+        enum CameraFluid : int { kFluidNone = 0, kFluidWater = 1, kFluidLava = 2 };
+        // `resonantWater`: the eye's water is Aurelith's resonant water (the
+        // river Vesper, BlockID::ResonantWater) — the water fog turns its
+        // luminous violet instead of the biome's colour (docs/fluids.md).
+        void SetCameraFluid(int fluid, Game::BiomeId biomeAtEye, bool spectator,
+                            bool resonantWater = false);
+        int  CameraFluid() const { return m_cameraFluid; }
+        // MC LocalPlayer.getWaterVision: 0..1, the eyes adjusting to water
+        // over 600 ticks; water fog distance scales by max(0.25, this).
+        float WaterVision() const;
+
     private:
         EnvironmentState() = default;
         void ApplyPendingSync();
+
+        // The mod dimensions' composition (see Atmosphere), run by
+        // UpdateFrame in place of the vanilla sky/fog colours, before the
+        // fluid fog.
+        void ComposeTwilightForest(int renderDistChunks, bool fogEnabled);
+        void ComposeAether(float partialTick, const glm::vec3& cameraForward,
+                           int renderDistChunks, bool fogEnabled);
+        // TF FogHandler.colorFog: the last word on the fog colour in the
+        // Twilight Forest, fluid fog included (ViewportEvent.ComputeFogColor).
+        void ApplyTwilightFogHandler();
 
         // Staged sync from the I/O thread.
         std::atomic<bool> m_hasPending{false};
@@ -147,8 +257,21 @@ namespace Render {
         // Skybox fog override (main thread only).
         bool m_skyboxActive = false;
         bool m_constantAmbientLight = false;
+        bool m_fixedNight = false;
+        Game::DimensionId m_lightDimension = Game::DimensionId::Overworld;
+        // Set while FrameForDimension recomposes another dimension's frame.
+        bool m_recomposing = false;
+        // Fills the frame's lightmap inputs (skyLightFactor & co.) for the
+        // vanilla composition; the mod atmospheres refine it.
+        void ComposeLightAttributes(double dayTimeF);
         float m_rainLevel = 0.0f;
         float m_thunderLevel = 0.0f;
+        int   m_cameraFluid = 0;
+        Game::BiomeId m_cameraBiome = Game::kFallbackBiomeId;
+        bool  m_cameraSpectator = false;
+        bool  m_cameraResonant  = false;   // eye in resonant water (SetCameraFluid)
+        int   m_waterVisionTime = 0;   // MC LocalPlayer.waterVisionTime, 0..600
+        int   m_skyFlashTime = 0;      // MC ClientLevel.skyFlashTime (lightning)
         const EnvironmentFrame* m_frameOverride = nullptr;
         // Last UpdateFrame inputs, so FrameForDimension can recompose.
         float     m_lastPartialTick = 0.0f;
@@ -158,6 +281,19 @@ namespace Render {
         bool      m_lastFogEnabled = true;
         glm::vec3 m_skyboxFogBase{0.5f};
         int m_skyboxMode = 2;
+
+        Atmosphere m_atmosphere = Atmosphere::Vanilla;
+        glm::dvec3 m_cameraPos{0.0};
+        bool       m_hasCameraPos = false;
+        // FrameForDimension composes a dimension the camera is NOT in: no
+        // biome sampling around it (the attributes are the dimension's
+        // defaults) and no stepping of per-frame state.
+        bool       m_composingForeign = false;
+        // TF FogHandler.spookyPercent: 0..1, easing toward 1 in the spooky
+        // forest and back to 0 outside it.
+        float      m_spookyPercent = 0.0f;
+        std::chrono::steady_clock::time_point m_lastSpookyStep{};
+        bool       m_aetherEternalDay = true;
 
         EnvironmentFrame m_frame;
     };

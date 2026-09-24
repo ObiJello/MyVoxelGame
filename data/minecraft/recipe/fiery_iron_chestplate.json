@@ -1,0 +1,43 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "equipment",
+  "group": "fiery_chestplate",
+  "ingredients": [
+    "minecraft:iron_chestplate",
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ]
+  ],
+  "result": {
+    "id": "minecraft:fiery_chestplate"
+  }
+}

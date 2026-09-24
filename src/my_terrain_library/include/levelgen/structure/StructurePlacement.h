@@ -70,9 +70,10 @@ public:
 
     // Reference: applyAdditionalChunkRestrictions()
     bool applyAdditionalChunkRestrictions(int32_t sourceX, int32_t sourceZ, int64_t levelSeed) const;
-    // Reference: applyInteractionsWithOtherStructures()
-    bool applyInteractionsWithOtherStructures(const ChunkGeneratorStructureState& state,
-                                              int32_t sourceX, int32_t sourceZ) const;
+    // Reference: applyInteractionsWithOtherStructures(). Virtual as in Java:
+    // the Twilight Forest's avoid_landmark_grid adds its own avoid list.
+    virtual bool applyInteractionsWithOtherStructures(const ChunkGeneratorStructureState& state,
+                                                      int32_t sourceX, int32_t sourceZ) const;
 
     virtual bool isPlacementChunk(const ChunkGeneratorStructureState& state,
                                   int32_t sourceX, int32_t sourceZ) const = 0;
@@ -102,6 +103,11 @@ public:
 
     int32_t spacing() const { return m_spacing; }
     int32_t separation() const { return m_separation; }
+    // The spacing getPotentialStructureChunk actually uses: `spacing` scaled
+    // by the World Properties structure-frequency knob (1.0 = vanilla).
+    // Engine companion placements (AnchoredStructurePlacement) enumerate the
+    // grid cells near a chunk with it.
+    int32_t effectiveSpacing() const;
 
     /**
      * Reference: getPotentialStructureChunk() - the candidate chunk for the

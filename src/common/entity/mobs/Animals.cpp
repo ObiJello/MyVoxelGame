@@ -21,6 +21,8 @@
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/sound/SoundEvents.hpp"
+#include "common/sound/SoundType.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
@@ -112,6 +114,9 @@ namespace Game {
             RecipeManager::ItemFromSlug("red_mushroom");
         EntityLevel* level = m_level;
         const glm::dvec3 dropPos = position + glm::dvec3(0.0, 1.0, 0.0);
+        // MC shear: level.playSound(null, this, MOOSHROOM_SHEAR, source, 1, 1)
+        // — PLAYERS from a player's shears.
+        level->PlaySoundFromEntity(nullptr, *this, SoundEvents::MOOSHROOM_SHEAR, SoundSource::Players, 1.0f, 1.0f);
         if (ConvertTo(std::make_unique<Cow>(level))) {
             // The EXPLOSION poof at the swap waits on particles.
             for (int i = 0; i < 5; ++i) {
@@ -370,6 +375,9 @@ namespace Game {
         // inside the per-count loop) rather than one stack of three, so the
         // wool scatters instead of landing in a pile. Item entities merge on
         // their own a moment later, which is exactly what vanilla looks like.
+        // MC Sheep.shear: level.playSound(null, this, SHEEP_SHEAR, source,
+        // 1, 1) — PLAYERS from a player's shears.
+        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::SHEEP_SHEAR, SoundSource::Players, 1.0f, 1.0f);
         JavaRandom& rng = m_level->Random();
         const int rolls = 1 + rng.NextInt(3);
         const uint32_t wool = WoolItemForColor(GetColor());
@@ -454,8 +462,10 @@ namespace Game {
     void Sheep::OnEatBlock() {
         SetSheared(false);
         // Grazing accelerates a lamb's growth by 60 seconds — the mechanic that
-        // lets a player speed up a flock by keeping them on grass.
-        if (IsBaby()) AgeUp(60);
+        // lets a player speed up a flock by keeping them on grass. MC
+        // Sheep.ate gates it on canAgeUp: an age-locked lamb grazes for wool
+        // only.
+        if (CanAgeUp()) AgeUp(60);
     }
 
     float Sheep::GetHeadEatPositionScale(float partialTick) const {
@@ -572,6 +582,10 @@ namespace Game {
         if (--m_eggTime > 0) return;
 
         m_level->SpawnItemDrop(position, Items::Egg, 1);
+        {
+            JavaRandom& rng = m_level->Random();
+            PlaySound(SoundEvents::CHICKEN_EGG, 1.0f, (rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f);
+        }
         m_eggTime = m_level->Random().NextInt(6000) + 6000;
     }
 
@@ -648,13 +662,135 @@ namespace Game {
 
     } // namespace
 
+    namespace {
+
+        // MC Parrot.MOB_SOUND_MAP, in its source order. The happy ghast maps
+        // to SoundEvents.EMPTY: imitated, but silent ("" here).
+        struct ParrotImitation {
+            EntityTypeId type;
+            const char*  event;
+        };
+        constexpr ParrotImitation kParrotImitations[] = {
+            {EntityTypeId::Blaze,          SoundEvents::PARROT_IMITATE_BLAZE},
+            {EntityTypeId::Bogged,         SoundEvents::PARROT_IMITATE_BOGGED},
+            {EntityTypeId::Breeze,         SoundEvents::PARROT_IMITATE_BREEZE},
+            {EntityTypeId::CamelHusk,      SoundEvents::PARROT_IMITATE_CAMEL_HUSK},
+            {EntityTypeId::CaveSpider,     SoundEvents::PARROT_IMITATE_SPIDER},
+            {EntityTypeId::Creaking,       SoundEvents::PARROT_IMITATE_CREAKING},
+            {EntityTypeId::Creeper,        SoundEvents::PARROT_IMITATE_CREEPER},
+            {EntityTypeId::Drowned,        SoundEvents::PARROT_IMITATE_DROWNED},
+            {EntityTypeId::ElderGuardian,  SoundEvents::PARROT_IMITATE_ELDER_GUARDIAN},
+            {EntityTypeId::EnderDragon,    SoundEvents::PARROT_IMITATE_ENDER_DRAGON},
+            {EntityTypeId::Endermite,      SoundEvents::PARROT_IMITATE_ENDERMITE},
+            {EntityTypeId::Evoker,         SoundEvents::PARROT_IMITATE_EVOKER},
+            {EntityTypeId::Ghast,          SoundEvents::PARROT_IMITATE_GHAST},
+            {EntityTypeId::HappyGhast,     ""},
+            {EntityTypeId::Guardian,       SoundEvents::PARROT_IMITATE_GUARDIAN},
+            {EntityTypeId::Hoglin,         SoundEvents::PARROT_IMITATE_HOGLIN},
+            {EntityTypeId::Husk,           SoundEvents::PARROT_IMITATE_HUSK},
+            {EntityTypeId::Illusioner,     SoundEvents::PARROT_IMITATE_ILLUSIONER},
+            {EntityTypeId::MagmaCube,      SoundEvents::PARROT_IMITATE_MAGMA_CUBE},
+            {EntityTypeId::Parched,        SoundEvents::PARROT_IMITATE_PARCHED},
+            {EntityTypeId::Phantom,        SoundEvents::PARROT_IMITATE_PHANTOM},
+            {EntityTypeId::Piglin,         SoundEvents::PARROT_IMITATE_PIGLIN},
+            {EntityTypeId::PiglinBrute,    SoundEvents::PARROT_IMITATE_PIGLIN_BRUTE},
+            {EntityTypeId::Pillager,       SoundEvents::PARROT_IMITATE_PILLAGER},
+            {EntityTypeId::Ravager,        SoundEvents::PARROT_IMITATE_RAVAGER},
+            {EntityTypeId::Shulker,        SoundEvents::PARROT_IMITATE_SHULKER},
+            {EntityTypeId::Silverfish,     SoundEvents::PARROT_IMITATE_SILVERFISH},
+            {EntityTypeId::Skeleton,       SoundEvents::PARROT_IMITATE_SKELETON},
+            {EntityTypeId::Slime,          SoundEvents::PARROT_IMITATE_SLIME},
+            {EntityTypeId::Spider,         SoundEvents::PARROT_IMITATE_SPIDER},
+            {EntityTypeId::Stray,          SoundEvents::PARROT_IMITATE_STRAY},
+            {EntityTypeId::Vex,            SoundEvents::PARROT_IMITATE_VEX},
+            {EntityTypeId::Vindicator,     SoundEvents::PARROT_IMITATE_VINDICATOR},
+            {EntityTypeId::Warden,         SoundEvents::PARROT_IMITATE_WARDEN},
+            {EntityTypeId::Witch,          SoundEvents::PARROT_IMITATE_WITCH},
+            {EntityTypeId::Wither,         SoundEvents::PARROT_IMITATE_WITHER},
+            {EntityTypeId::WitherSkeleton, SoundEvents::PARROT_IMITATE_WITHER_SKELETON},
+            {EntityTypeId::Zoglin,         SoundEvents::PARROT_IMITATE_ZOGLIN},
+            {EntityTypeId::Zombie,         SoundEvents::PARROT_IMITATE_ZOMBIE},
+            {EntityTypeId::ZombieHorse,    SoundEvents::PARROT_IMITATE_ZOMBIE_HORSE},
+            {EntityTypeId::ZombieNautilus, SoundEvents::PARROT_IMITATE_ZOMBIE_NAUTILUS},
+            {EntityTypeId::ZombieVillager, SoundEvents::PARROT_IMITATE_ZOMBIE_VILLAGER},
+        };
+
+        // MC Parrot.getImitatedSound; null when the type is not in the map.
+        const char* ImitatedSound(EntityTypeId type) {
+            for (const ParrotImitation& i : kParrotImitations) {
+                if (i.type == type) return i.event;
+            }
+            return nullptr;
+        }
+
+        float ParrotPitch(JavaRandom& rng) {
+            return (rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f;
+        }
+
+        // MC Parrot.imitateNearbyMobs: half the time, a random imitable mob
+        // within 20 blocks is voiced at the parrot (0.7).
+        void ImitateNearbyMobs(EntityLevel& level, const Entity& parrot) {
+            JavaRandom& rng = level.Random();
+            if (!parrot.IsAlive() || parrot.IsSilent() || rng.NextInt(2) != 0) return;
+            AABB box = parrot.GetAABB();
+            box.min -= glm::vec3(20.0f);
+            box.max += glm::vec3(20.0f);
+            std::vector<Entity*> nearby;
+            level.GetEntitiesInBox(box, nullptr, nearby);
+            std::vector<const Entity*> mobs;
+            for (const Entity* e : nearby) {
+                if (e && ImitatedSound(e->GetType())) mobs.push_back(e);
+            }
+            if (mobs.empty()) return;
+            const Entity* mob = mobs[static_cast<size_t>(rng.NextInt(static_cast<int>(mobs.size())))];
+            if (mob->IsSilent()) return;
+            const char* event = ImitatedSound(mob->GetType());
+            if (event && event[0]) {
+                level.PlaySound(nullptr, parrot.position, event, parrot.GetSoundSource(), 0.7f, ParrotPitch(rng));
+            }
+        }
+
+    } // namespace
+
+    const char* Parrot::GetAmbientSound() const {
+        // MC Parrot.getAmbient: outside peaceful, 1 in 1000 ambient calls
+        // imitates a random mob from the map instead.
+        if (!m_level) return SoundEvents::PARROT_AMBIENT;
+        JavaRandom& rng = m_level->Random();
+        if (m_level->GetDifficulty() != Difficulty::Peaceful && rng.NextInt(1000) == 0) {
+            constexpr int count = static_cast<int>(std::size(kParrotImitations));
+            return kParrotImitations[rng.NextInt(count)].event;
+        }
+        return SoundEvents::PARROT_AMBIENT;
+    }
+
+    float Parrot::GetVoicePitch() const {
+        // MC Parrot.getVoicePitch — getPitch, no baby shift.
+        return m_level ? ParrotPitch(m_level->Random()) : 1.0f;
+    }
+
+    bool Parrot::IsFlapping() const {
+        // MC Parrot.isFlapping.
+        return m_flyDist > m_nextFlap;
+    }
+
+    void Parrot::OnFlap() {
+        // MC Parrot.onFlap.
+        PlaySound(SoundEvents::PARROT_FLY, 0.15f, 1.0f);
+        m_nextFlap = m_flyDist + m_flapSpeed / 2.0f;
+    }
+
     UseResult Parrot::MobInteract(LivingEntity& player, ItemStack& held) {
-        // MC Parrot.mobInteract, verbatim shape. PARROT_EAT sound waits on
-        // the sound system.
+        // MC Parrot.mobInteract, verbatim shape.
         const bool clientSide = m_level && m_level->IsClientSide();
 
         if (!IsTame() && IsParrotFood(held.itemId)) {
             UsePlayerItem(held);
+            if (!IsSilent() && m_level) {
+                JavaRandom& rng = m_level->Random();
+                m_level->PlaySound(nullptr, position, SoundEvents::PARROT_EAT, GetSoundSource(),
+                                   1.0f, 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.2f);
+            }
             if (!clientSide && m_level) {
                 // MC: 1-in-10 — parrots are the hard tame.
                 if (m_level->Random().NextInt(10) == 0) {
@@ -686,9 +822,13 @@ namespace Game {
     }
 
     void Parrot::AiStep() {
-        // MC Parrot.aiStep also runs the jukebox party check and the
-        // 1-in-400 imitate-nearby-mobs roll — both wait on the jukebox and
-        // sound systems.
+        // MC Parrot.aiStep: the 1-in-400 imitate-nearby-mobs roll, then super
+        // and calculateFlapping. (The jukebox party check waits on the
+        // jukebox; the imitation's playSound(null, ...) is heard only from
+        // the server, so the client skips the entity query.)
+        if (m_level && !m_level->IsClientSide() && m_level->Random().NextInt(400) == 0) {
+            ImitateNearbyMobs(*m_level, *this);
+        }
         Animal::AiStep();
         CalculateFlapping();
     }
@@ -733,7 +873,7 @@ namespace Game {
             static const std::vector<EntityTypeId> kList = [] {
                 std::vector<EntityTypeId> list;
                 for (int i = 0; i < kEntityTypeCount; ++i) {
-                    if (kEntityTypeTable[i].category == MobCategory::Monster) {
+                    if (IsMonsterCategory(kEntityTypeTable[i].category)) {
                         list.push_back(static_cast<EntityTypeId>(i));
                     }
                 }
@@ -869,9 +1009,15 @@ namespace Game {
     }
 
     void Rabbit::SetJumping(bool jump) {
-        // MC Rabbit.setJumping — super sets the flag; the jump sound it plays
-        // when true waits on the sound system.
+        // MC Rabbit.setJumping — super sets the flag; a jump plays RABBIT_JUMP
+        // at 0.8x voice pitch. (playAttackSound is the EVIL variant's, which
+        // the variant system does not model.)
         jumping = jump;
+        if (jump && m_level) {
+            JavaRandom& rng = m_level->Random();
+            PlaySound(SoundEvents::RABBIT_JUMP, GetSoundVolume(),
+                      ((rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f) * 0.8f);
+        }
     }
 
     // MC 26.1 Rabbit.JUMP_DURATION — 15 ticks (10 before the rabbit remodel;
@@ -1093,10 +1239,9 @@ namespace Game {
     }
 
     void PolarBear::PlayWarningSound() {
-        // MC PolarBear.playWarningSound — the growl itself (POLAR_BEAR_WARNING)
-        // waits on the sound system; the 40-tick cadence is kept so the sound
-        // drops in without behaviour changes.
+        // MC PolarBear.playWarningSound — one growl per 40 ticks.
         if (m_warningSoundTicks <= 0) {
+            MakeSound(SoundEvents::POLAR_BEAR_WARNING);
             m_warningSoundTicks = 40;
         }
     }
@@ -1255,6 +1400,22 @@ namespace Game {
             UpdatePersistentAnger(/*stayAngryIfTargetPresent=*/true);
             SetAggressive(IsAngry());
         }
+    }
+
+    const char* Wolf::GetAmbientSound() const {
+        const bool baby = IsBaby();
+        if (IsAngry()) return baby ? SoundEvents::WOLF_GROWL_BABY : SoundEvents::ENTITY_WOLF_GROWL;
+        if (m_level && m_level->Random().NextInt(3) == 0) {
+            if (IsTame() && GetHealth() < 20.0f) {
+                return baby ? SoundEvents::WOLF_WHINE_BABY : SoundEvents::ENTITY_WOLF_WHINE;
+            }
+            return baby ? SoundEvents::WOLF_PANT_BABY : SoundEvents::ENTITY_WOLF_PANT;
+        }
+        return baby ? SoundEvents::WOLF_AMBIENT_BABY : SoundEvents::ENTITY_WOLF_AMBIENT;
+    }
+
+    const char* Wolf::GetHurtSound(MobDamageSource) const {
+        return IsBaby() ? SoundEvents::WOLF_HURT_BABY : SoundEvents::ENTITY_WOLF_HURT;
     }
 
     float Wolf::GetHeadRollAngle(float partialTick) const {
@@ -1418,6 +1579,11 @@ namespace Game {
         const double yo = std::sqrt(xd * xd + zd * zd) * 0.2;
 
         spit->Shoot(xd, yd + yo, zd, 1.5f, 10.0f);
+        if (!IsSilent()) {
+            JavaRandom& rng = m_level->Random();
+            m_level->PlaySound(nullptr, position, SoundEvents::LLAMA_SPIT, GetSoundSource(),
+                               1.0f, 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.2f);
+        }
         m_level->AddFreshEntity(std::move(spit));
 
         m_didSpit = true;
@@ -1665,7 +1831,34 @@ namespace Game {
         }
 
         Animal::AiStep();
-        // MC's 5% FOX_AGGRO bark while defending waits on the sound system.
+        if (IsDefending() && m_level && m_level->Random().NextFloat() < 0.05f) {
+            PlaySound(SoundEvents::FOX_AGGRO, 1.0f, 1.0f);
+        }
+    }
+
+    const char* Fox::GetAmbientSound() const {
+        // MC Fox.getAmbientSound: asleep it snores; at night, 1 in 10 calls
+        // screech when no player is within 16 blocks. (isBrightOutside is
+        // skyDarken < 4; foxes live in the overworld, which has no fixed time.)
+        if (IsSleeping()) return SoundEvents::FOX_SLEEP;
+        if (m_level && m_level->GetSkyDarken() >= 4 && m_level->Random().NextFloat() < 0.1f) {
+            const LivingEntity* player = m_level->GetNearestPlayer(position.x, position.y, position.z, -1.0);
+            AABB box = GetAABB();
+            box.min -= glm::vec3(16.0f);
+            box.max += glm::vec3(16.0f);
+            if (!player || !box.Intersects(player->GetAABB())) return SoundEvents::FOX_SCREECH;
+        }
+        return SoundEvents::FOX_AMBIENT;
+    }
+
+    void Fox::PlayAmbientSound() {
+        // MC Fox.playAmbientSound: the screech carries (volume 2).
+        const char* ambient = GetAmbientSound();
+        if (ambient == SoundEvents::FOX_SCREECH) {
+            PlaySound(ambient, 2.0f, GetVoicePitch());
+        } else {
+            MakeSound(ambient);
+        }
     }
 
     std::shared_ptr<SpawnGroupData>
@@ -1742,6 +1935,13 @@ namespace Game {
 
     std::unique_ptr<Animal> Turtle::CreateBaby() {
         return std::make_unique<Turtle>(m_level);
+    }
+
+    const char* Turtle::GetAmbientSound() const {
+        // MC Turtle.getAmbientSound: an adult ashore grunts; otherwise the
+        // generated row (none).
+        if (!IsInWater() && onGround && !IsBaby()) return SoundEvents::TURTLE_AMBIENT_LAND;
+        return Animal::GetAmbientSound();
     }
 
     bool Turtle::IsSandBlock(BlockID id) {
@@ -1960,9 +2160,19 @@ namespace Game {
 
     bool Panda::DoHurtTarget(Entity& target) {
         // MC Panda.doHurtTarget: a non-aggressive panda regrets the bite.
-        // (playAttackSound waits on the sound system.)
         if (!IsAggressiveGene()) m_didBite = true;
         return Animal::DoHurtTarget(target);
+    }
+
+    void Panda::PlayAttackSound() {
+        // MC Panda.playAttackSound.
+        PlaySound(SoundEvents::PANDA_BITE, 1.0f, 1.0f);
+    }
+
+    const char* Panda::GetAmbientSound() const {
+        // MC Panda.getAmbientSound.
+        if (IsAggressive()) return SoundEvents::PANDA_AGGRESSIVE_AMBIENT;
+        return IsWorried() ? SoundEvents::PANDA_WORRIED_AMBIENT : SoundEvents::PANDA_AMBIENT;
     }
 
     UseResult Panda::MobInteract(LivingEntity& player, ItemStack& held) {
@@ -1975,7 +2185,13 @@ namespace Game {
             return UseResult::Success;
         }
 
-        if (!IsFood(held.itemId)) return UseResult::Pass;
+        // MC Panda.mobInteract's tail: a non-food click PASSes — except a
+        // golden dandelion on a cub, which goes to AgeableMob's toggle.
+        if (!IsFood(held.itemId)) {
+            return IsBaby() && CanUseGoldenDandelion(held, true, GetAgeLockParticleTimer(), *this)
+                       ? AgeableMob::MobInteract(player, held)
+                       : UseResult::Pass;
+        }
 
         // MC: feeding a panda that has a grudge target sets gotBamboo — the
         // stand-down flag PandaHurtByTargetGoal reads.
@@ -1984,6 +2200,10 @@ namespace Game {
         const int age = GetAge();
         const bool clientSide = m_level && m_level->IsClientSide();
         if (IsBaby()) {
+            // An age-locked cub takes no bamboo (nothing to grow), and the
+            // click is not swallowed either — MC's isBaby branch there is
+            // PASS, and a PASS is what lets the flower below be reached.
+            if (!CanAgeUp()) return UseResult::Pass;
             UsePlayerItem(held);
             AgeUp(GetSpeedUpSecondsWhenFeeding(-age), /*forced=*/true);
         } else if (!clientSide && age == 0 && CanFallInLove()) {
@@ -2037,17 +2257,20 @@ namespace Game {
                                            target->GetEyeY(),
                                            target->position.z, 90.0f, 90.0f);
             }
-            // MC plays PANDA_CANT_BREED at counters 29 and 14 — sounds wait
-            // on the sound system.
+            if (m_unhappyCounter == 29 || m_unhappyCounter == 14) {
+                PlaySound(SoundEvents::PANDA_CANT_BREED, 1.0f, 1.0f);
+            }
             --m_unhappyCounter;
         }
 
         // The sneeze clock runs on BOTH sides (the client's flag comes off
-        // the anim byte); the sound and particle edges wait on their systems.
+        // the anim byte); the particle edge waits on particles.
         if (IsSneezing()) {
             ++m_sneezeCounter;
             if (m_sneezeCounter > 20) {
                 Sneeze(false);
+                // MC afterSneeze: the sneeze itself.
+                PlaySound(SoundEvents::PANDA_SNEEZE, 1.0f, 1.0f);
                 if (serverSide) {
                     // MC afterSneeze: startle every grounded adult panda
                     // within 10 blocks into a hop. (The sneeze particle and
@@ -2064,6 +2287,8 @@ namespace Game {
                         panda->JumpFromGround();
                     }
                 }
+            } else if (m_sneezeCounter == 1) {
+                PlaySound(SoundEvents::PANDA_PRE_SNEEZE, 1.0f, 1.0f);
             }
         }
 
@@ -2480,10 +2705,17 @@ namespace Game {
     }
 
     void Cat::Tick() {
-        // MC Cat.tick → handleLieDown: the ramps run every tick on both
-        // sides. (The purr sounds and the lying-on-sleeping-player scan wait
-        // on the sound system and player sleep.)
+        // MC Cat.tick → handleLieDown: the purr while lying, then the ramps,
+        // every tick on both sides. (The tempt-goal beg and the
+        // lying-on-sleeping-player scan wait on a tempt-goal handle and
+        // player sleep.)
         Animal::Tick();
+
+        if ((IsLying() || IsRelaxStateOne()) && tickCount % 5 == 0 && m_level) {
+            JavaRandom& rng = m_level->Random();
+            PlaySound(IsBaby() ? SoundEvents::CAT_PURR_BABY : SoundEvents::ENTITY_CAT_PURR,
+                      0.6f + 0.4f * (rng.NextFloat() - rng.NextFloat()), 1.0f);
+        }
 
         m_lieDownAmountO = m_lieDownAmount;
         m_lieDownAmountOTail = m_lieDownAmountTail;
@@ -2501,6 +2733,26 @@ namespace Game {
         } else {
             m_relaxStateOneAmount = std::max(0.0f, m_relaxStateOneAmount - 0.13f);
         }
+    }
+
+    const char* Cat::GetAmbientSound() const {
+        // MC Cat.getAmbientSound off the classic sound set (the sound-variant
+        // registry is not modelled).
+        const bool baby = IsBaby();
+        if (!IsTame()) return baby ? SoundEvents::CAT_STRAY_AMBIENT_BABY : SoundEvents::ENTITY_CAT_STRAY_AMBIENT;
+        if (IsInLove()) return baby ? SoundEvents::CAT_PURR_BABY : SoundEvents::ENTITY_CAT_PURR;
+        if (m_level && m_level->Random().NextInt(4) == 0) {
+            return baby ? SoundEvents::CAT_PURREOW_BABY : SoundEvents::ENTITY_CAT_PURREOW;
+        }
+        return baby ? SoundEvents::CAT_AMBIENT_BABY : SoundEvents::ENTITY_CAT_AMBIENT;
+    }
+
+    void Cat::PlayEatingSound() {
+        PlaySound(IsBaby() ? SoundEvents::CAT_EAT_BABY : SoundEvents::ENTITY_CAT_EAT, 1.0f, 1.0f);
+    }
+
+    void Cat::Hiss() {
+        MakeSound(IsBaby() ? SoundEvents::CAT_HISS_BABY : SoundEvents::ENTITY_CAT_HISS);
     }
 
     float Cat::GetLieDownAmount(float partialTick) const {
@@ -2668,7 +2920,8 @@ namespace Game {
             itemUsed = true;
         }
 
-        if (IsBaby() && ageUpSeconds > 0) {
+        // MC AbstractHorse.handleEating: `isBaby() && ageUp > 0 && !isAgeLocked()`.
+        if (IsBaby() && ageUpSeconds > 0 && !IsAgeLocked()) {
             // MC's HAPPY_VILLAGER particle waits on particles.
             if (!clientSide) {
                 AgeUp(ageUpSeconds);
@@ -2682,10 +2935,52 @@ namespace Game {
             itemUsed = true;
         }
 
-        // MC closes with eating() — the chew sound + open-mouth flag, both
-        // skipped (sound system; the mouth flag's only reader is the render
-        // mouth ramp, itself skipped).
+        // MC: `if (itemUsed) this.eating();`.
+        if (itemUsed) Eating();
         return itemUsed;
+    }
+
+    void AbstractHorse::MakeMad() {
+        if (!IsStanding() && m_level && !m_level->IsClientSide()) {
+            StandIfPossible();
+            MakeSound(GetAngrySound());
+        }
+    }
+
+    void AbstractHorse::Eating() {
+        if (IsSilent() || !m_level) return;
+        const char* sound = GetEatingSound();
+        if (IsEmptySound(sound)) return;
+        JavaRandom& rng = m_level->Random();
+        m_level->PlaySound(nullptr, position, sound, GetSoundSource(),
+                           1.0f, 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.2f);
+    }
+
+    void AbstractHorse::PlayStepSound(const glm::ivec3& pos, BlockState state) {
+        if (state.Block() == BlockID::Water || state.Block() == BlockID::Lava) return;
+        const SoundType* type = &SoundTypeOf(state);
+        if (m_level && m_level->Blocks()) {
+            const BlockState above = m_level->Blocks()->GetBlockState(pos.x, pos.y + 1, pos.z);
+            if (above.Block() == BlockID::SnowLayer) type = &SoundTypeOf(above);
+        }
+        const bool wood = type == &SoundTypes::WOOD || type == &SoundTypes::NETHER_WOOD
+                       || type == &SoundTypes::STEM || type == &SoundTypes::CHERRY_WOOD
+                       || type == &SoundTypes::BAMBOO_WOOD;
+        const char* step = wood ? SoundEvents::HORSE_STEP_WOOD
+                         : IsBaby() ? SoundEvents::HORSE_STEP_BABY : SoundEvents::HORSE_STEP;
+        PlaySound(step, type->GetVolume() * 0.15f, type->GetPitch());
+    }
+
+    bool AbstractHorse::CauseFallDamage(double fallDist, float damageMultiplier) {
+        if (m_level && m_level->IsClientSide()) return false;
+        if (fallDist > 1.0) {
+            PlaySound(IsBaby() ? SoundEvents::HORSE_LAND_BABY : SoundEvents::HORSE_LAND, 0.4f, 1.0f);
+        }
+        const int damage = CalculateFallDamage(fallDist, damageMultiplier);
+        if (damage <= 0) return false;
+        Hurt(MobDamageSource::Fall, static_cast<float>(damage), nullptr);
+        PlayBlockFallSound();
+        return true;
     }
 
     void AbstractHorse::Tick() {

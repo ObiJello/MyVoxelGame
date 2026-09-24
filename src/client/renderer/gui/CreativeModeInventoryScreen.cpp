@@ -1,14 +1,20 @@
 // File: src/client/renderer/gui/CreativeModeInventoryScreen.cpp
 #include "CreativeModeInventoryScreen.hpp"
+#include "EffectsInInventory.hpp"
 #include "InventoryScreen.hpp"          // GetSurvivalInventoryScreen (gamemode swap)
 #include "GuiGraphics.hpp"
 #include "items/PlayerInventoryPreview.hpp"
 #include "screens/Screen.hpp"           // LoadStandaloneGuiTexture
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/RedstonePlus.hpp"
 #include "common/entity/GeneratedItemList.hpp"   // Game::Items::Compass etc.
 #include "common/world/enchantment/Enchantment.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/entity/alchemy/Potions.hpp"
+#include "common/data/DataComponents.hpp"
 #include "client/entity/Player.hpp"
+#include "common/world/portal/PortalState.hpp"
+#include "common/core/Features.hpp"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -39,6 +45,17 @@ namespace {
     // TODO: replace this hardcoded denylist by extending tools/gen_items.py to
     // emit a `kBlockItemSlugs` allowlist parsed from Items.java's
     // `registerBlock(Blocks.X, ...)` calls. That's the MC-faithful approach.
+    // Engine blocks that exist only under a rule: the blue (zero-delay)
+    // redstone torch is offered only while redstone_plus is on (mirrored
+    // through WorldRulesS2C, so a remote client agrees with its host).
+    bool BlockOfferedNow(Game::BlockID id) {
+        if (id == Game::BlockID::BlueRedstoneTorch || id == Game::BlockID::BlueRedstoneWallTorch ||
+            id == Game::BlockID::DisplayBlock) {
+            return Game::RedstonePlus::Enabled();
+        }
+        return true;
+    }
+
     bool BlockHasItemForm(const std::string& slug) {
         // Substring patterns: anything matching is a wall/auto-placed variant.
         for (const char* needle : {
@@ -59,10 +76,11 @@ namespace {
             case 9: if (slug == "beetroots" || slug == "kelp_plant") return false; break;
             case 11: if (slug == "piston_head" || slug == "pumpkin_stem"
                          || slug == "redstone_wire" || slug == "end_portal"
-                         || slug == "melon_stem") return false; break;
+                         || slug == "hush_portal" || slug == "melon_stem") return false; break;
             case 13: if (slug == "moving_piston" || slug == "nether_portal"
                          || slug == "end_gateway" || slug == "tall_seagrass"
-                         || slug == "bubble_column") return false; break;
+                         || slug == "bubble_column" || slug == "aether_portal") return false; break;
+            case 15: if (slug == "twilight_portal") return false; break;
             case 16: if (slug == "sweet_berry_bush" || slug == "bamboo_sapling") return false; break;
             case 21: if (slug == "attached_melon_stem") return false; break;
             case 23: if (slug == "attached_pumpkin_stem") return false; break;
@@ -171,6 +189,7 @@ namespace Render {
         for (int i = 1; i < blockItemCount; ++i) {
             const auto& block = Game::BlockRegistry::Get((Game::BlockID)i);
             if (!BlockHasItemForm(block.modelName)) continue;
+            if (!BlockOfferedNow((Game::BlockID)i)) continue;
             const auto& it = Game::ItemRegistry::Get((Game::ItemID)i);
             if (needle.empty() || ToLower(it.name).find(needle) != std::string::npos) {
                 m_filteredItems.emplace_back((Game::ItemID)i, 1);
@@ -182,6 +201,16 @@ namespace Render {
         // included automatically. Iterating the table directly used to MISS
         // anything registered after the MC-table loop in ItemRegistry::Initialize.
         Game::ItemRegistry::ForEachPureItem([&](Game::ItemID id, const Game::Item&) {
+#if ENABLE_PORTAL_GUN
+            // /gamerule portal_gun false: the gun is not offered (WorldRulesS2C
+            // keeps a remote client's flag in step with the host's).
+            if (id == Game::Items::PortalGun && !Game::Portals::PortalGunAllowed()) return;
+#endif
+#if ENABLE_IMMERSIVE_PORTALS
+            // /gamerule immersive_portals false: the wand only makes immersive
+            // portals, so it is not offered either.
+            if (id == Game::Items::PortalWand && !Game::Portals::ImmersiveNetherPortals()) return;
+#endif
             // Special case: enchanted_book expands into one stack per
             // (enchantment, level) pair — mirrors MC's
             // CreativeModeTabs.generateEnchantmentBook TypesAllLevels at
@@ -213,6 +242,48 @@ namespace Render {
                     }
                 }
                 return; // (lambda — equivalent of `continue` in the old for-loop)
+            }
+            // Potions — CreativeModeTabs.generatePotionEffectTypes: one stack
+            // per registered potion, PotionContents.createItemStack(item,
+            // potion), for the potion, splash and lingering potions (FOOD_
+            // AND_DRINKS) and the tipped arrow (COMBAT), all PARENT_AND_
+            // SEARCH. Each variant matches on its own name ("Potion of
+            // Swiftness") or the item's.
+            if (id == Game::Items::Potion || id == Game::Items::SplashPotion ||
+                id == Game::Items::LingeringPotion || id == Game::Items::TippedArrow) {
+                const bool itemNameMatches =
+                    !needle.empty() &&
+                    ToLower(Game::ItemRegistry::Get(id).name).find(needle) != std::string::npos;
+                for (int p = 0; p < Game::kPotionCount; ++p) {
+                    Game::ItemStack variant =
+                        Game::CreatePotionItemStack(id, static_cast<Game::PotionId>(p));
+                    if (needle.empty() || itemNameMatches ||
+                        ToLower(Game::GetItemStackHoverName(variant)).find(needle) != std::string::npos) {
+                        m_filteredItems.push_back(std::move(variant));
+                    }
+                }
+                return;
+            }
+            // Suspicious stew — CreativeModeTabs.generateSuspiciousStews: one
+            // stew per SuspiciousEffectHolder (every flower), deduplicated by
+            // components (ItemStackLinkedSet.createTypeAndComponentsSet), so
+            // the three 7-tick saturation flowers make a single stew.
+            if (id == Game::Items::SuspiciousStew) {
+                const auto& stewItem = Game::ItemRegistry::Get(id);
+                if (!needle.empty() && ToLower(stewItem.name).find(needle) == std::string::npos) return;
+                std::vector<Game::SuspiciousStewEffects> seen;
+                for (Game::BlockID flower : Game::GetSuspiciousEffectFlowers()) {
+                    const Game::SuspiciousStewEffects* effects = Game::GetFlowerSuspiciousEffects(flower);
+                    if (!effects) continue;
+                    bool duplicate = false;
+                    for (const auto& s : seen) if (s == *effects) { duplicate = true; break; }
+                    if (duplicate) continue;
+                    seen.push_back(*effects);
+                    Game::ItemStack stew(id, 1);
+                    stew.components.set(Game::DataComponents::SUSPICIOUS_STEW_EFFECTS, *effects);
+                    m_filteredItems.push_back(std::move(stew));
+                }
+                return;
             }
             const auto& it = Game::ItemRegistry::Get(id);
             if (needle.empty() || ToLower(it.name).find(needle) != std::string::npos) {
@@ -623,6 +694,13 @@ namespace Render {
         }
         g.NextStratum();
         RenderSelectedTab(g, leftPos, topPos);
+        // MC CreativeModeInventoryScreen's EffectsInInventory column.
+        if (Player()) {
+            g.NextStratum();
+            EffectsInInventory::Render(g, Player()->activeEffects, g.GuiWidth(), leftPos, topPos,
+                                       IMAGE_W, static_cast<int>(MouseGui().x),
+                                       static_cast<int>(MouseGui().y));
+        }
     }
 
     void CreativeModeInventoryScreen::RenderExtraHoverHighlight(GuiGraphics& g,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/BlockPos.h"
+#include "core/Direction.h"
 #include "math/Mth.h"
 #include "levelgen/WorldgenRandom.h"
 #include "random/LegacyRandomSource.h"
@@ -11,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 
 // Reference: net/minecraft/world/level/levelgen/feature/stateproviders/BlockStateProvider.java
 // Reference: net/minecraft/world/level/levelgen/feature/stateproviders/SimpleStateProvider.java
@@ -125,41 +127,57 @@ enum class Axis {
 };
 
 /**
- * RotatedBlockProvider - Provides a block state with random rotation
- * Reference: RotatedBlockProvider.java
+ * RotatedBlockProvider - 26.3 stateproviders/RotatedBlockProvider.java: the
+ * inner provider's state turned to a direction - the fixed one, or
+ * Direction.getRandom(random) (nextInt(6), drawn before the inner state).
+ * AXIS takes the direction's axis, FACING the direction, and a horizontal
+ * direction also sets HORIZONTAL_FACING. 26.1 drew Direction.Axis.getRandom
+ * (nextInt(3)) instead.
  */
 class RotatedBlockProvider : public BlockStateProvider {
 private:
-    BlockState* m_state;
+    std::shared_ptr<BlockStateProvider> m_inner;
+    std::optional<core::Direction> m_direction;
 
 public:
-    explicit RotatedBlockProvider(BlockState* blockState) : m_state(blockState) {}
+    explicit RotatedBlockProvider(BlockState* blockState)
+        : m_inner(BlockStateProvider::simple(blockState)) {}
 
-    /**
-     * Get state with random axis
-     * Reference: RotatedBlockProvider.java getState() line 25
-     *
-     * CRITICAL: Must consume random.nextInt(3) for axis selection to match Java.
-     * Java code:
-     *   Direction.Axis randomAxis = Direction.Axis.getRandom(random);
-     *   return this.block.defaultBlockState().trySetValue(RotatedPillarBlock.AXIS, randomAxis);
-     *
-     * Direction.Axis.getRandom calls Util.getRandom(VALUES, random) which calls:
-     *   random.nextInt(array.length) = random.nextInt(3)
-     */
+    RotatedBlockProvider(std::shared_ptr<BlockStateProvider> inner, std::optional<core::Direction> direction)
+        : m_inner(std::move(inner)), m_direction(direction) {}
+
     BlockState* getState(WorldgenRandom& random, const core::BlockPos& pos) const override {
-        // Reference: Direction.Axis.getRandom(random) -> Util.getRandom(VALUES, random)
-        // CRITICAL: This MUST consume nextInt(3) for random state parity
-        int axisIndex = random.nextInt(3);  // 0=X, 1=Y, 2=Z
-        if (!m_state) {
+        using minecraft::world::level::block::state::properties::BlockStateProperties;
+        const core::Direction direction = m_direction ? *m_direction : core::fromIndex(random.nextInt(6));
+        BlockState* state = m_inner->getState(random, pos);
+        if (!state) {
             return nullptr;
         }
-
-        return m_state->trySetValue(
-            *minecraft::world::level::block::RotatedPillarBlock::AXIS,
-            static_cast<core::Axis>(axisIndex)
-        );
+        state = state->trySetValue(*minecraft::world::level::block::RotatedPillarBlock::AXIS, core::getAxis(direction));
+        if (BlockStateProperties::FACING) {
+            state = state->trySetValue(*BlockStateProperties::FACING, direction);
+        }
+        if (direction != core::Direction::UP && direction != core::Direction::DOWN
+            && BlockStateProperties::HORIZONTAL_FACING) {
+            state = state->trySetValue(*BlockStateProperties::HORIZONTAL_FACING, direction);
+        }
+        return state;
     }
+};
+
+/**
+ * RandomBlockProvider - 26.3 stateproviders/RandomBlockProvider.java: the
+ * default state of a block drawn from a tag (HolderSet.getRandomElement:
+ * nextInt(size) over the tag's file order).
+ */
+class RandomBlockProvider : public BlockStateProvider {
+private:
+    std::string m_tag;
+
+public:
+    explicit RandomBlockProvider(std::string tag) : m_tag(std::move(tag)) {}
+
+    BlockState* getState(WorldgenRandom& random, const core::BlockPos& pos) const override;
 };
 
 /**

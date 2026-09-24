@@ -4,8 +4,10 @@
 //
 //   OptionsScreen                    (menu.options — FOV + category grid)
 //   ├── SkinCustomizationScreen      (model-part toggles, persisted only)
-//   ├── SoundOptionsScreen           (volume sliders — persisted; no audio
-//   │                                 engine yet, values apply when one lands)
+//   ├── SoundOptionsScreen           (MC SoundOptionsScreen: the eleven
+//   │                                 category volumes, device, subtitles,
+//   │                                 directional audio, music frequency —
+//   │                                 applied live to client/sound)
 //   ├── VideoSettingsScreen          (display + quality + preferences)
 //   ├── ControlsScreen
 //   │   ├── MouseSettingsScreen
@@ -27,6 +29,7 @@
 #include "Screen.hpp"
 #include "Widgets.hpp"
 #include "client/input/KeyMapping.hpp"
+#include "common/sound/SoundSource.hpp"
 #include <functional>
 #include <utility>
 #include <vector>
@@ -128,8 +131,9 @@ namespace Render {
     protected:
         void AddOptions() override;
     private:
-        AbstractWidget* VolumeSlider(const std::string& caption, const char* settingsKey,
-                                     float defaultValue = 1.0f);
+        // MC Options.getSoundSourceOptionInstance: "<category>: <n>%" (or
+        // OFF at 0), options.txt `soundCategory_<name>`, applied live.
+        AbstractWidget* VolumeSlider(const std::string& caption, Game::SoundSource source);
     };
 
     class ControlsScreen : public OptionsSubScreen {

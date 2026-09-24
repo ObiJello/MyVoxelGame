@@ -30,6 +30,12 @@ namespace Game::Anvil {
         // on every /tick freeze|unfreeze|rate, read at world open.
         bool        tickFrozen  = false;
         float       tickRate    = 20.0f;
+        // World Options → Joinable, kept per world across sessions (vanilla's
+        // LAN publish is session-only; this game remembers the choice).
+        // Default ON. Written by IntegratedServer::SetJoinable, read at open.
+        bool        joinable    = true;
+        // /gamerule portal_gun, per world. Default on.
+        bool        portalGun   = true;
         int         worldType   = 0;      // 0 Default, 1 Superflat, 2 Large Biomes, 3 Amplified, 4 Single Biome
         std::string flatPreset;
         std::string flatLayers;

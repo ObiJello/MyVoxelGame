@@ -2,6 +2,8 @@
 #include "SystemMenus.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
+#include "common/entity/alchemy/PotionBrewing.hpp"
+#include "common/world/block/entity/BrewingStandBlockEntity.hpp"
 #include "common/world/enchantment/Enchantment.hpp"
 #include "common/world/enchantment/ItemEnchantments.hpp"
 #include <algorithm>
@@ -195,10 +197,47 @@ namespace Game {
     }
 
     // ══════════════════ Brewing stand ═════════════════════════════════════
-    BrewingStandMenu::BrewingStandMenu(Inventory* playerInventory, IContainer* container)
+    namespace {
+        // MC BrewingStandMenu.PotionSlot: a brewing potion input, one per slot.
+        class BrewingPotionSlot : public Slot {
+        public:
+            using Slot::Slot;
+            bool MayPlace(const ItemStack& stack) const override { return IsBrewingPotionInput(stack); }
+            int  GetMaxStackSize() const override { return 1; }
+        };
+        // MC BrewingStandMenu.IngredientsSlot: BREWING_REAGENTS.
+        class BrewingIngredientSlot : public Slot {
+        public:
+            using Slot::Slot;
+            bool MayPlace(const ItemStack& stack) const override { return IsBrewingReagent(stack); }
+        };
+        // MC BrewingStandMenu.FuelSlot: anything with BREWING_FUEL.
+        class BrewingFuelSlot : public Slot {
+        public:
+            using Slot::Slot;
+            bool MayPlace(const ItemStack& stack) const override { return GetBrewingFuelUses(stack) > 0; }
+        };
+    }
+
+    BrewingStandMenu::BrewingStandMenu(Inventory* playerInventory, BrewingStandBlockEntity* stand)
         : AbstractContainerMenu(playerInventory) {
-        BuildSlots(playerInventory, container);
-        SetOwnedData(std::make_unique<SimpleContainerData>(DATA_COUNT));
+        BuildSlots(playerInventory, stand);
+        // The block entity's own counters (MC's anonymous dataAccess).
+        if (stand) {
+            SetOwnedData(std::make_unique<DelegatingContainerData>(
+                std::vector<DelegatingContainerData::Entry>{
+                    {[stand] { return stand->BrewTime(); },
+                     [stand](int v) { stand->SetBrewTime(v); }},
+                    {[stand] { return stand->Fuel(); },
+                     [stand](int v) { stand->SetFuel(v); }},
+                    {[stand] { return stand->TotalBrewTime(); },
+                     [stand](int v) { stand->SetTotalBrewTime(v); }},
+                    {[stand] { return stand->TotalFuel(); },
+                     [stand](int v) { stand->SetTotalFuel(v); }},
+                }));
+        } else {
+            SetOwnedData(std::make_unique<SimpleContainerData>(DATA_COUNT));
+        }
     }
 
     BrewingStandMenu::BrewingStandMenu(Inventory* playerInventory)
@@ -211,11 +250,11 @@ namespace Game {
     void BrewingStandMenu::BuildSlots(Inventory* playerInventory, IContainer* container) {
         // MC BrewingStandMenu: bottles at (56,51),(79,58),(102,51),
         // ingredient (79,17), fuel (17,17).
-        AddSlot(std::make_unique<Slot>(container, 0, 56, 51));
-        AddSlot(std::make_unique<Slot>(container, 1, 79, 58));
-        AddSlot(std::make_unique<Slot>(container, 2, 102, 51));
-        AddSlot(std::make_unique<Slot>(container, SLOT_INGREDIENT, 79, 17));
-        AddSlot(std::make_unique<Slot>(container, SLOT_FUEL, 17, 17));
+        AddSlot(std::make_unique<BrewingPotionSlot>(container, 0, 56, 51));
+        AddSlot(std::make_unique<BrewingPotionSlot>(container, 1, 79, 58));
+        AddSlot(std::make_unique<BrewingPotionSlot>(container, 2, 102, 51));
+        AddSlot(std::make_unique<BrewingIngredientSlot>(container, SLOT_INGREDIENT, 79, 17));
+        AddSlot(std::make_unique<BrewingFuelSlot>(container, SLOT_FUEL, 17, 17));
         auto add = [this](std::unique_ptr<Slot> s) -> Slot& { return AddSlot(std::move(s)); };
         AddPlayerSlots(*this, playerInventory, 84, add);
     }
@@ -230,16 +269,49 @@ namespace Game {
         return -1;
     }
 
+    int BrewingStandMenu::GetFuel() const              { return GetData(DATA_FUEL); }
+    int BrewingStandMenu::GetTotalFuel() const         { return GetData(DATA_TOTAL_FUEL); }
+    int BrewingStandMenu::GetBrewingTicks() const      { return GetData(DATA_BREW_TIME); }
+    int BrewingStandMenu::GetTotalBrewingTicks() const { return GetData(DATA_TOTAL_BREW_TIME); }
+
     void BrewingStandMenu::QuickMoveStack(int slotIndex, ContainerClickResult& result) {
+        // MC BrewingStandMenu.quickMoveStack. MC's early `return EMPTY`s only
+        // end the shift-click loop; whatever already moved stays moved, so
+        // here every branch falls through to one "did the source change"
+        // record at the end.
         Slot& slot = GetSlot(slotIndex);
         if (!slot.HasItem()) return;
         ItemStack& stack = slot.GetItemMut();
         const ItemStack original = stack;
-        const bool moved = (slotIndex < CONTAINER_END)
-            ? MoveItemStackTo(stack, MAIN_BEGIN, SLOT_COUNT, true, result)
-            : MoveItemStackTo(stack, 0, CONTAINER_END, false, result);
-        if (!moved) return;
+
+        const bool fromStand = (slotIndex >= 0 && slotIndex <= 2) ||
+                               slotIndex == SLOT_INGREDIENT || slotIndex == SLOT_FUEL;
+        if (!fromStand) {
+            Slot& ingredientSlot = GetSlot(SLOT_INGREDIENT);
+            if (GetBrewingFuelUses(original) > 0) {
+                // Fuel first. Blaze powder is also a reagent (strength), so
+                // when the fuel slot is full it goes on to the ingredient.
+                if (!MoveItemStackTo(stack, SLOT_FUEL, SLOT_FUEL + 1, false, result) &&
+                    ingredientSlot.MayPlace(stack)) {
+                    MoveItemStackTo(stack, SLOT_INGREDIENT, SLOT_INGREDIENT + 1, false, result);
+                }
+            } else if (ingredientSlot.MayPlace(stack)) {
+                MoveItemStackTo(stack, SLOT_INGREDIENT, SLOT_INGREDIENT + 1, false, result);
+            } else if (IsBrewingPotionInput(original)) {
+                MoveItemStackTo(stack, 0, 3, false, result);
+            } else if (slotIndex >= MAIN_BEGIN && slotIndex < HOTBAR_BEGIN) {
+                MoveItemStackTo(stack, HOTBAR_BEGIN, SLOT_COUNT, false, result);
+            } else if (slotIndex >= HOTBAR_BEGIN && slotIndex < SLOT_COUNT) {
+                MoveItemStackTo(stack, MAIN_BEGIN, HOTBAR_BEGIN, false, result);
+            } else {
+                MoveItemStackTo(stack, MAIN_BEGIN, SLOT_COUNT, false, result);
+            }
+        } else {
+            MoveItemStackTo(stack, MAIN_BEGIN, SLOT_COUNT, true, result);
+        }
+
         if (stack.count != original.count) {
+            if (stack.count <= 0) stack.Clear();
             slot.SetChanged();
             MarkChanged(result, slotIndex);
         }

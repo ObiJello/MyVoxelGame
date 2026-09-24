@@ -16,7 +16,7 @@
 // clamped down to match an older install — see --data-version if you want to
 // target one deliberately.
 //
-// 4764 is SharedConstants.WORLD_VERSION in the vendored minecraft_code tree,
+// 4764 is SharedConstants.WORLD_VERSION in the vendored minecraft_code_26.1-snapshot-1 tree,
 // which is the release named "26.1 Snapshot 1". Verified against the user's
 // own saves: New World (1..3) are real vanilla worlds stamped 4764.
 #pragma once

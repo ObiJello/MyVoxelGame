@@ -115,6 +115,10 @@ namespace Server {
 
         // Process all sessions for one server tick
         void Tick(int64_t serverTick);
+
+        // /gamerule shared_vitals turned on or off: forget the pool, so the
+        // next tick seeds it afresh from a living player.
+        void ResetSharedVitals();
         
         // Process chunk sends for all players
         void ProcessChunkStreaming();
@@ -165,12 +169,10 @@ namespace Server {
         
         // Get world spawn point
         glm::vec3 GetWorldSpawn() const;
-        
-        // Set player spawn point
-        void SetPlayerSpawn(uint32_t playerId, const glm::vec3& spawnPos);
-        
-        // Get player spawn point (or world spawn if not set)
-        glm::vec3 GetPlayerSpawn(uint32_t playerId) const;
+
+        // A player's own respawn point is ServerPlayer::getRespawnConfig
+        // (the bed they last slept in, persisted with the player data);
+        // OnPlayerRespawn resolves it, and falls back to the world spawn.
 
         // === CONFIGURATION ===
 
@@ -247,13 +249,33 @@ namespace Server {
         ChunkStatusManager* m_statusManager = nullptr;
         SendScheduler* m_sendScheduler = nullptr;
         
+        // ── /gamerule shared_vitals ────────────────────────────────────────
+        //
+        // One health and one hunger for every survival/adventure player.
+        // Run at the top of every tick, before the sessions tick: each
+        // player's change since the last pass (damage taken, food eaten,
+        // regen, exhaustion) is summed into the pool and the pool is written
+        // back onto everyone — so two players hit in the same tick both
+        // count, and a hit on one flinches all. A pool at zero kills everyone
+        // with the source of the player who brought it there. Creative and
+        // spectator players keep their own (nothing can hurt them), the dead
+        // sit out until they respawn, and a respawner or a newcomer simply
+        // takes the pool's values.
+        struct Vitals {
+            float health     = 20.0f;
+            int   food       = 20;
+            float saturation = 5.0f;
+            float exhaustion = 0.0f;
+            bool  alive      = false;   // snapshot: was a participant; pool: is seeded
+        };
+        void ShareVitals(const std::vector<std::shared_ptr<PlayerSession>>& sessions);
+        std::unordered_map<uint32_t, Vitals> m_vitalsSnapshot;
+        Vitals m_sharedPool;
+
         // Player sessions
         std::unordered_map<uint32_t, std::shared_ptr<PlayerSession>> m_sessions;
         std::unordered_map<uint32_t, uint32_t> m_connectionToPlayer;  // connectionId -> playerId
         std::unordered_map<uint32_t, std::string> m_playerNames;
-        
-        // Player spawns
-        std::unordered_map<uint32_t, glm::vec3> m_playerSpawns;
         
         // Thread safety
         mutable std::mutex m_sessionMutex;

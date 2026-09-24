@@ -1,8 +1,10 @@
 // File: shaders/mob_particle_vk.vert
 // Vulkan version of MobParticleSystem's particle shader. Camera-facing
-// billboards built CPU-side, so all we do is project. Vertex format is
-// the standard 24-byte block layout (pos3 + uv2 + RGBA8 normalized).
-// Push constants match VKBackend's PushConstantBlock — only uMVP is used.
+// billboards built CPU-side in RENDER space, so all we do is project and
+// hand the position on for the fog. Vertex format is the standard 24-byte
+// block layout (pos3 + uv2 + RGBA8 normalized). Created through
+// CreateShaderFromFilesPortal — the fragment shader reads the frame's fog
+// from the Common UBO; uMVP stays a push constant.
 #version 450
 
 layout(location = 0) in vec3 aPos;
@@ -16,14 +18,16 @@ layout(push_constant) uniform PC {
     float uAlphaTest;    // 76
     vec4  uColor;        // 80
     vec4  uUVRange;      // 96
-    vec4  uScalars;      // 112
+    vec4  uScalars;      // 112 — x: the draw's light (uEntityLight)
 } pc;
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
+layout(location = 2) out vec3 vRenderPos;
 
 void main() {
     gl_Position = pc.uMVP * vec4(aPos, 1.0);
     vUV = aUV;
     vColor = aColor;
+    vRenderPos = aPos;
 }

@@ -2,6 +2,7 @@
 #include "common/world/level/BlockClip.hpp"
 
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/fluid/FluidState.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 
 #include <algorithm>
@@ -75,9 +76,10 @@ namespace Game {
                 const BlockState st = blocks.GetBlockState(c.x, c.y, c.z);
 
                 // MC ClipContext.Fluid.SOURCE_ONLY: the fluid shape is a full
-                // block for a source and empty otherwise, so a source cell
-                // stops the clip without any shape test.
-                if (includeWaterSource && BlockRegistry::IsWaterSource(st)) {
+                // block for a source (water OR lava — an empty bucket scoops
+                // either) and empty otherwise, so a source cell stops the
+                // clip without any shape test.
+                if (includeWaterSource && FluidStateOf(st).IsSource()) {
                     return true;
                 }
 

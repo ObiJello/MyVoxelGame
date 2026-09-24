@@ -160,6 +160,15 @@ namespace Game {
         return 1.0f;
     }
 
+    // MC CardinalLighting.byFace for a dimension type's `cardinal_light`:
+    // DEFAULT is the table above; NETHER (the_nether.json) lights the up and
+    // down faces at 0.9 and the sides as DEFAULT. World terrain and fluids
+    // read this; items keep the DEFAULT table.
+    constexpr float DirectionalShade(FaceDir dir, bool netherCardinalLight) {
+        if (netherCardinalLight && (dir == FaceDir::Up || dir == FaceDir::Down)) return 0.9f;
+        return DirectionalShade(dir);
+    }
+
     // One cuboid "element" of the model (Minecraft models can have multiple cuboids)
     struct Element {
         glm::vec3 from{0.0f};                           // Bottom-left-back corner in 0-16 model space
@@ -247,11 +256,21 @@ namespace Game {
 
             std::string result = it->second;
 
-            // RECURSIVE RESOLUTION: If the result is another reference (starts with '#'), resolve it too
-            if (!result.empty() && result[0] == '#') {
-                return ResolveTexture(result); // Recursive call
+            // Chained references ("#side" → "#all" → "block/stone") are
+            // followed, with MC's guard against a reference that never
+            // lands: vanilla's template models declare `"east": "#east"`
+            // (TextureSlots.resolve stops on a cycle and reports the slot
+            // missing), and the templates are loaded on their own here, so
+            // an unguarded walk was an infinite recursion — a stack overflow
+            // during block-model loading. A chain longer than the map can
+            // hold IS a cycle.
+            size_t hops = 0;
+            while (!result.empty() && result[0] == '#') {
+                if (++hops > textures.size()) return "missingno";
+                auto next = textures.find(result.substr(1));
+                if (next == textures.end()) return "missingno";
+                result = next->second;
             }
-
             // CANONICALIZATION: Strip "minecraft:" prefix if present
             if (result.rfind("minecraft:", 0) == 0) {
                 result = result.substr(10); // Remove "minecraft:" prefix

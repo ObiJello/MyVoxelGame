@@ -29,17 +29,45 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(REPO, "data", "minecraft", "worldgen", "biome")
+DATA = os.path.join(REPO, "data")
+SRC = os.path.join(DATA, "minecraft", "worldgen", "biome")
+
+
+def biome_files():
+    """Every data/<namespace>/worldgen/biome/*.json. The slug is the bare
+    name for minecraft and "<namespace>:<name>" otherwise, so a ported mod's
+    `twilightforest:forest` can live beside vanilla `forest` — the slug is
+    the biome's registry name everywhere in the engine (chunk packets carry
+    the id, BiomeRegistry::FromName resolves the string)."""
+    for ns in sorted(os.listdir(DATA)):
+        d = os.path.join(DATA, ns, "worldgen", "biome")
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".json"):
+                continue
+            slug = name[:-5] if ns == "minecraft" else f"{ns}:{name[:-5]}"
+            yield slug, os.path.join(d, name)
 OUT = os.path.join(REPO, "src", "common", "world", "biome", "GeneratedBiomeTable.inc")
 
 MODIFIERS = {None: "None", "none": "None",
-             "dark_forest": "DarkForest", "swamp": "Swamp"}
+             "dark_forest": "DarkForest", "swamp": "Swamp",
+             # Twilight Forest's own grass colour modifiers, mapped onto the
+             # engine's three until its biome colourisers are ported.
+             "twilightforest:dark_forest": "DarkForest",
+             "twilightforest:dark_forest_center": "DarkForest",
+             "twilightforest:swamp": "Swamp",
+             "twilightforest:enchanted_forest": "None",
+             "twilightforest:spooky_forest": "None"}
 
 
 def hex_to_rgb(value):
     """'#78a7ff' -> 0x78A7FF. Vanilla writes these as STRING_RGB_COLOR."""
     if value is None:
         return None
+    # 1.21.1-era data packs (the Aether port) write colours as plain ints.
+    if isinstance(value, int):
+        return value
     return int(value.lstrip("#"), 16)
 
 
@@ -48,7 +76,8 @@ def existing_order(path):
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8") as f:
-        return re.findall(r'BIOME_DEF\(\s*"([a-z0-9_]+)"', f.read())
+        # Namespaced mod biomes ("aether:skyroot_meadow") keep their ids too.
+        return re.findall(r'BIOME_DEF\(\s*"([a-z0-9_:]+)"', f.read())
 
 
 def main():
@@ -56,11 +85,8 @@ def main():
         sys.exit(f"biome data not found at {SRC}")
 
     biomes = {}
-    for name in sorted(os.listdir(SRC)):
-        if not name.endswith(".json"):
-            continue
-        slug = name[:-5]
-        with open(os.path.join(SRC, name), encoding="utf-8") as f:
+    for slug, path in biome_files():
+        with open(path, encoding="utf-8") as f:
             d = json.load(f)
         e = d.get("effects", {})
         biomes[slug] = {

@@ -54,6 +54,9 @@ namespace Game {
         SpawnReinforcements,
         StepHeight,
         TemptRange,
+        // MC generic.luck — a PLAYER attribute (Player.createAttributes);
+        // LUCK / UNLUCK move it. Appended so the table order stays put.
+        Luck,
         Count
     };
 
@@ -91,6 +94,7 @@ namespace Game {
         /* SpawnReinforcements  */ { "spawn_reinforcements",   0.0,  0.0,     1.0 },
         /* StepHeight           */ { "step_height",            0.6,  0.0,    10.0 },
         /* TemptRange           */ { "tempt_range",           10.0,  0.0,  2048.0 },
+        /* Luck                 */ { "luck",                   0.0, -1024.0, 1024.0 },
     };
 
     static_assert(sizeof(kAttributeTable) / sizeof(kAttributeTable[0]) ==
@@ -149,6 +153,12 @@ namespace Game {
         SulfurCubeBounciness = 21,
         SulfurCubeFriction = 22,
         SulfurCubeAirDrag = 23,
+        // The rest of MobEffects.java's "effect.<name>" templates (see the
+        // Effect* block above for why one id serves every level).
+        EffectHealthBoost = 24,
+        EffectAbsorption  = 25,
+        EffectLuck        = 26,
+        EffectUnluck      = 27,
     };
 
     // One attribute on one entity: a base value plus its modifier stack.

@@ -36,11 +36,11 @@ namespace Game {
         // drift down noticeably slower than drops.
         static constexpr double kGravity = 0.03;
 
-        // Air/ground drag, applied to ALL THREE axes (ExperienceOrb.tick does
-        // `scale(friction)`, unlike the item's per-axis multiply).
+        // Air drag, applied to ALL THREE axes (ExperienceOrb.tick does
+        // `scale(friction)`, unlike the item's per-axis multiply). On the
+        // ground it is multiplied by the supporting block's friction
+        // (GetBlockFriction), so orbs skate across ice like items do.
         static constexpr double kAirDrag       = 0.98;
-        static constexpr double kBlockFriction = 0.6;   // engine default — see ItemEntity
-        static constexpr double kGroundDrag    = kBlockFriction * kAirDrag;
 
         // Landing bounce: `if (verticalCollisionBelow && fallSpeed < -gravity)
         // vel.y = -fallSpeed * 0.4` — orbs bounce visibly where items settle.

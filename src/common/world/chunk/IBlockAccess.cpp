@@ -5,6 +5,8 @@
 // chain into every physics and mesher translation unit that only wants
 // GetBlock.
 #include "IBlockAccess.hpp"
+#include "common/world/lighting/ChunkLight.hpp"
+#include <algorithm>
 
 #include "../block/BlockRegistry.hpp"
 
@@ -62,7 +64,8 @@ namespace Game {
         }
     }
 
-    int IBlockAccess::GetRawBrightness(int worldX, int worldY, int worldZ) const {
+    int IBlockAccess::GetBrightness(Lighting::LightLayer layer, int worldX, int worldY, int worldZ) const {
+        if (layer == Lighting::LightLayer::Block) return 0;
         // Anything above the build limit is sky by definition.
         for (int y = worldY + 1; y <= kMaxBuildY; ++y) {
             // An unloaded neighbour column is not evidence of a roof. Treating
@@ -73,6 +76,16 @@ namespace Game {
             if (BlocksSkyLight(GetBlock(worldX, y, worldZ))) return 0;
         }
         return 15;
+    }
+
+    int IBlockAccess::GetRawBrightness(int worldX, int worldY, int worldZ) const {
+        return std::max(GetBrightness(Lighting::LightLayer::Block, worldX, worldY, worldZ),
+                        GetBrightness(Lighting::LightLayer::Sky, worldX, worldY, worldZ));
+    }
+
+    int IBlockAccess::GetMaxLocalRawBrightness(int worldX, int worldY, int worldZ, int amount) const {
+        return std::max(GetBrightness(Lighting::LightLayer::Block, worldX, worldY, worldZ),
+                        GetBrightness(Lighting::LightLayer::Sky, worldX, worldY, worldZ) - amount);
     }
 
 } // namespace Game

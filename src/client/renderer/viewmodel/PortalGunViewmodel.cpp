@@ -5,6 +5,8 @@
 #if ENABLE_PORTAL_GUN
 
 #include "PortalGunViewmodel.hpp"
+#include "HeldItemRenderer.hpp"
+#include "../environment/EnvironmentState.hpp"
 #include "GltfLoader.hpp"
 #include "../backend/RenderBackend.hpp"
 #ifdef HAS_VULKAN
@@ -475,8 +477,16 @@ void main() {
         g_renderBackend->SetUniformMat4 (m_shader, "uModel", model);
         g_renderBackend->SetUniformVec3 (m_shader, "uKeyDir",
             glm::normalize(glm::vec3(0.2f, -0.8f, -0.5f)));
-        g_renderBackend->SetUniformFloat(m_shader, "uKeyIntensity", 0.95f);
-        g_renderBackend->SetUniformFloat(m_shader, "uAmbient",      0.35f);
+        // The gun is held like any item, and MC lights the hand from the
+        // lightmap: the world's sky light (night, night vision, the Darkness
+        // pulse) scales both terms — shade = light · (ambient + key · n·l),
+        // linear, so scaling each is the same thing. No fog (too close).
+        // The hand's light (the lightmap at the eye — HeldItemRenderer), as
+        // one luminance: this shader lights with scalar key/ambient terms.
+        const float handLight = glm::dot(g_heldItemRenderer.HandLight(),
+                                         glm::vec3(0.2126f, 0.7152f, 0.0722f));
+        g_renderBackend->SetUniformFloat(m_shader, "uKeyIntensity", 0.95f * handLight);
+        g_renderBackend->SetUniformFloat(m_shader, "uAmbient",      0.35f * handLight);
 
         std::vector<std::vector<glm::mat4>> bonePalettes(m_model.skins.size());
         std::vector<bool>                   computed(m_model.skins.size(), false);
@@ -524,8 +534,8 @@ void main() {
             g_renderBackend->SetUniformMat4 (m_shader, "uModel", model);
             g_renderBackend->SetUniformVec3 (m_shader, "uKeyDir",
                 glm::normalize(glm::vec3(0.2f, -0.8f, -0.5f)));
-            g_renderBackend->SetUniformFloat(m_shader, "uKeyIntensity", 0.95f);
-            g_renderBackend->SetUniformFloat(m_shader, "uAmbient",      0.45f);
+            g_renderBackend->SetUniformFloat(m_shader, "uKeyIntensity", 0.95f * handLight);
+            g_renderBackend->SetUniformFloat(m_shader, "uAmbient",      0.45f * handLight);
     
             for (const auto& dc : m_drawCalls) {
                 if (!dc.isGlass || dc.skip) continue;

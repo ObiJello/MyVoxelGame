@@ -1,12 +1,15 @@
 // File: src/client/network/ClientPacketHandler.cpp
 #include "common/core/Features.hpp"
+#include "common/world/level/GameRules.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 #include "client/portal/ClientImmersivePortals.hpp"
 #endif
 #include "client/entity/ClientFallingBlocks.hpp"
 #include "client/world/ClientLevel.hpp"
+#include "client/world/ClientBiomeZoom.hpp"
 #include "client/renderer/mesh/Mesher.hpp"
 #include "ClientPacketHandler.hpp"
+#include "client/control/RemoteControl.hpp"
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/Player.hpp"
 #include "../entity/RemotePlayerManager.hpp"
@@ -23,9 +26,17 @@
 #include "../renderer/gui/BossBarState.hpp"
 #include "../renderer/gui/ChatScreen.hpp"   // SetServerCommandNames
 #include "../world/LevelLoadTracker.hpp"    // dimension change re-enters the load wait
+#include "../sound/ClientSounds.hpp"
+#include "../sound/SoundInstance.hpp"             // ResolveSoundEntity
+#include "../sound/LocalPlayerSounds.hpp"         // portal travel whoosh
+#include "../sound/SoundHost.hpp"                 // the dimension-change sound reset
+#include "common/sound/SoundEvents.hpp"
+#include "common/core/JavaRandom.hpp"
+#include <chrono>
 #include "../renderer/environment/SkyRenderer.hpp"  // per-dimension sky
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <cstdlib>
 #if ENABLE_PORTAL_GUN
 #include "../portal/ClientPortalManager.hpp"
@@ -48,11 +59,16 @@ namespace Render {
                                 const std::vector<Game::ItemStack>& slots);
     void OpenClientContainerScreen(Game::MenuType type, uint32_t containerId,
                                    const std::string& title);
+    // Defined in MerchantScreen.cpp — MC handleMerchantOffers.
+    void ApplyMerchantOffers(const Network::MerchantOffersS2CPacket& packet);
     // Defined in screens/DeathScreen.cpp — death flow hooks (health<=0 opens,
     // health>0 closes). Same no-GUI-header convention as above.
     void ShowDeathScreen();
+    void RequestImmediateRespawn();
     void DismissDeathScreen();
 }
+#include "../renderer/gui/screens/SignEditScreen.hpp"   // Render::SignEditorOpen / ShowSignEditScreen
+#include "../renderer/gui/screens/BookScreens.hpp"      // Render::OpenBookFromHand
 
 namespace Client {
 
@@ -104,6 +120,15 @@ namespace Client {
         }
         m_stats.chunksReceived++;
         m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onLightUpdateS2C(const Network::LightUpdateS2CPacket& packet) {
+        // MC ClientPacketListener.handleLightUpdatePacket: swap the sections
+        // in and re-mesh them. A chunk the client does not hold ignores it —
+        // its ChunkDataS2C (still to come) carries the light as of sending.
+        m_stats.packetsProcessed++;
+        if (!g_clientChunkManager || !packet.light) return;
+        g_clientChunkManager->ApplyLightUpdate(Game::Math::ChunkPos{packet.chunkX, packet.chunkZ}, *packet.light);
     }
 
     void ClientPacketHandler::handleChunkUnload(const Network::UnloadChunkS2CPacket& packet) {
@@ -234,8 +259,18 @@ namespace Client {
         if (g_remotePlayerManager) {
             // Scale first: the update's teleport test scales with it.
             g_remotePlayerManager->SetScale(packet.playerId, packet.scale);
+            g_remotePlayerManager->SetInvisible(packet.playerId, packet.invisible);
+            {
+                // MC DATA_EFFECT_PARTICLES + the glowing flag of that player.
+                Game::EffectVisuals visuals;
+                visuals.flags = packet.effectFlags;
+                visuals.particles = packet.effectParticles;
+                g_remotePlayerManager->SetEffectVisuals(packet.playerId, std::move(visuals));
+            }
+            g_remotePlayerManager->SetMorph(packet.playerId, packet.morph);
+            g_remotePlayerManager->SetMorphAnim(packet.playerId, packet.morphAnim);
             Game::DimensionId dim = Game::DimensionFromRaw(packet.dimensionId);
-            glm::vec3 updatePos = packet.position;
+            glm::dvec3 updatePos = packet.position;   // dvec3 on the wire; stays double
             glm::vec2 updateRot = packet.rotation;
 #if ENABLE_IMMERSIVE_PORTALS
             // A crossing already pending on this copy takes the update first
@@ -252,21 +287,21 @@ namespace Client {
                 auto it = players.find(packet.playerId);
                 if (it != players.end() && it->second.positionInitialized) {
                     const RemotePlayer& rp = it->second;
-                    const glm::vec3 jump = updatePos - rp.targetPosition;
-                    const float s = std::max(rp.scale, 0.05f);
+                    const glm::dvec3 jump = updatePos - rp.targetPosition;
+                    const double s = std::max(static_cast<double>(rp.scale), 0.05);
                     const bool suspicious = dim != rp.dimension ||
-                        (jump.x * jump.x + jump.z * jump.z) > (3.0f * s) * (3.0f * s) ||
-                        std::abs(jump.y) > 10.0f * s;
+                        (jump.x * jump.x + jump.z * jump.z) > (3.0 * s) * (3.0 * s) ||
+                        std::abs(jump.y) > 10.0 * s;
                     if (suspicious) {
                         const Game::DimensionId oldDim = rp.dimension;
                         const Game::Immersive::Portal* through = nullptr;
-                        double best = 2.5 * std::max(s, 1.0f);   // a few ticks of any walk
+                        double best = 2.5 * std::max(s, 1.0);    // a few ticks of any walk
                         if (ClientLevel* from = ClientLevels::Get(rp.dimension)) {
                             from->Portals().ForEach([&](const Game::Immersive::Portal& p) {
                                 if (p.IsMirror() || !p.Has(Game::Immersive::PortalFlag::Teleportable)) return;
                                 if (p.destDimension != dim) return;
-                                const glm::dvec3 back = p.InverseTransformPoint(glm::dvec3(updatePos));
-                                const double d = glm::length(back - glm::dvec3(rp.targetPosition));
+                                const glm::dvec3 back = p.InverseTransformPoint(updatePos);
+                                const double d = glm::length(back - rp.targetPosition);
                                 if (d < best) { best = d; through = &p; }
                             });
                         }
@@ -379,13 +414,33 @@ namespace Client {
     }
 
     void ClientPacketHandler::handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet) {
-        // MC also plays SoundEvents.ITEM_PICKUP / EXPERIENCE_ORB_PICKUP here.
-        // This engine has no sound system yet (Game::PlaySound is a logging
-        // stub), so the animation goes out silent — that is the one piece of
-        // MC's pickup feedback missing.
+        // MC handleTakeItemEntity: the pickup sound at the item, played by
+        // this client (level.playLocalSound, PLAYERS) — the orb's chime at
+        // 0.1 or the item's pop at 0.2, before the fly-in starts.
         //
         // The packet serves BOTH entity kinds (MC's does too); the id range
         // says which manager owns it.
+        {
+            static Game::JavaRandom s_random(static_cast<int64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+            if (Game::IsXpOrbEntityId(packet.itemEntityId)) {
+                if (g_xpOrbManager) {
+                    const auto& orbs = g_xpOrbManager->GetEntities();
+                    if (auto it = orbs.find(packet.itemEntityId); it != orbs.end()) {
+                        Sounds::PlayLocal(it->second.sim.pos, Game::SoundEvents::EXPERIENCE_ORB_PICKUP,
+                                          Game::SoundSource::Players, 0.1f,
+                                          (s_random.NextFloat() - s_random.NextFloat()) * 0.35f + 0.9f);
+                    }
+                }
+            } else if (g_itemEntityManager) {
+                const auto& items = g_itemEntityManager->GetEntities();
+                if (auto it = items.find(packet.itemEntityId); it != items.end()) {
+                    Sounds::PlayLocal(it->second.sim.pos, Game::SoundEvents::ITEM_PICKUP,
+                                      Game::SoundSource::Players, 0.2f,
+                                      (s_random.NextFloat() - s_random.NextFloat()) * 1.4f + 2.0f);
+                }
+            }
+        }
         if (Game::IsXpOrbEntityId(packet.itemEntityId)) {
             if (g_xpOrbManager) {
                 g_xpOrbManager->TakeOrb(packet.itemEntityId, packet.playerId);
@@ -451,6 +506,8 @@ namespace Client {
                                       packet.pose, packet.animState,
                                       packet.blockStateRaw);
             g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
+            g_clientMobManager->SetEffectVisuals(packet.entityId, packet.effectFlags,
+                                                 packet.effectParticles);
 #if ENABLE_IMMERSIVE_PORTALS
             // The same mob may still be in another level's store: it just
             // crossed a portal server-side. Hand it over through that portal
@@ -518,7 +575,8 @@ namespace Client {
                                          Game::Mth::UnpackDegrees(packet.yRot),
                                          Game::Mth::UnpackDegrees(packet.xRot),
                                          Game::Mth::UnpackDegrees(packet.yHeadRot),
-                                         packet.onGround);
+                                         packet.onGround,
+                                         (packet.flags & Network::EntityPositionSyncS2CPacket::kFlagPortalCrossing) != 0);
         }
         m_stats.packetsProcessed++;
     }
@@ -554,7 +612,110 @@ namespace Client {
                                         packet.pose, packet.animState,
                                         packet.blockStateRaw);
             g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
+            g_clientMobManager->SetEffectVisuals(packet.entityId, packet.effectFlags,
+                                                 packet.effectParticles);
         }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handlePlayerSleep(const Network::PlayerSleepS2CPacket& packet) {
+        // MC's two halves in one: the SLEEPING_POS entity-data update
+        // (LivingEntity.onSyncedDataUpdated → the pose and position follow)
+        // and ClientboundAnimatePacket WAKE_UP → player.stopSleepInBed(false,
+        // false), which clears the position and sets the sleep counter to
+        // 100 so the fade-out plays. The local player's own copy of the
+        // counter starts at 0 on lying down (Player.startSleepInBed).
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        if (m_player && packet.playerId == localId) {
+            if (packet.sleeping) {
+                m_player->sleepingPos  = packet.bedPos;
+                m_player->sleepCounter = 0;
+            } else if (m_player->IsSleeping()) {
+                m_player->sleepingPos.reset();
+                m_player->sleepCounter = 100;
+            }
+        } else if (g_remotePlayerManager) {
+            g_remotePlayerManager->SetSleepingPos(
+                packet.playerId,
+                packet.sleeping ? std::optional<glm::ivec3>(packet.bedPos) : std::nullopt);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    // MC ClientPacketListener.handleSoundEvent: level.playSeededSound(player,
+    // ...) with the local player as `except`, i.e. play it. A packet scoped to
+    // a level other than the one the player stands in (an immersive portal's
+    // far side) is not for these ears — MC never sends a sound across
+    // dimensions — so it is dropped.
+    void ClientPacketHandler::onSoundS2C(const Network::SoundS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        if (ClientLevels::HasSession() && ClientLevels::BoundDimension() != ClientLevels::ActiveDimension()) return;
+        Sounds::PlayAt(packet.Position(), packet.event, packet.source, packet.volume, packet.pitch,
+                       false, packet.seed);
+    }
+
+    // MC handleSoundEntityEvent: only for an entity this client knows.
+    void ClientPacketHandler::onSoundEntityS2C(const Network::SoundEntityS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        if (ClientLevels::HasSession() && ClientLevels::BoundDimension() != ClientLevels::ActiveDimension()) return;
+        SoundEntityState state;
+        if (!ResolveSoundEntity(packet.entityId, state)) return;
+        Sounds::PlayEntityBound(packet.entityId, packet.event, packet.source, packet.volume, packet.pitch,
+                                packet.seed);
+    }
+
+    void ClientPacketHandler::onUpdateMobEffectS2C(const Network::UpdateMobEffectS2CPacket& packet) {
+        // MC ClientPacketListener.handleUpdateMobEffect: a fresh instance
+        // from the packet (skipBlending unless it asks to blend), then
+        // forceAddEffect. The server only ever sends a player its own
+        // effects, so anything addressed elsewhere is ignored.
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        if (m_player && static_cast<uint32_t>(packet.entityId) == localId &&
+            Game::IsValidEffectId(packet.effectId)) {
+            Game::MobEffectInstance effect(static_cast<Game::MobEffectId>(packet.effectId),
+                                           packet.duration, packet.amplifier,
+                                           packet.IsAmbient(), packet.IsVisible(), packet.ShowsIcon());
+            m_player->ApplyEffectUpdate(std::move(effect), packet.ShouldBlend());
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onRemoveMobEffectS2C(const Network::RemoveMobEffectS2CPacket& packet) {
+        // MC handleRemoveMobEffect → removeEffectNoUpdate.
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        if (m_player && static_cast<uint32_t>(packet.entityId) == localId &&
+            Game::IsValidEffectId(packet.effectId)) {
+            m_player->ApplyEffectRemove(static_cast<Game::MobEffectId>(packet.effectId));
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onMerchantOffersS2C(const Network::MerchantOffersS2CPacket& packet) {
+        // MC ClientPacketListener.handleMerchantOffers: into the open
+        // MerchantMenu when the container id matches.
+        ::Render::ApplyMerchantOffers(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onOpenBookS2C(const Network::OpenBookS2CPacket& packet) {
+        // MC ClientPacketListener.handleOpenBook: BookAccess.fromItem on the
+        // stack in that hand — the server resolved it (and synced the slot)
+        // before sending this — and a BookViewScreen when there is one.
+        ::Render::OpenBookFromHand(packet.hand);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleOpenSignEditor(const Network::OpenSignEditorS2CPacket& packet) {
+        // MC ClientPacketListener.handleOpenSignEditor → LocalPlayer
+        // .openTextEdit → SignEditScreen / HangingSignEditScreen.
+        ::Render::SignEditorOpen open;
+        open.pos     = packet.pos;
+        open.front   = packet.front;
+        open.blockId = packet.blockId;
+        open.lines   = packet.lines;
+        open.color   = packet.color;
+        open.glowing = packet.glowing;
+        ::Render::ShowSignEditScreen(open);
         m_stats.packetsProcessed++;
     }
 
@@ -567,6 +728,9 @@ namespace Client {
             m_player->hurtDuration = 10;
             m_player->hurtTime     = m_player->hurtDuration;
             m_player->hurtDir      = packet.yaw;
+            // MC LivingEntity.hurt sets invulnerableTime = 20 on the hit;
+            // the client's copy is what the HUD's heart blink reads.
+            m_player->damageCooldownTime = 20;
         }
         m_stats.packetsProcessed++;
     }
@@ -601,7 +765,23 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::handleArmorStandData(const Network::ArmorStandDataS2CPacket& packet) {
+        if (g_clientMobManager) g_clientMobManager->SetArmorStandData(packet);
+        m_stats.packetsProcessed++;
+    }
+
     void ClientPacketHandler::handleEntityEvent(const Network::EntityEventS2CPacket& packet) {
+        // MC handleEntityEvent 35 (a totem of undying spent): the totem's
+        // sound at that entity, for everyone who sees it. Players (their
+        // ids are connection ids) are not in the mob store, so they are
+        // answered here; a mob's copy is its own HandleEntityEvent's.
+        if (packet.event == 35 && !Game::IsMobEntityId(packet.entityId)) {
+            SoundEntityState state;
+            if (ResolveSoundEntity(packet.entityId, state)) {
+                Sounds::PlayLocal(state.position, Game::SoundEvents::TOTEM_USE, Game::SoundSource::Players,
+                                  1.0f, 1.0f);
+            }
+        }
         if (g_clientMobManager) {
             g_clientMobManager->HandleEvent(packet.entityId, packet.event);
         }
@@ -685,6 +865,7 @@ namespace Client {
         m_player->flyingSpeed  = packet.flyingSpeed;
         m_player->physics.mayFly = packet.mayFly();
         m_player->physics.scale  = packet.scale;
+        m_player->SetMorph(packet.morph, packet.morphSpeed);   // /morph: the body's size, eye and speed
 
         // MC ClientPacketListener.handlePlayerAbilities:1884 assigns
         // `abilities.flying = packet.isFlying()` unconditionally, and this used
@@ -782,12 +963,22 @@ namespace Client {
                   static_cast<int>(packet.dimensionId),
                   packet.HasSkyLight() ? 1 : 0, packet.HasCeiling() ? 1 : 0);
 
+        // MC handleRespawn builds the new level's BiomeManager from the
+        // packet's hashedSeed. Before the new dimension's chunks arrive, so
+        // they are meshed with it.
+        if (packet.hasHashedSeed) ::Client::SetBiomeZoomSeed(packet.hashedSeed);
+
         // The player's level changes; the world objects do not get wiped —
         // each dimension is its own ClientLevel now (ClientLevel.hpp). The
         // level being left is destroyed unless the server says to keep it
         // (a seamless crossing, where it stays visible through the portal),
         // which is where the old "throw everything away" went.
         const Game::DimensionId dimension = Game::DimensionFromRaw(packet.dimensionId);
+        // Every sound of the old world stops and the music rearms, as MC's
+        // level swap does — then, through a portal, MC's level event 1032,
+        // the arrival whoosh, which must come AFTER the stop.
+        SoundHost::OnDimensionChanged();
+        LocalPlayerSounds::OnDimensionChanged();
         ClientLevels::SetActive(dimension, packet.KeepPrevious());
         ClientLevels::SetPacketDimension(dimension);
 
@@ -866,6 +1057,54 @@ namespace Client {
             Log::Debug("[ClientPacketHandler] Hotbar slot %d = block %d", i, packet.slots[i]);
         }
 
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onControlS2C(const Network::ControlS2CPacket& packet) {
+        Client::Control::OnControl(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onControlInputS2C(const Network::ControlInputPacket& packet) {
+        Client::Control::OnInput(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onControlViewS2C(const Network::ControlViewPacket& packet) {
+        Client::Control::OnView(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onMorphPickupS2C(const Network::MorphPickupS2CPacket& packet) {
+        // The real pickup's fly-in (ItemPickupParticle), from where the
+        // picked-up player stands — a remote player, or this one.
+        if (!g_itemEntityManager) return;
+        glm::dvec3 from(0.0);
+        bool found = false;
+        if (g_remotePlayerManager) {
+            const auto& players = g_remotePlayerManager->GetPlayers();
+            if (auto it = players.find(packet.heldPlayerId); it != players.end() && it->second.positionInitialized) {
+                from  = it->second.position;
+                found = true;
+            }
+        }
+        if (!found && m_player) {
+            from  = m_player->physics.position;
+            found = true;
+        }
+        if (found) g_itemEntityManager->SpawnPickupAnim(from, packet.stack, packet.holderId);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onMorphHeldS2C(const Network::MorphHeldS2CPacket& packet) {
+        if (!m_player) return;
+        m_player->heldByPlayer = packet.held ? packet.holderId : 0;
+        if (!packet.held) {
+            // The teleport to the holder's hand came just before this; the
+            // throw is MC's drop velocity, blocks per tick → per second.
+            m_player->physics.velocity   = packet.throwVel * 20.0f;
+            m_player->physics.isOnGround = false;
+        }
         m_stats.packetsProcessed++;
     }
 
@@ -952,6 +1191,9 @@ namespace Client {
         m_player->health     = static_cast<int>(std::ceil(packet.health));
         m_player->food       = static_cast<int>(packet.food);
         m_player->saturation = packet.saturation;
+        m_player->absorption = packet.absorption;
+        m_player->hudFlags   = packet.hudFlags;
+        m_player->airSupply  = packet.airSupply;
 
         // Health hitting 0 IS the death signal (MC LocalPlayer.hurtTo →
         // Minecraft.setScreen(new DeathScreen(...)) when health <= 0); a
@@ -963,7 +1205,14 @@ namespace Client {
             m_player->useItemRemaining = 0;
             m_player->useItemDuration  = 0;
             m_player->useAnim          = Game::ItemUseAnimation::NONE;
-            ::Render::ShowDeathScreen();
+            // MC LocalPlayer.shouldShowDeathScreen: with immediate_respawn
+            // on the client skips the screen and respawns at once
+            // (Minecraft.tick -> player.respawn()).
+            if (Game::Rules::GetBool(Game::Rules::Id::ImmediateRespawn)) {
+                ::Render::RequestImmediateRespawn();
+            } else {
+                ::Render::ShowDeathScreen();
+            }
         } else {
             ::Render::DismissDeathScreen();
         }
@@ -986,6 +1235,13 @@ namespace Client {
         // Fully qualified: this file lives in namespace Client, so a bare
         // `Render::` would look for Client::Render first and not find it.
         ::Render::SetServerCommandNames(commandNames);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onWorldgenIdsS2C(const Network::WorldgenIdsS2CPacket& packet) {
+        // /locate's completion lists for the dimension just entered.
+        ::Render::SetDimensionWorldgenIds(packet.biomes, packet.structures,
+                                          packet.biomeTags, packet.structureTags);
         m_stats.packetsProcessed++;
     }
 
@@ -1062,6 +1318,10 @@ namespace Client {
 
     void ClientPacketHandler::onBlockEntityRemoveS2C(const Network::BlockEntityRemoveS2CPacket& packet) {
         if (m_connection) m_connection->HandleBlockEntityRemove(packet);
+    }
+
+    void ClientPacketHandler::onBlockEntityActionS2C(const Network::BlockEntityActionS2CPacket& packet) {
+        if (m_connection) m_connection->HandleBlockEvent(packet);
     }
 
 #if ENABLE_IMMERSIVE_PORTALS

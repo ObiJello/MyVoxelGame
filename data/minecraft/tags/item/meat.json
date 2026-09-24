@@ -10,6 +10,10 @@
     "minecraft:mutton",
     "minecraft:porkchop",
     "minecraft:rabbit",
-    "minecraft:rotten_flesh"
+    "minecraft:rotten_flesh",
+    "minecraft:raw_venison",
+    "minecraft:cooked_venison",
+    "minecraft:raw_meef",
+    "minecraft:cooked_meef"
   ]
 }

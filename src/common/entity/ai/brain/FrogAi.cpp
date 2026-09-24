@@ -1,6 +1,7 @@
 // File: src/common/entity/ai/brain/FrogAi.cpp
 #include "common/entity/ai/brain/FrogAi.hpp"
 
+#include "common/sound/SoundEvents.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
@@ -148,6 +149,11 @@ namespace Game {
                     case State::MoveToTarget: {
                         const double d = std::sqrt(body.DistanceToSqr(*target));
                         if (d < kEatingDistance) {
+                            // MC ShootTongue: FROG_TONGUE, bound to the frog.
+                            if (EntityLevel* lvl = body.Level()) {
+                                lvl->PlaySoundFromEntity(nullptr, body, SoundEvents::FROG_TONGUE,
+                                                         SoundSource::Neutral, 2.0f, 1.0f);
+                            }
                             body.SetPose(Pose::UsingTongue);
                             // MC yanks the prey toward the frog along the tongue.
                             const glm::dvec3 toFrog = body.position - target->position;
@@ -172,6 +178,11 @@ namespace Game {
                     case State::CatchAnimation:
                         if (m_eatAnimationTimer++ >= kCatchAnimationDuration) {
                             m_state = State::EatAnimation;
+                            // MC ShootTongue.eatEntity: FROG_EAT, bound, 2.0.
+                            if (EntityLevel* lvl = body.Level()) {
+                                lvl->PlaySoundFromEntity(nullptr, body, SoundEvents::FROG_EAT,
+                                                         SoundSource::Neutral, 2.0f, 1.0f);
+                            }
                             if (target->IsAlive()) {
                                 mob->DoHurtTarget(*target);
                                 if (!target->IsAlive()) target->Remove(RemovalReason::Killed);

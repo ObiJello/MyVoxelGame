@@ -17,10 +17,11 @@ namespace Server {
         dispatcher.RegisterCommand("spawnall", SpawnAllCommand::Execute);
     }
 
-    void SpawnAllCommand::Execute(ServerPlayer& sender,
+    void SpawnAllCommand::Execute(const CommandSourceStack& source,
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
                                   PlayerSessionManager& sessionManager) {
+        ServerPlayer& sender = *source.sender;
         bool adults = true, babies = true;
         double spacing = 3.0;
 

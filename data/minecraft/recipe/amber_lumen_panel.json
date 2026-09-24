@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "group": "lumen_panel",
+  "key": {
+    "G": "minecraft:glass",
+    "C": "minecraft:resonant_crystal",
+    "D": "minecraft:orange_dye"
+  },
+  "pattern": [
+    " G ",
+    "GCG",
+    " D "
+  ],
+  "result": {
+    "count": 4,
+    "id": "minecraft:amber_lumen_panel"
+  }
+}

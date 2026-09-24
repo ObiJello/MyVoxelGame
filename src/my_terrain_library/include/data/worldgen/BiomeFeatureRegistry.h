@@ -92,6 +92,32 @@ public:
      */
     static const std::vector<std::string>& getEndBiomeKeys();
 
+    /**
+     * The Hush biome keys (engine-only dimension) in
+     * MultiNoiseBiomeSource::buildHushParameters() order — the Hush
+     * possibleBiomes() order that seeds its features. Like the nether and
+     * end lists these are NOT in s_biomeKeyOrder: merging them would reseed
+     * every Overworld feature.
+     */
+    static const std::vector<std::string>& getHushBiomeKeys();
+
+    /**
+     * The Aether biome keys in MultiNoiseBiomeSource::buildAetherParameters()
+     * first-appearance order (the_aether.json possibleBiomes(): meadow,
+     * forest, grove, woodland) — the order that seeds every Aether feature.
+     * NOT in s_biomeKeyOrder, like the nether / end / Hush lists.
+     */
+    static const std::vector<std::string>& getAetherBiomeKeys();
+
+    /**
+     * The Twilight Forest biome keys in TF possibleBiomes() order
+     * (BiomeDensitySource.collectPossibleBiomes: the biome_grid.json
+     * TerrainColumns sorted by key, each column's biome_layers ascending,
+     * first appearance kept) — the order that seeds every TF feature.
+     * NOT in s_biomeKeyOrder, like the nether / end / Hush / Aether lists.
+     */
+    static const std::vector<std::string>& getTwilightBiomeKeys();
+
 private:
     // Ordered list of biome keys (order matters for FeatureSorter)
     static std::vector<std::string> s_biomeKeyOrder;
@@ -312,6 +338,8 @@ private:
     static void setupJungle(const std::string& biomeKey, bool bamboo, bool sparse, bool core);
     static void setupOldGrowthTaiga(const std::string& biomeKey, bool spruce);
     static void setupLushCaves(const std::string& biomeKey);
+    static void setupSulfurCaves(const std::string& biomeKey);     // 26.3
+    static void setupDappledForest(const std::string& biomeKey);   // 26.3
     static void setupDripstoneCaves(const std::string& biomeKey);
     static void setupDeepDark(const std::string& biomeKey);
     static void setupMangroveSwamp(const std::string& biomeKey);
@@ -330,6 +358,25 @@ private:
     static void setupEndHighlands(const std::string& biomeKey);
     static void setupSmallEndIslands(const std::string& biomeKey);
     static void setupEndBarrensOrMidlands(const std::string& biomeKey);
+
+    // The Hush biomes - engine-only dimension (no Java reference)
+    static void setupHushMeadows(const std::string& biomeKey);
+    static void setupWhisperwoodForest(const std::string& biomeKey);
+    static void setupResonantBarrens(const std::string& biomeKey);
+    static void setupCrystalCaverns(const std::string& biomeKey);
+    static void setupSunkenChoir(const std::string& biomeKey);
+    static void setupHollowDeep(const std::string& biomeKey);
+    static void setupAuroraSteppe(const std::string& biomeKey);
+
+    // The Aether biomes - data/aether/worldgen/biome/*.json
+    static void setupAetherBiome(const std::string& biomeKey,
+                                 const levelgen::placement::PlacedFeature* trees);
+
+    // The Twilight Forest biomes - data/twilightforest/worldgen/biome/*.json
+    static void setupTwilightBiomes();
+    // Create an (empty) feature entry so a biome with no pass-one features
+    // is still a registered biome.
+    static void ensureBiomeEntry(const std::string& biomeKey);
     static void registerForestFeatures(const std::string& biomeKey);
     static void registerPlainsFeatures(const std::string& biomeKey);
     static void registerSwampFeatures(const std::string& biomeKey);

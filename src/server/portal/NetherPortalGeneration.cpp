@@ -1,5 +1,6 @@
 // File: src/server/portal/NetherPortalGeneration.cpp
 #include "common/core/Features.hpp"
+#include "SurfaceGate.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 
 #include "NetherPortalGeneration.hpp"
@@ -8,7 +9,11 @@
 #include "server/IntegratedServer.hpp"
 #include "server/level/ServerLevel.hpp"
 #include "server/world/ticketing/ChunkTicketManager.hpp"
+#include "common/world/chunk/Heightmap.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/portal/PortalFamily.hpp"
+#include "common/world/portal/PortalState.hpp"
+#include "server/level/NetherPortalIndex.hpp"
 #include "common/core/Log.hpp"
 
 #include <algorithm>
@@ -21,7 +26,7 @@ namespace Server {
 
     using Game::Immersive::FrameShape;
     using Game::Immersive::Portal;
-    using Game::Immersive::PortalKind;
+    using Game::PortalFamily;
 
     namespace {
 
@@ -31,12 +36,16 @@ namespace Server {
         constexpr int     kTicketLifespanTicks = 20 * 60;
         // Give generation this long before building blind.
         constexpr int64_t kLoadTimeoutTicks    = 20 * 30;
-        // The mod's frame-search radii: 128 toward the overworld, 16 toward
-        // the nether — bounded by what is resident.
-        constexpr int     kSearchRadiusOverworld = 128;
-        constexpr int     kSearchRadiusNether    = 16;
+        // The mod's frame-search radii live on the family (128 toward the
+        // overworld, 16 toward the far side — PortalFamily::SearchRadius-
+        // Toward); this bounds them by what is resident. The far radius is
+        // also how far a NEW frame's placement is searched.
         constexpr int     kSearchRadiusMax       = kFarRadiusChunks * 16 + 8;
+        constexpr int     kPlacementRadius       = PortalFamily::kFarSearchRadius;
         constexpr int     kSearchVertical        = 24;
+        // How far from the mapped column a surface gate may move to find
+        // flatter ground (SurfaceGate::Plan).
+        constexpr int     kSurfaceGateRadius     = 24;
         // Integrity sweep period (the mod: gameTime % 233 == id % 233).
         constexpr int64_t kIntegrityPeriod       = 233;
 
@@ -59,7 +68,7 @@ namespace Server {
         // Does `found` match `templ` exactly, or as a uniformly scaled
         // rectangle? Returns the scale (found / templ), 0 when no match.
         double MatchScale(const FrameShape& templ, const FrameShape& found) {
-            if (templ.axis != found.axis) return 0.0;
+            if (templ.axis != found.axis || templ.family != found.family) return 0.0;
             if (templ.area.size() == found.area.size() && NormalizedCells(templ) == NormalizedCells(found)) {
                 return 1.0;
             }
@@ -78,7 +87,8 @@ namespace Server {
     // ── Ignition ───────────────────────────────────────────────────────────
 
     bool NetherPortalGeneration::OnFrameLit(Game::DimensionId dimension, const FrameShape& shape) {
-        if (!Game::DimensionAllowsNetherPortal(dimension) || shape.Empty()) return false;
+        const PortalFamily& fam = shape.Family();
+        if (!fam.CanIgniteIn(dimension) || shape.Empty()) return false;
         if (FrameHostsPortal(dimension, shape)) return false;
 
         ServerLevel* fromLevel = m_server.GetLevel(dimension);
@@ -93,13 +103,14 @@ namespace Server {
 
         Pending p;
         p.from      = dimension;
-        p.to        = (dimension == Game::DimensionId::Overworld) ? Game::DimensionId::Nether
-                                                                   : Game::DimensionId::Overworld;
+        p.to        = fam.Other(dimension);
         p.fromShape = shape;
 
-        // MC/mod position mapping: the frame's centre through the 8:1 scale,
-        // Y unscaled, clamped into the far dimension's build range so the
-        // frame fits.
+        // MC/mod position mapping: the frame's centre through the family's
+        // scale (8:1 for the nether, 1:1 for the Hush), Y unscaled, clamped
+        // into the far dimension's build range so the frame fits. The Hush
+        // re-aims Y at its surface in Complete(), once the far chunks are
+        // resident and the heightmap can be read.
         const double scale = Game::TeleportationScale(dimension, p.to);
         const glm::dvec3 centre = shape.Center();
         const glm::ivec2 size = shape.Size();
@@ -129,8 +140,8 @@ namespace Server {
             }
         }
         p.startedTick = -1;
-        Log::Info("[NetherPortal] Frame lit in %s (%zu cells, axis %d); searching %s around (%d,%d,%d)",
-                  std::string(Game::DimensionName(dimension)).c_str(), shape.area.size(),
+        Log::Info("[NetherPortal] %s frame lit in %s (%zu cells, axis %d); searching %s around (%d,%d,%d)",
+                  fam.tag, std::string(Game::DimensionName(dimension)).c_str(), shape.area.size(),
                   static_cast<int>(shape.axis), std::string(Game::DimensionName(p.to)).c_str(),
                   p.toPos.x, p.toPos.y, p.toPos.z);
         m_pending.push_back(std::move(p));
@@ -142,7 +153,7 @@ namespace Server {
         if (!registry) return false;
         bool hosts = false;
         for (const Portal* p : registry->CollectNear(dimension, shape.Center(), 2.0)) {
-            if (p->kind != PortalKind::NetherPortal) continue;
+            if (p->kind != shape.Family().immersiveKind) continue;
             const auto frame = Game::Immersive::FrameFromPortal(*p);
             if (!frame) continue;
             if (frame->axis == shape.axis && frame->minCell == shape.minCell &&
@@ -192,8 +203,32 @@ namespace Server {
             return;
         }
 
-        const int radius = std::min(kSearchRadiusMax, p.to == Game::DimensionId::Nether
-                                                          ? kSearchRadiusNether : kSearchRadiusOverworld);
+        const PortalFamily& fam = p.fromShape.Family();
+
+        // The Hush is a surface world entered from the ancient city, ~120
+        // blocks under the Overworld's surface. Carrying the frame's Y across
+        // (the nether rule, which is what puts an Overworld hilltop portal
+        // on the nether roof) would bury its counterpart in the Hush's
+        // stone; the far side is aimed at the surface instead. Only now —
+        // Tick waited for the far chunks, so the heightmap is real; in
+        // OnFrameLit it would have answered the world floor. The Overworld
+        // return keeps the mapped position: an existing city frame 120
+        // blocks down is outside FindExistingFrame's ±24 window (accepted),
+        // and a fresh return frame belongs at the traveller's own height.
+        if (p.to == Game::DimensionId::Hush) {
+            Game::World& toWorld = *toLevel->World();
+            if (toWorld.IsChunkLoaded(p.toPos.x >> 4, p.toPos.z >> 4)) {
+                const int surface = toWorld.GetSurfaceHeight(p.toPos.x, p.toPos.z,
+                                                             Game::HeightmapType::MotionBlockingNoLeaves);
+                const glm::ivec2 size = p.fromShape.Size();
+                const int minY = Game::DimensionMinY(p.to) + 1;
+                const int maxY = Game::DimensionMinY(p.to) + Game::DimensionLogicalHeight(p.to)
+                                 - std::max(size.y, 2) - 2;
+                p.toPos.y = std::clamp(surface + 1, minY, std::max(minY, maxY));
+            }
+        }
+
+        const int radius = std::min(kSearchRadiusMax, fam.SearchRadiusToward(p.to));
         if (auto match = FindExistingFrame(*toLevel, p.fromShape, p.toPos, radius)) {
             Log::Info("[NetherPortal] Linked to an existing frame at (%d,%d,%d) scale %.2f",
                       match->shape.minCell.x, match->shape.minCell.y, match->shape.minCell.z, match->scale);
@@ -207,7 +242,17 @@ namespace Server {
             return;
         }
 
-        std::optional<glm::ivec3> placement = FindPlacement(*toLevel, p.fromShape, p.toPos, kSearchRadiusNether);
+        // The Hush side stands on the surface at full city-frame size
+        // (SurfaceGate.hpp): the generic search below looks downward first
+        // and, on rolling ground, settles for carving a 22-block slot into
+        // a hillside.
+        std::optional<glm::ivec3> placement;
+        bool surfaceGate = false;
+        if (p.to == Game::DimensionId::Hush) {
+            placement = SurfaceGate::Plan(*toLevel->World(), p.fromShape, p.toPos, kSurfaceGateRadius);
+            surfaceGate = placement.has_value();
+        }
+        if (!placement) placement = FindPlacement(*toLevel, p.fromShape, p.toPos, kPlacementRadius);
         if (!placement) {
             // Nowhere to stand it: float it at the mapped position, like
             // the mod's levitated placement.
@@ -217,8 +262,9 @@ namespace Server {
         }
         const FrameShape built = p.fromShape.Translated(*placement - p.fromShape.minCell);
         BuildFrame(*toLevel->World(), built);
-        Log::Info("[NetherPortal] Built a frame at (%d,%d,%d) in %s",
-                  built.minCell.x, built.minCell.y, built.minCell.z,
+        if (surfaceGate) SurfaceGate::BuildPlinth(*toLevel->World(), built);
+        Log::Info("[NetherPortal] Built a %s frame at (%d,%d,%d) in %s",
+                  fam.tag, built.minCell.x, built.minCell.y, built.minCell.z,
                   std::string(Game::DimensionName(p.to)).c_str());
         CreateCluster(p.from, p.fromShape, p.to, built, 1.0);
     }
@@ -245,12 +291,12 @@ namespace Server {
             for (int z = around.z - radius; z <= around.z + radius; ++z) {
                 if (!world->IsChunkLoaded(x >> 4, z >> 4)) continue;
                 for (int y = y0; y <= y1; ++y) {
-                    if (!FrameShape::IsObsidian(world->GetBlock(x, y, z))) continue;
+                    if (!templ.IsFrameBlock(world->GetBlock(x, y, z))) continue;
                     for (const glm::ivec3& n : kNeighbours) {
                         const glm::ivec3 start = glm::ivec3(x, y, z) + n;
                         if (!FrameShape::IsAirLike(world->GetBlock(start.x, start.y, start.z))) continue;
-                        // Only the template's plane can match.
-                        auto found = FrameShape::FindOnAxis(*world, start, templ.axis,
+                        // Only the template's plane and family can match.
+                        auto found = FrameShape::FindOnAxis(*world, start, templ.family, templ.axis,
                                                             FrameShape::kDefaultLengthLimit,
                                                             FrameShape::kDefaultAreaLimit);
                         if (!found) continue;
@@ -310,8 +356,8 @@ namespace Server {
 
     void NetherPortalGeneration::BuildFrame(Game::World& world, const FrameShape& shape) const {
         for (const glm::ivec3& c : shape.FrameWithCorners()) {
-            if (!FrameShape::IsObsidian(world.GetBlock(c.x, c.y, c.z))) {
-                world.SetBlock(c.x, c.y, c.z, Game::BlockID::Obsidian);
+            if (!shape.IsFrameBlock(world.GetBlock(c.x, c.y, c.z))) {
+                world.SetBlock(c.x, c.y, c.z, shape.Family().buildBlock);
             }
         }
         for (const glm::ivec3& c : shape.area) {
@@ -343,10 +389,14 @@ namespace Server {
                                                Game::DimensionId to, const FrameShape& toShape, double scale) {
         auto* registry = m_server.ImmersivePortals();
         if (!registry) return;
+        // A linked far frame may be a vanilla-lit one (the rule was off, or
+        // its records were lost): the surface replaces its purple blocks.
+        if (ServerLevel* fl = m_server.GetLevel(from); fl && fl->World()) ClearPortalBlocks(*fl->World(), fromShape);
+        if (ServerLevel* tl = m_server.GetLevel(to);   tl && tl->World()) ClearPortalBlocks(*tl->World(), toShape);
         Portal front;
         fromShape.FillPortal(front);
-        front.kind          = PortalKind::NetherPortal;
-        front.tag           = "nether";
+        front.kind          = fromShape.Family().immersiveKind;
+        front.tag           = fromShape.Family().tag;
         front.dimension     = from;
         front.destDimension = to;
         front.destination   = toShape.Center();
@@ -368,7 +418,7 @@ namespace Server {
         if (!registry) return;
         std::vector<Game::Immersive::PortalId> broken;
         registry->ForEach([&](const Portal& p) {
-            if (p.kind != PortalKind::NetherPortal) return;
+            if (!Game::FamilyOfKind(p.kind)) return;
             if (((serverTick + p.id) % kIntegrityPeriod) != 0) return;
             ServerLevel* level = m_server.GetLevel(p.dimension);
             if (!level || !level->World()) return;
@@ -384,7 +434,7 @@ namespace Server {
             for (const glm::ivec3& c : frame->frame) {
                 if (!world.IsPositionLoaded(c.x, c.y, c.z)) continue;
                 anyLoaded = true;
-                if (!Game::Immersive::FrameShape::IsObsidian(world.GetBlock(c.x, c.y, c.z))) { intact = false; break; }
+                if (!frame->IsFrameBlock(world.GetBlock(c.x, c.y, c.z))) { intact = false; break; }
             }
             if (intact) {
                 for (const glm::ivec3& c : frame->area) {
@@ -394,6 +444,7 @@ namespace Server {
                 }
             }
             if (anyLoaded && !intact) broken.push_back(p.id);
+            if (anyLoaded && intact) ClearPortalBlocks(world, *frame);
         });
         for (auto id : broken) {
             if (!registry->Get(id)) continue;   // removed with an earlier cluster
@@ -402,12 +453,97 @@ namespace Server {
         }
     }
 
-    void NetherPortalGeneration::OnObsidianRemoved(Game::DimensionId dimension, const glm::ivec3& pos) {
+    size_t NetherPortalGeneration::ClearPortalBlocks(Game::World& world, const FrameShape& shape) const {
+        size_t cleared = 0;
+        for (const glm::ivec3& c : shape.area) {
+            if (!world.IsPositionLoaded(c.x, c.y, c.z)) continue;
+            if (!Game::IsFamilyPortalBlock(world.GetBlock(c.x, c.y, c.z))) continue;
+            world.SetBlock(c.x, c.y, c.z, Game::BlockID::Air, Game::World::UpdateFlags::All);
+            ++cleared;
+        }
+        if (cleared) {
+            Log::Info("[NetherPortal] cleared %zu vanilla portal block(s) from the immersive frame at (%d,%d,%d)",
+                      cleared, shape.minCell.x, shape.minCell.y, shape.minCell.z);
+        }
+        return cleared;
+    }
+
+    bool NetherPortalGeneration::PendingCovers(Game::DimensionId dimension, const FrameShape& shape) const {
+        const glm::dvec3 centre = shape.Center();
+        for (const Pending& p : m_pending) {
+            if (p.fromShape.family != shape.family) continue;
+            if (p.from == dimension && p.fromShape.axis == shape.axis && p.fromShape.minCell == shape.minCell) return true;
+            if (p.to == dimension) {
+                // The far-side search's widest reach (the Overworld's 128).
+                const double dx = std::abs(centre.x - p.toPos.x), dz = std::abs(centre.z - p.toPos.z);
+                if (std::max(dx, dz) <= PortalFamily::kOverworldSearchRadius) return true;
+            }
+        }
+        return false;
+    }
+
+    void NetherPortalGeneration::OnChunkLoaded(ServerLevel& level, Game::Math::ChunkPos chunkPos) {
+        // Immersive families only (Portals::FamilyIsImmersive): the nether
+        // while the rule is on. The Hush and Aether are always vanilla
+        // blocks and are neither cleared nor adopted here.
+        auto* registry = m_server.ImmersivePortals();
+        Game::World* world = level.World();
+        if (!registry || !world) return;
+        const Game::DimensionId dimension = level.Dimension();
+
+        // Recorded frames touching this chunk: any vanilla blocks inside go.
+        registry->ForEach([&](const Portal& p) {
+            const PortalFamily* recordFamily = Game::FamilyOfKind(p.kind);
+            if (!recordFamily || p.dimension != dimension) return;
+            if (!Game::Portals::FamilyIsImmersive(recordFamily->id)) return;
+            const auto frame = Game::Immersive::FrameFromPortal(p);
+            if (!frame) return;
+            if ((frame->maxCell.x >> 4) < chunkPos.x || (frame->minCell.x >> 4) > chunkPos.x ||
+                (frame->maxCell.z >> 4) < chunkPos.z || (frame->minCell.z >> 4) > chunkPos.z) return;
+            ClearPortalBlocks(*world, *frame);
+        });
+
+        // Vanilla portals with no record: adopt them, family by family. The
+        // family's index is the cheap way to know where its portal blocks
+        // are (it scanned this chunk a moment ago); a position that no
+        // longer holds one is stale.
+        for (const Game::PortalFamilyId familyId : Game::kAllPortalFamilies) {
+            const PortalFamily& fam = Game::Family(familyId);
+            if (!Game::Portals::FamilyIsImmersive(familyId)) continue;
+            if (!fam.CanIgniteIn(dimension)) continue;
+            for (const glm::ivec3& pos : level.Portals(familyId).InChunk(chunkPos)) {
+                if (world->GetBlock(pos.x, pos.y, pos.z) != fam.portalBlock) continue;
+                const auto shape = FrameShape::Find(*world, pos, familyId);
+                if (!shape) continue;
+                // Every frame cell must be resident frame block: an unloaded
+                // neighbour chunk answers "air" and the frame would look
+                // open. The other chunk's own load retries this.
+                bool resident = true;
+                for (const glm::ivec3& c : shape->frame) {
+                    if (!world->IsPositionLoaded(c.x, c.y, c.z)) { resident = false; break; }
+                }
+                if (!resident || !shape->IsIntact(*world)) continue;
+                if (FrameHostsPortal(dimension, *shape) || PendingCovers(dimension, *shape)) continue;
+                Log::Info("[NetherPortal] adopting the vanilla %s portal at (%d,%d,%d) as an immersive portal",
+                          fam.tag, shape->minCell.x, shape->minCell.y, shape->minCell.z);
+                // OnFrameLit clears the interior (the portal blocks with it)
+                // and starts the far-side search, which links to the
+                // counterpart frame — a vanilla-lit one matches too, see
+                // FrameShape::IsAirLike.
+                OnFrameLit(dimension, *shape);
+            }
+        }
+    }
+
+    void NetherPortalGeneration::OnFrameBlockRemoved(Game::DimensionId dimension, const glm::ivec3& pos,
+                                                     Game::BlockID removed) {
+        const PortalFamily* fam = Game::FamilyOfFrameBlock(removed);
+        if (!fam) return;
         auto* registry = m_server.ImmersivePortals();
         if (!registry) return;
         std::vector<Game::Immersive::PortalId> broken;
         for (const Portal* p : registry->CollectNear(dimension, glm::dvec3(pos) + glm::dvec3(0.5), 2.0)) {
-            if (p->kind != PortalKind::NetherPortal) continue;
+            if (p->kind != fam->immersiveKind) continue;
             const auto frame = Game::Immersive::FrameFromPortal(*p);
             if (frame && frame->ContainsFrameCell(pos)) broken.push_back(p->id);
         }

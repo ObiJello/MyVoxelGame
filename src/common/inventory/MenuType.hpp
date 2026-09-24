@@ -51,6 +51,12 @@ namespace Game {
         BrewingStand = 20,
         Beacon       = 21,
         Crafter3x3   = 22,
+        // MC MenuType.LECTERN — a lectern's reading view (LecternMenu): one
+        // book slot and the shared page, no player inventory.
+        Lectern      = 23,
+        // MC MenuType.MERCHANT — a villager's / wandering trader's trades
+        // (MerchantMenu). Entity-backed: opened by the mob, not a block.
+        Merchant     = 24,
     };
 
 } // namespace Game

@@ -33,6 +33,10 @@ layout (location = 2) in vec4 aColor;     // Vertex color (RGBA8 normalized by G
 
 // Per-instance: xyz = world translation, w = uniform scale.
 layout (location = 3) in vec4 aInstance;
+// Per-instance: the lightmap colour for the entity's packed light (MC
+// EntityRenderer.getPackedLightCoords, one per falling block / TNT), RGBA8
+// normalized. The draw's uDrawLight is 1 on this path.
+layout (location = 4) in vec4 aInstanceLight;
 
 uniform mat4 uViewProj;         // View-projection only; model is per-instance
 uniform vec4 uPortalClipPlane;  // See block.vert for the contract
@@ -50,5 +54,5 @@ void main() {
         : 1.0;
     fragTexCoord = aTexCoord;
     fragWorldPos = worldPos.xyz;
-    fragColor = aColor;
+    fragColor = vec4(aColor.rgb * aInstanceLight.rgb, aColor.a);
 }

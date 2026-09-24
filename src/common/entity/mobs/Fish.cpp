@@ -14,6 +14,7 @@
 #include "common/entity/effect/MobEffects.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -77,6 +78,16 @@ namespace Game {
             velocity.z += (rng.NextFloat() * 2.0f - 1.0f) * 0.05f;
             onGround = false;
             needsSync = true;
+            // MC AbstractFish.aiStep: playSound(getFlopSound(), volume, pitch).
+            const char* flop = "";
+            switch (GetType()) {
+                case EntityTypeId::Cod:          flop = SoundEvents::COD_FLOP; break;
+                case EntityTypeId::Salmon:       flop = SoundEvents::SALMON_FLOP; break;
+                case EntityTypeId::Pufferfish:   flop = SoundEvents::PUFFER_FISH_FLOP; break;
+                case EntityTypeId::TropicalFish: flop = SoundEvents::TROPICAL_FISH_FLOP; break;
+                default: break;
+            }
+            PlaySound(flop, GetSoundVolume(), GetVoicePitch());
         }
         PathfinderMob::AiStep();
     }
@@ -170,20 +181,23 @@ namespace Game {
 
     void Pufferfish::Tick() {
         // MC Pufferfish.tick: the state machine runs BEFORE super, server
-        // side, alive, effective AI. (The blow-up/blow-out sounds wait on the
-        // sound system.)
+        // side, alive, effective AI; every puff edge voices blow-up/blow-out.
         if (m_level && !m_level->IsClientSide() && IsAlive() && IsEffectiveAi()) {
             if (m_inflateCounter > 0) {
                 if (m_puffState == kStateSmall) {
+                    MakeSound(SoundEvents::PUFFER_FISH_BLOW_UP);
                     m_puffState = kStateMid;
                 } else if (m_inflateCounter > 40 && m_puffState == kStateMid) {
+                    MakeSound(SoundEvents::PUFFER_FISH_BLOW_UP);
                     m_puffState = kStateFull;
                 }
                 ++m_inflateCounter;
             } else if (m_puffState != kStateSmall) {
                 if (m_deflateTimer > 60 && m_puffState == kStateFull) {
+                    MakeSound(SoundEvents::PUFFER_FISH_BLOW_OUT);
                     m_puffState = kStateMid;
                 } else if (m_deflateTimer > 100 && m_puffState == kStateMid) {
+                    MakeSound(SoundEvents::PUFFER_FISH_BLOW_OUT);
                     m_puffState = kStateSmall;
                 }
                 ++m_deflateTimer;
@@ -196,7 +210,8 @@ namespace Game {
         // MC Pufferfish.touch / playerTouch — identical numbers for both:
         // (1 + state) mob-attack damage, then POISON for 60 * state ticks
         // (amplifier 0). playerTouch additionally sends the PUFFER_FISH_STING
-        // game event — a client-side sting sound; no such packet exists.
+        // game event — a sting only the stung player hears; no such packet
+        // exists, so a player's sting is silent. A mob's is broadcast.
         // (NAUSEA belongs to EATING a pufferfish, not the sting — nothing to
         // skip here.)
         const int state = m_puffState;
@@ -204,6 +219,7 @@ namespace Game {
                      static_cast<float>(1 + state), this)) {
             mob.AddEffect(MobEffectInstance(MobEffectId::Poison, 60 * state, 0),
                           this);
+            if (!mob.IsPlayer()) PlaySound(SoundEvents::PUFFER_FISH_STING, 1.0f, 1.0f);
         }
     }
 

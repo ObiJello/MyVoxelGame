@@ -1,0 +1,8 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:angelic_stone",
+  "result": {
+    "count": 2,
+    "id": "minecraft:angelic_slab"
+  }
+}

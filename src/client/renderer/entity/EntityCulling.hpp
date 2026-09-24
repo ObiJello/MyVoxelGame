@@ -110,6 +110,12 @@ namespace Render {
         // clamped what it sends) and the option.
         inline float g_viewScale = 1.0f;
 
+        // Entities that passed every cull and were drawn this frame — the
+        // "E: rendered/total" half of the F3 entity_render_stats entry (MC
+        // LevelRenderState.lastEntityRenderStateCount). Reset by PlatformMain
+        // at the top of the frame, bumped by each entity renderer.
+        inline int g_renderedThisFrame = 0;
+
         inline void SetViewScale(int effectiveRenderDistanceChunks, float entityDistanceScaling) {
             const float byDistance = std::clamp(static_cast<float>(effectiveRenderDistanceChunks) / 8.0f,
                                                 1.0f, 2.5f);

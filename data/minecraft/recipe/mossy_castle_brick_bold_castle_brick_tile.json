@@ -1,0 +1,7 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:mossy_castle_brick",
+  "result": {
+    "id": "minecraft:bold_castle_brick_tile"
+  }
+}

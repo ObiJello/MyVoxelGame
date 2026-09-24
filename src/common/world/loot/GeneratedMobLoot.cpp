@@ -5,12 +5,60 @@
 
 namespace Game {
 
+    // aechor_plant
+    static const MobLootEntry k_aechor_plant_p0[] = {
+        { Items::AechorPetal, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_aechor_plant[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_aechor_plant_p0, 1 },
+    };
+
+    // aerbunny
+    static const MobLootEntry k_aerbunny_p0[] = {
+        { Items::String, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_aerbunny[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_aerbunny_p0, 1 },
+    };
+
+    // bighorn_sheep
+    static const MobLootEntry k_bighorn_sheep_p0[] = {
+        { Items::Mutton, 1, 1, 2, Items::CookedMutton, 0, 127 },
+    };
+    static const MobLootPool k_bighorn_sheep[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_bighorn_sheep_p0, 1 },
+    };
+
     // blaze
     static const MobLootEntry k_blaze_p0[] = {
         { Items::BlazeRod, 1, 0, 1, Items::Air, 0, 127 },
     };
     static const MobLootPool k_blaze[] = {
         { 1, 1, true, 1.0f, 0, 127, k_blaze_p0, 1 },
+    };
+
+    // block_and_chain_goblin
+    static const MobLootEntry k_block_and_chain_goblin_p0[] = {
+        { Items::ArmorShard, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_block_and_chain_goblin[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_block_and_chain_goblin_p0, 1 },
+    };
+
+    // blue_swet
+    static const MobLootEntry k_blue_swet_p0[] = {
+        { Items::SwetBall, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_blue_swet[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_blue_swet_p0, 1 },
+    };
+
+    // boar
+    static const MobLootEntry k_boar_p0[] = {
+        { Items::Porkchop, 1, 1, 3, Items::CookedPorkchop, 0, 127 },
+    };
+    static const MobLootPool k_boar[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_boar_p0, 1 },
     };
 
     // bogged
@@ -73,6 +121,26 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_chicken_p1, 1 },
     };
 
+    // choir_mother
+    static const MobLootEntry k_choir_mother_p0[] = {
+        { Items::ChoirHeart, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_choir_mother_p1[] = {
+        { Items::EchoShard, 1, 6, 10, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_choir_mother[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_choir_mother_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_choir_mother_p1, 1 },
+    };
+
+    // cockatrice
+    static const MobLootEntry k_cockatrice_p0[] = {
+        { Items::Feather, 1, 2, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_cockatrice[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_cockatrice_p0, 1 },
+    };
+
     // cod
     static const MobLootEntry k_cod_p0[] = {
         { Items::Cod, 1, 1, 1, Items::CookedCod, 0, 127 },
@@ -113,6 +181,26 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_creeper_p0, 1 },
     };
 
+    // crystal_golem
+    static const MobLootEntry k_crystal_golem_p0[] = {
+        { Items::RawResonite, 1, 1, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_crystal_golem[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_crystal_golem_p0, 1 },
+    };
+
+    // deer
+    static const MobLootEntry k_deer_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_deer_p1[] = {
+        { Items::RawVenison, 1, 1, 3, Items::CookedVenison, 0, 127 },
+    };
+    static const MobLootPool k_deer[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_deer_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_deer_p1, 1 },
+    };
+
     // dolphin
     static const MobLootEntry k_dolphin_p0[] = {
         { Items::Cod, 1, 0, 1, Items::CookedCod, 0, 127 },
@@ -139,6 +227,38 @@ namespace Game {
     static const MobLootPool k_drowned[] = {
         { 1, 1, false, 1.0f, 0, 127, k_drowned_p0, 1 },
         { 1, 1, true, 0.11f, 0, 127, k_drowned_p1, 1 },
+    };
+
+    // dwarf_rabbit
+    static const MobLootEntry k_dwarf_rabbit_p0[] = {
+        { Items::RabbitHide, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_dwarf_rabbit_p1[] = {
+        { Items::Rabbit, 1, 1, 1, Items::CookedRabbit, 0, 127 },
+    };
+    static const MobLootEntry k_dwarf_rabbit_p2[] = {
+        { Items::RabbitFoot, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_dwarf_rabbit[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_dwarf_rabbit_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_dwarf_rabbit_p1, 1 },
+        { 1, 1, true, 0.1f, 0, 127, k_dwarf_rabbit_p2, 1 },
+    };
+
+    // echo_mimic
+    static const MobLootEntry k_echo_mimic_p0[] = {
+        { Items::EchoShard, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_echo_mimic[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_echo_mimic_p0, 1 },
+    };
+
+    // echo_wraith
+    static const MobLootEntry k_echo_wraith_p0[] = {
+        { Items::EchoShard, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_echo_wraith[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_echo_wraith_p0, 1 },
     };
 
     // elder_guardian
@@ -180,6 +300,26 @@ namespace Game {
         { 1, 1, true, 1.0f, 0, 127, k_evoker_p1, 1 },
     };
 
+    // fire_beetle
+    static const MobLootEntry k_fire_beetle_p0[] = {
+        { Items::Gunpowder, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_fire_beetle[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_fire_beetle_p0, 1 },
+    };
+
+    // flying_cow
+    static const MobLootEntry k_flying_cow_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_flying_cow_p1[] = {
+        { Items::Beef, 1, 1, 3, Items::CookedBeef, 0, 127 },
+    };
+    static const MobLootPool k_flying_cow[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_flying_cow_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_flying_cow_p1, 1 },
+    };
+
     // ghast
     static const MobLootEntry k_ghast_p0[] = {
         { Items::GhastTear, 1, 0, 1, Items::Air, 0, 127 },
@@ -214,6 +354,30 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_guardian_p1, 3 },
     };
 
+    // hedge_spider
+    static const MobLootEntry k_hedge_spider_p0[] = {
+        { Items::String, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_hedge_spider_p1[] = {
+        { Items::SpiderEye, 1, -1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_hedge_spider[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_hedge_spider_p0, 1 },
+        { 1, 1, true, 1.0f, 0, 127, k_hedge_spider_p1, 1 },
+    };
+
+    // helmet_crab
+    static const MobLootEntry k_helmet_crab_p0[] = {
+        { Items::ArmorShard, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_helmet_crab_p1[] = {
+        { Items::Cod, 1, 1, 1, Items::CookedCod, 0, 127 },
+    };
+    static const MobLootPool k_helmet_crab[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_helmet_crab_p0, 1 },
+        { 1, 1, false, 0.5f, 0, 127, k_helmet_crab_p1, 1 },
+    };
+
     // hoglin
     static const MobLootEntry k_hoglin_p0[] = {
         { Items::Porkchop, 1, 2, 4, Items::CookedPorkchop, 0, 127 },
@@ -232,6 +396,14 @@ namespace Game {
     };
     static const MobLootPool k_horse[] = {
         { 1, 1, false, 1.0f, 0, 127, k_horse_p0, 1 },
+    };
+
+    // hushling
+    static const MobLootEntry k_hushling_p0[] = {
+        { Items::EchoShard, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_hushling[] = {
+        { 1, 1, false, 0.05f, 0, 127, k_hushling_p0, 1 },
     };
 
     // husk
@@ -256,6 +428,30 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_iron_golem_p0, 1 },
     };
 
+    // king_spider
+    static const MobLootEntry k_king_spider_p0[] = {
+        { Items::String, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_king_spider_p1[] = {
+        { Items::SpiderEye, 1, -1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_king_spider[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_king_spider_p0, 1 },
+        { 1, 1, true, 1.0f, 0, 127, k_king_spider_p1, 1 },
+    };
+
+    // kobold
+    static const MobLootEntry k_kobold_p0[] = {
+        { Items::Wheat, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_kobold_p1[] = {
+        { Items::GoldNugget, 1, -1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_kobold[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_kobold_p0, 1 },
+        { 1, 1, true, 1.0f, 0, 127, k_kobold_p1, 1 },
+    };
+
     // llama
     static const MobLootEntry k_llama_p0[] = {
         { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
@@ -264,12 +460,48 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_llama_p0, 1 },
     };
 
+    // lower_goblin_knight
+    static const MobLootEntry k_lower_goblin_knight_p0[] = {
+        { Items::ArmorShard, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_lower_goblin_knight[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_lower_goblin_knight_p0, 1 },
+    };
+
     // magma_cube
     static const MobLootEntry k_magma_cube_p0[] = {
         { Items::MagmaCream, 1, -2, 1, Items::Air, 2, 127 },
     };
     static const MobLootPool k_magma_cube[] = {
         { 1, 1, false, 1.0f, 0, 127, k_magma_cube_p0, 1 },
+    };
+
+    // maze_slime
+    static const MobLootEntry k_maze_slime_p0[] = {
+        { Items::SlimeBall, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_maze_slime[] = {
+        { 1, 1, false, 1.0f, 1, 1, k_maze_slime_p0, 1 },
+    };
+
+    // minotaur
+    static const MobLootEntry k_minotaur_p0[] = {
+        { Items::RawMeef, 1, 1, 1, Items::CookedMeef, 0, 127 },
+    };
+    static const MobLootEntry k_minotaur_p1[] = {
+        { Items::Paper, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_minotaur[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_minotaur_p0, 1 },
+        { 1, 1, false, 0.025f, 0, 127, k_minotaur_p1, 1 },
+    };
+
+    // moa
+    static const MobLootEntry k_moa_p0[] = {
+        { Items::Feather, 1, 2, 3, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_moa[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_moa_p0, 1 },
     };
 
     // mooshroom
@@ -320,12 +552,32 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_parrot_p0, 1 },
     };
 
+    // penguin
+    static const MobLootEntry k_penguin_p0[] = {
+        { Items::Feather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_penguin[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_penguin_p0, 1 },
+    };
+
     // phantom
     static const MobLootEntry k_phantom_p0[] = {
         { Items::PhantomMembrane, 1, 0, 1, Items::Air, 0, 127 },
     };
     static const MobLootPool k_phantom[] = {
         { 1, 1, true, 1.0f, 0, 127, k_phantom_p0, 1 },
+    };
+
+    // phyg
+    static const MobLootEntry k_phyg_p0[] = {
+        { Items::Porkchop, 1, 1, 3, Items::CookedPorkchop, 0, 127 },
+    };
+    static const MobLootEntry k_phyg_p1[] = {
+        { Items::Feather, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_phyg[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_phyg_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_phyg_p1, 1 },
     };
 
     // pig
@@ -381,6 +633,30 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_ravager_p0, 1 },
     };
 
+    // raven
+    static const MobLootEntry k_raven_p0[] = {
+        { Items::Feather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_raven[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_raven_p0, 1 },
+    };
+
+    // redcap
+    static const MobLootEntry k_redcap_p0[] = {
+        { Items::Coal, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_redcap[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_redcap_p0, 1 },
+    };
+
+    // redcap_sapper
+    static const MobLootEntry k_redcap_sapper_p0[] = {
+        { Items::Coal, 1, 0, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_redcap_sapper[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_redcap_sapper_p0, 1 },
+    };
+
     // salmon
     static const MobLootEntry k_salmon_p0[] = {
         { Items::Salmon, 1, 1, 1, Items::CookedSalmon, 0, 127 },
@@ -401,12 +677,32 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_sheep_p0, 1 },
     };
 
+    // sheepuff
+    static const MobLootEntry k_sheepuff_p0[] = {
+        { Items::Mutton, 1, 1, 2, Items::CookedMutton, 0, 127 },
+    };
+    static const MobLootPool k_sheepuff[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_sheepuff_p0, 1 },
+    };
+
     // shulker
     static const MobLootEntry k_shulker_p0[] = {
         { Items::ShulkerShell, 1, 1, 1, Items::Air, 0, 127 },
     };
     static const MobLootPool k_shulker[] = {
         { 1, 1, false, 0.5f, 0, 127, k_shulker_p0, 1 },
+    };
+
+    // silent_warden
+    static const MobLootEntry k_silent_warden_p0[] = {
+        { Items::ResonantHeart, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_silent_warden_p1[] = {
+        { Items::EchoShard, 1, 5, 8, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_silent_warden[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_silent_warden_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_silent_warden_p1, 1 },
     };
 
     // skeleton
@@ -419,6 +715,18 @@ namespace Game {
     static const MobLootPool k_skeleton[] = {
         { 1, 1, false, 1.0f, 0, 127, k_skeleton_p0, 1 },
         { 1, 1, false, 1.0f, 0, 127, k_skeleton_p1, 1 },
+    };
+
+    // skeleton_druid
+    static const MobLootEntry k_skeleton_druid_p0[] = {
+        { Items::Bone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_skeleton_druid_p1[] = {
+        { Items::Torchberries, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_skeleton_druid[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_skeleton_druid_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_skeleton_druid_p1, 1 },
     };
 
     // skeleton_horse
@@ -435,6 +743,14 @@ namespace Game {
     };
     static const MobLootPool k_slime[] = {
         { 1, 1, false, 1.0f, 1, 1, k_slime_p0, 1 },
+    };
+
+    // slime_beetle
+    static const MobLootEntry k_slime_beetle_p0[] = {
+        { Items::SlimeBall, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_slime_beetle[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_slime_beetle_p0, 1 },
     };
 
     // snow_golem
@@ -485,12 +801,60 @@ namespace Game {
         { 1, 1, false, 1.0f, 0, 127, k_strider_p0, 1 },
     };
 
+    // swarm_spider
+    static const MobLootEntry k_swarm_spider_p0[] = {
+        { Items::String, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_swarm_spider_p1[] = {
+        { Items::SpiderEye, 1, -1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_swarm_spider[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_swarm_spider_p0, 1 },
+        { 1, 1, true, 1.0f, 0, 127, k_swarm_spider_p1, 1 },
+    };
+
+    // the_unsung
+    static const MobLootEntry k_the_unsung_p0[] = {
+        { Items::EchoShard, 1, 8, 14, Items::Air, 0, 127 },
+    };
+    static const MobLootEntry k_the_unsung_p1[] = {
+        { Items::ResoniteIngot, 1, 2, 4, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_the_unsung[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_the_unsung_p0, 1 },
+        { 1, 1, false, 1.0f, 0, 127, k_the_unsung_p1, 1 },
+    };
+
+    // tiny_bird
+    static const MobLootEntry k_tiny_bird_p0[] = {
+        { Items::Feather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_tiny_bird[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_tiny_bird_p0, 1 },
+    };
+
+    // towerwood_borer
+    static const MobLootEntry k_towerwood_borer_p0[] = {
+        { Items::Redstone, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_towerwood_borer[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_towerwood_borer_p0, 1 },
+    };
+
     // trader_llama
     static const MobLootEntry k_trader_llama_p0[] = {
         { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
     };
     static const MobLootPool k_trader_llama[] = {
         { 1, 1, false, 1.0f, 0, 127, k_trader_llama_p0, 1 },
+    };
+
+    // troll
+    static const MobLootEntry k_troll_p0[] = {
+        { Items::CocoaBeans, 1, 1, 1, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_troll[] = {
+        { 1, 1, false, 0.025f, 0, 127, k_troll_p0, 1 },
     };
 
     // tropical_fish
@@ -505,12 +869,28 @@ namespace Game {
         { 1, 1, false, 0.05f, 0, 127, k_tropical_fish_p1, 1 },
     };
 
+    // upper_goblin_knight
+    static const MobLootEntry k_upper_goblin_knight_p0[] = {
+        { Items::ArmorShard, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_upper_goblin_knight[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_upper_goblin_knight_p0, 1 },
+    };
+
     // vindicator
     static const MobLootEntry k_vindicator_p0[] = {
         { Items::Emerald, 1, 0, 1, Items::Air, 0, 127 },
     };
     static const MobLootPool k_vindicator[] = {
         { 1, 1, true, 1.0f, 0, 127, k_vindicator_p0, 1 },
+    };
+
+    // winter_wolf
+    static const MobLootEntry k_winter_wolf_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_winter_wolf[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_winter_wolf_p0, 1 },
     };
 
     // witch
@@ -540,6 +920,22 @@ namespace Game {
     static const MobLootPool k_wither_skeleton[] = {
         { 1, 1, false, 1.0f, 0, 127, k_wither_skeleton_p0, 1 },
         { 1, 1, false, 1.0f, 0, 127, k_wither_skeleton_p1, 1 },
+    };
+
+    // wraith
+    static const MobLootEntry k_wraith_p0[] = {
+        { Items::GlowstoneDust, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_wraith[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_wraith_p0, 1 },
+    };
+
+    // yeti
+    static const MobLootEntry k_yeti_p0[] = {
+        { Items::Leather, 1, 0, 2, Items::Air, 0, 127 },
+    };
+    static const MobLootPool k_yeti[] = {
+        { 1, 1, false, 1.0f, 0, 127, k_yeti_p0, 1 },
     };
 
     // zoglin
@@ -611,12 +1007,20 @@ namespace Game {
     };
 
     const MobLootTable kMobLootTables[] = {
+        { EntityTypeId::AechorPlant, k_aechor_plant, 1 },
+        { EntityTypeId::Aerbunny, k_aerbunny, 1 },
+        { EntityTypeId::Aerwhale, nullptr, 0 },
         { EntityTypeId::Allay, nullptr, 0 },
         { EntityTypeId::Armadillo, nullptr, 0 },
+        { EntityTypeId::ArmorStand, nullptr, 0 },
         { EntityTypeId::Axolotl, nullptr, 0 },
         { EntityTypeId::Bat, nullptr, 0 },
         { EntityTypeId::Bee, nullptr, 0 },
+        { EntityTypeId::BighornSheep, k_bighorn_sheep, 1 },
         { EntityTypeId::Blaze, k_blaze, 1 },
+        { EntityTypeId::BlockAndChainGoblin, k_block_and_chain_goblin, 1 },
+        { EntityTypeId::BlueSwet, k_blue_swet, 1 },
+        { EntityTypeId::Boar, k_boar, 1 },
         { EntityTypeId::Bogged, k_bogged, 2 },
         { EntityTypeId::Breeze, k_breeze, 1 },
         { EntityTypeId::Camel, nullptr, 0 },
@@ -624,77 +1028,126 @@ namespace Game {
         { EntityTypeId::Cat, k_cat, 1 },
         { EntityTypeId::CaveSpider, k_cave_spider, 2 },
         { EntityTypeId::Chicken, k_chicken, 2 },
+        { EntityTypeId::ChoirMother, k_choir_mother, 2 },
+        { EntityTypeId::Cockatrice, k_cockatrice, 1 },
         { EntityTypeId::Cod, k_cod, 2 },
         { EntityTypeId::CopperGolem, k_copper_golem, 1 },
         { EntityTypeId::Cow, k_cow, 2 },
         { EntityTypeId::Creaking, nullptr, 0 },
         { EntityTypeId::Creeper, k_creeper, 1 },
+        { EntityTypeId::CrystalGolem, k_crystal_golem, 1 },
+        { EntityTypeId::Deer, k_deer, 2 },
         { EntityTypeId::Dolphin, k_dolphin, 1 },
         { EntityTypeId::Donkey, k_donkey, 1 },
         { EntityTypeId::Drowned, k_drowned, 2 },
+        { EntityTypeId::DwarfRabbit, k_dwarf_rabbit, 3 },
+        { EntityTypeId::EchoMimic, k_echo_mimic, 1 },
+        { EntityTypeId::EchoWraith, k_echo_wraith, 1 },
         { EntityTypeId::ElderGuardian, k_elder_guardian, 3 },
         { EntityTypeId::EnderDragon, nullptr, 0 },
         { EntityTypeId::Enderman, k_enderman, 1 },
         { EntityTypeId::Endermite, nullptr, 0 },
+        { EntityTypeId::EvilWhirlwind, nullptr, 0 },
         { EntityTypeId::Evoker, k_evoker, 2 },
+        { EntityTypeId::FireBeetle, k_fire_beetle, 1 },
+        { EntityTypeId::FireMinion, nullptr, 0 },
+        { EntityTypeId::FlyingCow, k_flying_cow, 2 },
         { EntityTypeId::Fox, nullptr, 0 },
         { EntityTypeId::Frog, nullptr, 0 },
         { EntityTypeId::Ghast, k_ghast, 2 },
         { EntityTypeId::Giant, nullptr, 0 },
         { EntityTypeId::GlowSquid, k_glow_squid, 1 },
         { EntityTypeId::Goat, nullptr, 0 },
+        { EntityTypeId::GoldenSwet, nullptr, 0 },
         { EntityTypeId::Guardian, k_guardian, 2 },
         { EntityTypeId::HappyGhast, nullptr, 0 },
+        { EntityTypeId::HedgeSpider, k_hedge_spider, 2 },
+        { EntityTypeId::HelmetCrab, k_helmet_crab, 2 },
         { EntityTypeId::Hoglin, k_hoglin, 2 },
         { EntityTypeId::Horse, k_horse, 1 },
+        { EntityTypeId::HostileWolf, nullptr, 0 },
+        { EntityTypeId::Hushling, k_hushling, 1 },
         { EntityTypeId::Husk, k_husk, 2 },
         { EntityTypeId::Illusioner, nullptr, 0 },
         { EntityTypeId::IronGolem, k_iron_golem, 1 },
+        { EntityTypeId::KingSpider, k_king_spider, 2 },
+        { EntityTypeId::Kobold, k_kobold, 2 },
         { EntityTypeId::Llama, k_llama, 1 },
+        { EntityTypeId::LowerGoblinKnight, k_lower_goblin_knight, 1 },
         { EntityTypeId::MagmaCube, k_magma_cube, 1 },
+        { EntityTypeId::MazeSlime, k_maze_slime, 1 },
+        { EntityTypeId::Mimic, nullptr, 0 },
+        { EntityTypeId::Minotaur, k_minotaur, 2 },
+        { EntityTypeId::MistWolf, nullptr, 0 },
+        { EntityTypeId::Moa, k_moa, 1 },
         { EntityTypeId::Mooshroom, k_mooshroom, 2 },
+        { EntityTypeId::MosquitoSwarm, nullptr, 0 },
         { EntityTypeId::Mule, k_mule, 1 },
         { EntityTypeId::Nautilus, k_nautilus, 1 },
         { EntityTypeId::Ocelot, nullptr, 0 },
         { EntityTypeId::Panda, nullptr, 0 },
         { EntityTypeId::Parched, k_parched, 2 },
         { EntityTypeId::Parrot, k_parrot, 1 },
+        { EntityTypeId::Penguin, k_penguin, 1 },
         { EntityTypeId::Phantom, k_phantom, 1 },
+        { EntityTypeId::Phyg, k_phyg, 2 },
         { EntityTypeId::Pig, k_pig, 1 },
         { EntityTypeId::Piglin, nullptr, 0 },
         { EntityTypeId::PiglinBrute, nullptr, 0 },
         { EntityTypeId::Pillager, nullptr, 0 },
+        { EntityTypeId::PinchBeetle, nullptr, 0 },
         { EntityTypeId::PolarBear, k_polar_bear, 1 },
         { EntityTypeId::Pufferfish, k_pufferfish, 2 },
         { EntityTypeId::Rabbit, k_rabbit, 3 },
         { EntityTypeId::Ravager, k_ravager, 1 },
+        { EntityTypeId::Raven, k_raven, 1 },
+        { EntityTypeId::Redcap, k_redcap, 1 },
+        { EntityTypeId::RedcapSapper, k_redcap_sapper, 1 },
         { EntityTypeId::Salmon, k_salmon, 2 },
+        { EntityTypeId::Sentry, nullptr, 0 },
         { EntityTypeId::Sheep, k_sheep, 1 },
+        { EntityTypeId::Sheepuff, k_sheepuff, 1 },
         { EntityTypeId::Shulker, k_shulker, 1 },
+        { EntityTypeId::SilentWarden, k_silent_warden, 2 },
         { EntityTypeId::Silverfish, nullptr, 0 },
         { EntityTypeId::Skeleton, k_skeleton, 2 },
+        { EntityTypeId::SkeletonDruid, k_skeleton_druid, 2 },
         { EntityTypeId::SkeletonHorse, k_skeleton_horse, 1 },
         { EntityTypeId::Slime, k_slime, 1 },
+        { EntityTypeId::SlimeBeetle, k_slime_beetle, 1 },
         { EntityTypeId::Sniffer, nullptr, 0 },
         { EntityTypeId::SnowGolem, k_snow_golem, 1 },
         { EntityTypeId::Spider, k_spider, 2 },
         { EntityTypeId::Squid, k_squid, 1 },
+        { EntityTypeId::Squirrel, nullptr, 0 },
         { EntityTypeId::Stray, k_stray, 2 },
         { EntityTypeId::Strider, k_strider, 1 },
         { EntityTypeId::SulfurCube, nullptr, 0 },
+        { EntityTypeId::SwarmSpider, k_swarm_spider, 2 },
         { EntityTypeId::Tadpole, nullptr, 0 },
+        { EntityTypeId::TheUnsung, k_the_unsung, 2 },
+        { EntityTypeId::TinyBird, k_tiny_bird, 1 },
+        { EntityTypeId::TowerwoodBorer, k_towerwood_borer, 1 },
         { EntityTypeId::TraderLlama, k_trader_llama, 1 },
+        { EntityTypeId::Troll, k_troll, 1 },
         { EntityTypeId::TropicalFish, k_tropical_fish, 2 },
         { EntityTypeId::Turtle, nullptr, 0 },
+        { EntityTypeId::UpperGoblinKnight, k_upper_goblin_knight, 1 },
+        { EntityTypeId::Valkyrie, nullptr, 0 },
         { EntityTypeId::Vex, nullptr, 0 },
         { EntityTypeId::Villager, nullptr, 0 },
         { EntityTypeId::Vindicator, k_vindicator, 1 },
         { EntityTypeId::WanderingTrader, nullptr, 0 },
         { EntityTypeId::Warden, nullptr, 0 },
+        { EntityTypeId::Whirlwind, nullptr, 0 },
+        { EntityTypeId::WinterWolf, k_winter_wolf, 1 },
         { EntityTypeId::Witch, k_witch, 2 },
         { EntityTypeId::Wither, nullptr, 0 },
         { EntityTypeId::WitherSkeleton, k_wither_skeleton, 2 },
         { EntityTypeId::Wolf, nullptr, 0 },
+        { EntityTypeId::Wraith, k_wraith, 1 },
+        { EntityTypeId::Yeti, k_yeti, 1 },
+        { EntityTypeId::Zephyr, nullptr, 0 },
         { EntityTypeId::Zoglin, k_zoglin, 1 },
         { EntityTypeId::Zombie, k_zombie, 2 },
         { EntityTypeId::ZombieHorse, k_zombie_horse, 1 },
@@ -703,7 +1156,7 @@ namespace Game {
         { EntityTypeId::ZombifiedPiglin, k_zombified_piglin, 3 },
     };
 
-    const int kMobLootTableCount = 90;
+    const int kMobLootTableCount = 147;
 
     const MobLootTable* FindMobLootTable(EntityTypeId type) {
         for (int i = 0; i < kMobLootTableCount; ++i) {

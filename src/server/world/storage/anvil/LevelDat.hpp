@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
 
 namespace Game::Anvil {
@@ -27,6 +28,7 @@ namespace Game::Anvil {
         bool hardcore      = false;
         bool allowCommands = true;
         int  difficulty    = 2;      // 0 peaceful .. 3 hard
+        bool difficultyLocked = false;   // MC DifficultyLocked (one-way, World Options' lock)
 
         bool generateStructures = true;
         bool bonusChest         = false;
@@ -37,6 +39,11 @@ namespace Game::Anvil {
 
         int   spawnX = 0, spawnY = 64, spawnZ = 0;
         float spawnYaw = 0.0f, spawnPitch = 0.0f;
+        // The file named a spawn (the `spawn` compound at DataVersion 4548+,
+        // or SpawnX/Y/Z before). MC keeps an existing world's spawn
+        // (setInitialSpawn runs only for a level that is not yet
+        // initialized); a world without one gets the generator's.
+        bool  hasSpawn = false;
 
         // Gamerules the engine models. Written as strings, which is how the
         // game_rules compound stores every rule regardless of its type.
@@ -45,6 +52,17 @@ namespace Game::Anvil {
         bool immersivePortals = true;   // this engine's rule, not vanilla's
         int  worldWrapSize   = 0;       // engine world option (0 = off)
         bool dimensionStack  = false;   // engine world option
+        bool redstonePlus    = false;   // engine rule (RedstonePlus.hpp)
+        bool redstoneChunks  = false;   // engine rule (ChunkKeeper.hpp)
+        int  veinMineMaxBlocks = 64;    // engine rule (PlayerSession::VeinMineFrom)
+        bool sharedVitals    = false;   // engine rule (PlayerSessionManager::ShareVitals)
+        bool twilightForestEnabled = true;   // engine rule (ModDimensions.hpp)
+        bool aetherEnabled   = true;    // engine rule (ModDimensions.hpp)
+        // World Options "Command Access": may guests use commands. MC keeps
+        // this per session (IntegratedServer.guestCommandAccess); this
+        // engine saves it with the world so a host does not re-enable it
+        // on every launch.
+        bool guestCommandAccess = false;
         bool mobGriefing      = true;
         int  randomTickSpeed  = 3;
         bool tntExplodes             = true;
@@ -52,6 +70,13 @@ namespace Game::Anvil {
         bool tntExplosionDropDecay   = false;   // vanilla's odd one out
         bool blockExplosionDropDecay = true;
         bool mobExplosionDropDecay   = true;
+
+        // EVERY registered game rule (Game::Rules), id -> value (booleans
+        // 0/1), as read from the file / to be written. The fields above are
+        // the nine rules that predate the registry; the writer takes THEM
+        // for those ids and this map for the rest, so a caller that fills
+        // only the fields still writes a complete game_rules compound.
+        std::map<std::string, int> gameRules;
     };
 
     // Reads <levelDat> (an existing world's) into `out`, leaving any field

@@ -8,6 +8,7 @@
 #include "common/core/Config.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include "common/world/math/ChunkViewDistance.hpp"
 
 namespace Render {
@@ -51,6 +52,8 @@ namespace Render {
         job.visitedCount = 0;
         job.occludedCount = 0;
         job.centerLoaded = false;
+        job.propagateDuringFlight.clear();
+        job.flightEventsRecorded = false;
 
         if (!m_chunks) return;
 
@@ -133,6 +136,17 @@ namespace Render {
                         // sections under the rim until the camera goes below
                         // it".
                         cell.visBits = VisibilitySet::kAllVisibleBits;
+                    } else if (si.builtOnce) {
+                        // Compiled, current, and the mesh came out EMPTY — no
+                        // GPU entry exists, but the section is not all-air:
+                        // water filling the whole section, blocks drawn only
+                        // by block-entity renderers (chests, beds, signs,
+                        // banners, heads), barriers and the like. MC keeps a
+                        // CompiledSectionMesh for it whose visibilitySet came
+                        // from the VisGraph like any other; reading "no GPU
+                        // entry" as opaque made every such section a BFS wall
+                        // that hid everything behind it.
+                        cell.visBits = si.compiledVisBits;
                     } else if (job.portalView) {
                         // A view THROUGH a portal: never-built terrain is
                         // see-through, not a wall. The Immersive Portals
@@ -179,6 +193,15 @@ namespace Render {
 
     void SectionOcclusionGraph::SubmitAsync(std::unique_ptr<BfsJob> job) {
         EnsureWorkerStarted();
+        // A main-view rebuild is about to run on a snapshot taken just now:
+        // from here until it is collected, every propagation source is also
+        // kept for it (MC scheduleFullUpdate's nextSectionsToPropagateFrom).
+        // Portal-view jobs are never adopted as the live graph, so they
+        // record nothing.
+        if (!job->portalView) {
+            m_nextPropagateFrom.clear();
+            m_recordingNext = true;
+        }
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pending = std::move(job);
@@ -187,8 +210,21 @@ namespace Render {
     }
 
     std::unique_ptr<SectionOcclusionGraph::BfsJob> SectionOcclusionGraph::TryCollect() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return std::move(m_completed);
+        std::unique_ptr<BfsJob> job;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            job = std::move(m_completed);
+        }
+        // The sources recorded while it ran travel with it: AdoptGraph makes
+        // them the new graph's queue. A job the caller drops takes them along
+        // harmlessly — every one is still in m_propagateFrom as well.
+        if (job && !job->portalView && m_recordingNext) {
+            job->propagateDuringFlight.swap(m_nextPropagateFrom);
+            job->flightEventsRecorded = true;
+            m_nextPropagateFrom.clear();
+            m_recordingNext = false;
+        }
+        return job;
     }
 
 
@@ -246,7 +282,8 @@ namespace Render {
     // INCREMENTAL GRAPH (MC SectionOcclusionGraph partial update)
     // ========================================================================
 
-    void SectionOcclusionGraph::SchedulePropagationFrom(Game::Math::ChunkPos chunkPos, int sectionY) {
+    void SectionOcclusionGraph::SchedulePropagationFrom(Game::Math::ChunkPos chunkPos, int sectionY,
+                                                        bool mayRequestRebuild) {
         // MC's schedulePropagationFrom. Queued unconditionally and filtered at
         // drain time — the graph may be mid-rebuild right now, and a source
         // that lands outside the eventual graph is simply skipped there.
@@ -256,11 +293,19 @@ namespace Render {
         // anchor mismatch the queue can sit unread for a while. Full dedup would
         // cost more than the duplicate does — draining a source that is already
         // a node just re-propagates from it, which is idempotent.
-        if (!m_propagateFrom.empty()) {
-            const PendingSource& last = m_propagateFrom.back();
-            if (last.sectionY == sectionY && last.chunkPos == chunkPos) return;
-        }
-        m_propagateFrom.push_back({chunkPos, sectionY});
+        auto push = [&](std::vector<PendingSource>& queue) {
+            if (!queue.empty()) {
+                PendingSource& last = queue.back();
+                if (last.sectionY == sectionY && last.chunkPos == chunkPos) {
+                    last.mayRequestRebuild = last.mayRequestRebuild || mayRequestRebuild;
+                    return;
+                }
+            }
+            queue.push_back({chunkPos, sectionY, mayRequestRebuild});
+        };
+        push(m_propagateFrom);
+        // MC schedulePropagationFrom: the in-flight rebuild's queue too.
+        if (m_recordingNext) push(m_nextPropagateFrom);
     }
 
     void SectionOcclusionGraph::InvalidateGraph() {
@@ -297,18 +342,29 @@ namespace Render {
         m_graph.nodes          = job.nodes;
         m_graph.generation     = job.generation;
 
-        // Queued sources are KEPT, not dropped. MC does the same and is
-        // explicit about it — schedulePropagationFrom pushes into
-        // nextGraphEvents (the in-flight rebuild's event queue) as well as the
-        // current graph's, so whatever compiled during a rebuild is already
-        // waiting when the new graph goes live.
+        // The new graph's event queue — MC scheduleFullUpdate hands
+        // nextSectionsToPropagateFrom to the new GraphState.
         //
-        // Dropping them here was a real bug: full rebuilds land 37-76 times a
-        // second while streaming, so most sections that finished meshing had
-        // their propagation source discarded before any frame drained it, and
-        // the incremental path only ever fired on ~42% of frames. Sources that
-        // do not correspond to a node in the NEW graph are filtered harmlessly
-        // in RunPartialUpdate.
+        // An async job's snapshot predates everything that changed while it
+        // ran, and the old graph DRAINED those events in the meantime (the
+        // per-frame partial update keeps running against it). So they are
+        // replayed from the copy recorded for this job. Keeping only what
+        // happened to be left undrained in m_propagateFrom was the "terrain
+        // vanishes and never comes back" bug: a section that compiled (or had
+        // its first block placed into it) during the flight was still a wall
+        // (or all-air) in this snapshot, its one event had been spent on the
+        // old graph, and the new graph never propagated through it or emitted
+        // it. Nothing re-derived it until some unrelated full rebuild — and a
+        // camera that stood still never got one (the debug "Reload Chunks" chord
+        // fixed it only by forcing one).
+        //
+        // Events queued BEFORE the snapshot are reflected in it, so dropping
+        // the leftovers is exactly MC's behaviour. A synchronous (cold-start)
+        // run has no flight: its snapshot is current, and m_propagateFrom
+        // already holds only newer events, so it is left alone.
+        if (job.flightEventsRecorded) {
+            m_propagateFrom = job.propagateDuringFlight;
+        }
     }
 
     bool SectionOcclusionGraph::HasGraphFor(int cameraChunkX, int cameraChunkZ, int cameraSectionY,
@@ -406,6 +462,9 @@ namespace Render {
                         (si.dirty || si.version != si.uploadedVersion))) {
                 // Opened-lid rule, as in BuildInput above.
                 c.visBits = VisibilitySet::kAllVisibleBits;
+            } else if (si.builtOnce) {
+                // Compiled to an empty mesh, as in BuildInput above.
+                c.visBits = si.compiledVisBits;
             }
             return c;
         };
@@ -504,7 +563,12 @@ namespace Render {
                 // else ever invalidated the slot. The request coalesces into
                 // one worldVersion bump, and the rebuild is async, so a burst
                 // of these costs one extra BFS, not a stall.
-                m_fullRebuildRequested = true;
+                //
+                // Block edits only (PendingSource::mayRequestRebuild). A
+                // streaming event out here is MC's `node == null` case and is
+                // dropped as MC drops it: when that region becomes reachable,
+                // the section that opens the way compiles and propagates.
+                if (src.mayRequestRebuild) m_fullRebuildRequested = true;
             }
         }
         m_propagateFrom.clear();
@@ -708,8 +772,15 @@ namespace Render {
                 currentVis.setRaw(cell.visBits);
             }
 
-            // Distant LOS check flag — computed ONCE per current node (Minecraft-style)
-            const bool distantFromCamera = smartCull && (
+            // Distant LOS check flag — computed ONCE per current node (Minecraft-style).
+            // OBEY_NO_LOS_RAYCAST=1: A/B kill switch for the raycast (the
+            // partial updates never run it, so a full rebuild — on a camera
+            // move — can drop a section a partial update had admitted).
+            static const bool kNoLosRaycast = [] {
+                const char* v = std::getenv("OBEY_NO_LOS_RAYCAST");
+                return v && v[0] == '1';
+            }();
+            const bool distantFromCamera = smartCull && !kNoLosRaycast && (
                 std::abs(entry.rx - startRX) > 3 ||
                 std::abs(entry.rz - startRZ) > 3 ||
                 std::abs(entry.sy - startSY) > 3);
@@ -848,6 +919,24 @@ namespace Render {
 
         job.visitedCount = visitedCount;
         job.occludedCount = occludedCount;
+    }
+
+
+    bool SectionOcclusionGraph::DebugNodeAt(int chunkX, int chunkZ, int sectionY, DebugNode& out) const {
+        if (!m_graph.valid) return false;
+        const int rx = chunkX - (m_graph.cx - m_graph.renderDistance);
+        const int rz = chunkZ - (m_graph.cz - m_graph.renderDistance);
+        if (rx < 0 || rz < 0 || rx >= m_graph.diameter || rz >= m_graph.diameter) return false;
+        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) return false;
+        const int chunkGrid = m_graph.diameter * m_graph.diameter;
+        const size_t idx = static_cast<size_t>(sectionY * chunkGrid + rz * m_graph.diameter + rx);
+        if (idx >= m_graph.nodes.size()) return false;
+        const GridNodeOut& node = m_graph.nodes[idx];
+        if (node.generation != m_graph.generation) return false;
+        out.sourceDirections = node.sourceDirections;
+        out.directions = node.directions;
+        out.step = std::abs(chunkX - m_graph.cx) + std::abs(chunkZ - m_graph.cz) + std::abs(sectionY - m_graph.sy);
+        return true;
     }
 
 } // namespace Render

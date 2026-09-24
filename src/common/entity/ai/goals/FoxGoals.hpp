@@ -162,13 +162,16 @@ namespace Game {
     };
 
     // MC Fox.FoxMeleeAttackGoal — melee gated off every special fox state.
-    // (MC also plays FOX_BITE on the hit; sounds wait on the sound system.)
+    // Its checkAndPerformAttack adds FOX_BITE after the swing.
     class FoxMeleeAttackGoal : public MeleeAttackGoal {
     public:
         FoxMeleeAttackGoal(Fox* fox, double speedModifier, bool trackTarget);
         bool CanUse() override;
         void Start() override;
         const char* Name() const override { return "FoxMeleeAttackGoal"; }
+
+    protected:
+        void CheckAndPerformAttack(LivingEntity& target) override;
 
     private:
         Fox* m_fox;

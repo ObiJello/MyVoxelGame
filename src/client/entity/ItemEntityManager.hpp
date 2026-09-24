@@ -114,6 +114,10 @@ namespace Client {
         // collected item on the client, so the animation always has an entity
         // to capture its starting state from.
         void TakeItem(int32_t itemId, uint32_t playerId, int32_t amount);
+        // The same flight for something that was never an item entity here
+        // (a player morphed into an item, picked up): from `pos` into
+        // `playerId`, drawn as `stack`.
+        void SpawnPickupAnim(const glm::dvec3& pos, const Game::ItemStack& stack, uint32_t playerId);
 
         // 20 Hz. Runs local physics, applies pending corrections, and advances
         // pickup animations. Takes the local player's feet position because a

@@ -2,8 +2,10 @@
 #pragma once
 
 #include "RenderTypes.hpp"
+#include <vector>
 #include <glm/glm.hpp>
 #include <string>
+#include <functional>
 #include <memory>
 
 struct GLFWwindow;
@@ -25,6 +27,8 @@ namespace Render {
 
         virtual BackendType GetType() const = 0;
         virtual const char* GetName() const = 0;
+        // Vendor / device / driver strings for the F3 system_specs lines.
+        virtual GpuDeviceInfo GetDeviceInfo() const { GpuDeviceInfo i; i.backendName = GetName(); return i; }
 
         // ====================================================================
         // FRAME MANAGEMENT
@@ -130,6 +134,17 @@ namespace Render {
         virtual TextureHandle CreateTexture2D(int width, int height,
                                              TextureFormat format,
                                              const void* data) = 0;
+        // An empty texture whose levels 0..maxLevel exist from the start,
+        // for a caller that fills them afterwards (UploadTextureRegionNow /
+        // UploadTextureMipLevel). Equivalent to CreateTexture2D(nullptr) +
+        // ReserveTextureMipLevels, but a backend that fixes the mip count
+        // at creation builds the image once instead of twice.
+        virtual TextureHandle CreateEmptyTexture2D(int width, int height,
+                                                  TextureFormat format, int maxLevel) {
+            TextureHandle handle = CreateTexture2D(width, height, format, nullptr);
+            if (handle != INVALID_TEXTURE && maxLevel > 0) ReserveTextureMipLevels(handle, maxLevel);
+            return handle;
+        }
         virtual void UpdateTexture2D(TextureHandle handle, int x, int y,
                                     int width, int height, const void* data) = 0;
         virtual void SetTextureFilter(TextureHandle handle,
@@ -137,6 +152,11 @@ namespace Render {
         virtual void SetTextureWrap(TextureHandle handle,
                                    TextureWrap s, TextureWrap t) = 0;
         virtual void GenerateMipmaps(TextureHandle handle) = 0;
+        // Anisotropic filtering, 1 = off, up to the device's maximum
+        // (clamped). Smooths textures seen at a grazing angle — the
+        // distant ground and walls — where mip selection alone blurs or
+        // shimmers. Default no-op for a backend without it.
+        virtual void SetTextureAnisotropy(TextureHandle /*handle*/, float /*maxAnisotropy*/) {}
 
         // ── CPU-authored mip chains ─────────────────────────────────────────
         //
@@ -162,6 +182,16 @@ namespace Render {
         virtual void ReserveTextureMipLevels(TextureHandle /*handle*/, int /*maxLevel*/) {}
 
         // Replaces the whole of one mip level. `level` 0 is the base image.
+        // A sub-rectangle of one level, uploaded on the same immediate path
+        // as UploadTextureMipLevel: the pixels are copied out before this
+        // returns (the caller's buffer is free) and the transfer is
+        // submitted at once, ahead of the frame's draws. The panorama
+        // capture streams each face up a tile at a time with it, so no
+        // frame carries a whole face.
+        virtual void UploadTextureRegionNow(TextureHandle /*handle*/, int /*level*/,
+                                            int /*x*/, int /*y*/, int /*width*/, int /*height*/,
+                                            const void* /*data*/) {}
+
         virtual void UploadTextureMipLevel(TextureHandle /*handle*/, int /*level*/,
                                            int /*width*/, int /*height*/,
                                            const void* /*data*/) {}
@@ -206,6 +236,13 @@ namespace Render {
                                     float value) = 0;
         virtual void SetUniformInt(ShaderHandle handle, const std::string& name,
                                   int value) = 0;
+        // Integer vec3: the render origin (RenderOrigin.hpp) is an integer
+        // block position that a float would round past ±16.7 M blocks.
+        virtual void SetUniformIVec3(ShaderHandle handle, const std::string& name,
+                                    const glm::ivec3& value) = 0;
+        // Integer vec2 (shader packs' eyeBrightness). Optional.
+        virtual void SetUniformIVec2(ShaderHandle /*handle*/, const std::string& /*name*/,
+                                    const glm::ivec2& /*value*/) {}
 
         // ====================================================================
         // MESH MANAGEMENT (VAO equivalent)
@@ -236,6 +273,35 @@ namespace Render {
         // support framebuffer copy silently skip the refraction effect.
         virtual void CopyFramebufferToTexture(TextureHandle /*dst*/) {}
 
+        // Copy the DEFAULT framebuffer's depth (and stencil) into `dst`, a
+        // Depth24Stencil8 texture sized exactly to it, as it stands at this
+        // call — a snapshot later draws can sample while the frame goes on
+        // (the volumetric beams end their rays at the scene with it). False
+        // when it cannot: an offscreen target is bound, or the backend has no
+        // mid-pass depth copy (Vulkan: the frame pass does not store depth).
+        virtual bool CopyFramebufferDepthToTexture(TextureHandle /*dst*/) { return false; }
+
+        // ====================================================================
+        // BACKBUFFER READ-BACK
+        // ====================================================================
+        // The panorama capture (PlatformMain's leave capture). Request takes
+        // a copy of the given rectangle of the colour buffer AS IT IS AT THIS
+        // CALL — x, y from the bottom-left, the way SetViewport counts — for
+        // a later Take, which hands it over as tightly packed RGBA8, rows top
+        // to bottom, once the GPU is done with it. Take must come on a LATER
+        // frame than the Request (after that frame's EndFrame has submitted
+        // it); one request may be outstanding at a time, and a new Request
+        // drops an untaken one. Both answer false when unsupported. Whatever
+        // is drawn after the Request does not reach the copy, so the caller
+        // is free to clear and draw the real frame over the captured one.
+        virtual bool RequestBackbufferReadback(int /*x*/, int /*y*/, int /*w*/, int /*h*/) {
+            return false;
+        }
+        virtual bool TakeBackbufferReadback(std::vector<uint8_t>& /*outRgba*/,
+                                            int& /*outW*/, int& /*outH*/) {
+            return false;
+        }
+
         // ====================================================================
         // RENDER TARGETS (offscreen framebuffers)
         // ====================================================================
@@ -265,6 +331,47 @@ namespace Render {
         // changes). Recreates underlying texture/FBO at the new
         // resolution.
         virtual void ResizeRenderTarget(RenderTargetHandle /*rt*/, int /*w*/, int /*h*/) {}
+
+        // A render target that WRAPS existing textures: `colors[0..count)`
+        // become colour attachments 0..count-1 (all drawn), `depth` (may be
+        // INVALID_TEXTURE) the depth-stencil attachment. Destroying it frees
+        // only the framebuffer, never the textures. The shader-pack pipeline
+        // builds its ping-pong pass targets with this. INVALID_RENDER_TARGET
+        // on a backend without it.
+        virtual RenderTargetHandle CreateRenderTargetFromTextures(const TextureHandle* /*colors*/, int /*colorCount*/,
+                                                                  TextureHandle /*depth*/) {
+            return INVALID_RENDER_TARGET;
+        }
+        // Copy the depth-stencil of one render target into another of the
+        // same size (a shader pack's depthtex1/depthtex2 snapshots). The
+        // bound target is unchanged afterwards. Optional.
+        virtual void BlitRenderTargetDepth(RenderTargetHandle /*src*/, RenderTargetHandle /*dst*/) {}
+
+        // ── Shader overrides (shader packs) ─────────────────────────────
+        // While override mode is on, BindShader of an ENGINE shader that has
+        // an override binds the pack's program instead (and that program's
+        // render target), every SetUniform* on the engine handle lands on
+        // the pack program (its translation declares the engine's uniform
+        // names), and a shader without an override binds `defaultTarget`.
+        // A pack program may be its own override, to carry a target. Off,
+        // nothing here costs a lookup. Optional; the Vulkan backend has none.
+        virtual void SetShaderOverrideMode(bool /*on*/, RenderTargetHandle /*defaultTarget*/) {}
+        virtual void SetShaderOverride(ShaderHandle /*engine*/, ShaderHandle /*pack*/, RenderTargetHandle /*target*/) {}
+        virtual void ClearShaderOverrides() {}
+        // Engine shaders whose sources satisfy `match(vertex, fragment)`:
+        // how the pack pipeline finds the renderers' programs without
+        // touching the renderers.
+        virtual std::vector<ShaderHandle> FindShadersBySource(
+            const std::function<bool(const std::string&, const std::string&)>& /*match*/) { return {}; }
+        // Log any pending API error, tagged with `where`; each distinct
+        // (where, error) is logged once a session. Diagnostics only.
+        virtual void CheckErrors(const char* /*where*/) {}
+        // The depth value at one pixel of a render target's depth attachment
+        // (0..1), for diagnostics. False when unsupported.
+        virtual bool ReadDepthPixel(RenderTargetHandle /*rt*/, int /*x*/, int /*y*/, float& /*out*/) { return false; }
+        // One line of the API's current raster state (viewport, scissor,
+        // masks, tests, bound program), for diagnostics.
+        virtual std::string DebugStateSummary() { return {}; }
 
         // Stencil override: while ENABLED, every subsequent SetPipelineState
         // call gets its stencil fields replaced with these values, regardless

@@ -3,6 +3,7 @@
 #include "common/core/HardwareProfile.hpp"
 #include "common/core/Log.hpp"
 #include "server/world/storage/NBTParser.hpp"
+#include <cmath>
 #include <zlib.h>
 #include <fstream>
 #include <sstream>
@@ -145,7 +146,7 @@ namespace Platform {
         SetFloat("glintStrength", 0.75f);
         SetInt("prioritizeChunkUpdates", 0);
         SetBool("fullscreen", false);
-        SetFloat("gamma", 1.0f);
+        SetFloat("gamma", 0.5f);
         SetString("graphicsPreset", "custom");
         SetBool("cutoutLeaves", true);
         SetBool("cullLeaves", false);
@@ -153,10 +154,11 @@ namespace Platform {
         SetInt("maxFps", 120);
         SetString("inactivityFpsLimit", "afk");
         SetInt("mipmapLevels", 4);
+        SetInt("anisotropicFiltering", 16);
         SetInt("narrator", 0);
         SetInt("particles", 0);
         // Layout version of this file — see MigrateSchema.
-        SetInt("optionsSchema", 2);
+        SetInt("optionsSchema", 5);
         SetBool("reducedDebugInfo", false);
         SetString("renderClouds", "true");
         SetInt("cloudRange", 128);
@@ -166,8 +168,9 @@ namespace Platform {
 
         // Audio Settings
         SetString("soundDevice", "");
-        SetFloat("soundCategory_master", 0.20778146f);
-        SetFloat("soundCategory_music", 0.0f);
+        // MC Options: every sound category defaults to 1.0.
+        SetFloat("soundCategory_master", 1.0f);
+        SetFloat("soundCategory_music", 1.0f);
         SetFloat("soundCategory_record", 1.0f);
         SetFloat("soundCategory_weather", 1.0f);
         SetFloat("soundCategory_block", 1.0f);
@@ -222,7 +225,7 @@ namespace Platform {
         SetBool("backgroundForChatOnly", true);
         SetBool("hideServerAddress", false);
         SetBool("advancedItemTooltips", true);
-        SetBool("pauseOnLostFocus", true);
+        SetBool("pauseOnLostFocus", false);
 
         // Screen Settings
         SetInt("overrideWidth", 0);
@@ -315,8 +318,51 @@ namespace Platform {
     // graphics options were wired up.
     void GameSettings::MigrateSchema() {
         const int schema = GetInt("optionsSchema", 1);
-        constexpr int kCurrentSchema = 2;
+        constexpr int kCurrentSchema = 5;
         if (schema >= kCurrentSchema) return;
+
+        if (schema < 5) {
+            // The audio defaults were a copied options.txt (master 0.2077…,
+            // music 0) written while no sound engine existed to read them.
+            // With the engine live they would start every existing install
+            // near-muted with no music; MC's default for every category is
+            // 1.0. Only those exact inert values are rewritten — nothing
+            // could have been chosen by ear before there was sound.
+            if (std::fabs(GetFloat("soundCategory_master", 1.0f) - 0.20778146f) < 1.0e-6f) {
+                SetFloat("soundCategory_master", 1.0f);
+                Log::Info("options.txt migration: soundCategory_master 0.2078 -> 1.0 (old inert default)");
+            }
+            if (GetFloat("soundCategory_music", 1.0f) == 0.0f) {
+                SetFloat("soundCategory_music", 1.0f);
+                Log::Info("options.txt migration: soundCategory_music 0 -> 1.0 (old inert default)");
+            }
+        }
+
+        if (schema < 4) {
+            // Every bind is written to the file, so a debug bind still at the
+            // OLD default is the default, not a choice: the debug modifier
+            // moved from F3 to Right Alt (macOS eats Fn+letter chords) and
+            // the ImGui-panels chord from M to K (Fn+M focuses the menu bar).
+            if (GetString("key_key.debug.modifier", "") == "key.keyboard.f3") {
+                SetString("key_key.debug.modifier", "key.keyboard.right.alt");
+                Log::Info("options.txt migration: key.debug.modifier f3 -> right.alt");
+            }
+            if (GetString("key_key.debug.imguiPanels", "") == "key.keyboard.m") {
+                SetString("key_key.debug.imguiPanels", "key.keyboard.k");
+                Log::Info("options.txt migration: key.debug.imguiPanels m -> k");
+            }
+        }
+
+        if (schema < 3) {
+            // `pauseOnLostFocus:true` was written as the default for a
+            // switch nothing read. The pause is implemented now (F3+P) and
+            // its default is OFF, so the inert old value is reset rather
+            // than suddenly pausing the game whenever the window loses focus.
+            if (GetBool("pauseOnLostFocus", false)) {
+                SetBool("pauseOnLostFocus", false);
+                Log::Info("options.txt migration: pauseOnLostFocus true -> false (old inert default)");
+            }
+        }
 
         if (schema < 2) {
             // Schema 1 wrote `particles:1` (Decreased) as its default while
@@ -590,6 +636,7 @@ namespace Platform {
         m_logsDirectory = m_gameDirectory + "/logs";
         m_screenshotsDirectory = m_gameDirectory + "/screenshots";
         m_skyboxesDirectory = m_gameDirectory + "/skyboxes";
+        m_shaderPacksDirectory = m_gameDirectory + "/shaderpacks";
 
         // Create the directory structure
         if (!CreateDirectories()) {
@@ -610,7 +657,8 @@ namespace Platform {
             m_assetsDirectory,
             m_logsDirectory,
             m_screenshotsDirectory,
-            m_skyboxesDirectory
+            m_skyboxesDirectory,
+            m_shaderPacksDirectory
         };
 
         for (const auto& dir : directories) {
@@ -665,6 +713,12 @@ namespace Platform {
     }
 
     std::string GameDirectory::GetDefaultGameDirectory() {
+        // OBEY_GAME_DIR (dev harness): a whole separate game directory —
+        // logs, options, saves, panoramas — so a scripted run beside a
+        // running copy of the game touches none of the player's files. Set
+        // it in the process environment (not --env): the log opens before
+        // the arguments are read.
+        if (const char* dir = std::getenv("OBEY_GAME_DIR"); dir && *dir) return dir;
         std::string userDataDir = GetUserDataDirectory();
         return userDataDir + "/obeycraft";
     }

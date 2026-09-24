@@ -42,6 +42,7 @@ public:
     // =========================================================================
     static const PlacedFeature* LAKE_LAVA_UNDERGROUND;
     static const PlacedFeature* LAKE_LAVA_SURFACE;
+    static const PlacedFeature* SULFUR_POOL;   // 26.3
 
     // =========================================================================
     // DISK PLACEMENTS - Reference: MiscOverworldPlacements.java lines 41-44

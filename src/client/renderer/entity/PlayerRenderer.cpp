@@ -1,5 +1,7 @@
 // File: src/client/renderer/entity/PlayerRenderer.cpp
 #include "PlayerRenderer.hpp"
+#include "client/world/ClientBlockAccess.hpp"
+#include "common/world/block/BedBlock.hpp"
 #include "StickFigureGeometry.hpp"
 #include "EntityCulling.hpp"
 #include "client/world/ClientLevel.hpp"
@@ -8,6 +10,9 @@
 #include "common/core/Mth.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "MobRenderer.hpp"
+#include "EntityOutline.hpp"
+#include "../core/RenderOrigin.hpp"
+#include "../environment/EntityEnvironment.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <vector>
 #include <algorithm>
@@ -56,9 +61,11 @@ namespace Render {
     } // namespace
 
     // ------------------------------------------------------------------
-    // Shader sources (OpenGL 330 core).
+    // The chat bubbles' shader (OpenGL 330 core; Vulkan loads
+    // player_billboard_vk.*). The stick figures themselves draw with
+    // shaders/stick_figure.* — lit and fogged.
     // Uses the block vertex layout: pos3 (loc 0), uv2 (loc 1), color4 ubyte (loc 2).
-    // UV is unused; color carries the stick-figure colour.
+    // UV is unused; color carries the colour.
     // ------------------------------------------------------------------
 
     const char* PlayerRenderer::s_vertSource = R"(
@@ -118,6 +125,10 @@ void main() {
     // gives the strip direction (always faces the camera). Width is in world
     // metres → perspective shrinks far players naturally; close players have
     // visibly thicker limbs.
+    //
+    // The line vertices are RENDER space (camera-relative), so `cameraPos`
+    // must be the render-space eye too — a world position here would put
+    // the strip direction off by the origin.
     // ------------------------------------------------------------------
     static void EmitThickWorldStripFromLines(const std::vector<StickVertex>& lineVerts,
                                              const glm::vec3& cameraPos,
@@ -182,13 +193,21 @@ void main() {
             return false;
         }
 
-        m_shader = g_renderBackend->CreateShaderFromFiles(
-            "shaders/player_billboard.vert", "shaders/player_billboard.frag");
+        // The figures read the frame's fog (on Vulkan the portal pipeline
+        // layout's Common UBO — EntityEnvironment::CreateShader).
+        m_shader = EntityEnvironment::CreateShader("shaders/stick_figure.vert",
+                                                   "shaders/stick_figure.frag");
         if (m_shader == INVALID_SHADER) {
-            m_shader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
+            Log::Error("[PlayerRenderer] Failed to create the stick-figure shader");
+            return false;
         }
-        if (m_shader == INVALID_SHADER) {
-            Log::Error("[PlayerRenderer] Failed to create shader");
+        m_bubbleShader = g_renderBackend->CreateShaderFromFiles(
+            "shaders/player_billboard.vert", "shaders/player_billboard.frag");
+        if (m_bubbleShader == INVALID_SHADER) {
+            m_bubbleShader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
+        }
+        if (m_bubbleShader == INVALID_SHADER) {
+            Log::Error("[PlayerRenderer] Failed to create the chat-bubble shader");
             return false;
         }
 
@@ -220,14 +239,32 @@ void main() {
         }
         if (m_dummyTexture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_dummyTexture); m_dummyTexture = INVALID_TEXTURE; }
         if (m_shader != INVALID_SHADER)       { g_renderBackend->DestroyShader(m_shader);       m_shader = INVALID_SHADER; }
+        if (m_bubbleShader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_bubbleShader); m_bubbleShader = INVALID_SHADER; }
     }
 
     // ------------------------------------------------------------------
     // Per-frame rendering
     // ------------------------------------------------------------------
 
+    namespace {
+        // MC EntityRenderer.getPackedLightCoords for a player: the light at
+        // the eye (Entity.getLightProbePosition), times the lightmap —
+        // applied to the figure's colour after the hurt flash (entity.fsh
+        // mixes the overlay in before the lightmap). All figures share one
+        // draw, so each carries its own light in its vertex colour.
+        PlayerColor LightFigureColor(PlayerColor c, const glm::dvec3& feetWorld,
+                                     float scale, bool crouching) {
+            const double eye = (crouching ? 1.27 : 1.62) * static_cast<double>(scale);
+            const glm::vec3 light = EntityEnvironment::LitAt(feetWorld + glm::dvec3(0.0, eye, 0.0));
+            auto mul = [](uint8_t v, float f) {
+                return static_cast<uint8_t>(std::clamp(static_cast<float>(v) * f + 0.5f, 0.0f, 255.0f));
+            };
+            return PlayerColor{ mul(c.r, light.r), mul(c.g, light.g), mul(c.b, light.b), c.a };
+        }
+    }
+
     void PlayerRenderer::SubmitFigures(const glm::mat4& mvp, const glm::vec3& cameraPos,
-                                       const glm::vec4& clipPlane) {
+                                       const glm::vec4& clipPlane, bool glowing, bool drawBody) {
         // Which set, and where in it — see EntityFrame.hpp.
         if (m_frameCursor.Advance()) {
             m_lineCursor = 0;
@@ -262,13 +299,23 @@ void main() {
             g_renderBackend->BindTexture(m_dummyTexture, 0);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP",   mvp);
             // Every caller bakes its transform into the vertices (see
-            // RenderSingle), so the shader's own model matrix is identity
-            // for BOTH passes.
-            g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));
+            // RenderSingle), so there is no model matrix for either pass.
             g_renderBackend->SetUniformVec4(m_shader, "uClipPlane", clipPlane);
-            g_renderBackend->DrawArrays(fb.triMesh, static_cast<uint32_t>(m_triVerts.size()),
-                                        static_cast<uint32_t>(m_triCursor));
-            g_renderBackend->UnbindMesh();
+            // The frame's fog, from this view's eye (render space, the
+            // vertices' space). Each figure's light is baked into its vertex
+            // colour (LightFigureColor), so the draw's own light is 1.
+            EntityEnvironment::SetEntityLight(m_shader, glm::vec3(1.0f));
+            EntityEnvironment::ApplyWorld(m_shader, Render::ToWorld(cameraPos));
+            if (drawBody) {
+                g_renderBackend->DrawArrays(fb.triMesh, static_cast<uint32_t>(m_triVerts.size()),
+                                            static_cast<uint32_t>(m_triCursor));
+                g_renderBackend->UnbindMesh();
+            }
+            if (glowing) {
+                EntityOutline::Get().SubmitArrays(fb.triMesh, static_cast<uint32_t>(m_triCursor),
+                                                  static_cast<uint32_t>(m_triVerts.size()),
+                                                  m_dummyTexture, mvp);
+            }
             m_triCursor += m_triVerts.size();
         }
 
@@ -301,11 +348,19 @@ void main() {
                 g_renderBackend->BindShader(m_shader);
                 g_renderBackend->BindTexture(m_dummyTexture, 0);
                 g_renderBackend->SetUniformMat4(m_shader, "uMVP",   mvp);
-                g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));
                 g_renderBackend->SetUniformVec4(m_shader, "uClipPlane", clipPlane);
-                g_renderBackend->DrawArrays(fb.lineMesh, static_cast<uint32_t>(m_stripVerts.size()),
-                                            static_cast<uint32_t>(m_lineCursor));
-                g_renderBackend->UnbindMesh();
+                EntityEnvironment::SetEntityLight(m_shader, glm::vec3(1.0f));
+                EntityEnvironment::ApplyWorld(m_shader, Render::ToWorld(cameraPos));
+                if (drawBody) {
+                    g_renderBackend->DrawArrays(fb.lineMesh, static_cast<uint32_t>(m_stripVerts.size()),
+                                                static_cast<uint32_t>(m_lineCursor));
+                    g_renderBackend->UnbindMesh();
+                }
+                if (glowing) {
+                    EntityOutline::Get().SubmitArrays(fb.lineMesh, static_cast<uint32_t>(m_lineCursor),
+                                                      static_cast<uint32_t>(m_stripVerts.size()),
+                                                      m_dummyTexture, mvp);
+                }
                 m_lineCursor += m_stripVerts.size();
             }
         }
@@ -332,13 +387,32 @@ void main() {
 
         m_lineVerts.clear();
         m_triVerts.clear();   // ringTris + discTris combined; both back-face-culled
+        m_glowLineVerts.clear();
+        m_glowTriVerts.clear();
+        m_outlineOnlyLineVerts.clear();
+        m_outlineOnlyTriVerts.clear();
+        const bool collectingOutline = EntityOutline::Get().Collecting();
         m_lineVerts.reserve(players.size() * 36);
         // Ring: 64 segs * 6 verts = 384, smile: 32 * 6 = 192, disc: 16 * 3 = 48 → ~624/player.
         m_triVerts.reserve(players.size() * 640);
 
         for (const auto& [id, rp] : players) {
             if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+            if (rp.invisible) continue;   // /invisible
+            if (rp.IsMorphed()) continue; // /morph: the mob renderer draws them
             if (skipIds && skipIds->count(id)) continue;
+            // MC LivingEntityRenderer.submit: an INVISIBLE body is not drawn
+            // (the stick figure has no layers to keep) — unless it GLOWS,
+            // when its outline alone is (the outline render type).
+            const bool glowing = collectingOutline && rp.effects.Glowing();
+            const bool bodyInvisible = rp.effects.Invisible();
+            if (bodyInvisible && !glowing) continue;
+            // Which batch the figure joins: drawn, drawn and outlined, or
+            // outlined only.
+            std::vector<StickVertex>& lineOut = !glowing ? m_lineVerts
+                                              : (bodyInvisible ? m_outlineOnlyLineVerts : m_glowLineVerts);
+            std::vector<StickVertex>& triOut  = !glowing ? m_triVerts
+                                              : (bodyInvisible ? m_outlineOnlyTriVerts : m_glowTriVerts);
             ++m_tally.inLevel;
             // ── Sub-tick interpolation. Mirrors MC Entity.getPosition(partialTick)
             // (Entity.java:1955-1960), Entity.getYRot(partialTick) (:1918, uses
@@ -346,11 +420,14 @@ void main() {
             // lerp — pitch never wraps). Without this the renderer holds the
             // same value for ~3 frames per tick at 60fps then snaps, producing
             // visible 50ms-period stair-stepping.
-            const glm::vec3 renderPos {
-                glm::mix(rp.renderPrevPosition.x, rp.position.x, partialTick),
-                glm::mix(rp.renderPrevPosition.y, rp.position.y, partialTick),
-                glm::mix(rp.renderPrevPosition.z, rp.position.z, partialTick),
-            };
+            // In DOUBLE: the world position only becomes a float after the
+            // render origin is subtracted (ToRender below). `cullPos` is the
+            // float copy the world-space distance/frustum culls take — a few
+            // centimetres loose far from the origin, which is all culling
+            // needs.
+            const glm::dvec3 renderPos =
+                glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(partialTick));
+            const glm::vec3 cullPos(renderPos);
             const float renderHeadYaw = Client::RotLerp(partialTick, rp.renderPrevRotation.x, rp.rotation.x);
             const float renderPitch   = glm::mix(           rp.renderPrevRotation.y, rp.rotation.y, partialTick);
             const float renderBodyYaw = Client::RotLerp(partialTick, rp.renderPrevBodyYaw,    rp.bodyYaw);
@@ -358,16 +435,16 @@ void main() {
             // Distance-cull on the INTERPOLATED position so the cull boundary
             // matches what the user sees on screen (avoids edge-case cull pop
             // when prev/current straddle the 256m line).
-            float dx = renderPos.x - cameraPos.x;
-            float dz = renderPos.z - cameraPos.z;
-            if (dx * dx + dz * dz > 256.0f * 256.0f) { ++m_tally.cullDistance; continue; }
+            const double dx = renderPos.x - cameraPos.x;
+            const double dz = renderPos.z - cameraPos.z;
+            if (dx * dx + dz * dz > 256.0 * 256.0) { ++m_tally.cullDistance; continue; }
 
             // MC Entity.shouldRenderAtSqrDistance for a 0.6x1.8 player: 64
             // blocks x viewScale (160 at a 20+ chunk view), before the Entity
             // Distance option.
             const float bodyWidth  = kPlayerWidth  * rp.scale;
             const float bodyHeight = kPlayerHeight * rp.scale;
-            if (!EntityCulling::ShouldRenderAtSqrDistance(cameraPos, renderPos,
+            if (!EntityCulling::ShouldRenderAtSqrDistance(cameraPos, cullPos,
                                                           bodyWidth, bodyHeight)) {
                 ++m_tally.cullDistance;
                 continue;
@@ -376,7 +453,7 @@ void main() {
             // MC extractVisibleEntities: frustum AABB test, then the visible-
             // section gate. A player behind the camera used to be built and
             // uploaded every frame regardless.
-            if (!EntityCulling::ShouldRender(frustum, renderPos, bodyWidth, bodyHeight)) {
+            if (!EntityCulling::ShouldRender(frustum, cullPos, bodyWidth, bodyHeight)) {
                 ++m_tally.cullFrustum;
                 continue;
             }
@@ -385,12 +462,13 @@ void main() {
             // EntityCulling::g_crossingFilter.
             {
                 const glm::vec3 half(bodyWidth * 0.5f, 0.0f, bodyWidth * 0.5f);
-                if (!EntityCulling::PassesCrossingFilter(renderPos - half,
-                                                         renderPos + half + glm::vec3(0.0f, bodyHeight, 0.0f))) {
+                if (!EntityCulling::PassesCrossingFilter(cullPos - half,
+                                                         cullPos + half + glm::vec3(0.0f, bodyHeight, 0.0f))) {
                     ++m_tally.cullCrossing;
                     continue;
                 }
             }
+            ++EntityCulling::g_renderedThisFrame;
             ++m_tally.drawn;
 
             const auto& colorEntry = Game::LookupPlayerColor(rp.color);
@@ -407,25 +485,81 @@ void main() {
                 color.g = static_cast<uint8_t>(color.g * kMix);
                 color.b = static_cast<uint8_t>(color.b * kMix);
             }
+            // GLOWING is MC's entity outline, not a tint (EntityOutline.hpp;
+            // the glowing batches above).
             // Append ring + disc into one shared list — both render with the
             // same triangles + CullMode::Back pipeline, so batching is fine.
-            const size_t lineBegin = m_lineVerts.size();
-            const size_t triBegin  = m_triVerts.size();
-            BuildStickFigure(m_lineVerts, m_triVerts, m_triVerts, renderPos,
-                             renderHeadYaw, renderBodyYaw, renderPitch, rp.isCrouching,
-                             color);
+            //
+            // The geometry is baked in RENDER space (camera-relative, see
+            // RenderOrigin.hpp): the vertices go to the GPU as they are, so
+            // the feet are moved next to the origin FIRST and the figure is
+            // built, toppled and scaled about those small numbers. The
+            // world-space `renderPos` above stays what the culls use.
+            glm::vec3 renderFeet = Render::ToRender(renderPos);
+            const size_t lineBegin = lineOut.size();
+            const size_t triBegin  = triOut.size();
 
-            // The corpse falls over. Applied to just this player's slice of the
-            // batch, which is why the two offsets above are taken first.
-            const float flip = MobRenderer::DeathFlipDegrees(rp.deathTime, partialTick);
-            ToppleStickFigure(m_lineVerts, lineBegin, renderPos, renderBodyYaw, flip);
-            ToppleStickFigure(m_triVerts,  triBegin,  renderPos, renderBodyYaw, flip);
-            ScaleStickFigure(m_lineVerts, lineBegin, renderPos, rp.scale);
-            ScaleStickFigure(m_triVerts,  triBegin,  renderPos, rp.scale);
-            for (size_t i = lineBegin; i < m_lineVerts.size(); ++i) m_lineVerts[i].u = rp.scale;
+            // MC LivingEntityRenderer for Pose.SLEEPING: the figure lies
+            // along the bed with its head toward the bed's facing, shifted
+            // back from the head cell by (eyeHeight − 0.1) so the head rests
+            // on the pillow end (submit's translate + setupRotations' 90°
+            // flip). ToppleStickFigure rolls the body about its own forward
+            // axis, so the head lands on the body's left; the body is built
+            // facing 90° counter-clockwise of the bed so that side IS the
+            // bed's head. Pitch and crouch are ignored in bed.
+            float bodyYaw = renderBodyYaw, headYaw = renderHeadYaw, pitch = renderPitch;
+            bool crouching = rp.isCrouching;
+            float flip = MobRenderer::DeathFlipDegrees(rp.deathTime, partialTick);
+            if (rp.sleepingPos && Client::g_clientBlockAccess) {
+                const glm::ivec3 bed = *rp.sleepingPos;
+                const Game::BlockState state =
+                    Client::g_clientBlockAccess->GetBlockState(bed.x, bed.y, bed.z);
+                if (Game::IsBedBlock(state.Block())) {
+                    const Game::Direction facing = Game::BedFacing(state);
+                    const glm::vec3 d(static_cast<float>(Game::StepX(facing)), 0.0f,
+                                      static_cast<float>(Game::StepZ(facing)));
+                    renderFeet -= d * (1.62f * rp.scale - 0.1f);
+                    bodyYaw = headYaw = Game::ToYRot(Game::CounterClockWise(facing));
+                    pitch = 0.0f;
+                    crouching = false;
+                    flip = 90.0f;
+                }
+            }
+
+            color = LightFigureColor(color, renderPos, rp.scale, crouching);
+            BuildStickFigure(lineOut, triOut, triOut, renderFeet,
+                             headYaw, bodyYaw, pitch, crouching, color);
+
+            // The corpse falls over (or the sleeper lies down). Applied to
+            // just this player's slice of the batch, which is why the two
+            // offsets above are taken first.
+            ToppleStickFigure(lineOut, lineBegin, renderFeet, bodyYaw, flip);
+            ToppleStickFigure(triOut,  triBegin,  renderFeet, bodyYaw, flip);
+            ScaleStickFigure(lineOut, lineBegin, renderFeet, rp.scale);
+            ScaleStickFigure(triOut,  triBegin,  renderFeet, rp.scale);
+            for (size_t i = lineBegin; i < lineOut.size(); ++i) lineOut[i].u = rp.scale;
         }
 
-        SubmitFigures(projection * view, cameraPos, clipPlane);
+        // The strips are widened against the camera in the vertices' own
+        // (render) space, so the camera goes in as a render-space point too.
+        const glm::mat4 mvp = projection * view;
+        const glm::vec3 renderEye = Render::ToRender(cameraPos);
+        SubmitFigures(mvp, renderEye, clipPlane, /*glowing=*/false);
+        // The GLOWING figures: drawn and outlined, then outlined only.
+        if (!m_glowLineVerts.empty() || !m_glowTriVerts.empty()) {
+            std::swap(m_lineVerts, m_glowLineVerts);
+            std::swap(m_triVerts, m_glowTriVerts);
+            SubmitFigures(mvp, renderEye, clipPlane, /*glowing=*/true);
+            std::swap(m_lineVerts, m_glowLineVerts);
+            std::swap(m_triVerts, m_glowTriVerts);
+        }
+        if (!m_outlineOnlyLineVerts.empty() || !m_outlineOnlyTriVerts.empty()) {
+            std::swap(m_lineVerts, m_outlineOnlyLineVerts);
+            std::swap(m_triVerts, m_outlineOnlyTriVerts);
+            SubmitFigures(mvp, renderEye, clipPlane, /*glowing=*/true, /*drawBody=*/false);
+            std::swap(m_lineVerts, m_outlineOnlyLineVerts);
+            std::swap(m_triVerts, m_outlineOnlyTriVerts);
+        }
 
         // Restore default
         PipelineState defaultState;
@@ -438,24 +572,41 @@ void main() {
     }
 
     void PlayerRenderer::RenderSingle(const glm::mat4& projection, const glm::mat4& view,
-                                      const glm::vec3& position,
+                                      const glm::dvec3& position,
                                       float headYaw, float bodyYaw, float pitch,
                                       bool isCrouching, uint8_t colorId,
-                                      const glm::mat4& model,
-                                      const glm::vec4& clipPlane,
-                                      float deathFlipDeg) {
+                                      const glm::dmat4& worldModel,
+                                      const glm::dvec4& worldClipPlane,
+                                      float deathFlipDeg,
+                                      bool glowing,
+                                      bool drawBody) {
         PROFILE_ZONE_N("PlayerRenderSingle");
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
 
         m_lineVerts.clear();
         m_triVerts.clear();
 
+        // Render space from the start (RenderOrigin.hpp): the feet relative
+        // to the view's origin, and the caller's WORLD model bridged into
+        // that space in double — T(−R)·M·T(R) — so no vertex ever holds a
+        // 300,000-block float. The `view` is render-space already
+        // (Camera::GetViewMatrix), so uMVP = projection * view lands the
+        // body where it belongs.
+        const glm::dvec3 origin = Render::RenderOrigin();
+        const glm::vec3 renderFeet = Render::ToRender(position);
+        const glm::mat4 model(glm::translate(glm::dmat4(1.0), -origin) * worldModel *
+                              glm::translate(glm::dmat4(1.0), origin));
+        const glm::vec4 clipPlane = Render::PlaneToRender(worldClipPlane);
+
         const auto& colorEntry = Game::LookupPlayerColor(static_cast<Game::PlayerColorId>(colorId));
         PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
-        BuildStickFigure(m_lineVerts, m_triVerts, m_triVerts, position,
+        // The light where the body stands — the caller's `position`, not
+        // where a portal model carries it (MC lights a ghost by its entity).
+        color = LightFigureColor(color, position, 1.0f, isCrouching);
+        BuildStickFigure(m_lineVerts, m_triVerts, m_triVerts, renderFeet,
                          headYaw, bodyYaw, pitch, isCrouching, color);
-        ToppleStickFigure(m_lineVerts, 0, position, bodyYaw, deathFlipDeg);
-        ToppleStickFigure(m_triVerts,  0, position, bodyYaw, deathFlipDeg);
+        ToppleStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, deathFlipDeg);
+        ToppleStickFigure(m_triVerts,  0, renderFeet, bodyYaw, deathFlipDeg);
 
         // Pre-multiply the per-call `model` transform into the vertex
         // positions on the CPU. This is the portal pair matrix for ghost
@@ -489,11 +640,16 @@ void main() {
             }
         }
 
+
         // For RenderSingle the camera position is recoverable from the
         // inverse view matrix's translation column — same convention as
-        // the rest of the see-through pass uses.
+        // the rest of the see-through pass uses. `view` is render-space, so
+        // the eye recovered here is the RENDER-space eye: exactly what the
+        // strip widening wants now that the vertices are render-space too.
         const glm::vec3 cameraPos = glm::vec3(glm::inverse(view)[3]);
-        SubmitFigures(projection * view, cameraPos, clipPlane);
+        const bool outline = glowing && EntityOutline::Get().Collecting();
+        if (!drawBody && !outline) return;
+        SubmitFigures(projection * view, cameraPos, clipPlane, outline, drawBody);
     }
 
     namespace {
@@ -577,11 +733,15 @@ void main() {
         s_bubbleIndices.clear();
         for (const auto& [id, rp] : remotePlayers.GetPlayers()) {
             if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+            // /invisible or INVISIBILITY: a bubble would give the position away.
+            if (rp.invisible || rp.effects.Invisible()) continue;
             if (rp.chatBubbleTimer <= 0.0f || rp.chatBubbleText.empty()) continue;
 
-            // Project player head position to screen
-            glm::vec4 worldPos(rp.position.x, rp.position.y + 1.8f * rp.scale + 0.6f, rp.position.z, 1.0f);
-            glm::vec4 clip = vp * worldPos;
+            // Project player head position to screen. `vp` is render-space
+            // (the view is camera-relative), so the head goes through
+            // ToRender before the multiply.
+            const glm::dvec3 headWorld(rp.position.x, rp.position.y + 1.8 * rp.scale + 0.6, rp.position.z);
+            glm::vec4 clip = vp * glm::vec4(Render::ToRender(headWorld), 1.0f);
             if (clip.w <= 0.0f) continue;
 
             float ndcX = clip.x / clip.w;
@@ -627,9 +787,10 @@ void main() {
         state.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
         state.cullMode = CullMode::None;
         g_renderBackend->SetPipelineState(state);
-        g_renderBackend->BindShader(m_shader);
+        g_renderBackend->BindShader(m_bubbleShader);
         g_renderBackend->BindTexture(m_dummyTexture, 0);
-        g_renderBackend->SetUniformMat4(m_shader, "uMVP", ortho);
+        g_renderBackend->SetUniformMat4(m_bubbleShader, "uMVP", ortho);
+        g_renderBackend->SetUniformVec4(m_bubbleShader, "uClipPlane", glm::vec4(0.0f));
         g_renderBackend->DrawIndexed(slot->mesh, static_cast<uint32_t>(s_bubbleIndices.size()));
         g_renderBackend->UnbindMesh();
 

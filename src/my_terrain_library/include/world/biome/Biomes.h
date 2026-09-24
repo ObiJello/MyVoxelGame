@@ -53,6 +53,7 @@ struct BiomeKeys {
     static constexpr const char* OLD_GROWTH_BIRCH_FOREST = "minecraft:old_growth_birch_forest";
     static constexpr const char* DARK_FOREST = "minecraft:dark_forest";
     static constexpr const char* PALE_GARDEN = "minecraft:pale_garden";
+    static constexpr const char* DAPPLED_FOREST = "minecraft:dappled_forest";
 
     // Taiga variants
     static constexpr const char* TAIGA = "minecraft:taiga";
@@ -111,6 +112,7 @@ struct BiomeKeys {
     static constexpr const char* DRIPSTONE_CAVES = "minecraft:dripstone_caves";
     static constexpr const char* LUSH_CAVES = "minecraft:lush_caves";
     static constexpr const char* DEEP_DARK = "minecraft:deep_dark";
+    static constexpr const char* SULFUR_CAVES = "minecraft:sulfur_caves";
 
     // Nether (for completeness)
     static constexpr const char* NETHER_WASTES = "minecraft:nether_wastes";
@@ -128,6 +130,33 @@ struct BiomeKeys {
 
     // The void
     static constexpr const char* THE_VOID = "minecraft:the_void";
+
+    // The Hush (engine-only dimension, DimensionId::Hush). The minecraft
+    // namespace is mandatory: the engine's biome table, mob-spawn and
+    // spawn-tag generators and BiomeRegistry::FromName all key on the bare
+    // data/minecraft/worldgen/biome/<slug>.json filename.
+    static constexpr const char* HUSH_MEADOWS = "minecraft:hush_meadows";
+    static constexpr const char* WHISPERWOOD_FOREST = "minecraft:whisperwood_forest";
+    static constexpr const char* RESONANT_BARRENS = "minecraft:resonant_barrens";
+    static constexpr const char* CRYSTAL_CAVERNS = "minecraft:crystal_caverns";
+    // Second Hush biome set: flooded lowland, chasm country, cold plateau.
+    static constexpr const char* SUNKEN_CHOIR = "minecraft:sunken_choir";
+    static constexpr const char* HOLLOW_DEEP = "minecraft:hollow_deep";
+    static constexpr const char* AURORA_STEPPE = "minecraft:aurora_steppe";
+
+    // The Aether (DimensionId::Aether; data/aether/worldgen/biome/*.json).
+    // Namespaced like the mod: gen_biomes.py / gen_mob_spawns.py scan every
+    // data namespace and name non-minecraft biomes "<namespace>:<name>", which
+    // is the key BiomeRegistry::FromName resolves.
+    static constexpr const char* SKYROOT_MEADOW = "aether:skyroot_meadow";
+    static constexpr const char* SKYROOT_FOREST = "aether:skyroot_forest";
+    static constexpr const char* SKYROOT_GROVE = "aether:skyroot_grove";
+    static constexpr const char* SKYROOT_WOODLAND = "aether:skyroot_woodland";
+
+    // The Twilight Forest (DimensionId::TwilightForest; data/twilightforest/
+    // worldgen/biome/*.json): 22 "twilightforest:<name>" biomes, listed in
+    // possibleBiomes() order by world::biome::twilight::possibleBiomeKeys()
+    // (TwilightBiomeSource.h); climates in Biomes.cpp kTwilightClimates.
 };
 
 /**

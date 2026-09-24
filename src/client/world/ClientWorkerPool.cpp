@@ -213,14 +213,14 @@ namespace Threading {
         m_workerCount = count;
     }
 
-    void ClientWorkerPool::SetPlayerPosition(const glm::vec3& position) {
+    void ClientWorkerPool::SetPlayerPosition(Game::DimensionId dimension, const glm::vec3& position) {
         std::lock_guard<std::mutex> lock(m_playerMutex);
-        m_playerPosition = position;
+        m_cameraByDimension[Game::DimensionSlot(dimension)] = position;
     }
 
-    glm::vec3 ClientWorkerPool::GetPlayerPosition() const {
+    glm::vec3 ClientWorkerPool::GetPlayerPosition(Game::DimensionId dimension) const {
         std::lock_guard<std::mutex> lock(m_playerMutex);
-        return m_playerPosition;
+        return m_cameraByDimension[Game::DimensionSlot(dimension)];
     }
 
     void ClientWorkerPool::LogStats() const {
@@ -284,11 +284,16 @@ namespace Threading {
                 continue;
             }
 
-            // 3. Take the nearest job to where the camera is RIGHT NOW.
-            const glm::vec3 cameraPos = GetPlayerPosition();
+            // 3. Take the nearest job to where the camera is RIGHT NOW —
+            //    each job against its own level's camera.
+            std::array<glm::vec3, Game::kDimensionCount> cameras;
+            {
+                std::lock_guard<std::mutex> lock(m_playerMutex);
+                cameras = m_cameraByDimension;
+            }
             {
                 std::lock_guard<std::mutex> lock(m_jobQueueMutex);
-                jobOpt = PollNearestLocked(cameraPos);
+                jobOpt = PollNearestLocked(cameras);
             }
 
             if (!jobOpt.has_value()) {
@@ -401,15 +406,15 @@ namespace Threading {
         result.paletteGen = paletteGen;
         result.jobSeq = job.snapshot->jobSeq;
         
-        // Handle based on job type
-        if (job.snapshot->jobType == Client::Render::MeshJobType::BorderOnly) {
-            // BorderOnly job - just compute neighbor mask (already done) and return empty geometry
-            result.success = true;
-            return result;
-        }
-        
-        // Full mesh job - check if section is empty
-        if (job.snapshot->region.CentreIsEmpty()) {
+        // An all-air centre compiles to MC's CompiledSectionMesh.EMPTY, whose
+        // facesCanSeeEachother is true — see-through, not the default
+        // (all-opaque) set, now that the occlusion BFS reads a geometry-less
+        // compile's visibility (SectionInfo::compiledVisBits).
+        const bool centreEmpty =
+            job.snapshot->jobType == Client::Render::MeshJobType::BorderOnly ||
+            job.snapshot->region.CentreIsEmpty();
+        if (centreEmpty) {
+            result.visibilitySet.setAll(true);
             result.success = true; // Empty section is valid, just no geometry
             return result;
         }
@@ -423,7 +428,7 @@ namespace Threading {
         mesher.BuildSectionMesh(job.snapshot->region, job.chunkPos, job.sectionY, sectionMesh);
         
         // Convert SectionMesh to MeshBuildResult format
-        result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY);
+        result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY, job.snapshot->dimension);
         result.generation = job.snapshot->generation;  // Restore generation after conversion
         result.neighborMask = job.snapshot->neighborMask;  // Restore neighbor mask after conversion
         result.paletteGen = paletteGen;                    // Restore palette stamp after conversion
@@ -485,7 +490,7 @@ namespace Threading {
     }
 
     // Port of MC CompileTaskDynamicQueue.poll(Vec3) — see
-    // minecraft_code/decompiled_net/minecraft/client/renderer/chunk/CompileTaskDynamicQueue.java
+    // minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/client/renderer/chunk/CompileTaskDynamicQueue.java
     //
     // Two things make this a linear scan rather than a sorted container:
     //   1. The key is distance to the CAMERA, which moves every frame. Anything
@@ -498,7 +503,8 @@ namespace Threading {
     // bounded by pipeline throughput (a poll only happens after a permit is
     // acquired), not by frame rate, so this is a few thousand distance
     // computations per second at most.
-    std::optional<MeshJob> ClientWorkerPool::PollNearestLocked(const glm::vec3& cameraPos) {
+    std::optional<MeshJob> ClientWorkerPool::PollNearestLocked(
+            const std::array<glm::vec3, Game::kDimensionCount>& cameras) {
         // Phase 1: drop cancelled entries (MC does this inline via
         // iterator.remove()). Swap-and-pop rather than a shifting erase — the
         // queue has no meaningful order, since selection is purely by distance.
@@ -532,6 +538,9 @@ namespace Threading {
 
         for (size_t i = 0; i < m_jobQueue.size(); ++i) {
             const MeshJob& job = m_jobQueue[i];
+            // The job's own level's camera: the queue holds every level's
+            // compiles, and their coordinates are not comparable across levels.
+            const glm::vec3& cameraPos = cameras[Game::DimensionSlot(job.snapshot->dimension)];
 
             // Section centre in world space. Y is attenuated by 0.1 (squared:
             // 0.01) — our deliberate deviation from MC's plain distSqr, kept
@@ -628,21 +637,22 @@ namespace Threading {
     }
 
     // Bulk-copy a TerrainVertex array into the result's float vector with one
-    // memcpy. The vector is an opaque byte blob here: a 16-byte TerrainVertex
-    // is four float-sized slots of packed uint16/uint8 data, nothing ever
+    // memcpy. The vector is an opaque byte blob here: a 20-byte TerrainVertex
+    // is five float-sized slots of packed uint16/uint8 data, nothing ever
     // interprets them as floats, they ride to the GPU verbatim.
     static void CopyVertexLayer(const std::vector<Render::TerrainVertex>& verts,
                                 std::vector<float>& outFloats) {
-        static_assert(sizeof(Render::TerrainVertex) == 4 * sizeof(float),
+        static_assert(sizeof(Render::TerrainVertex) == 5 * sizeof(float),
                       "TerrainVertex layout changed — update CopyVertexLayer");
 
-        const size_t floatCount = verts.size() * 4;
+        const size_t floatCount = verts.size() * 5;
         outFloats.resize(floatCount);
         std::memcpy(outFloats.data(), verts.data(), floatCount * sizeof(float));
     }
 
     Network::MeshBuildResult ClientWorkerPool::ConvertSectionMeshToResult(const Render::SectionMesh& sectionMesh,
-                                                                          Game::Math::ChunkPos chunkPos, int sectionY) {
+                                                                          Game::Math::ChunkPos chunkPos, int sectionY,
+                                                                          Game::DimensionId dimension) {
         Network::MeshBuildResult result(chunkPos, sectionY);
 
         // Opaque layer
@@ -681,7 +691,7 @@ namespace Threading {
             // 2026-08-29 at 0.26 ms each, a third of all upload time during a
             // world load. Now it uploads the sorted indices once and only
             // re-sorts when the point of view changes.
-            const glm::vec3 cameraPos = GetPlayerPosition();
+            const glm::vec3 cameraPos = GetPlayerPosition(dimension);
             // Positions are section-relative fixed point (TerrainVertex);
             // decode them back to world space against this section's origin.
             const auto* tv = reinterpret_cast<const Render::TerrainVertex*>(
@@ -753,9 +763,9 @@ namespace Threading {
     }
 
 
-    void SetClientWorkerPlayerPosition(const glm::vec3& position) {
+    void SetClientWorkerPlayerPosition(Game::DimensionId dimension, const glm::vec3& position) {
         if (g_clientWorkerPool) {
-            g_clientWorkerPool->SetPlayerPosition(position);
+            g_clientWorkerPool->SetPlayerPosition(dimension, position);
         }
     }
 

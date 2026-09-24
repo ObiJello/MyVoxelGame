@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "powered=false": {
+      "model": "minecraft:block/uncrafting_table"
+    },
+    "powered=true": {
+      "model": "minecraft:block/uncrafting_table_activated"
+    }
+  }
+}

@@ -9,6 +9,7 @@
 #include "common/core/Mth.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
 #include <vector>
@@ -63,7 +64,17 @@ namespace Game {
         m_attackWarmupDelay = AdjustedTickDelay(GetCastWarmupTime());
         m_caster->SetSpellCastingTime(GetCastingTime());
         m_nextAttackTickCount = m_caster->tickCount + GetCastingInterval();
-        // MC plays the spell's prepare sound here — no sound system.
+        // MC: the spell's prepare sound (getSpellPrepareSound).
+        const char* prepare = "";
+        switch (GetSpell()) {
+            case SpellcasterIllager::IllagerSpell::Fangs:     prepare = SoundEvents::EVOKER_PREPARE_ATTACK; break;
+            case SpellcasterIllager::IllagerSpell::SummonVex: prepare = SoundEvents::EVOKER_PREPARE_SUMMON; break;
+            case SpellcasterIllager::IllagerSpell::Wololo:    prepare = SoundEvents::EVOKER_PREPARE_WOLOLO; break;
+            case SpellcasterIllager::IllagerSpell::Disappear: prepare = SoundEvents::ILLUSIONER_PREPARE_MIRROR; break;
+            case SpellcasterIllager::IllagerSpell::Blindness: prepare = SoundEvents::ILLUSIONER_PREPARE_BLINDNESS; break;
+            case SpellcasterIllager::IllagerSpell::None:      break;
+        }
+        m_caster->PlaySound(prepare, 1.0f, 1.0f);
         m_caster->SetIsCastingSpell(GetSpell());
     }
 
@@ -71,7 +82,10 @@ namespace Game {
         --m_attackWarmupDelay;
         if (m_attackWarmupDelay == 0) {
             PerformSpellCasting();
-            // MC plays getCastingSoundEvent here — no sound system.
+            // MC caster.getCastingSoundEvent: the evoker's or illusioner's.
+            m_caster->PlaySound(m_caster->GetType() == EntityTypeId::Illusioner
+                                    ? SoundEvents::ILLUSIONER_CAST_SPELL : SoundEvents::EVOKER_CAST_SPELL,
+                                1.0f, 1.0f);
         }
     }
 
@@ -346,7 +360,7 @@ namespace Game {
             m_vex->GetMoveControl().SetWantedPosition(eye.x, eye.y, eye.z, 1.0);
         }
         m_vex->SetIsCharging(true);
-        // MC plays VEX_CHARGE — no sound system.
+        m_vex->PlaySound(SoundEvents::VEX_CHARGE, 1.0f, 1.0f);
     }
 
     void VexChargeAttackGoal::Stop() {

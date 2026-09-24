@@ -1,0 +1,16 @@
+{
+  "model": {
+    "type": "minecraft:model",
+    "model": "minecraft:item/the_unsung_spawn_egg",
+    "tints": [
+      {
+        "type": "minecraft:constant",
+        "value": -16116712
+      },
+      {
+        "type": "minecraft:constant",
+        "value": -4752129
+      }
+    ]
+  }
+}

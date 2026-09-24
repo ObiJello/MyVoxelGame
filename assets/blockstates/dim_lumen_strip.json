@@ -1,0 +1,16 @@
+{
+  "variants": {
+    "axis=x": {
+      "model": "minecraft:block/dim_lumen_strip_horizontal",
+      "x": 90,
+      "y": 90
+    },
+    "axis=y": {
+      "model": "minecraft:block/dim_lumen_strip"
+    },
+    "axis=z": {
+      "model": "minecraft:block/dim_lumen_strip_horizontal",
+      "x": 90
+    }
+  }
+}

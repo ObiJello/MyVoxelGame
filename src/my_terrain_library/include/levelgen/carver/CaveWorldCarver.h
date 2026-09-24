@@ -44,7 +44,7 @@ public:
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         XoroshiroRandomSource& random,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         const world::ChunkPos& sourceChunkPos,
         CarvingMask& mask
     ) override;
@@ -60,7 +60,7 @@ public:
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         LegacyRandomSource& random,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         const world::ChunkPos& sourceChunkPos,
         CarvingMask& mask
     ) override;
@@ -103,7 +103,7 @@ protected:
         const CaveCarverConfiguration& configuration,
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         double x, double y, double z,
         float thickness,
         double yScale,
@@ -121,7 +121,7 @@ protected:
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         int64_t tunnelSeed,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         double x, double y, double z,
         double horizontalRadiusMultiplier,
         double verticalRadiusMultiplier,
@@ -146,7 +146,7 @@ protected:
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         int64_t tunnelSeed,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         double x, double y, double z,
         double horizontalRadiusMultiplier,
         double verticalRadiusMultiplier,

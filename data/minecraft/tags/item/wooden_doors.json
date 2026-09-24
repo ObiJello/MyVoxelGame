@@ -12,6 +12,8 @@
     "minecraft:mangrove_door",
     "minecraft:bamboo_door",
     "minecraft:cherry_door",
-    "minecraft:poplar_door"
+    "minecraft:poplar_door",
+    "minecraft:whisperwood_door",
+    "minecraft:skyroot_door"
   ]
 }

@@ -1,5 +1,7 @@
 // File: src/client/input/PlayerController.cpp
 #include "PlayerController.hpp"
+#include "common/entity/Morph.hpp"
+#include "common/world/block/BedBlock.hpp"
 #include "client/entity/RemotePlayerManager.hpp"
 #include "common/core/Mth.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -21,11 +23,18 @@
 #include "../entity/ClientMobManager.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockPlacement.hpp"
+#include "common/world/fluid/FluidState.hpp"
 #include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
 #include "common/entity/Item.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/sound/SoundType.hpp"
+#include "client/sound/ClientSounds.hpp"
+#include "common/entity/ConsumableBehavior.hpp"
+#include "common/core/JavaRandom.hpp"
+#include <chrono>
 #if ENABLE_PORTAL_GUN
 #include "../renderer/portal/PortalParticleSystem.hpp"
 #include "../renderer/viewmodel/PortalGunViewmodel.hpp"
@@ -36,6 +45,42 @@
 #include <optional>
 
 namespace Game {
+
+    namespace {
+
+        // The local player's own block sounds, played the moment the client
+        // predicts the action. The server plays the same sounds to everyone
+        // else with this player as `except` (MC's levelEvent / playSound with
+        // the player), so each is heard exactly once.
+
+        // MC MultiPlayerGameMode.continueDestroyBlock: every fourth tick of
+        // mining, the hit sound — (volume + 1) / 8, pitch * 0.5, BLOCKS.
+        void PlayBlockHitSound(const glm::ivec3& pos, BlockState state) {
+            const SoundType& type = SoundTypeOf(state);
+            if (IsEmptySound(type.hitSound)) return;
+            Client::Sounds::PlayLocal(glm::dvec3(pos) + glm::dvec3(0.5), type.hitSound, SoundSource::Blocks,
+                                      (type.volume + 1.0f) / 8.0f, type.pitch * 0.5f);
+        }
+
+        // MC destroyBlock → Block.playerWillDestroy → levelEvent(player, 2001):
+        // LevelEventHandler's break sound, (volume + 1) / 2, pitch * 0.8.
+        void PlayBlockBreakSound(const glm::ivec3& pos, BlockState state) {
+            const SoundType& type = SoundTypeOf(state);
+            if (IsEmptySound(type.breakSound)) return;
+            Client::Sounds::PlayLocal(glm::dvec3(pos) + glm::dvec3(0.5), type.breakSound, SoundSource::Blocks,
+                                      (type.volume + 1.0f) / 2.0f, type.pitch * 0.8f);
+        }
+
+        // MC BlockItem.place: level.playSound(player, pos, getPlaceSound(state),
+        // BLOCKS, (volume + 1) / 2, pitch * 0.8).
+        void PlayBlockPlaceSound(const glm::ivec3& pos, BlockState state) {
+            const SoundType& type = SoundTypeOf(state);
+            if (IsEmptySound(type.placeSound)) return;
+            Client::Sounds::PlayLocal(glm::dvec3(pos) + glm::dvec3(0.5), type.placeSound, SoundSource::Blocks,
+                                      (type.volume + 1.0f) / 2.0f, type.pitch * 0.8f);
+        }
+
+    } // namespace
 
     ClientPlayerController::ClientPlayerController()
         : player(nullptr)
@@ -66,7 +111,11 @@ namespace Game {
         packet.blockId = blockId;
         // The wire still carries the within-block index next to the id.
         packet.blockState = blockState.Index();
-        packet.face = 0;
+        // The face the dig started on; kFaceUnknown when there was none
+        // (every dig path records one, so that is the defensive case).
+        packet.face = (digState.destroyFace >= 0 && digState.destroyFace <= 5)
+                    ? static_cast<uint8_t>(digState.destroyFace)
+                    : Network::BlockActionC2SPacket::kFaceUnknown;
         packet.sequenceNumber = ++interactSeq;
         // The dimension of the block. A START (or an instant BREAK) targets
         // what the crosshair reaches now. So does a STOP for the block still
@@ -82,6 +131,15 @@ namespace Game {
             if (startsHere || underCrosshair) digDimension = player->lastBlockHitDimension;
         }
         packet.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(digDimension));
+        // Vein mine is decided at the moment the dig FINISHES: the player
+        // holds the key together with Sneak while the block breaks. Both
+        // are held-state reads, so a screen that is open at that instant
+        // (Input::SetUiActive) reads as "not held".
+        if (action == Network::BlockActionType::STOP_DESTROY ||
+            action == Network::BlockActionType::BREAK) {
+            packet.veinMine = Input::IsDown(*Input::Binds::Sneak) &&
+                              Input::IsDown(*Input::Binds::VeinMine);
+        }
         auto data = Network::Serialization::Serialize(packet);
         auto connection = networkClient->GetConnection();
         if (connection) {
@@ -214,7 +272,7 @@ namespace Game {
         if (movementFlush) movementFlush();
     }
 
-    void ClientPlayerController::StartDig(const glm::ivec3& pos, int /*face*/) {
+    void ClientPlayerController::StartDig(const glm::ivec3& pos, int face) {
         // MC's MultiPlayerGameMode.startDestroyBlock:
         //   if (block is breakable && ...) {
         //       progress = 0;
@@ -226,6 +284,7 @@ namespace Game {
         digState.destroyProgress = 0.0f;
         digState.destroyTicks    = 0;
         digState.destroyBlockPos = pos;
+        digState.destroyFace     = face;
         digState.lastSwingTick   = -1000;
 
         // Cache block ID and state at start — the world may already be Air by
@@ -270,7 +329,7 @@ namespace Game {
         digState.destroyDelay    = POST_BREAK_DELAY_TICKS;
     }
 
-    void ClientPlayerController::CreativeDestroy(const glm::ivec3& pos) {
+    void ClientPlayerController::CreativeDestroy(const glm::ivec3& pos, int face) {
         // MC MultiPlayerGameMode's `instabuild` branch: the block is destroyed
         // outright — destroyProgress is never accumulated, so the block's
         // destroyTime (including bedrock's -1 "unbreakable" sentinel) is never
@@ -282,6 +341,7 @@ namespace Game {
         // Set up the minimal dig state FinishDig's packet + local-prediction
         // path expects, then finish immediately.
         digState.destroyBlockPos      = pos;
+        digState.destroyFace          = face;
         digState.destroyingBlockId    = target;
         digState.destroyingBlockState = ReadBlockState(pos);
         digState.destroyProgress      = 1.0f;
@@ -368,15 +428,71 @@ namespace Game {
         }
     }
 
+    BlockID ClientPlayerController::HeldFillBlock() const {
+        if (!player) return BlockID::Air;
+        const BlockID block = player->GetSelectedBlock();
+        if (block != BlockID::Air) return block;
+        const Game::ItemID item = player->inventory.GetSelectedItem();
+        if (item == Game::Items::WaterBucket) return BlockID::Water;
+        if (item == Game::Items::LavaBucket)  return BlockID::Lava;
+        return BlockID::Air;
+    }
+
+    bool ClientPlayerController::FluidCanFill(Game::BlockState existing, BlockID fluidBlock) const {
+        const BlockID id = existing.Block();
+        if (id == BlockID::Air) return true;
+        // The same fluid, source or flowing, is a valid pour target — MC's
+        // emptyContents succeeds over an existing source and overwrites a
+        // flowing cell — so a corner may sit in the pool being filled.
+        if (Game::FluidStateOf(existing).IsSame(
+                fluidBlock == BlockID::Lava ? Game::FluidType::Lava : Game::FluidType::Water)) {
+            return true;
+        }
+        // Water into a dry waterloggable block waterlogs it.
+        if (fluidBlock == BlockID::Water && BlockRegistry::IsWaterloggable(id) &&
+            !BlockRegistry::ContainsWater(existing)) {
+            return true;
+        }
+        // BlockBehaviour.canBeReplaced(state, fluid): the replaceable flag or
+        // no collision at all.
+        return BlockRegistry::Get(id).replaceable || !BlockRegistry::HasCollision(id);
+    }
+
+    bool ClientPlayerController::ComputeFillCorner(const RaycastHit& hit, glm::ivec3& outPos,
+                                                   Game::BlockState& outState) const {
+        if (!player) return false;
+        if (player->GetSelectedBlock() != BlockID::Air) {
+            BlockID block = BlockID::Air;
+            return ComputePredictedPlacement(hit, outPos, block, outState);
+        }
+        const BlockID fluidBlock = HeldFillBlock();
+        if (fluidBlock != BlockID::Water && fluidBlock != BlockID::Lava) return false;
+
+        // MC BucketItem.use: the cell in front of the clicked face, or the
+        // clicked cell itself when the bucket would pour into it (a
+        // LiquidBlockContainer for water; a cell the fluid may replace —
+        // the tall grass or the flowing water the crosshair is on).
+        const BlockState clickedState = ReadBlockState(hit.blockPos);
+        const BlockID    clickedId    = clickedState.Block();
+        const bool intoClicked =
+            (fluidBlock == BlockID::Water && BlockRegistry::IsWaterloggable(clickedId) &&
+             !BlockRegistry::ContainsWater(clickedState)) ||
+            BlockRegistry::Get(clickedId).replaceable || !BlockRegistry::HasCollision(clickedId);
+        const glm::ivec3 target = intoClicked ? hit.blockPos : hit.adjacentPos;
+        if (!FluidCanFill(ReadBlockState(target), fluidBlock)) return false;
+        outPos   = target;
+        outState = Game::BlockStates::Default(fluidBlock);
+        return true;
+    }
+
     bool ClientPlayerController::HandleFillClick(const std::optional<RaycastHit>& hit) {
         if (!player) return false;
         const bool alt = Input::IsKeyDown(Input::Key::LeftAlt);
         if (!alt && !m_fill.armed) return false;
         const Game::DimensionId dim = Client::ClientLevels::ActiveDimension();
         glm::ivec3 pos{0};
-        BlockID    block = BlockID::Air;
         BlockState state;
-        const bool can = hit.has_value() && ComputePredictedPlacement(*hit, pos, block, state);
+        const bool can = hit.has_value() && ComputeFillCorner(*hit, pos, state);
         if (alt) {
             if (!can) {
                 // Alt on air or on something that cannot take a block:
@@ -405,22 +521,26 @@ namespace Game {
 
     bool ClientPlayerController::FillAirCell(glm::ivec3& outCell, Game::BlockState& outState) const {
         if (!player || !m_fill.armed) return false;
-        // The block in hand must still be the marked one; its state
-        // (orientation) is the mark's.
-        const BlockID held = player->GetSelectedBlock();
+        // The block (or bucket) in hand must still be the marked one; its
+        // state (orientation) is the mark's.
+        const BlockID held = HeldFillBlock();
         if (held == BlockID::Air || held != m_fill.state.Block()) return false;
         constexpr float kAirCornerDistance = 5.0f;
-        const glm::vec3 eye = player->GetEyePosition();
+        const glm::dvec3 eye = player->GetEyePosition();
         const glm::vec3 dir = glm::normalize(player->lookDir);
-        const glm::vec3 point = eye + dir * kAirCornerDistance;
+        const glm::dvec3 point = eye + glm::dvec3(dir * kAirCornerDistance);
         const glm::ivec3 cell(static_cast<int>(std::floor(point.x)),
                               static_cast<int>(std::floor(point.y)),
                               static_cast<int>(std::floor(point.z)));
-        Game::PlacementClick click;
-        click.replacingClickedOnBlock = false;
-        if (!Game::CanBeReplacedByPlacement(ReadBlockState(cell), held,
-                                            player->physics.isSneaking, click)) {
-            return false;
+        if (held == BlockID::Water || held == BlockID::Lava) {
+            if (!FluidCanFill(ReadBlockState(cell), held)) return false;
+        } else {
+            Game::PlacementClick click;
+            click.replacingClickedOnBlock = false;
+            if (!Game::CanBeReplacedByPlacement(ReadBlockState(cell), held,
+                                                player->physics.isSneaking, click)) {
+                return false;
+            }
         }
         outCell  = cell;
         outState = m_fill.state;
@@ -447,10 +567,9 @@ namespace Game {
         if (!m_fill.armed || !player) return false;
         if (m_fill.dimension != Client::ClientLevels::ActiveDimension()) return false;
         glm::ivec3 pos = m_fill.cell;
-        BlockID    block = BlockID::Air;
         BlockState state = m_fill.state;
         if (hit.has_value()) {
-            if (!ComputePredictedPlacement(*hit, pos, block, state)) {
+            if (!ComputeFillCorner(*hit, pos, state)) {
                 pos   = m_fill.cell;
                 state = m_fill.state;
             }
@@ -534,6 +653,10 @@ namespace Game {
         // prediction never flips block when the authoritative update lands.
         if (!replaceClicked) {
             resolved = Game::SkullPlacementBlock(resolved, click.clickedFace);
+            resolved = Game::SignPlacementBlock(resolved, click.clickedFace);
+            if (blockAccess) {
+                resolved = Game::TorchPlacementBlock(*blockAccess, resolved, target, click.clickedFace);
+            }
         }
         bool grewInPlace = false;
         BlockState grownState;
@@ -608,7 +731,7 @@ namespace Game {
         ctx.hand   = 0;
         ctx.hitResult.blockPos = hit.blockPos;
         ctx.hitResult.face     = OurFaceToMcFace(hit.hitFace);
-        ctx.hitResult.hitPoint = glm::vec3(hit.blockPos) + hit.cursorPos;
+        ctx.hitResult.hitPoint = glm::dvec3(hit.blockPos) + glm::dvec3(hit.cursorPos);
         // LookAngles(), not player->yaw/pitch — those are only written on
         // teleports (mouse-look updates camera.yaw/pitch instead), so reading
         // them here made every predicted placement use a stale angle. The block
@@ -662,6 +785,18 @@ namespace Game {
             }
             if (blockAccess) {
                 outState = Game::DoorPlacementState(*blockAccess, target, outState, ctx.hitResult.hitPoint);
+            }
+        }
+        // A bed: the foot goes here and the head in the facing direction,
+        // which must be free as well (mirrors PlayerSession::HandleUseItemOn).
+        if (Game::IsBedBlock(outBlock)) {
+            outState = Game::BedFootPlacementState(outState);
+            const glm::ivec3 head = Game::BedOtherHalfPos(target, outState);
+            Game::PlacementClick headClick;
+            headClick.replacingClickedOnBlock = false;
+            if (!Game::CanBeReplacedByPlacement(ReadBlockState(head), outBlock,
+                                                player->physics.isSneaking, headClick)) {
+                return false;
             }
         }
         return true;
@@ -903,7 +1038,35 @@ namespace Game {
         // completeUsingItem fires (its slot broadcast updates our stack);
         // locally we just clear the pose state.
         if (!player || !player->usingItem) return;
+
+        // MC LivingEntity.updateUsingItem runs on the client too:
+        // ItemStack.onUseTick → Consumable.emitParticlesAndSounds every 4th
+        // tick past the first 21.875% — the eater hears its own chewing from
+        // its own prediction (Player.playSound: the server sends it to
+        // everyone else). The last bite is MC's entity event 9
+        // (completeUsingItem → onConsume's emit) at the end of the countdown.
+        const auto consumeSound = [this](const Game::Consumable& consumable) {
+            if (consumable.sound.empty()) return;
+            static Game::JavaRandom s_random(static_cast<int64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+            const bool drink = consumable.animation == ItemUseAnimation::DRINK;
+            const float eatVolume  = s_random.NextBool() ? 0.5f : 1.0f;
+            const float eatPitch   = 1.0f + 0.2f * (s_random.NextFloat() - s_random.NextFloat());
+            const float drinkPitch = 0.9f + s_random.NextFloat() * 0.1f;
+            Client::Sounds::PlayLocal(player->physics.position, consumable.sound, Game::SoundSource::Players,
+                                      drink ? 0.5f : eatVolume, drink ? drinkPitch : eatPitch);
+        };
+        const int slot = (player->usingHand == 0)
+            ? Inventory::HotbarToIndex(player->inventory.GetSelectedSlot())
+            : Inventory::OFFHAND_BEGIN;
+        const auto consumable = player->inventory.GetSlot(slot).get(DataComponents::CONSUMABLE);
+        if (consumable &&
+            Game::ConsumableBehavior::ShouldEmitParticlesAndSounds(*consumable, player->useItemRemaining)) {
+            consumeSound(*consumable);
+        }
+
         if (--player->useItemRemaining <= 0) {
+            if (consumable) consumeSound(*consumable);
             StopPredictedUse();
         }
     }
@@ -980,7 +1143,7 @@ namespace Game {
             // A dig left over from a mid-mine gamemode switch has to be torn
             // down (and its ABORT packet sent) before we start instant-breaking.
             if (digState.isDestroying) AbortDig();
-            CreativeDestroy(hitPos);
+            CreativeDestroy(hitPos, currentHit->hitFace);
             return;
         }
 
@@ -1013,9 +1176,16 @@ namespace Game {
         // Per-tick progress increment (MC's BlockBehaviour.getDestroyProgress).
         const Game::ItemID held = player->inventory.GetSelectedItem();
         const bool onGround = player->physics.isOnGround;
-        const float inc = GetDestroyProgressPerTick(held, block, onGround);
+        const float inc = GetDestroyProgressPerTick(held, block, onGround,
+                                                    player->GetEffectDigSpeedMultiplier(),
+                                                    player->physics.isEyeInWater);
 
         digState.destroyProgress += inc;
+        // MC continueDestroyBlock: `if (destroyTicks % 4.0F == 0.0F)` the hit
+        // sound, BEFORE the tick count advances.
+        if (digState.destroyTicks % 4 == 0) {
+            PlayBlockHitSound(hitPos, ReadBlockState(hitPos));
+        }
         digState.destroyTicks    += 1;
 
         // Continuous-mine arm swing (MC: every 4 ticks while mining).
@@ -1083,9 +1253,14 @@ namespace Game {
         const bool usedOn = PredictUseItemOn(*currentHit, 0, sequence);
         if (!usedOn && predictable) {
             PredictBlock(predictPos, predictBlock, sequence, predictState);
+            PlayBlockPlaceSound(predictPos, predictState);
             if (Game::IsDoorBlock(predictBlock)) {
                 PredictBlock(predictPos + glm::ivec3(0, 1, 0), predictBlock, sequence,
                              Game::DoorUpperState(predictState));
+            }
+            if (Game::IsBedBlock(predictBlock)) {
+                PredictBlock(Game::BedOtherHalfPos(predictPos, predictState), predictBlock, sequence,
+                             Game::BedHeadState(predictState));
             }
         }
         // Same guards as the edge path in StartUseItem: a block that swallowed
@@ -1149,9 +1324,9 @@ namespace Game {
         Log::Debug("Respawn request (TODO: Implement for multiplayer)");
     }
 
-    int32_t ClientPlayerController::PickEntityAlong(const glm::vec3& origin, const glm::vec3& dir,
+    int32_t ClientPlayerController::PickEntityAlong(const glm::dvec3& origin, const glm::vec3& dir,
                                                     float range, float blockLimit,
-                                                    int* outDragonPart) const {
+                                                    int* outDragonPart, glm::dvec3* outHit) const {
         if (outDragonPart) *outDragonPart = -1;
         if (!player) return 0;
         if (!Client::g_clientMobManager) return 0;
@@ -1171,6 +1346,30 @@ namespace Game {
         int32_t bestId = 0;
         float bestT = range;
 
+        // Slab test of the ray against a DOUBLE world box, taken in a frame
+        // anchored at the ray's origin: the box's faces are a few blocks
+        // from the eye, so float is exact once the world-sized numbers have
+        // cancelled in double. Returns the entry distance, or a negative
+        // number for a miss.
+        const auto slab = [&](const glm::dvec3& mn, const glm::dvec3& mx) -> float {
+            float tMin = 0.0f, tMax = bestT;
+            for (int a = 0; a < 3; ++a) {
+                const float d  = dir[a];
+                const float lo = static_cast<float>(mn[a] - origin[a]);
+                const float hi = static_cast<float>(mx[a] - origin[a]);
+                if (std::abs(d) < 1e-8f) {
+                    if (0.0f < lo || 0.0f > hi) return -1.0f;
+                    continue;
+                }
+                float t1 = lo / d, t2 = hi / d;
+                if (t1 > t2) std::swap(t1, t2);
+                tMin = std::max(tMin, t1);
+                tMax = std::min(tMax, t2);
+                if (tMin > tMax) return -1.0f;
+            }
+            return tMin;
+        };
+
         // Other players first, so the loop below can only beat them on
         // distance. A remote player's id IS its connection id, which is what
         // lets the server tell it from a mob without a kind byte on the wire.
@@ -1179,29 +1378,17 @@ namespace Game {
                 if (!rp.positionInitialized) continue;
                 if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
 
-                // MC's player box: 0.6 wide, 1.8 tall, feet at the position.
-                Game::AABB box;
-                box.min = rp.position - glm::vec3(0.3f, 0.0f, 0.3f)
-                        - glm::vec3(kPickInflate);
-                box.max = rp.position + glm::vec3(0.3f, 1.8f, 0.3f)
-                        + glm::vec3(kPickInflate);
-
-                float tMin = 0.0f, tMax = bestT;
-                bool hit = true;
-                for (int a = 0; a < 3 && hit; ++a) {
-                    const float o = origin[a], d = dir[a];
-                    const float lo = box.min[a], hi = box.max[a];
-                    if (std::abs(d) < 1e-8f) {
-                        if (o < lo || o > hi) { hit = false; break; }
-                        continue;
-                    }
-                    float t1 = (lo - o) / d, t2 = (hi - o) / d;
-                    if (t1 > t2) std::swap(t1, t2);
-                    tMin = std::max(tMin, t1);
-                    tMax = std::min(tMax, t2);
-                    if (tMin > tMax) { hit = false; break; }
-                }
-                if (!hit || tMin >= bestT) continue;
+                // MC's player box (0.6 wide, 1.8 tall, feet at the position),
+                // or the morph's — a snow golem's pumpkin sits above 1.8 and
+                // a bee is a hand's width — at the player's scale. The server
+                // reaches the same box (PlayerEntityView::BaseBbWidth/Height).
+                const Game::Morph::Dims dims = Game::Morph::DimsOf(rp.morph);
+                const double hw = static_cast<double>(dims.width) * rp.scale * 0.5;
+                const double h  = static_cast<double>(dims.height) * rp.scale;
+                const glm::dvec3 mn = rp.position - glm::dvec3(hw + kPickInflate, kPickInflate, hw + kPickInflate);
+                const glm::dvec3 mx = rp.position + glm::dvec3(hw + kPickInflate, h + kPickInflate, hw + kPickInflate);
+                const float tMin = slab(mn, mx);
+                if (tMin < 0.0f || tMin >= bestT) continue;
                 if (blockLimit < tMin) continue;
                 bestT = tMin;
                 bestId = static_cast<int32_t>(pid);
@@ -1230,30 +1417,13 @@ namespace Game {
                 Game::AABB parts[Game::EnderDragon::kDragonPartCount];
                 dragon->ComputePartBoxes(parts);
                 for (int pi = 0; pi < Game::EnderDragon::kDragonPartCount; ++pi) {
-                    Game::AABB pbox = parts[pi];
-                    pbox.min -= glm::vec3(kPickInflate);
-                    pbox.max += glm::vec3(kPickInflate);
-
-                    float tMin = 0.0f;
-                    float tMax = bestT;
-                    bool hit = true;
-                    for (int axis = 0; axis < 3; ++axis) {
-                        const float o = origin[axis];
-                        const float d = dir[axis];
-                        const float lo = pbox.min[axis];
-                        const float hi = pbox.max[axis];
-                        if (std::abs(d) < 1e-8f) {
-                            if (o < lo || o > hi) { hit = false; break; }
-                            continue;
-                        }
-                        float t1 = (lo - o) / d;
-                        float t2 = (hi - o) / d;
-                        if (t1 > t2) std::swap(t1, t2);
-                        tMin = std::max(tMin, t1);
-                        tMax = std::min(tMax, t2);
-                        if (tMin > tMax) { hit = false; break; }
-                    }
-                    if (!hit || tMin >= bestT) continue;
+                    // The part boxes are float world boxes (ComputePartBoxes);
+                    // their grid error far from the origin is well inside
+                    // the 0.3 pick margin.
+                    const Game::AABB& pbox = parts[pi];
+                    const float tMin = slab(glm::dvec3(pbox.min) - double(kPickInflate),
+                                            glm::dvec3(pbox.max) + double(kPickInflate));
+                    if (tMin < 0.0f || tMin >= bestT) continue;
                     if (blockLimit < tMin) continue;
                     bestT = tMin;
                     bestId = id;
@@ -1268,35 +1438,9 @@ namespace Game {
             // obviously want to build through.
             if (!mob.IsPickable()) continue;
 
-            Game::AABB box = mob.GetAABB();
-            box.min -= glm::vec3(kPickInflate);
-            box.max += glm::vec3(kPickInflate);
-
-            // Slab method. A zero direction component is handled by the
-            // infinities that division produces, which compare correctly
-            // against the finite bounds.
-            float tMin = 0.0f;
-            float tMax = bestT;
-            bool hit = true;
-            for (int axis = 0; axis < 3; ++axis) {
-                const float o = origin[axis];
-                const float d = dir[axis];
-                const float lo = box.min[axis];
-                const float hi = box.max[axis];
-
-                if (std::abs(d) < 1e-8f) {
-                    if (o < lo || o > hi) { hit = false; break; }
-                    continue;
-                }
-                float t1 = (lo - o) / d;
-                float t2 = (hi - o) / d;
-                if (t1 > t2) std::swap(t1, t2);
-                tMin = std::max(tMin, t1);
-                tMax = std::min(tMax, t2);
-                if (tMin > tMax) { hit = false; break; }
-            }
-
-            if (!hit || tMin >= bestT) continue;
+            const Game::AABBd box = mob.GetAABBd();
+            const float tMin = slab(box.min - double(kPickInflate), box.max + double(kPickInflate));
+            if (tMin < 0.0f || tMin >= bestT) continue;
 
             // A block between us and the mob wins. lastBlockHit is the
             // per-frame block raycast, already in the same units.
@@ -1308,17 +1452,19 @@ namespace Game {
             if (outDragonPart) *outDragonPart = -1;
         }
 
+        // The entry point on the box, for the interaction's click location.
+        if (outHit && bestId != 0) *outHit = origin + glm::dvec3(dir) * static_cast<double>(bestT);
         return bestId;
     }
 
-    int32_t ClientPlayerController::PickEntity(int* outDragonPart) const {
+    int32_t ClientPlayerController::PickEntity(int* outDragonPart, glm::dvec3* outHit) const {
         if (outDragonPart) *outDragonPart = -1;
         if (!player) return 0;
         // MC's entity pick distance in survival is 3.0 blocks
         // (Attributes.ENTITY_INTERACTION_RANGE). The server re-checks with a
         // more generous 6.0 to absorb latency — see HandleInteract.
         constexpr float kPickRange = 3.0f;
-        const glm::vec3 origin = player->GetEyePosition();
+        const glm::dvec3 origin = player->GetEyePosition();
         const glm::vec3 dir = glm::normalize(player->lookDir);
         // The block under the crosshair caps the pick, as a distance along
         // the ray: a hit through a portal is in another level's coordinates,
@@ -1332,18 +1478,18 @@ namespace Game {
         // while the crosshair reaches through a portal, and this pick is
         // what stops a dig when a mob is in the way.
         if (!Client::ClientLevels::HasSession()) {
-            return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart);
+            return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit);
         }
         int32_t nearId = 0;
         Client::ClientLevels::WithLevel(Client::ClientLevels::ActiveDimension(), [&]() {
-            nearId = PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart);
+            nearId = PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit);
         });
         if (nearId != 0) return nearId;
 
         // Through a portal: the rest of the ray continues in the far level,
         // the same way the block raycast does (ClientPlayer::UpdateRaycast).
         namespace PortalFlag = Game::Immersive::PortalFlag;
-        const glm::dvec3 from(origin);
+        const glm::dvec3 from = origin;
         const glm::dvec3 to = from + glm::dvec3(dir) * static_cast<double>(kPickRange);
         const Game::Immersive::Portal* best = nullptr;
         double bestT = 2.0;
@@ -1358,16 +1504,16 @@ namespace Game {
         const Game::Immersive::Portal portal = *best;   // copy: the level rebinds below
         const float travelled = static_cast<float>(glm::length(pierce - from));
         if (travelled >= kPickRange || travelled >= blockLimit) return 0;
-        const glm::vec3 farOrigin(portal.TransformPoint(pierce) + portal.ContentDirection() * 0.001);
+        const glm::dvec3 farOrigin = portal.TransformPoint(pierce) + portal.ContentDirection() * 0.001;
         const glm::vec3 farDir(glm::normalize(portal.TransformLocalVecNonScale(glm::dvec3(dir))));
         int32_t farId = 0;
         Client::ClientLevels::WithLevel(portal.destDimension, [&]() {
             farId = PickEntityAlong(farOrigin, farDir, kPickRange - travelled,
-                                    blockLimit - travelled, outDragonPart);
+                                    blockLimit - travelled, outDragonPart, outHit);
         });
         return farId;
 #else
-        return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart);
+        return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit);
 #endif
     }
 
@@ -1440,7 +1586,7 @@ namespace Game {
                 // getAbilities().instabuild first thing in startDestroyBlock,
                 // before any progress math).
                 if (player->IsCreative()) {
-                    CreativeDestroy(currentHit->blockPos);
+                    CreativeDestroy(currentHit->blockPos, currentHit->hitFace);
                     return;
                 }
                 // Instant-break check (MC's `if (f >= 1.0F) destroyBlock(pos)`):
@@ -1451,11 +1597,14 @@ namespace Game {
                     const Block& block = BlockRegistry::Get(hereBlock);
                     const float inc = GetDestroyProgressPerTick(
                         player->inventory.GetSelectedItem(), block,
-                        player->physics.isOnGround);
+                        player->physics.isOnGround,
+                        player->GetEffectDigSpeedMultiplier(),
+                        player->physics.isEyeInWater);
                     if (inc >= 1.0f) {
                         // Instant break — set up minimal state so FinishDig's
                         // packet/inventory path runs, then fire it.
                         digState.destroyBlockPos      = currentHit->blockPos;
+                        digState.destroyFace          = currentHit->hitFace;
                         digState.destroyingBlockId    = hereBlock;
                         digState.destroyingBlockState = ReadBlockState(currentHit->blockPos);
                         digState.destroyProgress      = 1.0f;
@@ -1518,7 +1667,13 @@ namespace Game {
                 {
                     const Game::ItemID heldRMB = player->inventory.GetSelectedItem();
                     if (heldRMB != Game::ItemID(0) && heldRMB == Game::Items::PortalGun) {
-                        if (player->physics.isSneaking) {
+                        // The RAW sneak key, not physics.isSneaking: that one
+                        // is false while flying (shift descends), yet the
+                        // move packet — and so the server's clear/fire
+                        // choice — carries the key. Reading a different
+                        // thing here is what fired a projectile client-side
+                        // while the server was clearing the pair.
+                        if (Input::IsDown(*Input::Binds::Sneak)) {
                             OnHotbarChanged(player->inventory.GetSelectedSlot());
                             if (currentHit.has_value()) {
                                 SendUseItemOn(*currentHit, /*hand=*/0, /*altInteract=*/false);
@@ -1533,7 +1688,7 @@ namespace Game {
                                 // so the synthetic-hit air block is never
                                 // actually queried — OnGunUseOn runs and the
                                 // sneak+!alt branch calls ClearPair.
-                                const glm::vec3 eye  = player->physics.GetEyePosition();
+                                const glm::dvec3 eye = player->physics.GetEyePosition();
                                 const glm::ivec3 ipos(
                                     static_cast<int>(std::floor(eye.x)),
                                     static_cast<int>(std::floor(eye.y)),
@@ -1568,7 +1723,8 @@ namespace Game {
                 // This is what dye-on-sheep (and every future saddle / name
                 // tag / shears interaction) arrives through.
                 int interactDragonPart = -1;
-                if (const int32_t pickedEntity = PickEntity(&interactDragonPart);
+                glm::dvec3 interactHit(0.0);
+                if (const int32_t pickedEntity = PickEntity(&interactDragonPart, &interactHit);
                     pickedEntity != 0) {
                     if (networkClient) {
                         Network::InteractC2SPacket packet;
@@ -1576,6 +1732,16 @@ namespace Game {
                         packet.action   = Network::InteractC2SPacket::Action::Interact;
                         packet.sneaking = player->sneakPressed;
                         packet.dragonPart = static_cast<int8_t>(interactDragonPart);
+                        // MC InteractionAtLocationAction: the hit relative to
+                        // the entity's position (Player.interactOn subtracts
+                        // it). A mob's position is its feet.
+                        if (Client::g_clientMobManager) {
+                            if (const Client::ClientMob* picked = Client::g_clientMobManager->GetMob(pickedEntity);
+                                picked && picked->mob) {
+                                packet.hasLocation = true;
+                                packet.location = glm::vec3(interactHit - picked->mob->position);
+                            }
+                        }
                         if (auto connection = networkClient->GetConnection()) {
                             FlushMovement();
                             connection->SendPacket(
@@ -1635,9 +1801,14 @@ namespace Game {
                     // later; the server's ack confirms it or rolls it back.
                     if (!usedOn && predictable) {
                         PredictBlock(predictPos, predictBlock, sequence, predictState);
+                        PlayBlockPlaceSound(predictPos, predictState);
                         if (Game::IsDoorBlock(predictBlock)) {
                             PredictBlock(predictPos + glm::ivec3(0, 1, 0), predictBlock, sequence,
                                          Game::DoorUpperState(predictState));
+                        }
+                        if (Game::IsBedBlock(predictBlock)) {
+                            PredictBlock(Game::BedOtherHalfPos(predictPos, predictState), predictBlock, sequence,
+                                         Game::BedHeadState(predictState));
                         }
                     }
 
@@ -1682,6 +1853,18 @@ namespace Game {
                             // Minecraft.startUseItem, and BlockItem.useOn's
                             // own fallthrough to `use` for consumables).
                             // Mirror the condition by predicting the same hand.
+                            //
+                            // That fallthrough is gameMode.useItem, which
+                            // runs Item.use on the client as well; for a book
+                            // and quill that is LocalPlayer.openItemGui — its
+                            // editor opens even with a block in the crosshair.
+                            {
+                                const uint32_t useHand = PickUseHand();
+                                Client::ClientUsePlayer usePlayer(player);
+                                Game::ItemStack& held =
+                                    player->inventory.MutableSlot(usePlayer.handSlotIndex(useHand));
+                                if (held.itemId == Game::Items::WritableBook) usePlayer.OpenItemGui(held, useHand);
+                            }
                             StartPredictedUse(PickUseHand());
                         }
                     }
@@ -1740,6 +1923,8 @@ namespace Game {
         if (brokenBlock == BlockID::Bedrock && !player->IsCreative()) {
             return;
         }
+
+        PlayBlockBreakSound(pos, digState.destroyingBlockState);
 
         // MC Level.destroyBlock:266 — the cell becomes the FLUID that was in
         // it, not air. Breaking a waterlogged fence or a kelp stalk under an
@@ -1807,7 +1992,7 @@ namespace Game {
         // them here makes every shot fly the same direction.
         const glm::vec3 front = player->lookDir;
 
-        const glm::vec3 origin = player->physics.GetEyePosition();
+        const glm::dvec3 origin = player->physics.GetEyePosition();
 
         // Logical projectile — the collision raycast stays anchored to
         // the eye so the shot lands EXACTLY where the crosshair points
@@ -1858,11 +2043,11 @@ namespace Game {
             right = glm::normalize(glm::cross(front, worldUp));
         }
         const glm::vec3 up = glm::normalize(glm::cross(right, front));
-        const glm::vec3 muzzle =
+        const glm::dvec3 muzzle =
             origin
-            + right * kMuzzleOffsetCameraSpace.x
-            + up    * kMuzzleOffsetCameraSpace.y
-            + front * kMuzzleOffsetCameraSpace.z;
+            + glm::dvec3(right * kMuzzleOffsetCameraSpace.x
+                       + up    * kMuzzleOffsetCameraSpace.y
+                       + front * kMuzzleOffsetCameraSpace.z);
 
         // Aim the visual bolt at the crosshair point — find the
         // logical projectile's first impact within max range, and
@@ -1873,19 +2058,19 @@ namespace Game {
         // muzzle and the crosshair.
         const float reachM = kPortalProjSpeed_m_per_s * kPortalProjMaxLifetime;
         auto aimHit = Raycast::CastRay(origin, front, reachM);
-        glm::vec3 aimPoint = aimHit.has_value()
+        glm::dvec3 aimPoint = aimHit.has_value()
             ? aimHit->hitPoint
-            : (origin + front * reachM);
+            : (origin + glm::dvec3(front * reachM));
 #if ENABLE_IMMERSIVE_PORTALS
         // An aim line that pierces an immersive portal before its block:
         // the bolt ends at the surface, and a second bolt carries on from
         // the far surface, in the far level, to where the shot will land.
         {
-            const float aimDist = glm::length(aimPoint - origin);
+            const float aimDist = static_cast<float>(glm::length(aimPoint - origin));
             const Game::Immersive::Portal* crossed = nullptr;
             double bestT = 1.0;
             glm::dvec3 crossPoint{0.0};
-            const glm::dvec3 from(origin), to(origin + front * aimDist);
+            const glm::dvec3 from(origin), to(origin + glm::dvec3(front * aimDist));
             Client::ClientLevels::Active().Portals().ForEach([&](const Game::Immersive::Portal& portal) {
                 if (!portal.Has(Game::Immersive::PortalFlag::Teleportable)) return;
                 const auto s = portal.RaytraceSegment(from, to, portal.CrossingLeniency());
@@ -1893,13 +2078,13 @@ namespace Game {
                 bestT = s->t; crossed = &portal; crossPoint = s->point;
             });
             if (crossed) {
-                aimPoint = glm::vec3(crossPoint);
+                aimPoint = crossPoint;
                 const glm::dvec3 farDir = glm::normalize(crossed->TransformLocalVecNonScale(glm::dvec3(front)));
-                const glm::vec3 farStart(crossed->TransformPoint(crossPoint) + farDir * 0.01);
+                const glm::dvec3 farStart = crossed->TransformPoint(crossPoint) + farDir * 0.01;
                 const Game::DimensionId farDim =
                     crossed->IsMirror() ? Client::ClientLevels::ActiveDimension() : crossed->destDimension;
                 const float farReach = reachM - static_cast<float>(bestT) * aimDist;
-                glm::vec3 farEnd = farStart + glm::vec3(farDir) * farReach;
+                glm::dvec3 farEnd = farStart + farDir * static_cast<double>(farReach);
                 Client::ClientLevels::WithLevel(farDim, [&]() {
                     if (auto farHit = Raycast::CastRay(farStart, glm::vec3(farDir), farReach)) {
                         farEnd = farHit->hitPoint;
@@ -1943,14 +2128,14 @@ namespace Game {
                 Client::ClientLevels::WithLevel(p.dimension, [&]() {
                     hit = Raycast::CastRay(p.currentPos, p.direction, remaining);
                 });
-                const float blockDist = hit ? glm::length(hit->hitPoint - p.currentPos) : remaining;
+                const float blockDist = hit ? static_cast<float>(glm::length(hit->hitPoint - p.currentPos)) : remaining;
 
 #if ENABLE_IMMERSIVE_PORTALS
                 const Game::Immersive::Portal* crossed = nullptr;
                 double bestT = 1.0;
                 glm::dvec3 crossPoint{0.0};
                 if (Client::ClientLevel* level = Client::ClientLevels::Get(p.dimension)) {
-                    const glm::dvec3 from(p.currentPos), to(p.currentPos + p.direction * remaining);
+                    const glm::dvec3 from = p.currentPos, to = p.currentPos + glm::dvec3(p.direction * remaining);
                     level->Portals().ForEach([&](const Game::Immersive::Portal& portal) {
                         if (!portal.Has(Game::Immersive::PortalFlag::Teleportable)) return;
                         const auto s = portal.RaytraceSegment(from, to, portal.CrossingLeniency());
@@ -1960,7 +2145,7 @@ namespace Game {
                 }
                 if (crossed && static_cast<float>(bestT) * remaining < blockDist) {
                     const glm::dvec3 dir = glm::normalize(crossed->TransformLocalVecNonScale(glm::dvec3(p.direction)));
-                    p.currentPos = glm::vec3(crossed->TransformPoint(crossPoint) + dir * 0.01);
+                    p.currentPos = crossed->TransformPoint(crossPoint) + dir * 0.01;
                     p.direction  = glm::vec3(dir);
                     if (!crossed->IsMirror()) p.dimension = crossed->destDimension;
                     remaining -= static_cast<float>(bestT) * remaining;
@@ -1973,7 +2158,7 @@ namespace Game {
                     impacted = true;
                     break;
                 }
-                p.currentPos += p.direction * remaining;
+                p.currentPos += glm::dvec3(p.direction * remaining);
                 remaining = 0.0f;
             }
 

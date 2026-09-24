@@ -58,11 +58,12 @@ namespace Game {
 
     // MC FallingBlock.onPlace — schedules, nothing else.
     void FallingBlockOnPlace(ILevelWrite& level, const glm::ivec3& pos,
-                             BlockState newState, BlockState oldState);
+                             BlockState newState, BlockState oldState,
+                             bool movedByPiston);
 
     // MC FallingBlock.updateShape — also only schedules, and returns the state
     // unchanged (so this always answers false: no transform).
-    bool FallingBlockNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+    bool FallingBlockUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                      BlockState state,
                                      Direction toNeighbour, BlockID neighbourId,
                                      BlockState& outState,
@@ -73,7 +74,7 @@ namespace Game {
     // own hook rather than sharing the family one. Returning a transform makes
     // World::NotifyNeighborBlocks write the concrete and skip the schedule,
     // which is exactly vanilla's ordering.
-    bool ConcretePowderNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+    bool ConcretePowderUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                        BlockState state,
                                        Direction toNeighbour, BlockID neighbourId,
                                        BlockState& outState,
@@ -96,8 +97,9 @@ namespace Game {
     void ScaffoldingTick(ILevelWrite& level, const glm::ivec3& pos,
                          BlockState state, JavaRandom& random);
     void ScaffoldingOnPlace(ILevelWrite& level, const glm::ivec3& pos,
-                            BlockState newState, BlockState oldState);
-    bool ScaffoldingNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                            BlockState newState, BlockState oldState,
+                            bool movedByPiston);
+    bool ScaffoldingUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                     BlockState state,
                                     Direction toNeighbour, BlockID neighbourId,
                                     BlockState& outState,
@@ -116,7 +118,7 @@ namespace Game {
     // breaks; a stalactite collapses as a column of falling entities.
     void PointedDripstoneTick(ILevelWrite& level, const glm::ivec3& pos,
                               BlockState state, JavaRandom& random);
-    bool PointedDripstoneNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+    bool PointedDripstoneUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
                                          BlockState state,
                                          Direction toNeighbour, BlockID neighbourId,
                                          BlockState& outState,

@@ -131,6 +131,12 @@ public:
      * @param updateLimit - Recursion limit for neighbor updates
      * @return true if block was set successfully
      */
+    /**
+     * Reference: WorldGenRegion.markPosForPostProcessing - the chunk holding
+     * pos records it for LevelChunk.postProcessGeneration.
+     */
+    void markPosForPostprocessing(const core::BlockPos& pos);
+
     bool setBlock(
         const core::BlockPos& pos,
         BlockState* blockState,

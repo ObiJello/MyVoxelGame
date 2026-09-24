@@ -3,6 +3,7 @@
 
 #include "levelgen/WorldGenLevel.h"
 #include "levelgen/blockpredicates/BlockPredicate.h"
+#include "levelgen/AetherBlocks.h"
 #include "math/Mth.h"
 #include "random/LegacyRandomSource.h"
 #include "world/level/block/Blocks.h"
@@ -15,6 +16,8 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 // Reference: RuleProcessor.processBlock - ONE RandomSource.create(
@@ -55,6 +58,22 @@ fs::path findDataRoot() {
 BlockState* resolveState(const json& stateJson) {
     std::string name = stateJson.at("Name").get<std::string>();
     if (name.find(':') == std::string::npos) name = "minecraft:" + name;
+    if (aether_blocks::isAetherId(name)) {
+        // The Aether's lists (data/aether/worldgen/processor_list): resolved
+        // through AetherBlocks (engine slug or stand-in), keeping only the
+        // properties the resolved block accepts (double_drops drops out).
+        std::unordered_map<std::string, std::string> want;
+        if (stateJson.contains("Properties")) {
+            for (const auto& [key, value] : stateJson.at("Properties").items()) {
+                want[key] = value.get<std::string>();
+            }
+        }
+        BlockState* state = aether_blocks::state(name, want);
+        if (state == nullptr) {
+            throw std::runtime_error("processor output uses unresolvable block " + name);
+        }
+        return state;
+    }
     Block* block = Blocks::getBlock(name);
     if (block == nullptr) {
         throw std::runtime_error("processor output uses unregistered block " + name);
@@ -114,6 +133,10 @@ Rule parseRule(const json& ruleJson) {
     auto blockOf = [](const json& j, const char* key) {
         std::string name = j.at(key).get<std::string>();
         if (name.find(':') == std::string::npos) name = "minecraft:" + name;
+        if (aether_blocks::isAetherId(name)) {
+            const std::string resolved = aether_blocks::resolveName(name);
+            if (!resolved.empty()) name = resolved;
+        }
         Block* block = Blocks::getBlock(name);
         if (block == nullptr) {
             throw std::runtime_error("processor predicate uses unregistered block " + name);
@@ -304,6 +327,11 @@ struct ParsedList {
         std::string cappedLootTable;  // append_loot loot_table ("" = none)
         BlockState* cappedOutput = nullptr;
         int cappedLimit = 0;
+        // The Aether's processor types (world/processor/*.java).
+        bool isDoubleDrops = false;   // aether:double_drops
+        bool isEntityOnly = false;    // aether:boss_room (processEntity only)
+        Block* noReplaceBase = nullptr;  // aether:no_replace "baseblock"
+        bool isVerticalGradient = false; // aether:vertical_gradient
     };
     std::vector<Processor> processors;
 };
@@ -317,9 +345,13 @@ const ParsedList& loadList(const std::string& listId) {
     if (it != cache.end()) return *it->second;
 
     std::string path = listId;
+    std::string nameSpace = "minecraft";
     size_t colon = path.find(':');
-    if (colon != std::string::npos) path = path.substr(colon + 1);
-    fs::path file = findDataRoot() / "minecraft" / "worldgen" / "processor_list"
+    if (colon != std::string::npos) {
+        nameSpace = path.substr(0, colon);
+        path = path.substr(colon + 1);
+    }
+    fs::path file = findDataRoot() / nameSpace / "worldgen" / "processor_list"
                     / (path + ".json");
     std::ifstream input(file);
     if (!input) {
@@ -399,6 +431,34 @@ const ParsedList& loadList(const std::string& listId) {
             } else {
                 throw std::runtime_error("Unsupported capped limit in " + listId);
             }
+        } else if (type == "aether:double_drops") {
+            // DoubleDropsProcessor: double_drops=true on blocks that have it.
+            processor.isDoubleDrops = true;
+        } else if (type == "aether:boss_room") {
+            // BossRoomProcessor overrides processEntity only (the boss's
+            // dungeon tracker); blocks pass through. Template entities are
+            // not placed by the engine yet, so it has nothing to do.
+            processor.isEntityOnly = true;
+        } else if (type == "aether:surface_rule") {
+            // SurfaceRuleProcessor: a block in #aether:aether_dirt other than
+            // aether_dirt itself takes the dimension surface rule's top
+            // material when that is also aether dirt. The Aether surface
+            // rule's top material is aether_grass_block — the only such block
+            // the gold templates use — so the swap is an identity.
+            processor.isEntityOnly = true;
+        } else if (type == "aether:vertical_gradient") {
+            processor.isVerticalGradient = true;
+        } else if (type == "aether:no_replace") {
+            // NoReplaceProcessor: where the WORLD block is `baseblock`, the
+            // world block is kept (placed back unchanged).
+            std::string base = processorJson.at("baseblock").get<std::string>();
+            if (base.find(':') == std::string::npos) base = "minecraft:" + base;
+            if (aether_blocks::isAetherId(base)) base = aether_blocks::resolveName(base);
+            processor.noReplaceBase = Blocks::getBlock(base);
+            if (processor.noReplaceBase == nullptr) {
+                throw std::runtime_error("aether:no_replace baseblock " + base
+                                         + " unregistered in " + listId);
+            }
         } else {
             throw std::runtime_error("Unsupported processor type " + type
                                      + " in " + listId);
@@ -416,6 +476,74 @@ void appendProcessors(const std::string& listId, TemplatePlaceSettings& settings
                       WorldGenLevel* level) {
     const ParsedList& list = loadList(listId);
     for (const ParsedList::Processor& processor : list.processors) {
+        if (processor.isEntityOnly) continue;
+        if (processor.isDoubleDrops) {
+            settings.processors.push_back(
+                [](const core::BlockPos&, BlockState* state, const core::BlockPos&,
+                   BlockState*, const core::BlockPos&) -> BlockState* {
+                    if (state == nullptr) return state;
+                    auto props = state->getProperties();
+                    auto it = props.find("double_drops");
+                    if (it == props.end() || it->second == "true") return state;
+                    // The sibling state differing only in double_drops.
+                    for (BlockState* candidate :
+                         state->getBlock()->getStateDefinition().getPossibleStates()) {
+                        auto have = candidate->getProperties();
+                        bool match = true;
+                        for (const auto& [key, value] : props) {
+                            const std::string& expect = key == "double_drops" ? std::string("true") : value;
+                            auto h = have.find(key);
+                            if (h == have.end() || h->second != expect) { match = false; break; }
+                        }
+                        if (match) return candidate;
+                    }
+                    return state;
+                });
+            continue;
+        }
+        if (processor.isVerticalGradient) {
+            // VerticalGradientProcessor: under a placed aether_dirt, a world
+            // #aether:holystone block turns to aether_dirt on
+            // settings.getRandom(below).nextBoolean() — a positional
+            // RandomSource.create(Mth.getSeed(below)) (no settings random).
+            // Skipped outside the 3x3 write window (isOutOfBounds).
+            BlockState* aetherDirt = aether_blocks::defaultState("aether:aether_dirt");
+            settings.processors.push_back(
+                [level, aetherDirt](const core::BlockPos& worldPos, BlockState* state,
+                                    const core::BlockPos&, BlockState*,
+                                    const core::BlockPos&) -> BlockState* {
+                    if (state == nullptr || aetherDirt == nullptr || state->getBlock() != aetherDirt->getBlock()) {
+                        return state;
+                    }
+                    if (!level->ensureCanWrite(worldPos)) return state;
+                    const core::BlockPos below = worldPos.below();
+                    BlockState* belowState = level->getBlockState(below);
+                    if (belowState != nullptr
+                        && ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                               belowState, "aether:holystone")) {
+                        LegacyRandomSource random(Mth::getSeed(below.getX(), below.getY(), below.getZ()));
+                        if (random.nextBoolean()) {
+                            level->setBlock(below, aetherDirt, 2);
+                        }
+                    }
+                    return state;
+                });
+            continue;
+        }
+        if (processor.noReplaceBase != nullptr) {
+            Block* base = processor.noReplaceBase;
+            settings.processors.push_back(
+                [level, base](const core::BlockPos& worldPos, BlockState* state,
+                              const core::BlockPos&, BlockState*,
+                              const core::BlockPos&) -> BlockState* {
+                    BlockState* worldState = level->getBlockState(worldPos);
+                    if (worldState != nullptr && worldState->getBlock() == base) {
+                        return worldState;
+                    }
+                    return state;
+                });
+            continue;
+        }
         if (!processor.protectedTag.empty()) {
             const std::string& tag = processor.protectedTag;
             settings.processors.push_back(
@@ -447,15 +575,16 @@ void appendProcessors(const std::string& listId, TemplatePlaceSettings& settings
             settings.processors.push_back(
                 [level, integrity, rottableTag](
                     const core::BlockPos& worldPos, BlockState* state,
-                    const core::BlockPos&, BlockState* originalState,
+                    const core::BlockPos&, BlockState*,
                     const core::BlockPos&) -> BlockState* {
                     (void)level;
-                    // Reference: BlockRotProcessor.processBlock - the tag
-                    // gate tests the ORIGINAL template state and short-
-                    // circuits BEFORE the nextFloat draw.
+                    // Reference: 26.3 BlockRotProcessor.processBlock - the tag
+                    // gate tests the PROCESSED state (a jigsaw's final_state
+                    // rots like any other block) and short-circuits BEFORE the
+                    // nextFloat draw.
                     if (!rottableTag.empty()
                         && !::minecraft::levelgen::blockpredicates::
-                               matchesBlockTagName(originalState, rottableTag)) {
+                               matchesBlockTagName(state, rottableTag)) {
                         return state;
                     }
                     if (integrity >= 1.0f) return state;

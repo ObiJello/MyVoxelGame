@@ -26,8 +26,10 @@
 namespace Network {
 
     // Ordinals mirror ServerboundPlayerActionPacket.Action (:66-74).
-    // PERFORM_RESPAWN is our extension — MC ships it as ServerboundClientCommand
-    // Action.PERFORM_RESPAWN; we append it here instead of a new packet.
+    // PERFORM_RESPAWN and STOP_SLEEPING are our extensions — MC ships the
+    // first as ServerboundClientCommand Action.PERFORM_RESPAWN and the second
+    // as ServerboundPlayerCommand Action.STOP_SLEEPING; both are appended
+    // here instead of two new packets.
     enum class PlayerAction : uint8_t {
         START_DESTROY_BLOCK    = 0,
         ABORT_DESTROY_BLOCK    = 1,
@@ -38,6 +40,7 @@ namespace Network {
         SWAP_ITEM_WITH_OFFHAND = 6,
         STAB                   = 7,
         PERFORM_RESPAWN        = 8,
+        STOP_SLEEPING          = 9,   // the InBedScreen's "Leave Bed"
     };
 
     struct PlayerActionC2SPacket {

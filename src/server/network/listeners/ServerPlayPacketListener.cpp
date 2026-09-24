@@ -58,6 +58,13 @@ namespace Server {
         // (IUsePlayer::PlaceCampfireFood) — the block entity lookup needs the
         // world, which the dispatch doesn't carry.
         m_session.FlushPendingCampfireFood();
+        // And a bed that asked to be slept in — or, in the Nether and the
+        // End, to blow up (IUsePlayer::UseBed).
+        m_session.FlushPendingBedUse();
+        // And a sign that asked for its editor or a dye (IUsePlayer::OpenSignEditor / ApplySignItem).
+        m_session.FlushPendingSignUse();
+        // And a written book the use-item fallthrough opened (IUsePlayer::OpenItemGui).
+        m_session.FlushPendingBookOpen();
         // And the overflow of a bucket that filled while a stack was held
         // (IUsePlayer::CreateFilledResult → player.drop).
         m_session.FlushPendingDrops();
@@ -78,6 +85,9 @@ namespace Server {
                    packet.hand, packet.sequence, packet.yRot, packet.xRot);
 
         m_session.HandleUseItem(packet);
+        // A written book asked to be read during that use
+        // (IUsePlayer::OpenItemGui → ServerPlayer.openItemGui).
+        m_session.FlushPendingBookOpen();
         m_session.FlushPendingDrops();
     }
 
@@ -128,6 +138,33 @@ namespace Server {
         m_session.HandlePickItem(packet);
     }
 
+    void ServerPlayPacketListener::onSignUpdateC2S(const Network::SignUpdateC2SPacket& packet) {
+        // MC handleSignUpdate: behind the load gate like every interaction.
+        if (!m_session.HasClientLoaded()) return;
+        m_session.HandleSignUpdate(packet);
+    }
+
+    void ServerPlayPacketListener::onEditBookC2S(const Network::EditBookC2SPacket& packet) {
+        // MC handleEditBook carries no hasClientLoaded check of its own, but
+        // every interaction here sits behind the load gate.
+        if (!m_session.HasClientLoaded()) return;
+        m_session.HandleEditBook(packet);
+    }
+
+    void ServerPlayPacketListener::onContainerButtonClickC2S(const Network::ContainerButtonClickC2SPacket& packet) {
+        // MC handleContainerButtonClick: behind the load gate like the rest
+        // of the container family.
+        if (!m_session.HasClientLoaded()) return;
+        m_session.HandleContainerButtonClick(packet);
+    }
+
+    void ServerPlayPacketListener::onSelectTradeC2S(const Network::SelectTradeC2SPacket& packet) {
+        // MC handleSelectTrade: behind the load gate like the rest of the
+        // container family.
+        if (!m_session.HasClientLoaded()) return;
+        m_session.HandleSelectTrade(packet);
+    }
+
     void ServerPlayPacketListener::onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) {
         m_session.HandleInventoryClick(packet);
     }
@@ -157,7 +194,8 @@ namespace Server {
         Server::g_integratedServer->HandleInteract(
             m_connection.GetConnectionId(), packet.entityId,
             packet.action == Network::InteractC2SPacket::Action::Attack,
-            packet.sprinting, packet.dragonPart);
+            packet.sprinting, packet.dragonPart,
+            packet.hasLocation ? &packet.location : nullptr);
     }
 
     void ServerPlayPacketListener::onInventoryCloseC2S(const Network::InventoryCloseC2SPacket& packet) {

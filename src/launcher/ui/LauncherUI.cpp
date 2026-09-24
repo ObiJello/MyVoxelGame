@@ -11,6 +11,7 @@
 #include "launcher/LauncherConfig.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/entity/PlayerColors.hpp"
+#include "common/core/Log.hpp"
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
@@ -1424,39 +1425,64 @@ namespace Launcher {
             ImGui::Dummy(ImVec2(0, 0));
         }
 
-        // Game directory row
+        // Game directory row: OPEN reveals the folder in the file browser,
+        // the path itself is a click-to-copy target (brightens on hover).
         {
             ImVec2 p = ImGui::GetCursorScreenPos();
             float rowH = 46.0f;
             Txt(dl, g_fontSmall, p + ImVec2(0, (rowH - 15) * 0.5f), TextBody, "Game directory");
 
-            static double s_copiedAt = -10.0;
-            const bool justCopied = ImGui::GetTime() - s_copiedAt < 1.2;
-            const char* copyLabel = justCopied ? "COPIED" : "COPY";
-            ImVec2 cts(MeasureTracked(g_fontMono95, copyLabel, 0.95f),
-                       Measure(g_fontMono95, copyLabel).y);
-            ImVec2 copySize(cts.x + 20, cts.y + 12);
-            ImVec2 copyPos(p.x + w - copySize.x, p.y + (rowH - copySize.y) * 0.5f);
+            ImVec2 ots(MeasureTracked(g_fontMono95, "OPEN", 0.95f),
+                       Measure(g_fontMono95, "OPEN").y);
+            ImVec2 openSize(ots.x + 20, ots.y + 12);
+            ImVec2 openPos(p.x + w - openSize.x, p.y + (rowH - openSize.y) * 0.5f);
 
             std::string dir = Platform::g_gameDirectory.GetGameDirectory();
             float labelW = Measure(g_fontSmall, "Game directory").x;
-            float pathMax = w - labelW - copySize.x - 30;
+            float pathMax = w - labelW - openSize.x - 30;
             std::string shown = Ellipsize(g_fontMono105, dir, pathMax);
             ImVec2 pts = Measure(g_fontMono105, shown.c_str());
-            Txt(dl, g_fontMono105,
-                ImVec2(copyPos.x - 10 - pts.x, p.y + (rowH - pts.y) * 0.5f),
-                TextMuted, shown.c_str());
+            ImVec2 pathPos(openPos.x - 10 - pts.x, p.y + (rowH - pts.y) * 0.5f);
 
-            ImGui::SetCursorScreenPos(copyPos);
-            bool pressed = ImGui::InvisibleButton("##copyDir", copySize);
-            bool hov = ImGui::IsItemHovered();
-            dl->AddRectFilled(copyPos, copyPos + copySize,
-                              hov ? BgActiveHov : BgActive, 7.0f);
-            TxtTracked(dl, g_fontMono95, copyPos + ImVec2(10, 6),
-                       justCopied ? GreenFg : AccentSoft, copyLabel, 0.95f);
-            if (pressed) {
+            // Path: click to copy. Hit box padded a little so thin glyphs are
+            // still comfortable to hit.
+            static double s_copiedAt = -10.0;
+            const bool justCopied = ImGui::GetTime() - s_copiedAt < 1.2;
+            ImGui::SetCursorScreenPos(ImVec2(pathPos.x - 4, p.y + 6));
+            bool pathPressed = ImGui::InvisibleButton("##copyDir",
+                                                      ImVec2(pts.x + 8, rowH - 12));
+            bool pathHov = ImGui::IsItemHovered();
+            if (pathHov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            Txt(dl, g_fontMono105, pathPos,
+                justCopied ? GreenFg : (pathHov ? IM_COL32_WHITE : TextMuted),
+                shown.c_str());
+            if (pathHov && ImGui::BeginTooltip()) {
+                {
+                    // Pop the font BEFORE EndTooltip — End() asserts on fonts
+                    // still pushed within the window.
+                    Font f(g_fontSmall);
+                    ImGui::TextUnformatted(justCopied ? "Copied" : "Click to copy");
+                }
+                ImGui::EndTooltip();
+            }
+            if (pathPressed) {
                 ImGui::SetClipboardText(dir.c_str());
                 s_copiedAt = ImGui::GetTime();
+            }
+
+            ImGui::SetCursorScreenPos(openPos);
+            bool pressed = ImGui::InvisibleButton("##openDir", openSize);
+            bool hov = ImGui::IsItemHovered();
+            if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            dl->AddRectFilled(openPos, openPos + openSize,
+                              hov ? BgActiveHov : BgActive, 7.0f);
+            TxtTracked(dl, g_fontMono95, openPos + ImVec2(10, 6),
+                       AccentSoft, "OPEN", 0.95f);
+            if (pressed) {
+                if (!Platform::GameDirectory::OpenInFileBrowser(dir)) {
+                    Log::Error("Failed to open game directory in file browser: %s",
+                               dir.c_str());
+                }
             }
             ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
             ImGui::Dummy(ImVec2(0, 0));

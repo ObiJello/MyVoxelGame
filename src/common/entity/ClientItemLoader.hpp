@@ -2,8 +2,8 @@
 // Reads MC 1.21.4+ client-item-info JSON from `assets/items/{slug}.json` — the
 // modern dispatch tree that supersedes the old `assets/models/item/{slug}.json`
 // + `overrides[]` system. See:
-//   minecraft_code/decompiled_net/minecraft/client/renderer/item/ItemModel.java
-//   minecraft_code/decompiled_net/minecraft/client/renderer/item/{Conditional,
+//   minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/client/renderer/item/ItemModel.java
+//   minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/client/renderer/item/{Conditional,
 //                                                                 RangeSelect,
 //                                                                 Select}ItemModel.java
 //
@@ -21,6 +21,7 @@
 // fishing cast, etc.) just renders the rest frame.
 #pragma once
 
+#include <glm/glm.hpp>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -32,7 +33,32 @@ namespace Game {
         FlatSprite,   // rest model is item/X — render as flat 2D sprite
         BlockModel,   // rest model is block/X — render via 3D iso using that block model
         Special,      // BEWLR (chest, sign, banner, shield…) — fall back to flat-sprite for now
+        Composite,    // 26.x "minecraft:composite": several block models, each with its own
+                      // transformation — baked into one synthetic block model (see
+                      // ItemRegistry::BakeCompositeItemModels) named by restSlug
     };
+
+    // One child of a composite item model: a block model plus the part of
+    // its `transformation` a BlockModel can carry — whole quarter turns
+    // (BlockModelRegistry::RotateModel) and an offset in model pixels. The
+    // quarter turns pivot about the cell centre the way RotateModel does, so
+    // `offsetPx` already includes the difference between that pivot and MC's
+    // rotate-about-origin-then-translate (Transformation.compose).
+    struct CompositeChild {
+        std::string modelSlug;
+        int         xQuarterTurns = 0;
+        int         yQuarterTurns = 0;
+        glm::vec3   offsetPx{0.0f};
+    };
+
+    // Which ItemTintSource a `tints` entry is. Only the kinds whose colour
+    // depends on the STACK need telling apart from a fixed default; the rest
+    // (constant, grass, foliage, dye's default) are baked into layerTints.
+    //   Potion — MC ItemTintSources' "minecraft:potion": the stack's
+    //            PotionContents.getColorOr(default), made opaque.
+    //   Dye    — MC "minecraft:dye" (Dye.calculate): the stack's DYED_COLOR
+    //            made opaque, else the default (LEATHER_COLOR on leather).
+    enum class ItemTintKind : uint8_t { Fixed = 0, Potion = 1, Dye = 2 };
 
     struct ClientItemDesc {
         ClientItemKind kind = ClientItemKind::Missing;
@@ -59,10 +85,15 @@ namespace Game {
         // untinted (white). Mirrors MC's ItemTintSource — for dye-tinted items
         // (leather armor, etc.) we read the `default` value of each tint. A
         // value of 0 means "no tint" and is rendered as white. See
-        //   minecraft_code/.../client/renderer/item/properties/select/...
+        //   minecraft_code_26.1-snapshot-1/.../client/renderer/item/properties/select/...
         // and the leather_chestplate.json `tints` array (default -6265536 =
         // 0xFFA06540, the brown leather color).
         std::vector<uint32_t> layerTints;
+        // Parallel to layerTints: which tint source each entry came from.
+        std::vector<ItemTintKind> layerTintKinds;
+        // For kind == Composite: the children, in order (the first supplies
+        // the display transforms, as MC's CompositeModel takes them).
+        std::vector<CompositeChild> compositeChildren;
     };
 
     class ClientItemLoader {

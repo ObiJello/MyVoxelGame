@@ -1,10 +1,12 @@
 #include "data/worldgen/features/CaveFeatures.h"
+#include "data/worldgen/features/MiscOverworldFeatures.h"
 #include "data/worldgen/features/TreeFeatures.h"
 #include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/placement/PlacementModifiers.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "levelgen/carver/CarverConfiguration.h"
 #include "util/IntProvider.h"
+#include <deque>
 
 // Reference: net/minecraft/data/worldgen/features/CaveFeatures.java
 
@@ -46,9 +48,12 @@ ConfiguredFeature* CaveFeatures::FOSSIL_DIAMONDS = nullptr;
 ConfiguredFeature* CaveFeatures::DRIPSTONE_CLUSTER = nullptr;
 ConfiguredFeature* CaveFeatures::LARGE_DRIPSTONE = nullptr;
 ConfiguredFeature* CaveFeatures::POINTED_DRIPSTONE = nullptr;
+ConfiguredFeature* CaveFeatures::SULFUR_SPIKE_CLUSTER = nullptr;
+ConfiguredFeature* CaveFeatures::SULFUR_SPIKE = nullptr;
 ConfiguredFeature* CaveFeatures::UNDERWATER_MAGMA = nullptr;
 ConfiguredFeature* CaveFeatures::GLOW_LICHEN = nullptr;
 ConfiguredFeature* CaveFeatures::ROOTED_AZALEA_TREE = nullptr;
+ConfiguredFeature* CaveFeatures::ROOTED_SULFUR_SPRING = nullptr;
 ConfiguredFeature* CaveFeatures::CAVE_VINE = nullptr;
 ConfiguredFeature* CaveFeatures::CAVE_VINE_IN_MOSS = nullptr;
 ConfiguredFeature* CaveFeatures::MOSS_VEGETATION = nullptr;
@@ -94,6 +99,7 @@ static BlockColumnFeature s_dripleafBlockColumnFeature;
 void CaveFeatures::bootstrap() {
     if (s_initialized) return;
     TreeFeatures::bootstrap();
+    MiscOverworldFeatures::bootstrap();  // ROOTED_SULFUR_SPRING grows SULFUR_SPRING
 
     auto createPlacedFeature = [](ConfiguredFeature* feature, const std::string& name = "") -> PlacedFeature* {
         auto placed = std::make_unique<PlacedFeature>(feature, std::vector<PlacementModifier*>{}, name);
@@ -207,11 +213,11 @@ void CaveFeatures::bootstrap() {
 
     // =========================================================================
     // GLOW_LICHEN
-    // Reference: CaveFeatures.java line 106
-    // MultifaceGrowthConfiguration(glowLichenBlock, 20, false, true, true, 0.5F,
+    // Reference: 26.3 CaveFeatures.java line 122
+    // MultifaceGrowthFeature(glowLichenBlock, 20, false, true, true, 0.5F,
     //   HolderSet.direct(Block::builtInRegistryHolder, Blocks.STONE, Blocks.ANDESITE,
     //   Blocks.DIORITE, Blocks.GRANITE, Blocks.DRIPSTONE_BLOCK, Blocks.CALCITE,
-    //   Blocks.TUFF, Blocks.DEEPSLATE))
+    //   Blocks.TUFF, Blocks.DEEPSLATE, Blocks.SULFUR, Blocks.CINNABAR))
     // =========================================================================
     {
         auto config = std::make_unique<MultifaceGrowthConfiguration>();
@@ -224,7 +230,7 @@ void CaveFeatures::bootstrap() {
         config->canBePlacedOn = {
             "minecraft:stone", "minecraft:andesite", "minecraft:diorite",
             "minecraft:granite", "minecraft:dripstone_block", "minecraft:calcite",
-            "minecraft:tuff", "minecraft:deepslate"
+            "minecraft:tuff", "minecraft:deepslate", "minecraft:sulfur", "minecraft:cinnabar"
         };
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<MultifaceGrowthConfiguration, MultifaceGrowthFeature>>(
@@ -255,13 +261,7 @@ void CaveFeatures::bootstrap() {
             2,
             BlockPredicate::allOf(
                 BlockPredicate::anyOf(
-                    BlockPredicate::matchesBlocks(
-                        std::vector<std::string>{
-                            "minecraft:air",
-                            "minecraft:cave_air",
-                            "minecraft:void_air"
-                        }
-                    ),
+                    BlockPredicate::ONLY_IN_AIR_PREDICATE,
                     BlockPredicate::matchesTag("minecraft:replaceable_by_trees")
                 ),
                 BlockPredicate::matchesTag(core::Vec3i(0, -1, 0), "minecraft:azalea_grows_on")
@@ -271,6 +271,40 @@ void CaveFeatures::bootstrap() {
         auto feature = std::make_unique<ConfiguredFeatureImpl<RootSystemConfiguration, RootSystemFeature>>(
             &s_rootSystemFeature, *config);
         ROOTED_AZALEA_TREE = feature.get();
+        s_features.push_back(std::move(feature));
+        s_blockStateProviders.push_back(config->rootStateProvider);
+        s_blockStateProviders.push_back(config->hangingRootStateProvider);
+        s_rootSystemConfigs.push_back(std::move(config));
+    }
+
+    // =========================================================================
+    // ROOTED_SULFUR_SPRING (26.3 CaveFeatures.java)
+    // RootSystemFeature(inlinePlaced(SULFUR_SPRING), 5, 8, 2, 3,
+    //   #azalea_root_replaceable, sulfur, 20, 184, 1, 1, sulfur, 1, 1,
+    //   ONLY_IN_AIR_PREDICATE)
+    // =========================================================================
+    {
+        auto sulfurSpring = createPlacedFeature(MiscOverworldFeatures::SULFUR_SPRING, "SULFUR_SPRING_INLINE");
+        auto config = std::make_unique<RootSystemConfiguration>(
+            sulfurSpring,
+            5,
+            3,
+            "minecraft:azalea_root_replaceable",
+            BlockStateProvider::simple(Blocks::SULFUR),
+            20,
+            184,
+            1,
+            1,
+            BlockStateProvider::simple(Blocks::SULFUR),
+            1,
+            1,
+            BlockPredicate::ONLY_IN_AIR_PREDICATE
+        );
+        config->levelTestDistance = 8;
+        config->maxLevelDeviation = 2;
+        auto feature = std::make_unique<ConfiguredFeatureImpl<RootSystemConfiguration, RootSystemFeature>>(
+            &s_rootSystemFeature, *config);
+        ROOTED_SULFUR_SPRING = feature.get();
         s_features.push_back(std::move(feature));
         s_blockStateProviders.push_back(config->rootStateProvider);
         s_blockStateProviders.push_back(config->hangingRootStateProvider);
@@ -623,47 +657,97 @@ void CaveFeatures::bootstrap() {
     }
 
     // =========================================================================
-    // SCULK_PATCH_DEEP_DARK
-    // Reference: CaveFeatures.java line 122
-    // SculkPatchConfiguration(10, 32, 64, 0, 1, ConstantInt.of(0), 0.5F)
+    // SCULK_PATCH_DEEP_DARK / SCULK_PATCH_ANCIENT_CITY
+    // Reference: 26.3 CaveFeatures.java lines 139-142
+    //   catalyst = SimpleBlock(sculk_catalyst) placed with RandomChance(0.5),
+    //     Filter(hasSturdyFace(DOWN, UP))
+    //   shriekers = SimpleBlock(sculk_shrieker[can_summon=true]) placed with
+    //     Count(UniformInt(1, 3)), Offset(UniformInt(-2, 2), UniformInt(-2, 2)),
+    //     Filter(ONLY_IN_AIR && hasSturdyFace(DOWN, UP))
+    //   DEEP_DARK    = Sequence[SculkPatch(10, 32, 64, 0, 1), catalyst]
+    //   ANCIENT_CITY = Sequence[SculkPatch(10, 32, 64, 0, 1), Overlay[catalyst, shriekers]]
     // =========================================================================
     {
-        auto config = std::make_unique<SculkPatchConfiguration>();
-        config->chargeCount = 10;
-        config->amountPerCharge = 32;
-        config->spreadAttempts = 64;
-        config->growthRounds = 0;
-        config->spreadRounds = 1;
-        config->extraRareGrowths = std::make_shared<util::ConstantInt>(0);
-        config->catalystChance = 0.5f;
+        using namespace levelgen::placement;
+        using levelgen::blockpredicates::BlockPredicate;
+        static SimpleBlockFeature s_sculkSimpleBlockFeature;
+        static SequenceFeature s_sculkSequenceFeature;
+        static OverlayFeature s_sculkOverlayFeature;
+        static std::deque<PlacedFeature> s_sculkPlaced;
+        static std::vector<std::shared_ptr<BlockStateProvider>> s_sculkProviders;
+        static std::vector<std::unique_ptr<SimpleBlockConfiguration>> s_sculkSimpleConfigs;
+        static std::vector<std::unique_ptr<SequenceFeatureConfiguration>> s_sculkSequenceConfigs;
+        static std::vector<std::unique_ptr<OverlayFeatureConfiguration>> s_sculkOverlayConfigs;
+        static RandomChancePlacement s_catalystChance(0.5f);
+        static BlockPredicateFilter s_sturdyBelow = BlockPredicateFilter::forPredicate(
+            BlockPredicate::hasSturdyFace(core::Vec3i(0, -1, 0), core::Direction::UP));
+        static levelgen::carver::UniformInt s_shriekerCount(1, 3);
+        static CountPlacement s_shriekerCountPlacement = CountPlacement::of(&s_shriekerCount);
+        static levelgen::carver::UniformInt s_shriekerSpread(-2, 2);
+        static OffsetPlacement s_shriekerOffset(&s_shriekerSpread, &s_shriekerSpread, &s_shriekerSpread);
+        static BlockPredicateFilter s_shriekerGround = BlockPredicateFilter::forPredicate(BlockPredicate::allOf(
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
+            BlockPredicate::hasSturdyFace(core::Vec3i(0, -1, 0), core::Direction::UP)));
 
-        auto feature = std::make_unique<ConfiguredFeatureImpl<SculkPatchConfiguration, SculkPatchFeature>>(
-            &s_sculkPatchFeature, *config);
-        SCULK_PATCH_DEEP_DARK = feature.get();
-        s_sculkPatchConfigs.push_back(std::move(config));
-        s_features.push_back(std::move(feature));
-    }
+        auto simpleBlock = [&](BlockState* state) -> ConfiguredFeature* {
+            s_sculkProviders.push_back(BlockStateProvider::simple(state));
+            s_sculkSimpleConfigs.push_back(std::make_unique<SimpleBlockConfiguration>(s_sculkProviders.back().get()));
+            auto feature = std::make_unique<ConfiguredFeatureImpl<SimpleBlockConfiguration, SimpleBlockFeature>>(
+                &s_sculkSimpleBlockFeature, *s_sculkSimpleConfigs.back());
+            ConfiguredFeature* raw = feature.get();
+            s_features.push_back(std::move(feature));
+            return raw;
+        };
+        auto inlinePlaced = [&](ConfiguredFeature* feature, std::vector<PlacementModifier*> modifiers,
+                                const std::string& name) -> PlacedFeature* {
+            s_sculkPlaced.emplace_back(feature, std::move(modifiers), name);
+            return &s_sculkPlaced.back();
+        };
+        auto sculkPatch = [&]() -> PlacedFeature* {
+            auto config = std::make_unique<SculkPatchConfiguration>();
+            config->chargeCount = 10;
+            config->amountPerCharge = 32;
+            config->spreadAttempts = 64;
+            config->growthRounds = 0;
+            config->spreadRounds = 1;
+            auto feature = std::make_unique<ConfiguredFeatureImpl<SculkPatchConfiguration, SculkPatchFeature>>(
+                &s_sculkPatchFeature, *config);
+            ConfiguredFeature* raw = feature.get();
+            s_sculkPatchConfigs.push_back(std::move(config));
+            s_features.push_back(std::move(feature));
+            return inlinePlaced(raw, {}, "SCULK_PATCH_INLINE");
+        };
+        auto sequence = [&](std::vector<PlacedFeature*> features) -> ConfiguredFeature* {
+            s_sculkSequenceConfigs.push_back(std::make_unique<SequenceFeatureConfiguration>(std::move(features)));
+            auto feature = std::make_unique<ConfiguredFeatureImpl<SequenceFeatureConfiguration, SequenceFeature>>(
+                &s_sculkSequenceFeature, *s_sculkSequenceConfigs.back());
+            ConfiguredFeature* raw = feature.get();
+            s_features.push_back(std::move(feature));
+            return raw;
+        };
 
-    // =========================================================================
-    // SCULK_PATCH_ANCIENT_CITY
-    // Reference: CaveFeatures.java line 123
-    // SculkPatchConfiguration(10, 32, 64, 0, 1, UniformInt.of(1, 3), 0.5F)
-    // =========================================================================
-    {
-        auto config = std::make_unique<SculkPatchConfiguration>();
-        config->chargeCount = 10;
-        config->amountPerCharge = 32;
-        config->spreadAttempts = 64;
-        config->growthRounds = 0;
-        config->spreadRounds = 1;
-        config->extraRareGrowths = std::make_shared<util::UniformInt>(1, 3);
-        config->catalystChance = 0.5f;
+        PlacedFeature* catalyst = inlinePlaced(
+            simpleBlock(Blocks::getDefaultState("minecraft:sculk_catalyst")),
+            {&s_catalystChance, &s_sturdyBelow}, "SCULK_CATALYST_INLINE");
 
-        auto feature = std::make_unique<ConfiguredFeatureImpl<SculkPatchConfiguration, SculkPatchFeature>>(
-            &s_sculkPatchFeature, *config);
-        SCULK_PATCH_ANCIENT_CITY = feature.get();
-        s_sculkPatchConfigs.push_back(std::move(config));
-        s_features.push_back(std::move(feature));
+        using ::minecraft::world::level::block::state::properties::BlockStateProperties;
+        BlockState* shrieker = Blocks::getDefaultState("minecraft:sculk_shrieker");
+        if (shrieker && BlockStateProperties::CAN_SUMMON && shrieker->hasProperty(BlockStateProperties::CAN_SUMMON)) {
+            shrieker = shrieker->setValue(*BlockStateProperties::CAN_SUMMON, true);
+        }
+        PlacedFeature* shriekers = inlinePlaced(
+            simpleBlock(shrieker),
+            {&s_shriekerCountPlacement, &s_shriekerOffset, &s_shriekerGround}, "SCULK_SHRIEKERS_INLINE");
+
+        SCULK_PATCH_DEEP_DARK = sequence({sculkPatch(), catalyst});
+
+        s_sculkOverlayConfigs.push_back(std::make_unique<OverlayFeatureConfiguration>(
+            std::vector<PlacedFeature*>{catalyst, shriekers}));
+        auto overlay = std::make_unique<ConfiguredFeatureImpl<OverlayFeatureConfiguration, OverlayFeature>>(
+            &s_sculkOverlayFeature, *s_sculkOverlayConfigs.back());
+        PlacedFeature* catalystAndShriekers = inlinePlaced(overlay.get(), {}, "SCULK_CATALYST_AND_SHRIEKERS_INLINE");
+        s_features.push_back(std::move(overlay));
+        SCULK_PATCH_ANCIENT_CITY = sequence({sculkPatch(), catalystAndShriekers});
     }
 
     // =========================================================================
@@ -739,15 +823,18 @@ void CaveFeatures::bootstrap() {
 
     // =========================================================================
     // LARGE_DRIPSTONE
-    // Reference: CaveFeatures.java line 102
-    // LargeDripstoneConfiguration(30, UniformInt(3,19), UniformFloat(0.4,2.0), 0.33,
+    // Reference: CaveFeatures.java line 116 (26.3)
+    // LargeDripstoneFeature(#dripstone_replaceable_blocks, 30,
+    //   ClampedInt.of(UniformInt(3,19), 3, 16), UniformFloat(0.4,2.0), 0.33,
     //   UniformFloat(0.3,0.9), UniformFloat(0.4,1.0), UniformFloat(0.0,0.3), 4, 0.6)
+    // Only the provider's min/max are read (radius range 3..16).
     // =========================================================================
     {
         static LargeDripstoneFeature s_largeDripFeature;
+        static ::minecraft::util::UniformInt s_columnRadiusSource(3, 19);
         auto config = std::make_unique<LargeDripstoneConfiguration>();
         config->floorToCeilingSearchRange = 30;
-        config->columnRadius = std::make_shared<::minecraft::util::UniformInt>(3, 19);
+        config->columnRadius = std::make_shared<::minecraft::util::ClampedInt>(&s_columnRadiusSource, 3, 16);
         config->maxColumnRadiusToCaveHeightRatio = 0.33f;
         config->stalactiteBluntness = std::make_shared<levelgen::carver::UniformFloat>(0.3f, 0.9f);
         config->stalagmiteBluntness = std::make_shared<levelgen::carver::UniformFloat>(0.4f, 1.0f);
@@ -782,8 +869,7 @@ void CaveFeatures::bootstrap() {
         ConfiguredFeature* pointedConfigured = feature.get();
         s_features.push_back(std::move(feature));
 
-        auto airOrWater = BlockPredicate::matchesBlocks(
-            std::vector<std::string>{"minecraft:air", "minecraft:water"});
+        auto airOrWater = BlockPredicate::ONLY_IN_AIR_OR_WATER_PREDICATE;
         std::vector<PlacedFeature*> variants;
 
         s_dripEnvScans.push_back(EnvironmentScanPlacement::scanningFor(
@@ -816,6 +902,89 @@ void CaveFeatures::bootstrap() {
         auto selector = std::make_unique<ConfiguredFeatureImpl<SimpleRandomFeatureConfiguration, SimpleRandomSelectorFeature>>(
             &s_simpleRandomSelectorFeature, *selectorConfig);
         POINTED_DRIPSTONE = selector.get();
+        s_simpleRandomConfigs.push_back(std::move(selectorConfig));
+        s_features.push_back(std::move(selector));
+    }
+
+    // =========================================================================
+    // SULFUR_SPIKE_CLUSTER (26.3 CaveFeatures.java)
+    // SpeleothemClusterFeature(sulfur, sulfur_spike,
+    //   #sulfur_spike_replaceable_blocks, 12, UniformInt(1,4), UniformInt(2,8),
+    //   1, 3, UniformInt(2,4), density UniformFloat(0.3,0.7),
+    //   wetness ConstantFloat.ZERO, 0.1, 3, 8)
+    // =========================================================================
+    {
+        static DripstoneClusterFeature s_sulfurClusterFeature;
+        auto config = std::make_unique<DripstoneClusterConfiguration>();
+        config->floorToCeilingSearchRange = 12;
+        config->height = std::make_shared<::minecraft::util::UniformInt>(1, 4);
+        config->radius = std::make_shared<::minecraft::util::UniformInt>(2, 8);
+        config->maxStalagmiteStalactiteHeightDiff = 1;
+        config->heightDeviation = 3;
+        config->dripstoneBlockLayerThickness = std::make_shared<::minecraft::util::UniformInt>(2, 4);
+        config->wetness = std::make_shared<levelgen::carver::ConstantFloat>(0.0f);
+        config->density = std::make_shared<levelgen::carver::UniformFloat>(0.3f, 0.7f);
+        config->chanceOfDripstoneColumnAtMaxDistanceFromCenter = 0.1f;
+        config->maxDistanceFromEdgeAffectingChanceOfDripstoneColumn = 3;
+        config->maxDistanceFromCenterAffectingHeightBias = 8;
+        config->blocks = SpeleothemBlocks::sulfur();
+        auto feature = std::make_unique<ConfiguredFeatureImpl<DripstoneClusterConfiguration, DripstoneClusterFeature>>(
+            &s_sulfurClusterFeature, *config);
+        SULFUR_SPIKE_CLUSTER = feature.get();
+        s_features.push_back(std::move(feature));
+    }
+
+    // =========================================================================
+    // SULFUR_SPIKE (26.3 CaveFeatures.java): POINTED_DRIPSTONE's
+    // simple_random_selector with SpeleothemFeature(sulfur, sulfur_spike,
+    // #sulfur_spike_replaceable_blocks, 0.2, 0.7, 0.5, 0.5).
+    // =========================================================================
+    {
+        static PointedDripstoneFeature s_sulfurSpikeFeature;
+        static std::deque<EnvironmentScanPlacement> s_spikeEnvScans;
+        static std::deque<RandomOffsetPlacement> s_spikeOffsets;
+        static levelgen::carver::ConstantInt s_spikePlusOne(1);
+        static levelgen::carver::ConstantInt s_spikeMinusOne(-1);
+
+        auto config = std::make_unique<PointedDripstoneConfiguration>(0.2f, 0.7f, 0.5f, 0.5f, SpeleothemBlocks::sulfur());
+        auto feature = std::make_unique<ConfiguredFeatureImpl<PointedDripstoneConfiguration, PointedDripstoneFeature>>(
+            &s_sulfurSpikeFeature, *config);
+        ConfiguredFeature* spikeConfigured = feature.get();
+        s_features.push_back(std::move(feature));
+
+        auto airOrWater = BlockPredicate::ONLY_IN_AIR_OR_WATER_PREDICATE;
+        std::vector<PlacedFeature*> variants;
+
+        s_spikeEnvScans.push_back(EnvironmentScanPlacement::scanningFor(
+            EnvironmentScanPlacement::Direction::DOWN,
+            BlockPredicate::solid(), airOrWater, 12));
+        s_spikeOffsets.push_back(RandomOffsetPlacement::vertical(&s_spikePlusOne));
+        {
+            auto placed = std::make_unique<PlacedFeature>(
+                spikeConfigured,
+                std::vector<PlacementModifier*>{&s_spikeEnvScans.back(), &s_spikeOffsets.back()},
+                "SULFUR_SPIKE_DOWN_INLINE");
+            variants.push_back(placed.get());
+            s_placedFeatures.push_back(std::move(placed));
+        }
+
+        s_spikeEnvScans.push_back(EnvironmentScanPlacement::scanningFor(
+            EnvironmentScanPlacement::Direction::UP,
+            BlockPredicate::solid(), airOrWater, 12));
+        s_spikeOffsets.push_back(RandomOffsetPlacement::vertical(&s_spikeMinusOne));
+        {
+            auto placed = std::make_unique<PlacedFeature>(
+                spikeConfigured,
+                std::vector<PlacementModifier*>{&s_spikeEnvScans.back(), &s_spikeOffsets.back()},
+                "SULFUR_SPIKE_UP_INLINE");
+            variants.push_back(placed.get());
+            s_placedFeatures.push_back(std::move(placed));
+        }
+
+        auto selectorConfig = std::make_unique<SimpleRandomFeatureConfiguration>(variants);
+        auto selector = std::make_unique<ConfiguredFeatureImpl<SimpleRandomFeatureConfiguration, SimpleRandomSelectorFeature>>(
+            &s_simpleRandomSelectorFeature, *selectorConfig);
+        SULFUR_SPIKE = selector.get();
         s_simpleRandomConfigs.push_back(std::move(selectorConfig));
         s_features.push_back(std::move(selector));
     }

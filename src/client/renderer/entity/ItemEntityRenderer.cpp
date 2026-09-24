@@ -3,9 +3,11 @@
 #include "ItemEntityRenderer.hpp"
 #include "EntityCulling.hpp"
 #include "../core/Frustum.hpp"
+#include "../core/RenderOrigin.hpp"
 
 #include "../backend/RenderBackend.hpp"
 #include "../environment/EnvironmentState.hpp"
+#include "../environment/EntityEnvironment.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "../viewmodel/HeldItemSpriteMesh.hpp"
 #include "../viewmodel/ItemMeshBuilder.hpp"
@@ -253,7 +255,9 @@ namespace Render {
 
         // MC EntityRenderer.shouldRender — distance AND frustum. A crater's
         // worth of drops behind the camera used to cost a full draw each.
-        const Frustum frustum = Frustum::FromMatrix(viewProj);
+        // Culling stays in WORLD space: `view` is render-space (camera-
+        // relative), so the frustum is built from its world twin.
+        const Frustum frustum = Frustum::FromMatrix(projection * Render::WorldViewFromRenderView(view));
 
         // Bound lazily by the first item that draws; nothing is bound for a
         // frame with every item culled.
@@ -277,8 +281,11 @@ namespace Render {
             // Sub-tick blend of the previous and current tick positions. Doing
             // this per frame is what makes a falling item look continuous
             // rather than stepping 20 times a second.
-            const glm::vec3 pos = glm::vec3(
-                glm::mix(ce.renderPrevPosition, e.pos, static_cast<double>(partialTick)));
+            // Kept in double until the render-space subtraction at the draw;
+            // the float `pos` is for the culls only.
+            const glm::dvec3 posD =
+                glm::mix(ce.renderPrevPosition, e.pos, static_cast<double>(partialTick));
+            const glm::vec3 pos = glm::vec3(posD);
 
             const glm::vec3 d = pos - cameraPos;
             if (glm::dot(d, d) > maxDistSq) { ++m_tally.cullDistance; continue; }
@@ -296,6 +303,7 @@ namespace Render {
                     ++m_tally.cullFrustum;
                     continue;
                 }
+                ++EntityCulling::g_renderedThisFrame;
                 // MC isSectionCompiledAndVisible, tightened by the occlusion
                 // BFS — an item on the far side of a wall is a draw for
                 // nothing. See EntityCulling.hpp.
@@ -307,7 +315,7 @@ namespace Render {
 
             // MC's age is in ticks and includes the partial tick, so the bob
             // and spin advance smoothly within a tick rather than in steps.
-            DrawItem(e.stack, pos, ce.ageTicks + partialTick, e.bobOffs,
+            DrawItem(e.stack, Render::ToRender(posD), ce.ageTicks + partialTick, e.bobOffs,
                      viewProj, cameraPos, pass, e.scale);
             ++itemDraws;
             ++m_tally.drawn;
@@ -335,18 +343,31 @@ namespace Render {
             const glm::dvec3 target = p.targetSeeded
                 ? glm::mix(p.targetPosOld, p.targetPos, static_cast<double>(partialTick))
                 : p.startPos;
-            const glm::vec3 pos =
-                glm::vec3(glm::mix(p.startPos, target, static_cast<double>(t)));
+            const glm::dvec3 posD = glm::mix(p.startPos, target, static_cast<double>(t));
+            const glm::vec3 pos = glm::vec3(posD);
 
             const glm::vec3 d = pos - cameraPos;
             if (glm::dot(d, d) > maxDistSq) continue;
 
             // Frozen age: a collected item keeps the orientation it had when it
             // was picked up instead of continuing to spin as it flies.
-            DrawItem(p.stack, pos, p.ageTicks, p.bobOffs,
+            DrawItem(p.stack, Render::ToRender(posD), p.ageTicks, p.bobOffs,
                      viewProj, cameraPos, pass);
         }
 
+        if (pass.begun) g_renderBackend->UnbindMesh();
+    }
+
+    // `pos` is the item's RENDER-space position (Render::ToRender of the
+    // interpolated world position — the subtraction happened in double in
+    // the caller); it goes straight into the model translation.
+    void ItemEntityRenderer::RenderSingle(const Game::ItemStack& stack, const glm::dvec3& worldPos,
+                                          float ageTicks, float bobOffs,
+                                          const glm::mat4& projection, const glm::mat4& view,
+                                          const glm::vec3& cameraPos) {
+        if (!m_initialized || !g_renderBackend || stack.IsEmpty()) return;
+        PassState pass;
+        DrawItem(stack, Render::ToRender(worldPos), ageTicks, bobOffs, projection * view, cameraPos, pass);
         if (pass.begun) g_renderBackend->UnbindMesh();
     }
 
@@ -407,10 +428,9 @@ namespace Render {
                 // Sprite items reuse the cached extruded mesh the hand uses.
                 // Layer-0 tint — see HeldItemRenderer. Plant sprites are
                 // greyscale and would otherwise lie on the ground grey.
-                const uint32_t spriteTint =
-                    item.layerTints.empty() ? 0u : item.layerTints[0];
-                const auto* entry =
-                    HeldItemSpriteMesh::GetOrBuild(item.spriteName, spriteTint);
+                // Every layer with its per-stack tint: a potion's contents
+                // colour, a spawn egg's base and spots.
+                const auto* entry = HeldItemSpriteMesh::GetOrBuildForStack(stack);
                 if (!entry || entry->indexCount == 0 ||
                     entry->mesh == INVALID_MESH) return;  // sprite failed to load
                 mesh        = entry->mesh;
@@ -444,12 +464,13 @@ namespace Render {
                 g_renderBackend->BindShader(m_shader);
                 g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ::Render::ChunkRenderer::PortalEntityClipPlane());
                 const auto& env = EnvironmentState::Get().Frame();
-                g_renderBackend->SetUniformFloat(m_shader, "uSkyBrightness", env.skyBrightness);
                 g_renderBackend->SetUniformVec4(m_shader, "uFogColor",
                     glm::vec4(env.fogColor, 1.0f));
                 g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
                     glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
-                g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", cameraPos);
+                // Fog distance is measured in render space (the model is
+                // camera-relative), so the camera is handed over as such.
+                g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", Render::ToRender(cameraPos));
                 // Force the per-kind state below to bind on this first item.
                 pass.lastBlock = !isBlock;
                 pass.lastTex   = INVALID_TEXTURE;
@@ -478,6 +499,11 @@ namespace Render {
                 pass.lastTex = tex;
                 g_renderBackend->BindTexture(tex, 0);
             }
+
+            // MC getPackedLightCoords: the light at the item's eye (ITEM's
+            // eyeHeight 0.2125), times the lightmap — per item.
+            EntityEnvironment::SetDrawLight(m_shader, EntityEnvironment::LitAt(
+                Render::ToWorld(pos) + glm::dvec3(0.0, 0.2125 * static_cast<double>(scale), 0.0)));
 
             // MC ItemEntityRenderer: lift so the model's lowest point sits
             // ITEM_MIN_HOVER_HEIGHT (1/16) above the entity origin, measured
@@ -535,13 +561,15 @@ namespace Render {
                 }
 
                 g_renderBackend->SetUniformMat4(m_shader, "uMVP", viewProj * model);
-                g_renderBackend->SetUniformMat4(m_shader, "uModel", model);   // fog from the WORLD position
+                g_renderBackend->SetUniformMat4(m_shader, "uModel", model);   // fog from the RENDER-space position
                 // block.vert clips with dot(plane, aPos) — correct for terrain,
-                // whose aPos is world space, and wrong here, where aPos is the
+                // whose aPos is render space, and wrong here, where aPos is the
                 // item mesh's own space: the plane's offset term alone then
                 // decided whether an item seen through a portal existed at
                 // all. Hand the shader the plane expressed in this draw's
-                // model space instead: p_local = p_world * M, i.e. Mᵀ p.
+                // model space instead: p_local = p_render * M, i.e. Mᵀ p.
+                // The model is render-space and PortalEntityClipPlane() is a
+                // render-space plane, so the two agree.
                 {
                     const glm::vec4 plane = ::Render::ChunkRenderer::PortalEntityClipPlane();
                     if (plane.x != 0.0f || plane.y != 0.0f || plane.z != 0.0f) {

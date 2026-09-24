@@ -69,10 +69,14 @@ namespace Game {
         // NearestAttackableTargetGoal runs per candidate.
         bool IsAngryAt(const LivingEntity& entity) const;
 
-        // MC isAngryAtAllPlayers: gated on the UNIVERSAL_ANGER game rule,
-        // which defaults OFF and has no game-rule system here — treated as
-        // permanently false, matching MC's default world.
-        bool IsAngryAtAllPlayers() const { return false; }
+        // MC isAngryAtAllPlayers: universal_anger on, still angry, and no
+        // particular target — then every player is one.
+        bool IsAngryAtAllPlayers() const;
+
+        // MC playerDied: with forgive_dead_players on, a mob whose grudge is
+        // against this player drops it. Called by the server for every
+        // NeutralMob in the level when a player dies.
+        void PlayerDied(const LivingEntity& player);
 
         // MC isAngry — the anger window is still open.
         bool IsAngry() const;

@@ -12,6 +12,12 @@
     "minecraft:mangrove_planks",
     "minecraft:bamboo_planks",
     "minecraft:cherry_planks",
-    "minecraft:poplar_planks"
+    "minecraft:poplar_planks",
+    "minecraft:whisperwood_planks",
+    "minecraft:twilight_oak_planks",
+    "minecraft:canopy_planks",
+    "minecraft:tf_mangrove_planks",
+    "minecraft:dark_planks",
+    "minecraft:skyroot_planks"
   ]
 }

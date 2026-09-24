@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "group": "lumen_window",
+  "key": {
+    "N": "minecraft:nightglass",
+    "P": "minecraft:cyan_lumen_panel"
+  },
+  "pattern": [
+    "N",
+    "P"
+  ],
+  "result": {
+    "count": 2,
+    "id": "minecraft:guttering_cyan_window"
+  }
+}

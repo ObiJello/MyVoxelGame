@@ -1,5 +1,8 @@
 // File: src/common/entity/ExperienceOrb.cpp
 #include "ExperienceOrb.hpp"
+#include "common/world/fluid/FluidState.hpp"
+#include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/block/BlockFriction.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,20 +10,21 @@
 namespace Game {
 
     namespace {
-        // MC Entity.isEyeInFluid(FluidTags.WATER), reduced to source fluids:
-        // the eye point is submerged when its cell holds water whose surface
-        // (8/9 of the cell, or the full cell when water continues above)
-        // stands above the eye.
+        // MC Entity.isEyeInFluid(FluidTags.WATER): the eye point is
+        // submerged when its cell holds water whose camera surface
+        // (FluidState.getHeightForCamera — amount/9, the full cell under a
+        // ceiling or where water continues above) stands above the eye.
         bool EyeInWater(const glm::dvec3& feetPos, const PhysicsContext& ctx) {
+            if (!ctx.blockAccess) return false;
             const double eyeY = feetPos.y + ExperienceOrb::kEyeHeight;
             const int bx = static_cast<int>(std::floor(feetPos.x));
             const int by = static_cast<int>(std::floor(eyeY));
             const int bz = static_cast<int>(std::floor(feetPos.z));
-            if (!ctx.ContainsWater(bx, by, bz)) return false;
-            const double surface = ctx.ContainsWater(bx, by + 1, bz)
-                ? static_cast<double>(by) + 1.0
-                : static_cast<double>(by) + 8.0 / 9.0;
-            return eyeY < surface;
+            const FluidState fs = GetFluidState(*ctx.blockAccess, bx, by, bz);
+            if (!fs.Is(FluidType::Water)) return false;
+            const double surface = static_cast<double>(by) +
+                FluidHeightForCamera(*ctx.blockAccess, glm::ivec3(bx, by, bz), fs);
+            return eyeY <= surface;
         }
     } // namespace
 
@@ -114,7 +118,15 @@ namespace Game {
         }
 
         // ── Friction — ALL axes, unlike the item entity ────────────────────
-        const double friction = onGround ? kGroundDrag : kAirDrag;
+        // ExperienceOrb.tick: airDrag, times Block.getFriction() of the block
+        // below the feet while grounded.
+        double friction = kAirDrag;
+        if (onGround) {
+            const glm::ivec3 below = BlockPosBelowThatAffectsMovement(pos);
+            // Motion-aware: quicksoil is FrictionCapped (BlockFriction.hpp).
+            friction *= GetBlockFriction(context.GetBlock(below.x, below.y, below.z),
+                                         glm::dvec3(vel));
+        }
         vel *= friction;
 
         // ── Landing bounce ─────────────────────────────────────────────────

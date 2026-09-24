@@ -1,0 +1,16 @@
+{
+  "model": {
+    "type": "minecraft:model",
+    "model": "minecraft:item/hush_leviathan_spawn_egg",
+    "tints": [
+      {
+        "type": "minecraft:constant",
+        "value": -15844801
+      },
+      {
+        "type": "minecraft:constant",
+        "value": -15233914
+      }
+    ]
+  }
+}

@@ -46,9 +46,17 @@ namespace Render {
                     const glm::vec3& cameraPos, const Frustum& frustum,
                     float partialTick);
 
+        // /morph: one orb at a world position, drawn as the orbs are (its
+        // bob and colour cycle from `ageTicks`). No cull.
+        void RenderSingle(int value, const glm::dvec3& worldPos, float ageTicks,
+                          const glm::mat4& projection, const glm::mat4& view,
+                          const glm::vec3& cameraPos);
+
     private:
         // Append one orb's world-space quad to m_verts.
-        void AppendOrb(int value, const glm::vec3& worldPos, float ageTicks,
+        // `renderPos` is render-space (Render::ToRender of the orb's
+        // interpolated world position).
+        void AppendOrb(int value, const glm::vec3& renderPos, float ageTicks,
                        const glm::mat3& billboard);
 
         bool m_initialized = false;
@@ -69,6 +77,9 @@ namespace Render {
             MeshHandle   mesh = INVALID_MESH;
         };
         FrameBuffers m_frames[2];
+        // The upload and draw of m_verts (Render and RenderSingle share it).
+        void SubmitOrbs(const glm::mat4& projection, const glm::mat4& view,
+                        const glm::vec3& cameraPos, FrameBuffers& fb);
         BufferHandle m_ib = INVALID_BUFFER;
         EntityFrame::Cursor m_frameCursor;
         size_t m_orbCursor = 0;   // orbs already written this frame

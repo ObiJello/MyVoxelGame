@@ -1,5 +1,6 @@
 // File: src/server/world/ChunkProvider.hpp
 #pragma once
+#include <chrono>
 
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/math/WorldMath.hpp"
@@ -20,6 +21,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <mutex>
 
@@ -128,6 +131,12 @@ namespace Game {
         // ticked this tick.
         std::shared_ptr<Chunk> GetLoadedChunk(Math::ChunkPos position);
 
+        // Told about every chunk the cache evicts (any thread) — World wires
+        // it to its LevelLightManager::NoteEvicted. Set once, before loads.
+        void SetLightEvictionHook(std::function<void(Math::ChunkPos, const std::shared_ptr<Chunk>&)> hook) {
+            m_lightEvictionHook = std::move(hook);
+        }
+
     private:
         // Cache-only chunk fetch with a per-thread 4-entry memo in front of it.
         // See the long note at its definition. Deliberately routed to the
@@ -135,6 +144,7 @@ namespace Game {
         // generate path would let a blast reaching an unloaded column stall the
         // server tick on terrain generation.
         std::shared_ptr<Chunk> GetCachedChunk(Math::ChunkPos position) const;
+
 
         // Borrowing form of the same fetch, for the hot block accessors. The
         // reference is the thread's memo slot: valid only until the next chunk
@@ -173,6 +183,11 @@ namespace Game {
         BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
         BlockState GetBlockState(int worldX, int worldY, int worldZ) const override;
         uint16_t GetBiome(int worldX, int worldY, int worldZ) const override;
+        // MC LevelReader.getNoiseBiome(quartX, quartY, quartZ): the stored
+        // 4x4x4 cell, quart Y clamped into the build height as
+        // ChunkAccess.getNoiseBiome clamps it. A chunk not resident answers
+        // the fallback biome.
+        uint16_t GetNoiseBiome(int quartX, int quartY, int quartZ) const;
         void SetBlock(int worldX, int worldY, int worldZ, BlockID block);
         // stateIndex is the index into the block's own state list (MC
         // BlockState.getId()); 0 = the block's default state.
@@ -215,7 +230,11 @@ namespace Game {
         // === SAVING ===
 
         void SaveChunk(Math::ChunkPos position);
-        void SaveAllDirtyChunks();
+        // wait = false: queue to the IO thread and return (autosave); see
+        // ChunkCache::SaveAllDirty.
+        void SaveAllDirtyChunks(bool wait = true);
+        // MC saveChunksEagerly — see ChunkCache::SaveSomeDirty.
+        size_t SaveDirtyChunksEagerly(size_t maxChunks, std::chrono::steady_clock::time_point deadline);
 
         // === CONFIGURATION ===
 
@@ -261,8 +280,20 @@ namespace Game {
         // its sand never falls.
         //
         // MUST be thread-safe; TryLoadFromDisk runs on the worker pool.
+        // Every chunk handed to the saver, with what is being written (see
+        // ChunkCache::SetSavedObserver). Only after Initialize (the cache).
+        void SetChunkSavedCallback(std::function<void(Math::ChunkPos, const Chunk&)> cb) {
+            if (m_chunkCache) m_chunkCache->SetSavedObserver(std::move(cb));
+        }
         void SetChunkTicksLoadedCallback(std::function<void(Math::ChunkPos)> cb) {
             m_onChunkTicksLoaded = std::move(cb);
+        }
+        // A chunk entering the cache with worldgen post-processing still
+        // pending (Chunk::postProcessing) announces itself here — generated
+        // or read back from disk; World applies it once the chunk ticks. MUST
+        // be thread-safe: chunks complete on the worker pool.
+        void SetChunkPostProcessCallback(std::function<void(Math::ChunkPos)> cb) {
+            m_onChunkPostProcess = std::move(cb);
         }
 
         // === STATISTICS ===
@@ -282,6 +313,10 @@ namespace Game {
 
         // Get all loaded chunk positions (for iterating loaded chunks)
         std::vector<Math::ChunkPos> GetLoadedChunkPositions() const;
+
+        // Resident chunks with at least one block entity (ChunkCache).
+        std::vector<std::pair<Math::ChunkPos, std::shared_ptr<Chunk>>>
+            GetChunksWithBlockEntities() const;
 
         void LogPerformanceStats() const;
         bool ValidateState() const;
@@ -313,6 +348,18 @@ namespace Game {
         bool ClearEntityChunk   (Math::ChunkPos pos, std::string& error);
         bool EntityPersistenceEnabled() const { return m_anvilIo != nullptr; }
 
+        // MC ServerLevel.addWorldGenChunkEntities' input: the entities world
+        // generation placed in this chunk (Chunk::worldgenEntities), handed
+        // out ONCE. Drains the resident chunk's list, plus anything parked
+        // when a chunk was evicted before its entities were ever claimed (a
+        // chunk generated for the spawn search or a neighbour fetch can leave
+        // the cache without a player having tracked it). The parked lists are
+        // in memory only; a chunk evicted, saved and never revisited before
+        // the server stops keeps its blocks but not those mobs. Handed out
+        // at most once per position per session, so a chunk regenerated in a
+        // world that keeps no saves does not bring its mobs twice. Any thread.
+        std::vector<WorldgenEntity> TakeWorldgenEntities(Math::ChunkPos pos);
+
     private:
         // Configuration
         ChunkProviderConfig m_config;
@@ -338,6 +385,8 @@ namespace Game {
         // See SetChunkTicksLoadedCallback. Assigned once during world setup,
         // before any load can run, so it needs no synchronisation of its own.
         std::function<void(Math::ChunkPos)> m_onChunkTicksLoaded;
+        // See SetChunkPostProcessCallback; assigned once during world setup.
+        std::function<void(Math::ChunkPos)> m_onChunkPostProcess;
 
         std::unique_ptr<DirtyTracker> m_dirtyTracker;
 
@@ -347,6 +396,16 @@ namespace Game {
         // Statistics
         mutable std::mutex m_statsMutex;
         ChunkProviderStats m_stats;
+
+        // See TakeWorldgenEntities: worldgen entities of chunks evicted
+        // before the level claimed them, and the chunks whose entities have
+        // been handed out — a world that keeps no saves regenerates an
+        // evicted chunk from the library, and its structure mobs must not
+        // come a second time.
+        std::mutex m_worldgenEntityMutex;
+        std::unordered_map<Math::ChunkPos, std::vector<WorldgenEntity>, Math::ChunkPosHash>
+            m_evictedWorldgenEntities;
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_worldgenEntitiesTaken;
 
         // === INTERNAL WORKFLOWS ===
 
@@ -366,6 +425,7 @@ namespace Game {
         void ConfigureComponents();
 
         void OnChunkEvicted(Math::ChunkPos position, std::shared_ptr<Chunk> chunk, bool wasDirty);
+        std::function<void(Math::ChunkPos, const std::shared_ptr<Chunk>&)> m_lightEvictionHook;
 
         // === VALIDATION ===
 

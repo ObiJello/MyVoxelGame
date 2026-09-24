@@ -5,17 +5,25 @@
 #include "../IntegratedServer.hpp"
 #include "../level/ServerLevel.hpp"
 #include "../entity/ItemEntityManager.hpp"
+#include "../entity/MobManager.hpp"
+#include "../entity/ServerEntityTracker.hpp"
+#include "../entity/ServerLevelBridge.hpp"   // PlayerEntityView
+#include "../level/PortalTravel.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../session/PlayerSession.hpp"
 #include "../session/PlayerSessionManager.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Mth.hpp"
+#include "common/entity/ItemEntity.hpp"
 #include "common/entity/Mob.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
+#include "common/world/level/DimensionId.hpp"
+#include "common/world/level/World.hpp"
 
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -65,30 +73,191 @@ namespace Server {
             return e.position + glm::dvec3(0.0, eyeHeight, 0.0);
         }
 
-        // MC TeleportCommand.performTeleport, minus the dimension change.
-        //
-        // Returns false only for a position outside the spawnable bounds, which
-        // MC turns into commands.teleport.invalidPosition.
-        bool PerformTeleport(const CommandSource& source,
-                             const SelectedEntity& victim, const glm::dvec3& pos,
-                             const Rotation& rot) {
-            if (!InSpawnableBounds(pos)) return false;
+        // What became of one victim — the feedback line distinguishes MC's
+        // commands.teleport.invalidPosition from a crossing that could not
+        // be carried out.
+        enum class TeleportResult : uint8_t { Moved, OutOfBounds, Failed };
 
-            const float yRot = Game::Mth::WrapDegrees(rot.yRot);
-            const float xRot = Game::Mth::WrapDegrees(rot.xRot);
+        // A non-player arriving in a level it was not in: make sure the
+        // column it lands in exists before it is inserted there. A mob
+        // placed in a chunk that was never loaded is simulated against air
+        // and saved nowhere. The destination of `/tp <mob> <player>` is
+        // already loaded (a player stands there); coordinates in a level
+        // nobody has visited are not. Same hold-and-generate as a portal
+        // exit (PortalTravel::EnsureExitAreaLoaded — a one-off stall).
+        void EnsureLandingLoaded(ServerLevel& level, const glm::dvec3& pos) {
+            Game::World* world = level.World();
+            if (!world) return;
+            const glm::ivec3 block{ static_cast<int>(std::floor(pos.x)),
+                                    static_cast<int>(std::floor(pos.y)),
+                                    static_cast<int>(std::floor(pos.z)) };
+            if (world->IsPositionLoaded(block.x, block.y, block.z)) return;
+            PortalTravel::EnsureExitAreaLoaded(level, block);
+        }
+
+        // Send tracker output scoped to the level it describes.
+        void SendTrackerPackets(const CommandSource& source, Game::DimensionId dimension,
+                                const std::vector<EntityPacketOut>& packets) {
+            if (!source.sessions) return;
+            for (const EntityPacketOut& packet : packets) {
+                auto session = source.sessions->GetSession(packet.connectionId);
+                if (!session || !session->GetConnection()) continue;
+                session->GetConnection()->SendPacketIn(dimension,
+                                                       static_cast<uint8_t>(packet.packetId),
+                                                       packet.payload);
+            }
+        }
+
+        // MC Entity.teleportTo(level, …) when `level` is not the victim's:
+        // Entity.teleport(TeleportTransition) → teleportCrossDimension (or
+        // ServerPlayer.teleport's respawn path for a player). The transition
+        // is absolute — position, rotation, deltaMovement ZERO — so the
+        // victim arrives still, facing (yRot, xRot).
+        TeleportResult TeleportAcross(const CommandSource& source, const SelectedEntity& victim,
+                                      Game::DimensionId toDim, const glm::dvec3& pos,
+                                      float yRot, float xRot) {
+            if (!g_integratedServer) return TeleportResult::Failed;
+            ServerLevel* from = g_integratedServer->GetLevel(victim.dimension);
+            ServerLevel* to   = g_integratedServer->GetOrCreateLevel(toDim);
+            if (!from || !to) {
+                Log::Warning("[TeleportCommand] %s: '%s' -> '%s' has no level to cross between",
+                             victim.name.c_str(),
+                             std::string(Game::DimensionName(victim.dimension)).c_str(),
+                             std::string(Game::DimensionName(toDim)).c_str());
+                return TeleportResult::Failed;
+            }
 
             switch (victim.kind) {
                 case SelectedEntity::Kind::Player: {
-                    if (!victim.session) return true;
-                    ServerConnection* conn = victim.session->GetConnection();
-                    if (!conn) return true;
-                    conn->Teleport(pos.x, pos.y, pos.z, yRot, xRot);
-                    return true;
+                    ServerPlayer* player = victim.session ? victim.session->GetPlayer() : victim.player;
+                    if (!player) return TeleportResult::Failed;
+                    PlayerEntityView* view = g_integratedServer->GetPlayerEntityView(player->getPlayerId());
+                    if (!view) return TeleportResult::Failed;
+
+                    // The dimension change every portal and /dim make: the
+                    // old level's tickets dropped, a ticket at the landing,
+                    // ChangeDimensionS2C (the client swaps its level and
+                    // shows the loading screen), then the position packet.
+                    // ArriveAt lands keeping the player's OWN facing (MC
+                    // Relative rotation), so the command's absolute
+                    // rotation is written onto the player first — MC
+                    // ServerPlayer.teleportTo(level, x, y, z, relatives=∅,
+                    // yRot, xRot).
+                    player->setRotation(yRot, xRot);
+                    PortalTravel::ArriveAt(*g_integratedServer, *from, *to, *view, pos);
+                    return player->getDimensionId() == Game::DimensionToRaw(toDim)
+                        ? TeleportResult::Moved : TeleportResult::Failed;
                 }
 
                 case SelectedEntity::Kind::Mob: {
                     Game::Mob* mob = victim.mob;
-                    if (!mob) return true;
+                    if (!mob || mob->IsRemoved()) return TeleportResult::Failed;
+                    MobManager* fromMobs = from->Mobs();
+                    if (!fromMobs || !to->Mobs() || !to->MobLevel() || !from->MobLevel())
+                        return TeleportResult::Failed;
+                    const int32_t id = mob->GetId();
+                    if (fromMobs->Find(id) != mob) return TeleportResult::Failed;
+
+                    EnsureLandingLoaded(*to, pos);
+
+                    // MC removeAfterChangingDimensions: the old level's
+                    // watchers are told it is gone before the new level's
+                    // tracker announces it on its next pass.
+                    std::vector<EntityPacketOut> outgoing;
+                    if (from->MobTracker()) from->MobTracker()->RemoveEntity(id, outgoing);
+                    SendTrackerPackets(source, from->Dimension(), outgoing);
+
+                    // Extract breaks riding links (the vehicle and riders
+                    // stay behind) and clears every reference TO the mob.
+                    std::unique_ptr<Game::Mob> owned = fromMobs->Extract(id);
+                    if (!owned) return TeleportResult::Failed;
+                    // …and the mob's own references to that level's
+                    // entities, which would dangle once it ticks elsewhere
+                    // (the same sweep EntityPortalTravel::MoveMob makes).
+                    for (PlayerEntityView* view : from->MobLevel()->PlayerViews()) mob->ClearReferenceTo(view);
+                    for (const auto& [otherId, other] : fromMobs->All()) mob->ClearReferenceTo(other.get());
+
+                    // MC teleportSetPosition(PositionMoveRotation.of(transition)):
+                    // placed before AddExisting, which files the mob under
+                    // the chunk it stands in.
+                    mob->position    = pos;
+                    mob->oldPosition = pos;
+                    mob->velocity    = glm::dvec3(0.0);
+                    mob->yRot = mob->yRotO = yRot;
+                    mob->xRot = mob->xRotO = xRot;
+                    mob->yHeadRot = mob->yHeadRotO = yRot;
+                    mob->yBodyRot = mob->yBodyRotO = yRot;
+                    mob->onGround = true;
+
+                    mob->SetLevel(to->MobLevel());
+                    if (!to->Mobs()->AddExisting(std::move(owned))) {
+                        // Process-wide ids make this unreachable; if it
+                        // happens the mob is gone rather than duplicated.
+                        Log::Warning("[TeleportCommand] Mob #%d lost crossing to %s: id taken",
+                                     id, std::string(Game::DimensionName(toDim)).c_str());
+                        return TeleportResult::Failed;
+                    }
+                    // performTeleport: `if (victim instanceof PathfinderMob)
+                    // mob.getNavigation().stop()` — after SetLevel, which
+                    // re-points the navigation at the new level.
+                    if (mob->HasAiControls()) mob->GetNavigation().Stop();
+                    return TeleportResult::Moved;
+                }
+
+                case SelectedEntity::Kind::Item: {
+                    ItemEntityManager* fromItems = from->Items();
+                    ItemEntityManager* toItems   = to->Items();
+                    if (!fromItems || !toItems) return TeleportResult::Failed;
+                    Game::ItemEntity* item = fromItems->Find(victim.id);
+                    if (!item || item->stack.IsEmpty()) return TeleportResult::Failed;
+
+                    EnsureLandingLoaded(*to, pos);
+
+                    // MC teleportCrossDimension: a new entity in the new
+                    // level restored from the old one (same uuid, stack,
+                    // age, pickup delay), and the old one removed.
+                    Game::ItemEntity arrival = *item;
+                    arrival.pos          = pos;
+                    arrival.vel          = glm::dvec3(0.0);
+                    arrival.onGround     = true;
+                    arrival.pendingSpawn = true;   // a fresh spawn to the new level's watchers
+                    if (toItems->Adopt(std::move(arrival)) == 0) return TeleportResult::Failed;
+                    // Emptied -> reaped on the old level's next tick, which
+                    // is what broadcasts its removal there (as /kill does).
+                    item->stack.Clear();
+                    return TeleportResult::Moved;
+                }
+            }
+            return TeleportResult::Failed;
+        }
+
+        // MC TeleportCommand.performTeleport. `level` is the destination
+        // level (the destination entity's, or the source's for coordinates);
+        // a victim standing in another one crosses (TeleportAcross).
+        TeleportResult PerformTeleport(const CommandSource& source,
+                                       const SelectedEntity& victim, Game::DimensionId level,
+                                       const glm::dvec3& pos, const Rotation& rot) {
+            if (!InSpawnableBounds(pos)) return TeleportResult::OutOfBounds;
+
+            const float yRot = Game::Mth::WrapDegrees(rot.yRot);
+            const float xRot = Game::Mth::WrapDegrees(rot.xRot);
+
+            if (victim.dimension != level) {
+                return TeleportAcross(source, victim, level, pos, yRot, xRot);
+            }
+
+            switch (victim.kind) {
+                case SelectedEntity::Kind::Player: {
+                    if (!victim.session) return TeleportResult::Moved;
+                    ServerConnection* conn = victim.session->GetConnection();
+                    if (!conn) return TeleportResult::Moved;
+                    conn->Teleport(pos.x, pos.y, pos.z, yRot, xRot);
+                    return TeleportResult::Moved;
+                }
+
+                case SelectedEntity::Kind::Mob: {
+                    Game::Mob* mob = victim.mob;
+                    if (!mob) return TeleportResult::Moved;
 
                     mob->position  = pos;
                     mob->yRot      = yRot;
@@ -111,17 +280,18 @@ namespace Server {
                     // name, and primed TNT and falling blocks have no navigator
                     // to stop (Mob::NoAiTag).
                     if (mob->HasAiControls()) mob->GetNavigation().Stop();
-                    return true;
+                    return TeleportResult::Moved;
                 }
 
                 case SelectedEntity::Kind::Item: {
-                    if (!g_integratedServer) return true;
-                    // The sender's level — matches CollectItems' scoping.
-                    ServerLevel* level = g_integratedServer->GetLevel(source.dimension);
-                    ItemEntityManager* items = level ? level->Items() : nullptr;
-                    if (!items) return true;
+                    if (!g_integratedServer) return TeleportResult::Moved;
+                    // The level the item was enumerated from (the sender's —
+                    // CollectItems' scoping), which is also the destination here.
+                    ServerLevel* itemLevel = g_integratedServer->GetLevel(victim.dimension);
+                    ItemEntityManager* items = itemLevel ? itemLevel->Items() : nullptr;
+                    if (!items) return TeleportResult::Moved;
                     Game::ItemEntity* item = items->Find(victim.id);
-                    if (!item) return true;
+                    if (!item) return TeleportResult::Moved;
 
                     item->pos       = pos;
                     item->vel.y     = 0.0;
@@ -129,10 +299,10 @@ namespace Server {
                     // There is no per-client tracked set for items; the flag is
                     // what puts this entity in the next tick's sync batch.
                     item->needsSync = true;
-                    return true;
+                    return TeleportResult::Moved;
                 }
             }
-            return true;
+            return TeleportResult::Moved;
         }
 
         std::string FormatPos(const glm::dvec3& p) {
@@ -150,24 +320,16 @@ namespace Server {
 
     } // namespace
 
-    void TeleportCommand::Execute(ServerPlayer& sender,
+    void TeleportCommand::Execute(const CommandSourceStack& source,
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
                                   PlayerSessionManager& sessionManager) {
-        CommandSource source;
-        source.sender   = &sender;
-        source.sessions = &sessionManager;
-        source.position = sender.getPosition();
-        // The sender's DIMENSION — selectors are level-scoped (see
-        // CommandSource); without this `/kill @e` from the End acted on the
-        // Overworld's mobs.
-        if (auto session = sessionManager.GetSession(sender.getPlayerId())) {
-            source.dimension = Game::DimensionFromRaw(session->GetDimensionId());
-        }
-
+        ServerPlayer& sender = *source.sender;
+        // The stack carries the origin: the sender's feet, rotation and
+        // level for a typed command, or whatever `/execute` rewrote them to.
         // The source's own rotation, in MC's convention, for `~` in a rotation
         // argument and as the fallback when no rotation is given.
-        const Rotation sourceRot{ sender.getYaw(), sender.getPitch() };
+        const Rotation sourceRot = source.rotation;
 
         std::string error;
 
@@ -218,12 +380,21 @@ namespace Server {
             // teleport onto someone leaves you facing the way they face.
             const Rotation rot{ dest.yRot, dest.xRot };
 
-            int moved = 0;
+            // ...and the destination's LEVEL: MC teleportToEntity passes
+            // `(ServerLevel)destination.level()`, so `/tp <player> @s` from
+            // the Overworld fetches a player out of the Nether, and
+            // `/tp @s <player>` follows them into theirs.
+            int  moved = 0;
+            bool anyOutOfBounds = false;
             for (const SelectedEntity& victim : targets) {
-                if (PerformTeleport(source, victim, dest.position, rot)) ++moved;
+                const TeleportResult r =
+                    PerformTeleport(source, victim, dest.dimension, dest.position, rot);
+                if (r == TeleportResult::Moved) ++moved;
+                else if (r == TeleportResult::OutOfBounds) anyOutOfBounds = true;
             }
             if (moved == 0) {
-                connection.SendChatMessage("Invalid position for teleport", 1);
+                connection.SendChatMessage(
+                    anyOutOfBounds ? "Invalid position for teleport" : "No entity was teleported", 1);
                 return;
             }
 
@@ -337,8 +508,12 @@ namespace Server {
                 moved_.position = pos;
                 rot = LookAtRotation(AnchorPos(moved_, facingEyes), facingTarget);
             }
-            if (PerformTeleport(source, victim, pos, rot)) ++moved;
-            else anyOutOfBounds = true;
+            // MC teleportToPos passes `source.getLevel()`: coordinates are
+            // in the SOURCE's level (`/execute in <dimension>` changes it), and a
+            // victim standing in another level is brought across.
+            const TeleportResult r = PerformTeleport(source, victim, source.dimension, pos, rot);
+            if (r == TeleportResult::Moved) ++moved;
+            else if (r == TeleportResult::OutOfBounds) anyOutOfBounds = true;
         }
 
         if (moved == 0) {

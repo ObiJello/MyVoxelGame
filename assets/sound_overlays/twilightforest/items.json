@@ -1,0 +1,8 @@
+{
+  "item.knightmetal.equip": {
+    "sounds": [
+      { "name": "item.armor.equip_iron", "type": "event", "pitch": 0.9 }
+    ],
+    "subtitle": "subtitles.item.armor.equip"
+  }
+}

@@ -1,4 +1,5 @@
 #include "levelgen/structure/OrientedPieceBehavior.h"
+#include "nbt/AllTags.h"
 
 #include "levelgen/WorldGenLevel.h"
 #include "levelgen/WorldgenRandom.h"
@@ -737,6 +738,14 @@ bool OrientedPieceBehavior::updateAverageGroundHeight(WorldGenLevel* level,
     m_heightPosition = total / count;
     m_self->boundingBox.move(0, m_heightPosition - box.minY + offset, 0);
     return true;
+}
+
+void OrientedPieceBehavior::saveHeightPosition(nbt::CompoundTag& tag) const {
+    tag.putInt("HPos", m_heightPosition);
+}
+
+void OrientedPieceBehavior::loadHeightPosition(const nbt::CompoundTag& tag) {
+    m_heightPosition = tag.getIntOr("HPos", m_heightPosition);
 }
 
 } // namespace structure

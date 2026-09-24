@@ -1,0 +1,7 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "minecraft:encased_castle_brick_tile",
+  "result": {
+    "id": "minecraft:encased_castle_brick_pillar"
+  }
+}

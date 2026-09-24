@@ -34,6 +34,12 @@ namespace Network {
         uint8_t gameMode     = 0;       // Server::GameMode raw value (0 = survival)
         // The player's size (scaled immersive portals). Trailing, optional.
         float   scale        = 1.0f;
+        // /morph: what this player has become (Game::Morph code: kind + id,
+        // 0xFFFFFFFF = none) and, for a mob, the speed its move control
+        // walks it at — the client takes the body's size and eye height and
+        // walks at that speed. Trailing, optional.
+        uint32_t morph       = 0xFFFFFFFFu;
+        float    morphSpeed  = 0.0f;
 
         bool invulnerable() const { return (flags & FLAG_INVULNERABLE) != 0; }
         bool flying()       const { return (flags & FLAG_FLYING) != 0; }
@@ -51,6 +57,8 @@ namespace Network {
             buffer.WriteFloat(packet.walkingSpeed);
             buffer.WriteByte(packet.gameMode);
             buffer.WriteFloat(packet.scale);
+            buffer.WriteVarInt(packet.morph);
+            buffer.WriteFloat(packet.morphSpeed);
             return buffer.GetData();
         }
 
@@ -62,6 +70,8 @@ namespace Network {
             packet.walkingSpeed = reader.ReadFloat();
             packet.gameMode     = reader.ReadByte();
             packet.scale        = reader.HasMore() ? reader.ReadFloat() : 1.0f;
+            packet.morph        = reader.HasMore() ? reader.ReadVarInt() : 0xFFFFFFFFu;
+            packet.morphSpeed   = reader.HasMore() ? reader.ReadFloat() : 0.0f;
             return packet;
         }
 

@@ -8,6 +8,7 @@
 
 #include "common/network/PacketRegistry.hpp"
 #include "common/world/math/WorldMath.hpp"   // SECTIONS_PER_CHUNK
+#include "common/world/lighting/LightNetCodec.hpp"
 #include <cstdint>
 #include <vector>
 #include <chrono>
@@ -86,6 +87,19 @@ namespace Network {
         // all-air section is present and cheap (see CalculateDataSize).
         std::vector<SectionData> sections;
 
+        // TRAILING (wire-compatible append): the column's light — MC
+        // ClientboundLevelChunkWithLightPacket.lightData — every light
+        // section, both layers (sky only in a dimension with sky light), in
+        // the Lighting::NetCodec block.
+        //   Server: `lightSource` points at the chunk's light for the
+        //           duration of Serialize (the session builds and serialises
+        //           the packet in one go on the server thread); null = none.
+        //   Client: `light` is decoded on the I/O thread; null when the
+        //           packet carried none (an older peer, a chunk never lit).
+        const Game::Lighting::ChunkLight* lightSource = nullptr;
+        bool lightHasSky = true;
+        std::shared_ptr<Game::Lighting::NetCodec::Decoded> light;
+
         // Timestamp for tracking
         std::chrono::steady_clock::time_point timestamp;
 
@@ -118,12 +132,16 @@ namespace Network {
                 }
                 return n + c.words.size() * sizeof(uint64_t);
             };
-            // chunkX + chunkZ + groundUpContinuous
-            size_t size = sizeof(int32_t) * 2 + sizeof(uint8_t);
+            // chunkX + chunkZ + groundUpContinuous + modStamp
+            size_t size = sizeof(int32_t) * 2 + sizeof(uint8_t) + sizeof(uint64_t);
             for (const auto& section : sections) {
                 size += sizeof(section.blockCount);
                 size += containerSize(section.states);
                 size += containerSize(section.biomes);
+            }
+            if (lightSource) {
+                size += Game::Lighting::NetCodec::EncodedSize(*lightSource, Game::Lighting::NetCodec::kAllSections,
+                                                              lightHasSky);
             }
             return size;
         }
@@ -208,6 +226,13 @@ namespace Network {
                 WriteContainer(buffer, section.biomes);
             }
 
+            // Trailing light block (see ChunkDataS2CPacket::lightSource).
+            if (packet.lightSource && packet.lightSource->lightCorrect) {
+                Game::Lighting::NetCodec::Write(buffer, *packet.lightSource,
+                                                Game::Lighting::NetCodec::kAllSections,
+                                                packet.lightHasSky);
+            }
+
             return buffer.GetData();
         }
 
@@ -226,13 +251,25 @@ namespace Network {
             // phase. A short read below leaves the tail sections default
             // constructed (all air), which the client treats as such.
             packet.sections.reserve(Game::Math::SECTIONS_PER_CHUNK);
+            bool sectionsComplete = true;
             for (int i = 0; i < Game::Math::SECTIONS_PER_CHUNK; ++i) {
                 ChunkDataS2CPacket::SectionData section;
-                if (reader.Remaining() < sizeof(uint16_t)) break;
+                if (reader.Remaining() < sizeof(uint16_t)) { sectionsComplete = false; break; }
                 section.blockCount = reader.ReadShort();
-                if (!ReadContainer(reader, section.states, 4096)) break;
-                if (!ReadContainer(reader, section.biomes, 64))   break;
+                if (!ReadContainer(reader, section.states, 4096)) { sectionsComplete = false; break; }
+                if (!ReadContainer(reader, section.biomes, 64))   { sectionsComplete = false; break; }
                 packet.sections.push_back(std::move(section));
+            }
+
+            // Trailing light block — only after a complete section list (a
+            // truncated one leaves the reader out of phase).
+            if (sectionsComplete && reader.Remaining() > 0) {
+                try {
+                    auto decoded = std::make_shared<Game::Lighting::NetCodec::Decoded>();
+                    if (Game::Lighting::NetCodec::Read(reader, *decoded)) packet.light = std::move(decoded);
+                } catch (const std::exception&) {
+                    packet.light.reset();                   // truncated: no light
+                }
             }
 
             // Hold the positional invariant even for a truncated stream: the

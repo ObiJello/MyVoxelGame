@@ -112,25 +112,52 @@ namespace Render {
         bool bold = false;
         bool italic = false;
 
-        // Drop shadow pass first (if enabled)
+        // Drop shadow pass first (if enabled). MC draws EVERY shadow glyph
+        // before any foreground glyph (StringRenderOutput runs the whole
+        // string once per layer), which is what keeps a bold glyph's second
+        // shadow from landing on top of its neighbour's foreground. The
+        // shadow follows the same style state as the foreground: a bold run
+        // is drawn twice (x, x+1) and advances one extra pixel, and a colour
+        // code darkens the shadow of that run (MC shadows are the colour at
+        // a quarter brightness).
         if (cmd.dropShadow) {
             float sx = cursorX;
+            bool sBold = false;
+            uint8_t sr = r / 4, sg = g / 4, sb = b / 4;
             for (size_t i = 0; i < cmd.text.size(); i++) {
                 unsigned char c = static_cast<unsigned char>(cmd.text[i]);
 
                 // Handle MC formatting codes (§)
                 if (c == 0xC2 && i + 1 < cmd.text.size() && static_cast<unsigned char>(cmd.text[i + 1]) == 0xA7) {
-                    i += 2; // Skip § (UTF-8: C2 A7)
-                    if (i < cmd.text.size()) i++; // Skip format code char
+                    i += 1;
+                    if (i + 1 < cmd.text.size()) {
+                        i++;
+                        char code = cmd.text[i];
+                        if (code == 'r' || code == 'R') {
+                            sBold = false; sr = r / 4; sg = g / 4; sb = b / 4;
+                        } else if (code == 'l' || code == 'L') {
+                            sBold = true;
+                        } else if (code == 'o' || code == 'O' || code == 'n' || code == 'N' ||
+                                   code == 'm' || code == 'M' || code == 'k' || code == 'K') {
+                            // no effect on the shadow's glyphs
+                        } else {
+                            uint32_t fmtColor = GetFormattingColor(code);
+                            if (fmtColor != 0) {
+                                sr = static_cast<uint8_t>(((fmtColor >> 16) & 0xFF) / 4);
+                                sg = static_cast<uint8_t>(((fmtColor >> 8) & 0xFF) / 4);
+                                sb = static_cast<uint8_t>((fmtColor & 0xFF) / 4);
+                            }
+                        }
+                    }
                     continue;
                 }
 
                 if (c < 32 || c > 126) { sx += 4; continue; }
 
-                // Shadow color: 25% of original brightness
-                uint8_t sr = r / 4, sg = g / 4, sb = b / 4;
                 addGlyph(sx + 1.0f, cursorY + 1.0f, c, sr, sg, sb, a);
+                if (sBold) addGlyph(sx + 2.0f, cursorY + 1.0f, c, sr, sg, sb, a);
                 sx += m_glyphWidths[c] + 1;
+                if (sBold) sx += 1;
             }
         }
 
@@ -170,8 +197,11 @@ namespace Render {
             if (c < 32 || c > 126) { cursorX += 4; continue; }
 
             addGlyph(cursorX, cursorY, c, cr, cg, cb, ca);
+            // MC bold: the glyph again one pixel to the right (BakedGlyph's
+            // boldOffset for a bitmap font), and the advance grows by one.
+            if (bold) addGlyph(cursorX + 1.0f, cursorY, c, cr, cg, cb, ca);
             cursorX += m_glyphWidths[c] + 1;
-            if (bold) cursorX += 1; // Bold adds 1px extra
+            if (bold) cursorX += 1;
         }
     }
 

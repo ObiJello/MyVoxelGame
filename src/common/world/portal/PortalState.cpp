@@ -1,6 +1,6 @@
 // File: src/common/world/portal/PortalState.cpp
 //
-// Line references are to minecraft_code/decompiled_net/minecraft/world/entity/
+// Line references are to minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/entity/
 // PortalProcessor.java and Entity.java.
 
 #include "PortalState.hpp"
@@ -36,10 +36,11 @@ namespace Game {
 
     // Entity.java:2602 + PortalProcessor.java:21
     std::optional<PortalState::Trigger> PortalState::HandleTick(
-        int transitionTime, bool allowedToTeleport, int cooldownOnFire)
+        int transitionTime, bool allowedToTeleport, int cooldownOnFire, bool processCooldown)
     {
-        // Entity.java:623 processPortalCooldown.
-        if (m_cooldown > 0) --m_cooldown;
+        // Entity.java:623 processPortalCooldown (ServerPlayer's override
+        // skips it while isChangingDimension — the caller's flag).
+        if (processCooldown && m_cooldown > 0) --m_cooldown;
 
         if (!m_process) return std::nullopt;
 

@@ -150,6 +150,8 @@ namespace Game {
               m_applyGravity(applyGravity) {}
 
         void Tick() override;
+        // The land factor (/morph reads the speed a mob walks at).
+        float OutsideWaterSpeedModifier() const { return m_outsideWaterSpeedModifier; }
 
     private:
         static float GetTurningSpeedFactor(float leftToTurn);

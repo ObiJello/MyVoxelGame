@@ -28,7 +28,6 @@ private:
     static levelgen::BlueIceFeature s_blueIceFeature;
     static levelgen::LakeFeature s_lakeFeature;
     static levelgen::SpringFeature s_springFeature;
-    static levelgen::DesertWellFeature s_desertWellFeature;
     static levelgen::VoidStartPlatformFeature s_voidStartPlatformFeature;
     static levelgen::BonusChestFeature s_bonusChestFeature;
     static bool s_initialized;
@@ -48,6 +47,9 @@ public:
     // =========================================================================
     static levelgen::ConfiguredFeature* FOREST_ROCK;
     static levelgen::ConfiguredFeature* LAKE_LAVA;
+    // 26.3 sulfur caves (MiscOverworldFeatures.java SULFUR_SPRING, SULFUR_POOL)
+    static levelgen::ConfiguredFeature* SULFUR_SPRING;
+    static levelgen::ConfiguredFeature* SULFUR_POOL;
 
     // =========================================================================
     // DISK FEATURES - Reference: MiscOverworldFeatures.java lines 30-34

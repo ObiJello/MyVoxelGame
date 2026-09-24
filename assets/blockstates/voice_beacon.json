@@ -1,0 +1,19 @@
+{
+  "variants": {
+    "facing=east": {
+      "model": "minecraft:block/voice_beacon",
+      "y": 90
+    },
+    "facing=north": {
+      "model": "minecraft:block/voice_beacon"
+    },
+    "facing=south": {
+      "model": "minecraft:block/voice_beacon",
+      "y": 180
+    },
+    "facing=west": {
+      "model": "minecraft:block/voice_beacon",
+      "y": 270
+    }
+  }
+}

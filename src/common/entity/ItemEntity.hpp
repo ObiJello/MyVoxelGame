@@ -59,14 +59,10 @@ namespace Game {
         // 0.98 regardless of whether the entity is grounded).
         static constexpr double kAirDrag    = 0.98;
 
-        // Horizontal drag while grounded is blockFriction * 0.98. This engine
-        // has no per-block friction property anywhere (players don't model ice
-        // either), so we use MC's DEFAULT block friction of 0.6 for every
-        // block: 0.6 * 0.98 = 0.588. Items therefore do not slide on ice —
-        // consistent with how the player behaves here, and the one number to
-        // change if per-block friction ever lands.
-        static constexpr double kBlockFriction  = 0.6;
-        static constexpr double kGroundDrag     = kBlockFriction * kAirDrag;
+        // Horizontal drag while grounded is Block.getFriction() of the block
+        // below the feet (GetBlockFriction: 0.6 default, 0.98 ice, 0.989 blue
+        // ice, 0.8 slime) times the air drag — so a drop slides across ice
+        // and stops dead on stone, exactly as in MC.
 
         // On landing, MC damps the remaining downward velocity and flips it,
         // producing a small settle rather than a dead stop.

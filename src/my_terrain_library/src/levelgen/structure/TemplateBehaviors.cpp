@@ -1,7 +1,9 @@
 #include "levelgen/structure/PieceBehaviors.h"
+#include "nbt/AllTags.h"
 #include "levelgen/structure/OrientedPieceBehavior.h"
 
 #include "levelgen/structure/TemplateEngine.h"
+#include "levelgen/structure/StructureEntities.h"
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/WorldGenLevel.h"
 #include "math/Mth.h"
@@ -155,8 +157,21 @@ public:
         (void)generator;
         (void)chunkPos;
         const FullTemplateData& data = TemplateEngine::get(m_templateId);
-        // Reference: isTooBigToFitInWorldGenRegion - unreachable for vanilla
-        // templates (layout throws for it too).
+        // Reference: 26.3 ShipwreckPiece.postProcess - the height is fixed by
+        // the FIRST chunk that processes the piece (adjustPositionHeight sets
+        // heightAdjusted, saved as NBT height_adjusted); later chunks place
+        // at that height. isTooBigToFitInWorldGenRegion (size x or y > 32)
+        // skips the adjustment.
+        if (!m_heightAdjusted && !(data.sizeX > 32 || data.sizeY > 32)) {
+            adjustHeight(level, random, data);
+        }
+        placeAtCurrentHeight(level, random, chunkBB, referencePos, self);
+    }
+
+    bool heightAdjusted() const { return m_heightAdjusted; }
+
+private:
+    void adjustHeight(WorldGenLevel* level, WorldgenRandom& random, const FullTemplateData& data) {
         Heightmap::Types heightmapType = m_isBeached ? Heightmap::Types::WORLD_SURFACE_WG
                                                      : Heightmap::Types::OCEAN_FLOOR_WG;
         int minY = level->getMaxY() + 1;
@@ -183,9 +198,13 @@ public:
             ? minY - data.sizeY / 2 - random.nextInt(3)  // calculateBeachedPosition
             : mean;
         // Reference: adjustPositionHeight - PERSISTENT mutation.
+        m_heightAdjusted = true;
         m_templatePosition = core::BlockPos(m_templatePosition.getX(), newHeight,
                                             m_templatePosition.getZ());
+    }
 
+    void placeAtCurrentHeight(WorldGenLevel* level, WorldgenRandom& random, const BoundingBox& chunkBB,
+                              const core::BlockPos& referencePos, StructurePieceData& self) {
         // Reference: TemplateStructurePiece.postProcess with the shipwreck
         // settings (rotation, pivot (4,0,15), STRUCTURE_AND_AIR ignore).
         TemplatePlaceSettings settings;
@@ -225,11 +244,27 @@ public:
         }
     }
 
-private:
     std::string m_templateId;
     int m_rotation;
     bool m_isBeached;
     core::BlockPos m_templatePosition;
+    bool m_heightAdjusted = false;
+
+public:
+    // Reference: TemplateStructurePiece (TPX/TPY/TPZ) + ShipwreckPiece
+    // (height_adjusted) addAdditionalSaveData.
+    void saveState(nbt::CompoundTag& tag) const override {
+        tag.putInt("TPX", m_templatePosition.getX());
+        tag.putInt("TPY", m_templatePosition.getY());
+        tag.putInt("TPZ", m_templatePosition.getZ());
+        tag.putBoolean("height_adjusted", m_heightAdjusted);
+    }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_templatePosition = core::BlockPos(tag.getIntOr("TPX", m_templatePosition.getX()),
+                                            tag.getIntOr("TPY", m_templatePosition.getY()),
+                                            tag.getIntOr("TPZ", m_templatePosition.getZ()));
+        m_heightAdjusted = tag.getBooleanOr("height_adjusted", m_heightAdjusted);
+    }
 };
 
 // Reference: OceanRuinPieces.OceanRuinPiece.
@@ -303,6 +338,20 @@ public:
                                  generator->getSeaLevel());
             }
         }
+    }
+
+public:
+    // Reference: TemplateStructurePiece.addAdditionalSaveData (TPX/TPY/TPZ):
+    // the piece settles onto the ocean floor as it places.
+    void saveState(nbt::CompoundTag& tag) const override {
+        tag.putInt("TPX", m_templatePosition.getX());
+        tag.putInt("TPY", m_templatePosition.getY());
+        tag.putInt("TPZ", m_templatePosition.getZ());
+    }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_templatePosition = core::BlockPos(tag.getIntOr("TPX", m_templatePosition.getX()),
+                                            tag.getIntOr("TPY", m_templatePosition.getY()),
+                                            tag.getIntOr("TPZ", m_templatePosition.getZ()));
     }
 
 private:
@@ -387,6 +436,13 @@ private:
             }
         } else if (markerId == "drowned") {
             // finalizeSpawn uses the LEVEL random, not this stream - no draws.
+            // setPersistenceRequired, snapTo(BlockPos) = the block's corner
+            // (x, y, z) with yaw/pitch 0, finalizeSpawn(STRUCTURE).
+            StructureEntities::addFreshEntity(
+                level,
+                StructureEntities::mobTag("minecraft:drowned", pos.getX(), pos.getY(),
+                                          pos.getZ(), 0.0f, 0.0f, true),
+                true);
             if (pos.getY() > seaLevel) {
                 level->setBlock(pos, Blocks::AIR->defaultBlockState(), 2);
             } else {
@@ -731,18 +787,25 @@ private:
         return level->getHeight(type, x, z) - 1;
     }
 
+    // Reference: 26.3 RuinedPortalPiece.canBlockBeReplacedByNetherrackOrMagma -
+    // !is(Blocks.AIR): plain air only, so cave_air IS replaceable.
     bool canBlockBeReplacedByNetherrackOrMagma(WorldGenLevel* level,
                                                const core::BlockPos& pos) const {
         BlockState* state = level->getBlockState(pos);
-        return !state->isAir() && !state->is(Blocks::getBlock("minecraft:obsidian"))
+        return !state->is(Blocks::getBlock("minecraft:air"))
+            && !state->is(Blocks::getBlock("minecraft:obsidian"))
             && !::minecraft::levelgen::blockpredicates::matchesBlockTagName(
                    state, "minecraft:features_cannot_replace")
             && (m_placement == "in_nether"
                 || !state->is(Blocks::getBlock("minecraft:lava")));
     }
 
+    // Reference: 26.3 RuinedPortalPiece.placeNetherrackOrMagma - the
+    // replaceability check moved in here (the drip columns get it too), and
+    // the magma draw only happens for a replaceable block.
     void placeNetherrackOrMagma(WorldgenRandom& random, WorldGenLevel* level,
                                 const core::BlockPos& pos) const {
+        if (!canBlockBeReplacedByNetherrackOrMagma(level, pos)) return;
         if (!m_properties.cold && random.nextFloat() < 0.07f) {
             level->setBlock(pos, Blocks::getDefaultState("minecraft:magma_block"), 3);
         } else {
@@ -870,6 +933,7 @@ public:
         settings.rotationPivot = core::BlockPos(0, 0, 0);
         settings.ignoreAir = false;   // BlockIgnoreProcessor.STRUCTURE_BLOCK only
         settings.keepLiquids = true;  // default LiquidSettings.APPLY_WATERLOGGING
+        settings.ignoreEntities = true;   // makeSettings: setIgnoreEntities(true)
 
         std::string templateId = "minecraft:woodland_mansion/" + m_templateName;
         self.boundingBox = templateBox(templateId, settings, m_templatePosition);
@@ -904,14 +968,41 @@ private:
     }
 
     // Reference: WoodlandMansionPiece.handleDataMarker. The chest facing uses
-    // placeSettings.getRotation() ONLY (mirror not applied - vanilla quirk);
-    // Mage/Warrior/allay markers create entities - creation fails in the
-    // reference harness (ocean-ruin drowned precedent): no writes, no draws
-    // from the passed random.
+    // placeSettings.getRotation() ONLY (mirror not applied - vanilla quirk).
+    // Mage/Warrior/"Group of Allays" create entities: no draws from the
+    // passed random (the allay count draws from the REGION random, as
+    // Java's level.getRandom()), and each created mob sets the marker cell
+    // to air. The parity reference harness cannot create these entities, so
+    // its dumps keep the marker cell's prior block; the game follows Java.
     void handleDataMarker(const std::string& markerId, const core::BlockPos& pos,
                           WorldGenLevel* level, WorldgenRandom& random,
                           const BoundingBox& chunkBB) {
-        if (markerId.rfind("Chest", 0) != 0) return;
+        if (markerId.rfind("Chest", 0) != 0) {
+            const char* mobId = nullptr;
+            int count = 1;
+            if (markerId == "Mage") {
+                mobId = "minecraft:evoker";
+            } else if (markerId == "Warrior") {
+                mobId = "minecraft:vindicator";
+            } else if (markerId == "Group of Allays") {
+                mobId = "minecraft:allay";
+                count = level->getRandom().nextInt(3) + 1;
+            } else {
+                return;
+            }
+            for (int i = 0; i < count; ++i) {
+                // setPersistenceRequired, snapTo(BlockPos, 0, 0) = the
+                // block corner, finalizeSpawn(STRUCTURE), then the marker
+                // cell becomes air (once per mob, idempotent).
+                StructureEntities::addFreshEntity(
+                    level,
+                    StructureEntities::mobTag(mobId, pos.getX(), pos.getY(), pos.getZ(),
+                                              0.0f, 0.0f, true),
+                    true);
+                level->setBlock(pos, Blocks::AIR->defaultBlockState(), 2);
+            }
+            return;
+        }
         auto* facingProp =
             world::level::block::state::properties::BlockStateProperties::HORIZONTAL_FACING;
         BlockState* chestState = Blocks::CHEST->defaultBlockState();
@@ -1135,6 +1226,7 @@ public:
         settings.rotationPivot = core::BlockPos(0, 0, 0);
         settings.ignoreAir = !m_overwrite;
         settings.keepLiquids = true;
+        settings.ignoreEntities = true;
 
         self.boundingBox = templateBox(m_templateId, settings, m_templatePosition);
         if (TemplateEngine::placeInWorld(level, m_templateId, m_templatePosition,
@@ -1168,8 +1260,19 @@ private:
                 }
             }
         }
-        // Sentry (shulker) and Elytra (item frame) are entities: no worldgen
-        // RNG draws from this stream, out of scope.
+        // Sentry (shulker): setPos(x + 0.5, y, z + 0.5) and addFreshEntity -
+        // no persistence flag and NO finalizeSpawn (Java skips it here).
+        // Level.isInSpawnableBounds is the +-30M horizontal / build-height
+        // test, which every placed marker passes. Elytra is an ItemFrame (a
+        // hanging entity this engine does not have), so it is not placed.
+        else if (chunkBB.isInside(pos.getX(), pos.getY(), pos.getZ())
+                 && markerId.rfind("Sentry", 0) == 0) {
+            StructureEntities::addFreshEntity(
+                level,
+                StructureEntities::mobTag("minecraft:shulker", pos.getX() + 0.5, pos.getY(),
+                                          pos.getZ() + 0.5, 0.0f, 0.0f, false),
+                false);
+        }
     }
 
     std::string m_templateId;

@@ -2,7 +2,7 @@
 
 How to check, in a running world, that the spawning/AI systems match Minecraft's
 numbers. Each recipe names the MC rule it exercises; the constants come from
-`minecraft_code/decompiled_net/` (world version 4764).
+`minecraft_code_26.1-snapshot-1/decompiled_net/` (world version 4764).
 
 Run `python3 tools/mob_audit.py --all` after any mob change — no gap count may
 increase.

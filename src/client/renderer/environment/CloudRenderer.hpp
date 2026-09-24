@@ -39,8 +39,11 @@ namespace Render {
         // clouds.png now resolves to.
         void ReloadTexture();
 
+        // `cameraPos` in DOUBLE: the cell placement below is MC's double
+        // math, and a float camera at x = 300,000 would put the clouds on
+        // a 3 cm grid that crawls as the camera moves.
         void Render(const glm::mat4& proj, const glm::mat4& view,
-                    const glm::vec3& cameraPos, int renderDistChunks,
+                    const glm::dvec3& cameraPos, int renderDistChunks,
                     float partialTick);
 
     private:

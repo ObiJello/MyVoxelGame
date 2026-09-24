@@ -1,0 +1,12 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "group": "resonite_ingot",
+  "ingredients": [
+    "minecraft:resonite_block"
+  ],
+  "result": {
+    "count": 9,
+    "id": "minecraft:resonite_ingot"
+  }
+}

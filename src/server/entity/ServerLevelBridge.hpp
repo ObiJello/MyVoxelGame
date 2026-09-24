@@ -26,9 +26,13 @@
 
 #include <chrono>
 
+#include "common/core/Features.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/core/JavaRandom.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "server/portal/MobPortalCollision.hpp"
+#endif
 
 #include <memory>
 #include <unordered_map>
@@ -57,16 +61,24 @@ namespace Server {
         bool IsSpectator() const override;
         bool IsAbilityFlying() const override;
 
+        // A player's current push is applied by the CLIENT's own physics
+        // (MC LocalPlayer runs updateFluidInteraction itself); pushing the
+        // view too would queue a velocity packet every tick in a river and
+        // fight the client's copy. The view still tracks the fluid state
+        // (RefreshFluidState in TickCombatState) for the mobs that ask.
+        bool IsPushedByFluid() const override { return false; }
+
         // MC LivingEntity.isAttackable — creative and spectator players are not
         // valid targets, which is what makes a creative player invisible to
         // hostile mobs.
         bool IsAttackable() const override { return !IsCreative() && !IsSpectator(); }
 
         // The base box; Entity::scale (set from the player's size when the
-        // view syncs) sits on top of it.
-        float BaseBbWidth()   const override { return 0.6f; }
-        float BaseBbHeight()  const override { return 1.8f; }
-        float BaseEyeHeight() const override { return 1.62f; }
+        // view syncs) sits on top of it. A morphed player (/morph) has the
+        // mob's box and eye, so mobs target and reach them as that mob.
+        float BaseBbWidth()   const override;
+        float BaseBbHeight()  const override;
+        float BaseEyeHeight() const override;
 
         // MC ServerPlayer.getKnownMovement: the movement the client actually
         // reported, not `velocity` (which on a view is only the knockback
@@ -101,6 +113,12 @@ namespace Server {
         // default would call a player undead — harming would heal them.
         bool IsInvertedHealAndHarm() const override { return false; }
 
+        // MC: a player is not in #can_breathe_under_water (the placeholder
+        // Zombie type would say it is — undead); LivingEntity.baseTick's
+        // `isPlayer && abilities.invulnerable` exemption (creative and
+        // spectator) is folded in here, which gives the same air outcome.
+        bool CanBreatheUnderwater() const override { return IsCreative() || IsSpectator(); }
+
         // The view's own health is a mirror; REGENERATION and INSTANT_HEALTH
         // must land on the real player or the next SyncFromPlayer would
         // silently erase them.
@@ -111,6 +129,30 @@ namespace Server {
         // FoodData.eat).
         void CauseFoodExhaustion(float amount) override;
         void EatFood(int nutrition, float saturationModifier) override;
+
+        // MC getVisibilityPercent's three inputs for a player: sneaking
+        // (isDiscrete), the four worn armour slots (getArmorCoverPercentage)
+        // and a mob head on the HEAD slot (the MOB_VISIBILITY component a
+        // skeleton skull / zombie head / creeper head / piglin head carries).
+        bool   IsDiscrete() const override;
+        float  GetArmorCoverPercentage() const override;
+        double GetEquipmentVisibilityFactor(const Game::Entity* targetingEntity) const override;
+
+        // MC Entity.isSwimming for the player: the sprint the client reports,
+        // under water — the client's own swim rule (Physics: sprint with the
+        // eye in water). Read by the dolphin's escort (DOLPHINS_GRACE).
+        bool IsSwimming() const override;
+
+        // The player's absorption hearts live on ServerPlayer (MC Player's
+        // DATA_PLAYER_ABSORPTION_ID); ABSORPTION's onEffectStarted and the
+        // hurt path reach them through these.
+        float GetAbsorptionAmount() const override;
+        void  SetAbsorptionAmount(float v) override;
+
+        // MC LivingEntity.tickDeath on a player: at deathTime 20 the body is
+        // removed (KILLED) — triggerOnDeathMobEffects fires WIND_CHARGED /
+        // WEAVING / OOZING and empties the list. Called by TickCombatState.
+        void TickPlayerDeathEffects();
 
         // Called once per server tick, before mobs tick.
         void SyncFromPlayer();
@@ -127,6 +169,17 @@ namespace Server {
         // a player is effectively unhittable after one sword swing.
         void TickCombatState();
 
+        // The player's arm swing, as MC's server-side Player keeps it
+        // (ServerboundSwingPacket -> swing; LivingEntity.tick's
+        // updateSwingTime). There is no swing packet here, so the server
+        // swings the view where it learns of one: an attack, and every tick
+        // of a dig (MC's client swings the whole time it mines —
+        // continueAttack). TickCombatState runs the swing clock. Nothing is
+        // broadcast: a view is not a tracked entity, so Swing's entity event
+        // is dropped; mobs read the swing off the view (the echo mimic
+        // replays it).
+        void SetDigging(bool digging) { m_digging = digging; }
+
         // MC ServerPlayer.indicateDamage — records the direction the hit came
         // from and pushes it to this player's own client, which is the only
         // thing that can drive the camera tilt (the hurt FLASH other players
@@ -134,6 +187,15 @@ namespace Server {
         void IndicateDamage(double xd, double zd);
 
         ServerPlayer* GetPlayer() const { return m_player; }
+
+        // Built for an earlier visit of the player to this level: they have
+        // changed dimension since (ServerPlayer::getDimensionEpoch). A level
+        // nobody stands in is not ticked, so its SyncPlayerViews never dropped
+        // this view when they left; resuming it on their return would resume
+        // the portal state, position and timers of that old visit instead of
+        // the ones the player carried across (MC recreates the entity on
+        // every dimension change — Entity.restoreFrom).
+        bool IsFromEarlierVisit() const;
 
         // Knockback the mob system applied that the client has not been told
         // about yet. The player is client-authoritative for movement, so a push
@@ -157,13 +219,33 @@ namespace Server {
         void ActuallyHurt(Game::MobDamageSource source, float amount,
                           Game::Entity* attacker) override;
 
+        // ── A player's effects (MC ServerPlayer's effect overrides) ────────
+        // The list is the ServerPlayer's (it survives this per-level view and
+        // is saved); the hooks add MC ServerPlayer's packet halves —
+        // UpdateMobEffect (blend on add) / RemoveMobEffect to the player's own
+        // client — and keep ServerPlayer's health / absorption inside the
+        // maxima the remaining effects allow.
+        std::vector<Game::MobEffectInstance>&       EffectStorage() override;
+        const std::vector<Game::MobEffectInstance>& EffectStorage() const override;
+        void OnEffectAdded(const Game::MobEffectInstance& effect, Game::Entity* source) override;
+        void OnEffectUpdated(const Game::MobEffectInstance& effect, bool refreshAttributes,
+                             Game::Entity* source) override;
+        void OnEffectRemoved(const Game::MobEffectInstance& effect) override;
+
     private:
         ServerPlayer* m_player;
+        // The player's dimension epoch when this view was built.
+        uint32_t      m_dimensionEpoch = 0;
         bool          m_hasPendingKnockback = false;
         glm::dvec3    m_pendingKnockback{0.0};
         // Last value of ServerPlayer::getDamageCounter this view has reacted to
         // — see TickCombatState.
         uint32_t      m_lastSeenDamageCounter = 0;
+        // The corpse's effects were already handed to triggerOnDeathMobEffects
+        // (once per death).
+        bool          m_deathEffectsTriggered = false;
+        // Between a survival START_DESTROY and its STOP / ABORT (SetDigging).
+        bool          m_digging = false;
     };
 
     // Game::EntityLevel over the server's world and session list.
@@ -210,6 +292,13 @@ namespace Server {
         // queue, and the sweep is what would free the sources the applies read.
         void ResolveQueuedExplosions();
         bool IsClientSide() const override { return false; }
+#if ENABLE_IMMERSIVE_PORTALS
+        // Cross-portal collision for this level's mobs: the gun surfaces
+        // they may walk through (MobPortalCollision). Refreshed by
+        // IntegratedServer::TickMobs before the mobs move.
+        const Game::PortalCollisionProvider* PortalCollision() const override { return &m_portalCollision; }
+        MobPortalCollision& PortalCollisionState() { return m_portalCollision; }
+#endif
         int64_t GetGameTime() const override;
         int64_t GetDayTime()  const override;
         // Out of line, and reading the WORLD rather than a member of its own:
@@ -220,6 +309,7 @@ namespace Server {
         Game::JavaRandom& Random() override { return m_random; }
 
         int  GetSkyBrightness(int x, int y, int z) const override;
+        int  GetBlockBrightness(int x, int y, int z) const override;
         int  GetMaxLocalRawBrightness(int x, int y, int z) const override;
         int  GetMaxLocalRawBrightness(int x, int y, int z, int amount) const override;
         int  GetSkyDarken() const override;
@@ -244,13 +334,28 @@ namespace Server {
         Game::Entity*       ResolveEntity(const Game::Uuid& uuid) const override;
         Game::LivingEntity* ResolvePlayer(const Game::Uuid& uuid) const override;
         uint32_t GetHeldItemId(const Game::LivingEntity& player) const override;
+        uint32_t GetChestItemId(const Game::LivingEntity& player) const override;
+        void DisplayClientMessage(const Game::LivingEntity& player, const std::string& text,
+                                  bool actionBar) const override;
         void GetItemEntitiesInBox(const Game::AABBd& box,
                                   std::vector<NearbyItemEntity>& out) const override;
         int  TakeFromItemEntity(int32_t id, int count) override;
+        bool AddItemEntityDeltaMovement(int32_t id, const glm::dvec3& delta) override;
+        const Game::ItemStack* GetItemEntityStack(int32_t id) const override;
+        bool SetItemEntityStack(int32_t id, const Game::ItemStack& stack) override;
         void CreateFilledResult(Game::LivingEntity& player, Game::ItemStack& held,
                                 const Game::ItemStack& filled) override;
 
         void BroadcastEntityEvent(const Game::Entity& entity, uint8_t event) override;
+
+        // MC ServerLevel.playSeededSound (both forms): through the installed
+        // ServerSoundSink, scoped to this level's dimension.
+        void PlaySeededSound(const Game::SoundExcept& except, const glm::dvec3& pos,
+                             std::string_view event, Game::SoundSource source,
+                             float volume, float pitch, int64_t seed) override;
+        void PlaySeededSoundFromEntity(const Game::SoundExcept& except, const Game::Entity& sourceEntity,
+                                       std::string_view event, Game::SoundSource source,
+                                       float volume, float pitch, int64_t seed) override;
 
         // MC ServerExplosion.hurtEntities over the two entity kinds that live
         // outside the Game::Entity hierarchy — dropped items and XP orbs.
@@ -263,6 +368,18 @@ namespace Server {
         // MC ClientboundHurtAnimationPacket, sent to that player alone.
         void SendHurtAnimation(int32_t connectionId, float hurtDir);
         void SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) override;
+        void SpawnItemStackDrop(const glm::dvec3& pos, const Game::ItemStack& stack) override;
+        // MC BehaviorUtils.throwItem's ItemEntity: an exact spawn point,
+        // velocity and pickup delay.
+        void SpawnThrownItem(const glm::dvec3& pos, const glm::dvec3& velocity,
+                             const Game::ItemStack& stack, int pickupDelay) override;
+
+        // MC ServerLevel.getPoiManager — ServerLevel owns it; set once.
+        void SetPoiManager(Game::PoiManager* poi) { m_poi = poi; }
+        Game::PoiManager* GetPoiManager() override { return m_poi; }
+        // MC Merchant.openTradingScreen: recorded on the ServerPlayer and
+        // performed by its session (PlayerSession::FlushPendingMenuOpen).
+        void OpenMerchantMenu(Game::LivingEntity& player, Game::Mob& merchant) override;
 
         // MC ExperienceOrb.award, minus the orb. DEVIATION (documented in
         // EntityLevel.hpp): the points go straight into a ServerPlayer's
@@ -298,6 +415,10 @@ namespace Server {
         // null everywhere else. See common/entity/DragonFight.hpp.
         void SetDragonFight(Game::IDragonFight* fight) { m_dragonFight = fight; }
         Game::IDragonFight* DragonFight() override { return m_dragonFight; }
+        // The Hush's stillness (Server::HushStillness raises it, once a tick
+        // before the mobs tick). Atomic because mobs tick on the worker pool.
+        void SetStilled(bool stilled) { m_stilled.store(stilled, std::memory_order_relaxed); }
+        bool IsStilled() const override { return m_stilled.load(std::memory_order_relaxed); }
 
         Game::DimensionId Dimension() const override;
         bool MobGriefing() const override;
@@ -343,12 +464,21 @@ namespace Server {
         std::vector<std::unique_ptr<Game::Entity>>& DrainSpawned() { return m_spawned; }
 
     private:
+        // Tell every mob, in every level, that `departing` is going away —
+        // the half of dropping a player view that must precede the erase.
+        void ClearReferencesToPlayerView(PlayerEntityView* departing);
+
         Game::World*          m_world;
         PlayerSessionManager* m_sessions;
         MobManager*           m_mobs = nullptr;
+#if ENABLE_IMMERSIVE_PORTALS
+        MobPortalCollision    m_portalCollision;
+#endif
         ItemEntityManager*    m_items = nullptr;
         ExperienceOrbManager* m_orbs = nullptr;
         Game::IDragonFight*   m_dragonFight = nullptr;   // End only
+        Game::PoiManager*     m_poi = nullptr;           // ServerLevel's
+        std::atomic<bool>     m_stilled{false};          // Hush only (HushStillness)
 
         mutable Game::JavaRandom m_random{0};
 

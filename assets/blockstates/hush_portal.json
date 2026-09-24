@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "axis=x": {
+      "model": "minecraft:block/hush_portal_ns"
+    },
+    "axis=z": {
+      "model": "minecraft:block/hush_portal_ew"
+    }
+  }
+}

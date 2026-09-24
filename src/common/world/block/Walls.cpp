@@ -137,7 +137,8 @@ namespace Game {
             if (EndsWith(n, "_banner")) return true;
             return n == "torch" || n == "soul_torch" || n == "redstone_torch" ||
                    n == "wall_torch" || n == "soul_wall_torch" ||
-                   n == "redstone_wall_torch" || n == "tripwire";
+                   n == "redstone_wall_torch" || n == "tripwire" ||
+                   n == "ambrosium_torch" || n == "ambrosium_wall_torch";
         }
 
         // MC makeWallState(connects, aboveShape, testShape).

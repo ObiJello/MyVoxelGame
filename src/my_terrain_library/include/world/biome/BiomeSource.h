@@ -2,6 +2,7 @@
 
 #include "world/biome/Climate.h"
 #include "world/biome/Biomes.h"
+#include <functional>
 #include <vector>
 #include <set>
 #include <string>
@@ -48,6 +49,24 @@ public:
      */
     virtual BiomeKey getNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ,
                                    const Climate::Sampler& sampler) = 0;
+
+    // BiomeResolver: (quartX, quartY, quartZ) -> biome.
+    using BiomeResolver = std::function<BiomeKey(int32_t, int32_t, int32_t)>;
+
+    // Reference: 26.3 BiomeSource.createResolverForChunk - the biomes of one
+    // quart box, which a source may sample as a whole volume up front (the
+    // multi-noise source does; see MultiNoiseBiomeSource). The default asks
+    // getNoiseBiome per cell. The sampler must outlive the resolver.
+    virtual BiomeResolver createResolverForChunk(const Climate::Sampler& sampler, int32_t minQuartX,
+                                                 int32_t minQuartY, int32_t minQuartZ, int32_t quartSizeX,
+                                                 int32_t quartSizeY, int32_t quartSizeZ) {
+        (void)minQuartX; (void)minQuartY; (void)minQuartZ;
+        (void)quartSizeX; (void)quartSizeY; (void)quartSizeZ;
+        const Climate::Sampler* bound = &sampler;
+        return [this, bound](int32_t quartX, int32_t quartY, int32_t quartZ) {
+            return getNoiseBiome(quartX, quartY, quartZ, *bound);
+        };
+    }
 
     /**
      * Get all possible biomes this source can generate

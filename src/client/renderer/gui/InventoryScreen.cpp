@@ -1,7 +1,9 @@
 // File: src/client/renderer/gui/InventoryScreen.cpp
 #include "InventoryScreen.hpp"
+#include "EffectsInInventory.hpp"
 #include "ContainerScreen.hpp"
 #include "FurnaceScreen.hpp"
+#include "MerchantScreen.hpp"
 #include "CreativeModeInventoryScreen.hpp"
 #include "CraftingScreen.hpp"
 #include "GuiGraphics.hpp"
@@ -13,6 +15,9 @@
 #include "common/inventory/UtilityMenus.hpp"
 #include "common/inventory/SystemMenus.hpp"
 #include "common/inventory/CraftingMenu.hpp"
+#include "common/inventory/LecternMenu.hpp"
+#include "common/inventory/MerchantMenu.hpp"
+#include "screens/BookScreens.hpp"
 #include "common/core/Log.hpp"
 
 namespace Render {
@@ -29,6 +34,10 @@ namespace Render {
             GetCraftingScreen().CloseSilently();
             GetContainerScreen().CloseSilently();
             GetFurnaceScreen().CloseSilently();
+            GetMerchantScreen().CloseSilently();
+            // The lectern's book view is a ScreenManager screen, not a slot
+            // grid, but it is just as bound to the menu going away.
+            CloseLecternScreen();
         }
     }
 
@@ -49,6 +58,7 @@ namespace Render {
         if (GetCraftingScreen().IsOpen())          return GetCraftingScreen();
         if (GetContainerScreen().IsOpen())         return GetContainerScreen();
         if (GetFurnaceScreen().IsOpen())           return GetFurnaceScreen();
+        if (GetMerchantScreen().IsOpen())          return GetMerchantScreen();
         if (GetCreativeInventoryScreen().IsOpen()) return GetCreativeInventoryScreen();
         return GetSurvivalInventoryScreen();
     }
@@ -62,6 +72,7 @@ namespace Render {
         if (GetCraftingScreen().IsOpen())  { GetCraftingScreen().Close();  return; }
         if (GetContainerScreen().IsOpen()) { GetContainerScreen().Close(); return; }
         if (GetFurnaceScreen().IsOpen())   { GetFurnaceScreen().Close();   return; }
+        if (GetMerchantScreen().IsOpen())  { GetMerchantScreen().Close();  return; }
         if (s_player && s_player->IsCreative()) GetCreativeInventoryScreen().Open();
         else                                    GetSurvivalInventoryScreen().Open();
     }
@@ -197,6 +208,32 @@ namespace Render {
                 break;
             }
 
+            case Game::MenuType::Lectern: {
+                // MC LecternScreen over a client LecternMenu: the book slot
+                // and the page data slot are filled by the snapshot and the
+                // data sync that follow. Abilities.mayBuild decides whether
+                // there is a Take Book button (not in adventure/spectator).
+                auto menu = std::make_unique<Game::LecternMenu>(&s_player->inventory);
+                menu->containerId = containerId;
+                SetClientContainerMenu(std::move(menu), type);
+                const bool mayBuild = s_player->gameMode != 2 && !s_player->IsSpectator();
+                OpenLecternScreen(title, mayBuild);
+                break;
+            }
+
+            case Game::MenuType::Merchant: {
+                // MC MerchantScreen over MerchantMenu(containerId, inventory):
+                // a ClientSideMerchant whose offers arrive in the
+                // MerchantOffersS2C right behind the slot snapshot.
+                auto menu = std::make_unique<Game::MerchantMenu>(&s_player->inventory);
+                menu->containerId = containerId;
+                SetClientContainerMenu(std::move(menu), type);
+                GetMerchantScreen().SetPlayer(s_player);
+                GetMerchantScreen().Configure(title);
+                GetMerchantScreen().Open();
+                break;
+            }
+
             case Game::MenuType::Inventory:
                 // Not something the server opens — it is what you fall back to.
                 SetClientContainerMenu(nullptr, Game::MenuType::Inventory);
@@ -288,6 +325,15 @@ namespace Render {
         // MC InventoryScreen.renderLabels line 58 — the title only ("Crafting",
         // container.crafting), dark grey and WITHOUT a drop shadow.
         g.DrawString("Crafting", leftPos + TITLE_X, topPos + TITLE_Y, LABEL_COLOR, false);
+    }
+
+    void InventoryScreen::RenderExtras(GuiGraphics& g, int leftPos, int topPos) {
+        // MC InventoryScreen.extractRenderState → effects.extractRenderState.
+        if (!Player()) return;
+        g.NextStratum();
+        EffectsInInventory::Render(g, Player()->activeEffects, g.GuiWidth(), leftPos, topPos,
+                                   IMAGE_W, static_cast<int>(MouseGui().x),
+                                   static_cast<int>(MouseGui().y));
     }
 
     void InventoryScreen::ContainerTick() {

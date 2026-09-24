@@ -82,6 +82,7 @@ public:
     static levelgen::ConfiguredFeature* PATCH_WATERLILY;        // Lily pad
     static levelgen::ConfiguredFeature* PATCH_FIREFLY_BUSH;     // Firefly bush
     static levelgen::ConfiguredFeature* PATCH_BUSH;             // Bush patch
+    static levelgen::ConfiguredFeature* RED_SHRUB;              // 26.3: dappled forest
 
     // =========================================================================
     // BAMBOO & VINES - Reference: VegetationFeatures.java
@@ -130,6 +131,7 @@ public:
     static levelgen::ConfiguredFeature* TREES_WINDSWEPT_HILLS;
     static levelgen::ConfiguredFeature* TREES_WATER;
     static levelgen::ConfiguredFeature* TREES_SPARSE_JUNGLE;
+    static levelgen::ConfiguredFeature* TREES_DAPPLED_FOREST;   // 26.3
     static levelgen::ConfiguredFeature* TREES_OLD_GROWTH_SPRUCE_TAIGA;
     static levelgen::ConfiguredFeature* TREES_OLD_GROWTH_PINE_TAIGA;
     static levelgen::ConfiguredFeature* TREES_JUNGLE;

@@ -14,8 +14,8 @@
 
 import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.GameProfileRepository;
-import com.mojang.authlib.minecraft.MinecraftSessionService;
-import com.mojang.authlib.yggdrasil.ServicesKeySet;
+import com.mojang.authlib.minecraft.SessionService;
+import com.mojang.authlib.services.ServicesKeySet;
 import com.mojang.logging.LogUtils;
 import com.mojang.serialization.Lifecycle;
 import net.minecraft.CrashReport;
@@ -39,6 +39,7 @@ import net.minecraft.gizmos.Gizmos;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.progress.LoggingLevelLoadListener;
 import net.minecraft.server.notifications.EmptyNotificationService;
+import net.minecraft.server.notifications.NotificationManager;
 import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.server.players.NameAndId;
 import net.minecraft.server.players.PlayerList;
@@ -69,6 +70,8 @@ import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.WorldDimensions;
 import net.minecraft.world.level.levelgen.WorldOptions;
+import net.minecraft.world.level.levelgen.WorldGenSettings;
+import net.minecraft.world.level.storage.LevelDataAndDimensions;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructurePiece;
@@ -115,6 +118,13 @@ public class MinecraftAsyncChunkTest {
     static String worldType = "default";
     static String flatPreset = "";     // vanilla flat preset short name ("" = default flat)
     static String flatLayers = "";     // custom "<layers>;<biome>" (PresetFlatWorldScreen)
+    static String featureOrderOutput = null;  // --dump-feature-order <file>: featuresPerStep, then exit
+    // --block-trace <file>: every block a decoration feature sets, as
+    // "BLOCK_SET STEP=<s> IDX=<i> <placed feature> pos=x,y,z old=<id> new=<id>"
+    // (the C++ harness's --block-trace lines; ore writes through
+    // BulkSectionAccess are not seen here).
+    static String blockTracePath = null;
+    static java.io.PrintWriter blockTraceWriter = null;
     static String singleBiome = "";    // single_biome_surface biome id  // --dimension overworld|nether|end
 
     private static ServerLevel getTargetLevel(MinecraftServer server) {
@@ -139,7 +149,7 @@ public class MinecraftAsyncChunkTest {
     private static boolean dumpFull = false;
     private static ChunkStatus targetStatus = null;
     private static boolean generateStructures = true;
-    private static String phasesDescription = "all (0-11)";
+    private static String phasesDescription = "all (0-9)";
 
     /**
      * Parse a --phases spec into (targetStatus, generateStructures, phasesDescription).
@@ -147,22 +157,23 @@ public class MinecraftAsyncChunkTest {
      * semantically identical to configurePhases() in tests/parity/cpp/CppChunkGeneratorTest.cpp.
      *
      * Accepted: "all", or "A-B" where A is 0 (EMPTY start, structures ON) or
-     * 3 (BIOMES start, structures OFF) and B in 1..7 (B >= 3 when A is 3):
-     * 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS, 3=BIOMES, 4=NOISE, 5=SURFACE,
-     * 6=CARVERS, 7=FEATURES. Unknown specs must fail loudly: silently running
+     * 3 (BIOMES start, structures OFF) and B in 1..5 (B >= 3 when A is 3):
+     * 1=STRUCTURE_STARTS, 2=STRUCTURE_REFS, 3=BIOMES, 4=TERRAIN, 5=FEATURES —
+     * MC 26.3's statuses (ChunkStatus.java:111-116; TERRAIN replaced the old
+     * NOISE/SURFACE/CARVERS). Unknown specs must fail loudly: silently running
      * "all" (racy FULL pipeline) produced misleading dumps.
      */
     private static void configurePhaseSpec(String phases) {
         if (phases.equals("all")) {
             targetStatus = ChunkStatus.FULL;
             generateStructures = true;
-            phasesDescription = "all (0-11, complete generation)";
+            phasesDescription = "all (0-9, complete generation)";
             return;
         }
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^([03])-([1-7])$").matcher(phases);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^([03])-([1-5])$").matcher(phases);
         if (!m.matches()) {
             throw new IllegalArgumentException(
-                "unknown --phases spec '" + phases + "' (valid: all, or A-B with A in {0,3}, B in 1..7, e.g. 3-7, 0-2, 3-5)");
+                "unknown --phases spec '" + phases + "' (valid: all, or A-B with A in {0,3}, B in 1..5, e.g. 3-5, 0-2, 3-4)");
         }
         int start = Integer.parseInt(m.group(1));
         int end = Integer.parseInt(m.group(2));
@@ -172,10 +183,10 @@ public class MinecraftAsyncChunkTest {
         }
         ChunkStatus[] endStatuses = {
             null, ChunkStatus.STRUCTURE_STARTS, ChunkStatus.STRUCTURE_REFERENCES, ChunkStatus.BIOMES,
-            ChunkStatus.NOISE, ChunkStatus.SURFACE, ChunkStatus.CARVERS, ChunkStatus.FEATURES
+            ChunkStatus.TERRAIN, ChunkStatus.FEATURES
         };
         String[] endNames = {
-            null, "STRUCTURE_STARTS", "STRUCTURE_REFS", "BIOMES", "NOISE", "SURFACE", "CARVERS", "FEATURES"
+            null, "STRUCTURE_STARTS", "STRUCTURE_REFS", "BIOMES", "TERRAIN", "FEATURES"
         };
         targetStatus = endStatuses[end];
         generateStructures = (start == 0);
@@ -303,6 +314,9 @@ public class MinecraftAsyncChunkTest {
                 case "--dump-full":
                     dumpFull = true;
                     break;
+                case "--block-trace":
+                    blockTracePath = args[++i];
+                    break;
                 // FEATURE TRACING OPTIONS (remove after fixing parity)
                 case "--trace-features":
                     traceFeatures = true;
@@ -363,6 +377,9 @@ public class MinecraftAsyncChunkTest {
                     break;
                 case "--dump-block-entities":
                     dumpBlockEntities = true;
+                    break;
+                case "--dump-feature-order":
+                    featureOrderOutput = args[++i];
                     break;
                 default:
                     // Unknown args must fail loudly (mirrors the C++ harness):
@@ -440,6 +457,39 @@ public class MinecraftAsyncChunkTest {
     }
 
     /**
+     * --dump-feature-order: the generator's FeatureSorter result, one line per
+     * placed feature: "<step> <globalIndex> <placed feature id>". The global
+     * index is what setFeatureSeed(decorationSeed, index, step) is keyed on.
+     */
+    @SuppressWarnings("unchecked")
+    private static void dumpFeatureOrder(ServerLevel level, String path) throws Exception {
+        net.minecraft.world.level.chunk.ChunkGenerator generator = level.getChunkSource().getGenerator();
+        java.lang.reflect.Field field = net.minecraft.world.level.chunk.ChunkGenerator.class.getDeclaredField("featuresPerStep");
+        field.setAccessible(true);
+        java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>> supplier =
+            (java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>) field.get(generator);
+        net.minecraft.core.Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> registry =
+            level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.PLACED_FEATURE);
+        StringBuilder out = new StringBuilder();
+        out.append("# possibleBiomes:");
+        for (var biome : generator.getBiomeSource().possibleBiomes()) {
+            out.append(' ').append(biome.unwrapKey().map(k -> k.identifier().toString()).orElse("?"));
+        }
+        out.append('\n');
+        List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps = supplier.get();
+        for (int step = 0; step < steps.size(); ++step) {
+            List<net.minecraft.world.level.levelgen.placement.PlacedFeature> features = steps.get(step).features();
+            for (int index = 0; index < features.size(); ++index) {
+                var feature = features.get(index);
+                String name = registry.getResourceKey(feature).map(k -> k.identifier().toString()).orElse("<inline>");
+                out.append(step).append(' ').append(index).append(' ').append(name).append('\n');
+            }
+        }
+        Files.writeString(Path.of(path), out.toString());
+        System.out.println("  Feature order written to " + path);
+    }
+
+    /**
      * Run the test using the FULL Minecraft server pipeline.
      * This is identical to how Minecraft generates chunks in actual gameplay.
      */
@@ -505,29 +555,30 @@ public class MinecraftAsyncChunkTest {
                     // Create new world with specified seed
                     Registry<LevelStem> datapackDimensions = context.datapackDimensions().lookupOrThrow(Registries.LEVEL_STEM);
 
+                    // 26.3: difficulty/hardcore are one DifficultySettings
+                    // record, game rules go to the server, and the seed
+                    // options travel in WorldGenSettings next to the level
+                    // data (GameTestServer.create is the reference pattern).
                     LevelSettings levelSettings = new LevelSettings(
                         "test_world",
                         GameType.CREATIVE,
-                        false,  // hardcore
-                        Difficulty.NORMAL,
+                        new LevelSettings.DifficultySettings(Difficulty.NORMAL, false, false),
                         true,   // allowCommands
-                        new GameRules(context.dataConfiguration().enabledFeatures()),
                         context.dataConfiguration()
                     );
 
                     WorldOptions worldOptions = new WorldOptions(SEED, generateStructures, false);  // seed, generateStructures, bonusChest
-                    WorldDimensions dimensions = createWorldDimensionsForType(context.datapackWorldgen());
+                    WorldDimensions dimensions = createWorldDimensionsForType(context.datapackWorldRegistries());
                     WorldDimensions.Complete finalDimensions = dimensions.bake(datapackDimensions);
-                    Lifecycle lifecycle = finalDimensions.lifecycle().add(context.datapackWorldgen().allRegistriesLifecycle());
 
-                    PrimaryLevelData levelData = new PrimaryLevelData(levelSettings, worldOptions, finalDimensions.specialWorldProperty(), lifecycle);
+                    PrimaryLevelData levelData = new PrimaryLevelData(levelSettings, finalDimensions.specialWorldProperty(), finalDimensions.lifecycle());
                     // Mark initialized so MinecraftServer skips the initial spawn
                     // search, which fully generates chunks around spawn with
                     // parallel FEATURES steps - verified nondeterministic (clay/
                     // moss/sculk cross-chunk reads depend on scheduling).
                     levelData.setInitialized(true);
-                    return new WorldLoader.DataLoadOutput<WorldData>(
-                        levelData,
+                    return new WorldLoader.DataLoadOutput<>(
+                        new LevelDataAndDimensions.WorldDataAndGenSettings(levelData, new WorldGenSettings(worldOptions, dimensions)),
                         finalDimensions.dimensionsRegistryAccess()
                     );
                 },
@@ -586,8 +637,17 @@ public class MinecraftAsyncChunkTest {
             }
             ServerChunkCache chunkCache = level.getChunkSource();
             System.out.println("  Got ServerChunkCache: " + chunkCache.getClass().getName());
-            System.out.println("  Spawn suggestion: " + chunkCache.randomState().sampler().findSpawnPosition());
             System.out.println("  Shared spawn: " + level.getRespawnData().pos());
+
+            if (featureOrderOutput != null) {
+                dumpFeatureOrder(level, featureOrderOutput);
+                server.halt(true);
+                return;
+            }
+
+            if (blockTracePath != null) {
+                installBlockTrace(level);
+            }
 
             // Install live feature wrappers before generation so tracing reflects
             // the actual async execution context rather than a post-generation replay.
@@ -646,7 +706,7 @@ public class MinecraftAsyncChunkTest {
                             if (traceWatchPos != null && System.getenv("WATCH_SCAN") != null) {
                                 ChunkAccess wc = chunkCache.getChunk(
                                     traceWatchPos.getX() >> 4, traceWatchPos.getZ() >> 4,
-                                    net.minecraft.world.level.chunk.status.ChunkStatus.NOISE, false);
+                                    net.minecraft.world.level.chunk.status.ChunkStatus.TERRAIN, false);
                                 String stateNow = wc == null ? "(chunk not ready)"
                                     : serializeState(wc.getBlockState(traceWatchPos));
                                 if (!stateNow.equals(lastWatchScanState)) {
@@ -674,9 +734,9 @@ public class MinecraftAsyncChunkTest {
                                         if (ha == null) continue;
                                         net.minecraft.world.level.chunk.status.ChunkStatus st = ha.getPersistedStatus();
                                         if (!st.isOrAfter(net.minecraft.world.level.chunk.status.ChunkStatus.FEATURES)) continue;
-                                        long key = holder.getPos().toLong();
+                                        long key = ChunkPos.pack(holder.getPos().x(), holder.getPos().z());
                                         if (!decorOrderSeen.add(key)) continue;
-                                        System.out.println("STATUS_SCAN " + holder.getPos().x + " " + holder.getPos().z
+                                        System.out.println("STATUS_SCAN " + holder.getPos().x() + " " + holder.getPos().z()
                                             + " reached " + st + " afterRequest " + cx + " " + cz);
                                     }
                                 } catch (Exception e) {
@@ -693,7 +753,7 @@ public class MinecraftAsyncChunkTest {
                                     for (int px = -finalRadius - 2; px <= finalRadius + 2; px++) {
                                         int qx = finalCenterX + px;
                                         int qz = finalCenterZ + pz;
-                                        long key = ChunkPos.asLong(qx, qz);
+                                        long key = ChunkPos.pack(qx, qz);
                                         if (decorOrderSeen.contains(key)) continue;
                                         ChunkAccess probe = chunkCache.getChunk(
                                             qx, qz, net.minecraft.world.level.chunk.status.ChunkStatus.FEATURES, false);
@@ -761,13 +821,13 @@ public class MinecraftAsyncChunkTest {
                 // (chunkX, chunkZ) ascending.
                 List<Map.Entry<ChunkPos, ChunkAccess>> sortedChunks = new ArrayList<>(generatedChunks.entrySet());
                 sortedChunks.sort(Comparator
-                    .comparingInt((Map.Entry<ChunkPos, ChunkAccess> e) -> e.getKey().x)
-                    .thenComparingInt(e -> e.getKey().z));
+                    .comparingInt((Map.Entry<ChunkPos, ChunkAccess> e) -> e.getKey().x())
+                    .thenComparingInt(e -> e.getKey().z()));
 
                 if (dumpFull) {
                     writeCanonicalHeader(out, "radius");
                     for (Map.Entry<ChunkPos, ChunkAccess> entry : sortedChunks) {
-                        writeCanonicalChunk(out, entry.getValue(), entry.getKey().x, entry.getKey().z);
+                        writeCanonicalChunk(out, entry.getValue(), entry.getKey().x(), entry.getKey().z());
                     }
                 } else {
                     out.println("# Java Minecraft Async Chunk Test Output");
@@ -784,7 +844,7 @@ public class MinecraftAsyncChunkTest {
                     out.println();
 
                     for (Map.Entry<ChunkPos, ChunkAccess> entry : sortedChunks) {
-                        writeChunkData(out, entry.getValue(), entry.getKey().x, entry.getKey().z);
+                        writeChunkData(out, entry.getValue(), entry.getKey().x(), entry.getKey().z());
                     }
                 }
             }
@@ -809,6 +869,7 @@ public class MinecraftAsyncChunkTest {
         } finally {
             // Clean up temp directory
             if (tempWorldPath != null) {
+                if (blockTraceWriter != null) blockTraceWriter.flush();
                 System.out.println("Cleaning up temp directory...");
                 deleteDirectory(tempWorldPath.toFile());
             }
@@ -915,29 +976,30 @@ public class MinecraftAsyncChunkTest {
                 context -> {
                     Registry<LevelStem> datapackDimensions = context.datapackDimensions().lookupOrThrow(Registries.LEVEL_STEM);
 
+                    // 26.3: difficulty/hardcore are one DifficultySettings
+                    // record, game rules go to the server, and the seed
+                    // options travel in WorldGenSettings next to the level
+                    // data (GameTestServer.create is the reference pattern).
                     LevelSettings levelSettings = new LevelSettings(
                         "test_world",
                         GameType.CREATIVE,
-                        false,
-                        Difficulty.NORMAL,
-                        true,
-                        new GameRules(context.dataConfiguration().enabledFeatures()),
+                        new LevelSettings.DifficultySettings(Difficulty.NORMAL, false, false),
+                        true,   // allowCommands
                         context.dataConfiguration()
                     );
 
-                    WorldOptions worldOptions = new WorldOptions(SEED, generateStructures, false);
-                    WorldDimensions dimensions = createWorldDimensionsForType(context.datapackWorldgen());
+                    WorldOptions worldOptions = new WorldOptions(SEED, generateStructures, false);  // seed, generateStructures, bonusChest
+                    WorldDimensions dimensions = createWorldDimensionsForType(context.datapackWorldRegistries());
                     WorldDimensions.Complete finalDimensions = dimensions.bake(datapackDimensions);
-                    Lifecycle lifecycle = finalDimensions.lifecycle().add(context.datapackWorldgen().allRegistriesLifecycle());
 
-                    PrimaryLevelData levelData = new PrimaryLevelData(levelSettings, worldOptions, finalDimensions.specialWorldProperty(), lifecycle);
+                    PrimaryLevelData levelData = new PrimaryLevelData(levelSettings, finalDimensions.specialWorldProperty(), finalDimensions.lifecycle());
                     // Mark initialized so MinecraftServer skips the initial spawn
                     // search, which fully generates chunks around spawn with
                     // parallel FEATURES steps - verified nondeterministic (clay/
                     // moss/sculk cross-chunk reads depend on scheduling).
                     levelData.setInitialized(true);
-                    return new WorldLoader.DataLoadOutput<WorldData>(
-                        levelData,
+                    return new WorldLoader.DataLoadOutput<>(
+                        new LevelDataAndDimensions.WorldDataAndGenSettings(levelData, new WorldGenSettings(worldOptions, dimensions)),
                         finalDimensions.dimensionsRegistryAccess()
                     );
                 },
@@ -983,7 +1045,6 @@ public class MinecraftAsyncChunkTest {
             }
             ServerChunkCache chunkCache = level.getChunkSource();
             System.out.println("  Got ServerChunkCache: " + chunkCache.getClass().getName());
-            System.out.println("  Spawn suggestion: " + chunkCache.randomState().sampler().findSpawnPosition());
             System.out.println("  Shared spawn: " + level.getRespawnData().pos());
 
             // Install live feature wrappers before generation so tracing reflects
@@ -1078,16 +1139,16 @@ public class MinecraftAsyncChunkTest {
      */
     private static String serializeState(BlockState state) {
         StringBuilder sb = new StringBuilder(BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
-        Map<Property<?>, Comparable<?>> values = state.getValues();
-        if (!values.isEmpty()) {
-            List<Map.Entry<Property<?>, Comparable<?>>> entries = new ArrayList<>(values.entrySet());
-            entries.sort(Comparator.comparing(e -> e.getKey().getName()));
+        // 26.3: getValues() streams Property.Value records.
+        List<Property.Value<?>> entries = new ArrayList<>(state.getValues().toList());
+        if (!entries.isEmpty()) {
+            entries.sort(Comparator.comparing(v -> v.property().getName()));
             sb.append('[');
             boolean first = true;
-            for (Map.Entry<Property<?>, Comparable<?>> e : entries) {
+            for (Property.Value<?> v : entries) {
                 if (!first) sb.append(',');
                 first = false;
-                sb.append(e.getKey().getName()).append('=').append(propertyValueName(e.getKey(), e.getValue()));
+                sb.append(v.property().getName()).append('=').append(propertyValueName(v.property(), v.value()));
             }
             sb.append(']');
         }
@@ -1245,10 +1306,10 @@ public class MinecraftAsyncChunkTest {
             for (Map.Entry<Structure, LongSet> entry : refEntries) {
                 if (entry.getValue().isEmpty()) continue;
                 List<ChunkPos> refs = new ArrayList<>();
-                for (long packed : entry.getValue()) refs.add(new ChunkPos(packed));
-                refs.sort(Comparator.comparingInt((ChunkPos p) -> p.x).thenComparingInt(p -> p.z));
+                for (long packed : entry.getValue()) refs.add(ChunkPos.unpack(packed));
+                refs.sort(Comparator.comparingInt((ChunkPos p) -> p.x()).thenComparingInt(p -> p.z()));
                 StringBuilder sb = new StringBuilder("R," + structureName(registry, entry.getKey()));
-                for (ChunkPos p : refs) sb.append(',').append(p.x).append(';').append(p.z);
+                for (ChunkPos p : refs) sb.append(',').append(p.x()).append(';').append(p.z());
                 out.println(sb);
             }
         }
@@ -1316,7 +1377,7 @@ public class MinecraftAsyncChunkTest {
             writeCanonicalStructures(out, chunk);
         }
 
-        // B/Q require BIOMES+; H requires NOISE+ (FORMAT.md "Section presence").
+        // B/Q require BIOMES+; H requires TERRAIN+ (FORMAT.md "Section presence").
         if (!targetStatus.isOrAfter(ChunkStatus.BIOMES)) return;
 
         // B lines: y outer, then z, then x. Plain air omitted; cave_air/void_air emitted.
@@ -1345,8 +1406,8 @@ public class MinecraftAsyncChunkTest {
             }
         }
 
-        // H lines: type outer (WS then OF), then z, then x. NOISE+ only.
-        if (!targetStatus.isOrAfter(ChunkStatus.NOISE)) return;
+        // H lines: type outer (WS then OF), then z, then x. TERRAIN+ only (the worldgen heightmaps are written by TERRAIN).
+        if (!targetStatus.isOrAfter(ChunkStatus.TERRAIN)) return;
         Heightmap.Types[] hmTypes = { Heightmap.Types.WORLD_SURFACE_WG, Heightmap.Types.OCEAN_FLOOR_WG };
         String[] hmLabels = { "WS", "OF" };
         for (int t = 0; t < hmTypes.length; t++) {
@@ -1419,1499 +1480,174 @@ public class MinecraftAsyncChunkTest {
         }
     }
 
+    // --trace-features (live feature tracing, sculk/geode/vegetation-patch
+    // shadows) was written against 26.1's feature API — ConfiguredFeature,
+    // FeaturePlaceContext, levelgen.feature.configurations — which 26.3
+    // replaced. The 26.1 code is kept in java/legacy/FeatureTracing_26_1.txt
+    // until it is ported; asking for it fails instead of tracing nothing.
     /**
-     * Replace matching placed features with live tracing wrappers so the trace
-     * runs during real chunk generation instead of replaying after mutation.
+     * --block-trace: rebind every configured feature's registry holder to a
+     * wrapper whose place() hands the feature a WorldGenLevel proxy that logs
+     * each successful setBlock / setBlockAndUpdate. The PlacedFeature objects
+     * stay untouched (BiomeFilter matches them by equality with the biome's
+     * list); nested inline features inherit the proxy from their parent.
+     * Labels are the top-level placed feature (WorldGenRegion's
+     * currentlyGenerating) and the configured feature doing the write.
      */
-    private static void installLiveFeatureTracing(ServerLevel level) {
-        installLiveFeatureTracing(
-            level.getChunkSource().getGenerator(),
-            level.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
-        );
-
-        try {
-            net.minecraft.server.level.ServerChunkCache chunkSource = level.getChunkSource();
-            net.minecraft.server.level.ChunkMap chunkMap = chunkSource.chunkMap;
-            java.lang.reflect.Field worldGenContextField =
-                net.minecraft.server.level.ChunkMap.class.getDeclaredField("worldGenContext");
-            worldGenContextField.setAccessible(true);
-            net.minecraft.world.level.chunk.status.WorldGenContext worldGenContext =
-                (net.minecraft.world.level.chunk.status.WorldGenContext) worldGenContextField.get(chunkMap);
-            installLiveFeatureTracing(
-                worldGenContext.generator(),
-                level.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE)
-            );
-        } catch (Exception e) {
-            traceWriter.println("# LIVE_TRACE_INSTALL_ERROR: chunkMap generator " + e.getMessage());
-            e.printStackTrace(traceWriter);
-            traceWriter.flush();
+    @SuppressWarnings("unchecked")
+    private static void installBlockTrace(ServerLevel level) throws Exception {
+        blockTraceWriter = new java.io.PrintWriter(new java.io.BufferedWriter(new java.io.FileWriter(blockTracePath)));
+        net.minecraft.core.Registry<net.minecraft.world.level.levelgen.feature.Feature> registry =
+            level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.FEATURE);
+        java.lang.reflect.Field valueField = net.minecraft.core.Holder.Reference.class.getDeclaredField("value");
+        valueField.setAccessible(true);
+        int rebound = 0;
+        for (net.minecraft.core.Holder.Reference<net.minecraft.world.level.levelgen.feature.Feature> ref :
+                registry.listElements().toList()) {
+            net.minecraft.world.level.levelgen.feature.Feature inner = ref.value();
+            if (inner instanceof BlockTraceFeature) continue;
+            valueField.set(ref, new BlockTraceFeature(inner, ref.key().identifier().toString()));
+            ++rebound;
         }
+        System.out.println("  Block trace installed (" + rebound + " configured features) -> " + blockTracePath);
     }
 
-    private static void installLiveFeatureTracing(WorldStem worldStem) {
-        if (!traceFeatures || traceWriter == null || traceFeatureFilter == null) return;
+    private static java.lang.reflect.Field currentlyGeneratingField;
 
+    private static String currentlyGenerating(net.minecraft.world.level.WorldGenLevel level) {
         try {
-            RegistryAccess.Frozen registries = worldStem.registries().compositeAccess();
-            Registry<LevelStem> dimensions = registries.lookupOrThrow(Registries.LEVEL_STEM);
-            LevelStem overworldStem = dimensions.getValue(LevelStem.OVERWORLD);
-            if (overworldStem == null) {
-                traceWriter.println("# LIVE_TRACE_INSTALL_ERROR: missing overworld LevelStem");
-                traceWriter.flush();
-                return;
+            if (currentlyGeneratingField == null) {
+                currentlyGeneratingField = net.minecraft.server.level.WorldGenRegion.class.getDeclaredField("currentlyGenerating");
+                currentlyGeneratingField.setAccessible(true);
             }
-
-            installLiveFeatureTracing(
-                overworldStem.generator(),
-                registries.lookupOrThrow(Registries.PLACED_FEATURE)
-            );
-        } catch (Exception e) {
-            traceWriter.println("# LIVE_TRACE_INSTALL_ERROR: " + e.getMessage());
-            e.printStackTrace(traceWriter);
-            traceWriter.flush();
+            if (level instanceof net.minecraft.server.level.WorldGenRegion) {
+                Object supplier = currentlyGeneratingField.get(level);
+                if (supplier instanceof java.util.function.Supplier<?> sup) return String.valueOf(sup.get());
+            }
+        } catch (Exception ignored) {
         }
+        return "?";
     }
 
-    private static void installLiveFeatureTracing(
-        net.minecraft.world.level.chunk.ChunkGenerator generator,
-        Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> featureRegistry
-    ) {
-        if (!traceFeatures || traceWriter == null ||
-            (traceFeatureFilter == null && traceWatchPos == null)) return;
-        if (!liveTraceInstalledTargets.add(generator)) return;
+    private static final class BlockTraceFeature implements net.minecraft.world.level.levelgen.feature.Feature {
+        private final net.minecraft.world.level.levelgen.feature.Feature inner;
+        private final String label;
 
-        try {
-            java.lang.reflect.Field featuresField =
-                net.minecraft.world.level.chunk.ChunkGenerator.class.getDeclaredField("featuresPerStep");
-            featuresField.setAccessible(true);
+        BlockTraceFeature(net.minecraft.world.level.levelgen.feature.Feature inner, String label) {
+            this.inner = inner;
+            this.label = label;
+        }
 
-            @SuppressWarnings("unchecked")
-            java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>> featuresSupplier =
-                (java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>) featuresField.get(generator);
+        @Override
+        public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.levelgen.feature.Feature> codec() {
+            return inner.codec();
+        }
 
-            List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> originalSteps = featuresSupplier.get();
+        @Override
+        public java.util.stream.Stream<net.minecraft.core.Holder<net.minecraft.world.level.levelgen.feature.Feature>> getSubFeatures() {
+            return inner.getSubFeatures();
+        }
 
-            List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> wrappedSteps =
-                new ArrayList<>(originalSteps.size());
-
-            int wrappedCount = 0;
-            // wrapped-object -> original index, so the biome-step index lookup
-            // still resolves features whose registry HOLDER was rebound to a
-            // wrapper (Holder::value then returns the wrapped object, which
-            // the identity lookup of originals cannot know).
-            java.util.IdentityHashMap<net.minecraft.world.level.levelgen.placement.PlacedFeature, Integer> wrappedToIndex =
-                new java.util.IdentityHashMap<>();
-            java.util.IdentityHashMap<net.minecraft.world.level.levelgen.placement.PlacedFeature, net.minecraft.world.level.levelgen.placement.PlacedFeature> wrapperByOriginal =
-                new java.util.IdentityHashMap<>();
-            for (int stepIndex = 0; stepIndex < originalSteps.size(); stepIndex++) {
-                net.minecraft.world.level.biome.FeatureSorter.StepFeatureData stepData = originalSteps.get(stepIndex);
-                List<net.minecraft.world.level.levelgen.placement.PlacedFeature> wrappedFeatures =
-                    new ArrayList<>(stepData.features().size());
-
-                wrappedToIndex.clear();
-                for (int featureIndex = 0; featureIndex < stepData.features().size(); featureIndex++) {
-                    net.minecraft.world.level.levelgen.placement.PlacedFeature feature = stepData.features().get(featureIndex);
-                    Optional<net.minecraft.resources.ResourceKey<net.minecraft.world.level.levelgen.placement.PlacedFeature>> keyOpt =
-                        featureRegistry.getResourceKey(feature);
-                    String featureName = keyOpt.map(k -> k.identifier().toString()).orElse("(unnamed)");
-
-                    if (traceFeatureFilter != null && traceFeatureFilter.equals(featureName)) {
-                        net.minecraft.world.level.levelgen.placement.PlacedFeature original = feature;
-                        feature = wrapPlacedFeatureForLiveTracing(feature, featureName, stepIndex, featureIndex);
-                        wrappedCount++;
-                        wrappedToIndex.put(feature, featureIndex);
-                        wrapperByOriginal.put(original, feature);
-                    } else if (traceWatchPos != null) {
-                        feature = wrapPlacedFeatureForWatch(feature, featureName);
-                    }
-
-                    wrappedFeatures.add(feature);
-                }
-
-                java.util.function.ToIntFunction<net.minecraft.world.level.levelgen.placement.PlacedFeature> originalLookup =
-                    Util.createIndexIdentityLookup(stepData.features());
-                java.util.IdentityHashMap<net.minecraft.world.level.levelgen.placement.PlacedFeature, Integer> stepWrappedToIndex =
-                    new java.util.IdentityHashMap<>(wrappedToIndex);
-                java.util.function.ToIntFunction<net.minecraft.world.level.levelgen.placement.PlacedFeature> lookupWithWrapped =
-                    f -> {
-                        Integer idx = stepWrappedToIndex.get(f);
-                        return idx != null ? idx : originalLookup.applyAsInt(f);
-                    };
-
-                wrappedSteps.add(
-                    new net.minecraft.world.level.biome.FeatureSorter.StepFeatureData(
-                        wrappedFeatures,
-                        lookupWithWrapped
-                    )
-                );
+        @Override
+        public boolean place(net.minecraft.world.level.WorldGenLevel level,
+                             net.minecraft.world.level.chunk.ChunkGenerator chunkGenerator,
+                             net.minecraft.util.RandomSource random, BlockPos origin) {
+            if (java.lang.reflect.Proxy.isProxyClass(level.getClass())) {
+                return inner.place(level, chunkGenerator, random, origin);   // nested: already traced
             }
-
-            featuresField.set(generator, (java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>)() -> wrappedSteps);
-
-            // Structure-pass feature pool elements (FeaturePoolElement) resolve
-            // their PlacedFeature through the registry Holder.Reference, not
-            // through featuresPerStep - rebind the reference's value to the
-            // tracing wrapper so those invocations are traced too.
-            int reboundHolders = 0;
-            if (traceFeatureFilter != null) {
-                List<net.minecraft.core.Holder.Reference<net.minecraft.world.level.levelgen.placement.PlacedFeature>> refs =
-                    featureRegistry.listElements()
-                        .filter(ref -> ref.key().identifier().toString().equals(traceFeatureFilter))
-                        .toList();
-                for (net.minecraft.core.Holder.Reference<net.minecraft.world.level.levelgen.placement.PlacedFeature> ref : refs) {
-                    // Reuse the step-list wrapper when one exists so the
-                    // biome-step index lookup resolves Holder::value; only
-                    // pool-element-only features get a fresh wrapper.
-                    net.minecraft.world.level.levelgen.placement.PlacedFeature wrapped =
-                        wrapperByOriginal.get(ref.value());
-                    if (wrapped == null) {
-                        wrapped = wrapPlacedFeatureForLiveTracing(ref.value(), traceFeatureFilter, -1, -1);
+            String top = currentlyGenerating(level);
+            String want = System.getenv("MC_RNG_TRACE_FEATURE");
+            String rngPath = System.getenv("MC_RNG_TRACE_FILE");
+            if (want == null || rngPath == null || !label.equals(want)) {
+                return inner.place(tracingLevel(level, top + " " + label, null), chunkGenerator, random, origin);
+            }
+            // Parity-debug: the C++ side's MC_RNG_TRACE_* stream (RNG nextInt /
+            // nextFloat draws interleaved with SET lines), buffered per call so
+            // concurrent chunk workers never interleave.
+            StringBuilder buf = new StringBuilder();
+            buf.append("RNGTRACE_BEGIN origin=").append(origin.getX()).append(',').append(origin.getY()).append(',').append(origin.getZ()).append('\n');
+            try {
+                return inner.place(tracingLevel(level, top + " " + label, buf), chunkGenerator, tracingRandom(random, buf), origin);
+            } finally {
+                buf.append("RNGTRACE_END\n");
+                synchronized (BlockTraceFeature.class) {
+                    try (java.io.FileWriter w = new java.io.FileWriter(rngPath, true)) {
+                        w.write(buf.toString());
+                    } catch (java.io.IOException e) {
+                        throw new java.io.UncheckedIOException(e);
                     }
-                    java.lang.reflect.Field valueField =
-                        net.minecraft.core.Holder.Reference.class.getDeclaredField("value");
-                    valueField.setAccessible(true);
-                    valueField.set(ref, wrapped);
-                    reboundHolders++;
                 }
             }
-
-            traceWriter.println(
-                "# LIVE_TRACE_INSTALLED filter=" + traceFeatureFilter +
-                " wrapped=" + wrappedCount +
-                " reboundHolders=" + reboundHolders +
-                " generator=" + generator.getClass().getName() +
-                " id=" + System.identityHashCode(generator)
-            );
-            traceWriter.flush();
-        } catch (Exception e) {
-            liveTraceInstalledTargets.remove(generator);
-            traceWriter.println("# LIVE_TRACE_INSTALL_ERROR: " + e.getMessage());
-            e.printStackTrace(traceWriter);
-            traceWriter.flush();
         }
     }
 
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private static net.minecraft.world.level.levelgen.placement.PlacedFeature wrapPlacedFeatureForLiveTracing(
-        net.minecraft.world.level.levelgen.placement.PlacedFeature placedFeature,
-        String featureName,
-        int stepIndex,
-        int featureIndex
-    ) {
-        net.minecraft.world.level.levelgen.feature.ConfiguredFeature originalConfigured =
-            (net.minecraft.world.level.levelgen.feature.ConfiguredFeature) placedFeature.feature().value();
-        net.minecraft.world.level.levelgen.feature.Feature originalFeature =
-            (net.minecraft.world.level.levelgen.feature.Feature) originalConfigured.feature();
-        net.minecraft.world.level.levelgen.feature.configurations.FeatureConfiguration originalConfig =
-            (net.minecraft.world.level.levelgen.feature.configurations.FeatureConfiguration) originalConfigured.config();
-        boolean geodeTrace =
-            originalFeature.getClass().getName().equals("net.minecraft.world.level.levelgen.feature.GeodeFeature");
-
-        net.minecraft.world.level.levelgen.feature.Feature tracingFeature =
-            new net.minecraft.world.level.levelgen.feature.Feature(
-                net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration.CODEC
-            ) {
-                @Override
-                public boolean place(net.minecraft.world.level.levelgen.feature.FeaturePlaceContext context) {
-                    Map<BlockPos, String> beforeBlocks = captureLiveFeatureBlocks(context.level(), context.origin());
-                    logLiveFeaturePlacement(featureName, stepIndex, featureIndex, context);
-                    boolean placed;
-                    if (geodeTrace &&
-                        originalConfig instanceof net.minecraft.world.level.levelgen.feature.configurations.GeodeConfiguration geodeConfig) {
-                        List<LoggedRandomCall> randomCalls = new ArrayList<>();
-                        net.minecraft.util.RandomSource loggingRandom =
-                            wrapRandomSourceForGeodeTracing(context.random(), randomCalls);
-                        net.minecraft.world.level.levelgen.feature.FeaturePlaceContext tracedContext =
-                            new net.minecraft.world.level.levelgen.feature.FeaturePlaceContext(
-                                context.topFeature(),
-                                context.level(),
-                                context.chunkGenerator(),
-                                loggingRandom,
-                                context.origin(),
-                                geodeConfig
-                            );
-                        placed = originalFeature.place(tracedContext);
-                        logLiveGeodeRandomSummary(
-                            featureName,
-                            stepIndex,
-                            featureIndex,
-                            context.origin(),
-                            context.level().getSeed(),
-                            geodeConfig,
-                            randomCalls
-                        );
-                    } else {
-                        // NOTE: logLiveVegetationPatchShadow is intentionally NOT
-                        // called - its traceVegetationPatchGround replay performs
-                        // real setBlock writes and corrupts the traced run.
-                        // Generic chronological RNG + setBlock trace for the
-                        // filtered feature (mirrors C++ MC_RNG_TRACE_FEATURE /
-                        // MC_RNG_TRACE_FILE).
-                        BlockPos rngOrigin = context.origin();
-                        traceWriter.println("RNGTRACE_BEGIN origin=" +
-                            rngOrigin.getX() + "," + rngOrigin.getY() + "," + rngOrigin.getZ());
-                        traceWriter.flush();
-                        net.minecraft.util.RandomSource loggingRandom =
-                            wrapRandomSourceForSculkTracing(context.random());
-                        net.minecraft.world.level.WorldGenLevel loggingLevel =
-                            wrapLevelForSculkTracing(context.level());
-                        net.minecraft.world.level.levelgen.feature.FeaturePlaceContext rngContext =
-                            new net.minecraft.world.level.levelgen.feature.FeaturePlaceContext(
-                                context.topFeature(),
-                                loggingLevel,
-                                context.chunkGenerator(),
-                                loggingRandom,
-                                rngOrigin,
-                                originalConfig
-                            );
-                        placed = originalFeature.place(rngContext);
-                        traceWriter.println("RNGTRACE_END");
-                        traceWriter.flush();
-                    }
-                    logLiveFeatureResult(featureName, stepIndex, featureIndex, context, placed, beforeBlocks);
-                    return placed;
-                }
-            };
-
-        net.minecraft.world.level.levelgen.feature.ConfiguredFeature wrappedConfigured =
-            new net.minecraft.world.level.levelgen.feature.ConfiguredFeature(tracingFeature, originalConfig);
-
-        List<net.minecraft.world.level.levelgen.placement.PlacementModifier> wrappedPlacement =
-            new ArrayList<>(placedFeature.placement().size());
-        for (int modifierIndex = 0; modifierIndex < placedFeature.placement().size(); modifierIndex++) {
-            wrappedPlacement.add(
-                wrapPlacementModifierForLiveTracing(
-                    placedFeature,
-                    placedFeature.placement().get(modifierIndex),
-                    featureName,
-                    stepIndex,
-                    featureIndex,
-                    modifierIndex
-                )
-            );
-        }
-
-        return new net.minecraft.world.level.levelgen.placement.PlacedFeature(
-            net.minecraft.core.Holder.direct(wrappedConfigured),
-            wrappedPlacement
-        );
-    }
-
-    private static final class LoggedRandomCall {
-        final String method;
-        final int bound;
-        final long longValue;
-        final double doubleValue;
-
-        private LoggedRandomCall(String method, int bound, long longValue, double doubleValue) {
-            this.method = method;
-            this.bound = bound;
-            this.longValue = longValue;
-            this.doubleValue = doubleValue;
-        }
-
-        static LoggedRandomCall nextInt(int bound, int value) {
-            return new LoggedRandomCall("nextInt", bound, value, value);
-        }
-
-        static LoggedRandomCall nextFloat(float value) {
-            return new LoggedRandomCall("nextFloat", -1, 0L, value);
-        }
-
-        static LoggedRandomCall nextDouble(double value) {
-            return new LoggedRandomCall("nextDouble", -1, 0L, value);
-        }
-    }
-
-    /**
-     * Light wrapper applied to EVERY feature when --trace-watch is set: logs a
-     * WATCH line whenever the watched position's block changes across a
-     * feature's place() call, attributing the change to that feature.
-     */
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private static net.minecraft.world.level.levelgen.placement.PlacedFeature wrapPlacedFeatureForWatch(
-        net.minecraft.world.level.levelgen.placement.PlacedFeature placedFeature,
-        String featureName
-    ) {
-        net.minecraft.world.level.levelgen.feature.ConfiguredFeature originalConfigured =
-            (net.minecraft.world.level.levelgen.feature.ConfiguredFeature) placedFeature.feature().value();
-        net.minecraft.world.level.levelgen.feature.Feature originalFeature =
-            (net.minecraft.world.level.levelgen.feature.Feature) originalConfigured.feature();
-
-        net.minecraft.world.level.levelgen.feature.Feature watchingFeature =
-            new net.minecraft.world.level.levelgen.feature.Feature(
-                net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration.CODEC
-            ) {
-                @Override
-                public boolean place(net.minecraft.world.level.levelgen.feature.FeaturePlaceContext context) {
-                    BlockState before = context.level().getBlockState(traceWatchPos);
-                    boolean placed = originalFeature.place(context);
-                    BlockState after = context.level().getBlockState(traceWatchPos);
-                    if (before != after && traceWriter != null) {
-                        BlockPos origin = context.origin();
-                        traceWriter.println("WATCH " + featureName +
-                            " origin=" + origin.getX() + "," + origin.getY() + "," + origin.getZ() +
-                            " pos=" + traceWatchPos.getX() + "," + traceWatchPos.getY() + "," + traceWatchPos.getZ() +
-                            " " + serializeState(before) + " -> " + serializeState(after));
-                        traceWriter.flush();
-                    }
-                    return placed;
-                }
-            };
-
-        net.minecraft.world.level.levelgen.feature.ConfiguredFeature wrappedConfigured =
-            new net.minecraft.world.level.levelgen.feature.ConfiguredFeature(
-                watchingFeature, originalConfigured.config());
-
-        // Modifiers must see the ORIGINAL placed feature as topFeature or the
-        // BiomeFilter check fails and the feature silently never places.
-        List<net.minecraft.world.level.levelgen.placement.PlacementModifier> watchPlacement =
-            new ArrayList<>(placedFeature.placement().size());
-        for (net.minecraft.world.level.levelgen.placement.PlacementModifier modifier : placedFeature.placement()) {
-            watchPlacement.add(new net.minecraft.world.level.levelgen.placement.PlacementModifier() {
-                @Override
-                public java.util.stream.Stream<BlockPos> getPositions(
-                    net.minecraft.world.level.levelgen.placement.PlacementContext context,
-                    net.minecraft.util.RandomSource random,
-                    BlockPos origin
-                ) {
-                    net.minecraft.world.level.levelgen.placement.PlacementContext delegateContext =
-                        new net.minecraft.world.level.levelgen.placement.PlacementContext(
-                            context.getLevel(),
-                            context.generator(),
-                            Optional.of(placedFeature)
-                        );
-                    return modifier.getPositions(delegateContext, random, origin);
-                }
-
-                @Override
-                public net.minecraft.world.level.levelgen.placement.PlacementModifierType<?> type() {
-                    return modifier.type();
-                }
-            });
-        }
-
-        return new net.minecraft.world.level.levelgen.placement.PlacedFeature(
-            net.minecraft.core.Holder.direct(wrappedConfigured),
-            watchPlacement
-        );
-    }
-
-    /**
-     * Dynamic proxy over WorldGenLevel that logs every setBlock chronologically
-     * (interleaved with the RNG trace lines), mirroring the C++ hook in
-     * WorldGenRegion::setBlock.
-     */
-    private static net.minecraft.world.level.WorldGenLevel wrapLevelForSculkTracing(
-        net.minecraft.world.level.WorldGenLevel delegate
-    ) {
-        return (net.minecraft.world.level.WorldGenLevel) java.lang.reflect.Proxy.newProxyInstance(
-            net.minecraft.world.level.WorldGenLevel.class.getClassLoader(),
-            new Class<?>[]{ net.minecraft.world.level.WorldGenLevel.class },
+    private static net.minecraft.util.RandomSource tracingRandom(net.minecraft.util.RandomSource real, StringBuilder buf) {
+        return (net.minecraft.util.RandomSource) java.lang.reflect.Proxy.newProxyInstance(
+            net.minecraft.util.RandomSource.class.getClassLoader(),
+            new Class<?>[]{net.minecraft.util.RandomSource.class},
             (proxy, method, args) -> {
-                if (method.getName().equals("getHeightmapPos")
-                    && args != null && args.length == 2
-                    && args[1] instanceof BlockPos hmPos) {
-                    Object result;
-                    try {
-                        result = method.invoke(delegate, args);
-                    } catch (java.lang.reflect.InvocationTargetException e) {
-                        throw e.getCause();
-                    }
-                    BlockPos rp = (BlockPos) result;
-                    traceWriter.println("CALL getHeightmapPos " + args[0] + " " +
-                        hmPos.getX() + "," + hmPos.getZ() + "=" + rp.getY());
-                    return result;
+                String m = method.getName();
+                if (m.equals("nextIntBetweenInclusive") && args != null && args.length == 2) {
+                    int min = (Integer) args[0], max = (Integer) args[1];
+                    int r = real.nextInt(max - min + 1);
+                    buf.append("RNG nextInt(").append(max - min + 1).append(")=").append(r).append('\n');
+                    return min + r;
                 }
-                if (method.getName().equals("getBlockState")
-                    && args != null && args.length == 1
-                    && args[0] instanceof BlockPos readPos) {
-                    Object result;
-                    try {
-                        result = method.invoke(delegate, args);
-                    } catch (java.lang.reflect.InvocationTargetException e) {
-                        throw e.getCause();
-                    }
-                    traceWriter.println("GET " + readPos.getX() + "," + readPos.getY() + ","
-                        + readPos.getZ() + "=" + serializeState((BlockState) result));
-                    return result;
-                }
-                if (method.getName().equals("isEmptyBlock")
-                    && args != null && args.length == 1
-                    && args[0] instanceof BlockPos emptyPos) {
-                    Object result;
-                    try {
-                        result = method.invoke(delegate, args);
-                    } catch (java.lang.reflect.InvocationTargetException e) {
-                        throw e.getCause();
-                    }
-                    traceWriter.println("CALL isEmptyBlock " + emptyPos.getX() + "," +
-                        emptyPos.getY() + "," + emptyPos.getZ() + "=" + result);
-                    return result;
-                }
-                boolean isSetBlock = method.getName().equals("setBlock")
-                    && args != null && args.length >= 3
-                    && args[0] instanceof BlockPos
-                    && args[1] instanceof BlockState;
-                String setLine = null;
-                if (isSetBlock) {
-                    BlockPos pos = (BlockPos) args[0];
-                    BlockState newState = (BlockState) args[1];
-                    BlockState before = delegate.getBlockState(pos);
-                    setLine = "SET " + pos.getX() + "," + pos.getY() + "," + pos.getZ() +
-                        " " + serializeState(before) + " -> " + serializeState(newState) +
-                        " flags=" + args[2];
-                }
+                Object result;
                 try {
-                    Object result = method.invoke(delegate, args);
-                    if (setLine != null) {
-                        traceWriter.println(setLine);
-                    }
-                    return result;
+                    result = method.invoke(real, args);
                 } catch (java.lang.reflect.InvocationTargetException e) {
                     throw e.getCause();
                 }
+                if (m.equals("nextInt") && args != null && args.length == 1) {
+                    buf.append("RNG nextInt(").append(args[0]).append(")=").append(result).append('\n');
+                } else if (m.equals("nextFloat") && (args == null || args.length == 0)) {
+                    buf.append("RNG nextFloat=").append(String.format("%.9e", (Float) result)).append('\n');
+                }
+                return result;
             });
     }
 
-    /**
-     * Logs every interface-level RNG draw (nextInt(bound), nextFloat) with the
-     * calling frame, mirroring the C++ MC_SCULK_RNG_TRACE hook so the two
-     * chronological streams can be diffed line-by-line.
-     */
-    private static net.minecraft.util.RandomSource wrapRandomSourceForSculkTracing(
-        net.minecraft.util.RandomSource delegate
-    ) {
-        final StackWalker walker = StackWalker.getInstance();
-        return new net.minecraft.util.RandomSource() {
-            private String callSite() {
+    private static net.minecraft.world.level.WorldGenLevel tracingLevel(net.minecraft.world.level.WorldGenLevel real, String label, StringBuilder rngBuf) {
+        return (net.minecraft.world.level.WorldGenLevel) java.lang.reflect.Proxy.newProxyInstance(
+            net.minecraft.world.level.WorldGenLevel.class.getClassLoader(),
+            new Class<?>[]{net.minecraft.world.level.WorldGenLevel.class},
+            (proxy, method, args) -> {
+                String m = method.getName();
+                boolean isSet = (m.equals("setBlock") || m.equals("setBlockAndUpdate")) && args != null
+                    && args.length >= 2 && args[0] instanceof BlockPos && args[1] instanceof BlockState;
+                BlockState before = isSet ? real.getBlockState((BlockPos) args[0]) : null;
+                Object result;
                 try {
-                    return walker.walk(frames -> frames
-                        .map(StackWalker.StackFrame::toStackTraceElement)
-                        .filter(e -> !e.getClassName().contains("MinecraftAsyncChunkTest"))
-                        .limit(3)
-                        .map(e -> {
-                            String cn = e.getClassName();
-                            int idx = cn.lastIndexOf('.');
-                            return (idx >= 0 ? cn.substring(idx + 1) : cn)
-                                + "." + e.getMethodName() + ":" + e.getLineNumber();
-                        })
-                        .reduce((a, b) -> a + "<" + b)
-                        .orElse("?"));
-                } catch (Exception e) {
-                    return "?";
+                    result = method.invoke(real, args);
+                } catch (java.lang.reflect.InvocationTargetException e) {
+                    throw e.getCause();
                 }
-            }
-
-            @Override
-            public net.minecraft.util.RandomSource fork() {
-                return delegate.fork();
-            }
-
-            @Override
-            public net.minecraft.world.level.levelgen.PositionalRandomFactory forkPositional() {
-                return delegate.forkPositional();
-            }
-
-            @Override
-            public void setSeed(long seed) {
-                delegate.setSeed(seed);
-            }
-
-            @Override
-            public int nextInt() {
-                return delegate.nextInt();
-            }
-
-            @Override
-            public int nextInt(int bound) {
-                int value = delegate.nextInt(bound);
-                traceWriter.println("RNG nextInt(" + bound + ")=" + value + " @" + callSite());
-                return value;
-            }
-
-            @Override
-            public long nextLong() {
-                return delegate.nextLong();
-            }
-
-            @Override
-            public boolean nextBoolean() {
-                return delegate.nextBoolean();
-            }
-
-            @Override
-            public float nextFloat() {
-                float value = delegate.nextFloat();
-                traceWriter.println(
-                    "RNG nextFloat=" + String.format(java.util.Locale.ROOT, "%.9e", value) +
-                    " @" + callSite());
-                return value;
-            }
-
-            @Override
-            public double nextDouble() {
-                return delegate.nextDouble();
-            }
-
-            @Override
-            public double nextGaussian() {
-                return delegate.nextGaussian();
-            }
-        };
-    }
-
-    private static net.minecraft.util.RandomSource wrapRandomSourceForGeodeTracing(
-        net.minecraft.util.RandomSource delegate,
-        List<LoggedRandomCall> calls
-    ) {
-        return new net.minecraft.util.RandomSource() {
-            @Override
-            public net.minecraft.util.RandomSource fork() {
-                return delegate.fork();
-            }
-
-            @Override
-            public net.minecraft.world.level.levelgen.PositionalRandomFactory forkPositional() {
-                return delegate.forkPositional();
-            }
-
-            @Override
-            public void setSeed(long seed) {
-                delegate.setSeed(seed);
-            }
-
-            @Override
-            public int nextInt() {
-                return delegate.nextInt();
-            }
-
-            @Override
-            public int nextInt(int bound) {
-                int value = delegate.nextInt(bound);
-                calls.add(LoggedRandomCall.nextInt(bound, value));
-                return value;
-            }
-
-            @Override
-            public long nextLong() {
-                return delegate.nextLong();
-            }
-
-            @Override
-            public boolean nextBoolean() {
-                return delegate.nextBoolean();
-            }
-
-            @Override
-            public float nextFloat() {
-                float value = delegate.nextFloat();
-                calls.add(LoggedRandomCall.nextFloat(value));
-                return value;
-            }
-
-            @Override
-            public double nextDouble() {
-                double value = delegate.nextDouble();
-                calls.add(LoggedRandomCall.nextDouble(value));
-                return value;
-            }
-
-            @Override
-            public double nextGaussian() {
-                return delegate.nextGaussian();
-            }
-        };
-    }
-
-    private static void logLiveGeodeRandomSummary(
-        String featureName,
-        int stepIndex,
-        int featureIndex,
-        BlockPos origin,
-        long levelSeed,
-        net.minecraft.world.level.levelgen.feature.configurations.GeodeConfiguration config,
-        List<LoggedRandomCall> calls
-    ) {
-        if (traceWriter == null) return;
-
-        try {
-            int[] cursor = new int[]{0};
-            int numPoints = decodeIntProviderSample(config.distributionPoints, calls, cursor);
-            double crackRoll = takeNextDouble(calls, cursor);
-            float crackChanceRoll = takeNextFloat(calls, cursor);
-            boolean shouldGenerateCrack = (double)crackChanceRoll < config.geodeCrackSettings.generateCrackChance;
-            double crackSizeAdjustment =
-                (double)numPoints / (double)config.outerWallDistance.getMaxValue();
-            double innerAir = (double)1.0F / Math.sqrt(config.geodeLayerSettings.filling);
-            double innermostBlockLayer =
-                (double)1.0F / Math.sqrt(config.geodeLayerSettings.innerLayer + crackSizeAdjustment);
-            double innerCrust =
-                (double)1.0F / Math.sqrt(config.geodeLayerSettings.middleLayer + crackSizeAdjustment);
-            double outerCrust =
-                (double)1.0F / Math.sqrt(config.geodeLayerSettings.outerLayer + crackSizeAdjustment);
-            double crackSize =
-                (double)1.0F / Math.sqrt(
-                    config.geodeCrackSettings.baseCrackSize +
-                    crackRoll / (double)2.0F +
-                    (numPoints > 3 ? crackSizeAdjustment : (double)0.0F)
-                );
-
-            traceWriter.println(
-                "LIVE_GEODE[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                " IDX=" + featureIndex +
-                " " + featureName +
-                " ORIGIN=" + origin.getX() + "," + origin.getY() + "," + origin.getZ() +
-                " NUM_POINTS=" + numPoints +
-                " OUTER_WALL_MAX=" + config.outerWallDistance.getMaxValue() +
-                " CRACK_ROLL=" + crackRoll +
-                " CRACK_CHANCE_ROLL=" + crackChanceRoll +
-                " SHOULD_CRACK=" + shouldGenerateCrack +
-                " INNER_AIR=" + innerAir +
-                " INNERMOST=" + innermostBlockLayer +
-                " INNER_CRUST=" + innerCrust +
-                " OUTER_CRUST=" + outerCrust +
-                " CRACK_SIZE=" + crackSize
-            );
-
-            List<BlockPos> pointPositions = new ArrayList<>(numPoints);
-            List<Integer> pointOffsets = new ArrayList<>(numPoints);
-            for (int i = 0; i < numPoints; i++) {
-                int x = decodeIntProviderSample(config.outerWallDistance, calls, cursor);
-                int y = decodeIntProviderSample(config.outerWallDistance, calls, cursor);
-                int z = decodeIntProviderSample(config.outerWallDistance, calls, cursor);
-                int pointOffset = decodeIntProviderSample(config.pointOffset, calls, cursor);
-                BlockPos pointPos = origin.offset(x, y, z);
-                pointPositions.add(pointPos);
-                pointOffsets.add(pointOffset);
-                traceWriter.println(
-                    "  GEODE_POINT[" + i + "]=" +
-                    pointPos.getX() + "," + pointPos.getY() + "," + pointPos.getZ() +
-                    " offset=" + pointOffset
-                );
-            }
-
-            List<BlockPos> crackPoints = List.of();
-            if (shouldGenerateCrack) {
-                int offsetIndex = takeNextInt(calls, cursor, 4);
-                int crackOffset = numPoints * 2 + 1;
-                crackPoints = computeGeodeCrackPoints(origin, offsetIndex, crackOffset);
-                traceWriter.println(
-                    "  GEODE_CRACK_OFFSET_INDEX=" + offsetIndex +
-                    " CRACK_OFFSET=" + crackOffset
-                );
-                for (BlockPos crackPoint : crackPoints) {
-                    traceWriter.println(
-                        "  GEODE_CRACK_POINT=" +
-                        crackPoint.getX() + "," + crackPoint.getY() + "," + crackPoint.getZ()
-                    );
-                }
-            }
-
-            traceWriter.println(
-                "  GEODE_RANDOM_CALLS_USED=" + cursor[0] +
-                " TOTAL_RANDOM_CALLS=" + calls.size()
-            );
-            for (int i = cursor[0]; i < Math.min(cursor[0] + 12, calls.size()); i++) {
-                LoggedRandomCall call = calls.get(i);
-                if ("nextInt".equals(call.method)) {
-                    traceWriter.println(
-                        "  GEODE_RANDOM[" + i + "]=nextInt(" + call.bound + ") -> " + call.longValue
-                    );
-                } else {
-                    traceWriter.println(
-                        "  GEODE_RANDOM[" + i + "]=" + call.method + " -> " + call.doubleValue
-                    );
-                }
-            }
-
-            net.minecraft.world.level.levelgen.WorldgenRandom noiseRandom =
-                new net.minecraft.world.level.levelgen.WorldgenRandom(
-                    new net.minecraft.world.level.levelgen.LegacyRandomSource(levelSeed)
-                );
-            net.minecraft.world.level.levelgen.synth.NormalNoise noise =
-                net.minecraft.world.level.levelgen.synth.NormalNoise.create(noiseRandom, -4, (double)1.0F);
-            StringBuilder noiseConfig = new StringBuilder();
-            noise.parityConfigString(noiseConfig);
-            traceWriter.println("  GEODE_NOISE_CONFIG=" + noiseConfig);
-
-            for (BlockPos pointInside : BlockPos.betweenClosed(
-                origin.offset(config.minGenOffset, config.minGenOffset, config.minGenOffset),
-                origin.offset(config.maxGenOffset, config.maxGenOffset, config.maxGenOffset)
-            )) {
-                double noiseOffset =
-                    noise.getValue((double)pointInside.getX(), (double)pointInside.getY(), (double)pointInside.getZ()) *
-                    config.noiseMultiplier;
-                double distSumShell = (double)0.0F;
-                double distSumCrack = (double)0.0F;
-
-                for (int i = 0; i < pointPositions.size(); i++) {
-                    distSumShell += net.minecraft.util.Mth.invSqrt(
-                        pointInside.distSqr(pointPositions.get(i)) + (double)pointOffsets.get(i)
-                    ) + noiseOffset;
-                }
-
-                for (BlockPos crackPoint : crackPoints) {
-                    distSumCrack += net.minecraft.util.Mth.invSqrt(
-                        pointInside.distSqr(crackPoint) + (double)config.geodeCrackSettings.crackPointOffset
-                    ) + noiseOffset;
-                }
-
-                if (!(distSumShell < outerCrust)) {
-                    String branch = "outer";
-                    if (shouldGenerateCrack && distSumCrack >= crackSize && distSumShell < innerAir) {
-                        branch = "crack_air";
-                    } else if (distSumShell >= innerAir) {
-                        branch = "filling";
-                    } else if (distSumShell >= innermostBlockLayer) {
-                        branch = "inner";
-                    } else if (distSumShell >= innerCrust) {
-                        branch = "middle";
+                if (isSet && !Boolean.FALSE.equals(result)) {
+                    BlockPos pos = (BlockPos) args[0];
+                    BlockState state = (BlockState) args[1];
+                    if (rngBuf != null) {
+                        rngBuf.append("SET ").append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ())
+                            .append(' ').append(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(before.getBlock()))
+                            .append(" -> ").append(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock())).append('\n');
                     }
-
-                    traceWriter.println(
-                        "  GEODE_SAMPLE pos=" +
-                        pointInside.getX() + "," + pointInside.getY() + "," + pointInside.getZ() +
-                        " noise=" + noiseOffset +
-                        " shell=" + distSumShell +
-                        " crack=" + distSumCrack +
-                        " branch=" + branch
-                    );
-                }
-            }
-            traceWriter.flush();
-        } catch (Exception e) {
-            traceWriter.println(
-                "LIVE_GEODE[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                " IDX=" + featureIndex +
-                " " + featureName +
-                " TRACE_ERROR=" + e.getMessage()
-            );
-            e.printStackTrace(traceWriter);
-            traceWriter.flush();
-        }
-    }
-
-    private static int decodeIntProviderSample(
-        net.minecraft.util.valueproviders.IntProvider provider,
-        List<LoggedRandomCall> calls,
-        int[] cursor
-    ) {
-        if (provider instanceof net.minecraft.util.valueproviders.ConstantInt constantInt) {
-            return constantInt.getMinValue();
-        }
-
-        if (provider instanceof net.minecraft.util.valueproviders.UniformInt uniformInt) {
-            int min = uniformInt.getMinValue();
-            int max = uniformInt.getMaxValue();
-            int bound = max - min + 1;
-            return min + takeNextInt(calls, cursor, bound);
-        }
-
-        throw new IllegalStateException("Unsupported IntProvider for geode tracing: " + provider.getClass().getName());
-    }
-
-    private static int takeNextInt(List<LoggedRandomCall> calls, int[] cursor, int expectedBound) {
-        LoggedRandomCall call = calls.get(cursor[0]++);
-        if (!"nextInt".equals(call.method) || call.bound != expectedBound) {
-            throw new IllegalStateException(
-                "Expected nextInt(" + expectedBound + "), got " + call.method + "(" + call.bound + ")"
-            );
-        }
-        return (int)call.longValue;
-    }
-
-    private static float takeNextFloat(List<LoggedRandomCall> calls, int[] cursor) {
-        LoggedRandomCall call = calls.get(cursor[0]++);
-        if (!"nextFloat".equals(call.method)) {
-            throw new IllegalStateException("Expected nextFloat, got " + call.method);
-        }
-        return (float)call.doubleValue;
-    }
-
-    private static double takeNextDouble(List<LoggedRandomCall> calls, int[] cursor) {
-        LoggedRandomCall call = calls.get(cursor[0]++);
-        if (!"nextDouble".equals(call.method)) {
-            throw new IllegalStateException("Expected nextDouble, got " + call.method);
-        }
-        return call.doubleValue;
-    }
-
-    private static List<BlockPos> computeGeodeCrackPoints(BlockPos origin, int offsetIndex, int crackOffset) {
-        List<BlockPos> points = new ArrayList<>(3);
-        if (offsetIndex == 0) {
-            points.add(origin.offset(crackOffset, 7, 0));
-            points.add(origin.offset(crackOffset, 5, 0));
-            points.add(origin.offset(crackOffset, 1, 0));
-        } else if (offsetIndex == 1) {
-            points.add(origin.offset(0, 7, crackOffset));
-            points.add(origin.offset(0, 5, crackOffset));
-            points.add(origin.offset(0, 1, crackOffset));
-        } else if (offsetIndex == 2) {
-            points.add(origin.offset(crackOffset, 7, crackOffset));
-            points.add(origin.offset(crackOffset, 5, crackOffset));
-            points.add(origin.offset(crackOffset, 1, crackOffset));
-        } else {
-            points.add(origin.offset(0, 7, 0));
-            points.add(origin.offset(0, 5, 0));
-            points.add(origin.offset(0, 1, 0));
-        }
-        return points;
-    }
-
-    private static void logLiveVegetationPatchShadow(
-        String featureName,
-        int stepIndex,
-        int featureIndex,
-        net.minecraft.world.level.levelgen.feature.FeaturePlaceContext<?> context,
-        net.minecraft.world.level.levelgen.feature.configurations.VegetationPatchConfiguration config
-    ) {
-        if (traceWriter == null) return;
-        if (!(context.random() instanceof net.minecraft.world.level.levelgen.WorldgenRandom worldgenRandom)) return;
-
-        try {
-            net.minecraft.world.level.levelgen.WorldgenRandom shadowRandom = cloneWorldgenRandom(worldgenRandom);
-            if (shadowRandom == null) {
-                traceWriter.println(
-                    "LIVE_VEG_PATCH[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                    " IDX=" + featureIndex +
-                    " " + featureName +
-                    " TRACE_ERROR=clone_random_failed"
-                );
-                traceWriter.flush();
-                return;
-            }
-
-            BlockPos origin = context.origin();
-            int xRadius = config.xzRadius.sample(shadowRandom) + 1;
-            int zRadius = config.xzRadius.sample(shadowRandom) + 1;
-            Set<BlockPos> surface = traceVegetationPatchSurface(
-                context.level(),
-                config,
-                shadowRandom,
-                origin,
-                xRadius,
-                zRadius
-            );
-
-            traceWriter.println(
-                "LIVE_VEG_PATCH[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                " IDX=" + featureIndex +
-                " " + featureName +
-                " ORIGIN=" + origin.getX() + "," + origin.getY() + "," + origin.getZ() +
-                " X_RADIUS=" + xRadius +
-                " Z_RADIUS=" + zRadius +
-                " SURFACE_COUNT=" + surface.size()
-            );
-
-            int surfaceIndex = 0;
-            for (BlockPos surfacePos : surface) {
-                traceWriter.println(
-                    "  LIVE_VEG_SURFACE[" + surfaceIndex + "]=" +
-                    surfacePos.getX() + "," + surfacePos.getY() + "," + surfacePos.getZ()
-                );
-                surfaceIndex++;
-            }
-            traceWriter.flush();
-        } catch (Exception e) {
-            traceWriter.println(
-                "LIVE_VEG_PATCH[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                " IDX=" + featureIndex +
-                " " + featureName +
-                " TRACE_ERROR=" + e.getMessage()
-            );
-            e.printStackTrace(traceWriter);
-            traceWriter.flush();
-        }
-    }
-
-    private static Set<BlockPos> traceVegetationPatchSurface(
-        net.minecraft.world.level.WorldGenLevel level,
-        net.minecraft.world.level.levelgen.feature.configurations.VegetationPatchConfiguration config,
-        net.minecraft.util.RandomSource random,
-        BlockPos origin,
-        int xRadius,
-        int zRadius
-    ) {
-        BlockPos.MutableBlockPos pos = origin.mutable();
-        BlockPos.MutableBlockPos belowPos = pos.mutable();
-        Direction inwards = config.surface.getDirection();
-        Direction outwards = inwards.getOpposite();
-        Set<BlockPos> surface = new HashSet<>();
-        java.util.function.Predicate<BlockState> replaceable = (state) -> state.is(config.replaceable);
-
-        pos.set(origin);
-        belowPos.set(origin);
-        int columnIndex = 0;
-
-        for (int dx = -xRadius; dx <= xRadius; ++dx) {
-            boolean isXEdge = dx == -xRadius || dx == xRadius;
-
-            for (int dz = -zRadius; dz <= zRadius; ++dz) {
-                boolean isZEdge = dz == -zRadius || dz == zRadius;
-                boolean isEdge = isXEdge || isZEdge;
-                boolean isCorner = isXEdge && isZEdge;
-                boolean isEdgeButNotCorner = isEdge && !isCorner;
-                float edgeRoll = Float.NaN;
-                if (isCorner) {
-                    if (traceWriter != null) {
-                        traceWriter.println("  LIVE_VEG_COLUMN[" + columnIndex + "] dx=" + dx + " dz=" + dz + " skipped=corner");
-                    }
-                    columnIndex++;
-                    continue;
-                }
-
-                if (isEdgeButNotCorner) {
-                    if (config.extraEdgeColumnChance == 0.0F) {
-                        if (traceWriter != null) {
-                            traceWriter.println("  LIVE_VEG_COLUMN[" + columnIndex + "] dx=" + dx + " dz=" + dz + " skipped=edge_chance_zero");
-                        }
-                        columnIndex++;
-                        continue;
-                    }
-
-                    edgeRoll = random.nextFloat();
-                    if (edgeRoll > config.extraEdgeColumnChance) {
-                        if (traceWriter != null) {
-                            traceWriter.println(
-                                "  LIVE_VEG_COLUMN[" + columnIndex + "] dx=" + dx +
-                                " dz=" + dz +
-                                " skipped=edge_roll roll=" + edgeRoll +
-                                " chance=" + config.extraEdgeColumnChance
-                            );
-                        }
-                        columnIndex++;
-                        continue;
+                    synchronized (blockTraceWriter) {
+                        blockTraceWriter.println("BLOCK_SET " + label + " pos=" + pos.getX() + "," + pos.getY() + "," + pos.getZ()
+                            + " old=" + net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(before.getBlock())
+                            + " new=" + net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()));
                     }
                 }
-
-                pos.setWithOffset(origin, dx, 0, dz);
-                int airMoves = 0;
-                for (int offset = 0; level.isStateAtPosition(pos, net.minecraft.world.level.block.state.BlockBehaviour.BlockStateBase::isAir) && offset < config.verticalRange; ++offset) {
-                    pos.move(inwards);
-                    airMoves++;
-                }
-
-                int solidMoves = 0;
-                for (int offset = 0; level.isStateAtPosition(pos, (state) -> !state.isAir()) && offset < config.verticalRange; ++offset) {
-                    pos.move(outwards);
-                    solidMoves++;
-                }
-
-                belowPos.setWithOffset(pos, inwards);
-                BlockState belowState = level.getBlockState(belowPos);
-                BlockPos surfacePos = pos.immutable();
-                BlockPos groundPosBefore = belowPos.immutable();
-                boolean empty = level.isEmptyBlock(pos);
-                boolean sturdy = empty && belowState.isFaceSturdy(level, belowPos, inwards.getOpposite());
-                int depth = -1;
-                boolean groundPlaced = false;
-                boolean surfaceAdded = false;
-                if (empty && sturdy) {
-                    depth = config.depth.sample(random) + (config.extraBottomBlockChance > 0.0F && random.nextFloat() < config.extraBottomBlockChance ? 1 : 0);
-                    BlockPos groundPos = belowPos.immutable();
-                    groundPlaced = traceVegetationPatchGround(level, config, replaceable, random, belowPos, depth, columnIndex);
-                    if (groundPlaced) {
-                        surfaceAdded = surface.add(groundPos);
-                    }
-                }
-
-                if (traceWriter != null) {
-                    traceWriter.println(
-                        "  LIVE_VEG_COLUMN[" + columnIndex + "] dx=" + dx +
-                        " dz=" + dz +
-                        " edge_roll=" + (Float.isNaN(edgeRoll) ? "NaN" : Float.toString(edgeRoll)) +
-                        " air_moves=" + airMoves +
-                        " solid_moves=" + solidMoves +
-                        " pos=" + surfacePos.getX() + "," + surfacePos.getY() + "," + surfacePos.getZ() +
-                        " below=" + groundPosBefore.getX() + "," + groundPosBefore.getY() + "," + groundPosBefore.getZ() +
-                        " below_block=" + BuiltInRegistries.BLOCK.getKey(belowState.getBlock()) +
-                        " empty=" + empty +
-                        " sturdy=" + sturdy +
-                        " depth=" + depth +
-                        " ground=" + groundPlaced +
-                        " surface_add=" + surfaceAdded
-                    );
-                }
-                columnIndex++;
-            }
-        }
-
-        return surface;
+                return result;
+            });
     }
 
-    private static boolean traceVegetationPatchGround(
-        net.minecraft.world.level.WorldGenLevel level,
-        net.minecraft.world.level.levelgen.feature.configurations.VegetationPatchConfiguration config,
-        java.util.function.Predicate<BlockState> replaceable,
-        net.minecraft.util.RandomSource random,
-        BlockPos.MutableBlockPos belowPos,
-        int depth,
-        int columnIndex
-    ) {
-        for (int i = 0; i < depth; ++i) {
-            BlockState stateToPlace = config.groundState.getState(random, belowPos);
-            BlockState belowState = level.getBlockState(belowPos);
-            BlockPos currentPos = belowPos.immutable();
-            if (!stateToPlace.is(belowState.getBlock())) {
-                if (!replaceable.test(belowState)) {
-                    if (traceWriter != null) {
-                        traceWriter.println(
-                            "  LIVE_VEG_GROUND[" + columnIndex + "][" + i + "] pos=" +
-                            currentPos.getX() + "," + currentPos.getY() + "," + currentPos.getZ() +
-                            " below_block=" + BuiltInRegistries.BLOCK.getKey(belowState.getBlock()) +
-                            " place_block=" + BuiltInRegistries.BLOCK.getKey(stateToPlace.getBlock()) +
-                            " action=stop_not_replaceable"
-                        );
-                    }
-                    return i != 0;
-                }
-                if (traceWriter != null) {
-                    traceWriter.println(
-                        "  LIVE_VEG_GROUND[" + columnIndex + "][" + i + "] pos=" +
-                        currentPos.getX() + "," + currentPos.getY() + "," + currentPos.getZ() +
-                        " below_block=" + BuiltInRegistries.BLOCK.getKey(belowState.getBlock()) +
-                        " place_block=" + BuiltInRegistries.BLOCK.getKey(stateToPlace.getBlock()) +
-                        " action=replace"
-                    );
-                }
-                level.setBlock(belowPos, stateToPlace, 2);
-                belowPos.move(config.surface.getDirection());
-            } else if (traceWriter != null) {
-                traceWriter.println(
-                    "  LIVE_VEG_GROUND[" + columnIndex + "][" + i + "] pos=" +
-                    currentPos.getX() + "," + currentPos.getY() + "," + currentPos.getZ() +
-                    " below_block=" + BuiltInRegistries.BLOCK.getKey(belowState.getBlock()) +
-                    " place_block=" + BuiltInRegistries.BLOCK.getKey(stateToPlace.getBlock()) +
-                    " action=same_block"
-                );
-            }
-        }
-
-        return true;
+    private static UnsupportedOperationException featureTracingNotPorted() {
+        return new UnsupportedOperationException(
+            "--trace-features is not ported to MC 26.3's feature API yet (see java/legacy/FeatureTracing_26_1.txt)");
     }
-
-    private static net.minecraft.world.level.levelgen.WorldgenRandom cloneWorldgenRandom(
-        net.minecraft.world.level.levelgen.WorldgenRandom random
-    ) {
-        try {
-            long[] seedState = getSeedState(random);
-            return new net.minecraft.world.level.levelgen.WorldgenRandom(
-                new net.minecraft.world.level.levelgen.XoroshiroRandomSource(seedState[0], seedState[1])
-            );
-        } catch (Exception e) {
-            logSeedTraceError("cloneWorldgenRandom", e);
-            return null;
-        }
-    }
-
-    private static net.minecraft.world.level.levelgen.placement.PlacementModifier wrapPlacementModifierForLiveTracing(
-        net.minecraft.world.level.levelgen.placement.PlacedFeature originalPlacedFeature,
-        net.minecraft.world.level.levelgen.placement.PlacementModifier originalModifier,
-        String featureName,
-        int stepIndex,
-        int featureIndex,
-        int modifierIndex
-    ) {
-        return new net.minecraft.world.level.levelgen.placement.PlacementModifier() {
-            @Override
-            public java.util.stream.Stream<BlockPos> getPositions(
-                net.minecraft.world.level.levelgen.placement.PlacementContext context,
-                net.minecraft.util.RandomSource random,
-                BlockPos origin
-            ) {
-                // Pass the OUTER context through unchanged: with the registry
-                // holder rebound, the biome's memoized featureSet contains the
-                // WRAPPED feature, so BiomeFilter.hasFeature must see it (the
-                // outer topFeature). Substituting the original here made every
-                // BiomeFilter reject and silently suppressed the feature.
-                List<BlockPos> results = originalModifier.getPositions(context, random, origin).toList();
-                logLiveModifierPlacement(featureName, stepIndex, featureIndex, modifierIndex, originalModifier, random, origin, results);
-                return results.stream();
-            }
-
-            @Override
-            public net.minecraft.world.level.levelgen.placement.PlacementModifierType<?> type() {
-                return originalModifier.type();
-            }
-        };
-    }
-
-    private static void logLiveFeaturePlacement(
-        String featureName,
-        int stepIndex,
-        int featureIndex,
-        net.minecraft.world.level.levelgen.feature.FeaturePlaceContext<?> context
-    ) {
-        if (!traceFeatures || traceWriter == null) return;
-
-        try {
-            BlockPos origin = context.origin();
-            BlockState stateAtOrigin = context.level().getBlockState(origin);
-            BlockState stateBelow = context.level().getBlockState(origin.below());
-            String originName = BuiltInRegistries.BLOCK.getKey(stateAtOrigin.getBlock()).toString();
-            String belowName = BuiltInRegistries.BLOCK.getKey(stateBelow.getBlock()).toString();
-
-            long seedLo = 0L;
-            long seedHi = 0L;
-            if (context.random() instanceof net.minecraft.world.level.levelgen.WorldgenRandom worldgenRandom) {
-                long[] seedState = getSeedState(worldgenRandom);
-                seedLo = seedState[0];
-                seedHi = seedState[1];
-            }
-
-            traceWriter.println(
-                "LIVE_FEATURE[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                " IDX=" + featureIndex +
-                " " + featureName +
-                " ORIGIN=" + origin.getX() + "," + origin.getY() + "," + origin.getZ() +
-                " ORIGIN_BLOCK=" + originName +
-                " BELOW_BLOCK=" + belowName +
-                " SEED_LO=" + seedLo +
-                " SEED_HI=" + seedHi
-            );
-            traceWriter.flush();
-        } catch (Exception e) {
-            traceWriter.println("# LIVE_TRACE_LOG_ERROR: " + e.getMessage());
-            traceWriter.flush();
-        }
-    }
-
-    private static void logLiveModifierPlacement(
-        String featureName,
-        int stepIndex,
-        int featureIndex,
-        int modifierIndex,
-        net.minecraft.world.level.levelgen.placement.PlacementModifier modifier,
-        net.minecraft.util.RandomSource random,
-        BlockPos origin,
-        List<BlockPos> results
-    ) {
-        if (!traceFeatures || traceWriter == null) return;
-
-        try {
-            long seedLo = 0L;
-            long seedHi = 0L;
-            if (random instanceof net.minecraft.world.level.levelgen.WorldgenRandom worldgenRandom) {
-                long[] seedState = getSeedState(worldgenRandom);
-                seedLo = seedState[0];
-                seedHi = seedState[1];
-            }
-
-            traceWriter.println(
-                "LIVE_MOD[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                " IDX=" + featureIndex +
-                " MOD=" + modifierIndex +
-                " TYPE=" + modifier.getClass().getSimpleName() +
-                " " + featureName +
-                " INPUT=" + origin.getX() + "," + origin.getY() + "," + origin.getZ() +
-                " OUT_COUNT=" + results.size() +
-                " SEED_LO=" + seedLo +
-                " SEED_HI=" + seedHi
-            );
-            for (int i = 0; i < results.size(); i++) {
-                BlockPos result = results.get(i);
-                traceWriter.println("  LIVE_OUT[" + i + "]=" + result.getX() + "," + result.getY() + "," + result.getZ());
-            }
-            traceWriter.flush();
-        } catch (Exception e) {
-            traceWriter.println("# LIVE_TRACE_LOG_ERROR: " + e.getMessage());
-            traceWriter.flush();
-        }
-    }
-
-    private static void logLiveFeatureResult(
-        String featureName,
-        int stepIndex,
-        int featureIndex,
-        net.minecraft.world.level.levelgen.feature.FeaturePlaceContext<?> context,
-        boolean placed,
-        Map<BlockPos, String> beforeBlocks
-    ) {
-        if (!traceFeatures || traceWriter == null) return;
-
-        try {
-            List<String> blockChanges = collectLiveFeatureBlockChanges(context.level(), beforeBlocks);
-            BlockPos origin = context.origin();
-
-            traceWriter.println(
-                "LIVE_PLACE[" + liveTraceEventCounter.getAndIncrement() + "] STEP=" + stepIndex +
-                " IDX=" + featureIndex +
-                " " + featureName +
-                " ORIGIN=" + origin.getX() + "," + origin.getY() + "," + origin.getZ() +
-                " PLACED=" + placed +
-                " BLOCK_CHANGES=" + blockChanges.size()
-            );
-            for (String change : blockChanges) {
-                traceWriter.println("  " + change);
-            }
-            traceWriter.flush();
-        } catch (Exception e) {
-            traceWriter.println("# LIVE_TRACE_LOG_ERROR: " + e.getMessage());
-            traceWriter.flush();
-        }
-    }
-
-    private static Map<BlockPos, String> captureLiveFeatureBlocks(
-        net.minecraft.world.level.WorldGenLevel level,
-        BlockPos origin
-    ) {
-        Map<BlockPos, String> blocks = new HashMap<>();
-        ChunkPos centerChunk = new ChunkPos(origin);
-
-        for (int chunkZ = centerChunk.z - 1; chunkZ <= centerChunk.z + 1; chunkZ++) {
-            for (int chunkX = centerChunk.x - 1; chunkX <= centerChunk.x + 1; chunkX++) {
-                ChunkAccess chunk = level.getChunk(chunkX, chunkZ);
-                int minBlockX = chunk.getPos().getMinBlockX();
-                int minBlockZ = chunk.getPos().getMinBlockZ();
-
-                for (int z = 0; z < 16; z++) {
-                    for (int y = MIN_Y; y < MAX_Y; y++) {
-                        for (int x = 0; x < 16; x++) {
-                            BlockPos pos = new BlockPos(minBlockX + x, y, minBlockZ + z);
-                            BlockState state = chunk.getBlockState(pos);
-                            String blockName = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
-                            blocks.put(pos, blockName);
-                        }
-                    }
-                }
-            }
-        }
-
-        return blocks;
-    }
-
-    private static List<String> collectLiveFeatureBlockChanges(
-        net.minecraft.world.level.WorldGenLevel level,
-        Map<BlockPos, String> beforeBlocks
-    ) {
-        List<BlockPos> positions = new ArrayList<>(beforeBlocks.keySet());
-        positions.sort(Comparator
-            .<BlockPos>comparingInt(pos -> pos.getZ())
-            .thenComparingInt(pos -> pos.getY())
-            .thenComparingInt(pos -> pos.getX()));
-
-        List<String> changes = new ArrayList<>();
-        for (BlockPos pos : positions) {
-            String before = beforeBlocks.get(pos);
-            String after = BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).getBlock()).toString();
-            if (!Objects.equals(before, after)) {
-                changes.add(
-                    "BLOCK pos=" + pos.getX() + "," + pos.getY() + "," + pos.getZ() +
-                    " old=" + before +
-                    " new=" + after
-                );
-            }
-        }
-
-        return changes;
-    }
-
-    /**
-     * Trace features for a chunk - runs actual placement with tracing
-     */
-    private static void traceChunkFeatures(ServerLevel level, int chunkX, int chunkZ) {
-        if (!traceFeatures || traceWriter == null) return;
-
-        try {
-            traceWriter.println("# CHUNK (" + chunkX + ", " + chunkZ + ")");
-
-            net.minecraft.world.level.chunk.ChunkGenerator generator = level.getChunkSource().getGenerator();
-
-            // Calculate origin
-            int minSectionY = level.getMinSectionY();
-            int originX = chunkX * 16;
-            int originY = minSectionY * 16;
-            int originZ = chunkZ * 16;
-            BlockPos origin = new BlockPos(originX, originY, originZ);
-            traceWriter.println("# Origin: " + originX + ", " + originY + ", " + originZ);
-
-            // Create random and get decoration seed
-            net.minecraft.world.level.levelgen.WorldgenRandom random = new net.minecraft.world.level.levelgen.WorldgenRandom(
-                new net.minecraft.world.level.levelgen.XoroshiroRandomSource(
-                    net.minecraft.world.level.levelgen.RandomSupport.generateUniqueSeed()));
-            long decorationSeed = random.setDecorationSeed(level.getSeed(), originX, originZ);
-            traceWriter.println("# DecorationSeed: " + decorationSeed);
-
-            // Get featuresPerStep via reflection
-            java.lang.reflect.Field featuresField = net.minecraft.world.level.chunk.ChunkGenerator.class.getDeclaredField("featuresPerStep");
-            featuresField.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>> featuresSupplier =
-                (java.util.function.Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>) featuresField.get(generator);
-
-            List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> featureList = featuresSupplier.get();
-
-            Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> featureRegistry =
-                level.registryAccess().lookupOrThrow(Registries.PLACED_FEATURE);
-
-            traceWriter.println();
-
-            // Trace each step
-            for (int stepIndex = 0; stepIndex < featureList.size(); stepIndex++) {
-                net.minecraft.world.level.biome.FeatureSorter.StepFeatureData stepData = featureList.get(stepIndex);
-                List<net.minecraft.world.level.levelgen.placement.PlacedFeature> features = stepData.features();
-
-                if (features.isEmpty()) continue;
-
-                boolean wroteStepHeader = false;
-
-                for (int idx = 0; idx < features.size(); idx++) {
-                    net.minecraft.world.level.levelgen.placement.PlacedFeature feature = features.get(idx);
-
-                    Optional<net.minecraft.resources.ResourceKey<net.minecraft.world.level.levelgen.placement.PlacedFeature>> keyOpt =
-                        featureRegistry.getResourceKey(feature);
-                    String featureName = keyOpt.map(k -> k.identifier().toString()).orElse("(unnamed)");
-
-                    if (traceFeatureFilter != null && !traceFeatureFilter.equals(featureName)) {
-                        continue;
-                    }
-
-                    if (!wroteStepHeader) {
-                        traceWriter.println("# ===== STEP " + stepIndex + " (" + features.size() + " features) =====");
-                        wroteStepHeader = true;
-                    }
-
-                    // Set feature seed
-                    random.setFeatureSeed(decorationSeed, idx, stepIndex);
-
-                    traceWriter.println("FEATURE STEP=" + stepIndex + " IDX=" + idx + " " + featureName);
-
-                    // Get seed state before tracing
-                    long[] savedSeedState = getSeedState(random);
-                    long savedSeedLo = savedSeedState[0];
-                    long savedSeedHi = savedSeedState[1];
-                    traceWriter.println("  SEED_BEFORE: lo=" + savedSeedLo + " hi=" + savedSeedHi);
-
-                    // Trace through modifiers
-                    traceFeatureModifiers(feature, level, generator, random, origin, traceFeatureFilter != null);
-
-                    traceWriter.println();
-                }
-            }
-
-            traceWriter.println("# END CHUNK (" + chunkX + ", " + chunkZ + ")");
-            traceWriter.flush();
-
-        } catch (Exception e) {
-            traceWriter.println("# ERROR: " + e.getMessage());
-            e.printStackTrace(traceWriter);
-        }
-    }
-
-    /**
-     * Trace a feature's placement modifiers
-     */
-    private static void traceFeatureModifiers(
-        net.minecraft.world.level.levelgen.placement.PlacedFeature feature,
-        ServerLevel level,
-        net.minecraft.world.level.chunk.ChunkGenerator generator,
-        net.minecraft.world.level.levelgen.WorldgenRandom random,
-        BlockPos origin,
-        boolean dumpAllPositions
-    ) {
-        try {
-            List<net.minecraft.world.level.levelgen.placement.PlacementModifier> modifiers = feature.placement();
-            net.minecraft.world.level.levelgen.placement.PlacementContext context =
-                new net.minecraft.world.level.levelgen.placement.PlacementContext(level, generator, Optional.of(feature));
-
-            List<BlockPos> currentPositions = List.of(origin);
-
-            for (int i = 0; i < modifiers.size(); i++) {
-                net.minecraft.world.level.levelgen.placement.PlacementModifier modifier = modifiers.get(i);
-                List<BlockPos> prevPositions = new ArrayList<>(currentPositions);
-
-                // Apply modifier to all current positions
-                List<BlockPos> newPositions = new ArrayList<>();
-                List<String> transformations = new ArrayList<>();
-
-                for (BlockPos pos : currentPositions) {
-                    List<BlockPos> results = modifier.getPositions(context, random, pos).toList();
-                    for (BlockPos result : results) {
-                        newPositions.add(result);
-                        if (dumpAllPositions || transformations.size() < 10) {
-                            transformations.add("      POS[" + (newPositions.size() - 1) + "]: " +
-                                pos.getX() + "," + pos.getY() + "," + pos.getZ() + " -> " +
-                                result.getX() + "," + result.getY() + "," + result.getZ());
-                        }
-                    }
-                }
-
-                traceWriter.println("  [" + i + "] " + modifier.getClass().getSimpleName() +
-                    ": " + prevPositions.size() + " -> " + newPositions.size() + " positions");
-
-                for (String t : transformations) {
-                    traceWriter.println(t);
-                }
-                if (!dumpAllPositions && newPositions.size() > transformations.size()) {
-                    traceWriter.println("      ... and " + (newPositions.size() - transformations.size()) + " more");
-                }
-
-                // Log seed state after
-                long[] seedAfter = getSeedState(random);
-                traceWriter.println("      SEED_AFTER: lo=" + seedAfter[0] + " hi=" + seedAfter[1]);
-
-                currentPositions = newPositions;
-                if (currentPositions.isEmpty()) break;
-            }
-
-            traceWriter.println("  TRACE_FINAL: " + currentPositions.size() + " positions");
-            if (dumpAllPositions) {
-                for (int i = 0; i < currentPositions.size(); i++) {
-                    BlockPos pos = currentPositions.get(i);
-                    traceWriter.println("      FINAL_POS[" + i + "]: " +
-                        pos.getX() + "," + pos.getY() + "," + pos.getZ());
-                }
-            }
-
-        } catch (Exception e) {
-            traceWriter.println("  ERROR: " + e.getMessage());
-        }
-    }
-
-    private static long[] getSeedState(net.minecraft.world.level.levelgen.WorldgenRandom random) {
-        try {
-            java.lang.reflect.Field randomField = net.minecraft.world.level.levelgen.WorldgenRandom.class.getDeclaredField("randomSource");
-            randomField.setAccessible(true);
-            Object randomSource = randomField.get(random);
-            if (randomSource == null) {
-                throw new IllegalStateException("WorldgenRandom.randomSource is null");
-            }
-
-            java.lang.reflect.Field implField = randomSource.getClass().getDeclaredField("randomNumberGenerator");
-            implField.setAccessible(true);
-            Object generator = implField.get(randomSource);
-            if (generator == null) {
-                throw new IllegalStateException("XoroshiroRandomSource.randomNumberGenerator is null");
-            }
-
-            java.lang.reflect.Field loField = generator.getClass().getDeclaredField("seedLo");
-            java.lang.reflect.Field hiField = generator.getClass().getDeclaredField("seedHi");
-            loField.setAccessible(true);
-            hiField.setAccessible(true);
-            return new long[]{loField.getLong(generator), hiField.getLong(generator)};
-        } catch (Exception e) {
-            logSeedTraceError("getSeedState", e);
-            return new long[]{0L, 0L};
-        }
-    }
-
-    private static void logSeedTraceError(String source, Exception e) {
-        String key = source + ":" + e.getClass().getName() + ":" + String.valueOf(e.getMessage());
-        if (!loggedSeedTraceErrors.add(key)) {
-            return;
-        }
-
-        String message = "# SEED_TRACE_ERROR[" + source + "]: " + e.getClass().getSimpleName() + ": " + e.getMessage();
-        if (traceWriter != null) {
-            traceWriter.println(message);
-            e.printStackTrace(traceWriter);
-            traceWriter.flush();
-        } else {
-            System.err.println(message);
-            e.printStackTrace(System.err);
-        }
-    }
+    private static void installLiveFeatureTracing(ServerLevel level) { throw featureTracingNotPorted(); }
+    private static void installLiveFeatureTracing(WorldStem worldStem) { throw featureTracingNotPorted(); }
+    private static void traceChunkFeatures(ServerLevel level, int chunkX, int chunkZ) { throw featureTracingNotPorted(); }
 
     /**
      * Placement-layer trace: no chunk generation involved. Line grammar (all
@@ -2951,7 +1687,7 @@ public class MinecraftAsyncChunkTest {
                     if (positions != null) {
                         int index = 0;
                         for (ChunkPos p : positions) {
-                            out.println("RING," + setId + "," + (index++) + "," + p.x + "," + p.z);
+                            out.println("RING," + setId + "," + (index++) + "," + p.x() + "," + p.z());
                         }
                     }
                 }
@@ -2976,8 +1712,8 @@ public class MinecraftAsyncChunkTest {
         Registry<Structure> structuresRegistry = level.registryAccess().lookupOrThrow(Registries.STRUCTURE);
         List<Map.Entry<ChunkPos, ChunkAccess>> sortedChunks = new ArrayList<>(generatedChunks.entrySet());
         sortedChunks.sort(Comparator
-            .comparingInt((Map.Entry<ChunkPos, ChunkAccess> entry) -> entry.getKey().x)
-            .thenComparingInt(entry -> entry.getKey().z));
+            .comparingInt((Map.Entry<ChunkPos, ChunkAccess> entry) -> entry.getKey().x())
+            .thenComparingInt(entry -> entry.getKey().z()));
 
         Set<Long> referencedStartChunks = new TreeSet<>();
 
@@ -2992,7 +1728,7 @@ public class MinecraftAsyncChunkTest {
             for (Map.Entry<ChunkPos, ChunkAccess> entry : sortedChunks) {
                 ChunkPos chunkPos = entry.getKey();
                 ChunkAccess chunk = entry.getValue();
-                out.println("CHUNK " + chunkPos.x + "," + chunkPos.z);
+                out.println("CHUNK " + chunkPos.x() + "," + chunkPos.z());
 
                 Map<Structure, LongSet> references = chunk.getAllReferences();
                 if (references.isEmpty()) {
@@ -3003,9 +1739,9 @@ public class MinecraftAsyncChunkTest {
                     for (Map.Entry<Structure, LongSet> refEntry : refEntries) {
                         List<String> refChunks = new ArrayList<>();
                         for (long ref : refEntry.getValue()) {
-                            ChunkPos refPos = new ChunkPos(ref);
+                            ChunkPos refPos = ChunkPos.unpack(ref);
                             referencedStartChunks.add(ref);
-                            refChunks.add(refPos.x + "," + refPos.z);
+                            refChunks.add(refPos.x() + "," + refPos.z());
                         }
                         Collections.sort(refChunks);
                         out.println("  REFERENCES " + structureName(structuresRegistry, refEntry.getKey()) + " -> " + String.join(" | ", refChunks));
@@ -3028,9 +1764,9 @@ public class MinecraftAsyncChunkTest {
 
             out.println("# REFERENCED START CHUNKS");
             for (long ref : referencedStartChunks) {
-                ChunkPos startChunkPos = new ChunkPos(ref);
-                ChunkAccess startChunk = level.getChunk(startChunkPos.x, startChunkPos.z, ChunkStatus.STRUCTURE_STARTS);
-                out.println("SOURCE_CHUNK " + startChunkPos.x + "," + startChunkPos.z);
+                ChunkPos startChunkPos = ChunkPos.unpack(ref);
+                ChunkAccess startChunk = level.getChunk(startChunkPos.x(), startChunkPos.z(), ChunkStatus.STRUCTURE_STARTS);
+                out.println("SOURCE_CHUNK " + startChunkPos.x() + "," + startChunkPos.z());
 
                 Map<Structure, StructureStart> starts = startChunk.getAllStarts();
                 if (starts.isEmpty()) {
@@ -3065,7 +1801,7 @@ public class MinecraftAsyncChunkTest {
         out.println(
             prefix + " " + structureName(structuresRegistry, structure) +
             " valid=" + start.isValid() +
-            " start_chunk=" + start.getChunkPos().x + "," + start.getChunkPos().z +
+            " start_chunk=" + start.getChunkPos().x() + "," + start.getChunkPos().z() +
             " refs=" + start.getReferences() +
             " bb=" + bb.minX() + "," + bb.minY() + "," + bb.minZ() +
             " -> " + bb.maxX() + "," + bb.maxY() + "," + bb.maxZ()
@@ -3106,7 +1842,7 @@ public class MinecraftAsyncChunkTest {
      */
     private static class HeadlessParityServer extends MinecraftServer {
         private static final Services NO_SERVICES = new Services(
-            (MinecraftSessionService) null,
+            (SessionService) null,
             ServicesKeySet.EMPTY,
             (GameProfileRepository) null,
             new MockUserNameToIdResolver(),
@@ -3119,9 +1855,13 @@ public class MinecraftAsyncChunkTest {
                              LevelStorageSource.LevelStorageAccess storage,
                              PackRepository packRepository,
                              WorldStem worldStem) {
-            super(serverThread, storage, packRepository, worldStem, Proxy.NO_PROXY,
+            // 26.3: game rules are handed to the server (they left
+            // LevelSettings), plus the notification manager.
+            super(serverThread, storage, packRepository, worldStem,
+                  Optional.of(new GameRules(FeatureFlags.DEFAULT_FLAGS)), Proxy.NO_PROXY,
                   DataFixers.getDataFixer(), NO_SERVICES,
-                  net.minecraft.server.level.progress.LoggingLevelLoadListener.forDedicatedServer());
+                  net.minecraft.server.level.progress.LoggingLevelLoadListener.forDedicatedServer(),
+                  false, new NotificationManager());
         }
 
         @Override
@@ -3151,6 +1891,8 @@ public class MinecraftAsyncChunkTest {
         @Override public boolean shouldRconBroadcast() { return false; }
         @Override public boolean isDedicatedServer() { return false; }
         @Override public int getRateLimitPacketsPerSecond() { return 0; }
+        @Override public int getCommandSpamThresholdSeconds() { return 0; }
+        @Override public int getChatSpamThresholdSeconds() { return 0; }
         @Override public boolean useNativeTransport() { return false; }
         @Override public boolean isPublished() { return false; }
         @Override public boolean shouldInformAdmins() { return false; }

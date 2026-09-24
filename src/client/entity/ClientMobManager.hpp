@@ -39,6 +39,8 @@ namespace Game { struct IBlockAccess; }
 #include "common/core/Features.hpp"
 namespace Game::Immersive { struct Portal; }
 
+namespace Network { struct ArmorStandDataS2CPacket; }
+
 namespace Client {
 
     class ClientMobManager;
@@ -77,6 +79,11 @@ namespace Client {
         bool MonstersBurn() const override { return false; }
         bool IsDay() const override { return (m_dayTime % 24000) < 12000; }
 
+        // MC ClientLevel.setSkyFlashTime — a lightning bolt's flash. Routed
+        // to Render::EnvironmentState, which owns the counter and brightens
+        // the sky and fog while it runs (out of line: renderer header).
+        void SetSkyFlashTime(int ticks) override;
+
         // REAL, unlike the rest of the entity queries: MC's client runs
         // checkCrystals on its own mirror (EnderDragon.aiStep client branch)
         // so the renderer knows which crystal the healing beam attaches to —
@@ -90,6 +97,23 @@ namespace Client {
         }
         void GetPlayers(std::vector<Game::LivingEntity*>&) const override {}
         void BroadcastEntityEvent(const Game::Entity&, uint8_t) override {}
+
+        // MC ClientLevel's sound half (common/sound/LevelSound.hpp). A mob's
+        // own sound (`except` null or another entity) is the SERVER's to play
+        // and arrives as a packet, so the mirror stays quiet; only the
+        // local-sound calls MC makes client-side reach the speakers. Out of
+        // line (ClientMobManager.cpp): the sound module is client code this
+        // header keeps out.
+        void PlaySeededSound(const Game::SoundExcept& except, const glm::dvec3& pos,
+                             std::string_view event, Game::SoundSource source,
+                             float volume, float pitch, int64_t seed) override;
+        void PlaySeededSoundFromEntity(const Game::SoundExcept& except, const Game::Entity& sourceEntity,
+                                       std::string_view event, Game::SoundSource source,
+                                       float volume, float pitch, int64_t seed) override;
+        void PlayLocalSound(const glm::dvec3& pos, std::string_view event, Game::SoundSource source,
+                            float volume, float pitch, bool distanceDelay) override;
+        void PlayLocalSoundFromEntity(const Game::Entity& sourceEntity, std::string_view event,
+                                      Game::SoundSource source, float volume, float pitch) override;
 
         // ── Particles (MC ClientLevel.addParticle) ─────────────────────────
         //
@@ -107,6 +131,9 @@ namespace Client {
             // ENTITY_EFFECT tint (MC ColorParticleOption); 1,1,1,1 for
             // everything spawned through the colourless overload.
             float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
+            // BLOCK_MARKER's BlockParticleOption: the state whose particle
+            // sprite the marker shows (BlockState::RawId). 0 elsewhere.
+            uint32_t blockState = 0;
         };
 
         // ── The queue cap ──────────────────────────────────────────────
@@ -150,6 +177,18 @@ namespace Client {
         }
 
         // Move the queued spawns into `out` (appending) and clear the queue.
+        // MC ClientLevel.addParticle(new BlockParticleOption(BLOCK_MARKER,
+        // state), x, y, z, 0, 0, 0) — the creative-hand marker for barrier
+        // and light blocks (see Client::AnimateTick). Client-only, so it is
+        // not part of the EntityLevel interface.
+        void AddBlockMarkerParticle(Game::BlockState state, double x, double y, double z) {
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            std::lock_guard<std::mutex> lock(m_particleMutex);
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            m_particleQueue.push_back({Game::ParticleKind::BlockMarker, x, y, z, 0.0, 0.0, 0.0,
+                                       1.0f, 1.0f, 1.0f, 1.0f, state.RawId()});
+        }
+
         void DrainParticles(std::vector<QueuedParticle>& out) {
             out.insert(out.end(), m_particleQueue.begin(), m_particleQueue.end());
             m_particleQueue.clear();
@@ -270,9 +309,17 @@ namespace Client {
                    uint8_t pose, uint8_t animState, uint32_t blockStateRaw = 0);
         void MoveDelta(int32_t id, bool hasPos, const glm::dvec3& delta,
                        bool hasRot, float yRot, float xRot, float yHeadRot, bool onGround);
+        // `snap`: the entity went through an immersive surface — it is put
+        // at the new place and facing outright, with no interpolation and
+        // no sub-tick render lerp from where it was (the far side of the
+        // room, or another level's coordinates).
         void Teleport(int32_t id, const glm::dvec3& pos, const glm::vec3& vel,
-                      float yRot, float xRot, float yHeadRot, bool onGround);
+                      float yRot, float xRot, float yHeadRot, bool onGround,
+                      bool snap = false);
         void SetMotion(int32_t id, const glm::vec3& vel);
+        // Armor stand poses + equipment (ArmorStandDataS2C). No-op for
+        // anything that is not an armor stand.
+        void SetArmorStandData(const Network::ArmorStandDataS2CPacket& packet);
         // MC DATA_BEAM_TARGET, arriving as EndCrystalBeamS2C — see
         // DragonPackets.hpp. No-op for anything that is not an End crystal.
         void SetEndCrystalBeam(int32_t id, bool hasTarget, const glm::ivec3& target);
@@ -331,6 +378,9 @@ namespace Client {
         // Particle spawns the client mobs queued this tick — see
         // ClientLevelBridge. Render::MobParticleSystem drains this each
         // frame (main thread only).
+        void AddBlockMarkerParticle(Game::BlockState state, double x, double y, double z) {
+            m_level.AddBlockMarkerParticle(state, x, y, z);
+        }
         void DrainParticles(std::vector<ClientLevelBridge::QueuedParticle>& out) {
             m_level.DrainParticles(out);
         }
@@ -354,7 +404,7 @@ namespace Client {
         // so the ExplodeS2C handler can spawn a blast's particles: the blast
         // has no entity to hang them off, because the TNT that produced it was
         // discarded server-side a tick before the packet went out.
-        Game::EntityLevel& Level() { return m_level; }
+        ClientLevelBridge& Level() { return m_level; }   // a Game::EntityLevel, plus the client-only spawns
 
         // The type of a mob the client knows, Count when it does not (pick
         // block on an entity asks for its spawn egg).
@@ -367,6 +417,18 @@ namespace Client {
         // handler on add and on every data update.
         void SetEntityScale(int32_t id, float scale) {
             if (ClientMob* cm = Find(id); cm && cm->mob) cm->mob->scale = scale;
+        }
+        // The synched effect visuals (MC DATA_EFFECT_PARTICLES + the invisible
+        // / glowing flags), on add and on every data update: the mob's client
+        // tick rolls its effect swirl from them, the renderer skips an
+        // invisible mob and tints a glowing one.
+        void SetEffectVisuals(int32_t id, uint8_t flags, const std::vector<uint8_t>& particles) {
+            if (ClientMob* cm = Find(id); cm && cm->mob) {
+                Game::EffectVisuals v;
+                v.flags = flags;
+                v.particles = particles;
+                cm->mob->SetSyncedEffectVisuals(std::move(v));
+            }
         }
 
     private:

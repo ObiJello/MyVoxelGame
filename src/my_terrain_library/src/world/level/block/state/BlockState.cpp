@@ -230,16 +230,19 @@ bool BlockState::hasBlockEntity() const {
 }
 
 bool BlockState::computeHasBlockEntity() const {
-    // Reference: the Java EntityBlock implementer set (decompiled scan
-    // 2026-08-13), restricted to blocks that can exist in generated terrain.
+    // Reference: 26.3 BlockEntityTypes - every block some type is valid for.
+    // Beds have no block entity since 26.3 (BlockEntityTypes has no BED);
+    // copper chests share CHEST, shelves SHELF, the statues COPPER_GOLEM_STATUE.
     auto endsWith = [this](const char* suffix) {
         size_t n = std::strlen(suffix);
         return m_identifier.size() > n
             && m_identifier.compare(m_identifier.size() - n, n, suffix) == 0;
     };
-    if (endsWith("_bed") || endsWith("_banner") || endsWith("_sign")
+    if (endsWith("_banner") || endsWith("_sign")
         || endsWith("_skull") || endsWith("_head") || endsWith("shulker_box")
-        || endsWith("campfire") || endsWith("_hanging_sign")) {
+        || endsWith("campfire") || endsWith("_hanging_sign")
+        || endsWith("copper_chest") || endsWith("_shelf")
+        || endsWith("copper_golem_statue")) {
         return m_identifier != "minecraft:piston_head";
     }
     static const std::set<std::string> s_entityBlocks = {
@@ -260,7 +263,19 @@ bool BlockState::computeHasBlockEntity() const {
         "minecraft:trial_spawner", "minecraft:vault",
         "minecraft:end_gateway", "minecraft:end_portal",
         "minecraft:command_block", "minecraft:chain_command_block",
-        "minecraft:repeating_command_block",
+        "minecraft:repeating_command_block", "minecraft:potent_sulfur",
+        "minecraft:test_block", "minecraft:test_instance_block",
+        // Engine block (The Hush): the lighthouse lamp's block entity drives
+        // its beam renderer; the Hush Lighthouse template places it.
+        "minecraft:hush_lighthouse_lamp",
+        // Engine blocks (Aurelith): the Heart's resonance engine and the gate
+        // towers' voice beacons carry the block entities their renderers
+        // draw from; the Aurelith templates place both.
+        "minecraft:resonance_engine", "minecraft:voice_beacon",
+        // Aurelith's quest blocks: the Podium's chord sockets (the key seated
+        // in each), the pedestals (the item on show) and the Hall of
+        // Instruments' cabinet (its contents and its tuned lock).
+        "minecraft:chord_socket", "minecraft:voice_pedestal", "minecraft:choir_cabinet",
     };
     return s_entityBlocks.count(m_identifier) != 0;
 }
@@ -292,6 +307,7 @@ bool BlockState::isCollisionShapeFullBlock(
         m_identifier == "minecraft:medium_amethyst_bud" ||
         m_identifier == "minecraft:large_amethyst_bud" ||
         m_identifier == "minecraft:amethyst_cluster" ||
+        m_identifier == "minecraft:resonant_cluster" ||   // the Hush's amethyst-cluster twin
         m_identifier == "minecraft:moss_carpet" ||
         m_identifier == "minecraft:pale_moss_carpet" ||
         m_identifier == "minecraft:azalea" ||
@@ -408,7 +424,8 @@ bool BlockState::computeIsFaceSturdy(
     if (m_identifier == "minecraft:small_amethyst_bud" ||
         m_identifier == "minecraft:medium_amethyst_bud" ||
         m_identifier == "minecraft:large_amethyst_bud" ||
-        m_identifier == "minecraft:amethyst_cluster") {
+        m_identifier == "minecraft:amethyst_cluster" ||
+        m_identifier == "minecraft:resonant_cluster") {   // the Hush's twin
         return false;
     }
 

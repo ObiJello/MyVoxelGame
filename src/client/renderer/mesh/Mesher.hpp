@@ -182,6 +182,7 @@ namespace Render {
                 Constant,  // fixed colour (spruce / birch leaves)
                 FlowerBed, // tintIndex 0 untinted, otherwise grass
                 StemAge,   // melon / pumpkin stem: colour computed from `age`
+                RedstonePower, // redstone dust: RedstoneWireBlock.COLORS[power]
             };
             TintSource tintSource = TintSource::None;
             uint8_t    tintChannel = 0;            // BiomeChannel
@@ -197,6 +198,13 @@ namespace Render {
             // `neighborState.is(this)`, so glass against stained glass keeps
             // both faces.
             bool cullsAgainstSelf = false;
+            // MC IronBarsBlock (glass panes, iron / copper bars): a face
+            // shared with the same block — or, for bars, any #bars block —
+            // is skipped on the vertical axis always, and on a horizontal
+            // axis when both sides connect that way. What makes a run of
+            // panes one sheet of glass instead of a row of framed squares.
+            bool isPane = false;
+            bool isBars = false;
 
             // Index into s_ctmUVs, or -1 for the great majority of blocks that
             // have no connected-texture variants. Kept as a slot rather than
@@ -398,11 +406,42 @@ namespace Render {
         // too hot for a registry lookup per query — same reasoning as
         // m_opaqueCache, which exists for exactly the same access pattern.
         bool m_waterCache[18][18][18];
+
+        // ── Light (MC BlockModelLighter's reads) ────────────────────────────
+        // Raw stored light per cell of the 18^3 halo, sky << 4 | block — the
+        // section copies' DataLayers (RegionSnapshot::LightAtLocal), or the
+        // IBlockAccess's GetBrightness on the generic path.
+        uint8_t m_lightCache[18][18][18];
+        // MC BlockState.isLightPermeable (!solidRender || dampening == 0) over
+        // a 20^3 box: smooth lighting tests the cells one step PAST a face's
+        // side neighbours (base + corner + direction), which for a full face
+        // on a section edge is two cells out.
+        bool m_lightPermeable[20][20][20];
+        void FillLightCaches(const Client::Render::RegionSnapshot* region, const Game::IBlockAccess* blocks);
+        // MC LightCoordsUtil.getLightCoords(state, level, pos): the light at
+        // a cell, with `state`'s emission raising its block light and an
+        // emissiveRendering state reading FULL_BRIGHT. Packed coords.
+        int LightCoordsWith(Game::BlockState state, int worldX, int worldY, int worldZ) const;
+        // The same with the cell's own state (the smooth blend's samples).
+        int LightCoordsAt(int worldX, int worldY, int worldZ) const {
+            return LightCoordsWith(GetCachedBlockState(worldX, worldY, worldZ), worldX, worldY, worldZ);
+        }
+        bool LightPermeableAt(int worldX, int worldY, int worldZ) const;
+        // The four vertices' light words (TerrainVertex::light) for one face:
+        // MC prepareQuadAmbientOcclusion's light half when `smooth`, else
+        // prepareQuadFlat. `localPos` = the vertices relative to the block
+        // AFTER element rotation, before the block offset (MC's baked quad).
+        void ComputeFaceLight(Game::BlockState state, int worldX, int worldY, int worldZ,
+                              BlockFace face, int cullfaceDir, bool smooth,
+                              const glm::vec3 (&localPos)[4], std::array<uint32_t, 4>& outLight) const;
         // Biome grid for this section (with the blend margin), or null when
         // meshing straight off an IBlockAccess. See ResolveBiome.
         const Client::Render::RegionSnapshot* m_biomeSource = nullptr;
         // Only set on the direct-access path, where biomes come from the world.
         const Game::IBlockAccess* m_biomeAccess = nullptr;
+        // The client's BiomeManager seed for the region path's fuzzy zoom
+        // (ClientBiomeZoom.hpp), taken when the region is bound.
+        int64_t m_biomeZoomSeed = 0;
 
         int m_sectionBaseWorldX;
         int m_sectionBaseWorldY;
@@ -424,6 +463,18 @@ namespace Render {
         void BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh);
         bool GetCachedOpaque(int worldX, int worldY, int worldZ) const;
         Game::BlockID GetCachedBlock(int worldX, int worldY, int worldZ) const;
+        // The voxel's full state (block + index) off the two cache planes;
+        // air's default outside the halo.
+        Game::BlockState GetCachedBlockState(int worldX, int worldY, int worldZ) const;
+        // MC Block.shouldRenderFace's partial-occluder half: the neighbour
+        // in `cullAgainst` is an opaque block that is NOT a full cube (a
+        // slab, a stair, a wall) whose face toward this block either is a
+        // full square (VoxelShape.calculateFace hands back Shapes.block()
+        // for that) or, when this block occludes too, covers this element
+        // face's own rectangle. `from`/`to` are the element's 0..16 bounds.
+        bool IsFaceOccludedByPartialNeighbour(int worldX, int worldY, int worldZ,
+                                              BlockFace cullAgainst, bool thisOccludes,
+                                              const glm::vec3& from, const glm::vec3& to) const;
 
         // UV cache: thread-local so it persists across Mesher instances on the same
         // worker thread, avoiding ResolveTexture string allocs + atlas hash lookups
@@ -453,6 +504,7 @@ namespace Render {
         // the vertices. Any disagreement emits both faces as before.
         struct FaceCapture {
             std::array<Vertex, 4> verts{};
+            std::array<uint32_t, 4> light{};
             SpriteRef sprite{};
             glm::vec4 uvRect{};
             RenderLayer layer = RenderLayer::Opaque;
@@ -472,7 +524,7 @@ namespace Render {
 
         // outFacing: the layer's per-quad facing list (SectionMesh), or null
         // for translucent, which keeps no groups.
-        void GenerateQuad(const std::array<Vertex, 4>& quadVerts,
+        void GenerateQuad(const std::array<Vertex, 4>& quadVerts, const std::array<uint32_t, 4>& light,
                          std::vector<TerrainVertex>& outVerts, std::vector<uint16_t>& outIndices,
                          std::vector<uint8_t>* outFacing);
 
@@ -497,6 +549,7 @@ namespace Render {
                                 BlockFace face, bool hasBlockOffset,
                                 RenderLayer layer, Game::BlockID blockId,
                                 const uint32_t (&baseColor)[4], const uint8_t (&aoCode)[4],
+                                const std::array<uint32_t, 4>& light,
                                 int worldX, int worldY, int worldZ);
         void FlushGreedyQuads(SectionMesh& outMesh);
 
@@ -534,34 +587,18 @@ namespace Render {
                                               const glm::vec4& faceUv, int uvRotation);
         glm::vec3 GetFaceNormal(BlockFace face);
 
-        // Minecraft-style per-vertex ambient occlusion
-        // Returns a shade value 0.0-1.0 for a vertex corner based on 3 neighbor blocks
-        float CalculateVertexAO(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
-                                BlockFace face, int vertexIndex);
-
-        // AO for a quad that does not fill its cell's face.
-        //
-        // MC ModelBlockRenderer.AmbientOcclusionFace: the four AO values are
-        // properties of the CELL's face corners, and each vertex takes a
-        // BILINEAR blend of them at its own position within that face
-        // (AmbientOcclusionFace.calculate → the u/v weighting after
-        // calculateShape). CalculateVertexAO alone hands corner k's value to
-        // vertex k, which is only right when the quad spans the whole face.
-        //
-        // Every partial element gets this wrong without the blend, and it is
-        // worst where two elements STACK on one side of a cell — a stair's
-        // side and back are a slab quad below a step quad, and handing both
-        // the same four cell-corner values puts the cell's bottom shading on
-        // the step's bottom edge and its top shading on the slab's top edge,
-        // i.e. a hard bright/dark seam across the middle of the block.
-        //
-        // `localPos` is the four vertices in block-local [0,1] space, in
-        // CreateFaceVertices' emission order.
-        void ComputeFaceAO(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
-                           BlockFace face, const glm::vec3 (&localPos)[4], float (&outAO)[4]);
+        // MC BlockModelLighter.prepareQuadAmbientOcclusion's shade half: the
+        // four vertices' AO (0.2..1.0) for a quad of `state` at the given
+        // cell. `localPos` is the four vertices in block-local [0,1] space,
+        // in CreateFaceVertices' emission order; a quad that does not fill
+        // its cell's face takes the bilinear blend of the four cell-face
+        // corner values at each vertex (a stair's slab and step quads share
+        // one cell face without a seam).
+        void ComputeFaceAO(Game::BlockState state, int worldX, int worldY, int worldZ,
+                           BlockFace face, const glm::vec3 (&localPos)[4], float (&outAO)[4]) const;
 
         // Minecraft directional face shading multiplier
-        static float GetDirectionalShade(BlockFace face);
+        float GetDirectionalShade(BlockFace face) const;
 
         // Which of the four in-plane neighbours of this face are the same
         // block, as a Render::CTM bitmask in TEXTURE space (left/right/top/

@@ -7,10 +7,12 @@
 #include "ClientItemLoader.hpp"
 #include "ConsumableBehavior.hpp"
 #include "EquipmentBehavior.hpp"
+#include "BookItems.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../data/DataComponents.hpp"
 #include "../core/Mth.hpp"
 #include "../core/Log.hpp"
+#include "../world/block/BlockModel.hpp"   // BakeCompositeItemModels
 #include "server/player/ServerPlayer.hpp"  // startUsingItem in Item_DefaultUse
                                            // (common→server precedent: PortalGunBehavior.cpp)
 #include <nlohmann/json.hpp>
@@ -130,6 +132,42 @@ namespace Game {
             return frame;
         }
 
+        // The Hush's echo compass (docs/the-hush.md) — its own needle, so it
+        // can point at the nearest Echo Vault while the vanilla compass in
+        // the next slot points at spawn. Same CompassAngleState wobble; with
+        // no target (outside the Hush, or no vault within reach) MC's
+        // getRandomlySpinningRotation: the wobble chases a fresh random
+        // target every tick, which is the erratic spin a compass in the
+        // Nether shows.
+        float    g_echoCompassRotation = 0.0f;
+        float    g_echoCompassVelocity = 0.0f;
+        uint32_t g_echoCompassSpinSeed = 0x9E3779B9u;
+
+        void TickEchoCompass(const ItemRenderContext& ctx) {
+            float target;
+            if (ctx.echoCompassHasTarget) {
+                ItemRenderContext aimed = ctx;
+                aimed.compassTargetX = ctx.echoCompassTargetX;
+                aimed.compassTargetZ = ctx.echoCompassTargetZ;
+                target = ComputeCompassTargetRevolutions(aimed);
+            } else {
+                g_echoCompassSpinSeed = g_echoCompassSpinSeed * 1664525u + 1013904223u;
+                target = static_cast<float>(g_echoCompassSpinSeed >> 8) / 16777216.0f;
+            }
+            float delta = target - g_echoCompassRotation;
+            if (delta >  0.5f) delta -= 1.0f;
+            if (delta < -0.5f) delta += 1.0f;
+            g_echoCompassVelocity *= COMPASS_INERTIA;
+            g_echoCompassVelocity += delta * COMPASS_STIFFNESS;
+            g_echoCompassRotation = WrapToUnit(g_echoCompassRotation + g_echoCompassVelocity);
+        }
+
+        int EchoCompassFrameSelector(const ItemRenderContext& /*ctx*/) {
+            int frame = static_cast<int>(std::floor(g_echoCompassRotation * 32.0f + 0.5f)) % 32;
+            if (frame < 0) frame += 32;
+            return frame;
+        }
+
         // Recovery compass — points at the player's last death position. We don't
         // track death yet, so it just behaves like a normal compass for now.
         int RecoveryCompassFrameSelector(const ItemRenderContext& ctx) {
@@ -169,6 +207,46 @@ namespace Game {
         }
     }
 
+    void ItemRegistry::BakeCompositeItemModels() {
+        auto bake = [](Item& item) {
+            if (item.compositeChildren.empty() || item.blockModelOverride.empty()) return;
+            if (BlockModelRegistry::HasModel(item.blockModelOverride)) return;   // idempotent
+
+            // MC CuboidItemModelWrapper.bake: each child is its model's
+            // geometry under Transformation.compose(parent, own). Here that
+            // is RotateModel's quarter turns (about the cell centre — the
+            // offset already accounts for that pivot, see DecodeTransformation)
+            // plus a translation of every element, then MergeModels' union,
+            // which takes display transforms from the first part exactly as
+            // CompositeModel does.
+            std::vector<BlockModel> owned;
+            owned.reserve(item.compositeChildren.size());
+            for (const CompositeChild& child : item.compositeChildren) {
+                if (!BlockModelRegistry::HasModel(child.modelSlug)) {
+                    Log::Warning("[ItemRegistry] composite item '%s': block model '%s' not loaded",
+                                 item.name.c_str(), child.modelSlug.c_str());
+                    return;
+                }
+                BlockModel part = BlockModelRegistry::RotateModel(
+                    BlockModelRegistry::GetModel(child.modelSlug),
+                    child.xQuarterTurns, child.yQuarterTurns, /*uvLock=*/false);
+                for (Element& e : part.elements) {
+                    e.from += child.offsetPx;
+                    e.to   += child.offsetPx;
+                    if (e.rotation.axis != 0) e.rotation.origin += child.offsetPx;
+                }
+                owned.push_back(std::move(part));
+            }
+            std::vector<const BlockModel*> parts;
+            parts.reserve(owned.size());
+            for (const BlockModel& m : owned) parts.push_back(&m);
+            BlockModelRegistry::RegisterModel(item.blockModelOverride,
+                                              BlockModelRegistry::MergeModels(parts));
+        };
+        for (Item& item : g_blockItems) bake(item);
+        for (auto& [id, item] : g_pureItems) bake(item);
+    }
+
     void ItemRegistry::Initialize() {
         if (g_initialized) return;
         g_blockItems.clear();
@@ -186,6 +264,15 @@ namespace Game {
                     item.renderType        = ItemRenderType::Block;
                     item.blockModelOverride = desc.restSlug; // e.g. "oak_trapdoor_bottom"
                     item.spriteName        = "";
+                    break;
+                case ClientItemKind::Composite:
+                    // The synthetic model does not exist yet — the block
+                    // models load after the items. BakeCompositeItemModels
+                    // registers it under this name once they have.
+                    item.renderType         = ItemRenderType::Block;
+                    item.blockModelOverride = desc.restSlug;
+                    item.compositeChildren  = desc.compositeChildren;
+                    item.spriteName         = "";
                     break;
                 case ClientItemKind::FlatSprite:
                 case ClientItemKind::Special:
@@ -209,7 +296,10 @@ namespace Game {
                     // Tints from the items/{slug}.json `tints` array — index N
                     // applies to layerN. 0 means untinted/white; non-zero is
                     // ARGB. Used by leather armor, spawn eggs, potions, etc.
-                    if (!desc.layerTints.empty()) item.layerTints = desc.layerTints;
+                    if (!desc.layerTints.empty()) {
+                        item.layerTints     = desc.layerTints;
+                        item.layerTintKinds = desc.layerTintKinds;
+                    }
 
                     // ── Auto-attach the `_overlay.png` companion ONLY when
                     // the items.json carries tints. Mirrors MC's
@@ -319,6 +409,14 @@ namespace Game {
                 }
             }
         }
+        // MC Items.java:2133-2135 — the two BlockItems registered with
+        // `.rarity(Rarity.EPIC)`: the barrier and the light. Everything else
+        // in g_blockItems is plain COMMON (an absent RARITY component).
+        g_blockItems[static_cast<size_t>(BlockID::Barrier)]
+            .defaultComponents.set(DataComponents::RARITY, Rarity::EPIC);
+        g_blockItems[static_cast<size_t>(BlockID::Light)]
+            .defaultComponents.set(DataComponents::RARITY, Rarity::EPIC);
+
         // Slot 0 (Air) is special — render type doesn't matter, but mark it as a sprite
         // with no texture so accidental rendering is a no-op.
         g_blockItems[0].name        = "Air";
@@ -350,6 +448,9 @@ namespace Game {
                 }
             }
         } catch (...) { /* missing or malformed → falls back to title-case below */ }
+        // The potion names, effect potencies and attribute lines the
+        // POTION_CONTENTS tooltip and name need (Potions.cpp).
+        LoadAlchemyLanguage(lang);
 
         auto titleCaseFromSlug = [](const std::string& slug) {
             std::string out;
@@ -370,6 +471,13 @@ namespace Game {
             auto langIt = lang.find(langKey);
             it.name         = (langIt != lang.end()) ? langIt->second : titleCaseFromSlug(slug);
             it.renderType   = ItemRenderType::Sprite;
+            // Music discs: data/minecraft/jukebox_song/<song>.json names the
+            // description key jukebox_song.minecraft.<song>, and every disc's
+            // slug is music_disc_<song>.
+            if (slug.rfind("music_disc_", 0) == 0) {
+                const auto songIt = lang.find("jukebox_song.minecraft." + slug.substr(11));
+                if (songIt != lang.end()) it.jukeboxSongDescription = songIt->second;
+            }
             // MC's MAX_STACK_SIZE component, extracted from Items.java by
             // tools/gen_items.py: 64 by default (DataComponents.java:220), 1
             // for anything durable — tools and armour get theirs implicitly
@@ -398,7 +506,9 @@ namespace Game {
             if (pred.compare(0, 10, "minecraft:") == 0) pred = pred.substr(10);
             // Newer schema keys: compass/lodestone, compass/recovery, compass/spawn, time,
             // use_duration, damage, etc. Older overrides[]: angle, time, pull, damage…
-            if (pred == "angle"
+            if (slug == "echo_compass" && !it.spriteFrames.empty()) {
+                it.selectFrame = &EchoCompassFrameSelector;
+            } else if (pred == "angle"
                 || pred.compare(0, 8, "compass/") == 0) {
                 it.selectFrame = (slug == "recovery_compass") ? &RecoveryCompassFrameSelector
                                                               : &CompassFrameSelector;
@@ -581,6 +691,8 @@ namespace Game {
         if (stack.get(DataComponents::BLOCKS_ATTACKS)) {
             return ItemUseAnimation::BLOCK;
         }
+        // An Item subclass's own override (BowItem.getUseAnimation → BOW).
+        if (!stack.IsEmpty()) return ItemRegistry::Get(stack.itemId).useAnimation;
         return ItemUseAnimation::NONE;  // :311
     }
 
@@ -593,6 +705,8 @@ namespace Game {
         if (stack.get(DataComponents::BLOCKS_ATTACKS)) {
             return 72000;
         }
+        // An Item subclass's own override (BowItem.getUseDuration → 72000).
+        if (!stack.IsEmpty()) return ItemRegistry::Get(stack.itemId).useDuration;
         return 0;  // :320 (neither component present)
     }
 
@@ -608,6 +722,55 @@ namespace Game {
             return !stored->entries.empty();
         }
         return false;
+    }
+
+    uint32_t ResolveItemLayerTint(const ItemStack& stack, size_t layer) {
+        const Item& item = ItemRegistry::Get(stack.itemId);
+        if (layer >= item.layerTints.size()) return 0u;
+        const uint32_t fixed = item.layerTints[layer];
+        if (layer < item.layerTintKinds.size() &&
+            item.layerTintKinds[layer] == ItemTintKind::Potion) {
+            // MC ItemTintSources Potion.calculate: the stack's contents, else
+            // the JSON default — ARGB.opaque either way.
+            if (auto contents = stack.get(DataComponents::POTION_CONTENTS)) {
+                return static_cast<uint32_t>(
+                           contents->GetColorOr(static_cast<int32_t>(fixed))) | 0xFF000000u;
+            }
+            return fixed | 0xFF000000u;
+        }
+        if (layer < item.layerTintKinds.size() &&
+            item.layerTintKinds[layer] == ItemTintKind::Dye) {
+            // MC ItemTintSources Dye.calculate: DyedItemColor.getOrDefault —
+            // the stack's dye made opaque, else the JSON default.
+            if (auto dyed = stack.get(DataComponents::DYED_COLOR)) {
+                return static_cast<uint32_t>(*dyed) | 0xFF000000u;
+            }
+            return fixed;
+        }
+        return fixed;
+    }
+
+    std::string GetItemStackItemName(const ItemStack& stack) {
+        // PotionItem.getName / TippedArrowItem.getName: the contents' name
+        // whenever the component is present (it always is — every one of the
+        // four items defaults to EMPTY, which names itself "Uncraftable …").
+        if (IsPotionNamedItem(stack.itemId)) {
+            if (auto contents = stack.get(DataComponents::POTION_CONTENTS)) {
+                return contents->GetName(ItemRegistry::Slug(stack.itemId));
+            }
+        }
+        // Item.getName: ITEM_NAME, which in MC every item carries by default
+        // (its translated registry name) — here the registry display name.
+        if (auto itemName = stack.get(DataComponents::ITEM_NAME)) return *itemName;
+        return ItemRegistry::Get(stack.itemId).name;
+    }
+
+    std::string GetItemStackHoverName(const ItemStack& stack) {
+        // MC ItemStack.getHoverName → getCustomName: CUSTOM_NAME, else a
+        // written book's non-blank title, else the item name.
+        if (auto custom = stack.get(DataComponents::CUSTOM_NAME)) return *custom;
+        if (std::string title = Books::WrittenBookTitle(stack); !title.empty()) return title;
+        return GetItemStackItemName(stack);
     }
 
     bool IsSameItemSameComponents(const ItemStack& a, const ItemStack& b) {
@@ -643,6 +806,7 @@ namespace Game {
         if (g_compassTickAccum > 0.25f) g_compassTickAccum = 0.25f;
         while (g_compassTickAccum >= COMPASS_TICK_DT) {
             TickCompass(g_renderContext);
+            TickEchoCompass(g_renderContext);
             g_compassTickAccum -= COMPASS_TICK_DT;
         }
     }
@@ -654,6 +818,17 @@ namespace Game {
         auto it = g_pureItems.find(id);
         if (it != g_pureItems.end()) return it->second;
         return AirItem();
+    }
+
+    std::string_view ItemRegistry::Slug(ItemID id) {
+        if (id >= PURE_ITEM_BASE) {
+            const size_t index = static_cast<size_t>(id - PURE_ITEM_BASE);
+            if (index < kPureItemTableSize && kPureItemTable[index].slug) {
+                return kPureItemTable[index].slug;
+            }
+            return {};
+        }
+        return BlockRegistry::Get(ToBlock(id)).registrySlug;
     }
 
     bool ItemRegistry::IsBlockItem(ItemID id) {

@@ -11,8 +11,7 @@
 // Not ported (deliberately, with nothing behind them yet):
 //   • the recipe-book button and panel — there is no recipe system, and a
 //     button that opens nothing is worse than no button.
-//   • EffectsInInventory — the status-effect strip beside the panel; we have no
-//     mob effects.
+// The status-effect strip beside the panel is EffectsInInventory.hpp.
 // The crafting grid itself IS live: items can be parked in it and the server
 // hands them back when the screen closes (MC InventoryMenu.removed), but no
 // recipe ever resolves, so the result square stays empty.
@@ -56,6 +55,8 @@ namespace Render {
 
         void RenderBg(GuiGraphics& g, int leftPos, int topPos) override;
         void RenderLabels(GuiGraphics& g, int leftPos, int topPos) override;
+        // MC InventoryScreen's EffectsInInventory column.
+        void RenderExtras(GuiGraphics& g, int leftPos, int topPos) override;
         void ContainerTick() override;
 
     private:

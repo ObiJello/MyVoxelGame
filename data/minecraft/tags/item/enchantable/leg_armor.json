@@ -1,5 +1,10 @@
 {
   "values": [
-    "#minecraft:leg_armor"
+    "#minecraft:leg_armor",
+    "minecraft:naga_leggings",
+    "minecraft:ironwood_leggings",
+    "minecraft:steeleaf_leggings",
+    "minecraft:knightmetal_leggings",
+    "minecraft:fiery_leggings"
   ]
 }

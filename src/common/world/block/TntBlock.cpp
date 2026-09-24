@@ -1,7 +1,7 @@
 // File: src/common/world/block/TntBlock.cpp
 #include "common/world/block/TntBlock.hpp"
 
-#include "common/core/SoundEvents.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "common/entity/Entity.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/IUsePlayer.hpp"
@@ -21,45 +21,28 @@ namespace Game {
         // flint-and-steel durability point.
         if (!SpawnPrimedTnt(level, pos, igniter)) return false;
 
-        // MC: level.playSound(null, x, y, z, TNT_PRIMED, BLOCKS, 1.0F, 1.0F).
-        PlaySound("entity.tnt.primed", pos);
+        // MC TntBlock.prime: level.playSound(null, tnt.getX(), tnt.getY(),
+        // tnt.getZ(), TNT_PRIMED, BLOCKS, 1.0F, 1.0F) — at the primed entity,
+        // which spawns at the cell's bottom centre.
+        level.PlaySound(nullptr, glm::dvec3(pos.x + 0.5, pos.y, pos.z + 0.5),
+                        SoundEvents::TNT_PRIMED, SoundSource::Blocks, 1.0f, 1.0f);
         // MC: level.gameEvent(source, GameEvent.PRIME_FUSE, pos) — no game-event
         // system here; the site is named so a sculk sensor finds it later.
         return true;
     }
 
     void TntOnPlace(ILevelWrite& level, const glm::ivec3& pos,
-                    BlockState /*newState*/, BlockState /*oldState*/) {
+                    BlockState newState, BlockState oldState, bool /*movedByPiston*/) {
         // MC TntBlock.onPlace: place a TNT block into a powered cell and it
-        // lights immediately. Dead until redstone exists — see
-        // RedstoneSignal.hpp, which is the single seam.
+        // lights immediately. Guarded on a BLOCK change exactly as vanilla
+        // (`!oldState.is(state.getBlock())`) — onPlace also fires for a
+        // state-only edit, and TNT has one (`unstable`).
+        if (oldState.Block() == newState.Block()) return;
         if (!HasNeighborSignal(level, pos)) return;
         if (TntPrime(level, pos, nullptr)) {
             // MC removeBlock(pos, false) — flag 3, no drops.
             level.SetBlock(pos.x, pos.y, pos.z, BlockID::Air, World::UpdateFlags::All);
         }
-    }
-
-    bool TntNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
-                            BlockState /*state*/,
-                            Direction /*toNeighbour*/, BlockID /*neighbourId*/,
-                            BlockState& outState,
-                            ScheduledTickAccess* /*ticks*/) {
-        // Same check as onPlace, for a lever thrown next to TNT that is already
-        // placed. Also dead until redstone exists.
-        //
-        // Returning a transform to AIR (rather than writing the block here) is
-        // how a neighborChanged hook removes its own block — but priming has to
-        // happen FIRST, and the const IBlockAccess this hook is handed cannot
-        // spawn an entity. So the whole path waits on redstone anyway, and the
-        // call below documents where it goes.
-        if (!HasNeighborSignal(level, pos)) return false;
-        // Unreachable today. When redstone lands, this needs the writable level
-        // that MC's neighborChanged has and this hook does not — the likely
-        // shape is a scheduled tick that primes, which is also how MC's
-        // repeater and observer will want to work.
-        outState = BlockStates::Default(BlockID::Air);
-        return false;
     }
 
     UseResult TntUseItemOn(ItemStack& stack, ILevelWrite* level, const glm::ivec3& pos,

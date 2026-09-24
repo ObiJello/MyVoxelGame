@@ -5,7 +5,10 @@
 
 #include "EntityCulling.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
 #include "../environment/EnvironmentState.hpp"
+#include "../environment/EntityEnvironment.hpp"
+#include "common/world/lighting/LightCoords.hpp"
 #include "client/entity/XpOrbManager.hpp"
 #include "common/entity/ExperienceOrb.hpp"
 #include "common/core/Log.hpp"
@@ -144,9 +147,11 @@ namespace Render {
         // ── Orbs in the world ──────────────────────────────────────────────
         for (const auto& [id, ce] : entities) {
             if (m_verts.size() / 4 >= orbRoom) break;
-            const glm::vec3 pos = glm::vec3(
-                glm::mix(ce.renderPrevPosition, ce.sim.pos,
-                         static_cast<double>(partialTick)));
+            // Interpolated in double and kept that way until the render-space
+            // subtraction below: the float `pos` is only for the culls.
+            const glm::dvec3 posD =
+                glm::mix(ce.renderPrevPosition, ce.sim.pos, static_cast<double>(partialTick));
+            const glm::vec3 pos = glm::vec3(posD);
 
             const glm::vec3 d = pos - cameraPos;
             if (glm::dot(d, d) > maxDistSq) continue;
@@ -159,7 +164,8 @@ namespace Render {
                 continue;
             }
 
-            AppendOrb(ce.sim.value, pos, ce.ageTicks + partialTick, billboard);
+            ++EntityCulling::g_renderedThisFrame;
+            AppendOrb(ce.sim.value, Render::ToRender(posD), ce.ageTicks + partialTick, billboard);
         }
 
         // ── Orbs flying into whoever absorbed them ─────────────────────────
@@ -174,8 +180,8 @@ namespace Render {
             const glm::dvec3 target = p.targetSeeded
                 ? glm::mix(p.targetPosOld, p.targetPos, static_cast<double>(partialTick))
                 : p.startPos;
-            const glm::vec3 pos =
-                glm::vec3(glm::mix(p.startPos, target, static_cast<double>(t)));
+            const glm::dvec3 posD = glm::mix(p.startPos, target, static_cast<double>(t));
+            const glm::vec3 pos = glm::vec3(posD);
 
             const glm::vec3 d = pos - cameraPos;
             if (glm::dot(d, d) > maxDistSq) continue;
@@ -194,9 +200,14 @@ namespace Render {
             }
 
             // Frozen colour phase, like the item's frozen spin.
-            AppendOrb(p.value, pos, p.ageTicks, billboard);
+            AppendOrb(p.value, Render::ToRender(posD), p.ageTicks, billboard);
         }
 
+        SubmitOrbs(projection, view, cameraPos, fb);
+    }
+
+    void XpOrbRenderer::SubmitOrbs(const glm::mat4& projection, const glm::mat4& view,
+                                   const glm::vec3& cameraPos, FrameBuffers& fb) {
         if (m_verts.empty()) return;
         const size_t orbCount = m_verts.size() / 4;
 
@@ -226,25 +237,43 @@ namespace Render {
         g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", ::Render::ChunkRenderer::PortalEntityClipPlane());
 
         const auto& env = EnvironmentState::Get().Frame();
-        g_renderBackend->SetUniformFloat(m_shader, "uSkyBrightness", env.skyBrightness);
+        // Each orb's light is in its vertex colour (AppendOrb).
+        EntityEnvironment::SetDrawLight(m_shader, glm::vec3(1.0f));
         g_renderBackend->SetUniformVec4(m_shader, "uFogColor",
             glm::vec4(env.fogColor, 1.0f));
         g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
             glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
-        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", cameraPos);
+        // The fog is measured against render-space fragment positions, so
+        // the camera goes in as a render-space point (its sub-block offset).
+        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", Render::ToRender(cameraPos));
 
-        // The quads are already in world space, so the MVP is the bare
-        // view-projection — the same thing the per-orb model matrix used to
-        // fold in, applied on the CPU instead.
+        // The quads are already in render space (camera-relative, see
+        // RenderOrigin.hpp) and `view` is the render-space view, so the MVP
+        // is the bare view-projection — the same thing the per-orb model
+        // matrix used to fold in, applied on the CPU instead.
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", projection * view);
-        g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));   // world-space quads
+        g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));   // render-space quads
         g_renderBackend->DrawIndexed(fb.mesh, static_cast<uint32_t>(orbCount * 6),
                                      static_cast<uint32_t>(firstIndex));
 
         g_renderBackend->UnbindMesh();
     }
 
-    void XpOrbRenderer::AppendOrb(int value, const glm::vec3& worldPos,
+    void XpOrbRenderer::RenderSingle(int value, const glm::dvec3& worldPos, float ageTicks,
+                                     const glm::mat4& projection, const glm::mat4& view,
+                                     const glm::vec3& cameraPos) {
+        if (m_initialized && g_renderBackend && Resources::CacheStale(m_packGeneration)) LoadTexture();
+        if (!m_initialized || !g_renderBackend) return;
+        if (m_frameCursor.Advance()) m_orbCursor = 0;
+        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        if (fb.mesh == INVALID_MESH || m_orbCursor >= kMaxOrbs) return;
+        const glm::mat3 billboard = glm::transpose(glm::mat3(view));
+        m_verts.clear();
+        AppendOrb(value, Render::ToRender(worldPos), ageTicks, billboard);
+        SubmitOrbs(projection, view, cameraPos, fb);
+    }
+
+    void XpOrbRenderer::AppendOrb(int value, const glm::vec3& renderPos,
                                   float ageTicks, const glm::mat3& billboard) {
         // Sprite cell from the value (ExperienceOrb.getIcon), on the 64×64
         // sheet's 4×4 grid.
@@ -263,15 +292,36 @@ namespace Render {
             return static_cast<uint8_t>(
                 glm::clamp((s + 1.0f) * scale * 255.0f, 0.0f, 255.0f));
         };
-        const uint8_t r = channel(std::sin(phase), 0.5f);
-        const uint8_t g = 255;
-        const uint8_t b = channel(std::sin(phase + 4.1887903f), 0.1f);
+        uint8_t r = channel(std::sin(phase), 0.5f);
+        uint8_t g = 255;
+        uint8_t b = channel(std::sin(phase + 4.1887903f), 0.1f);
         const uint8_t a = 128;   // MC renders orbs half-transparent
+
+        // MC getPackedLightCoords at the orb's eye (0.85 x its 0.5 height),
+        // ExperienceOrbRenderer.getBlockLightLevel adding 7 to the block
+        // light — the orbs glow faintly in the dark. Every orb shares one
+        // draw, so each carries its light in its vertex colour.
+        {
+            namespace LC = Game::Lighting::LightCoords;
+            const int packed = EntityEnvironment::PackedLightAt(
+                Render::ToWorld(renderPos) + glm::dvec3(0.0, 0.425, 0.0));
+            const glm::vec3 light = EntityEnvironment::LightColor(
+                LC::WithBlock(packed, std::min(LC::Block(packed) + 7, 15)));
+            const auto lit = [](uint8_t c, float f) {
+                return static_cast<uint8_t>(glm::clamp(static_cast<float>(c) * f + 0.5f, 0.0f, 255.0f));
+            };
+            r = lit(r, light.r);
+            g = lit(g, light.g);
+            b = lit(b, light.b);
+        }
 
         // MC's quad, in the 0.3-scaled billboard frame, raised 0.1 off the
         // entity origin: x ∈ [-0.5, 0.5], y ∈ [-0.25, 0.75]. The model chain
         // (translate, billboard rotate, scale 0.3) applied per corner here.
-        const glm::vec3 origin = worldPos + glm::vec3(0.0f, 0.1f, 0.0f);
+        // `renderPos` is the orb's RENDER-space position (world minus the
+        // view's origin, subtracted in double by the caller), so the
+        // vertices are small numbers wherever the world the orb lies.
+        const glm::vec3 origin = renderPos + glm::vec3(0.0f, 0.1f, 0.0f);
         const auto corner = [&](float x, float y, float u, float v) {
             const glm::vec3 p = origin + billboard * (glm::vec3(x, y, 0.0f) * 0.3f);
             m_verts.push_back({ p.x, p.y, p.z, u, v, r, g, b, a });

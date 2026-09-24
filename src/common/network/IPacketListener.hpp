@@ -11,7 +11,9 @@ namespace Network {
 
     // Forward declarations for packet types
     struct ChunkDataS2CPacket;
+    struct WorldgenIdsS2CPacket;
     struct ChunkUnchangedS2CPacket;
+    struct LightUpdateS2CPacket;
     struct UnloadChunkS2CPacket;
     struct BlockChangeS2CPacket;
     struct ClientboundBlockUpdateS2CPacket;
@@ -33,6 +35,23 @@ namespace Network {
     struct SetEntityDataS2CPacket;
     struct EntityEventS2CPacket;
     struct HurtAnimationS2CPacket;
+    struct PlayerSleepS2CPacket;
+    struct OpenSignEditorS2CPacket;
+    struct SignUpdateC2SPacket;
+    struct ControlS2CPacket;
+    struct ControlInputPacket;
+    struct ControlViewPacket;
+    struct MorphHeldS2CPacket;
+    struct MorphPickupS2CPacket;
+    struct UpdateMobEffectS2CPacket;
+    struct SoundS2CPacket;
+    struct SoundEntityS2CPacket;
+    struct OpenBookS2CPacket;
+    struct EditBookC2SPacket;
+    struct ContainerButtonClickC2SPacket;
+    struct MerchantOffersS2CPacket;
+    struct SelectTradeC2SPacket;
+    struct RemoveMobEffectS2CPacket;
     struct TickingStateS2CPacket;
     struct TickingStepS2CPacket;
     struct ChangeDimensionS2CPacket;
@@ -40,6 +59,7 @@ namespace Network {
     struct ExplodeS2CPacket;
     struct BossEventS2CPacket;
     struct EndCrystalBeamS2CPacket;
+    struct ArmorStandDataS2CPacket;
     struct InteractC2SPacket;
     struct HotbarSyncS2CPacket;
     struct InventoryFullS2CPacket;
@@ -107,6 +127,7 @@ namespace Network {
         virtual void onChunkDataS2C(const ChunkDataS2CPacket& packet) {}
         virtual void onUnloadChunkS2C(const UnloadChunkS2CPacket& packet) {}
         virtual void onChunkUnchangedS2C(const ChunkUnchangedS2CPacket& packet) {}
+        virtual void onLightUpdateS2C(const LightUpdateS2CPacket& packet) {}
         virtual void onChunkBatchStart() {}
         virtual void onChunkBatchFinished(int batchSize) {}
         
@@ -144,10 +165,33 @@ namespace Network {
         virtual void onSetEntityDataS2C(const SetEntityDataS2CPacket& packet) {}
         virtual void onEntityEventS2C(const EntityEventS2CPacket& packet) {}
         virtual void onHurtAnimationS2C(const HurtAnimationS2CPacket& packet) {}
+        // A player lay down in / got up from a bed (PlayerSleepS2CPacket.hpp)
+        virtual void onPlayerSleepS2C(const PlayerSleepS2CPacket& packet) {}
+        // Open the sign editor (OpenSignEditorS2CPacket.hpp)
+        virtual void onOpenSignEditorS2C(const OpenSignEditorS2CPacket& packet) {}
+        // /control (ControlPackets.hpp)
+        virtual void onControlS2C(const ControlS2CPacket& packet) {}
+        virtual void onControlInputS2C(const ControlInputPacket& packet) {}
+        virtual void onControlViewS2C(const ControlViewPacket& packet) {}
+        // /morph item carried (MorphHeldS2CPacket.hpp)
+        virtual void onMorphHeldS2C(const MorphHeldS2CPacket& packet) {}
+        virtual void onMorphPickupS2C(const MorphPickupS2CPacket& packet) {}
+        // Status effects on the local player (MobEffectPackets.hpp)
+        virtual void onUpdateMobEffectS2C(const UpdateMobEffectS2CPacket& packet) {}
+        // Sounds (SoundPackets.hpp) — MC handleSoundEvent / handleSoundEntityEvent
+        virtual void onSoundS2C(const SoundS2CPacket& packet) {}
+        virtual void onSoundEntityS2C(const SoundEntityS2CPacket& packet) {}
+        // Show the written book in a hand (BookPackets.hpp) — MC handleOpenBook
+        virtual void onOpenBookS2C(const OpenBookS2CPacket& packet) {}
+        // A merchant's offers (MerchantPackets.hpp) — MC handleMerchantOffers
+        virtual void onMerchantOffersS2C(const MerchantOffersS2CPacket& packet) {}
+        virtual void onRemoveMobEffectS2C(const RemoveMobEffectS2CPacket& packet) {}
 
         // ── End dragon fight ───────────────────────────────────────────────
         virtual void onBossEventS2C(const BossEventS2CPacket& packet) {}
         virtual void onEndCrystalBeamS2C(const EndCrystalBeamS2CPacket& packet) {}
+        // Armor stand poses + equipment (ArmorStandDataS2CPacket.hpp)
+        virtual void onArmorStandDataS2C(const ArmorStandDataS2CPacket& packet) {}
         virtual void onTickingStateS2C(const TickingStateS2CPacket& packet) {}
         virtual void onTickingStepS2C(const TickingStepS2CPacket& packet) {}
 
@@ -212,6 +256,7 @@ namespace Network {
         virtual void onSetChunkCacheRadiusS2C(int viewDistance) {}
         // Command names this server accepts — drives chat tab-completion.
         virtual void onCommandsS2C(const std::vector<std::string>& commandNames) {}
+        virtual void onWorldgenIdsS2C(const WorldgenIdsS2CPacket& packet) {}
         
         // Connection management
         virtual void onDisconnect(const std::string& reason) {}
@@ -255,6 +300,14 @@ namespace Network {
         virtual void onHeldItemChangeC2S(const HeldItemChangeC2SPacket& packet) {}
         // Play phase - Pick block / entity (P)
         virtual void onPickItemC2S(const PickItemC2SPacket& packet) {}
+        // The sign editor's lines (SignUpdateC2SPacket.hpp)
+        virtual void onSignUpdateC2S(const SignUpdateC2SPacket& packet) {}
+        // Book and quill saved / signed (BookPackets.hpp) — MC handleEditBook
+        virtual void onEditBookC2S(const EditBookC2SPacket& packet) {}
+        // A menu button (the lectern's) (BookPackets.hpp) — MC handleContainerButtonClick
+        virtual void onContainerButtonClickC2S(const ContainerButtonClickC2SPacket& packet) {}
+        // A trade picked in the list (MerchantPackets.hpp) — MC handleSelectTrade
+        virtual void onSelectTradeC2S(const SelectTradeC2SPacket& packet) {}
 
         // Play phase - Inventory clicks
         virtual void onInventoryClickC2S(const InventoryClickC2SPacket& packet) {}

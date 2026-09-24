@@ -62,10 +62,11 @@ namespace Server {
         dispatcher.RegisterCommand("shape", ShapeCommand::Execute);
     }
 
-    void ShapeCommand::Execute(ServerPlayer& sender,
+    void ShapeCommand::Execute(const CommandSourceStack& source,
                                const std::vector<std::string>& args,
                                ServerConnection& connection,
                                PlayerSessionManager& /*sessionManager*/) {
+        ServerPlayer& sender = *source.sender;
         auto* server = g_integratedServer.get();
         if (!server) return;
 

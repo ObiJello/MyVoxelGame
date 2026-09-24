@@ -45,7 +45,7 @@ void ChunkPyramid::initialize() {
     server::level::GenerationChunkHolder::initializeStatics();
     server::level::ChunkHolder::initializeStatics();
 
-    // Reference: ChunkPyramid.java lines 17-18
+    // Reference: ChunkPyramid.java lines 30-71 (26.3)
     // GENERATION_PYRAMID
     s_generationPyramid = Builder()
         // EMPTY
@@ -66,30 +66,19 @@ void ChunkPyramid::initialize() {
             return s.addRequirement(ChunkStatus::STRUCTURE_STARTS, 8)
                     .setTask(ChunkStatusTasks::generateBiomes);
         })
-        // NOISE - needs STRUCTURE_STARTS at radius 8, BIOMES at radius 1
-        .step(ChunkStatus::NOISE, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
+        // TERRAIN - MC 26.3 (ChunkPyramid.java:39): noise fill, material
+        // rules and carvers in one step. Needs STRUCTURE_STARTS at radius 8
+        // and BIOMES at radius 1, writes only its own chunk.
+        .step(ChunkStatus::TERRAIN, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
             return s.addRequirement(ChunkStatus::STRUCTURE_STARTS, 8)
                     .addRequirement(ChunkStatus::BIOMES, 1)
                     .setBlockStateWriteRadius(0)
-                    .setTask(ChunkStatusTasks::generateNoise);
+                    .setTask(ChunkStatusTasks::buildTerrain);
         })
-        // SURFACE - needs STRUCTURE_STARTS at radius 8, BIOMES at radius 1
-        .step(ChunkStatus::SURFACE, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
-            return s.addRequirement(ChunkStatus::STRUCTURE_STARTS, 8)
-                    .addRequirement(ChunkStatus::BIOMES, 1)
-                    .setBlockStateWriteRadius(0)
-                    .setTask(ChunkStatusTasks::generateSurface);
-        })
-        // CARVERS - needs STRUCTURE_STARTS at radius 8
-        .step(ChunkStatus::CARVERS, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
-            return s.addRequirement(ChunkStatus::STRUCTURE_STARTS, 8)
-                    .setBlockStateWriteRadius(0)
-                    .setTask(ChunkStatusTasks::generateCarvers);
-        })
-        // FEATURES - needs STRUCTURE_STARTS at radius 8, CARVERS at radius 1
+        // FEATURES - needs STRUCTURE_STARTS at radius 8, TERRAIN at radius 1
         .step(ChunkStatus::FEATURES, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
             return s.addRequirement(ChunkStatus::STRUCTURE_STARTS, 8)
-                    .addRequirement(ChunkStatus::CARVERS, 1)
+                    .addRequirement(ChunkStatus::TERRAIN, 1)
                     .setBlockStateWriteRadius(1)
                     .setTask(ChunkStatusTasks::generateFeatures);
         })
@@ -127,13 +116,7 @@ void ChunkPyramid::initialize() {
         .step(ChunkStatus::BIOMES, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
             return s;
         })
-        .step(ChunkStatus::NOISE, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
-            return s;
-        })
-        .step(ChunkStatus::SURFACE, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
-            return s;
-        })
-        .step(ChunkStatus::CARVERS, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
+        .step(ChunkStatus::TERRAIN, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {
             return s;
         })
         .step(ChunkStatus::FEATURES, [](ChunkStepBuilder& s) -> ChunkStepBuilder& {

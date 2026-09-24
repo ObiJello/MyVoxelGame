@@ -15,6 +15,7 @@
 #include "client/portal/ClientPortalManager.hpp"
 #include "common/core/Log.hpp"
 
+#include "../debug/FlickerDiag.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
 #include "stb_image.h"
@@ -806,16 +807,17 @@ void main() {
 
     namespace {
 
-        // Build the portal's local→world matrix from the orthonormal basis +
-        // origin. Columns: [right, up, normal, origin]. Same convention as
-        // PortalRegistry.cpp::PortalToWorld so the visual exactly matches the
-        // server's collision plane.
+        // Build the portal's local→render-space matrix from the orthonormal
+        // basis + origin. Columns: [right, up, normal, origin]. Same
+        // convention as PortalRegistry.cpp::PortalToWorld so the visual
+        // exactly matches the server's collision plane; the translation is
+        // relative to the view's render origin (RenderOrigin.hpp).
         glm::mat4 PortalToWorldMat(const Client::ClientPortal& p) {
             glm::mat4 m(1.0f);
             m[0] = glm::vec4(p.right,  0.0f);
             m[1] = glm::vec4(p.upDir,  0.0f);
             m[2] = glm::vec4(p.normal, 0.0f);
-            m[3] = glm::vec4(glm::vec3(p.origin), 1.0f);
+            m[3] = glm::vec4(Render::ToRender(p.origin), 1.0f);
             return m;
         }
 
@@ -1044,6 +1046,11 @@ void main() {
             s.depthBiasEnabled   = true;
             s.depthBiasSlope     = -2.0f;
             s.depthBiasConstant  = -2.0f;
+            // The camera may stand right in the oval (looking along the wall
+            // it is on): without clamping, the part of the mesh in front of
+            // the near plane is discarded and a lone portal shows as a
+            // sliver. Same fix the immersive surface pass carries.
+            s.depthClampEnabled  = true;
             return s;
         }
 
@@ -1094,16 +1101,39 @@ void main() {
         const float wobble = 0.5f + 0.5f * std::sin(t * kPulseFreqHz * 6.2831853f);
         const float pulse  = 1.0f - kPulseAmplitude * wobble;
 
-        // Helper: portal world model matrix (basis = right/up/normal,
-        // translation = origin). Same convention used everywhere portal
-        // geometry gets drawn so the visual matches the collision plane.
+        // Helper: portal model matrix (basis = right/up/normal, translation
+        // = origin in the view's RENDER space, RenderOrigin.hpp). Same
+        // convention used everywhere portal geometry gets drawn so the
+        // visual matches the collision plane.
         auto PortalModel = [](const Client::ClientPortal& p) {
             return glm::mat4{
                 glm::vec4(p.right,  0.0f),
                 glm::vec4(p.upDir,  0.0f),
                 glm::vec4(p.normal, 0.0f),
-                glm::vec4(glm::vec3(p.origin), 1.0f),
+                glm::vec4(Render::ToRender(p.origin), 1.0f),
             };
+        };
+        // The portal mesh lies a millimetre off its wall. A fixed depth bias
+        // does not settle that race: a 24-bit buffer resolves about a
+        // millimetre at 20-30 m, so the wall won at some mouse angles and
+        // showed through the oval. This is the immersive mask's answer
+        // (ImmersivePortalRenderer::RenderLayer): scale the mesh about the
+        // EYE so every vertex moves toward it along its own view ray by a
+        // margin that is the buffer's resolution at that distance with
+        // eight times the headroom — the screen outline stays exactly the
+        // oval's, only its depth gains the margin.
+        // The eye in render space, like the models it scales.
+        const glm::vec3 eyeF = Render::ToRender(camera.position);
+        auto MarginModel = [&](const Client::ClientPortal& p, const glm::mat4& model) {
+            // The oval is two metres across, so its centre stands in for the
+            // surface (a surface seen along the wall is still far away even
+            // when its plane is close, which is why not the plane distance).
+            const float dist      = std::max(0.2f, glm::length(eyeF - Render::ToRender(p.origin)));
+            const float margin    = ChunkRenderer::SurfaceDepthMargin(dist, eyeF);
+            const float shrink    = std::max(0.5f, 1.0f - margin / dist);
+            return glm::translate(glm::mat4(1.0f), eyeF) *
+                   glm::scale(glm::mat4(1.0f), glm::vec3(shrink)) *
+                   glm::translate(glm::mat4(1.0f), -eyeF) * model;
         };
 
         // ─── Single-level see-through (Phase 6) ─────────────────────────
@@ -1127,7 +1157,7 @@ void main() {
                                   float flashIntensity,
                                   float openAmount,
                                   float staticAmount) {
-            const glm::mat4 model = PortalModel(src);
+            const glm::mat4 model = MarginModel(src, PortalModel(src));
             const glm::mat4 mvp   = projectionMatrix * viewMatrix * model;
 
             // 0. Reset stencil so this pass starts clean. Without this, the
@@ -1193,12 +1223,17 @@ void main() {
             //    every SetPipelineState the lambda makes, so chunks and
             //    players render only inside the silhouette.
             const Camera virt = PortalTransform::ComputeVirtualCamera(camera, src, dst);
+            // The far side is drawn relative to the virtual camera's own
+            // render origin (RenderOrigin.hpp): current from here until the
+            // scene callback returns, then the real camera's again.
+            virt.ActivateRenderOrigin();
             const glm::mat4 virtView = virt.GetViewMatrix();
             const glm::mat4 baseProj = glm::perspective(
                 glm::radians(virt.fov), aspect, 0.05f, farPlane);
             const glm::mat4 virtProj = PortalTransform::ObliqueProjection(
                 baseProj, virtView, dst);
-            const Frustum   virtFrust = Frustum::FromMatrix(baseProj * virtView);
+            // Culling stays in world space.
+            const Frustum   virtFrust = Frustum::FromMatrix(baseProj * virt.GetWorldViewMatrix());
 
             g_renderBackend->SetStencilOverride(
                 /*enabled=*/   true,
@@ -1214,16 +1249,16 @@ void main() {
             // (in -dst.normal direction) so half-in objects (e.g. the
             // player straddling the dst portal right after teleport)
             // render correctly without their body being clipped.
-            constexpr float kClipPlaneOffsetBack = 0.05f;
-            const glm::vec3 dstN = dst.normal;
-            const glm::vec3 dstO = glm::vec3(dst.origin);
-            const glm::vec4 clipPlane(dstN, -glm::dot(dstN, dstO) + kClipPlaneOffsetBack);
+            constexpr double kClipPlaneOffsetBack = 0.05;
+            const glm::dvec3 dstN(dst.normal);
+            const glm::dvec4 clipPlane(dstN, -glm::dot(dstN, dst.origin) + kClipPlaneOffsetBack);
             ChunkRenderer::SetPortalClipPlane(clipPlane);
 
             renderScene(virt, virtFrust, virtProj);
 
-            ChunkRenderer::SetPortalClipPlane(glm::vec4(0.0f));  // reset
+            ChunkRenderer::SetPortalClipPlane(glm::dvec4(0.0));  // reset
             g_renderBackend->SetStencilOverride(false);
+            camera.ActivateRenderOrigin();
 
             // 3.5. Refraction sub-pass — DISABLED per user feedback.
             // Portal 1's portals don't visibly pinch the see-through
@@ -1303,7 +1338,7 @@ void main() {
                                 (clip.x / clip.w) * 0.5f + 0.5f,
                                 (clip.y / clip.w) * 0.5f + 0.5f);
                         };
-                        const glm::vec3 portalOrigin = glm::vec3(src.origin);
+                        const glm::vec3 portalOrigin = Render::ToRender(src.origin);
                         const glm::vec2 uvOrigin = toScreenUV(portalOrigin);
                         const glm::vec2 uvTan    = toScreenUV(portalOrigin + src.right);
                         const glm::vec2 uvBin    = toScreenUV(portalOrigin + src.upDir);
@@ -1410,17 +1445,18 @@ void main() {
         auto RimPass = [&](const Client::ClientPortal& src, const PortalPalette& palette,
                            bool isOrange, float flashIntensity, float openAmount,
                            float staticAmount) {
-            // A hair in front of the plane: the immersive surface stamped this
-            // plane's depth from a different mesh, and two meshes on one plane
-            // z-fight. (The see-through path draws the rim from the very
-            // vertices that stamped the depth, so it never needed this.)
-            glm::mat4 rimModel = PortalModel(src);
-            rimModel[3] += glm::vec4(src.normal * 0.01f, 0.0f);
+            // In front of the plane by the distance-scaled margin: the
+            // immersive surface stamped this plane's depth from a different
+            // mesh, and two meshes on one plane z-fight. (The see-through
+            // path draws the rim from the very vertices that stamped the
+            // depth, so it never needed this.)
+            const glm::mat4 rimModel = MarginModel(src, PortalModel(src));
             const glm::mat4 mvp = projectionMatrix * viewMatrix * rimModel;
             PipelineState rimState = OutlineState(kStencilRef);
             rimState.depthBiasEnabled  = true;   // same bias as the surface it sits on
             rimState.depthBiasSlope    = -2.0f;
             rimState.depthBiasConstant = -2.0f;
+            rimState.depthClampEnabled = true;   // and its near-plane clamp (see InactivePortalState)
             g_renderBackend->SetPipelineState(rimState);
             g_renderBackend->BindShader(m_shader);
             const bool useTex = (m_noiseTexture != INVALID_TEXTURE &&
@@ -1477,7 +1513,7 @@ void main() {
                 g_renderBackend->BindTexture(m_dummyTexture, 0);
                 g_renderBackend->SetUniformInt(m_shader, "uUseTextures", 0);
             }
-            const glm::mat4 mvp = projectionMatrix * viewMatrix * PortalModel(p);
+            const glm::mat4 mvp = projectionMatrix * viewMatrix * MarginModel(p, PortalModel(p));
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
             // The active portal-view clip plane (zero in the main view). Set on
             // EVERY draw with the portal shader: on Vulkan the plane rides the
@@ -1505,7 +1541,7 @@ void main() {
         };
 
         const double now = glfwGetTime();
-        mgr.ForEachPair([&](uint64_t /*gunId*/, const Client::ClientPortalPair& pair) {
+        mgr.ForEachPair([&](uint64_t gunId, const Client::ClientPortalPair& pair) {
             // Per-pair teleport flash intensity, decaying from 1 → 0 over
             // kFlashDurationSec after a teleport (server pushes a packet
             // that sets pair.flashEndTimeSec; renderer reads it here).
@@ -1562,6 +1598,19 @@ void main() {
             // (c_portal_player.cpp:CalcPortalView).
             const bool both = pair.blue.active && pair.orange.active;
             const bool immersive = pair.blue.immersive || pair.orange.immersive;
+            if (FlickerDiag::DumpPending()) {
+                auto one = [&](const char* name, const Client::ClientPortal& q) {
+                    if (!q.active) { Log::Info("[PortalDiag]  gun %llu %s: inactive", static_cast<unsigned long long>(gunId), name); return; }
+                    const float dist = glm::length(eyeF - Render::ToRender(q.origin));
+                    const float margin = ChunkRenderer::SurfaceDepthMargin(dist, eyeF);
+                    Log::Info("[PortalDiag]  gun %llu %s: origin=(%.3f,%.3f,%.3f) n=(%.2f,%.2f,%.2f) up=(%.2f,%.2f,%.2f) dim=%d immersive=%d dist=%.3f margin=%.4f",
+                              static_cast<unsigned long long>(gunId), name, q.origin.x, q.origin.y, q.origin.z,
+                              q.normal.x, q.normal.y, q.normal.z, q.upDir.x, q.upDir.y, q.upDir.z,
+                              static_cast<int>(Game::DimensionToRaw(q.dimension)), q.immersive ? 1 : 0, dist, margin);
+                };
+                one("blue", pair.blue);
+                one("orange", pair.orange);
+            }
             if (both && immersive) {
                 if (inLevel(pair.blue))
                     RimPass(pair.blue,   kBluePalette,   /*isOrange=*/false, flash,

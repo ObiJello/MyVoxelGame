@@ -4,7 +4,13 @@
 #include <algorithm>
 #include "BlockRegistry.hpp"
 #include "RedstoneWire.hpp"
+#include "RedstoneComponents.hpp"
+#include "RedstoneFamilies.hpp"
+#include "RedstoneSignal.hpp"
+#include "RedstoneStateUtil.hpp"
+#include "Rails.hpp"
 #include "Stairs.hpp"
+#include "PotentSulfurBlock.hpp"
 #include "CrossCollision.hpp"
 #include "Walls.hpp"
 #include "Vine.hpp"
@@ -31,13 +37,41 @@ namespace Game {
         }
         bool Is(const std::string& n, std::string_view exact) { return n == exact; }
 
+        // MC AmethystClusterBlock: the cluster, its three bud sizes, and The
+        // Hush's resonant_cluster (registered on the same class). Keyed on
+        // model name so every rule below reads the same family.
+        bool IsAmethystClusterLike(const std::string& n) {
+            return Is(n, "amethyst_cluster") || Has(n, "amethyst_bud") ||
+                   Is(n, "resonant_cluster");
+        }
+
+        // MC SaplingBlock (VegetationBlock): every "*_sapling" that is a plant
+        // in the ground — not the potted ones (FlowerPotBlock) and not
+        // bamboo_sapling (BambooSaplingBlock, its own #bamboo_plantable_on rule).
+        bool IsSaplingName(const std::string& n) {
+            if (n.rfind("potted_", 0) == 0) return false;
+            if (n == "bamboo_sapling") return false;
+            constexpr std::string_view kSuffix = "_sapling";
+            return n.size() > kSuffix.size() &&
+                   n.compare(n.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+        }
+
         PlacementRule ClassifyPlacement(const std::string& n) {
+            // The Aether's berry_bush_stem is an AetherBushBlock with no AXIS;
+            // the "_stem" pillar match below is for crimson/warped stems.
+            if (Is(n, "berry_bush_stem")) return PlacementRule::None;
+            // The Aether's boss/treasure doorway stones are plain cubes whose
+            // names contain "_door" (…_doorway_…): not doors.
+            if (Has(n, "_doorway_")) return PlacementRule::None;
+
             // ── Axis pillars — MC RotatedPillarBlock.getStateForPlacement:
             //    setValue(AXIS, context.getClickedFace().getAxis())
             if (Has(n, "_log") || Has(n, "_wood") || Has(n, "_stem") || Has(n, "_hyphae") ||
                 Has(n, "_pillar") || Is(n, "bone_block") || Is(n, "hay_block") ||
                 Is(n, "basalt") || Is(n, "polished_basalt") || Is(n, "deepslate") ||
-                Is(n, "muddy_mangrove_roots") || Has(n, "_froglight")) {
+                Is(n, "muddy_mangrove_roots") || Has(n, "_froglight") ||
+                Is(n, "pillar") ||   // the Aether's dungeon pillar (RotatedPillarBlock)
+                Has(n, "_thorns")) { // TF ThornsBlock: AXIS = the clicked face's axis
                 return PlacementRule::ClickedFaceAxis;
             }
 
@@ -61,8 +95,13 @@ namespace Game {
             // ── Grows out of the clicked surface — MC ShulkerBoxBlock /
             //    AmethystClusterBlock / LightningRodBlock / EndRodBlock:
             //    setValue(FACING, context.getClickedFace())
-            if (Has(n, "shulker_box") || Is(n, "amethyst_cluster") || Has(n, "amethyst_bud") ||
-                Is(n, "lightning_rod") || Is(n, "end_rod")) {
+            //    Twilight Forest's CritterBlock (firefly, cicada, moonworm) is
+            //    the same rule: setValue(FACING, context.getClickedFace()).
+            if (Has(n, "shulker_box") || IsAmethystClusterLike(n) ||
+                Is(n, "lightning_rod") || Is(n, "end_rod") ||
+                Is(n, "firefly") || Is(n, "cicada") || Is(n, "moonworm") ||
+                Is(n, "pillar_top")) {
+                // pillar_top: the Aether's FacingPillarBlock, same rule.
                 return PlacementRule::ClickedFace;
             }
 
@@ -87,8 +126,12 @@ namespace Game {
             //    intercepts them before the switch — see the stairs branch
             //    there. The classification stays because it is the truth about
             //    FACING and keeps this table a description of MC's categories.
+            //    Beds too (AbstractBedBlock.getStateForPlacement: FACING =
+            //    context.getHorizontalDirection(), the head going in that
+            //    direction — the pair itself is placed by the caller, see
+            //    BedBlock.hpp).
             if (Has(n, "_stairs") || Is(n, "campfire") || Is(n, "soul_campfire") ||
-                Has(n, "_fence_gate") || Has(n, "_door") ||
+                Has(n, "_fence_gate") || Has(n, "_door") || Has(n, "_bed") ||
                 Is(n, "decorated_pot") || Is(n, "calibrated_sculk_sensor") ||
                 Is(n, "grindstone")) {
                 return PlacementRule::Horizontal;
@@ -114,16 +157,9 @@ namespace Game {
                 return PlacementRule::HorizontalOpposite;
             }
 
-            // ── Wall-attached blocks (ladder, wall torches, signs) use MC's
-            //    "walk the look-ordered directions and take the first that can
-            //    survive" loop, which needs neighbour queries we don't do here.
-            //    Ladder gets the clicked-face rule as a close approximation —
-            //    clicking a wall gives the wall you clicked, which is what the
-            //    loop lands on in the overwhelmingly common case.
-            if (Is(n, "ladder")) {
-                return PlacementRule::ClickedFaceOpposite;
-            }
-
+            // (Ladders, wall torches and signs — MC's "walk the look-ordered
+            // directions and take the first that can survive" — are handled
+            // by name in ComputePlacementState, with the world when it has one.)
             return PlacementRule::None;
         }
 
@@ -265,6 +301,147 @@ namespace Game {
         //                    the button points out of the wall it is on.
         // Vertical placements take FACING from the player, which is what makes
         // a floor button line up with the way you were standing.
+        // Signs. The item's standing↔wall choice is already made by
+        // SignPlacementBlock (the caller); this is each block's
+        // getStateForPlacement.
+        if (IsSignBlock(id)) {
+            BlockRegistry::BlockStateDefinition::PropertyMap props;
+            props["waterlogged"] = "false";
+            if (IsStandingSignBlock(id)) {
+                // StandingSignBlock: RotationSegment.convertToSegment(rotation + 180)
+                // — round(deg * 16/360) & 15, so the front faces the placer.
+                const int segment = static_cast<int>(std::floor(
+                    (context.playerYaw + 180.0f) * (16.0f / 360.0f) + 0.5f)) & 15;
+                props["rotation"] = std::to_string(segment);
+            } else if (IsWallSignBlock(id)) {
+                // WallSignBlock: the first looking direction that can hang —
+                // with a side click that is the face clicked (the sign faces
+                // out of the wall).
+                props["facing"] = std::string(NameOf(IsHorizontal(clicked) ? clicked : Opposite(look)));
+            } else if (IsCeilingHangingSignBlock(id)) {
+                // CeilingHangingSignBlock: hangs from the block's centre
+                // (ATTACHED, free 16-way rotation) when the block above has
+                // no full bottom face or the placer sneaks; otherwise on
+                // the bar, squared to the cardinal the placer faces.
+                bool attached = context.player && context.player->IsSneaking();
+                if (!attached && context.world) {
+                    const glm::ivec3 placePos = context.getPlacementPos();
+                    const glm::ivec3 above(placePos.x, placePos.y + 1, placePos.z);
+                    const BlockState aboveState = context.world->GetBlockState(above.x, above.y, above.z);
+                    const bool fullBottom = BlockRegistry::HasCollision(aboveState.Block()) &&
+                                            BlockRegistry::GetBlockCollisionShapeSet(aboveState).IsFullCube();
+                    attached = !fullBottom;
+                }
+                props["attached"] = attached ? "true" : "false";
+                if (attached) {
+                    const int segment = static_cast<int>(std::floor(
+                        (context.playerYaw + 180.0f) * (16.0f / 360.0f) + 0.5f)) & 15;
+                    props["rotation"] = std::to_string(segment);
+                } else {
+                    // convertToSegment(direction.getOpposite()) with direction
+                    // = Direction.fromYRot(yaw): S=0, W=4, N=8, E=12 in the
+                    // 2D-data order, so the opposite of the facing.
+                    const Direction facing = Opposite(look);
+                    int segment = 0;
+                    switch (facing) {
+                        case Direction::South: segment = 0;  break;
+                        case Direction::West:  segment = 4;  break;
+                        case Direction::North: segment = 8;  break;
+                        default:               segment = 12; break;   // East
+                    }
+                    props["rotation"] = std::to_string(segment);
+                }
+            } else {
+                // WallHangingSignBlock: the first horizontal looking
+                // direction not on the clicked face's axis, facing back.
+                Direction facing = Opposite(look);
+                if (IsHorizontal(clicked) && AxisOf(clicked) == AxisOf(facing)) {
+                    facing = ClockWise(facing);
+                }
+                props["facing"] = std::string(NameOf(facing));
+            }
+            return def.IndexOf(props);
+        }
+
+        // MC TrapDoorBlock.getStateForPlacement:
+        //   clicked a SIDE of a block (and not replacing it) → the trapdoor
+        //   hangs on that face, top/bottom half by where on the face you hit;
+        //   clicked top/bottom (or replacing) → faces away from you, bottom
+        //   half when you clicked the top face, top half otherwise.
+        if (IsTrapdoorBlock(id)) {
+            const glm::ivec3 clickedPos = context.hitResult.blockPos;
+            // BlockPlaceContext.replacingClickedOnBlock: the clicked block
+            // itself is replaceable, so the trapdoor goes INTO it.
+            bool replacingClicked = false;
+            if (context.world) {
+                const BlockID at = context.world->GetBlock(clickedPos.x, clickedPos.y, clickedPos.z);
+                replacingClicked = at == BlockID::Air || BlockRegistry::Get(at).replaceable;
+            }
+            BlockRegistry::BlockStateDefinition::PropertyMap props;
+            if (!replacingClicked && IsHorizontal(clicked)) {
+                props["facing"] = std::string(NameOf(clicked));
+                const double hitY = context.hitResult.hitPoint.y - static_cast<double>(clickedPos.y);
+                props["half"] = hitY > 0.5 ? "top" : "bottom";
+            } else {
+                props["facing"] = std::string(NameOf(Opposite(look)));
+                props["half"]   = (clicked == Direction::Up) ? "bottom" : "top";
+            }
+            // MC: `if (level.hasNeighborSignal(pos)) state = OPEN true, POWERED true`.
+            bool powered = false;
+            if (context.world) {
+                const glm::ivec3 placePos = context.getPlacementPos();
+                powered = HasNeighborSignal(*context.world, placePos);
+            }
+            props["open"]    = powered ? "true" : "false";
+            props["powered"] = powered ? "true" : "false";
+            return def.IndexOf(props);
+        }
+
+        if (id == BlockID::Ladder) {
+            // MC LadderBlock.getStateForPlacement: for each of the player's
+            // nearest looking directions that is horizontal, FACING = its
+            // opposite, and the first state that can survive (a sturdy face
+            // on the block behind it) wins. Clicking a wall's face means
+            // looking at it, so that face leads; then the look direction's
+            // opposite (clicking a floor or ceiling), then the rest. Without
+            // a world (the client's predictor) the first candidate stands and
+            // ComputeWorldPlacementState re-resolves it on both sides.
+            const Direction first = IsHorizontal(clicked) ? clicked : Opposite(look);
+            Direction facing = first;
+            if (context.world) {
+                const glm::ivec3 placePos = context.getPlacementPos();
+                const Direction order[] = { first, Opposite(look), ClockWise(look), CounterClockWise(look), look };
+                for (Direction d : order) {
+                    if (LadderCanSurvive(*context.world, placePos, d)) { facing = d; break; }
+                }
+            }
+            return def.IndexOfSingle("facing", NameOf(facing));
+        }
+
+        if (IsWallTorch(id)) {
+            // MC WallTorchBlock.getStateForPlacement: the first horizontal
+            // look direction whose wall can hold it; the clicked face comes
+            // first in that walk, so it is what lands here.
+            BlockRegistry::BlockStateDefinition::PropertyMap props;
+            props["facing"] = std::string(NameOf(IsHorizontal(clicked) ? clicked : Opposite(look)));
+            if (id == BlockID::RedstoneWallTorch || id == BlockID::BlueRedstoneWallTorch) props["lit"] = "true";
+            return def.IndexOf(props);
+        }
+
+        if (id == BlockID::RedstoneLamp && context.world) {
+            // MC RedstoneLampBlock.getStateForPlacement: LIT = hasNeighborSignal.
+            BlockRegistry::BlockStateDefinition::PropertyMap props;
+            props["lit"] = HasNeighborSignal(*context.world, context.getPlacementPos()) ? "true" : "false";
+            return def.IndexOf(props);
+        }
+
+        if (IsRailBlock(id)) {
+            // MC BaseRailBlock.getStateForPlacement: along the player's
+            // horizontal facing; the neighbour-aware shaping happens in
+            // onPlace once the block is in the world.
+            return RailPlacementState(BlockStates::Default(id), Opposite(look)).Index();
+        }
+
         {
             const std::string& name = BlockRegistry::Get(id).modelName;
             if (name.find("_button") != std::string::npos || name == "lever") {
@@ -614,6 +791,15 @@ namespace Game {
             "dirt", "grass_block", "podzol", "coarse_dirt", "mycelium",
             "rooted_dirt", "moss_block", "pale_moss_block", "mud",
             "muddy_mangrove_roots",
+            // The Hush's two soils — also in data/minecraft/tags/block/dirt.json
+            // so the terrain library's trees and flowers treat them as dirt.
+            "sculk_loam", "hush_moss",
+            // The Aether's ground — its data pack adds #aether:aether_dirt
+            // (aether grass + aether dirt) to #minecraft:dirt, also mirrored in
+            // data/minecraft/tags/block/dirt.json. Without it skyroot and
+            // golden oak saplings, the flowers and the berry bush would refuse
+            // the Aether's own soil.
+            "aether_grass_block", "aether_dirt",
             // Not a tag entry: vanilla's snowy grass is `grass_block{snowy=true}`,
             // the same block, but this engine promotes it to its own BlockID
             // with its own model name. Omitting it would make snow-covered
@@ -674,6 +860,17 @@ namespace Game {
         // NetherWartBlock.mayPlaceOn: `state.is(Blocks.SOUL_SAND)`.
         if (name == "nether_wart") {
             return belowId == BlockID::SoulSand;
+        }
+
+        // SaplingBlock inherits VegetationBlock.mayPlaceOn as well:
+        // `state.is(BlockTags.DIRT) || state.is(Blocks.FARMLAND)`. The Hush's
+        // whisperwood sapling is the one that made this matter — sculk loam
+        // and hush moss are in kDirtTag, so it plants on its own soils.
+        if (IsSaplingName(name)) {
+            const std::string& belowName = BlockRegistry::Get(belowId).modelName;
+            if (belowName == "farmland") return true;
+            for (std::string_view d : kDirtTag) if (belowName == d) return true;
+            return false;
         }
 
         // SweetBerryBushBlock inherits VegetationBlock.mayPlaceOn:
@@ -764,8 +961,46 @@ namespace Game {
         }
     } // namespace
 
+    bool IsAmethystClusterBlock(BlockID id) {
+        if (id == BlockID::Air) return false;
+        return IsAmethystClusterLike(BlockRegistry::Get(id).modelName);
+    }
+
+    bool IsSaplingBlock(BlockID id) {
+        if (id == BlockID::Air) return false;
+        return IsSaplingName(BlockRegistry::Get(id).modelName);
+    }
+
+    bool AmethystClusterCanSurvive(const IBlockAccess& level, const glm::ivec3& pos,
+                                   BlockState state) {
+        // MC AmethystClusterBlock.canSurvive:
+        //   Direction d = state.getValue(FACING);
+        //   BlockPos adjacent = pos.relative(d.getOpposite());
+        //   return level.getBlockState(adjacent).isFaceSturdy(level, adjacent, d);
+        // The cluster POINTS along FACING and is held by the block behind it,
+        // whose face toward the cluster must be sturdy.
+        const Direction facing    = FacingOf(state);
+        const Direction toSupport = Opposite(facing);
+        const glm::ivec3 support{pos.x + StepX(toSupport),
+                                 pos.y + StepY(toSupport),
+                                 pos.z + StepZ(toSupport)};
+        return IsFaceSturdy(level, support, facing);
+    }
+
+    bool LadderCanSurvive(const IBlockAccess& level, const glm::ivec3& pos, Direction facing) {
+        // MC LadderBlock.canSurvive: the block behind (opposite FACING) has a
+        // sturdy face pointing back at the ladder.
+        if (!IsHorizontal(facing)) return false;
+        const Direction toWall = Opposite(facing);
+        return IsFaceSturdy(level, glm::ivec3(pos.x + StepX(toWall), pos.y, pos.z + StepZ(toWall)), facing);
+    }
+
     bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockState state) {
         const BlockID id = state.Block();
+        if (HasRedstoneSurvivalRule(id)) return RedstoneComponentCanSurvive(level, pos, state);
+        if (id == BlockID::Ladder) {
+            return LadderCanSurvive(level, pos, HorizontalFacingFromIndex(state.GetIndex(PropertyId::HORIZONTAL_FACING)));
+        }
         // MC FaceAttachedHorizontalDirectionalBlock.canSurvive:
         //   canAttach(level, pos, getConnectedDirection(state).getOpposite())
         // where getConnectedDirection is UP for FLOOR, DOWN for CEILING, and
@@ -794,6 +1029,26 @@ namespace Game {
         }
         if (IsVineBlock(id)) return VineCanSurvive(level, pos, state);
         if (IsMultifaceBlock(id)) return MultifaceCanSurvive(level, pos, state);
+        if (IsAmethystClusterBlock(id)) return AmethystClusterCanSurvive(level, pos, state);
+        // Signs: standing needs a solid block below, wall a sturdy face
+        // behind, ceiling-hanging a sturdy face above, wall-hanging a
+        // sturdy face on either side (MC canSurvive / canPlace).
+        if (IsStandingSignBlock(id)) {
+            return IsFaceSturdy(level, glm::ivec3(pos.x, pos.y - 1, pos.z), Direction::Up);
+        }
+        if (IsWallSignBlock(id) || IsWallHangingSignBlock(id)) {
+            const Direction facing = HorizontalFacingFromIndex(state.GetIndex(PropertyId::HORIZONTAL_FACING));
+            if (IsWallSignBlock(id)) {
+                const Direction toWall = Opposite(facing);
+                return IsFaceSturdy(level, glm::ivec3(pos.x + StepX(toWall), pos.y, pos.z + StepZ(toWall)), facing);
+            }
+            const Direction cw = ClockWise(facing), ccw = CounterClockWise(facing);
+            return IsFaceSturdy(level, glm::ivec3(pos.x + StepX(cw),  pos.y, pos.z + StepZ(cw)),  ccw) ||
+                   IsFaceSturdy(level, glm::ivec3(pos.x + StepX(ccw), pos.y, pos.z + StepZ(ccw)), cw);
+        }
+        if (IsCeilingHangingSignBlock(id)) {
+            return IsFaceSturdy(level, glm::ivec3(pos.x, pos.y + 1, pos.z), Direction::Down);
+        }
         // MC ScaffoldingBlock.canSurvive / PointedDripstoneBlock.canSurvive.
         // Both are STATE-shaped rules that the generic "solid below" heuristic
         // cannot express: scaffolding is held by a horizontal distance walk,
@@ -809,10 +1064,31 @@ namespace Game {
     BlockState ComputeWorldPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
                                           BlockState fallback) {
         const BlockID id = fallback.Block();
+        if (id == BlockID::Ladder) {
+            // The click's facing if its wall holds, else the first wall
+            // round the cell that does (MC's loop, minus the look order the
+            // predictor does not carry here). A cell with no wall keeps the
+            // hint, and CanSurviveAt refuses the placement.
+            const Direction hint = HorizontalFacingFromIndex(fallback.GetIndex(PropertyId::HORIZONTAL_FACING));
+            if (!LadderCanSurvive(level, pos, hint)) {
+                for (Direction d : { ClockWise(hint), Opposite(hint), CounterClockWise(hint) }) {
+                    if (LadderCanSurvive(level, pos, d)) {
+                        return fallback.SetName(PropertyId::HORIZONTAL_FACING, NameOf(d));
+                    }
+                }
+            }
+            return fallback;
+        }
         if (id == BlockID::RedstoneWire) {
             // MC RedStoneWireBlock.getStateForPlacement:
             //   getConnectionState(level, this.crossState, pos)
             return RedstonePlacementState(level, pos);
+        }
+        if (id == BlockID::PotentSulfur) {
+            // MC PotentSulfurBlock.getStateForPlacement:
+            //   validBlockState(defaultBlockState(), level, clickedPos)
+            // No block entity is there yet to reset a countdown on.
+            return PotentSulfur::ValidBlockState(fallback, level, pos, nullptr);
         }
 
         // MC StairBlock.getStateForPlacement's closing line:
@@ -905,6 +1181,20 @@ namespace Game {
             fallback = FenceGatePlacementState(level, pos, fallback);
         }
 
+        // MC RepeaterBlock.getStateForPlacement: LOCKED from the side inputs.
+        if (id == BlockID::Repeater) {
+            fallback = RepeaterPlacementState(level, pos, fallback);
+        }
+        // MC NoteBlock.getStateForPlacement: the instrument of what is below
+        // (or the head above).
+        if (id == BlockID::NoteBlock) {
+            fallback = NoteBlockWithInstrument(level, pos, fallback);
+        }
+        // MC TripWireBlock.getStateForPlacement: which sides join.
+        if (id == BlockID::Tripwire) {
+            fallback = TripWirePlacementState(level, pos, fallback);
+        }
+
         // Waterlogging. Every SimpleWaterloggedBlock's getStateForPlacement
         // ends with the same line — StairBlock.java, SlabBlock.java,
         // FenceBlock via CrossCollisionBlock, and the rest:
@@ -912,9 +1202,11 @@ namespace Game {
         //   .setValue(WATERLOGGED, fluidState.getType() == Fluids.WATER)
         //
         // so it belongs here, applied to the whole family at once, rather than
-        // as 386 special cases. Coral and sea pickle additionally require
-        // `getAmount() == 8` (a SOURCE, not flowing) — identical here, because
-        // this engine has no fluid levels and every water cell is a source.
+        // as 386 special cases. Note the comparison: `getType() == Fluids
+        // .WATER` is the SOURCE fluid — FLOWING_WATER is a different Fluid —
+        // so a stair set down in a stream is dry and the stream is simply
+        // displaced, while one set down in a pool is waterlogged. Coral and
+        // sea pickle's extra `getAmount() == 8` says the same thing.
         //
         // Placed after the fallback is computed so it composes with whatever
         // orientation ComputePlacementState already chose: WithWaterlogged
@@ -927,12 +1219,14 @@ namespace Game {
         // unconditional setValue does.
         if (BlockRegistry::IsWaterloggable(id)) {
             return BlockRegistry::WithWaterlogged(
-                fallback, level.ContainsWater(pos.x, pos.y, pos.z));
+                fallback, BlockRegistry::IsWaterSource(level.GetBlockState(pos.x, pos.y, pos.z)));
         }
         return fallback;
     }
 
     bool HasModelledSurvivalRule(BlockID id) {
+        if (HasRedstoneSurvivalRule(id)) return true;
+        if (id == BlockID::HangingWhisperfruit) return true;   // CanSurviveAt: lantern leaves above
         // Every family the two functions above actually branch on. Kept as one
         // list so adding a rule and advertising it is a single edit.
         static constexpr std::string_view kModelled[] = {
@@ -946,15 +1240,31 @@ namespace Game {
             // its no-connection sub-model (see BlockRegistry's multipart note).
             "redstone_wire", "tripwire_ns",
             // CanSurviveAt (world-aware)
+            "ladder",
             "sugar_cane", "cactus", "bamboo", "bamboo_sapling",
             "vine", "glow_lichen", "sculk_vein", "resin_clump",
         };
         const std::string& name = BlockRegistry::Get(id).modelName;
         for (std::string_view m : kModelled) if (name == m) return true;
-        return false;
+        // Families matched by name shape rather than exact name: saplings
+        // (CanSurviveOn: dirt or farmland) and the amethyst clusters
+        // (CanSurviveAt: the block behind FACING).
+        return IsSaplingName(name) || IsAmethystClusterLike(name);
     }
 
     bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockID id) {
+        if (HasRedstoneSurvivalRule(id)) {
+            // The state-free gate: the default state's rule. Placement asks
+            // again with the real state once it is known.
+            return RedstoneComponentCanSurvive(level, pos, BlockStates::Default(id));
+        }
+        if (id == BlockID::Ladder) {
+            // Asked by the world's support collapse for a ladder already
+            // placed: its facing is in the world.
+            const BlockState here = level.GetBlockState(pos.x, pos.y, pos.z);
+            if (!here.Is(id)) return true;
+            return LadderCanSurvive(level, pos, HorizontalFacingFromIndex(here.GetIndex(PropertyId::HORIZONTAL_FACING)));
+        }
         const std::string& name = BlockRegistry::Get(id).modelName;
         const glm::ivec3 below{pos.x, pos.y - 1, pos.z};
         const BlockID belowId = level.GetBlock(below.x, below.y, below.z);
@@ -999,6 +1309,13 @@ namespace Game {
                    belowId == BlockID::Bamboo || belowId == BlockID::BambooSapling;
         }
 
+        // The Hush's whisperfruit hangs from the underside of lantern leaves
+        // and nothing else (HushBlocks.cpp; its updateShape drops it when the
+        // leaf goes) — the ABOVE-block twin of the support rules here.
+        if (id == BlockID::HangingWhisperfruit) {
+            return level.GetBlock(pos.x, pos.y + 1, pos.z) == BlockID::LanternLeaves;
+        }
+
         // CocoaBlock.canSurvive is about the block it FACES, not the one below,
         // and the facing is not known until placement resolves. Left to the
         // generic path for now — cocoa places like any other block.
@@ -1008,6 +1325,64 @@ namespace Game {
     }
 
     // ── Doors ───────────────────────────────────────────────────────────
+
+    // ── Signs ───────────────────────────────────────────────────────────
+
+    namespace {
+        bool SlugEndsWith(BlockID id, std::string_view suffix) {
+            if (id == BlockID::Air) return false;
+            const std::string& slug = BlockRegistry::Get(id).registrySlug;
+            return slug.size() > suffix.size() &&
+                   slug.compare(slug.size() - suffix.size(), suffix.size(), suffix) == 0;
+        }
+    } // namespace
+
+    bool IsSignBlock(BlockID id)               { return SlugEndsWith(id, "_sign"); }
+    bool IsWallSignBlock(BlockID id)           { return SlugEndsWith(id, "_wall_sign"); }
+    bool IsWallHangingSignBlock(BlockID id)    { return SlugEndsWith(id, "_wall_hanging_sign"); }
+    bool IsCeilingHangingSignBlock(BlockID id) { return SlugEndsWith(id, "_hanging_sign") && !IsWallHangingSignBlock(id); }
+    bool IsStandingSignBlock(BlockID id) {
+        return IsSignBlock(id) && !IsWallSignBlock(id) && !IsCeilingHangingSignBlock(id) &&
+               !IsWallHangingSignBlock(id);
+    }
+
+    BlockID SignPlacementBlock(BlockID held, Direction clickedFace) {
+        if (!IsHorizontal(clickedFace)) return held;
+        const std::string& slug = BlockRegistry::Get(held).registrySlug;
+        std::string wallSlug;
+        if (IsStandingSignBlock(held)) {
+            wallSlug = slug.substr(0, slug.size() - 5) + "_wall_sign";                // oak_sign → oak_wall_sign
+        } else if (IsCeilingHangingSignBlock(held)) {
+            wallSlug = slug.substr(0, slug.size() - 13) + "_wall_hanging_sign";       // oak_hanging_sign → oak_wall_hanging_sign
+        } else {
+            return held;
+        }
+        const BlockID wall = BlockStates::FromSlug(wallSlug).Block();
+        return wall != BlockID::Air ? wall : held;
+    }
+
+    float SignYawDegrees(BlockState state) {
+        const BlockID id = state.Block();
+        if (IsWallSignBlock(id) || IsWallHangingSignBlock(id)) {
+            return ToYRot(HorizontalFacingFromIndex(state.GetIndex(PropertyId::HORIZONTAL_FACING)));
+        }
+        // RotationSegment.convertToDegrees: segment * 22.5, into [-180, 180).
+        const std::string_view rot = state.GetValueByName("rotation");
+        const float deg = rot.empty() ? 0.0f : 22.5f * static_cast<float>(std::atoi(std::string(rot).c_str()));
+        return deg >= 180.0f ? deg - 360.0f : deg;
+    }
+
+    bool IsTrapdoorBlock(BlockID id) {
+        if (id == BlockID::Air) return false;
+        const std::string& slug = BlockRegistry::Get(id).registrySlug;
+        constexpr std::string_view kSuffix = "_trapdoor";
+        return slug.size() > kSuffix.size() &&
+               slug.compare(slug.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+    }
+
+    bool IsHandOpenableTrapdoor(BlockID id) {
+        return IsTrapdoorBlock(id) && id != BlockID::IronTrapdoor;
+    }
 
     bool IsDoorBlock(BlockID id) {
         if (id == BlockID::Air) return false;
@@ -1022,7 +1397,7 @@ namespace Game {
     }
 
     BlockState DoorPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
-                                  BlockState state, const glm::vec3& clickWorld) {
+                                  BlockState state, const glm::dvec3& clickWorld) {
         // MC DoorBlock.getHinge. A full block beside the door pushes the
         // hinge to the other side; a lower door half beside it makes the
         // pair a double door; otherwise the click's side of the cell decides.
@@ -1037,9 +1412,11 @@ namespace Game {
         auto full = [&](const glm::ivec3& p) {
             return BlockRegistry::GetBlockShapeSet(level.GetBlockState(p.x, p.y, p.z)).IsFullCube();
         };
+        // MC 26.3: `leftState.getBlock() instanceof DoorBlock` — any door,
+        // not only this wood.
         auto lowerDoor = [&](const glm::ivec3& p) {
             const BlockState s = level.GetBlockState(p.x, p.y, p.z);
-            return s.Block() == id && s.GetName(PropertyId::DOUBLE_BLOCK_HALF) == "lower";
+            return IsDoorBlock(s.Block()) && s.GetName(PropertyId::DOUBLE_BLOCK_HALF) == "lower";
         };
         const glm::ivec3 left = at(ccw, 0), right = at(cw, 0);
         const int i = (full(left) ? -1 : 0) + (full(at(ccw, 1)) ? -1 : 0) +
@@ -1050,8 +1427,8 @@ namespace Game {
         if ((!leftIsDoor || rightIsDoor) && i <= 0) {
             if ((!rightIsDoor || leftIsDoor) && i >= 0) {
                 const int j = StepX(facing), k = StepZ(facing);
-                const double d0 = static_cast<double>(clickWorld.x) - pos.x;
-                const double d1 = static_cast<double>(clickWorld.z) - pos.z;
+                const double d0 = clickWorld.x - pos.x;
+                const double d1 = clickWorld.z - pos.z;
                 hingeLeft = (j >= 0 || !(d1 < 0.5)) && (j <= 0 || !(d1 > 0.5)) &&
                             (k >= 0 || !(d0 > 0.5)) && (k <= 0 || !(d0 < 0.5));
             } else {
@@ -1060,10 +1437,32 @@ namespace Game {
         } else {
             hingeLeft = false;
         }
+        // MC DoorBlock.getStateForPlacement: `hasNeighborSignal(pos) ||
+        // hasNeighborSignal(pos.above())` sets both POWERED and OPEN.
+        const bool powered = HasNeighborSignal(level, pos) || HasNeighborSignal(level, Above(pos));
         return state.SetName(PropertyId::HINGE, hingeLeft ? "left" : "right")
                     .SetName(PropertyId::DOUBLE_BLOCK_HALF, "lower")
-                    .SetName(PropertyId::OPEN, "false")
-                    .SetName(PropertyId::POWERED, "false");
+                    .SetName(PropertyId::OPEN, powered ? "true" : "false")
+                    .SetName(PropertyId::POWERED, powered ? "true" : "false");
+    }
+
+    BlockID TorchPlacementBlock(const IBlockAccess& level, BlockID held, const glm::ivec3& pos,
+                                Direction clickedFace) {
+        if (!IsStandingTorch(held)) return held;
+        const BlockID wall = WallTorchOf(held);
+        if (wall == BlockID::Air) return held;
+        // MC StandingAndWallBlockItem.getPlacementState: the wall block's
+        // own getStateForPlacement is tried first — WallTorchBlock walks the
+        // look directions, the clicked face at the front, and takes the
+        // first wall that can hold it — and the standing block only when no
+        // wall can. A click on a top or bottom face never reaches the wall
+        // block in vanilla either, because canAttach fails for a vertical
+        // face.
+        if (IsHorizontal(clickedFace)) {
+            const glm::ivec3 behind = Relative(pos, Opposite(clickedFace));
+            if (IsFaceSturdyAt(level, behind, clickedFace)) return wall;
+        }
+        return held;
     }
 
     BlockState DoorUpperState(BlockState lower) {

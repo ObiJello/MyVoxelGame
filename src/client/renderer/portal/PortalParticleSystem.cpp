@@ -6,6 +6,7 @@
 
 #include "PortalParticleSystem.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
 #include "client/portal/ClientPortalManager.hpp"
 #include "client/world/ClientLevel.hpp"
 #include "common/core/Log.hpp"
@@ -393,12 +394,14 @@ void main() {
         // ── 1. Age existing particles, drop the dead ──
         for (auto& p : m_particles) {
             p.age += dt;
-            p.position += p.velocity * dt;
+            // Double position, float velocity: the step is small, the sum
+            // is not (see Particle::position).
+            p.position += glm::dvec3(p.velocity * dt);
             if (p.type == ParticleType::Projectile) {
                 // Portal-gun projectile — constant velocity, no forces,
                 // no drag. Just travels in a straight line at BLAST_SPEED
                 // until its travel-time lifetime expires (then dies).
-                // (Position already integrated via `p.position += p.velocity * dt` above.)
+                // (Position already integrated via `p.position += dvec3(p.velocity * dt)` above.)
             } else if (p.type == ParticleType::Spark) {
                 // Sparks: drag + warm-air drift.
                 p.velocity *= std::pow(0.4f, dt);
@@ -412,7 +415,9 @@ void main() {
                 // normal — instead of orbiting at constant depth.
                 // Twist stays in-plane (cross-product around portal
                 // normal as Source's `twist around axis` does).
-                const glm::vec3 r3d = p.position - p.swirlOrigin;
+                // Double minus double, THEN narrowed: the offset from the
+                // portal is at most a few metres, exact in float.
+                const glm::vec3 r3d = glm::vec3(p.position - p.swirlOrigin);
                 const float r3dLen = glm::length(r3d);
                 if (r3dLen > 1.0e-4f) {
                     const glm::vec3 inward3d = -r3d / r3dLen;
@@ -441,7 +446,7 @@ void main() {
                 // Close burst — same Source formulas as swirl, just
                 // bigger amounts. Primary pull is falloff=1 (1/r);
                 // delayed pull is falloff=0 (constant magnitude).
-                const glm::vec3 r = p.position - p.swirlOrigin;
+                const glm::vec3 r = glm::vec3(p.position - p.swirlOrigin);
                 const glm::vec3 rPlane =
                     r - glm::dot(r, p.swirlNormal) * p.swirlNormal;
                 const float rLen = glm::length(rPlane);
@@ -465,7 +470,7 @@ void main() {
             } else {
                 // Swirl: Source's "Pull towards control point" + "twist
                 // around axis" + "Movement Basic" drag.
-                const glm::vec3 r = p.position - p.swirlOrigin;
+                const glm::vec3 r = glm::vec3(p.position - p.swirlOrigin);
                 const glm::vec3 rPlane =
                     r - glm::dot(r, p.swirlNormal) * p.swirlNormal;
                 const float rLen = glm::length(rPlane);
@@ -517,9 +522,10 @@ void main() {
                 float lx = std::cos(angle) * kPortalWidthHalf;
                 float ly = std::sin(angle) * kPortalHeightHalf;
 
-                glm::vec3 worldPos = glm::vec3(portal.origin)
-                    + portal.right * lx
-                    + portal.upDir * ly;
+                // Double origin + float in-plane offset (small), no float
+                // world point in between.
+                const glm::dvec3 worldPos = portal.origin
+                    + glm::dvec3(portal.right * lx + portal.upDir * ly);
 
                 // Outward radial direction in world (along portal's right/up).
                 glm::vec3 outward = glm::normalize(
@@ -533,8 +539,8 @@ void main() {
                 Particle p;
                 p.dimension = portal.dimension;
                 p.anchored  = true;
-                p.anchor    = glm::vec3(portal.origin);
-                p.position = worldPos;
+                p.anchor    = portal.origin;
+                p.position  = worldPos;
                 p.velocity = outward * kRadialSpeed
                            + tangent * (Frand() - 0.5f) * 2.0f * kTangentialSpeedJitter;
                 // Portal's portal_X_particles defines NO Color Random
@@ -608,16 +614,16 @@ void main() {
                           + kPortalHalfHeight_m * kSpawnYFactor);
                 const float ln = (Frand() * 2.0f - 1.0f) * spawnRadiusAvg_m * kSpawnNormalBias;
 
-                const glm::vec3 worldPos = glm::vec3(portal.origin)
-                    + portal.right * lx
-                    + portal.upDir * ly
-                    + portal.normal * ln;
+                const glm::dvec3 worldPos = portal.origin
+                    + glm::dvec3(portal.right * lx
+                               + portal.upDir * ly
+                               + portal.normal * ln);
 
                 Particle p;
                 p.dimension = portal.dimension;
                 p.anchored  = true;
-                p.anchor    = glm::vec3(portal.origin);
-                p.position = worldPos;
+                p.anchor    = portal.origin;
+                p.position  = worldPos;
                 // PCF: speed_min=speed_max=0 → spawn AT REST. Twist + pull
                 // forces in the per-frame physics accelerate them to
                 // orbital velocity over the first ~50 ms of life.
@@ -631,7 +637,7 @@ void main() {
                            + (Frand() - 0.5f) * 2.0f * kSwirlLifetimeJitter;
                 p.birthSizeM = kSwirlBirthSize;
                 p.type = ParticleType::Swirl;
-                p.swirlOrigin = glm::vec3(portal.origin);
+                p.swirlOrigin = portal.origin;
                 p.swirlNormal = portal.normal;
                 // Portal Alpha Random 5-50/255 — very low per-particle.
                 p.alphaMul = (5.0f + Frand() * 45.0f) / 255.0f;
@@ -669,15 +675,15 @@ void main() {
                 const float lx = cosA * kVacuumSpawnRadius_m * kVacuumWarpX;
                 const float ly = sinA * kVacuumSpawnRadius_m;
                 // Pushed forward along portal normal
-                const glm::vec3 worldPos = glm::vec3(portal.origin)
-                    + portal.right  * lx
-                    + portal.upDir  * ly
-                    + portal.normal * kVacuumNormalOffset_m;
+                const glm::dvec3 worldPos = portal.origin
+                    + glm::dvec3(portal.right  * lx
+                               + portal.upDir  * ly
+                               + portal.normal * kVacuumNormalOffset_m);
 
                 Particle p;
                 p.dimension   = portal.dimension;
                 p.anchored    = true;
-                p.anchor      = glm::vec3(portal.origin);
+                p.anchor      = portal.origin;
                 p.position    = worldPos;
                 // Small outward initial speed along portal normal (PCF
                 // speed_in_local z=70-100 HU/s).
@@ -687,7 +693,7 @@ void main() {
                 p.lifetime    = kVacuumLifetime;
                 p.birthSizeM  = kVacuumBirthSize;
                 p.type        = ParticleType::Vacuum;
-                p.swirlOrigin = glm::vec3(portal.origin);
+                p.swirlOrigin = portal.origin;
                 p.swirlNormal = portal.normal;
                 p.alphaMul    = 0.6f;   // moderate per-particle alpha — PCF uses
                                         // Alpha Fade In/Out Random to ramp; we
@@ -711,15 +717,15 @@ void main() {
         });
     }
 
-    void PortalParticleSystem::EmitProjectile(const glm::vec3& start,
-                                              const glm::vec3& end,
+    void PortalParticleSystem::EmitProjectile(const glm::dvec3& start,
+                                              const glm::dvec3& end,
                                               bool isOrange) {
         EmitProjectileIn(Client::ClientLevels::ActiveDimension(), start, end, isOrange);
     }
 
     void PortalParticleSystem::EmitProjectileIn(Game::DimensionId dimension,
-                                                const glm::vec3& start,
-                                                const glm::vec3& end,
+                                                const glm::dvec3& start,
+                                                const glm::dvec3& end,
                                                 bool isOrange) {
         if (m_shader == INVALID_SHADER) return;
 
@@ -735,10 +741,13 @@ void main() {
         // bolt should travel its full path so impact + placement
         // line up visually.
 
-        glm::vec3 dir = end - start;
-        float dist = glm::length(dir);
-        if (dist < 1.0e-3f) return;   // gun is already at the impact point — skip
-        dir /= dist;
+        // Endpoints are world points (double); the span between them is
+        // short, so its length and direction are float from here on.
+        const glm::dvec3 span = end - start;
+        const double spanLen = glm::length(span);
+        if (spanLen < 1.0e-3) return;   // gun is already at the impact point — skip
+        const glm::vec3 dir = glm::vec3(span / spanLen);
+        float dist = static_cast<float>(spanLen);
 
         // We don't have a gun viewmodel, so the projectile would
         // otherwise spawn AT the camera eye — distance 0 from the
@@ -748,7 +757,7 @@ void main() {
         // visible from frame 1 (and reduce the remaining travel
         // distance correspondingly).
         constexpr float kSpawnForwardOffset = 0.5f;
-        glm::vec3 spawnPos = start + dir * kSpawnForwardOffset;
+        const glm::dvec3 spawnPos = start + glm::dvec3(dir * kSpawnForwardOffset);
         dist -= kSpawnForwardOffset;
         if (dist < 1.0e-3f) return;   // impact within 0.5 m of camera — skip
 
@@ -778,7 +787,7 @@ void main() {
     }
 
     void PortalParticleSystem::EmitOneShot(BurstKind kind,
-                                           const glm::vec3& origin,
+                                           const glm::dvec3& origin,
                                            const glm::vec3& normal,
                                            bool isOrange,
                                            Game::DimensionId dimension) {
@@ -820,7 +829,8 @@ void main() {
                 const float lx = std::cos(angle) * r * 0.6f;
                 const float ly = std::sin(angle) * r;
 
-                const glm::vec3 spawnPos = origin + right * lx + up * ly;
+                // Double origin + float in-plane offset (small).
+                const glm::dvec3 spawnPos = origin + glm::dvec3(right * lx + up * ly);
                 const glm::vec3 outwardInPlane = glm::length(
                     right * std::cos(angle) + up * std::sin(angle)) > 1e-4f
                     ? glm::normalize(right * std::cos(angle) + up * std::sin(angle))
@@ -918,7 +928,7 @@ void main() {
                                       const glm::mat4& view,
                                       const glm::vec3& cameraPos,
                                       Game::DimensionId dimension,
-                                      const glm::vec3* skipAnchor) {
+                                      const glm::dvec3* skipAnchor) {
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         if (m_particles.empty()) return;
 
@@ -1029,10 +1039,15 @@ void main() {
             // space and stretches backwards by trailSec × speed; the
             // short axis is perpendicular, screen-aligned. For round
             // particles the quad is camera-axis-aligned.
+            // The quad goes to the GPU as it is, so its centre is the
+            // particle's RENDER-space position (world minus the view's
+            // origin, see RenderOrigin.hpp). The world `p.position` is
+            // still what the view direction below is taken from.
+            const glm::vec3 renderPos = Render::ToRender(p.position);
             glm::vec3 longAxis;
             glm::vec3 shortAxis;
-            glm::vec3 frontCenter = p.position;
-            glm::vec3 backCenter  = p.position;
+            glm::vec3 frontCenter = renderPos;
+            glm::vec3 backCenter  = renderPos;
             const float speed = glm::length(p.velocity);
             if (p.trailSec > 0.0f && speed > 0.05f) {
                 const glm::vec3 dir = p.velocity / speed;
@@ -1046,10 +1061,12 @@ void main() {
                 constexpr float kMaxLengthM = 38.1f;
                 const float trailLen = std::clamp(
                     speed * p.trailSec, kMinLengthM, kMaxLengthM);
-                backCenter = p.position - dir * trailLen;
+                backCenter = renderPos - dir * trailLen;
                 // Short axis = perpendicular to dir in screen-aligned
-                // plane (cross with view direction at particle).
-                const glm::vec3 view = glm::normalize(p.position - cameraPos);
+                // plane (cross with view direction at particle). A
+                // direction: subtract in double, then narrow.
+                const glm::vec3 view = glm::normalize(
+                    glm::vec3(p.position - glm::dvec3(cameraPos)));
                 glm::vec3 perp = glm::cross(dir, view);
                 const float perpLen = glm::length(perp);
                 if (perpLen > 1.0e-4f) {
@@ -1067,8 +1084,8 @@ void main() {
                 const float s = std::sin(p.rotation);
                 shortAxis = ( camRight * c + camUp    * s) * size;
                 longAxis  = (-camRight * s + camUp    * c) * size;
-                frontCenter = p.position + longAxis;
-                backCenter  = p.position - longAxis;
+                frontCenter = renderPos + longAxis;
+                backCenter  = renderPos - longAxis;
             }
 
             const glm::vec3 c0 = frontCenter - shortAxis;
@@ -1089,12 +1106,12 @@ void main() {
         // own sprite without re-sorting the VB.
         for (const auto& p : m_particles) {
             if (p.dimension != dimension) continue;
-            if (skipAnchor && p.anchored && glm::length(p.anchor - *skipAnchor) < 0.05f) continue;
+            if (skipAnchor && p.anchored && glm::length(p.anchor - *skipAnchor) < 0.05) continue;
             if (!p.isOrange) { emitOne(p); blueVerts += 6; }
         }
         for (const auto& p : m_particles) {
             if (p.dimension != dimension) continue;
-            if (skipAnchor && p.anchored && glm::length(p.anchor - *skipAnchor) < 0.05f) continue;
+            if (skipAnchor && p.anchored && glm::length(p.anchor - *skipAnchor) < 0.05) continue;
             if (p.isOrange)  { emitOne(p); orangeVerts += 6; }
         }
 

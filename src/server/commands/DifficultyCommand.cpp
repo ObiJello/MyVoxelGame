@@ -25,7 +25,7 @@ namespace Server {
         }
     }
 
-    void DifficultyCommand::Execute(ServerPlayer& /*sender*/,
+    void DifficultyCommand::Execute(const CommandSourceStack& source,
                                     const std::vector<std::string>& args,
                                     ServerConnection& connection,
                                     PlayerSessionManager& /*sessionManager*/) {

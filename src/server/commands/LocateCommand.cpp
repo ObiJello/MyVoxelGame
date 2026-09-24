@@ -9,17 +9,20 @@
 #include "../level/ServerLevel.hpp"
 #include "../level/LocateFinder.hpp"
 #include "../level/NetherPortalIndex.hpp"
+#include "common/world/portal/PortalFamily.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/core/Log.hpp"
 
 #include "levelgen/structure/StructureSet.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <exception>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace Server {
 
@@ -44,14 +47,12 @@ namespace Server {
             const std::string tp = "/tp @s " + std::to_string(pos.x) + " " + y + " " + std::to_string(pos.z);
             Network::ChatMessageS2CPacket packet;
             packet.position = 1;
-            // Like /seed's layout: white brackets around the green, clickable
-            // coordinates (MC colours the brackets too; this game keeps them
-            // white so the clickable part stands out).
+            // MC ComponentUtils.wrapInSquareBrackets(coordinates).withStyle(
+            // GREEN + click + hover): the brackets share the green and the
+            // click, so the whole "[x, y, z]" is one link.
             packet.segments.push_back(Network::ChatSegmentData{"The nearest " + foundName + " is at ", 0xFFFFFFFF, Network::ChatClickAction::None, "", ""});
-            packet.segments.push_back(Network::ChatSegmentData{"[", 0xFFFFFFFF, Network::ChatClickAction::None, "", ""});
-            packet.segments.push_back(Network::ChatSegmentData{coords, 0xFF55FF55,   // ChatFormatting.GREEN
+            packet.segments.push_back(Network::ChatSegmentData{"[" + coords + "]", 0xFF55FF55,   // ChatFormatting.GREEN
                                                                Network::ChatClickAction::RunCommand, tp, "Click to teleport"});
-            packet.segments.push_back(Network::ChatSegmentData{"]", 0xFFFFFFFF, Network::ChatClickAction::None, "", ""});
             packet.segments.push_back(Network::ChatSegmentData{" (" + std::to_string(distance) + " blocks away)", 0xFFFFFFFF, Network::ChatClickAction::None, "", ""});
             connection.SendChatMessage(packet);
         }
@@ -67,12 +68,50 @@ namespace Server {
             return shown + " (" + found + ")";
         }
         std::string Quoted(const std::string& s) { return "\"" + s + "\""; }
+
+        // Not in MC: when the search misses because the element only
+        // generates in another dimension, say which one and how to get
+        // there — a gray line after MC's own "not found" message.
+        std::string_view DimensionTitle(Game::DimensionId d) {
+            switch (d) {
+                case Game::DimensionId::Overworld:      return "the Overworld (/dimension overworld)";
+                case Game::DimensionId::Nether:         return "the Nether (/dimension nether)";
+                case Game::DimensionId::End:            return "the End (/dimension end)";
+                case Game::DimensionId::Hush:           return "the Hush (/dimension hush)";
+                case Game::DimensionId::TwilightForest: return "the Twilight Forest (/dimension twilight)";
+                case Game::DimensionId::Aether:         return "the Aether (/dimension aether)";
+            }
+            return "another dimension";
+        }
+        void SendGrayLine(ServerConnection& connection, const std::string& text) {
+            Network::ChatMessageS2CPacket packet;
+            packet.position = 1;
+            packet.segments.push_back(Network::ChatSegmentData{text, 0xFFAAAAAA,   // ChatFormatting.GRAY
+                                                               Network::ChatClickAction::None, "", ""});
+            connection.SendChatMessage(packet);
+        }
+        template <typename Has>
+        void SendElsewhereHint(ServerConnection& connection, Game::DimensionId here, Has&& has) {
+            if (!g_integratedServer) return;
+            ServerLevel* current = g_integratedServer->GetLevel(here);
+            if (current && has(*current)) return;   // it is here, just too far
+            std::string where;
+            for (Game::DimensionId d : Game::kAllDimensions) {
+                if (d == here) continue;
+                ServerLevel* other = g_integratedServer->GetLevel(d);
+                if (!other || !has(*other)) continue;
+                if (!where.empty()) where += ", ";
+                where += DimensionTitle(d);
+            }
+            if (where.empty()) return;
+            SendGrayLine(connection, "It generates in " + where + ", not here.");
+        }
     }
 
-    void LocateCommand::Execute(ServerPlayer& sender,
+    void LocateCommand::Execute(const CommandSourceStack& source,
                                 const std::vector<std::string>& args,
                                 ServerConnection& connection,
-                                PlayerSessionManager& sessionManager) {
+                                PlayerSessionManager& /*sessionManager*/) {
         if (args.size() < 2) {
             connection.SendChatMessage("Usage: /locate <structure|biome|poi> <id>", 1);
             return;
@@ -83,35 +122,50 @@ namespace Server {
             connection.SendChatMessage("Locate is unavailable (no server)", 1);
             return;
         }
-        auto session = sessionManager.GetSession(sender.getPlayerId());
-        ServerLevel* level = session ? g_integratedServer->GetLevel(Game::DimensionFromRaw(session->GetDimensionId())) : nullptr;
+        // The stack's level and position — `/execute in the_nether positioned
+        // 0 64 0 run locate structure fortress` searches from there.
+        ServerLevel* level = g_integratedServer->GetLevel(source.dimension);
         if (!level) {
             connection.SendChatMessage("Locate is unavailable (your level is not ready)", 1);
             return;
         }
-        const glm::dvec3 p = sender.getPosition();
+        const glm::dvec3 p = source.position;
         const glm::ivec3 from(static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.y)), static_cast<int>(std::floor(p.z)));
 
         if (kind == "structure") {
-            // ResourceOrTagKeyArgument: an unknown id is ERROR_STRUCTURE_INVALID
-            // at parse time; an empty tag is "not found".
-            const bool isTag = IsWorldgenTag("structure", asked);
-            const std::vector<std::string> ids = ResolveStructureIdOrTag(asked);
+            // ResourceOrTagKeyArgument: an unknown id or tag is
+            // ERROR_STRUCTURE_INVALID ("There is no structure with type").
+            // A bare name finds its namespace (CanonicalWorldgenId), so
+            // `lich_tower` is twilightforest:lich_tower.
+            const std::string id = CanonicalWorldgenId("structure", asked, level);
+            const bool isTag = id[0] == '#';
+            const std::vector<std::string> ids = ResolveStructureIdOrTag(id);
+            bool known = !ids.empty();
             if (!isTag) {
                 try { (void)minecraft::levelgen::structure::StructureSets::structureByName(ids.front()); }
-                catch (const std::exception&) {
-                    connection.SendChatMessage("There is no structure with type " + Quoted(asked), 1);
-                    return;
-                }
+                catch (const std::exception&) { known = false; }
+            }
+            if (!known) {
+                connection.SendChatMessage("There is no structure with type " + Quoted(id), 1);
+                return;
             }
             const auto t0 = std::chrono::steady_clock::now();
             const auto found = FindNearestStructure(*level, ids, from, 100);
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
             if (!found) {
-                connection.SendChatMessage("Could not find a structure of type " + Quoted(asked) + " within reasonable distance", 1);
+                connection.SendChatMessage("Could not find a structure of type " + Quoted(id) + " nearby", 1);
+                if (std::none_of(ids.begin(), ids.end(), [](const std::string& s) { return StructureIsGenerated(s); })) {
+                    SendGrayLine(connection, (isTag ? "None of " + id + "'s structures is" : id + " is") +
+                                             std::string(" generated by this version of the game yet."));
+                    return;
+                }
+                SendElsewhereHint(connection, source.dimension, [&](ServerLevel& other) {
+                    for (const std::string& s : ids) if (LevelHasStructure(other, s)) return true;
+                    return false;
+                });
                 return;
             }
-            const std::string name = FoundName(asked, isTag, found->id);
+            const std::string name = FoundName(id, isTag, found->id);
             // The finder's Y is the placement's locate offset (0); the
             // distance stays horizontal as MC's is.
             const glm::ivec3 pos(found->pos.x, LocateSurfaceY(*level, found->pos.x, found->pos.z, from.y), found->pos.z);
@@ -121,17 +175,30 @@ namespace Server {
         }
 
         if (kind == "biome") {
-            const bool isTag = IsWorldgenTag("biome", asked);
-            const auto ids = ResolveBiomeIdOrTag(asked);
+            // ResourceOrTagArgument: an unknown element or tag fails at parse
+            // time (argument.resource.not_found / resource_tag.not_found).
+            const std::string id = CanonicalWorldgenId("biome", asked, level);
+            const bool isTag = id[0] == '#';
+            if (isTag ? !IsWorldgenTag("biome", id.substr(1))
+                      : !std::binary_search(AllBiomeIds().begin(), AllBiomeIds().end(), id)) {
+                connection.SendChatMessage(std::string(isTag ? "Can't find tag '" : "Can't find element '") +
+                                           (isTag ? id.substr(1) : id) + "' of type 'minecraft:worldgen/biome'", 1);
+                return;
+            }
+            const auto ids = ResolveBiomeIdOrTag(id);
             const auto t0 = std::chrono::steady_clock::now();
             std::optional<LocateResult> found;
             if (!ids.empty()) found = FindClosestBiome(*level, ids, from, 6400, 32, 64);
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
             if (!found) {
-                connection.SendChatMessage("Could not find a biome of type " + Quoted(asked) + " within reasonable distance", 1);
+                connection.SendChatMessage("Could not find a biome of type " + Quoted(id) + " within reasonable distance", 1);
+                SendElsewhereHint(connection, source.dimension, [&](ServerLevel& other) {
+                    for (const std::string& b : ids) if (LevelHasBiome(other, b)) return true;
+                    return false;
+                });
                 return;
             }
-            const std::string name = FoundName(asked, isTag, found->id);
+            const std::string name = FoundName(id, isTag, found->id);
             SendLocateResult(connection, name, found->pos, true, Distance(from, found->pos, true));
             Log::Info("Locating element %s took %lld ms", name.c_str(), static_cast<long long>(ms));
             return;
@@ -140,20 +207,26 @@ namespace Server {
         if (kind == "poi") {
             // MC asks the POI manager (workstations, beds, bells, portals,
             // lodestones, hives…) within 256 blocks. This engine indexes one
-            // point of interest: nether portals (NetherPortalIndex, the
-            // portal-linking search), so that is the one that can be found.
+            // kind of point of interest: frame portals, one index per
+            // family (NetherPortalIndex, the portal-linking search), so
+            // those are the ones that can be found.
             std::string id = asked;
             if (id.rfind("minecraft:", 0) == 0) id.erase(0, 10);
-            if (id == "nether_portal") {
+            const Game::PortalFamily* family =
+                id == "nether_portal" ? &Game::NetherFamily()
+              : id == "hush_portal"   ? &Game::HushFamily()
+                                      : nullptr;
+            if (family) {
+                const std::string name = "minecraft:" + id;
                 const auto t0 = std::chrono::steady_clock::now();
-                const std::optional<glm::ivec3> portal = level->Portals().FindClosest(*level->World(), from, 256);
+                const std::optional<glm::ivec3> portal = level->Portals(family->id).FindClosest(*level->World(), from, 256);
                 const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
                 if (!portal) {
                     connection.SendChatMessage("Could not find a point of interest of type " + Quoted(asked) + " within reasonable distance", 1);
                     return;
                 }
-                SendLocateResult(connection, "minecraft:nether_portal", *portal, false, Distance(from, *portal, false));
-                Log::Info("Locating element minecraft:nether_portal took %lld ms", static_cast<long long>(ms));
+                SendLocateResult(connection, name, *portal, false, Distance(from, *portal, false));
+                Log::Info("Locating element %s took %lld ms", name.c_str(), static_cast<long long>(ms));
                 return;
             }
             connection.SendChatMessage("Could not find a point of interest of type " + Quoted(asked) +

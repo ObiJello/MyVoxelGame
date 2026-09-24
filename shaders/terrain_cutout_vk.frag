@@ -11,6 +11,11 @@ layout (location = 2) in vec4 fragColor;
 layout (location = 3) flat in int fragSprite;  // see terrain_vk.vert; -1 = untiled
 layout (location = 4) flat in int fragRecord;  // face-mapped: first record texel
 layout (location = 5) flat in int fragAux;     // two-sided: back mapping
+layout (location = 6) flat in float fragVisibility;   // MC ChunkVisibility (terrain_vk.vert)
+// The lightmap colour of a face-mapped rectangle's (uniform) light; 1 for
+// every other quad, whose vertex colour already carries its lightmap sample
+// (terrain_vk.vert, MC terrain.vsh: vertexColor = Color * sample_lightmap).
+layout (location = 7) in vec3 fragLight;
 
 // Texture atlas sampler (descriptor set 0, binding 0)
 layout (set = 0, binding = 0) uniform sampler2D uTextureAtlas;
@@ -180,14 +185,18 @@ void main() {
     // the lightmap, so a flashing block still dims and fogs.
     finalColor = mix(finalColor, U.uOverlayColor_.rgb, U.uOverlayColor_.a);
 
-    // Day/night sky-light dim + MC-style distance fog
-    finalColor *= U.uCamPosBright_.w;
+    // MC lightmap (Render::Lightmap): the vertex colour is already lit;
+    // a face-mapped rectangle takes its uniform light here.
+    finalColor *= fragLight;
     vec3 fogDelta = fragWorldPos - U.uCamPosBright_.xyz;
     float sph = length(fogDelta);
     float cyl = max(length(fogDelta.xz), abs(fogDelta.y));
     float fogValue = max(linearFog(sph, U.uFogEnv_.x, U.uFogEnv_.y),
                          linearFog(cyl, U.uFogEnv_.z, U.uFogEnv_.w));
     finalColor = mix(finalColor, U.uFogColor_.rgb, fogValue * U.uFogColor_.a);
+    // MC terrain.fsh: a freshly loaded section fades in from the fog
+    // colour — mix(FogColor, color, ChunkVisibility), alpha untouched.
+    finalColor = mix(U.uFogColor_.rgb, finalColor, fragVisibility);
 
     FragColor = vec4(finalColor, textureColor.a * vcol.a);
 }

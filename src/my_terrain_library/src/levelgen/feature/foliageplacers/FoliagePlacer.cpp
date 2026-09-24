@@ -1,6 +1,9 @@
 #include "levelgen/feature/foliageplacers/FoliagePlacer.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
+#include "world/level/block/blocks/RotatedPillarBlock.h"
+#include "core/Direction.h"
+#include <stdexcept>
 #include <cmath>
 #include <algorithm>
 
@@ -537,6 +540,159 @@ bool CherryFoliagePlacer::shouldSkipLocation(
         // Reference: line 61 - narrow layers only skip corners randomly
         return corner && random.nextFloat() < m_cornerHoleChance;
     }
+}
+
+// ============================================================================
+// PoplarFoliagePlacer
+// Reference: 26.3 PoplarFoliagePlacer.java
+// ============================================================================
+
+void PoplarFoliagePlacer::createFoliageImpl(
+    FoliageSetter& foliageSetter,
+    WorldgenRandom& random,
+    std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+    int treeHeight,
+    const FoliageAttachment& attachment,
+    int foliageHeight,
+    int leafRadius,
+    int offset
+) {
+    // Poplars always come through createFoliageWithTrunk (TreeFeature passes
+    // the trunk provider); without one there is no log to place.
+    createFoliageWithTrunk(foliageSetter, random, foliageProvider, nullptr, treeHeight, attachment,
+                           foliageHeight, leafRadius, offset);
+}
+
+void PoplarFoliagePlacer::createFoliageWithTrunk(
+    FoliageSetter& foliageSetter,
+    WorldgenRandom& random,
+    std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+    std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+    int /*treeHeight*/,
+    const FoliageAttachment& attachment,
+    int foliageHeight,
+    int leafRadius,
+    int offset
+) {
+    const bool doubleTrunk = attachment.doubleTrunk();
+    const core::BlockPos foliagePos = attachment.pos().above(offset);
+    // radiusOffsetXZ; the attachment's foliageHeightOffset (26.3) is 0 for
+    // every trunk placer that feeds this placer.
+    const int currentRadius = leafRadius + attachment.radiusOffset() - 1;
+    const bool flipRhombusShape = random.nextBoolean();
+    const int height = foliageHeight;
+
+    placeLeavesRow(foliageSetter, random, foliageProvider, foliagePos, currentRadius - 2, height - 1,
+                   doubleTrunk, height, flipRhombusShape);
+    placeLeavesRow(foliageSetter, random, foliageProvider, foliagePos, currentRadius - 1, height - 2,
+                   doubleTrunk, height, flipRhombusShape);
+    placeLeavesRow(foliageSetter, random, foliageProvider, foliagePos, currentRadius - 1, height - 3,
+                   doubleTrunk, height, flipRhombusShape);
+    for (int y = height - 4; y >= 1; --y) {
+        placeLeavesRow(foliageSetter, random, foliageProvider, foliagePos, currentRadius, y,
+                       doubleTrunk, height, flipRhombusShape);
+    }
+    replaceLeavesWithLog(foliageSetter, random, foliageProvider, trunkProvider, foliagePos, currentRadius,
+                         height - 4, doubleTrunk, height, flipRhombusShape);
+    placeLeavesRow(foliageSetter, random, foliageProvider, foliagePos, currentRadius - 1, 0,
+                   doubleTrunk, height, flipRhombusShape);
+    placeLeavesRow(foliageSetter, random, foliageProvider, foliagePos,
+                   std::clamp(currentRadius - 2, 1, 2), -1, doubleTrunk, height, flipRhombusShape);
+}
+
+bool PoplarFoliagePlacer::shouldSkipLocation(
+    WorldgenRandom& /*random*/,
+    int /*dx*/, int /*y*/, int /*dz*/,
+    int /*currentRadius*/,
+    bool /*doubleTrunk*/
+) const {
+    throw std::logic_error("PoplarFoliagePlacer: shouldSkipLocation needs the row's foliage height");
+}
+
+void PoplarFoliagePlacer::placeLeavesRow(
+    FoliageSetter& foliageSetter,
+    WorldgenRandom& random,
+    std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+    const core::BlockPos& origin,
+    int currentRadius,
+    int y,
+    bool doubleTrunk,
+    int foliageHeight,
+    bool flipRhombusShape
+) const {
+    const int offset = doubleTrunk ? 1 : 0;
+    for (int dx = -currentRadius; dx <= currentRadius + offset; ++dx) {
+        for (int dz = -currentRadius; dz <= currentRadius + offset; ++dz) {
+            if (!shouldSkipPoplarLocation(random, dx, y, dz, currentRadius, foliageHeight, flipRhombusShape)) {
+                tryPlaceLeaf(foliageSetter, random, foliageProvider, origin.offset(dx, y, dz));
+            }
+        }
+    }
+}
+
+void PoplarFoliagePlacer::replaceLeavesWithLog(
+    FoliageSetter& foliageSetter,
+    WorldgenRandom& random,
+    std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+    std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+    const core::BlockPos& origin,
+    int currentRadius,
+    int y,
+    bool doubleTrunk,
+    int foliageHeight,
+    bool flipRhombusShape
+) const {
+    const int offset = doubleTrunk ? 1 : 0;
+    const bool partialRow = shouldRowBePartialRhombusShape(foliageHeight, y);
+    for (int dx = -currentRadius; dx <= currentRadius + offset; ++dx) {
+        for (int dz = -currentRadius; dz <= currentRadius + offset; ++dz) {
+            const int absDz = std::abs(dz);
+            const int absDx = std::abs(dx);
+            const int corner = cornerBlocksToCutForRhombusShape(dx, dz, currentRadius, partialRow, flipRhombusShape);
+            if (!isWithinRhombusShape(currentRadius, absDx, absDz, corner, 2)) continue;
+            if (!((absDz == 0 && currentRadius - absDx >= 4) || (absDx == 0 && currentRadius - absDz >= 4))) continue;
+            const core::BlockPos pos = origin.offset(dx, y, dz);
+            // tryPlaceLog: only over this tree's own leaf state
+            BlockState* existing = foliageSetter.getBlockState(pos);
+            BlockState* leafState = foliageProvider->getState(random, pos);
+            if (existing == nullptr || existing != leafState || trunkProvider == nullptr) continue;
+            BlockState* logState = trunkProvider->getState(random, pos);
+            const core::Axis axis = absDz == 0 ? core::Axis::X : core::Axis::Z;
+            foliageSetter.set(pos, logState->trySetValue(*world::level::block::RotatedPillarBlock::AXIS, axis));
+        }
+    }
+}
+
+bool PoplarFoliagePlacer::shouldSkipPoplarLocation(
+    WorldgenRandom& random,
+    int dx, int y, int dz,
+    int currentRadius,
+    int foliageHeight,
+    bool flipRhombusShape
+) const {
+    const bool partialRow = shouldRowBePartialRhombusShape(foliageHeight, y);
+    const int corner = cornerBlocksToCutForRhombusShape(dx, dz, currentRadius, partialRow, flipRhombusShape);
+    const int absDx = std::abs(dx);
+    const int absDz = std::abs(dz);
+    const bool isRhombusEdgeBlock = absDx == currentRadius || absDz == currentRadius;
+    if (partialRow && isRhombusEdgeBlock) {
+        return true;
+    }
+    const int additionalSideRemoval = random.nextFloat() <= m_sideHoleChance ? 1 : 0;
+    return !isWithinRhombusShape(currentRadius, absDx, absDz, corner, additionalSideRemoval);
+}
+
+int PoplarFoliagePlacer::cornerBlocksToCutForRhombusShape(int dx, int dz, int currentRadius,
+                                                          bool partialRow, bool flipRhombusShape) {
+    const bool leftTopOrRightLower = (dx > 0 && dz > 0) || (dz < 0 && dx < 0);
+    const bool leftLowerOrRightTop = (dx > 0 && dz < 0) || (dz > 0 && dx < 0);
+    const bool isSmallCornerOfShape = flipRhombusShape ? leftTopOrRightLower : leftLowerOrRightTop;
+    return isSmallCornerOfShape ? currentRadius - 1 : (partialRow ? currentRadius + 1 : currentRadius);
+}
+
+bool PoplarFoliagePlacer::isWithinRhombusShape(int currentRadius, int absDx, int absDz, int cornerBlocksToCut,
+                                               int additionalSideRemoval) {
+    return absDx + absDz <= currentRadius * 2 - (cornerBlocksToCut + additionalSideRemoval);
 }
 
 } // namespace foliageplacers

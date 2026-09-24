@@ -195,6 +195,14 @@ namespace Game {
         bool IsNoAi() const { return m_noAi; }
         void SetNoAi(bool v) { m_noAi = v; }
 
+        // ── The Held Note (docs/the-hush.md "Reawakening the Heart") ───────
+        // A mob that hears the Chord held stops, as in the Hush's stillness:
+        // its whole AI step is skipped and it is held where it stands until
+        // `untilTick` (the level's game time); its path, goals and target
+        // wait for it. Runtime only — a reload lets it go.
+        void HoldByNote(int64_t untilTick) { m_heldUntil = std::max(m_heldUntil, untilTick); }
+        bool IsHeldByNote(int64_t now) const { return now < m_heldUntil; }
+
         // ── Persistence / despawn ──────────────────────────────────────────
         bool IsPersistenceRequired() const { return m_persistenceRequired; }
         void SetPersistenceRequired(bool v) { m_persistenceRequired = v; }
@@ -269,13 +277,29 @@ namespace Game {
         }
 
         // MC Mob.checkSpawnObstruction: no liquid anywhere in the bounding box
-        // and no other entity already occupying it.
+        // and no other entity already occupying it. The water mobs (MC
+        // WaterAnimal, AgeableWaterCreature, Axolotl, Drowned, the nautili)
+        // override it to IsUnobstructed alone; Ravager to !ContainsAnyLiquid.
         virtual bool CheckSpawnObstruction(EntityLevel& level) const;
+
+        // The two halves of the base test, for the overrides.
+        // MC LevelReader.containsAnyLiquid(getBoundingBox()).
+        bool ContainsAnyLiquid(EntityLevel& level) const;
+        // MC EntityGetter.isUnobstructed(this): no live entity overlapping
+        // the bounding box.
+        bool IsUnobstructed(EntityLevel& level) const;
 
         // MC Mob.dropCustomDeathLoot — the non-table drops (an enderman's
         // carried block, equipment when that exists). Called by the server's
         // loot pass alongside the generated table.
         virtual void DropCustomDeathLoot(EntityLevel& level) { (void)level; }
+
+        // The mod mobs' own saved fields (ModMobNbt.hpp) — a Twilight Forest
+        // / Aether class's addAdditionalSaveData / readAdditionalSaveData.
+        // EntityNbt calls both for every mob after the vanilla fields; the
+        // vanilla classes keep their rows in EntityNbt and leave these empty.
+        virtual void SaveModNbt(class ModNbtOut& out) const { (void)out; }
+        virtual void LoadModNbt(const class ModNbtIn& in) { (void)in; }
 
         // MC Mob.mobInteract — the ENTITY's own answer to a right-click,
         // e.g. shears on a sheep or a saddle on a pig.
@@ -295,6 +319,14 @@ namespace Game {
         // calls it and then checks IsBaby(): a mob with no baby form stays an
         // adult and the egg is not spent.
         virtual void SetBaby(bool baby) { (void)baby; }
+
+        // MC AgeableMob.AGE_LOCKED, the synched flag behind the golden
+        // dandelion: a locked baby never grows up. Declared here, like
+        // SetBaby, because the wire packs it beside the baby bit for every
+        // mob and the sulfur cube carries its own copy (MC SulfurCube has the
+        // field too, outside AgeableMob). No-ops on a mob with no age.
+        virtual bool IsAgeLocked() const { return false; }
+        virtual void SetAgeLocked(bool locked) { (void)locked; }
 
         // The chunk-column bucket Server::MobManager last filed this mob under.
         // Written by the manager only, read back when the mob is removed so the
@@ -328,6 +360,9 @@ namespace Game {
         // ── Combat ─────────────────────────────────────────────────────────
         // MC Mob.doHurtTarget. Returns whether the hit landed.
         virtual bool DoHurtTarget(Entity& target);
+        // MC LivingEntity.playAttackSound — silent by default; the panda,
+        // dolphin, killer bunny, axolotl and creaking bite audibly.
+        virtual void PlayAttackSound() {}
 
         // MC LivingEntity.hurtServer → resolvePlayerResponsibleForDamage
         // (LivingEntity.java:1332): an accepted hit from a player opens a
@@ -500,8 +535,22 @@ namespace Game {
         int GetMaxHeadYRot() const override { return 75; }
         int GetHeadRotSpeed() const override { return 10; }
 
-        // MC Mob.getAmbientSoundInterval — Animal overrides to 120.
-        virtual int GetAmbientSoundInterval() const { return 80; }
+        // MC Mob.getAmbientSoundInterval — 80, Animal 120, and the per-class
+        // overrides MC has (the generated row carries each type's answer).
+        virtual int GetAmbientSoundInterval() const;
+
+        // MC Mob.getAmbientSound: the idle voice, from the generated row
+        // unless the class knows better. "" = none (MC null).
+        virtual const char* GetAmbientSound() const;
+        // MC Mob.playAmbientSound — makeSound(getAmbientSound()).
+        virtual void PlayAmbientSound() { MakeSound(GetAmbientSound()); }
+        // MC Mob.playHurtSound: a hurt mob restarts its ambient clock.
+        void PlayHurtSound(MobDamageSource source) override {
+            ResetAmbientSoundTime();
+            LivingEntity::PlayHurtSound(source);
+        }
+        // MC Mob.resetAmbientSoundTime.
+        void ResetAmbientSoundTime() { m_ambientSoundTime = -GetAmbientSoundInterval(); }
 
     protected:
         // Subclasses register their goals here. Called once from the concrete
@@ -544,6 +593,13 @@ namespace Game {
         // AiStep's per-tick wet damage.
         virtual bool IsSensitiveToWater() const { return false; }
 
+    public:
+        // The same answer, readable from outside — a thrown water potion
+        // hurts exactly these mobs (AbstractThrownPotion.affectEntitiesAround).
+        bool SensitiveToWater() const { return IsSensitiveToWater(); }
+
+    protected:
+
         // MC Mob.isSunBurnTick / burnUndead. NOT const: the brightness roll
         // consumes the level's random exactly once per tick per burning mob,
         // and that draw is part of the shared spawn/AI RNG stream.
@@ -576,6 +632,7 @@ namespace Game {
         bool m_aggressive = false;
         bool m_noAi = false;
         bool m_persistenceRequired = false;
+        int64_t m_heldUntil = 0;           // HoldByNote
 
         // MC LivingEntity.lastHurtByPlayer / lastHurtByPlayerMemoryTime
         // (LivingEntity.java:215-216) — the player kill-credit window, set to

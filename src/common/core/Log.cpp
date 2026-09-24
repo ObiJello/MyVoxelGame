@@ -68,19 +68,26 @@ namespace Log {
         return currentLevel;
     }
 
+    // The logger's state is deliberately never destroyed. A function-local
+    // static is destroyed in reverse order of its construction, and these are
+    // constructed by the FIRST log line, at runtime — so every namespace-scope
+    // object built before main (the ClientLevel table, pools, registries) is
+    // destroyed AFTER them. Any such destructor that logged locked a
+    // destroyed mutex, and libc++ throws on that ("mutex lock failed: Invalid
+    // argument") from inside exit(), which terminates the process.
     static std::mutex& getLogMutex() {
-        static std::mutex logMutex;
-        return logMutex;
+        static std::mutex* const logMutex = new std::mutex;
+        return *logMutex;
     }
 
     static LogCallback& getCallback() {
-        static LogCallback callback;
-        return callback;
+        static LogCallback* const callback = new LogCallback;
+        return *callback;
     }
 
     static std::mutex& getCallbackMutex() {
-        static std::mutex cbMutex;
-        return cbMutex;
+        static std::mutex* const cbMutex = new std::mutex;
+        return *cbMutex;
     }
 
     void Init() {
@@ -226,12 +233,17 @@ namespace Log {
         // colour codes — those are terminal control characters that would make
         // the file unreadable in whatever the player opens it with.
         {
+            // The ring keeps fixed-size slots (the crash handler copies them
+            // out without allocating), so ITS copy is cut at kRingStride. The
+            // file gets the whole line: long report lines such as
+            // [ServerStats] used to lose their tail in latest.log.
+            const std::string timestamp = TimestampNow("%H:%M:%S");
             char line[kRingStride];
             std::snprintf(line, sizeof(line), "[%s] [%s] %s",
-                          TimestampNow("%H:%M:%S").c_str(), LevelName(level), callbackBuf);
+                          timestamp.c_str(), LevelName(level), callbackBuf);
             RingPush(line);
             if (LogFile()) {
-                std::fprintf(LogFile(), "%s\n", line);
+                std::fprintf(LogFile(), "[%s] [%s] %s\n", timestamp.c_str(), LevelName(level), callbackBuf);
                 // Errors and warnings are what a crash report is read for, so
                 // pay the flush to guarantee they reach disk even if the line
                 // buffer would have held them.

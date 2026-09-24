@@ -24,6 +24,8 @@
 #include "Tilt.h"
 #include "DripstoneThickness.h"
 #include "CreakingHeartState.h"
+#include "PotentSulfurState.h"
+#include "CopperGolemPose.h"
 #include "SculkSensorPhase.h"
 #include "StructureMode.h"
 #include <memory>
@@ -141,6 +143,9 @@ public:
     static EnumProperty<Tilt>* TILT;
     static EnumProperty<DripstoneThickness>* DRIPSTONE_THICKNESS;
     static EnumProperty<CreakingHeartState>* CREAKING_HEART_STATE;
+    // 26.3 PotentSulfurBlock.STATE
+    static EnumProperty<PotentSulfurState>* POTENT_SULFUR_STATE;
+    static EnumProperty<CopperGolemPose>* COPPER_GOLEM_POSE;
     static EnumProperty<SculkSensorPhase>* SCULK_SENSOR_PHASE;
     static EnumProperty<StructureMode>* STRUCTUREBLOCK_MODE;
     static EnumProperty<BellAttachType>* BELL_ATTACHMENT;

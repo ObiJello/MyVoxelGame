@@ -99,6 +99,17 @@ public:
                               bool loadOrGenerate);
 
     /**
+     * getChunkFuture(x, z, status, true) with the caller's own ticket in
+     * place of the one-tick UNKNOWN — for a request that outlives the tick.
+     * The ticket is left in place; the caller removes it (removeTicket with
+     * the same type and byStatus(targetStatus)) when it is done with the
+     * chunk, or to abandon the request, which fails the future as Java's
+     * holders fail theirs when their ticket goes. Main thread only.
+     */
+    FutureType getChunkFutureHeld(int x, int z, const world::chunk::status::ChunkStatus& targetStatus,
+                                  const TicketType& ticketType);
+
+    /**
      * Get a chunk immediately if present (non-blocking)
      * Reference: ServerChunkCache.java lines 152-181
      */
@@ -112,9 +123,18 @@ public:
 
     /**
      * Tick the chunk cache
-     * Reference: ServerChunkCache.java lines 283-300
+     * Reference: ServerChunkCache.java lines 283-300 — stale-ticket purge,
+     * distance-manager updates, chunkMap.tick(haveTime) (processUnloads),
+     * clearCache. The last-chunk cache is cleared AFTER the unloads, so no
+     * pointer into a destroyed holder survives the call.
      */
     void tick(std::function<bool()> haveTime, bool tickChunks);
+
+    // The embedder's veto for processUnloads: false keeps a holder it still
+    // reads (a result being converted). Unset = no veto.
+    void setUnloadVeto(std::function<bool(int64_t)> canUnload) { m_canUnload = std::move(canUnload); }
+    // Holders the last tick() destroyed.
+    size_t lastUnloadCount() const { return m_lastUnloadCount; }
 
     /**
      * Run distance manager updates
@@ -127,6 +147,12 @@ public:
      * Reference: ServerChunkCache.java lines 448-450
      */
     void addTicket(const Ticket& ticket, const world::ChunkPos& pos);
+
+    /**
+     * Remove a ticket added with addTicket (same type and level).
+     * Reference: ServerChunkCache.java removeTicket → TicketStorage.removeTicket
+     */
+    void removeTicket(const Ticket& ticket, const world::ChunkPos& pos);
 
     /**
      * Add a loading ticket and return a future that completes when the full
@@ -192,7 +218,8 @@ private:
      */
     FutureType getChunkFutureMainThread(int x, int z,
                                          const world::chunk::status::ChunkStatus& targetStatus,
-                                         bool loadOrGenerate);
+                                         bool loadOrGenerate,
+                                         const TicketType& ticketType = TicketType::UNKNOWN);
 
     /**
      * Store a chunk in the cache
@@ -218,6 +245,9 @@ private:
      * Reference: ServerChunkCache.java lines 103-105
      */
     ChunkHolder* getVisibleChunkIfPresent(int64_t key);
+
+    std::function<bool(int64_t)> m_canUnload;
+    size_t m_lastUnloadCount = 0;
 
     // Components
     world::level::TicketStorage m_ticketStorage;

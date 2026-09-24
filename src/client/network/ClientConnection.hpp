@@ -1,6 +1,8 @@
 // File: src/client/network/ClientConnection.hpp
 #pragma once
 
+#include <atomic>
+
 #include "common/network/NetworkConnection.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "common/network/PacketRegistry.hpp"
@@ -35,6 +37,14 @@ namespace Client {
         // Check if logged in
         bool IsLoggedIn() const { return m_loggedIn; }
 
+        // Bot swarm (src/client/dev/BotSwarm.hpp): in PLAY, decode only the
+        // packets a headless bot acts on — position snaps, chunk batch
+        // start/finish, dimension changes, chat, retained-chunk notices — and
+        // turn everything else into a no-op packet. Chunk data is never
+        // parsed or prebuilt, so a hundred bots in one process do not spend
+        // the CPU a hundred real clients would. Set before connecting.
+        void SetLightweightDecode(bool on) { m_lightweightDecode.store(on, std::memory_order_relaxed); }
+
         // See NetworkConnection::ShouldDeferPacket.
         bool ShouldDeferPacket(uint8_t packetId) const override;
 
@@ -68,6 +78,15 @@ namespace Client {
         
         // Send keep-alive response
         void SendKeepAliveResponse(uint64_t id);
+
+        // F3+3 ping chart — MC PingDebugMonitor. The request carries the send
+        // time; the server echoes it (PongResponseS2C) and the echo is timed
+        // on the I/O thread, so the sample is a true socket round trip and
+        // never includes a stalled main-thread frame.
+        void SendPingRequest();
+        // The most recent completed round trip in milliseconds, or -1 when no
+        // pong has landed since the last call (the value is consumed).
+        int32_t ConsumePingRtt();
 
         // ========================================================================
         // PACKET HANDLERS (OVERRIDE FROM BASE)
@@ -105,6 +124,9 @@ namespace Client {
         // it next frame.
         void HandleBlockEntityData(const Network::BlockEntityDataS2CPacket& packet);
         void HandleBlockEntityRemove(const Network::BlockEntityRemoveS2CPacket& packet);
+        // MC ClientPacketListener.handleBlockEvent → level.blockEvent: the
+        // client runs the block's triggerEvent itself (pistons, note blocks).
+        void HandleBlockEvent(const Network::BlockEntityActionS2CPacket& packet);
 
         // Handle chat message
         void HandleChatMessage(const Network::ChatMessageS2CPacket& packet);
@@ -139,6 +161,9 @@ namespace Client {
         // Player information
         std::string m_playerName;
         uint32_t m_playerId = 0;
+        // Written by the PongResponseS2C handler on the I/O thread, read by
+        // the debug overlay on the main thread (see ConsumePingRtt).
+        std::atomic<int32_t> m_pingRttMs{-1};
         bool m_loggedIn = false;
         
         // Connection phase
@@ -148,6 +173,7 @@ namespace Client {
             PLAY
         };
         ConnectionPhase m_phase = ConnectionPhase::HANDSHAKING;
+        std::atomic<bool> m_lightweightDecode{false};   // see SetLightweightDecode
         
         // Packet registry for this connection
         Network::PacketRegistry m_packetRegistry;

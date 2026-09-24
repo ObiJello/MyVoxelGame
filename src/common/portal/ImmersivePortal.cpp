@@ -130,6 +130,23 @@ namespace Game::Immersive {
         return shape.ContainsLocal(local.x, local.y, HalfWidth(), HalfHeight(), leniency);
     }
 
+    bool Portal::BoxFitsOpening(const glm::dvec3& boxMin, const glm::dvec3& boxMax,
+                                double slack) const {
+        const double hw = OpeningHalfWidth();
+        const double hh = OpeningHalfHeight();
+        double uMin = 1e300, uMax = -1e300, vMin = 1e300, vMax = -1e300;
+        for (int i = 0; i < 8; ++i) {
+            const glm::dvec3 corner((i & 1) ? boxMax.x : boxMin.x,
+                                    (i & 2) ? boxMax.y : boxMin.y,
+                                    (i & 4) ? boxMax.z : boxMin.z);
+            const glm::dvec3 local = WorldToLocal(corner);
+            uMin = std::min(uMin, local.x); uMax = std::max(uMax, local.x);
+            vMin = std::min(vMin, local.y); vMax = std::max(vMax, local.y);
+        }
+        return uMin >= -hw - slack && uMax <= hw + slack &&
+               vMin >= -hh - slack && vMax <= hh + slack;
+    }
+
     // ── Portal: transform ──────────────────────────────────────────────────
 
     bool Portal::IntersectsBox(const glm::dvec3& boxMin, const glm::dvec3& boxMax,
@@ -227,7 +244,16 @@ namespace Game::Immersive {
         const double t = d0 / denom;
         const glm::dvec3 point = from + (to - from) * t;
         const glm::dvec3 local = WorldToLocal(point);
-        if (!shape.ContainsLocal(local.x, local.y, HalfWidth(), HalfHeight(), leniency)) {
+        if (kind == PortalKind::PortalGun) {
+            // The oval is the picture; the hole is the gun's full 1×2 (the
+            // two wall cells), the same opening ImmersivePortalCollision
+            // lets the body through. Tested against the oval, a body
+            // entering near either end of the hole — where the oval is
+            // centimetres wide — had its eye miss and fell into the block.
+            if (std::abs(local.x) > 0.5 + leniency || std::abs(local.y) > 1.0 + leniency) {
+                return std::nullopt;
+            }
+        } else if (!shape.ContainsLocal(local.x, local.y, HalfWidth(), HalfHeight(), leniency)) {
             return std::nullopt;
         }
         return SegmentHit{ t, point };
@@ -356,6 +382,8 @@ namespace Game::Immersive {
             case PortalKind::EndPortal:    return "end_portal";
             case PortalKind::PortalGun:    return "gun_portal";
             case PortalKind::Mirror:       return "mirror";
+            case PortalKind::HushPortal:   return "hush_portal";
+            case PortalKind::AetherPortal: return "aether_portal";
         }
         return "portal";
     }

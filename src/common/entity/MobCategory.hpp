@@ -32,6 +32,15 @@ namespace Game {
         WaterCreature,
         WaterAmbient,
         Misc,
+        // The Aether's own categories (its META-INF/enumextensions.json:
+        // NeoForge appends them to MC's MobCategory, after MISC — so they
+        // sit after Misc here too and every vanilla ordinal stays put).
+        // They take part in natural spawning like any non-MISC category
+        // (NaturalSpawner's SPAWNING_CATEGORIES), each with its own cap.
+        AetherSurfaceMonster,
+        AetherDarknessMonster,
+        AetherSkyMonster,
+        AetherAerwhale,
         Count
     };
 
@@ -55,6 +64,12 @@ namespace Game {
         /* WaterCreature            */ {  5, true,  false, 128 },
         /* WaterAmbient             */ { 20, true,  false,  64 },
         /* Misc                     */ { -1, true,  true,  128 },
+        // enumextensions.json rows: (name, max, isFriendly, isPersistent,
+        // despawnDistance).
+        /* AetherSurfaceMonster     */ { 15, false, false, 128 },
+        /* AetherDarknessMonster    */ {  5, false, false, 128 },
+        /* AetherSkyMonster         */ {  4, false, false, 128 },
+        /* AetherAerwhale           */ {  1, true,  false, 128 },
     };
 
     static_assert(sizeof(kMobCategoryTable) / sizeof(kMobCategoryTable[0]) ==
@@ -63,6 +78,20 @@ namespace Game {
 
     inline const MobCategoryInfo& GetMobCategoryInfo(MobCategory c) {
         return kMobCategoryTable[static_cast<size_t>(c)];
+    }
+
+    inline constexpr size_t kMobCategoryCount = static_cast<size_t>(MobCategory::Count);
+
+    // "Is this a hostile mob" by category — MC's `instanceof Monster` /
+    // Enemy checks, which this engine answers from the type table. MONSTER
+    // plus the Aether's three monster categories (its cockatrice, zephyr,
+    // swets, whirlwinds and aechor plant are Monster/Enemy classes filed
+    // under their own spawn buckets).
+    inline constexpr bool IsMonsterCategory(MobCategory c) {
+        return c == MobCategory::Monster ||
+               c == MobCategory::AetherSurfaceMonster ||
+               c == MobCategory::AetherDarknessMonster ||
+               c == MobCategory::AetherSkyMonster;
     }
 
 } // namespace Game

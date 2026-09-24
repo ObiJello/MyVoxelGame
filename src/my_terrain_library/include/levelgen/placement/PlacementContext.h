@@ -1,7 +1,7 @@
 #pragma once
 
 #include "levelgen/WorldGenLevel.h"
-#include "levelgen/SurfaceRules.h"
+#include "levelgen/VerticalAnchor.h"
 #include "levelgen/Heightmap.h"
 #include "levelgen/carver/CarvingMask.h"
 #include "world/ChunkPos.h"
@@ -52,18 +52,6 @@ public:
      */
     int32_t getHeight(Heightmap::Types type, int32_t x, int32_t z) const {
         return m_level->getHeight(type, x, z);
-    }
-
-    /**
-     * Get carving mask for chunk
-     * Reference: PlacementContext.java lines 30-32
-     */
-    carver::CarvingMask* getCarvingMask(const world::ChunkPos& pos) const {
-        ::world::IChunk* chunk = const_cast<WorldGenLevel*>(m_level)->getChunk(pos.x(), pos.z());
-        if (auto* protoChunk = dynamic_cast<::world::ProtoChunk*>(chunk)) {
-            return &protoChunk->getOrCreateCarvingMask();
-        }
-        return nullptr;
     }
 
     /**

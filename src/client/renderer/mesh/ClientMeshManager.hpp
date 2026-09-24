@@ -17,6 +17,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Render {
 
@@ -101,10 +102,18 @@ namespace Render {
         // Check if mesh upload is ready for chunk section
         bool IsMeshUploadReady(::Game::Math::ChunkPos chunkPos, int sectionY) const;
 
-        // Upload mesh build result directly to GPU data storage (stores in atomic pointers for lock-free rendering)
-        void UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
+        // Upload mesh build result directly to GPU data storage (stores in atomic pointers for lock-free rendering).
+        // False when a layer found no room in its mega-buffer: the section is
+        // left with no GPU data and the caller re-dirties it for a retry.
+        bool UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
                                   const Network::MeshBuildResult::SectionMeshData& meshData,
                                   const VisibilitySet& visSet = VisibilitySet());
+
+        // Mega-buffer pressure: a layer is past three quarters of its hard
+        // ceiling, or an upload failed since the last call. The chunk manager
+        // answers by dropping parked (retained) chunk meshes. Consumes the
+        // failure flags.
+        bool ConsumeMeshBufferPressure();
 
         // ========================================================================
         // GPU DATA ACCESS
@@ -154,6 +163,16 @@ namespace Render {
         size_t ParkChunkGPUData(::Game::Math::ChunkPos chunkPos);
         bool UnparkChunkGPUData(::Game::Math::ChunkPos chunkPos);
         void DiscardParkedChunkGPUData(::Game::Math::ChunkPos chunkPos);
+        // Fences (or unfences) a section's mega-buffer ranges in all three
+        // layers for one reason (ChunkMegaBuffer::SetSectionNoBridge), so
+        // merged draws never bridge across them. Caller holds m_gpuDataMutex.
+        void SetMegaBufferNoBridge(::Game::Math::ChunkPos chunkPos, int sectionY, uint8_t reason, bool on);
+
+        // The loaded chunks OUTSIDE the rendered view (the halo the server
+        // sends so edge chunks have neighbours; MC never draws it). Their
+        // sections are fenced from bridged gaps; the set is replaced whole
+        // and only the difference is applied. Main thread (ChunkRenderer).
+        void SetOutsideViewChunks(std::unordered_set<::Game::Math::ChunkPos, ::Game::Math::ChunkPosHash> chunks);
         size_t ParkedSectionCount() const { std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex); return m_parkedGpuData.size(); }
 
         // ========================================================================
@@ -339,6 +358,7 @@ namespace Render {
         using GpuDataMap = std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash>;
         GpuDataMap m_gpuData;
         GpuDataMap m_parkedGpuData;   // retention cache, see ParkChunkGPUData
+        std::unordered_set<::Game::Math::ChunkPos, ::Game::Math::ChunkPosHash> m_outsideViewChunks;   // see SetOutsideViewChunks
 
         // See GetGpuDataGeneration. Starts at 1 so a zero-initialised cache
         // stamp never matches.

@@ -52,10 +52,11 @@ namespace Server {
 
     } // namespace
 
-    void GameModeCommand::Execute(ServerPlayer& sender,
+    void GameModeCommand::Execute(const CommandSourceStack& source,
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
                                   PlayerSessionManager& sessionManager) {
+        ServerPlayer& sender = *source.sender;
         if (args.empty()) {
             connection.SendChatMessage("Usage: /gamemode <survival|creative|adventure|spectator> [player]", 1);
             return;

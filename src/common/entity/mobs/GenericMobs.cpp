@@ -6,6 +6,12 @@
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Fish.hpp"
+#include "common/entity/mobs/HushMobs.hpp"
+#include "common/entity/mobs/HushCreatures.hpp"
+#include "common/entity/mobs/TwilightMobs.hpp"
+#include "common/entity/mobs/AetherMobs.hpp"
+#include "common/entity/mobs/TwilightHostiles.hpp"
+#include "common/entity/npc/Villager.hpp"
 
 #include "common/entity/ai/goals/AnimalGoals.hpp"
 #include "common/entity/ai/goals/AttackGoals.hpp"
@@ -370,6 +376,29 @@ namespace Game {
     // ── Factory ────────────────────────────────────────────────────────────
 
     std::unique_ptr<Mob> MakeGenericMob(EntityTypeId type, EntityLevel* level) {
+        // Engine-only mobs (The Hush, HushMobs.hpp; the Twilight Forest and
+        // Aether creatures, TwilightMobs.hpp / AetherMobs.hpp) have no MobDef row —
+        // there is no MC class for the generator to read — so they are
+        // promoted BEFORE the def check. Hand-written attributes and goals;
+        // the type table (GeneratedEntityTypes) still supplies box, tracking
+        // range and XP.
+        switch (type) {
+            case EntityTypeId::Hushling:     return std::make_unique<Hushling>(level);
+            case EntityTypeId::EchoWraith:   return std::make_unique<EchoWraith>(level);
+            case EntityTypeId::SilentWarden: return std::make_unique<SilentWarden>(level);
+            default: break;
+        }
+        // The deep-Hush creatures and the Choir Mother (HushCreatures.hpp)
+        // own their type switch, like the mod files below.
+        if (auto hush = MakeHushCreature(type, level)) return hush;
+        // Twilight Forest and Aether creatures (docs/mod-ports.md) —
+        // engine-only in the same sense: their classes live in the mods, not
+        // in MC, so there is no MobDef row either. Each mod file owns its
+        // own type switch.
+        if (auto mod = MakeTwilightMob(type, level)) return mod;
+        if (auto mod = MakeTwilightHostile(type, level)) return mod;
+        if (auto mod = MakeAetherMob(type, level)) return mod;
+
         const MobDef* def = FindMobDef(type);
         if (!def) return nullptr;
 
@@ -418,10 +447,10 @@ namespace Game {
             case EntityTypeId::Sniffer:   return std::make_unique<Sniffer>(level);
             case EntityTypeId::CopperGolem:
                 return std::make_unique<CopperGolem>(level);
-            // MC Villager extends AbstractVillager extends AgeableMob: the
-            // age is what a baby villager IS. Goal set unchanged.
+            // MC Villager extends AbstractVillager extends AgeableMob — the
+            // full brain / trading / POI port lives in npc/Villager.hpp.
             case EntityTypeId::Villager:
-                return std::make_unique<GenericAgeableMob>(type, level);
+                return std::make_unique<Villager>(level);
             // Silverfish stays generic: both of its bespoke goals need
             // infested blocks, which this engine does not have —
             // SilverfishWakeUpFriendsGoal bursts hidden silverfish OUT of

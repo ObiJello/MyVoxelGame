@@ -140,12 +140,14 @@ namespace Render {
         // HeaderEntry: the title, centred, bold + underlined in MC.
         {
             const int y = m_y + 4 - static_cast<int>(m_scroll);
-            const int textW = g.GetStringWidth(m_title);
+            // One string in MC's bold + underline style; the font renders the
+            // bold copy and the underline itself (shadows first, so no
+            // second shadow lands on the first copy's glyphs).
+            const std::string title = "\xC2\xA7l\xC2\xA7n" + m_title;
+            const int textW = g.GetStringWidth(title);
             const int textX = m_x + m_width / 2 - textW / 2;
             const int textY = y + HEADER_H / 2 - FontRenderer::LINE_HEIGHT / 2;
-            g.DrawString(m_title, textX, textY, 0xFFFFFFFF);
-            g.DrawString(m_title, textX + 1, textY, 0xFFFFFFFF);            // bold: MC's one-pixel offset
-            g.Fill(textX, textY + FontRenderer::LINE_HEIGHT, textX + textW + 1, textY + FontRenderer::LINE_HEIGHT + 1, 0xFFFFFFFF);
+            g.DrawString(title, textX, textY, 0xFFFFFFFF);
         }
 
         const int hoveredRow = RowAt(mouseX, mouseY);

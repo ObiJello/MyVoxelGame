@@ -50,6 +50,10 @@ namespace Server {
         // width), so a goal that immediately turns it around cannot put it
         // straight back through the reverse surface.
         constexpr double  kArrivalMargin      = 0.3;
+        // The gun's arrival: the player's traveler lands the eye's exact
+        // image this far past the far surface (ImmersivePortalTraveler's
+        // kArrivalEpsilon), and a mob lands the same way — see MoveMob.
+        constexpr double  kGunArrivalEpsilon  = 0.001;
         constexpr int64_t kLooseCooldownTicks = 10;
         // A dropped item or orb crosses only while it is actually moving.
         // Friction never brings a resting item's velocity to exactly zero,
@@ -277,7 +281,7 @@ namespace Server {
             // target, hunting; and an animal, tempted by food held on the
             // far side — the wheat a player carries into the Nether keeps
             // its cows coming, as it would across any field.
-            const bool hostile = mob->TypeInfo().category == Game::MobCategory::Monster;
+            const bool hostile = Game::IsMonsterCategory(mob->TypeInfo().category);
             const Game::Animal* animal = hostile ? nullptr : dynamic_cast<const Game::Animal*>(mob);
             if (hostile && mob->GetTarget() != nullptr) continue;
             if (!hostile && !animal) continue;
@@ -362,6 +366,14 @@ namespace Server {
             const Portal* portal = FindCrossing(portals, from, to);
             if (!portal) continue;
             if (portal->specificPlayerId != 0) continue;   // a player's private portal
+            // The gun's hole is 1×2: only a body that fits through it goes
+            // through — the same test its collision made to let the body
+            // reach the surface at all (MobPortalCollision), so a mob that
+            // could not walk through cannot be shoved through either.
+            if (portal->kind == Game::Immersive::PortalKind::PortalGun) {
+                const Game::AABBd box = mob->GetAABBd();
+                if (!portal->BoxFitsOpening(box.min, box.max, Game::Immersive::kFitSlack)) continue;
+            }
             MoveMob(level, *mob, *portal, serverTick);
         }
     }
@@ -378,19 +390,78 @@ namespace Server {
         // sit a hair past it (the crossing was detected the tick the eye
         // went through), and a body that wide straddles the reverse
         // surface — which then sends it straight back the next tick.
+        //
+        // The gun is the exception, and lands like the player does: the
+        // eye's exact image, a millimetre past the far surface. The body
+        // straddling the far surface is what a smooth crossing IS — the
+        // watchers already see it emerging there (the crossers pass) — and
+        // that surface's wall is open to a body that fits (MobPortal-
+        // Collision), so nothing pushes it back; the cooldown below covers
+        // the reverse test. A frame portal keeps the margin: nothing opens
+        // its far wall for a mob, and a body left in it is sent back.
         {
             const glm::dvec3 content = portal.ContentDirection();
             const glm::dvec3 farPoint = portal.IsMirror() ? portal.origin : portal.destination;
-            const double margin = kArrivalMargin + 0.5 * static_cast<double>(mob.GetBbWidth());
+            const bool gun = portal.kind == Game::Immersive::PortalKind::PortalGun;
+            const double margin = gun ? kGunArrivalEpsilon
+                                      : kArrivalMargin + 0.5 * static_cast<double>(mob.GetBbWidth());
             const double depth  = glm::dot(newEye - farPoint, content);
             if (depth < margin) newEye += content * (margin - depth);
         }
-        const glm::dvec3 newFeet = newEye - glm::dvec3(0.0, static_cast<double>(mob.GetEyeHeight()), 0.0);
+        glm::dvec3 newFeet = newEye - glm::dvec3(0.0, static_cast<double>(mob.GetEyeHeight()), 0.0);
+        // The gun's arrival rules — the player's traveler has them
+        // (ImmersivePortalTraveler::Evaluate), the generic margin above does
+        // not, and a mob is a body the same way a player is:
+        //   • wall exit: the eye lands where it was in the oval, which for
+        //     a tall mob puts the feet inside the floor under a wall portal
+        //     whose opening is two blocks tall. Feet no lower than the
+        //     opening's bottom edge, standing on the surface below it.
+        //   • ceiling exit: the head no higher than a decimetre below the
+        //     ceiling, so it is not inside the ceiling block.
+        //   • floor exit: the feet on the surface, not under it — the eye
+        //     was mapped, and the body hangs a body's height below it into
+        //     the floor the portal is painted on.
+        if (portal.kind == Game::Immersive::PortalKind::PortalGun) {
+            const glm::dvec3 content  = portal.ContentDirection();
+            const glm::dvec3 farPoint = portal.IsMirror() ? portal.origin : portal.destination;
+            const double height = static_cast<double>(mob.GetBbHeight());
+            if (std::abs(content.y) < 0.3) {
+                const double bottom = farPoint.y - portal.OpeningHalfHeight();
+                if (newFeet.y < bottom) {
+                    const double lift = bottom - newFeet.y;
+                    newFeet.y += lift;
+                    newEye.y  += lift;
+                }
+            } else if (content.y < -0.7) {
+                constexpr double kCeilingHeadClearance = 0.1;
+                const double drop = (newFeet.y + height) - (farPoint.y - kCeilingHeadClearance);
+                if (drop > 0.0) {
+                    newEye.y  -= drop;
+                    newFeet.y -= drop;
+                }
+            } else if (content.y > 0.7) {
+                const double lift = (farPoint.y + kNudge) - newFeet.y;
+                if (lift > 0.0) {
+                    newFeet.y += lift;
+                    newEye.y  += lift;
+                }
+            }
+        }
         if (!ChunkLoadedAt(*to, newFeet)) return false;
 
         // Motion and facing through the portal's rotation (and scale for the
         // velocity), exactly as the player's traveler does it.
-        const glm::dvec3 newVel = portal.TransformLocalVec(mob.velocity);
+        glm::dvec3 newVel = portal.TransformLocalVec(mob.velocity);
+        // The gun's floor exit pops the body out (Portal's fling, the
+        // traveler's rule): a walk into a wall portal maps to a slow rise
+        // out of a floor portal, not enough to clear the surface before
+        // gravity brings the eye back down through it — and back to where
+        // it came from, forever. The player's 12 m/s, in blocks per tick.
+        if (portal.kind == Game::Immersive::PortalKind::PortalGun &&
+            portal.ContentDirection().y > 0.7) {
+            constexpr double kMinFloorExitVelocity = 12.0 / 20.0;
+            if (newVel.y < kMinFloorExitVelocity) newVel.y = kMinFloorExitVelocity;
+        }
         const glm::vec3  look   = Game::Mth::ViewVector(mob.xRot, mob.yRot);
         const glm::dvec3 newLook = glm::normalize(portal.TransformLocalVecNonScale(glm::dvec3(look)));
         const float newYaw   = Game::Mth::YRotFromVector(glm::vec3(newLook));
@@ -428,6 +499,9 @@ namespace Server {
         mob.yBodyRot = mob.yBodyRotO = newYaw;
         mob.yHeadRot = mob.yHeadRotO = newYaw;
         mob.portal.SetCooldown(kMobCooldownTicks);
+        // The tracker's next pass sends this as a flagged sync: the watchers
+        // snap, they do not slide the body across the room.
+        mob.portal.MarkCrossedSurface();
         if (mob.HasAiControls()) mob.GetNavigation().Stop();
         // A scaled portal scales what goes through, like the player.
         if (!portal.IsMirror() && std::abs(portal.scale - 1.0) > 1e-9) {
@@ -476,6 +550,58 @@ namespace Server {
     }
 
     // ── Chasing ──────────────────────────────────────────────────────────
+
+    // A gun portal is painted ON a wall (or a floor), and the pathfinder
+    // sees that wall as solid: the walk SendMobToPortal issues ends at the
+    // face, a body's half-width short of the plane, and the crossing never
+    // fires. The wall is not solid for a body that fits the opening
+    // (MobPortalCollision), so from the face the mob is driven straight
+    // in on its move control — one wanted position a tick, the way the
+    // navigation itself feeds the control — until its eye crosses. False
+    // when the mob is not at the surface, or does not fit through it.
+    bool EntityPortalTravel::WalkIntoGunPortal(Game::Mob& mob, const Portal& portal) const {
+        if (portal.kind != Game::Immersive::PortalKind::PortalGun) return false;
+        if (!mob.HasAiControls()) return false;
+        const Game::AABBd box = mob.GetAABBd();
+        if (!portal.BoxFitsOpening(box.min, box.max, Game::Immersive::kFitSlack)) return false;
+        // In front of the surface and close: the collision's own engage
+        // depth, measured at the body's centre as it measures it.
+        const glm::dvec3 center = (box.min + box.max) * 0.5;
+        const double depth = portal.SignedDistanceToPlane(center);
+        if (depth < 0.0 || depth > 2.0) return false;
+        // Inside the opening's width, at the feet's own height on the
+        // surface — clamped a shoulder's width in from the sides so the
+        // body enters the hole, not the wall beside it — then well past
+        // the plane, so the walk does not end on it.
+        const glm::dvec3 local = portal.WorldToLocal(mob.position);
+        const double hw = portal.OpeningHalfWidth();
+        const double hh = portal.OpeningHalfHeight();
+        const double u = std::clamp(local.x, -hw + 0.3, hw - 0.3);
+        const double v = std::clamp(local.y, -hh, hh);
+        const glm::dvec3 target = portal.LocalToWorld(u, v) - portal.Normal() * 1.5;
+        mob.GetMoveControl().SetWantedPosition(target.x, target.y, target.z, kChaseSpeed);
+        return true;
+    }
+
+    // The stretch OUT of a gun surface after arriving through it: while the
+    // body's centre is still within a block in front of the exit surface
+    // (its back in the far wall's opening), drive it straight out along the
+    // surface's normal. A floor exit is the fling's, not a walk. False once
+    // the mob is clear, or when it is not standing in this surface at all.
+    bool EntityPortalTravel::WalkOutOfGunPortal(Game::Mob& mob, const Portal& exit) const {
+        if (exit.kind != Game::Immersive::PortalKind::PortalGun) return false;
+        if (!mob.HasAiControls() || mob.IsNoAi()) return false;
+        const glm::dvec3 normal = exit.Normal();
+        if (std::abs(normal.y) > 0.7) return false;
+        const Game::AABBd box = mob.GetAABBd();
+        const glm::dvec3 center = (box.min + box.max) * 0.5;
+        const double depth = exit.SignedDistanceToPlane(center);
+        if (depth < -0.5 || depth > 1.0) return false;
+        if (!exit.IsInProjection(center, 0.5)) return false;
+        const glm::dvec3 target = mob.position + normal * 2.0;
+        mob.GetMoveControl().SetWantedPosition(target.x, target.y, target.z, kChaseSpeed);
+        return true;
+    }
 
     void EntityPortalTravel::SendMobToPortal(Game::Mob& mob, const Portal& portal) const {
         if (!mob.HasAiControls()) return;
@@ -535,6 +661,16 @@ namespace Server {
             }
 
             if (chase.arrived) {
+                // Just through a gun surface: the body is still in the far
+                // wall's opening, with no path driving it (the navigation
+                // was stopped at the crossing) — a mob that stops here
+                // stands half in the wall. Walk it clear of the surface
+                // first; the hunt or the food takes over from open floor.
+                if (const Portal* entry = registry ? registry->Get(chase.portalId) : nullptr) {
+                    if (const Portal* exit = registry->Get(entry->reversePortalId)) {
+                        if (WalkOutOfGunPortal(*mob, *exit)) { ++it; continue; }
+                    }
+                }
                 // A tempted animal is now in the player's level: its own
                 // TemptGoal finds the food from here.
                 if (chase.tempt) { it = m_chases.erase(it); continue; }
@@ -577,6 +713,10 @@ namespace Server {
                 continue;
             }
             if (mob->HasAiControls() && mob->GetNavigation().IsDone()) {
+                // At a gun surface the path is done at the wall; the last
+                // stretch is a straight walk into the hole (see above). The
+                // chase's own expiry bounds a mob that never makes it.
+                if (WalkIntoGunPortal(*mob, *portal)) { ++it; continue; }
                 constexpr int kMaxReissues = 3;
                 if (++chase.reissues > kMaxReissues) {
                     // Arrived at the frame and did not go through: the

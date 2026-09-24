@@ -110,8 +110,10 @@ void ChunkGenerationTask::markForCancellation() {
     // 2026-08-30: 15k holders after a teleport). Release now if no run has
     // claimed the task; a running task keeps ownership and releases itself.
     // Early release for never-started tasks was tried here (2026-08-30) and
-    // is off: it only matters when holder unloading is on, and that path is
-    // disabled until its stuck-task race is understood.
+    // stays off, as in Java: the task's queued submit reads its centre
+    // holder's queue level when the dispatcher gets to it
+    // (ChunkMap::runGenerationTask), and releasing the claims now would let
+    // processUnloads free that holder first.
 }
 
 void ChunkGenerationTask::releaseClaim() {
@@ -214,9 +216,11 @@ bool ChunkGenerationTask::scheduleChunkInLayer(
     if (generate && !needsGeneration) {
         // Java throws IllegalStateException here: its saved statuses and its
         // pyramid can never disagree. Ours can — the game saves FULL chunks
-        // to the region files the library loads from, while the library's
-        // own ring chunks stay unsaved — so a task that chose the loading
-        // pyramid can meet a neighbour that still needs generating. Recover:
+        // to the region files the library loads from, and a world saved
+        // before the library kept its own unfinished chunks (or a read-only
+        // one) has FULL chunks with no saved neighbours — so a task that
+        // chose the loading pyramid can meet a neighbour that still needs
+        // generating. Recover:
         // flag the centre so the NEXT task takes the generation pyramid from
         // the start, and reschedule it now (rescheduleChunkTask cancels this
         // task; runUntilWait then releases its claims). Restarting in place
@@ -231,12 +235,13 @@ bool ChunkGenerationTask::scheduleChunkInLayer(
         return false;
     }
 
-    // Already at or past this layer's status: the step's future is done and
-    // successful (the status is written by the step's thenApply just before
-    // the holder completes it), so applyStep would only take the holder's
-    // mutex to discover that. Skipping it is what makes the two 529-holder
-    // layers of a FULL pyramid cheap; Java's volatile reads make it free.
-    if (persistedStatus != nullptr && !status.isAfter(*persistedStatus)) {
+    // This layer's step already completed on the holder: applyStep would
+    // only take the holder's mutex to discover that. Skipping it is what
+    // makes the two 529-holder layers of a FULL pyramid cheap; Java's
+    // volatile reads make it free. (Not the persisted status: a chunk read
+    // from disk is at FEATURES before its loading steps — structure starts
+    // among them — have run.)
+    if (chunkHolder->hasCompletedStep(status)) {
         return true;
     }
 

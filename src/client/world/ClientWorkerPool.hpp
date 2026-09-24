@@ -6,6 +6,8 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "../renderer/mesh/SectionMesh.hpp"
+#include "common/world/level/DimensionId.hpp"
+#include <array>
 #include <functional>
 #include <memory>
 #include <atomic>
@@ -144,9 +146,15 @@ namespace Threading {
         // PLAYER POSITION UPDATES
         // ========================================================================
 
-        // Update player position for priority calculations
-        void SetPlayerPosition(const glm::vec3& position);
-        glm::vec3 GetPlayerPosition() const;
+        // The camera each level's compile jobs are ordered against. One per
+        // dimension because the queue is shared: a far level drawn through a
+        // portal schedules its sections against ITS camera (in its own
+        // coordinates), and a single shared position made the last caller of
+        // the frame — the portal pass — the point every level's jobs were
+        // polled nearest to. The main level's sections then compiled as a
+        // sweep from that far-away point instead of outward from the player.
+        void SetPlayerPosition(Game::DimensionId dimension, const glm::vec3& position);
+        glm::vec3 GetPlayerPosition(Game::DimensionId dimension) const;
 
         // ========================================================================
         // STATISTICS
@@ -226,9 +234,9 @@ namespace Threading {
         std::unordered_set<SectionKey, SectionKeyHash> m_cancelledSections;
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_cancelledChunks;
 
-        // Player position for priority calculations
+        // Camera per level (Game::DimensionSlot) for priority calculations.
         mutable std::mutex m_playerMutex;
-        glm::vec3 m_playerPosition{0.0f};
+        std::array<glm::vec3, Game::kDimensionCount> m_cameraByDimension{};
 
         // Statistics
         ClientWorkerStats m_stats;
@@ -261,7 +269,9 @@ namespace Threading {
         // Port of MC's CompileTaskDynamicQueue.poll(Vec3): drop cancelled
         // entries, then take the nearest job to `cameraPos`, subject to the
         // recompile quota. Caller MUST hold m_jobQueueMutex.
-        std::optional<MeshJob> PollNearestLocked(const glm::vec3& cameraPos);
+        // Each job is measured against its own level's camera.
+        std::optional<MeshJob> PollNearestLocked(
+            const std::array<glm::vec3, Game::kDimensionCount>& cameras);
 
         // Priority calculation
         float CalculatePriority(Game::Math::ChunkPos chunkPos, int sectionY, const glm::vec3& playerPos) const;
@@ -276,7 +286,8 @@ namespace Threading {
         
         // Convert SectionMesh to MeshBuildResult format
         Network::MeshBuildResult ConvertSectionMeshToResult(const Render::SectionMesh& sectionMesh,
-                                                           Game::Math::ChunkPos chunkPos, int sectionY);
+                                                           Game::Math::ChunkPos chunkPos, int sectionY,
+                                                           Game::DimensionId dimension);
     };
 
     // ========================================================================
@@ -293,7 +304,7 @@ namespace Threading {
     // Direct job submission
 
     // Player position updates
-    void SetClientWorkerPlayerPosition(const glm::vec3& position);
+    void SetClientWorkerPlayerPosition(Game::DimensionId dimension, const glm::vec3& position);
 
     // Job cancellation
     void CancelClientMeshJob(Game::Math::ChunkPos chunkPos);

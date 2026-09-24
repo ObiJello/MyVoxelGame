@@ -10,7 +10,11 @@
 #include "common/core/Mth.hpp"
 
 #include "common/entity/PlayerColors.hpp"
+#include "common/entity/LivingEntity.hpp"   // WalkAnimationState (morph)
+#include "common/entity/Morph.hpp"
 #include <glm/glm.hpp>
+#include <cmath>
+#include <optional>
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -54,20 +58,42 @@ namespace Client {
         // Body size (server-broadcast on every position update): the stick
         // figure, its name tag and its culling box all take it.
         float scale = 1.0f;
+        // /invisible on the server: no body, no name tag, no chat bubble,
+        // no portal ghost — the copy is tracked but never drawn.
+        bool invisible = false;
+        // The effect swirl and flags (MC DATA_EFFECT_PARTICLES, shared flags
+        // 5 / 6), from every PlayerUpdateS2C.
+        Game::EffectVisuals effects;
+        // /morph on the server: this copy is drawn as that body — a mob or
+        // block by the mob renderer, an item or orb by theirs (Game::Morph
+        // code, kNone = none) — no stick figure, no name tag, no ghost.
+        uint32_t morph = Game::Morph::kNone;
+        bool IsMorphed() const { return !Game::Morph::IsNone(morph); }
+        // MC LivingEntity.walkAnimation, driven from the tick's travel in
+        // Tick(): the morph's limb swing (the stick figure has none).
+        Game::WalkAnimationState walk;
+        int ticks = 0;   // age since first seen, the mob models' idle clock
+        // The morph's animation byte from the player (creeper swell), and
+        // the previous tick's for the renderer's lerp.
+        uint8_t morphAnim = 0;
+        uint8_t morphAnimOld = 0;
         bool positionInitialized = false;  // True after first UpdatePlayer call
 
-        // Current rendered state (interpolated each tick)
-        glm::vec3 position{0.0f};
+        // Current rendered state (interpolated each tick). World positions
+        // are DOUBLE (camera-relative rendering, RenderOrigin.hpp): a float
+        // sits on a 3 cm grid at x = 300,000, and the renderer subtracts
+        // the render origin in double before anything reaches the GPU.
+        glm::dvec3 position{0.0};
         glm::vec2 rotation{0.0f}; // head yaw, pitch
         bool isCrouching = false;
 
         // Body yaw — follows movement direction or head with 50-degree max offset
         // (Minecraft's LivingEntity.yBodyRot)
         float bodyYaw = 0.0f;
-        glm::vec3 prevPosition{0.0f}; // previous tick position for velocity estimation
+        glm::dvec3 prevPosition{0.0}; // previous tick position for velocity estimation
 
         // Interpolation target (set when server packet arrives)
-        glm::vec3 targetPosition{0.0f};
+        glm::dvec3 targetPosition{0.0};
         glm::vec2 targetRotation{0.0f};
         int lerpSteps = 0;
 
@@ -79,7 +105,7 @@ namespace Client {
         // fraction so frames within a tick show a continuously-advancing
         // position instead of a stair-step (Entity.java:1955-1960 for pos,
         // :1918 for yaw, :1914 for pitch).
-        glm::vec3 renderPrevPosition{0.0f};
+        glm::dvec3 renderPrevPosition{0.0};
         glm::vec2 renderPrevRotation{0.0f};
         float     renderPrevBodyYaw = 0.0f;
 
@@ -93,6 +119,12 @@ namespace Client {
         // taking the max would leave the revived player lying on the ground
         // forever. Advanced locally between broadcasts so the fall is smooth.
         int deathTime = 0;
+
+        // MC LivingEntity.sleepingPos — the bed's head cell while this player
+        // is in it (PlayerSleepS2C). The renderer lays the figure down along
+        // the bed (LivingEntityRenderer.setupRotations' SLEEPING branch) and
+        // reads the bed's facing off the block under this position.
+        std::optional<glm::ivec3> sleepingPos;
 
         // Chat bubble
         std::string chatBubbleText;
@@ -135,6 +167,15 @@ namespace Client {
             if (it != m_players.end()) it->second.deathTime = deathTime;
         }
 
+        // A player lay down (bed head cell) or got up (nullopt). Applied to
+        // a known copy only — the sleep packet can precede PlayerInfo ADD
+        // for a late joiner, and a copy that does not exist yet cannot be in
+        // a bed.
+        void SetSleepingPos(uint32_t id, const std::optional<glm::ivec3>& bedPos) {
+            auto it = m_players.find(id);
+            if (it != m_players.end()) it->second.sleepingPos = bedPos;
+        }
+
         void SetDimension(uint32_t id, Game::DimensionId dimension) {
             auto it = m_players.find(id);
             if (it != m_players.end()) it->second.dimension = dimension;
@@ -142,6 +183,21 @@ namespace Client {
 
         void SetScale(uint32_t id, float scale) {
             m_players[id].scale = scale;   // the update that follows fills the rest
+        }
+        void SetInvisible(uint32_t id, bool invisible) {
+            m_players[id].invisible = invisible;
+        }
+        // The player's synched effect visuals (MC DATA_EFFECT_PARTICLES + the
+        // invisible / glowing flags) — the swirl their body gives off and the
+        // GLOWING tint.
+        void SetEffectVisuals(uint32_t id, Game::EffectVisuals visuals) {
+            m_players[id].effects = std::move(visuals);
+        }
+        void SetMorph(uint32_t id, uint32_t morph) {
+            m_players[id].morph = morph;
+        }
+        void SetMorphAnim(uint32_t id, uint8_t anim) {
+            m_players[id].morphAnim = anim;
         }
 
 #if ENABLE_IMMERSIVE_PORTALS
@@ -164,7 +220,7 @@ namespace Client {
         // third level, or one that has moved far from the surface on the
         // far side, commits the crossing first (the copy will snap).
         Game::DimensionId ApplyPendingCrossing(uint32_t id, Game::DimensionId dimension,
-                                               glm::vec3& pos, glm::vec2& rot) {
+                                               glm::dvec3& pos, glm::vec2& rot) {
             auto it = m_players.find(id);
             if (it == m_players.end() || !it->second.pending.active) return dimension;
             RemotePlayer& rp = it->second;
@@ -176,10 +232,10 @@ namespace Client {
                 CommitPortalCrossing(rp);
                 return dimension;
             }
-            const glm::vec3 here(rp.pending.back.TransformPoint(glm::dvec3(pos)));
+            const glm::dvec3 here = rp.pending.back.TransformPoint(pos);
             // Well past the surface on the far side: the copy would never
             // catch up (a teleport there, a sprint through) — go now.
-            if (rp.pending.forward.SignedDistanceToPlane(glm::dvec3(here)) < -4.0 * std::max(rp.scale, 0.05f)) {
+            if (rp.pending.forward.SignedDistanceToPlane(here) < -4.0 * std::max(rp.scale, 0.05f)) {
                 CommitPortalCrossing(rp);
                 return dimension;
             }
@@ -203,8 +259,8 @@ namespace Client {
             auto it = m_players.find(id);
             if (it == m_players.end() || !it->second.positionInitialized) return;
             RemotePlayer& rp = it->second;
-            auto mapPoint = [&](const glm::vec3& p) {
-                return glm::vec3(portal.TransformPoint(glm::dvec3(p)));
+            auto mapPoint = [&](const glm::dvec3& p) {
+                return portal.TransformPoint(p);
             };
             auto mapYaw = [&](float yaw, float pitch, float& outYaw, float& outPitch) {
                 const glm::vec3 look = Game::Mth::ViewVector(pitch, yaw);
@@ -240,18 +296,18 @@ namespace Client {
         // Overworld coordinates happen to fall in it — for a visible
         // moment. MC removes and re-adds the entity on a level change for
         // the same reason.
-        void UpdatePlayer(uint32_t id, const glm::vec3& pos, const glm::vec2& rot, bool crouching,
+        void UpdatePlayer(uint32_t id, const glm::dvec3& pos, const glm::vec2& rot, bool crouching,
                           Game::DimensionId dimension) {
             auto& rp = m_players[id];
             if (rp.positionInitialized) {
-                const glm::vec3 jump = pos - rp.targetPosition;
-                const float horizSq = jump.x * jump.x + jump.z * jump.z;
+                const glm::dvec3 jump = pos - rp.targetPosition;
+                const double horizSq = jump.x * jump.x + jump.z * jump.z;
                 // 3 m sideways is ten times a sprint's per-tick step; 10 m
                 // up or down is over terminal velocity's. A scaled body
                 // moves that much faster, so the limits scale with it.
-                const float s = std::max(rp.scale, 0.05f);
+                const double s = std::max(static_cast<double>(rp.scale), 0.05);
                 const bool teleported = dimension != rp.dimension ||
-                                        horizSq > (3.0f * s) * (3.0f * s) || std::abs(jump.y) > 10.0f * s;
+                                        horizSq > (3.0 * s) * (3.0 * s) || std::abs(jump.y) > 10.0 * s;
                 if (teleported) rp.positionInitialized = false;
             }
             rp.dimension = dimension;
@@ -297,33 +353,52 @@ namespace Client {
                 rp.renderPrevPosition = rp.position;
                 rp.renderPrevRotation = rp.rotation;
                 rp.renderPrevBodyYaw  = rp.bodyYaw;
+                rp.morphAnimOld       = rp.morphAnim;
 
                 // --- Position/rotation interpolation (Minecraft's InterpolationHandler) ---
                 if (rp.lerpSteps > 0) {
-                    float alpha = 1.0f / static_cast<float>(rp.lerpSteps);
+                    const double alpha = 1.0 / static_cast<double>(rp.lerpSteps);
                     rp.position = glm::mix(rp.position, rp.targetPosition, alpha);
 
+                    const float alphaF = static_cast<float>(alpha);
                     float yawDiff = Wrap180(rp.targetRotation.x - rp.rotation.x);
-                    rp.rotation.x += yawDiff * alpha;
-                    rp.rotation.y = glm::mix(rp.rotation.y, rp.targetRotation.y, alpha);
+                    rp.rotation.x += yawDiff * alphaF;
+                    rp.rotation.y = glm::mix(rp.rotation.y, rp.targetRotation.y, alphaF);
 
                     rp.lerpSteps--;
                 }
 
                 // --- Body rotation (Minecraft's LivingEntity.tickHeadTurn) ---
-                // Estimate horizontal velocity from position change
-                glm::vec3 vel = rp.position - rp.prevPosition;
-                float speedSq = vel.x * vel.x + vel.z * vel.z;
+                // Estimate horizontal velocity from position change. The
+                // difference of two doubles; a per-tick step is a small
+                // number, so its float copy below (direction only) is exact
+                // enough anywhere in the world.
+                const glm::dvec3 vel = rp.position - rp.prevPosition;
+                const double speedSq = vel.x * vel.x + vel.z * vel.z;
                 rp.prevPosition = rp.position;
+
+                // MC LivingEntity.updateWalkAnimation: horizontal travel × 4,
+                // capped at 1, smoothed by 0.4 a tick. Only a morph reads it.
+                ++rp.ticks;
+                {
+                    float f = static_cast<float>(std::sqrt(speedSq)) * 4.0f;
+                    if (f > 1.0f) f = 1.0f;
+                    rp.walk.Update(f, 0.4f, 1.0f);
+                }
 
                 float headYaw = rp.rotation.x;
 
-                // Determine body target: movement direction when moving, head when still
+                // Body target — MC LivingEntity.aiStep: the movement
+                // direction while moving; standing still it is the body's
+                // OWN yaw, i.e. the body stays put and only the ±50° clamp
+                // below drags it after the head. It used to chase the head
+                // whenever still, which left a mob morph's head never
+                // turning against its body.
                 float bodyTarget;
-                if (speedSq > 0.0001f) {
-                    bodyTarget = Game::Mth::YRotFromVector(vel);
+                if (speedSq > 0.0001) {
+                    bodyTarget = Game::Mth::YRotFromVector(glm::vec3(vel));
                 } else {
-                    bodyTarget = headYaw;
+                    bodyTarget = rp.bodyYaw;
                 }
 
                 // Smooth body toward target at 30% per tick
@@ -340,7 +415,7 @@ namespace Client {
                 // A pending crossing completes once the whole body is past
                 // the plane (the centre a body's half-width beyond it).
                 if (rp.pending.active) {
-                    const double depth = rp.pending.forward.SignedDistanceToPlane(glm::dvec3(rp.position));
+                    const double depth = rp.pending.forward.SignedDistanceToPlane(rp.position);
                     const double halfWidth = 0.3 * std::max(rp.scale, 0.05f);
                     if (depth < -(halfWidth + 0.05)) CommitPortalCrossing(rp);
                 }

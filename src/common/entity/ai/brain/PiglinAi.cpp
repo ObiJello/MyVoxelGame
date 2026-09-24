@@ -6,6 +6,7 @@
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 
@@ -1022,15 +1023,36 @@ namespace Game {
         brain.UseDefaultActivity();
     }
 
+    const char* PiglinAi::SoundForCurrentActivity(const Piglin& piglin) {
+        const Brain* brain = piglin.GetBrain();
+        const std::optional<Activity> activity = brain ? brain->GetActiveNonCoreActivity() : std::nullopt;
+        if (!activity) return "";
+        if (*activity == Activity::Fight) return SoundEvents::PIGLIN_ANGRY;
+        if (*activity == Activity::Avoid) {
+            const auto* avoid = dynamic_cast<const LivingEntity*>(brain->GetEntity(MemoryModule::AvoidTarget));
+            if (avoid) {
+                const glm::dvec3 d = avoid->position - piglin.position;
+                if (d.x * d.x + d.y * d.y + d.z * d.z < 12.0 * 12.0) return SoundEvents::PIGLIN_RETREAT;
+            }
+        }
+        if (*activity == Activity::AdmireItem) return SoundEvents::PIGLIN_ADMIRING_ITEM;
+        if (*activity == Activity::Celebrate) return SoundEvents::PIGLIN_CELEBRATE;
+        return SoundEvents::PIGLIN_AMBIENT;
+    }
+
     void PiglinAi::UpdateActivity(Piglin& piglin) {
         Brain* brain = piglin.GetBrain();
         if (!brain) return;
         // MC's order, ADMIRE_ITEM included (it never validates here — the
-        // activity is not registered without the item system). The activity-
-        // change sounds are skipped.
+        // activity is not registered without the item system). An activity
+        // change voices the new activity (MC makeSound).
+        const std::optional<Activity> oldActivity = brain->GetActiveNonCoreActivity();
         brain->SetActiveActivityToFirstValid(
             { Activity::AdmireItem, Activity::Fight, Activity::Avoid,
               Activity::Celebrate, Activity::Ride, Activity::Idle });
+        if (brain->GetActiveNonCoreActivity() != oldActivity) {
+            piglin.MakeSound(SoundForCurrentActivity(piglin));
+        }
 
         piglin.SetAggressive(brain->HasMemoryValue(MemoryModule::AttackTarget));
 

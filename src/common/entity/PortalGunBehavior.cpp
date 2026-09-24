@@ -24,6 +24,7 @@
 // .cpp to the build target (defense in depth).
 
 #include "../core/Features.hpp"
+#include "common/world/portal/PortalState.hpp"
 #if ENABLE_PORTAL_GUN
 
 #include "Item.hpp"
@@ -71,6 +72,10 @@ namespace Game::Portal {
         // Shift+right-click clears the pair. Sneaking is the trigger
         // (matches the prior gesture). Returns Success so the arm
         // swings as feedback.
+        // /gamerule portal_gun false: the gun is inert (no portals, no
+        // clearing — there are none to clear).
+        if (!Game::Portals::PortalGunAllowed()) return UseResult::Fail;
+
         if (ctx.player->IsSneaking() && !ctx.altInteract) {
             ServerRegistry().ClearPair(id);
             return UseResult::Success;
@@ -83,9 +88,9 @@ namespace Game::Portal {
         const PortalColor color = ctx.altInteract ? PortalColor::Blue
                                                   : PortalColor::Orange;
 
-        // Hand off to the registry: walks the candidate-orientation list
-        // (vertical-up → vertical-down → horizontal → ...) and registers
-        // the first valid placement.
+        // Hand off to the registry: a fixed orientation (upright on walls,
+        // the player's facing on floors and ceilings), bumped along its own
+        // axis into the spot that fits — never rotated.
         // The portal registry is server-only state. This callback is
         // therefore never run client-side — ClientPlayerController::
         // PredictUseItemOn explicitly skips PortalGun (the client fires

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "world/level/chunk/storage/RegionFileStorage.h"
+#include "world/level/chunk/storage/ChunkStorageBackend.h"
 #include "world/ChunkPos.h"
 #include "nbt/CompoundTag.h"
 #include "util/CompletableFuture.h"
@@ -13,6 +14,7 @@
 #include <optional>
 #include <queue>
 #include <thread>
+#include <unordered_set>
 
 // Reference: net/minecraft/world/level/chunk/storage/IOWorker.java
 
@@ -42,6 +44,9 @@ class IOWorker : public ChunkScanAccess {
 public:
     // Reference: IOWorker.java constructor lines 40-43
     IOWorker(const RegionStorageInfo& info, const std::string& folder, bool sync);
+
+    // An embedder-provided backend (the game's region I/O).
+    explicit IOWorker(std::shared_ptr<ChunkStorageBackend> storage);
 
     ~IOWorker();
 
@@ -94,6 +99,14 @@ public:
      */
     bool hasChunk(const ChunkPos& pos);
 
+    /** True when a load of pos failed to read or decode (the chunk was then
+     *  generated anew); a save must not replace what is on disk. */
+    bool isUnreadable(const ChunkPos& pos);
+
+    /** Record that the data at pos could not be decoded (the reader found
+     *  it after this worker handed it over). */
+    void markUnreadable(const ChunkPos& pos);
+
     // =========================================================================
     // Lifecycle
     // Reference: IOWorker.java lines 232-244
@@ -124,7 +137,8 @@ private:
         std::shared_ptr<util::CompletableFuture<std::optional<std::unique_ptr<nbt::CompoundTag>>>> result;
     };
 
-    RegionFileStorage m_storage;
+    std::shared_ptr<ChunkStorageBackend> m_storage;
+    std::unordered_set<int64_t> m_unreadable;   // guarded by m_mutex
     std::map<int64_t, PendingStore> m_pendingWrites;  // Keyed by ChunkPos.toLong()
 
     std::mutex m_mutex;

@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "type=bottom": {
+      "model": "minecraft:block/choirstone_tile_slab"
+    },
+    "type=double": {
+      "model": "minecraft:block/choirstone_tiles"
+    },
+    "type=top": {
+      "model": "minecraft:block/choirstone_tile_slab_top"
+    }
+  }
+}

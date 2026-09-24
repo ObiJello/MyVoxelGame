@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "equipment",
+  "group": "fiery_sword",
+  "ingredients": [
+    "minecraft:iron_sword",
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    "minecraft:blaze_rod"
+  ],
+  "result": {
+    "id": "minecraft:fiery_sword"
+  }
+}

@@ -2,7 +2,9 @@
 #include "PauseScreen.hpp"
 #include "OptionsScreens.hpp"
 #include "FriendsScreen.hpp"
+#include "WorldOptionsScreen.hpp"
 #include "TitleScreen.hpp"   // TitleAction (quit signal to the host loop)
+#include <GLFW/glfw3.h>
 
 #include "../GuiGraphics.hpp"
 
@@ -44,12 +46,12 @@ namespace Render {
             "Options...", [this] {
                 m_manager->Push(std::make_unique<OptionsScreen>());
             }));
-        {
-            Button* lan = AddWidget(new Button(cx + 2, y, 98, WidgetDims::BUTTON_HEIGHT,
-                "Open to LAN", nullptr));
-            lan->active = false;
-            lan->SetTooltip({"The server already accepts", "connections on port 25565."});
-        }
+        // MC 26.3: "World Options..." (options.worldOptions.button) took
+        // the Open to LAN slot; LAN lives inside it as the Joinable switch.
+        AddWidget(new Button(cx + 2, y, 98, WidgetDims::BUTTON_HEIGHT,
+            "World Options...", [this] {
+                m_manager->Push(std::make_unique<WorldOptionsScreen>());
+            }));
         y += 24;
 
         AddWidget(new Button(fullX, y, WidgetDims::BUTTON_WIDTH, WidgetDims::BUTTON_HEIGHT,

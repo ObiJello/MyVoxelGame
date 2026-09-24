@@ -32,6 +32,10 @@ namespace Game::Anvil {
                            int dataVersion, std::string& error);
 
     // Just the directories.
+    // Creates the MC folder layout (region/entities/poi/data per dimension,
+    // playerdata). Also repairs a world written by builds that nested the
+    // Nether and End one level too deep (DIM-1/DIM-1/region): those files are
+    // moved up to DIM-1/region, where both this engine and Minecraft read them.
     bool EnsureDirectories(const SaveRoot& root, std::string& error);
 
     // Resolve <savesDir>/<name> into a SaveRoot, creating nothing. Returns

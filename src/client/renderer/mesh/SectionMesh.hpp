@@ -22,7 +22,7 @@ namespace Render {
     // absolute uint32 at upload (ChunkMegaBuffer::INDEX_SIZE), so nothing on
     // the GPU side ever sees these as-is.
     //
-    // Vertices are the 16-byte packed TERRAIN format (TerrainVertex: section-
+    // Vertices are the 20-byte packed TERRAIN format (TerrainVertex: section-
     // relative fixed-point position, slot, uv/sprite, colour). Everything
     // downstream of the mesher — MeshBuildResult float blobs,
     // ChunkMegaBuffer::VERTEX_STRIDE, the terrain shaders — assumes this stride.

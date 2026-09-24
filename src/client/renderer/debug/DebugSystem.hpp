@@ -183,6 +183,7 @@ namespace Debug {
         size_t sessionWatchSetSize = 0;
         size_t sessionSentChunks = 0;
         int sessionViewDistance = 0;
+        int sessionSimulationDistance = 0;
     };
 
     struct NetworkMetricsSnapshot {
@@ -347,7 +348,7 @@ namespace Debug {
     // ========================================================================
 
     struct PanelVisibility {
-        bool f3Overlay = false;
+        bool f3Overlay = false;   // unused since the vanilla F3 screen replaced the ImGui one
         bool performance = true;
         bool serverNetwork = false;
         bool clientSystems = false;
@@ -385,6 +386,10 @@ namespace Debug {
 
         static void BeginFrame();
         static void EndFrame();
+
+        // The ImGui panel set as a whole (F3+M). Off by default in Release.
+        static void ToggleDebugUI();
+        static bool IsDebugUIEnabled();
 
         // Call from PlatformMain to populate cross-thread metrics before RenderDebugUI
         static void SetServerSnapshot(const ServerMetricsSnapshot& snap);
@@ -444,6 +449,16 @@ namespace Debug {
     public:
         // Returns true once if render distance was changed via debug UI, then resets
         static bool ConsumeRenderDistanceChanged();
+
+        // The F+C free camera's culling (PlatformMain's freeCam block):
+        // false (default) culls from the free camera itself, so flying
+        // around shows everything around it — the chunk set stays the
+        // player's, nothing loads or unloads; true freezes every cull
+        // decision at the player's own view, the culling-verification
+        // mode (what the player sees is all that draws, even from behind).
+        // Render Controls panel checkbox.
+        static bool FreeCamCullFromPlayer();
+        static void SetFreeCamCullFromPlayer(bool on);
     };
 
 } // namespace Debug

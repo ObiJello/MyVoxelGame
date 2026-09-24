@@ -18,6 +18,7 @@ namespace Render {
         CopyToClipboard,   // MC ClickEvent.CopyToClipboard
         RunCommand,        // MC ClickEvent.RunCommand: the value is submitted as if typed
         SuggestCommand,    // MC ClickEvent.SuggestCommand: the value is put in the chat box
+        OpenFile,          // MC ClickEvent.OpenFile: the value is a path the OS opens (Finder/Explorer)
     };
 
     // One styled run within a message — our stand-in for MC's Component tree.
@@ -44,6 +45,8 @@ namespace Render {
     // client and the chat input (MC Screen.handleComponentClicked).
     void SetRunCommandHandler(std::function<void(const std::string&)> handler);
     void SetSuggestCommandHandler(std::function<void(const std::string&)> handler);
+    // OpenFile sink — the host reveals the path in the platform's file browser.
+    void SetOpenFileHandler(std::function<void(const std::string&)> handler);
 
     class ChatComponent {
     public:

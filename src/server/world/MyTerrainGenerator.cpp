@@ -1,22 +1,43 @@
+#include <algorithm>
 #include <climits>
+#include <cstdlib>
+#include <cstring>
 #include <map>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
 // File: src/server/world/MyTerrainGenerator.cpp
 #include "MyTerrainGenerator.hpp"
 #include "storage/SectionDataUnpacker.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/entity/BaseContainerBlockEntity.hpp"
+#include "common/world/block/entity/SignBlockEntity.hpp"
+#include "common/world/block/entity/LecternBlockEntity.hpp"
+#include "common/world/block/entity/SpawnerBlockEntity.hpp"
+#include "common/nbt/NbtWrite.hpp"
+#include "server/world/storage/NBTParser.hpp"
+#include "server/world/storage/anvil/SpawnerNbt.hpp"
+#include "common/world/block/entity/AurelithBlockEntities.hpp"
+#include "server/world/storage/anvil/ItemStackNbt.hpp"   // ItemFromName
 #include "common/world/biome/Biomes.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include <chrono>
+#include <cmath>
 #include <future>
+#include <sstream>
 #include <stdexcept>   // std::runtime_error — libc++ pulls it in transitively, MSVC does not
 
 // Terrain library includes
-#include "levelgen/NoiseRegistry.h"
-#include "levelgen/DensityFunctionRegistry.h"
-#include "levelgen/NoiseSettings.h"
-#include "levelgen/SurfaceRuleData.h"
+#include "levelgen/ModTerrainSettings.h"
+#include "levelgen/density/WorldgenRegistries.h"
+#include "levelgen/density/terrain/TerrainSettings.h"
 #include "levelgen/Heightmap.h"
+#include "nbt/AllTags.h"
+#include "nbt/NbtIo.h"
 #include "world/biome/OverworldBiomeBuilder.h"
 #include "world/biome/TheEndBiomeSource.h"
+#include "world/biome/TwilightBiomeSource.h"
 #include "data/worldgen/BiomeFeatureRegistry.h"
 #include "levelgen/WorldGenTweaks.h"
 #include <nlohmann/json.hpp>
@@ -36,6 +57,538 @@ using minecraft::BlockState;
 // the noise range into the level range on purpose, which is what puts the
 // nether's carve ceiling at y<=120. Do not "fix" the mismatch.
 namespace {
+
+    // ── Generated block entities ───────────────────────────────────────────
+    //
+    // MC has no hand-off here: a structure's chest is placed straight into
+    // the level with its BlockEntity. The vendored library instead parks the
+    // block-entity NBT on the ProtoChunk (ChunkAccess.setBlockEntityNbt) as
+    // the CANONICAL single-line text its parity harness uses (nbt/
+    // CanonicalNbt.h — NOT SNBT: keys sorted, floats as f0x…, strings with
+    // only \\ and \" escaped). This reads that text back into the engine's
+    // block entities so a template chest arrives with the Items the template
+    // carried, or the LootTable key it will roll from when first opened
+    // (BaseContainerBlockEntity::UnpackLootTable).
+    struct CanonicalTag {
+        // Number is every INTEGER scalar (its NBT width in `suffix`); Float /
+        // Double carry the IEEE value decoded from the f0x… / d0x… bit
+        // pattern. A typed array is a List whose `arrayType` is 'B', 'I' or
+        // 'L'.
+        enum class Kind { Compound, List, String, Number, Float, Double, Other };
+        Kind kind = Kind::Other;
+        std::map<std::string, CanonicalTag> compound;
+        std::vector<CanonicalTag> list;
+        std::string str;
+        long long number = 0;
+        double real = 0.0;
+        char suffix = 0;       // Number: 'b', 's', 'l', or 0 for an int
+        char arrayType = 0;    // List: 'B' / 'I' / 'L' for a typed array
+
+        const CanonicalTag* Get(const char* key) const {
+            auto it = compound.find(key);
+            return it == compound.end() ? nullptr : &it->second;
+        }
+    };
+
+    class CanonicalNbtReader {
+    public:
+        explicit CanonicalNbtReader(std::string_view text) : m_text(text) {}
+
+        bool Read(CanonicalTag& out) {
+            return Value(out) && m_pos == m_text.size();
+        }
+
+    private:
+        bool Value(CanonicalTag& out) {
+            if (m_pos >= m_text.size()) return false;
+            const char c = m_text[m_pos];
+            if (c == '{') return Compound(out);
+            if (c == '[') return List(out);
+            if (c == '"') { out.kind = CanonicalTag::Kind::String; return Quoted(out.str); }
+            return Scalar(out);
+        }
+
+        bool Compound(CanonicalTag& out) {
+            out.kind = CanonicalTag::Kind::Compound;
+            ++m_pos;                                          // '{'
+            if (Peek() == '}') { ++m_pos; return true; }
+            for (;;) {
+                std::string key;
+                if (Peek() == '"') { if (!Quoted(key)) return false; }
+                else {
+                    const size_t start = m_pos;
+                    while (m_pos < m_text.size() && m_text[m_pos] != ':') ++m_pos;
+                    key.assign(m_text.substr(start, m_pos - start));
+                }
+                if (Peek() != ':') return false;
+                ++m_pos;
+                CanonicalTag value;
+                if (!Value(value)) return false;
+                out.compound[std::move(key)] = std::move(value);
+                if (Peek() == ',') { ++m_pos; continue; }
+                if (Peek() == '}') { ++m_pos; return true; }
+                return false;
+            }
+        }
+
+        bool List(CanonicalTag& out) {
+            out.kind = CanonicalTag::Kind::List;
+            ++m_pos;                                          // '['
+            // Typed arrays: [B;…] [I;…] [L;…] — a type letter then ';'.
+            if (m_pos + 1 < m_text.size() && m_text[m_pos + 1] == ';') {
+                out.arrayType = m_text[m_pos];
+                m_pos += 2;
+            }
+            if (Peek() == ']') { ++m_pos; return true; }
+            for (;;) {
+                CanonicalTag value;
+                if (!Value(value)) return false;
+                out.list.push_back(std::move(value));
+                if (Peek() == ',') { ++m_pos; continue; }
+                if (Peek() == ']') { ++m_pos; return true; }
+                return false;
+            }
+        }
+
+        bool Quoted(std::string& out) {
+            ++m_pos;                                          // opening quote
+            while (m_pos < m_text.size()) {
+                const char c = m_text[m_pos++];
+                if (c == '\\') {
+                    if (m_pos >= m_text.size()) return false;
+                    out += m_text[m_pos++];
+                } else if (c == '"') {
+                    return true;
+                } else {
+                    out += c;
+                }
+            }
+            return false;
+        }
+
+        // <n>b <n>s <n> <n>l are integers; f0x… / d0x… are IEEE bit patterns
+        // (kept as Other — nothing here needs them); anything else is Other.
+        bool Scalar(CanonicalTag& out) {
+            const size_t start = m_pos;
+            while (m_pos < m_text.size()) {
+                const char c = m_text[m_pos];
+                if (c == ',' || c == '}' || c == ']') break;
+                ++m_pos;
+            }
+            std::string_view token = m_text.substr(start, m_pos - start);
+            if (token.empty()) return false;
+            if ((token[0] == 'f' || token[0] == 'd') && token.size() > 3 && token[1] == '0' && token[2] == 'x') {
+                // IEEE-754 bit patterns: f0x<8 hex> / d0x<16 hex>.
+                const std::string hex(token.substr(3));
+                char* hexEnd = nullptr;
+                const unsigned long long bits = std::strtoull(hex.c_str(), &hexEnd, 16);
+                if (hexEnd == hex.c_str() || *hexEnd != '\0') { out.kind = CanonicalTag::Kind::Other; return true; }
+                if (token[0] == 'f') {
+                    const uint32_t b32 = static_cast<uint32_t>(bits);
+                    float f;
+                    std::memcpy(&f, &b32, sizeof(f));
+                    out.kind = CanonicalTag::Kind::Float;
+                    out.real = f;
+                } else {
+                    double d;
+                    std::memcpy(&d, &bits, sizeof(d));
+                    out.kind = CanonicalTag::Kind::Double;
+                    out.real = d;
+                }
+                return true;
+            }
+            const char suffix = token.back();
+            if (suffix == 'b' || suffix == 's' || suffix == 'l') {
+                out.suffix = suffix;
+                token.remove_suffix(1);
+            }
+            char* end = nullptr;
+            const std::string digits(token);
+            const long long v = std::strtoll(digits.c_str(), &end, 10);
+            if (end == digits.c_str() || *end != '\0') { out.kind = CanonicalTag::Kind::Other; return true; }
+            out.kind = CanonicalTag::Kind::Number;
+            out.number = v;
+            return true;
+        }
+
+        char Peek() const { return m_pos < m_text.size() ? m_text[m_pos] : '\0'; }
+
+        std::string_view m_text;
+        size_t m_pos = 0;
+    };
+
+    // A canonical tag as the Anvil reader's NBT tree, so an item baked into
+    // a template goes through the same ReadItemStack a saved chest does —
+    // components (potions, enchantments, written books) included.
+    ::World::NBTTagPtr CanonicalToNbt(const CanonicalTag& tag) {
+        using namespace ::World;
+        switch (tag.kind) {
+            case CanonicalTag::Kind::Compound: {
+                auto out = std::make_shared<NBTTagCompound>();
+                for (const auto& [key, value] : tag.compound) {
+                    if (auto child = CanonicalToNbt(value)) out->value[key] = std::move(child);
+                }
+                return out;
+            }
+            case CanonicalTag::Kind::List: {
+                if (tag.arrayType == 'B') {
+                    auto out = std::make_shared<NBTTagByteArray>();
+                    for (const auto& e : tag.list) out->value.push_back(static_cast<int8_t>(e.number));
+                    return out;
+                }
+                if (tag.arrayType == 'I') {
+                    auto out = std::make_shared<NBTTagIntArray>();
+                    for (const auto& e : tag.list) out->value.push_back(static_cast<int32_t>(e.number));
+                    return out;
+                }
+                if (tag.arrayType == 'L') {
+                    auto out = std::make_shared<NBTTagLongArray>();
+                    for (const auto& e : tag.list) out->value.push_back(static_cast<int64_t>(e.number));
+                    return out;
+                }
+                auto out = std::make_shared<NBTTagList>();
+                for (const auto& e : tag.list) {
+                    if (auto child = CanonicalToNbt(e)) {
+                        if (out->value.empty()) out->listType = child->type;
+                        out->value.push_back(std::move(child));
+                    }
+                }
+                return out;
+            }
+            case CanonicalTag::Kind::String:
+                return std::make_shared<NBTTagString>(tag.str);
+            case CanonicalTag::Kind::Number:
+                switch (tag.suffix) {
+                    case 'b': return std::make_shared<NBTTagByte>(static_cast<int8_t>(tag.number));
+                    case 's': return std::make_shared<NBTTagShort>(static_cast<int16_t>(tag.number));
+                    case 'l': return std::make_shared<NBTTagLong>(static_cast<int64_t>(tag.number));
+                    default:  return std::make_shared<NBTTagInt>(static_cast<int32_t>(tag.number));
+                }
+            case CanonicalTag::Kind::Float:
+                return std::make_shared<NBTTagFloat>(static_cast<float>(tag.real));
+            case CanonicalTag::Kind::Double:
+                return std::make_shared<NBTTagDouble>(tag.real);
+            case CanonicalTag::Kind::Other:
+                break;
+        }
+        return nullptr;
+    }
+
+    // One item compound ({id, count, components?}) through the Anvil reader.
+    Game::ItemStack ItemFromCanonical(const CanonicalTag& entry) {
+        auto nbt = std::dynamic_pointer_cast<::World::NBTTagCompound>(CanonicalToNbt(entry));
+        return nbt ? Game::Anvil::ReadItemStack(*nbt) : Game::ItemStack{};
+    }
+
+    // The Anvil loader's ReadContainerItems, over the canonical text instead
+    // of a parsed tag: Slot plus the item (read by ReadItemStack, components
+    // and all) per entry, unknown items and bad slots dropped exactly as
+    // vanilla does.
+    void FillContainerFromCanonical(const CanonicalTag& root, Game::BaseContainerBlockEntity& container) {
+        // A structure chest normally carries only {LootTable, LootTableSeed}
+        // (RandomizableContainer.setBlockEntityLootTable); the roll happens on
+        // first access, exactly as in MC.
+        if (const CanonicalTag* lootTable = root.Get("LootTable");
+            lootTable && lootTable->kind == CanonicalTag::Kind::String && !lootTable->str.empty()) {
+            const CanonicalTag* seed = root.Get("LootTableSeed");
+            container.SetLootTable(lootTable->str,
+                                   (seed && seed->kind == CanonicalTag::Kind::Number) ? seed->number : 0);
+            return;
+        }
+        const CanonicalTag* items = root.Get("Items");
+        if (!items || items->kind != CanonicalTag::Kind::List) return;
+        for (const CanonicalTag& entry : items->list) {
+            if (entry.kind != CanonicalTag::Kind::Compound) continue;
+            const CanonicalTag* slot  = entry.Get("Slot");
+            if (!slot || slot->kind != CanonicalTag::Kind::Number) continue;
+            if (slot->number < 0 || slot->number >= container.GetContainerSize()) continue;
+
+            Game::ItemStack stack = ItemFromCanonical(entry);
+            if (stack.IsEmpty()) continue;
+            container.SetItem(static_cast<int>(slot->number), stack);
+        }
+    }
+
+    // MC SignBlockEntity.loadAdditional over the canonical text: front_text /
+    // back_text (SignText's codec — four `messages`, a dye `color`,
+    // `has_glowing_text`) and is_waxed. Template signs (Aurelith's street
+    // names and plaques) carry their lines as plain-string text components;
+    // a JSON-object component keeps only its "text", as the Anvil loader does.
+    void FillSignFromCanonical(const CanonicalTag& root, Game::SignBlockEntity& sign) {
+        auto readText = [&](const char* key, Game::SignTextSlot slot) {
+            const CanonicalTag* text = root.Get(key);
+            if (!text || text->kind != CanonicalTag::Kind::Compound) return;
+            Game::SignText out;
+            if (const CanonicalTag* messages = text->Get("messages");
+                messages && messages->kind == CanonicalTag::Kind::List) {
+                for (size_t i = 0; i < out.lines.size() && i < messages->list.size(); ++i) {
+                    const CanonicalTag& line = messages->list[i];
+                    if (line.kind == CanonicalTag::Kind::String) {
+                        out.lines[i] = line.str;
+                    } else if (line.kind == CanonicalTag::Kind::Compound) {
+                        if (const CanonicalTag* t = line.Get("text");
+                            t && t->kind == CanonicalTag::Kind::String) {
+                            out.lines[i] = t->str;
+                        }
+                    }
+                }
+            }
+            if (const CanonicalTag* colour = text->Get("color");
+                colour && colour->kind == CanonicalTag::Kind::String) {
+                Game::DyeColor dye = Game::DyeColor::Black;
+                if (Game::DyeColorFromName(colour->str, dye)) out.color = dye;
+            }
+            if (const CanonicalTag* glow = text->Get("has_glowing_text");
+                glow && glow->kind == CanonicalTag::Kind::Number) {
+                out.glowing = glow->number != 0;
+            }
+            sign.SetText(slot, out);
+        };
+        readText("front_text", Game::SignTextSlot::Front);
+        readText("back_text", Game::SignTextSlot::Back);
+        if (const CanonicalTag* waxed = root.Get("is_waxed");
+            waxed && waxed->kind == CanonicalTag::Kind::Number) {
+            sign.SetWaxed(waxed->number != 0);
+        }
+    }
+
+    // The canonical text as binary NBT, so the Anvil block-entity readers
+    // (which speak NBTParser trees) can load a generated block entity the
+    // same way they load a saved one. Kinds map one to one; an integer's
+    // width is its suffix, a typed array its letter, a list's element type
+    // its first element's (an empty list is TAG_End, as vanilla writes it).
+    void WriteCanonicalValue(Game::Nbt::Writer& w, std::string_view name, const CanonicalTag& tag);
+
+    Game::Nbt::TagType CanonicalElementType(const CanonicalTag& tag) {
+        using T = Game::Nbt::TagType;
+        switch (tag.kind) {
+            case CanonicalTag::Kind::Compound: return T::Compound;
+            case CanonicalTag::Kind::String:   return T::String;
+            case CanonicalTag::Kind::Float:    return T::Float;
+            case CanonicalTag::Kind::Double:   return T::Double;
+            case CanonicalTag::Kind::List:
+                return tag.arrayType == 'B' ? T::ByteArray
+                     : tag.arrayType == 'I' ? T::IntArray
+                     : tag.arrayType == 'L' ? T::LongArray : T::List;
+            case CanonicalTag::Kind::Number:
+                return tag.suffix == 'b' ? T::Byte : tag.suffix == 's' ? T::Short
+                     : tag.suffix == 'l' ? T::Long : T::Int;
+            default: return T::End;
+        }
+    }
+
+    template <typename V>
+    std::vector<V> CanonicalArray(const CanonicalTag& tag) {
+        std::vector<V> out;
+        out.reserve(tag.list.size());
+        for (const CanonicalTag& e : tag.list) out.push_back(static_cast<V>(e.number));
+        return out;
+    }
+
+    void WriteCanonicalElement(Game::Nbt::Writer& w, Game::Nbt::Writer::ListScope& list,
+                               const CanonicalTag& tag) {
+        using T = Game::Nbt::TagType;
+        switch (CanonicalElementType(tag)) {
+            case T::Compound:
+                w.ListCompoundBegin(list);
+                for (const auto& [key, child] : tag.compound) WriteCanonicalValue(w, key, child);
+                w.ListCompoundEnd(list);
+                break;
+            case T::String: w.ListString(list, tag.str); break;
+            case T::Float:  w.ListFloat(list, static_cast<float>(tag.real)); break;
+            case T::Double: w.ListDouble(list, tag.real); break;
+            case T::Byte:   w.ListByte(list, static_cast<int8_t>(tag.number)); break;
+            case T::Short:  w.ListShort(list, static_cast<int16_t>(tag.number)); break;
+            case T::Int:    w.ListInt(list, static_cast<int32_t>(tag.number)); break;
+            case T::Long:   w.ListLong(list, static_cast<int64_t>(tag.number)); break;
+            case T::ByteArray: { auto v = CanonicalArray<int8_t>(tag);  w.ListByteArray(list, v.data(), v.size()); break; }
+            case T::IntArray:  { auto v = CanonicalArray<int32_t>(tag); w.ListIntArray(list, v.data(), v.size()); break; }
+            case T::LongArray: { auto v = CanonicalArray<int64_t>(tag); w.ListLongArray(list, v.data(), v.size()); break; }
+            case T::List: {
+                auto nested = w.ListListBegin(list, tag.list.empty() ? T::End : CanonicalElementType(tag.list.front()));
+                for (const CanonicalTag& e : tag.list) WriteCanonicalElement(w, nested, e);
+                w.EndList(nested);
+                break;
+            }
+            default: break;
+        }
+    }
+
+    void WriteCanonicalValue(Game::Nbt::Writer& w, std::string_view name, const CanonicalTag& tag) {
+        using T = Game::Nbt::TagType;
+        switch (CanonicalElementType(tag)) {
+            case T::Compound:
+                w.BeginCompound(name);
+                for (const auto& [key, child] : tag.compound) WriteCanonicalValue(w, key, child);
+                w.EndCompound();
+                break;
+            case T::String: w.String(name, tag.str); break;
+            case T::Float:  w.Float(name, static_cast<float>(tag.real)); break;
+            case T::Double: w.Double(name, tag.real); break;
+            case T::Byte:   w.Byte(name, static_cast<int8_t>(tag.number)); break;
+            case T::Short:  w.Short(name, static_cast<int16_t>(tag.number)); break;
+            case T::Int:    w.Int(name, static_cast<int32_t>(tag.number)); break;
+            case T::Long:   w.Long(name, static_cast<int64_t>(tag.number)); break;
+            case T::ByteArray: { auto v = CanonicalArray<int8_t>(tag);  w.ByteArray(name, v.data(), v.size()); break; }
+            case T::IntArray:  { auto v = CanonicalArray<int32_t>(tag); w.IntArray(name, v.data(), v.size()); break; }
+            case T::LongArray: { auto v = CanonicalArray<int64_t>(tag); w.LongArray(name, v.data(), v.size()); break; }
+            case T::List: {
+                auto list = w.BeginList(name, tag.list.empty() ? T::End : CanonicalElementType(tag.list.front()));
+                for (const CanonicalTag& e : tag.list) WriteCanonicalElement(w, list, e);
+                w.EndList(list);
+                break;
+            }
+            default: break;
+        }
+    }
+
+    std::shared_ptr<::World::NBTTagCompound> CanonicalToNbtTree(const CanonicalTag& root) {
+        Game::Nbt::Writer w;
+        w.BeginRootCompound();
+        for (const auto& [key, child] : root.compound) WriteCanonicalValue(w, key, child);
+        w.EndRootCompound();
+        if (!w.ok()) return nullptr;
+        try {
+            return std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                ::World::NBTParser::Parse(w.TakeBytes()));
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+    }
+
+    void AttachGeneratedBlockEntities(Game::Chunk& gameChunk, const minecraft::world::IChunk& libChunk,
+                                      Game::Math::ChunkPos position) {
+        const auto* pending = libChunk.getBlockEntityNbts();
+        if (!pending || pending->empty()) return;
+
+        for (const auto& [key, text] : *pending) {
+            const int worldY = std::get<0>(key);
+            const int worldZ = std::get<1>(key);
+            const int worldX = std::get<2>(key);
+            if ((worldX >> 4) != position.x || (worldZ >> 4) != position.z) continue;
+
+            CanonicalTag root;
+            if (!CanonicalNbtReader(text).Read(root) || root.kind != CanonicalTag::Kind::Compound) {
+                Log::Warning("[MyTerrainGenerator] unreadable block-entity text at (%d,%d,%d): %s",
+                             worldX, worldY, worldZ, text.c_str());
+                continue;
+            }
+            const CanonicalTag* idTag = root.Get("id");
+            if (!idTag || idTag->kind != CanonicalTag::Kind::String) continue;
+            std::string id = idTag->str;
+            if (id.rfind("minecraft:", 0) == 0) id.erase(0, 10);
+
+            const int localX = worldX & 15;
+            const int localZ = worldZ & 15;
+            const Game::BlockID blockAt = gameChunk.GetBlock(localX, worldY, localZ);
+
+            // "DUMMY" marks a block placed during generation that owns a block
+            // entity but carries no data (WorldGenRegion.setBlock ->
+            // ProtoChunk.setBlockEntityNbt): MC's LevelChunk.
+            // promotePendingBlockEntity creates the block's own entity.
+            const Game::BlockEntityType* type = id == "DUMMY"
+                ? Game::BlockEntityTypes::ForBlock(blockAt)
+                : Game::BlockEntityTypes::ByStringId(id);
+            if (!type) continue;                              // a block entity this build lacks
+            if (!type->IsValidFor(blockAt)) continue;         // the template's block did not survive placement
+
+            auto entity = type->Create(glm::ivec3(worldX, worldY, worldZ), blockAt);
+            if (!entity) continue;
+            if (auto* container = dynamic_cast<Game::BaseContainerBlockEntity*>(entity.get())) {
+                FillContainerFromCanonical(root, *container);
+            }
+            if (auto* sign = dynamic_cast<Game::SignBlockEntity*>(entity.get())) {
+                FillSignFromCanonical(root, *sign);
+            }
+            if (auto* lectern = dynamic_cast<Game::LecternBlockEntity*>(entity.get())) {
+                // MC LecternBlockEntity.loadAdditional: Book (an ItemStack,
+                // components and all) and Page, clamped by the entity.
+                const CanonicalTag* book = root.Get("Book");
+                const CanonicalTag* page = root.Get("Page");
+                if (book && book->kind == CanonicalTag::Kind::Compound) {
+                    lectern->LoadFromNbt(ItemFromCanonical(*book),
+                                         (page && page->kind == CanonicalTag::Kind::Number)
+                                             ? static_cast<int>(page->number) : 0);
+                }
+            }
+            // Aurelith's quest block entities (AurelithBlockEntities.hpp):
+            // the engine's rotation, a pedestal's or socket's Item, the
+            // cabinet's contents and song.
+            if (auto* engine = dynamic_cast<Game::ResonanceEngineBlockEntity*>(entity.get())) {
+                const CanonicalTag* rotation = root.Get("Rotation");
+                if (rotation && rotation->kind == CanonicalTag::Kind::Number) {
+                    engine->SetRotation(static_cast<int>(rotation->number));
+                }
+            }
+            const CanonicalTag* item = root.Get("Item");
+            const bool hasItem = item && item->kind == CanonicalTag::Kind::Compound;
+            if (auto* pedestal = dynamic_cast<Game::VoicePedestalBlockEntity*>(entity.get())) {
+                if (hasItem) pedestal->LoadFromNbt(ItemFromCanonical(*item));
+            }
+            if (auto* socket = dynamic_cast<Game::ChordSocketBlockEntity*>(entity.get())) {
+                if (hasItem) socket->LoadFromNbt(ItemFromCanonical(*item), 0, false);
+            }
+            if (auto* cabinet = dynamic_cast<Game::ChoirCabinetBlockEntity*>(entity.get())) {
+                std::vector<Game::ItemStack> contents;
+                if (const CanonicalTag* items = root.Get("Items");
+                    items && items->kind == CanonicalTag::Kind::List) {
+                    for (const CanonicalTag& entry : items->list) {
+                        if (entry.kind != CanonicalTag::Kind::Compound) continue;
+                        Game::ItemStack stack = ItemFromCanonical(entry);
+                        if (!stack.IsEmpty()) contents.push_back(std::move(stack));
+                    }
+                }
+                std::vector<std::string> melody;
+                if (const CanonicalTag* notes = root.Get("Melody");
+                    notes && notes->kind == CanonicalTag::Kind::List) {
+                    for (const CanonicalTag& note : notes->list) {
+                        if (note.kind == CanonicalTag::Kind::String) melody.push_back(note.str);
+                    }
+                }
+                cabinet->LoadFromNbt(std::move(contents), std::move(melody), 0, false);
+            }
+            if (auto* spawner = dynamic_cast<Game::SpawnerBlockEntity*>(entity.get())) {
+                // MC BaseSpawner.load over the generated tag — the dungeon's,
+                // mineshaft's, stronghold's, fortress's or a template's
+                // SpawnData (and any SpawnPotentials / limits it carries).
+                if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadSpawner(*tree, *spawner);
+            }
+            gameChunk.SetBlockEntity(localX, worldY, localZ, std::move(entity));
+        }
+    }
+
+    // MC ProtoChunk.getEntities, handed over for ServerLevel.
+    // addWorldGenChunkEntities. WorldGenRegion.addFreshEntity already filed
+    // each entity under the chunk its position falls in; the position test
+    // here only guards against a region write straying into a neighbour.
+    void AttachGeneratedEntities(Game::Chunk& gameChunk, const minecraft::world::IChunk& libChunk,
+                                 Game::Math::ChunkPos position) {
+        const auto* pending = libChunk.getEntities();
+        if (!pending || pending->empty()) return;
+
+        gameChunk.worldgenEntities.reserve(pending->size());
+        for (const auto& entity : *pending) {
+            if (!entity.tag) continue;
+            const minecraft::nbt::ListTag* pos = entity.tag->getListPtr("Pos");
+            if (!pos || pos->size() != 3) continue;
+            const int blockX = static_cast<int>(std::floor(pos->getDouble(0)));
+            const int blockZ = static_cast<int>(std::floor(pos->getDouble(2)));
+            if ((blockX >> 4) != position.x || (blockZ >> 4) != position.z) {
+                Log::Warning("[MyTerrainGenerator] worldgen entity %s at (%d,%d) filed under chunk (%d,%d)",
+                             entity.tag->getStringOr("id", "?").c_str(), blockX, blockZ,
+                             position.x, position.z);
+                continue;
+            }
+            std::ostringstream bytes(std::ios::binary);
+            minecraft::nbt::NbtIo::write(*entity.tag, bytes);
+            const std::string buffer = bytes.str();
+            Game::WorldgenEntity out;
+            out.nbt.assign(buffer.begin(), buffer.end());
+            out.finalizeSpawn = entity.finalizeSpawn;
+            gameChunk.worldgenEntities.push_back(std::move(out));
+        }
+    }
+
     struct DimensionHeight {
         int minY;
         int height;
@@ -43,6 +596,16 @@ namespace {
     constexpr DimensionHeight OVERWORLD_LEVEL{-64, 384};
     constexpr DimensionHeight NETHER_LEVEL{0, 256};
     constexpr DimensionHeight END_LEVEL{0, 256};
+    // The Hush: an engine-only surface dimension (DimensionId::Hush) on the
+    // Overworld's noise settings, so it shares the Overworld's level height.
+    constexpr DimensionHeight HUSH_LEVEL{-64, 384};
+    // The Aether (dimension_type/the_aether.json): min_y 0, height 256 —
+    // twice its 128-tall skylands noise, like the nether/end mismatch above.
+    constexpr DimensionHeight AETHER_LEVEL{0, 256};
+    // The Twilight Forest (dimension_type/twilight_forest_type.json): min_y
+    // -32, height 288 — its twilight_noise_gen noise is (-32, 256), so the
+    // top 32 blocks are always above the terrain.
+    constexpr DimensionHeight TWILIGHT_LEVEL{-32, 288};
 }
 
 // Epoch for the thread_local MapBlockType caches. Bumped every generator
@@ -113,10 +676,11 @@ namespace Game {
             // ================================================================
             // Step 1: Bootstrap registries (once per program)
             // ================================================================
+            // The worldgen registries (noise, density_function,
+            // noise_settings, material_rule) are datapack JSON read on first
+            // use through density::WorldgenRegistries; only the block table
+            // needs bootstrapping up front.
             Blocks::bootstrap();
-            minecraft::levelgen::NoiseRegistry::bootstrap();
-            minecraft::levelgen::DensityFunctionRegistry::bootstrap(seed);
-            minecraft::levelgen::SurfaceRuleData::initialize();
             Log::Info("[MyTerrainGenerator] Registries bootstrapped");
 
             // ================================================================
@@ -171,19 +735,42 @@ namespace Game {
             // ================================================================
             const bool isNether = (m_config.dimension == "nether");
             const bool isEnd    = (m_config.dimension == "end");
-            const bool isOverworld = !isNether && !isEnd;
+            // The Hush (DimensionGeneratorKey(DimensionId::Hush) == "hush"):
+            // engine-only dimension on the Overworld's router and noise
+            // settings with its own biome source, surface rules, default
+            // block and features. It is NOT the overworld — isOverworld
+            // excludes it so the WorldGenTweaks writer guard, the world-type
+            // presets and the spawn target all stay Overworld-only.
+            const bool isHush   = (m_config.dimension == "hush");
+            // The Aether (DimensionGeneratorKey(DimensionId::Aether) ==
+            // "aether"): skylands.json — its own router, noise settings,
+            // biome source, surface rules and features. Not the overworld.
+            const bool isAether = (m_config.dimension == "aether");
+            // The Twilight Forest (DimensionGeneratorKey(DimensionId::
+            // TwilightForest) == "twilight_forest"): twilight_noise_gen.json —
+            // its own router, noise settings, layer-stack biome source,
+            // surface rules, carvers and features. Its default block is
+            // vanilla stone, so the library tells it apart by the dimension
+            // tag set on its NoiseGeneratorSettings below. Not the overworld.
+            const bool isTwilight = (m_config.dimension == "twilight_forest");
+            const bool isOverworld = !isNether && !isEnd && !isHush && !isAether && !isTwilight;
             if (isOverworld && m_config.dimension != "overworld") {
                 Log::Warning("[MyTerrainGenerator] Unknown dimension '%s' — generating"
                              " overworld", m_config.dimension.c_str());
             }
-            Log::Info("[MyTerrainGenerator] Dimension: %s",
-                      isNether ? "nether" : (isEnd ? "end" : "overworld"));
+            const char* dimensionName =
+                isNether ? "nether"
+                         : (isEnd ? "end"
+                                  : (isHush ? "hush"
+                                            : (isAether ? "aether"
+                                                        : (isTwilight ? "twilight_forest" : "overworld"))));
+            Log::Info("[MyTerrainGenerator] Dimension: %s", dimensionName);
 
             if (!isOverworld && !m_config.worldType.empty()
                 && m_config.worldType != "default") {
                 Log::Warning("[MyTerrainGenerator] World type '%s' is overworld-only —"
                              " ignoring it for the %s", m_config.worldType.c_str(),
-                             isNether ? "nether" : "end");
+                             dimensionName);
             }
             const std::string worldType = isOverworld ? m_config.worldType : "default";
             const bool isFlat = (worldType == "flat" || worldType == "superflat");
@@ -197,7 +784,11 @@ namespace Game {
             // DimensionHeight comment at the top of this file before touching
             // it — the nether/end level height is NOT their noise height.
             const DimensionHeight levelHeight =
-                isNether ? NETHER_LEVEL : (isEnd ? END_LEVEL : OVERWORLD_LEVEL);
+                isNether ? NETHER_LEVEL
+                         : (isEnd ? END_LEVEL
+                                  : (isHush ? HUSH_LEVEL
+                                            : (isAether ? AETHER_LEVEL
+                                                        : (isTwilight ? TWILIGHT_LEVEL : OVERWORLD_LEVEL))));
 
             // World Properties sandbox tweaks: reset to pure vanilla, then
             // apply the world's JSON BEFORE any biome source / generator
@@ -250,36 +841,67 @@ namespace Game {
                 }
             }
 
-            // ---- Router + biome source + noise settings, per dimension.
-            // Same construction order as the parity harness
-            // (CppChunkGeneratorTest.cpp:425-459), which builds the biome
-            // source up here with the router rather than down beside the
-            // generator: it keeps everything the dimension selects in one
-            // block, and the End's source needs the seed, not the settings.
-            minecraft::levelgen::NoiseRouter* router = nullptr;
-            minecraft::levelgen::NoiseSettings noiseSettings =
-                minecraft::levelgen::NoiseSettings::OVERWORLD_NOISE_SETTINGS;
+            // ---- Noise settings + biome source, per dimension. The vanilla
+            // dimensions read their worldgen/noise_settings entry exactly as a
+            // world load does (router, aquifers, material rule, spawn target,
+            // sea level, default block/fluid, random algorithm); the engine's
+            // own dimensions build theirs in code (ModTerrainSettings).
+            //
+            // THE DEFAULT BLOCK IS LOAD-BEARING BEYOND THE FILL COLOUR. The
+            // library has no dimension enum; ChunkStatusTasks picks the
+            // nether/end/Hush/Aether featuresPerStep and NoiseBasedChunk-
+            // Generator the carvers from it ("minecraft:netherrack", ...), and
+            // featuresPerStep drives setFeatureSeed, so the wrong one silently
+            // reseeds every feature. The Twilight Forest's default block is
+            // vanilla stone, so it is told apart by its dimension tag.
+            std::shared_ptr<const minecraft::levelgen::density::TerrainSettings> terrain;
+            std::string dimensionTag;
             if (isNether) {
-                // NoiseRouterData.nether() = noNewCaves(slideNetherLike(0,128)).
-                router = minecraft::levelgen::NoiseRouterData::nether();
+                terrain = minecraft::levelgen::density::TerrainSettings::load(
+                    "minecraft:nether", minecraft::levelgen::density::WorldgenRegistries::get());
                 m_biomeSource = minecraft::world::biome::MultiNoiseBiomeSource::createNether();
-                // NoiseSettings.cpp:14 — NETHER_NOISE_SETTINGS(0, 128, 1, 2).
-                noiseSettings = minecraft::levelgen::NoiseSettings::NETHER_NOISE_SETTINGS;
             } else if (isEnd) {
-                router = minecraft::levelgen::NoiseRouterData::end();
+                terrain = minecraft::levelgen::density::TerrainSettings::load(
+                    "minecraft:end", minecraft::levelgen::density::WorldgenRegistries::get());
                 // TheEndBiomeSource is the one biome source that takes the
                 // seed directly — the End's island layout is simplex noise
                 // over the world seed, not a climate lookup.
                 m_biomeSource =
                     std::make_unique<minecraft::world::biome::TheEndBiomeSource>(seed);
-                // NoiseSettings.cpp:15 — END_NOISE_SETTINGS(0, 128, 2, 1).
-                noiseSettings = minecraft::levelgen::NoiseSettings::END_NOISE_SETTINGS;
+            } else if (isHush) {
+                // The Overworld's router and aquifers under hushstone, sea
+                // level 50 and the Hush material rules: its climate bands need
+                // the continents / erosion / depth functions the nether and
+                // end routers drop.
+                terrain = minecraft::levelgen::ModTerrainSettings::hush();
+                m_biomeSource = minecraft::world::biome::MultiNoiseBiomeSource::createHush();
+            } else if (isAether) {
+                // skylands.json (AetherNoiseBuilders): 3D blended noise
+                // squeezed between two Y gradients into islands between y 8
+                // and 128; aether:* shifted noises drive the_aether.json's
+                // multi-noise source.
+                terrain = minecraft::levelgen::ModTerrainSettings::aether();
+                m_biomeSource = minecraft::world::biome::MultiNoiseBiomeSource::createAether();
+            } else if (isTwilight) {
+                // dimension/twilight_forest.json: biome source
+                // twilightforest:twilight_biomes over the legacy layer stack,
+                // settings twilight_noise_gen. The router's biome_driven_terrain
+                // / biome_driven_noise read the same layout, so the source is
+                // built first and hands its layout to the settings.
+                auto twilightSource =
+                    std::make_unique<minecraft::world::biome::TwilightBiomeSource>(seed);
+                terrain = minecraft::levelgen::ModTerrainSettings::twilight(twilightSource->layout());
+                m_biomeSource = std::move(twilightSource);
+                dimensionTag = "twilight_forest";
             } else {
-                // NoiseRouterData::overworld(largeBiomes, amplified) - for flat
-                // this feeds only the RandomState (Java uses dummy(); nothing in a
-                // flat world samples the router).
-                router = minecraft::levelgen::NoiseRouterData::overworld(
-                    isLargeBiomes, isAmplified);
+                // WorldPresets: large_biomes / amplified select their own
+                // noise_settings; default, single_biome_surface and flat use
+                // minecraft:overworld (flat only for the RandomState, which
+                // nothing in a flat world samples - Java uses dummy()).
+                const char* key = isLargeBiomes ? "minecraft:large_biomes"
+                                                : (isAmplified ? "minecraft:amplified" : "minecraft:overworld");
+                terrain = minecraft::levelgen::density::TerrainSettings::load(
+                    key, minecraft::levelgen::density::WorldgenRegistries::get());
                 if (isSingleBiome) {
                     // Reference: WorldPresets SINGLE_BIOME_SURFACE -
                     // FixedBiomeSource + normal overworld noise settings.
@@ -299,118 +921,10 @@ namespace Game {
                         minecraft::world::biome::MultiNoiseBiomeSource::createOverworld();
                 }
                 // flat: FlatLevelSource owns its own FixedBiomeSource, so
-                // m_biomeSource stays null (matches harness:454-459).
+                // m_biomeSource stays null.
             }
-
-            // Spawn-target climate list (MC NoiseGeneratorSettings.overworld()
-            // passes OverworldBiomeBuilder.spawnTarget(); nether.json and
-            // end.json carry NO spawn target). RandomState hands this to the
-            // Climate::Sampler, which is what makes Sampler::findSpawnPosition()
-            // work — with an empty list it just returns the origin, which is
-            // the correct behaviour for dimensions MC never climate-searches.
-            // The settings API wants opaque ClimateParameterPoint*, so keep
-            // value storage here and pass pointers (same reinterpret pattern
-            // RandomState uses to read them back).
-            //
-            // Deliberately NOT m_biomeSource->getSpawnTarget(), even though
-            // that accessor exists and would give the same three answers: for
-            // the overworld it would ALSO change flat (null source) and
-            // single_biome (FixedBiomeSource -> empty list) worlds, which today
-            // carry the overworld list on purpose — FindSpawnPosition below
-            // documents and relies on that.
-            m_spawnTargetStorage = isOverworld
-                ? minecraft::world::biome::OverworldBiomeBuilder().spawnTarget()
-                : std::vector<minecraft::world::biome::Climate::ParameterPoint>{};
-            std::vector<minecraft::levelgen::ClimateParameterPoint*> spawnTargetPtrs;
-            spawnTargetPtrs.reserve(m_spawnTargetStorage.size());
-            for (auto& point : m_spawnTargetStorage) {
-                spawnTargetPtrs.push_back(
-                    reinterpret_cast<minecraft::levelgen::ClimateParameterPoint*>(&point));
-            }
-
-            // ---- NoiseGeneratorSettings, per dimension. Argument order is
-            // (noiseSettings, defaultBlock, defaultFluid, router, surfaceRule,
-            // spawnTarget, seaLevel, disableMobGeneration, aquifersEnabled,
-            // oreVeinsEnabled, useLegacyRandomSource) — NoiseGeneratorSettings.h:29.
-            //
-            // THE DEFAULT BLOCK IS LOAD-BEARING BEYOND THE FILL COLOUR. The
-            // library has no dimension enum; it infers the dimension from this
-            // string. ChunkGenerator.cpp:751-753 picks the nether carvers when
-            // it reads "minecraft:netherrack", and ChunkStatusTasks.h:457-509
-            // picks the nether/end featuresPerStep from "minecraft:netherrack"
-            // / "minecraft:end_stone" — and featuresPerStep drives
-            // setFeatureSeed, so the wrong one silently reseeds every feature.
-            // Pass the wrong block and you get overworld caves and overworld
-            // feature RNG in the nether, with no error anywhere.
-            if (isNether) {
-                // nether.json: netherrack/lava, sea_level 32, aquifers OFF,
-                // ore veins OFF, legacy_random_source TRUE (LEGACY = Java LCG,
-                // RandomAlgorithm in NoiseGeneratorSettings.h:18-21).
-                // `auto*`, not `BlockState*`: this file is inside namespace
-                // Game, where an unqualified BlockState is GAME's 32-bit state
-                // handle rather than the terrain library's pointer type. The
-                // two are unrelated and the mistake reads as correct.
-                auto* netherrack = Blocks::getDefaultState("minecraft:netherrack");
-                if (!netherrack) {
-                    // Blocks::getDefaultState returns null for an unregistered
-                    // id; a null default block would fall through as "not the
-                    // nether" in both dimension tests above.
-                    throw std::runtime_error(
-                        "minecraft:netherrack missing from the block registry");
-                }
-                m_settings = new minecraft::levelgen::NoiseGeneratorSettings(
-                    noiseSettings,
-                    netherrack,
-                    Blocks::LAVA->defaultBlockState(),
-                    *router, nullptr, spawnTargetPtrs, 32, false, false, false, true
-                );
-            } else if (isEnd) {
-                // end.json: end_stone/air, sea_level 0, aquifers OFF, ore veins
-                // OFF, legacy_random_source TRUE. The "fluid" really is air —
-                // the End has no sea.
-                auto* endStone = Blocks::getDefaultState("minecraft:end_stone");   // see the note above
-                if (!endStone) {
-                    throw std::runtime_error(
-                        "minecraft:end_stone missing from the block registry");
-                }
-                m_settings = new minecraft::levelgen::NoiseGeneratorSettings(
-                    noiseSettings,
-                    endStone,
-                    Blocks::AIR->defaultBlockState(),
-                    *router, nullptr, spawnTargetPtrs, 0, false, false, false, true
-                );
-            } else {
-                m_settings = new minecraft::levelgen::NoiseGeneratorSettings(
-                    noiseSettings,
-                    Blocks::STONE->defaultBlockState(),
-                    Blocks::WATER->defaultBlockState(),
-                    *router, nullptr, spawnTargetPtrs, 63, false, true, true, false
-                );
-            }
-
+            m_settings = std::make_shared<minecraft::levelgen::NoiseGeneratorSettings>(terrain, dimensionTag);
             m_randomState = minecraft::levelgen::RandomState::create(m_settings, seed);
-
-            // ---- Surface rules + fluid picker, per dimension.
-            minecraft::levelgen::RuleSource* surfaceRules = nullptr;
-            if (isNether) {
-                surfaceRules = minecraft::levelgen::SurfaceRuleData::nether();
-                // Reference: NoiseBasedChunkGenerator's nether lava picker —
-                // a lava "sea" at the nether sea level (32), not water.
-                m_fluidPicker = new minecraft::levelgen::SeaLevelFluidPicker(
-                    32, Blocks::LAVA->defaultBlockState());
-            } else if (isEnd) {
-                surfaceRules = minecraft::levelgen::SurfaceRuleData::end();
-                // Sea level 0 with air as the fluid: nothing is ever flooded.
-                m_fluidPicker = new minecraft::levelgen::SeaLevelFluidPicker(
-                    0, Blocks::AIR->defaultBlockState());
-            } else {
-                surfaceRules = minecraft::levelgen::SurfaceRuleData::overworld();
-                m_fluidPicker = new minecraft::levelgen::OverworldFluidPicker(
-                    63, -54,
-                    Blocks::WATER->defaultBlockState(),
-                    Blocks::LAVA->defaultBlockState()
-                );
-            }
 
             if (isFlat) {
                 // Reference: WorldPresets FLAT - FlatLevelSource with the
@@ -433,14 +947,7 @@ namespace Game {
                 flatGenerator->setLevelHeightRange(levelHeight.minY, levelHeight.height);
                 m_generator = flatGenerator;
             } else {
-                // The generator's fill block is the dimension's default block —
-                // netherrack / end_stone / stone (harness:542-543). Not
-                // m_stoneBlock: that would fill the nether and the end with
-                // overworld stone.
-                auto* noiseGenerator = new minecraft::levelgen::NoiseBasedChunkGenerator(
-                    m_settings, m_randomState->surfaceSystem(), surfaceRules,
-                    m_settings->defaultBlock(), m_airBlock, m_fluidPicker, nullptr
-                );
+                auto* noiseGenerator = new minecraft::levelgen::NoiseBasedChunkGenerator(m_settings);
                 noiseGenerator->setBiomeSource(m_biomeSource.get());
                 m_generator = noiseGenerator;
             }
@@ -492,11 +999,43 @@ namespace Game {
                 m_config.storagePath);
 
             if (m_decorationPool) m_chunkCache->getChunkMap().worldGenContextMutable().decorationExecutor = m_decorationPool->getExecutor();
+            // processUnloads (run by tick(), TickLibrary) must not free a
+            // holder whose chunk is being converted: the completion hands
+            // the game a raw pointer into it.
+            m_chunkCache->setUnloadVeto([this](int64_t key) {
+                const minecraft::world::ChunkPos pos(key);
+                return !IsConversionPinned(Math::ChunkPos{pos.x(), pos.z()});
+            });
+            // MC ChunkMap.onChunkReadyToSend: a chunk whose 3x3 is FULL goes
+            // to whoever is waiting for it, whichever ticket brought it
+            // there. Pinned here, on the main thread and before any
+            // processUnloads can see it; ServiceGenerationQueues takes it or
+            // unpins it.
+            {
+                std::shared_ptr<CompletionSink> sink = m_sink;
+                m_chunkCache->getChunkMap().setChunkReadyListener(
+                    [this, sink](int64_t key, minecraft::world::IChunk* chunk) {
+                        const minecraft::world::ChunkPos pos(key);
+                        const Math::ChunkPos position{pos.x(), pos.z()};
+                        std::lock_guard<std::mutex> lock(sink->mutex);
+                        if (sink->closed) return;
+                        PinReady(position);
+                        sink->ready.push_back(Completion{position, chunk});
+                    });
+            }
             m_chunkCache->setTaskPoller([this]() {
                 if (m_mainThreadExecutor->hasPendingTasks()) {
                     m_mainThreadExecutor->runPendingTasks();
                 }
             });
+            if (m_libraryStorage) {
+                // MC ChunkMap's storage: unfinished chunks are saved on unload
+                // and read back (processUnloads -> save), in the world's own
+                // region files.
+                m_chunkCache->getChunkMap().setChunkStorage(m_libraryStorage, m_libraryDataVersion);
+                Log::Info("[MyTerrainGenerator] Library chunk storage: world region files (DataVersion %d)",
+                          m_libraryDataVersion);
+            }
             Log::Info("[MyTerrainGenerator] ServerChunkCache created");
             {   // Diagnostics: accumulated radii of both pyramids for a FULL target.
                 using minecraft::world::chunk::status::ChunkPyramid;
@@ -595,6 +1134,10 @@ namespace Game {
         }
     }
 
+    void MyTerrainGenerator::SetLibraryGameTime(int64_t gameTime) {
+        if (m_chunkCache) m_chunkCache->getChunkMap().setGameTime(gameTime);
+    }
+
     void MyTerrainGenerator::Shutdown() {
         // Orphan the completion sink first: futures may still complete on
         // pool threads while the executors below are torn down.
@@ -617,6 +1160,19 @@ namespace Game {
         if (m_backgroundLease) {
             m_backgroundLease->closeAndWait();
         }
+        // MC stops a level with saveAllChunks(true): every chunk still being
+        // generated is written, so the next session carries on where this one
+        // stopped. Nothing runs any more (the lease is closed), so every
+        // holder's chunk is quiet whatever tasks still claim it.
+        if (m_chunkCache && m_libraryStorage) {
+            m_chunkCache->getChunkMap().saveAllChunks(
+                /*flush=*/true, [this](int64_t key) {
+                    const minecraft::world::ChunkPos pos(key);
+                    return !IsConversionPinned(Math::ChunkPos{pos.x(), pos.z()});
+                },
+                /*quiesced=*/true);
+            Log::Info("[MyTerrainGenerator] Library chunks saved");
+        }
         m_mainThreadExecutor.reset();
         m_chunkCache.reset();
         // After m_chunkCache: its executor closure holds the lease pointer.
@@ -626,19 +1182,16 @@ namespace Game {
 
         delete m_generator;   m_generator = nullptr;
         m_biomeSource.reset();
-        delete m_fluidPicker;  m_fluidPicker = nullptr;
         delete m_randomState;  m_randomState = nullptr;
-        delete m_settings;     m_settings = nullptr;
+        m_settings.reset();
         delete m_blockRegistry; m_blockRegistry = nullptr;
-        // After m_settings/m_randomState (they hold pointers into this).
-        m_spawnTargetStorage.clear();
 
         m_initialized = false;
         Log::Info("[MyTerrainGenerator] Shutdown complete");
     }
 
     glm::ivec3 MyTerrainGenerator::FindSpawnPosition() {
-        // Overworld-only algorithm, and NOTHING SHOULD CALL IT on the other two
+        // Overworld-only algorithm, and NOTHING SHOULD CALL IT on the other
         // dimensions: MC's setInitialSpawn runs against the overworld LevelStem
         // alone, and arrival elsewhere is by portal (nether) or onto the fixed
         // obsidian platform (end), neither of which asks the generator. Both
@@ -664,6 +1217,35 @@ namespace Game {
             // ServerLevel.java:188 — END_SPAWN_POINT = BlockPos(100, 50, 0).
             return glm::ivec3(100, 50, 0);
         }
+        if (m_config.dimension == "hush") {
+            Log::Warning("[MyTerrainGenerator] FindSpawnPosition called on the hush —"
+                         " world spawn is an overworld concept; returning a placeholder");
+            // Entered by portal only (the ancient-city frame); like the
+            // nether there is no MC counterpart. A point above the Hush sea
+            // level (50) is the least harmful constant — the portal code
+            // resolves the real surface height on arrival.
+            return glm::ivec3(0, 80, 0);
+        }
+        if (m_config.dimension == "aether") {
+            Log::Warning("[MyTerrainGenerator] FindSpawnPosition called on the aether —"
+                         " world spawn is an overworld concept; returning a placeholder");
+            // Entered by portal only (AetherPortalForcer finds or builds the
+            // far portal); skylands.json has an empty spawn_target. Mid-island
+            // height (islands sit between y 8 and 128) is the least harmful
+            // constant.
+            return glm::ivec3(0, 80, 0);
+        }
+
+        if (m_config.dimension == "twilight_forest") {
+            Log::Warning("[MyTerrainGenerator] FindSpawnPosition called on the twilight"
+                         " forest — world spawn is an overworld concept; returning a"
+                         " placeholder");
+            // Entered by the pool portal only (TFTeleporter finds or builds
+            // the far portal); twilight_noise_gen.json has an empty
+            // spawn_target. Just above the forest floor (sea level 0, most
+            // terrain between y 0 and 30) is the least harmful constant.
+            return glm::ivec3(0, 32, 0);
+        }
 
         // Called once per world on the server thread; the generator may not
         // have lazily initialized yet.
@@ -672,22 +1254,17 @@ namespace Game {
             return glm::ivec3(0, 67, 0);
         }
 
-        // ── Step 1: climate search (MC Climate.SpawnFinder) ────────────────
-        // Radial fitness search over the biome parameter space, biased toward
-        // the world origin. The library ports the whole algorithm; it needs
-        // the spawn-target list wired through NoiseGeneratorSettings (done in
-        // Initialize Step 4).
-        // Flat worlds: MC's RandomState there is built from
-        // NoiseGeneratorSettings.dummy() whose spawnTarget is EMPTY, so the
-        // climate search degenerates to the origin. Ours carries the
-        // overworld spawn target (shared construction), so skip it here.
-        const bool flatWorld =
-            dynamic_cast<minecraft::levelgen::FlatLevelSource*>(m_generator) != nullptr;
-        const auto climatePos = flatWorld
-            ? minecraft::core::BlockPos(0, 0, 0)
-            : m_randomState->sampler()->findSpawnPosition();
-        const int spawnChunkX = climatePos.getX() >> 4;
-        const int spawnChunkZ = climatePos.getZ() >> 4;
+        // ── Step 1: the generator's origin (MC ServerLevel.setInitialSpawn ->
+        // generator.getOrigin(randomState)). The noise generator searches the
+        // settings' spawn_target (NoiseSpawnFinder: a radial climate-fit
+        // search biased toward the world origin); a flat world has none and
+        // starts at chunk (0, 0).
+        auto* noiseGenerator = dynamic_cast<minecraft::levelgen::NoiseBasedChunkGenerator*>(m_generator);
+        const minecraft::world::ChunkPos originChunk = noiseGenerator != nullptr
+            ? noiseGenerator->getOrigin(m_randomState)
+            : minecraft::world::ChunkPos(0, 0);
+        const int spawnChunkX = originChunk.x();
+        const int spawnChunkZ = originChunk.z();
 
         const int32_t seaLevel = m_generator->getSeaLevel();
         auto surfaceAt = [&](int blockX, int blockZ) {
@@ -717,9 +1294,8 @@ namespace Game {
                 const int32_t surfaceY = surfaceAt(blockX, blockZ);
                 if (surfaceY > seaLevel) {
                     Log::Info("[MyTerrainGenerator] Spawn selected at (%d, %d, %d) "
-                              "(climate pos %d,%d; %d chunk probes)",
-                              blockX, surfaceY, blockZ,
-                              climatePos.getX(), climatePos.getZ(), i + 1);
+                              "(origin chunk %d,%d; %d chunk probes)",
+                              blockX, surfaceY, blockZ, spawnChunkX, spawnChunkZ, i + 1);
                     return glm::ivec3(blockX, surfaceY, blockZ);
                 }
             }
@@ -762,13 +1338,21 @@ namespace Game {
             //   5. ChunkMap.scheduleGenerationTask()
             //   6. ChunkTaskDispatcher.submit() -> ConsecutiveExecutor
             //   7. ChunkGenerationTask runs through all statuses
-            //      (BIOMES -> NOISE -> SURFACE -> CARVERS -> FEATURES -> ...)
+            //      (BIOMES -> TERRAIN -> FEATURES -> ...)
             //   8. managedBlock() pumps tasks until complete
             //
             // This provides multi-chunk neighbor access via WorldGenRegion,
             // so features like trees can span chunk boundaries correctly.
             // ================================================================
             world::IChunk* chunk = nullptr;
+            // The holder owns `chunk`, and processUnloads may destroy it once
+            // its ticket goes; pinned until the conversion below has read it
+            // (the same guard the asynchronous path's results carry).
+            PinConversion(position);
+            struct Unpin {
+                MyTerrainGenerator* self; Math::ChunkPos pos;
+                ~Unpin() { self->UnpinConversion(pos); }
+            } unpin{this, position};
             {
                 // Time the MC generation pipeline separately from our
                 // conversion loop below — the next Tracy capture shows how
@@ -790,6 +1374,10 @@ namespace Game {
             // ================================================================
             int blocksSet = 0;
             auto gameChunk = ConvertLibChunk(chunk, position, &blocksSet);
+            if (!gameChunk) {
+                result.errorMessage = "Library chunk could not be converted";
+                return result;
+            }
 
             auto endTime = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
@@ -1033,6 +1621,17 @@ namespace Game {
                                                                Math::ChunkPos position,
                                                                int* outBlocksSet) const {
         PROFILE_ZONE_N("ConvertChunk");
+        // A FULL chunk the game already took, whose blocks the library has
+        // released (ChunkMap::releaseHandedOffChunks). The game loads such a
+        // chunk from its own save, never from here; reaching this means that
+        // save is missing, and converting would hand over an empty column.
+        if (const auto* proto = dynamic_cast<const minecraft::world::ProtoChunk*>(chunk);
+            proto && proto->isBlockDataReleased()) {
+            Log::Error("[MyTerrainGenerator] chunk (%d, %d) was requested again after the game "
+                       "took it and its library copy was released — the game's own save of it "
+                       "is missing", position.x, position.z);
+            return nullptr;
+        }
         auto gameChunk = std::make_shared<Chunk>();
         gameChunk->pos = position;
 
@@ -1139,6 +1738,64 @@ namespace Game {
             gameChunk->MarkHeightmapsPrimed();
         }
 
+        // ── Block entities ─────────────────────────────────────────────────
+        // Template chests and the like (see AttachGeneratedBlockEntities).
+        AttachGeneratedBlockEntities(*gameChunk, *chunk, position);
+
+        // ── Worldgen entities ──────────────────────────────────────────────
+        // MC ProtoChunk.entities: template mobs (villagers, golems, cats,
+        // bastion piglins, the igloo's pair) and piece-spawned ones (swamp hut
+        // witch, monument elders, mansion illagers, end city shulkers). Carried
+        // as binary NBT so every type survives exactly; the server adds them
+        // to the level when it first claims this chunk's entities.
+        AttachGeneratedEntities(*gameChunk, *chunk, position);
+
+        // ── Structure spawn areas ──────────────────────────────────────────
+        // What spawn_overrides and the fortress rule test at spawn time.
+        if (const auto* areas = chunk->getStructureSpawnAreas()) {
+            gameChunk->structureSpawnAreas.reserve(areas->size());
+            for (const auto& area : *areas) {
+                StructureSpawnArea out;
+                out.structure = area.structure;
+                out.startMin = glm::ivec3(area.startBox.minX, area.startBox.minY, area.startBox.minZ);
+                out.startMax = glm::ivec3(area.startBox.maxX, area.startBox.maxY, area.startBox.maxZ);
+                out.pieces.reserve(area.pieces.size());
+                for (const auto& piece : area.pieces) {
+                    out.pieces.push_back({glm::ivec3(piece.box.minX, piece.box.minY, piece.box.minZ),
+                                          glm::ivec3(piece.box.maxX, piece.box.maxY, piece.box.maxZ),
+                                          piece.templateId,
+                                          static_cast<uint8_t>(piece.rotation & 3),
+                                          piece.pieceType});
+                }
+                gameChunk->structureSpawnAreas.push_back(std::move(out));
+            }
+        }
+
+        // ── Structure starts and references ────────────────────────────────
+        // MC saves them with the full chunk; the library encoded them when
+        // the chunk reached FULL (ChunkStatusTasks::full). Carried through so
+        // a structure begun here finishes where it started after a reload.
+        if (const auto* proto = dynamic_cast<const minecraft::world::ProtoChunk*>(chunk)) {
+            gameChunk->structuresNbt = proto->getStructuresAtFull();
+
+            // ── Post-processing ────────────────────────────────────────────
+            // The cells worldgen marked (ProtoChunk.markPosForPostprocessing),
+            // re-indexed from the library's sections (its level's min Y) to
+            // the game's; applied when the chunk starts ticking.
+            const auto& marked = proto->getPostProcessing();
+            for (size_t si = 0; si < marked.size(); ++si) {
+                if (marked[si].empty()) continue;
+                const int baseY = libMinY + static_cast<int>(si) * 16;
+                const int gameSectionIndex = Math::WorldCoordinates::WorldYToSectionIndex(baseY);
+                if (gameSectionIndex < 0 || gameSectionIndex >= Chunk::SECTION_COUNT) continue;
+                if (gameChunk->postProcessing.empty()) {
+                    gameChunk->postProcessing.resize(Chunk::SECTION_COUNT);
+                }
+                auto& out = gameChunk->postProcessing[static_cast<size_t>(gameSectionIndex)];
+                out.insert(out.end(), marked[si].begin(), marked[si].end());
+            }
+        }
+
         if (outBlocksSet) *outBlocksSet = blocksSet;
         return gameChunk;
     }
@@ -1148,49 +1805,126 @@ namespace Game {
     bool MyTerrainGenerator::RequestChunkGeneration(Math::ChunkPos position) {
         if (!m_initialized || !m_chunkCache) return false;
 
-        // getChunkFuture dispatches to the main thread executor internally.
-        // Since we're calling from the server thread (which IS the main thread
-        // for the terrain library), this calls getChunkFutureMainThread directly,
-        // which adds a ticket and schedules generation — but does NOT block.
-        // loadOrGenerate=false: NO per-chunk UNKNOWN ticket. The viewer's
-        // radius ticket (SetViewTicket) already holds the area at the right
-        // levels, exactly as MC's player tickets do; we only attach to the
-        // holder's FULL future. Per-chunk one-tick tickets meant thousands
-        // of expiries per tick — a level-change/resort storm through the
-        // dispatcher that left tasks stranded (measured 2026-08-30).
-        // loadOrGenerate=true: a per-chunk UNKNOWN ticket at level 33 (FULL).
-        // This is what the old blocking path did and it measured fastest. A
-        // radius "view ticket" (tried 2026-08-30) puts near chunks at levels
-        // <= 32, which makes the library schedule block/entity-ticking
-        // promotions — an extra task pyramid for every chunk in view — and
-        // fresh generation dropped ~12-25%. Tickets are never purged while
-        // library unloading is disabled, so the holder stays at FULL.
-        auto future = m_chunkCache->getChunkFuture(
-            position.x, position.z, *m_targetStatus, true
-        );
-        if (!future) return false;
-        {
-            // Already resolved (holder missing or below the level the view
-            // ticket gives it): report failure now so the caller retries
-            // next tick once the distance manager has propagated levels.
-            auto now = future->getNow(nullptr);
-            if (now && !now->isSuccess()) return false;
+        // MC's player loading ticket, per chunk: DistanceManager.
+        // PlayerTicketTracker gives every chunk in a player's view a
+        // PLAYER_LOADING ticket at PLAYER_TICKET_LEVEL — 31, ENTITY_TICKING —
+        // so the 5x5 around it reaches FULL (levels 31-33) and is generated
+        // together, the 25 chunks sharing one dependency pyramid. A ticket at
+        // 33 made only the chunk itself FULL: every request built its own
+        // pyramid (~529 structure-start and 25 terrain chunks for one FULL
+        // chunk), and 50 players flying apart generated ~14 chunks a second
+        // (stress test 2026-09-24).
+        //
+        // GENERATION_REQUEST rather than PLAYER_LOADING: the request lives
+        // until the chunk leaves every view (IntegratedServer::
+        // CancelLoadIfUnwanted), and ReleaseGenerationRequest removes it; with
+        // it gone the holders' levels rise past MAX and processUnloads frees
+        // them.
+        //
+        // ONLY the ticket, as MC's player tickets: the chunks they create are
+        // picked up after the next runAllUpdates. This used to go through
+        // getChunkFutureMainThread with loadOrGenerate, which runs a whole
+        // distance-manager pass whenever the holder does not exist yet — one
+        // pass per fresh chunk instead of one per batch. AttachPendingRequests
+        // hooks the request onto its holder after the next pass.
+        if (m_requestTickets.insert(position).second) {
+            using minecraft::server::level::Ticket;
+            using minecraft::server::level::TicketType;
+            m_chunkCache->addTicket(Ticket(TicketType::GENERATION_REQUEST, RequestTicketLevel()),
+                                    minecraft::world::ChunkPos(position.x, position.z));
         }
-        // Pinned from request until the game has converted (or dropped) the
-        // result, so processUnloads cannot destroy the holder while a raw
-        // chunk pointer is on its way to us.
-        PinConversion(position);
+        // Once per position until it attaches: a request released and issued
+        // again meanwhile (the stall watchdog) still produces one future.
+        if (m_awaitingAttachSet.insert(position).second) m_awaitingAttach.push_back(position);
+        return true;
+    }
+
+    int MyTerrainGenerator::RequestTicketLevel() {
+        return minecraft::server::level::DistanceManager::getPlayerTicketLevel();
+    }
+
+    bool MyTerrainGenerator::AttachPendingRequests() {
+        if (m_awaitingAttach.empty() || !m_chunkCache) return false;
+        std::vector<Math::ChunkPos> batch;
+        batch.swap(m_awaitingAttach);
+        m_awaitingAttachSet.clear();
+
         std::shared_ptr<CompletionSink> sink = m_sink;
-        future->thenAccept([sink, position](
-                const minecraft::server::level::ServerChunkCache::ChunkResultType& result) {
-            minecraft::world::IChunk* chunk = result ? result->orElse(nullptr) : nullptr;
+        // A request that cannot attach: failed completion and its release.
+        const auto fail = [&sink](Math::ChunkPos position) {
             {
                 std::lock_guard<std::mutex> lock(sink->mutex);
                 if (sink->closed) return;
-                sink->completions.push_back(Completion{position, chunk});
+                sink->completions.push_back(Completion{position, nullptr});
+                sink->releases.push_back(position);
             }
             if (sink->wake) sink->wake();
-        });
+        };
+        const auto release = [sink](Math::ChunkPos position) {
+            {
+                std::lock_guard<std::mutex> lock(sink->mutex);
+                if (sink->closed) return;
+                sink->releases.push_back(position);
+            }
+            if (sink->wake) sink->wake();
+        };
+        auto& chunkMap = m_chunkCache->getChunkMap();
+
+        for (const Math::ChunkPos position : batch) {
+            // Released before it attached (cancelled, or given up on): its
+            // ticket is gone, so a future now would find the holder dropping.
+            // The caller still counts it in flight — answer it as failed,
+            // exactly as a request cancelled after attaching would be.
+            if (m_requestTickets.count(position) == 0) {
+                fail(position);
+                continue;
+            }
+            // MC getChunkFutureMainThread(x, z, status, false): the ticket has
+            // been propagated, so the holder exists at a level that allows
+            // FULL; attach to its generation. A holder that is somehow absent
+            // yields UNLOADED_CHUNK_FUTURE — a failed completion, retried by
+            // the caller.
+            auto future = m_chunkCache->getChunkFuture(position.x, position.z, *m_targetStatus,
+                                                       /*loadOrGenerate=*/false);
+            if (!future) {
+                fail(position);
+                continue;
+            }
+            // Pinned from attaching until the game has converted (or dropped)
+            // the result, so processUnloads cannot destroy the holder while a
+            // raw chunk pointer is on its way to us.
+            PinConversion(position);
+            future->thenAccept([sink, position](
+                    const minecraft::server::level::ServerChunkCache::ChunkResultType& result) {
+                minecraft::world::IChunk* chunk = result ? result->orElse(nullptr) : nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(sink->mutex);
+                    if (sink->closed) return;
+                    sink->completions.push_back(Completion{position, chunk});
+                }
+                if (sink->wake) sink->wake();
+            });
+            // MC DistanceManager.runAllUpdates' ticketsToRelease: the
+            // throttle slot is held until the chunk is ENTITY_TICKING — its
+            // whole 5x5 FULL — and let go early if that future fails (the
+            // ticket went: the chunk left every view). A holder whose level
+            // never reached ENTITY_TICKING has the completed UNLOADED future.
+            minecraft::server::level::ChunkHolder* holder =
+                chunkMap.getVisibleChunkIfPresent(minecraft::world::ChunkPos::asLong(position.x, position.z));
+            if (!holder) {
+                release(position);
+                continue;
+            }
+            auto entityTicking = holder->getEntityTickingChunkFuture();
+            if (!entityTicking) {
+                release(position);
+                continue;
+            }
+            entityTicking->thenAccept([release, position](
+                    const minecraft::server::level::ChunkHolder::LevelChunkResult&) {
+                release(position);
+            });
+        }
         return true;
     }
 
@@ -1205,18 +1939,39 @@ namespace Game {
     }
 
     void MyTerrainGenerator::TakeRequests(std::vector<Math::ChunkPos>& out) {
-        // Make sure the view ticket added this tick has produced holders at
-        // their levels before the requests below attach to them.
-        if (m_chunkCache) m_chunkCache->runDistanceManagerUpdates();
+        // No distance-manager pass here: nothing attaches to a holder until
+        // AttachPendingRequests, which runs after one.
         std::lock_guard<std::mutex> lock(m_requestMutex);
+        if (m_requests.empty()) return;
         out.insert(out.end(), m_requests.begin(), m_requests.end());
         m_requests.clear();
+    }
+
+    bool MyTerrainGenerator::HasQueuedWork() {
+        {
+            std::lock_guard<std::mutex> lock(m_requestMutex);
+            if (!m_requests.empty()) return true;
+        }
+        std::lock_guard<std::mutex> lock(m_sink->mutex);
+        return !m_sink->completions.empty() || !m_sink->releases.empty() || !m_sink->ready.empty();
+    }
+
+    void MyTerrainGenerator::TakeReady(std::vector<Completion>& out) {
+        std::lock_guard<std::mutex> lock(m_sink->mutex);
+        out.insert(out.end(), m_sink->ready.begin(), m_sink->ready.end());
+        m_sink->ready.clear();
     }
 
     void MyTerrainGenerator::TakeCompletions(std::vector<Completion>& out) {
         std::lock_guard<std::mutex> lock(m_sink->mutex);
         out.insert(out.end(), m_sink->completions.begin(), m_sink->completions.end());
         m_sink->completions.clear();
+    }
+
+    void MyTerrainGenerator::TakeReleases(std::vector<Math::ChunkPos>& out) {
+        std::lock_guard<std::mutex> lock(m_sink->mutex);
+        out.insert(out.end(), m_sink->releases.begin(), m_sink->releases.end());
+        m_sink->releases.clear();
     }
 
     std::shared_ptr<Chunk> MyTerrainGenerator::ConvertCompletedChunk(minecraft::world::IChunk* chunk,
@@ -1251,6 +2006,36 @@ namespace Game {
         m_viewTickets.erase(it);
     }
 
+    void MyTerrainGenerator::ReleaseGenerationRequest(Math::ChunkPos position) {
+        if (!m_chunkCache || m_requestTickets.erase(position) == 0) return;
+        using minecraft::server::level::Ticket;
+        using minecraft::server::level::TicketType;
+        m_chunkCache->removeTicket(
+            Ticket(TicketType::GENERATION_REQUEST, RequestTicketLevel()),
+            minecraft::world::ChunkPos(position.x, position.z));
+    }
+
+    size_t MyTerrainGenerator::SweepRequestTickets(const std::function<bool(Math::ChunkPos)>& stillWanted,
+                                                   size_t maxChecks) {
+        if (m_requestTickets.empty()) return 0;
+        size_t released = 0;
+        for (size_t checked = 0; checked < maxChecks; ++checked) {
+            if (m_ticketSweepCursor >= m_ticketSweep.size()) {
+                // Start the next pass over the tickets held right now.
+                m_ticketSweep.assign(m_requestTickets.begin(), m_requestTickets.end());
+                m_ticketSweepCursor = 0;
+                if (checked > 0) break;   // at most one pass per call
+            }
+            const Math::ChunkPos pos = m_ticketSweep[m_ticketSweepCursor++];
+            if (m_requestTickets.count(pos) == 0) continue;   // released since the snapshot
+            if (!stillWanted(pos)) {
+                ReleaseGenerationRequest(pos);
+                ++released;
+            }
+        }
+        return released;
+    }
+
     void MyTerrainGenerator::PinConversion(Math::ChunkPos position) {
         std::lock_guard<std::mutex> lock(m_pinMutex);
         m_pinned.insert(position);
@@ -1261,7 +2046,16 @@ namespace Game {
     }
     bool MyTerrainGenerator::IsConversionPinned(Math::ChunkPos position) const {
         std::lock_guard<std::mutex> lock(m_pinMutex);
-        return m_pinned.count(position) != 0;
+        return m_pinned.count(position) != 0 || m_readyPins.count(position) != 0;
+    }
+    void MyTerrainGenerator::PinReady(Math::ChunkPos position) {
+        std::lock_guard<std::mutex> lock(m_pinMutex);
+        ++m_readyPins[position];
+    }
+    void MyTerrainGenerator::UnpinReady(Math::ChunkPos position) {
+        std::lock_guard<std::mutex> lock(m_pinMutex);
+        auto it = m_readyPins.find(position);
+        if (it != m_readyPins.end() && --it->second <= 0) m_readyPins.erase(it);
     }
 
     bool MyTerrainGenerator::PumpOneTask() {
@@ -1269,8 +2063,11 @@ namespace Game {
 
         // runDistanceManagerUpdates propagates ticket levels, promotes the
         // visible chunk map and dispatches generation tasks. One pass only —
-        // the loop belongs to the caller, which owns the deadline.
-        if (m_chunkCache->runDistanceManagerUpdates()) {
+        // the loop belongs to the caller, which owns the deadline. Every
+        // request issued since the last pass attaches right after it.
+        const bool updated = m_chunkCache->runDistanceManagerUpdates();
+        const bool attached = AttachPendingRequests();
+        if (updated || attached) {
             return true;
         }
 
@@ -1279,29 +2076,8 @@ namespace Game {
         return m_mainThreadExecutor && m_mainThreadExecutor->runOnePendingTask();
     }
 
-    // WHY THIS EXISTS. The library never unloads: every UNKNOWN ticket lives
-    // forever (nothing calls ServerChunkCache::tick), so every holder it ever
-    // created stays. A holder that reached FULL already dropped its NoiseChunk
-    // (ChunkStatusTasks::full), but the ring of chunks around each visited
-    // area that only reached BIOMES/NOISE/SURFACE/CARVERS keeps one — and a
-    // NoiseChunk is the per-chunk copy of the whole density-function DAG plus
-    // its caches, ~600 KB. Measured 2026-08-29 (`heap` at the RSS peak): 3.9 GB
-    // of malloc, dominated by 5.1M DensityFunctions::Marker, 1.9M MulOrAdd,
-    // 1M ShiftedNoise ... all live NoiseChunks of ~5,500 ring chunks after
-    // two areas; the process hit 5.6 GB and stalled for 25 s paging.
-    //
-    // The NoiseChunk is a CACHE (ProtoChunk::getOrCreateNoiseChunk recreates
-    // it deterministically from seed and position, as MC's lazy supplier
-    // does), so dropping it when nothing is using the chunk loses nothing but
-    // ~10 ms if that ring chunk is ever generated further. "Nothing using it"
-    // is generationRefCount()==0: every ChunkGenerationTask acquires every
-    // holder in its dependency radius for its whole life, so zero means no
-    // step is running on, or reading, this chunk. Tasks are only created on
-    // this thread (runGenerationTasks), so a zero seen here stays zero until
-    // we schedule more.
-    //
-    // The MC-faithful fix is real unloading (ticket expiry + ChunkMap
-    // processUnloads); this is the contained version.
+    // TickLibrary below is MC ServerChunkCache.tick: stale-ticket purge, the
+    // distance-manager pass, then ChunkMap.processUnloads.
     size_t MyTerrainGenerator::TickLibrary(std::chrono::steady_clock::time_point deadline) {
         if (!m_initialized || !m_chunkCache) return 0;
         PROFILE_ZONE_N("Lib.Tick");
@@ -1309,10 +2085,59 @@ namespace Game {
         // Java runs purgeStaleTickets + runDistanceManagerUpdates every tick;
         // that is what turns a removed view ticket into unload candidates.
         m_chunkCache->tick(haveTime, /*tickChunks=*/false);
-        return m_chunkCache->getChunkMap().processUnloads(haveTime, [this](int64_t key) {
+        // The pass above propagated this tick's requests (IntegratedServer
+        // issues them in the watch-set phase): attach them now, so their
+        // generation starts in the time after this tick.
+        AttachPendingRequests();
+
+        // Chunks the game took since the last tick become release
+        // candidates; a slice of the candidates is checked every tick.
+        std::vector<Math::ChunkPos> handedOff;
+        {
+            std::lock_guard<std::mutex> lock(m_handedOffMutex);
+            handedOff.swap(m_handedOff);
+        }
+        auto& chunkMap = m_chunkCache->getChunkMap();
+        for (const Math::ChunkPos& pos : handedOff) {
+            chunkMap.markHandedOff(minecraft::world::ChunkPos::asLong(pos.x, pos.z));
+        }
+        // A few hundred a tick: a candidate waits only for its neighbours to
+        // finish SPAWN, and the ring of view-edge chunks that wait longest is
+        // a few thousand at most.
+        constexpr size_t kReleaseChecksPerTick = 256;
+        chunkMap.releaseHandedOffChunks(kReleaseChecksPerTick, [this](int64_t key) {
             const minecraft::world::ChunkPos pos(key);
-            return !IsConversionPinned(Math::ChunkPos{pos.x(), pos.z()});
+            return !IsConversionPinned(Math::ChunkPos(pos.x(), pos.z()));
         });
+        return m_chunkCache->lastUnloadCount();
+    }
+
+    void MyTerrainGenerator::NoteHandedOff(Math::ChunkPos position) {
+        std::lock_guard<std::mutex> lock(m_handedOffMutex);
+        m_handedOff.push_back(position);
+    }
+
+    MyTerrainGenerator::HolderStatusCounts MyTerrainGenerator::LibraryHolderStatusCounts() const {
+        HolderStatusCounts counts;
+        if (!m_initialized || !m_chunkCache) return counts;
+        using minecraft::world::chunk::status::ChunkStatus;
+        const int maxLevel = minecraft::server::level::ChunkLevel::getMaxLevel();
+        auto& map = const_cast<minecraft::server::level::ChunkMap&>(m_chunkCache->getChunkMap());
+        // Pointers under the map lock, statuses outside it: a status takes the
+        // holder's futures mutex, which must not nest inside the map lock (see
+        // ChunkMap::processUnloads). Holders are only destroyed on this thread.
+        std::vector<minecraft::server::level::ChunkHolder*> holders;
+        holders.reserve(map.size());
+        map.forEachHolder([&](minecraft::server::level::ChunkHolder& h) { holders.push_back(&h); });
+        for (auto* h : holders) {
+            if (h->getTicketLevel() <= maxLevel) ++counts.wanted;
+            const ChunkStatus* latest = h->getLatestStatus();
+            if (latest == nullptr) ++counts.noChunk;
+            else if (latest->isBefore(ChunkStatus::TERRAIN)) ++counts.beforeTerrain;
+            else if (latest->isBefore(ChunkStatus::FULL)) ++counts.edgeBand;
+            else ++counts.full;
+        }
+        return counts;
     }
 
     MyTerrainGenerator::UnloadDiag MyTerrainGenerator::GetUnloadDiag() const {
@@ -1371,49 +2196,6 @@ namespace Game {
                       map.pendingGenerationTaskCount());
         }
         return d;
-    }
-
-    size_t MyTerrainGenerator::ReleaseIdleNoiseChunks(std::chrono::steady_clock::time_point deadline) {
-        if (!m_initialized || !m_chunkCache) return 0;
-        using minecraft::server::level::ChunkHolder;
-        using minecraft::world::ProtoChunk;
-        auto& map = m_chunkCache->getChunkMap();
-
-        if (m_noiseReleaseQueue.empty()) {
-            if (++m_noiseReleaseRescan < 100) return 0;
-            m_noiseReleaseRescan = 0;
-            constexpr int kIdleScansRequired = 3;   // ~15 s quiet
-            std::unordered_map<int64_t, int> next;
-            map.forEachHolder([&](ChunkHolder& holder) {
-                if (holder.generationRefCount() != 0) return;
-                auto* proto = dynamic_cast<ProtoChunk*>(holder.getLatestChunk());
-                if (!proto || proto->getNoiseChunk() == nullptr) return;
-                const int64_t key = holder.getPos().toLong();
-                auto it = m_noiseIdleScans.find(key);
-                const int scans = (it == m_noiseIdleScans.end() ? 0 : it->second) + 1;
-                if (scans >= kIdleScansRequired) m_noiseReleaseQueue.push_back(key);
-                else next[key] = scans;
-            });
-            m_noiseIdleScans.swap(next);
-            if (m_noiseReleaseQueue.empty()) return 0;
-        }
-
-        // MC processUnloads: while (floor > 0 || haveTime()) — a floor so an
-        // already-late tick still drains something, the deadline for the rest.
-        constexpr size_t kFloor = 4;
-        size_t released = 0;
-        while (!m_noiseReleaseQueue.empty() &&
-               (released < kFloor || std::chrono::steady_clock::now() < deadline)) {
-            const int64_t key = m_noiseReleaseQueue.back();
-            m_noiseReleaseQueue.pop_back();
-            ChunkHolder* holder = map.getUpdatingChunkIfPresent(key);
-            if (!holder || holder->generationRefCount() != 0) continue;   // re-check: may be busy again
-            auto* proto = dynamic_cast<ProtoChunk*>(holder->getLatestChunk());
-            if (!proto || proto->getNoiseChunk() == nullptr) continue;
-            proto->setNoiseChunk(nullptr);
-            ++released;
-        }
-        return released;
     }
 
     bool MyTerrainGenerator::IsChunkReady(Math::ChunkPos position) {

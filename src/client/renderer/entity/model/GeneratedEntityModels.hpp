@@ -93,7 +93,7 @@ namespace Render {
         bool  cull;
     };
 
-    inline constexpr int kGenModelCount = 175;
+    inline constexpr int kGenModelCount = 219;
     extern const GenModel kGenModels[kGenModelCount];
     extern const GenPart  kGenParts[];
     extern const GenCube  kGenCubes[];
@@ -101,7 +101,7 @@ namespace Render {
     extern const GenClipVisibility kGenClipVis[];
 
     // Mesh for a mob slug, or nullptr when it has a hand-written model class
-    // (or none at all). Linear over ~175 entries, called once per type.
+    // (or none at all). Linear over ~219 entries, called once per type.
     const GenModel* FindGenModel(std::string_view slug);
 
 } // namespace Render

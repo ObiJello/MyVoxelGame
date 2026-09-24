@@ -4,6 +4,9 @@
 #include "../world/biome/Biomes.hpp"   // grass/foliage tint sampling
 
 #include <nlohmann/json.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/constants.hpp>
+#include <cmath>
 #include <fstream>
 #include <filesystem>
 
@@ -42,6 +45,89 @@ namespace Game {
         // NOTE: only the FIRST range_dispatch we hit becomes the animation. Items
         // with nested dispatches (compass-in-end-dimension etc.) collapse to a
         // single animated frame set — fidelity loss here is acceptable for v1.
+        // MC com.mojang.math.Transformation's codec: translation (blocks),
+        // left_rotation / right_rotation (quaternions [x,y,z,w], or
+        // {axis, angle}), scale. A BlockModel can only carry an axis-aligned
+        // quarter turn and a translation, so the composed rotation is snapped
+        // to one and anything else is refused (the caller then falls back).
+        bool ReadQuaternion(const nlohmann::json& node, const char* key, glm::quat& out) {
+            out = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            auto it = node.find(key);
+            if (it == node.end()) return true;
+            if (it->is_array() && it->size() == 4) {
+                // Stored [x, y, z, w]; glm::quat takes (w, x, y, z).
+                out = glm::normalize(glm::quat((*it)[3].get<float>(), (*it)[0].get<float>(),
+                                               (*it)[1].get<float>(), (*it)[2].get<float>()));
+                return true;
+            }
+            if (it->is_object() && it->contains("axis") && it->contains("angle")) {
+                const auto& a = (*it)["axis"];
+                if (!a.is_array() || a.size() != 3) return false;
+                const glm::vec3 axis(a[0].get<float>(), a[1].get<float>(), a[2].get<float>());
+                out = glm::angleAxis(glm::radians((*it)["angle"].get<float>()), glm::normalize(axis));
+                return true;
+            }
+            return false;
+        }
+
+        bool DecodeTransformation(const nlohmann::json& child, CompositeChild& out) {
+            auto t = child.find("transformation");
+            if (t == child.end()) return true;   // identity
+            if (!t->is_object()) return false;
+
+            glm::quat left, right;
+            if (!ReadQuaternion(*t, "left_rotation", left) ||
+                !ReadQuaternion(*t, "right_rotation", right)) {
+                return false;
+            }
+            if (auto s = t->find("scale"); s != t->end() && s->is_array() && s->size() == 3) {
+                for (int i = 0; i < 3; ++i) {
+                    if (std::abs((*s)[i].get<float>() - 1.0f) > 1e-3f) return false;   // no scale in a BlockModel
+                }
+            }
+            glm::vec3 translation(0.0f);
+            if (auto tr = t->find("translation"); tr != t->end() && tr->is_array() && tr->size() == 3) {
+                translation = glm::vec3((*tr)[0].get<float>(), (*tr)[1].get<float>(), (*tr)[2].get<float>());
+            }
+
+            // Transformation = T · R_left · S · R_right, scale being 1 here.
+            const glm::quat rotation = glm::normalize(left * right);
+
+            // Snap to a whole quarter turn about X or Y. RotateModel's turn is
+            // MC's blockstate `x`/`y` step — a −90° right-handed rotation per
+            // turn — so a right-handed angle θ about +axis is −θ/90 turns.
+            int xTurns = 0, yTurns = 0;
+            const float w = glm::clamp(rotation.w, -1.0f, 1.0f);
+            const float angleDeg = glm::degrees(2.0f * std::acos(w));
+            if (angleDeg > 1.0f && angleDeg < 359.0f) {
+                const float s = std::sqrt(std::max(0.0f, 1.0f - w * w));
+                const glm::vec3 axis = glm::vec3(rotation.x, rotation.y, rotation.z) / s;
+                const float quarters = angleDeg / 90.0f;
+                const int q = static_cast<int>(std::lround(quarters));
+                if (std::abs(quarters - static_cast<float>(q)) > 0.02f) return false;
+                auto turns = [&](float component) {
+                    const int signed_ = component < 0.0f ? -q : q;
+                    return ((-signed_) % 4 + 4) % 4;
+                };
+                if (std::abs(axis.y) > 0.99f)      yTurns = turns(axis.y);
+                else if (std::abs(axis.x) > 0.99f) xTurns = turns(axis.x);
+                else return false;   // Z or a diagonal: not bakeable
+            }
+
+            // RotateModel pivots about the cell centre C = (8,8,8); MC rotates
+            // about the origin and then translates. rotate-about-C followed
+            // by an offset o equals rotate-about-origin followed by
+            // o + (C − R·C), so o = t·16 − (C − R·C) = t·16 + R·C − C.
+            const glm::vec3 centre(8.0f);
+            const glm::vec3 rotatedCentre = rotation * centre;
+            out.xQuarterTurns = xTurns;
+            out.yQuarterTurns = yTurns;
+            out.offsetPx      = translation * 16.0f + rotatedCentre - centre;
+            // Snap the residue (float noise from the quaternion) to the pixel.
+            for (int i = 0; i < 3; ++i) out.offsetPx[i] = std::round(out.offsetPx[i] * 16.0f) / 16.0f;
+            return true;
+        }
+
         void Resolve(const nlohmann::json& node, ClientItemDesc& out, bool& foundFrames) {
             if (!node.is_object()) return;
             auto typeIt = node.find("type");
@@ -65,7 +151,11 @@ namespace Game {
                 auto tints = node.find("tints");
                 if (tints != node.end() && tints->is_array()) {
                     out.layerTints.reserve(tints->size());
+                    out.layerTintKinds.reserve(tints->size());
                     for (const auto& t : *tints) {
+                        // One kind per entry, pushed before the value so every
+                        // `continue` below leaves the two arrays aligned.
+                        out.layerTintKinds.push_back(ItemTintKind::Fixed);
                         if (!t.is_object()) { out.layerTints.push_back(0); continue; }
 
                         // Climate-sampled tint sources. MC's `minecraft:grass`
@@ -84,6 +174,11 @@ namespace Game {
                         if (ty != t.end() && ty->is_string()) {
                             std::string tt = ty->get<std::string>();
                             if (tt.rfind("minecraft:", 0) == 0) tt.erase(0, 10);
+                            // The potion source's colour is the STACK's
+                            // PotionContents; its `default` (read below) is
+                            // only the fallback. Item::ResolveLayerTint.
+                            if (tt == "potion") out.layerTintKinds.back() = ItemTintKind::Potion;
+                            if (tt == "dye")    out.layerTintKinds.back() = ItemTintKind::Dye;
                             if (tt == "grass" || tt == "foliage") {
                                 const auto num = [&](const char* k, float dflt) {
                                     auto f = t.find(k);
@@ -100,7 +195,12 @@ namespace Game {
                             }
                         }
 
-                        auto def = t.find("default");
+                        // `minecraft:constant` carries its colour as `value`
+                        // (ItemTintSources.CONSTANT); every other source's
+                        // fallback is `default`. The engine-only spawn eggs
+                        // are two constant tints over a shared template.
+                        auto def = t.find("value");
+                        if (def == t.end() || !def->is_number_integer()) def = t.find("default");
                         if (def != t.end() && def->is_number_integer()) {
                             // Java int → ARGB uint32 (negative ints store the
                             // high alpha bit set; reinterpreting two's-complement
@@ -237,6 +337,52 @@ namespace Game {
                 if (out.kind == ClientItemKind::Missing && !out.frameSlugs.empty()) {
                     out.restSlug = out.frameSlugs.front();
                     out.kind     = ClientItemKind::FlatSprite;
+                }
+                return;
+            }
+            if (type == "composite") {
+                // MC CompositeModel: every child drawn with its own
+                // transformation. Children that are block models with a
+                // bakeable transformation become one synthetic BlockModel
+                // (ItemRegistry::BakeCompositeItemModels); anything else
+                // falls back to the first child's own look.
+                auto models = node.find("models");
+                if (models == node.end() || !models->is_array() || models->empty()) return;
+                std::vector<CompositeChild> children;
+                ClientItemDesc first;
+                bool firstSet = false, bakeable = true;
+                for (const auto& childNode : *models) {
+                    ClientItemDesc sub;
+                    bool subFrames = false;
+                    Resolve(childNode, sub, subFrames);
+                    if (!firstSet) { first = sub; firstSet = true; }
+                    if (sub.kind != ClientItemKind::BlockModel) { bakeable = false; continue; }
+                    CompositeChild child;
+                    child.modelSlug = sub.restSlug;
+                    if (!DecodeTransformation(childNode, child)) {
+                        Log::Warning("[ClientItemLoader] composite child '%s' has a transformation a block model cannot carry",
+                                     sub.restSlug.c_str());
+                        bakeable = false;
+                        continue;
+                    }
+                    children.push_back(std::move(child));
+                }
+                if (bakeable && !children.empty()) {
+                    out.kind = ClientItemKind::Composite;
+                    out.compositeChildren = std::move(children);
+                    // A registry name no file could collide with; the bake
+                    // registers the merged model under it.
+                    std::string name = "composite";
+                    for (const auto& c : out.compositeChildren) {
+                        name += "/" + c.modelSlug + "@x" + std::to_string(c.xQuarterTurns) +
+                                "y" + std::to_string(c.yQuarterTurns) +
+                                "o" + std::to_string(static_cast<int>(std::lround(c.offsetPx.x))) +
+                                "," + std::to_string(static_cast<int>(std::lround(c.offsetPx.y))) +
+                                "," + std::to_string(static_cast<int>(std::lround(c.offsetPx.z)));
+                    }
+                    out.restSlug = name;
+                } else if (firstSet) {
+                    out = first;
                 }
                 return;
             }

@@ -1,5 +1,6 @@
 // File: src/server/world/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
+#include "common/world/lighting/LightEngine.hpp"
 #include "common/world/portal/PortalState.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/biome/Biomes.hpp"
@@ -7,9 +8,11 @@
 #include "common/core/SaveVersion.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "storage/MinecraftChunkLoaderImpl.hpp"
+#include "storage/anvil/LibraryChunkStorage.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
+#include <iterator>
 
 // ========================================================================
 // TERRAIN GENERATION: Using custom terrain library
@@ -102,12 +105,11 @@ namespace Game {
 
             Log::Info("Creating MyTerrainGenerator (custom terrain library) for dimension '%s'...",
                       m_config.generationConfig.dimension.c_str());
-            if (!m_config.savePath.empty()) {
-                std::string reason;
-                if (auto root = Anvil::SaveRoot::Open(m_config.savePath, reason)) {
-                    if (!std::getenv("OBEY_NO_LIB_DISK")) m_config.generationConfig.storagePath = root->Dimension(m_config.dimensionId).string();
-                }
-            }
+            // The library reads and writes the world's region files through
+            // the game's AnvilChunkIo (attached below, once it exists), never
+            // through a storage path of its own: two handles on one region
+            // file corrupt it.
+            m_config.generationConfig.storagePath.clear();
             m_chunkGenerator = std::make_unique<MyTerrainGenerator>(m_config.generationConfig);
             Log::Info("MyTerrainGenerator created");
 
@@ -165,6 +167,18 @@ namespace Game {
                     m_anvilLoader = std::make_unique<Anvil::AnvilChunkLoader>(
                         m_anvilIo, m_config.dimensionId);
                     Log::Info("Anvil chunk storage enabled: %s", root->Root().string().c_str());
+
+                    // The terrain library's unfinished chunks live in the same
+                    // region files (MC saves every proto chunk it unloads).
+                    // OBEY_NO_LIB_DISK keeps them in memory instead (A/B).
+                    if (!std::getenv("OBEY_NO_LIB_DISK")) {
+                        if (auto* generator = dynamic_cast<MyTerrainGenerator*>(m_chunkGenerator.get())) {
+                            generator->SetLibraryChunkStorage(
+                                std::make_shared<Anvil::LibraryChunkStorage>(
+                                    m_anvilIo, m_config.dimensionId, m_anvilStorage),
+                                Save::DataVersion());
+                        }
+                    }
                 }
             }
 
@@ -245,8 +259,8 @@ namespace Game {
         //    shared_ptr they are not a use-after-free either.
         if (m_chunkSaver && m_chunkCache) {
             Log::Info("Saving all dirty chunks before shutdown...");
-            m_chunkCache->SaveAllDirty();
-            m_chunkSaver->FlushAndJoin();
+            { PROFILE_ZONE_N("ChunkProvider.Shutdown.SaveDirty"); m_chunkCache->SaveAllDirty(); }
+            { PROFILE_ZONE_N("ChunkProvider.Shutdown.FlushSaver"); m_chunkSaver->FlushAndJoin(); }
         }
 
         // Shutdown components in reverse order
@@ -256,26 +270,32 @@ namespace Game {
         }
 
         if (m_chunkCache) {
+            PROFILE_ZONE_N("ChunkProvider.Shutdown.Cache");
             m_chunkCache.reset();
         }
 
         if (m_chunkSaver) {
+            PROFILE_ZONE_N("ChunkProvider.Shutdown.Saver");
             m_chunkSaver->Shutdown();
             m_chunkSaver.reset();
         }
         // Released after m_chunkSaver: it is the SAME object, and dropping the
         // concrete alias first would leave m_chunkSaver holding the last
         // reference to something we then Shutdown() through a base pointer.
+        { PROFILE_ZONE_N("ChunkProvider.Shutdown.Anvil");
         m_anvilStorage.reset();
         m_anvilLoader.reset();
         m_anvilIo.reset();
+        }
 
         if (m_chunkGenerator) {
+            PROFILE_ZONE_N("ChunkProvider.Shutdown.Generator");
             m_chunkGenerator->Shutdown();
             m_chunkGenerator.reset();
         }
 
         if (m_chunkLoader) {
+            PROFILE_ZONE_N("ChunkProvider.Shutdown.Loader");
             m_chunkLoader->Shutdown();
             m_chunkLoader.reset();
         }
@@ -540,6 +560,10 @@ namespace Game {
     // tell "absent" from "air" because it only has GetBlockState.
     bool ChunkProvider::IsRegionAllAir(const glm::ivec3& min, const glm::ivec3& max,
                                        bool absentIsAir) const {
+        PROFILE_ZONE_N("Chunk.IsRegionAllAir");
+        // Zone value = chunk columns walked; a runaway box shows as a big number.
+        PROFILE_ZONE_VALUE(static_cast<int64_t>((max.x >> 4) - (min.x >> 4) + 1) *
+                           static_cast<int64_t>((max.z >> 4) - (min.z >> 4) + 1));
         if (min.x > max.x || min.y > max.y || min.z > max.z) return true;
         // Section index range. Y outside the build range holds nothing, so it
         // is air for this purpose; the clamp keeps the loop inside [0, 24).
@@ -579,6 +603,7 @@ namespace Game {
 
     void ChunkProvider::GetBlockStatesInBox(const glm::ivec3& min, const glm::ivec3& max,
                                             BlockState* out) const {
+        PROFILE_ZONE_N("Chunk.BlockStatesInBox");
         if (min.x > max.x || min.y > max.y || min.z > max.z) return;
         const int ny = max.y - min.y + 1, nz = max.z - min.z + 1;
         const size_t total = static_cast<size_t>(max.x - min.x + 1) * ny * nz;
@@ -791,6 +816,16 @@ namespace Game {
         return chunk->GetBiome(localX, worldY, localZ);
     }
 
+    uint16_t ChunkProvider::GetNoiseBiome(int quartX, int quartY, int quartZ) const {
+        const Chunk* chunk = GetCachedChunkRef(Math::ChunkPos{ quartX >> 2, quartZ >> 2 }).get();
+        if (!chunk) {
+            return kFallbackBiomeId;
+        }
+        // Chunk::GetBiome clamps the rebased quart Y into the column, which
+        // is ChunkAccess.getNoiseBiome's clamp; X and Z pick the cell.
+        return chunk->GetBiome((quartX & 3) << 2, quartY * 4, (quartZ & 3) << 2);
+    }
+
     void ChunkProvider::SetBlock(int worldX, int worldY, int worldZ, BlockID block) {
         SetBlock(worldX, worldY, worldZ, block, 0);
     }
@@ -993,17 +1028,23 @@ namespace Game {
 
         auto chunk = m_chunkCache->Get(position);
         if (chunk && m_chunkCache->IsDirty(position)) {
+            m_chunkCache->NotifySaved(position, *chunk);
             m_chunkSaver->SaveChunkAsync(*chunk);
             m_chunkCache->ClearDirtyFlag(position);
         }
     }
 
-    void ChunkProvider::SaveAllDirtyChunks() {
+    void ChunkProvider::SaveAllDirtyChunks(bool wait) {
         if (!m_initialized || !m_chunkCache) {
             return;
         }
 
-        m_chunkCache->SaveAllDirty();
+        m_chunkCache->SaveAllDirty(wait);
+    }
+
+    size_t ChunkProvider::SaveDirtyChunksEagerly(size_t maxChunks, std::chrono::steady_clock::time_point deadline) {
+        if (!m_initialized || !m_chunkCache) return 0;
+        return m_chunkCache->SaveSomeDirty(maxChunks, deadline);
     }
 
     // === CONFIGURATION ===
@@ -1049,12 +1090,14 @@ namespace Game {
 
     void ChunkProvider::SetMaxLoadedChunks(size_t maxChunks) {
         std::lock_guard<std::mutex> lock(m_configMutex);
-        // Cache size is now managed directly by ChunkCache
-        if (m_chunkCache) {
-            ChunkCacheConfig cacheConfig;
-            cacheConfig.maxSize = std::max(size_t(16), maxChunks);
-            // Note: Would need to recreate cache to change size
-        }
+        // Grow-only: the cache is built at 32768 on purpose (see the
+        // constructor), so a smaller configured cap is ignored, and a larger
+        // one — a player's simulation ring beyond what 32768 holds — raises
+        // it in place. Chunks that spill over an LRU cache are evicted with
+        // their load results already processed, so nothing re-requests them:
+        // measured 2026-09-10, a 128-chunk simulation ring (54k chunks)
+        // thrashed a 32768 cache and the far part of it never simulated.
+        if (m_chunkCache) m_chunkCache->GrowMaxSize(std::max(size_t(16), maxChunks));
     }
 
     size_t ChunkProvider::GetMaxLoadedChunks() const {
@@ -1073,6 +1116,9 @@ namespace Game {
         // more lifetime to reason about for a value that is four aligned bytes.
         if (m_anvilStorage) m_anvilStorage->SetGameTime(gameTime);
         if (m_anvilLoader)  m_anvilLoader->SetGameTime(gameTime);
+        if (auto* generator = dynamic_cast<MyTerrainGenerator*>(m_chunkGenerator.get())) {
+            generator->SetLibraryGameTime(gameTime);
+        }
     }
 
     void ChunkProvider::SetGenerationSeed(int64_t seed) {
@@ -1204,6 +1250,14 @@ namespace Game {
             return {};
         }
         return m_chunkCache->GetLoadedChunkPositions();
+    }
+
+    std::vector<std::pair<Math::ChunkPos, std::shared_ptr<Chunk>>>
+    ChunkProvider::GetChunksWithBlockEntities() const {
+        if (!m_initialized || !m_chunkCache) {
+            return {};
+        }
+        return m_chunkCache->GetChunksWithBlockEntities();
     }
 
     void ChunkProvider::LogPerformanceStats() const {
@@ -1424,8 +1478,29 @@ namespace Game {
             return m_chunkCache->Get(chunk->pos);
         }
 
+        // MC's LIGHT status, on this (worker) thread while the chunk is still
+        // private: a generated chunk, or a saved one without isLightOn (the
+        // old engine's saves, Minecraft worlds saved unlit), gets its own
+        // sky and block light here. The level's light engine reconciles its
+        // borders when IntegratedServer registers it. A saved chunk whose
+        // light is correct keeps it (MC trusts isLightOn the same way).
+        if (!chunk->light.lightCorrect) {
+            Lighting::LightChunk(*chunk, DimensionHasSkyLight(m_config.dimensionId));
+        }
+
         // Add to cache
         m_chunkCache->Put(chunk->pos, chunk);
+
+        // Worldgen post-processing still to apply (MC runs it when the chunk
+        // starts ticking) — announce the chunk to the level.
+        if (m_onChunkPostProcess) {
+            bool pending;
+            {
+                const auto guard = chunk->LockShared();
+                pending = chunk->HasPostProcessing();
+            }
+            if (pending) m_onChunkPostProcess(chunk->pos);
+        }
         //Log::Debug("Added chunk (%d, %d) to cache", chunk->pos.x, chunk->pos.z);
 
         // Now that the cache knows about it, mark a freshly generated chunk as
@@ -1473,6 +1548,26 @@ namespace Game {
         if (!m_anvilIo) { error.clear(); return false; }
         return m_anvilIo->WriteChunkNbt(m_config.dimensionId, Anvil::RegionKind::Entities,
                                         pos, payload, error);
+    }
+
+    std::vector<WorldgenEntity> ChunkProvider::TakeWorldgenEntities(Math::ChunkPos pos) {
+        std::vector<WorldgenEntity> out;
+        if (std::shared_ptr<Chunk> chunk = GetLoadedChunk(pos)) {
+            const auto guard = chunk->LockExclusive();
+            out.swap(chunk->worldgenEntities);
+        }
+        std::lock_guard<std::mutex> lock(m_worldgenEntityMutex);
+        if (auto it = m_evictedWorldgenEntities.find(pos); it != m_evictedWorldgenEntities.end()) {
+            // A parked list and a resident one describe the same generation
+            // (the chunk was regenerated since): either, never both.
+            if (out.empty()) out = std::move(it->second);
+            m_evictedWorldgenEntities.erase(it);
+        }
+        if (out.empty()) return out;
+        // Once per chunk per session: a regenerated chunk (no saves) carries
+        // its template mobs again, and they are already in the level.
+        if (!m_worldgenEntitiesTaken.insert(pos).second) out.clear();
+        return out;
     }
 
     bool ChunkProvider::ClearEntityChunk(Math::ChunkPos pos, std::string& error) {
@@ -1539,6 +1634,27 @@ namespace Game {
             std::lock_guard<std::mutex> lock(m_statsMutex);
             m_stats.chunksEvicted++;
         }
+
+        // Worldgen entities the level never claimed must not leave with the
+        // chunk: the saved chunk does not carry them (entities/*.mca does, once
+        // they exist), so park them until TakeWorldgenEntities asks.
+        if (chunk) {
+            std::vector<WorldgenEntity> unclaimed;
+            {
+                const auto guard = chunk->LockExclusive();
+                unclaimed.swap(chunk->worldgenEntities);
+            }
+            if (!unclaimed.empty()) {
+                std::lock_guard<std::mutex> lock(m_worldgenEntityMutex);
+                auto& parked = m_evictedWorldgenEntities[position];
+                parked.insert(parked.end(), std::make_move_iterator(unclaimed.begin()),
+                              std::make_move_iterator(unclaimed.end()));
+            }
+        }
+
+        // The level light engine must stop writing into a chunk that left the
+        // cache (it is queued; the server thread drains it).
+        if (m_lightEvictionHook && chunk) m_lightEvictionHook(position, chunk);
 
         Log::Debug("Chunk (%d, %d) evicted from cache%s", position.x, position.z, wasDirty ? " (was dirty)" : "");
     }
@@ -1612,6 +1728,7 @@ namespace Game {
                 isTransparent = true;
                 break;
             case BlockID::Water:
+            case BlockID::ResonantWater:   // Aurelith's river: water in all but its look
                 isSolid = false;
                 isFluid = true;
                 isTransparent = true;

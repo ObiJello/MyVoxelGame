@@ -12,6 +12,8 @@
 #include "common/entity/NeutralMob.hpp"
 #include "common/entity/RangedAttackMob.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
+#include "common/entity/npc/VillagerData.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>   // std::min in Wither::GetAnimStateByte (MSVC: no transitive pull)
 
@@ -114,8 +116,8 @@ namespace Game {
         // villager; false for drowned and zombified piglin.
         virtual bool ConvertsInWater() const { return true; }
         // MC Zombie.doUnderWaterConversion — which zombie type this becomes
-        // (zombie → drowned; the husk overrides to → zombie). The level
-        // events (1040/1041, the conversion sound) wait on the sound system.
+        // (zombie → drowned; the husk overrides to → zombie), then its level
+        // event (1040/1041, the conversion sound).
         virtual void DoUnderWaterConversion();
         void StartUnderWaterConversion(int time) {
             m_conversionTime = time;
@@ -169,13 +171,43 @@ namespace Game {
     // the item system.
     class ZombieVillager : public Zombie {
     public:
-        explicit ZombieVillager(EntityLevel* level)
-            : Zombie(EntityTypeId::ZombieVillager, level) {
-            RegisterGoals();
+        // MC's constructor defines DATA_VILLAGER_DATA as
+        // initializeZombieVillagerData: plains, level 1, a random profession
+        // (every registered one, none and nitwit included).
+        explicit ZombieVillager(EntityLevel* level);
+
+        // ── MC VillagerDataHolder ─────────────────────────────────────────
+        const VillagerData& GetVillagerData() const { return m_villagerData; }
+        void SetVillagerData(const VillagerData& data) { m_villagerData = data; }
+        bool GetVillagerDataFinalized() const { return m_villagerDataFinalized; }
+        void SetVillagerDataFinalized(bool v) { m_villagerDataFinalized = v; }
+        // MC ZombieVillager.readAdditionalSaveData's fallback: a finalized
+        // entity whose file has no VillagerData re-rolls it.
+        void RerollVillagerData();
+
+        // MC finalizeSpawn: finalizeVillagerType (the biome's type unless
+        // the data came from NBT), then Zombie's.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
+        // The renderer's type / profession / level, on the same bytes the
+        // villager uses (VillagerData.hpp PackVillagerVariant).
+        uint8_t GetVariantByte() const override { return PackVillagerVariant(m_villagerData); }
+        void    SetVariantByte(uint8_t v) override { UnpackVillagerVariant(v, m_villagerData); }
+        uint8_t GetAnimStateByte() const override {
+            return static_cast<uint8_t>(static_cast<uint8_t>(m_villagerData.profession) & 0x0F);
+        }
+        void    SetAnimStateByte(uint8_t v) override {
+            const int p = v & 0x0F;
+            if (p < kVillagerProfessionCount) m_villagerData.profession = static_cast<VillagerProfession>(p);
         }
 
     protected:
         bool ConvertsInWater() const override { return false; }
+
+    private:
+        VillagerData m_villagerData;
+        bool         m_villagerDataFinalized = false;
     };
 
     // MC Drowned — the waterborne zombie: no daylight burn, water is free to
@@ -191,6 +223,10 @@ namespace Game {
     class Drowned : public Zombie, public RangedAttackMob {
     public:
         explicit Drowned(EntityLevel* level);
+
+        // MC Drowned.checkSpawnObstruction: level.isUnobstructed(this) only — the
+        // base's no-liquid half would refuse every underwater spawn.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
 
         bool HasTrident() const { return m_hasTrident; }
 
@@ -218,6 +254,9 @@ namespace Game {
     // one piglin a terrible idea), and anger adds a +0.05 speed modifier.
     class ZombifiedPiglin : public Zombie, public NeutralMob {
     public:
+        // MC ZombifiedPiglin.getAmbientSound — angry or idle.
+        const char* GetAmbientSound() const override;
+
         explicit ZombifiedPiglin(EntityLevel* level);
         bool FireImmune() const override { return true; }
 
@@ -251,6 +290,8 @@ namespace Game {
 
         // MC ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4, 6) → 80..120 ticks.
         int m_ticksUntilNextAlert = 0;
+        // MC playFirstAngerSoundIn.
+        int m_playFirstAngerSoundIn = 0;
     };
 
     // MC Skeleton / AbstractSkeleton. MOVEMENT_SPEED 0.25; health and attack
@@ -317,6 +358,12 @@ namespace Game {
 
         // MC WitherSkeleton.doHurtTarget.
         bool DoHurtTarget(Entity& target) override;
+
+        // MC WitherSkeleton.canBeAffected — immune to WITHER.
+        bool CanBeAffected(const MobEffectInstance& effect) const override {
+            if (effect.effect == MobEffectId::Wither) return false;
+            return GenericMonster::CanBeAffected(effect);
+        }
     };
 
     // MC Stray — a skeleton whose arrows carry SLOWNESS. Attributes and goals
@@ -351,6 +398,33 @@ namespace Game {
 
         int GetHardAttackInterval() const override { return 50; }
         int GetAttackInterval() const override { return 70; }
+    };
+
+    // MC Parched — the desert skeleton (26.x): AbstractSkeleton's goals and
+    // bow, MAX_HEALTH 16, WEAKNESS-tipped arrows, the Bogged's slower 50/70
+    // bow, immune to WEAKNESS itself. Not in #burn_in_daylight, so it does
+    // not burn (it still keeps to the shade through RestrictSunGoal, as MC's
+    // AbstractSkeleton goals do for every skeleton).
+    class Parched : public Skeleton {
+    public:
+        explicit Parched(EntityLevel* level);
+
+        // MC Parched.createAttributes: AbstractSkeleton's + MAX_HEALTH 16.
+        static void CreateAttributes(AttributeMap& out);
+
+        // MC Parched.canBeAffected.
+        bool CanBeAffected(const MobEffectInstance& effect) const override {
+            if (effect.effect == MobEffectId::Weakness) return false;
+            return Skeleton::CanBeAffected(effect);
+        }
+
+    protected:
+        // MC Parched.getArrow: WEAKNESS for 600 ticks (30 s), amplifier 0.
+        void CustomizeArrow(Arrow& arrow) override;
+
+        int GetHardAttackInterval() const override { return 50; }
+        int GetAttackInterval() const override { return 70; }
+        bool BurnsInDaylight() const override { return false; }
     };
 
     // MC Creeper. MOVEMENT_SPEED 0.25; the fuse lives here rather than in
@@ -519,6 +593,13 @@ namespace Game {
 
         static void CreateAttributes(AttributeMap& out);
 
+        // MC Spider.canBeAffected — immune to POISON (the cave spider, which
+        // extends Spider, inherits it).
+        bool CanBeAffected(const MobEffectInstance& effect) const override {
+            if (effect.effect == MobEffectId::Poison) return false;
+            return Monster::CanBeAffected(effect);
+        }
+
     protected:
         // The variant constructor — CaveSpider is a spider of a different
         // type id, exactly as MC's `CaveSpider extends Spider`.
@@ -661,6 +742,8 @@ namespace Game {
         float m_tailAnimation = 0.0f;
         float m_tailAnimationO = 0.0f;
         float m_tailAnimationSpeed = 0.0f;
+        // MC clientSideTouchedGround — the flop-sound latch.
+        bool  m_clientSideTouchedGround = false;
         float m_spikesAnimation = 0.0f;
         float m_spikesAnimationO = 0.0f;
         int   m_clientSideAttackTime = 0;
@@ -709,6 +792,11 @@ namespace Game {
     class IronGolem : public PathfinderMob, public NeutralMob {
     public:
         explicit IronGolem(EntityLevel* level);
+
+        // MC IronGolem.checkSpawnObstruction: something to stand on, two
+        // clear empty cells above the feet, the feet cell empty (its fluid
+        // ignored), and no entity in the box.
+        bool CheckSpawnObstruction(EntityLevel& level) const override;
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -967,6 +1055,11 @@ namespace Game {
         // ── Peek (MC DATA_PEEK_ID, 0-100) ─────────────────────────────────
         int  GetRawPeekAmount() const { return m_peekAmount; }
         void SetRawPeekAmount(int amount);
+
+        // MC Shulker.getHurtSound: the shell clacks when closed.
+        const char* GetHurtSound(MobDamageSource) const override {
+            return m_peekAmount == 0 ? SoundEvents::SHULKER_HURT_CLOSED : SoundEvents::SHULKER_HURT;
+        }
         bool IsClosed() const { return m_peekAmount == 0; }
         // MC Shulker.getClientPeekAmount — what ShulkerRenderer feeds the
         // model (0..1).
@@ -1035,6 +1128,10 @@ namespace Game {
     class Ravager : public Monster {
     public:
         explicit Ravager(EntityLevel* level);
+
+        // MC Ravager.checkSpawnObstruction: !containsAnyLiquid only — the
+        // entity-overlap half is dropped.
+        bool CheckSpawnObstruction(EntityLevel& level) const override { return !ContainsAnyLiquid(level); }
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -1175,7 +1272,9 @@ namespace Game {
     // roster exemption on HurtByTargetGoal.
     class Vex : public Monster {
     public:
-        explicit Vex(EntityLevel* level);
+        // `type` lets a subclass register under its own id (EchoWraith,
+        // HushMobs.hpp) — the CamelHusk-on-Camel precedent.
+        explicit Vex(EntityLevel* level, EntityTypeId type = EntityTypeId::Vex);
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -1907,6 +2006,9 @@ namespace Game {
         // per-tick displacement instead).
         glm::dvec3 m_prevPosForFlap{0.0};
         bool m_prevPosForFlapValid = false;
+
+        // MC EnderDragon.growlTime — the client's idle growl clock.
+        int m_growlTime = 100;
     };
 
 } // namespace Game

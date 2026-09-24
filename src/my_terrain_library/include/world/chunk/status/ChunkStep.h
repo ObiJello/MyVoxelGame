@@ -41,7 +41,7 @@ struct WorldGenContext;
  * @return A CompletableFuture that completes with the processed chunk
  *
  * Note: Most tasks return CompletableFuture::completed() for synchronous work.
- * The NOISE task uses supplyAsync() for parallel chunk generation.
+ * The BIOMES and TERRAIN tasks use supplyAsync() for parallel chunk generation.
  * Reference: Java returns CompletableFuture<ChunkAccess>
  */
 using ChunkStatusTask = std::function<std::shared_ptr<util::CompletableFuture<::world::IChunk*>>(
@@ -309,50 +309,6 @@ public:
             m_blockStateWriteRadius,
             m_task
         );
-    }
-};
-
-/**
- * ChunkPipeline - Manages the complete generation pipeline
- * Contains all ChunkSteps in order
- */
-class ChunkPipeline {
-private:
-    std::vector<ChunkStep> m_steps;
-
-public:
-    /**
-     * Create the default Minecraft generation pipeline
-     * Call after static initialization
-     */
-    static ChunkPipeline createDefault();
-
-    /**
-     * Get step for a status
-     */
-    const ChunkStep& getStep(const ChunkStatus& status) const {
-        return m_steps[status.getIndex()];
-    }
-
-    /**
-     * Get step by index
-     */
-    const ChunkStep& getStep(int32_t index) const {
-        return m_steps[index];
-    }
-
-    /**
-     * Get all steps
-     */
-    const std::vector<ChunkStep>& getSteps() const {
-        return m_steps;
-    }
-
-    /**
-     * Add a step to the pipeline
-     */
-    void addStep(ChunkStep step) {
-        m_steps.push_back(std::move(step));
     }
 };
 

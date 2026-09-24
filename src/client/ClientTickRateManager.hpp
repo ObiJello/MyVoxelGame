@@ -52,20 +52,33 @@ namespace Client {
             if (m_frozenTicksToRun > 0) --m_frozenTicksToRun;
         }
 
-        bool RunsNormally() const { return m_runGameElements; }
+        // MC Minecraft.pause folded in: while the WORLD is paused (the
+        // server reports every player paused — ServerPausedS2C, or the
+        // host's own IntegratedServer::IsPaused) nothing runs, the local
+        // player included (Minecraft.java:1959 skips the whole level tick).
+        // A pause menu open while somebody else is still playing pauses
+        // nothing, exactly as a published vanilla world.
+        void SetServerPaused(bool paused) { m_serverPaused = paused; }
+        bool IsServerPaused() const       { return m_serverPaused; }
+        void SetWorldPaused(bool paused)  { m_worldPaused = paused; }
+        bool IsWorldPaused() const        { return m_worldPaused; }
+
+        bool RunsNormally() const { return m_runGameElements && !m_worldPaused; }
 
         // MC TickRateManager.isEntityFrozen, minus the two clauses this engine
         // cannot express: the local player is ticked separately here rather
         // than through an entity list, and nothing can be ridden, so
         // `countPlayerPassengers()` is always 0. What remains is the whole
         // rule for mobs and dropped items.
-        bool IsEntityFrozen() const { return !m_runGameElements; }
+        bool IsEntityFrozen() const { return !m_runGameElements || m_worldPaused; }
 
     private:
         float m_tickRate         = 20.0f;
         int   m_frozenTicksToRun = 0;
         bool  m_runGameElements  = true;
         bool  m_isFrozen         = false;
+        bool  m_serverPaused     = false;   // what the server last reported
+        bool  m_worldPaused      = false;   // serverPaused && this client's menu is open
     };
 
     // One per process — the client has exactly one level at a time, and MC

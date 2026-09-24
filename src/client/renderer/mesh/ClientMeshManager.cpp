@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/ClientMeshManager.cpp
 #include "ClientMeshManager.hpp"
+#include "SectionFade.hpp"
 #include "client/world/ClientLevel.hpp"
 #include "ChunkRenderer.hpp"
 #include "MeshUploadPermits.hpp"
@@ -218,8 +219,13 @@ namespace Render {
             m_playerPosition = position;
         }
         
-        // Update ClientWorkerPool player position for prioritization
-        Threading::SetClientWorkerPlayerPosition(position);
+        // Update ClientWorkerPool player position for prioritization — as
+        // THIS level's camera. The portal pass calls this for every far
+        // level it draws; keyed per level, that no longer moves the point
+        // the main level's compiles are ordered against.
+        const Game::DimensionId dimension = m_chunkManager ? m_chunkManager->Dimension()
+                                                           : Client::ClientLevels::BoundDimension();
+        Threading::SetClientWorkerPlayerPosition(dimension, position);
     }
 
     glm::vec3 ClientMeshManager::GetPlayerPosition() const {
@@ -355,7 +361,16 @@ namespace Render {
                 // the frame-level phase in PlatformMain and the trace showed
                 // the same label at two different depths.
                 { PROFILE_ZONE_N("WriteBuffers");
-                UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData, result.visibilitySet);
+                if (!UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData, result.visibilitySet)) {
+                    // No room in a mega-buffer. The section holds no GPU data
+                    // now; re-dirty it so it retries once parked meshes have
+                    // made room (ConsumeMeshBufferPressure). Finalizing would
+                    // have marked it built and current — invisible for good.
+                    m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
+                    m_chunkManager->NoteMeshBuildFailed(result.chunkPos, result.sectionY,
+                                                        result.generation);
+                    return;
+                }
                 }
 
                 { PROFILE_ZONE_N("FinalizeUpload");
@@ -553,7 +568,7 @@ namespace Render {
     }
     
     // Float-sized slots per terrain vertex in the MeshBuildResult blobs.
-    // 16-byte TerrainVertex = 4 slots of packed uint16/uint8 data that ride
+    // 20-byte TerrainVertex = 5 slots of packed uint16/uint8 data that ride
     // the float vector as opaque bytes (see CopyVertexLayer).
     // This was a literal 6 from the 24-byte era — the greedy-meshing stride
     // bump missed it, and every non-empty mesh failed validation, which
@@ -677,8 +692,11 @@ namespace Render {
             // stops resolving — there is no pointer left to keep alive.
             m_gpuData.erase(it);
 
+            // No full rebuild: lists hold identity only, and the section now
+            // resolves to nothing. It may have become see-through, which is a
+            // propagation (MC schedulePropagationFrom), not an invalidation.
             if (m_renderer) {
-                m_renderer->MarkVisibleSectionsDirty();
+                m_renderer->SchedulePropagationFrom(chunkPos, sectionY);
             }
             LogMeshActivity("Removed section GPU data", chunkPos, sectionY);
         }
@@ -692,18 +710,22 @@ namespace Render {
             auto it = m_gpuData.find(key);
             if (it == m_gpuData.end()) continue;
             const GPUSectionData& d = it->second;
-            bytes += (size_t(d.opaqueVertexCount) + d.cutoutVertexCount + d.translucentVertexCount) * 16
+            bytes += (size_t(d.opaqueVertexCount) + d.cutoutVertexCount + d.translucentVertexCount) * sizeof(TerrainVertex)
                    + (size_t(d.opaqueIndexCount) + d.cutoutIndexCount + d.translucentIndexCount) * 4;
             if (auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY)) {
                 sectionInfo->gpuData.store(nullptr, std::memory_order_release);
             }
             BumpGpuDataGeneration();
             m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
+            // Its ranges stay allocated but must never be drawn, not even
+            // inside a bridged gap between two visible neighbours.
+            SetMegaBufferNoBridge(chunkPos, sectionY, ChunkMegaBuffer::kNoBridgeParked, true);
             // Node handle: the GPUSectionData object keeps its address.
             auto node = m_gpuData.extract(it);
             m_parkedGpuData.insert(std::move(node));
         }
-        if (m_renderer) m_renderer->MarkVisibleSectionsDirty();
+        // No rebuild: parked sections resolve to nothing and draw nothing
+        // (see ClientChunkManager::NotifyRenderGridChunkUnloaded).
         return bytes;
     }
 
@@ -717,6 +739,7 @@ namespace Render {
             auto node = m_parkedGpuData.extract(it);
             auto ins = m_gpuData.insert(std::move(node));
             GPUSectionData* data = &ins.position->second;
+            SetMegaBufferNoBridge(chunkPos, sectionY, ChunkMegaBuffer::kNoBridgeParked, false);
             if (auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY)) {
                 sectionInfo->gpuData.store(data, std::memory_order_release);
             }
@@ -724,8 +747,33 @@ namespace Render {
             m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, data);
             any = true;
         }
-        if (any && m_renderer) m_renderer->MarkVisibleSectionsDirty();
+        // No rebuild: the chunk's load transition already queued its sections
+        // as propagation sources (ClientChunkManager::NotifyRenderGridChunkLoaded).
         return any;
+    }
+
+    void ClientMeshManager::SetMegaBufferNoBridge(::Game::Math::ChunkPos chunkPos, int sectionY,
+                                                  uint8_t reason, bool on) {
+        const MegaBufferSectionKey megaKey{chunkPos, sectionY};
+        m_opaqueMegaBuffer.SetSectionNoBridge(megaKey, reason, on);
+        m_cutoutMegaBuffer.SetSectionNoBridge(megaKey, reason, on);
+        m_translucentMegaBuffer.SetSectionNoBridge(megaKey, reason, on);
+    }
+
+    void ClientMeshManager::SetOutsideViewChunks(
+            std::unordered_set<::Game::Math::ChunkPos, ::Game::Math::ChunkPosHash> chunks) {
+        // No lock: the mega-buffers and this set are main-thread state, and
+        // the renderer may already hold m_gpuDataMutex when it calls this.
+        constexpr uint8_t kReason = ChunkMegaBuffer::kNoBridgeOutsideView;
+        for (const auto& pos : m_outsideViewChunks) {
+            if (chunks.count(pos)) continue;
+            for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) SetMegaBufferNoBridge(pos, sy, kReason, false);
+        }
+        for (const auto& pos : chunks) {
+            if (m_outsideViewChunks.count(pos)) continue;
+            for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) SetMegaBufferNoBridge(pos, sy, kReason, true);
+        }
+        m_outsideViewChunks = std::move(chunks);
     }
 
     void ClientMeshManager::DiscardParkedChunkGPUData(::Game::Math::ChunkPos chunkPos) {
@@ -771,9 +819,7 @@ namespace Render {
             }
         }
 
-        if (m_renderer) {
-            m_renderer->MarkVisibleSectionsDirty();
-        }
+        // No rebuild — see ParkChunkGPUData.
 
         LogMeshActivity("Removed chunk GPU data from mega-buffers", chunkPos);
     }
@@ -786,7 +832,17 @@ namespace Render {
         m_pendingDestroys.clear();
     }
 
-    void ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
+    bool ClientMeshManager::ConsumeMeshBufferPressure() {
+        // Every flag consumed, not short-circuited.
+        const bool opaqueFailed      = m_opaqueMegaBuffer.ConsumeUploadFailed();
+        const bool cutoutFailed      = m_cutoutMegaBuffer.ConsumeUploadFailed();
+        const bool translucentFailed = m_translucentMegaBuffer.ConsumeUploadFailed();
+        return opaqueFailed || cutoutFailed || translucentFailed ||
+               m_opaqueMegaBuffer.NearCapacity() || m_cutoutMegaBuffer.NearCapacity() ||
+               m_translucentMegaBuffer.NearCapacity();
+    }
+
+    bool ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
                                                  const Network::MeshBuildResult::SectionMeshData& meshData,
                                                  const VisibilitySet& visSet) {
         PROFILE_ZONE;
@@ -795,7 +851,7 @@ namespace Render {
         // Validate section index
         if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
             Log::Error("Invalid section Y %d for chunk (%d, %d)", sectionY, chunkPos.x, chunkPos.z);
-            return;
+            return true;   // nothing a retry could fix
         }
 
         SectionKey key{chunkPos, sectionY};
@@ -807,6 +863,24 @@ namespace Render {
         // Initialize GPU data
         gpuData.chunkPos = chunkPos;
         gpuData.sectionY = sectionY;
+
+        // The fade-in clock (SectionFade.hpp): stamped on the first upload,
+        // kept across rebuilds, written into the origin row at upload.
+        // Only a section whose chunk data arrived moments ago fades — see
+        // SectionFade::kFreshArrivalMs: terrain walked into fades in, a
+        // section first meshed because the player turned to it appears at
+        // once.
+        int32_t fadeStart = 0;
+        if (auto* si = m_chunkManager ? m_chunkManager->GetSectionInfo(chunkPos, sectionY) : nullptr) {
+            if (si->fadeStartMs == 0) {
+                const int32_t now = SectionFade::NowMs();
+                const Client::ClientChunk* chunk = m_chunkManager->GetChunk(chunkPos);
+                const bool fresh = chunk && chunk->dataArrivedMs != 0 &&
+                                   now - chunk->dataArrivedMs <= SectionFade::kFreshArrivalMs;
+                si->fadeStartMs = fresh ? now : SectionFade::kAlreadyVisible;
+            }
+            fadeStart = si->fadeStartMs;
+        }
 
         // Remove existing mega-buffer regions for this section (re-upload)
         MegaBufferSectionKey megaKey{chunkPos, sectionY};
@@ -828,16 +902,18 @@ namespace Render {
         gpuData.cutoutDrawCmd = {};
         gpuData.translucentDrawCmd = {};
         gpuData.visibilitySet = visSet;
+        bool uploadFailed = false;
 
         // Upload each non-empty layer into its mega-buffer and cache draw commands
         if (!meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty()) {
-            m_opaqueMegaBuffer.UploadSection(megaKey,
+            if (!m_opaqueMegaBuffer.UploadSection(megaKey,
                 meshData.opaqueVertices.data(),
                 meshData.opaqueVertexCount,
                 meshData.opaqueIndices.data(),
                 meshData.opaqueIndexCount,
                 meshData.opaqueFaceMap.data(),
-                meshData.opaqueFaceMap.size());
+                meshData.opaqueFaceMap.size(),
+                fadeStart)) uploadFailed = true;
             gpuData.opaqueVertexCount = static_cast<uint32_t>(meshData.opaqueVertexCount);
             gpuData.opaqueIndexCount = static_cast<uint32_t>(meshData.opaqueIndexCount);
             // Cache draw command to avoid per-frame hash lookup in RenderLayerPass
@@ -848,13 +924,14 @@ namespace Render {
             }
         }
         if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
-            m_cutoutMegaBuffer.UploadSection(megaKey,
+            if (!m_cutoutMegaBuffer.UploadSection(megaKey,
                 meshData.cutoutVertices.data(),
                 meshData.cutoutVertexCount,
                 meshData.cutoutIndices.data(),
                 meshData.cutoutIndexCount,
                 meshData.cutoutFaceMap.data(),
-                meshData.cutoutFaceMap.size());
+                meshData.cutoutFaceMap.size(),
+                fadeStart)) uploadFailed = true;
             gpuData.cutoutVertexCount = static_cast<uint32_t>(meshData.cutoutVertexCount);
             gpuData.cutoutIndexCount = static_cast<uint32_t>(meshData.cutoutIndexCount);
             ChunkMegaBuffer::DrawCommand cmd;
@@ -865,11 +942,12 @@ namespace Render {
         }
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
             PROFILE_ZONE_N("Upl.Translucent");
-            m_translucentMegaBuffer.UploadSection(megaKey,
+            if (!m_translucentMegaBuffer.UploadSection(megaKey,
                 meshData.translucentVertices.data(),
                 meshData.translucentVertexCount,
                 meshData.translucentIndices.data(),
-                meshData.translucentIndexCount);
+                meshData.translucentIndexCount,
+                nullptr, 0, fadeStart)) uploadFailed = true;
             gpuData.translucentVertexCount = static_cast<uint32_t>(meshData.translucentVertexCount);
             gpuData.translucentIndexCount = static_cast<uint32_t>(meshData.translucentIndexCount);
             ChunkMegaBuffer::DrawCommand cmd;
@@ -886,8 +964,8 @@ namespace Render {
             {
                 // Sorted on the worker (ClientWorkerPool::ConvertSectionMeshToResult);
                 // keep the centroids for later re-sorts and record the view.
-                static_assert(sizeof(Render::TerrainVertex) == 16,
-                              "translucent centroids are decoded on the worker from the 16-byte terrain vertex");
+                static_assert(sizeof(Render::TerrainVertex) == 20,
+                              "translucent centroids are decoded on the worker from the 20-byte terrain vertex");
                 const size_t quads = meshData.translucentCentroids.size() / 3;
                 gpuData.translucentCentroids.resize(quads);
                 if (quads > 0) {
@@ -906,6 +984,36 @@ namespace Render {
         }
         gpuData.lastUploadFrame = 0; // TODO: Add frame counter
         gpuData.needsUpload = false;
+
+        // A layer found no room (mega-buffer at its slab ceiling). Roll the
+        // whole section back rather than publish a mesh with a layer missing
+        // — counts set, no draw command: the section read as meshed and
+        // current and never drew again. The caller re-dirties it.
+        if (uploadFailed) {
+            m_opaqueMegaBuffer.RemoveSection(megaKey);
+            m_cutoutMegaBuffer.RemoveSection(megaKey);
+            m_translucentMegaBuffer.RemoveSection(megaKey);
+            if (auto* failedInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY)) {
+                failedInfo->gpuData.store(nullptr, std::memory_order_release);
+            }
+            BumpGpuDataGeneration();
+            m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
+            m_gpuData.erase(key);
+            return false;
+        }
+
+        // A fresh region starts unfenced: re-fence it if its chunk is in the
+        // halo outside the rendered view (SetOutsideViewChunks).
+        if (m_outsideViewChunks.count(chunkPos)) {
+            SetMegaBufferNoBridge(chunkPos, sectionY, ChunkMegaBuffer::kNoBridgeOutsideView, true);
+        }
+
+        // The compile's visibility outlives the GPU entry: an empty mesh
+        // erases it below, and the occlusion BFS must still know whether
+        // the section can be seen through (SectionInfo::compiledVisBits).
+        if (auto* compiledInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY)) {
+            compiledInfo->compiledVisBits = visSet.raw();
+        }
 
         // Skip empty sections entirely to avoid "zombie" entries in m_gpuData
         // that waste map lookup time during rendering. Clear the section's
@@ -927,10 +1035,16 @@ namespace Render {
                 // Fresh entry created by this very call — nothing references it.
                 m_gpuData.erase(it);
             }
+            // A compile with no geometry is still a compile: MC propagates
+            // from it (its visibility may have opened) and does not rebuild
+            // the graph. The rebuild this used to force fired constantly
+            // while chunks streamed in — border and light remeshes of buried
+            // sections resolve to empty — and each one replaced the visible
+            // list with a stricter one.
             if (m_renderer) {
-                m_renderer->MarkVisibleSectionsDirty();
+                m_renderer->SchedulePropagationFrom(chunkPos, sectionY);
             }
-            return;
+            return true;
         }
 
         // Store GPU data pointer in the atomic field for lock-free rendering
@@ -989,6 +1103,7 @@ namespace Render {
         }
 
         LogMeshActivity("Uploaded mesh result to GPU", chunkPos, sectionY);
+        return true;
     }
 
     // ========================================================================

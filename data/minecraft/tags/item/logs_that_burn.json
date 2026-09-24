@@ -8,6 +8,24 @@
     "#minecraft:jungle_logs",
     "#minecraft:spruce_logs",
     "#minecraft:mangrove_logs",
-    "#minecraft:cherry_logs"
+    "#minecraft:cherry_logs",
+    "minecraft:whisperwood_log",
+    "minecraft:stripped_whisperwood_log",
+    "minecraft:twilight_oak_log",
+    "minecraft:stripped_twilight_oak_log",
+    "minecraft:canopy_log",
+    "minecraft:stripped_canopy_log",
+    "minecraft:tf_mangrove_log",
+    "minecraft:stripped_tf_mangrove_log",
+    "minecraft:dark_log",
+    "minecraft:stripped_dark_log",
+    "minecraft:skyroot_log",
+    "minecraft:stripped_skyroot_log",
+    "minecraft:golden_oak_log",
+    "minecraft:skyroot_wood",
+    "minecraft:golden_oak_wood",
+    "minecraft:stripped_skyroot_wood",
+    "minecraft:cinder_log",
+    "minecraft:cinder_wood"
   ]
 }

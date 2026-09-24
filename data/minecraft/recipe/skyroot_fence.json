@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "group": "wooden_fence",
+  "key": {
+    "/": "minecraft:skyroot_stick",
+    "M": "minecraft:skyroot_planks"
+  },
+  "pattern": [
+    "M/M",
+    "M/M"
+  ],
+  "result": {
+    "count": 3,
+    "id": "minecraft:skyroot_fence"
+  }
+}

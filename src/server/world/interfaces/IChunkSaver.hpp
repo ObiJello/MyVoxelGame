@@ -76,6 +76,12 @@ namespace Game {
         // instead of snapshotting on the caller's — SaveChunkAsync must
         // snapshot immediately because a live chunk keeps changing. Default:
         // behave like SaveChunkAsync.
+        // SaveChunkAsync without the write cooldown — MC saveAllChunks(flush
+        // = true), for shutdown and other saves that must not skip a chunk.
+        virtual std::future<ChunkSaveResult> SaveChunkNowAsync(const Chunk& chunk) {
+            return SaveChunkAsync(chunk);
+        }
+
         virtual std::future<ChunkSaveResult> SaveEvictedAsync(std::shared_ptr<const Chunk> chunk) {
             return SaveChunkAsync(*chunk);
         }

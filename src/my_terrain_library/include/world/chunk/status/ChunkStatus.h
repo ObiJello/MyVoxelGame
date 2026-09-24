@@ -17,10 +17,14 @@ namespace status {
 /**
  * ChunkStatus - Represents the generation stage of a chunk
  *
- * The 12 stages in order (Java reference lines 19-30, 113-124):
+ * The 10 stages of MC 26.3 in order (ChunkStatus.java:111-120):
  *   EMPTY -> STRUCTURE_STARTS -> STRUCTURE_REFERENCES -> BIOMES ->
- *   NOISE -> SURFACE -> CARVERS -> FEATURES ->
- *   INITIALIZE_LIGHT -> LIGHT -> SPAWN -> FULL
+ *   TERRAIN -> FEATURES -> INITIALIZE_LIGHT -> LIGHT -> SPAWN -> FULL
+ *
+ * TERRAIN replaced 1.18-26.2's NOISE, SURFACE and CARVERS: one step fills
+ * the noise, applies the material (surface) rules and carves. Saves from
+ * before it name the old statuses; see SerializableChunkData for how they
+ * are read (MC's MergeTerrainChunkStatusFix).
  *
  * Each status tracks:
  *   - Parent status (what must be done before)
@@ -39,22 +43,20 @@ public:
 
     /**
      * Status index values - matches Java static initialization order
-     * Reference: ChunkStatus.java lines 113-124
+     * Reference: ChunkStatus.java lines 111-120 (26.3)
      */
     enum Index : int32_t {
         EMPTY_INDEX = 0,
         STRUCTURE_STARTS_INDEX = 1,
         STRUCTURE_REFERENCES_INDEX = 2,
         BIOMES_INDEX = 3,
-        NOISE_INDEX = 4,
-        SURFACE_INDEX = 5,
-        CARVERS_INDEX = 6,
-        FEATURES_INDEX = 7,
-        INITIALIZE_LIGHT_INDEX = 8,
-        LIGHT_INDEX = 9,
-        SPAWN_INDEX = 10,
-        FULL_INDEX = 11,
-        STATUS_COUNT = 12
+        TERRAIN_INDEX = 4,
+        FEATURES_INDEX = 5,
+        INITIALIZE_LIGHT_INDEX = 6,
+        LIGHT_INDEX = 7,
+        SPAWN_INDEX = 8,
+        FULL_INDEX = 9,
+        STATUS_COUNT = 10
     };
 
 private:
@@ -77,14 +79,12 @@ private:
 
 public:
     // Static status instances (defined in cpp)
-    // Reference: ChunkStatus.java lines 19-30, 113-124
+    // Reference: ChunkStatus.java lines 111-120 (26.3)
     static const ChunkStatus EMPTY;
     static const ChunkStatus STRUCTURE_STARTS;
     static const ChunkStatus STRUCTURE_REFERENCES;
     static const ChunkStatus BIOMES;
-    static const ChunkStatus NOISE;
-    static const ChunkStatus SURFACE;
-    static const ChunkStatus CARVERS;
+    static const ChunkStatus TERRAIN;
     static const ChunkStatus FEATURES;
     static const ChunkStatus INITIALIZE_LIGHT;
     static const ChunkStatus LIGHT;

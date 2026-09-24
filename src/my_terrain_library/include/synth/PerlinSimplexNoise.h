@@ -118,6 +118,29 @@ public:
      * @param useNoiseStart Whether to add noise offsets
      * @return Noise value in range approximately [-1, 1]
      */
+    /**
+     * 26.3 NoiseStack.get(x, y) over the same layers: every SimplexNoise.get
+     * narrows to float and the stack accumulates amplitude * value in float
+     * (amplitudes are the float valueFactors 1/7, 2/7, 4/7 ...).
+     * Reference: 26.3 NoiseStack.java get(double, double), SimplexNoise.get
+     */
+    float getNoiseStackValue(double x, double y) const {
+        float value = 0.0f;
+        double factor = m_highestFreqInputFactor;
+        double valueFactor = m_highestFreqValueFactor;
+        for (const auto& noiseLevel : m_noiseLevels) {
+            if (noiseLevel) {
+                const float noise = static_cast<float>(noiseLevel->getValue(x * factor, y * factor));
+                // Separate statements: no fused multiply-add (Java rounds the product).
+                const float term = static_cast<float>(valueFactor) * noise;
+                value += term;
+            }
+            factor /= 2.0;
+            valueFactor *= 2.0;
+        }
+        return value;
+    }
+
     double getValue(double x, double y, bool useNoiseStart = false) const {
         double value = 0.0;
         double factor = m_highestFreqInputFactor;
@@ -167,7 +190,8 @@ public:
      */
     static double getValue(double x, double z) {
         ensureInitialized();
-        return s_instance->getValue(x, z, false);
+        // 26.3 SimplexNoise.get returns float: (float)(70.0 * (n0 + n1 + n2)).
+        return static_cast<double>(static_cast<float>(s_instance->getValue(x, z, false)));
     }
 };
 

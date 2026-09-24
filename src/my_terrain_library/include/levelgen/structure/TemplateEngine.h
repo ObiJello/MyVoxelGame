@@ -50,6 +50,15 @@ struct TemplateBlockInfo {
     std::shared_ptr<nbt::CompoundTag> nbt;
 };
 
+/** One entry of the NBT "entities" list. Reference:
+ *  StructureTemplate.StructureEntityInfo - pos (template-local, fractional),
+ *  blockPos (the block it stands in) and the saved entity compound. */
+struct TemplateEntityInfo {
+    double x = 0.0, y = 0.0, z = 0.0;
+    int32_t blockX = 0, blockY = 0, blockZ = 0;
+    std::shared_ptr<nbt::CompoundTag> nbt;
+};
+
 struct FullTemplateData {
     int32_t sizeX = 0, sizeY = 0, sizeZ = 0;
     // Palette states resolved against the C++ registry (throws if a palette
@@ -57,6 +66,9 @@ struct FullTemplateData {
     // invisible parity hole).
     std::vector<std::vector<BlockState*>> palettes;
     std::vector<TemplateBlockInfo> blocks;
+    // Reference: StructureTemplate.entityInfoList (loaded from "entities";
+    // entries without an "nbt" compound are skipped, as Java's ifPresent).
+    std::vector<TemplateEntityInfo> entities;
 
     bool empty() const { return palettes.empty(); }
 };
@@ -64,6 +76,9 @@ struct FullTemplateData {
 /** Reference: StructurePlaceSettings - the fields placement needs. */
 struct TemplatePlaceSettings {
     int rotation = 0;               // Rot ordinal (0..3)
+    // StructurePlaceSettings.setRandom(r): the palette comes from that random
+    // (drawn by the caller, e.g. TemplateFeature); -1 = seeded by position.
+    int paletteIndex = -1;
     int mirror = 0;                 // Mirror ordinal (0..2)
     core::BlockPos rotationPivot{0, 0, 0};
     bool ignoreAir = false;         // BlockIgnoreProcessor.STRUCTURE_AND_AIR
@@ -108,9 +123,33 @@ struct TemplatePlaceSettings {
     };
     std::vector<CappedReplace> cappedReplaces;
 
+    // Reference: RuleProcessor(ProcessorRule(BlockMatchTest(block),
+    // AlwaysTrueTest, PosAlwaysTrueTest, block.defaultBlockState(),
+    // AppendLoot(lootTable))) - every matching block becomes its default state
+    // with {LootTable, LootTableSeed}; seed = the first nextLong of
+    // LegacyRandomSource(Mth.getSeed(worldPos)) (the desert well's suspicious
+    // sand).
+    struct AppendLootRule {
+        std::string block;
+        std::string lootTable;
+        std::string beId = "minecraft:brushable_block";
+    };
+    std::vector<AppendLootRule> appendLootRules;
+
     // Reference: StructurePlaceSettings.setKnownShape(true) - pool elements
     // skip BOTH shape-update passes entirely.
     bool knownShape = false;
+
+    // Reference: StructurePlaceSettings.ignoreEntities (default false) -
+    // WoodlandMansionPiece and EndCityPiece set it; everything else places
+    // the template's entities (placeEntities).
+    bool ignoreEntities = false;
+    // Reference: StructurePlaceSettings.finalizeEntities (default false) -
+    // SinglePoolElement.getSettings sets it, so jigsaw-placed mobs (village
+    // villagers, golems, cats, animals; bastion piglins and hoglins; outpost
+    // cage golems and allays) get finalizeSpawn(STRUCTURE). Template pieces
+    // (the igloo's villager and zombie villager) do not.
+    bool finalizeEntities = false;
 
     // Reference: JigsawReplacementProcessor - jigsaw blocks with nbt become
     // their parsed final_state (default "minecraft:air"); a structure_void
@@ -143,6 +182,11 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
                   const TemplatePlaceSettings& settings, WorldgenRandom& random,
                   const BoundingBox& chunkBB);
 
+/** Reference: StructureTemplate.transform(Vec3, mirror, rotation, pivot) -
+ *  the fractional twin of calculateRelativePosition (mirror flips about the
+ *  block's far face: 1 - x, and rotations add the +1). */
+void transformVec(const TemplatePlaceSettings& settings, double& x, double& y, double& z);
+
 /** Reference: StructureTemplate.calculateRelativePosition (transform of a
  *  template-local pos with the settings' mirror/rotation/pivot). */
 core::BlockPos calculateRelativePosition(const TemplatePlaceSettings& settings,
@@ -167,10 +211,14 @@ std::vector<DataMarker> dataMarkers(const std::string& templateId,
  * B8: canonical save-format E payload for a template-placed block entity
  * (load->save round trip modeled per type; see B8_BE_INVENTORY.md). Returns
  * "" for unmodeled types (the pending {id:"DUMMY"} tag then remains).
+ * `placementRotation` is the piece's rotation ordinal (0..3): engine block
+ * entities that must know how their structure was turned record it (the
+ * Aurelith resonance engine's Rotation — see its branch).
  */
 std::string blockEntityPayloadFor(const std::string& blockId,
                                   const nbt::CompoundTag* templateNbt,
-                                  std::optional<int64_t> lootSeed);
+                                  std::optional<int64_t> lootSeed,
+                                  std::optional<int> placementRotation = std::nullopt);
 
 /**
  * Reference: TemplateStructurePiece.postProcess jigsaw pass - every jigsaw
@@ -191,6 +239,14 @@ BlockState* updateShapeForBlock(BlockState* state, WorldGenLevel* level,
                                 const core::BlockPos& pos, core::Direction dir,
                                 const core::BlockPos& neighborPos,
                                 BlockState* neighborState);
+
+/**
+ * A "namespace:block[k=v,...]" spec resolved like BlockStateParser: listed
+ * properties over the block's default state. Throws for an unregistered
+ * block or an unknown property value. Exposed for code-placed engine pieces
+ * (AurelithOutskirts' roads) that name their blocks the way templates do.
+ */
+BlockState* parseBlockStateSpec(const std::string& spec);
 
 } // namespace TemplateEngine
 

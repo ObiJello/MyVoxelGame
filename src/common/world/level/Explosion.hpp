@@ -109,6 +109,11 @@ namespace Game {
 
         // Broadcast the client-side visual. False only for tests.
         bool  spawnVisual = true;
+
+        // MC Level.explode's `explosionSound` (ClientboundExplodePacket
+        // .explosionSound): GENERIC_EXPLODE for everything but the wind
+        // charges (WIND_CHARGE_BURST). Empty = a silent blast.
+        const char* explosionSound = "entity.generic.explode";
     };
 
     struct ExplosionResult {

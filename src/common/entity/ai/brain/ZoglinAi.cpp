@@ -5,6 +5,7 @@
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -133,9 +134,13 @@ namespace Game {
     void ZoglinAi::UpdateActivity(Zoglin& zoglin) {
         Brain* brain = zoglin.GetBrain();
         if (!brain) return;
-        // MC Zoglin.updateActivity — the FIGHT-entry angry sound waits on the
-        // sound system; the aggressive flag is what reaches the wire.
+        // MC Zoglin.updateActivity — entering FIGHT plays playAngrySound
+        // (ZOGLIN_ANGRY); the aggressive flag is what reaches the wire.
+        const std::optional<Activity> oldActivity = brain->GetActiveNonCoreActivity();
         brain->SetActiveActivityToFirstValid({ Activity::Fight, Activity::Idle });
+        if (brain->GetActiveNonCoreActivity() == Activity::Fight && oldActivity != Activity::Fight) {
+            zoglin.MakeSound(SoundEvents::ZOGLIN_ANGRY);
+        }
         zoglin.SetAggressive(brain->HasMemoryValue(MemoryModule::AttackTarget));
     }
 

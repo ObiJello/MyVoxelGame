@@ -19,11 +19,11 @@ namespace Game {
     struct BlockHitResult {
         glm::ivec3 blockPos;        // Position of the clicked block
         int face;                   // Face that was clicked (0-5: bottom, top, north, south, west, east)
-        glm::vec3 hitPoint;         // Exact world-space hit point
+        glm::dvec3 hitPoint;        // Exact world-space hit point (double, MC's BlockHitResult location)
         bool insideBlock;           // True if raycast started inside the block
         
         BlockHitResult() = default;
-        BlockHitResult(const glm::ivec3& pos, int f, const glm::vec3& hit, bool inside)
+        BlockHitResult(const glm::ivec3& pos, int f, const glm::dvec3& hit, bool inside)
             : blockPos(pos), face(f), hitPoint(hit), insideBlock(inside) {}
     };
     
@@ -105,7 +105,8 @@ namespace Game {
         // Get the cursor position within the clicked face (0-1 range)
         glm::vec3 getCursorPos() const {
             // Calculate block-local coordinates
-            glm::vec3 localPos = hitResult.hitPoint - glm::vec3(hitResult.blockPos);
+            // The difference is small; float once it is taken in double.
+            glm::vec3 localPos(hitResult.hitPoint - glm::dvec3(hitResult.blockPos));
             
             // Clamp to [0, 1) range
             localPos.x = glm::clamp(localPos.x - glm::floor(localPos.x), 0.0f, 0.999f);
@@ -177,11 +178,11 @@ namespace Game {
     };
     
     // Helper to convert packet cursor coordinates to world-space hit point
-    inline glm::vec3 faceLocalUVToWorld(int face, float cursorX, float cursorY, float cursorZ, const glm::ivec3& blockPos) {
+    inline glm::dvec3 faceLocalUVToWorld(int face, float cursorX, float cursorY, float cursorZ, const glm::ivec3& blockPos) {
         // The cursor coordinates are in block-local space [0,1)
         // We need to convert them to world space based on which face was hit
         
-        glm::vec3 worldPos = glm::vec3(blockPos);
+        glm::dvec3 worldPos = glm::dvec3(blockPos);
         
         // Add the local offset
         // The cursor values represent the position on the face that was clicked

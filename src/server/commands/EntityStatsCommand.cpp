@@ -16,7 +16,7 @@ namespace Server {
         dispatcher.RegisterCommand("entitystats", EntityStatsCommand::Execute);
     }
 
-    void EntityStatsCommand::Execute(ServerPlayer& /*sender*/,
+    void EntityStatsCommand::Execute(const CommandSourceStack& source,
                                      const std::vector<std::string>& args,
                                      ServerConnection& connection,
                                      PlayerSessionManager& /*sessionManager*/) {

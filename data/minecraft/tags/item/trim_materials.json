@@ -10,6 +10,13 @@
     "minecraft:netherite_ingot",
     "minecraft:quartz",
     "minecraft:redstone",
-    "minecraft:resin_brick"
+    "minecraft:resin_brick",
+    "minecraft:enchanted_gravitite",
+    "minecraft:golden_amber",
+    "minecraft:ironwood_ingot",
+    "minecraft:steeleaf_ingot",
+    "minecraft:knightmetal_ingot",
+    "minecraft:naga_scale",
+    "minecraft:fiery_ingot"
   ]
 }

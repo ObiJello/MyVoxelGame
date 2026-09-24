@@ -85,6 +85,7 @@ namespace Network {
     // Legitimate use, and the reason it exists: skipping compression for a
     // same-machine connection, MC's isMemoryConnection (LoginPacketListener).
     bool NetworkConnection::IsLoopback() const {
+        if (IsRelayed()) return false;
         try {
             const auto endpoint = m_socket.remote_endpoint();
             return endpoint.address().is_loopback();
@@ -199,6 +200,7 @@ namespace Network {
         }
         
         m_stats.bytesSent.fetch_add(queuedBytes);
+        m_stats.pendingSendBytes.fetch_add(queuedBytes, std::memory_order_relaxed);
     }
 
     void NetworkConnection::StartRead() {
@@ -424,6 +426,7 @@ namespace Network {
         struct SendBatch {
             std::vector<uint8_t> bytes;
             std::function<void()> onSent;   // at most one, for the LAST frame
+            size_t bodyBytes = 0;           // unframed sizes, for pendingSendBytes
         };
         auto batch = std::make_shared<SendBatch>();
 
@@ -454,6 +457,7 @@ namespace Network {
         // send-completion hook and the very next packet may already have been
         // framed under the old rules, which the peer would then mis-parse.
         for (PendingSend& e : taken) {
+            batch->bodyBytes += e.data.size();
             const std::vector<uint8_t> framed = FrameForWire(e.data);
             batch->bytes.insert(batch->bytes.end(), framed.begin(), framed.end());
             if (e.onSent) batch->onSent = std::move(e.onSent);
@@ -470,6 +474,11 @@ namespace Network {
                     // this packet and nothing before it. Unconditional, as in
                     // PacketSendListener.thenRun.
                     if (batch->onSent) batch->onSent();
+                    self->m_stats.pendingSendBytes.fetch_sub(
+                        std::min<uint64_t>(batch->bodyBytes,
+                                           self->m_stats.pendingSendBytes.load(std::memory_order_relaxed)),
+                        std::memory_order_relaxed);
+                    self->m_stats.wireBytesSent.fetch_add(bytes, std::memory_order_relaxed);
                     self->HandleWrite(ec, bytes);
                 }));
     }

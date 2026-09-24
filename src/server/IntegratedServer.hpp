@@ -13,10 +13,13 @@
 #include "commands/CommandDispatcher.hpp"
 #include "server/world/watch/ChunkLoader.hpp"
 #include "ServerTickRateManager.hpp"
+#include "ServerStressStats.hpp"
 #include <memory>
 #include <functional>
 #include <optional>
 #include <vector>
+#include <string>
+#include <climits>
 #include <atomic>
 #include <thread>
 #include <chrono>
@@ -26,6 +29,7 @@
 #include <array>
 
 #include "common/world/level/DimensionId.hpp"
+#include "common/world/portal/PortalFamily.hpp"
 
 namespace Game {
     class Mob;
@@ -40,6 +44,8 @@ namespace Game {
 #include "common/entity/EntityType.hpp"
 
 namespace Game::Immersive { struct Portal; }
+
+namespace Game { struct BlockHitResult; }
 
 namespace Server {
 
@@ -114,6 +120,10 @@ namespace Server {
     class ChunkStatusManager;
     class SendScheduler;
     class PlayerSessionManager;
+    class RemoteControlManager;
+    class MorphCarry;
+    class MorphBlockAnchor;
+    class ServerSoundBroadcaster;
     class ServerPlayer;
     class PlayerSession;
     class SectionChangeAccumulator;
@@ -124,6 +134,7 @@ namespace Server {
     class ServerLevelBridge;
     class ServerEntityTracker;
     class ServerLevel;
+    class NetherPortalIndex;
     struct ItemPickupEvent;
     struct XpOrbPickupEvent;
 
@@ -137,6 +148,10 @@ namespace Server {
         float chunkProcessBudgetMs = 2.0f;     // Time budget for chunk processing per tick
         int defaultViewDistance = 8;           // Default view distance in chunks (Minecraft-like)
         int serverViewDistance = 32;           // Server's max view distance cap (clients clamped to this)
+        // Cap on the simulation distance clients may request. Above the view
+        // distance the extra ring is loaded and ticked but never sent (see
+        // ChunkLoader::Source::Simulation). ChunkLevel's scale is sized for it.
+        int maxSimulationDistance = 128;
         bool enableAsyncChunkLoading = true;   // Use ServerWorkerPool for chunk loading
         bool enableChunkCaching = true;        // Keep recently used chunks in memory
         std::string minecraftWorldPath;        // Optional Minecraft world to load (empty by default)
@@ -170,14 +185,34 @@ namespace Server {
         // still be broken during the session; nothing is persisted.
         bool readOnlyWorld = false;
         int defaultGameMode = 0;               // World game mode applied to joining players (GameMode raw: 0 survival, 1 creative)
+        bool hardcore = false;                 // level.dat `hardcore` for a NEW world (an existing save's file wins)
         int64_t initialDayTime = 6000;         // World time restored from world metadata (6000 = noon)
         bool doDaylightCycle = false;          // doDaylightCycle gamerule restored from world metadata
         // Immersive nether portals (see-through, no purple blocks) vs the
         // vanilla block portals. /gamerule immersive_portals, --vanilla-portals.
+        // Nether only: Hush and Aether portals are always vanilla blocks
+        // (Game::Portals::FamilyIsImmersive).
         bool immersivePortals = true;
         // World options (see Game::Portals::WorldWrapSize / DimensionStack).
         int  worldWrapSize = 0;
         bool dimensionStack = false;
+        // /gamerule redstone_plus (RedstonePlus.hpp): dust without range
+        // decay, torches without burn-out. Per world (level.dat obeycraft).
+        bool redstonePlus = false;
+        // /gamerule redstone_chunks (ChunkKeeper.hpp): every saved chunk with a
+        // redstone component stays loaded and ticking. Per world (level.dat).
+        bool redstoneChunks = false;
+        // /gamerule vein_mine_max_blocks (PlayerSession::VeinMineFrom): the
+        // most extra blocks one vein mine takes. Per world (level.dat).
+        int veinMineMaxBlocks = 64;
+        // /gamerule shared_vitals (PlayerSessionManager::ShareVitals): every
+        // player in the world has one health and one hunger between them.
+        // Per world (level.dat obeycraft).
+        bool sharedVitals = false;
+        // /gamerule twilight_forest, /gamerule aether (ModDimensions.hpp):
+        // whether each ported mod dimension can be entered. Per world.
+        bool twilightForestEnabled = true;
+        bool aetherEnabled = true;
         // 0 peaceful, 1 easy, 2 normal, 3 hard (MC Difficulty ids). Applied
         // to every level's World; /difficulty changes it for the session and
         // the save.
@@ -243,6 +278,11 @@ namespace Server {
         // wants LevelOf() instead; passing this where a dimension was meant is
         // how a Nether edit lands in the Overworld.
         Game::World* GetWorld() const;
+        // MC CommonPlayerSpawnInfo.hashedSeed — BiomeManager.obfuscateSeed of
+        // the world seed, which the client zooms biomes with. One value for
+        // every dimension, as in MC. Safe from the network thread (the
+        // overworld and its cached seed are fixed before any connection).
+        int64_t GetBiomeZoomSeed() const;
 
         // ========================================================================
         // DIMENSIONS
@@ -262,6 +302,14 @@ namespace Server {
         // The overworld, which always exists once Initialize has run.
         ServerLevel& Overworld() const;
 
+        // Where the twilight_portal blocks of a dimension are — the Twilight
+        // Forest pool portal's stand-in for TFTeleporter's portal scan and
+        // TeleporterCache (server/portal/TwilightTeleporter). Not a
+        // PortalFamily, so it is not one of ServerLevel::Portals; kept here,
+        // per dimension, fed by the same chunk-result scan. Created on first
+        // use. Server thread only.
+        NetherPortalIndex& TwilightPortalIndex(Game::DimensionId dimension);
+
 #if ENABLE_IMMERSIVE_PORTALS
         // Every immersive portal in every dimension — see
         // server/portal/ImmersivePortalRegistry.hpp. Null until Initialize
@@ -272,10 +320,50 @@ namespace Server {
         // The immersive/vanilla switch (config + the common-side global).
         void SetImmersivePortals(bool on);
         bool ImmersivePortalsEnabled() const { return m_config.immersivePortals; }
+        // /gamerule redstone_plus: config + the common-side global the wire
+        // evaluator and torch tick read.
+        void SetRedstonePlus(bool on);
+        bool RedstonePlusEnabled() const { return m_config.redstonePlus; }
+        void SetRedstoneChunks(bool on);
+        bool RedstoneChunksEnabled() const { return m_config.redstoneChunks; }
+        // /gamerule vein_mine_max_blocks: the cap PlayerSession::VeinMineFrom
+        // stops at (0 = vein mining off). Clamped to [0, kMaxVeinMineMaxBlocks].
+        static constexpr int kDefaultVeinMineMaxBlocks = 64;
+        static constexpr int kMaxVeinMineMaxBlocks     = 4096;
+        void SetVeinMineMaxBlocks(int count);
+        // /gamerule shared_vitals: one health and hunger pool for every
+        // player (PlayerSessionManager::ShareVitals).
+        void SetSharedVitals(bool on);
+        bool SharedVitalsEnabled() const { return m_config.sharedVitals; }
+        // /gamerule twilight_forest / aether: can the mod dimension be entered.
+        void SetModDimensionEnabled(Game::DimensionId dimension, bool on);
+        bool ModDimensionEnabled(Game::DimensionId dimension) const {
+            return dimension == Game::DimensionId::Aether ? m_config.aetherEnabled
+                 : dimension == Game::DimensionId::TwilightForest ? m_config.twilightForestEnabled
+                 : true;
+        }
+        int  VeinMineMaxBlocks() const { return m_config.veinMineMaxBlocks; }
+        // /gamerule portal_gun: off closes every placed pair and the gun goes
+        // inert (PortalGunBehavior); kept per world in the sidecar.
+        void SetPortalGunAllowed(bool on);
+        // Push the current immersive_portals / portal_gun switches to every client.
+        void BroadcastWorldRules();
+        // immersive_portals off/on: nether portal blocks in the immersive
+        // nether frames, and out of them again. Hush and Aether portals are
+        // always vanilla blocks and are never touched.
+        void FillNetherFramesWithPortalBlocks();
+        void ClearPortalBlocksInImmersiveFrames();
+        // Hush and Aether portals an older build lit as immersive surfaces
+        // become vanilla portal blocks (both ends) and their records go.
+        // Once, on the server thread before the first tick.
+        void ConvertVanillaFamilyPortals();
 #endif
-        // A block of obsidian was removed somewhere (World::SetBlock). Breaks
-        // any immersive nether portal whose frame it belonged to.
-        void OnObsidianRemoved(Game::DimensionId dimension, const glm::ivec3& pos);
+        // A block was removed somewhere (World::SetBlock, block-break);
+        // `removed` is what stood there. If it is a portal family's frame
+        // block (obsidian, reinforced deepslate), breaks any immersive
+        // portal of that family whose frame it belonged to.
+        void OnFrameBlockRemoved(Game::DimensionId dimension, const glm::ivec3& pos,
+                                 Game::BlockID removed);
 
         // A chunk's data (full or "unchanged") just went out to a session.
         // Anything anchored in that chunk that the client must hold alongside
@@ -350,6 +438,14 @@ namespace Server {
         // after /time or /gamerule doDaylightCycle changes.
         void ForceTimeSync();
 
+        // ── Sleeping (MC ServerLevel.sleepStatus over SleepStatus) ───────
+        // Recount who is in bed among the Overworld's players and, when the
+        // count moved, tell everyone "N/M players sleeping" or "Sleeping
+        // through this night" on the action bar. MC ServerLevel
+        // .updateSleepingPlayerList; called on every sleep transition and
+        // once a tick (TickSleep), which also covers joins and leaves.
+        void UpdateSleepingPlayerList();
+
         // The level.dat this session started from, when the world had one.
         // Its gamerules are the authority (MC PrimaryLevelData): applied to
         // the overworld at Initialize and copied to every level built later.
@@ -413,6 +509,12 @@ namespace Server {
 
         // Get session manager for accessing player sessions
         PlayerSessionManager* GetSessionManager() const { return m_sessionManager.get(); }
+        // /control pairs (src/server/control/RemoteControlManager.hpp).
+        RemoteControlManager& RemoteControl() { return *m_remoteControl; }
+        // /morph item pickups (src/server/entity/MorphCarry.hpp).
+        MorphCarry& Carry() { return *m_morphCarry; }
+        // /morph block grid locks (src/server/entity/MorphBlockAnchor.hpp).
+        MorphBlockAnchor& BlockAnchor() { return *m_morphBlockAnchor; }
 
         // Dropped-item entities. Every "this produced an item in the world"
         // path goes through here — block loot, container spill, player throws,
@@ -432,22 +534,36 @@ namespace Server {
 
         // Process watch set changes: request loading for new chunks, unload for removed
         void ProcessWatchSetChanges();
+        // (dim, pos) has left a session's view. Unless a session other than
+        // `excluding`, or the ChunkKeeper, still wants the chunk: release its
+        // generation ticket (MC: the PLAYER_LOADING ticket goes) and cancel
+        // its pending load. Server thread.
+        void CancelLoadIfUnwanted(Game::DimensionId dim, Game::Math::ChunkPos pos,
+                                  const PlayerSession* excluding,
+                                  const std::vector<std::shared_ptr<PlayerSession>>& sessions);
 
         // Drains the terrain generator's main-thread queue (MC's
         // runDistanceManagerUpdates). MUST run on the server thread: the tasks
         // touch ChunkMap/DistanceManager, which the terrain library treats as
         // main-thread-only, so a worker cannot pump this itself.
         //
-        // Called from the server loop's idle window, not just once per tick.
-        // Measured 2026-08: a ServerWorker blocked in ServerChunkCache::getChunk
-        // waits on THIS queue, so pumping it only at 20 TPS added ~25 ms of pure
-        // latency to every chunk (measured wait 32.79 ms of a 68.68 ms load).
+        // Called from the server loop's window between ticks, and only there —
+        // MC's MainThreadExecutor.pollTask runs in the same place. Inside the
+        // tick, chunk work is ServiceGenerationQueues (requests in, results
+        // out) plus TickLibrary's one distance-manager pass. Measured 2026-08:
+        // a ServerWorker blocked in ServerChunkCache::getChunk waits on THIS
+        // queue, so pumping it only at 20 TPS added ~25 ms of pure latency to
+        // every chunk (measured wait 32.79 ms of a 68.68 ms load).
         //
         // `deadline` is mandatory and is the ONLY bound on how long this runs.
         // One unit of pipeline work is bounded; the pipeline is not. Every
         // caller must pass a deadline it can afford to reach — see
         // MyTerrainGenerator::PumpOneTask for what happened when nothing did.
         void PumpChunkPipeline(std::chrono::steady_clock::time_point deadline);
+        // One level's generation bookkeeping, no generation work: issue queued
+        // requests nearest-first (each adds a ticket), run the stall watchdog,
+        // hand completed chunks to conversion. Called by PumpChunkPipeline and
+        // once a tick from ProcessWatchSetChanges.
         void ServiceGenerationQueues(ServerLevel& level, Game::MyTerrainGenerator& gen);
 
         // The OVERWORLD's terrain generator, or null before its provider is
@@ -549,6 +665,40 @@ namespace Server {
         int  GetDifficulty() const { return m_config.difficulty; }
         void SetDifficulty(int difficulty);
 
+        // ── World options (MC PrimaryLevelData + IntegratedServer fields) ──
+        // What the pause menu's World Options screen reads and what its
+        // Apply sends back through /worldoptions, /defaultgamemode and
+        // /publish. The level.dat-backed ones are written on change; the
+        // multiplayer ones live for the session, as vanilla's do.
+        bool IsAllowCommands() const { return m_allowCommands.load(); }
+        void SetWorldAllowCommands(bool allow);                 // level.dat allowCommands
+        bool IsHardcore() const { return m_hardcore.load(); }
+        bool IsDifficultyLocked() const { return m_difficultyLocked.load(); }
+        void SetDifficultyLocked(bool locked);                  // level.dat DifficultyLocked
+        int  GetWorldGameType() const { return m_config.defaultGameMode; }
+        void SetWorldGameType(int gameMode);                    // level.dat GameType
+        // MC IntegratedServer.guestCommandAccess: may players who are not
+        // the host run commands? Default false.
+        bool GetGuestCommandAccess() const { return m_guestCommandAccess.load(); }
+        void SetGuestCommandAccess(bool access);               // saved with the world (level.dat obeycraft)
+        // MC IntegratedServer.forceGameMode: every joining guest is put in
+        // the world's default game mode. Default true.
+        bool ForceGameMode() const { return m_forceGameMode.load(); }
+        void SetForceGameMode(bool force);
+        // MC MultiplayerScope LAN (true) / OFF (false). OFF closes the door
+        // AND disconnects every guest (IntegratedServer.unpublishServer);
+        // the host's own connection stays. Default: joinable.
+        bool IsJoinable() const { return m_joinable.load(); }
+        bool SetJoinable(bool joinable);
+        // MC changeMultiplayerScope with another port: the listener moves,
+        // guests are disconnected (they would be on the wrong port), the
+        // host stays. False when the port cannot be bound.
+        bool ChangePort(uint16_t port);
+        uint16_t GetPort() const;
+        bool IsSingleplayerOwnerConnection(uint32_t connectionId) const {
+            return connectionId != 0 && m_singleplayerOwnerConnId.load() == connectionId;
+        }
+
         // ========================================================================
         // STATISTICS
         // ========================================================================
@@ -562,7 +712,6 @@ namespace Server {
             std::atomic<uint64_t> packetsSent{0};
             std::atomic<float> averageTickTime{0.0f};
             std::atomic<float> averageTPS{20.0f};
-            std::atomic<size_t> noiseChunksReleased{0};
             std::atomic<size_t> libraryHoldersUnloaded{0};
 
             void Reset() {
@@ -574,11 +723,76 @@ namespace Server {
         };
 
         const ServerStats& GetStats() const { return m_stats; }
+        // Once-a-second load report (tick time per phase, chunk streaming,
+        // per-player send backlog). OBEY_SERVER_STATS=1, or a headless server.
+        // Configure before Start(); runs on the server thread.
+        ServerStressStats& StressStats() { return m_stress; }
+
+        // Chunks a session stopped watching WITHOUT the per-chunk leave
+        // callback — a dimension change forgets the old dimension's view, a
+        // disconnect clears everything. Their pending loads are cancelled on
+        // the next tick (unless someone else still wants them); before this
+        // they kept generating for nobody (a player hopping dimensions leaked
+        // their whole view every time). Any thread.
+        void QueueAbandonedChunks(std::vector<DimChunkKey> keys);
+        uint64_t AbandonedLoadsCancelled() const { return m_abandonedLoadsCancelled; }
         void ResetStats() { m_stats.Reset(); }
         void LogStats() const;
 
         // Chunk streaming metrics
         size_t GetPendingChunkLoadCount() const;
+
+        // ── F3 debug sample ──────────────────────────────────────────────
+        // What the host's F3 screen shows about the server. MC reads its
+        // integrated server directly (with a future for the chunk); here the
+        // sample is taken ON THE SERVER THREAD at the end of every tick and
+        // copied out under a mutex, so the overlay never touches level state
+        // from the render thread.
+        struct DebugSample {
+            bool valid = false;
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            // MC getCurrentSmoothedTickTime / TickRateManager.
+            float smoothedTickMs = 0.0f;
+            float msPerTick = 50.0f;
+            bool  frozen = false, stepping = false, sprinting = false;
+            // The player's level (MC ServerLevel / ServerChunkCache stats).
+            size_t loadedChunks = 0, tickets = 0, playerTickets = 0;
+            size_t blockTickingChunks = 0, entityTickingChunks = 0;
+            int    mobCount = 0;
+            int    forceLoadedChunks = 0;     // ChunkKeeper sources: /forceload + redstone index
+            int    difficulty = 0;            // Game::Difficulty raw
+            int64_t dayTime = 0, gameTime = 0;
+            // NaturalSpawner.SpawnState of the last spawn pass.
+            int spawnableChunks = 0;
+            int categoryCounts[8] = {};
+            // The column the player stands in (MC's serverChunk).
+            bool chunkLoaded = false;
+            bool heightmapsPrimed = false;
+            int  heightWorldSurface = 0, heightOceanFloor = 0;
+            int  heightMotionBlocking = 0, heightMotionBlockingNoLeaves = 0;
+            int64_t  inhabitedTime = 0;       // Chunk::inhabitedTime of the player's chunk
+            uint16_t biome = 0;
+            int  skyLight = 0, blockLight = 0;
+            // visualize_chunks_on_server: status of every chunk within
+            // statusRadius of the player, row-major (z outer, x inner), as
+            // ChunkStatus raw values. Empty unless requested.
+            int statusRadius = 0;
+            std::vector<uint8_t> chunkStatus;
+            // chunk_generation_stats: the noise router's density samples and
+            // the biome builder's bands at the feet (MC NoiseBasedChunkGenerator
+            // .addDebugScreenInfo + MultiNoiseBiomeSource.addDebugInfo),
+            // re-sampled when the feet block changes. Empty unless requested.
+            std::vector<std::string> chunkGenLines;
+        };
+        DebugSample GetDebugSample() const;
+        // Whether the sample should carry the chunk-status map (costs a
+        // status lookup per chunk in a 39x39 square each tick).
+        void SetDebugWantsChunkMap(bool wants) { m_debugWantsChunkMap.store(wants, std::memory_order_relaxed); }
+        void SetDebugWantsChunkGen(bool wants) { m_debugWantsChunkGen.store(wants, std::memory_order_relaxed); }
+        // The F3+2 TPS chart: every tick since the last drain as
+        // {full tick, tickServer, scheduled tasks, idle} nanoseconds
+        // (MC TpsDebugDimensions).
+        void DrainTickTimeSamples(std::vector<std::array<int64_t, 4>>& out);
 
     private:
         // Configuration
@@ -600,6 +814,8 @@ namespace Server {
         // dimension, so leaving any single one shared would apply one
         // dimension's edits to another's identically-numbered chunk.
         std::array<std::unique_ptr<ServerLevel>, Game::kDimensionCount> m_levels;
+        // TwilightPortalIndex(), by DimensionSlot.
+        std::array<std::unique_ptr<NetherPortalIndex>, Game::kDimensionCount> m_twilightPortalIndexes;
 
 #if ENABLE_IMMERSIVE_PORTALS
         // One for the whole server, not per level: ids are global because a
@@ -611,9 +827,10 @@ namespace Server {
         // through them. Reaches the private entity broadcasts.
         std::unique_ptr<EntityPortalTravel>      m_entityTravel;
         friend class EntityPortalTravel;
-        // Game::Portals' frame-lit handler — the fire block's route into
-        // NetherPortalGeneration.
-        static bool OnImmersiveFrameLit(Game::ILevelWrite& level, const glm::ivec3& firePos);
+        // Game::Portals' frame-lit handler — the fire block's (nether) and
+        // the echo shard's (hush) route into NetherPortalGeneration.
+        static bool OnImmersiveFrameLit(Game::ILevelWrite& level, const glm::ivec3& seedPos,
+                                        Game::PortalFamilyId family);
 #endif
         // No-op when the feature is off or nothing changed.
         void SaveImmersivePortals();
@@ -653,6 +870,13 @@ namespace Server {
         // a property of a world, and the send budget belongs to the socket.
         std::unique_ptr<SendScheduler> m_sendScheduler;
         std::unique_ptr<PlayerSessionManager> m_sessionManager;
+        std::unique_ptr<RemoteControlManager> m_remoteControl;   // /control
+        std::unique_ptr<MorphCarry>           m_morphCarry;      // /morph item pickups
+        std::unique_ptr<MorphBlockAnchor>     m_morphBlockAnchor; // /morph block grid locks
+        // MC PlayerList.broadcast for sounds — the Game::Sound server sink
+        // (server/sound/ServerSoundBroadcaster.hpp). Global: a sound's
+        // dimension travels with it.
+        std::unique_ptr<ServerSoundBroadcaster> m_soundBroadcaster;
         CommandDispatcher m_commandDispatcher;
 
         // Player reference (for integrated server)
@@ -673,8 +897,27 @@ namespace Server {
 
         std::atomic<uint32_t> m_singleplayerOwnerConnId{0};
 
+        // World options — see the accessors above.
+        std::atomic<bool> m_allowCommands{true};
+        std::atomic<bool> m_hardcore{false};
+        std::atomic<bool> m_difficultyLocked{false};
+        std::atomic<bool> m_guestCommandAccess{false};
+        std::atomic<bool> m_forceGameMode{true};
+        std::atomic<bool> m_joinable{true};
+        // Disconnect every connection that is not the singleplayer owner.
+        void DisconnectGuests(const std::string& reason);
+        // Force Game Mode: put every online guest in the default game mode.
+        void EnforceGameModeForGuests();
+        // Joinable → the world sidecar (per world, across sessions).
+        void PersistJoinable();
+        void PersistPortalGunAllowed();
+
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_shouldStop{false};
+        // Set once Start() succeeds. A server whose Start failed (its port was
+        // taken) never ran ServerLoop, so its world spawn is still the
+        // placeholder; Shutdown must not write that over the saved one.
+        bool m_everStarted = false;
         // Server-thread only, but atomic because the debug overlay and the
         // client's own "is the world frozen" checks read it from elsewhere.
         // TRUE at construction, exactly like MC's `private boolean paused =
@@ -683,6 +926,23 @@ namespace Server {
         // TRANSITION and fire a full world save before the world exists.
         int64_t m_currentServerTick = 0;   // set each ServerTick, read by the unload sweep
         std::atomic<bool> m_paused{true};
+
+        // MC SleepStatus + the sleep block of ServerLevel.tick: when enough
+        // Overworld players have been asleep long enough (players_sleeping_
+        // percentage), the clock jumps to the next morning and everyone gets
+        // up.
+        struct SleepStatus {
+            int activePlayers   = 0;   // Overworld players who are not spectators
+            int sleepingPlayers = 0;
+            int  SleepersNeeded(int percentage) const;
+            bool AreEnoughSleeping(int percentage) const {
+                return sleepingPlayers >= SleepersNeeded(percentage);
+            }
+        };
+        SleepStatus m_sleepStatus;
+        void TickSleep();
+        void AnnounceSleepStatus();
+        void WakeUpAllPlayers();
 
         // New player architecture
         std::unique_ptr<ServerPlayer> m_serverPlayer;     // Host player (ID 1)
@@ -712,6 +972,31 @@ namespace Server {
 
         // Statistics
         ServerStats m_stats;
+        ServerStressStats m_stress;
+        std::mutex m_abandonedMutex;
+        std::vector<DimChunkKey> m_abandonedChunks;
+        uint64_t m_abandonedLoadsCancelled = 0;
+        size_t m_unloadedSinceLog = 0;   // UnloadUnwatchedChunks' log line, once per ~3 s
+
+        // Connections that closed off the server thread, handled at the start
+        // of the next tick (see the disconnect callback in Start()).
+        std::mutex m_closedMutex;
+        std::vector<std::shared_ptr<ServerConnection>> m_closedConnections;
+        std::atomic<bool> m_serverThreadActive{false};
+        void DrainClosedConnections();
+
+        // F3 debug sample (see GetDebugSample). Written on the server thread
+        // at the end of every tick, read by the client's overlay.
+        mutable std::mutex m_debugSampleMutex;
+        DebugSample m_debugSample;
+        std::vector<std::array<int64_t, 4>> m_tickTimeSamples;
+        std::atomic<bool> m_debugWantsChunkMap{false};
+        std::atomic<bool> m_debugWantsChunkGen{false};
+        glm::ivec3 m_debugGenPos{INT32_MIN, 0, 0};
+        Game::DimensionId m_debugGenDimension = Game::DimensionId::Overworld;
+        std::vector<std::string> m_debugGenLines;
+        int64_t m_prevTickExecNanos = 0;
+        void SampleDebugInfo(int64_t tickExecNanos, int64_t timeBetweenTicksNanos);
 
         // Timing
         std::chrono::steady_clock::time_point m_lastTickTime;
@@ -748,6 +1033,10 @@ namespace Server {
 
         // Process async chunk load results from ServerWorkerPool
         void ProcessAsyncChunkResults();
+        // Drain one level's light engine and send the sections it changed to
+        // their watchers (LightUpdateS2C). Before the block-delta flush.
+        void FlushLightUpdates(ServerLevel& level);
+        void SettleRedstoneBorders(ServerLevel& level, Game::Math::ChunkPos chunkPos);
 
         // ========================================================================
         // ITEM ENTITY BROADCAST
@@ -813,8 +1102,18 @@ namespace Server {
         // `dragonPart` is the client-picked EnderDragon part index (-1 for
         // everything else); re-validated against the server's own part
         // layout before it can route head damage.
+        // `location`: the click relative to the entity's position, when the
+        // client sent one (Entity.interact's location — the armor stand's
+        // slot pick); null = an older client, read as the feet.
         void HandleInteract(uint32_t connectionId, int32_t entityId, bool attack,
-                            bool sprinting, int dragonPart = -1);
+                            bool sprinting, int dragonPart = -1,
+                            const glm::vec3* location = nullptr);
+        // MC ArmorStandItem.useOn: a stand placed on the clicked face, its
+        // yaw snapped to 45°, refused where its box would meet a block or an
+        // entity. Returns whether one was placed (the caller consumes the
+        // item). Server-side for the same reason as the end crystal.
+        bool PlaceArmorStandFromUse(PlayerSession& session, const Game::BlockHitResult& hit,
+                                    float playerYaw);
 
         // MC PlayerList.broadcastSystemMessage(component, false): a server
         // message with no sender, delivered to every connected client. Used for
@@ -851,8 +1150,13 @@ namespace Server {
         // Spawn `count` mobs of `type` at `pos`, for /summon. Returns how many
         // were actually created. Scattered slightly so a stack of them does not
         // spawn inside one another and immediately push apart.
+        // `dimension` is the level they spawn in (the command source's);
+        // `outIds` receives the MobManager id of each one, for a caller that
+        // needs to address them afterwards (`/execute summon`).
         int SummonMobs(Game::EntityTypeId type, const glm::dvec3& pos, int count,
-                       const SummonOptions& options = {});
+                       const SummonOptions& options = {},
+                       Game::DimensionId dimension = Game::DimensionId::Overworld,
+                       std::vector<int32_t>* outIds = nullptr);
 
         // /spawnall — the debug line-up (see SpawnAllCommand.hpp): one adult
         // of every mob type in a 12-wide grid in front of `origin`, `spacing`
@@ -902,6 +1206,8 @@ namespace Server {
         // callers cannot flood the pipeline.
         void RequestChunkLoad(Game::DimensionId dimension, Game::Math::ChunkPos chunkPos,
                               int priority = 0);
+        // Per tick: loads for force-loaded / redstone-indexed chunks (ChunkKeeper).
+        void ServiceKeptChunks();
 
         // MC WitherSkullBlock.checkSpawn — the soul-sand ritual. Called by
         // PlayerSession right after a wither skeleton skull block (floor or

@@ -51,6 +51,7 @@ namespace Game {
         bool CanHitEntity(const Entity& entity) const override;
 
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
+        void OnHitBlock(const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
 
     public:

@@ -1,0 +1,105 @@
+{
+  "attributes": {
+    "minecraft:audio/ambient_sounds": {
+      "additions": {
+        "sound": "obeycraft:ambient.hush.forest.additions",
+        "tick_chance": 0.0111
+      },
+      "loop": "obeycraft:ambient.hush.forest.loop",
+      "mood": {
+        "block_search_extent": 8,
+        "offset": 2.0,
+        "sound": "obeycraft:ambient.hush.mood",
+        "tick_delay": 6000
+      }
+    },
+    "minecraft:audio/background_music": {
+      "default": {
+        "max_delay": 24000,
+        "min_delay": 12000,
+        "sound": "obeycraft:music.hush.forest"
+      }
+    },
+    "minecraft:visual/sky_color": "#06141a"
+  },
+  "carvers": [
+    "minecraft:cave",
+    "minecraft:cave_extra_underground",
+    "minecraft:canyon"
+  ],
+  "downfall": 0.4,
+  "effects": {
+    "fog_color": "#0b2a2e",
+    "foliage_color": "#3e6f6a",
+    "grass_color": "#4f7f79",
+    "water_color": "#0e3a3f",
+    "water_fog_color": "#0e3a3f"
+  },
+  "features": [
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [
+      "minecraft:ore_echo",
+      "minecraft:ore_resonite"
+    ],
+    [],
+    [],
+    [
+      "minecraft:whisperwood_forest",
+      "minecraft:patch_resonance_bloom",
+      "minecraft:patch_hush_grass_forest",
+      "minecraft:hush_moss_patch"
+    ],
+    []
+  ],
+  "has_precipitation": false,
+  "spawn_costs": {},
+  "spawners": {
+    "ambient": [
+      {
+        "type": "minecraft:bat",
+        "maxCount": 8,
+        "minCount": 8,
+        "weight": 10
+      },
+      {
+        "type": "minecraft:lumen_moth",
+        "maxCount": 6,
+        "minCount": 3,
+        "weight": 15
+      }
+    ],
+    "axolotls": [],
+    "creature": [
+      {
+        "type": "minecraft:hushling",
+        "maxCount": 4,
+        "minCount": 2,
+        "weight": 8
+      }
+    ],
+    "misc": [],
+    "monster": [
+      {
+        "type": "minecraft:enderman",
+        "maxCount": 4,
+        "minCount": 1,
+        "weight": 10
+      },
+      {
+        "type": "minecraft:echo_wraith",
+        "maxCount": 2,
+        "minCount": 1,
+        "weight": 30
+      }
+    ],
+    "underground_water_creature": [],
+    "water_ambient": [],
+    "water_creature": []
+  },
+  "temperature": 0.5
+}

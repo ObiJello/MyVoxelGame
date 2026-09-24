@@ -1,4 +1,5 @@
 #include "levelgen/FlatLevelSource.h"
+#include "core/QuartPos.h"
 
 #include "data/worldgen/BiomeFeatureRegistry.h"
 #include "levelgen/RandomState.h"
@@ -15,8 +16,8 @@ FlatLevelSource::FlatLevelSource(flat::FlatLevelGeneratorSettings settings)
     : m_settings(std::move(settings)),
       m_biomeSource(std::make_unique<world::biome::FixedBiomeSource>(m_settings.biome())) {}
 
-void FlatLevelSource::fillFromNoise(RandomState* /*randomState*/, Blender* /*blender*/,
-                                    ::world::IChunk* chunk) {
+void FlatLevelSource::buildTerrain(RandomState* /*randomState*/, const TerrainContext& /*context*/,
+                                   ::world::IChunk* chunk) {
     // Reference: FlatLevelSource.fillFromNoise() - one layer per y from the
     // CHUNK's minY, updating the two worldgen heightmaps as it goes. Null
     // layers (non-opaque, moved to FILL_LAYER features) are skipped.
@@ -51,8 +52,13 @@ void FlatLevelSource::createBiomes(RandomState* randomState, Blender* /*blender*
                                    ::world::IChunk* chunk) {
     // Reference: ChunkGenerator.createBiomes() base implementation.
     auto* protoChunk = dynamic_cast<::world::ProtoChunk*>(chunk);
-    if (!protoChunk || !randomState || !randomState->sampler()) return;
-    protoChunk->fillBiomesFromNoise(m_biomeSource.get(), *randomState->sampler());
+    if (!protoChunk || !randomState) return;
+    const ::world::ChunkPos pos = chunk->getPos();
+    const auto resolver = m_biomeSource->createResolverForChunk(
+        *randomState->sampler(), core::QuartPos::fromBlock(pos.getMinBlockX()),
+        core::QuartPos::fromBlock(chunk->getMinBuildHeight()), core::QuartPos::fromBlock(pos.getMinBlockZ()),
+        4, core::QuartPos::fromBlock(chunk->getMaxBuildHeight() - chunk->getMinBuildHeight()), 4);
+    protoChunk->fillBiomesFromNoise(resolver);
 }
 
 int32_t FlatLevelSource::getBaseHeight(int32_t /*x*/, int32_t /*z*/,

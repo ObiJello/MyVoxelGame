@@ -309,11 +309,10 @@ void updateLeaves(
             // update must kill tall_grass left on a street's dirt_path).
             bool survives;
             if (lower) {
-                // VegetationBlock.canSurvive: dirt-tag or farmland below.
+                // VegetationBlock.canSurvive: BlockTags.SUPPORTS_VEGETATION below.
                 BlockState* below = level.getBlockState(pos.below());
                 survives = below && !below->isAir() &&
-                    (::minecraft::levelgen::blockpredicates::matchesBlockTagName(below, "minecraft:dirt") ||
-                     below->getIdentifier() == "minecraft:farmland");
+                    ::minecraft::levelgen::blockpredicates::matchesBlockTagName(below, "minecraft:supports_vegetation");
             } else {
                 // Upper half survives on its own lower half.
                 BlockState* below = level.getBlockState(pos.below());
@@ -614,7 +613,8 @@ bool TreeFeature::doPlace(
             clippedTreeHeight,
             attachment,
             foliageHeight,
-            leafRadius
+            leafRadius,
+            config.trunkProvider
         );
     }
 

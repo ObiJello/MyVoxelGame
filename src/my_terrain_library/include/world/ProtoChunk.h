@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/LiveCounters.h"
 #include "world/IChunk.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/ChunkPos.h"
@@ -10,9 +11,10 @@
 #include "world/biome/Biomes.h"
 #include "levelgen/Heightmap.h"
 #include "levelgen/carver/CarvingMask.h"
-#include "levelgen/NoiseChunk.h"
 #include "core/BlockPos.h"
 #include "core/QuartPos.h"
+#include "nbt/CompoundTag.h"
+#include <atomic>
 #include <vector>
 #include <map>
 #include <set>
@@ -57,14 +59,11 @@ private:
     std::vector<std::set<int16_t>> m_postProcessing;
     // (y,z,x) -> canonical E-line payload; ascending = emission order.
     std::map<std::tuple<int, int, int>, std::string> m_blockEntityNbts;
-
-    // Carving mask for cave carving
-    std::unique_ptr<levelgen::carver::CarvingMask> m_carvingMask;
-
-    // Cached NoiseChunk for reuse across generation stages
-    // Reference: ProtoChunk.java noiseChunk field
-    // Java uses getOrCreateNoiseChunk() to cache and reuse
-    levelgen::NoiseChunk* m_noiseChunk;
+    // Reference: ProtoChunk.entities - worldgen-placed entities, in
+    // placement order (see IChunk::GeneratedEntity).
+    std::vector<GeneratedEntity> m_entities;
+    // See IChunk::StructureSpawnArea.
+    std::vector<StructureSpawnArea> m_structureSpawnAreas;
 
     // Chunk generation status
     // Reference: ProtoChunk.java status field
@@ -79,13 +78,19 @@ private:
     levelgen::structure::StructureStartMap m_structureStarts;
     levelgen::structure::StructureReferenceMap m_structureReferences;
 
-    // Per-chunk structure Beardifier (Java builds it inside createNoiseChunk via
-    // Beardifier.forStructuresInChunk; we build it in the chunk-status task where
-    // the dependency grid is available, before the memoized NoiseChunk is created
-    // at BIOMES). nullptr = Beardifier.EMPTY; m_structureBeardifierBuilt keeps
-    // the empty result memoized too.
-    levelgen::Beardifier* m_structureBeardifier = nullptr;
-    bool m_structureBeardifierBuilt = false;
+    // The "starts" compound of a chunk read from disk, held until the
+    // STRUCTURE_STARTS load step restores them (it has the generator and
+    // structure state; the serializer does not). Null once consumed.
+    std::unique_ptr<nbt::CompoundTag> m_savedStructureStarts;
+    std::shared_ptr<const std::vector<uint8_t>> m_structuresAtFull;
+
+    // Reference: ChunkAccess.unsaved - set by a status change and by
+    // structure starts/references (MC does not set it for block writes: a
+    // status change always follows them).
+    std::atomic<bool> m_unsaved{false};
+    // See releaseBlockData.
+    std::atomic<bool> m_blockDataReleased{false};
+
 
 public:
     // Convert Y to section index
@@ -98,51 +103,7 @@ public:
         return (index << 4) + m_minY;
     }
 
-    /**
-     * Get or create the carving mask for this chunk
-     */
-    levelgen::carver::CarvingMask& getOrCreateCarvingMask() {
-        if (!m_carvingMask) {
-            m_carvingMask = std::make_unique<levelgen::carver::CarvingMask>(m_height, m_minY);
-        }
-        return *m_carvingMask;
-    }
 
-    /**
-     * Get or create the NoiseChunk for this chunk
-     * Reference: ProtoChunk.java getOrCreateNoiseChunk()
-     *
-     * Java signature: public NoiseChunk getOrCreateNoiseChunk(Function<ChunkAccess, NoiseChunk> supplier)
-     *
-     * This caches the NoiseChunk so it can be reused across BIOMES, NOISE, SURFACE, and CARVERS stages.
-     * Creating a NoiseChunk is expensive (~10ms), so caching it saves significant time.
-     *
-     * @param supplier Function that creates the NoiseChunk if it doesn't exist
-     * @return The cached or newly created NoiseChunk
-     */
-    levelgen::NoiseChunk* getOrCreateNoiseChunk(std::function<levelgen::NoiseChunk*(IChunk*)> supplier) {
-        if (m_noiseChunk == nullptr) {
-            m_noiseChunk = supplier(this);
-        }
-        return m_noiseChunk;
-    }
-
-    /**
-     * Set the cached NoiseChunk (for ownership transfer)
-     */
-    void setNoiseChunk(levelgen::NoiseChunk* noiseChunk) {
-        if (m_noiseChunk != nullptr && m_noiseChunk != noiseChunk) {
-            delete m_noiseChunk;
-        }
-        m_noiseChunk = noiseChunk;
-    }
-
-    /**
-     * Get the cached NoiseChunk (may be nullptr)
-     */
-    levelgen::NoiseChunk* getNoiseChunk() const {
-        return m_noiseChunk;
-    }
 
     /**
      * Constructor
@@ -170,7 +131,6 @@ public:
         , m_blockStrategy(registry)
         , m_airBlock(airBlock)
         , m_defaultBlock(defaultBlock)
-        , m_noiseChunk(nullptr)
         , m_status(&chunk::status::ChunkStatus::EMPTY)
         , m_inhabitedTime(0)
     {
@@ -192,35 +152,13 @@ public:
             std::make_unique<levelgen::Heightmap>(minY, height, levelgen::Heightmap::Types::WORLD_SURFACE_WG, blockGetter);
         m_heightmaps[levelgen::Heightmap::Types::OCEAN_FLOOR_WG] =
             std::make_unique<levelgen::Heightmap>(minY, height, levelgen::Heightmap::Types::OCEAN_FLOOR_WG, blockGetter);
+        ::minecraft::util::LiveCounters::protoChunks().fetch_add(1, std::memory_order_relaxed);
     }
 
-    /**
-     * Destructor - cleans up cached NoiseChunk
-     */
     ~ProtoChunk() {
-        if (m_noiseChunk != nullptr) {
-            delete m_noiseChunk;
-            m_noiseChunk = nullptr;
-        }
-        if (m_structureBeardifier != nullptr) {
-            delete m_structureBeardifier;
-            m_structureBeardifier = nullptr;
-        }
+        ::minecraft::util::LiveCounters::protoChunks().fetch_sub(1, std::memory_order_relaxed);
     }
 
-    /**
-     * Per-chunk structure Beardifier (see member comment). The returned
-     * pointer may be nullptr even after building (= Beardifier.EMPTY).
-     */
-    levelgen::Beardifier* structureBeardifier() const { return m_structureBeardifier; }
-    bool structureBeardifierBuilt() const { return m_structureBeardifierBuilt; }
-    void setStructureBeardifier(levelgen::Beardifier* beardifier) {
-        if (m_structureBeardifier != nullptr && m_structureBeardifier != beardifier) {
-            delete m_structureBeardifier;
-        }
-        m_structureBeardifier = beardifier;
-        m_structureBeardifierBuilt = true;
-    }
 
     // IChunk interface implementation
 
@@ -375,6 +313,23 @@ public:
         return &m_blockEntityNbts;
     }
 
+    // Reference: ProtoChunk.addEntity(CompoundTag) / getEntities.
+    void addEntity(GeneratedEntity entity) override {
+        m_entities.push_back(std::move(entity));
+    }
+
+    const std::vector<GeneratedEntity>* getEntities() const override {
+        return &m_entities;
+    }
+
+    void addStructureSpawnArea(StructureSpawnArea area) override {
+        m_structureSpawnAreas.push_back(std::move(area));
+    }
+
+    const std::vector<StructureSpawnArea>* getStructureSpawnAreas() const override {
+        return &m_structureSpawnAreas;
+    }
+
     /**
      * Mark position for post-processing (fluid updates, etc.)
      * Reference: ProtoChunk.java markPosForPostprocessing() lines 236-240
@@ -392,6 +347,41 @@ public:
 
             m_postProcessing[sectionIndex].insert(packed);
         }
+    }
+
+    /**
+     * Post-processing positions per section index, packed x | y<<4 | z<<8.
+     * Reference: ChunkAccess.getPostProcessing()
+     */
+    const std::vector<std::set<int16_t>>& getPostProcessing() const {
+        return m_postProcessing;
+    }
+
+    /**
+     * Reference: ChunkAccess.addPackedPostProcess(ShortList, int)
+     */
+    void addPackedPostProcess(int16_t packed, int32_t sectionIndex) {
+        if (sectionIndex >= 0 && sectionIndex < static_cast<int32_t>(m_postProcessing.size())) {
+            m_postProcessing[sectionIndex].insert(packed);
+        }
+    }
+
+    // The chunk's "structures" compound, encoded when it reached FULL (on
+    // the worldgen lane, so no piece placement runs concurrently) for the
+    // embedder's own chunk format. Null before FULL.
+    void setStructuresAtFull(std::shared_ptr<const std::vector<uint8_t>> encoded) {
+        m_structuresAtFull = std::move(encoded);
+    }
+    const std::shared_ptr<const std::vector<uint8_t>>& getStructuresAtFull() const {
+        return m_structuresAtFull;
+    }
+
+    void setSavedStructureStarts(std::unique_ptr<nbt::CompoundTag> starts) {
+        m_savedStructureStarts = std::move(starts);
+    }
+
+    std::unique_ptr<nbt::CompoundTag> takeSavedStructureStarts() {
+        return std::move(m_savedStructureStarts);
     }
 
     /**
@@ -518,6 +508,7 @@ public:
      */
     void setPersistedStatus(const chunk::status::ChunkStatus& status) override {
         m_status = &status;
+        markUnsaved();
     }
 
     /**
@@ -525,7 +516,41 @@ public:
      */
     void setStatus(const chunk::status::ChunkStatus* status) {
         m_status = status;
+        markUnsaved();
     }
+
+    // Reference: ChunkAccess.markUnsaved / tryMarkSaved / isUnsaved.
+    void markUnsaved() { m_unsaved.store(true, std::memory_order_release); }
+    bool tryMarkSaved() { return m_unsaved.exchange(false, std::memory_order_acq_rel); }
+    bool isUnsaved() const { return m_unsaved.load(std::memory_order_acquire); }
+
+    // Drop the content of a FULL chunk the embedder has taken over — blocks,
+    // biomes, block entities, generated entities, post-processing — keeping
+    // only what OTHER chunks' generation still reads from it: its status,
+    // structure starts and references (a start is read up to 8 chunks away),
+    // and heightmaps. MC holds one copy of a finished chunk (the holder's
+    // LevelChunk is the world's); the embedder converts ours into its own
+    // format, so without this every finished chunk was held twice.
+    //
+    // ChunkMap::releaseHandedOffChunks decides when: FULL, every neighbour
+    // past SPAWN (the last step that reads a neighbour's blocks), no task
+    // holding it. Sections are replaced by empty ones rather than removed, so
+    // a read that should never happen sees air instead of freed memory.
+    // Main thread.
+    void releaseBlockData() {
+        for (auto& section : m_sections) {
+            section = std::make_unique<LevelChunkSection>(m_airBlock, m_blockStrategy);
+        }
+        m_postProcessing.assign(m_postProcessing.size(), {});
+        m_blockEntityNbts.clear();
+        std::vector<GeneratedEntity>().swap(m_entities);
+        std::vector<StructureSpawnArea>().swap(m_structureSpawnAreas);
+        m_structuresAtFull.reset();
+        m_blockDataReleased.store(true, std::memory_order_release);
+    }
+    // Any thread: whether releaseBlockData has run — such a chunk must never
+    // be converted again (its blocks are gone).
+    bool isBlockDataReleased() const { return m_blockDataReleased.load(std::memory_order_acquire); }
 
     /**
      * Get the time players have spent in this chunk (in ticks)
@@ -552,6 +577,7 @@ public:
         const levelgen::structure::StructureStartData& start
     ) override {
         m_structureStarts[structureName] = start;
+        markUnsaved();
     }
 
     levelgen::structure::StructureStartData* getMutableStartForStructure(
@@ -572,6 +598,7 @@ public:
         if (std::find(references.begin(), references.end(), reference) == references.end()) {
             references.push_back(reference);
         }
+        markUnsaved();
     }
 
     //=========================================================================
@@ -641,13 +668,9 @@ public:
      *
      * This is called during the BIOMES phase to populate biome data.
      *
-     * @param biomeSource The biome source to sample from
-     * @param sampler Climate sampler for the noise
+     * @param resolver The chunk's biome resolver (BiomeSource.createResolverForChunk)
      */
-    void fillBiomesFromNoise(
-        biome::BiomeSource* biomeSource,
-        const biome::Climate::Sampler& sampler
-    ) {
+    void fillBiomesFromNoise(const biome::BiomeSource::BiomeResolver& resolver) {
         // Reference: ChunkAccess.java lines 433-443
         int32_t quartMinX = core::QuartPos::fromBlock(m_pos.getMinBlockX());
         int32_t quartMinZ = core::QuartPos::fromBlock(m_pos.getMinBlockZ());
@@ -662,8 +685,7 @@ public:
                 // Quart Y for the bottom of this section
                 int32_t quartMinY = core::QuartPos::fromSection(sectionY);
                 m_sections[sectionIndex]->fillBiomesFromNoise(
-                    biomeSource,
-                    sampler,
+                    resolver,
                     quartMinX,
                     quartMinY,
                     quartMinZ

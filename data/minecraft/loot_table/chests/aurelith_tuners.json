@@ -1,0 +1,239 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "bonus_rolls": 0.0,
+      "rolls": {
+        "type": "minecraft:uniform",
+        "min": 4.0,
+        "max": 7.0
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonite_ingot",
+          "weight": 8,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 5.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:raw_resonite",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 6.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonant_crystal",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 5.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:crystal_conduit",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 6.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:lumen_strip",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 6.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_shard",
+          "weight": 6,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 5.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:tuning_fork",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:redstone",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 8.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:amethyst_shard",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 6.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonite_pickaxe",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bonus_rolls": 0.0,
+      "rolls": 1.0,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "Log of the Heart"
+              },
+              "author": "Orrin of the Tuners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "LOG OF THE HEART\nkept at the Tuners'\nWorks by Orrin,\nMaster Tuner.\n\nBook the ninth.\nC. 1139 onward.",
+                "C.1139, 3rd rest.\nOuter ring drift\n0.2 of a comma.\nRetuned. Conduit\nseven cloudy,\nreplaced. Chord\nsteady. Tea cold.\nAs usual.",
+                "C.1140. Up the mast\non our roof to set\nthe lighthouses'\nnote against the\nTenor. Left the\nTenor's key up\nthere again. It is\nsafest in the wind.",
+                "C.1141. Drift 0.5.\nRetuned twice.\nApprentice swears\nthe inner ring\nturned backwards\nfor a breath. It\ndid not. Rings do\nnot turn backwards.",
+                "C.1141. Full\nretune. Voices set\nas always, floor\nto crown: the Bass\nfirst, the Tenor,\nthe Alto, and the\nSoprano to close\nit. Apprentice\nstill asks why.",
+                "C.1142. Drift 1.1.\nThere is a second\nnote under ours.\nVery low. Below\nhearing, but the\nwater in my cup\nhears it. Liesl\nsays she hears it\ntoo. Log it and\nmove on.",
+                "C.1144. Lanterns\nin the Stillhouses\nflickered for the\nlength of a breath.\nThe whole city.\nNot us. Not the\nHeart. I checked\nevery conduit\nmyself.",
+                "C.1145. Drift 3.\nRetuning makes it\nworse. It is not\ndrift. Something\nis singing back,\nand it is learning\nthe Chord.",
+                "C.1146. Stopped\nsleeping in the\nWorks. The rings\nhum in my teeth.\nThe crystal on the\nnorth conduit grew\na finger's width\novernight. Dark.",
+                "C.1147. Ysolde came\nto the Works\ntonight. She asked\nhow long the Heart\ncould be held.\nI told her the\ntruth. Not long.",
+                "C.1147. Rest is\ncalled for the\nfourth bell.\nConduits drained.\nRings locked.\nThey still turn.\nI do not know why\nthey still turn.",
+                "Last entry.\nIt stopped.\nIt is so quiet.\nI can hear my own\nheart and it is\nthe loudest thing\nin the city.\n\nOrrin."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "The Lampwright's Primer"
+              },
+              "author": "Hesper of the Lampwrights",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "THE LAMPWRIGHT'S\nPRIMER\n\nfor apprentices\nwho have already\nbroken one lantern\nand would like to\nstop.",
+                "I. Light is song\nmade visible.\nA lantern does not\nmake light. It\nholds a note, and\nthe note shows.",
+                "II. Grow the\ncrystal under a\nsteady voice. A\nwavering voice\ngrows a cloudy\ncrystal. A cloudy\ncrystal flickers.\nCustomers notice.",
+                "III. Cage it in\nresonite, never\niron. Iron is\ndeaf. Resonite\nlistens with the\ncrystal and keeps\nit company.",
+                "IV. Panels: set\nsong-light in glass\nfor walls. Cyan is\nthe Chord. Violet\nis the river.\nAmber is a hearth.\nDo not mix amber\ninto the Plaza.",
+                "V. A lantern is\ntuned, not lit.\nHum its note to\nit. If it brightens\nyou have the right\nnote. If it goes\nout, you have\nlearned something.",
+                "VI. A lamp far\nfrom the Heart\nwill fade in a\nhundred years.\nNear the Heart,\nnever.\n\nAll the more reason\nto live close in."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:empty",
+          "weight": 2
+        }
+      ]
+    }
+  ],
+  "random_sequence": "minecraft:chests/aurelith_tuners"
+}

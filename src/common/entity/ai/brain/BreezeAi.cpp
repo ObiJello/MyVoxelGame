@@ -10,6 +10,7 @@
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 
@@ -153,6 +154,7 @@ namespace Game {
         protected:
             void Start(EntityLevel& level, LivingEntity& body, int64_t t) override {
                 MoveToTargetSink::Start(level, body, t);
+                body.PlaySound(SoundEvents::BREEZE_SLIDE);   // MC body.playSound(BREEZE_SLIDE)
                 body.SetPose(Pose::Sliding);
             }
 
@@ -218,6 +220,7 @@ namespace Game {
                     brain->SetMemoryWithExpiry(MemoryModule::BreezeShootCharging,
                                                std::monostate{}, kInitialDelay);
                 }
+                body.PlaySound(SoundEvents::BREEZE_INHALE, 1.0f, 1.0f);   // MC Shoot.start
             }
 
             void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
@@ -251,6 +254,7 @@ namespace Game {
                     const float inaccuracy = static_cast<float>(
                         5 - static_cast<int>(level.GetDifficulty()) * 4);
                     breeze->ShootWindCharge(xd, yd, zd, inaccuracy);
+                    breeze->PlaySound(SoundEvents::BREEZE_SHOOT, 1.5f, 1.0f);   // MC Shoot.tick
                 }
             }
         };
@@ -286,7 +290,7 @@ namespace Game {
                     && !brain->HasMemoryValue(MemoryModule::BreezeJumpCooldown);
             }
 
-            void Start(EntityLevel&, LivingEntity& body, int64_t) override {
+            void Start(EntityLevel& level, LivingEntity& body, int64_t) override {
                 Brain* brain = body.GetBrain();
                 if (!brain) return;
                 if (brain->CheckMemory(MemoryModule::BreezeJumpInhaling,
@@ -295,6 +299,9 @@ namespace Game {
                                                std::monostate{}, kInhalingDuration);
                 }
                 body.SetPose(Pose::Inhaling);
+                // MC LongJump.start: level.playSound(null, breeze, BREEZE_CHARGE,
+                // HOSTILE, 1, 1) — bound to the breeze.
+                level.PlaySoundFromEntity(nullptr, body, SoundEvents::BREEZE_CHARGE, SoundSource::Hostile, 1.0f, 1.0f);
                 if (const std::optional<glm::ivec3> target =
                         brain->GetBlockPos(MemoryModule::BreezeJumpTarget)) {
                     if (auto* mob = dynamic_cast<Mob*>(&body)) {
@@ -330,11 +337,13 @@ namespace Game {
                         brain->SetMemory(MemoryModule::BreezeLeavingWater,
                                          std::monostate{});
                     }
+                    breeze->PlaySound(SoundEvents::BREEZE_JUMP, 1.0f, 1.0f);
                     breeze->SetPose(Pose::LongJumping);
                     breeze->yRot = breeze->yBodyRot;
                     breeze->SetDiscardFriction(true);
                     breeze->velocity = *velocity;
                 } else if (IsFinishedJumping(*breeze)) {
+                    breeze->PlaySound(SoundEvents::BREEZE_LAND, 1.0f, 1.0f);
                     breeze->SetPose(Pose::Standing);
                     breeze->SetDiscardFriction(false);
                     const bool wasHurt = brain->HasMemoryValue(MemoryModule::HurtBy);
@@ -459,8 +468,16 @@ namespace Game {
                 for (int angle : angles) {
                     std::optional<glm::dvec3> v = CalculateJumpVectorForAngle(
                         breeze, targetPos, maxJumpVelocity, angle, false);
-                    // MC adds jump-boost lift here; no status effects exist.
-                    if (v) return v;
+                    if (!v) continue;
+                    // MC LongJump.calculateOptimalJumpVector: with JUMP_BOOST
+                    // the chosen vector gains normalize(v).y *
+                    // getJumpBoostPower() of extra lift.
+                    if (breeze.HasEffect(MobEffectId::JumpBoost)) {
+                        const double len = glm::length(*v);
+                        const double normY = len < 9.999999747378752e-6 ? 0.0 : v->y / len;   // Vec3.normalize
+                        v->y += normY * static_cast<double>(breeze.GetJumpBoostPower());
+                    }
+                    return v;
                 }
                 return std::nullopt;
             }
@@ -480,10 +497,11 @@ namespace Game {
 
         protected:
             bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
-                // MC: isPassenger() || isInWater() || has LEVITATION. Riding
-                // and status effects do not exist, so water is the reachable
-                // clause.
-                return body.IsInWater();
+                // MC ShootWhenStuck: isPassenger() || isInWater() ||
+                // getEffect(LEVITATION) != null — a breeze that cannot jump
+                // (riding, swimming, lifted by a shulker bullet) shoots.
+                return body.IsPassenger() || body.IsInWater() ||
+                       body.HasEffect(MobEffectId::Levitation);
             }
 
             void Start(EntityLevel&, LivingEntity& body, int64_t) override {

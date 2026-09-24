@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "type=bottom": {
+      "model": "minecraft:block/polished_choirstone_slab"
+    },
+    "type=double": {
+      "model": "minecraft:block/polished_choirstone"
+    },
+    "type=top": {
+      "model": "minecraft:block/polished_choirstone_slab_top"
+    }
+  }
+}

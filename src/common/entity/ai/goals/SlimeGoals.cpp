@@ -75,9 +75,11 @@ namespace Game {
     }
 
     bool SlimeRandomDirectionGoal::CanUse() {
-        // MC also allows levitation; no status effects exist yet.
+        // MC CubeMobRandomDirectionGoal: on the ground, in a liquid, or
+        // LEVITATING — a slime lifted by a shulker bullet keeps turning.
         return m_slime->GetTarget() == nullptr &&
-               (m_slime->onGround || m_slime->IsInWater() || m_slime->IsInLava()) &&
+               (m_slime->onGround || m_slime->IsInWater() || m_slime->IsInLava() ||
+                m_slime->HasEffect(MobEffectId::Levitation)) &&
                SlimeControl(*m_slime) != nullptr;
     }
 

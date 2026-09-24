@@ -9,6 +9,7 @@
 #pragma once
 
 #include "CommandDispatcher.hpp"
+#include "common/entity/EntityType.hpp"
 
 namespace Server {
 
@@ -16,10 +17,14 @@ namespace Server {
     public:
         static void Register(CommandDispatcher& dispatcher);
 
-        static void Execute(ServerPlayer& sender,
+        static void Execute(const CommandSourceStack& source,
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);
+
+        // MC ResourceArgument for an entity type: "[minecraft:]zombie".
+        // Shared with `/execute summon`.
+        static bool ParseEntityType(const std::string& text, Game::EntityTypeId& out);
     };
 
 } // namespace Server

@@ -22,13 +22,13 @@ import os
 import re
 import sys
 
-MC = "minecraft_code/decompiled_net/minecraft"
+MC = "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft"
 DEF_DIR = os.path.join(MC, "client/animation/definitions")
 # Definitions that only exist in the NEWER decompile (26.3), read for the
 # 26.1 baby remodel's meshes (gen_entity_models.py REMODEL_MESHES): the
 # remodeled rabbit's hop and idle head tilt, adult and baby. A name that
 # also exists in the main tree is taken from the main tree.
-MC2 = "minecraft_code2/decompiled_net/minecraft"
+MC2 = "minecraft_code_26.3-pre-2/decompiled_net/minecraft"
 DEF_DIR2 = os.path.join(MC2, "client/animation/definitions")
 EXTRA_DEFS = ("RabbitAnimation.java", "BabyRabbitAnimation.java",
               "BabyAxolotlAnimation.java")

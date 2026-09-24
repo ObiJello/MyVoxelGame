@@ -1,6 +1,6 @@
 // File: src/common/entity/projectile/EyeOfEnder.cpp
 //
-// Line references are to minecraft_code/decompiled_net/minecraft/world/entity/
+// Line references are to minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/entity/
 // projectile/EyeOfEnder.java.
 
 #include "common/entity/projectile/EyeOfEnder.hpp"
@@ -10,6 +10,7 @@
 #include "common/world/level/WorldDrops.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
 
@@ -129,9 +130,9 @@ namespace Game {
                                           : DimensionId::Overworld,
                                   BlockPosition(), m_item);
             }
-            // MC's shatter is levelEvent 2003 (a particle + sound burst).
-            // There is no level-event packet, so a shattered eye simply
-            // vanishes; the 4-in-5 drop is the half that matters for play.
+            // MC: ENDER_EYE_DEATH either way (levelEvent 2003's shatter is
+            // particles only, which wait on particles).
+            PlaySound(SoundEvents::ENDER_EYE_DEATH, 1.0f, 1.0f);
             Discard();
         }
     }

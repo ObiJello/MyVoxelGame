@@ -58,6 +58,11 @@ namespace Network {
         int32_t  worldZ = 0;
         uint8_t  actionType  = 0;
         uint8_t  actionParam = 0;
+        // MC ClientboundBlockEventPacket.block: the client runs the event
+        // only if this block still sits at the position (doBlockEvent's
+        // `state.is(block)`). Trailing field; an older peer reads Air and
+        // the client skips the event.
+        uint16_t blockId     = 0;
 
         BlockEntityActionS2CPacket() = default;
         BlockEntityActionS2CPacket(int x, int y, int z, uint8_t type, uint8_t param)
@@ -115,6 +120,7 @@ namespace Network {
             buffer.WriteInt(packet.worldZ);
             buffer.WriteByte(packet.actionType);
             buffer.WriteByte(packet.actionParam);
+            buffer.WriteShort(packet.blockId);
             return buffer.GetData();
         }
 
@@ -127,6 +133,7 @@ namespace Network {
             p.worldZ = reader.ReadInt();
             p.actionType  = reader.ReadByte();
             p.actionParam = reader.ReadByte();
+            if (reader.HasMore()) p.blockId = reader.ReadShort();
             return p;
         }
 

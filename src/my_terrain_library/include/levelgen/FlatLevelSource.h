@@ -29,23 +29,12 @@ public:
     const flat::FlatLevelGeneratorSettings& settings() const { return m_settings; }
     world::biome::FixedBiomeSource* biomeSource() { return m_biomeSource.get(); }
 
-    // Reference: FlatLevelSource.fillFromNoise().
-    void fillFromNoise(RandomState* randomState, Blender* blender,
-                       ::world::IChunk* chunk) override;
+    // Reference: FlatLevelSource.buildTerrain() - the layers; no surface
+    // rules, no carvers.
+    void buildTerrain(RandomState* randomState, const TerrainContext& context, ::world::IChunk* chunk) override;
 
-    // Reference: FlatLevelSource.applyCarvers() - no-op.
-    void applyCarvers(int64_t /*seed*/, RandomState* /*randomState*/,
-                      std::function<world::biome::BiomeHolder(const core::BlockPos&)> /*biomeGetter*/,
-                      ::world::IChunk* /*chunk*/,
-                      GenerationStep::Decoration /*step*/) override {}
-
-    // Reference: FlatLevelSource.buildSurface() - no-op.
-    void buildSurface(RandomState* /*randomState*/,
-                      std::function<world::biome::BiomeHolder(const core::BlockPos&)> /*biomeGetter*/,
-                      ::world::IChunk* /*chunk*/) override {}
-
-    // Reference: ChunkGenerator.createBiomes() base implementation -
-    // chunk.fillBiomesFromNoise(biomeSource, randomState.sampler()).
+    // Reference: ChunkGenerator.createBiomes() base implementation
+    // (doCreateBiomes through the fixed source's resolver).
     void createBiomes(RandomState* randomState, Blender* blender,
                       ::world::IChunk* chunk) override;
 

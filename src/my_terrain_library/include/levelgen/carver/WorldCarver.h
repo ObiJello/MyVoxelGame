@@ -3,8 +3,7 @@
 #include "levelgen/carver/CarverConfiguration.h"
 #include "levelgen/carver/CarvingContext.h"
 #include "levelgen/carver/CarvingMask.h"
-#include "levelgen/Aquifer.h"
-#include "levelgen/DensityFunction.h"
+#include "levelgen/density/terrain/Aquifer.h"
 #include "world/ChunkPos.h"
 #include "world/IChunk.h"
 #include "world/level/block/state/BlockState.h"
@@ -67,7 +66,7 @@ public:
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         XoroshiroRandomSource& random,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         const world::ChunkPos& sourceChunkPos,
         CarvingMask& mask
     ) = 0;
@@ -83,7 +82,7 @@ public:
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
         LegacyRandomSource& random,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         const world::ChunkPos& sourceChunkPos,
         CarvingMask& mask
     ) = 0;
@@ -111,7 +110,7 @@ protected:
         const C& configuration,
         world::IChunk* chunk,
         std::function<void*(const core::BlockPos&)> biomeGetter,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         double x, double y, double z,
         double horizontalRadius,
         double verticalRadius,
@@ -131,7 +130,7 @@ protected:
         CarvingMask& mask,
         core::BlockPos::MutableBlockPos& blockPos,
         core::BlockPos::MutableBlockPos& helperPos,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         bool& hasGrass
     );
 
@@ -143,7 +142,7 @@ protected:
         const CarvingContext& context,
         const C& configuration,
         const core::BlockPos& blockPos,
-        Aquifer* aquifer
+        density::Aquifer* aquifer
     );
 
     /**
@@ -174,7 +173,7 @@ bool WorldCarver<C>::carveEllipsoid(
     const C& configuration,
     world::IChunk* chunk,
     std::function<void*(const core::BlockPos&)> biomeGetter,
-    Aquifer* aquifer,
+    density::Aquifer* aquifer,
     double x, double y, double z,
     double horizontalRadius,
     double verticalRadius,
@@ -203,6 +202,25 @@ bool WorldCarver<C>::carveEllipsoid(
                             context.getMinGenY() + context.getGenDepth() - 1 - protectedBlocksOnTop);
     int32_t minZIndex = std::max(static_cast<int32_t>(std::floor(z - horizontalRadius)) - chunkMinZ - 1, 0);
     int32_t maxZIndex = std::min(static_cast<int32_t>(std::floor(z + horizontalRadius)) - chunkMinZ, 15);
+
+    // MC 26.3 WorldCarver.carveEllipsoid: every cell the skip checker lets
+    // through is marked, nothing is written — applyCarvingMask does that.
+    if (context.maskOnly) {
+        for (int32_t xIndex = minXIndex; xIndex <= maxXIndex; ++xIndex) {
+            double xd = (static_cast<double>(chunkPos.getBlockX(xIndex)) + 0.5 - x) / horizontalRadius;
+            for (int32_t zIndex = minZIndex; zIndex <= maxZIndex; ++zIndex) {
+                double zd = (static_cast<double>(chunkPos.getBlockZ(zIndex)) + 0.5 - z) / horizontalRadius;
+                if (xd * xd + zd * zd >= 1.0) continue;
+                for (int32_t worldY = maxY; worldY > minY; --worldY) {
+                    double yd = (static_cast<double>(worldY) - 0.5 - y) / verticalRadius;
+                    if (!skipChecker(context, xd, yd, zd, worldY)) {
+                        mask.set(xIndex, worldY, zIndex);
+                    }
+                }
+            }
+        }
+        return true;
+    }
 
     bool carved = false;
     core::BlockPos::MutableBlockPos blockPos;
@@ -251,7 +269,7 @@ bool WorldCarver<C>::carveBlock(
     CarvingMask& mask,
     core::BlockPos::MutableBlockPos& blockPos,
     core::BlockPos::MutableBlockPos& helperPos,
-    Aquifer* aquifer,
+    density::Aquifer* aquifer,
     bool& hasGrass
 ) {
     // Get block at position - Reference: line 111
@@ -306,7 +324,7 @@ BlockState* WorldCarver<C>::getCarveState(
     const CarvingContext& context,
     const C& configuration,
     const core::BlockPos& blockPos,
-    Aquifer* aquifer
+    density::Aquifer* aquifer
 ) {
     // Below lava level, fill with lava - Reference: lines 147-148
     if (blockPos.getY() <= configuration.lavaLevel.resolveY(context)) {
@@ -318,10 +336,7 @@ BlockState* WorldCarver<C>::getCarveState(
     //       if (state == null) return null;  // Don't carve (barrier)
     //       return state;  // Return what aquifer says (AIR, WATER, etc.)
     if (aquifer) {
-        density::DensityFunction::SinglePointContext singleContext(
-            blockPos.getX(), blockPos.getY(), blockPos.getZ()
-        );
-        BlockState* block = aquifer->computeSubstance(singleContext, 0.0);
+        BlockState* block = aquifer->computeSubstance(blockPos.getX(), blockPos.getY(), blockPos.getZ(), 0.0);
 
         if (block == nullptr) {
             // Aquifer returns null = barrier, don't carve here

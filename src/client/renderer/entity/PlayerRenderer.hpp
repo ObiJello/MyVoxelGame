@@ -63,13 +63,21 @@ namespace Render {
         // of the body is drawn (clipped against the destination wall).
         // `deathFlipDeg` is MC LivingEntityRenderer.setupRotations' topple, in
         // degrees (MobRenderer::DeathFlipDegrees) — the corpse falling over.
+        // `position`, `model` and `clipPlane` are WORLD space, in double: the
+        // body is built in the view's render space (RenderOrigin.hpp), the
+        // model is bridged into it in double, the plane re-expressed there.
         void RenderSingle(const glm::mat4& projection, const glm::mat4& view,
-                          const glm::vec3& position,
+                          const glm::dvec3& position,
                           float headYaw, float bodyYaw, float pitch,
                           bool isCrouching, uint8_t colorId,
-                          const glm::mat4& model     = glm::mat4(1.0f),
-                          const glm::vec4& clipPlane = glm::vec4(0.0f),
-                          float deathFlipDeg = 0.0f);
+                          const glm::dmat4& model     = glm::dmat4(1.0),
+                          const glm::dvec4& clipPlane = glm::dvec4(0.0),
+                          float deathFlipDeg = 0.0f,
+                          bool glowing = false,
+                          bool drawBody = true);
+        // `glowing`: also into the GLOWING outline pass (EntityOutline.hpp)
+        // while the main view is collecting; `drawBody` false with it: the
+        // outline alone (an INVISIBLE glowing body, MC's outline render type).
 
         // Render chat bubbles above remote players (screen-space billboarded)
         void RenderChatBubbles(const glm::mat4& projection, const glm::mat4& view,
@@ -87,11 +95,18 @@ namespace Render {
         Tally m_tally;
         // Upload this call's m_triVerts / m_lineVerts into the frame's set
         // and draw both passes. `clipPlane` is the portal ghost half-body
-        // plane (zero = off); the vertices are already in world space.
+        // plane (zero = off); the vertices are already in render space, as
+        // is `cameraPos`. `glowing`: the figures also go to the GLOWING
+        // outline pass (EntityOutline.hpp).
+        // `drawBody` false: outline only (an INVISIBLE glowing body).
         void SubmitFigures(const glm::mat4& mvp, const glm::vec3& cameraPos,
-                           const glm::vec4& clipPlane);
+                           const glm::vec4& clipPlane, bool glowing, bool drawBody = true);
 
+        // The stick figures (shaders/stick_figure.*): lit and fogged like
+        // every entity (EntityEnvironment.hpp).
         ShaderHandle  m_shader       = INVALID_SHADER;
+        // The chat bubbles: flat screen-space colour (player_billboard.*).
+        ShaderHandle  m_bubbleShader = INVALID_SHADER;
         TextureHandle m_dummyTexture = INVALID_TEXTURE;
 
         // Two streaming sets alternated per FRAME, every call in a frame
@@ -118,6 +133,12 @@ namespace Render {
         std::vector<StickVertex> m_lineVerts;
         std::vector<StickVertex> m_triVerts;
         std::vector<StickVertex> m_stripVerts;
+        // Render's GLOWING figures, submitted after the rest: drawn and
+        // outlined, and (INVISIBLE ones) outlined only.
+        std::vector<StickVertex> m_glowLineVerts;
+        std::vector<StickVertex> m_glowTriVerts;
+        std::vector<StickVertex> m_outlineOnlyLineVerts;
+        std::vector<StickVertex> m_outlineOnlyTriVerts;
 
         static const char* s_vertSource;
         static const char* s_fragSource;

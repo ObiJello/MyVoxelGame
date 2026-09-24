@@ -54,6 +54,14 @@ namespace Game {
 
     class SulfurCube : public Slime {
     public:
+        // MC SulfurCube's sound overrides: the small/regular voice, a
+        // held block's bounce for the squish, no footsteps while holding one.
+        const char* GetHurtSound(MobDamageSource source) const override;
+        const char* GetDeathSound() const override;
+        const char* GetSquishSound() const override;
+        const char* GetJumpSound() const override;
+        void PlayStepSound(const glm::ivec3& pos, BlockState state) override;
+
         static constexpr int    kSplitCount           = 2;
         static constexpr int    kMaxSize              = 2;
         static constexpr int    kMinSize              = 1;
@@ -86,8 +94,8 @@ namespace Game {
         void SetAge(int age) { m_age = age; }
         int  GetForcedAge() const { return m_forcedAge; }
         void SetForcedAge(int age) { m_forcedAge = age; }
-        bool IsAgeLocked() const { return m_ageLocked; }
-        void SetAgeLocked(bool locked) { m_ageLocked = locked; }
+        bool IsAgeLocked() const override { return m_ageLocked; }
+        void SetAgeLocked(bool locked) override { m_ageLocked = locked; }
         // MC AgeableMob.canAgeUp: a baby that is not age-locked.
         bool CanAgeUp() const { return IsBaby() && !m_ageLocked; }
         // MC AgeableMob.ageUp(seconds, forced), the Animal port's twin.

@@ -1,0 +1,14 @@
+{
+  "placement": {
+    "type": "minecraft:random_spread",
+    "salt": 1147031147,
+    "separation": 32,
+    "spacing": 90
+  },
+  "structures": [
+    {
+      "structure": "minecraft:aurelith",
+      "weight": 1
+    }
+  ]
+}

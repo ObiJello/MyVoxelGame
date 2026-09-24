@@ -1,0 +1,191 @@
+{
+  "multipart": [
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_thorns"
+      },
+      "when": {
+        "axis": "y"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_top",
+        "x": 90
+      },
+      "when": {
+        "axis": "y"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_bottom",
+        "x": 90
+      },
+      "when": {
+        "axis": "y"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section",
+        "y": 90
+      },
+      "when": {
+        "axis": "y"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section",
+        "y": 270
+      },
+      "when": {
+        "axis": "y"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section",
+        "y": 180
+      },
+      "when": {
+        "axis": "y"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section"
+      },
+      "when": {
+        "axis": "y"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_thorns",
+        "x": 90,
+        "y": 90
+      },
+      "when": {
+        "axis": "x"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section",
+        "x": 270,
+        "y": 90
+      },
+      "when": {
+        "axis": "x"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section",
+        "x": 90,
+        "y": 90
+      },
+      "when": {
+        "axis": "x"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_top",
+        "y": 270
+      },
+      "when": {
+        "axis": "x"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_bottom",
+        "y": 270
+      },
+      "when": {
+        "axis": "x"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section_alt",
+        "y": 180
+      },
+      "when": {
+        "axis": "x"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section_alt"
+      },
+      "when": {
+        "axis": "x"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_thorns",
+        "x": 90
+      },
+      "when": {
+        "axis": "z"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section",
+        "x": 270
+      },
+      "when": {
+        "axis": "z"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section",
+        "x": 90
+      },
+      "when": {
+        "axis": "z"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section_alt",
+        "y": 90
+      },
+      "when": {
+        "axis": "z"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_no_section_alt",
+        "y": 270
+      },
+      "when": {
+        "axis": "z"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_top"
+      },
+      "when": {
+        "axis": "z"
+      }
+    },
+    {
+      "apply": {
+        "model": "minecraft:block/green_thorns_bottom"
+      },
+      "when": {
+        "axis": "z"
+      }
+    }
+  ]
+}

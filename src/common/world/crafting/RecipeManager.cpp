@@ -1,14 +1,60 @@
 // File: src/common/world/crafting/RecipeManager.cpp
 #include "RecipeManager.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/core/Features.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 #include "common/core/Log.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/entity/alchemy/Potions.hpp"
 
 #include <algorithm>
+#include <cstring>
+#include <string_view>
 #include <unordered_map>
 
 namespace Game {
 
     namespace {
+        constexpr const char* kTippedArrowRecipeId = "minecraft:tipped_arrow";
+
+        // MC 26.3 BookCloningRecipe "minecraft:book_cloning"
+        // (VanillaRecipeProvider: source WRITTEN_BOOK, material WRITABLE_BOOK,
+        // allowed generations 0..1, result WRITTEN_BOOK). A custom recipe:
+        // one written book plus any number of books and quills, anywhere in
+        // the grid. The data pack's crafting_special_bookcloning JSON is not
+        // a type the generator bakes, so it is matched here.
+        constexpr const char* kBookCloningRecipeId = "minecraft:book_cloning";
+        CraftingRecipe s_bookCloning = [] {
+            CraftingRecipe r;
+            r.id = kBookCloningRecipeId;
+            r.kind = RecipeKind::Shapeless;
+            r.resultItem = Items::WrittenBook;
+            r.resultCount = 1;
+            return r;
+        }();
+
+        // BookCloningRecipe.matches: at least two items; exactly one source
+        // (a written book whose generation is in 0..1); every other item a
+        // material (a book and quill).
+        bool BookCloningMatches(const CraftingInput& input) {
+            if (input.IngredientCount() < 2) return false;
+            bool hasSource = false, hasMaterial = false;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (stack.itemId == Items::WrittenBook) {
+                    const auto content = stack.get(DataComponents::WRITTEN_BOOK_CONTENT);
+                    if (!content || content->generation < 0 || content->generation > 1) return false;
+                    if (hasSource) return false;
+                    hasSource = true;
+                } else if (stack.itemId == Items::WritableBook) {
+                    hasMaterial = true;
+                } else {
+                    return false;
+                }
+            }
+            return hasSource && hasMaterial;
+        }
+
         // Resolved ingredient: the sorted ItemIDs that satisfy it. Sorted so
         // membership is a binary search — ingredients like #minecraft:planks
         // carry a dozen items and are tested once per grid cell per recipe.
@@ -209,6 +255,76 @@ namespace Game {
             s_recipes.push_back(std::move(recipe));
         }
 
+        // ── The engine's own items ──────────────────────────────────────────
+        //
+        // The portal gun and the portal wand have no data-pack row (they
+        // are not Minecraft items), so their recipes are written here in the
+        // shape MC's ShapedRecipe JSON takes: a pattern and a key. Registered
+        // AFTER the generated table so a pack can never shadow them, and
+        // only when the item exists in this build (its id is assigned at
+        // ItemRegistry::Initialize; 0 = the feature is off).
+        const auto shaped = [&](const char* id, ItemID result,
+                                const std::vector<const char*>& pattern,
+                                const std::vector<std::pair<char, ItemID>>& key) {
+            if (result == Items::Air) return;
+            CraftingRecipe recipe;
+            recipe.id          = id;
+            recipe.kind        = RecipeKind::Shaped;
+            recipe.height      = static_cast<int>(pattern.size());
+            recipe.width       = static_cast<int>(std::strlen(pattern.front()));
+            recipe.resultItem  = result;
+            recipe.resultCount = 1;
+            std::unordered_map<char, int32_t> slots;
+            for (const auto& [symbol, item] : key) {
+                if (item == Items::Air) return;   // an ingredient this build lacks
+                slots[symbol] = static_cast<int32_t>(s_ingredients.size());
+                s_ingredients.push_back(IngredientItems{ item });
+            }
+            for (const char* row : pattern) {
+                for (int x = 0; x < recipe.width; ++x) {
+                    const char c = row[x];
+                    if (c == ' ') { recipe.cells.push_back(-1); continue; }
+                    const auto it = slots.find(c);
+                    if (it == slots.end()) return;   // a pattern symbol with no key
+                    recipe.cells.push_back(it->second);
+                    recipe.ingredientCount++;
+                }
+            }
+            recipe.symmetrical = IsSymmetrical(recipe.width, recipe.height, recipe.cells);
+            s_recipes.push_back(std::move(recipe));
+        };
+        const ItemID obsidian = ItemRegistry::FromBlock(BlockID::Obsidian);
+#if ENABLE_PORTAL_GUN
+        // Obsidian body, iron fittings, a diamond at the heart, an iron grip.
+        shaped("obeycraft:portal_gun", Items::PortalGun,
+               { "OOO",
+                 "IDI",
+                 " I " },
+               { { 'O', obsidian }, { 'I', Items::IronIngot }, { 'D', Items::Diamond } });
+#endif
+#if ENABLE_IMMERSIVE_PORTALS
+        // A blaze rod with an ender pearl at its tip.
+        shaped("obeycraft:portal_wand", Items::PortalWand,
+               { " E",
+                 "B " },
+               { { 'E', Items::EnderPearl }, { 'B', Items::BlazeRod } });
+#endif
+        // MC 26.3 ImbueRecipe "minecraft:tipped_arrow" (VanillaRecipeProvider:
+        // source LINGERING_POTION, material ARROW, result TIPPED_ARROW x8).
+        // Its matches() is exactly a full 3x3 shaped test — the source in the
+        // centre, the material in the other eight cells — so it rides the
+        // shaped matcher; Assemble copies the centre's POTION_CONTENTS. (The
+        // data pack's old crafting_special_tippedarrow JSON is not a type the
+        // generator bakes, which is why it is registered here.)
+        shaped(kTippedArrowRecipeId, Items::TippedArrow,
+               { "AAA",
+                 "ALA",
+                 "AAA" },
+               { { 'A', Items::Arrow }, { 'L', Items::LingeringPotion } });
+        if (!s_recipes.empty() && std::strcmp(s_recipes.back().id, kTippedArrowRecipeId) == 0) {
+            s_recipes.back().resultCount = 8;
+        }
+
         Log::Info("[RecipeManager] %zu crafting recipes loaded (%zu dropped — unknown items)",
                   s_recipes.size(), dropped);
 
@@ -377,11 +493,67 @@ namespace Game {
                                : UnorderedMatches(recipe, input);
             if (matched) return &recipe;
         }
+        if (BookCloningMatches(input)) return &s_bookCloning;
         return nullptr;
     }
 
     ItemStack RecipeManager::Assemble(const CraftingRecipe& recipe, const CraftingInput& input) {
         ItemStack out{recipe.resultItem, recipe.resultCount};
+
+        // BookCloningRecipe.assemble: one copy per book and quill, carrying
+        // the source's components (TransmuteRecipe.createWithOriginalComponents)
+        // and its content one generation on (craftCopy).
+        if (&recipe == &s_bookCloning) {
+            const ItemStack* source = nullptr;
+            int count = 0;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (stack.itemId == Items::WrittenBook && stack.get(DataComponents::WRITTEN_BOOK_CONTENT)) {
+                    if (source) return ItemStack{};
+                    source = &stack;
+                } else if (stack.itemId == Items::WritableBook) {
+                    ++count;
+                } else {
+                    return ItemStack{};
+                }
+            }
+            if (!source) return ItemStack{};
+            const auto content = source->get(DataComponents::WRITTEN_BOOK_CONTENT);
+            ItemStack copy = *source;
+            copy.itemId = Items::WrittenBook;
+            copy.count  = recipe.resultCount + (count - 1);
+            copy.components.set(DataComponents::WRITTEN_BOOK_CONTENT, content->CraftCopy());
+            return copy;
+        }
+
+        // ImbueRecipe.assemble: result.set(POTION_CONTENTS, source's).
+        if (std::strcmp(recipe.id, kTippedArrowRecipeId) == 0) {
+            if (input.Width() == 3 && input.Height() == 3) {
+                if (auto contents = input.GetItem(1, 1).get(DataComponents::POTION_CONTENTS)) {
+                    out.components.set(DataComponents::POTION_CONTENTS, *contents);
+                }
+            }
+            return out;
+        }
+
+        // The suspicious stews are shapeless recipes whose RESULT carries
+        // components (data/minecraft/recipe/suspicious_stew_from_<flower>
+        // .json: result.components."minecraft:suspicious_stew_effects").
+        // The generated table keeps no result components, and each of those
+        // lists is exactly the flower's FlowerBlock.getSuspiciousEffects, so
+        // the flower named by the recipe id supplies it.
+        constexpr std::string_view kStewPrefix = "minecraft:suspicious_stew_from_";
+        if (std::string_view(recipe.id).rfind(kStewPrefix, 0) == 0) {
+            const std::string flowerSlug(std::string_view(recipe.id).substr(kStewPrefix.size()));
+            const ItemID flower = ItemFromSlug(flowerSlug);
+            if (ItemRegistry::IsBlockItem(flower)) {
+                if (const SuspiciousStewEffects* effects =
+                        GetFlowerSuspiciousEffects(ItemRegistry::ToBlock(flower))) {
+                    out.components.set(DataComponents::SUSPICIOUS_STEW_EFFECTS, *effects);
+                }
+            }
+            return out;
+        }
 
         if (recipe.kind != RecipeKind::Transmute) return out;
 
@@ -414,9 +586,27 @@ namespace Game {
     }
 
     std::vector<ItemStack> RecipeManager::GetRemainingItems(const CraftingInput& input) {
-        // MC CraftingRecipe.defaultCraftingReminder — no crafting recipe kind we
-        // support overrides getRemainingItems, so this IS the answer for all of
-        // them: each cell leaves behind its item's crafting remainder.
+        // BookCloningRecipe.getRemainingItems: the source book stays in the
+        // grid (one of it), the rest leave their crafting remainders.
+        if (Find(input) == &s_bookCloning) {
+            std::vector<ItemStack> out(input.Items().size());
+            for (size_t i = 0; i < input.Items().size(); ++i) {
+                const ItemStack& stack = input.Items()[i];
+                if (stack.IsEmpty()) continue;
+                const ItemID remainder = ItemRegistry::Get(stack.itemId).craftingRemainder;
+                if (remainder != Items::Air) {
+                    out[i] = ItemStack{remainder, 1};
+                } else if (stack.get(DataComponents::WRITTEN_BOOK_CONTENT)) {
+                    out[i] = stack;
+                    out[i].count = 1;
+                    break;
+                }
+            }
+            return out;
+        }
+
+        // MC CraftingRecipe.defaultCraftingReminder — every other recipe kind
+        // we support leaves each cell's crafting remainder behind.
         std::vector<ItemStack> out;
         out.reserve(input.Items().size());
         for (const auto& stack : input.Items()) {

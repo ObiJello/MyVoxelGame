@@ -1,0 +1,16 @@
+{
+  "model": {
+    "type": "minecraft:model",
+    "model": "minecraft:item/fire_minion_spawn_egg",
+    "tints": [
+      {
+        "type": "minecraft:constant",
+        "value": -37631
+      },
+      {
+        "type": "minecraft:constant",
+        "value": -68352
+      }
+    ]
+  }
+}

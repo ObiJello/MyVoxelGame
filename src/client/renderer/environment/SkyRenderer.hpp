@@ -9,9 +9,14 @@
 
 #include "../backend/RenderTypes.hpp"
 #include <glm/glm.hpp>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cstdint>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -105,6 +110,24 @@ namespace Render {
         // hands it to the cloud renderer every frame.
         const std::string& PackCloudTexture() const;
 
+        // ── Sky pack prefetch ──────────────────────────────────────────
+        // An OptiFine sky pack is nine or so 3072×2048 PNGs: decoded and
+        // uploaded on the join, they were a 330-390 ms hitch (Join.Skybox)
+        // on the first world of a session. The title screen knows which
+        // sky the player is likely to join with — the most recently played
+        // world's, then whichever world is selected — so it asks for the
+        // pack here: the layers decode on a background thread (two at a
+        // time, so the title stays smooth), and PumpPrefetch, once a title
+        // frame, uploads one decoded layer. A join then finds the pack
+        // resident, or at worst decoded, and SetSkybox costs the uploads
+        // alone. A prefetch for a sky that is already resident or already
+        // in flight is a no-op; one for a different sky replaces the
+        // current one. Nothing to decode (vanilla without a pack sky, a
+        // six-face set, an unknown id) is a no-op too.
+        void PrefetchSkybox(const std::string& id);
+        // One title frame's share of the prefetch: one layer's six faces.
+        void PumpPrefetch();
+
         // Which dimension the local player is in — raw Game::DimensionId
         // (-1 nether, 0 overworld, 1 end). Driven by ChangeDimensionS2C.
         //
@@ -124,6 +147,16 @@ namespace Render {
         // fog system this engine does not have yet.
         static constexpr float kNetherFog[3] = {0x33 / 255.0f, 0x08 / 255.0f, 0x08 / 255.0f};
 
+        // The Hush (DimensionId::Hush, raw 2): an open sky frozen at
+        // midnight — MC's fixedTime on a NORMAL sky, which vanilla never
+        // combines. Sculk's palette (#0E3A3F base, #2BD4C0 veins) taken down
+        // to night: a teal-black fog the terrain fades into, a darker disc
+        // behind it, and stars tinted toward the veins' cyan. All of it is
+        // dark on purpose — the glowing flora and crystals carry the light.
+        static constexpr float kHushFog[3]      = {0x0B / 255.0f, 0x2A / 255.0f, 0x2E / 255.0f};
+        static constexpr float kHushSky[3]      = {0x06 / 255.0f, 0x14 / 255.0f, 0x1A / 255.0f};
+        static constexpr float kHushStarTint[3] = {0.55f, 0.95f, 1.0f};
+
         // True while the active dimension draws no sky (the Nether). The
         // cloud renderer reads it — MC has no clouds outside the overworld.
         bool SkyHidden() const { return m_noSky; }
@@ -132,6 +165,17 @@ namespace Render {
         // player having CHOSEN the "end" skybox in settings — that is a purely
         // cosmetic overworld choice and should not suppress clouds.
         bool CurrentSkyboxIsEnd() const { return m_dimension == 1; }
+
+        // Whether the active dimension has a cloud layer. MC gives every
+        // dimension but the Overworld a cloud height of Float.NaN
+        // (DimensionSpecialEffects: NetherEffects and EndEffects both;
+        // the Hush is a night sky with none) — its way of saying "no cloud
+        // layer". The cloud passes gate on this, not on the sky's shape.
+        // The Aether (raw 4) has one, at its own height and colour
+        // (AetherSkyRenderEffects.renderClouds — EnvironmentFrame
+        // .cloudBottomY / cloudColor); the Twilight Forest (raw 3) has none —
+        // its dimension sets no CLOUD_COLOR, whose default is transparent.
+        bool HasClouds() const { return m_dimension == 0 || m_dimension == 4; }
 
         // proj: dedicated sky projection (far plane must cover the 512-radius
         //       disc — the main projection's far plane is too near at low
@@ -170,10 +214,25 @@ namespace Render {
         void BuildSunriseFan();
         void BuildCelestialQuads();
         void BuildStars();
+        // SkyRenderer.buildStars' loop with `attempts` tries from
+        // JavaRandom(10842): 1500 for vanilla, 3000 for the Twilight Forest
+        // (TFSkyRenderer.buildStars — the same stream, so its first half is
+        // vanilla's sky).
+        Mesh BuildStarMesh(int attempts);
         void BuildSkyboxCubes();
         void DestroySkyboxTextures();
         bool LoadSkyboxTextures(const std::string& id);
         void RenderSkybox(const glm::mat4& viewProj, float brightness);
+        // The Hush's sky: the disc in kHushSky under the sky fog, then the
+        // star sphere — tinted, additive, and at ONE fixed rotation (a
+        // frozen sky, not the Overworld's turning one). No sunrise fan, sun,
+        // moon, OptiFine layers or dark disc.
+        void RenderFixedNight(const glm::mat4& proj, const glm::mat4& viewRotation);
+        // TF TFSkyRenderer.renderSky: the vanilla overworld pass without the
+        // sunrise fan, sun and moon — the sky disc in the frame's (biome) sky
+        // colour, the doubled star field at full brightness turned only by
+        // the −90° yaw, and the dark disc below the dimension's floor.
+        void RenderTwilight(const glm::mat4& proj, const glm::mat4& viewRotation);
 
         // ── OptiFine custom sky ────────────────────────────────────────
         // One sky<n>.properties = one layer: six face textures cut from
@@ -233,10 +292,63 @@ namespace Render {
         // The player's chosen sky is the resident pack.
         bool PackChosen() const { return m_pack.loaded && m_pack.id == m_userSkyboxId; }
         bool LoadOptiFinePack(const std::string& id, const std::string& setDir);
-        bool LoadOptiFineWorldLayers(const std::string& setDir, const std::string& skyDir,
-                                     std::vector<OptiFineLayer>& out);
         void ReadPackDecorations(const std::string& setDir);
         void DestroyOptiFinePack();
+
+        // A pack between the disk and the GPU. Decoding (the PNG work,
+        // which is all of the cost) is thread-safe and touches nothing of
+        // the renderer; uploading is the main thread's, one layer at a time
+        // or all at once. Slots keep the file order the layers draw in
+        // whatever order the workers finish them.
+        struct DecodedImage {
+            std::vector<unsigned char> pixels;   // RGBA8
+            int w = 0, h = 0;
+        };
+        struct DecodedLayer {
+            OptiFineLayer layer;                          // faces INVALID until uploaded
+            std::array<std::vector<unsigned char>, 6> pixels;
+            int  faceSize = 0;                            // 0: the layer could not be read
+            bool blur     = false;                        // .mcmeta blur → linear sampling
+            bool uploaded = false;
+        };
+        struct DecodedPack {
+            std::string id;                               // the skybox id it is for
+            std::string dir;                              // pack root, trailing separator
+            std::mutex  mutex;                            // guards the slots and `decoded`
+            std::vector<DecodedLayer> layers[2];          // [0] overworld, [1] End; sized up front
+            std::vector<uint8_t>      ready[2];           // slot decoded
+            DecodedImage sun, moon;                       // the pack's own, when it has them
+            bool decoded = false;                         // every slot is in
+            std::atomic<bool> cancel{false};              // abandoned: stop after the current layer
+        };
+        // Reads one sky<n>.properties and cuts its 3×2 image into faces.
+        static void DecodeOptiFineLayer(const std::string& file, const std::string& setDir,
+                                        const std::string& skyDir, DecodedLayer& out);
+        // Decodes every layer of both worlds with `parallelism` workers,
+        // then the pack's sun and moon. Runs on any thread.
+        static void DecodeOptiFinePack(DecodedPack& pack, int parallelism);
+        // Main thread: the six face textures of one decoded layer.
+        bool UploadDecodedLayer(DecodedLayer& layer);
+        // Main thread: uploads what is still pending, then makes the pack
+        // the resident one (m_pack). False when no layer could be read.
+        bool InstallDecodedPack(DecodedPack& pack);
+        // The pack root a skybox id names, or empty when the id is not an
+        // OptiFine pack (vanilla resolves to the enabled resource pack's sky).
+        static std::string PackDirFor(const std::string& id);
+
+        struct Prefetch {
+            std::shared_ptr<DecodedPack> pack;   // decoding, or decoded and uploading
+            std::future<void>            decode; // valid while the background decode runs
+        };
+        Prefetch m_prefetch;
+        // Decodes abandoned for another sky finish on their own (a layer or
+        // so after the cancel) and are joined here, never waited on.
+        std::vector<std::future<void>> m_abandonedDecodes;
+        bool PrefetchMatches(const std::string& id, const std::string& dir) const {
+            return m_prefetch.pack && m_prefetch.pack->id == id && m_prefetch.pack->dir == dir;
+        }
+        void DiscardPrefetch();
+        void ReapAbandonedDecodes();
         // Draws one world's layers over the sky already drawn (after the
         // sunrise glow, before the sun and moon, where OptiFine draws
         // them), each with fade × position × weather brightness for this
@@ -260,6 +372,7 @@ namespace Render {
         Mesh m_sunQuad;
         Mesh m_moonQuads;   // 8 phase quads, drawn 6 indices at phase*6
         Mesh m_stars;       // ~1500 quads from JavaRandom(10842)
+        Mesh m_twilightStars;   // TFSkyRenderer's ~3000 from the same seed
 
         // Cubemap skybox state.
         Mesh m_skyboxCube;  // inward cube, UV 0..1 per face (panorama sets)
@@ -282,6 +395,14 @@ namespace Render {
         int         m_userSkyboxMode = 2;
         int         m_dimension = 0;
         bool        m_noSky = false;
+        // The Hush's frozen night is the active sky (see RenderFixedNight).
+        bool        m_fixedNight = false;
+        // The mod dimensions' skies are the active sky: the Twilight
+        // Forest's (RenderTwilight) and the Aether's (the vanilla pass with
+        // its frame — AetherSkyRenderEffects' colours, sun/moon fade and no
+        // dark disc — and never a chosen skybox or pack).
+        bool        m_twilightSky = false;
+        bool        m_aetherSky = false;
 
         // Apply m_dimension + the user's choice to the active sky.
         void ApplyDimensionSky();

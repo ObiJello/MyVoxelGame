@@ -98,8 +98,11 @@ namespace Server {
                 glm::dvec3(Game::Mth::ViewVector(srcRot.xRot - 90.0f, srcRot.yRot));
             const glm::dvec3 leftVec = -glm::cross(forward, upVec);
 
-            // MC's anchor here is the source's, which defaults to FEET.
-            out = src.position + forward * forwards + upVec * up + leftVec * left;
+            // MC LocalCoordinates.getPosition starts from the source's
+            // ANCHOR (`/execute anchored eyes` raises it by the eye height);
+            // `~` coordinates below use the plain position, as MC's
+            // WorldCoordinates do.
+            out = SourceAnchorPosition(src) + forward * forwards + upVec * up + leftVec * left;
             return true;
         }
 
@@ -109,6 +112,16 @@ namespace Server {
             error = "Invalid position: " + ax + " " + ay + " " + az;
             return false;
         }
+        return true;
+    }
+
+    bool ParseBlockPos(const std::string& ax, const std::string& ay, const std::string& az,
+                       const CommandSource& src, const CommandRotation& srcRot,
+                       glm::ivec3& out, std::string& error) {
+        glm::dvec3 p;
+        if (!ParseVec3(ax, ay, az, src, srcRot, p, error)) return false;
+        out = glm::ivec3(static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.y)),
+                         static_cast<int>(std::floor(p.z)));
         return true;
     }
 

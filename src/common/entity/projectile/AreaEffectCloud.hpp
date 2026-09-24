@@ -21,12 +21,14 @@
 //
 // Not modelled, each named at its site: the particle field (DATA_PARTICLE +
 // clientTick — no particle system; the cloud is INVISIBLE, which is the
-// documented render answer for this wave), the DATA_RADIUS/DATA_WAITING sync
-// (client renders nothing, so nothing reads them), and PotionContents (the
-// effect list is stored directly, the shape our witch already uses).
+// documented render answer for this wave) and the DATA_RADIUS/DATA_WAITING
+// sync (client renders nothing, so nothing reads them). The contents are MC's
+// PotionContents (a lingering potion's potion, or the custom effects a
+// dragon fireball / effect-carrying creeper adds).
 #pragma once
 
 #include "common/entity/projectile/Projectile.hpp"
+#include "common/entity/alchemy/Potions.hpp"
 
 #include <unordered_map>
 #include <vector>
@@ -78,10 +80,19 @@ namespace Game {
         // "shrunk below minimum" discard, so the save layer uses this.
         void SetRadiusRaw(float radius) { m_radius = radius; }
 
-        // MC addEffect(MobEffectInstance) — appends to the stored contents.
+        // MC addEffect(MobEffectInstance) — appends to the stored contents
+        // (potionContents.withEffectAdded).
         void AddCloudEffect(const MobEffectInstance& effect) {
-            m_effects.push_back(effect);
+            m_potionContents = m_potionContents.WithEffectAdded(effect);
         }
+
+        // MC setPotionContents / getPotionContents.
+        void SetPotionContents(const PotionContents& contents) { m_potionContents = contents; }
+        const PotionContents& GetPotionContents() const { return m_potionContents; }
+
+        // MC applyComponentsFromItemStack — the lingering potion's contents
+        // and its POTION_DURATION_SCALE (0.25).
+        void ApplyComponentsFromItemStack(const ItemStack& stack);
 
         void Tick() override;
 
@@ -102,7 +113,7 @@ namespace Game {
         float m_radiusPerTick = 0.0f;
         float m_potionDurationScale = 1.0f;
 
-        std::vector<MobEffectInstance> m_effects;
+        PotionContents m_potionContents;
 
         // MC's victims map: entity -> tickCount at which it may be hit again.
         std::unordered_map<Entity*, int> m_victims;

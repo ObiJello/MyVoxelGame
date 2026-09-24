@@ -31,6 +31,13 @@
     "minecraft:cinnabar_brick_wall",
     "minecraft:sulfur_wall",
     "minecraft:polished_sulfur_wall",
-    "minecraft:sulfur_brick_wall"
+    "minecraft:sulfur_brick_wall",
+    "minecraft:carved_wall",
+    "minecraft:angelic_wall",
+    "minecraft:hellfire_wall",
+    "minecraft:holystone_wall",
+    "minecraft:mossy_holystone_wall",
+    "minecraft:icestone_wall",
+    "minecraft:holystone_brick_wall"
   ]
 }

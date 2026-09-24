@@ -19,6 +19,7 @@
 #include "Screen.hpp"
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,15 @@ namespace Render {
         // procedural worlds. Set for both the auto-detected saves/world and
         // worlds imported from a real Minecraft installation.
         std::string savePath;
+
+        // "Regenerate on join": the world never gets a save folder — every
+        // session generates it fresh from the seed and nothing done in it is
+        // kept (the way every world behaved before folders existed). A
+        // creation-time choice; saved worlds cannot be switched to it.
+        bool regenerateOnJoin = false;
+        // This launch created the world (CreateWorldScreen): not saved; it
+        // becomes TitleAction::freshWorld.
+        bool justCreated = false;
 
         // Worlds from the player's Minecraft install are loaded but never
         // written back: we do not implement enough of the format to be trusted
@@ -141,6 +151,11 @@ namespace Render {
 
         void SetEntries(std::vector<WorldEntry> entries) { m_entries = std::move(entries); }
         const std::vector<WorldEntry>& Entries() const { return m_entries; }
+        // While the entries are being read (SelectWorldScreen::ReadEntries)
+        // the list draws MC's loading header — WorldSelectionList.
+        // LoadingHeader: "Loading worlds…" over the LoadingDotsText line.
+        void SetLoading(bool loading) { m_loading = loading; }
+        bool IsLoading() const { return m_loading; }
 
         int  SelectedIndex() const { return m_selected; }
         const WorldEntry* Selected() const {
@@ -163,6 +178,7 @@ namespace Render {
         double MaxScroll() const;
 
         std::vector<WorldEntry> m_entries;
+        bool   m_loading  = false;
         int    m_selected = -1;
         double m_scroll   = 0.0;
         long long m_lastClickMs  = 0;
@@ -184,6 +200,16 @@ namespace Render {
         // becomes editable and saveable. The original is only ever read.
         void CopySelected();
         void UpdateButtonStates();
+
+        // The list is read off the frame. Every world's level.dat and
+        // sidecar — and the Minecraft install's saves, when there is one —
+        // took 15-27 ms on the frame this screen opened. Init starts the
+        // read and shows the loading header; Render installs the entries
+        // the moment they are in. ReadEntries touches only the disk and
+        // the world-list file, nothing of the screen.
+        static std::vector<WorldEntry> ReadEntries();
+        void InstallEntries(std::vector<WorldEntry> entries);
+        std::future<std::vector<WorldEntry>> m_pendingEntries;
 
         WorldListWidget* m_list = nullptr;
         Button* m_playButton     = nullptr;

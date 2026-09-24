@@ -38,6 +38,10 @@ namespace Server {
 
         void setFoodLevel(int food)         { m_foodLevel = food; }     // :109-111
         void setSaturation(float saturation){ m_saturationLevel = saturation; } // :113-115
+        // The exhaustion accumulator, for the shared-vitals pool (MC has
+        // getExhaustionLevel; the setter is this engine's).
+        float getExhaustionLevel() const     { return m_exhaustionLevel; }
+        void  setExhaustion(float exhaustion){ m_exhaustionLevel = exhaustion; }
 
     private:
         // Defaults mirror FoodData.java:14-17.

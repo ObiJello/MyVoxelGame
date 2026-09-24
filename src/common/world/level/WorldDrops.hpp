@@ -14,6 +14,7 @@
 #pragma once
 
 #include "common/world/level/DimensionId.hpp"
+#include "common/world/block/BlockState.hpp"
 
 #include <glm/glm.hpp>
 
@@ -42,6 +43,12 @@ namespace Game {
     bool DropItemStackAt(DimensionId dimension, const glm::dvec3& pos,
                          const ItemStack& stack);
 
+    // MC `level.addFreshEntity(new ItemEntity(level, x, y, z, stack))` with a
+    // caller-chosen velocity and pickup delay — the dispenser's
+    // DefaultDispenseItemBehavior.spawnItem.
+    bool SpawnItemEntity(DimensionId dimension, const glm::dvec3& pos, const glm::dvec3& velocity,
+                         const ItemStack& stack, int pickupDelay);
+
     // MC Block.popResourceFromFace — same, but nudged out of one face of the
     // block and launched away from it, for items that logically come off a
     // particular side. `face` is a Direction ordinal (0=down .. 5=east).
@@ -60,5 +67,11 @@ namespace Game {
     // collapse is reproducible and two blocks breaking in the same tick do not
     // draw from each other's rolls.
     void DestroyBlockWithDrops(ILevelWrite& level, const glm::ivec3& pos);
+
+    // MC Block.dropResources(state, level, pos): roll `state`'s loot table
+    // and pop the results at `pos`, without touching the cell. The half of
+    // DestroyBlockWithDrops that World::DestroyBlock needs on its own,
+    // because it clears the cell with a caller-supplied update limit.
+    void DropBlockLoot(ILevelWrite& level, const glm::ivec3& pos, BlockState state);
 
 } // namespace Game

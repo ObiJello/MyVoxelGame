@@ -1,5 +1,6 @@
 // File: src/client/renderer/entity/model/ModelPart.cpp
 #include "client/renderer/entity/model/ModelPart.hpp"
+#include "client/renderer/entity/EntityLighting.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -64,8 +65,8 @@ namespace Render {
             const size_t firstVert = verts.size();
             BuildCube(cube, world, verts, idx, culled);
             for (size_t i = firstVert; i < verts.size(); ++i) {
-                verts[i].u /= texWidth;
-                verts[i].v /= texHeight;
+                verts[i].u /= texWidth  * cube.texScaleU;
+                verts[i].v /= texHeight * cube.texScaleV;
             }
         }
 
@@ -104,15 +105,20 @@ namespace Render {
         const float v1 = cube.texOffsY + d;
         const float v2 = cube.texOffsY + d + h;
 
-        // MC's standard directional shading, baked into vertex colour.
-        const auto shade = [](float s) { return static_cast<uint8_t>(s * 255.0f); };
-        const uint8_t S_UP = shade(1.00f);
-        const uint8_t S_DOWN = shade(0.50f);
-        const uint8_t S_NS = shade(0.80f);
-        const uint8_t S_EW = shade(0.60f);
+        // MC's entity lighting (EntityLighting.hpp), baked into vertex colour
+        // from each face's WORLD normal. The faces below carry their
+        // ModelPart.Polygon normals in model space (Y down, so the model's
+        // DOWN face is the top of a standing mob once the renderer's
+        // scale(-1,-1,1) is applied — the normal matrix carries that flip).
+        const glm::mat3 normalMat = EntityLighting::NormalMatrix(transform);
+        const EntityLighting::LightSet lightSet = EntityLighting::Current();
+        const glm::vec3 N_DOWN(0, -1, 0), N_UP(0, 1, 0);
+        const glm::vec3 N_WEST(-1, 0, 0), N_EAST(1, 0, 0);
+        const glm::vec3 N_NORTH(0, 0, -1), N_SOUTH(0, 0, 1);
 
         const auto emit = [&](const glm::vec3 q[4], float U0, float V0, float U1, float V1,
-                              uint8_t sh) {
+                              const glm::vec3& modelNormal) {
+            const uint8_t sh = EntityLighting::ShadeByte(normalMat * modelNormal, lightSet);
             const uint32_t base = static_cast<uint32_t>(verts.size());
 
             // Mirroring swaps the u extents, which is exactly what MC's
@@ -163,19 +169,19 @@ namespace Render {
         const bool flatY = (maxY - minY) == 0.0f;
         const bool flatZ = (maxZ - minZ) == 0.0f;
         if (!(flatX || flatZ)) {
-            if (flatY && !culled) { const glm::vec3 q[4] = { t1, t0, l0, l1 }; emit(q, u1, v1, u2,  v0, S_DOWN); }
-            else                  { const glm::vec3 q[4] = { l1, l0, t0, t1 }; emit(q, u1, v0, u2,  v1, S_DOWN); }
-            { const glm::vec3 q[4] = { t2, t3, l3, l2 }; emit(q, u2, v1, u22, v0, S_UP); }
+            if (flatY && !culled) { const glm::vec3 q[4] = { t1, t0, l0, l1 }; emit(q, u1, v1, u2,  v0, N_DOWN); }
+            else                  { const glm::vec3 q[4] = { l1, l0, t0, t1 }; emit(q, u1, v0, u2,  v1, N_DOWN); }
+            { const glm::vec3 q[4] = { t2, t3, l3, l2 }; emit(q, u2, v1, u22, v0, N_UP); }
         }
         if (!(flatY || flatZ)) {
-            if (flatX && !culled) { const glm::vec3 q[4] = { l0, t0, t3, l3 }; emit(q, u1, v1, u0, v2, S_EW); }
-            else                  { const glm::vec3 q[4] = { t0, l0, l3, t3 }; emit(q, u0, v1, u1, v2, S_EW); }
-            { const glm::vec3 q[4] = { l1, t1, t2, l2 }; emit(q, u2, v1, u3, v2, S_EW); }
+            if (flatX && !culled) { const glm::vec3 q[4] = { l0, t0, t3, l3 }; emit(q, u1, v1, u0, v2, N_WEST); }
+            else                  { const glm::vec3 q[4] = { t0, l0, l3, t3 }; emit(q, u0, v1, u1, v2, N_WEST); }
+            { const glm::vec3 q[4] = { l1, t1, t2, l2 }; emit(q, u2, v1, u3, v2, N_EAST); }
         }
         if (!(flatX || flatY)) {
-            if (flatZ && !culled) { const glm::vec3 q[4] = { t0, t1, t2, t3 }; emit(q, u2, v1, u1, v2, S_NS); }
-            else                  { const glm::vec3 q[4] = { t1, t0, t3, t2 }; emit(q, u1, v1, u2, v2, S_NS); }
-            { const glm::vec3 q[4] = { l0, l1, l2, l3 }; emit(q, u3, v1, u4, v2, S_NS); }
+            if (flatZ && !culled) { const glm::vec3 q[4] = { t0, t1, t2, t3 }; emit(q, u2, v1, u1, v2, N_NORTH); }
+            else                  { const glm::vec3 q[4] = { t1, t0, t3, t2 }; emit(q, u1, v1, u2, v2, N_NORTH); }
+            { const glm::vec3 q[4] = { l0, l1, l2, l3 }; emit(q, u3, v1, u4, v2, N_SOUTH); }
         }
     }
 

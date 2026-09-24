@@ -13,6 +13,7 @@
 
 #include "common/entity/projectile/Projectile.hpp"
 #include "common/world/level/Explosion.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 namespace Game {
 
@@ -175,6 +176,7 @@ namespace Game {
             p.interaction         = ExplosionInteraction::Trigger;
             p.damageEntities      = false;
             p.knockbackMultiplier = 1.22f;
+            p.explosionSound      = SoundEvents::WIND_CHARGE_BURST;
             // Qualified: the virtual we are inside shadows the free function.
             Game::Explode(*m_level, p);
         }
@@ -201,6 +203,7 @@ namespace Game {
             p.interaction         = ExplosionInteraction::Trigger;
             p.damageEntities      = false;
             p.knockbackMultiplier = 1.0f;
+            p.explosionSound      = SoundEvents::BREEZE_WIND_CHARGE_BURST;
             // Qualified: the virtual we are inside shadows the free function.
             Game::Explode(*m_level, p);
         }

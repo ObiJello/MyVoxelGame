@@ -1,0 +1,27 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "equipment",
+  "group": "fiery_boots",
+  "ingredients": [
+    "minecraft:iron_boots",
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ],
+    [
+      "minecraft:fiery_blood",
+      "minecraft:fiery_tears"
+    ]
+  ],
+  "result": {
+    "id": "minecraft:fiery_boots"
+  }
+}

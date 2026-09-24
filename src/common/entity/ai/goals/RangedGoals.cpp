@@ -12,6 +12,8 @@
 #include "common/core/Mth.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/sound/EntitySounds.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -191,7 +193,9 @@ namespace Game {
                 }
 
                 if (m_attackStep > 1) {
-                    // MC level event 1018 (blaze shoot) — no sound system.
+                    if (!m_blaze->IsSilent()) {
+                        PlayEntityLevelEventSound(*level, EntityLevelEvent::BLAZE_SHOOT, m_blaze->BlockPosition());
+                    }
                     const double sqd = std::sqrt(std::sqrt(distance)) * 0.5;
                     JavaRandom& rng = level->Random();
                     glm::dvec3 direction(rng.Triangle(xd, 2.297 * sqd), yd,
@@ -309,10 +313,16 @@ namespace Game {
         if (target->DistanceToSqr(*m_ghast) < 4096.0 &&
             m_ghast->GetSensing().HasLineOfSight(*target)) {
             ++m_chargeTime;
-            // MC level events 1015 (warble, tick 10) and 1016 (shoot) — no
-            // sound system.
+            // MC level events 1015 (the warble at tick 10) and 1016 (the
+            // shot), unless silent.
+            if (m_chargeTime == 10 && !m_ghast->IsSilent()) {
+                PlayEntityLevelEventSound(*level, EntityLevelEvent::GHAST_WARNING, m_ghast->BlockPosition());
+            }
 
             if (m_chargeTime == 20) {
+                if (!m_ghast->IsSilent()) {
+                    PlayEntityLevelEventSound(*level, EntityLevelEvent::GHAST_SHOOT, m_ghast->BlockPosition());
+                }
                 const glm::vec3 view =
                     Mth::ViewVector(m_ghast->xRot, m_ghast->yRot);
                 const double mouthX =
@@ -386,6 +396,9 @@ namespace Game {
                 auto bullet = std::make_unique<ShulkerBullet>(level);
                 bullet->InitShot(*m_shulker, *target, m_shulker->GetAttachAxis());
                 level->AddFreshEntity(std::move(bullet));
+                JavaRandom& rng = level->Random();
+                m_shulker->PlaySound(SoundEvents::SHULKER_SHOOT, 2.0f,
+                                     (rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f);
             }
         } else {
             m_shulker->SetTarget(nullptr);

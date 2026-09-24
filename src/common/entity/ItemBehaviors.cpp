@@ -19,7 +19,8 @@
 // whether to stop the dispatch chain or fall through.
 
 #include "Item.hpp"
-#include "common/core/SoundEvents.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "GeneratedItemList.hpp"
 #include "SpawnEggs.hpp"
 #include "mobs/SulfurCube.hpp"
@@ -28,14 +29,23 @@
 #include "../data/DataComponents.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../world/block/BlockPlacement.hpp"
+#include "../world/fluid/FlowingFluid.hpp"
+#include "../world/level/DimensionId.hpp"
 #include "../world/level/World.hpp"
 #include "../world/level/WorldDrops.hpp"
+#include "../world/level/HushItems.hpp"
+#include "../world/level/AurelithQuest.hpp"
+#include "../world/portal/ModPortalBehaviors.hpp"
+#include "../world/portal/PortalFamily.hpp"
 #include "../world/portal/PortalShape.hpp"
+#include "../world/portal/PortalState.hpp"
 #include "../world/portal/EndPortalFrame.hpp"
 #include "../core/JavaRandom.hpp"
 #include "../core/Mth.hpp"
 #include "../core/Log.hpp"
 #include "IUsePlayer.hpp"
+#include "../world/block/entity/SpawnerBlockEntity.hpp"
+#include "../world/level/GameRules.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -57,15 +67,28 @@ namespace Game {
     // canFitInsideContainerItems + crafting remainders.
     void ItemRegistry_RegisterBundles(std::unordered_map<ItemID, Item>& pureItems);
 
+    // Implemented in alchemy/PotionItems.cpp — POTION_CONTENTS defaults on the
+    // four potion items, the drinkable potion's CONSUMABLE, the throws, and
+    // the stew's SUSPICIOUS_STEW_EFFECTS.
+    void ItemRegistry_RegisterPotionItems(std::unordered_map<ItemID, Item>& pureItems);
+    void ItemRegistry_RegisterBookItems(std::unordered_map<ItemID, Item>& pureItems);   // BookItems.cpp
+
     namespace {
 
         // ── Common helpers ──────────────────────────────────────────────────
 
-        // PlaySound moved to common/core/SoundEvents.hpp — it lived here, in an
-        // anonymous namespace, which meant only item behaviours could reach it
-        // and every block and entity that should have been making a noise
-        // silently was not. The unqualified calls below now resolve to
-        // Game::PlaySound through the enclosing namespace.
+        // Sounds go through the level (ILevelWrite::PlaySound, MC
+        // Level.playSound) with MC's `except` argument: an item used on a
+        // block passes the player, because this chain runs twice — on the
+        // client as the prediction (which plays it for the user at once) and
+        // on the server (which sends it to everyone else).
+
+        // MC level.getRandom().nextFloat(), or a midpoint where the level has
+        // no random (never on either real side).
+        float LevelRandomFloat(ILevelWrite* level) {
+            JavaRandom* r = level ? level->Random() : nullptr;
+            return r ? r->NextFloat() : 0.5f;
+        }
 
         // Mirrors MC `Level.gameEvent(GameEvent, BlockPos, Context)`
         // (Level.java:1129). Sculk sensors / wardens listen on these. We don't
@@ -206,7 +229,10 @@ namespace Game {
                 const auto& def = BlockRegistry::GetStateDefinition(here);
                 const BlockState cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
                 if (cur.GetValueByName("lit") == "false") {
-                    PlaySound("item.flintandsteel.use", pos);
+                    // FlintAndSteelItem.useOn:54 — playSound(player, pos,
+                    // FLINTANDSTEEL_USE, BLOCKS, 1.0, nextFloat * 0.4 + 0.8).
+                    ctx.world->PlaySound(ctx.player, pos, SoundEvents::FLINTANDSTEEL_USE, SoundSource::Blocks,
+                                         1.0f, LevelRandomFloat(ctx.world) * 0.4f + 0.8f);
                     BlockRegistry::BlockStateDefinition::PropertyMap props;
                     props["facing"] = std::string(cur.GetValueByName("facing"));
                     props["lit"]    = "true";
@@ -234,7 +260,8 @@ namespace Game {
 
             // MC: `level.playSound(player, relativePos, FLINTANDSTEEL_USE,
             //      BLOCKS, 1.0F, level.getRandom().nextFloat() * 0.4F + 0.8F)`
-            PlaySound("flint_and_steel.use", firePos);
+            ctx.world->PlaySound(ctx.player, firePos, SoundEvents::FLINTANDSTEEL_USE, SoundSource::Blocks,
+                                 1.0f, LevelRandomFloat(ctx.world) * 0.4f + 0.8f);
 
             // MC: `BlockState fireState = BaseFireBlock.getState(level, relativePos);
             //      level.setBlock(relativePos, fireState, 11);`
@@ -287,7 +314,8 @@ namespace Game {
             }
 
             // MC: level.levelEvent(1503, pos, 0) — the eye-seated sound.
-            PlaySound("block.end_portal_frame.fill", pos);
+            PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::END_PORTAL_FRAME_FILL, pos, 0,
+                                ctx.world->Random());
             stack.count -= 1;
             if (stack.count <= 0) stack.Clear();
 
@@ -318,7 +346,107 @@ namespace Game {
 
             // MC: globalLevelEvent(1038, blockPos.offset(1, 0, 1), 0) — the
             // portal-spawn fanfare, heard world-wide.
-            PlaySound("block.end_portal.spawn", base + glm::ivec3(1, 0, 1));
+            PlayGlobalLevelEventSound(*ctx.world, LevelEvent::SOUND_END_PORTAL_SPAWN,
+                                      base + glm::ivec3(1, 0, 1));
+            return UseResult::Success;
+        }
+
+        // ── EchoShard.useOn — the Hush portal's ignition ─────────────────
+        //
+        // The engine's own item behaviour (vanilla's echo shard has no
+        // useOn): an echo shard held against the ancient city's
+        // reinforced-deepslate frame resonates and lights it, the way fire
+        // lights obsidian. Shaped like UseOn_EnderEye above — the click
+        // must land on the frame block itself, the client only swings, and
+        // the server decides — with the fire block's two ignition routes
+        // (immersive handler, vanilla PortalShape) behind it.
+        //
+        // The clicked block is the FRAME, not the interior, so the interior
+        // has to be found from it: first the cell past the clicked face
+        // (clicking the inside of a frame from within the opening), then
+        // the four neighbours of the frame block perpendicular to the face
+        // normal (clicking the frame's outer face — the interior lies
+        // beside the block, not in front of it). The first seed that closes
+        // a loop wins.
+        UseResult UseOn_EchoShard(const UseOnContext& ctx, ItemStack& stack) {
+            if (!ctx.world) return UseResult::Pass;
+            const glm::ivec3 pos = ctx.hitResult.blockPos;
+            const BlockState target = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+
+            // PASS, not FAIL, for anything but the frame block — the ender
+            // eye's reasoning: FAIL stops the dispatch, and the shard has no
+            // other use to fall through to today, but the block under the
+            // click still gets its useWithoutItem.
+            const PortalFamily& family = HushFamily();
+            if (!family.isFrame(target.Block())) return UseResult::Pass;
+            // A city frame in the Nether, or a hand-built one in the End,
+            // does not resonate — the Hush's counterpart of
+            // BaseFireBlock.inPortalDimension.
+            if (!DimensionAllowsHushPortal(ctx.world->GetDimension())) return UseResult::Fail;
+
+            // The client predicts the arm swing and nothing else, as with the
+            // eye: lighting a 20x6 frame on a prediction the server then
+            // rejects would leave a portal the server does not have.
+            if (ctx.world->IsClientSide()) return UseResult::Success;
+
+            const Direction face = static_cast<Direction>(
+                ctx.hitResult.face >= 0 && ctx.hitResult.face <= 5 ? ctx.hitResult.face
+                                                                    : static_cast<int>(Direction::North));
+            const Axis faceAxis = AxisOf(face);
+            // The vanilla walk's preferred axis, derived from the clicked face
+            // the way FlintAndSteel's CanFireBePlacedAt does; FindEmptyPortal-
+            // Shape tries the other one anyway.
+            const Axis preferredAxis = IsHorizontal(face) ? AxisOf(ClockWise(face)) : Axis::X;
+
+            glm::ivec3 seeds[5];
+            int seedCount = 0;
+            seeds[seedCount++] = ctx.getPlacementPos();
+            for (int axis = 0; axis < 3; ++axis) {
+                if (axis == static_cast<int>(faceAxis)) continue;
+                glm::ivec3 step(0);
+                step[axis] = 1;
+                seeds[seedCount++] = pos + step;
+                seeds[seedCount++] = pos - step;
+            }
+
+            bool lit = false;
+            if (Portals::FamilyIsImmersive(family.id)) {
+                // Never for the Hush today (Portals::FamilyIsImmersive: the
+                // family is always vanilla, whatever /gamerule
+                // immersive_portals says); kept so the family can be made
+                // immersive in one place: the server's frame-lit handler
+                // finds the loop and starts the far-side generation.
+                if (auto handler = Portals::GetImmersiveFrameLitHandler()) {
+                    for (int i = 0; i < seedCount && !lit; ++i) {
+                        lit = handler(*ctx.world, seeds[i], family.id);
+                    }
+                }
+            } else {
+                // The Hush's portal: MC PortalShape's rectangle walk against
+                // the Hush family (reinforced deepslate, up to 21×21),
+                // filled with hush_portal blocks.
+                for (int i = 0; i < seedCount && !lit; ++i) {
+                    auto shape = PortalShape::FindEmptyPortalShape(*ctx.world, seeds[i],
+                                                                   preferredAxis, family);
+                    if (!shape) continue;
+                    shape->CreatePortalBlocks(*ctx.world);
+                    lit = true;
+                }
+            }
+            if (!lit) return UseResult::Fail;
+
+            // The shriek is the deep dark's own sound; a shard resonating
+            // against the frame is the same voice (the engine event resolves
+            // to it through assets/sound_overlays/obeycraft/world.json).
+            // Server-only past the gate above, so everyone hears it from here.
+            ctx.world->PlaySound(nullptr, pos, "obeycraft:block.hush_portal.ignite", SoundSource::Blocks,
+                                 1.0f, 1.0f);
+            // One shard per lighting; creative keeps its stack, as the
+            // bucket and spawn-egg paths above do (MC `hasInfiniteMaterials`).
+            if (!ctx.player || !ctx.player->isCreative()) {
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+            }
             return UseResult::Success;
         }
 
@@ -365,9 +493,10 @@ namespace Game {
                 }
             }
 
-            // MC: play HOE_TILL sound on BOTH client and server side
-            // (it's outside the !isClientSide guard).
-            PlaySound("item.hoe.till", pos);
+            // MC HoeItem.useOn: playSound(player, pos, HOE_TILL, BLOCKS, 1, 1)
+            // on BOTH sides (outside the !isClientSide guard) — the user's
+            // prediction plays it, the server skips them.
+            ctx.world->PlaySound(ctx.player, pos, SoundEvents::HOE_TILL, SoundSource::Blocks, 1.0f, 1.0f);
 
             // MC: `if (!level.isClientSide()) { action.accept(context); ...hurtAndBreak... }`
             // Always runs server-side for us.
@@ -422,7 +551,9 @@ namespace Game {
                     const BlockID above = ctx.world->GetBlock(pos.x, pos.y + 1, pos.z);
                     if (above != BlockID::Air) return UseResult::Pass;
                 }
-                PlaySound("item.shovel.flatten", pos);
+                // ShovelItem.useOn: playSound(player, pos, SHOVEL_FLATTEN, BLOCKS).
+                ctx.world->PlaySound(ctx.player, pos, SoundEvents::SHOVEL_FLATTEN, SoundSource::Blocks,
+                                     1.0f, 1.0f);
                 newBlock = BlockID::DirtPath;
             } else if (src == BlockID::Campfire || src == BlockID::SoulCampfire) {
                 // MC: `else if (block instanceof CampfireBlock && state.getValue(LIT))`
@@ -436,7 +567,12 @@ namespace Game {
                 const BlockState cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
                 if (cur.GetValueByName("lit") != "true") return UseResult::Pass;
 
-                PlaySound("block.fire.extinguish", pos);
+                // ShovelItem.useOn: `if (!level.isClientSide()) level.levelEvent(
+                // null, 1009, pos, 0)` — FIRE_EXTINGUISH, for everyone.
+                if (!ctx.world->IsClientSide()) {
+                    PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::SOUND_EXTINGUISH_FIRE, pos, 0,
+                                        ctx.world->Random());
+                }
                 BlockRegistry::BlockStateDefinition::PropertyMap props;
                 props["facing"] = std::string(cur.GetValueByName("facing"));
                 props["lit"]    = "false";
@@ -495,6 +631,9 @@ namespace Game {
                 case BlockID::MangroveWood:   return BlockID::StrippedMangroveWood;
                 case BlockID::MangroveLog:    return BlockID::StrippedMangroveLog;
                 case BlockID::BambooBlock:    return BlockID::StrippedBambooBlock;
+                // The Hush (docs/the-hush.md) — whisperwood has no "wood"
+                // (bark-on-all-sides) variant, only the log.
+                case BlockID::WhisperwoodLog: return BlockID::StrippedWhisperwoodLog;
                 default:                      return BlockID::Air;
             }
         }
@@ -597,16 +736,19 @@ namespace Game {
             // evaluateNewBlockState (:70-90) — strip, then scrape, then wax-off.
             BlockID newBlock = StrippedVariant(src);
             if (newBlock != BlockID::Air) {
-                PlaySound("item.axe.strip", pos);                       // :73
+                ctx.world->PlaySound(ctx.player, pos, SoundEvents::AXE_STRIP, SoundSource::Blocks,
+                                     1.0f, 1.0f);                               // :73
             } else {
                 newBlock = CopperScrapedVariant(src);
                 if (newBlock != BlockID::Air) {
-                    PlaySound("item.axe.scrape", pos);                  // :78
+                    ctx.world->PlaySound(ctx.player, pos, SoundEvents::AXE_SCRAPE, SoundSource::Blocks,
+                                         1.0f, 1.0f);                           // :78
                     // levelEvent 3005 (scrape particles) — particle system TODO.
                 } else {
                     newBlock = WaxOffVariant(src);
                     if (newBlock != BlockID::Air) {
-                        PlaySound("item.axe.wax_off", pos);             // :83
+                        ctx.world->PlaySound(ctx.player, pos, SoundEvents::AXE_WAX_OFF, SoundSource::Blocks,
+                                             1.0f, 1.0f);                       // :83
                         // levelEvent 3004 (wax-off particles) — TODO.
                     } else {
                         return UseResult::Pass;                         // :86
@@ -636,7 +778,12 @@ namespace Game {
             if (!sheep->IsAlive() || sheep->IsSheared()) return UseResult::Pass;
             if (sheep->GetColor() == color) return UseResult::Pass;
 
-            PlaySound("item.dye.use", sheep->BlockPosition());
+            // MC DyeItem.interactLivingEntity:28 — playSound(player, sheep,
+            // DYE_USE, PLAYERS): entity-bound. The interaction is the
+            // server's alone here, so the user hears it from the server too.
+            if (EntityLevel* lvl = sheep->Level()) {
+                lvl->PlaySoundFromEntity(nullptr, *sheep, SoundEvents::DYE_USE, SoundSource::Players, 1.0f, 1.0f);
+            }
             sheep->SetColor(color);
 
             // MC itemStack.shrink(1). Creative is restored by the dispatch's
@@ -669,10 +816,30 @@ namespace Game {
             const EntityTypeId type = SpawnEggEntityType(stack.itemId);
             if (type == EntityTypeId::Count) return UseResult::Fail;   // :62 FAIL
 
-            // MC's first branch is a Spawner block entity (a monster spawner
-            // reprogrammed by the egg). There is no Spawner in this port, so
-            // the else branch is the only one.
             const glm::ivec3 clicked = ctx.hitResult.blockPos;
+
+            // :56-79 the first branch: a Spawner block entity is reprogrammed
+            // by the egg. With spawner_blocks_work off MC says so and FAILs;
+            // otherwise setEntityId (the op-only ENTITY_DATA variant has no
+            // component to read here), sendBlockUpdated, BLOCK_CHANGE, and
+            // one egg is used (creative restores it through the dispatch's
+            // stack snapshot, as below).
+            if (auto* spawner = dynamic_cast<SpawnerBlockEntity*>(ctx.world->GetBlockEntity(clicked))) {
+                if (!Rules::GetBool(Rules::Id::SpawnerBlocksWork)) {
+                    if (ctx.player) {
+                        ctx.player->DisplayClientMessage("Spawner blocks are disabled", /*actionBar=*/false);
+                    }
+                    return UseResult::Fail;
+                }
+                JavaRandom* random = ctx.world->Random();
+                JavaRandom fallback(0);
+                spawner->SetEntityId(type, random ? *random : fallback);
+                ctx.world->BlockEntityChanged(clicked);
+                GameEventEmit("block_change", clicked);
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+                return UseResult::Success;
+            }
 
             // :80-85 spawn INSIDE the clicked cell when it has no collision
             // (tall grass, a flower, air), otherwise on the face that was hit.
@@ -720,7 +887,9 @@ namespace Game {
                                      World::UpdateFlags::All)) {
                 return UseResult::Fail;
             }
-            PlaySound("item.honeycomb.wax_on", pos);
+            // HoneycombItem.useOn:71 — playSound(player, pos, HONEYCOMB_WAX_ON,
+            // BLOCKS, 1.0, 1.0).
+            ctx.world->PlaySound(ctx.player, pos, SoundEvents::HONEYCOMB_WAX_ON, SoundSource::Blocks, 1.0f, 1.0f);
             GameEventEmit("block_change", pos);
             return UseResult::Success;
         }
@@ -763,8 +932,13 @@ namespace Game {
                         // MC: `level.levelEvent(1505, pos, 15)` →
                         // BoneMealItem.addGrowthParticles spawns 15
                         // happy_villager particles inside the block.
-                        // TODO(particles): no particle system yet.
-                        PlaySound("item.bone_meal.use", pos);
+                        // TODO(particles): no particle system yet. The sound
+                        // half is the server's (`if (!level.isClientSide())`),
+                        // for everyone.
+                        if (!ctx.world->IsClientSide()) {
+                            PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::PARTICLES_AND_SOUND_PLANT_GROWTH,
+                                                pos, 15, ctx.world->Random());
+                        }
                         // MC: itemStack.shrink(1). Creative is handled by the
                         // dispatch's whole-stack snapshot, NOT here — and it
                         // has to be the whole stack, because Clear() below
@@ -825,8 +999,12 @@ namespace Game {
 
             if (!anyPlaced) return UseResult::Fail;
 
-            // :43 levelEvent 1505 (bone-meal particles) — particle system TODO.
-            PlaySound("item.bone_meal.use", pos);
+            // :43 levelEvent 1505 (bone-meal particles — particle system TODO;
+            // its sound, server-side, for everyone).
+            if (!ctx.world->IsClientSide()) {
+                PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::PARTICLES_AND_SOUND_PLANT_GROWTH, pos, 15,
+                                    ctx.world->Random());
+            }
             // :73 itemStack.shrink(1) — creative restored by the dispatch's
             // whole-stack snapshot (Clear() wipes the id too, so a count-only
             // restore would lose the last bone meal).
@@ -930,7 +1108,11 @@ namespace Game {
             while (travelled <= kReach) {
                 if (!world->IsValidPosition(cell.x, cell.y, cell.z)) return std::nullopt;
                 const BlockID block = world->GetBlock(cell.x, cell.y, cell.z);
-                const bool isFluid = (block == BlockID::Water || block == BlockID::Lava);
+                // Aurelith's resonant water is a fluid cell here too (its
+                // shape is empty, like a bubble column's, so the shape test
+                // below would let the ray through it).
+                const bool isFluid = (block == BlockID::Water || block == BlockID::Lava ||
+                                      block == BlockID::ResonantWater);
                 if (block != BlockID::Air && (!isFluid || stopOnFluid)) {
                     // Fluids fill their cell, so they need no shape test; every
                     // other block is clipped against its real geometry.
@@ -1014,7 +1196,10 @@ namespace Game {
                 return UseResult::Consume;
             }
 
-            PlaySound("entity.ender_eye.launch", glm::ivec3(from));
+            // EnderEyeItem.use:103 — at the player, NEUTRAL, pitch
+            // lerp(nextFloat, 0.33, 0.5); server-side, for everyone.
+            world->PlaySound(nullptr, player->getPosition(), SoundEvents::ENDER_EYE_LAUNCH, SoundSource::Neutral,
+                             1.0f, 0.33f + LevelRandomFloat(world) * (0.5f - 0.33f));
             stack.count -= 1;
             if (stack.count <= 0) stack.Clear();
             return UseResult::Success;
@@ -1040,8 +1225,10 @@ namespace Game {
                 return UseResult::Fail;
             }
 
-            PlaySound("entity.ender_pearl.throw",
-                      glm::ivec3(glm::floor(player->getPosition())));
+            // EnderpearlItem.use:25 — playSound(null, player, ENDER_PEARL_THROW,
+            // NEUTRAL, 0.5, 0.4 / (nextFloat * 0.4 + 0.8)).
+            world->PlaySound(nullptr, player->getPosition(), SoundEvents::ENDER_PEARL_THROW, SoundSource::Neutral,
+                             0.5f, 0.4f / (LevelRandomFloat(world) * 0.4f + 0.8f));
             // MC itemStack.consume(1, player) — creative keeps the pearl.
             if (!player->isCreative()) {
                 stack.count -= 1;
@@ -1050,9 +1237,23 @@ namespace Game {
             return UseResult::Success;
         }
 
+        // MC Player.playSound(sound, volume, pitch): at the player, in PLAYERS,
+        // `except` the player itself — its own client (LocalPlayer.playSound)
+        // plays it locally, the server sends it to everyone else.
+        void PlayerPlaySound(ILevelWrite* world, IUsePlayer* player, std::string_view event,
+                             float volume, float pitch) {
+            world->PlaySound(player, player->getPosition(), event, SoundSource::Players, volume, pitch);
+        }
+
         UseResult Use_EmptyBucket(ILevelWrite* world, IUsePlayer* player,
                                   uint32_t hand, ItemStack& stack) {
             if (!world || !player) return UseResult::Pass;
+            // The Aether's SkyrootBucketItem (Fluids.EMPTY) is this item with
+            // two differences: it fills to the SKYROOT water bucket, and it
+            // cannot hold lava (SkyrootBucketItem.use passes on anything but
+            // water).
+            const bool skyroot = stack.itemId == Items::SkyrootBucket;
+            const ItemID filledWater = skyroot ? Items::SkyrootWaterBucket : Items::WaterBucket;
             auto hit = BucketClip(world, *player, /*stopOnFluid=*/true);   // :45 SOURCE_ONLY
             if (!hit) return UseResult::Pass;                              // :46-47
             // MC BucketItem.java:49-53 dispatches on `state.getBlock()
@@ -1078,25 +1279,46 @@ namespace Game {
                     world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z,
                                     BlockID::Air, World::UpdateFlags::All);
                 }
-                PlaySound("item.bucket.fill", hit->pos);
+                // BucketItem.use:82 — bucketPickup.getPickupSound() through
+                // player.playSound (the waterlogged block's is water's).
+                PlayerPlaySound(world, player, SoundEvents::BUCKET_FILL, 1.0f, 1.0f);
                 {
-                    player->CreateFilledResult(stack, ItemStack(Items::WaterBucket, 1));
+                    player->CreateFilledResult(stack, ItemStack(filledWater, 1));
                     player->markSlotDirty(player->handSlotIndex(hand));
                 }
                 return UseResult::Success;
             }
 
-            if (hit->block != BlockID::Water && hit->block != BlockID::Lava) {
+            // Aurelith's resonant water is a BucketPickup the way MC's bubble
+            // column is (BubbleColumnBlock.pickupBlock: the cell becomes air,
+            // the bucket fills with plain WATER): its fluid state is a water
+            // source, so it takes the water path below unchanged. What the
+            // bucket holds is ordinary water — the river's glow stays in the
+            // river (docs/fluids.md).
+            if (hit->block != BlockID::Water && hit->block != BlockID::Lava &&
+                hit->block != BlockID::ResonantWater) {
                 return UseResult::Pass;                                    // :93-94 (BLOCK hit → pass)
             }
+            if (skyroot && hit->block == BlockID::Lava) return UseResult::Pass;
 
-            // :55-74 — pickupBlock (no fluid levels: every water/lava cell is
-            // a source), sound, transform bucket → filled variant.
+            // LiquidBlock.pickupBlock: only a SOURCE (`level == 0`) fills the
+            // bucket; flowing water hands back nothing. The clip above stops
+            // on sources only (ClipContext.Fluid.SOURCE_ONLY), so a flowing
+            // cell is never even the hit — this is the belt to that brace.
+            if (!FluidStateOf(hitState).IsSource()) {
+                return UseResult::Fail;
+            }
+
+            // :55-74 — pickupBlock writes air with flag 11, sound, transform
+            // bucket → filled variant. Removing the source is what lets the
+            // pool's neighbours drain: flag 1 tells them, and their
+            // LiquidBlock.neighborChanged books the tick.
             world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z, BlockID::Air,
-                            World::UpdateFlags::All);
-            PlaySound(hit->block == BlockID::Lava ? "item.bucket.fill_lava"
-                                                  : "item.bucket.fill",
-                      hit->pos);
+                            World::UpdateFlags::AllImmediate);
+            // BucketItem.use:82 — the fluid's pickup sound, player.playSound.
+            PlayerPlaySound(world, player,
+                            hit->block == BlockID::Lava ? SoundEvents::BUCKET_FILL_LAVA : SoundEvents::BUCKET_FILL,
+                            1.0f, 1.0f);
             // ItemUtils.createFilledResult (:62): creative keeps the empty
             // bucket, survival transforms it. Component patch reset — a
             // fresh filled bucket carries no per-stack state.
@@ -1104,7 +1326,32 @@ namespace Game {
             // the rest stays (creative keeps the stack and gains the filled
             // bucket once).
             player->CreateFilledResult(stack, ItemStack(hit->block == BlockID::Lava ? Items::LavaBucket
-                                                                                      : Items::WaterBucket, 1));
+                                                                                      : filledWater, 1));
+            player->markSlotDirty(player->handSlotIndex(hand));
+            return UseResult::Success;
+        }
+
+        // Glass bottle — MC BottleItem.use: fill from WATER at the POV clip
+        // (ClipContext.Fluid.SOURCE_ONLY) into a water bottle,
+        // PotionContents.createItemStack(POTION, WATER), through
+        // ItemUtils.createFilledResult. A waterlogged block counts — its
+        // fluid state is a water source. MC's first branch (an ender
+        // dragon's breath cloud within 2 blocks → dragon's breath) needs the
+        // dragon to OWN its breath clouds, which the engine's dragon does not
+        // record; that branch is left out.
+        UseResult Use_GlassBottle(ILevelWrite* world, IUsePlayer* player,
+                                  uint32_t hand, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+            auto hit = BucketClip(world, *player, /*stopOnFluid=*/true);
+            if (!hit) return UseResult::Pass;
+            const BlockState state = world->GetBlockState(hit->pos.x, hit->pos.y, hit->pos.z);
+            if (!FluidStateOf(state).IsSourceOf(FluidType::Water)) return UseResult::Pass;
+            // BottleItem.use:59 — playSound(player, player's position,
+            // BOTTLE_FILL, NEUTRAL, 1.0, 1.0).
+            world->PlaySound(player, player->getPosition(), SoundEvents::BOTTLE_FILL, SoundSource::Neutral,
+                             1.0f, 1.0f);
+            // GameEvent.FLUID_PICKUP — no game-event system.
+            player->CreateFilledResult(stack, CreatePotionItemStack(Items::Potion, PotionId::Water));
             player->markSlotDirty(player->handSlotIndex(hand));
             return UseResult::Success;
         }
@@ -1115,8 +1362,33 @@ namespace Game {
                                    uint32_t hand, ItemStack& stack) {
             if (!world || !player) return UseResult::Pass;
             const bool isLava = (stack.itemId == Items::LavaBucket);
+            // SkyrootBucketItem(Fluids.WATER): pours like the water bucket and
+            // leaves its own empty skyroot bucket behind.
+            const ItemID emptied = stack.itemId == Items::SkyrootWaterBucket ? Items::SkyrootBucket
+                                                                             : Items::Bucket;
             auto hit = BucketClip(world, *player, /*stopOnFluid=*/false);  // ClipContext.Fluid.NONE
             if (!hit) return UseResult::Pass;
+
+            // The Aether's ignition — DimensionHooks.createPortal, which the
+            // mod runs from PlayerInteractEvent.RightClickBlock, i.e. BEFORE
+            // BucketItem.use gets to pour: water against a glowstone frame
+            // lights an empty frame around the cell past the clicked face
+            // (either axis), and the bucket empties into the portal instead
+            // of the world. The client only predicts (TryLight writes
+            // nothing there), so it does not pour a source the server will
+            // not have. `#aether:aether_portal_activation_items` is the
+            // water bucket alone.
+            if (stack.itemId == Items::WaterBucket && hit->block == BlockID::Glowstone &&
+                AetherPortalIgnition::TryLight(*world, hit->beforePos)) {
+                world->PlaySound(player, hit->beforePos, SoundEvents::BUCKET_EMPTY, SoundSource::Blocks, 1.0f, 1.0f);
+                // Not creative: the stack's crafting remainder, the empty
+                // bucket (the mod's setItemInHand(getCraftingRemainingItem)).
+                if (!player->isCreative()) {
+                    stack = ItemStack(emptied, 1);
+                    player->markSlotDirty(player->handSlotIndex(hand));
+                }
+                return UseResult::Success;
+            }
 
             // MC BucketItem.java:83-84:
             //   BlockPos target = state.getBlock() instanceof LiquidBlockContainer
@@ -1139,43 +1411,146 @@ namespace Game {
                 world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z,
                                 BlockRegistry::WithWaterlogged(hitState, true),
                                 World::UpdateFlags::All);
-                PlaySound("item.bucket.empty", hit->pos);
+                // SimpleWaterloggedBlock.placeLiquid's second half: the new
+                // water books its first tick so it can start flowing out of
+                // the block. A no-op on the client (no scheduler).
+                Fluids::ScheduleTick(*world, hit->pos, FluidType::Water);
+                // BucketItem.emptyContents → playEmptySound(user, level, pos).
+                world->PlaySound(player, hit->pos, SoundEvents::BUCKET_EMPTY, SoundSource::Blocks, 1.0f, 1.0f);
                 if (!player->isCreative()) {
-                    stack = ItemStack(Items::Bucket, 1);
+                    stack = ItemStack(emptied, 1);
                     player->markSlotDirty(player->handSlotIndex(hand));
                 }
                 return UseResult::Success;
             }
 
-            // :76-77 — target = clicked cell when replaceable, else the cell
-            // the ray came from (pos.relative(direction)).
-            const Game::Block& hitDef = BlockRegistry::Get(hit->block);
-            (void)hitDef;
+            // BucketItem.use:84 — the cell in front of the clicked face
+            // (pos.relative(direction)); the clicked cell itself only for
+            // water into a LiquidBlockContainer, handled above.
             glm::ivec3 target = hit->beforePos;
-            const BlockID targetBlock =
-                world->IsValidPosition(target.x, target.y, target.z)
-                    ? world->GetBlock(target.x, target.y, target.z)
-                    : BlockID::Bedrock;
-            // emptyContents' mayInteract/replaceable gate (:161-163): air and
-            // fluids are pour-into-able; anything else is blocked.
-            if (targetBlock != BlockID::Air
-                && targetBlock != BlockID::Water && targetBlock != BlockID::Lava) {
+            if (!world->IsValidPosition(target.x, target.y, target.z)) {
+                return UseResult::Fail;
+            }
+            const BlockState targetState =
+                world->GetBlockState(target.x, target.y, target.z);
+            const BlockID targetBlock = targetState.Block();
+
+            // emptyContents: `mayReplace = blockState.canBeReplaced(content)`
+            // — BlockBehaviour.canBeReplaced(state, fluid) is
+            // `canBeReplaced() || !isSolid()`: the replaceable flag (water,
+            // lava, tall grass, snow layers, fire…) or no collision at all
+            // (a torch, a flower). `canPlaceFluidInsideBlock = isAir ||
+            // mayReplace` — the shift-key term only matters on the first of
+            // MC's two attempts, and the second retries without it, so the
+            // net rule is exactly this.
+            const bool mayReplace = BlockRegistry::Get(targetBlock).replaceable ||
+                                    !BlockRegistry::HasCollision(targetBlock);
+            if (targetBlock != BlockID::Air && !mayReplace) {
                 return UseResult::Fail;                                     // :88
             }
 
-            if (!world->SetBlock(target.x, target.y, target.z,
-                                 isLava ? BlockID::Lava : BlockID::Water,
-                                 World::UpdateFlags::All)) {
+            // EnvironmentAttributes.WATER_EVAPORATES (the nether's ultrawarm
+            // flag): water poured in the nether hisses away and the bucket
+            // still empties. MC also spawns eight LARGE_SMOKE here — no
+            // server→client particle channel yet.
+            if (!isLava && world->GetDimension() == DimensionId::Nether) {
+                float pitch = 2.6f;
+                if (JavaRandom* random = world->Random()) {
+                    pitch += (random->NextFloat() - random->NextFloat()) * 0.8f;
+                }
+                // BucketItem.emptyContents:154 — playSound(user, pos, FIRE_EXTINGUISH, …).
+                world->PlaySound(player, target, SoundEvents::FIRE_EXTINGUISH, SoundSource::Blocks, 0.5f, pitch);
+                if (!player->isCreative()) {
+                    stack = ItemStack(emptied, 1);
+                    player->markSlotDirty(player->handSlotIndex(hand));
+                }
+                return UseResult::Success;
+            }
+
+            // `if (!isClientSide && mayReplace && !blockState.liquid())
+            //     level.destroyBlock(pos, true)` — the tall grass the water
+            // displaces drops as an item.
+            const bool targetIsLiquid = targetBlock == BlockID::Water || targetBlock == BlockID::Lava;
+            if (!world->IsClientSide() && mayReplace && !targetIsLiquid &&
+                targetBlock != BlockID::Air) {
+                world->DestroyBlock(target, true);
+            }
+
+            // `level.setBlock(pos, content.defaultFluidState().createLegacyBlock(), 11)`
+            // — a SOURCE, flag 11. A write that changes nothing (pouring into
+            // an identical source) still counts as success in vanilla; only
+            // a no-op over a non-source fails.
+            const bool wrote = world->SetBlock(target.x, target.y, target.z,
+                                               isLava ? BlockID::Lava : BlockID::Water,
+                                               World::UpdateFlags::AllImmediate);
+            if (!wrote && !FluidStateOf(targetState).IsSource()) {
                 return UseResult::Fail;
             }
-            PlaySound(isLava ? "item.bucket.empty_lava" : "item.bucket.empty",
-                      target);                                              // :175-179
+            // BucketItem.playEmptySound:188 — (user, pos, BUCKET_EMPTY(_LAVA), BLOCKS).
+            world->PlaySound(player, target, isLava ? SoundEvents::BUCKET_EMPTY_LAVA : SoundEvents::BUCKET_EMPTY,
+                             SoundSource::Blocks, 1.0f, 1.0f);                // :175-179
             // :97-99 getEmptySuccessItem — creative keeps the filled bucket.
             if (!player->isCreative()) {
-                stack = ItemStack(Items::Bucket, 1);
+                stack = ItemStack(emptied, 1);
                 player->markSlotDirty(player->handSlotIndex(hand));
             }
             return UseResult::Success;                                      // :90
+        }
+
+        // ── The Hush: the tools of the deep (docs/the-hush.md) ────────────
+        //
+        // Thin shells over the server bridges in common/world/level/
+        // HushItems.hpp: every one of these items does its work on the
+        // server (a lookup, a packet, a teleport, an arrow). The client's run
+        // of the same dispatch only needs the right UseResult — a swing, or
+        // "not a placement" — so it answers without calling across.
+
+        // Tuning fork, used on a resonant crystal or cluster: the ping. Any
+        // other block is not the fork's business (PASS, the ender-eye rule).
+        UseResult UseOn_TuningFork(const UseOnContext& ctx, ItemStack& stack) {
+            (void)stack;
+            if (!ctx.world || !ctx.player) return UseResult::Pass;
+            const glm::ivec3 pos = ctx.hitResult.blockPos;
+            const BlockID target = ctx.world->GetBlockState(pos.x, pos.y, pos.z).Block();
+            if (target != BlockID::ResonantCrystal && target != BlockID::ResonantCluster) {
+                return UseResult::Pass;
+            }
+            if (ctx.world->IsClientSide()) return UseResult::Success;
+            return HushItems::TuningForkStrike(*ctx.player, pos);
+        }
+
+        // MC BowItem.use: draw if there is an arrow (or creative). The vanilla
+        // bow and the resonance bow share it; the release (BowRelease) picks
+        // the arrow kind from the bow.
+        UseResult Use_Bow(ILevelWrite* world, IUsePlayer* player, uint32_t hand,
+                          ItemStack& /*stack*/) {
+            if (!world || !player) return UseResult::Pass;
+            if (world->IsClientSide()) return UseResult::Consume;
+            return HushItems::BowBegin(*player, hand);
+        }
+
+        // Recall chime: start the hold (kRecallUseTicks) if there is a gate
+        // to go back to and the chime is not still ringing; the teleport is
+        // the finish.
+        UseResult Use_RecallChime(ILevelWrite* world, IUsePlayer* player, uint32_t hand,
+                                  ItemStack& /*stack*/) {
+            if (!world || !player) return UseResult::Pass;
+            if (world->IsClientSide()) return UseResult::Consume;
+            return HushItems::RecallChimeBegin(*player, hand);
+        }
+
+        // The Held Note (Aurelith's reward): a 1 s hold, then the Chord
+        // sounds and the hostile mobs round the player stop (server:
+        // server/items/AurelithItems.cpp). Not used up.
+        UseResult Use_HeldNote(ILevelWrite* world, IUsePlayer* player, uint32_t hand,
+                               ItemStack& /*stack*/) {
+            if (!world || !player) return UseResult::Pass;
+            if (world->IsClientSide()) return UseResult::Consume;
+            return Aurelith::HeldNoteBegin(*player, hand) ? UseResult::Consume : UseResult::Fail;
+        }
+
+        void Finish_HeldNote(IUsePlayer& player, ItemStack& /*stack*/) {
+            Aurelith::HeldNoteFinish(player);
         }
 
     } // namespace
@@ -1241,6 +1616,47 @@ namespace Game {
         // predicting a block that is not a block item at all.
         wireUseOn(Items::EnderEye, &UseOn_EnderEye);
 
+        // EchoShard — lights a reinforced-deepslate frame as a Hush portal
+        // (PortalFamily::Hush). Same prediction note as the eye: a useOn
+        // keeps the client from predicting a block placement for it.
+        wireUseOn(Items::EchoShard, &UseOn_EchoShard);
+
+        // ── The Hush: the tools of the deep (docs/the-hush.md) ───────────
+        // Tuning fork: the resonance ping, struck on a crystal.
+        wireUseOn(Items::TuningFork, &UseOn_TuningFork);
+        {
+            auto setHold = [&](ItemID id, ItemUseFn use, int duration, ItemUseAnimation anim,
+                               ItemFinishUsingFn finish, ItemReleaseUsingFn release) {
+                auto it = pureItems.find(id);
+                if (it == pureItems.end()) return;
+                it->second.use          = use;
+                it->second.useDuration  = duration;
+                it->second.useAnimation = anim;
+                it->second.finishUsing  = finish;
+                it->second.releaseUsing = release;
+            };
+            // MC BowItem (getUseDuration 72000, BOW, fires on release). This
+            // engine had no bow at all: the resonance bow needed the port, so
+            // the vanilla bow gets it too — plain arrows from one, resonance
+            // arrows from the other (HushItems::BowRelease).
+            setHold(Items::Bow,          &Use_Bow, 72000, ItemUseAnimation::BOW,
+                    nullptr, &HushItems::BowRelease);
+            setHold(Items::ResonanceBow, &Use_Bow, 72000, ItemUseAnimation::BOW,
+                    nullptr, &HushItems::BowRelease);
+            // Recall chime: a hold as long as its note (the goat horn's
+            // pose), then home to the last hush gate; letting go early only
+            // says so. The chime is not used up.
+            setHold(Items::RecallChime, &Use_RecallChime, HushItems::kRecallUseTicks,
+                    ItemUseAnimation::TOOT_HORN, &HushItems::RecallChimeFinish,
+                    &HushItems::RecallChimeRelease);
+            // The Held Note: a second's hold in the horn's pose, then the Chord.
+            setHold(Items::HeldNote, &Use_HeldNote, Aurelith::kHeldNoteUseTicks,
+                    ItemUseAnimation::TOOT_HORN, &Finish_HeldNote, nullptr);
+        }
+        // The whisperfruit plants its block under a lantern leaf (the sweet
+        // berries' placesBlock; CanSurviveAt carries the leaf rule).
+        wirePlacesBlock(Items::Whisperfruit, BlockID::HangingWhisperfruit);
+
         // Every hoe tier shares the till behaviour. Tool material (mining
         // speed, durability, attack damage) is a per-item property MC reads
         // from the Item.Properties.hoe(material, …) builder; we don't model
@@ -1248,7 +1664,9 @@ namespace Game {
         for (ItemID id : {
                 Items::WoodenHoe, Items::CopperHoe, Items::StoneHoe,
                 Items::GoldenHoe, Items::IronHoe,   Items::DiamondHoe,
-                Items::NetheriteHoe }) {
+                Items::NetheriteHoe, Items::ResoniteHoe,
+                // the Aether's and Twilight Forest's tiers (docs/mod-ports.md)
+                Items::SkyrootHoe, Items::HolystoneHoe, Items::ZaniteHoe, Items::GravititeHoe, Items::IronwoodHoe, Items::SteeleafHoe }) {
             wireUseOn(id, &UseOn_Hoe);
         }
 
@@ -1256,7 +1674,9 @@ namespace Game {
         for (ItemID id : {
                 Items::WoodenShovel, Items::CopperShovel, Items::StoneShovel,
                 Items::GoldenShovel, Items::IronShovel,   Items::DiamondShovel,
-                Items::NetheriteShovel }) {
+                Items::NetheriteShovel, Items::ResoniteShovel,
+                // the Aether's and Twilight Forest's tiers (docs/mod-ports.md)
+                Items::SkyrootShovel, Items::HolystoneShovel, Items::ZaniteShovel, Items::GravititeShovel, Items::IronwoodShovel, Items::SteeleafShovel }) {
             wireUseOn(id, &UseOn_Shovel);
         }
 
@@ -1264,7 +1684,9 @@ namespace Game {
         for (ItemID id : {
                 Items::WoodenAxe, Items::CopperAxe, Items::StoneAxe,
                 Items::GoldenAxe, Items::IronAxe,   Items::DiamondAxe,
-                Items::NetheriteAxe }) {
+                Items::NetheriteAxe, Items::ResoniteAxe,
+                // the Aether's and Twilight Forest's tiers (docs/mod-ports.md)
+                Items::SkyrootAxe, Items::HolystoneAxe, Items::ZaniteAxe, Items::GravititeAxe, Items::IronwoodAxe, Items::SteeleafAxe, Items::KnightmetalAxe }) {
             wireUseOn(id, &UseOn_Axe);
         }
 
@@ -1313,9 +1735,14 @@ namespace Game {
         wireUse(Items::EnderEye,    &Use_EnderEye);
         wireUse(Items::EnderPearl,  &Use_EnderPearl);
         wireUse(Items::Bucket,      &Use_EmptyBucket);
+        wireUse(Items::GlassBottle, &Use_GlassBottle);
         wireUse(Items::SulfurCubeBucket, &Use_SulfurCubeBucket);
         wireUse(Items::WaterBucket, &Use_FilledBucket);
         wireUse(Items::LavaBucket,  &Use_FilledBucket);
+        // The Aether's skyroot buckets (SkyrootBucketItem): the same use, their
+        // own empty/filled pair (see Use_EmptyBucket / Use_FilledBucket).
+        wireUse(Items::SkyrootBucket,      &Use_EmptyBucket);
+        wireUse(Items::SkyrootWaterBucket, &Use_FilledBucket);
         // Filled buckets stack to 1 (Items.java `.stacksTo(1)` on all buckets;
         // the empty bucket stacks to 16).
         if (auto it = pureItems.find(Items::Bucket); it != pureItems.end())
@@ -1335,7 +1762,9 @@ namespace Game {
         // Speeds: wood 2.0, gold 12.0, stone 4.0, iron 6.0, diamond 8.0,
         // netherite 9.0 (vanilla Tiers.java). Copper isn't a vanilla tier — we
         // size it between stone and iron (speed 5.0, level=stone) so the items
-        // remain useful.
+        // remain useful. Resonite (The Hush, docs/the-hush.md) is netherite's
+        // twin in speed and mining level, and additionally the only tier that
+        // opens the echo core (MiningTier.hpp).
         auto setTool = [&](ItemID id, Tool t) {
             auto it = pureItems.find(id);
             if (it != pureItems.end()) {
@@ -1351,6 +1780,7 @@ namespace Game {
         setTool(Items::IronPickaxe,      Tool{ToolType::Pickaxe, MiningTier::Iron,      6.0f});
         setTool(Items::DiamondPickaxe,   Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
         setTool(Items::NetheritePickaxe, Tool{ToolType::Pickaxe, MiningTier::Netherite, 9.0f});
+        setTool(Items::ResonitePickaxe,  Tool{ToolType::Pickaxe, MiningTier::Resonite,  9.0f});
         // Axes
         setTool(Items::WoodenAxe,        Tool{ToolType::Axe,     MiningTier::Wood,      2.0f});
         setTool(Items::CopperAxe,        Tool{ToolType::Axe,     MiningTier::Stone,     5.0f});
@@ -1359,6 +1789,7 @@ namespace Game {
         setTool(Items::IronAxe,          Tool{ToolType::Axe,     MiningTier::Iron,      6.0f});
         setTool(Items::DiamondAxe,       Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
         setTool(Items::NetheriteAxe,     Tool{ToolType::Axe,     MiningTier::Netherite, 9.0f});
+        setTool(Items::ResoniteAxe,      Tool{ToolType::Axe,     MiningTier::Resonite,  9.0f});
         // Shovels
         setTool(Items::WoodenShovel,     Tool{ToolType::Shovel,  MiningTier::Wood,      2.0f});
         setTool(Items::CopperShovel,     Tool{ToolType::Shovel,  MiningTier::Stone,     5.0f});
@@ -1367,6 +1798,7 @@ namespace Game {
         setTool(Items::IronShovel,       Tool{ToolType::Shovel,  MiningTier::Iron,      6.0f});
         setTool(Items::DiamondShovel,    Tool{ToolType::Shovel,  MiningTier::Diamond,   8.0f});
         setTool(Items::NetheriteShovel,  Tool{ToolType::Shovel,  MiningTier::Netherite, 9.0f});
+        setTool(Items::ResoniteShovel,   Tool{ToolType::Shovel,  MiningTier::Resonite,  9.0f});
         // Hoes
         setTool(Items::WoodenHoe,        Tool{ToolType::Hoe,     MiningTier::Wood,      2.0f});
         setTool(Items::CopperHoe,        Tool{ToolType::Hoe,     MiningTier::Stone,     5.0f});
@@ -1375,6 +1807,7 @@ namespace Game {
         setTool(Items::IronHoe,          Tool{ToolType::Hoe,     MiningTier::Iron,      6.0f});
         setTool(Items::DiamondHoe,       Tool{ToolType::Hoe,     MiningTier::Diamond,   8.0f});
         setTool(Items::NetheriteHoe,     Tool{ToolType::Hoe,     MiningTier::Netherite, 9.0f});
+        setTool(Items::ResoniteHoe,      Tool{ToolType::Hoe,     MiningTier::Resonite,  9.0f});
         // Swords (used for cobweb / bamboo speedup in MC)
         setTool(Items::WoodenSword,      Tool{ToolType::Sword,   MiningTier::Wood,      2.0f});
         setTool(Items::CopperSword,      Tool{ToolType::Sword,   MiningTier::Stone,     5.0f});
@@ -1383,10 +1816,54 @@ namespace Game {
         setTool(Items::IronSword,        Tool{ToolType::Sword,   MiningTier::Iron,      6.0f});
         setTool(Items::DiamondSword,     Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
         setTool(Items::NetheriteSword,   Tool{ToolType::Sword,   MiningTier::Netherite, 9.0f});
+        setTool(Items::ResoniteSword,    Tool{ToolType::Sword,   MiningTier::Resonite,  9.0f});
         // Shears (single tier; MC speed = 1.5 against most, 15.0 vs wool/leaves)
         // No useOn wired: ShearsItem's interactions (beehive honeycombs,
         // pumpkin carving) all produce item DROPS — BLOCKED on item entities.
         setTool(Items::Shears,           Tool{ToolType::Shears,  MiningTier::Iron,      1.5f});
+
+        // The Aether (AetherItemTiers) and Twilight Forest (TFToolMaterials)
+        // tool sets, docs/mod-ports.md. Their incorrect-for-drops tags are the
+        // vanilla tiers' (skyroot = wooden, holystone = stone, zanite = iron,
+        // gravitite = diamond; ironwood = iron, steeleaf / knightmetal =
+        // diamond, fiery = netherite), so they need no new MiningTier; the
+        // speed is the material's own. The steeleaf sword is registered on
+        // KNIGHTMETAL in TFItems, which has the same speed.
+        setTool(Items::SkyrootPickaxe,        Tool{ToolType::Pickaxe, MiningTier::Wood,      2.0f});
+        setTool(Items::SkyrootAxe,            Tool{ToolType::Axe,     MiningTier::Wood,      2.0f});
+        setTool(Items::SkyrootShovel,         Tool{ToolType::Shovel,  MiningTier::Wood,      2.0f});
+        setTool(Items::SkyrootHoe,            Tool{ToolType::Hoe,     MiningTier::Wood,      2.0f});
+        setTool(Items::SkyrootSword,          Tool{ToolType::Sword,   MiningTier::Wood,      2.0f});
+        setTool(Items::HolystonePickaxe,      Tool{ToolType::Pickaxe, MiningTier::Stone,     4.0f});
+        setTool(Items::HolystoneAxe,          Tool{ToolType::Axe,     MiningTier::Stone,     4.0f});
+        setTool(Items::HolystoneShovel,       Tool{ToolType::Shovel,  MiningTier::Stone,     4.0f});
+        setTool(Items::HolystoneHoe,          Tool{ToolType::Hoe,     MiningTier::Stone,     4.0f});
+        setTool(Items::HolystoneSword,        Tool{ToolType::Sword,   MiningTier::Stone,     4.0f});
+        setTool(Items::ZanitePickaxe,         Tool{ToolType::Pickaxe, MiningTier::Iron,      6.0f});
+        setTool(Items::ZaniteAxe,             Tool{ToolType::Axe,     MiningTier::Iron,      6.0f});
+        setTool(Items::ZaniteShovel,          Tool{ToolType::Shovel,  MiningTier::Iron,      6.0f});
+        setTool(Items::ZaniteHoe,             Tool{ToolType::Hoe,     MiningTier::Iron,      6.0f});
+        setTool(Items::ZaniteSword,           Tool{ToolType::Sword,   MiningTier::Iron,      6.0f});
+        setTool(Items::GravititePickaxe,      Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
+        setTool(Items::GravititeAxe,          Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
+        setTool(Items::GravititeShovel,       Tool{ToolType::Shovel,  MiningTier::Diamond,   8.0f});
+        setTool(Items::GravititeHoe,          Tool{ToolType::Hoe,     MiningTier::Diamond,   8.0f});
+        setTool(Items::GravititeSword,        Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
+        setTool(Items::IronwoodPickaxe,       Tool{ToolType::Pickaxe, MiningTier::Iron,      6.5f});
+        setTool(Items::IronwoodAxe,           Tool{ToolType::Axe,     MiningTier::Iron,      6.5f});
+        setTool(Items::IronwoodShovel,        Tool{ToolType::Shovel,  MiningTier::Iron,      6.5f});
+        setTool(Items::IronwoodHoe,           Tool{ToolType::Hoe,     MiningTier::Iron,      6.5f});
+        setTool(Items::IronwoodSword,         Tool{ToolType::Sword,   MiningTier::Iron,      6.5f});
+        setTool(Items::SteeleafPickaxe,       Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
+        setTool(Items::SteeleafAxe,           Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
+        setTool(Items::SteeleafShovel,        Tool{ToolType::Shovel,  MiningTier::Diamond,   8.0f});
+        setTool(Items::SteeleafHoe,           Tool{ToolType::Hoe,     MiningTier::Diamond,   8.0f});
+        setTool(Items::SteeleafSword,         Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
+        setTool(Items::KnightmetalPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
+        setTool(Items::KnightmetalAxe,        Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
+        setTool(Items::KnightmetalSword,      Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
+        setTool(Items::FieryPickaxe,          Tool{ToolType::Pickaxe, MiningTier::Netherite, 9.0f});
+        setTool(Items::FierySword,            Tool{ToolType::Sword,   MiningTier::Netherite, 9.0f});
 
         // ── RARITY defaults (name-line tooltip color) ───────────────────────
         // Rows verbatim from Items.java `.rarity(...)` builders in THIS
@@ -1416,6 +1893,24 @@ namespace Game {
             setRarity(Items::Trident,              Rarity::RARE);     // :2941
             setRarity(Items::CreeperBannerPattern, Rarity::UNCOMMON); // :2953
             setRarity(Items::MojangBannerPattern,  Rarity::RARE);     // :2955
+            // The Hush (docs/the-hush.md): the boss drop and the capstone
+            // sword sit with the mace and elytra.
+            setRarity(Items::ResonantHeart,        Rarity::EPIC);
+            setRarity(Items::EchoBlade,            Rarity::EPIC);
+            setRarity(Items::ChoirHeart,           Rarity::EPIC);   // the Choir Mother's drop
+            // The tools of the deep: the capstone-adjacent bow and cloak sit
+            // with the recovery compass; the rest are workaday.
+            setRarity(Items::ResonanceBow,         Rarity::UNCOMMON);
+            setRarity(Items::CloakOfSilence,       Rarity::UNCOMMON);
+            setRarity(Items::EchoCompass,          Rarity::UNCOMMON);
+            // Aurelith, reawakening the Heart: the four voice keys are the
+            // city's treasures (RARE, the nether star's tier); the Held
+            // Note, sung out of the Heart itself, sits with the boss drops.
+            setRarity(Items::SopranoVoiceKey,      Rarity::RARE);
+            setRarity(Items::AltoVoiceKey,         Rarity::RARE);
+            setRarity(Items::TenorVoiceKey,        Rarity::RARE);
+            setRarity(Items::BassVoiceKey,         Rarity::RARE);
+            setRarity(Items::HeldNote,             Rarity::EPIC);
         }
 
         // Food/consumable component defaults (FoodDefs.cpp).
@@ -1427,8 +1922,15 @@ namespace Game {
         // Bundle click behaviours + crafting remainders (BundleBehavior.cpp).
         ItemRegistry_RegisterBundles(pureItems);
 
+        // Potions, splash/lingering throws, tipped arrows, suspicious stew
+        // (alchemy/PotionItems.cpp).
+        ItemRegistry_RegisterPotionItems(pureItems);
+
+        // Book and quill / written book (BookItems.cpp).
+        ItemRegistry_RegisterBookItems(pureItems);
+
         Log::Info("[ItemRegistry] Wired use-behaviour callbacks "
-                  "(FlintAndSteel, 7 hoes, 7 shovels) + Tool components on 36 tool items");
+                  "(FlintAndSteel, 8 hoes, 8 shovels) + Tool components on 41 tool items");
     }
 
 } // namespace Game

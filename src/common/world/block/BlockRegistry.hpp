@@ -7,6 +7,7 @@
 #include "BlockModel.hpp"
 #include "Direction.hpp"
 #include "../../entity/MiningTier.hpp"
+#include "PushReaction.hpp"
 #include <array>
 #include <optional>
 #include <string>
@@ -123,7 +124,7 @@ namespace Game {
     // level would let it recurse into setBlock in the middle of the neighbour
     // walk. It is NULL on the client (block ticks are server authority), so
     // implementations must check before using it.
-    using BlockNeighborChangedFn = bool (*)(const IBlockAccess& level, const glm::ivec3& pos,
+    using BlockUpdateShapeFn = bool (*)(const IBlockAccess& level, const glm::ivec3& pos,
                                             BlockState state,
                                             Direction toNeighbour, BlockID neighbourId,
                                             BlockState& outState,
@@ -171,15 +172,23 @@ namespace Game {
     // vanilla ignition lives in `BaseFireBlock.onPlace` precisely so that any
     // fire appearing in a frame lights it, not just flint and steel.
     //
-    // MC only calls it when the BLOCK changed (`!oldState.is(state.getBlock())`
-    // guards every implementation); the engine applies that filter for you, so
-    // a state-only edit never reaches here.
+    // Called on EVERY write, state-only edits included, exactly as
+    // LevelChunk.setBlockState does. Most vanilla implementations open with
+    // `if (!oldState.is(state.getBlock()))` and so must the ports here — but
+    // not all of them: RedstoneTorchBlock.onPlace fires neighbour updates on a
+    // lit→unlit flip too, and the update count is observable in redstone
+    // timing, so the filter belongs in the callback, not in the engine.
+    //
+    // `movedByPiston` is MC's flag-64 (UPDATE_MOVE_BY_PISTON) — the piston
+    // structure being re-placed after a move, which several blocks ignore
+    // (a wire does not re-evaluate power while it is in transit).
     //
     // A callback may write to the world — including overwriting itself, which
     // is exactly what the fire→portal path does. World's existing recursion
     // budget bounds the resulting cascade.
     using BlockOnPlaceFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
-                                    BlockState newState, BlockState oldState);
+                                    BlockState newState, BlockState oldState,
+                                    bool movedByPiston);
 
     // An entity's bounding box overlaps this block's cell. Port of MC's
     // `BlockBehaviour.entityInside(state, level, pos, entity, effectApplier,
@@ -198,6 +207,84 @@ namespace Game {
     // ServerPlayerGameMode (creative instabreaks without ever attacking).
     // One block cares today: the dragon egg teleports away.
     using BlockAttackFn = void (*)(ILevelWrite& level, const glm::ivec3& pos);
+
+    // ── Redstone (MC BlockBehaviour's signal half) ──────────────────────
+    //
+    // `BlockBehaviour.neighborChanged(state, level, pos, sourceBlock,
+    // orientation, movedByPiston)` — the WRITABLE neighbour notification, and
+    // the one every redstone component lives on. Not to be confused with
+    // `updateShape` above: that is the read-only "re-derive my shape" walk
+    // (flag 16 turns it off), this is the "something next to you changed,
+    // react" call that Level.updateNeighborsAt fans out (flag 1 turns it on).
+    // A lever flipping reaches its neighbours through THIS, a fence joining
+    // up reaches them through THAT.
+    //
+    // `sourceBlock` is the block that changed at the neighbouring cell —
+    // vanilla passes it so a wire can tell "another wire told me" from "a
+    // lever told me". MC's `Orientation` argument is dropped: it is only
+    // non-null under the redstone_experiments feature flag, which is off by
+    // default, and this engine ports the default evaluator.
+    using BlockNeighborChangedFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                            BlockState state, BlockID sourceBlock,
+                                            bool movedByPiston);
+
+    // `BlockBehaviour.getSignal(state, level, pos, direction)` — WEAK power
+    // this block emits toward `direction` (the direction FROM the block TO
+    // whoever is asking, as vanilla passes it). `getDirectSignal` is the
+    // STRONG power, which is what charges a solid block behind a torch or a
+    // repeater. Both read-only.
+    using BlockGetSignalFn = int (*)(const IBlockAccess& level, const glm::ivec3& pos,
+                                     BlockState state, Direction direction);
+
+    // `BlockBehaviour.getAnalogOutputSignal(state, level, pos, direction)` —
+    // the comparator's reading of a container, a cake, a cauldron. Needs the
+    // writable level only because vanilla passes `Level` so the block can
+    // reach its block entity; nothing is written.
+    using BlockAnalogOutputSignalFn = int (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                              BlockState state, Direction direction);
+
+    // `BlockBehaviour.triggerEvent(state, level, pos, b0, b1)` — a block
+    // event booked through ILevelWrite::BlockEvent has come due. Returns
+    // whether the event was handled (vanilla broadcasts it to clients only
+    // then). Pistons extend here; note blocks play here.
+    using BlockTriggerEventFn = bool (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                         BlockState state, int b0, int b1);
+
+    // `BlockBehaviour.affectNeighborsAfterRemoval(state, level, pos,
+    // movedByPiston)` — the block has just been REPLACED by a different block
+    // and gets one last chance to tell its neighbours. 26.x's replacement for
+    // the old `onRemove`. A torch coming out tells the wire it was powering;
+    // a wire coming out re-evaluates everything it touched.
+    //
+    // `state` is the OLD state; the world already holds the new block. Fires
+    // only on a block change and only when the write carried flag 1 or 64,
+    // matching LevelChunk.setBlockState.
+    using BlockAffectNeighborsAfterRemovalFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                                        BlockState state, bool movedByPiston);
+
+    // `BlockBehaviour.updateIndirectNeighbourShapes(state, level, pos,
+    // flags, limit)` — the diagonal shape updates a block wants beyond its
+    // six neighbours. Only redstone dust overrides it: dust one step up or
+    // down from a horizontal neighbour must re-resolve when this cell
+    // changes, and the six-way walk never reaches those cells.
+    using BlockUpdateIndirectNeighbourShapesFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                                          BlockState state, uint32_t updateFlags,
+                                                          int updateLimit);
+
+    // The occupancy-only counterpart of `entityInside` for things that are
+    // not Game::Entity — dropped items today. Pressure plates and tripwire
+    // re-check their own cell rather than caring which entity arrived, so
+    // the same implementation serves both hooks.
+    using BlockAnyInsideFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                      BlockState state);
+
+    // `BlockBehaviour.onProjectileHit(level, state, hit, projectile)` — an
+    // arrow or other projectile struck this block. The target block scores
+    // it; TNT lights from a burning one. `hitPos` is the exact impact point
+    // and `face` the face struck.
+    using BlockOnProjectileHitFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                            BlockState state, const glm::dvec3& hitPos,
+                                            Direction face, Entity& projectile);
 
     struct Block {
         std::string name;
@@ -225,6 +312,10 @@ namespace Game {
         bool enableBiomeTinting = false;  // Whether this block uses biome coloring
         bool isTransparent = false;       // Whether this block has transparent parts
         RenderLayer renderLayer = RenderLayer::Opaque;
+        // Drawn at full brightness whatever the time of day (a lit screen):
+        // the mesher marks the block's face-map records and the terrain
+        // shaders skip the sky dim for them. Per block, not per state.
+        bool emissive = false;
 
         // Per-block interaction callbacks. Default nullptr → Pass.
         BlockUseWithoutItemFn useWithoutItem = nullptr;
@@ -238,7 +329,7 @@ namespace Game {
         BlockRandomTickFn            randomTick            = nullptr;
         BlockIsValidBonemealTargetFn isValidBonemealTarget = nullptr;
         BlockPerformBonemealFn       performBonemeal       = nullptr;
-        BlockNeighborChangedFn       neighborChanged       = nullptr;
+        BlockUpdateShapeFn       updateShape       = nullptr;
         BlockTickFn                  tick                  = nullptr;
         BlockAnimateTickFn           animateTick           = nullptr;
 
@@ -246,6 +337,29 @@ namespace Game {
         BlockOnPlaceFn               onPlace               = nullptr;
         BlockEntityInsideFn          entityInside          = nullptr;
         BlockAttackFn                attack                = nullptr;
+
+        // Redstone callbacks — see the typedefs above. All default to null,
+        // which reads as "emits nothing, reacts to nothing", the state every
+        // non-redstone block is in.
+        BlockNeighborChangedFn                 neighborChanged               = nullptr;
+        BlockGetSignalFn                       getSignal                     = nullptr;
+        BlockGetSignalFn                       getDirectSignal               = nullptr;
+        BlockAnalogOutputSignalFn              getAnalogOutputSignal         = nullptr;
+        BlockTriggerEventFn                    triggerEvent                  = nullptr;
+        BlockAffectNeighborsAfterRemovalFn     affectNeighborsAfterRemoval   = nullptr;
+        BlockUpdateIndirectNeighbourShapesFn   updateIndirectNeighbourShapes = nullptr;
+        BlockAnyInsideFn                       anyInside                     = nullptr;
+        BlockOnProjectileHitFn                 onProjectileHit               = nullptr;
+
+        // MC `BlockBehaviour.isSignalSource(state)`. Per-block constant in
+        // vanilla for everything but redstone dust, whose answer flips while
+        // it evaluates its own power — the dust handles that inside its own
+        // getSignal instead, so a flag serves.
+        bool isSignalSource       = false;
+        // MC `BlockBehaviour.hasAnalogOutputSignal(state)`. Set for every
+        // block a comparator can read; the reading itself is
+        // `getAnalogOutputSignal` above.
+        bool hasAnalogOutputSignal = false;
 
         // ── Mining data (MC parity) ────────────────────────────────────────
         // destroyTime: MC's `strength(destroyTime, ...)` first arg from
@@ -282,6 +396,14 @@ namespace Game {
         // MC Properties.ignitedByLava(). The data half of fire spread, which
         // does not exist yet — see the seam in FireBlock.
         bool        ignitedByLava        = false;
+
+        // MC Properties.pushReaction / isRedstoneConductor, from Blocks.java
+        // via the same generator as the mining data. See PushReaction.hpp.
+        PushReaction      pushReaction      = PushReaction::PushPull;
+        RedstoneConductor redstoneConductor = RedstoneConductor::Default;
+        // MC Properties.instrument — NoteBlockInstrument's serialized name,
+        // what a note block sitting on this block plays. "harp" by default.
+        std::string_view  instrument        = "harp";
 
         // MC's BlockBehaviour.Properties.noCollision(): when false, the block
         // is non-colliding (the player walks straight through it). Mirrors
@@ -367,7 +489,9 @@ namespace Game {
         // 6, not 5: a multiface block (glow lichen, sculk vein, resin clump)
         // can clad all six faces of its cell at once. Fences and walls need 5
         // (post + four arms) and stairs 3, so this is the family that sets it.
-        static constexpr size_t kMaxShapeBoxes = 6;
+        // The hopper is the widest set: four rim walls, the bowl floor, the
+        // middle column and the spout.
+        static constexpr size_t kMaxShapeBoxes = 8;
         struct BlockShapeSet {
             BlockShape boxes[kMaxShapeBoxes];
             uint8_t    count = 0;
@@ -411,6 +535,16 @@ namespace Game {
         // and every other block's is a 24-byte copy of its already-cached
         // single shape.
         static BlockShapeSet GetBlockShapeSet(BlockState state);
+
+        // MC `Block.isShapeFullBlock(state.getOcclusionShape())` — does this
+        // state hide the faces of the blocks around it? Answered from the
+        // model's ELEMENTS, not from the shape set: the shape set collapses a
+        // multi-element model to the bounds of its union, and a piston head
+        // (a 4-thick platform plus an arm that reaches 20/16 into the next
+        // cell) has full-cube BOUNDS while covering almost none of its faces.
+        // Culling on the bounds is what made the blocks under an extended
+        // piston vanish. True only when some single element fills the cell.
+        static bool IsOcclusionFullCube(BlockState state);
 
         // GetBlockShapeSet + the neighbour-dependent extension GetBlockShapeAt
         // applies. Use this wherever the single-shape code used GetBlockShapeAt.

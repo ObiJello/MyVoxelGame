@@ -147,7 +147,10 @@ std::vector<PlacedJigsaw> shuffledJigsaws(const PoolElement& element,
             synthetic.x = x; synthetic.y = y; synthetic.z = z;
             synthetic.front = D_DOWN;
             synthetic.top = D_SOUTH;
-            synthetic.name = "minecraft:bottom";
+            // 26.3 FeaturePoolElement: JigsawBlockInfo(..., name = null,
+            // pool = Pools.EMPTY, target = JigsawBlockEntity.EMPTY_ID, 0, 0).
+            synthetic.name.clear();
+            synthetic.nameIsNull = true;
             synthetic.pool = "minecraft:empty";
             synthetic.target = "minecraft:empty";
             synthetic.rollable = true;  // vertical front -> ROLLABLE default
@@ -224,11 +227,12 @@ std::array<int, 4> shuffledRotations(LegacyRandomSource& random) {
     return rotations;
 }
 
-// Reference: JigsawBlock.canAttach.
+// Reference: 26.3 JigsawBlock.canAttach - a null target name matches any
+// source target.
 bool canAttach(const PlacedJigsaw& source, const PlacedJigsaw& target) {
     return source.front == oppositeDir(target.front)
         && (source.rollable || source.top == target.top)
-        && source.target == target.name;
+        && (target.nameIsNull || source.target == target.name);
 }
 
 struct Placer {
@@ -502,10 +506,38 @@ bool generateJigsaw(const StructureInfo& info, GenerationContext& ctx, Structure
     if (info.jigsawProjectToHeightmap.empty()) {
         bottomY = adjY;
     } else {
+        // 26.3 JigsawPlacement.addPieces: no valid biome anywhere in the
+        // centre column, no start (heightAccessor.getMinY() .. getMaxY()).
+        if (!ctx.couldStructureExistInColumn(centerX, centerZ, ctx.generator->getLevelMinY(),
+                                             ctx.generator->getLevelMinY() + ctx.generator->getLevelHeight() - 1)) {
+            return false;
+        }
         Heightmap::Types type = info.jigsawProjectToHeightmap == "OCEAN_FLOOR_WG"
             ? Heightmap::Types::OCEAN_FLOOR_WG : Heightmap::Types::WORLD_SURFACE_WG;
-        // getFirstFreeHeight == getBaseHeight exactly (no -1).
-        bottomY = height + ctx.generator->getBaseHeight(centerX, centerZ, type, ctx.randomState);
+        if (info.jigsawSiteRadius > 0) {
+            // Engine extension (StructureInfo::jigsawSiteRadius): a levelled
+            // site. 7x7 surface samples across the footprint; too rough a
+            // site is refused, otherwise the start sits on the median so the
+            // platform meets as much of the ground as it can.
+            constexpr int kSamples = 7;
+            std::vector<int32_t> heights;
+            heights.reserve(kSamples * kSamples);
+            for (int i = 0; i < kSamples; ++i) {
+                for (int j = 0; j < kSamples; ++j) {
+                    const int32_t sx = centerX - info.jigsawSiteRadius
+                                     + (2 * info.jigsawSiteRadius * i) / (kSamples - 1);
+                    const int32_t sz = centerZ - info.jigsawSiteRadius
+                                     + (2 * info.jigsawSiteRadius * j) / (kSamples - 1);
+                    heights.push_back(ctx.generator->getBaseHeight(sx, sz, type, ctx.randomState));
+                }
+            }
+            std::sort(heights.begin(), heights.end());
+            if (heights.back() - heights.front() > info.jigsawSiteMaxSpread) return false;
+            bottomY = height + heights[heights.size() / 2];
+        } else {
+            // getFirstFreeHeight == getBaseHeight exactly (no -1).
+            bottomY = height + ctx.generator->getBaseHeight(centerX, centerZ, type, ctx.randomState);
+        }
     }
     int centerGroundLevelDelta = 1;  // element getGroundLevelDelta always 1
     int32_t oldAbsoluteGroundY = centerBox.minY + centerGroundLevelDelta;
@@ -523,7 +555,12 @@ bool generateJigsaw(const StructureInfo& info, GenerationContext& ctx, Structure
 
     int32_t centerY = bottomY + localAnchorY;
     // Stub biome check at (centerX, centerY, centerZ) BEFORE the placer runs.
-    if (!validBiomeAt(centerX, centerY, centerZ)) return false;
+    // Engine extension (StructureInfo::jigsawBiomeAtSurface): a buried start
+    // checks the projected surface (bottomY without the start height).
+    const int32_t biomeCheckY = info.jigsawBiomeAtSurface && !info.jigsawProjectToHeightmap.empty()
+        ? bottomY - height
+        : centerY;
+    if (!validBiomeAt(centerX, biomeCheckY, centerZ)) return false;
 
     std::vector<PlacedPiece> pieces;
     PlacedPiece center;

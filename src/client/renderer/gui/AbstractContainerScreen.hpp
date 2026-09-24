@@ -69,6 +69,9 @@ namespace Render {
     // are the table's own grid, which the inventory has no room for at all.
     void ApplyContainerSlot(int menuIndex, const Game::ItemStack& stack);
     void ApplyContainerSlots(const std::vector<Game::ItemStack>& slots);
+    // Changes whenever either of the two above writes the open menu — the
+    // lectern screen polls it for MC's ContainerListener.slotChanged.
+    uint32_t ContainerContentRevision();
 
     // Apply one ContainerData index (MC ClientboundContainerSetDataPacket).
     // Dropped when `containerId` names a menu we already replaced — a furnace
@@ -149,8 +152,14 @@ namespace Render {
         // ── Panel geometry (MC imageWidth / imageHeight) ─────────────────
         virtual int ImageWidth()  const = 0;
         virtual int ImageHeight() const = 0;
+    public:
+        // The panel's top-left in GUI pixels (MC leftPos / topPos). Public
+        // for /control, which places the shared cursor relative to it.
         int LeftPos(int guiW) const { return (guiW - ImageWidth())  / 2; }
+        // MC imageWidth, for the effect column's placement (EffectsInInventory).
+        int PanelWidth() const { return ImageWidth(); }
         int TopPos (int guiH) const { return (guiH - ImageHeight()) / 2; }
+    protected:
 
         // ── Draw hooks, in draw order ────────────────────────────────────
         // Behind the panel (creative's unselected tabs tuck under its top edge).

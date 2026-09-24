@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "decorations",
+  "key": {
+    "R": "minecraft:resonite_ingot",
+    "C": "minecraft:resonant_crystal",
+    "P": "minecraft:polished_choirstone"
+  },
+  "pattern": [
+    " R ",
+    "RCR",
+    " P "
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:chord_socket"
+  }
+}

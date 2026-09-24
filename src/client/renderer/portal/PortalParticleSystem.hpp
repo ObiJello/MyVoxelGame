@@ -51,7 +51,7 @@ namespace Render {
         // view comes out of) are left out — see PortalRenderer::Render.
         void Render(const glm::mat4& projection, const glm::mat4& view,
                     const glm::vec3& cameraPos, Game::DimensionId dimension,
-                    const glm::vec3* skipAnchor = nullptr);
+                    const glm::dvec3* skipAnchor = nullptr);
 
         // One-shot burst kinds — matches the reason byte in
         // PortalFizzleS2CPacket. See `portal_X_close` in portals_dump.txt
@@ -73,7 +73,9 @@ namespace Render {
         //     (Portal's portal_X_close PCF: 18000 HU/s² pull + ±150 HU/s²
         //     twist + drag=0.25, 1s lifetime). Conveys "portal collapsed."
         // `isOrange` selects the per-color palette / twist direction.
-        void EmitOneShot(BurstKind kind, const glm::vec3& origin,
+        // `origin` is a world point and stays double all the way into
+        // the particle (see Particle::position).
+        void EmitOneShot(BurstKind kind, const glm::dvec3& origin,
                          const glm::vec3& normal, bool isOrange,
                          Game::DimensionId dimension);
 
@@ -86,10 +88,10 @@ namespace Render {
         // Server placement remains instant; this is purely visual.
         // The bolt flies in the level the player stands in; EmitProjectileIn
         // puts one in `dimension` (the far leg of a shot through a portal).
-        void EmitProjectile(const glm::vec3& start, const glm::vec3& end,
+        void EmitProjectile(const glm::dvec3& start, const glm::dvec3& end,
                             bool isOrange);
-        void EmitProjectileIn(Game::DimensionId dimension, const glm::vec3& start,
-                              const glm::vec3& end, bool isOrange);
+        void EmitProjectileIn(Game::DimensionId dimension, const glm::dvec3& start,
+                              const glm::dvec3& end, bool isOrange);
 
     private:
         // Particle classification — mirrors Portal's two separate continuous
@@ -101,7 +103,15 @@ namespace Render {
         enum class ParticleType : uint8_t { Spark, Swirl, CloseBurst, Vacuum, Projectile };
 
         struct Particle {
-            glm::vec3 position;     // world-space
+            // World-space points are DOUBLE (position, anchor, swirlOrigin):
+            // a float world position far from the origin sits on a coarse
+            // grid (3 cm at x = 300,000) and jitters as it moves. Rendering
+            // is camera-relative (Render::ToRender subtracts the view
+            // origin in double, then narrows), and the per-frame force math
+            // works on the SMALL difference `position - swirlOrigin`, which
+            // is narrowed to float after the double subtraction. Velocities,
+            // directions, colours and sizes stay float.
+            glm::dvec3 position{0.0};   // world-space
             glm::vec3 velocity;     // world-space, m/s
             glm::vec3 colorHot;     // particle's hot color (palette.hot)
             float     age = 0.0f;
@@ -113,13 +123,13 @@ namespace Render {
             // The portal this particle belongs to (its origin), for the
             // continuous rim effects; unanchored for bolts and bursts.
             bool      anchored = false;
-            glm::vec3 anchor{0.0f};
+            glm::dvec3 anchor{0.0};
             // Swirl-only: portal anchor for the vortex force (pull toward
             // origin + twist around normal). Mirrors Portal's
             // "Pull towards control point" + "twist around axis" operators.
             // Ignored for sparks.
-            glm::vec3 swirlOrigin{0.0f};
-            glm::vec3 swirlNormal{0.0f};
+            glm::dvec3 swirlOrigin{0.0};
+            glm::vec3  swirlNormal{0.0f};
             // Per-particle alpha multiplier (Portal's "Alpha Random" 5-50/255).
             // Sparks use 1.0; swirl uses a low random factor so the ribbon
             // is bright via density, not per-particle alpha.

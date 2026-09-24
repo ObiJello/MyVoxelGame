@@ -6,6 +6,9 @@
 #include "DataComponents.hpp"
 #include "../network/ItemStackSerialization.hpp"
 
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace Game {
@@ -251,6 +254,172 @@ namespace Game::DataComponents {
             return v;
         }
 
+        // MC MobEffectInstance.STREAM_CODEC: the effect holder, then Details
+        // (VarInt amplifier, VarInt duration, bool ambient, bool
+        // showParticles, bool showIcon). The hidden chain is never part of a
+        // potion's contents, so it is not carried.
+        void SerEffectInstance(Network::PacketBuffer& b, const MobEffectInstance& e) {
+            b.WriteVarInt(static_cast<uint32_t>(e.effect));
+            b.WriteVarInt(static_cast<uint32_t>(e.amplifier));
+            b.WriteVarInt(static_cast<uint32_t>(e.duration));   // -1 = infinite
+            b.WriteByte(e.ambient ? 1 : 0);
+            b.WriteByte(e.visible ? 1 : 0);
+            b.WriteByte(e.showIcon ? 1 : 0);
+        }
+        MobEffectInstance DeEffectInstance(Network::PacketReader& r) {
+            const uint32_t raw = r.ReadVarInt();
+            if (!IsValidEffectId(static_cast<int>(raw))) {
+                throw std::runtime_error("potion effect id out of range: " + std::to_string(raw));
+            }
+            const int amplifier = static_cast<int>(r.ReadVarInt());
+            const int duration  = static_cast<int>(r.ReadVarInt());
+            const bool ambient  = r.ReadByte() != 0;
+            const bool visible  = r.ReadByte() != 0;
+            const bool icon     = r.ReadByte() != 0;
+            return MobEffectInstance(static_cast<MobEffectId>(raw), duration, amplifier,
+                                     ambient, visible, icon);
+        }
+
+        // Field order mirrors PotionContents.STREAM_CODEC
+        // (PotionContents.java): optional potion holder, optional INT colour,
+        // the custom-effect list, optional UTF-8 custom name. Optionals are a
+        // presence byte then the value (ByteBufCodecs.optional).
+        void SerPotionContents(Network::PacketBuffer& b, const PotionContents& v) {
+            b.WriteByte(v.potion ? 1 : 0);
+            if (v.potion) b.WriteVarInt(static_cast<uint32_t>(*v.potion));
+            b.WriteByte(v.customColor ? 1 : 0);
+            if (v.customColor) b.WriteInt(static_cast<uint32_t>(*v.customColor));
+            b.WriteVarInt(static_cast<uint32_t>(v.customEffects.size()));
+            for (const auto& e : v.customEffects) SerEffectInstance(b, e);
+            b.WriteByte(v.customName ? 1 : 0);
+            if (v.customName) b.WriteString(*v.customName);
+        }
+        PotionContents DePotionContents(Network::PacketReader& r) {
+            PotionContents v;
+            if (r.ReadByte() != 0) {
+                const uint32_t raw = r.ReadVarInt();
+                if (!IsValidPotionId(static_cast<int>(raw))) {
+                    throw std::runtime_error("potion id out of range: " + std::to_string(raw));
+                }
+                v.potion = static_cast<PotionId>(raw);
+            }
+            if (r.ReadByte() != 0) v.customColor = static_cast<int32_t>(r.ReadInt());
+            const uint32_t count = r.ReadVarInt();
+            v.customEffects.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) v.customEffects.push_back(DeEffectInstance(r));
+            if (r.ReadByte() != 0) v.customName = r.ReadString();
+            return v;
+        }
+
+        void SerFloat(Network::PacketBuffer& b, const float& v) { b.WriteFloat(v); }
+        float DeFloat(Network::PacketReader& r)                 { return r.ReadFloat(); }
+
+        // Mirrors SuspiciousStewEffects.STREAM_CODEC — a list of Entry
+        // (effect holder, VarInt duration).
+        void SerStewEffects(Network::PacketBuffer& b, const SuspiciousStewEffects& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.effects.size()));
+            for (const auto& e : v.effects) {
+                b.WriteVarInt(static_cast<uint32_t>(e.effect));
+                b.WriteVarInt(static_cast<uint32_t>(e.duration));
+            }
+        }
+        SuspiciousStewEffects DeStewEffects(Network::PacketReader& r) {
+            SuspiciousStewEffects v;
+            const uint32_t count = r.ReadVarInt();
+            v.effects.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint32_t raw = r.ReadVarInt();
+                if (!IsValidEffectId(static_cast<int>(raw))) {
+                    throw std::runtime_error("stew effect id out of range: " + std::to_string(raw));
+                }
+                SuspiciousStewEffects::Entry e;
+                e.effect   = static_cast<MobEffectId>(raw);
+                e.duration = static_cast<int>(r.ReadVarInt());
+                v.effects.push_back(e);
+            }
+            return v;
+        }
+
+        // Mirrors WrittenBookContent.STREAM_CODEC: Filterable<String(32)>
+        // title, UTF-8 author, VarInt generation, list of
+        // Filterable<Component> pages, bool resolved. A Filterable is the raw
+        // value then an optional (presence byte) filtered value.
+        void SerWrittenBook(Network::PacketBuffer& b, const WrittenBookContent& v) {
+            b.WriteString(v.title.raw);
+            b.WriteByte(v.title.filtered ? 1 : 0);
+            if (v.title.filtered) b.WriteString(*v.title.filtered);
+            b.WriteString(v.author);
+            b.WriteVarInt(static_cast<uint32_t>(v.generation));
+            b.WriteVarInt(static_cast<uint32_t>(v.pages.size()));
+            for (const auto& page : v.pages) {
+                Text::Write(b, page.raw);
+                b.WriteByte(page.filtered ? 1 : 0);
+                if (page.filtered) Text::Write(b, *page.filtered);
+            }
+            b.WriteByte(v.resolved ? 1 : 0);
+        }
+        WrittenBookContent DeWrittenBook(Network::PacketReader& r) {
+            // stringUtf8(32) bounds CHARACTERS; four bytes each is the
+            // widest a UTF-8 character can be.
+            constexpr size_t kTitleBytes = WrittenBookContent::TITLE_MAX_LENGTH * 4;
+            WrittenBookContent v;
+            v.title.raw = r.ReadString(kTitleBytes);
+            if (r.ReadByte() != 0) v.title.filtered = r.ReadString(kTitleBytes);
+            v.author = r.ReadString(32767);
+            const uint32_t generation = r.ReadVarInt();
+            if (generation > static_cast<uint32_t>(WrittenBookContent::MAX_GENERATION)) {
+                // The record constructor's IllegalArgumentException.
+                throw std::runtime_error("written book generation " + std::to_string(generation) +
+                                         " is not between 0 and 3");
+            }
+            v.generation = static_cast<int>(generation);
+            const uint32_t count = r.ReadVarInt();
+            if (count > r.Remaining()) throw std::runtime_error("written book page count out of range");
+            v.pages.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                Filterable<Text::Component> page;
+                page.raw = Text::Read(r);
+                if (r.ReadByte() != 0) page.filtered = Text::Read(r);
+                v.pages.push_back(std::move(page));
+            }
+            v.resolved = r.ReadByte() != 0;
+            return v;
+        }
+
+        // Mirrors WritableBookContent.STREAM_CODEC: a list (at most 100) of
+        // Filterable<String(1024)>.
+        void SerWritableBook(Network::PacketBuffer& b, const WritableBookContent& v) {
+            const size_t count = std::min<size_t>(v.pages.size(), WritableBookContent::MAX_PAGES);
+            b.WriteVarInt(static_cast<uint32_t>(count));
+            for (size_t i = 0; i < count; ++i) {
+                const auto& page = v.pages[i];
+                b.WriteString(page.raw);
+                b.WriteByte(page.filtered ? 1 : 0);
+                if (page.filtered) b.WriteString(*page.filtered);
+            }
+        }
+        WritableBookContent DeWritableBook(Network::PacketReader& r) {
+            constexpr size_t kPageBytes = WritableBookContent::PAGE_EDIT_LENGTH * 4;
+            WritableBookContent v;
+            const uint32_t count = r.ReadVarInt();
+            if (count > static_cast<uint32_t>(WritableBookContent::MAX_PAGES)) {
+                throw std::runtime_error("writable book has " + std::to_string(count) +
+                                         " pages, but maximum is 100");
+            }
+            v.pages.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                Filterable<std::string> page;
+                page.raw = r.ReadString(kPageBytes);
+                if (r.ReadByte() != 0) page.filtered = r.ReadString(kPageBytes);
+                v.pages.push_back(std::move(page));
+            }
+            return v;
+        }
+
+        // MC DyedItemColor.STREAM_CODEC — ByteBufCodecs.INT.
+        void SerI32(Network::PacketBuffer& b, const int32_t& v) { b.WriteInt(static_cast<uint32_t>(v)); }
+        int32_t DeI32(Network::PacketReader& r)                 { return static_cast<int32_t>(r.ReadInt()); }
+
 #if ENABLE_PORTAL_GUN
         void SerU8(Network::PacketBuffer& b, const uint8_t& v)  { b.WriteByte(v); }
         uint8_t DeU8(Network::PacketReader& r)                  { return r.ReadByte(); }
@@ -278,6 +447,12 @@ namespace Game::DataComponents {
     const DataComponentType<Equippable>       EQUIPPABLE                {"equippable",                11, &SerEquippable,   &DeEquippable};
     const DataComponentType<BlocksAttacks>    BLOCKS_ATTACKS            {"blocks_attacks",            12, &SerBlocksAttacks,&DeBlocksAttacks};
     const DataComponentType<BundleContents>   BUNDLE_CONTENTS           {"bundle_contents",           13, &SerBundleContents,&DeBundleContents};
+    const DataComponentType<PotionContents>   POTION_CONTENTS           {"potion_contents",           15, &SerPotionContents,&DePotionContents};
+    const DataComponentType<float>            POTION_DURATION_SCALE     {"potion_duration_scale",     16, &SerFloat,        &DeFloat};
+    const DataComponentType<SuspiciousStewEffects> SUSPICIOUS_STEW_EFFECTS {"suspicious_stew_effects", 17, &SerStewEffects, &DeStewEffects};
+    const DataComponentType<WrittenBookContent> WRITTEN_BOOK_CONTENT  {"written_book_content",      18, &SerWrittenBook, &DeWrittenBook};
+    const DataComponentType<WritableBookContent> WRITABLE_BOOK_CONTENT {"writable_book_content",     19, &SerWritableBook, &DeWritableBook};
+    const DataComponentType<int32_t>          DYED_COLOR                {"dyed_color",                20, &SerI32,          &DeI32};
 
 #if ENABLE_PORTAL_GUN
     const DataComponentType<uint8_t>  PORTAL_GUN_NEXT_COLOR  {"portal_gun_next_color",  100, &SerU8,  &DeU8};

@@ -2,6 +2,8 @@
 #include "ServerConnection.hpp"
 #include "NetworkServer.hpp"
 #include "../commands/CommandDispatcher.hpp"
+#include "common/world/portal/PortalState.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "../session/PlayerSessionManager.hpp"
 #include "listeners/HandshakePacketListener.hpp"
 #include "listeners/LoginPacketListener.hpp"
@@ -9,6 +11,9 @@
 #include "../session/PlayerSession.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../IntegratedServer.hpp"
+#include "../control/RemoteControlManager.hpp"
+#include "../world/ticketing/ChunkLevel.hpp"
+#include "common/world/block/RedstonePlus.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Assert.hpp"
 #include "common/core/Log.hpp"
@@ -73,6 +78,25 @@ namespace Server {
         // answerable while the tick thread is stalled.
         m_packetRegistry.RegisterHandler(PacketId::KeepAliveC2S,
                                          [this](const std::vector<uint8_t>& p) { HandleKeepAliveResponse(p); });
+        // MC ServerCommonPacketListenerImpl.handlePingRequest: the payload is
+        // echoed back verbatim, inline, so the client's F3+3 chart measures
+        // the socket and not the tick thread's backlog.
+        m_packetRegistry.RegisterHandler(PacketId::PingRequestC2S,
+                                         [this](const std::vector<uint8_t>& p) {
+                                             SendPacket(static_cast<uint8_t>(Network::PacketId::PongResponseS2C), p);
+                                         });
+        // /control: both streams are relayed inline, payload verbatim (the
+        // C2S and S2C bodies are the same struct) — see SetRelayInputTo.
+        m_packetRegistry.RegisterHandler(PacketId::ControlInputC2S,
+                                         [this](const std::vector<uint8_t>& p) {
+                                             RelayControl(static_cast<uint8_t>(Network::PacketId::ControlInputS2C),
+                                                          m_relayInputTo.load(std::memory_order_relaxed), p);
+                                         });
+        m_packetRegistry.RegisterHandler(PacketId::ControlViewC2S,
+                                         [this](const std::vector<uint8_t>& p) {
+                                             RelayControl(static_cast<uint8_t>(Network::PacketId::ControlViewS2C),
+                                                          m_relayViewTo.load(std::memory_order_relaxed), p);
+                                         });
     }
 
     ServerConnection::~ServerConnection() {
@@ -357,6 +381,7 @@ namespace Server {
         
         // Send time update
         SendCurrentTimeUpdate();
+        SendWorldRules();
 
         // Send player abilities + the world's game mode
         SendPlayerAbilitiesForJoin();
@@ -388,7 +413,26 @@ namespace Server {
         // thread. Deferring it to the tick is what let an 11.7 s tick eat the
         // response and time the player out of their own singleplayer world.
         return packetId != static_cast<uint8_t>(Network::PacketId::Disconnect)
-            && packetId != static_cast<uint8_t>(Network::PacketId::KeepAliveC2S);
+            && packetId != static_cast<uint8_t>(Network::PacketId::KeepAliveC2S)
+            && packetId != static_cast<uint8_t>(Network::PacketId::PingRequestC2S)
+            // /control streams touch no level or player state — they are
+            // forwarded to another socket, and at frame rate.
+            && packetId != static_cast<uint8_t>(Network::PacketId::ControlInputC2S)
+            && packetId != static_cast<uint8_t>(Network::PacketId::ControlViewC2S);
+    }
+
+    void ServerConnection::RelayControl(uint8_t s2cPacketId, uint32_t toPlayerId,
+                                        const std::vector<uint8_t>& payload) {
+        // I/O thread. Nothing here is the server thread's: the target id is
+        // an atomic, the session lookup takes the manager's own mutex, and
+        // the send queues to the target's write strand.
+        if (!toPlayerId || m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
+        if (!Server::g_integratedServer) return;
+        auto* sessionManager = Server::g_integratedServer->GetSessionManager();
+        if (!sessionManager) return;
+        auto target = sessionManager->GetSession(toPlayerId);
+        if (!target || !target->GetConnection() || target->GetConnection() == this) return;
+        target->GetConnection()->Network::NetworkConnection::SendPacket(s2cPacketId, payload);
     }
 
     void ServerConnection::OnPacketReceived(uint8_t packetId, const std::vector<uint8_t>& payload) {
@@ -449,6 +493,26 @@ namespace Server {
         Disconnect();
     }
 
+    void ServerConnection::SendWorldRules() {
+        Network::PacketBuffer buffer;
+        buffer.WriteByte(Game::Portals::ImmersiveNetherPortals() ? 1 : 0);
+        buffer.WriteByte(Game::Portals::PortalGunAllowed() ? 1 : 0);
+        // The vanilla rules a client acts on itself (MC sends these as
+        // player entity-data flags / GAME_EVENT packets).
+        buffer.WriteByte(Game::Rules::GetBool(Game::Rules::Id::ReducedDebugInfo) ? 1 : 0);
+        buffer.WriteByte(Game::Rules::GetBool(Game::Rules::Id::ImmediateRespawn) ? 1 : 0);
+        // Trailing field (wire compatibility): redstone_plus, so a client
+        // offers the blue torch only where it is instant.
+        buffer.WriteByte(Game::RedstonePlus::Enabled() ? 1 : 0);
+        SendPacket(static_cast<uint8_t>(Network::PacketId::WorldRulesS2C), buffer.GetData());
+    }
+
+    void ServerConnection::SendServerPaused(bool paused) {
+        Network::PacketBuffer buffer;
+        buffer.WriteByte(paused ? 1 : 0);
+        SendPacket(static_cast<uint8_t>(Network::PacketId::ServerPausedS2C), buffer.GetData());
+    }
+
     void ServerConnection::SendTimeUpdate(uint64_t worldAge, uint64_t timeOfDay, bool doDaylightCycle) {
         Network::PacketBuffer buffer;
         buffer.WriteLong(worldAge);
@@ -480,9 +544,13 @@ namespace Server {
         Network::PlayerAbilitiesS2CPacket BuildAbilitiesPacket(GameMode mode,
                                                                bool flying, bool canFly,
                                                                bool noclip = false,
-                                                               float scale = 1.0f) {
+                                                               float scale = 1.0f,
+                                                               uint32_t morph = 0xFFFFFFFFu,
+                                                               float morphSpeed = 0.0f) {
             Network::PlayerAbilitiesS2CPacket packet;
-            packet.scale = scale;
+            packet.scale      = scale;
+            packet.morph      = morph;
+            packet.morphSpeed = morphSpeed;
             if (noclip) packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_NOCLIP;
             if (mode == GameMode::CREATIVE || mode == GameMode::SPECTATOR) {
                 packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INVULNERABLE;
@@ -497,10 +565,39 @@ namespace Server {
         }
     } // namespace
 
+    void ServerConnection::SendPacket(uint8_t packetId, const std::vector<uint8_t>& data,
+                                      std::function<void()> onSent) {
+        Network::NetworkConnection::SendPacket(packetId, data, std::move(onSent));
+        if (!m_mirrorPlayerId) return;
+        // The controller's client applies these to its own player exactly as
+        // the controlled client does; the server restores the controller's
+        // own inventory and stats when the session ends.
+        switch (static_cast<Network::PacketId>(packetId)) {
+            case Network::PacketId::InventoryFullS2C:
+            case Network::PacketId::InventorySetSlotS2C:
+            case Network::PacketId::InventorySetCarriedS2C:
+            case Network::PacketId::SetHeldSlotS2C:
+            case Network::PacketId::OpenScreenS2C:
+            case Network::PacketId::ContainerSetDataS2C:
+            case Network::PacketId::SetHealthS2C:
+            case Network::PacketId::SetExperienceS2C:
+                break;
+            default:
+                return;
+        }
+        if (!Server::g_integratedServer) return;
+        auto* sessionManager = Server::g_integratedServer->GetSessionManager();
+        if (!sessionManager) return;
+        auto mirror = sessionManager->GetSession(m_mirrorPlayerId);
+        if (!mirror || !mirror->GetConnection() || mirror->GetConnection() == this) return;
+        mirror->GetConnection()->Network::NetworkConnection::SendPacket(packetId, data);
+    }
+
     void ServerConnection::SendPlayerAbilities(const ServerPlayer& player) {
         auto data = Network::Serialization::Serialize(
             BuildAbilitiesPacket(player.getGameMode(), player.isFlying(), player.canFly(),
-                                 player.isNoclip(), player.getScale()));
+                                 player.isNoclip(), player.getScale(),
+                                 player.getMorph(), player.getMorphSpeed()));
         SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
     }
 
@@ -590,6 +687,10 @@ namespace Server {
         Network::PacketBuffer buffer;
         buffer.WriteString(std::to_string(m_playerId)); // UUID as string
         buffer.WriteString(m_playerName);
+        // Trailing: the hashed seed for the client's biome zoom (MC's
+        // ClientboundLoginPacket carries it the same way).
+        buffer.WriteLong(static_cast<uint64_t>(
+            Server::g_integratedServer ? Server::g_integratedServer->GetBiomeZoomSeed() : 0));
         Log::Debug("[ServerConnection %u] Sending LoginSuccess packet", GetConnectionId());
         SendPacket(static_cast<uint8_t>(Network::PacketId::LoginSuccess), buffer.GetData());
         
@@ -638,6 +739,35 @@ namespace Server {
             if (!sessionManager) return;
             auto session = sessionManager->GetSession(m_playerId);
             if (session && session->GetPlayer()) {
+                // World Options: "Allow Cheats" off means nobody, the host
+                // included, has commands (MC: the world's allowCommands feeds
+                // the player's permission set); a guest additionally needs
+                // "Command Access" (IntegratedServer.guestCommandAccess). The
+                // World Options commands themselves are exempt so the host
+                // can turn cheats back on from the screen.
+                const std::string firstWord = cmdLine.substr(0, cmdLine.find(' '));
+                std::string lower = firstWord;
+                for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                const bool optionsCommand = lower == "worldoptions" || lower == "publish" || lower == "defaultgamemode";
+                // A morph's own acts (Left Alt, Shift+Alt, the grid lock) ride
+                // the chat as `/morph ability|rotate|lock|unlock`; they act
+                // only on a morph the player already has, so a guest without
+                // command access keeps them — the morph itself was the gated
+                // part.
+                bool morphAction = false;
+                if (lower == "morph") {
+                    std::string rest = cmdLine.substr(firstWord.size());
+                    rest.erase(0, rest.find_first_not_of(' '));
+                    const std::string sub = rest.substr(0, rest.find(' '));
+                    morphAction = sub == "ability" || sub == "rotate" || sub == "lock" || sub == "unlock";
+                }
+                const bool allowed = optionsCommand || morphAction ||
+                    (Server::g_integratedServer->IsAllowCommands() &&
+                     (IsSingleplayerOwner() || Server::g_integratedServer->GetGuestCommandAccess()));
+                if (!allowed) {
+                    SendChatMessage("You do not have permission to use this command", 1);
+                    return;
+                }
                 Server::g_integratedServer->GetCommandDispatcher().ExecuteCommand(
                     cmdLine, *session->GetPlayer(), *this, *sessionManager);
             }
@@ -651,7 +781,23 @@ namespace Server {
 
         // Broadcast chat to all connected players
         if (m_server) {
-            std::string formattedMessage = "<" + m_playerName + "> " + packet.message;
+            // /control: a controller's chat line is spoken BY the controlled
+            // player — their name, their chat bubble. (Commands above stay
+            // the controller's own.)
+            std::string speakerName = m_playerName;
+            uint32_t    speakerId   = m_playerId;
+            if (Server::g_integratedServer) {
+                if (const uint32_t targetId = Server::g_integratedServer->RemoteControl().TargetOf(m_playerId)) {
+                    if (auto* sessions = Server::g_integratedServer->GetSessionManager()) {
+                        auto target = sessions->GetSession(targetId);
+                        if (target && target->GetPlayer()) {
+                            speakerName = target->GetPlayer()->getName();
+                            speakerId   = targetId;
+                        }
+                    }
+                }
+            }
+            std::string formattedMessage = "<" + speakerName + "> " + packet.message;
             auto connections = m_server->GetConnections();
 
             std::vector<ServerConnectionPtr> activeConnections;
@@ -663,7 +809,7 @@ namespace Server {
 
             for (auto& conn : activeConnections) {
                 try {
-                    conn->SendChatMessage(formattedMessage, 0, m_playerId);
+                    conn->SendChatMessage(formattedMessage, 0, speakerId);
                 } catch (const std::exception& e) {
                     Log::Warning("Failed to send chat message to connection: %s", e.what());
                 }
@@ -803,6 +949,15 @@ namespace Server {
             }
             // Clear the gate — subsequent C2S move packets are honored in full again.
             m_awaitingPositionFromClient.reset();
+            // MC handleAcceptTeleportPacket: `this.player.hasChangedDimension()`
+            // — the portal cooldown frozen by a cross-dimension teleport
+            // (ServerPlayer::isChangingDimension) runs again.
+            if (Server::g_integratedServer) {
+                if (auto* sessions = Server::g_integratedServer->GetSessionManager()) {
+                    auto session = sessions->GetSession(m_playerId);
+                    if (session && session->GetPlayer()) session->GetPlayer()->hasChangedDimension();
+                }
+            }
             Log::Info("[ServerConnection %u] Teleport id=%d acked", GetConnectionId(), teleportId);
         } else {
             // Not an error: an ack for a SUPERSEDED teleport, which is exactly
@@ -834,7 +989,7 @@ namespace Server {
         // field existed sends none, and for it the old behaviour — simulate
         // everything it can see — is exactly what it expects.
         if (!reader.HasMore()) return std::clamp(renderDistance, 2, 32);
-        return std::clamp(static_cast<int>(reader.ReadVarInt()), 2, 32);
+        return std::clamp(static_cast<int>(reader.ReadVarInt()), 2, Server::ChunkLevel::kMaxSimulationDistance);
     }
 
     void ServerConnection::ApplyClientSettings(int renderDistance, int simulationDistance,
@@ -1061,6 +1216,31 @@ namespace Server {
                     return std::make_unique<Network::Packets::PickItemC2SPacketImpl>(data);
                 }
                 break;
+            case PacketId::SignUpdateC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeSignUpdateC2S(payload);
+                    return std::make_unique<Network::Packets::SignUpdateC2SPacketImpl>(std::move(data));
+                }
+                break;
+            case PacketId::EditBookC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeEditBookC2S(payload);
+                    return std::make_unique<Network::Packets::EditBookC2SPacketImpl>(std::move(data));
+                }
+                break;
+            case PacketId::ContainerButtonClickC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeContainerButtonClickC2S(payload);
+                    return std::make_unique<Network::Packets::ContainerButtonClickC2SPacketImpl>(data);
+                }
+                break;
+            case PacketId::SelectTradeC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeSelectTradeC2S(payload);
+                    return std::make_unique<Network::Packets::SelectTradeC2SPacketImpl>(data);
+                }
+                break;
+
 
             case PacketId::InventoryClickC2S:
                 if (m_phase == ConnectionPhase::PLAY && m_authenticated) {

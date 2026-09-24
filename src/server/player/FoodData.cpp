@@ -2,6 +2,7 @@
 // Verbatim port of net/minecraft/world/food/FoodData.java (see header).
 #include "FoodData.hpp"
 #include "ServerPlayer.hpp"
+#include "common/world/level/GameRules.hpp"
 
 #include <algorithm>
 
@@ -56,8 +57,8 @@ namespace Server {
             }
         }
 
-        // :44 — naturalRegeneration gamerule pinned to true (no gamerules).
-        const bool naturalRegen = true;
+        // :44 — the natural_health_regeneration game rule.
+        const bool naturalRegen = Game::Rules::GetBool(Game::Rules::Id::NaturalHealthRegeneration);
         const bool isHurt = player.getHealth() < 20.0f;  // Player.isHurt()
 
         if (naturalRegen && m_saturationLevel > 0.0f && isHurt && m_foodLevel >= 20) {

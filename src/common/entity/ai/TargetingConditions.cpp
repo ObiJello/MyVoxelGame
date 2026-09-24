@@ -41,14 +41,12 @@ namespace Game {
         if (range > 0.0) {
             // MC scales the range by the target's visibility percent and
             // floors the product at 2.0 — an invisible player can still be
-            // noticed point-blank. getVisibilityPercent: invisibility scales
-            // by 0.7 * armor coverage floored at 0.1; mobs carry no armor
-            // here, so the floor applies. (Sneaking affects players only and
-            // player-vs-mob targeting reads mob state, not the reverse.)
-            double modifier = 1.0;
-            if (testInvisible && target.HasEffect(MobEffectId::Invisibility)) {
-                modifier = 0.7 * 0.1;
-            }
+            // noticed point-blank. LivingEntity::GetVisibilityPercent is MC's
+            // getVisibilityPercent: sneaking x0.8, invisibility x0.7 * the
+            // worn-armor cover (floored at 0.1 — every armour piece a player
+            // wears gives an invisible player away), and a mob head worn
+            // against its own kind x0.5.
+            const double modifier = testInvisible ? target.GetVisibilityPercent(attacker) : 1.0;
             const double visibilityDistance = std::max(range * modifier, 2.0);
             if (attacker->DistanceToSqr(target) >
                 visibilityDistance * visibilityDistance) {

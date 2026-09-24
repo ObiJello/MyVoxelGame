@@ -1,0 +1,244 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "bonus_rolls": 0.0,
+      "rolls": {
+        "type": "minecraft:uniform",
+        "min": 3.0,
+        "max": 6.0
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:whisperfruit",
+          "weight": 8,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 5.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:bread",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:paper",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 4.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:string",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 4.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:lead",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:compass",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_shard",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:white_candle",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:cyan_wool",
+          "weight": 3,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_compass",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:recall_chime",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bonus_rolls": 0.0,
+      "rolls": 1.0,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "The Waystation Book"
+              },
+              "author": "Many Hands",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "THE WAYSTATION\nON THE ALTO ROAD\n\nTwo measures and a\nhalf from the Heart.\n\nWrite your name and\nyour road. Leave\nthe lamp lit.\n- the Keeper",
+                "C.873. Pell of the\nQuays, walking to\nthe Choir Hall on\nthe steppe. Feet\nhurt. Soup good.\nThe Alto beam\nfollows you all\nnight. Kind of it.",
+                "C.1021. Two Tuners\nout to the\nlighthouses with\nnew crystal. The\nfar lamps drift\nflat. We tune them\nfrom the Tenor.\nAlways the Tenor.",
+                "C.1144. A family\nfrom Stillhouse\nRow, going nowhere\nin particular. The\nchildren will not\nsleep in the city.\nThey dream of a\ndeep place. Here\nthey slept.",
+                "C.1146. Nobody\nwalked the road\nthis month. The\nKeeper says the\nlighthouses turn\nwrong now. They\nstop, and look back\ntoward the city.",
+                "C.1147. The whole\ncity passed in the\nnight. Nobody\nstopped. Nobody\nwrote. I am\nwriting it for\nthem.\n\nThe lamp is lit.\n- the Keeper"
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "A Legend of Aurelith"
+              },
+              "author": "Corvin of the Quays",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "A LEGEND OF\nAURELITH\nfor travellers who\narrive by gate or\nby water.\n\nCorvin, harbour-\nmaster, Vesper\nQuays. C. 1102.",
+                "THE GATES\nFour towers, four\nbeams. From the\nplain, walk toward\nthe light: every\nbeam stands on a\ngate. Soprano N,\nAlto E, Tenor S,\nBass W.",
+                "THE PLAZA OF THE\nHELD NOTE\nAt the centre. The\nHeart hangs above\nits dais. Canticle\nWay runs north and\nsouth from here,\nHeld Note Avenue\neast and west.",
+                "Mind the Podium,\nfacing the Heart.\nIt is the\nconductor's. Do not\nstand on it. People\ndo. The Wardens\nhave views.",
+                "THE VESPER QUAYS\nFollow the glow.\nThe river crosses\nthe city under\nthree arched\nbridges. Moor at\nthe stone posts,\nnot the lamps.",
+                "THE ARCADE OF\nECHOES\nThe long market\nunder the columns.\nEverything is paid\nfor in echoes.\nHesper's lamps are\nfair; others less.",
+                "THE STILLHOUSES\nThe quiet quarter.\nTerraces, dark\nglass, amber eaves.\nIf a door is shut,\nthey are sleeping.\nIf it is open,\nknock anyway.",
+                "THE ARCHIVE OF\nECHOES\nThe tower of\nshelves. Listen\nfirst; the\nListeners will\nnot let you in\notherwise.",
+                "STARWARD\nThe domed tower.\nClimb it on a\nstrong aurora.\n\nTHE QUIET GARDENS\nStepped terraces.\nNo talking. Truly.",
+                "THE CONDUCTOR'S\nSPIRE\nThe tallest tower.\nFrom its top\nterrace the four\nbeams, the river\nand the Heart all\nline up. Go once.\nEveryone should."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:empty",
+          "weight": 2
+        }
+      ]
+    }
+  ],
+  "random_sequence": "minecraft:chests/aurelith_waystation"
+}

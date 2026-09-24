@@ -83,7 +83,7 @@ namespace Client {
             const auto& players = g_remotePlayerManager->GetPlayers();
             auto it = players.find(playerId);
             if (it != players.end()) {
-                feet = glm::dvec3(it->second.position);
+                feet = it->second.position;
             }
         }
         // Chest height — midpoint of feet and eyes, like the item pickup.
@@ -136,7 +136,7 @@ namespace Client {
                         const auto& players = g_remotePlayerManager->GetPlayers();
                         auto it = players.find(static_cast<uint32_t>(pid));
                         if (it != players.end()) {
-                            out = glm::dvec3(it->second.position);
+                            out = it->second.position;
                             return true;
                         }
                     }
@@ -161,12 +161,12 @@ namespace Client {
                     }
                     if (g_remotePlayerManager) {
                         for (const auto& [pid, rp] : g_remotePlayerManager->GetPlayers()) {
-                            const glm::dvec3 dr = glm::dvec3(rp.position) - e.sim.pos;
+                            const glm::dvec3 dr = rp.position - e.sim.pos;
                             const double distSq = glm::dot(dr, dr);
                             if (distSq <= bestSq) {
                                 bestSq = distSq;
                                 e.sim.followingPlayerId = static_cast<int64_t>(pid);
-                                feet = glm::dvec3(rp.position);
+                                feet = rp.position;
                                 following = true;
                             }
                         }

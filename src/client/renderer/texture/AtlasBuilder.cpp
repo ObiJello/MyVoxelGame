@@ -1,11 +1,13 @@
 // File: src/client/renderer/texture/AtlasBuilder.cpp
 #include "AtlasBuilder.hpp"
+#include <unordered_map>
 #include "TextureAnimator.hpp"
 #include "common/core/AssetLocator.hpp"
 #include "MipmapGenerator.hpp"
 #include "ConnectedTextures.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
+#include "platform/GameDirectory.hpp"   // anisotropic filtering setting
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -661,6 +663,10 @@ namespace Render {
 
         Render::g_renderBackend->SetTextureWrap(m_atlasTexture,
             Render::TextureWrap::ClampToEdge, Render::TextureWrap::ClampToEdge);
+        // Anisotropy applies with mipmaps (it selects across them); without
+        // a chain there is nothing for it to smooth.
+        Render::g_renderBackend->SetTextureAnisotropy(m_atlasTexture,
+            mipmapEnabled ? static_cast<float>(Platform::g_gameSettings.GetAnisotropicFiltering()) : 1.0f);
     }
 
     void AtlasBuilder::ReleaseGpuResources() {
@@ -1164,7 +1170,13 @@ namespace Render {
     }
 
     bool AtlasBuilder::SaveAtlasDebugImage(const std::string& outputPath) const {
-        if (atlasData.empty()) {
+        // `atlasData` is freed once the sheet is on the GPU (BuildFromJSON);
+        // `originalAtlasData` is the level-0 copy kept for RebuildAtlas, and
+        // is what a dump after startup has to read. F3+S always said "could
+        // not save" because it only looked at the freed one.
+        const std::vector<unsigned char>& pixels = atlasData.empty() ? originalAtlasData : atlasData;
+        if (pixels.empty() || atlasWidth <= 0 || atlasHeight <= 0 ||
+            pixels.size() < static_cast<size_t>(atlasWidth) * static_cast<size_t>(atlasHeight) * 4) {
             Log::Warning("No atlas data to save");
             return false;
         }
@@ -1172,7 +1184,7 @@ namespace Render {
         // Save as PNG
         int result = stbi_write_png(outputPath.c_str(),
                                    atlasWidth, atlasHeight, 4,
-                                   atlasData.data(), atlasWidth * 4);
+                                   pixels.data(), atlasWidth * 4);
 
         if (result) {
             Log::Info("Saved atlas debug image to: %s", outputPath.c_str());
@@ -1190,6 +1202,29 @@ namespace Render {
             textureAnimator->Initialize(m_atlasTexture);
         }
     }
+
+    namespace {
+        // The most common RGBA pixel strictly inside a sprite's 1px frame —
+        // what a connected edge is painted with. Falls back to the whole
+        // sprite for one too small to have an interior.
+        uint32_t InteriorFillPixel(const TextureSource& src) {
+            const int w = src.width, h = src.height;
+            const int x0 = w > 2 ? 1 : 0, x1 = w > 2 ? w - 1 : w;
+            const int y0 = h > 2 ? 1 : 0, y1 = h > 2 ? h - 1 : h;
+            std::unordered_map<uint32_t, int> counts;
+            uint32_t best = 0;
+            int bestCount = -1;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    uint32_t px = 0;
+                    std::memcpy(&px, &src.data[(static_cast<size_t>(y) * w + x) * 4u], 4u);
+                    const int n = ++counts[px];
+                    if (n > bestCount) { bestCount = n; best = px; }
+                }
+            }
+            return best;
+        }
+    } // namespace
 
     void AtlasBuilder::GenerateConnectedTextureVariants(std::vector<TextureSource>& sources) {
         // Variants are accumulated separately and appended once at the end.
@@ -1221,11 +1256,18 @@ namespace Render {
                 TextureSource variant = base;
                 variant.key = CTM::VariantKey(base.key, slot);
 
-                // Erase the 1px frame along every edge that abuts an identical
-                // block. Alpha only — the RGB is left alone so the mipmap
-                // solidify pass still has real colour to flood outward.
+                // Replace the 1px frame along every edge that abuts an
+                // identical block with the sprite's interior FILL — the most
+                // common pixel inside the frame. For plain glass that is the
+                // transparent pixel, so the frame simply vanishes; for tinted
+                // and stained glass the interior is a translucent colour, and
+                // clearing the frame to alpha 0 (what this used to do) cut a
+                // clear 1px line between every two panes, so the tint never
+                // read as one sheet. The mode, not the pixel next door, so a
+                // highlight streak touching the frame cannot leak into it.
+                const uint32_t fill = InteriorFillPixel(base);
                 auto clearPixel = [&](int x, int y) {
-                    variant.data[(static_cast<size_t>(y) * w + x) * 4u + 3u] = 0;
+                    std::memcpy(&variant.data[(static_cast<size_t>(y) * w + x) * 4u], &fill, 4u);
                 };
 
                 const bool l = (mask & CTM::LEFT)   != 0;
@@ -1335,17 +1377,27 @@ namespace Render {
         animation.declaredFrameHeight = animData.value("height", 0);
 
         // Parse custom frame sequence if present
+        // MC AnimationMetadataSection.frames: a list of AnimationFrame, each
+        // a bare index or {index, time}; a frame without its own time runs
+        // for the section's frametime (FrameInfo(index, time.orElse(
+        // defaultFrameTime))). Times are kept parallel to the indices; a
+        // non-positive time is MC's codec error, read here as the default.
         if (animData.contains("frames") && animData["frames"].is_array()) {
             animation.frames.clear();
+            animation.frameTimes.clear();
+            bool anyTimed = false;
             for (const auto& frame : animData["frames"]) {
                 if (frame.is_number_integer()) {
                     animation.frames.push_back(frame.get<int>());
+                    animation.frameTimes.push_back(0);
                 } else if (frame.is_object() && frame.contains("index")) {
-                    // Frame object with index and optional time
                     animation.frames.push_back(frame["index"].get<int>());
-                    // TODO: Handle per-frame timing if needed
+                    const int time = frame.value("time", 0);
+                    animation.frameTimes.push_back(time > 0 ? time : 0);
+                    anyTimed = anyTimed || time > 0;
                 }
             }
+            if (!anyTimed) animation.frameTimes.clear();
         }
 
         /*Log::Debug("Parsed .mcmeta: frametime=%d, interpolate=%s, custom_frames=%zu",

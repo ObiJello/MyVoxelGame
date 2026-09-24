@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "powered=false": {
+      "model": "minecraft:block/skyroot_pressure_plate"
+    },
+    "powered=true": {
+      "model": "minecraft:block/skyroot_pressure_plate_down"
+    }
+  }
+}

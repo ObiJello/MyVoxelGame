@@ -1,13 +1,14 @@
 // File: src/client/renderer/environment/CloudRenderer.cpp
 //
 // Constants and cell/face logic verbatim from the vendored decompile
-// (minecraft_code/.../client/renderer/CloudRenderer.java) and the vanilla
+// (minecraft_code_26.1-snapshot-1/.../client/renderer/CloudRenderer.java) and the vanilla
 // cloud shader (assets/shaders/core/rendertype_clouds.vsh):
 //   CELL_SIZE_IN_BLOCKS 12, thickness 4, drift 0.03 blocks/tick (+X),
 //   fixed Z offset 3.96, cell empty when alpha < 10, face colors
 //   top (1,1,1) bottom (0.7) N/S (0.8) E/W (0.9) × CLOUD_COLOR attribute,
 //   fog fades ALPHA toward 0 at FogCloudsEnd (spherical distance).
-// Cloud bottom height = DimensionTypes overworld CLOUD_HEIGHT 192.33.
+// Cloud bottom height = EnvironmentFrame.cloudBottomY (DimensionTypes
+// overworld CLOUD_HEIGHT 192.33; the Aether's 9.83).
 #include "CloudRenderer.hpp"
 #include "EnvironmentState.hpp"
 #include "../backend/RenderBackend.hpp"
@@ -31,7 +32,6 @@ namespace Render {
     namespace {
         constexpr float kCellSize = 12.0f;
         constexpr float kCellHeight = 4.0f;
-        constexpr float kCloudBottomY = 192.33f;   // DimensionTypes CLOUD_HEIGHT
         constexpr float kDriftPerTick = 0.03f;     // BLOCKS_PER_SECOND 0.6 / 20
         constexpr float kFixedZOffset = 3.96f;
         constexpr int kTicksPerCell = 400;
@@ -373,7 +373,7 @@ void main() {
     }
 
     void CloudRenderer::Render(const glm::mat4& proj, const glm::mat4& view,
-                               const glm::vec3& cameraPos, int renderDistChunks,
+                               const glm::dvec3& cameraPos, int renderDistChunks,
                                float partialTick) {
         if (!m_initialized || !g_renderBackend || m_texWidth == 0) return;
 
@@ -390,8 +390,8 @@ void main() {
             static_cast<double>(EnvironmentState::Get().GameTime() %
                                 (static_cast<int64_t>(m_texWidth) * kTicksPerCell)) +
             static_cast<double>(partialTick);
-        double cloudX = static_cast<double>(cameraPos.x) + cloudOffset * 0.030000001;
-        double cloudZ = static_cast<double>(cameraPos.z) + kFixedZOffset;
+        double cloudX = cameraPos.x + cloudOffset * 0.030000001;
+        double cloudZ = cameraPos.z + kFixedZOffset;
         const double texW = static_cast<double>(m_texWidth) * kCellSize;
         const double texH = static_cast<double>(m_texHeight) * kCellSize;
         cloudX -= std::floor(cloudX / texW) * texW;
@@ -401,7 +401,10 @@ void main() {
         const float xInCell = static_cast<float>(cloudX - cellX * static_cast<double>(kCellSize));
         const float zInCell = static_cast<float>(cloudZ - cellZ * static_cast<double>(kCellSize));
 
-        const float relativeBottomY = kCloudBottomY - cameraPos.y;
+        // The layer's bottom: the frame's CLOUD_HEIGHT — the Overworld's
+        // 192.33, the Aether's 9.83 (AetherSkyRenderEffects.renderClouds
+        // draws vanilla's clouds at its own cloudLevel, 9.5, + 0.33).
+        const float relativeBottomY = static_cast<float>(static_cast<double>(env.cloudBottomY) - cameraPos.y);
         const float relativeTopY = relativeBottomY + kCellHeight;
         const RelativePos rel = relativeTopY < 0.0f ? RelativePos::AboveClouds
                               : (relativeBottomY > 0.0f ? RelativePos::BelowClouds

@@ -1,5 +1,9 @@
 {
   "values": [
-    "#minecraft:foot_armor"
+    "#minecraft:foot_armor",
+    "minecraft:ironwood_boots",
+    "minecraft:steeleaf_boots",
+    "minecraft:knightmetal_boots",
+    "minecraft:fiery_boots"
   ]
 }

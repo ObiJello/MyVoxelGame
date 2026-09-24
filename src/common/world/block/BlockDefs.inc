@@ -888,6 +888,11 @@ BLOCK_DEF(RedstoneLamp, "redstone_lamp", "Redstone Lamp", Opaque)
 BLOCK_DEF(RedstoneOre, "redstone_ore", "Redstone Ore", Opaque)
 BLOCK_DEF(RedstoneTorch, "redstone_torch", "Redstone Torch", Cutout)
 BLOCK_DEF(RedstoneWallTorch, "redstone_wall_torch", "Redstone Wall Torch", Cutout)
+// Engine blocks (redstone_plus): a redstone torch that switches with no delay.
+BLOCK_DEF(BlueRedstoneTorch, "blue_redstone_torch", "Blue Redstone Torch", Cutout)
+BLOCK_DEF(BlueRedstoneWallTorch, "blue_redstone_wall_torch", "Blue Redstone Wall Torch", Cutout)
+// Engine block (redstone_plus): an addressable colour pixel with its own memory (DisplayBlock in RedstoneComponents.cpp).
+BLOCK_DEF(DisplayBlock, "display_block", "Display Block", Opaque)
 BLOCK_DEF(RedstoneWire, "redstone_wire", "Redstone Wire", Cutout)
 BLOCK_DEF(ReinforcedDeepslate, "reinforced_deepslate", "Reinforced Deepslate", Opaque)
 BLOCK_DEF(Repeater, "repeater", "Redstone Repeater", Cutout)
@@ -1243,3 +1248,437 @@ BLOCK_DEF(SulfurSpike, "sulfur_spike", "Sulfur Spike", Cutout)
 BLOCK_DEF(SulfurStairs, "sulfur_stairs", "Sulfur Stairs", Opaque)
 BLOCK_DEF(SulfurWall, "sulfur_wall", "Sulfur Wall", Opaque)
 BLOCK_DEF(YellowPoplarLeaves, "yellow_poplar_leaves", "Yellow Poplar Leaves", Cutout)
+
+// ── The Hush (2026-09-21), APPENDED, never re-sorted: a BlockID is also the
+// block item's ItemID, and those are save/wire ids. Engine dimension blocks:
+// the hushstone family, sculk loam, echo ore, the resonant crystal (an
+// opaque full cube — stacked spires need collision and stay out of the
+// sorted translucent pass; its glow is `emissive`), the whisperwood set,
+// hush moss and the portal. Layers by the same rule as the families they
+// alias in gen_block_states.py (flower/leaves cutout, the portal
+// translucent like nether_portal, the rest solid).
+BLOCK_DEF(Hushstone, "hushstone", "Hushstone", Opaque)
+BLOCK_DEF(PolishedHushstone, "polished_hushstone", "Polished Hushstone", Opaque)
+BLOCK_DEF(HushstoneBricks, "hushstone_bricks", "Hushstone Bricks", Opaque)
+BLOCK_DEF(SculkLoam, "sculk_loam", "Sculk Loam", Opaque)
+BLOCK_DEF(EchoOre, "echo_ore", "Echo Ore", Opaque)
+BLOCK_DEF(ResonantCrystal, "resonant_crystal", "Resonant Crystal", Opaque)
+BLOCK_DEF(ResonanceBloom, "resonance_bloom", "Resonance Bloom", Cutout)
+BLOCK_DEF(WhisperwoodLog, "whisperwood_log", "Whisperwood Log", Opaque)
+BLOCK_DEF(WhisperwoodPlanks, "whisperwood_planks", "Whisperwood Planks", Opaque)
+BLOCK_DEF(LanternLeaves, "lantern_leaves", "Lantern Leaves", Cutout)
+BLOCK_DEF(HushMoss, "hush_moss", "Hush Moss", Opaque)
+BLOCK_DEF(HushPortal, "hush_portal", "Hush Portal", Translucent)
+// The Hush, second drop (2026-09-22): the building sets, the sapling, the
+// cavern crystals and the vault heart. Still APPENDED, never re-sorted. Layers
+// follow the vanilla counterpart's row above (oak_* / cobblestone_wall /
+// stone / short_grass / amethyst_cluster / lantern / iron_block); the
+// glowing ones (cluster, echo lantern, echo core) are `emissive` in
+// BlockRegistry, not a different layer.
+BLOCK_DEF(StrippedWhisperwoodLog, "stripped_whisperwood_log", "Stripped Whisperwood Log", Opaque)
+BLOCK_DEF(WhisperwoodStairs, "whisperwood_stairs", "Whisperwood Stairs", Opaque)
+BLOCK_DEF(WhisperwoodSlab, "whisperwood_slab", "Whisperwood Slab", Opaque)
+BLOCK_DEF(WhisperwoodFence, "whisperwood_fence", "Whisperwood Fence", Opaque)
+BLOCK_DEF(WhisperwoodFenceGate, "whisperwood_fence_gate", "Whisperwood Fence Gate", Opaque)
+BLOCK_DEF(WhisperwoodDoor, "whisperwood_door", "Whisperwood Door", Cutout)
+BLOCK_DEF(WhisperwoodTrapdoor, "whisperwood_trapdoor", "Whisperwood Trapdoor", Cutout)
+BLOCK_DEF(WhisperwoodSapling, "whisperwood_sapling", "Whisperwood Sapling", Cutout)
+BLOCK_DEF(HushstoneStairs, "hushstone_stairs", "Hushstone Stairs", Opaque)
+BLOCK_DEF(HushstoneSlab, "hushstone_slab", "Hushstone Slab", Opaque)
+BLOCK_DEF(PolishedHushstoneStairs, "polished_hushstone_stairs", "Polished Hushstone Stairs", Opaque)
+BLOCK_DEF(PolishedHushstoneSlab, "polished_hushstone_slab", "Polished Hushstone Slab", Opaque)
+BLOCK_DEF(HushstoneBrickStairs, "hushstone_brick_stairs", "Hushstone Brick Stairs", Opaque)
+BLOCK_DEF(HushstoneBrickSlab, "hushstone_brick_slab", "Hushstone Brick Slab", Opaque)
+BLOCK_DEF(HushstoneBrickWall, "hushstone_brick_wall", "Hushstone Brick Wall", Opaque)
+BLOCK_DEF(CrackedHushstoneBricks, "cracked_hushstone_bricks", "Cracked Hushstone Bricks", Opaque)
+BLOCK_DEF(ChiseledHushstoneBricks, "chiseled_hushstone_bricks", "Chiseled Hushstone Bricks", Opaque)
+BLOCK_DEF(HushGrass, "hush_grass", "Hush Grass", Cutout)
+BLOCK_DEF(ResonantCluster, "resonant_cluster", "Resonant Cluster", Cutout)
+BLOCK_DEF(ResoniteOre, "resonite_ore", "Resonite Ore", Opaque)
+BLOCK_DEF(ResoniteBlock, "resonite_block", "Block of Resonite", Opaque)
+BLOCK_DEF(EchoLantern, "echo_lantern", "Echo Lantern", Cutout)
+BLOCK_DEF(EchoCore, "echo_core", "Echo Core", Opaque)
+// ── Twilight Forest (port, pass one — docs/mod-ports.md), APPENDED, never
+// re-sorted (a BlockID is also the block item's ItemID). Slugs are TF's own
+// registry names in the minecraft namespace, except `tf_mangrove_*`: vanilla
+// already owns mangrove_log/leaves/planks, so TF's twin takes a tf_ prefix.
+// Each block aliases a vanilla block in gen_block_states.py (ALIAS_EXACT) and
+// takes that block's layer: logs/planks solid, leaves/saplings/plants/
+// critters cutout (hardened_dark_leaves too: its model parents block/leaves),
+// the portal translucent like nether_portal. Display names are TF's en_us.
+BLOCK_DEF(TwilightOakLog, "twilight_oak_log", "Twilight Oak Log", Opaque)
+BLOCK_DEF(StrippedTwilightOakLog, "stripped_twilight_oak_log", "Stripped Twilight Oak Log", Opaque)
+BLOCK_DEF(TwilightOakLeaves, "twilight_oak_leaves", "Twilight Oak Leaves", Cutout)
+BLOCK_DEF(TwilightOakPlanks, "twilight_oak_planks", "Twilight Oak Planks", Opaque)
+BLOCK_DEF(TwilightOakSapling, "twilight_oak_sapling", "Sickly Twilight Oak Sapling", Cutout)
+BLOCK_DEF(CanopyLog, "canopy_log", "Canopy Tree Log", Opaque)
+BLOCK_DEF(StrippedCanopyLog, "stripped_canopy_log", "Stripped Canopy Tree Log", Opaque)
+BLOCK_DEF(CanopyLeaves, "canopy_leaves", "Canopy Tree Leaves", Cutout)
+BLOCK_DEF(CanopyPlanks, "canopy_planks", "Canopy Planks", Opaque)
+BLOCK_DEF(CanopySapling, "canopy_sapling", "Canopy Tree Sapling", Cutout)
+BLOCK_DEF(TfMangroveLog, "tf_mangrove_log", "Twilight Mangrove Log", Opaque)
+BLOCK_DEF(StrippedTfMangroveLog, "stripped_tf_mangrove_log", "Stripped Twilight Mangrove Log", Opaque)
+BLOCK_DEF(TfMangroveLeaves, "tf_mangrove_leaves", "Twilight Mangrove Leaves", Cutout)
+BLOCK_DEF(TfMangrovePlanks, "tf_mangrove_planks", "Twilight Mangrove Planks", Opaque)
+BLOCK_DEF(TfMangroveSapling, "tf_mangrove_sapling", "Twilight Mangrove Sapling", Cutout)
+BLOCK_DEF(DarkLog, "dark_log", "Darkwood Log", Opaque)
+BLOCK_DEF(StrippedDarkLog, "stripped_dark_log", "Stripped Darkwood Log", Opaque)
+BLOCK_DEF(DarkLeaves, "dark_leaves", "Darkwood Leaves", Cutout)
+BLOCK_DEF(DarkPlanks, "dark_planks", "Darkwood Planks", Opaque)
+BLOCK_DEF(DarkwoodSapling, "darkwood_sapling", "Darkwood Sapling", Cutout)
+BLOCK_DEF(HardenedDarkLeaves, "hardened_dark_leaves", "Thick Darkwood Leaves", Cutout)
+BLOCK_DEF(Root, "root", "Roots", Opaque)
+BLOCK_DEF(LiverootBlock, "liveroot_block", "Liveroots", Opaque)
+BLOCK_DEF(Hedge, "hedge", "Hedge", Opaque)
+BLOCK_DEF(Firefly, "firefly", "Firefly", Cutout)
+BLOCK_DEF(Cicada, "cicada", "Cicada", Cutout)
+BLOCK_DEF(Moonworm, "moonworm", "Moonworm", Cutout)
+BLOCK_DEF(Mushgloom, "mushgloom", "Mushgloom", Cutout)
+BLOCK_DEF(Fiddlehead, "fiddlehead", "Fiddlehead Fern", Cutout)
+BLOCK_DEF(Mayapple, "mayapple", "Mayapple", Cutout)
+BLOCK_DEF(CloverPatch, "clover_patch", "Clover Patch", Cutout)
+BLOCK_DEF(MossPatch, "moss_patch", "Moss Patch", Cutout)
+BLOCK_DEF(TorchberryPlant, "torchberry_plant", "Torchberry Plant", Cutout)
+BLOCK_DEF(FallenLeaves, "fallen_leaves", "Fallen Leaves", Cutout)
+BLOCK_DEF(Mazestone, "mazestone", "Mazestone", Opaque)
+BLOCK_DEF(MazestoneBrick, "mazestone_brick", "Mazestone Brick", Opaque)
+BLOCK_DEF(CrackedMazestone, "cracked_mazestone", "Cracked Mazestone Brick", Opaque)
+BLOCK_DEF(MossyMazestone, "mossy_mazestone", "Mossy Mazestone Brick", Opaque)
+BLOCK_DEF(MazestoneMosaic, "mazestone_mosaic", "Mazestone Mosaic", Opaque)
+BLOCK_DEF(MazestoneBorder, "mazestone_border", "Mazestone Border", Opaque)
+BLOCK_DEF(AuroraBlock, "aurora_block", "Aurora Block", Opaque)
+BLOCK_DEF(TwilightPortal, "twilight_portal", "Twilight Forest Portal", Translucent)
+// ── The Aether (port, pass one — docs/mod-ports.md), APPENDED, never
+// re-sorted. The Aether's own registry names in the minecraft namespace.
+// Layers follow the aliased vanilla row (grass_block/stone/oak_* solid,
+// leaves/saplings/flowers/bushes cutout, aether_portal translucent like
+// nether_portal) except the aerclouds, which are translucent: AercloudBlock
+// is a HalfTransparentBlock drawn through the sorted pass like glass.
+BLOCK_DEF(AetherGrassBlock, "aether_grass_block", "Aether Grass Block", Opaque)
+BLOCK_DEF(AetherDirt, "aether_dirt", "Aether Dirt", Opaque)
+BLOCK_DEF(Quicksoil, "quicksoil", "Quicksoil", Opaque)
+BLOCK_DEF(Holystone, "holystone", "Holystone", Opaque)
+BLOCK_DEF(MossyHolystone, "mossy_holystone", "Mossy Holystone", Opaque)
+BLOCK_DEF(HolystoneBricks, "holystone_bricks", "Holystone Bricks", Opaque)
+BLOCK_DEF(ColdAercloud, "cold_aercloud", "Cold Aercloud", Translucent)
+BLOCK_DEF(BlueAercloud, "blue_aercloud", "Blue Aercloud", Translucent)
+BLOCK_DEF(GoldenAercloud, "golden_aercloud", "Golden Aercloud", Translucent)
+BLOCK_DEF(Icestone, "icestone", "Icestone", Opaque)
+BLOCK_DEF(AmbrosiumOre, "ambrosium_ore", "Ambrosium Ore", Opaque)
+BLOCK_DEF(ZaniteOre, "zanite_ore", "Zanite Ore", Opaque)
+BLOCK_DEF(GravititeOre, "gravitite_ore", "Gravitite Ore", Opaque)
+BLOCK_DEF(SkyrootLog, "skyroot_log", "Skyroot Log", Opaque)
+BLOCK_DEF(StrippedSkyrootLog, "stripped_skyroot_log", "Stripped Skyroot Log", Opaque)
+BLOCK_DEF(SkyrootLeaves, "skyroot_leaves", "Skyroot Leaves", Cutout)
+BLOCK_DEF(SkyrootPlanks, "skyroot_planks", "Skyroot Planks", Opaque)
+BLOCK_DEF(SkyrootSapling, "skyroot_sapling", "Skyroot Sapling", Cutout)
+BLOCK_DEF(GoldenOakLog, "golden_oak_log", "Golden Oak Log", Opaque)
+BLOCK_DEF(GoldenOakLeaves, "golden_oak_leaves", "Golden Oak Leaves", Cutout)
+BLOCK_DEF(GoldenOakSapling, "golden_oak_sapling", "Golden Oak Sapling", Cutout)
+BLOCK_DEF(AetherPortal, "aether_portal", "Aether Portal", Translucent)
+BLOCK_DEF(BerryBush, "berry_bush", "Berry Bush", Cutout)
+BLOCK_DEF(BerryBushStem, "berry_bush_stem", "Bush Stem", Cutout)
+BLOCK_DEF(WhiteFlower, "white_flower", "White Flower", Cutout)
+BLOCK_DEF(PurpleFlower, "purple_flower", "Purple Flower", Cutout)
+// ── The Aether, pass two (docs/mod-ports.md): the building sets, the
+// storage blocks, the ambrosium torch, aerogel, quicksoil glass and the
+// dungeon block families (carved/sentry, angelic, hellfire; their locked,
+// trapped, boss-doorway and treasure-doorway twins; pillar, pillar top).
+// APPENDED, never re-sorted. Layers follow the aliased vanilla row in
+// gen_block_states.py (oak_*/stone_*/cobblestone_wall solid, doors/
+// trapdoors/buttons/plates/torches cutout); aerogel and quicksoil glass are
+// translucent (AerogelBlock / QuicksoilGlassBlock are HalfTransparent/
+// TransparentBlocks drawn through the sorted pass in the mod). The locked,
+// trapped and doorway variants are plain blocks for now (their TrappedBlock /
+// DoorwayBlock / TreasureDoorwayBlock mechanics wait for the dungeons).
+BLOCK_DEF(HolystoneStairs, "holystone_stairs", "Holystone Stairs", Opaque)
+BLOCK_DEF(HolystoneSlab, "holystone_slab", "Holystone Slab", Opaque)
+BLOCK_DEF(HolystoneWall, "holystone_wall", "Holystone Wall", Opaque)
+BLOCK_DEF(MossyHolystoneStairs, "mossy_holystone_stairs", "Mossy Holystone Stairs", Opaque)
+BLOCK_DEF(MossyHolystoneSlab, "mossy_holystone_slab", "Mossy Holystone Slab", Opaque)
+BLOCK_DEF(MossyHolystoneWall, "mossy_holystone_wall", "Mossy Holystone Wall", Opaque)
+BLOCK_DEF(HolystoneBrickStairs, "holystone_brick_stairs", "Holystone Brick Stairs", Opaque)
+BLOCK_DEF(HolystoneBrickSlab, "holystone_brick_slab", "Holystone Brick Slab", Opaque)
+BLOCK_DEF(HolystoneBrickWall, "holystone_brick_wall", "Holystone Brick Wall", Opaque)
+BLOCK_DEF(HolystoneButton, "holystone_button", "Holystone Button", Cutout)
+BLOCK_DEF(HolystonePressurePlate, "holystone_pressure_plate", "Holystone Pressure Plate", Cutout)
+BLOCK_DEF(SkyrootWood, "skyroot_wood", "Skyroot Wood", Opaque)
+BLOCK_DEF(StrippedSkyrootWood, "stripped_skyroot_wood", "Stripped Skyroot Wood", Opaque)
+BLOCK_DEF(GoldenOakWood, "golden_oak_wood", "Golden Oak Wood", Opaque)
+BLOCK_DEF(SkyrootStairs, "skyroot_stairs", "Skyroot Stairs", Opaque)
+BLOCK_DEF(SkyrootSlab, "skyroot_slab", "Skyroot Slab", Opaque)
+BLOCK_DEF(SkyrootFence, "skyroot_fence", "Skyroot Fence", Opaque)
+BLOCK_DEF(SkyrootFenceGate, "skyroot_fence_gate", "Skyroot Fence Gate", Opaque)
+BLOCK_DEF(SkyrootDoor, "skyroot_door", "Skyroot Door", Cutout)
+BLOCK_DEF(SkyrootTrapdoor, "skyroot_trapdoor", "Skyroot Trapdoor", Cutout)
+BLOCK_DEF(SkyrootButton, "skyroot_button", "Skyroot Button", Cutout)
+BLOCK_DEF(SkyrootPressurePlate, "skyroot_pressure_plate", "Skyroot Pressure Plate", Cutout)
+BLOCK_DEF(Aerogel, "aerogel", "Aerogel", Translucent)
+BLOCK_DEF(IcestoneStairs, "icestone_stairs", "Icestone Stairs", Opaque)
+BLOCK_DEF(IcestoneSlab, "icestone_slab", "Icestone Slab", Opaque)
+BLOCK_DEF(IcestoneWall, "icestone_wall", "Icestone Wall", Opaque)
+BLOCK_DEF(AmbrosiumBlock, "ambrosium_block", "Block of Ambrosium", Opaque)
+BLOCK_DEF(ZaniteBlock, "zanite_block", "Block of Zanite", Opaque)
+BLOCK_DEF(EnchantedGravitite, "enchanted_gravitite", "Enchanted Gravitite", Opaque)
+BLOCK_DEF(AmbrosiumTorch, "ambrosium_torch", "Ambrosium Torch", Cutout)
+BLOCK_DEF(AmbrosiumWallTorch, "ambrosium_wall_torch", "Ambrosium Wall Torch", Cutout)
+BLOCK_DEF(QuicksoilGlass, "quicksoil_glass", "Quicksoil Glass", Translucent)
+BLOCK_DEF(CarvedStone, "carved_stone", "Carved Stone", Opaque)
+BLOCK_DEF(SentryStone, "sentry_stone", "Sentry Stone", Opaque)
+BLOCK_DEF(AngelicStone, "angelic_stone", "Angelic Stone", Opaque)
+BLOCK_DEF(LightAngelicStone, "light_angelic_stone", "Light Angelic Stone", Opaque)
+BLOCK_DEF(HellfireStone, "hellfire_stone", "Hellfire Stone", Opaque)
+BLOCK_DEF(LightHellfireStone, "light_hellfire_stone", "Light Hellfire Stone", Opaque)
+BLOCK_DEF(LockedCarvedStone, "locked_carved_stone", "Locked Carved Stone", Opaque)
+BLOCK_DEF(LockedSentryStone, "locked_sentry_stone", "Locked Sentry Stone", Opaque)
+BLOCK_DEF(LockedAngelicStone, "locked_angelic_stone", "Locked Angelic Stone", Opaque)
+BLOCK_DEF(LockedLightAngelicStone, "locked_light_angelic_stone", "Locked Light Angelic Stone", Opaque)
+BLOCK_DEF(LockedHellfireStone, "locked_hellfire_stone", "Locked Hellfire Stone", Opaque)
+BLOCK_DEF(LockedLightHellfireStone, "locked_light_hellfire_stone", "Locked Light Hellfire Stone", Opaque)
+BLOCK_DEF(TrappedCarvedStone, "trapped_carved_stone", "Trapped Carved Stone", Opaque)
+BLOCK_DEF(TrappedSentryStone, "trapped_sentry_stone", "Trapped Sentry Stone", Opaque)
+BLOCK_DEF(TrappedAngelicStone, "trapped_angelic_stone", "Trapped Angelic Stone", Opaque)
+BLOCK_DEF(TrappedLightAngelicStone, "trapped_light_angelic_stone", "Trapped Light Angelic Stone", Opaque)
+BLOCK_DEF(TrappedHellfireStone, "trapped_hellfire_stone", "Trapped Hellfire Stone", Opaque)
+BLOCK_DEF(TrappedLightHellfireStone, "trapped_light_hellfire_stone", "Trapped Light Hellfire Stone", Opaque)
+BLOCK_DEF(BossDoorwayCarvedStone, "boss_doorway_carved_stone", "Boss Doorway Carved Stone", Opaque)
+BLOCK_DEF(BossDoorwaySentryStone, "boss_doorway_sentry_stone", "Boss Doorway Sentry Stone", Opaque)
+BLOCK_DEF(BossDoorwayAngelicStone, "boss_doorway_angelic_stone", "Boss Doorway Angelic Stone", Opaque)
+BLOCK_DEF(BossDoorwayLightAngelicStone, "boss_doorway_light_angelic_stone", "Boss Doorway Light Angelic Stone", Opaque)
+BLOCK_DEF(BossDoorwayHellfireStone, "boss_doorway_hellfire_stone", "Boss Doorway Hellfire Stone", Opaque)
+BLOCK_DEF(BossDoorwayLightHellfireStone, "boss_doorway_light_hellfire_stone", "Boss Doorway Light Hellfire Stone", Opaque)
+BLOCK_DEF(TreasureDoorwayCarvedStone, "treasure_doorway_carved_stone", "Treasure Doorway Carved Stone", Opaque)
+BLOCK_DEF(TreasureDoorwaySentryStone, "treasure_doorway_sentry_stone", "Treasure Doorway Sentry Stone", Opaque)
+BLOCK_DEF(TreasureDoorwayAngelicStone, "treasure_doorway_angelic_stone", "Treasure Doorway Angelic Stone", Opaque)
+BLOCK_DEF(TreasureDoorwayLightAngelicStone, "treasure_doorway_light_angelic_stone", "Treasure Doorway Light Angelic Stone", Opaque)
+BLOCK_DEF(TreasureDoorwayHellfireStone, "treasure_doorway_hellfire_stone", "Treasure Doorway Hellfire Stone", Opaque)
+BLOCK_DEF(TreasureDoorwayLightHellfireStone, "treasure_doorway_light_hellfire_stone", "Treasure Doorway Light Hellfire Stone", Opaque)
+BLOCK_DEF(Pillar, "pillar", "Pillar", Opaque)
+BLOCK_DEF(PillarTop, "pillar_top", "Pillar Top", Opaque)
+BLOCK_DEF(CarvedStairs, "carved_stairs", "Carved Stairs", Opaque)
+BLOCK_DEF(CarvedSlab, "carved_slab", "Carved Slab", Opaque)
+BLOCK_DEF(CarvedWall, "carved_wall", "Carved Wall", Opaque)
+BLOCK_DEF(AngelicStairs, "angelic_stairs", "Angelic Stairs", Opaque)
+BLOCK_DEF(AngelicSlab, "angelic_slab", "Angelic Slab", Opaque)
+BLOCK_DEF(AngelicWall, "angelic_wall", "Angelic Wall", Opaque)
+BLOCK_DEF(HellfireStairs, "hellfire_stairs", "Hellfire Stairs", Opaque)
+BLOCK_DEF(HellfireSlab, "hellfire_slab", "Hellfire Slab", Opaque)
+BLOCK_DEF(HellfireWall, "hellfire_wall", "Hellfire Wall", Opaque)
+// ── Twilight Forest, pass two (docs/mod-ports.md): the dark tower's
+// towerwood, the final castle's brick family, the highlands' deadrock and
+// trollsteinn, thorns, the huge water lily, the uncrafting table (a plain
+// block for now — no menu), cinder wood and the four material storage
+// blocks. APPENDED, never re-sorted. Layers: cubes/stairs/pillars solid;
+// thorns (a 10x10 pillar model), the lily (a cross), the knightmetal block
+// (a lattice of small cubes) and the fiery block (an inner cube under a
+// transparent pattern shell) cutout. Display names are TF's en_us.
+BLOCK_DEF(Towerwood, "towerwood", "Towerwood Planks", Opaque)
+BLOCK_DEF(EncasedTowerwood, "encased_towerwood", "Encased Towerwood Planks", Opaque)
+BLOCK_DEF(CrackedTowerwood, "cracked_towerwood", "Cracked Towerwood Planks", Opaque)
+BLOCK_DEF(MossyTowerwood, "mossy_towerwood", "Mossy Towerwood Planks", Opaque)
+BLOCK_DEF(InfestedTowerwood, "infested_towerwood", "Infested Towerwood Planks", Opaque)
+BLOCK_DEF(CastleBrick, "castle_brick", "Castle Brick", Opaque)
+BLOCK_DEF(WornCastleBrick, "worn_castle_brick", "Worn Castle Brick", Opaque)
+BLOCK_DEF(CrackedCastleBrick, "cracked_castle_brick", "Cracked Castle Brick", Opaque)
+BLOCK_DEF(CastleRoofTile, "castle_roof_tile", "Castle Roof Tile", Opaque)
+BLOCK_DEF(MossyCastleBrick, "mossy_castle_brick", "Mossy Castle Brick", Opaque)
+BLOCK_DEF(ThickCastleBrick, "thick_castle_brick", "Thick Castle Brick", Opaque)
+BLOCK_DEF(EncasedCastleBrickPillar, "encased_castle_brick_pillar", "Encased Castle Brick Pillar", Opaque)
+BLOCK_DEF(EncasedCastleBrickTile, "encased_castle_brick_tile", "Encased Castle Brick Tile", Opaque)
+BLOCK_DEF(BoldCastleBrickPillar, "bold_castle_brick_pillar", "Bold Castle Brick Pillar", Opaque)
+BLOCK_DEF(BoldCastleBrickTile, "bold_castle_brick_tile", "Bold Castle Brick Tile", Opaque)
+BLOCK_DEF(CastleBrickStairs, "castle_brick_stairs", "Castle Brick Stairs", Opaque)
+BLOCK_DEF(WornCastleBrickStairs, "worn_castle_brick_stairs", "Worn Castle Brick Stairs", Opaque)
+BLOCK_DEF(CrackedCastleBrickStairs, "cracked_castle_brick_stairs", "Cracked Castle Brick Stairs", Opaque)
+BLOCK_DEF(MossyCastleBrickStairs, "mossy_castle_brick_stairs", "Mossy Castle Brick Stairs", Opaque)
+BLOCK_DEF(EncasedCastleBrickStairs, "encased_castle_brick_stairs", "Encased Castle Brick Stairs", Opaque)
+BLOCK_DEF(BoldCastleBrickStairs, "bold_castle_brick_stairs", "Bold Castle Brick Stairs", Opaque)
+BLOCK_DEF(PinkCastleRuneBrick, "pink_castle_rune_brick", "Magenta Castle Rune Brick", Opaque)
+BLOCK_DEF(BlueCastleRuneBrick, "blue_castle_rune_brick", "Blue Castle Rune Brick", Opaque)
+BLOCK_DEF(YellowCastleRuneBrick, "yellow_castle_rune_brick", "Yellow Castle Rune Brick", Opaque)
+BLOCK_DEF(VioletCastleRuneBrick, "violet_castle_rune_brick", "Violet Castle Rune Brick", Opaque)
+BLOCK_DEF(Deadrock, "deadrock", "Deadrock", Opaque)
+BLOCK_DEF(CrackedDeadrock, "cracked_deadrock", "Cracked Deadrock", Opaque)
+BLOCK_DEF(WeatheredDeadrock, "weathered_deadrock", "Weathered Deadrock", Opaque)
+BLOCK_DEF(Trollsteinn, "trollsteinn", "Trollsteinn", Opaque)
+BLOCK_DEF(BrownThorns, "brown_thorns", "Thorns", Cutout)
+BLOCK_DEF(GreenThorns, "green_thorns", "Green Thorns", Cutout)
+BLOCK_DEF(BurntThorns, "burnt_thorns", "Burnt Thorns", Cutout)
+BLOCK_DEF(HugeWaterLily, "huge_water_lily", "Huge Water Lily", Cutout)
+BLOCK_DEF(UncraftingTable, "uncrafting_table", "Uncrafting Table", Opaque)
+BLOCK_DEF(CinderLog, "cinder_log", "Cinder Log", Opaque)
+BLOCK_DEF(CinderWood, "cinder_wood", "Cinder Wood", Opaque)
+BLOCK_DEF(IronwoodBlock, "ironwood_block", "Block of Ironwood", Opaque)
+BLOCK_DEF(SteeleafBlock, "steeleaf_block", "Block of Steeleaf", Opaque)
+BLOCK_DEF(KnightmetalBlock, "knightmetal_block", "Block of Knightmetal", Cutout)
+BLOCK_DEF(FieryBlock, "fiery_block", "Block of Fiery Metal", Cutout)
+// ── The Hush, the Choir Hall puzzle (2026-09-22, docs/the-hush.md;
+// world/block/ChoirPuzzle), APPENDED, never re-sorted. The chime is a
+// redstone-lamp-shaped cube with a `lit` state (it lights while it sounds);
+// the altar is a plain cube. Both glow (`emissive`, set in ChoirPuzzle.cpp).
+BLOCK_DEF(ResonantChime, "resonant_chime", "Resonant Chime", Opaque)
+BLOCK_DEF(ChoirAltar, "choir_altar", "Choir Altar", Opaque)
+// ── The Hush, the tools of the deep (2026-09-22, docs/the-hush.md;
+// world/block/HushBlocks), APPENDED, never re-sorted. The whisperfruit hangs
+// under lantern leaves with cocoa's `age` 0..2 (and no facing); its item is
+// the pure `whisperfruit` food (placesBlock), so the block's slug differs —
+// a block and a pure item sharing one slug would make "minecraft:whisperfruit"
+// ambiguous to recipes and loot. The echo heart is a glowing cube (beacon
+// class: no properties) whose aura is driven by its own scheduled ticks.
+BLOCK_DEF(HangingWhisperfruit, "hanging_whisperfruit", "Whisperfruit", Cutout)
+BLOCK_DEF(EchoHeart, "echo_heart", "Echo Heart", Opaque)
+// ── The Hush, the lighthouse (2026-09-22, docs/the-hush.md;
+// world/block/HushBlocks + client/renderer/blockentity/HushLighthouseRenderer),
+// APPENDED, never re-sorted. The lamp is a beacon-class block (no properties)
+// with a block entity; its model is a lens between a metal base and cap, it
+// glows (`emissive`), and its renderer sweeps two beams from it.
+BLOCK_DEF(HushLighthouseLamp, "hush_lighthouse_lamp", "Hush Lighthouse Lamp", Opaque)
+// ── The Hush, Aurelith — the Lantern City (2026-09-22, docs/the-hush.md,
+// docs/hush-lore.md; world/block/AurelithBlocks, client/renderer/blockentity/
+// AurelithRenderers), APPENDED, never re-sorted. The city's material
+// language: the pale choirstone family (cubes, a pillar, stairs/slabs/wall),
+// stave stone (dark stone with glowing Stave glyphs), nightglass (smoked
+// glass, translucent like tinted glass), the resonite grate (a copper-grate
+// class cutout cube), the three lumen panels and the lumen strip (glowing
+// cubes; the strip is a pillar so it runs along x, y or z), the crystal
+// conduit (chain class: axis + waterlogged) and the choir lamp (lantern
+// class: hanging + waterlogged). resonant_water is the river Vesper's
+// glowing water — an always-water block (bubble_column's rule: its fluid
+// state is a water source, so it swims, drowns and waterlogs as water),
+// drawn by the fluid renderer with its own sprites, tint and glow
+// (docs/fluids.md). The resonance engine (the Heart's core, its hanging rings
+// drawn by AurelithHeartRenderer) and the voice beacon (a gate tower's sky
+// beam; `facing` picks the voice) are block-entity blocks. Layers follow
+// the aliased vanilla rows in gen_block_states.py.
+BLOCK_DEF(Choirstone, "choirstone", "Choirstone", Opaque)
+BLOCK_DEF(PolishedChoirstone, "polished_choirstone", "Polished Choirstone", Opaque)
+BLOCK_DEF(ChoirstoneBricks, "choirstone_bricks", "Choirstone Bricks", Opaque)
+BLOCK_DEF(CrackedChoirstoneBricks, "cracked_choirstone_bricks", "Cracked Choirstone Bricks", Opaque)
+BLOCK_DEF(ChiseledChoirstone, "chiseled_choirstone", "Chiseled Choirstone", Opaque)
+BLOCK_DEF(ChoirstoneTiles, "choirstone_tiles", "Choirstone Tiles", Opaque)
+BLOCK_DEF(ChoirstonePillar, "choirstone_pillar", "Choirstone Pillar", Opaque)
+BLOCK_DEF(PolishedChoirstoneStairs, "polished_choirstone_stairs", "Polished Choirstone Stairs", Opaque)
+BLOCK_DEF(PolishedChoirstoneSlab, "polished_choirstone_slab", "Polished Choirstone Slab", Opaque)
+BLOCK_DEF(ChoirstoneBrickStairs, "choirstone_brick_stairs", "Choirstone Brick Stairs", Opaque)
+BLOCK_DEF(ChoirstoneBrickSlab, "choirstone_brick_slab", "Choirstone Brick Slab", Opaque)
+BLOCK_DEF(ChoirstoneBrickWall, "choirstone_brick_wall", "Choirstone Brick Wall", Opaque)
+BLOCK_DEF(ChoirstoneTileStairs, "choirstone_tile_stairs", "Choirstone Tile Stairs", Opaque)
+BLOCK_DEF(ChoirstoneTileSlab, "choirstone_tile_slab", "Choirstone Tile Slab", Opaque)
+BLOCK_DEF(StaveStone, "stave_stone", "Stave Stone", Opaque)
+BLOCK_DEF(Nightglass, "nightglass", "Nightglass", Translucent)
+BLOCK_DEF(ResoniteGrate, "resonite_grate", "Resonite Grate", Cutout)
+BLOCK_DEF(CyanLumenPanel, "cyan_lumen_panel", "Cyan Lumen Panel", Opaque)
+BLOCK_DEF(VioletLumenPanel, "violet_lumen_panel", "Violet Lumen Panel", Opaque)
+BLOCK_DEF(AmberLumenPanel, "amber_lumen_panel", "Amber Lumen Panel", Opaque)
+BLOCK_DEF(LumenStrip, "lumen_strip", "Lumen Strip", Opaque)
+BLOCK_DEF(CrystalConduit, "crystal_conduit", "Crystal Conduit", Cutout)
+BLOCK_DEF(ChoirLamp, "choir_lamp", "Choir Lamp", Cutout)
+BLOCK_DEF(ResonantWater, "resonant_water", "Resonant Water", Translucent)
+BLOCK_DEF(ResonanceEngine, "resonance_engine", "Resonance Engine", Opaque)
+BLOCK_DEF(VoiceBeacon, "voice_beacon", "Voice Beacon", Opaque)
+// ── Aurelith: reawakening the Heart (2026-09-22, docs/the-hush.md
+// "Reawakening the Heart"; world/block/AurelithQuestBlocks, client/renderer/
+// blockentity/AurelithQuestRenderers), APPENDED, never re-sorted. The dim_*
+// blocks are the dormant city's lights — the lumen panels, the strip, stave
+// stone and the choir lamp as they burn while the Heart is silent (the same
+// classes and properties as their lit twins; the awakening's light wave
+// swaps each for its twin). The chord socket (a stonecutter-class block:
+// horizontal facing) holds a voice key on the Conductor's Podium; the voice
+// pedestal (a plain block) holds one item for show; the choir cabinet (a
+// barrel-class block: facing + open) is the Hall of Instruments' tuned lock.
+// All three carry block entities.
+BLOCK_DEF(DimCyanLumenPanel, "dim_cyan_lumen_panel", "Dim Cyan Lumen Panel", Opaque)
+BLOCK_DEF(DimVioletLumenPanel, "dim_violet_lumen_panel", "Dim Violet Lumen Panel", Opaque)
+BLOCK_DEF(DimAmberLumenPanel, "dim_amber_lumen_panel", "Dim Amber Lumen Panel", Opaque)
+BLOCK_DEF(DimLumenStrip, "dim_lumen_strip", "Dim Lumen Strip", Opaque)
+BLOCK_DEF(DimStaveStone, "dim_stave_stone", "Dim Stave Stone", Opaque)
+BLOCK_DEF(DimChoirLamp, "dim_choir_lamp", "Dim Choir Lamp", Cutout)
+BLOCK_DEF(ChordSocket, "chord_socket", "Chord Socket", Cutout)
+BLOCK_DEF(VoicePedestal, "voice_pedestal", "Voice Pedestal", Cutout)
+BLOCK_DEF(ChoirCabinet, "choir_cabinet", "Choir Cabinet", Opaque)
+// ── Aurelith: the flickering windows (2026-09-22, docs/the-hush.md "Motion
+// and life"), APPENDED, never re-sorted. Lit tower and house windows whose
+// lamps gutter and wake at random: sea-lantern-class cubes (no properties),
+// emissive, each with its own irregular .mcmeta frame schedule (per-frame
+// "time") so neighbouring windows never blink together. Not touched by the
+// awakening's light wave (that swaps only the dim_* lights).
+BLOCK_DEF(GutteringAmberWindow, "guttering_amber_window", "Guttering Amber Window", Opaque)
+BLOCK_DEF(WakingAmberWindow, "waking_amber_window", "Waking Amber Window", Opaque)
+BLOCK_DEF(RestlessAmberWindow, "restless_amber_window", "Restless Amber Window", Opaque)
+BLOCK_DEF(GutteringCyanWindow, "guttering_cyan_window", "Guttering Cyan Window", Opaque)
+BLOCK_DEF(WakingCyanWindow, "waking_cyan_window", "Waking Cyan Window", Opaque)
+BLOCK_DEF(GutteringVioletWindow, "guttering_violet_window", "Guttering Violet Window", Opaque)
+BLOCK_DEF(WakingVioletWindow, "waking_violet_window", "Waking Violet Window", Opaque)
+
+// ── MC 26.3 dyed stairs and slabs (2026-09-23), APPENDED, never re-sorted: a
+// BlockID is also the block item's ItemID, and those are save/wire ids.
+// Blocks.java registers them with ColorCollection.zipMap over
+// ColorCollection.VALUES (white … black) as registerStair / registerSlab of
+// the matching wool or concrete block — a StairBlock / SlabBlock with the
+// base block's properties — in the order WOOL_STAIRS, WOOL_SLAB,
+// CONCRETE_STAIRS, CONCRETE_SLAB, which is the order kept here. None is in
+// ItemBlockRenderTypes, so all are solid.
+BLOCK_DEF(WhiteWoolStairs, "white_wool_stairs", "White Wool Stairs", Opaque)
+BLOCK_DEF(OrangeWoolStairs, "orange_wool_stairs", "Orange Wool Stairs", Opaque)
+BLOCK_DEF(MagentaWoolStairs, "magenta_wool_stairs", "Magenta Wool Stairs", Opaque)
+BLOCK_DEF(LightBlueWoolStairs, "light_blue_wool_stairs", "Light Blue Wool Stairs", Opaque)
+BLOCK_DEF(YellowWoolStairs, "yellow_wool_stairs", "Yellow Wool Stairs", Opaque)
+BLOCK_DEF(LimeWoolStairs, "lime_wool_stairs", "Lime Wool Stairs", Opaque)
+BLOCK_DEF(PinkWoolStairs, "pink_wool_stairs", "Pink Wool Stairs", Opaque)
+BLOCK_DEF(GrayWoolStairs, "gray_wool_stairs", "Gray Wool Stairs", Opaque)
+BLOCK_DEF(LightGrayWoolStairs, "light_gray_wool_stairs", "Light Gray Wool Stairs", Opaque)
+BLOCK_DEF(CyanWoolStairs, "cyan_wool_stairs", "Cyan Wool Stairs", Opaque)
+BLOCK_DEF(PurpleWoolStairs, "purple_wool_stairs", "Purple Wool Stairs", Opaque)
+BLOCK_DEF(BlueWoolStairs, "blue_wool_stairs", "Blue Wool Stairs", Opaque)
+BLOCK_DEF(BrownWoolStairs, "brown_wool_stairs", "Brown Wool Stairs", Opaque)
+BLOCK_DEF(GreenWoolStairs, "green_wool_stairs", "Green Wool Stairs", Opaque)
+BLOCK_DEF(RedWoolStairs, "red_wool_stairs", "Red Wool Stairs", Opaque)
+BLOCK_DEF(BlackWoolStairs, "black_wool_stairs", "Black Wool Stairs", Opaque)
+BLOCK_DEF(WhiteWoolSlab, "white_wool_slab", "White Wool Slab", Opaque)
+BLOCK_DEF(OrangeWoolSlab, "orange_wool_slab", "Orange Wool Slab", Opaque)
+BLOCK_DEF(MagentaWoolSlab, "magenta_wool_slab", "Magenta Wool Slab", Opaque)
+BLOCK_DEF(LightBlueWoolSlab, "light_blue_wool_slab", "Light Blue Wool Slab", Opaque)
+BLOCK_DEF(YellowWoolSlab, "yellow_wool_slab", "Yellow Wool Slab", Opaque)
+BLOCK_DEF(LimeWoolSlab, "lime_wool_slab", "Lime Wool Slab", Opaque)
+BLOCK_DEF(PinkWoolSlab, "pink_wool_slab", "Pink Wool Slab", Opaque)
+BLOCK_DEF(GrayWoolSlab, "gray_wool_slab", "Gray Wool Slab", Opaque)
+BLOCK_DEF(LightGrayWoolSlab, "light_gray_wool_slab", "Light Gray Wool Slab", Opaque)
+BLOCK_DEF(CyanWoolSlab, "cyan_wool_slab", "Cyan Wool Slab", Opaque)
+BLOCK_DEF(PurpleWoolSlab, "purple_wool_slab", "Purple Wool Slab", Opaque)
+BLOCK_DEF(BlueWoolSlab, "blue_wool_slab", "Blue Wool Slab", Opaque)
+BLOCK_DEF(BrownWoolSlab, "brown_wool_slab", "Brown Wool Slab", Opaque)
+BLOCK_DEF(GreenWoolSlab, "green_wool_slab", "Green Wool Slab", Opaque)
+BLOCK_DEF(RedWoolSlab, "red_wool_slab", "Red Wool Slab", Opaque)
+BLOCK_DEF(BlackWoolSlab, "black_wool_slab", "Black Wool Slab", Opaque)
+BLOCK_DEF(WhiteConcreteStairs, "white_concrete_stairs", "White Concrete Stairs", Opaque)
+BLOCK_DEF(OrangeConcreteStairs, "orange_concrete_stairs", "Orange Concrete Stairs", Opaque)
+BLOCK_DEF(MagentaConcreteStairs, "magenta_concrete_stairs", "Magenta Concrete Stairs", Opaque)
+BLOCK_DEF(LightBlueConcreteStairs, "light_blue_concrete_stairs", "Light Blue Concrete Stairs", Opaque)
+BLOCK_DEF(YellowConcreteStairs, "yellow_concrete_stairs", "Yellow Concrete Stairs", Opaque)
+BLOCK_DEF(LimeConcreteStairs, "lime_concrete_stairs", "Lime Concrete Stairs", Opaque)
+BLOCK_DEF(PinkConcreteStairs, "pink_concrete_stairs", "Pink Concrete Stairs", Opaque)
+BLOCK_DEF(GrayConcreteStairs, "gray_concrete_stairs", "Gray Concrete Stairs", Opaque)
+BLOCK_DEF(LightGrayConcreteStairs, "light_gray_concrete_stairs", "Light Gray Concrete Stairs", Opaque)
+BLOCK_DEF(CyanConcreteStairs, "cyan_concrete_stairs", "Cyan Concrete Stairs", Opaque)
+BLOCK_DEF(PurpleConcreteStairs, "purple_concrete_stairs", "Purple Concrete Stairs", Opaque)
+BLOCK_DEF(BlueConcreteStairs, "blue_concrete_stairs", "Blue Concrete Stairs", Opaque)
+BLOCK_DEF(BrownConcreteStairs, "brown_concrete_stairs", "Brown Concrete Stairs", Opaque)
+BLOCK_DEF(GreenConcreteStairs, "green_concrete_stairs", "Green Concrete Stairs", Opaque)
+BLOCK_DEF(RedConcreteStairs, "red_concrete_stairs", "Red Concrete Stairs", Opaque)
+BLOCK_DEF(BlackConcreteStairs, "black_concrete_stairs", "Black Concrete Stairs", Opaque)
+BLOCK_DEF(WhiteConcreteSlab, "white_concrete_slab", "White Concrete Slab", Opaque)
+BLOCK_DEF(OrangeConcreteSlab, "orange_concrete_slab", "Orange Concrete Slab", Opaque)
+BLOCK_DEF(MagentaConcreteSlab, "magenta_concrete_slab", "Magenta Concrete Slab", Opaque)
+BLOCK_DEF(LightBlueConcreteSlab, "light_blue_concrete_slab", "Light Blue Concrete Slab", Opaque)
+BLOCK_DEF(YellowConcreteSlab, "yellow_concrete_slab", "Yellow Concrete Slab", Opaque)
+BLOCK_DEF(LimeConcreteSlab, "lime_concrete_slab", "Lime Concrete Slab", Opaque)
+BLOCK_DEF(PinkConcreteSlab, "pink_concrete_slab", "Pink Concrete Slab", Opaque)
+BLOCK_DEF(GrayConcreteSlab, "gray_concrete_slab", "Gray Concrete Slab", Opaque)
+BLOCK_DEF(LightGrayConcreteSlab, "light_gray_concrete_slab", "Light Gray Concrete Slab", Opaque)
+BLOCK_DEF(CyanConcreteSlab, "cyan_concrete_slab", "Cyan Concrete Slab", Opaque)
+BLOCK_DEF(PurpleConcreteSlab, "purple_concrete_slab", "Purple Concrete Slab", Opaque)
+BLOCK_DEF(BlueConcreteSlab, "blue_concrete_slab", "Blue Concrete Slab", Opaque)
+BLOCK_DEF(BrownConcreteSlab, "brown_concrete_slab", "Brown Concrete Slab", Opaque)
+BLOCK_DEF(GreenConcreteSlab, "green_concrete_slab", "Green Concrete Slab", Opaque)
+BLOCK_DEF(RedConcreteSlab, "red_concrete_slab", "Red Concrete Slab", Opaque)
+BLOCK_DEF(BlackConcreteSlab, "black_concrete_slab", "Black Concrete Slab", Opaque)

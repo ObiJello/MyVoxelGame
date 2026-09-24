@@ -1,0 +1,7 @@
+{
+  "parent": "minecraft:block/cross_emissive",
+  "textures": {
+    "cross": "minecraft:block/torchberry_plant",
+    "cross_emissive": "minecraft:block/torchberry_plant_emissive"
+  }
+}

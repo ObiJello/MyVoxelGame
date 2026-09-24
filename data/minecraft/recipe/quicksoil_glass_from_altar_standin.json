@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:smelting",
+  "category": "blocks",
+  "cookingtime": 250,
+  "experience": 0.1,
+  "ingredient": "minecraft:quicksoil",
+  "result": {
+    "count": 1,
+    "id": "minecraft:quicksoil_glass"
+  }
+}

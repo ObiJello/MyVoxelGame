@@ -54,6 +54,7 @@ namespace Game::SpawnTags {
         BlockID::Granite,
         BlockID::Stone,
         BlockID::Tuff,
+        BlockID::Hushstone,
     };
     bool BatsSpawnableOn(BlockID block) {
         return Contains(std::begin(k_BatsSpawnableOn), std::end(k_BatsSpawnableOn), block);
@@ -166,6 +167,9 @@ namespace Game::SpawnTags {
         BlockID::StrippedWarpedStem,
         BlockID::WarpedHyphae,
         BlockID::WarpedStem,
+        BlockID::OrangePoplarLeaves,
+        BlockID::RedPoplarLeaves,
+        BlockID::YellowPoplarLeaves,
     };
     bool ParrotsSpawnableOn(BlockID block) {
         return Contains(std::begin(k_ParrotsSpawnableOn), std::end(k_ParrotsSpawnableOn), block);
@@ -263,6 +267,9 @@ namespace Game::SpawnTags {
         BlockID::WarpedRoots,
         BlockID::WhiteTulip,
         BlockID::WitherRose,
+        BlockID::GoldenDandelion,
+        BlockID::SculkLoam,
+        BlockID::HushMoss,
     };
     bool EndermanHoldable(BlockID block) {
         return Contains(std::begin(k_EndermanHoldable), std::end(k_EndermanHoldable), block);

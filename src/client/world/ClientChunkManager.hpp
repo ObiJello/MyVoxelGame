@@ -31,6 +31,8 @@ namespace Render {
     class ChunkRenderer;
 }
 
+namespace Game { class ILevelWrite; }
+
 namespace Client {
 
     // Main thread assertion for debug builds
@@ -146,6 +148,17 @@ namespace Client {
         uint32_t lastJobSeq = 0;
         uint32_t uploadedJobSeq = 0;
         bool builtOnce = false;       // True after first successful build
+        // The last compile's VisibilitySet bits (MC CompiledSectionMesh.
+        // visibilitySet), kept here because a compile with no geometry has no
+        // GPU entry to carry them. Written with every upload; the occlusion
+        // BFS reads it for a built section that has no GPU data — a section
+        // of water or block-entity-drawn blocks is see-through, not a wall.
+        uint64_t compiledVisBits = 0;
+        // MC RenderSection.uploadedTime: when the section's FIRST mesh went
+        // to the GPU (SectionFade::NowMs), 0 until then. Rebuilds keep it,
+        // so a section fades in once, not on every edit. Carried into the
+        // section's origin-table row at every upload (ChunkMegaBuffer).
+        int32_t fadeStartMs = 0;
         // MC's RenderSection.isDirtyFromPlayer — set when THIS client edited a
         // block in the section, cleared when it is scheduled. Drives the
         // "Semi Blocking" / "Fully Blocking" chunk-builder modes, which compile
@@ -171,6 +184,10 @@ namespace Client {
         
         // Timing information
         std::chrono::steady_clock::time_point loadTime;
+        // SectionFade::NowMs() when the server's full (ground-up) data last
+        // arrived; 0 before. Only sections whose first mesh uploads within
+        // SectionFade::kFreshArrivalMs of it fade in (ClientMeshManager).
+        int32_t dataArrivedMs = 0;
         
         // Per-section state tracking (24 sections per chunk)
         std::array<SectionInfo, 24> sectionInfos;
@@ -212,6 +229,11 @@ namespace Client {
         // chunk mesh (MC RenderShape.INVISIBLE) and EndPortalRenderer draws
         // its starfield cube off this index.
         std::vector<glm::ivec3> endGateways;
+        // Same contract for the dyed BEDS: their block model is vanilla's
+        // element-less builtin/entity stub, and Render::BedRenderer draws
+        // the head and foot pieces off this index from the entity texture.
+        // (The straw bed has a real block model and is not listed.)
+        std::vector<glm::ivec3> beds;
 
         ClientChunk(Game::Math::ChunkPos pos) 
             : position(pos), loadTime(std::chrono::steady_clock::now())
@@ -302,6 +324,22 @@ namespace Client {
         // main thread so the edit shows up the same frame.
         void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId, Game::BlockStateIndex stateIndex = 0,
                            bool fromPlayer = false);
+
+        // ── Client-side block-entity ticking (MC ClientLevel.tickBlockEntities)
+        //
+        // The client ticks only what asks to be ticked: today the moving
+        // piston cells it built from a block event, which advance their own
+        // animation, push the local player, and land their block. Positions
+        // are re-resolved each tick, so an entity that went away is pruned.
+        void RegisterTickingBlockEntity(const glm::ivec3& pos);
+        void TickBlockEntities(Game::ILevelWrite& level);
+        // Drop landed moving-piston entities whose section mesh has been
+        // uploaded with the final block in it. Per frame, before the
+        // block-entity render pass, so the mesh and the entity never draw
+        // the same block in the same frame.
+        void RetireLandedBlockEntities();
+        int64_t ClientGameTime() const { return m_clientTicks; }
+
         
 
         // Re-derive SectionInfo::isAllAir for one section from the live
@@ -316,7 +354,19 @@ namespace Client {
         void RefreshSectionEmptiness(ClientChunk& chunk, int sectionY);
 
         // Mark individual section dirty for mesh rebuilding
-        void MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY, bool fromPlayer = false);
+        // `blockEdit`: the section changed because a block in or next to it
+        // was written (SetBlockLocal). Only those count toward the mass-edit
+        // full visibility rebuild and may ask for one when they land outside
+        // the occlusion graph; streaming and light re-dirties may not.
+        void MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY, bool fromPlayer = false,
+                              bool blockEdit = false);
+
+        // LightUpdateS2C: replace the masked light layers of a loaded chunk
+        // and re-mesh those sections. Main thread.
+        void ApplyLightUpdate(Game::Math::ChunkPos chunkPos, const Game::Lighting::NetCodec::Decoded& light);
+        // ChunkDataS2C's light (null = none sent) into a freshly built chunk.
+        // Any thread (PrebuildChunk runs on the I/O thread).
+        static void AdoptLight(Game::Chunk& chunk, const Game::Lighting::NetCodec::Decoded* light);
 
         // Mark entire chunk dirty (all 24 sections) for mesh rebuilding
         void MarkChunkDirty(Game::Math::ChunkPos chunkPos);
@@ -334,13 +384,29 @@ namespace Client {
         // Get client chunk by position
         ClientChunk* GetChunk(Game::Math::ChunkPos chunkPos);
 
-        // Biome id at a world position, across chunk borders. 0 = fallback.
+        // The NOISE biome (the stored 4x4x4 cell) at a world position, across
+        // chunk borders; 0 = fallback. MC getNoiseBiomeAtPosition — what the
+        // non-full-resolution environment attributes sample (fog, sky, water
+        // fog, music). A block's own biome, MC getBiome, is
+        // ClientBlockAccess::GetBiome (fuzzy-zoomed, BiomeZoom.hpp).
         uint16_t BiomeAtWorld(int worldX, int worldY, int worldZ);
         const ClientChunk* GetChunk(Game::Math::ChunkPos chunkPos) const;
 
         // Check chunk state
         ChunkState GetChunkState(Game::Math::ChunkPos chunkPos) const;
         bool IsChunkLoaded(Game::Math::ChunkPos chunkPos) const;
+        // Parked in the retention cache (unloaded, meshes kept for an instant
+        // revisit). Main thread.
+        bool IsChunkRetained(Game::Math::ChunkPos chunkPos) const { return m_retained.count(chunkPos) != 0; }
+        // Bumped whenever a chunk becomes or stops being LOADED, so a caller
+        // deriving something from the loaded set can skip unchanged frames.
+        uint64_t LoadedSetVersion() const { return m_loadedSetVersion; }
+        template <class F>
+        void ForEachLoadedChunkPos(F&& fn) const {
+            for (const auto& [pos, chunk] : m_chunks) {
+                if (chunk && chunk->state == ChunkState::LOADED) fn(pos);
+            }
+        }
         
         // NEW: Direct section access for lock-free rendering
         SectionInfo* GetSectionInfo(Game::Math::ChunkPos chunkPos, int sectionY);
@@ -402,6 +468,7 @@ namespace Client {
         // snapshots and used to walk all ~4,000 chunks each time — 2.8% of
         // the main thread's running time (Instruments, 2026-09-04).
         size_t m_loadedChunkCount = 0;
+        uint64_t m_loadedSetVersion = 0;   // see LoadedSetVersion
 
         // Index of chunks that (may) have dirty sections — lets the mesh
         // scheduler iterate only chunks with work instead of every loaded chunk
@@ -426,6 +493,11 @@ namespace Client {
         const size_t m_retainBudgetBytes = ComputeRetainBudgetBytes();
         static size_t ComputeRetainBudgetBytes();
         void DiscardRetained(Game::Math::ChunkPos pos);
+        // Drops parked chunks, oldest first, while the mesh buffers are near
+        // their slab ceiling (see the definition). Once per scheduler pass.
+        void RelieveMeshBufferPressure();
+        uint64_t m_retainPressureDiscards = 0;
+        std::chrono::steady_clock::time_point m_lastPressureLog{};
         uint32_t m_schedulerSkip = 0;   // idle backoff, see ScheduleMeshBuildsWithSnapshots
         // See MarkSectionDirty: counts section dirties toward a forced
         // full visibility rebuild during mass destruction.
@@ -473,6 +545,11 @@ namespace Client {
         // palette-membership test, so only a section that genuinely contains
         // portal blocks pays the 4096-voxel walk.
         static void RebuildEndPortalIndex(ClientChunk& chunk);
+        // A bed drawn by Render::BedRenderer (every dyed bed; not straw).
+        static bool IsEntityRenderedBed(Game::BlockID id);
+        // Every section of `pos` as an occlusion-graph propagation source
+        // (chunk arrival / re-send), never a full-rebuild request.
+        void ScheduleChunkPropagation(Game::Math::ChunkPos pos);
         
         // Schedule mesh build for dirty sections
         void ScheduleDirtySectionMeshes();
@@ -537,6 +614,8 @@ namespace Client {
         Game::DimensionId          m_dimension = Game::DimensionId::Overworld;
         ::Render::ClientMeshManager* m_meshes   = nullptr;
         ::Render::ChunkRenderer*     m_renderer = nullptr;
+        std::vector<glm::ivec3> m_tickingBlockEntities;
+        int64_t                 m_clientTicks = 0;
     };
 
     // ========================================================================

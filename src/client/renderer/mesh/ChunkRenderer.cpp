@@ -2,6 +2,7 @@
 #include "ChunkRenderer.hpp"
 #include "../core/DevRenderSkip.hpp"
 #include <cstdlib>
+#include "SectionFade.hpp"
 #include "ChunkMegaBuffer.hpp"
 #include "Mesher.hpp"
 #include "ClientMeshManager.hpp"
@@ -12,6 +13,7 @@
 #include "../backend/vulkan/VKBackend.hpp"
 #endif
 #include "../environment/EnvironmentState.hpp"
+#include "client/renderer/environment/Lightmap.hpp"
 #include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
@@ -25,6 +27,7 @@
 #include "common/world/math/ChunkViewDistance.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
@@ -68,7 +71,7 @@ namespace Render {
     bool g_enableGpuPassTimers = false;
 
     // Static portal clip plane (no clipping by default).
-    glm::vec4 ChunkRenderer::s_portalClipPlane{0.0f};
+    glm::dvec4 ChunkRenderer::s_portalClipPlane{0.0};
     float     ChunkRenderer::s_portalEntityClipMargin = 0.0f;
     float     ChunkRenderer::s_nearPlane = 0.05f;
     int       ChunkRenderer::s_renderDistanceOverride = 0;
@@ -286,6 +289,7 @@ namespace Render {
                 g_renderBackend->DestroyTexture(m_whiteDebugTexture);
                 m_whiteDebugTexture = INVALID_TEXTURE;
             }
+            Lightmap::Get().Shutdown();
         }
         m_backendShader = INVALID_SHADER;
         m_activeShader = INVALID_SHADER;
@@ -368,12 +372,24 @@ namespace Render {
         m_stats.translucentPassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
-    void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum,
-                                  const glm::mat4& projectionOverride) {
+    void ChunkRenderer::RecordViewForScheduler(const Camera& camera, const Frustum& frustum) {
+        if (!m_chunks) return;
+        // As a portal view without a seed: frustum-only discovery, appended
+        // to the portal-view list (PrepareVisibleSectionsThroughPortal).
+        const bool wasOverride = m_useProjectionOverride;
         m_useProjectionOverride = true;
-        m_projectionOverride    = projectionOverride;
+        PrepareVisibleSections(camera, frustum);
+        m_useProjectionOverride = wasOverride;
+    }
+
+    void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum,
+                                  const glm::mat4& projectionOverride, bool exactProjection) {
+        m_useProjectionOverride   = true;
+        m_projectionOverrideExact = exactProjection;
+        m_projectionOverride      = projectionOverride;
         RenderAll(camera, frustum);
-        m_useProjectionOverride = false;
+        m_useProjectionOverride   = false;
+        m_projectionOverrideExact = false;
     }
 
     void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum) {
@@ -427,6 +443,24 @@ namespace Render {
         const Frustum& cullFrustum = m_cullOverrideActive ? m_cullFrustum : frustum;
         PrepareVisibleSections(cullCamera, cullFrustum);
 
+        // The main view's outstanding meshes (MainViewSectionsPending): the
+        // visible sections whose chunk still marks them dirty or building.
+        // Air sections carry no mesh and are not "pending"; only the flags
+        // say so, which is why the count comes from the chunk, not from
+        // whether GPU data resolved.
+        if (!m_useProjectionOverride) {
+            int pending = 0;
+            if (const auto* ccm = m_chunks) {
+                for (const auto& rd : m_visibleSections) {
+                    const Client::ClientChunk* chunk = ccm->GetChunk(rd.chunkPos);
+                    if (!chunk || rd.sectionY < 0 || rd.sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
+                    const auto& si = chunk->sectionInfos[static_cast<size_t>(rd.sectionY)];
+                    if (si.dirty || si.state == Client::SectionState::MESHING) ++pending;
+                }
+            }
+            m_mainViewPending = pending;
+        }
+
         // Bind opaque shader, compute MVP, and bind atlas texture
         BindSharedRenderState(camera);
 
@@ -454,13 +488,14 @@ namespace Render {
         }
 
         // Switch to cutout shader for cutout + translucent passes (has discard)
-        const ShaderHandle cutoutPassShader = m_cutoutShader;
+        const ShaderHandle cutoutPassShader = PassShader(kPassCutout, m_cutoutShader);
         if (cutoutPassShader != INVALID_SHADER && g_renderBackend) {
             PROFILE_ZONE_N("PassShaderSwitch");
+            BindPassTarget(kPassCutout);
             m_activeShader = cutoutPassShader;
             g_renderBackend->BindShader(cutoutPassShader);
             g_renderBackend->SetUniformMat4(cutoutPassShader, "uMVP", m_cachedMVP);
-            g_renderBackend->SetUniformVec4(cutoutPassShader, "uPortalClipPlane", s_portalClipPlane);
+            g_renderBackend->SetUniformVec4(cutoutPassShader, "uPortalClipPlane", PortalClipPlane());
             SetEnvironmentUniforms(cutoutPassShader, camera);
             ApplyDebugOverlayUniform(cutoutPassShader);
             g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
@@ -473,35 +508,25 @@ namespace Render {
             endPassTimer(1, t);
         }
 
-        // Translucent pass — skipped wholesale when no visible section has any
-        // translucent geometry (counted by PrepareVisibleSections this frame,
-        // so a water section entering the view is never a frame late). The
-        // pass itself would draw nothing, but the shader bind and uniform
-        // uploads in front of it are not free on either backend.
-        if (m_visibleTranslucentSections > 0) {
-            // Switch to solid shader for translucent pass (no discard → early-z enabled,
-            // blending handles transparency). This avoids the discard penalty entirely.
-            const ShaderHandle solidPassShader = m_solidShader;
-            if (solidPassShader != INVALID_SHADER && g_renderBackend) {
-                PROFILE_ZONE_N("PassShaderSwitch");
-                m_activeShader = solidPassShader;
-                g_renderBackend->BindShader(solidPassShader);
-                g_renderBackend->SetUniformMat4(solidPassShader, "uMVP", m_cachedMVP);
-                g_renderBackend->SetUniformVec4(solidPassShader, "uPortalClipPlane", s_portalClipPlane);
-                SetEnvironmentUniforms(solidPassShader, camera);
-                ApplyDebugOverlayUniform(solidPassShader);
-                g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
-                BindSpriteTable(solidPassShader);
-            }
-
-            GPUTimerHandle t = beginPassTimer(2, "translucent");
-            // The cull view, deliberately: RenderTranslucent's only use of its
-            // camera is the resort origin, and back-to-front order must match
-            // the origin the sections were sorted for — the override camera.
-            if (!DevSkip("translucent")) RenderTranslucent(cullCamera, cullFrustum);
-            endPassTimer(2, t);
+        // Translucent pass. Parked for the caller (RenderDeferredTranslucent)
+        // so entities and block entities go under it; drawn inline only in
+        // the greedy-debug view, whose two-phase re-run needs the whole
+        // chain in one place.
+        if (m_greedyMeshDebug) {
+            DrawTranslucentPass(camera, cullCamera, cullFrustum, gpuTiming);
         } else {
+            m_deferredTranslucent.pending                 = true;
+            m_deferredTranslucent.gpuTiming               = gpuTiming;
+            m_deferredTranslucent.camera                  = camera;
+            m_deferredTranslucent.cullCamera              = cullCamera;
+            m_deferredTranslucent.cullFrustum             = cullFrustum;
+            m_deferredTranslucent.useProjectionOverride   = m_useProjectionOverride;
+            m_deferredTranslucent.projectionOverrideExact = m_projectionOverrideExact;
+            m_deferredTranslucent.projectionOverride      = m_projectionOverride;
             m_stats.translucentPassTimeMs = 0.0f;
+        }
+        if (m_afterPassesTarget != INVALID_RENDER_TARGET && g_renderBackend) {
+            g_renderBackend->BindRenderTarget(m_afterPassesTarget);
         }
         };  // renderPasses
 
@@ -547,6 +572,82 @@ namespace Render {
     }
 
 
+    void ChunkRenderer::DrawTranslucentPass(const Camera& camera, const Camera& cullCamera,
+                                            const Frustum& cullFrustum, bool gpuTiming) {
+        // Skipped wholesale when no visible section has any translucent
+        // geometry (counted by PrepareVisibleSections this frame, so a water
+        // section entering the view is never a frame late). The pass itself
+        // would draw nothing, but the shader bind and uniform uploads in
+        // front of it are not free on either backend.
+        if (m_visibleTranslucentSections <= 0) {
+            m_stats.translucentPassTimeMs = 0.0f;
+            return;
+        }
+        if (m_beforeTranslucent) {
+            m_beforeTranslucent();
+            // The hook draws its own meshes (a shader pack's deferred
+            // passes), which leaves THEIR vertex array bound; the slab
+            // binds below would then be written into it. Ours again.
+            if (m_meshes) m_meshes->BindSharedBlockVAO();
+        }
+        // The solid shader (no discard → early-z enabled, blending handles
+        // transparency). This avoids the discard penalty entirely.
+        const ShaderHandle solidPassShader = PassShader(kPassTranslucent, m_solidShader);
+        if (solidPassShader != INVALID_SHADER && g_renderBackend) {
+            PROFILE_ZONE_N("PassShaderSwitch");
+            BindPassTarget(kPassTranslucent);
+            m_activeShader = solidPassShader;
+            g_renderBackend->BindShader(solidPassShader);
+            g_renderBackend->SetUniformMat4(solidPassShader, "uMVP", m_cachedMVP);
+            g_renderBackend->SetUniformVec4(solidPassShader, "uPortalClipPlane", PortalClipPlane());
+            SetEnvironmentUniforms(solidPassShader, camera);
+            ApplyDebugOverlayUniform(solidPassShader);
+            g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
+            BindSpriteTable(solidPassShader);
+        }
+
+        GPUTimerHandle t = INVALID_GPU_TIMER;
+        if (gpuTiming && m_gpuTimerPending[2] == INVALID_GPU_TIMER && g_renderBackend) {
+            t = g_renderBackend->BeginGPUTimer("translucent");
+        }
+        // The cull view, deliberately: RenderTranslucent's only use of its
+        // camera is the resort origin, and back-to-front order must match
+        // the origin the sections were sorted for — the override camera.
+        if (!DevSkip("translucent")) RenderTranslucent(cullCamera, cullFrustum);
+        if (t != INVALID_GPU_TIMER) {
+            g_renderBackend->EndGPUTimer(t);
+            m_gpuTimerPending[2] = t;
+        }
+    }
+
+    void ChunkRenderer::RenderDeferredTranslucent() {
+        DeferredTranslucent d = m_deferredTranslucent;
+        m_deferredTranslucent.pending = false;
+        if (!d.pending) return;
+        PROFILE_ZONE_N("ChunkRenderer.DeferredTranslucent");
+
+        // The projection the opaque passes were drawn with, back in force
+        // for the same view. The MVP itself is still cached from
+        // BindSharedRenderState; the flags steer the backend's pipeline
+        // choice and the pass-target logic.
+        m_useProjectionOverride   = d.useProjectionOverride;
+        m_projectionOverrideExact = d.projectionOverrideExact;
+        m_projectionOverride      = d.projectionOverride;
+
+        // Whatever drew in between (entity renderers, block entities) left
+        // its own vertex array and pipeline state behind.
+        if (m_meshes) m_meshes->BindSharedBlockVAO();
+        DrawTranslucentPass(d.camera, d.cullCamera, d.cullFrustum, d.gpuTiming);
+        if (m_afterPassesTarget != INVALID_RENDER_TARGET && g_renderBackend) {
+            g_renderBackend->BindRenderTarget(m_afterPassesTarget);
+        }
+        m_stats.renderTimeMs += m_stats.translucentPassTimeMs;
+
+        m_useProjectionOverride   = false;
+        m_projectionOverrideExact = false;
+        RestoreRenderState();
+    }
+
     // Greedy-debug substitute for the atlas: with a 1x1 white texture every
     // texel is opaque white, so the fragment shaders pass their alpha tests
     // and output pure vertex color — combined with line polygon mode the
@@ -571,6 +672,17 @@ namespace Render {
             m_whiteDebugTexture = g_renderBackend->CreateTexture2D(1, 1, TextureFormat::RGBA8, white);
         }
         return m_whiteDebugTexture != INVALID_TEXTURE ? m_whiteDebugTexture : m_backendAtlasTexture;
+    }
+
+    void ChunkRenderer::ClearPassOverrides() {
+        for (PassOverride& o : m_passOverride) o = PassOverride{};
+        m_beforeTranslucent = nullptr;
+    }
+
+    void ChunkRenderer::BindPassTarget(TerrainPass pass) {
+        if (m_passOverride[pass].target != INVALID_RENDER_TARGET && g_renderBackend) {
+            g_renderBackend->BindRenderTarget(m_passOverride[pass].target);
+        }
     }
 
     void ChunkRenderer::SetGreedyMeshingEnabled(bool enable) {
@@ -602,9 +714,13 @@ namespace Render {
                                                             int renderDistanceChunks) {
         PROFILE_ZONE_N("PortalViewSections");
         m_facingCameraPos = camera.position;
+        // A directional view sweeps the disc around its centre (the player);
+        // the light's eye is far off along the light and centres nothing.
+        const bool directional = m_directionalActive && m_useProjectionOverride;
+        const glm::vec3 sweepCentre = directional ? glm::vec3(m_directionalCentre) : glm::vec3(camera.position);
         m_visibleSections.clear();
-        m_visibleGrid.Reset(static_cast<int>(std::floor(camera.position.x / 16.0f)),
-                            static_cast<int>(std::floor(camera.position.z / 16.0f)),
+        m_visibleGrid.Reset(static_cast<int>(std::floor(sweepCentre.x / 16.0f)),
+                            static_cast<int>(std::floor(sweepCentre.z / 16.0f)),
                             renderDistanceChunks + 4);
         m_visibleTranslucentSections = 0;
         const auto* ccm = m_chunks;
@@ -613,8 +729,8 @@ namespace Render {
             return;
         }
 
-        const int camChunkX = static_cast<int>(std::floor(camera.position.x / 16.0f));
-        const int camChunkZ = static_cast<int>(std::floor(camera.position.z / 16.0f));
+        const int camChunkX = static_cast<int>(std::floor(sweepCentre.x / 16.0f));
+        const int camChunkZ = static_cast<int>(std::floor(sweepCentre.z / 16.0f));
         const int sectionsY = Game::Math::SECTIONS_PER_CHUNK;
         // OBEY_PORTAL_DIAG=1: one line per second per portal view.
         static const bool kDiag = std::getenv("OBEY_PORTAL_DIAG") != nullptr;
@@ -677,6 +793,15 @@ namespace Render {
 
         { PROFILE_ZONE_N("PortalView.Keys");
         for (const auto& rd : m_visibleSections) m_visibleGrid.Insert(rd.chunkPos, rd.sectionY);
+        if (directional) {
+            // The shadow view: its own grid for the scheduler, never the
+            // portal lists (the main pass clears those right after this).
+            m_shadowViewGrid = m_visibleGrid;
+            m_lastReachableCount = static_cast<uint32_t>(m_visibleSections.size());
+            m_lastVisibleCount   = static_cast<uint32_t>(m_visibleSections.size());
+            m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
+            return;
+        }
         // A far level's main view (its mesh scheduler reads this) — see
         // SetRecordMainView. Otherwise a portal view of the player's own
         // level, recorded for the scheduler alongside the main view.
@@ -763,7 +888,7 @@ namespace Render {
         // A portal view seeds its BFS at the far surface, not at its camera
         // (see SetPortalViewSeed); its slot is keyed by the seed's section.
         const bool portalView = m_useProjectionOverride && m_portalSeedActive;
-        const glm::vec3 bfsOrigin = portalView ? m_portalSeed : camera.position;
+        const glm::vec3 bfsOrigin = portalView ? m_portalSeed : glm::vec3(camera.position);
         int currentChunkX = static_cast<int>(std::floor(bfsOrigin.x / 16.0f));
         int currentChunkZ = static_cast<int>(std::floor(bfsOrigin.z / 16.0f));
         int currentSectionY = static_cast<int>(std::floor((bfsOrigin.y - Config::MinY) / 16.0f));
@@ -817,6 +942,7 @@ namespace Render {
                 dst->sy = job->keySy;
                 dst->sections.swap(job->result);
                 dst->worldVersion = job->worldVersion;
+                dst->propagationEpoch = job->propagationEpoch;
                 dst->portalView = job->portalView;
                 dst->renderDistance = job->renderDistance;
                 dst->valid = true;
@@ -904,15 +1030,31 @@ namespace Render {
             }
         }
         ReachableCacheSlot* usable = exact;
-        if (!usable) {
-            // The main view's stand-in is the most recently used MAIN slot
-            // (the section it just left: nearly the same set). Never a
-            // portal view's — see ReachableCacheSlot::portalView.
-            for (auto& s : m_reachableSlots) {
-                if (s.valid && !s.portalView && (!usable || s.lastUsed > usable->lastUsed)) usable = &s;
+        // The main view's stand-in is the most recently used MAIN slot (the
+        // section it just left: nearly the same set, and the one the live
+        // graph has kept current). Never a portal view's — see
+        // ReachableCacheSlot::portalView.
+        ReachableCacheSlot* mostRecentMain = nullptr;
+        for (auto& s : m_reachableSlots) {
+            if (s.valid && !s.portalView && (!mostRecentMain || s.lastUsed > mostRecentMain->lastUsed)) {
+                mostRecentMain = &s;
             }
         }
-        if (!portalView) m_mainViewAwaitingBfs = (exact == nullptr);
+        if (!usable) usable = mostRecentMain;
+        // Arriving in a section whose cached list is OUT OF DATE: keep drawing
+        // the current one until the new rebuild lands — MC keeps drawing its
+        // one live graph after an 8-block move. The stale list misses every
+        // section that compiled or streamed in since it was built — while
+        // flying up and down, sections blinked out on every boundary
+        // crossing. While the camera STAYS
+        // in the section, its own slot is the most recent one and is used.
+        bool staleExactBypassed = false;
+        if (!portalView && exact && mostRecentMain && mostRecentMain != exact &&
+            !IsSlotFresh(*exact, renderDistanceChunks)) {
+            usable = mostRecentMain;
+            staleExactBypassed = true;
+        }
+        if (!portalView) m_mainViewAwaitingBfs = (exact == nullptr) || staleExactBypassed;
 
         // A portal view with no reachable set of its own yet must not borrow
         // another view's (that was terrain vanishing through portals as the
@@ -927,6 +1069,7 @@ namespace Render {
                 job->keySy = currentSectionY;
                 job->worldVersion = m_worldVersion;
                 job->eraseToken = m_eraseToken;
+                job->propagationEpoch = m_propagationEpoch;
                 job->portalView = true;
                 m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull, renderDistanceChunks);
                 m_occlusionGraph.SubmitAsync(std::move(job));
@@ -954,6 +1097,7 @@ namespace Render {
             job->keySy = currentSectionY;
             job->worldVersion = m_worldVersion;
             job->eraseToken = m_eraseToken;
+            job->propagationEpoch = m_propagationEpoch;
             job->portalView = portalView;
 
             auto iterationStart = std::chrono::high_resolution_clock::now();
@@ -975,6 +1119,7 @@ namespace Render {
             // refresh keeps retrying until real data exists.
             const bool syncDegenerate = dst->sections.empty() && !job->centerLoaded;
             dst->worldVersion = syncDegenerate ? job->worldVersion - 1 : job->worldVersion;
+            dst->propagationEpoch = job->propagationEpoch;
             dst->valid = true;
             m_bfsVisitedCount = job->visitedCount;
             m_bfsOccludedCount = job->occludedCount;
@@ -1043,7 +1188,6 @@ namespace Render {
         // Kick an async refresh when the current view's data is missing or
         // stale and the worker is idle (one job in flight at a time — no
         // queue buildup, newest state wins).
-        const bool haveExactFresh = exact && exact->worldVersion == m_worldVersion;
         bool startedFullRebuild = false;
         // REBUILD RATE LIMIT. During a post-blast remesh flood the world
         // version bumps every frame (each section that remeshes to empty kicks
@@ -1057,7 +1201,27 @@ namespace Render {
         // immediately — movement latency is untouched — and the per-frame
         // partial updates keep ADDING new sections between rebuilds, so only
         // removals wait, and a late removal is invisible over-draw.
-        const bool urgentRebuild = exact == nullptr;
+        //
+        // "A camera-section change submits immediately" must hold for a
+        // section visited before, too. Its slot survives up to ~10 s and is
+        // then EXACT but stale — it misses everything that compiled or opened
+        // since (partial updates only ever extend the slot the live graph is
+        // anchored to). Held to the 250 ms floor, walking back across a
+        // boundary drew that old list for up to a quarter second: terrain
+        // blinking out while moving.
+        // Sticky until the rebuild is actually submitted — the worker may be
+        // busy on the frame of arrival.
+        const bool haveExactFresh = exact && IsSlotFresh(*exact, renderDistanceChunks);
+        if (!m_useProjectionOverride) {
+            const glm::ivec3 bfsSection(currentChunkX, currentSectionY, currentChunkZ);
+            if (bfsSection != m_lastMainBfsSection) {
+                m_lastMainBfsSection = bfsSection;
+                m_arrivalRebuildPending = true;
+            }
+            if (haveExactFresh) m_arrivalRebuildPending = false;
+        }
+        const bool urgentRebuild = exact == nullptr ||
+                                   (!m_useProjectionOverride && m_arrivalRebuildPending);
         const auto rebuildNow = std::chrono::steady_clock::now();
         // A portal view waits while the main view has no slot of its own:
         // the one job in flight must be the player's world, not a far side.
@@ -1072,10 +1236,12 @@ namespace Render {
             job->keySy = currentSectionY;
             job->worldVersion = m_worldVersion;
             job->eraseToken = m_eraseToken;
+            job->propagationEpoch = m_propagationEpoch;
             job->portalView = portalView;
             m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull, renderDistanceChunks);
             m_occlusionGraph.SubmitAsync(std::move(job));
             startedFullRebuild = true;
+            if (!m_useProjectionOverride) m_arrivalRebuildPending = false;
         }
         // Full rebuilds per frame. MC only invalidates on an 8-block camera move
         // or needsUpdate(); anything above ~0 while standing still means
@@ -1264,6 +1430,26 @@ namespace Render {
             if (!m_useProjectionOverride) {
                 static const bool s_dump = std::getenv("OBEY_DUMP_VISIBLE") != nullptr;
                 if (s_dump) DumpVisibleSections(camera);
+                // The halo outside the rendered view (loaded, never drawn):
+                // fence it from bridged gaps. Recomputed only when the camera
+                // chunk, the render distance or the loaded set changes.
+                UpdateOutsideViewFence(currentChunkX, currentChunkZ, renderDistanceChunks);
+
+                // OBEY_STRAY_AUDIT=1: sample this frame's main view once a
+                // second (see AuditBridgedGap); report the previous sample.
+                static const bool s_strayAudit = std::getenv("OBEY_STRAY_AUDIT") != nullptr;
+                m_strayAuditFrame = false;
+                if (s_strayAudit) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - m_strayAuditLast >= std::chrono::seconds(1)) {
+                        FlushStrayAudit();
+                        m_strayAuditLast = now;
+                        m_strayAuditFrame = true;
+                        m_strayAuditRenderDistance = renderDistanceChunks;
+                    }
+                }
+            } else {
+                m_strayAuditFrame = false;   // portal views are not audited
             }
             if (m_useProjectionOverride) {
                 // A portal view: of the player's own level, or one of a far
@@ -1620,11 +1806,20 @@ namespace Render {
         // portal views re-enter here with their own virtual camera, so fog
         // stays consistent through portals.
         const EnvironmentFrame& env = EnvironmentState::Get().Frame();
-        g_renderBackend->SetUniformVec3(shader, "uCameraPos", camera.position);
+        // Render space (RenderOrigin.hpp): the fragment shaders measure fog
+        // from it against render-space positions.
+        g_renderBackend->SetUniformVec3(shader, "uCameraPos", Render::ToRender(camera.position));
+        g_renderBackend->SetUniformIVec3(shader, "uRenderOrigin", glm::ivec3(Render::RenderOrigin()));
         g_renderBackend->SetUniformFloat(shader, "uSkyBrightness", env.skyBrightness);
         g_renderBackend->SetUniformVec4(shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
         g_renderBackend->SetUniformVec4(shader, "uFogEnv",
             glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
+        // MC ChunkVisibility (options.chunkFade): the vertex shader turns a
+        // section's upload time (its origin row's .w) and these two into a
+        // 0..1 that the fragment shader mixes from the fog colour.
+        g_renderBackend->SetUniformInt(shader, "uFadeNowMs", SectionFade::NowMs());
+        g_renderBackend->SetUniformInt(shader, "uFadeMs", m_fadeSuppressed ? 0 :
+            static_cast<int>(Platform::g_gameSettings.GetChunkFadeInTime() * 1000.0f));
     }
 
     void ChunkRenderer::BindSharedRenderState(const Camera& camera) {
@@ -1635,7 +1830,8 @@ namespace Render {
 
         // Bind the opaque shader. (The old OBEY_SKIP=opaquediscard A/B swap is
         // gone: the opaque shader no longer has a discard to measure against.)
-        const ShaderHandle opaquePassShader = m_opaqueShader;
+        BindPassTarget(kPassOpaque);
+        const ShaderHandle opaquePassShader = PassShader(kPassOpaque, m_opaqueShader);
         m_activeShader = opaquePassShader;
         g_renderBackend->BindShader(opaquePassShader);
 
@@ -1643,6 +1839,20 @@ namespace Render {
         int width, height;
         glfwGetFramebufferSize(g_renderBackend->GetWindow(), &width, &height);
         float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
+        // Render space: the camera's own origin must be the one every other
+        // renderer of this view reads (Render::RenderOrigin()), or terrain
+        // and entities disagree by the difference. A camera that was never
+        // PrepareRender()ed / given an origin is the bug this catches.
+        if (camera.renderOrigin != Render::RenderOrigin()) {
+            static auto s_lastWarn = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+            const auto now = std::chrono::steady_clock::now();
+            if (now - s_lastWarn > std::chrono::seconds(5)) {
+                s_lastWarn = now;
+                Log::Warning("[ChunkRenderer] camera.renderOrigin (%.0f,%.0f,%.0f) != Render::RenderOrigin() (%.0f,%.0f,%.0f)",
+                             camera.renderOrigin.x, camera.renderOrigin.y, camera.renderOrigin.z,
+                             Render::RenderOrigin().x, Render::RenderOrigin().y, Render::RenderOrigin().z);
+            }
+        }
         glm::mat4 view = camera.GetViewMatrix();
         int effectiveRenderDist = Platform::g_gameSettings.GetRenderDistance();
         if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
@@ -1663,14 +1873,20 @@ namespace Render {
         // write (using the world-space uPortalClipPlane uniform set by
         // PortalRenderer::SetPortalClipPlane) to clip at the dst plane —
         // same end result as the oblique math, no depth compression.
+        // An EXACT override (a plain perspective — the panorama capture's
+        // square 90°) is honoured everywhere; without the flag the
+        // window-aspect perspective below stands in on Vulkan, which is
+        // what stretched each captured face window-shaped into its square
+        // and left gaps between the faces.
         const bool useOverride = m_useProjectionOverride && g_renderBackend &&
-                                 g_renderBackend->GetType() != BackendType::Vulkan;
+                                 (m_projectionOverrideExact ||
+                                  g_renderBackend->GetType() != BackendType::Vulkan);
         const glm::mat4 proj = useOverride
             ? m_projectionOverride
             : glm::perspective(glm::radians(camera.fov), aspect, s_nearPlane, farPlane);
         m_cachedMVP = proj * view;
         g_renderBackend->SetUniformMat4(opaquePassShader, "uMVP", m_cachedMVP);
-        g_renderBackend->SetUniformVec4(opaquePassShader, "uPortalClipPlane", s_portalClipPlane);
+        g_renderBackend->SetUniformVec4(opaquePassShader, "uPortalClipPlane", PortalClipPlane());
         SetEnvironmentUniforms(opaquePassShader, camera);
         ApplyDebugOverlayUniform(opaquePassShader);
 
@@ -1712,7 +1928,19 @@ namespace Render {
     }
 
     void ChunkRenderer::BindSpriteTable(ShaderHandle shader) {
-        if (!g_renderBackend || !g_atlasBuilder) return;
+        if (!g_renderBackend) return;
+        // MC's lightmap (Render::Lightmap) for this view — the camera's, or a
+        // portal far side's own — on texture slot 3 (GL unit 3; Vulkan
+        // descriptor set 5), sampled per vertex by the terrain shaders.
+        {
+            Lightmap& lightmap = Lightmap::Get();
+            const TextureHandle lm = lightmap.TextureFor(EnvironmentState::Get().Frame());
+            if (lm != INVALID_TEXTURE) {
+                g_renderBackend->BindTexture(lm, 3);
+                if (shader != INVALID_SHADER) g_renderBackend->SetUniformInt(shader, "uLightmap", 3);
+            }
+        }
+        if (!g_atlasBuilder) return;
         const TextureHandle table = g_atlasBuilder->GetSpriteTableHandle();
         if (table == INVALID_TEXTURE) return;
         g_renderBackend->BindTexture(table, 1);
@@ -1767,6 +1995,8 @@ namespace Render {
         const bool useFacing = layer != RenderLayer::Translucent && passConfig.enableBackFaceCulling &&
                                !s_faceCullDisabled;
         const glm::vec3 eye = m_facingCameraPos;
+        const bool directional = m_directionalActive && m_useProjectionOverride;
+        const glm::vec3 toLight = m_directionalToLight;
 
         // Collect this layer's draw entries from the visible list. Zone split:
         // "BuildDrawList" is OUR loop over visible sections; "SubmitMultiDraw"
@@ -1808,14 +2038,17 @@ namespace Render {
                         const float minX = static_cast<float>(section.chunkPos.x * 16);
                         const float minY = static_cast<float>(Config::MinY + section.sectionY * 16);
                         const float minZ = static_cast<float>(section.chunkPos.z * 16);
+                        // A directional (shadow) view lights in parallel: a
+                        // group faces the light iff the light has a
+                        // component along its normal, wherever the section.
                         const bool visible[kFacingCount] = {
-                            eye.x < minX + 16.0f,   // -X
-                            eye.x > minX,           // +X
-                            eye.y < minY + 16.0f,   // -Y
-                            eye.y > minY,           // +Y
-                            eye.z < minZ + 16.0f,   // -Z
-                            eye.z > minZ,           // +Z
-                            true,                   // Any
+                            directional ? toLight.x < 0.0f : eye.x < minX + 16.0f,   // -X
+                            directional ? toLight.x > 0.0f : eye.x > minX,           // +X
+                            directional ? toLight.y < 0.0f : eye.y < minY + 16.0f,   // -Y
+                            directional ? toLight.y > 0.0f : eye.y > minY,           // +Y
+                            directional ? toLight.z < 0.0f : eye.z < minZ + 16.0f,   // -Z
+                            directional ? toLight.z > 0.0f : eye.z > minZ,           // +Z
+                            true,                                                    // Any
                         };
                         // Contiguous runs of visible slots become one entry
                         // each; exact-adjacent entries fuse again in
@@ -2063,6 +2296,9 @@ namespace Render {
 
         const size_t n = m_drawEntries.size();
         size_t i = 0;
+        std::vector<std::vector<ChunkMegaBuffer::DebugRegionRef>> auditRegions;
+        const bool audit = merge && m_strayAuditFrame;
+        if (audit) auditRegions = megaBuffer.DebugRegionsBySlab();
         PROFILE_ZONE_N("MergeRuns.Flush");
         while (i < n) {
             const uint32_t slab = m_drawEntries[i].slab;
@@ -2080,6 +2316,7 @@ namespace Render {
                                   e.offset <= runEnd + gapTol &&
                                   megaBuffer.IsIndexGapDrawable(slab, runEnd, e.offset);
                 if (fuse) {
+                    if (audit && e.offset > runEnd) AuditBridgedGap(auditRegions, slab, runEnd, e.offset);
                     runEnd = std::max(runEnd, eEnd);
                 } else {
                     m_runCounts.push_back(static_cast<int32_t>(runEnd - runBegin));
@@ -2164,6 +2401,77 @@ namespace Render {
         }
         m_lastOpaqueRuns = m_callRuns;
         return subDraws;
+    }
+
+    void ChunkRenderer::UpdateOutsideViewFence(int cameraChunkX, int cameraChunkZ, int renderDistanceChunks) {
+        if (!m_chunks || !m_meshes) return;
+        const uint64_t version = m_chunks->LoadedSetVersion();
+        if (cameraChunkX == m_fenceCamX && cameraChunkZ == m_fenceCamZ &&
+            renderDistanceChunks == m_fenceRenderDistance && version == m_fenceLoadedVersion) {
+            return;
+        }
+        m_fenceCamX = cameraChunkX;
+        m_fenceCamZ = cameraChunkZ;
+        m_fenceRenderDistance = renderDistanceChunks;
+        m_fenceLoadedVersion = version;
+        PROFILE_ZONE_N("OutsideViewFence");
+        // The same test the occlusion graph uses for "renderable"
+        // (SectionOcclusionGraph: MC isInViewDistance, buffer 1).
+        std::unordered_set<::Game::Math::ChunkPos, ::Game::Math::ChunkPosHash> outside;
+        m_chunks->ForEachLoadedChunkPos([&](::Game::Math::ChunkPos pos) {
+            if (!Game::Math::IsWithinChunkViewDistance(cameraChunkX, cameraChunkZ, renderDistanceChunks,
+                                                       pos.x, pos.z, /*includeNeighbors=*/false)) {
+                outside.insert(pos);
+            }
+        });
+        m_meshes->SetOutsideViewChunks(std::move(outside));
+    }
+
+    void ChunkRenderer::AuditBridgedGap(
+            const std::vector<std::vector<ChunkMegaBuffer::DebugRegionRef>>& regions,
+            uint32_t slab, size_t gapBegin, size_t gapEnd) {
+        StrayAudit& a = m_strayAudit;
+        ++a.gaps;
+        a.gapIndices += gapEnd - gapBegin;
+        if (slab >= regions.size()) return;
+        const auto& list = regions[slab];
+        auto it = std::lower_bound(list.begin(), list.end(), gapBegin,
+            [](const ChunkMegaBuffer::DebugRegionRef& r, size_t off) { return r.indexOffset + r.indexCount <= off; });
+        const int camX = m_visibleGrid.originX, camZ = m_visibleGrid.originZ;
+        for (; it != list.end() && it->indexOffset < gapEnd; ++it) {
+            const ::Game::Math::ChunkPos pos = it->key.chunkPos;
+            const int sy = it->key.sectionY;
+            const int dist = std::max(std::abs(pos.x - camX), std::abs(pos.z - camZ));
+            ++a.sections;
+            const char* what = nullptr;
+            if (m_visibleGrid.HasSection(pos, sy)) { ++a.visible; continue; }
+            if (m_chunks && m_chunks->IsChunkRetained(pos))      { ++a.parked;     what = "PARKED (unloaded, retained)"; }
+            else if (m_chunks && !m_chunks->IsChunkLoaded(pos))  { ++a.notLoaded;  what = "NOT LOADED"; }
+            else if (!Game::Math::IsWithinChunkViewDistance(camX, camZ, m_strayAuditRenderDistance,
+                                                             pos.x, pos.z, /*includeNeighbors=*/false)) {
+                ++a.outOfRange; what = "OUTSIDE RENDERED VIEW";
+            }
+            else                                                 { ++a.hiddenLoaded; }
+            if (what && a.examples.size() < 6) a.examples.push_back({pos, sy, dist, what});
+        }
+    }
+
+    void ChunkRenderer::FlushStrayAudit() {
+        StrayAudit& a = m_strayAudit;
+        if (a.gaps > 0) {
+            std::string ex;
+            for (const auto& e : a.examples) {
+                char buf[128];
+                std::snprintf(buf, sizeof buf, " (%d,%d) y%d d=%d %s;", e.pos.x, e.pos.z, e.sectionY, e.dist, e.what);
+                ex += buf;
+            }
+            Log::Info("[StrayAudit] rd=%d cam=(%d,%d) bridged gaps=%zu (%zu indices) holding %zu sections: "
+                      "parked=%zu notLoaded=%zu outsideView=%zu loadedNotVisible=%zu visible=%zu |%s",
+                      m_strayAuditRenderDistance, m_visibleGrid.originX, m_visibleGrid.originZ,
+                      a.gaps, a.gapIndices, a.sections, a.parked, a.notLoaded, a.outOfRange,
+                      a.hiddenLoaded, a.visible, ex.c_str());
+        }
+        a = StrayAudit{};
     }
 
     // Translucent: m_drawEntries is in back-to-front order and the GPU has to
@@ -2344,9 +2652,15 @@ namespace Render {
     }
 
     void RenderChunksAll(const Camera& camera, const Frustum& frustum,
-                         const glm::mat4& projectionOverride) {
+                         const glm::mat4& projectionOverride, bool exactProjection) {
         if (g_chunkRenderer) {
-            g_chunkRenderer->RenderAll(camera, frustum, projectionOverride);
+            g_chunkRenderer->RenderAll(camera, frustum, projectionOverride, exactProjection);
+        }
+    }
+
+    void RenderChunksDeferredTranslucent() {
+        if (g_chunkRenderer) {
+            g_chunkRenderer->RenderDeferredTranslucent();
         }
     }
     

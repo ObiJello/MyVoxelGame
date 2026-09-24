@@ -1,5 +1,6 @@
 // File: src/server/commands/EntitySelector.cpp
 #include "EntitySelector.hpp"
+#include "../entity/ServerLevelBridge.hpp"   // PlayerEntityView
 
 #include "../IntegratedServer.hpp"
 #include "../entity/ItemEntityManager.hpp"
@@ -392,6 +393,7 @@ namespace Server {
                 // PlayerEntityView's dimensions (0.6 x 1.8), built around FEET.
                 e.box.min = glm::vec3(e.position) + glm::vec3(-0.3f, 0.0f, -0.3f);
                 e.box.max = glm::vec3(e.position) + glm::vec3( 0.3f, 1.8f,  0.3f);
+                e.dimension = Game::DimensionFromRaw(session->GetDimensionId());
                 e.typeSlug = "player";
                 e.name     = p->getName();
                 out.push_back(std::move(e));
@@ -416,6 +418,7 @@ namespace Server {
                 e.yRot     = mob->yRot;
                 e.xRot     = mob->xRot;
                 e.box      = mob->GetAABB();
+                e.dimension = src.dimension;
                 e.typeSlug = std::string(mob->TypeInfo().slug);
                 e.name     = e.typeSlug;
                 out.push_back(std::move(e));
@@ -439,6 +442,7 @@ namespace Server {
                 e.box.min = glm::vec3(item.pos) + glm::vec3(-half, 0.0f, -half);
                 e.box.max = glm::vec3(item.pos) +
                             glm::vec3( half, Game::ItemEntity::kHeight, half);
+                e.dimension = src.dimension;
                 e.typeSlug = "item";
                 e.name     = "item";
                 out.push_back(std::move(e));
@@ -468,6 +472,9 @@ namespace Server {
                     return true;
                 }
             }
+            // MC: a name selector's findEntities is simply empty for an
+            // offline player; only the non-optional argument types throw.
+            if (kind == SelectorKind::OptionalEntities) return true;
             error = "No player was found: " + token;
             return false;
         }
@@ -586,11 +593,17 @@ namespace Server {
         if (sel.currentEntity) {
             // MC: @s is the command's own entity, tested against the same
             // predicates as anything else — `@s[type=zombie]` legitimately
-            // matches nothing.
-            std::vector<SelectedEntity> players;
-            CollectPlayers(source, players);
-            for (SelectedEntity& p : players) {
-                if (p.player == source.sender) { candidates.push_back(std::move(p)); break; }
+            // matches nothing. The source's entity when `/execute as` set
+            // one (re-read, so a chain sees where it is NOW), else the sender.
+            if (source.entity) {
+                SelectedEntity e = *source.entity;
+                if (RefreshSelectedEntity(source, e)) candidates.push_back(std::move(e));
+            } else {
+                std::vector<SelectedEntity> players;
+                CollectPlayers(source, players);
+                for (SelectedEntity& p : players) {
+                    if (p.player == source.sender) { candidates.push_back(std::move(p)); break; }
+                }
             }
         } else {
             CollectPlayers(source, candidates);
@@ -663,9 +676,25 @@ namespace Server {
         }
 
         // ── Result-count rules (MC EntityArgument) ───────────────────────────
+        if (kind == SelectorKind::OptionalEntities) {
+            out = std::move(matched);
+            return true;
+        }
         if (matched.empty()) {
             error = playersOnlyArgument ? "No player was found" : "No entity was found";
             return false;
+        }
+        // `@s` slipped past the includesEntities test above (MC lets it
+        // through the parser too) but the argument type still rejects a
+        // non-player result — EntityArgument.player() on a zombie source.
+        if (playersOnlyArgument) {
+            for (const SelectedEntity& e : matched) {
+                if (e.kind != SelectedEntity::Kind::Player) {
+                    error = "Only players may be affected by this command, but the "
+                            "provided selector includes entities";
+                    return false;
+                }
+            }
         }
         if (singleOnly && matched.size() > 1) {
             error = playersOnlyArgument
@@ -676,6 +705,83 @@ namespace Server {
 
         out = std::move(matched);
         return true;
+    }
+
+    // ── Source anchors and entity descriptions ──────────────────────────────
+
+    namespace {
+        double EyeHeightOf(const SelectedEntity& e) {
+            switch (e.kind) {
+                case SelectedEntity::Kind::Player: return 1.62;
+                case SelectedEntity::Kind::Mob:    return e.mob ? e.mob->GetEyeHeight() : 0.0;
+                case SelectedEntity::Kind::Item:   return 0.0;
+            }
+            return 0.0;
+        }
+    }
+
+    glm::dvec3 EntityAnchorPosition(const SelectedEntity& entity, bool eyes) {
+        return eyes ? entity.position + glm::dvec3(0.0, EyeHeightOf(entity), 0.0) : entity.position;
+    }
+
+    glm::dvec3 SourceAnchorPosition(const CommandSource& source) {
+        // MC Anchor.apply(CommandSourceStack): the SOURCE's position (which
+        // `positioned` may have moved away from the entity), offset by the
+        // entity's eye height — never the entity's own position.
+        if (!source.anchorEyes || !source.entity) return source.position;
+        return source.position + glm::dvec3(0.0, EyeHeightOf(*source.entity), 0.0);
+    }
+
+    bool DescribePlayer(ServerPlayer& player, const CommandSource& source, SelectedEntity& out) {
+        std::vector<SelectedEntity> players;
+        CollectPlayers(source, players);
+        for (SelectedEntity& p : players) {
+            if (p.player == &player) { out = std::move(p); return true; }
+        }
+        return false;
+    }
+
+    bool DescribeEntity(Game::Entity* entity, const CommandSource& source, SelectedEntity& out) {
+        if (!entity || entity->IsRemoved()) return false;
+        if (auto* view = dynamic_cast<PlayerEntityView*>(entity)) {
+            return view->GetPlayer() && DescribePlayer(*view->GetPlayer(), source, out);
+        }
+        auto* mob = dynamic_cast<Game::Mob*>(entity);
+        if (!mob || !g_integratedServer) return false;
+        // Only a mob the source's level still owns: the pointer came from a
+        // relation (target, vehicle, owner…) that may reach across a tick.
+        ServerLevel* level = g_integratedServer->GetLevel(source.dimension);
+        MobManager* mobs = level ? level->Mobs() : nullptr;
+        if (!mobs || mobs->Find(mob->GetId()) != mob) return false;
+
+        SelectedEntity e;
+        e.kind      = SelectedEntity::Kind::Mob;
+        e.id        = mob->GetId();
+        e.mob       = mob;
+        e.position  = mob->position;
+        e.yRot      = mob->yRot;
+        e.xRot      = mob->xRot;
+        e.box       = mob->GetAABB();
+        e.dimension = source.dimension;
+        e.typeSlug  = std::string(mob->TypeInfo().slug);
+        e.name      = e.typeSlug;
+        out = std::move(e);
+        return true;
+    }
+
+    bool RefreshSelectedEntity(const CommandSource& source, SelectedEntity& entity) {
+        CommandSource scoped = source;
+        scoped.dimension = entity.dimension;
+        std::vector<SelectedEntity> all;
+        switch (entity.kind) {
+            case SelectedEntity::Kind::Player: CollectPlayers(scoped, all); break;
+            case SelectedEntity::Kind::Mob:    CollectMobs(scoped, all);    break;
+            case SelectedEntity::Kind::Item:   CollectItems(scoped, all);   break;
+        }
+        for (SelectedEntity& e : all) {
+            if (e.kind == entity.kind && e.id == entity.id) { entity = std::move(e); return true; }
+        }
+        return false;
     }
 
 } // namespace Server

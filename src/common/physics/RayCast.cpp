@@ -1,5 +1,6 @@
 // File: src/common/physics/RayCast.cpp
 #include "RayCast.hpp"
+#include "common/world/block/BlockRegistry.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../core/Log.hpp"
 #include "../core/Config.hpp"
@@ -36,15 +37,20 @@ namespace Game {
     }
 
     std::optional<RaycastHit> Raycast::CastRay(
-        const glm::vec3& origin,
+        const glm::dvec3& origin,
         const glm::vec3& direction,
-        float maxDistance)
+        float maxDistanceF,
+        bool collisionOnly)
     {
+        // DOUBLE throughout, as MC's BlockGetter.clip / traverseBlocks: the
+        // origin is the eye, which at x = 300,000 a float puts on a 3 cm
+        // grid — enough to pick the wrong face or the wrong half of a slab.
+        const double maxDistance = maxDistanceF;
         // Normalize direction
-        glm::vec3 dir = glm::normalize(direction);
+        const glm::dvec3 dir = glm::normalize(glm::dvec3(direction));
 
         // DDA algorithm setup
-        glm::vec3 currentPos = origin;
+        glm::dvec3 currentPos = origin;
         glm::ivec3 currentBlock = glm::ivec3(
             static_cast<int>(std::floor(currentPos.x)),
             static_cast<int>(std::floor(currentPos.y)),
@@ -58,67 +64,70 @@ namespace Game {
         step.z = (dir.z > 0) ? 1 : -1;
 
         // Calculate the distance to the next voxel boundary for each axis
-        glm::vec3 tMax;
-        glm::vec3 tDelta;
+        glm::dvec3 tMax;
+        glm::dvec3 tDelta;
 
         // Small epsilon to avoid division by zero
-        const float epsilon = 1e-6f;
+        const double epsilon = 1e-6;
 
         // X axis
         if (std::abs(dir.x) > epsilon) {
-            float voxelBoundary = (dir.x > 0) ?
-                std::floor(currentPos.x) + 1.0f :
+            double voxelBoundary = (dir.x > 0) ?
+                std::floor(currentPos.x) + 1.0 :
                 std::floor(currentPos.x);
             tMax.x = (voxelBoundary - currentPos.x) / dir.x;
-            tDelta.x = 1.0f / std::abs(dir.x);
+            tDelta.x = 1.0 / std::abs(dir.x);
         } else {
-            tMax.x = 1e30f;
-            tDelta.x = 1e30f;
+            tMax.x = 1e30;
+            tDelta.x = 1e30;
         }
 
         // Y axis
         if (std::abs(dir.y) > epsilon) {
-            float voxelBoundary = (dir.y > 0) ?
-                std::floor(currentPos.y) + 1.0f :
+            double voxelBoundary = (dir.y > 0) ?
+                std::floor(currentPos.y) + 1.0 :
                 std::floor(currentPos.y);
             tMax.y = (voxelBoundary - currentPos.y) / dir.y;
-            tDelta.y = 1.0f / std::abs(dir.y);
+            tDelta.y = 1.0 / std::abs(dir.y);
         } else {
-            tMax.y = 1e30f;
-            tDelta.y = 1e30f;
+            tMax.y = 1e30;
+            tDelta.y = 1e30;
         }
 
         // Z axis
         if (std::abs(dir.z) > epsilon) {
-            float voxelBoundary = (dir.z > 0) ?
-                std::floor(currentPos.z) + 1.0f :
+            double voxelBoundary = (dir.z > 0) ?
+                std::floor(currentPos.z) + 1.0 :
                 std::floor(currentPos.z);
             tMax.z = (voxelBoundary - currentPos.z) / dir.z;
-            tDelta.z = 1.0f / std::abs(dir.z);
+            tDelta.z = 1.0 / std::abs(dir.z);
         } else {
-            tMax.z = 1e30f;
-            tDelta.z = 1e30f;
+            tMax.z = 1e30;
+            tDelta.z = 1e30;
         }
 
         // Track the previous block position for adjacent placement
         glm::ivec3 previousBlock = currentBlock;
         int lastStepAxis = -1; // 0=X, 1=Y, 2=Z
 
-        float totalDistance = 0.0f;
+        double totalDistance = 0.0;
         
         // Check if we start inside a block
         bool startedInsideBlock = false;
         BlockID startBlockId = GetBlockAtWorldPos(origin);
-        if (IsBlockSolid(startBlockId)) {
+        const auto stops = [&](BlockID id) {
+            return IsBlockSolid(id) && (!collisionOnly || BlockRegistry::HasCollision(id));
+        };
+        if (stops(startBlockId)) {
             startedInsideBlock = true;
         }
 
         // Ray marching loop
         while (totalDistance < maxDistance) {
             // Check current block
-            BlockID blockId = GetBlockAtWorldPos(glm::vec3(currentBlock));
+            BlockID blockId = GetBlockAtWorldPos(glm::dvec3(currentBlock));
 
-            if (IsBlockSolid(blockId)) {
+            if (stops(blockId)) {
                 // Per-block shape refinement. MC's clip() walks every voxel the
                 // ray crosses and tests against the block's actual VoxelShape —
                 // so leaf litter (a flat plane at y=0.015625) only "hits" when
@@ -151,36 +160,36 @@ namespace Game {
                 // shape can overlap in t (a stair's slab and its step share a
                 // face), so "first hit wins" is the only ordering that gives
                 // the same face MC would report.
-                float bestHit  = std::numeric_limits<float>::infinity();
+                double bestHit  = std::numeric_limits<double>::infinity();
                 int   nearAxis = -1;
                 int   nearSign = 0;
                 bool  insideShape = false;
                 bool  anyHit   = false;
 
                 for (const auto& shape : shapes) {
-                    const glm::vec3 boxMin = glm::vec3(currentBlock) + shape.min;
-                    const glm::vec3 boxMax = glm::vec3(currentBlock) + shape.max;
+                    const glm::dvec3 boxMin = glm::dvec3(currentBlock) + glm::dvec3(shape.min);
+                    const glm::dvec3 boxMax = glm::dvec3(currentBlock) + glm::dvec3(shape.max);
 
                     // Slab-test ray vs AABB. Returns tEnter / tExit relative to the
                     // unit-`dir` ray. We use the post-step `totalDistance` as the
                     // lower bound on tEnter so we never re-hit something the DDA
                     // already crossed.
-                    float tNear = -std::numeric_limits<float>::infinity();
-                    float tFar  =  std::numeric_limits<float>::infinity();
+                    double tNear = -std::numeric_limits<double>::infinity();
+                    double tFar  =  std::numeric_limits<double>::infinity();
                     int   boxAxis = -1;
                     int   boxSign = 0;
                     bool  hitBox   = true;
                     for (int axis = 0; axis < 3; ++axis) {
-                        const float d = dir[axis];
-                        const float o = origin[axis];
+                        const double d = dir[axis];
+                        const double o = origin[axis];
                         if (std::abs(d) < epsilon) {
                             // Ray parallel to this slab — must already be inside it.
                             if (o < boxMin[axis] || o > boxMax[axis]) { hitBox = false; break; }
                             continue;
                         }
-                        const float invD = 1.0f / d;
-                        float t1 = (boxMin[axis] - o) * invD;
-                        float t2 = (boxMax[axis] - o) * invD;
+                        const double invD = 1.0 / d;
+                        double t1 = (boxMin[axis] - o) * invD;
+                        double t2 = (boxMax[axis] - o) * invD;
                         int   sign = -1; // hit the -axis face (entering through min)
                         if (t1 > t2) { std::swap(t1, t2); sign = +1; }
                         if (t1 > tNear) { tNear = t1; boxAxis = axis; boxSign = sign; }
@@ -192,13 +201,13 @@ namespace Game {
                     // MC's `if (clipcontext.block().get(start) ...` behaviour on the
                     // origin voxel).
                     const bool insideBox =
-                        (totalDistance == 0.0f &&
+                        (totalDistance == 0.0 &&
                          origin.x >= boxMin.x && origin.x <= boxMax.x &&
                          origin.y >= boxMin.y && origin.y <= boxMax.y &&
                          origin.z >= boxMin.z && origin.z <= boxMax.z);
 
-                    if (hitBox && tFar >= 0.0f && tNear <= maxDistance) {
-                        const float t = insideBox ? 0.0f : std::max(tNear, 0.0f);
+                    if (hitBox && tFar >= 0.0 && tNear <= maxDistance) {
+                        const double t = insideBox ? 0.0 : std::max(tNear, 0.0);
                         if (t <= maxDistance && t < bestHit) {
                             bestHit     = t;
                             nearAxis    = boxAxis;
@@ -211,15 +220,15 @@ namespace Game {
 
                 if (anyHit) {
                     // tHit is the entry distance (or 0 if the ray starts inside).
-                    const float tHit = bestHit;
+                    const double tHit = bestHit;
                     RaycastHit hit;
                     hit.blockPos = currentBlock;
                     hit.adjacentPos = previousBlock;
                     hit.blockId = blockId;
                     hit.state = state;
-                    hit.distance = tHit;
+                    hit.distance = static_cast<float>(tHit);
                     hit.hitPoint = origin + dir * tHit;
-                    hit.cursorPos = hit.hitPoint - glm::vec3(currentBlock);
+                    hit.cursorPos = glm::vec3(hit.hitPoint - glm::dvec3(currentBlock));
                     hit.cursorPos = glm::clamp(hit.cursorPos, glm::vec3(0.0f), glm::vec3(0.999f));
                     hit.insideBlock = insideShape;
 
@@ -312,7 +321,7 @@ namespace Game {
         return std::nullopt;
     }
 
-    BlockID Raycast::GetBlockAtWorldPos(const glm::vec3& pos) {
+    BlockID Raycast::GetBlockAtWorldPos(const glm::dvec3& pos) {
         return GetBlock(
             static_cast<int>(std::floor(pos.x)),
             static_cast<int>(std::floor(pos.y)),
@@ -326,8 +335,10 @@ namespace Game {
         }
         // Raycast should hit all solid blocks, not just opaque ones.
         // Leaves (Cutout) are solid for interaction but not opaque for rendering.
-        // Water and Lava are non-solid (can't target them).
-        return id != BlockID::Water && id != BlockID::Lava;
+        // Water and Lava are non-solid (can't target them); nor is Aurelith's
+        // resonant water, which is water in every way but its look (MC's
+        // bubble column: an empty shape, so the outline clip passes through).
+        return id != BlockID::Water && id != BlockID::Lava && id != BlockID::ResonantWater;
     }
 
 } // namespace Game

@@ -1,0 +1,7 @@
+{
+  "parent": "minecraft:block/castle_rune_template",
+  "textures": {
+    "all": "minecraft:block/castle_brick",
+    "rune": "minecraft:block/castleblock_magic_3"
+  }
+}

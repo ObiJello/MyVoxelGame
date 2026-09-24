@@ -1,0 +1,49 @@
+{
+  "parent": "minecraft:block/block",
+  "textures": {
+    "particle": "minecraft:block/hush_lighthouse_lamp_side",
+    "side": "minecraft:block/hush_lighthouse_lamp_side",
+    "top": "minecraft:block/hush_lighthouse_lamp_top",
+    "lens": "minecraft:block/hush_lighthouse_lamp_lens",
+    "bottom": "minecraft:block/polished_hushstone"
+  },
+  "elements": [
+    {
+      "__comment": "base: the resonite band the lens stands on",
+      "from": [0, 0, 0],
+      "to": [16, 3, 16],
+      "faces": {
+        "down":  { "texture": "#bottom", "cullface": "down" },
+        "up":    { "texture": "#top" },
+        "north": { "texture": "#side", "cullface": "north" },
+        "south": { "texture": "#side", "cullface": "south" },
+        "west":  { "texture": "#side", "cullface": "west" },
+        "east":  { "texture": "#side", "cullface": "east" }
+      }
+    },
+    {
+      "__comment": "the Fresnel lens",
+      "from": [2, 3, 2],
+      "to": [14, 13, 14],
+      "faces": {
+        "north": { "texture": "#lens" },
+        "south": { "texture": "#lens" },
+        "west":  { "texture": "#lens" },
+        "east":  { "texture": "#lens" }
+      }
+    },
+    {
+      "__comment": "the cap with its vent",
+      "from": [1, 13, 1],
+      "to": [15, 16, 15],
+      "faces": {
+        "down":  { "texture": "#top" },
+        "up":    { "texture": "#top", "cullface": "up" },
+        "north": { "texture": "#side" },
+        "south": { "texture": "#side" },
+        "west":  { "texture": "#side" },
+        "east":  { "texture": "#side" }
+      }
+    }
+  ]
+}

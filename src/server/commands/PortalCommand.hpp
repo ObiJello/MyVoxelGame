@@ -28,13 +28,13 @@ namespace Server {
     public:
         static void Register(CommandDispatcher& dispatcher);
 
-        static void Execute(ServerPlayer& sender,
+        static void Execute(const CommandSourceStack& source,
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);
         // /scale [value] — the player's own size (1 = vanilla), the number a
         // scaled portal multiplies. No value resets it to 1.
-        static void ExecuteScale(ServerPlayer& sender,
+        static void ExecuteScale(const CommandSourceStack& source,
                                  const std::vector<std::string>& args,
                                  ServerConnection& connection,
                                  PlayerSessionManager& sessionManager);

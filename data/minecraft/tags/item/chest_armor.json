@@ -6,6 +6,13 @@
     "minecraft:golden_chestplate",
     "minecraft:iron_chestplate",
     "minecraft:diamond_chestplate",
-    "minecraft:netherite_chestplate"
+    "minecraft:netherite_chestplate",
+    "minecraft:zanite_chestplate",
+    "minecraft:gravitite_chestplate",
+    "minecraft:ironwood_chestplate",
+    "minecraft:steeleaf_chestplate",
+    "minecraft:knightmetal_chestplate",
+    "minecraft:fiery_chestplate",
+    "minecraft:naga_chestplate"
   ]
 }

@@ -2,6 +2,7 @@
 #include "levelgen/WorldGenTweaks.h"
 #include "world/biome/FixedBiomeSource.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
@@ -121,6 +122,13 @@ std::pair<int32_t, int32_t> RandomSpreadStructurePlacement::getPotentialStructur
     int32_t spreadX = evaluateSpread(m_spreadType, random, limit);
     int32_t spreadZ = evaluateSpread(m_spreadType, random, limit);
     return {spacedGridX * spacing + spreadX, spacedGridZ * spacing + spreadZ};
+}
+
+int32_t RandomSpreadStructurePlacement::effectiveSpacing() const {
+    // The same scaling getPotentialStructureChunk applies.
+    const float freq = WorldGenTweaks::get().structureFrequency;
+    if (freq == 1.0f) return m_spacing;
+    return std::max(1, static_cast<int32_t>(std::lround(m_spacing / freq)));
 }
 
 bool RandomSpreadStructurePlacement::isPlacementChunk(const ChunkGeneratorStructureState& state,

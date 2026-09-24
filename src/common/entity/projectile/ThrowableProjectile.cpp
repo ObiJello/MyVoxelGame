@@ -4,6 +4,13 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/entity/projectile/AreaEffectCloud.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/RedstoneStateUtil.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "common/sound/LevelSound.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -101,7 +108,8 @@ namespace Game {
                 owner->fallDistance = 0.0f;
                 owner->needsSync = true;
             }
-            // MC playSound PLAYER_TELEPORT — sound system stub.
+            // MC ThrownEnderpearl.playSound: PLAYER_TELEPORT at the landing.
+            m_level->PlaySound(nullptr, teleportPos, SoundEvents::PLAYER_TELEPORT, SoundSource::Players, 1.0f, 1.0f);
         }
 
         Discard();
@@ -159,55 +167,221 @@ namespace Game {
         Discard();
     }
 
-    // ── ThrownSplashPotion ─────────────────────────────────────────────────
+    // ── ThrownSplashPotion (AbstractThrownPotion + splash + lingering) ─────
+
+    ThrownSplashPotion::ThrownSplashPotion(EntityLevel* level)
+        : ThrowableProjectile(EntityTypeId::SplashPotion, level),
+          // MC ThrownSplashPotion.getDefaultItem — an EMPTY splash potion,
+          // which splashes and does nothing (what a bare /summon throws).
+          m_item(Items::SplashPotion, 1) {}
+
+    void ThrownSplashPotion::SetItem(const ItemStack& stack) {
+        m_item = stack;
+        m_item.count = 1;   // ThrowableItemProjectile.setItem: copyWithCount(1)
+        if (m_item.IsEmpty()) m_item = ItemStack(Items::SplashPotion, 1);
+    }
+
+    bool ThrownSplashPotion::IsLingering() const {
+        return m_item.itemId == Items::LingeringPotion;
+    }
+
+    void ThrownSplashPotion::OnHitBlock(const HitResult& hit) {
+        // MC AbstractThrownPotion.onHitBlock: a douses_fire potion (water)
+        // puts out fire, lit candles and lit campfires in the cell in front
+        // of the hit face, the hit block itself, and the four horizontal
+        // neighbours of the front cell.
+        ThrowableProjectile::OnHitBlock(hit);
+        if (!m_level || m_level->IsClientSide()) return;
+
+        const PotionContents potion = GetPotionContents(m_item);
+        if (!potion.potion || !potion.Is(*potion.potion) || !PotionDousesFire(*potion.potion)) return;
+
+        // The hit face: the cell the projectile arrived from. The hit point
+        // sits on the face, so a hair back along the flight is outside it.
+        const glm::ivec3 hitPos = hit.blockPos;
+        glm::dvec3 back = velocity;
+        const double len = glm::length(back);
+        back = len > 1e-9 ? back / len : glm::dvec3(0.0, -1.0, 0.0);
+        const glm::dvec3 probe = hit.location - back * 1.0e-3;
+        glm::ivec3 face(static_cast<int>(std::floor(probe.x)) - hitPos.x,
+                        static_cast<int>(std::floor(probe.y)) - hitPos.y,
+                        static_cast<int>(std::floor(probe.z)) - hitPos.z);
+        if (std::abs(face.x) + std::abs(face.y) + std::abs(face.z) != 1) {
+            face = glm::ivec3(0, 1, 0);   // an edge or corner hit: call it the top
+        }
+        const glm::ivec3 effectPos = hitPos + face;
+
+        DouseFire(effectPos);
+        DouseFire(effectPos - face);                       // relative(opposite)
+        DouseFire(effectPos + glm::ivec3( 0, 0, -1));      // Direction.Plane.HORIZONTAL:
+        DouseFire(effectPos + glm::ivec3( 1, 0,  0));      // north, east, south, west
+        DouseFire(effectPos + glm::ivec3( 0, 0,  1));
+        DouseFire(effectPos + glm::ivec3(-1, 0,  0));
+    }
+
+    void ThrownSplashPotion::DouseFire(const glm::ivec3& pos) {
+        // MC AbstractThrownPotion.douseFire.
+        const IBlockAccess* blocks = m_level->Blocks();
+        if (!blocks) return;
+        const BlockState state = blocks->GetBlockState(pos.x, pos.y, pos.z);
+        const BlockID block = state.Block();
+        if (block == BlockID::Fire || block == BlockID::SoulFire) {       // #fire
+            m_level->DestroyBlock(pos, false);
+            return;
+        }
+        const std::string_view slug = BlockRegistry::Get(block).registrySlug;
+        const auto endsWith = [&](std::string_view suffix) {
+            return slug.size() >= suffix.size() &&
+                   slug.compare(slug.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        const bool candle = endsWith("candle") || endsWith("candle_cake");   // #candles, #candle_cakes
+        const bool campfire = block == BlockID::Campfire || block == BlockID::SoulCampfire;
+        if ((candle || campfire) && state.HasProperty(PropertyId::LIT) && LitOf(state)) {
+            // AbstractCandleBlock.extinguish (CANDLE_EXTINGUISH) / the
+            // campfire's level event 1009 + CampfireBlock.douse: LIT=false
+            // (the smoke particles wait on particles).
+            if (candle) {
+                m_level->PlaySound(nullptr, pos, SoundEvents::CANDLE_EXTINGUISH, SoundSource::Blocks, 1.0f, 1.0f);
+            } else {
+                PlayLevelEventSound(*m_level, nullptr, LevelEvent::SOUND_EXTINGUISH_FIRE, pos, 0, &m_level->Random());
+            }
+            m_level->SetBlockState(pos, WithLit(state, false));
+        }
+    }
+
+    void ThrownSplashPotion::AffectEntitiesAround(const PotionContents& potion) {
+        // MC AbstractThrownPotion.affectEntitiesAround — the water potion's
+        // extras. Each tag test is potion.is(TAG): the plain potion, no
+        // custom effects.
+        const bool plain = potion.potion.has_value() && potion.Is(*potion.potion);
+        const bool hurtsWaterSensitive = plain && PotionHurtsWaterSensitive(*potion.potion);
+        const bool extinguishes = plain && PotionExtinguishesEntities(*potion.potion);
+        const bool rehydrates = plain && *potion.potion == PotionId::Water;   // #rehydrates_axolotls
+        if (!hurtsWaterSensitive && !extinguishes && !rehydrates) return;
+
+        AABB box = GetAABB();
+        box.min -= glm::vec3(4.0f, 2.0f, 4.0f);
+        box.max += glm::vec3(4.0f, 2.0f, 4.0f);
+        std::vector<Entity*> nearby;
+        m_level->GetEntitiesInBox(box, this, nearby);
+
+        for (Entity* e : nearby) {
+            auto* living = dynamic_cast<LivingEntity*>(e);
+            if (!living) continue;
+            auto* mob = dynamic_cast<Mob*>(living);
+            const bool sensitive = mob && mob->SensitiveToWater();
+            if ((hurtsWaterSensitive || extinguishes) && (sensitive || living->IsOnFire())) {
+                if (DistanceToSqr(*living) < 16.0) {
+                    if (hurtsWaterSensitive && sensitive) {
+                        // damageSources().indirectMagic(this, owner), 1.0.
+                        living->Hurt(MobDamageSource::Magic, 1.0f,
+                                     GetOwner() ? GetOwner() : this);
+                    }
+                    if (extinguishes && living->IsOnFire() && living->IsAlive()) {
+                        living->ClearFire();
+                    }
+                }
+            }
+            if (rehydrates && living->GetType() == EntityTypeId::Axolotl) {
+                // Axolotl.rehydrate: +1800 air, capped at the maximum.
+                living->SetAirSupply(std::min(living->GetAirSupply() + 1800,
+                                              living->GetMaxAirSupply()));
+            }
+        }
+    }
 
     void ThrownSplashPotion::OnHit(const HitResult& hit) {
         ThrowableProjectile::OnHit(hit);
         if (!m_level || m_level->IsClientSide()) return;
 
-        // MC AbstractThrownPotion.onHit → ThrownSplashPotion.onHitAsPotion:
-        // everything within the box inflated by (4, 2, 4) and inside 4 blocks
-        // takes scale = 1 - dist/4 of each effect. (MC measures dist between
-        // AABBs; centre-to-centre is the same simplification Creeper::Explode
-        // uses. MC also re-centres the box on the exact hit location; the tick
-        // granularity difference is sub-block.)
-        AABB box = GetAABB();
-        box.min -= glm::vec3(4.0f, 2.0f, 4.0f);
-        box.max += glm::vec3(4.0f, 2.0f, 4.0f);
+        // MC AbstractThrownPotion.onHit.
+        const PotionContents potion = GetPotionContents(m_item);
+        AffectEntitiesAround(potion);
+        if (potion.HasEffects()) {
+            if (IsLingering()) OnHitAsLingering(hit);
+            else               OnHitAsSplash(potion, GetPotionDurationScale(m_item), hit);
+        }
+        // levelEvent 1054/1053, the glass break (2007/2002, the splash
+        // particles in potion.getColor(), wait on particles). Entity event 3
+        // keeps the client's copy on the same removal path the snowball uses.
+        if (!IsSilent()) {
+            m_level->PlaySound(nullptr, Sound::BlockCenter(BlockPosition()), SoundEvents::SPLASH_POTION_BREAK,
+                               SoundSource::Neutral, 1.0f, m_level->Random().NextFloat() * 0.1f + 0.9f);
+        }
+        m_level->BroadcastEntityEvent(*this, 3);
+        Discard();
+    }
 
+    void ThrownSplashPotion::OnHitAsSplash(const PotionContents& contents, float durationScale,
+                                           const HitResult& hit) {
+        // MC ThrownSplashPotion.onHitAsPotion, transcribed.
+        const std::vector<MobEffectInstance> mobEffects = contents.GetAllEffects();
+
+        // potionAabb = getBoundingBox().move(hit.location - position()).
+        AABBd potionBox = GetAABBd();
+        const glm::dvec3 shift = hit.location - position;
+        potionBox.min += shift;
+        potionBox.max += shift;
+
+        AABB effectBox = AABB::FromMinMax(glm::vec3(potionBox.min) - glm::vec3(4.0f, 2.0f, 4.0f),
+                                          glm::vec3(potionBox.max) + glm::vec3(4.0f, 2.0f, 4.0f));
         std::vector<Entity*> nearby;
-        m_level->GetEntitiesInBox(box, this, nearby);
+        m_level->GetEntitiesInBox(effectBox, this, nearby);
+
+        // ProjectileUtil.computeMargin(this).
+        const double margin = std::max(0.0f, std::min(0.3f, static_cast<float>(tickCount - 2) / 20.0f));
+        Entity* effectSource = GetOwner() ? GetOwner() : this;   // getEffectSource
+
         for (Entity* e : nearby) {
             auto* living = dynamic_cast<LivingEntity*>(e);
             if (!living || !living->IsAlive()) continue;
+            // LivingEntity.isAffectedByPotions — false only for the armor stand.
+            if (living->GetType() == EntityTypeId::ArmorStand) continue;
 
-            const double distSq = DistanceToSqr(*living);
-            if (distSq >= 16.0) continue;
+            // potionAabb.distanceToSqr(entity box inflated by margin).
+            AABBd target = living->GetAABBd();
+            target.min -= glm::dvec3(margin);
+            target.max += glm::dvec3(margin);
+            const double dx = std::max({potionBox.min.x - target.max.x, target.min.x - potionBox.max.x, 0.0});
+            const double dy = std::max({potionBox.min.y - target.max.y, target.min.y - potionBox.max.y, 0.0});
+            const double dz = std::max({potionBox.min.z - target.max.z, target.min.z - potionBox.max.z, 0.0});
+            const double dist = dx * dx + dy * dy + dz * dz;
+            if (!(dist < 16.0)) continue;
 
-            const double scale = 1.0 - std::sqrt(distSq) / 4.0;
-            for (const MobEffectInstance& effect : m_effects) {
+            const double scale = 1.0 - std::sqrt(dist) / 4.0;
+            for (const MobEffectInstance& effect : mobEffects) {
                 if (IsInstantenousEffect(effect.effect)) {
-                    // Harming's damage is indirect MAGIC — bypasses armor,
-                    // attributed to the thrower so retaliation targets the
-                    // witch (ApplyInstantenousEffect handles both).
                     ApplyInstantenousEffect(this, GetOwner(), *living,
                                             effect.effect, effect.amplifier, scale);
                 } else {
-                    MobEffectInstance scaled(effect.effect,
-                                             effect.MapScaledDuration(scale),
-                                             effect.amplifier,
+                    // mapDuration(d -> (int)(scale * d * durationScale + 0.5)).
+                    int duration = effect.duration;
+                    if (!effect.IsInfiniteDuration() && duration != 0) {
+                        duration = static_cast<int>(scale * static_cast<double>(duration) *
+                                                    static_cast<double>(durationScale) + 0.5);
+                    }
+                    MobEffectInstance scaled(effect.effect, duration, effect.amplifier,
                                              effect.ambient, effect.visible);
-                    // MC drops a scaled effect that would end within a second.
                     if (!scaled.EndsWithin(20)) {
-                        living->AddEffect(std::move(scaled),
-                                          GetOwner() ? GetOwner() : this);
+                        living->AddEffect(std::move(scaled), effectSource);
                     }
                 }
             }
         }
+    }
 
-        m_level->BroadcastEntityEvent(*this, 3);
-        Discard();
+    void ThrownSplashPotion::OnHitAsLingering(const HitResult& hit) {
+        // MC ThrownLingeringPotion.onHitAsPotion, transcribed.
+        auto cloud = std::make_unique<AreaEffectCloud>(m_level);
+        cloud->position = (hit.IsEntity() && hit.entity) ? hit.entity->position : position;
+        if (auto* owner = dynamic_cast<LivingEntity*>(GetOwner())) cloud->SetOwner(owner);
+        cloud->SetRadius(3.0f);
+        cloud->SetRadiusOnUse(-0.5f);
+        cloud->SetDuration(600);
+        cloud->SetWaitTime(10);
+        cloud->SetRadiusPerTick(-cloud->GetRadius() / static_cast<float>(cloud->GetDuration()));
+        cloud->ApplyComponentsFromItemStack(m_item);
+        m_level->AddFreshEntity(std::move(cloud));
     }
 
 } // namespace Game

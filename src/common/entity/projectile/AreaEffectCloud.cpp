@@ -21,6 +21,13 @@ namespace Game {
         m_radius = Mth::Clamp(radius, 0.0f, kMaxRadius);
     }
 
+    void AreaEffectCloud::ApplyComponentsFromItemStack(const ItemStack& stack) {
+        // Qualified: the members of the same names would hide the free
+        // stack readers.
+        SetPotionContents(Game::GetPotionContents(stack));
+        SetPotionDurationScale(Game::GetPotionDurationScale(stack));
+    }
+
     void AreaEffectCloud::Tick() {
         // MC AreaEffectCloud.tick: super.tick() (baseTick), then the server
         // half. clientTick() is the particle field — no particle system, so
@@ -62,23 +69,16 @@ namespace Game {
             else ++it;
         }
 
-        if (m_effects.empty()) {
+        // MC PotionContents.forEachEffect(allEffects::add, potionDurationScale):
+        // every effect through withScaledDuration (max(floor(d * scale), 1)).
+        std::vector<MobEffectInstance> allEffects;
+        m_potionContents.ForEachEffect([&](MobEffectInstance e) {
+            allEffects.push_back(std::move(e));
+        }, m_potionDurationScale);
+
+        if (allEffects.empty()) {
             m_victims.clear();
             return;
-        }
-
-        // MC PotionContents.forEachEffect(allEffects::add, potionDurationScale):
-        // non-instant durations are scaled by potionDurationScale
-        // (withScaledDuration — floor, MC's mapDuration lambda).
-        std::vector<MobEffectInstance> allEffects;
-        allEffects.reserve(m_effects.size());
-        for (const MobEffectInstance& e : m_effects) {
-            MobEffectInstance scaled = e;
-            if (m_potionDurationScale != 1.0f && !scaled.IsInfiniteDuration()) {
-                scaled.duration = static_cast<int>(
-                    static_cast<float>(scaled.duration) * m_potionDurationScale);
-            }
-            allEffects.push_back(scaled);
         }
 
         // MC getEntitiesOfClass(LivingEntity.class, getBoundingBox()).

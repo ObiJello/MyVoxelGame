@@ -6,6 +6,119 @@
 
 namespace Game {
 
+    static const MobSpawnEntry k_aether__skyroot_forest[] = {
+        { MobCategory::Creature, EntityTypeId::Phyg, 10, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::Sheepuff, 12, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::FlyingCow, 12, 2, 5 },
+        { MobCategory::Creature, EntityTypeId::Aerbunny, 11, 3, 3 },
+        { MobCategory::Creature, EntityTypeId::Moa, 8, 1, 3 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::AechorPlant, 7, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::BlueSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::GoldenSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::Whirlwind, 3, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::EvilWhirlwind, 1, 1, 1 },
+        { MobCategory::AetherDarknessMonster, EntityTypeId::Cockatrice, 8, 1, 1 },
+        { MobCategory::AetherSkyMonster, EntityTypeId::Zephyr, 20, 1, 1 },
+        { MobCategory::AetherAerwhale, EntityTypeId::Aerwhale, 10, 1, 1 },
+    };
+    static const MobSpawnCost k_aether__skyroot_forest_costs[] = {
+        { EntityTypeId::AechorPlant, 0.11, 0.4 },
+        { EntityTypeId::Aerwhale, 0.11, 0.5 },
+        { EntityTypeId::BlueSwet, 0.1, 0.5 },
+        { EntityTypeId::Cockatrice, 0.15, 0.5 },
+        { EntityTypeId::EvilWhirlwind, 0.1, 0.4 },
+        { EntityTypeId::GoldenSwet, 0.1, 0.5 },
+        { EntityTypeId::Whirlwind, 0.1, 0.4 },
+        { EntityTypeId::Zephyr, 0.16, 0.6 },
+    };
+
+    static const MobSpawnEntry k_aether__skyroot_grove[] = {
+        { MobCategory::Creature, EntityTypeId::Phyg, 10, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::Sheepuff, 12, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::FlyingCow, 12, 2, 5 },
+        { MobCategory::Creature, EntityTypeId::Aerbunny, 11, 3, 3 },
+        { MobCategory::Creature, EntityTypeId::Moa, 8, 1, 3 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::AechorPlant, 7, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::BlueSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::GoldenSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::Whirlwind, 3, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::EvilWhirlwind, 1, 1, 1 },
+        { MobCategory::AetherDarknessMonster, EntityTypeId::Cockatrice, 8, 1, 1 },
+        { MobCategory::AetherSkyMonster, EntityTypeId::Zephyr, 20, 1, 1 },
+        { MobCategory::AetherAerwhale, EntityTypeId::Aerwhale, 10, 1, 1 },
+    };
+    static const MobSpawnCost k_aether__skyroot_grove_costs[] = {
+        { EntityTypeId::AechorPlant, 0.11, 0.4 },
+        { EntityTypeId::Aerwhale, 0.11, 0.5 },
+        { EntityTypeId::BlueSwet, 0.1, 0.5 },
+        { EntityTypeId::Cockatrice, 0.15, 0.5 },
+        { EntityTypeId::EvilWhirlwind, 0.1, 0.4 },
+        { EntityTypeId::GoldenSwet, 0.1, 0.5 },
+        { EntityTypeId::Whirlwind, 0.1, 0.4 },
+        { EntityTypeId::Zephyr, 0.16, 0.6 },
+    };
+
+    static const MobSpawnEntry k_aether__skyroot_meadow[] = {
+        { MobCategory::Creature, EntityTypeId::Phyg, 10, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::Sheepuff, 12, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::FlyingCow, 12, 2, 5 },
+        { MobCategory::Creature, EntityTypeId::Aerbunny, 11, 3, 3 },
+        { MobCategory::Creature, EntityTypeId::Moa, 8, 1, 3 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::AechorPlant, 7, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::BlueSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::GoldenSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::Whirlwind, 3, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::EvilWhirlwind, 1, 1, 1 },
+        { MobCategory::AetherDarknessMonster, EntityTypeId::Cockatrice, 8, 1, 1 },
+        { MobCategory::AetherSkyMonster, EntityTypeId::Zephyr, 20, 1, 1 },
+        { MobCategory::AetherAerwhale, EntityTypeId::Aerwhale, 10, 1, 1 },
+    };
+    static const MobSpawnCost k_aether__skyroot_meadow_costs[] = {
+        { EntityTypeId::AechorPlant, 0.11, 0.4 },
+        { EntityTypeId::Aerwhale, 0.11, 0.5 },
+        { EntityTypeId::BlueSwet, 0.1, 0.5 },
+        { EntityTypeId::Cockatrice, 0.15, 0.5 },
+        { EntityTypeId::EvilWhirlwind, 0.1, 0.4 },
+        { EntityTypeId::GoldenSwet, 0.1, 0.5 },
+        { EntityTypeId::Whirlwind, 0.1, 0.4 },
+        { EntityTypeId::Zephyr, 0.16, 0.6 },
+    };
+
+    static const MobSpawnEntry k_aether__skyroot_woodland[] = {
+        { MobCategory::Creature, EntityTypeId::Phyg, 10, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::Sheepuff, 12, 3, 4 },
+        { MobCategory::Creature, EntityTypeId::FlyingCow, 12, 2, 5 },
+        { MobCategory::Creature, EntityTypeId::Aerbunny, 11, 3, 3 },
+        { MobCategory::Creature, EntityTypeId::Moa, 8, 1, 3 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::AechorPlant, 7, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::BlueSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::GoldenSwet, 6, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::Whirlwind, 3, 1, 1 },
+        { MobCategory::AetherSurfaceMonster, EntityTypeId::EvilWhirlwind, 1, 1, 1 },
+        { MobCategory::AetherDarknessMonster, EntityTypeId::Cockatrice, 8, 1, 1 },
+        { MobCategory::AetherSkyMonster, EntityTypeId::Zephyr, 20, 1, 1 },
+        { MobCategory::AetherAerwhale, EntityTypeId::Aerwhale, 10, 1, 1 },
+    };
+    static const MobSpawnCost k_aether__skyroot_woodland_costs[] = {
+        { EntityTypeId::AechorPlant, 0.11, 0.4 },
+        { EntityTypeId::Aerwhale, 0.11, 0.5 },
+        { EntityTypeId::BlueSwet, 0.1, 0.5 },
+        { EntityTypeId::Cockatrice, 0.15, 0.5 },
+        { EntityTypeId::EvilWhirlwind, 0.1, 0.4 },
+        { EntityTypeId::GoldenSwet, 0.1, 0.5 },
+        { EntityTypeId::Whirlwind, 0.1, 0.4 },
+        { EntityTypeId::Zephyr, 0.16, 0.6 },
+    };
+
+    static const MobSpawnEntry k_aurora_steppe[] = {
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 4 },
+        { MobCategory::Monster, EntityTypeId::EchoWraith, 25, 1, 2 },
+        { MobCategory::Creature, EntityTypeId::Hushling, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::CrystalGolem, 10, 1, 1 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+        { MobCategory::Ambient, EntityTypeId::LumenMoth, 15, 3, 5 },
+    };
+
     static const MobSpawnEntry k_badlands[] = {
         { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
         { MobCategory::Monster, EntityTypeId::Zombie, 95, 4, 4 },
@@ -121,6 +234,31 @@ namespace Game {
         { MobCategory::Monster, EntityTypeId::Hoglin, 9, 3, 4 },
         { MobCategory::Monster, EntityTypeId::Piglin, 5, 3, 4 },
         { MobCategory::Creature, EntityTypeId::Strider, 60, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_crystal_caverns[] = {
+        { MobCategory::Monster, EntityTypeId::EchoWraith, 60, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::EchoMimic, 10, 1, 1 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+    };
+
+    static const MobSpawnEntry k_dappled_forest[] = {
+        { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
+        { MobCategory::Monster, EntityTypeId::Zombie, 95, 4, 4 },
+        { MobCategory::Monster, EntityTypeId::ZombieVillager, 5, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 100, 4, 4 },
+        { MobCategory::Monster, EntityTypeId::Creeper, 100, 4, 4 },
+        { MobCategory::Monster, EntityTypeId::Slime, 100, 4, 4 },
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 4 },
+        { MobCategory::Monster, EntityTypeId::Witch, 5, 1, 1 },
+        { MobCategory::Creature, EntityTypeId::Sheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Pig, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Cow, 8, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Rabbit, 4, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::Fox, 4, 2, 4 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+        { MobCategory::UndergroundWaterCreature, EntityTypeId::GlowSquid, 10, 4, 6 },
     };
 
     static const MobSpawnEntry k_dark_forest[] = {
@@ -375,6 +513,25 @@ namespace Game {
         { MobCategory::UndergroundWaterCreature, EntityTypeId::GlowSquid, 10, 4, 6 },
     };
 
+    static const MobSpawnEntry k_hollow_deep[] = {
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 4 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 10, 2, 4 },
+        { MobCategory::Monster, EntityTypeId::EchoWraith, 40, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::EchoMimic, 10, 1, 1 },
+        { MobCategory::Creature, EntityTypeId::CrystalGolem, 15, 1, 2 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+        { MobCategory::Ambient, EntityTypeId::LumenMoth, 8, 2, 3 },
+    };
+
+    static const MobSpawnEntry k_hush_meadows[] = {
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 4 },
+        { MobCategory::Monster, EntityTypeId::EchoWraith, 30, 1, 2 },
+        { MobCategory::Creature, EntityTypeId::Hushling, 12, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::HushLeviathan, 1, 1, 1 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+        { MobCategory::Ambient, EntityTypeId::LumenMoth, 12, 3, 6 },
+    };
+
     static const MobSpawnEntry k_ice_spikes[] = {
         { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
         { MobCategory::Monster, EntityTypeId::Zombie, 95, 4, 4 },
@@ -617,6 +774,16 @@ namespace Game {
         { MobCategory::UndergroundWaterCreature, EntityTypeId::GlowSquid, 10, 4, 6 },
     };
 
+    static const MobSpawnEntry k_resonant_barrens[] = {
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 4 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 20, 4, 4 },
+        { MobCategory::Monster, EntityTypeId::EchoWraith, 30, 1, 2 },
+        { MobCategory::Creature, EntityTypeId::CrystalGolem, 6, 1, 1 },
+        { MobCategory::Creature, EntityTypeId::HushLeviathan, 1, 1, 1 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+        { MobCategory::Ambient, EntityTypeId::LumenMoth, 8, 2, 4 },
+    };
+
     static const MobSpawnEntry k_river[] = {
         { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
         { MobCategory::Monster, EntityTypeId::Zombie, 95, 4, 4 },
@@ -804,6 +971,19 @@ namespace Game {
         { MobCategory::UndergroundWaterCreature, EntityTypeId::GlowSquid, 10, 4, 6 },
     };
 
+    static const MobSpawnEntry k_sulfur_caves[] = {
+        { MobCategory::Monster, EntityTypeId::SulfurCube, 100, 2, 4 },
+        { MobCategory::Monster, EntityTypeId::Creeper, 50, 2, 2 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 50, 2, 2 },
+        { MobCategory::Monster, EntityTypeId::Slime, 25, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::CaveSpider, 20, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Zombie, 50, 2, 2 },
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Witch, 1, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::ZombieVillager, 5, 1, 1 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+    };
+
     static const MobSpawnEntry k_sunflower_plains[] = {
         { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
         { MobCategory::Monster, EntityTypeId::Zombie, 90, 4, 4 },
@@ -822,6 +1002,16 @@ namespace Game {
         { MobCategory::Creature, EntityTypeId::Donkey, 1, 1, 3 },
         { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
         { MobCategory::UndergroundWaterCreature, EntityTypeId::GlowSquid, 10, 4, 6 },
+    };
+
+    static const MobSpawnEntry k_sunken_choir[] = {
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 4 },
+        { MobCategory::Monster, EntityTypeId::EchoWraith, 30, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::EchoMimic, 10, 1, 1 },
+        { MobCategory::Creature, EntityTypeId::Hushling, 8, 2, 3 },
+        { MobCategory::Creature, EntityTypeId::HushLeviathan, 2, 1, 1 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+        { MobCategory::Ambient, EntityTypeId::LumenMoth, 12, 2, 4 },
     };
 
     static const MobSpawnEntry k_swamp[] = {
@@ -868,6 +1058,213 @@ namespace Game {
         { MobCategory::Monster, EntityTypeId::Enderman, 10, 4, 4 },
     };
 
+    static const MobSpawnEntry k_twilightforest__clearing[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__dark_forest[] = {
+        { MobCategory::Monster, EntityTypeId::Enderman, 2, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::Zombie, 5, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 5, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::MistWolf, 5, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::SkeletonDruid, 5, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::KingSpider, 1, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Kobold, 10, 1, 3 },
+        { MobCategory::Monster, EntityTypeId::Witch, 2, 1, 1 },
+    };
+    static const MobSpawnCost k_twilightforest__dark_forest_costs[] = {
+        { EntityTypeId::Enderman, 0.15, 0.75 },
+        { EntityTypeId::Skeleton, 0.15, 0.8 },
+        { EntityTypeId::Witch, 0.15, 0.75 },
+        { EntityTypeId::Zombie, 0.15, 0.7 },
+        { EntityTypeId::KingSpider, 0.25, 0.85 },
+        { EntityTypeId::Kobold, 0.15, 0.7 },
+        { EntityTypeId::MistWolf, 0.2, 0.75 },
+        { EntityTypeId::SkeletonDruid, 0.2, 0.8 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__dense_forest[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__dense_mushroom_forest[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__enchanted_forest[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__final_plateau[] = {
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 4, 4 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__firefly_forest[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__forest[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__glacier[] = {
+        { MobCategory::Creature, EntityTypeId::Penguin, 10, 2, 4 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__highlands[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__highlands_underground[] = {
+        { MobCategory::Monster, EntityTypeId::Spider, 10, 2, 3 },
+        { MobCategory::Monster, EntityTypeId::Zombie, 10, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 10, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Creeper, 1, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Slime, 10, 2, 4 },
+        { MobCategory::Monster, EntityTypeId::Enderman, 1, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::Kobold, 10, 1, 3 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 1, 1 },
+    };
+    static const MobSpawnCost k_twilightforest__highlands_underground_costs[] = {
+        { EntityTypeId::Creeper, 0.15, 0.35 },
+        { EntityTypeId::Enderman, 0.15, 0.4 },
+        { EntityTypeId::Skeleton, 0.15, 0.3 },
+        { EntityTypeId::Slime, 0.15, 0.2 },
+        { EntityTypeId::Spider, 0.15, 0.2 },
+        { EntityTypeId::Zombie, 0.15, 0.2 },
+        { EntityTypeId::Kobold, 0.15, 0.2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__mushroom_forest[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__oak_savannah[] = {
+        { MobCategory::Creature, EntityTypeId::BighornSheep, 12, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Boar, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Chicken, 10, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::Deer, 15, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Wolf, 5, 4, 4 },
+        { MobCategory::Creature, EntityTypeId::TinyBird, 15, 4, 8 },
+        { MobCategory::Creature, EntityTypeId::Squirrel, 10, 2, 4 },
+        { MobCategory::Creature, EntityTypeId::DwarfRabbit, 10, 4, 5 },
+        { MobCategory::Creature, EntityTypeId::Raven, 10, 1, 2 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__snowy_forest[] = {
+        { MobCategory::Monster, EntityTypeId::WinterWolf, 5, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Yeti, 5, 1, 1 },
+    };
+    static const MobSpawnCost k_twilightforest__snowy_forest_costs[] = {
+        { EntityTypeId::WinterWolf, 0.15, 0.6 },
+        { EntityTypeId::Yeti, 0.15, 0.6 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__spooky_forest[] = {
+        { MobCategory::Monster, EntityTypeId::Spider, 50, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 20, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::SkeletonDruid, 5, 1, 1 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 20, 2, 4 },
+    };
+    static const MobSpawnCost k_twilightforest__spooky_forest_costs[] = {
+        { EntityTypeId::Skeleton, 0.25, 0.85 },
+        { EntityTypeId::Spider, 0.25, 0.75 },
+        { EntityTypeId::SkeletonDruid, 0.25, 0.95 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__swamp[] = {
+        { MobCategory::Monster, EntityTypeId::Zombie, 10, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::MosquitoSwarm, 10, 1, 1 },
+    };
+    static const MobSpawnCost k_twilightforest__swamp_costs[] = {
+        { EntityTypeId::Zombie, 0.15, 0.7 },
+        { EntityTypeId::MosquitoSwarm, 0.15, 0.7 },
+    };
+
+    static const MobSpawnEntry k_twilightforest__underground[] = {
+        { MobCategory::Monster, EntityTypeId::Spider, 10, 2, 3 },
+        { MobCategory::Monster, EntityTypeId::Zombie, 10, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::Skeleton, 10, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Creeper, 1, 1, 1 },
+        { MobCategory::Monster, EntityTypeId::Slime, 10, 2, 4 },
+        { MobCategory::Monster, EntityTypeId::Enderman, 1, 1, 2 },
+        { MobCategory::Monster, EntityTypeId::Kobold, 10, 1, 3 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 1, 1 },
+    };
+    static const MobSpawnCost k_twilightforest__underground_costs[] = {
+        { EntityTypeId::Creeper, 0.15, 0.35 },
+        { EntityTypeId::Enderman, 0.15, 0.4 },
+        { EntityTypeId::Skeleton, 0.15, 0.3 },
+        { EntityTypeId::Slime, 0.15, 0.2 },
+        { EntityTypeId::Spider, 0.15, 0.2 },
+        { EntityTypeId::Zombie, 0.15, 0.2 },
+        { EntityTypeId::Kobold, 0.15, 0.2 },
+    };
+
     static const MobSpawnEntry k_warm_ocean[] = {
         { MobCategory::Monster, EntityTypeId::Drowned, 5, 1, 1 },
         { MobCategory::Monster, EntityTypeId::Spider, 100, 4, 4 },
@@ -893,6 +1290,14 @@ namespace Game {
     };
     static const MobSpawnCost k_warped_forest_costs[] = {
         { EntityTypeId::Enderman, 0.12, 1.0 },
+    };
+
+    static const MobSpawnEntry k_whisperwood_forest[] = {
+        { MobCategory::Monster, EntityTypeId::Enderman, 10, 1, 4 },
+        { MobCategory::Monster, EntityTypeId::EchoWraith, 30, 1, 2 },
+        { MobCategory::Creature, EntityTypeId::Hushling, 8, 2, 4 },
+        { MobCategory::Ambient, EntityTypeId::Bat, 10, 8, 8 },
+        { MobCategory::Ambient, EntityTypeId::LumenMoth, 15, 3, 6 },
     };
 
     static const MobSpawnEntry k_windswept_forest[] = {
@@ -990,6 +1395,11 @@ namespace Game {
     };
 
     const BiomeSpawnList kBiomeSpawnLists[] = {
+        { "aether:skyroot_forest", k_aether__skyroot_forest, 13, k_aether__skyroot_forest_costs, 8 },
+        { "aether:skyroot_grove", k_aether__skyroot_grove, 13, k_aether__skyroot_grove_costs, 8 },
+        { "aether:skyroot_meadow", k_aether__skyroot_meadow, 13, k_aether__skyroot_meadow_costs, 8 },
+        { "aether:skyroot_woodland", k_aether__skyroot_woodland, 13, k_aether__skyroot_woodland_costs, 8 },
+        { "aurora_steppe", k_aurora_steppe, 6, nullptr, 0 },
         { "badlands", k_badlands, 15, nullptr, 0 },
         { "bamboo_jungle", k_bamboo_jungle, 18, nullptr, 0 },
         { "basalt_deltas", k_basalt_deltas, 3, nullptr, 0 },
@@ -998,6 +1408,8 @@ namespace Game {
         { "cherry_grove", k_cherry_grove, 13, nullptr, 0 },
         { "cold_ocean", k_cold_ocean, 15, nullptr, 0 },
         { "crimson_forest", k_crimson_forest, 4, nullptr, 0 },
+        { "crystal_caverns", k_crystal_caverns, 3, nullptr, 0 },
+        { "dappled_forest", k_dappled_forest, 16, nullptr, 0 },
         { "dark_forest", k_dark_forest, 14, nullptr, 0 },
         { "deep_cold_ocean", k_deep_cold_ocean, 15, nullptr, 0 },
         { "deep_frozen_ocean", k_deep_frozen_ocean, 15, nullptr, 0 },
@@ -1015,6 +1427,8 @@ namespace Game {
         { "frozen_peaks", k_frozen_peaks, 11, nullptr, 0 },
         { "frozen_river", k_frozen_river, 13, nullptr, 0 },
         { "grove", k_grove, 13, nullptr, 0 },
+        { "hollow_deep", k_hollow_deep, 7, nullptr, 0 },
+        { "hush_meadows", k_hush_meadows, 6, nullptr, 0 },
         { "ice_spikes", k_ice_spikes, 13, nullptr, 0 },
         { "jagged_peaks", k_jagged_peaks, 11, nullptr, 0 },
         { "jungle", k_jungle, 18, nullptr, 0 },
@@ -1030,6 +1444,7 @@ namespace Game {
         { "old_growth_spruce_taiga", k_old_growth_spruce_taiga, 17, nullptr, 0 },
         { "pale_garden", k_pale_garden, 10, nullptr, 0 },
         { "plains", k_plains, 17, nullptr, 0 },
+        { "resonant_barrens", k_resonant_barrens, 7, nullptr, 0 },
         { "river", k_river, 13, nullptr, 0 },
         { "savanna", k_savanna, 18, nullptr, 0 },
         { "savanna_plateau", k_savanna_plateau, 20, nullptr, 0 },
@@ -1042,12 +1457,32 @@ namespace Game {
         { "sparse_jungle", k_sparse_jungle, 16, nullptr, 0 },
         { "stony_peaks", k_stony_peaks, 10, nullptr, 0 },
         { "stony_shore", k_stony_shore, 10, nullptr, 0 },
+        { "sulfur_caves", k_sulfur_caves, 10, nullptr, 0 },
         { "sunflower_plains", k_sunflower_plains, 17, nullptr, 0 },
+        { "sunken_choir", k_sunken_choir, 7, nullptr, 0 },
         { "swamp", k_swamp, 17, nullptr, 0 },
         { "taiga", k_taiga, 17, nullptr, 0 },
         { "the_end", k_the_end, 1, nullptr, 0 },
+        { "twilightforest:clearing", k_twilightforest__clearing, 9, nullptr, 0 },
+        { "twilightforest:dark_forest", k_twilightforest__dark_forest, 8, k_twilightforest__dark_forest_costs, 8 },
+        { "twilightforest:dense_forest", k_twilightforest__dense_forest, 9, nullptr, 0 },
+        { "twilightforest:dense_mushroom_forest", k_twilightforest__dense_mushroom_forest, 9, nullptr, 0 },
+        { "twilightforest:enchanted_forest", k_twilightforest__enchanted_forest, 9, nullptr, 0 },
+        { "twilightforest:final_plateau", k_twilightforest__final_plateau, 1, nullptr, 0 },
+        { "twilightforest:firefly_forest", k_twilightforest__firefly_forest, 9, nullptr, 0 },
+        { "twilightforest:forest", k_twilightforest__forest, 9, nullptr, 0 },
+        { "twilightforest:glacier", k_twilightforest__glacier, 1, nullptr, 0 },
+        { "twilightforest:highlands", k_twilightforest__highlands, 9, nullptr, 0 },
+        { "twilightforest:highlands_underground", k_twilightforest__highlands_underground, 8, k_twilightforest__highlands_underground_costs, 7 },
+        { "twilightforest:mushroom_forest", k_twilightforest__mushroom_forest, 9, nullptr, 0 },
+        { "twilightforest:oak_savannah", k_twilightforest__oak_savannah, 9, nullptr, 0 },
+        { "twilightforest:snowy_forest", k_twilightforest__snowy_forest, 2, k_twilightforest__snowy_forest_costs, 2 },
+        { "twilightforest:spooky_forest", k_twilightforest__spooky_forest, 4, k_twilightforest__spooky_forest_costs, 3 },
+        { "twilightforest:swamp", k_twilightforest__swamp, 2, k_twilightforest__swamp_costs, 2 },
+        { "twilightforest:underground", k_twilightforest__underground, 8, k_twilightforest__underground_costs, 7 },
         { "warm_ocean", k_warm_ocean, 16, nullptr, 0 },
         { "warped_forest", k_warped_forest, 2, k_warped_forest_costs, 1 },
+        { "whisperwood_forest", k_whisperwood_forest, 5, nullptr, 0 },
         { "windswept_forest", k_windswept_forest, 15, nullptr, 0 },
         { "windswept_gravelly_hills", k_windswept_gravelly_hills, 15, nullptr, 0 },
         { "windswept_hills", k_windswept_hills, 15, nullptr, 0 },
@@ -1055,7 +1490,7 @@ namespace Game {
         { "wooded_badlands", k_wooded_badlands, 16, nullptr, 0 },
     };
 
-    const int kBiomeSpawnListCount = 63;
+    const int kBiomeSpawnListCount = 93;
 
     const BiomeSpawnList* FindBiomeSpawnList(std::string_view biomeSlug) {
         const auto* begin = kBiomeSpawnLists;

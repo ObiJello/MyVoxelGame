@@ -1,0 +1,19 @@
+{
+  "block.aether_portal.ambient": {
+    "sounds": [
+      { "name": "minecraft:block.portal.ambient", "type": "event", "pitch": 1.25 }
+    ],
+    "subtitle": "subtitles.aether.block.aether_portal.ambient"
+  },
+  "block.aether_portal.trigger": {
+    "sounds": [
+      { "name": "minecraft:block.portal.trigger", "type": "event", "pitch": 1.25 }
+    ],
+    "subtitle": "subtitles.aether.block.aether_portal.trigger"
+  },
+  "block.aether_portal.travel": {
+    "sounds": [
+      { "name": "minecraft:block.portal.travel", "type": "event", "pitch": 1.25 }
+    ]
+  }
+}

@@ -1,4 +1,5 @@
 #include "levelgen/structure/PieceBehaviors.h"
+#include "nbt/AllTags.h"
 
 #include "levelgen/structure/OrientedPieceBehavior.h"
 #include "levelgen/structure/StructureSet.h"
@@ -261,6 +262,16 @@ public:
                 }
             }
         }
+    }
+
+public:
+    // Reference: MineShaftCorridor.addAdditionalSaveData "hps" (hr/sc/Num
+    // never change after the layout).
+    void saveState(nbt::CompoundTag& tag) const override {
+        tag.putBoolean("hps", m_hasPlacedSpider);
+    }
+    void loadState(const nbt::CompoundTag& tag, StructurePieceData&) override {
+        m_hasPlacedSpider = tag.getBooleanOr("hps", m_hasPlacedSpider);
     }
 
 private:

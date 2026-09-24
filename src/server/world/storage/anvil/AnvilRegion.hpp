@@ -1,7 +1,7 @@
 // File: src/server/world/storage/anvil/AnvilRegion.hpp
 //
 // One .mca region file, read AND write. Modelled directly on vanilla
-// RegionFile.java (minecraft_code/decompiled_net/.../chunk/storage/), not on
+// RegionFile.java (minecraft_code_26.1-snapshot-1/decompiled_net/.../chunk/storage/), not on
 // the port in my_terrain_library — that port inverts the allocate/free order
 // (it frees the old sectors before allocating the new ones, so a write can
 // land on the only copy of the chunk), caps the sector bitmap at a 32 MB file

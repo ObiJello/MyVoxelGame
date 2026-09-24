@@ -95,10 +95,12 @@ public:
         int treeHeight,
         const FoliageAttachment& attachment,
         int foliageHeight,
-        int leafRadius
+        int leafRadius,
+        std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider = nullptr
     ) {
         int offset = m_offset->sample(random);
-        createFoliageImpl(foliageSetter, random, foliageProvider, treeHeight, attachment, foliageHeight, leafRadius, offset);
+        createFoliageWithTrunk(foliageSetter, random, foliageProvider, trunkProvider, treeHeight, attachment,
+                               foliageHeight, leafRadius, offset);
     }
 
     /**
@@ -120,6 +122,25 @@ public:
     }
 
 protected:
+    /**
+     * Create foliage with the tree's trunk provider at hand (26.3 passes
+     * the whole TreeFeature; PoplarFoliagePlacer turns leaves into logs).
+     * Placers that only need the foliage provider use createFoliageImpl.
+     */
+    virtual void createFoliageWithTrunk(
+        FoliageSetter& foliageSetter,
+        WorldgenRandom& random,
+        std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+        std::shared_ptr<stateproviders::BlockStateProvider> /*trunkProvider*/,
+        int treeHeight,
+        const FoliageAttachment& attachment,
+        int foliageHeight,
+        int leafRadius,
+        int offset
+    ) {
+        createFoliageImpl(foliageSetter, random, foliageProvider, treeHeight, attachment, foliageHeight, leafRadius, offset);
+    }
+
     /**
      * Create foliage implementation
      * Reference: FoliagePlacer.java line 38
@@ -771,6 +792,111 @@ protected:
         int currentRadius,
         bool doubleTrunk
     ) const override;
+};
+
+/**
+ * PoplarFoliagePlacer - 26.3 foliageplacers/PoplarFoliagePlacer.java: a tall
+ * rhombus column of leaves (two partial top rows), random side holes, and
+ * a cross of sideways logs through its lowest full row.
+ */
+class PoplarFoliagePlacer : public FoliagePlacer {
+private:
+    std::shared_ptr<carver::IntProvider> m_height;
+    float m_sideHoleChance;
+
+public:
+    PoplarFoliagePlacer(
+        std::shared_ptr<carver::IntProvider> radius,
+        std::shared_ptr<carver::IntProvider> offset,
+        std::shared_ptr<carver::IntProvider> height,
+        float sideHoleChance
+    )
+        : FoliagePlacer(std::move(radius), std::move(offset))
+        , m_height(std::move(height))
+        , m_sideHoleChance(sideHoleChance)
+    {}
+
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
+        return m_height->sample(random);
+    }
+
+protected:
+    void createFoliageWithTrunk(
+        FoliageSetter& foliageSetter,
+        WorldgenRandom& random,
+        std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+        std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+        int treeHeight,
+        const FoliageAttachment& attachment,
+        int foliageHeight,
+        int leafRadius,
+        int offset
+    ) override;
+
+    void createFoliageImpl(
+        FoliageSetter& foliageSetter,
+        WorldgenRandom& random,
+        std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+        int treeHeight,
+        const FoliageAttachment& attachment,
+        int foliageHeight,
+        int leafRadius,
+        int offset
+    ) override;
+
+    // Java throws: the rhombus test needs the row's foliage height.
+    bool shouldSkipLocation(
+        WorldgenRandom& random,
+        int dx, int y, int dz,
+        int currentRadius,
+        bool doubleTrunk
+    ) const override;
+
+private:
+    void placeLeavesRow(
+        FoliageSetter& foliageSetter,
+        WorldgenRandom& random,
+        std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+        const core::BlockPos& origin,
+        int currentRadius,
+        int y,
+        bool doubleTrunk,
+        int foliageHeight,
+        bool flipRhombusShape
+    ) const;
+
+    void replaceLeavesWithLog(
+        FoliageSetter& foliageSetter,
+        WorldgenRandom& random,
+        std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+        std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+        const core::BlockPos& origin,
+        int currentRadius,
+        int y,
+        bool doubleTrunk,
+        int foliageHeight,
+        bool flipRhombusShape
+    ) const;
+
+    bool shouldSkipPoplarLocation(
+        WorldgenRandom& random,
+        int dx, int y, int dz,
+        int currentRadius,
+        int foliageHeight,
+        bool flipRhombusShape
+    ) const;
+
+    static int cornerBlocksToCutForRhombusShape(int dx, int dz, int currentRadius,
+                                                bool partialRow, bool flipRhombusShape);
+    static bool isWithinRhombusShape(int currentRadius, int absDx, int absDz, int cornerBlocksToCut,
+                                     int additionalSideRemoval);
+    static bool shouldRowBePartialRhombusShape(int foliageHeight, int y) {
+        return foliageHeight - 1 == y || foliageHeight - 2 == y;
+    }
 };
 
 } // namespace foliageplacers

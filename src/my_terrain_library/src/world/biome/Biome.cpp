@@ -46,27 +46,28 @@ float modifyTemperatureFrozen(const core::BlockPos& pos, float baseTemperature) 
     auto* frozenNoise = getFrozenTemperatureNoise();
     auto* biomeNoise = getBiomeInfoNoise();
 
-    // Reference: line 269
-    double groundValueLargeVariation = frozenNoise->getValue(
+    // Reference: 26.3 Biome.java TemperatureModifier.FROZEN -
+    // (double)(FROZEN_TEMPERATURE_NOISE.get(x * 0.05, z * 0.05) * 7.0F), a
+    // float NoiseStack scaled in float; BIOME_INFO_NOISE.get is a float.
+    const float largeVariation = frozenNoise->getNoiseStackValue(
         static_cast<double>(pos.getX()) * 0.05,
-        static_cast<double>(pos.getZ()) * 0.05,
-        false) * 7.0;
+        static_cast<double>(pos.getZ()) * 0.05) * 7.0f;
+    double groundValueLargeVariation = static_cast<double>(largeVariation);
 
-    // Reference: line 270
-    double groundValueEdgeVariation = biomeNoise->getValue(
+    double groundValueEdgeVariation = static_cast<double>(static_cast<float>(biomeNoise->getValue(
         static_cast<double>(pos.getX()) * 0.2,
         static_cast<double>(pos.getZ()) * 0.2,
-        false);
+        false)));
 
     // Reference: line 271
     double icePatches = groundValueLargeVariation + groundValueEdgeVariation;
 
     // Reference: lines 272-277
     if (icePatches < 0.3) {
-        double groundValueSmallVariation = biomeNoise->getValue(
+        double groundValueSmallVariation = static_cast<double>(static_cast<float>(biomeNoise->getValue(
             static_cast<double>(pos.getX()) * 0.09,
             static_cast<double>(pos.getZ()) * 0.09,
-            false);
+            false)));
         if (groundValueSmallVariation < 0.8) {
             return 0.2f;  // Warmer patch - ice melts here
         }
@@ -98,8 +99,8 @@ float Biome::getTemperature(const core::BlockPos& pos, int32_t seaLevel) const {
         // This intermediate float step affects precision and must be matched exactly
         double noiseInputX = static_cast<double>(static_cast<float>(pos.getX()) / 8.0f);
         double noiseInputZ = static_cast<double>(static_cast<float>(pos.getZ()) / 8.0f);
-        double noiseRaw = tempNoise->getValue(noiseInputX, noiseInputZ, false);
-        float noiseValue = static_cast<float>(noiseRaw * static_cast<double>(8.0f));
+        // 26.3: TEMPERATURE_NOISE.get(...) is a float, scaled by 8.0F in float.
+        float noiseValue = static_cast<float>(tempNoise->getValue(noiseInputX, noiseInputZ, false)) * 8.0f;
         float heightFactor = (noiseValue + static_cast<float>(pos.getY()) - static_cast<float>(snowLevel)) * 0.05f / 40.0f;
 
         adjustedTemp -= heightFactor;

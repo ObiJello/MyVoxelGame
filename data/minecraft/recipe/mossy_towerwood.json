@@ -1,0 +1,14 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "building",
+  "ingredients": [
+    "minecraft:towerwood",
+    [
+      "minecraft:vine",
+      "minecraft:moss_block"
+    ]
+  ],
+  "result": {
+    "id": "minecraft:mossy_towerwood"
+  }
+}

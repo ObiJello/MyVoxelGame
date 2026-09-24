@@ -27,29 +27,34 @@
 //
 // ── Propagation ────────────────────────────────────────────────────────────
 //
-// MC spreads levels with an incremental min-fixed-point solver (ChunkTracker
-// over DynamicGraphMinFixedPoint): a priority queue by level, 3x3 neighbourhood,
-// +1 per step, plus an increase branch that forces a removed source's node to
-// max and re-floods its neighbours.
-//
-// Because every edge cost is exactly +1 over a 3x3 neighbourhood, the fixed
-// point that solver converges to is precisely
+// MC's own solver: ChunkTracker over DynamicGraphMinFixedPoint (the terrain
+// library's port, shared rather than duplicated), exactly as MC's
+// LoadingChunkTracker / SimulationChunkTracker use it. A ticket change only
+// queues its chunk (MC TicketStorage -> ChunkTracker.update); RunAllUpdates
+// drains the queue once per tick, touching only the chunks whose level
+// actually moves. The fixed point is
 //
 //     level(c) = min over tickets t of ( t.level + chebyshev(t.chunk, c) )
 //
-// so this implements that min directly as a bounded multi-source BFS. The
-// RESULT is identical to MC's; what is given up is incrementality, which MC
-// needs at its scale and we do not — a solve is re-run only when a ticket
-// actually changes (a player crossing a chunk boundary), not per tick, and one
-// player at simulation distance 10 is a 21x21 flood. This is the one
-// deliberate simplification in this file and it is called out so nobody
-// mistakes it for an oversight.
+// This replaced a from-scratch flood over every ticket, which a level query
+// forced after every ticket change: with 50 players flying, each chunk border
+// crossed re-flooded ~90,000 chunks (a player ticket reaches MAX_LEVEL, 18
+// chunks out at simulation distance 8), several times a tick — 29 ms of
+// session ticking in the stress test (2026-09-23).
+//
+// ── When levels change ─────────────────────────────────────────────────────
+//
+// Only in RunAllUpdates (MC DistanceManager.runAllUpdates, run from
+// ServerChunkCache.tick). Every query reads the levels as of the last call;
+// a ticket added since is not visible until the next one. The server calls it
+// for every level once a tick, after the sessions have moved their tickets.
 #pragma once
 
 #include "common/world/math/WorldMath.hpp"
 #include "server/world/ticketing/ChunkLevel.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -119,21 +124,23 @@ namespace Server {
         // MC DistanceManager.runAllUpdates: drain pending level changes at ONE
         // defined point in the tick. Everything after it can read levels
         // without taking the mutex, because the only writers of m_levels are
-        // the solve itself and Clear() — a ticket mutation merely marks dirty.
+        // this call and Clear() — a ticket mutation merely queues its chunk.
         //
-        // This exists because the gate below is asked once PER ENTITY PER TICK.
-        // At a million entities that was a million mutex acquisitions and a
-        // million potential solve-triggers on the read path, measured at
-        // 37 ns/entity before the hash fix.
+        // Also checks, whenever levels moved, that every player stands in
+        // their own entity-ticking range (see the .cpp).
         void RunAllUpdates();
 
-        // Lock-free entity-ticking test. REQUIRES RunAllUpdates() earlier in
-        // the same tick. Returns the level as of that call: a ticket changed
-        // afterwards reads one tick stale, which is exactly MC's semantics —
-        // levels move at defined points, not continuously. Never torn, because
-        // nothing structurally modifies m_levels outside a solve.
+        // Lock-free entity-ticking test, asked once PER ENTITY PER TICK (at a
+        // million entities a mutex here was 37 ns/entity). Returns the level
+        // as of the last RunAllUpdates: a ticket changed afterwards reads one
+        // tick stale, which is exactly MC's semantics — levels move at defined
+        // points, not continuously. Never torn, because nothing structurally
+        // modifies m_levels outside RunAllUpdates.
         bool IsEntityTickingAfterUpdates(Game::Math::ChunkPos chunk) const;
 
+        // The same answers under the mutex, for callers off the tick's
+        // defined points. Also as of the last RunAllUpdates — no query ever
+        // propagates (MC reads the trackers' current levels the same way).
         int  GetChunkLevel(Game::Math::ChunkPos chunk) const;
         bool IsEntityTicking(Game::Math::ChunkPos chunk) const;
         bool IsBlockTicking(Game::Math::ChunkPos chunk) const;
@@ -151,7 +158,23 @@ namespace Server {
         // each entity from its own live chunk position every tick. Anything
         // gating a single entity should call IsEntityTicking, not search these.
         std::vector<Game::Math::ChunkPos> GetLoadedChunks() const;
+        // Cached: the list is rebuilt only when the levels change (see
+        // LevelsVersion), since with a large simulation distance it holds
+        // tens of thousands of chunks and it is asked for every tick.
         std::vector<Game::Math::ChunkPos> GetBlockTickingChunks() const;
+        // The block-ticking chunks that also RANDOM-tick: within vanilla's
+        // largest simulation distance (32 chunks, plus the one-chunk block-
+        // ticking margin) of a player, or reached by a non-player ticket.
+        // Below a simulation distance of 33 this IS the block-ticking list,
+        // exactly MC; beyond it — a range MC cannot express — the outer ring
+        // keeps scheduled ticks (redstone, fluids, falling sand) and drops
+        // random ticks, which is what makes a 128-chunk ring affordable
+        // (measured: 66k chunks of random-ticking grass alone were 100 ms a
+        // tick).
+        std::vector<Game::Math::ChunkPos> GetRandomTickingChunks() const;
+        // Bumps every time a RunAllUpdates changed any level. A caller holding
+        // a copy of a list can skip its own rebuild while unchanged.
+        uint64_t LevelsVersion() const;
         std::vector<Game::Math::ChunkPos> GetEntityTickingChunks() const;
 
         // ── Maintenance ─────────────────────────────────────────────────────
@@ -196,26 +219,37 @@ namespace Server {
         // ticket mutation, so it cannot drift from the ticket it describes.
         std::unordered_map<uint32_t, Game::Math::ChunkPos> m_playerTicketChunk;
 
-        // Derived. Rebuilt by Solve() whenever m_dirty.
-        mutable std::unordered_map<Game::Math::ChunkPos, int,
-                                   Game::Math::ChunkPosHash> m_levels;
-        mutable bool m_dirty = true;
+        // Derived: every chunk at a level <= MAX_LEVEL. Written only by the
+        // tracker, inside RunAllUpdates.
+        std::unordered_map<Game::Math::ChunkPos, int, Game::Math::ChunkPosHash> m_levels;
+        // MC's ChunkTracker over m_tickets and m_levels (defined in the .cpp,
+        // which is the only place that needs the library's headers).
+        class LevelTracker;
+        std::unique_ptr<LevelTracker> m_tracker;
+        bool     m_levelsChanged = false;                 // set by the tracker
+        uint64_t m_levelsVersion = 0;                     // bumped per RunAllUpdates that changed levels
+        mutable uint64_t m_cacheVersion = ~uint64_t{0};   // version the caches were built from
+        mutable std::vector<Game::Math::ChunkPos> m_cachedBlockTicking;
+        mutable std::vector<Game::Math::ChunkPos> m_cachedRandomTicking;
 
         mutable std::mutex m_mutex;
         int64_t m_currentTick = 0;
         int     m_simulationDistance = 10;   // MC's default
-
-        // Multi-source bounded Chebyshev flood over m_tickets. See the header
-        // note for why this is equivalent to MC's incremental solver.
-        void SolveIfDirty() const;
 
         // Lock-free internals — callers already hold m_mutex.
         void AddTicketLocked(Game::Math::ChunkPos chunk, TicketType type, int level,
                              int lifespan, const std::string& identifier);
         void RemoveTicketLocked(Game::Math::ChunkPos chunk, TicketType type,
                                 const std::string& identifier);
+        // MC TicketStorage.getTicketLevelAt: the lowest level among a chunk's
+        // tickets, UNLOADED without any.
+        int  TicketLevelAtLocked(Game::Math::ChunkPos chunk) const;
+        // MC TicketStorage's listener call after a chunk's tickets changed:
+        // queue the chunk for the tracker when its source level moved.
+        void OnTicketsChangedLocked(Game::Math::ChunkPos chunk, int oldSourceLevel);
         int  GetChunkLevelLocked(Game::Math::ChunkPos chunk) const;
         std::vector<Game::Math::ChunkPos> CollectAtMostLocked(int maxLevel) const;
+        void RefreshTickingCachesLocked() const;
     };
 
 } // namespace Server

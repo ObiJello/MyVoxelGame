@@ -113,7 +113,7 @@ namespace Game {
 
         // MC TamableAnimal.feed — consume one, heal by the food's nutrition
         // times the factor (defaultHeal when the item carries no FOOD
-        // component). The eating sound waits on the sound system.
+        // component), then the animal's eating sound.
         void Feed(ItemStack& held, float healingFactor, float defaultHeal);
 
         // MC spawnTamingParticles via entity events 7 (hearts) / 6 (smoke).

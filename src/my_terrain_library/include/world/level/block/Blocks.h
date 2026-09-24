@@ -31,6 +31,7 @@
 #include "world/level/block/blocks/SculkShriekerBlock.h"
 #include "world/level/block/blocks/SculkVeinBlock.h"
 #include "world/level/block/blocks/TallFlowerBlock.h"
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <string>
@@ -95,6 +96,20 @@ public:
     static Block* AMETHYST_BLOCK;
     static Block* BUDDING_AMETHYST;
     static Block* CALCITE;
+    // 26.3 sulfur caves (OverworldMaterialRules sulfur cave bands)
+    static Block* SULFUR;
+    static Block* CINNABAR;
+    static Block* SULFUR_SPIKE;
+    static Block* POTENT_SULFUR;
+    // 26.3 dappled forest
+    static Block* SHELF_MUSHROOM;
+    static Block* RED_SHRUB;
+    static Block* POPLAR_SAPLING;
+    static LeavesBlock* RED_POPLAR_LEAVES;
+    static LeavesBlock* ORANGE_POPLAR_LEAVES;
+    static LeavesBlock* YELLOW_POPLAR_LEAVES;
+    static RotatedPillarBlock* POPLAR_LOG;
+    static RotatedPillarBlock* STRIPPED_POPLAR_LOG;
     static Block* SMOOTH_BASALT;
     static Block* SMALL_AMETHYST_BUD;
     static Block* MEDIUM_AMETHYST_BUD;
@@ -393,6 +408,14 @@ public:
      * @return Default BlockState or nullptr if not found
      */
     static BlockState* getDefaultState(const std::string& name);
+
+    /**
+     * The state named by a block id and property values, as MC's StateHolder
+     * codec decodes it: a property the block lacks or a value it does not
+     * take keeps that property's default (partial decode). Cached.
+     * @return nullptr when there is no such block
+     */
+    static BlockState* resolveState(const std::string& name, const std::map<std::string, std::string>& properties);
 
 private:
     static bool s_initialized;

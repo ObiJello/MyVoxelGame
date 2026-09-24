@@ -26,8 +26,8 @@ private:
     static levelgen::OreFeature s_oreFeature;
 
     // RuleTest instances (shared)
-    static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_stoneOreReplaceables;
-    static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_deepslateOreReplaceables;
+    static std::shared_ptr<levelgen::structure::templatesystem::RuleTest> s_stoneOreReplaceables;
+    static std::shared_ptr<levelgen::structure::templatesystem::RuleTest> s_deepslateOreReplaceables;
     static std::shared_ptr<levelgen::structure::templatesystem::TagMatchTest> s_naturalStone;
     // Java: new BlockMatchTest(Blocks.NETHERRACK) - NOT a tag test
     static std::shared_ptr<levelgen::structure::templatesystem::RuleTest> s_netherrack;

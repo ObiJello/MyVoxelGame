@@ -59,6 +59,31 @@ namespace Server {
         }
     }
 
+    bool NetworkServer::Rebind(uint16_t port) {
+        if (!m_running.load()) return false;
+        if (port == m_port) return true;
+        // Try the new endpoint on a fresh acceptor first, so a port that is
+        // taken leaves the old listener exactly as it was.
+        try {
+            tcp::endpoint endpoint(net::ip::make_address(m_bindAddress), port);
+            tcp::acceptor fresh(m_ioContext);
+            fresh.open(endpoint.protocol());
+            fresh.set_option(tcp::acceptor::reuse_address(true));
+            fresh.bind(endpoint);
+            fresh.listen();
+            error_code ec;
+            m_acceptor.close(ec);
+            m_acceptor = std::move(fresh);
+            m_port = m_acceptor.local_endpoint().port();
+            Log::Info("NetworkServer moved to %s:%d", m_bindAddress.c_str(), m_port);
+            StartAccept();
+            return true;
+        } catch (const std::exception& e) {
+            Log::Error("Could not move NetworkServer to port %d: %s", port, e.what());
+            return false;
+        }
+    }
+
     void NetworkServer::Stop() {
         if (!m_running.exchange(false)) {
             return;
@@ -117,6 +142,16 @@ namespace Server {
             return;
         }
         
+        // Not joinable (World Options): the listener stays bound so the port
+        // is still ours, but nobody gets in.
+        if (!m_accepting.load()) {
+            Log::Info("Rejecting new connection: the world is not joinable");
+            error_code ignored;
+            socket.close(ignored);
+            StartAccept();
+            return;
+        }
+
         // Check max connections
         if (GetConnectionCount() >= m_maxConnections) {
             Log::Warning("Max connections reached, rejecting new connection");
@@ -131,7 +166,7 @@ namespace Server {
         StartAccept();
     }
 
-    void NetworkServer::SetupConnection(tcp::socket socket, const char* origin) {
+    void NetworkServer::SetupConnection(tcp::socket socket, const char* origin, bool relayed) {
         // Set TCP_NODELAY to disable Nagle's algorithm for low-latency
         // This is critical for real-time game networking, especially on Windows
         try {
@@ -142,6 +177,9 @@ namespace Server {
 
         // Create new ServerConnection
         auto connection = std::make_shared<ServerConnection>(std::move(socket), this);
+        // Before Start(): the login listener asks IsLoopback() to decide on
+        // compression as soon as LoginStart arrives.
+        if (relayed) connection->MarkRelayed();
 
         // Add to connections list
         AddConnection(connection);
@@ -163,8 +201,9 @@ namespace Server {
         // Runs on the caller's thread (the friends-client io thread), so hop
         // to the server's io context before touching server state.
         net::post(m_ioContext, [this, handle]() {
-            if (GetConnectionCount() >= m_maxConnections) {
-                Log::Warning("Max connections reached, rejecting relay tunnel");
+            if (!m_accepting.load() || GetConnectionCount() >= m_maxConnections) {
+                Log::Warning(m_accepting.load() ? "Max connections reached, rejecting relay tunnel"
+                                                : "World not joinable, rejecting relay tunnel");
 #ifdef _WIN32
                 (void)::closesocket(handle);
 #else
@@ -179,7 +218,7 @@ namespace Server {
                 Log::Error("Failed to adopt relay socket: %s", ec.message().c_str());
                 return;
             }
-            SetupConnection(std::move(socket), "adopted (relay)");
+            SetupConnection(std::move(socket), "adopted (relay)", /*relayed=*/true);
         });
     }
 

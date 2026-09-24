@@ -54,6 +54,20 @@
     "minecraft:polished_sulfur_stairs",
     "minecraft:sulfur_brick_stairs",
     "#minecraft:wool_stairs",
-    "#minecraft:concrete_stairs"
+    "#minecraft:concrete_stairs",
+    "minecraft:skyroot_stairs",
+    "minecraft:carved_stairs",
+    "minecraft:angelic_stairs",
+    "minecraft:hellfire_stairs",
+    "minecraft:holystone_stairs",
+    "minecraft:mossy_holystone_stairs",
+    "minecraft:icestone_stairs",
+    "minecraft:holystone_brick_stairs",
+    "minecraft:castle_brick_stairs",
+    "minecraft:worn_castle_brick_stairs",
+    "minecraft:cracked_castle_brick_stairs",
+    "minecraft:mossy_castle_brick_stairs",
+    "minecraft:encased_castle_brick_stairs",
+    "minecraft:bold_castle_brick_stairs"
   ]
 }

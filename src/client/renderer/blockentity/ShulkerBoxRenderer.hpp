@@ -38,7 +38,8 @@ namespace Render {
                     const glm::mat4& view,
                     const glm::vec3& cameraPos) override;
 
-        void RenderBEWLR(Game::BlockID blockId, const glm::mat4& mvp) override;
+        void RenderBEWLR(Game::BlockID blockId, const glm::mat4& mvp,
+                         const BEWLRLight& light = BEWLRLight{}) override;
         // Owns its item geometry — see BlockEntityRenderer::SupportsBEWLR.
         bool SupportsBEWLR() const override { return true; }
 
@@ -54,11 +55,22 @@ namespace Render {
 
         enum Part { kBase = 0, kLid = 1, kPartCount = 2 };
 
+        // Each part's mesh holds one copy of its geometry per lighting, back
+        // to back; a draw picks one with DrawIndexed's index offset. MC lights
+        // the box from fixed WORLD directions (EntityLighting.hpp), so the
+        // shade depends on the facing and on the dimension's light set.
+        // Copy 0 is the item form; then 6 facings (Direction order) × 2 sets.
+        static constexpr int kItemLighting  = 0;
+        static constexpr int kLightingCount = 1 + 6 * 2;
+        static int WorldLighting(Game::Direction facing, bool nether) {
+            return 1 + static_cast<int>(facing) * 2 + (nether ? 1 : 0);
+        }
+
         ShaderHandle m_shader = INVALID_SHADER;
         MeshHandle   m_mesh[kPartCount] = {INVALID_MESH, INVALID_MESH};
         BufferHandle m_vb[kPartCount]   = {INVALID_BUFFER, INVALID_BUFFER};
         BufferHandle m_ib[kPartCount]   = {INVALID_BUFFER, INVALID_BUFFER};
-        uint32_t     m_indexCount[kPartCount] = {0, 0};
+        uint32_t     m_indexCount[kPartCount] = {0, 0};   // ONE lighting's copy
         std::unordered_map<std::string, TextureHandle> m_textureCache;
         int m_textureCacheGeneration = -1;   // Resources::CacheStale
         bool         m_geomBuilt = false;

@@ -205,6 +205,10 @@ FUEL_SPEC = [
     ("wooden_hoe", _U), ("wooden_axe", _U), ("wooden_pickaxe", _U),
     ("#wooden_doors", _U), ("#boats", _U * 6),
     ("#wool", _U // 2), ("#wooden_buttons", _U // 2), ("stick", _U // 2),
+    # 26.3's dyed wool stairs and slabs are not in 26.1's FuelValues; 26.3
+    # gives them `cookingFuel(COOKING_TIME_WOOL)` / `(COOKING_TIME_WOOL_SLABS)`
+    # in Items.java, which ContextIntProviders resolves to 100 and 50 ticks.
+    ("#wool_stairs", _U // 2), ("#wool_slabs", _U // 4),
     ("#saplings", _U // 2), ("bowl", _U // 2),
     ("#wool_carpets", 1 + _U // 3), ("dried_kelp_block", 1 + _U * 20),
     ("crossbow", _U * 3 // 2), ("bamboo", _U // 4),

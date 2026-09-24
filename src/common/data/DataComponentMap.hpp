@@ -55,6 +55,14 @@ namespace Game {
         // compare equal — see the guard in the .cpp.
         bool Equals(const DataComponentMap& other) const;
 
+        // MC DataComponentExactPredicate.test: every component in THIS map is
+        // present on the target with an equal value — the target's own
+        // override first, then `targetDefaults` (the item's prototype, MC's
+        // PatchedDataComponentMap fallback). A trade's cost ("a water
+        // bottle": potion_contents {potion: water}) is the one reader.
+        bool IsExactSubsetOf(const DataComponentMap& target,
+                             const DataComponentMap* targetDefaults) const;
+
         // ── Network codec — mirrors MC DataComponentPatch.STREAM_CODEC
         // (DataComponentPatch.java:31-106): VarInt addedCount, VarInt
         // removedCount, then per added entry (VarInt networkId, payload).

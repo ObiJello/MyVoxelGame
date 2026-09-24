@@ -131,6 +131,11 @@ namespace Server {
         
         // Send time update
         void SendTimeUpdate(uint64_t worldAge, uint64_t timeOfDay, bool doDaylightCycle);
+        // WorldRulesS2C: the immersive_portals and portal_gun switches, so a
+        // remote client's creative search and portal code agree with the host.
+        void SendWorldRules();
+        // ServerPausedS2C — the server's pause flag (IntegratedServer::IsPaused).
+        void SendServerPaused(bool paused);
         void SendCurrentTimeUpdate(); // reads live values from the server world
         
         // Send player abilities + game mode built from the live ServerPlayer
@@ -140,6 +145,30 @@ namespace Server {
         // ServerPlayer doesn't exist yet at this point, but the mode does —
         // see the definition for why this must NOT be a survival placeholder.
         void SendPlayerAbilitiesForJoin();
+
+        // ── /control tee ───────────────────────────────────────────────
+        // While this player is being controlled, the packets that describe
+        // what THEY see of themselves — inventory, containers, stats — are
+        // also sent to the controller's connection, so the controller's
+        // client holds the same inventory and draws the same screens. The
+        // mirror is a player id, resolved at send time through the session
+        // manager, so a controller that has left cannot be dangled into.
+        void SetMirrorPlayerId(uint32_t playerId) { m_mirrorPlayerId = playerId; }
+        uint32_t MirrorPlayerId() const { return m_mirrorPlayerId; }
+        // Shadows NetworkConnection::SendPacket: same send, plus the tee
+        // for the mirrored packet ids.
+        void SendPacket(uint8_t packetId, const std::vector<uint8_t>& data,
+                        std::function<void()> onSent = {});
+
+        // /control relays. A ControlInputC2S from this connection goes to
+        // player `m_relayInputTo`'s connection, a ControlViewC2S to
+        // `m_relayViewTo`'s — INLINE on the network I/O thread, like the
+        // ping echo, never through the tick queue: bucketing a per-frame
+        // input or view stream into 20 Hz server ticks is a 50 ms stutter
+        // on both screens. Set by RemoteControlManager (server thread),
+        // read on the I/O thread; 0 = no relay.
+        void SetRelayInputTo(uint32_t playerId) { m_relayInputTo.store(playerId, std::memory_order_relaxed); }
+        void SetRelayViewTo(uint32_t playerId)  { m_relayViewTo.store(playerId, std::memory_order_relaxed); }
 
         // Authoritative teleport (matches MC's ServerGamePacketListenerImpl.teleport overload).
         // Increments awaiting-teleport id, snaps the player's ServerPlayer position, and sends
@@ -257,6 +286,10 @@ namespace Server {
         // Player information
         std::string m_playerName;
         uint32_t m_playerId = 0;
+        uint32_t m_mirrorPlayerId = 0;   // /control: the controller hearing this player's inventory
+        std::atomic<uint32_t> m_relayInputTo{0};   // /control: where this connection's input frames go
+        std::atomic<uint32_t> m_relayViewTo{0};    // /control: where this connection's view frames go
+        void RelayControl(uint8_t s2cPacketId, uint32_t toPlayerId, const std::vector<uint8_t>& payload);
         bool m_authenticated = false;
         // Stick-figure colour from the client's LoginStart (Game::PlayerColorId
         // value). Echoed in PlayerInfoS2C ADD broadcasts so other clients render

@@ -4,6 +4,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/Animal.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/data/DataComponents.hpp"
@@ -122,13 +123,14 @@ namespace Game {
     void TamableAnimal::Feed(ItemStack& held, float healingFactor,
                              float defaultHeal) {
         // MC TamableAnimal.feed: usePlayerItem (creative restore is
-        // HandleInteract's), then heal by nutrition * factor. playEatingSound
-        // waits on the sound system.
+        // HandleInteract's), then heal by nutrition * factor, then
+        // playEatingSound.
         const auto food = held.get(DataComponents::FOOD);
         held.count -= 1;
         if (held.count <= 0) held.Clear();
         m_tamableSelf->Heal(food ? healingFactor * static_cast<float>(food->nutrition)
                                  : defaultHeal);
+        if (auto* animal = dynamic_cast<Animal*>(m_tamableSelf)) animal->PlayEatingSound();
     }
 
     void TamableAnimal::BroadcastTamingResult(bool success) {

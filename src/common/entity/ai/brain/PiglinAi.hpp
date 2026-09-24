@@ -33,6 +33,13 @@ namespace Game {
 
         void UpdateActivity(Piglin& piglin);
 
+        // MC PiglinAi.getSoundForCurrentActivity — the voice the piglin's
+        // current activity calls for ("" with no activity): ANGRY fighting,
+        // RETREAT fleeing something within 12 blocks, ADMIRING_ITEM,
+        // CELEBRATE, else AMBIENT. (JEALOUS and the repellent RETREAT need
+        // the loved-item and repellent sensors, which are not ported.)
+        const char* SoundForCurrentActivity(const Piglin& piglin);
+
         // MC PiglinAi.wasHurtBy — the retaliate/flee/pack-anger switchboard.
         void WasHurtBy(EntityLevel& level, Piglin& piglin, LivingEntity& attacker);
 

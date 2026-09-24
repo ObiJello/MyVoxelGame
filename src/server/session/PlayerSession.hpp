@@ -1,11 +1,13 @@
 // File: src/server/session/PlayerSession.hpp
 #pragma once
+#include <deque>
 
 #include <set>
 #include "common/core/JavaRandom.hpp"               // Game::JavaRandom (loot rolls)
 #include "common/core/Log.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/BlockInteraction.hpp"  // Game::UseResult
+#include "common/world/block/entity/SignBlockEntity.hpp"  // Game::SignTextSlot
 #include "common/network/PacketTypes.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "../world/watch/ChunkTrackingView.hpp"
@@ -117,7 +119,7 @@ namespace Server {
         // === PLAYER STATE (delegated to ServerPlayer) ===
 
         // Update player position (from client packets) - delegates to ServerPlayer
-        void UpdatePosition(const glm::vec3& position, const glm::vec2& rotation);
+        void UpdatePosition(const glm::dvec3& position, const glm::vec2& rotation);
         
         // Update player's chunk position for view management
         void UpdateChunkPosition(Game::Math::ChunkPos newChunk);
@@ -216,15 +218,24 @@ namespace Server {
         // set, computed by IntegratedServer::ComputeChunkLoaders; the diff
         // against the previous union fires onEnter/onLeave with the chunk's
         // dimension. Nothing happens when the loader set is unchanged.
+        // onEnter fires for chunks entering the VISIBLE union (they are sent),
+        // onSimulationEnter for chunks entering only a Simulation loader (they
+        // are loaded, never sent), and onLeave for chunks leaving the visible
+        // union — with `stillLoaded` true when a Simulation loader still holds
+        // them — or leaving the simulation set entirely.
         void UpdateChunkTracking(
             std::vector<ChunkLoader> loaders,
             const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onEnter,
-            const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onLeave);
+            const std::function<void(Game::DimensionId, Game::Math::ChunkPos, bool stillLoaded)>& onLeave,
+            const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onSimulationEnter);
 
-        // Is (dimension, chunk) inside any of this session's loaders? This is
-        // the authority for "does this player care about chunk X" — there is
-        // no reverse index.
+        // Is (dimension, chunk) inside any of this session's VISIBLE loaders?
+        // This is the authority for "does this player see chunk X" — there is
+        // no reverse index. Chunks held only for simulation are not watched.
         bool IsWatching(Game::DimensionId dimension, Game::Math::ChunkPos chunk) const;
+        // Watched, or held loaded by a Simulation loader: the question chunk
+        // unloading asks.
+        bool KeepsLoaded(Game::DimensionId dimension, Game::Math::ChunkPos chunk) const;
         // The player's OWN dimension. Kept for the callers that only ever
         // meant "the world the player stands in".
         bool IsWatching(Game::Math::ChunkPos chunk) const {
@@ -303,8 +314,22 @@ namespace Server {
         void OnChunkRequestFull(Game::DimensionId dimension, Game::Math::ChunkPos pos);
         size_t GetUnchangedSentCount() const { return m_unchangedSent; }
         size_t m_unchangedSent = 0;
+        // [ChunkOrder] log: batches left to report after a tracking re-centre
+        // (teleport, dimension change, join) — see SendNextChunks.
+        int m_chunkOrderLogBatches = 0;
         float GetBatchQuota() const { return m_batchQuota; }
         int GetMaxUnackedBatches() const { return m_maxUnackedBatches; }
+
+        // Stress-report counters (ServerStressStats). Server thread only.
+        // Totals since join; the reporter differences them per second.
+        uint64_t GetChunksSentTotal() const { return m_statChunksSent; }
+        uint64_t GetChunkBytesSentTotal() const { return m_statChunkBytes; }
+        // Batch round trip: ChunkBatchFinished queued -> its ack applied.
+        // Network transit both ways, the send queue ahead of the batch and
+        // the client's own backlog — what a lagging remote player feels.
+        // Max and sum/count since the last TakeBatchRtt.
+        struct BatchRtt { double maxMs = 0.0, sumMs = 0.0; uint32_t count = 0; };
+        BatchRtt TakeBatchRtt() { BatchRtt r = m_batchRtt; m_batchRtt = {}; return r; }
 
         // Send unload packet for chunk
         void SendChunkUnload(Game::DimensionId dimension, Game::Math::ChunkPos chunk);
@@ -329,6 +354,28 @@ namespace Server {
         // by HandlePlayerMove before the position write).
         void UpdateMovementStats(const Network::PlayerMoveC2SPacket& packet);
         void HandleBlockAction(const Network::BlockActionC2SPacket& packet);
+        // The body of a finished dig (STOP_DESTROY / BREAK) once the packet
+        // has been validated: paired halves, container spill, the cell
+        // clear, exhaustion, loot and XP. `oldBlock`/`oldBlockState` are
+        // what stood at `pos` — from the packet for the dug block (the
+        // client's prediction has already cleared a shared world) and from
+        // the world for the extra blocks of a vein.
+        void DestroyBlockAsPlayer(Game::World* world, const glm::ivec3& pos,
+                                  Game::BlockID oldBlock, Game::BlockState oldBlockState,
+                                  bool creativeBreak);
+        // Vein mine, capped by the vein_mine_max_blocks rule. The cluster of
+        // `kind` touching `origin` (26-neighbourhood) is counted first:
+        //   • it fits under the cap  -> the whole cluster goes (a vein);
+        //   • it is bigger           -> it is a mass, not a vein, and the
+        //     mine becomes a tunnel: a kVeinTunnelSize-square cross-section
+        //     centred on the origin, driven into the dug face (`face`,
+        //     RaycastHit::hitFace order) one layer at a time until the cap
+        //     is reached or a layer holds none of `kind`.
+        // Every block goes through DestroyBlockAsPlayer, so it drops and
+        // pays XP exactly as if dug by hand.
+        static constexpr int kVeinTunnelSize = 5;
+        void VeinMineFrom(Game::World* world, const glm::ivec3& origin,
+                          Game::BlockID kind, uint8_t face, bool creativeBreak);
         void HandleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
         // Use item in air — mirrors ServerGamePacketListenerImpl.handleUseItem
         // (ServerGamePacketListenerImpl.java:1329-1354) + the useItem game-mode
@@ -351,6 +398,11 @@ namespace Server {
 
         // Send full 46-slot inventory snapshot to this player's client.
         void SendInventoryFull();
+        // /control: the whole container to the controller's connection only.
+        // The normal click path sends the controlled client just what it
+        // predicted wrong — nothing at all for a correct prediction — so the
+        // mirror, which never clicks, would only ever hear about mistakes.
+        void SendInventoryFullToMirror();
 
         // The `Item.use` dispatch for one hand — mirrors
         // ServerPlayerGameMode.useItem (ServerPlayerGameMode.java:290-327):
@@ -409,6 +461,11 @@ namespace Server {
         // IUsePlayer::OpenMenu). Called right after the dispatch returns, so the
         // screen appears on the same packet round as the interaction ack.
         void FlushPendingMenuOpen();
+        // MC ContainerOpenersCounter.hasContainerOpen for a player: whether
+        // this player's open chest menu covers the chest at `pos` in `world`
+        // (either half of a double). Spectators never count. What a chest's
+        // opener recheck counts — see ChestBlockEntity::RecheckOpen.
+        bool HasChestOpenAt(const Game::World* world, const glm::ivec3& pos) const;
         // Drop what a CreateFilledResult could not fit in the inventory
         // (MC player.drop inside ItemUtils.createFilledResult).
         void FlushPendingDrops();
@@ -418,11 +475,62 @@ namespace Server {
         // returns, alongside FlushPendingMenuOpen and for the same reason.
         void FlushPendingCampfireFood();
 
+        // ── Beds / sleeping ───────────────────────────────────────────────
+        // A bed asked to be slept in — or, outside the Overworld, blew up —
+        // during use dispatch (IUsePlayer::UseBed). Drained right after the
+        // dispatch returns, with the two above.
+        void FlushPendingBedUse();
+        // A sign was clicked during use dispatch (IUsePlayer::OpenSignEditor /
+        // ApplySignItem). Drained with the others.
+        void FlushPendingSignUse();
+        // MC ServerGamePacketListenerImpl.handleSignUpdate → SignBlockEntity
+        // .updateSignText: the editor's four lines, from the one player the
+        // editor was opened for.
+        void HandleSignUpdate(const Network::SignUpdateC2SPacket& packet);
+        // MC ServerGamePacketListenerImpl.handleContainerButtonClick: a menu
+        // button (a lectern's page turn / page jump / Take Book) for the open
+        // menu, if the ids match and it is still valid.
+        void HandleContainerButtonClick(const Network::ContainerButtonClickC2SPacket& packet);
+        // MC ServerGamePacketListenerImpl.handleSelectTrade: a trade picked
+        // in the merchant screen — the hint for the result square, and the
+        // payments moved in from the inventory (MerchantMenu.tryMoveItems).
+        void HandleSelectTrade(const Network::SelectTradeC2SPacket& packet);
+        // A written book asked to be read during a use (IUsePlayer::
+        // OpenItemGui): MC ServerPlayer.openItemGui — resolve it, then
+        // OpenBookS2C. Drained right after HandleUseItem.
+        void FlushPendingBookOpen();
+        // MC ServerGamePacketListenerImpl.handleEditBook → updateBookContents
+        // / signBook: the book and quill's pages, or its signing.
+        void HandleEditBook(const Network::EditBookC2SPacket& packet);
+        // MC Inventory.add then Player.drop(stack, false) for what did not
+        // fit — how /loot give hands a player its items.
+        void GiveItem(const Game::ItemStack& stack);
+        // Forget the last-sent health / food / saturation / XP so the next
+        // tick sends them again (a /control mirror needs the current values,
+        // not the next change).
+        void ResendStats();
+        // MC SignBlock.openTextEdit + ServerPlayer.openTextEdit: mark this
+        // player as the sign's editor and open the editor on their client.
+        void OpenSignEditorAt(const glm::ivec3& pos, Game::SignTextSlot slot);
+        // MC ServerPlayer.stopSleepInBed(forcefulWakeUp, updateLevelList):
+        // out of the bed onto a stand-up cell facing it, OCCUPIED cleared on
+        // both halves, the client snapped there, every client told.
+        // `forcefulWakeUp` skips the fade-out (sleep counter 0 rather than
+        // 100); `updateLevelList` recounts the sleepers for the night skip.
+        void StopSleepInBed(bool forcefulWakeUp, bool updateLevelList);
+        // MC Player.displayClientMessage(text, actionBar=true) — the line
+        // above the hotbar — and sendSystemMessage — the chat.
+        void SendOverlayMessage(const std::string& text);
+        void SendSystemMessage(const std::string& text);
+
         // Push one block entity's current state to every watcher. Block
         // entities carry state the block id and state index cannot (chest
         // contents, campfire food), so a mutation that doesn't change the
-        // block is invisible to clients until this goes out.
-        void BroadcastBlockEntity(const glm::ivec3& pos, Game::BlockEntity* be);
+        // block is invisible to clients until this goes out. `world` is the
+        // world the block entity lives in; the send is scoped to its
+        // dimension and goes only to the sessions watching its chunk.
+        void BroadcastBlockEntity(const Game::World& world, const glm::ivec3& pos,
+                                  Game::BlockEntity* be);
 
         // Client block-prediction acknowledgement (MC
         // ServerGamePacketListenerImpl.ackBlockChangesUpTo). Interaction
@@ -515,12 +623,18 @@ namespace Server {
         // portal gun's shot travels its whole range before it lands, so a
         // gun impact may have come through a portal that far away.
         Game::World* InteractionWorld(int8_t packetDimension, const glm::ivec3& target,
-                                      glm::vec3& outEye, InteractionScope& scope,
+                                      glm::dvec3& outEye, InteractionScope& scope,
                                       double portalSearchRadius = 0.0);
         
         // View management getters
         Game::Math::ChunkPos GetChunkPosition() const { return m_currentChunk; }
         Game::Math::ChunkPos GetAnchorChunk() const { return m_anchorChunk; }
+        // /control: track chunks around another player's chunk instead of
+        // this player's own (MC ServerPlayer.tick's spectator-camera
+        // absSnapTo + chunkSource.move). Re-applied every tick by the
+        // control manager; ResetAnchor returns to the player's own chunk.
+        void FollowAnchor(Game::Math::ChunkPos chunk) { m_anchorChunk = chunk; }
+        void ResetAnchor() { m_anchorChunk = m_currentChunk; }
 
         
         int GetViewDistance() const { return m_viewDistance; }
@@ -541,11 +655,28 @@ namespace Server {
         // g_integratedServer null-dance at each site.
         ItemEntityManager* ItemEntitiesOrNull() const;
 
+        // MC ServerPlayer.startSleepInBed: the check chain (alive, in range,
+        // not obstructed, night, no monsters near), the respawn point, then
+        // LivingEntity.startSleeping. Problems go to the action bar.
+        void StartSleepInBed(const glm::ivec3& headPos);
+        // The per-tick half of MC Player.tick / LivingEntity.tick for a
+        // sleeper: up when the bed is gone, when hurt, or when it is bright.
+        void TickSleep();
+        // PlayerSleepS2C to every client (MC: SLEEPING_POS entity data or the
+        // WAKE_UP animation, to every tracker and the player itself).
+        void BroadcastSleepState();
+        // ServerPlayer::getDamageCounter when the sleep began: a change means
+        // a hit landed (MC LivingEntity.hurtServer → stopSleeping).
+        uint32_t m_sleepDamageCounter = 0;
+
         // Throw `stack` into the world from this player's hand, along their
         // look direction (MC LivingEntity.drop with thrownFromHand). Shared by
         // the Q keybind and the container THROW / click-outside paths. No-op on
         // an empty stack.
         void DropItemFromPlayer(const Game::ItemStack& stack);
+        // MC Player.dropEquipment + dropExperience on death: with
+        // keep_inventory off, every slot pops out and the XP is paid as orbs.
+        void DropInventoryOnDeath();
 
         // Spawn experience orbs in the world (MC Block.popExperience /
         // ExperienceOrb.award). No-op for amount <= 0 or before the server's
@@ -601,6 +732,9 @@ namespace Server {
         // ordinary enter path.
         std::vector<ChunkLoader> m_loaders;
         std::unordered_set<DimChunkKey, DimChunkKeyHash> m_watched;
+        // The Simulation loaders' union minus the watched set: chunks kept
+        // loaded for ticking that the client never receives.
+        std::unordered_set<DimChunkKey, DimChunkKeyHash> m_simulated;
 
         // Per-dimension send state. A client holds one level per dimension,
         // so "sent", "pending" and "what stamp does the client have" are
@@ -632,6 +766,11 @@ namespace Server {
         float m_batchQuota = 0.0f;
         int m_unackedBatches = 0;
         int m_maxUnackedBatches = 1;  // Bumps to 10 after first ack
+        // Stress-report counters (see GetChunksSentTotal).
+        uint64_t m_statChunksSent = 0;
+        uint64_t m_statChunkBytes = 0;
+        std::deque<std::chrono::steady_clock::time_point> m_batchSentAt;   // one per unacked batch, oldest first
+        BatchRtt m_batchRtt;
 
         // === DIFF MANAGEMENT ===
         std::unordered_map<Game::Math::ChunkPos, 
@@ -694,12 +833,44 @@ namespace Server {
         // Returns true when the menu was closed because its block vanished.
         bool CloseMenuIfBlockGone();
 
+        // ── Merchant menu (MenuType::Merchant) ───────────────────────────
+        // The trading mob, by entity id in the dimension it was opened in —
+        // the menu resolves it on every use, so it never holds a pointer.
+        int32_t  m_merchantEntityId  = -1;
+        int8_t   m_merchantDimension = 0;
+        uint32_t m_merchantOffersRevision = 0;
+        // MerchantMenu.stillValid (AbstractVillager.stillValid) each tick and
+        // before every click: the villager alive, still trading with this
+        // player, within reach. Closes the menu otherwise.
+        bool CloseMerchantMenuIfInvalid();
+        // MC Player.sendMerchantOffers.
+        void SendMerchantOffers();
+        // MC resendOffersToTradingPlayer: the villager's offers or level
+        // changed while the screen is open (AbstractVillager::OffersRevision).
+        void ResendMerchantOffersIfChanged();
+
+        // The chests whose lids this player's open menu is holding up (MC
+        // ChestMenu's container.startOpen / menu.removed → stopOpen): one, or
+        // both halves of a double. Recorded by position and world rather than
+        // by pointer — a close may come after a half was broken, and the
+        // lookup then simply finds nothing to stop.
+        void StartChestLids(const glm::ivec3& pos, const glm::ivec3* partnerPos);
+        void StopChestLids();
+        std::vector<glm::ivec3> m_openChestLids;
+        // The dimension whose WorldgenIdsS2C (/locate completion) this client
+        // last got; a sentinel no dimension has until the first send.
+        int m_worldgenIdsSentDimension = -128;
+        Game::World*            m_openChestLidsWorld = nullptr;
+
         // Last-sent stat triple for the SetHealthS2C dirty-check — mirrors
         // ServerPlayer.lastSentHealth / lastSentFood / lastSaturationLevel.
         // Health init -1e8 forces a send on the first PLAYING tick.
         float m_lastSentHealth     = -1.0e8f;
         int   m_lastSentFood       = -1;
         float m_lastSentSaturation = -1.0f;
+        float m_lastSentAbsorption = -1.0f;
+        int   m_lastSentHudFlags   = -1;
+        int   m_lastSentAir        = -100000;
 
         // XP dirty-check cache (MC ServerPlayer.lastSentExp) — impossible
         // starting values force the first PLAYING tick to sync.

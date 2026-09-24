@@ -102,7 +102,16 @@ namespace Network {
         // for its integrated server (Connection.isMemoryConnection, a Netty
         // LocalChannel); the closest equivalent here is a loopback socket,
         // where deflating would cost CPU to save bandwidth that is free.
+        //
+        // A RELAYED connection is never loopback, whatever its socket says: the
+        // host reaches a relayed friend by dialing out to the friends service,
+        // and a host that runs that service itself dials 127.0.0.1 — so a
+        // player across the country presented a loopback endpoint and got an
+        // UNCOMPRESSED stream over the internet (chunk data is several times
+        // its deflated size). NetworkServer::AdoptConnection marks them.
         bool IsLoopback() const;
+        void MarkRelayed() { m_relayed.store(true, std::memory_order_relaxed); }
+        bool IsRelayed() const { return m_relayed.load(std::memory_order_relaxed); }
         void SendPacket(const RawPacket& packet);
 
         // Queue a frame BODY (VarInt packet id + payload). Length-prefixing and
@@ -206,6 +215,14 @@ namespace Network {
             std::atomic<uint64_t> bytesReceived{0};
             std::atomic<uint64_t> packetsSent{0};
             std::atomic<uint64_t> packetsReceived{0};
+            // Bytes that actually left through the socket (after framing and
+            // compression) — bytesSent above counts uncompressed bodies at
+            // enqueue time.
+            std::atomic<uint64_t> wireBytesSent{0};
+            // Uncompressed body bytes queued or in flight: how far behind the
+            // socket this connection's sender is. Head-of-line delay for
+            // anything queued now is roughly this over the link's rate.
+            std::atomic<uint64_t> pendingSendBytes{0};
             std::chrono::steady_clock::time_point connectedTime;
         };
         
@@ -293,6 +310,7 @@ namespace Network {
             std::vector<uint8_t> data;
             std::function<void()> onSent;
         };
+        std::atomic<bool> m_relayed{false};   // see IsLoopback
         std::deque<PendingSend> m_sendQueue;
         bool m_sending = false;
         

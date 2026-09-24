@@ -1,5 +1,6 @@
 // File: src/server/commands/PortalCommand.cpp
 #include "common/core/Features.hpp"
+#include "common/world/portal/PortalFamily.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 
 #include "PortalCommand.hpp"
@@ -55,6 +56,9 @@ namespace Server {
             if (k == "overworld" || k == "0")                        { out = Game::DimensionId::Overworld; return true; }
             if (k == "nether" || k == "the_nether" || k == "-1")     { out = Game::DimensionId::Nether;    return true; }
             if (k == "end" || k == "the_end" || k == "1")            { out = Game::DimensionId::End;       return true; }
+            if (k == "hush" || k == "the_hush" || k == "2")          { out = Game::DimensionId::Hush;      return true; }
+            if (k == "twilight" || k == "twilight_forest" || k == "3") { out = Game::DimensionId::TwilightForest; return true; }
+            if (k == "aether" || k == "the_aether" || k == "4")      { out = Game::DimensionId::Aether;    return true; }
             return false;
         }
 
@@ -179,10 +183,11 @@ namespace Server {
         dispatcher.RegisterCommand("scale",  PortalCommand::ExecuteScale);
     }
 
-    void PortalCommand::ExecuteScale(ServerPlayer& sender,
+    void PortalCommand::ExecuteScale(const CommandSourceStack& source,
                                      const std::vector<std::string>& args,
                                      ServerConnection& connection,
                                      PlayerSessionManager& sessionManager) {
+        ServerPlayer& sender = *source.sender;
         // /scale                  → you, back to 1
         // /scale <value>          → you
         // /scale <value> <player> → that player (@s is you)
@@ -273,10 +278,11 @@ namespace Server {
         connection.SendChatMessage(buf, 1);
     }
 
-    void PortalCommand::Execute(ServerPlayer& sender,
+    void PortalCommand::Execute(const CommandSourceStack& source,
                                 const std::vector<std::string>& args,
                                 ServerConnection& connection,
                                 PlayerSessionManager& /*sessionManager*/) {
+        ServerPlayer& sender = *source.sender;
         if (!g_integratedServer || !g_integratedServer->ImmersivePortals()) {
             connection.SendChatMessage("Immersive portals are not available", 1);
             return;
@@ -440,8 +446,8 @@ namespace Server {
             const Portal* target = NearestPortal(registry, sender, here);
             if (!target) { connection.SendChatMessage("No portal nearby", 1); return; }
             if (target->IsMirror()) { connection.SendChatMessage("A mirror has no rotation", 1); return; }
-            if (target->kind == Game::Immersive::PortalKind::NetherPortal) {
-                connection.SendChatMessage("A nether portal's surface is its obsidian frame; it cannot be rotated. Use a /portal make_full portal.", 1);
+            if (Game::FamilyOfKind(target->kind)) {
+                connection.SendChatMessage("A frame portal's surface is its frame; it cannot be rotated. Use a /portal make_full portal.", 1);
                 return;
             }
             Portal edited = *target;
@@ -465,13 +471,13 @@ namespace Server {
             const Portal* target = NearestPortal(registry, sender, here);
             if (!target) { connection.SendChatMessage("No portal nearby", 1); return; }
             if (target->IsMirror()) { connection.SendChatMessage("A mirror has no scale", 1); return; }
-            // A nether portal's surfaces ARE its two obsidian frames; a scale
-            // set by hand leaves one surface the wrong size for its frame
-            // (and the integrity sweep then removes the cluster). Its scale
-            // comes from the frames: light a 2x3 with a 4x6 waiting at the
-            // far side and the link is made at scale 2.
-            if (target->kind == Game::Immersive::PortalKind::NetherPortal) {
-                connection.SendChatMessage("A nether portal's scale comes from its frames: build the far frame N times larger (a 2x3 here, a 4x6 there) and light it. Use a /portal make_full portal to scale by command.", 1);
+            // A frame portal's (nether, hush) surfaces ARE its two frames; a
+            // scale set by hand leaves one surface the wrong size for its
+            // frame (and the integrity sweep then removes the cluster). Its
+            // scale comes from the frames: light a 2x3 with a 4x6 waiting at
+            // the far side and the link is made at scale 2.
+            if (Game::FamilyOfKind(target->kind)) {
+                connection.SendChatMessage("A frame portal's scale comes from its frames: build the far frame N times larger (a 2x3 here, a 4x6 there) and light it. Use a /portal make_full portal to scale by command.", 1);
                 return;
             }
             Portal edited = *target;
@@ -510,17 +516,12 @@ namespace Server {
         }
         Game::DimensionId destDim;
         if (!ParseDimension(args[3], destDim)) {
-            connection.SendChatMessage("Dimension must be overworld, nether or end", 1);
+            connection.SendChatMessage("Dimension must be overworld, nether, end, hush, twilight or aether", 1);
             return;
         }
-        CommandSource source;
-        source.sender    = &sender;
-        source.position  = sender.getPosition();
-        source.dimension = here;
-        CommandRotation rot{ sender.getYaw(), sender.getPitch() };
         glm::dvec3 dest;
         std::string error;
-        if (!ParseVec3(args[4], args[5], args[6], source, rot, dest, error)) {
+        if (!ParseVec3(args[4], args[5], args[6], source, source.rotation, dest, error)) {
             connection.SendChatMessage(error, 1);
             return;
         }

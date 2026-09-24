@@ -8,6 +8,8 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/spawn/SpawnPlacements.hpp"
+#include "common/world/level/HushStillnessRules.hpp"
+#include "common/sound/EntitySounds.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -196,6 +198,7 @@ namespace Game {
                 velocity.z *= 0.6;
             }
             SetLastHurtMob(&target);
+            PlayAttackSound();   // MC Mob.doHurtTarget → playAttackSound
         }
         return hit;
     }
@@ -212,6 +215,28 @@ namespace Game {
 
     void Mob::ServerAiStep() {
         PROFILE_ZONE_N("Mob.ServerAiStep");
+
+        // A mob built with NoAiTag has no sensing, no navigation and no
+        // controls — MC's LivingEntity.serverAiStep is empty for such an
+        // entity (the armor stand), and the primed TNT and falling block
+        // never reach here because they tick without LivingEntity's AiStep.
+        // The armor stand does take LivingEntity's tick (gravity, fire, the
+        // hurt clocks) and so arrives here with nothing to run.
+        if (!m_sensing) return;
+
+        // The Hush's stillness: the whole AI step is skipped and the mob held
+        // where it stands; its path, goals and target are kept for when the
+        // stillness lifts. Bosses are exempt. See HushStillnessRules.hpp.
+        if (m_level && m_level->IsStilled() && !HushStillnessRules::IsImmune(GetType())) {
+            HushStillnessRules::HoldStill(*this);
+            return;
+        }
+        // The Held Note (Mob::HoldByNote): the same hold, for one mob, for
+        // the few seconds the Chord rings in its ears.
+        if (m_heldUntil > 0 && m_level && IsHeldByNote(m_level->GetGameTime())) {
+            HushStillnessRules::HoldStill(*this);
+            return;
+        }
 
         // CATCH-ALL for Entity::HoldsEntityRefs. Individual goals cache their
         // own raw victim pointers (GuardianGoals, EndermanGoals, WitherGoals
@@ -270,6 +295,14 @@ namespace Game {
         if (m_bodyRotationControl) m_bodyRotationControl->ClientTick();
     }
 
+    int Mob::GetAmbientSoundInterval() const {
+        return EntitySoundsOf(GetType()).ambientInterval;
+    }
+
+    const char* Mob::GetAmbientSound() const {
+        return PickSound(EntitySoundsOf(GetType()).ambient, *this);
+    }
+
     void Mob::BaseTick() {
         LivingEntity::BaseTick();
 
@@ -282,16 +315,22 @@ namespace Game {
             m_lastHurtByPlayerId = -1;
         }
 
-        // Ambient sound cadence. No audio is emitted yet; the counter is kept
-        // so wiring a sound in later is one call and not a behaviour change.
+        // MC Mob.baseTick: the ambient cadence — each tick a 1-in-1000 roll
+        // against a counter that climbs from -interval, so a mob speaks
+        // every `interval` ticks give or take. Runs on both sides as in MC;
+        // the client mirror's makeSound is dropped by its level (the server's
+        // copy is the one everyone hears).
         if (IsAlive() && m_level) {
             if (m_level->Random().NextInt(1000) < m_ambientSoundTime++) {
-                m_ambientSoundTime = -GetAmbientSoundInterval();
+                ResetAmbientSoundTime();
+                PlayAmbientSound();
             }
         }
     }
 
     void Mob::Tick() {
+        PROFILE_ZONE_N("Mob.Tick");
+        { const std::string_view slug = TypeInfo().slug; PROFILE_ZONE_TEXT(slug.data(), slug.size()); }
         LivingEntity::Tick();
 
         // MC's `if (this.level().isClientSide()) this.setupAnimationStates();`,
@@ -333,6 +372,7 @@ namespace Game {
     }
 
     void Mob::AiStep() {
+        PROFILE_ZONE_N("Mob.AiStep");
         LivingEntity::AiStep();
         if (BurnsInDaylight()) BurnUndead();
 
@@ -432,12 +472,19 @@ namespace Game {
     }
 
     bool Mob::CheckSpawnObstruction(EntityLevel& level) const {
+        // MC Mob.checkSpawnObstruction: !containsAnyLiquid && isUnobstructed.
+        return !ContainsAnyLiquid(level) && IsUnobstructed(level);
+    }
+
+    bool Mob::ContainsAnyLiquid(EntityLevel& level) const {
+        // No block access means no answer; report liquid so a spawn test
+        // built on this refuses rather than passes.
         const IBlockAccess* blocks = level.Blocks();
-        if (!blocks) return false;
+        if (!blocks) return true;
 
         // MC LevelReader.containsAnyLiquid(getBoundingBox()) — any fluid block
-        // the box overlaps rejects the spawn. This is what keeps ON_GROUND
-        // mobs out of water even when the feet/head columns were dry.
+        // the box overlaps. This is what keeps ON_GROUND mobs out of water
+        // even when the feet/head columns were dry.
         const AABB box = GetAABB();
         const int minX = static_cast<int>(std::floor(box.min.x));
         const int maxX = static_cast<int>(std::ceil(box.max.x));
@@ -448,14 +495,18 @@ namespace Game {
         for (int x = minX; x < maxX; ++x) {
             for (int y = minY; y < maxY; ++y) {
                 for (int z = minZ; z < maxZ; ++z) {
-                    if (blocks->IsBlockFluid(x, y, z)) return false;
+                    if (blocks->IsBlockFluid(x, y, z)) return true;
                 }
             }
         }
+        return false;
+    }
 
+    bool Mob::IsUnobstructed(EntityLevel& level) const {
         // MC EntityGetter.isUnobstructed(this) — no other entity already
         // occupying the box. (MC filters on blocksBuilding, which is true for
         // every living entity — the ones this query returns.)
+        const AABB box = GetAABB();
         std::vector<Entity*> occupants;
         level.GetEntitiesInBox(box, this, occupants);
         for (const Entity* other : occupants) {

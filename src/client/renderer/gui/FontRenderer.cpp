@@ -102,11 +102,17 @@ namespace Render {
 
     int FontRenderer::GetStringWidth(const std::string& text) const {
         int width = 0;
+        bool bold = false;
         for (size_t i = 0; i < text.size(); i++) {
             unsigned char c = static_cast<unsigned char>(text[i]);
 
-            // Skip MC formatting codes (§ = UTF-8 C2 A7)
+            // MC formatting codes (§ = UTF-8 C2 A7): §l widens every glyph
+            // that follows by one (Font.width's bold advance), §r ends it;
+            // the rest take no space.
             if (c == 0xC2 && i + 1 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0xA7) {
+                const char code = i + 2 < text.size() ? text[i + 2] : '\0';
+                if (code == 'l' || code == 'L') bold = true;
+                else if (code == 'r' || code == 'R') bold = false;
                 i += 2; // Skip § + format code
                 continue;
             }
@@ -116,6 +122,7 @@ namespace Render {
                 continue;
             }
             width += m_glyphWidths[c] + 1; // +1 for inter-character spacing
+            if (bold) width += 1;
         }
         if (width > 0) width -= 1; // Remove trailing spacing
         return width;

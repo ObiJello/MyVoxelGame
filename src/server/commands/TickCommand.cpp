@@ -139,7 +139,7 @@ namespace Server {
 
     } // namespace
 
-    void TickCommand::Execute(ServerPlayer& /*sender*/,
+    void TickCommand::Execute(const CommandSourceStack& source,
                               const std::vector<std::string>& args,
                               ServerConnection& connection,
                               PlayerSessionManager& /*sessionManager*/) {

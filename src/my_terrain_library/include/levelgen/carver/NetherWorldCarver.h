@@ -43,7 +43,7 @@ public:
         CarvingMask& mask,
         core::BlockPos::MutableBlockPos& blockPos,
         core::BlockPos::MutableBlockPos& helperPos,
-        Aquifer* aquifer,
+        density::Aquifer* aquifer,
         bool& hasGrass
     ) override {
         (void)biomeGetter;

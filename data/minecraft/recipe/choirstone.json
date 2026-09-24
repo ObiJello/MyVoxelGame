@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "H": "minecraft:hushstone",
+    "E": "minecraft:echo_shard"
+  },
+  "pattern": [
+    "HHH",
+    "HEH",
+    "HHH"
+  ],
+  "result": {
+    "count": 8,
+    "id": "minecraft:choirstone"
+  }
+}

@@ -1,0 +1,251 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "bonus_rolls": 0.0,
+      "rolls": {
+        "type": "minecraft:uniform",
+        "min": 3.0,
+        "max": 5.0
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:note_block",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:resonant_chime",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 2.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:amethyst_shard",
+          "weight": 5,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 2.0,
+                "max": 6.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:goat_horn",
+          "weight": 2,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:bell",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:music_disc_13",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:music_disc_otherside",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:music_disc_relic",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:music_disc_5",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:disc_fragment_5",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:echo_shard",
+          "weight": 4,
+          "functions": [
+            {
+              "add": false,
+              "count": {
+                "type": "minecraft:uniform",
+                "min": 1.0,
+                "max": 3.0
+              },
+              "function": "minecraft:set_count"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:recall_chime",
+          "weight": 1,
+          "functions": [
+            {
+              "add": false,
+              "count": 1.0,
+              "function": "minecraft:set_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "bonus_rolls": 0.0,
+      "rolls": 1.0,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "The Four Voices"
+              },
+              "author": "Liesl of the Listeners",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "THE FOUR VOICES\n\nThe Chord is four\nparts sung as one.\nAurelith has a\ngate for each, and\neach gate a light\nthat stands into\nthe sky.",
+                "SOPRANO, north.\nThe high voice\nkeeps watch. Its\nbeam is the palest.\nThe Last\nProcession left\nthe city by it.",
+                "ALTO, east.\nThe warm voice\nwelcomes. Most\ntravellers come in\nunder its beam, and\nthe Arcade opens\nto meet them.",
+                "TENOR, south.\nThe bright voice\ncarries. Its beam\nreaches furthest;\nthe lighthouses on\nthe plains were\ntuned from it.",
+                "BASS, west.\nThe deep voice\nholds. Its beam is\nthe darkest and the\nsteadiest. In every\nchord the bass is\nthe floor the\nothers stand on.",
+                "Four statues face\nthe Heart, one for\neach voice. Their\nfaces are blank so\nanyone may sing in\nthem.",
+                "A chord is raised\nas a house is: the\nfloor first, the\nroof last. Deep,\nbright, warm, high.\nSung any other way\nit falls.",
+                "The Alto keeps the\nlamplighters' song:\nthe hearth, the\nriver, the Chord,\nthe hearth again.\nThe Hall's cabinet\nwas tuned to it.",
+                "The fourth voice\npoints down.\nIt always has."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:written_book",
+          "weight": 3,
+          "functions": [
+            {
+              "function": "minecraft:set_book_cover",
+              "title": {
+                "raw": "The Charter of Aurelith"
+              },
+              "author": "The First Conductor",
+              "generation": 0
+            },
+            {
+              "function": "minecraft:set_written_book_pages",
+              "pages": [
+                "THE CHARTER\nOF AURELITH\n\nSet down in the\nfirst year of the\nChord, over the\nspring that sings.",
+                "We came through the\ngates into a world\nwith no sound in it.\n\nHere a note does\nnot fade. Here we\nwill build a city\nthat never has to\nstop singing.",
+                "I. The Heart shall\nhold the Chord.\nWhile it holds, the\nlanterns burn, the\ncrystal grows and\nthe gates stay open.",
+                "II. Every voice is\na lantern. No one\nin Aurelith sings\nalone, and no one\nis made to be\nsilent.",
+                "III. Listen first.\nSpeak second. In\nthe Plaza of the\nHeld Note, speak\nnot at all.",
+                "IV. Four gates for\nfour voices:\nSoprano to the\nnorth, Alto to the\neast, Tenor to the\nsouth, Bass to the\nwest. Their lights\nshall stand so no\ntraveller is lost.",
+                "V. The river Vesper\nis the Chord's own\nwater. Drink of it,\nsail on it, and\nnever wall it in.",
+                "VI. The Wardens\nguard the gates and\nthe Heart. They\nanswer to the\nconductor alone.",
+                "VII. Should the\nChord ever fail,\nthe conductor alone\nmay call a Rest.\n\nA rest is not an\nending. It is the\nsilence the next\nnote needs.",
+                "Sung and set in\nstone, C. 1.\n\nWHAT IS SUNG IS\nNEVER LOST."
+              ],
+              "mode": "replace_all"
+            }
+          ]
+        },
+        {
+          "type": "minecraft:empty",
+          "weight": 2
+        }
+      ]
+    }
+  ],
+  "random_sequence": "minecraft:chests/aurelith_instruments"
+}

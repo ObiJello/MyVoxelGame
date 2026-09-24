@@ -52,8 +52,8 @@ namespace Game {
     // MC RandomStandGoal, verbatim: nextStand starts at minus the ambient
     // stand interval, canUse counts it up and past zero rolls
     // nextInt(1000) < nextStand, then (interval reset) a 1-in-10 for the
-    // actual rear. start() rears via standIfPossible. (The ambient stand
-    // sound waits on the sound system.)
+    // actual rear. start() rears via standIfPossible and voices the ambient
+    // stand sound.
     class RandomStandGoal : public Goal {
     public:
         explicit RandomStandGoal(AbstractHorse* horse);

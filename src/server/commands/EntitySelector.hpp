@@ -32,10 +32,11 @@
 #include <glm/glm.hpp>
 #include "common/world/level/DimensionId.hpp"
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-namespace Game { class Mob; }
+namespace Game { class Entity; class Mob; }
 
 namespace Server {
 
@@ -67,6 +68,10 @@ namespace Server {
         float      xRot = 0.0f;
         Game::AABB box{};
 
+        // The level the entity lives in (a player's session dimension; a mob
+        // or item, the level it was enumerated from). `/execute at` reads it.
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
+
         // MC's registry name without the namespace: "player", "item",
         // "zombie", … — what `type=` matches against.
         std::string typeSlug;
@@ -88,7 +93,40 @@ namespace Server {
         // silently searched the Overworld: `/kill @e` from the End cleared
         // the wrong world. Fill it from the sender's session.
         Game::DimensionId dimension = Game::DimensionId::Overworld;
+        // MC CommandSourceStack.entity — what `@s` resolves to. The sender
+        // for a plain command; `/execute as <targets>` swaps it for each
+        // target, which is how `/execute as @e[type=zombie] run tp @s ~ ~5 ~`
+        // moves the zombies and not the player. Empty = no entity (a console
+        // would be one; here every command has a sender, so it is empty only
+        // when a relation (`/execute on`) found nothing).
+        std::optional<SelectedEntity> entity;
+        // MC CommandSourceStack.anchor (EntityAnchorArgument.Anchor): FEET
+        // (false) or EYES. `^` local coordinates and `facing` start from it.
+        bool anchorEyes = false;
     };
+
+    // MC EntityAnchorArgument.Anchor.apply(CommandSourceStack): the source's
+    // position, raised by the entity's eye height when the anchor is EYES
+    // (an anchor without an entity is FEET whatever it says).
+    glm::dvec3 SourceAnchorPosition(const CommandSource& source);
+
+    // MC EntityAnchorArgument.Anchor.apply(Entity): the entity's own feet or
+    // eye position.
+    glm::dvec3 EntityAnchorPosition(const SelectedEntity& entity, bool eyes);
+
+    // Describe a live entity the way a selector would, so code that reaches
+    // an entity by some other route (`/execute on`, a summon) can hand it on
+    // as a command source. `entity` is a Mob or the server's player view;
+    // dropped items are not Entities here and cannot be described. Fails for
+    // an entity that is removed or no longer in `source.dimension`'s level.
+    bool DescribeEntity(Game::Entity* entity, const CommandSource& source, SelectedEntity& out);
+
+    // The sender's own SelectedEntity (what `@s` is for a plain command).
+    bool DescribePlayer(ServerPlayer& player, const CommandSource& source, SelectedEntity& out);
+
+    // Re-read a previously selected entity's live state (position, rotation,
+    // box) from its container. False when it is gone.
+    bool RefreshSelectedEntity(const CommandSource& source, SelectedEntity& entity);
 
     // MC EntityArgument's four flavours. They differ in two ways: whether more
     // than one result is allowed, and whether non-players may be returned at
@@ -99,6 +137,10 @@ namespace Server {
         Entities,   // EntityArgument.entities() — one or more, any type
         Player,     // EntityArgument.player()   — exactly one player
         Players,    // EntityArgument.players()  — one or more players
+        // EntityArgument.getOptionalEntities — any number INCLUDING zero.
+        // What `/execute as|at|if entity` reads: a selector that matches
+        // nothing forks into nothing rather than failing the command.
+        OptionalEntities,
     };
 
     // Parse `token` and resolve it against the live world.

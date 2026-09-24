@@ -7,6 +7,7 @@
 #include "../backend/vulkan/VKBackend.hpp"
 #endif
 #include "../environment/EnvironmentState.hpp"
+#include "../environment/EntityEnvironment.hpp"
 #include "../core/Vertex.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -226,6 +227,16 @@ namespace Render {
         // on the pose stack before renderHandsWithItems touches it.
         //
         // Both angles arrive pre-multiplied by MC's 0.1 factor.
+        void applySwayTransform(glm::mat4& m, float swayPitchDeg, float swayYawDeg);
+    }
+
+    void HeldItemRenderer::OnViewRewritten(float deltaPitchDeg, float deltaYawDeg) {
+        if (m_firstTick) return;   // the first Tick snaps to the view anyway
+        m_xBob += deltaPitchDeg;  m_xBobPrev += deltaPitchDeg;
+        m_yBob += deltaYawDeg;    m_yBobPrev += deltaYawDeg;
+    }
+
+    namespace {
         void applySwayTransform(glm::mat4& m, float swayPitchDeg, float swayYawDeg) {
             m = glm::rotate(m, glm::radians(swayPitchDeg), {1, 0, 0});
             m = glm::rotate(m, glm::radians(swayYawDeg),   {0, 1, 0});
@@ -427,6 +438,11 @@ namespace Render {
         }
     }
 
+    glm::vec3 HeldItemRenderer::HandLight() const {
+        if (!m_hasLightProbe) return glm::vec3(EntityEnvironment::Lit());
+        return EntityEnvironment::LitAt(m_lightProbe);
+    }
+
     void HeldItemRenderer::Render(float aspect, float partialTick,
                                   float walkDistance,
                                   float viewPitchDeg, float viewYawDeg,
@@ -572,7 +588,13 @@ namespace Render {
             // the damage tilt and the death spin carry the hand with them. The
             // hand's own transform is already in view space, so the tilt slots
             // in exactly where the view matrix would be.
-            beRenderer->RenderBEWLR(item.blockId, projBE * m_viewTilt * modelBE);
+            // MC lights the hand from the lightmap (night, night vision and
+            // the Darkness pulse all reach it) but never fogs it — the same
+            // environment the block-item path below takes.
+            BEWLRLight light;
+            light.world = false;
+            light.light = HandLight();
+            beRenderer->RenderBEWLR(item.blockId, projBE * m_viewTilt * modelBE, light);
             return;
         }
 
@@ -606,18 +628,16 @@ namespace Render {
             // Items can have either a layer0 (single-frame) or a
             // selectable sprite (compass/clock); fall back to layer0
             // for now — the dynamic frame selectors are GUI-only.
-            std::string name = item.spriteName;
-            if (name.empty() && !item.spriteFrames.empty()) name = item.spriteFrames[0];
-            if (name.empty() && !item.spriteLayers.empty()) name = item.spriteLayers[0];
-            if (name.empty()) return;
-
-            // Layer-0 tint from assets/items/{slug}.json. Plant sprites are
-            // greyscale in vanilla and get their colour from here — without it
-            // a bush or fern renders grey. The GUI icon path already applies
-            // the same value (GuiGraphics), so this keeps the two agreeing.
-            const uint32_t spriteTint =
-                item.layerTints.empty() ? 0u : item.layerTints[0];
-            const auto* entry = HeldItemSpriteMesh::GetOrBuild(name, spriteTint);
+            //
+            // Every layer, each with its tint from assets/items/{slug}.json —
+            // plant sprites are greyscale and coloured by it, spawn eggs are
+            // a tinted base under tinted spots — the same composition the GUI
+            // icon draws (GuiGraphics). The hand carries only the item id, so
+            // per-stack tints (a potion's contents) read as the JSON default.
+            Game::ItemStack shown;
+            shown.itemId = hs.displayed;
+            shown.count  = 1;
+            const auto* entry = HeldItemSpriteMesh::GetOrBuildForStack(shown);
             if (!entry) return;
             mesh       = entry->mesh;
             indexCount = entry->indexCount;
@@ -774,11 +794,11 @@ namespace Render {
         // drawn in view space, so world-space fog math is meaningless here:
         // uFogColor alpha 0 makes the fog mix a no-op (fogValue is
         // multiplied by it), and the distances are pushed out of reach.
-        // Sky brightness IS applied so the held item dims at night with the
-        // terrain, like MC's lightmap-lit viewmodel. Without these the GL
-        // uniforms default to 0 → the item would render black.
-        g_renderBackend->SetUniformFloat(m_shader, "uSkyBrightness",
-            EnvironmentState::Get().Frame().skyBrightness);
+        // The lightmap colour at the player's eye IS applied (MC's
+        // lightmap-lit viewmodel: a torch-lit cave lights the hand warm, the
+        // night dims it). Without these the GL uniforms default to 0 → the
+        // item would render black.
+        EntityEnvironment::SetDrawLight(m_shader, HandLight());
         g_renderBackend->SetUniformVec4 (m_shader, "uFogColor", glm::vec4(0.0f));
         g_renderBackend->SetUniformVec4 (m_shader, "uFogEnv",
             glm::vec4(1e9f, 1e9f, 1e9f, 1e9f));

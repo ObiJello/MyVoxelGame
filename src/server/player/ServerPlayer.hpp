@@ -13,14 +13,20 @@
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/entity/Inventory.hpp"
+#include "common/entity/Morph.hpp"
 #include "common/inventory/InventoryMenu.hpp"
 #include "common/entity/IUsePlayer.hpp"
 #include "common/world/portal/PortalState.hpp"
+#include "common/entity/effect/MobEffects.hpp"
 #include "FoodData.hpp"
 #include "PlayerExperience.hpp"
+#include "common/core/JavaRandom.hpp"
+#include "common/sound/PlayerMovementSounds.hpp"
 
 namespace Game {
     class World;
+    class Entity;
+    class LivingEntity;
 }
 
 namespace Server {
@@ -46,8 +52,12 @@ namespace Server {
     // Damage sources for future implementation
     enum class DamageSource {
         GENERIC,
+        // MC DamageTypes.GENERIC_KILL — /kill. In BYPASSES_INVULNERABILITY,
+        // so creative and the hurt cooldown do not stop it.
+        GENERIC_KILL,
         FALL,
         FIRE,
+        LAVA,       // MC DamageTypes.LAVA — swimming in it
         DROWNING,
         STARVATION,
         VOID_DAMAGE,
@@ -61,6 +71,9 @@ namespace Server {
         FALLING_ANVIL,
         FALLING_STALACTITE,
         STALAGMITE,
+        // MC DamageTypes.WITHER — the WITHER effect's tick (armor-bypassing
+        // like MAGIC, but its own death message).
+        WITHER,
     };
 
     // MC CombatTracker.getDeathMessage + DamageSource.getLocalizedDeathMessage,
@@ -82,11 +95,20 @@ namespace Server {
         switch (source) {
             case DS::FALL:         return victim + " hit the ground too hard";
             case DS::FIRE:         return victim + " burned to death";
+            case DS::LAVA:         return victim + " tried to swim in lava";
             case DS::DROWNING:     return victim + " drowned";
             case DS::STARVATION:   return victim + " starved to death";
             case DS::VOID_DAMAGE:  return victim + " fell out of the world";
             case DS::EXPLOSION:    return victim + " blew up";
-            case DS::MAGIC:        return victim + " was killed by magic";
+            // MC death.attack.magic, or death.attack.indirectMagic when the
+            // magic has a causing entity (a witch's harming potion).
+            case DS::MAGIC:
+                if (!attackerName.empty()) {
+                    return victim + " was killed by " + attackerName + " using magic";
+                }
+                return victim + " was killed by magic";
+            case DS::WITHER:       return victim + " withered away";   // death.attack.wither
+            case DS::GENERIC_KILL: return victim + " was killed";   // death.attack.genericKill
             // MC death.attack.fallingBlock / fallingStalactite / stalagmite.
             case DS::FALLING_BLOCK:      return victim + " was squashed by a falling block";
             case DS::FALLING_ANVIL:      return victim + " was squashed by a falling anvil";
@@ -101,13 +123,6 @@ namespace Server {
             default:               return victim + " died";
         }
     }
-
-    // Status effect placeholder for future implementation
-    struct StatusEffect {
-        int effectId;
-        int duration;
-        int amplifier;
-    };
 
     // Server-side player entity representing authoritative gameplay state
     // This class owns all gameplay logic and state for a player
@@ -218,9 +233,16 @@ namespace Server {
         struct PendingMenuOpen {
             Game::MenuType type;
             glm::ivec3     pos;
+            // The trading mob for MenuType::Merchant (an entity-backed menu
+            // has no block position); -1 otherwise.
+            int32_t        entityId = -1;
         };
         void OpenMenu(Game::MenuType type, const glm::ivec3& pos) override {
-            m_pendingMenuOpen = PendingMenuOpen{type, pos};
+            m_pendingMenuOpen = PendingMenuOpen{type, pos, -1};
+        }
+        // MC Merchant.openTradingScreen → player.openMenu(MerchantMenu).
+        void OpenMerchantMenu(int32_t merchantEntityId) {
+            m_pendingMenuOpen = PendingMenuOpen{Game::MenuType::Merchant, glm::ivec3(0), merchantEntityId};
         }
         std::optional<PendingMenuOpen> takePendingMenuOpen() {
             auto pending = m_pendingMenuOpen;
@@ -249,6 +271,9 @@ namespace Server {
         // player.drop) for PlayerSession::FlushPendingDrops, which owns the
         // item-entity manager; the dispatch itself has no world.
         void CreateFilledResult(Game::ItemStack& held, const Game::ItemStack& filled) override;
+        // Queue an item the inventory could not take (MC player.drop) for
+        // PlayerSession::FlushPendingDrops.
+        void queuePendingDrop(const Game::ItemStack& stack) { m_pendingDrops.push_back(stack); }
         // Items to drop in front of the player once the dispatch returns.
         std::vector<Game::ItemStack> takePendingDrops() {
             std::vector<Game::ItemStack> out;
@@ -301,6 +326,10 @@ namespace Server {
         
         // Apply damage to player
         void damage(float amount, DamageSource source);
+        // MC LivingEntity.kill → hurtServer(genericKill, Float.MAX_VALUE).
+        // generic_kill BYPASSES_INVULNERABILITY: neither creative abilities
+        // nor the hurt cooldown stop it, only being dead already.
+        void kill();
         // Overload carrying the killer's display name, for the death message.
         // MC gets this from DamageSource.causingEntity via CombatTracker; we
         // have no combat tracker, so the caller passes it at the one site that
@@ -312,14 +341,83 @@ namespace Server {
         DamageSource       getLastDamageSource() const { return m_lastDamageSource; }
         const std::string& getLastAttackerName() const { return m_lastAttackerName; }
         
-        // Heal player
+        // Heal player — MC LivingEntity.heal: clamped to getMaxHealth().
         void heal(float amount);
-        
-        // Add status effect
-        void addEffect(const StatusEffect& effect);
-        
-        // Remove status effect
-        void removeEffect(int effectId);
+
+        // MC LivingEntity.getMaxHealth: the MAX_HEALTH attribute, 20 plus
+        // HEALTH_BOOST's +4 per level.
+        float getMaxHealth() const;
+        // MC Player's DATA_PLAYER_ABSORPTION_ID (the golden hearts). Set
+        // through the view (ABSORPTION's onEffectStarted); the damage path
+        // soaks hits with it first.
+        float getAbsorptionAmount() const { return m_absorptionAmount; }
+        void  setAbsorptionAmount(float v) { m_absorptionAmount = v < 0.0f ? 0.0f : v; }
+        // MC getMaxAbsorption — MAX_ABSORPTION, ABSORPTION's +4 per level.
+        float getMaxAbsorption() const;
+        // MC onAttributeUpdated for MAX_HEALTH / MAX_ABSORPTION: clamp health
+        // and absorption after an effect that raised them ends.
+        void clampToEffectMaxima();
+        // MC Attributes.SAFE_FALL_DISTANCE: 3 + JUMP_BOOST's +1 per level.
+        float getSafeFallDistance() const;
+        // MC LivingEntity.checkTotemDeathProtection — a totem of undying in
+        // either hand (main first) is spent to survive a killing blow that
+        // is not #bypasses_invulnerability. Called by damage() at 0 health.
+        bool checkTotemDeathProtection(DamageSource source);
+        // MC Player.getLuck — the LUCK attribute: base 0, LUCK +1 and UNLUCK
+        // -1 per level. Read by container loot (LootParams.withLuck).
+        float getLuck() const;
+        // MC Attributes.ATTACK_DAMAGE: the base 1.0 plus the held weapon's
+        // modifier, then STRENGTH (+3/level) and WEAKNESS (-4/level).
+        float getAttackDamage(float itemDamage) const;
+        // MC Player.isMobilityRestricted — BLINDNESS (no sprint, no crits).
+        bool isMobilityRestricted() const { return hasEffect(Game::MobEffectId::Blindness); }
+
+        // ── Status effects (MC LivingEntity.activeEffects, on the player) ──
+        //
+        // The list LIVES here — the ServerPlayer is what survives a dimension
+        // change and what is saved (playerdata "active_effects") — but every
+        // MC hook runs through the player's PlayerEntityView, the
+        // LivingEntity whose EffectStorage() is this list: its AddEffect is
+        // MC's addEffect (update rules, onEffectStarted, attribute modifiers,
+        // the UpdateMobEffect packet), its TickEffects MC's tickEffects.
+        // These helpers route there; they return false when the player has
+        // no live view (between levels), which no gameplay path hits.
+        std::vector<Game::MobEffectInstance>&       activeEffects()       { return m_activeEffects; }
+        const std::vector<Game::MobEffectInstance>& activeEffects() const { return m_activeEffects; }
+        bool hasEffect(Game::MobEffectId id) const { return Game::HasEffectIn(m_activeEffects, id); }
+        const Game::MobEffectInstance* getEffect(Game::MobEffectId id) const {
+            return Game::FindEffectIn(m_activeEffects, id);
+        }
+        // The live view (MC: the player IS this LivingEntity). Null between levels.
+        Game::LivingEntity* effectEntity() const;
+        bool addEffect(const Game::MobEffectInstance& effect, Game::Entity* source = nullptr);
+        bool removeEffect(Game::MobEffectId id);
+        bool removeAllEffects();
+
+        // MC ServerPlayer.onEffectAdded / onEffectUpdated / onEffectsRemoved's
+        // packet halves: ClientboundUpdateMobEffectPacket(id, effect, blend)
+        // and ClientboundRemoveMobEffectPacket to this player's connection.
+        void sendEffectUpdate(const Game::MobEffectInstance& effect, bool blend) const;
+        void sendEffectRemove(Game::MobEffectId id) const;
+        // MC PlayerList.sendActivePlayerEffects — every active effect,
+        // blend=false, on join and on a level change.
+        void sendAllEffects() const;
+
+        // ── Armor (MC LivingEntity.getArmorValue / the ARMOR attribute) ──
+        // Summed from the four armor slots' pieces (GeneratedItemAttributes'
+        // ArmorMaterial rows). Read by damage() for the sources armor
+        // applies to; the HUD reads the same sum off the client's inventory.
+        float getArmorValue() const;
+        float getArmorToughness() const;
+        // MC DamageTypeTags.BYPASSES_ARMOR, on this port's sources.
+        static bool bypassesArmor(DamageSource source);
+
+        // /gamerule shared_vitals: this player takes the pool's values. A
+        // drop in health is a hit (the hurt flash and cooldown, as damage()
+        // gives them); a pool at zero kills, with the source and killer of
+        // whoever brought it there so the death message reads right.
+        void applySharedVitals(float health, int foodLevel, float saturation, float exhaustion,
+                               DamageSource deathSource, const std::string& deathAttacker);
         
         // === ABILITIES ===
         
@@ -340,14 +438,30 @@ namespace Server {
         
         // Check if player can reach position
         bool canReach(const glm::vec3& pos) const;
-        // The reach canReach tests against, for callers that measure from a
-        // different eye (a portal's image of it).
-        float getReachDistance() const { return m_reachDistance; }
+        // MC Player.blockInteractionRange: the BLOCK_INTERACTION_RANGE
+        // attribute — 4.5 by default, +0.5 in creative (ServerPlayer's
+        // CREATIVE_BLOCK_INTERACTION_RANGE_MODIFIER). For callers that
+        // measure from a different eye (a portal's image of it).
+        float getReachDistance() const {
+            return m_reachDistance + (m_gameMode == GameMode::CREATIVE ? 0.5f : 0.0f);
+        }
+        // MC Player.isWithinBlockInteractionRange(pos, buffer): the distance
+        // from `eye` to the nearest point ON the block's box, against reach
+        // plus `buffer`. The break handler passes 1.0 — that slack is what
+        // lets a block whose FACE is in reach but whose centre is not be
+        // broken; measuring to the centre instead is what made a dig at
+        // the edge of reach snap back a moment later.
+        bool isWithinBlockInteractionRange(const glm::dvec3& eye, const glm::ivec3& pos,
+                                           double buffer) const;
+        // The same test from this player's own eye, with MC's 1.0 buffer —
+        // what handleBlockBreakAction and handleUseItemOn both apply.
+        bool canReachBlock(const glm::ivec3& pos) const;
         
         // === GETTERS ===
         
         uint32_t getPlayerId() const { return m_playerId; }
         const std::string& getName() const { return m_name; }
+        std::string getPlainTextName() const override { return m_name; }
         void setName(const std::string& name) { m_name = name; }
         // Stick-figure colour id (Game::PlayerColorId raw value). Set from the
         // client's LoginStart packet at join time; broadcast in PlayerInfoS2C ADD
@@ -361,7 +475,28 @@ namespace Server {
         const glm::vec2& getRotation() const { return m_rotation; }
         
         int getDimensionId() const override { return m_dimensionId; }
-        void setDimensionId(int id) { m_dimensionId = id; }
+        void setDimensionId(int id) {
+            if (id != m_dimensionId) ++m_dimensionEpoch;
+            m_dimensionId = id;
+        }
+
+        // Bumped on every dimension change. A level's PlayerEntityView
+        // records it when built: a view whose number is behind was left
+        // over from an earlier visit (a level nobody stands in is not
+        // ticked, so SyncPlayerViews never got to drop it) and must be
+        // rebuilt, not resumed — MC recreates the entity on every change.
+        uint32_t getDimensionEpoch() const { return m_dimensionEpoch; }
+
+        // MC ServerPlayer.isChangingDimension: set by a cross-dimension
+        // teleport (PortalTravel), cleared by the client's ack of the
+        // position packet that went with it (ServerConnection::
+        // AcceptTeleportation = MC handleAcceptTeleportPacket ->
+        // hasChangedDimension). While set, the portal cooldown does not run
+        // (MC ServerPlayer.processPortalCooldown), so the hand-off's network
+        // round trip is not spent out of the arrival cooldown.
+        bool isChangingDimension() const { return m_changingDimension; }
+        void setChangingDimension()      { m_changingDimension = true; }
+        void hasChangedDimension()       { m_changingDimension = false; }
 
         // MC Entity.restoreFrom (Entity.java:3008-3009): the entity rebuilt in
         // the destination level inherits `portalCooldown` and `portalProcess`
@@ -405,6 +540,16 @@ namespace Server {
         PlayerExperience&       getExperience()       { return m_experience; }
         const PlayerExperience& getExperience() const { return m_experience; }
 
+        // ── Sound ────────────────────────────────────────────────────────
+        // The replay of this player's reported movement that other players
+        // hear (footsteps, swimming, splashes — PlayerSession::
+        // UpdateMovementStats), and the random their pitches come from (MC
+        // Entity.random). The Game::World this player stands in, for the
+        // sounds ServerPlayer plays itself (hurt, death, level-up, equip).
+        Game::PlayerMovementSounds& movementSounds() { return m_movementSounds; }
+        Game::JavaRandom&           soundRandom()    { return m_soundRandom; }
+        Game::World*                soundWorld() const;
+
         // Mirrors Player.canEat(canAlwaysEat) — canAlwaysEat || needsFood().
         bool canEat(bool canAlwaysEat) const {
             return canAlwaysEat || m_foodData.needsFood();
@@ -417,7 +562,22 @@ namespace Server {
         // body's box all follow it.
         float getScale() const { return m_scale; }
         void  setScale(float scale) { m_scale = std::clamp(scale, 0.05f, 32.0f); }
-        float getEyeHeight() const { return 1.62f * m_scale; }
+        // /invisible: other clients draw neither this player's body nor
+        // their name tag (broadcast on every PlayerUpdateS2C). Session
+        // state, not saved.
+        bool  isInvisible() const { return m_invisible; }
+        void  setInvisible(bool on) { m_invisible = on; }
+        // /morph: what other clients draw in place of this player and whose
+        // body this player takes (Game::Morph code; kNone = none), plus a
+        // mob's walking speed. Rides every PlayerUpdateS2C and the
+        // abilities packet. Session state, not saved.
+        uint32_t getMorph()      const { return m_morph; }
+        float    getMorphSpeed() const { return m_morphSpeed; }
+        bool     isMorphed()     const { return !Game::Morph::IsNone(m_morph); }
+        void     setMorph(uint32_t code, float walkSpeed) { m_morph = code; m_morphSpeed = walkSpeed; m_morphAnim = 0; }
+        uint8_t  getMorphAnim() const { return m_morphAnim; }
+        void     setMorphAnim(uint8_t a) { m_morphAnim = a; }
+        float getEyeHeight() const { return Game::Morph::DimsOf(m_morph).eyeHeight * m_scale; }
 
         // Debug noclip. There is no vanilla equivalent — the flag exists so
         // the state survives a save and a rejoin, which is the only reason
@@ -436,6 +596,19 @@ namespace Server {
         
         bool isOnGround() const { return m_onGround; }
         void setOnGround(bool onGround) { m_onGround = onGround; }
+
+        // MC Entity.remainingFireTicks on the player: set by lava contact
+        // (Entity.lavaIgnite, 15 s), counted down and paid out at 1 damage
+        // per 20 ticks in tick(), put out by water. Not persisted or synced
+        // yet — the client has no burning overlay to show for it.
+        bool isOnFire() const { return m_remainingFireTicks > 0; }
+        int  getRemainingFireTicks() const { return m_remainingFireTicks; }
+        void setRemainingFireTicks(int ticks) { m_remainingFireTicks = ticks; }
+        void igniteForSeconds(float seconds) {
+            const int ticks = static_cast<int>(seconds * 20.0f);
+            if (ticks > m_remainingFireTicks) m_remainingFireTicks = ticks;
+        }
+        void clearFire() { m_remainingFireTicks = 0; }
 
         // MC Entity.isSprinting. Client-authoritative here (movement is), and
         // recorded because Player.canCriticalAttack excludes a sprinting
@@ -469,6 +642,100 @@ namespace Server {
         
         bool IsSneaking() const override { return m_sneaking; }
         void setSneaking(bool sneaking) { m_sneaking = sneaking; }
+
+        // ── Bed / sleeping (MC LivingEntity.sleepingPos, Player.sleepCounter) ──
+        //
+        // The bed's HEAD cell while asleep; its presence IS isSleeping(), as
+        // in MC. PlayerSession owns the transitions (StartSleepInBed /
+        // StopSleepInBed): they need the level, the connection and the other
+        // sessions, none of which the player has. tick() runs the counter.
+        bool isSleeping() const { return m_sleepingPos.has_value(); }
+        const std::optional<glm::ivec3>& getSleepingPos() const { return m_sleepingPos; }
+        void setSleepingPos(const glm::ivec3& bedPos) { m_sleepingPos = bedPos; }
+        void clearSleepingPos() { m_sleepingPos.reset(); }
+        // MC Player.getSleepTimer / isSleepingLongEnough (SLEEP_DURATION = 100).
+        int  getSleepTimer() const { return m_sleepCounter; }
+        void setSleepTimer(int ticks) { m_sleepCounter = ticks; }
+        bool isSleepingLongEnough() const { return isSleeping() && m_sleepCounter >= 100; }
+
+        // ── Respawn point (MC ServerPlayer.RespawnConfig over LevelData.RespawnData) ──
+        struct RespawnConfig {
+            int        dimensionId = 0;   // Game::DimensionToRaw
+            glm::ivec3 pos{0};            // the bed's head cell
+            float      yaw   = 0.0f;
+            float      pitch = 0.0f;
+            bool       forced = false;    // /spawnpoint sets it; a bed never does
+        };
+        const std::optional<RespawnConfig>& getRespawnConfig() const { return m_respawnConfig; }
+        // MC setRespawnPosition. Returns true when the POSITION changed — the
+        // one case MC shows "Respawn point set" for (RespawnConfig
+        // .isSamePosition); re-clicking your own bed says nothing.
+        bool setRespawnConfig(const std::optional<RespawnConfig>& config);
+
+        // ── The Hush: the last Hush gate crossed (docs/the-hush.md, recall
+        // chime). Where the player STOOD on arriving through a hush_portal —
+        // the far side's landing, in front of the gate — so the chime
+        // (server/items/HushItems) can send them back to it from anywhere,
+        // any dimension. Saved as `obey_hush_gate` (PlayerDataStore).
+        struct HushGateMark {
+            int        dimensionId = 0;   // Game::DimensionToRaw
+            glm::dvec3 pos{0.0};
+            float      yaw = 0.0f;
+        };
+        const std::optional<HushGateMark>& getLastHushGate() const { return m_lastHushGate; }
+        void setLastHushGate(const std::optional<HushGateMark>& mark) { m_lastHushGate = mark; }
+
+        // ── IUsePlayer: pending sign requests ────────────────────────────
+        // A sign was clicked during use dispatch: an empty hand asks for the
+        // editor (SignBlock.openTextEdit), a dye / ink / honeycomb asks to be
+        // applied. The block entity and the connection are PlayerSession's,
+        // so both are recorded here and drained right after the dispatch.
+        struct PendingSignUse {
+            glm::ivec3 pos;
+            bool       applyItem;   // false: open the editor
+            uint32_t   hand;
+        };
+        void OpenSignEditor(const glm::ivec3& pos) override {
+            m_pendingSignUse = PendingSignUse{pos, false, 0};
+        }
+        void ApplySignItem(const glm::ivec3& pos, uint32_t hand) override {
+            m_pendingSignUse = PendingSignUse{pos, true, hand};
+        }
+        std::optional<PendingSignUse> takePendingSignUse() {
+            auto pending = m_pendingSignUse;
+            m_pendingSignUse.reset();
+            return pending;
+        }
+
+        // ── IUsePlayer: pending book open ─────────────────────────────────
+        // MC ServerPlayer.openItemGui: a written book was used. The resolve
+        // and the OpenBookS2C need the connection, so the hand is recorded
+        // here and PlayerSession::FlushPendingBookOpen does the rest right
+        // after the use dispatch returns.
+        void OpenItemGui(Game::ItemStack& stack, uint32_t hand) override;
+        std::optional<uint32_t> takePendingBookOpen() {
+            auto pending = m_pendingBookOpen;
+            m_pendingBookOpen.reset();
+            return pending;
+        }
+
+        // ── IUsePlayer: pending bed use ───────────────────────────────────
+        // A bed was right-clicked during use dispatch (IUsePlayer::UseBed).
+        // Recorded for the same reason as the menu request: the sleep checks
+        // read the level and the monsters, the blast needs the level, and
+        // the answer goes out on the connection — all PlayerSession's.
+        struct PendingBedUse {
+            glm::ivec3 headPos;
+            bool       destroyOnUse;
+        };
+        void UseBed(const glm::ivec3& headPos, bool destroyOnUse) override {
+            m_pendingBedUse = PendingBedUse{headPos, destroyOnUse};
+        }
+        std::optional<PendingBedUse> takePendingBedUse() {
+            auto pending = m_pendingBedUse;
+            m_pendingBedUse.reset();
+            return pending;
+        }
         
         Game::Math::ChunkPos getChunkPosition() const {
             return Game::Math::ChunkPos(
@@ -507,10 +774,20 @@ namespace Server {
         bool m_sneaking = false;
         // TODO: AABB m_boundingBox;
         int m_dimensionId = 0;
+        uint32_t m_dimensionEpoch = 0;
+        bool m_changingDimension = false;
         // Survives the dimension change the PlayerEntityView does not — see
         // portalState() above.
         Game::PortalState m_portalState;
-        // TODO: glm::vec3 m_respawnPoint;
+        // The bed's head cell while asleep, and MC Player.sleepCounter.
+        std::optional<glm::ivec3> m_sleepingPos;
+        int m_sleepCounter = 0;
+        // Where death sends this player back to (MC ServerPlayer.respawnConfig).
+        std::optional<RespawnConfig> m_respawnConfig;
+        std::optional<HushGateMark> m_lastHushGate;
+        std::optional<PendingBedUse> m_pendingBedUse;
+        std::optional<PendingSignUse> m_pendingSignUse;
+        std::optional<uint32_t> m_pendingBookOpen;   // OpenItemGui: the hand
         
         // === ATTRIBUTES & STATUS ===
         float m_health = 20.0f;
@@ -523,7 +800,10 @@ namespace Server {
         // XP — MC Player's experienceLevel / experienceProgress /
         // totalExperience, with the level-curve arithmetic (PlayerExperience.hpp).
         PlayerExperience m_experience;
-        // TODO: std::vector<StatusEffect> m_effects;
+        // MC LivingEntity.activeEffects — see activeEffects() above.
+        std::vector<Game::MobEffectInstance> m_activeEffects;
+        // MC Player DATA_PLAYER_ABSORPTION_ID.
+        float m_absorptionAmount = 0.0f;
         float m_stepHeight = 0.6f;
         float m_fallDistance = 0.0f;
         // Set by teleport(); setPosition() bypasses the anti-cheat
@@ -542,8 +822,12 @@ namespace Server {
         bool m_flying = false;
         bool m_noclip = false;
         bool m_instabuild = false; // creative instant break
-        float m_reachDistance = 5.0f;
+        float m_reachDistance = 4.5f;   // MC Player.DEFAULT_BLOCK_INTERACTION_RANGE
+        bool  m_invisible = false;
         float m_scale = 1.0f;
+        uint32_t m_morph      = Game::Morph::kNone;
+        float    m_morphSpeed = 0.0f;
+        uint8_t  m_morphAnim  = 0;   // the client's, relayed (creeper swell)
         
         // === INVENTORY ===
         // 46-slot MC-compatible inventory (crafting + armor + main + hotbar + offhand).
@@ -567,8 +851,22 @@ namespace Server {
         // TODO: ItemStack m_offHand;
         // TODO: std::array<ItemStack, 4> m_armor;
         
+        // === SOUND ===
+        Game::PlayerMovementSounds m_movementSounds;
+        Game::JavaRandom           m_soundRandom{static_cast<int64_t>(reinterpret_cast<uintptr_t>(this)) ^ 0x5DEECE66DLL};
+        // Player.giveExperienceLevels' level-up chime: the level last seen by
+        // tick() and MC's lastLevelUpTime (at most one chime per 100 ticks).
+        int m_lastSeenXpLevel = -1;
+        int m_lastLevelUpTick = -100000;
+        // LivingEntity.onEquipItem, watched per tick: the armor last worn
+        // (item ids, HEAD..FEET); false until the first tick has seen it
+        // (MC's firstTick — no equip sounds for what a player logs in wearing).
+        std::array<uint32_t, 4> m_lastArmorItems{};
+        bool                    m_armorSeen = false;
+
         // === GAMEPLAY TIMERS ===
         int m_invulnerabilityTicks = 0;
+        int m_remainingFireTicks = 0;
         // TODO: int m_portalCooldown = 0;
         // TODO: int m_attackCooldown = 0;
         // TODO: bool m_sleeping = false;

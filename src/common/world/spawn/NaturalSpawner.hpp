@@ -33,6 +33,7 @@
 #include <string_view>
 #include <vector>
 
+#include "common/world/biome/Biomes.hpp"
 #include "common/world/chunk/Chunk.hpp"
 
 namespace Game {
@@ -41,6 +42,7 @@ namespace Game {
     struct EntityLevel;
     class JavaRandom;
     class PotentialCalculator;
+    struct BiomeSpawnList;
 
     // MC NaturalSpawner constants.
     inline constexpr int kMinSpawnDistance    = 24;    // blocks from any player
@@ -72,8 +74,21 @@ namespace Game {
         // Positions of every non-spectator player, for the distance rules.
         const std::vector<glm::dvec3>* playerPositions = nullptr;
 
-        // Biome slug at a world position — the key into GeneratedMobSpawns.
+        // Biome slug at a world position — the key into GeneratedMobSpawns,
+        // and what the placement rules' biome-tag tests read.
         std::function<std::string_view(int, int, int)> biomeAt;
+
+        // Biome id at a world position (World::GetBiome). When set, the pack
+        // loop resolves spawn lists through SpawnListForBiome — an index —
+        // instead of searching the table by slug for every lookup. Must agree
+        // with biomeAt (biomeAt == BiomeRegistry::Get(biomeIdAt).name).
+        std::function<BiomeId(int, int, int)> biomeIdAt;
+
+        // MC NaturalSpawner.mobsAt's structure half — the fortress rule, then
+        // ChunkGenerator.getMobsAt's spawn_overrides (StructureSpawnOverrides).
+        // Returns the list that REPLACES the biome's for (category, x, y, z),
+        // or null for "use the biome's". Null callback = no structures.
+        std::function<const BiomeSpawnList*(MobCategory, int, int, int)> structureSpawnsAt;
 
         // MC Level.noCollision(type.getSpawnAABB(...)) — does the mob's own box
         // fit here? Without this mobs spawn embedded in walls and immediately
@@ -149,6 +164,10 @@ namespace Game {
                        int chunkX, int chunkZ,
                        const std::vector<MobCategory>& categories,
                        JavaRandom& rng);
+
+    // GeneratedMobSpawns' list for a biome id — FindBiomeSpawnList on the
+    // biome's slug, looked up once per biome and then indexed.
+    const BiomeSpawnList* SpawnListForBiome(BiomeId biome);
 
     // MC SpawnState.canSpawnForCategoryGlobal.
     bool CanSpawnForCategory(const SpawnContext& ctx, MobCategory category);

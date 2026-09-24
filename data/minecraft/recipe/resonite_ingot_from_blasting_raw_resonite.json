@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:blasting",
+  "category": "misc",
+  "cookingtime": 100,
+  "experience": 0.7,
+  "group": "resonite_ingot",
+  "ingredient": "minecraft:raw_resonite",
+  "result": {
+    "id": "minecraft:resonite_ingot"
+  }
+}

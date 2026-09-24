@@ -1,0 +1,16 @@
+{
+  "model": {
+    "type": "minecraft:model",
+    "model": "minecraft:item/whirlwind_spawn_egg",
+    "tints": [
+      {
+        "type": "minecraft:constant",
+        "value": -6306825
+      },
+      {
+        "type": "minecraft:constant",
+        "value": -1
+      }
+    ]
+  }
+}

@@ -17,7 +17,7 @@
 //
 //   * REDSTONE — `HasNeighborSignal` in RedstoneSignal.hpp answers false today
 //     because there is no power simulation at all (RedstoneWire.hpp:8-12 holds
-//     POWER at 0). onPlace and neighborChanged below already call it, so a
+//     POWER at 0). onPlace below and the redstone neighborChanged call it, so a
 //     lever will light TNT the day that function grows a body.
 //
 //   * FIRE SPREAD — MC ignites TNT inside FireBlock.checkBurnOut, gated on the
@@ -52,14 +52,11 @@ namespace Game {
     // setBlock(AIR, 11) for the flint-and-steel one).
     bool TntPrime(ILevelWrite& level, const glm::ivec3& pos, Entity* igniter);
 
-    // MC TntBlock.onPlace / neighborChanged — both are the redstone check.
+    // MC TntBlock.onPlace — the redstone check on placement. The
+    // neighborChanged half lives with the other redstone components
+    // (RedstoneComponents.cpp), which own the writable neighbour hook.
     void TntOnPlace(ILevelWrite& level, const glm::ivec3& pos,
-                    BlockState newState, BlockState oldState);
-    bool TntNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
-                            BlockState state,
-                            Direction toNeighbour, BlockID neighbourId,
-                            BlockState& outState,
-                            ScheduledTickAccess* ticks);
+                    BlockState newState, BlockState oldState, bool movedByPiston);
 
     // MC TntBlock.useItemOn — flint & steel or a fire charge lights it.
     //

@@ -56,7 +56,7 @@ private:
     static bool isBigDripleafPlaceable(BlockState* state) {
         return minecraft::levelgen::blockpredicates::matchesBlockTagName(
             state,
-            "minecraft:big_dripleaf_placeable"
+            "minecraft:supports_big_dripleaf"
         );
     }
 

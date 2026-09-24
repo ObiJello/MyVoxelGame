@@ -68,6 +68,55 @@
             InventorySetSlotS2C    = 0x2A, // Single-slot delta (slot, blockId, count)
             InventorySetCarriedS2C = 0x2B, // Cursor item update
             SetHeldSlotS2C         = 0x4E, // Server moved the selected hotbar slot (pick block) — MC ClientboundSetHeldSlotPacket
+            PongResponseS2C        = 0x4F, // Echo of PingRequestC2S, answered on the I/O thread — MC ClientboundPongResponsePacket (F3+3 ping chart)
+            WorldRulesS2C          = 0x50, // The rules a client must mirror: immersive_portals, portal_gun, reduced_debug_info, immediate_respawn (four bytes). Sent at login and on /gamerule.
+            ServerPausedS2C        = 0x51, // One byte: the integrated server's pause flag (every player paused). Sent on each transition; a client freezes its own player only while this is set (vanilla singleplayer pause).
+            PlayerSleepS2C         = 0x52, // A player lay down in a bed (head cell) or got up — MC LivingEntity SLEEPING_POS entity data + ClientboundAnimatePacket WAKE_UP, see PlayerSleepS2CPacket.hpp
+            ControlS2C             = 0x54, // /control: role assignment to both sides — see ControlPackets.hpp
+            ControlInputS2C        = 0x55, // /control: the controller's input frame, relayed to the controlled client
+            ControlViewS2C         = 0x56, // /control: the controlled client's view frame, relayed to the controller
+            MorphHeldS2C           = 0x57, // /morph item: picked up by / let go of a player — see MorphHeldS2CPacket.hpp
+            MorphPickupS2C         = 0x58, // /morph item: the pickup fly-in, to the dimension — see MorphPickupS2CPacket.hpp
+            // 0x5E, not the next free 0x5A: parallel work is claiming the ids
+            // straight after 0x59, and a duplicate enum value compiles clean
+            // but silently steals the other packet's handler at runtime.
+            HushStillnessS2C       = 0x5E, // The Hush's stillness began (remaining ticks) / lifted — see HushStillnessS2CPacket.hpp
+            // Status effects — MC ClientboundUpdateMobEffectPacket /
+            // ClientboundRemoveMobEffectPacket, see MobEffectPackets.hpp.
+            // 0x70/0x71, well clear of the 0x5A.. ids parallel work claims.
+            UpdateMobEffectS2C     = 0x70,
+            RemoveMobEffectS2C     = 0x71,
+            // The Hush's item signals — tuning-fork ping outlines, resonance
+            // arrow bursts, the echo compass's target; one packet, a kind
+            // byte. See HushSignalS2CPacket.hpp.
+            HushSignalS2C          = 0x72,
+            // Sounds — MC ClientboundSoundPacket / ClientboundSoundEntityPacket,
+            // see SoundPackets.hpp. 0x7A/0x7B, clear of the ids straight after
+            // 0x72 that parallel work may claim next.
+            SoundS2C               = 0x7A,
+            SoundEntityS2C         = 0x7B,
+            // Aurelith's cities near the player — Heart, rotation, quest
+            // state and when it began (the client animates the awakening
+            // from those); one packet, a kind byte. See AurelithS2CPacket.hpp.
+            // 0x7D, clear of 0x7C that parallel work may claim after 0x7B.
+            AurelithS2C            = 0x7D,
+            // The current dimension's biome / structure ids and tags, for
+            // /locate's tab completion — see WorldgenIdsS2CPacket.hpp.
+            WorldgenIdsS2C         = 0x6F,
+            // Light sections one server light run changed — MC
+            // ClientboundLightUpdatePacket, see LightUpdateS2CPacket.hpp. 0x6A,
+            // mid-range, clear of the ids straight after 0x59/0x5E/0x72/0x7B
+            // that parallel work claims.
+            LightUpdateS2C         = 0x6A,
+            // Books — MC ClientboundOpenBookPacket, see BookPackets.hpp. 0x66,
+            // well clear of the ids after 0x5E and 0x7B that parallel work
+            // claims next.
+            OpenBookS2C            = 0x66,
+            // Trading — MC ClientboundMerchantOffersPacket, see
+            // MerchantPackets.hpp. 0x6C, clear of the ids parallel work
+            // claims after 0x5E / 0x6A / 0x72 / 0x7B.
+            MerchantOffersS2C      = 0x6C,
+            OpenSignEditorS2C      = 0x53, // Open the sign editor at a position, front or back — MC ClientboundOpenSignEditorPacket
             BlockEntityDataS2C     = 0x30, // BE create / state update — mirrors MC ClientboundBlockEntityDataPacket
             BlockEntityRemoveS2C   = 0x31, // BE destroyed (block changed to non-BE) — explicit teardown signal
             BlockEntityActionS2C   = 0x32, // BE "block event" (chest lid open count, bell ring) — MC Level.blockEvent path
@@ -123,6 +172,7 @@
             // ── End dragon fight ───────────────────────────────────────────
             BossEventS2C           = 0x48, // MC ClientboundBossEventPacket (reduced)
             EndCrystalBeamS2C      = 0x49, // crystal beam target (MC DATA_BEAM_TARGET)
+            ArmorStandDataS2C      = 0x59, // armor stand poses + equipment — see ArmorStandDataS2CPacket.hpp
 
             // ── Immersive portals (see-through / walk-through surfaces) ────
             // Full-record upsert and removal of Game::Immersive::Portal,
@@ -179,7 +229,19 @@
             PortalTeleportC2S   = 0x99,  // "my eye crossed immersive portal P" — see PortalTeleportC2SPacket.hpp
 #endif
             PickItemC2S         = 0x9B,  // Pick block / pick entity (P) — MC ServerboundPickItemFromBlock/EntityPacket
+            PingRequestC2S      = 0x9C,  // Client-timed RTT probe (one long) — MC ServerboundPingRequestPacket
+            SignUpdateC2S       = 0x9D,  // The sign editor's four lines — MC ServerboundSignUpdatePacket
+            ControlInputC2S     = 0x9E,  // /control: one frame of the controller's input — see ControlPackets.hpp
+            ControlViewC2S      = 0x9F,  // /control: one frame of the controlled client's view — see ControlPackets.hpp
             FillBlocksC2S       = 0x9A,  // The fill tool's box of held blocks — see FillBlocksC2SPacket.hpp
+            // Books and lecterns — MC ServerboundEditBookPacket /
+            // ServerboundContainerButtonClickPacket, see BookPackets.hpp. 0xB4/
+            // 0xB5, clear of the 0xA0.. range parallel work claims next.
+            EditBookC2S             = 0xB4,
+            ContainerButtonClickC2S = 0xB5,
+            // Trading — MC ServerboundSelectTradePacket, see
+            // MerchantPackets.hpp. 0xBC, clear of 0xB4.. neighbours.
+            SelectTradeC2S          = 0xBC,
         };
 
         // Convert PacketId to string for logging
@@ -220,6 +282,7 @@
                 case PacketId::ChangeDimensionS2C: return "ChangeDimensionS2C";
                 case PacketId::BossEventS2C: return "BossEventS2C";
                 case PacketId::EndCrystalBeamS2C: return "EndCrystalBeamS2C";
+                case PacketId::ArmorStandDataS2C: return "ArmorStandDataS2C";
                 case PacketId::EntityDestroy: return "EntityDestroy";
                 case PacketId::ChatMessageS2C: return "ChatMessageS2C";
                 case PacketId::TimeUpdate: return "TimeUpdate";
@@ -231,6 +294,7 @@
                 case PacketId::ChunkDataS2C: return "ChunkDataS2C";
                 case PacketId::UnloadChunkS2C: return "UnloadChunkS2C";
                 case PacketId::ChunkUnchangedS2C: return "ChunkUnchangedS2C";
+                case PacketId::LightUpdateS2C: return "LightUpdateS2C";
                 case PacketId::ClientboundSectionBlocksUpdate: return "ClientboundSectionBlocksUpdate";
                 case PacketId::ChunkBatchStartS2C: return "ChunkBatchStartS2C";
                 case PacketId::ChunkBatchFinishedS2C: return "ChunkBatchFinishedS2C";
@@ -241,6 +305,28 @@
                 case PacketId::InventorySetSlotS2C: return "InventorySetSlotS2C";
                 case PacketId::InventorySetCarriedS2C: return "InventorySetCarriedS2C";
                 case PacketId::SetHeldSlotS2C: return "SetHeldSlotS2C";
+                case PacketId::PongResponseS2C: return "PongResponseS2C";
+                case PacketId::WorldRulesS2C: return "WorldRulesS2C";
+                case PacketId::ServerPausedS2C: return "ServerPausedS2C";
+                case PacketId::PlayerSleepS2C: return "PlayerSleepS2C";
+                case PacketId::ControlS2C:            return "ControlS2C";
+                case PacketId::ControlInputS2C:       return "ControlInputS2C";
+                case PacketId::ControlViewS2C:        return "ControlViewS2C";
+                case PacketId::MorphHeldS2C:          return "MorphHeldS2C";
+                case PacketId::MorphPickupS2C:        return "MorphPickupS2C";
+                case PacketId::UpdateMobEffectS2C:    return "UpdateMobEffectS2C";
+                case PacketId::RemoveMobEffectS2C:    return "RemoveMobEffectS2C";
+                case PacketId::SoundS2C:              return "SoundS2C";
+                case PacketId::SoundEntityS2C:        return "SoundEntityS2C";
+                case PacketId::AurelithS2C:           return "AurelithS2C";
+                case PacketId::WorldgenIdsS2C:        return "WorldgenIdsS2C";
+                case PacketId::OpenBookS2C:           return "OpenBookS2C";
+                case PacketId::MerchantOffersS2C:     return "MerchantOffersS2C";
+                case PacketId::ControlInputC2S:       return "ControlInputC2S";
+                case PacketId::ControlViewC2S:        return "ControlViewC2S";
+                case PacketId::OpenSignEditorS2C: return "OpenSignEditorS2C";
+                case PacketId::SignUpdateC2S: return "SignUpdateC2S";
+                case PacketId::PingRequestC2S: return "PingRequestC2S";
                 case PacketId::OpenScreenS2C: return "OpenScreenS2C";
                 case PacketId::BlockEntityDataS2C: return "BlockEntityDataS2C";
                 case PacketId::BlockEntityRemoveS2C: return "BlockEntityRemoveS2C";
@@ -291,6 +377,9 @@
 #if ENABLE_IMMERSIVE_PORTALS
                 case PacketId::PortalTeleportC2S: return "PortalTeleportC2S";
                 case PacketId::FillBlocksC2S:     return "FillBlocksC2S";
+                case PacketId::EditBookC2S:       return "EditBookC2S";
+                case PacketId::ContainerButtonClickC2S: return "ContainerButtonClickC2S";
+                case PacketId::SelectTradeC2S: return "SelectTradeC2S";
 #endif
 
                 default: return "Unknown";

@@ -8,12 +8,16 @@
 #include "GeneratedBlockShapes.hpp"
 #include "GeneratedWaterlogged.hpp"
 #include "Stairs.hpp"
+#include "BedBlock.hpp"
 #include "CrossCollision.hpp"
 #include "Walls.hpp"
+#include "RedstoneShapes.hpp"
 #include "Vine.hpp"
 #include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
+#include "AercloudBlock.hpp"
 #include "entity/BlockEntityTypes.hpp"
+#include "common/world/lighting/BlockLightProperties.hpp"
 #include "../../core/Log.hpp"
 #include <string_view>
 #include <atomic>
@@ -29,8 +33,15 @@ namespace Game {
     // Defined in BlockBehaviors.cpp — wires the per-block right-click callbacks
     // once the table exists. Mirrors ItemRegistry_RegisterBehaviors.
     void BlockRegistry_RegisterBehaviors(std::array<Block, BlockRegistry::Size>& blocks);
+    void BlockRegistry_RegisterChoirBlocks(std::array<Block, BlockRegistry::Size>& blocks);
+    void BlockRegistry_RegisterHushBlocks(std::array<Block, BlockRegistry::Size>& blocks);
+    void BlockRegistry_RegisterAurelithBlocks(std::array<Block, BlockRegistry::Size>& blocks);
+    void BlockRegistry_RegisterAurelithQuestBlocks(std::array<Block, BlockRegistry::Size>& blocks);   // AurelithQuestBlocks.hpp
+    void RegisterAurelithAmbientSounds(std::array<Block, BlockRegistry::Size>& blocks);   // BlockAmbientSounds.hpp
     // BlockGrowth.cpp — random-tick and bone-meal callbacks for the farming set.
     void BlockRegistry_RegisterGrowth(std::array<Block, BlockRegistry::Size>& blocks);
+    // fluid/FlowingFluid.cpp — LiquidBlock's hooks on water and lava.
+    void BlockRegistry_RegisterFluids(std::array<Block, BlockRegistry::Size>& blocks);
 
     namespace {
 
@@ -80,6 +91,9 @@ namespace Game {
                 b.minTier              = row->minTier;
                 b.mapColor             = row->mapColor;
                 b.ignitedByLava        = row->ignitedByLava;
+                b.pushReaction         = row->pushReaction;
+                b.redstoneConductor    = row->redstoneConductor;
+                b.instrument           = row->instrument;
                 ++matched;
             }
 
@@ -404,6 +418,27 @@ namespace Game {
             "pale_hanging_moss", "frogspawn", "nether_sprouts",
             "scaffolding",              // Blocks.java: .noCollision() (its own shape is the climb)
             "cobweb",                   // slows you down; never blocks you
+            "resonance_bloom",          // The Hush flower — a dandelion-class BushBlock
+            "hush_grass",               // The Hush's short_grass twin (BushBlock, .noCollision())
+            "hanging_whisperfruit",     // The Hush's fruit — cocoa-like, but hangs; walk-through
+            // Twilight Forest (pass one) — every one `.noCollision()` in
+            // TFBlocks.java. Saplings arrive through "_sapling"; the
+            // torchberry plant through "torch" above (it IS noCollision).
+            // Critters are exact matches in noCollisionFor ("firefly" would
+            // also catch the vanilla firefly_bush, which already matches).
+            "mushgloom", "fiddlehead", "mayapple", "clover_patch", "moss_patch",
+            "fallen_leaves",
+            // The Aether (pass one): the flowers arrive through "_flower";
+            // BerryBushStemBlock is `.noCollission()` and BerryBushBlock's
+            // getCollisionShape is empty under berry_bush_consistency, the
+            // mode ported here (BlockBehaviors.cpp BerryBushUse).
+            "berry_bush",
+            // Twilight Forest (pass two): HUGE_WATER_LILY is `.noCollision()`
+            // in TFBlocks (the huge lily PAD is the one you stand on).
+            "huge_water_lily",
+            // NOT resonant_cluster / echo_lantern: AmethystClusterBlock and
+            // LanternBlock have real shapes in Blocks.java (no .noCollision()),
+            // exactly like the amethyst_cluster and lantern they alias.
         };
         // ── Support: blocks whose MC canSurvive is "solid top face below" ──
         // A strict SUBSET of the noCollision list above, and the difference is
@@ -414,7 +449,8 @@ namespace Game {
         // the block under them changed.
         //
         // `kelp` and `seagrass` are out for a different reason — their MC rule
-        // is about water, which this engine does not simulate.
+        // is a fluid condition (a water source below / above), not a
+        // support one, and belongs with the fluid rules.
         static constexpr std::string_view kNeedsSupportBelowSubstr[] = {
             "_sapling", "_flower", "tulip", "allium", "azure_bluet",
             "oxeye_daisy", "cornflower", "lily_of_the_valley", "dandelion",
@@ -422,6 +458,17 @@ namespace Game {
             "closed_eyeblossom", "pitcher_plant",
             "short_grass", "tall_grass", "fern", "large_fern", "dead_bush",
             "red_shrub",                // 26.3 BushBlock — same rule as dead_bush
+            "resonance_bloom",          // The Hush flower — same rule as dandelion
+            "hush_grass",               // The Hush grass — same rule as short_grass
+            // whisperwood_sapling arrives through "_sapling" above.
+            // Twilight Forest + The Aether (pass one): the saplings come
+            // through "_sapling" and the Aether flowers through "_flower".
+            // TFPlantBlock / MushroomBlock / AetherBushBlock all inherit
+            // VegetationBlock.canSurvive (mayPlaceOn the block below), and
+            // FallenLeavesBlock / PatchBlock are TFPlantBlocks too.
+            "mushgloom", "fiddlehead", "mayapple", "torchberry_plant",
+            "clover_patch", "moss_patch", "fallen_leaves",
+            "berry_bush",               // + berry_bush_stem (substring)
             "leaf_litter", "wildflowers", "pink_petals",
             "warped_roots", "crimson_roots", "warped_fungus", "crimson_fungus",
             "sugar_cane",
@@ -470,6 +517,7 @@ namespace Game {
         // sweet_berry_bush, powder_snow, snow_block, and every solid block.
         static constexpr std::string_view kReplaceableSlugs[] = {
             "water", "lava", "bubble_column",
+            "resonant_water",             // Aurelith's river: always-water, placed into like water
             "short_grass", "fern", "tall_grass", "large_fern",
             "short_dry_grass", "tall_dry_grass",
             "dead_bush", "bush",
@@ -480,6 +528,10 @@ namespace Game {
             "light", "structure_void",
             "warped_roots", "crimson_roots", "nether_sprouts", "hanging_roots",
             "leaf_litter",
+            "hush_grass",                 // The Hush: short_grass's twin, `.replaceable()` too
+            // Twilight Forest: FIDDLEHEAD and FALLEN_LEAVES are the two
+            // `.replaceable()` entries of the pass-one set (TFBlocks.java).
+            "fiddlehead", "fallen_leaves",
         };
         auto replaceableFor = [](const std::string& slug) -> bool {
             for (auto sv : kReplaceableSlugs) if (slug == sv) return true;
@@ -525,6 +577,15 @@ namespace Game {
             if (n == "nether_portal" || n == "end_portal" || n == "end_gateway") {
                 return true;
             }
+            // The Hush portal is the nether portal's twin (same states, same
+            // shape) and is walked into the same way.
+            if (n == "hush_portal") return true;
+            // The two mod portals (TFPortalBlock and AetherPortalBlock are
+            // both `.noCollision()`), and TF's critters: CritterBlock is
+            // `.noCollision()` for all three. Exact matches — "firefly" as a
+            // substring is also inside the vanilla firefly_bush.
+            if (n == "twilight_portal" || n == "aether_portal") return true;
+            if (n == "firefly" || n == "cicada" || n == "moonworm") return true;
             for (auto sv : kNoCollisionSubstr) {
                 if (n.find(sv) != std::string::npos) return true;
             }
@@ -559,6 +620,10 @@ namespace Game {
         for (BlockID id : { BlockID::Air, BlockID::Water, BlockID::Lava }) {
             blockDefinitions[static_cast<size_t>(id)].hasCollision = false;
         }
+        // Aurelith's resonant water is water to everything that moves
+        // (docs/fluids.md): swum through, never stood on — the bubble
+        // column's `.noCollision()`.
+        blockDefinitions[static_cast<size_t>(BlockID::ResonantWater)].hasCollision = false;
 
         // Air is REPLACEABLE. Blocks.java registers it as
         // `.replaceable().noCollision()`, and the substring table above cannot
@@ -579,6 +644,64 @@ namespace Game {
         // the slug, and an empty slug matches nothing.
         ApplyGeneratedHardness(blockDefinitions);
 
+        // The Hush's glowing blocks. There is no block light engine, so
+        // `emissive` is a RENDER-ONLY full-bright flag (the mesher tags the
+        // faces and the terrain shaders skip the sky dim); nothing here
+        // lights its neighbours or feeds mob spawning.
+        // Second drop: the cavern cluster, the echo lantern and the vault's
+        // core glow; the resonite ore/block and the stone/wood sets do not.
+        for (BlockID id : { BlockID::ResonantCrystal, BlockID::ResonanceBloom,
+                            BlockID::LanternLeaves, BlockID::HushPortal,
+                            BlockID::ResonantCluster, BlockID::EchoLantern,
+                            BlockID::EchoCore }) {
+            blockDefinitions[static_cast<size_t>(id)].emissive = true;
+        }
+        // Twilight Forest + The Aether (pass one): the blocks their mods give
+        // a lightLevel — Mushgloom 3, Firefly 15, Moonworm 14, Torchberry
+        // plant 7 with berries / 1 without (always lit here: has_torchberries
+        // is dropped in pass one), both portals 11 (TFBlocks / AetherBlocks
+        // lightLevel11). Same render-only full-bright flag as the Hush's.
+        // The cicada has no light in TFBlocks and stays out.
+        for (BlockID id : { BlockID::Mushgloom, BlockID::Firefly, BlockID::Moonworm,
+                            BlockID::TorchberryPlant, BlockID::TwilightPortal,
+                            BlockID::AetherPortal }) {
+            blockDefinitions[static_cast<size_t>(id)].emissive = true;
+        }
+        // The Aether, pass two: AetherBlocks' lightLevel11 blocks — quicksoil
+        // glass, the sentry stone and the light angelic / light hellfire
+        // stones, and every locked / trapped / treasure-doorway copy of those
+        // (ofFullCopy carries the light level; the boss doorways copy the
+        // UNLIT carved/angelic/hellfire stone and stay dark). The ambrosium
+        // torch is Blocks.TORCH's copy and renders as the vanilla torch does.
+        for (BlockID id : { BlockID::QuicksoilGlass,
+                            BlockID::SentryStone, BlockID::LightAngelicStone,
+                            BlockID::LightHellfireStone,
+                            BlockID::LockedSentryStone, BlockID::LockedLightAngelicStone,
+                            BlockID::LockedLightHellfireStone,
+                            BlockID::TrappedSentryStone, BlockID::TrappedLightAngelicStone,
+                            BlockID::TrappedLightHellfireStone,
+                            BlockID::TreasureDoorwaySentryStone,
+                            BlockID::TreasureDoorwayLightAngelicStone,
+                            BlockID::TreasureDoorwayLightHellfireStone }) {
+            blockDefinitions[static_cast<size_t>(id)].emissive = true;
+        }
+        // Twilight Forest, pass two: the fiery block's model is lit at full
+        // block and sky light (its faces carry neoforge_data block_light 15).
+        blockDefinitions[static_cast<size_t>(BlockID::FieryBlock)].emissive = true;
+
+        // Shape families BEFORE the behaviour pass. BlockRegistry_Register-
+        // Behaviors installs the updateShape hooks for fences, panes, walls,
+        // fence gates and stairs by asking IsCrossCollisionBlock / IsWallBlock
+        // / IsFenceGateBlock / IsStairs — all of which read s_familyBits. With
+        // the table still zero on the FIRST Init, none of those blocks got a
+        // hook: a fence resolved its arms when placed but never reacted to a
+        // neighbour placed or broken beside it, so it stayed joined to open
+        // air. (A second world in the same process worked, because the table
+        // survived from the first — which is what made it look intermittent.)
+        // Every model name the families key on is final by here; the call at
+        // the end of Init stays as the documented home of the table.
+        InitFamilies();
+
         // Right-click behaviour (crafting table's menu, container menus, …).
         // Must come after the registry-slug pass above: it looks blocks up by
         // registrySlug, and an empty slug matches nothing.
@@ -594,6 +717,31 @@ namespace Game {
         // definition. Wiring them before the definitions exist would give every
         // crop a max age of 0 and nothing would ever grow.
         BlockRegistry_RegisterGrowth(blockDefinitions);
+
+        // Fluids (MC LiquidBlock): onPlace / neighborChanged / updateShape /
+        // tick on water and lava, plus lava's random tick. After
+        // InitBlockStates for the same reason growth is — every hook reads
+        // `level` — and before the random-tick table below is published.
+        BlockRegistry_RegisterFluids(blockDefinitions);
+
+        // The Choir Hall puzzle blocks (ChoirPuzzle.hpp): the chime's strike
+        // and dimming read its `lit` property, so after InitBlockStates.
+        BlockRegistry_RegisterChoirBlocks(blockDefinitions);
+
+        // The whisperfruit and the echo heart (HushBlocks.hpp): the fruit's
+        // growth reads its `age`, so after InitBlockStates, and before the
+        // random-tick table below is published (both random-tick).
+        BlockRegistry_RegisterHushBlocks(blockDefinitions);
+
+        // Aurelith's glowing blocks and their motes (AurelithBlocks.hpp):
+        // emissive flags and animateTick hooks only.
+        BlockRegistry_RegisterAurelithBlocks(blockDefinitions);
+        // The quest's blocks (AurelithQuestBlocks.hpp): the dormant lights,
+        // the Podium's sockets, the pedestals and the tuned cabinet.
+        BlockRegistry_RegisterAurelithQuestBlocks(blockDefinitions);
+        // The river's lapping chains after the water's motes set just above
+        // (BlockAmbientSounds.hpp).
+        RegisterAurelithAmbientSounds(blockDefinitions);
 
         // Publish the flat "does this block random-tick" table ChunkSection
         // consults on every write. Must follow RegisterGrowth, which is what
@@ -648,6 +796,24 @@ namespace Game {
             return BlockModelRegistry::GetModel(stateModel);
         }
         return GetBlockModel(id);
+    }
+
+    bool BlockRegistry::IsOcclusionFullCube(BlockState state) {
+        const BlockID id = state.Block();
+        if (id == BlockID::Air) return false;
+        const BlockModel& model = GetBlockModel(state);
+        constexpr float lo = 0.0001f, hi = 15.9999f;
+        for (const auto& e : model.elements) {
+            // A rotated element is never axis-aligned with the cell; a
+            // 90°-multiple rotation of a full cube is still a full cube, but
+            // the model format does not allow those (rotations are ±22.5/45).
+            if (!e.rotation.IsIdentity()) continue;
+            if (e.from.x <= lo && e.from.y <= lo && e.from.z <= lo &&
+                e.to.x >= hi && e.to.y >= hi && e.to.z >= hi) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool BlockRegistry::HasCollision(BlockID id) {
@@ -1143,6 +1309,10 @@ namespace Game {
             // FlowerBedBlock (pink_petals, wildflowers) overrides to 3.0
             // (FlowerBedBlock.java:59).
             if (has("wildflowers") || has("pink_petals")) return 3.0f;
+            // TFPortalBlock.AABB — (0, 0, 0)-(1, 0.8125, 1), the pool's
+            // surface down to its floor. The model is a single up-face at
+            // y 13, which on its own would give a zero-height sliver.
+            if (modelName == "twilight_portal") return 13.0f;
             return 0.0f;
         }
 
@@ -1433,10 +1603,17 @@ namespace Game {
     namespace {
         // Which families build their shape from a box union rather than from
         // the model. Each one is a MC class that overrides getShape.
+        // The dyed beds: mattress slab + two legs (BedBlock.hpp). The straw
+        // bed has a real block model and stays single-box from its elements.
+        bool IsMultiBoxBed(BlockID id) {
+            return IsBedBlock(id) && id != BlockID::StrawBed;
+        }
+
         bool HasMultiBoxShape(BlockID id) {
             return IsStairs(id) || IsCrossCollisionBlock(id) ||
                    IsWallBlock(id) || IsFenceGateBlock(id) ||
-                   IsVineBlock(id) || IsMultifaceBlock(id);
+                   IsVineBlock(id) || IsMultifaceBlock(id) || IsMultiBoxBed(id) ||
+                   IsRedstoneMultiBoxBlock(id);
         }
 
         // `collision` picks getCollisionShape over getShape. They differ for
@@ -1444,9 +1621,11 @@ namespace Game {
         BlockRegistry::BlockShapeSet MultiBoxShape(BlockState state,
                                                    bool collision) {
             const BlockID id = state.Block();
+            if (IsRedstoneMultiBoxBlock(id)) return RedstoneMultiBoxShape(state, collision);
             if (IsVineBlock(id))          return VineShapeBoxes(state);
             if (IsMultifaceBlock(id))     return MultifaceShapeBoxes(state);
             if (IsStairs(id))             return StairShapeBoxes(state);
+            if (IsMultiBoxBed(id))        return BedShapeBoxes(state);   // outline == collision
             if (IsCrossCollisionBlock(id)) return collision ? CrossCollisionBoxes(state)
                                                             : CrossShapeBoxes(state);
             if (IsWallBlock(id))          return collision ? WallCollisionBoxes(state)
@@ -1553,6 +1732,11 @@ namespace Game {
             Log::Info("[BlockRegistry] prewarmed shape caches (%zu element-less states "
                       "filled with the full cube)", forced);
         }
+
+        // The light engine's per-state table (emission, dampening, sky
+        // passthrough, face occlusion) reads the shapes, so it is built here,
+        // once they are final — on every boot path that prewarms.
+        Lighting::BlockLightProperties::Init();
     }
 
     const BlockRegistry::BlockShape* BlockRegistry::GetSingleCollisionBox(BlockState state) {
@@ -1565,6 +1749,13 @@ namespace Game {
             return nullptr;
         }
         if (HasMultiBoxShape(id)) return nullptr;
+        // The Aether's aerclouds: the entity-less collision shape, not the
+        // model's cube (see GetBlockCollisionShapeSet).
+        if (Aercloud::IsAercloud(id)) {
+            static const BlockShape kCloudFloor{ glm::vec3(0.0f),
+                                                 glm::vec3(1.0f, Aercloud::kFloorHeight, 1.0f) };
+            return &kCloudFloor;
+        }
         // GetBlockShape returns a reference into the cache — nothing is copied.
         return &GetBlockShape(state);
     }
@@ -1577,7 +1768,8 @@ namespace Game {
         // Everything else inherits BlockBehaviour.getCollisionShape's default
         // of "the outline shape".
         if (idx < Size &&
-            (IsCrossCollisionBlock(id) || IsWallBlock(id) || IsFenceGateBlock(id))) {
+            (IsCrossCollisionBlock(id) || IsWallBlock(id) || IsFenceGateBlock(id) ||
+             id == BlockID::Lectern)) {
             // Memoised exactly like the outline variant above, and keyed the
             // same way, so the two caches agree on what a state index means.
             BlockStateIndex stateIndex = state.Index();
@@ -1591,6 +1783,20 @@ namespace Game {
             BlockShapeSet set = MultiBoxShape(state, /*collision=*/true);
             cache.sets[slot] = set;
             cache.computed[slot].store(true, std::memory_order_release);
+            return set;
+        }
+        // The Aether's aerclouds (AercloudBlock.getCollisionShape) draw and
+        // outline as a full cube but collide as a floor 0.01 pixels thick —
+        // what an entity-less query (CollisionContext.empty()) sees for all
+        // three, blue included. The rest of the rule needs the level and the
+        // mover — a full block under another cloud, the 0.9 falling shape,
+        // the blue cloud's empty shape for an entity — and lives in
+        // Physics.cpp (AercloudColliderAt), which every mover goes through.
+        if (idx < Size && Aercloud::IsAercloud(id)) {
+            BlockShapeSet set;
+            set.boxes[0].min = glm::vec3(0.0f);
+            set.boxes[0].max = glm::vec3(1.0f, Aercloud::kFloorHeight, 1.0f);
+            set.count = 1;
             return set;
         }
         return GetBlockShapeSet(state);
@@ -1807,6 +2013,14 @@ namespace Game {
         }
 
         if (FaceAttachedShapeFor(id, stateIndex, shapes[slot])) {
+            computed[slot].store(true, std::memory_order_release);
+            return shapes[slot];
+        }
+
+        // The rest of the redstone set whose shape reads state — wall
+        // torches, tripwire and hook, rails, pressure plates. Wire, hopper
+        // and lectern are multi-box and were folded to their bounds above.
+        if (RedstoneShapeFor(BlockStates::FromIndex(id, stateIndex), shapes[slot])) {
             computed[slot].store(true, std::memory_order_release);
             return shapes[slot];
         }

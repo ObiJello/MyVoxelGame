@@ -41,6 +41,12 @@ struct StructureInfo {
     std::string biomesTag;          // "#minecraft:has_structure/village_plains" (all 34 use tags)
     std::string step;               // GenerationStep.Decoration serialized name
     std::string terrainAdaptation;  // "none", "beard_thin", "beard_box", "bury", "encapsulate"
+    // Reference: Structure.StructureSettings.spawnOverrides - true when the
+    // JSON carries a non-empty "spawn_overrides" map. The library only needs
+    // to know WHICH structures to record spawn areas for
+    // (StructureGeneration::recordSpawnOverrideAreas); the per-category mob
+    // lists are the engine's to read.
+    bool hasSpawnOverrides = false;
     std::string mineshaftType;      // "normal"/"mesa" (mineshaft JSONs only; else empty)
     std::vector<RuinedPortalSetup> portalSetups;  // ruined_portal JSONs only
 
@@ -61,6 +67,27 @@ struct StructureInfo {
     int jigsawPaddingBottom = 0;
     int jigsawPaddingTop = 0;
     bool jigsawHasAliases = false;          // pool_aliases present
+    // Engine extension (not a vanilla codec field): "level_site" {radius,
+    // max_spread}. A structure too large to follow the ground (Aurelith, the
+    // Hush's city: one rigid platform ~220 blocks across) samples the
+    // WORLD_SURFACE_WG height on a 7x7 grid spanning +/- radius around its
+    // centre, refuses the site when the highest and lowest samples differ by
+    // more than max_spread, and otherwise sets its start on the MEDIAN sample
+    // instead of the centre column (the vanilla projection). Precedent:
+    // WoodlandMansionStructure.findGenerationPoint's lowest-corner sample.
+    // radius 0 = off (every vanilla structure).
+    int jigsawSiteRadius = 0;
+    int jigsawSiteMaxSpread = 0;
+    // Engine extension: "biome_at_surface": true. MC's Structure.isValidBiome
+    // samples the biome at the jigsaw stub, i.e. start_height below the
+    // projected surface for a buried start. Under a biome source whose cave
+    // biome spans the whole underground band (The Hush's Crystal Caverns,
+    // depth 0.2..0.9), a stub a dozen blocks down lands in the cave biome on
+    // about half the land, so a structure tagged by surface biome is refused
+    // there. With this flag (only meaningful with project_start_to_heightmap)
+    // the check samples the projected surface column instead. false = the
+    // vanilla stub check (every vanilla structure).
+    bool jigsawBiomeAtSurface = false;
     struct PoolAlias {
         std::string type;    // "direct" / "random" / "random_group"
         std::string alias;   // direct/random
@@ -69,6 +96,11 @@ struct StructureInfo {
         std::vector<std::pair<std::vector<PoolAlias>, int>> groups;   // random_group
     };
     std::vector<PoolAlias> jigsawAliases;
+
+    // Mod structure types (non-minecraft namespaces, e.g. "aether:bronze_dungeon"):
+    // the full structure JSON, serialized, for the type's own port to read
+    // its codec fields from. Empty for vanilla structures.
+    std::string modJson;
 };
 
 // Reference: StructureSet.StructureSelectionEntry (record)
@@ -95,6 +127,13 @@ const std::vector<const StructureSet*>& all();
 
 /** Structure registry (alphabetical by id), loaded from worldgen/structure/. */
 const std::vector<const StructureInfo*>& allStructures();
+
+/**
+ * True for the structures in vanilla Minecraft 26.3's own registry. The
+ * engine adds structures under the minecraft namespace too (the Hush,
+ * Aurelith); those must not take a vanilla structure's decoration index.
+ */
+bool isVanillaStructure(const std::string& name);
 
 /** Lookup by full id; throws if unknown. */
 const StructureSet& byName(const std::string& name);

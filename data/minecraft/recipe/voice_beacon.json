@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "N": "minecraft:nightglass",
+    "H": "minecraft:resonant_heart",
+    "R": "minecraft:resonite_ingot"
+  },
+  "pattern": [
+    "NNN",
+    "NHN",
+    "RRR"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:voice_beacon"
+  }
+}

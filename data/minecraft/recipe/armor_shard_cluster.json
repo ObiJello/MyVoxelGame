@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "minecraft:armor_shard",
+    "minecraft:armor_shard",
+    "minecraft:armor_shard",
+    "minecraft:armor_shard",
+    "minecraft:armor_shard",
+    "minecraft:armor_shard",
+    "minecraft:armor_shard",
+    "minecraft:armor_shard",
+    "minecraft:armor_shard"
+  ],
+  "result": {
+    "id": "minecraft:armor_shard_cluster"
+  }
+}

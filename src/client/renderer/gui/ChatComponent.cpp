@@ -19,7 +19,9 @@ namespace Render {
         std::function<void(const std::string&)> s_runCommandHandler;
         std::function<void(const std::string&)> s_suggestCommandHandler;
     }
+    namespace { std::function<void(const std::string&)> s_openFileHandler; }
     void SetRunCommandHandler(std::function<void(const std::string&)> handler) { s_runCommandHandler = std::move(handler); }
+    void SetOpenFileHandler(std::function<void(const std::string&)> handler) { s_openFileHandler = std::move(handler); }
     void SetSuggestCommandHandler(std::function<void(const std::string&)> handler) { s_suggestCommandHandler = std::move(handler); }
 
     void CopyToClipboard(const std::string& text) {
@@ -278,6 +280,10 @@ namespace Render {
             }
             if (r.action == ChatClickAction::SuggestCommand) {
                 if (s_suggestCommandHandler) s_suggestCommandHandler(r.value);
+                return true;
+            }
+            if (r.action == ChatClickAction::OpenFile) {
+                if (s_openFileHandler) s_openFileHandler(r.value);
                 return true;
             }
         }

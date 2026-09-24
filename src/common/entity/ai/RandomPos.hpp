@@ -16,6 +16,7 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <functional>
 #include <optional>
 
 namespace Game {
@@ -63,6 +64,12 @@ namespace Game {
         // of any solid it landed inside, so a swimming mob aims at dry land.
         std::optional<glm::dvec3> GetLandPos(PathfinderMob& mob, int horizontalDist,
                                              int verticalDist);
+        // MC LandRandomPos.getPos(mob, xz, y, scoring) — the same roll, but
+        // the ten candidates are ranked by `scoring` instead of the mob's
+        // walk-target value (GoToClosestVillage ranks by -sectionsToVillage).
+        std::optional<glm::dvec3> GetLandPos(PathfinderMob& mob, int horizontalDist,
+                                             int verticalDist,
+                                             const std::function<double(const glm::ivec3&)>& scoring);
 
     } // namespace RandomPos
 

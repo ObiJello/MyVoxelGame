@@ -36,10 +36,10 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BLOCK_DIR = os.path.join(ROOT, "minecraft_code/decompiled_net/minecraft/world/level/block")
+BLOCK_DIR = os.path.join(ROOT, "minecraft_code_26.1-snapshot-1/decompiled_net/minecraft/world/level/block")
 BLOCKS_JAVA = os.path.join(BLOCK_DIR, "Blocks.java")
-# 26.3 (minecraft_code2) fills GAPS only: a block or class 26.1 lacks.
-BLOCK_DIR2 = os.path.join(ROOT, "minecraft_code2/decompiled_net/minecraft/world/level/block")
+# 26.3 (minecraft_code_26.3-pre-2) fills GAPS only: a block or class 26.1 lacks.
+BLOCK_DIR2 = os.path.join(ROOT, "minecraft_code_26.3-pre-2/decompiled_net/minecraft/world/level/block")
 BLOCKS_JAVA2 = os.path.join(BLOCK_DIR2, "Blocks.java")
 
 
@@ -61,6 +61,28 @@ def mc2_registry(existing):
                     ("registerStair", "StairBlock"), ("registerLegacyStair", "StairBlock")):
         for m in re.finditer(fn + r'\(\s*Block\w*Ids\.([A-Z0-9_]+)', src):
             out.setdefault(m.group(1).lower(), cls)
+    # ColorCollection.registerBlocks / zipMap: a whole dyed family (the wool
+    # and concrete stairs and slabs, …) off one call, expanded per colour by
+    # gen_block_hardness (imported with the repo root as the working
+    # directory, which its input paths are relative to).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    cwd = os.getcwd()
+    os.chdir(ROOT)
+    try:
+        import gen_block_hardness as hard
+        expanded = hard.color_collection_calls(src)
+    finally:
+        os.chdir(cwd)
+    wrapper = {"registerSlab": "SlabBlock", "registerWall": "WallBlock",
+               "registerStair": "StairBlock", "registerLegacyStair": "StairBlock"}
+    for _offset, fn, args, _field in expanded:
+        slug = args[0].strip('"')
+        if fn in wrapper:
+            out.setdefault(slug, wrapper[fn])
+            continue
+        m = (re.search(r'(\w+)::new', args[1]) or
+             re.search(r'\bnew\s+(\w+)\s*\(', args[1])) if len(args) >= 3 else None
+        out.setdefault(slug, m.group(1) if m else "Block")
     return {k: v for k, v in out.items() if k not in existing}
 OUT_HPP = os.path.join(ROOT, "src/common/world/block/GeneratedBlockShapes.hpp")
 OUT_CPP = os.path.join(ROOT, "src/common/world/block/GeneratedBlockShapes.cpp")
@@ -328,6 +350,54 @@ def main():
             blocks_src):
         slug2cls[m.group(1)] = m.group(2) or m.group(3)
     slug2cls.update(mc2_registry(slug2cls))
+    # engine blocks (redstone_plus): the zero-delay torch has the redstone torch's shape
+    # The Hush (engine dimension): the bloom is a flower, the portal a nether portal; its cubes need no row.
+    for engine_slug, vanilla in (("blue_redstone_torch", "redstone_torch"), ("blue_redstone_wall_torch", "redstone_wall_torch"),
+                                 ("display_block", "redstone_lamp"),
+                                 ("resonance_bloom", "dandelion"), ("hush_portal", "nether_portal"),
+                                 # second drop: the sapling column, the grass tuft, the wall cluster
+                                 # and the lantern; the stairs/slab/fence/gate/door/trapdoor/wall
+                                 # families are per-state and stay with the engine's family builders.
+                                 ("whisperwood_sapling", "oak_sapling"), ("hush_grass", "short_grass"),
+                                 ("resonant_cluster", "amethyst_cluster"), ("echo_lantern", "lantern"),
+                                 # the tools of the deep: the whisperfruit hangs from the leaf above
+                                 # like hanging roots (box 2,10,2 .. 14,16,14); the heart is a cube.
+                                 ("hanging_whisperfruit", "hanging_roots"),
+                                 # Aurelith (2026-09-22): the choir lamp is a lantern, the
+                                 # crystal conduit a chain (26.x names it iron_chain), the
+                                 # river's water a bubble column (no outline); its cubes,
+                                 # pillars and panels need no row.
+                                 ("choir_lamp", "lantern"), ("crystal_conduit", "iron_chain"),
+                                 # the dormant city's dim lamp is its lit twin's lantern; the
+                                 # chord socket and the voice pedestal keep their model boxes.
+                                 ("dim_choir_lamp", "lantern"),
+                                 ("resonant_water", "bubble_column"),
+                                 # Twilight Forest + The Aether (pass one): the non-cube ones take
+                                 # the shape of the vanilla block they alias in gen_block_states.py;
+                                 # their cubes (logs, leaves, planks, stone-class blocks) need no row.
+                                 ("twilight_oak_sapling", "oak_sapling"), ("canopy_sapling", "oak_sapling"),
+                                 ("tf_mangrove_sapling", "oak_sapling"), ("darkwood_sapling", "oak_sapling"),
+                                 ("skyroot_sapling", "oak_sapling"), ("golden_oak_sapling", "oak_sapling"),
+                                 ("firefly", "end_rod"), ("cicada", "end_rod"), ("moonworm", "end_rod"),
+                                 ("mushgloom", "dandelion"), ("mayapple", "dandelion"),
+                                 ("torchberry_plant", "dandelion"), ("fiddlehead", "short_grass"),
+                                 ("clover_patch", "moss_carpet"), ("moss_patch", "moss_carpet"),
+                                 ("fallen_leaves", "snow"),
+                                 ("white_flower", "dandelion"), ("purple_flower", "dandelion"),
+                                 # BerryBushStemBlock.SHAPE is box(2,0,2,14,13,14) — exactly
+                                 # short_grass's (TallGrassBlock) shape.
+                                 ("berry_bush_stem", "short_grass"),
+                                 ("aether_portal", "nether_portal"),
+                                 # The Aether, pass two: the ambrosium torch is a TorchBlock (the
+                                 # wall twin and the plates/buttons are per-state); every other
+                                 # pass-two block is a cube or a per-state family.
+                                 ("ambrosium_torch", "torch"), ("ambrosium_wall_torch", "wall_torch"),
+                                 ("skyroot_pressure_plate", "oak_pressure_plate"),
+                                 ("holystone_pressure_plate", "stone_pressure_plate"),
+                                 ("skyroot_button", "oak_button"), ("holystone_button", "stone_button"),
+                                 # Twilight Forest, pass two: HugeWaterLilyBlock is a LilyPadBlock.
+                                 ("huge_water_lily", "lily_pad")):
+        if vanilla in slug2cls: slug2cls[engine_slug] = slug2cls[vanilla]
 
     cache, rows, skipped = {}, [], {}
     for slug, cls in sorted(slug2cls.items()):

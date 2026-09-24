@@ -5,6 +5,7 @@
 #include "common/core/Log.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "levelgen/Heightmap.h"
 
 #include "levelgen/structure/ChunkGeneratorStructureState.h"
@@ -12,6 +13,8 @@
 #include "levelgen/structure/StructureSet.h"
 #include "levelgen/structure/Structures.h"
 #include "levelgen/structure/StructureStartData.h"
+#include "levelgen/structure/TwilightLandmarks.h"
+#include "levelgen/structure/TwilightStructurePlacements.h"
 #include "levelgen/RandomState.h"
 #include "world/biome/BiomeSource.h"
 
@@ -24,8 +27,10 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
+#include <queue>
 #include <set>
 
 namespace Server {
@@ -206,6 +211,113 @@ namespace Server {
         return { WithNamespace(idOrTag) };
     }
 
+    const std::vector<std::string>& AllBiomeIds() {
+        static const std::vector<std::string> ids = [] {
+            std::vector<std::string> out;
+            for (Game::BiomeId id = 0; id < Game::BiomeRegistry::Count(); ++id) {
+                out.push_back(WithNamespace(std::string(Game::BiomeRegistry::Get(id).name)));
+            }
+            std::sort(out.begin(), out.end());
+            out.erase(std::unique(out.begin(), out.end()), out.end());
+            return out;
+        }();
+        return ids;
+    }
+
+    const std::vector<std::string>& AllStructureIds() {
+        static const std::vector<std::string> ids = [] {
+            std::vector<std::string> out;
+            try {
+                for (const mls::StructureInfo* info : mls::StructureSets::allStructures()) out.push_back(info->name);
+            } catch (const std::exception& e) {
+                Log::Warning("[Locate] structure registry failed to load: %s", e.what());
+            }
+            std::sort(out.begin(), out.end());
+            return out;
+        }();
+        return ids;
+    }
+
+    bool LevelHasBiome(ServerLevel& level, const std::string& biomeId) {
+        Game::MyTerrainGenerator* generator = level.TerrainGenerator();
+        if (!generator || !generator->GetBiomeSource()) return false;
+        return generator->GetBiomeSource()->possibleBiomes().count(biomeId) != 0;
+    }
+
+    bool StructureIsGenerated(const std::string& structureId) {
+        try {
+            return mls::Structures::isImplemented(mls::StructureSets::structureByName(structureId));
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
+    bool LevelHasStructure(ServerLevel& level, const std::string& structureId) {
+        Game::MyTerrainGenerator* generator = level.TerrainGenerator();
+        mls::ChunkGeneratorStructureState* state = generator ? generator->GetStructureState() : nullptr;
+        if (!state) return false;
+        for (const mls::StructureSet* set : state->possibleStructureSets()) {
+            for (const auto& entry : set->structures) {
+                if (entry.structure->name == structureId) return true;
+            }
+        }
+        return false;
+    }
+
+    std::string CanonicalWorldgenId(const std::string& kind, const std::string& typed, ServerLevel* level) {
+        // A bare tag ("#in_twilight_forest" — the tab completion shows tags
+        // without their namespace): the namespace that defines it, minecraft
+        // first. Assuming minecraft: would miss every mod tag.
+        if (!typed.empty() && typed[0] == '#' && typed.find(':') == std::string::npos) {
+            const std::string path = typed.substr(1);
+            std::error_code ec;
+            auto defines = [&](const std::filesystem::path& ns) {
+                return std::filesystem::is_regular_file(ns / "tags" / "worldgen" / kind / (path + ".json"), ec);
+            };
+            if (defines(DataRoot() / "minecraft")) return "#minecraft:" + path;
+            for (const auto& ns : std::filesystem::directory_iterator(DataRoot(), ec)) {
+                if (ns.is_directory(ec) && defines(ns.path())) {
+                    return "#" + ns.path().filename().string() + ":" + path;
+                }
+            }
+            return typed;
+        }
+        if (typed.empty() || typed[0] == '#' || typed.find(':') != std::string::npos) return typed;
+        const bool biome = kind == "biome";
+        const std::string suffix = ":" + typed;
+        auto endsWithPath = [&](const std::string& id) {
+            return id.size() > suffix.size() && id.compare(id.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        // (1) What this level generates.
+        if (level) {
+            if (biome) {
+                if (Game::MyTerrainGenerator* g = level->TerrainGenerator(); g && g->GetBiomeSource()) {
+                    const auto& possible = g->GetBiomeSource()->possibleBiomes();
+                    if (possible.count("minecraft" + suffix)) return "minecraft" + suffix;
+                    for (const auto& id : possible) if (endsWithPath(id)) return id;
+                }
+            } else {
+                for (const std::string& id : AllStructureIds()) {
+                    if (endsWithPath(id) && LevelHasStructure(*level, id)) return id;
+                }
+            }
+        }
+        // (2) minecraft:, (3) any other namespace.
+        const std::vector<std::string>& all = biome ? AllBiomeIds() : AllStructureIds();
+        if (std::binary_search(all.begin(), all.end(), "minecraft" + suffix)) return "minecraft" + suffix;
+        for (const std::string& id : all) if (endsWithPath(id)) return id;
+        // (4) A tag of that name in any namespace (minecraft first).
+        if (IsWorldgenTag(kind, typed)) return "#minecraft" + suffix;
+        std::error_code ec;
+        for (const auto& ns : std::filesystem::directory_iterator(DataRoot(), ec)) {
+            if (!ns.is_directory(ec)) continue;
+            if (std::filesystem::is_regular_file(ns.path() / "tags" / "worldgen" / kind / (typed + ".json"), ec)) {
+                return "#" + ns.path().filename().string() + suffix;
+            }
+        }
+        return "minecraft" + suffix;
+    }
+
     std::optional<LocateResult> FindNearestStructure(ServerLevel& level,
                                                      const std::vector<std::string>& structureIds,
                                                      const glm::ivec3& from, int maxSearchRadius) {
@@ -222,7 +334,10 @@ namespace Server {
         for (const mls::StructureSet* set : state->possibleStructureSets()) {
             Scan scan{set, {}};
             for (const auto& entry : set->structures) {
-                if (std::find(structureIds.begin(), structureIds.end(), entry.structure->name) != structureIds.end()) {
+                // A structure this build does not generate yet can never be
+                // found; skipping it saves scanning a whole radius for it.
+                if (std::find(structureIds.begin(), structureIds.end(), entry.structure->name) != structureIds.end() &&
+                    mls::Structures::isImplemented(*entry.structure)) {
                     scan.wanted.push_back(entry.structure);
                 }
             }
@@ -233,6 +348,7 @@ namespace Server {
         std::optional<LocateResult> nearest;
         double nearestDistSqr = std::numeric_limits<double>::max();
         std::vector<const Scan*> randomSpread;
+        std::vector<const Scan*> landmarks;
 
         for (const Scan& scan : scans) {
             const mls::StructurePlacement* placement = scan.set->placement.get();
@@ -263,6 +379,75 @@ namespace Server {
                 }
             } else if (dynamic_cast<const mls::RandomSpreadStructurePlacement*>(placement)) {
                 randomSpread.push_back(&scan);
+            } else if (dynamic_cast<const mls::TwilightLandmarkGridPlacement*>(placement)) {
+                landmarks.push_back(&scan);
+            }
+        }
+
+        // Twilight Forest landmarks (lich tower, hydra lair, labyrinth…):
+        // vanilla's findNearestMapStructure skips a placement that is neither
+        // rings nor random spread; the mod patches the tail of it with
+        // WorldUtil.findNearestMapLandmark — every landmark centre (one per
+        // 256-block region, LegacyLandmarkPlacements.landmarkCenterScanner)
+        // within the radius, counted when the placement accepts its chunk and
+        // the biome at the centre is one of the structure's, the nearest
+        // (horizontally) kept. Same here, walking regions ring by ring and
+        // stopping once no farther ring can beat the best; the kept candidate
+        // is also run through the structure's own generation (as the other
+        // placements are), falling back to the next-nearest if it declines.
+        if (!landmarks.empty()) {
+            const int32_t focusChunkX = (static_cast<int32_t>(std::floor(from.x / 16.0))) & ~15;
+            const int32_t focusChunkZ = (static_cast<int32_t>(std::floor(from.z / 16.0))) & ~15;
+            struct Candidate { double distSqr; int32_t cx, cz, blockX, blockZ; const mls::StructurePlacement* placement; const mls::StructureInfo* info; };
+            auto farther = [](const Candidate& a, const Candidate& b) { return a.distSqr > b.distSqr; };
+            std::priority_queue<Candidate, std::vector<Candidate>, decltype(farther)> pending(farther);
+            minecraft::world::biome::BiomeSource* source = state->biomeSource();
+            const auto* sampler = state->sampler();
+            auto consider = [&](int dx, int dz) {
+                const minecraft::core::BlockPos center = mls::twilight_landmarks::getNearestCenterXZ(
+                    focusChunkX + dx * 16, focusChunkZ + dz * 16);
+                const int32_t cx = center.getX() >> 4, cz = center.getZ() >> 4;
+                std::string biome;
+                for (const Scan* scan : landmarks) {
+                    const mls::StructurePlacement& placement = *scan->set->placement;
+                    if (!placement.isStructureChunk(*state, cx, cz)) continue;
+                    if (biome.empty() && source && sampler) {
+                        biome = source->getNoiseBiome(center.getX() >> 2, center.getY() >> 2, center.getZ() >> 2, *sampler);
+                    }
+                    for (const mls::StructureInfo* info : scan->wanted) {
+                        if (!mls::BiomeTags::resolve(info->biomesTag).count(biome)) continue;
+                        const double ddx = center.getX() - from.x, ddz = center.getZ() - from.z;
+                        pending.push(Candidate{ddx * ddx + ddz * ddz, cx, cz, center.getX(), center.getZ(), &placement, info});
+                    }
+                }
+            };
+            std::optional<LocateResult> best;
+            for (int ring = 0; ring <= maxSearchRadius && !best; ++ring) {
+                for (int dx = -ring; dx <= ring; ++dx) {
+                    for (int dz = -ring; dz <= ring; ++dz) {
+                        if (std::abs(dx) != ring && std::abs(dz) != ring) continue;
+                        consider(dx, dz);
+                    }
+                }
+                // A centre in ring k sits within +/-3 chunks of its region's
+                // middle and the player anywhere in the focus region's 16
+                // chunks, so it is at least 256k - 304 blocks away; a
+                // candidate closer than ring+1's floor (rounded down to
+                // 256(k+1) - 320) cannot be beaten by any farther ring.
+                const double floorNext = std::max(0.0, static_cast<double>(ring + 1) * 256.0 - 320.0);
+                const bool lastRing = ring == maxSearchRadius;
+                while (!pending.empty() && (lastRing || pending.top().distSqr <= floorNext * floorNext)) {
+                    const Candidate c = pending.top();
+                    pending.pop();
+                    if (StructureGeneratesAt(*generator, *state, *c.placement, *c.info, c.cx, c.cz)) {
+                        best = LocateResult{glm::ivec3(c.blockX, 0, c.blockZ), c.info->name};   // the landmark centre, as the mod reports
+                        break;
+                    }
+                }
+            }
+            if (best) {
+                const double d = DistSqr(best->pos, from);
+                if (d < nearestDistSqr) { nearestDistSqr = d; nearest = best; }
             }
         }
 
@@ -302,6 +487,60 @@ namespace Server {
             }
         }
         return nearest;
+    }
+
+    std::string BiomeAt(ServerLevel& level, const glm::ivec3& pos) {
+        Game::MyTerrainGenerator* generator = level.TerrainGenerator();
+        if (!generator || !generator->GetBiomeSource() || !generator->GetRandomState() ||
+            !generator->GetRandomState()->sampler()) return {};
+        return generator->GetBiomeSource()->getNoiseBiome(pos.x >> 2, pos.y >> 2, pos.z >> 2,
+                                                          *generator->GetRandomState()->sampler());
+    }
+
+    namespace {
+        // The standing Y nearest `aroundY` in column (x, z) whose feet block
+        // is in the wanted biome: a motion-blocking floor with two
+        // non-blocking (air, not water) blocks over it, searched outward up
+        // to 64 blocks each way. A loaded chunk answers from its blocks,
+        // otherwise the generator's noise column (cheese / spaghetti caves
+        // and aquifers are in it; carvers are not). `aroundY` when nothing
+        // fits.
+        template <typename InBiome>
+        int OpenFloorInBiome(ServerLevel& level, int x, int z, int aroundY, InBiome&& inBiome) {
+            const Game::DimensionId dim = level.Dimension();
+            const int minY = Game::DimensionMinY(dim);
+            const int maxY = minY + Game::DimensionLogicalHeight(dim) - 2;
+            std::function<bool(int)> blocking;
+            std::vector<minecraft::levelgen::BlockState*> column;
+            int columnMinY = 0;
+            if (Game::World* world = level.World(); world && world->IsChunkLoaded(x >> 4, z >> 4)) {
+                blocking = [world, x, z](int y) {
+                    return Game::HeightmapIsOpaque(Game::HeightmapType::MotionBlocking, world->GetBlock(x, y, z));
+                };
+            } else {
+                Game::MyTerrainGenerator* generator = level.TerrainGenerator();
+                if (!generator || !generator->GetLibGenerator() || !generator->GetRandomState()) return aroundY;
+                generator->GetLibGenerator()->getBaseColumn(x, z, generator->GetRandomState(), column);
+                if (column.empty()) return aroundY;
+                columnMinY = generator->GetLibGenerator()->getBaseColumnMinY();
+                const auto opaque = minecraft::levelgen::Heightmap::getOpaquePredicate(
+                    minecraft::levelgen::Heightmap::Types::MOTION_BLOCKING);
+                blocking = [&column, columnMinY, opaque](int y) {
+                    const int i = y - columnMinY;
+                    if (i < 0 || i >= static_cast<int>(column.size())) return false;
+                    minecraft::levelgen::BlockState* state = column[static_cast<size_t>(i)];
+                    return state != nullptr && opaque(state);
+                };
+            }
+            auto standable = [&](int y) {
+                return y - 1 >= minY && y + 1 <= maxY && blocking(y - 1) && !blocking(y) && !blocking(y + 1) && inBiome(y);
+            };
+            for (int d = 0; d <= 64; ++d) {
+                if (standable(aroundY - d)) return aroundY - d;
+                if (d > 0 && standable(aroundY + d)) return aroundY + d;
+            }
+            return aroundY;
+        }
     }
 
     std::optional<LocateResult> FindClosestBiome(ServerLevel& level,
@@ -349,9 +588,19 @@ namespace Server {
                     // MC reports the Y of the matching SAMPLE, which is often
                     // underground or in the air (biomes are 3D). This game
                     // reports the terrain surface of that column instead, so
-                    // the click-to-teleport lands on the ground; the sampled
+                    // the click-to-teleport lands on the ground — unless the
+                    // surface is another biome (a cave biome: crystal
+                    // caverns, lush caves, deep dark), where it is the open
+                    // floor nearest the sample inside the biome. The sampled
                     // Y is kept when the column cannot be answered.
-                    return LocateResult{glm::ivec3(blockX, LocateSurfaceY(level, blockX, blockZ, blockY), blockZ), biome};
+                    const int surfaceY = LocateSurfaceY(level, blockX, blockZ, blockY);
+                    if (source.getNoiseBiome(quartX, surfaceY >> 2, quartZ, sampler) == biome) {
+                        return LocateResult{glm::ivec3(blockX, surfaceY, blockZ), biome};
+                    }
+                    const int floorY = OpenFloorInBiome(level, blockX, blockZ, blockY, [&](int y) {
+                        return source.getNoiseBiome(quartX, y >> 2, quartZ, sampler) == biome;
+                    });
+                    return LocateResult{glm::ivec3(blockX, floorY, blockZ), biome};
                 }
             }
             return std::nullopt;
@@ -372,6 +621,63 @@ namespace Server {
             }
         }
         return std::nullopt;
+    }
+
+    const DimensionWorldgenIds& WorldgenIdsFor(ServerLevel& level) {
+        // Static data per dimension: the generator's biome source and
+        // structure sets and the data/ tags never change while running.
+        static std::map<int, DimensionWorldgenIds> cache;
+        const int key = static_cast<int>(Game::DimensionToRaw(level.Dimension()));
+        if (auto it = cache.find(key); it != cache.end()) return it->second;
+
+        DimensionWorldgenIds ids;
+        if (Game::MyTerrainGenerator* g = level.TerrainGenerator(); g && g->GetBiomeSource()) {
+            for (const auto& id : g->GetBiomeSource()->possibleBiomes()) ids.biomes.push_back(id);
+        }
+        for (const std::string& id : AllStructureIds()) {
+            if (LevelHasStructure(level, id) && StructureIsGenerated(id)) ids.structures.push_back(id);
+        }
+        const std::unordered_set<std::string> biomeSet(ids.biomes.begin(), ids.biomes.end());
+        const std::unordered_set<std::string> structureSet(ids.structures.begin(), ids.structures.end());
+
+        // Every tag under data/<ns>/tags/worldgen/<kind>/, kept when one of
+        // its members lives here.
+        auto collectTags = [&](const char* kind, std::vector<std::string>& out) {
+            std::error_code ec;
+            for (const auto& ns : std::filesystem::directory_iterator(DataRoot(), ec)) {
+                if (!ns.is_directory(ec)) continue;
+                const std::filesystem::path dir = ns.path() / "tags" / "worldgen" / kind;
+                for (auto e = std::filesystem::recursive_directory_iterator(dir, ec);
+                     !ec && e != std::filesystem::recursive_directory_iterator(); e.increment(ec)) {
+                    if (!e->is_regular_file(ec) || e->path().extension() != ".json") continue;
+                    std::string path = std::filesystem::relative(e->path(), dir, ec).replace_extension().generic_string();
+                    const std::string tag = "#" + ns.path().filename().string() + ":" + path;
+                    bool here = false;
+                    if (std::string(kind) == "biome") {
+                        for (const auto& member : ResolveBiomeIdOrTag(tag)) {
+                            if (biomeSet.count(member)) { here = true; break; }
+                        }
+                    } else {
+                        for (const auto& member : ResolveStructureIdOrTag(tag)) {
+                            if (structureSet.count(member)) { here = true; break; }
+                        }
+                    }
+                    if (here) out.push_back(tag);
+                }
+                ec.clear();
+            }
+        };
+        collectTags("biome", ids.biomeTags);
+        collectTags("structure", ids.structureTags);
+
+        for (auto* v : {&ids.biomes, &ids.structures, &ids.biomeTags, &ids.structureTags}) {
+            std::sort(v->begin(), v->end());
+            v->erase(std::unique(v->begin(), v->end()), v->end());
+        }
+        Log::Info("[Locate] %s: %zu biomes, %zu structures, %zu + %zu tags for completion",
+                  std::string(Game::DimensionName(level.Dimension())).c_str(), ids.biomes.size(),
+                  ids.structures.size(), ids.biomeTags.size(), ids.structureTags.size());
+        return cache.emplace(key, std::move(ids)).first->second;
     }
 
 } // namespace Server

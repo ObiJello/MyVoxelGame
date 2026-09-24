@@ -6,6 +6,12 @@
     "minecraft:netherite_shovel",
     "minecraft:wooden_shovel",
     "minecraft:iron_shovel",
-    "minecraft:copper_shovel"
+    "minecraft:copper_shovel",
+    "minecraft:skyroot_shovel",
+    "minecraft:holystone_shovel",
+    "minecraft:zanite_shovel",
+    "minecraft:gravitite_shovel",
+    "minecraft:ironwood_shovel",
+    "minecraft:steeleaf_shovel"
   ]
 }

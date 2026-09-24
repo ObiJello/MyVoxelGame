@@ -67,4 +67,11 @@ namespace Game {
     // pearl).
     bool ThrowEnderPearl(int dimensionId, IUsePlayer& player);
 
+    // MC ThrowablePotionItem.use's server half: spawn a thrown potion owned
+    // by the throwing player carrying `stack` (count 1) —
+    // Projectile.spawnProjectileFromRotation(createPotion, level, stack,
+    // player, -20.0F, 0.5F, 1.0F). A lingering_potion stack makes it the
+    // lingering kind. Same bridge shape and return contract as the pearl.
+    bool ThrowPotion(int dimensionId, IUsePlayer& player, const ItemStack& stack);
+
 } // namespace Game

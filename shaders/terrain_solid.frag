@@ -14,6 +14,11 @@ in vec4 fragColor;
 flat in int fragSprite;   // see terrain.vert; -1 = untiled
 flat in int fragRecord;   // face-mapped: first record texel
 flat in int fragAux;      // two-sided: back mapping
+flat in float fragVisibility;   // MC ChunkVisibility (terrain.vert)
+// The lightmap colour of a face-mapped rectangle's (uniform) light; 1 for
+// every other quad, whose vertex colour already carries its lightmap sample
+// (terrain.vert, MC terrain.vsh: vertexColor = Color * sample_lightmap).
+in vec3 fragLight;
 
 uniform sampler2D uTextureAtlas;
 // Atlas sprite table (AtlasBuilder), texture unit 1: texel (id & 255,
@@ -23,7 +28,6 @@ uniform sampler2D uSpriteTable;
 // holding the per-block records of face-mapped rectangles (Vertex.hpp).
 uniform samplerBuffer uFaceMap;
 uniform vec3 uCameraPos;            // World-space camera position (per view)
-uniform float uSkyBrightness;       // Day/night terrain dim (0.2667..1)
 uniform vec4 uFogColor;             // Time-of-day fog color
 uniform vec4 uFogEnv;               // (envStart, envEnd, rdStart, rdEnd); 1e9 = fog off
 // Debug fill override (greedy-mesh view): rgb painted at strength a over the
@@ -146,14 +150,18 @@ void main() {
     vec4 vcol = shadedVertexColor(mapped, rec, uv);
     vec3 finalColor = textureColor.rgb * vcol.rgb;
 
-    // Day/night sky-light dim + MC-style distance fog
-    finalColor *= uSkyBrightness;
+    // MC lightmap (Render::Lightmap): the vertex colour is already lit;
+    // a face-mapped rectangle takes its uniform light here.
+    finalColor *= fragLight;
     vec3 fogDelta = fragWorldPos - uCameraPos;
     float sph = length(fogDelta);
     float cyl = max(length(fogDelta.xz), abs(fogDelta.y));
     float fogValue = max(linearFog(sph, uFogEnv.x, uFogEnv.y),
                          linearFog(cyl, uFogEnv.z, uFogEnv.w));
     finalColor = mix(finalColor, uFogColor.rgb, fogValue * uFogColor.a);
+    // MC terrain.fsh: a freshly loaded section fades in from the fog
+    // colour — mix(FogColor, color, ChunkVisibility), alpha untouched.
+    finalColor = mix(uFogColor.rgb, finalColor, fragVisibility);
 
     finalColor = mix(finalColor, uOverlayColor.rgb, uOverlayColor.a);
     FragColor = vec4(finalColor, textureColor.a * vcol.a);

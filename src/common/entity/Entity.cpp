@@ -1,14 +1,27 @@
 // File: src/common/entity/Entity.cpp
 #include "common/entity/Entity.hpp"
+#include "common/world/block/BlockBounce.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/core/Log.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/entity/LivingEntity.hpp"
+#include "common/sound/EntitySounds.hpp"
+#include "common/sound/SoundEvents.hpp"
+#include "common/sound/SoundType.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <string>
 #include <algorithm>
 #include <cmath>
+#include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/fluid/FluidState.hpp"
+#include <glm/geometric.hpp>
 
 namespace Game {
 
@@ -279,7 +292,11 @@ namespace Game {
         // takes this one-overlap-test mover instead of Move's ~16-27-cell
         // swept gather — the single biggest per-entity cost in the client
         // tick when a detonation puts a hundred thousand entities in the level.
-        const PhysicsContext ctx = m_level->Physics();
+        // MC EntityCollisionContext: the Aether's aerclouds shape by the
+        // mover's fall distance (AercloudBlock.hpp). No mob glides here.
+        PhysicsContext ctx = m_level->Physics();
+        ctx.collisionEntity       = true;
+        ctx.collisionFallDistance = fallDistance;
         const bool verticalHit = ::Game::MoveApproximate(
             position, velocity, HalfExtents(), delta, onGround,
             horizontalCollision, verticalCollision, ctx);
@@ -290,7 +307,194 @@ namespace Game {
         if (verticalHit) ResetFallDistance();
     }
 
+    namespace {
+        // The two block tags the mob footstep reads, resolved per BlockID
+        // once from the registry slugs:
+        //   #climbable + powder snow — MC isStateClimbable: a climbing mob's
+        //     odometer runs on its full movement, not just the horizontal;
+        //   #crystal_sound_blocks — amethyst chimes as it is walked on.
+        struct StepTags {
+            std::vector<uint8_t> climbable;
+            std::vector<uint8_t> crystal;
+        };
+        const StepTags& GetStepTags() {
+            static const StepTags tags = [] {
+                StepTags t;
+                t.climbable.assign(BlockRegistry::Size, 0);
+                t.crystal.assign(BlockRegistry::Size, 0);
+                static constexpr std::string_view kClimbable[] = {
+                    "ladder", "vine", "scaffolding", "weeping_vines", "weeping_vines_plant",
+                    "twisting_vines", "twisting_vines_plant", "cave_vines", "cave_vines_plant",
+                    "powder_snow"};
+                for (size_t i = 0; i < BlockRegistry::Size; ++i) {
+                    const std::string& slug = BlockRegistry::Get(static_cast<BlockID>(i)).registrySlug;
+                    for (std::string_view c : kClimbable) if (slug == c) t.climbable[i] = 1;
+                    if (slug == "amethyst_block" || slug == "budding_amethyst") t.crystal[i] = 1;
+                }
+                return t;
+            }();
+            return tags;
+        }
+        bool IsClimbableForSound(BlockID id) {
+            const size_t i = static_cast<size_t>(id);
+            const auto& t = GetStepTags().climbable;
+            return i < t.size() && t[i];
+        }
+        bool IsCrystalSoundBlock(BlockID id) {
+            const size_t i = static_cast<size_t>(id);
+            const auto& t = GetStepTags().crystal;
+            return i < t.size() && t[i];
+        }
+    } // namespace
+
+    SoundSource Entity::GetSoundSource() const {
+        return EntitySoundsOf(GetType()).source;
+    }
+
+    const char* Entity::GetSwimSound() const { return EntitySoundsOf(GetType()).swim; }
+    const char* Entity::GetSwimSplashSound() const { return EntitySoundsOf(GetType()).splash; }
+    const char* Entity::GetSwimHighSpeedSplashSound() const { return EntitySoundsOf(GetType()).splashHighSpeed; }
+
+    bool Entity::EmitsMovementSounds() const {
+        return EntitySoundsOf(GetType()).stepMode != EntityStepMode::None;
+    }
+
+    void Entity::PlayStepSound(const glm::ivec3& pos, BlockState state) {
+        (void)pos;
+        const EntitySoundRow& row = EntitySoundsOf(GetType());
+        switch (row.stepMode) {
+            case EntityStepMode::None:
+                return;
+            case EntityStepMode::Event:
+                // The class's own playStepSound (a zombie's shuffle, a
+                // spider's skitter).
+                PlaySound(PickSound(row.step, *this), row.stepVolume, row.stepPitch);
+                return;
+            case EntityStepMode::Block: {
+                // MC Entity.playStepSound: the block's SoundType step at
+                // 0.15 × its volume, its pitch.
+                const SoundType& type = SoundTypeOf(state);
+                PlaySound(type.GetStepSound(), type.GetVolume() * 0.15f, type.GetPitch());
+                return;
+            }
+        }
+    }
+
+    void Entity::PlayEntityOnFireExtinguishedSound() {
+        // MC: server only, NULL except, this entity's category.
+        if (!m_level || m_level->IsClientSide()) return;
+        JavaRandom& rng = m_level->Random();
+        const float pitch = 1.6f + (rng.NextFloat() - rng.NextFloat()) * 0.4f;
+        m_level->PlaySound(nullptr, position, SoundEvents::GENERIC_EXTINGUISH_FIRE, GetSoundSource(), 0.7f, pitch);
+    }
+
+    void Entity::PlaySwimSound(float volume) {
+        if (!m_level) return;
+        JavaRandom& rng = m_level->Random();
+        PlaySound(GetSwimSound(), volume, 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.4f);
+    }
+
+    void Entity::WaterSwimSound() {
+        // MC waterSwimSound: the stroke's volume from the controlling
+        // passenger's motion (0.4 for a ridden mount, 0.35 on its own).
+        const Entity* controller = GetControllingPassenger();
+        const Entity& mover = controller ? *controller : *this;
+        const float modifier = controller ? 0.4f : 0.35f;
+        const glm::dvec3 d = mover.velocity;
+        const float speed = std::min(1.0f, static_cast<float>(std::sqrt(d.x * d.x * 0.2 + d.y * d.y + d.z * d.z * 0.2)) * modifier);
+        PlaySwimSound(speed);
+    }
+
+    void Entity::DoWaterSplashEffect() {
+        // MC doWaterSplashEffect, sound half (the BUBBLE / SPLASH particles
+        // have no client particle type here): quieter strokes below 0.25 use
+        // the plain splash, a hard entry the high-speed one.
+        if (!m_level) return;
+        const Entity* controller = GetControllingPassenger();
+        const Entity& mover = controller ? *controller : *this;
+        const float modifier = controller ? 0.9f : 0.2f;
+        const glm::dvec3 d = mover.velocity;
+        const float speed = std::min(1.0f, static_cast<float>(std::sqrt(d.x * d.x * 0.2 + d.y * d.y + d.z * d.z * 0.2)) * modifier);
+        JavaRandom& rng = m_level->Random();
+        const float pitch = 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.4f;
+        PlaySound(speed < 0.25f ? GetSwimSplashSound() : GetSwimHighSpeedSplashSound(), speed, pitch);
+    }
+
+    void Entity::ApplyMovementEmissionAndPlaySound(const glm::dvec3& movement) {
+        const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr;
+        if (!blocks) return;
+
+        const float movedDistance = static_cast<float>(glm::length(movement) * 0.6000000238418579);
+        const float horizontalMovedDistance = static_cast<float>(
+            std::sqrt(movement.x * movement.x + movement.z * movement.z) * 0.6000000238418579);
+
+        // MC getOnPos() (offset 1e-5) — the block the entity stands on — and
+        // getOnPosLegacy() (offset 0.2), the "effect" block (a carpet on it).
+        const int bx = static_cast<int>(std::floor(position.x));
+        const int bz = static_cast<int>(std::floor(position.z));
+        const glm::ivec3 supportingPos(bx, static_cast<int>(std::floor(position.y - 1.0e-5)), bz);
+        const glm::ivec3 effectPos(bx, static_cast<int>(std::floor(position.y - 0.2)), bz);
+        const BlockState supportingState = blocks->GetBlockState(supportingPos.x, supportingPos.y, supportingPos.z);
+        const BlockState effectState = blocks->GetBlockState(effectPos.x, effectPos.y, effectPos.z);
+
+        const bool climbing = IsClimbableForSound(supportingState.Block());
+        m_moveDist += climbing ? movedDistance : horizontalMovedDistance;
+        m_flyDist += movedDistance;
+
+        const bool supportingIsAir = supportingState.Block() == BlockID::Air;
+        if (m_moveDist > m_nextStep && !supportingIsAir) {
+            LivingEntity* living = AsLiving();
+            const bool swimming = living && living->IsSwimming();
+            // MC vibrationAndSoundEffectsFromBlock: a step lands when the
+            // entity is on the ground (or climbing) and not swimming.
+            const auto stepOn = [&](const glm::ivec3& pos, BlockState state, bool shouldSound) {
+                if (state.Block() == BlockID::Air) return false;
+                const bool isClimbable = IsClimbableForSound(state.Block());
+                if (!(onGround || isClimbable) || swimming) return false;
+                if (shouldSound) {
+                    // MC walkingStepSound: the step, and amethyst's chime.
+                    PlayStepSound(pos, state);
+                    if (IsCrystalSoundBlock(state.Block()) && tickCount >= m_lastCrystalSoundPlayTick + 20) {
+                        // MC playAmethystStepSound.
+                        m_crystalSoundIntensity *= static_cast<float>(
+                            std::pow(0.997, static_cast<double>(tickCount - m_lastCrystalSoundPlayTick)));
+                        m_crystalSoundIntensity = std::min(1.0f, m_crystalSoundIntensity + 0.07f);
+                        JavaRandom& rng = m_level->Random();
+                        const float pitch = 0.5f + m_crystalSoundIntensity * rng.NextFloat() * 1.2f;
+                        const float volume = 0.1f + m_crystalSoundIntensity * 1.2f;
+                        PlaySound(SoundEvents::AMETHYST_BLOCK_CHIME, volume, pitch);
+                        m_lastCrystalSoundPlayTick = tickCount;
+                    }
+                }
+                return true;
+            };
+            const bool onlyEffectState = supportingPos == effectPos;
+            bool produced = stepOn(effectPos, effectState, true);
+            if (!onlyEffectState) produced |= stepOn(supportingPos, supportingState, false);
+            if (produced) {
+                m_nextStep = NextStep();
+            } else if (IsInWater()) {
+                m_nextStep = NextStep();
+                WaterSwimSound();
+            }
+        } else if (supportingIsAir) {
+            // MC processFlappingMovement.
+            if (IsFlapping()) OnFlap();
+        }
+    }
+
+    void Entity::PlaySound(std::string_view event, float volume, float pitch) {
+        // MC Entity.playSound: level.playSound(null, getX(), getY(), getZ(),
+        // sound, getSoundSource(), volume, pitch) unless silent. A null
+        // `except` means the server sends it to every nearby player and a
+        // client-side copy of this entity stays quiet — the server's is the
+        // one everyone hears.
+        if (IsSilent() || !m_level || event.empty()) return;
+        m_level->PlaySound(nullptr, position, event, GetSoundSource(), volume, pitch);
+    }
+
     void Entity::Move(const glm::dvec3& delta) {
+        PROFILE_ZONE_N("Entity.Move");
         if (!m_level) return;
 
         // ── THE RIDER SEAM ─────────────────────────────────────────────────
@@ -306,13 +510,47 @@ namespace Game {
         // (knockback) still accumulate and take effect on dismount.
         if (IsPassenger()) return;
 
-        const PhysicsContext ctx = m_level->Physics();
+        // MC EntityCollisionContext: the Aether's aerclouds shape by the
+        // mover's fall distance (AercloudBlock.hpp) — a mob falling faster
+        // lands on the 0.9 falling shape, one drifting down sinks through
+        // the thin floor, and the entityInside hooks (BlockBehaviors.cpp)
+        // slow it. No mob glides here.
+        PhysicsContext ctx = m_level->Physics();
+        ctx.collisionEntity       = true;
+        ctx.collisionFallDistance = fallDistance;
 
         // MoveEntity consumes the velocity vector it is handed, zeroing blocked
         // axes. MC passes deltaMovement itself, so the caller's velocity is the
         // thing that must be mutated — hand it the real member, not a copy.
         const double oldY = position.y;
+        const glm::dvec3 startPos = position;
         glm::dvec3 vel = delta;
+        // A move is a step, never a teleport. MoveEntity sweeps the box the
+        // step covers and IsRegionAllAir walks every chunk column of it, so
+        // a delta the size of the world (a velocity computed from a
+        // position that just teleported 300,000 blocks) costs tens of
+        // thousands of chunk lookups per collision test and freezes the
+        // thread for seconds a tick — on the server, and again on every
+        // client the velocity packet reaches. Nothing legitimate moves an
+        // entity a hundred blocks in one tick (terminal velocity is under
+        // four); anything that asks to is dropped and named in the log.
+        {
+            constexpr double kMaxStep = 64.0;
+            const double stepSq = glm::dot(vel, vel);
+            if (!(stepSq <= kMaxStep * kMaxStep)) {   // also catches NaN
+                static std::atomic<int64_t> s_lastLogMs{0};
+                const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (nowMs - s_lastLogMs.load(std::memory_order_relaxed) > 1000) {
+                    s_lastLogMs.store(nowMs, std::memory_order_relaxed);
+                    Log::Warning("[Entity] %s #%d at (%.1f, %.1f, %.1f) asked to move (%.1f, %.1f, %.1f) in one tick — dropped",
+                                 std::string(TypeInfo().slug).c_str(), GetId(), position.x, position.y, position.z,
+                                 vel.x, vel.y, vel.z);
+                }
+                velocity = glm::dvec3(0.0);
+                return;
+            }
+        }
         const EntityMoveResult result =
             MoveEntity(position, vel, HalfExtents(), MaxUpStep(), onGround, ctx);
 
@@ -329,6 +567,14 @@ namespace Game {
         // MC Entity.move -> checkFallDamage with the movement that actually
         // HAPPENED (post-collision), not the movement that was asked for.
         CheckFallDamage(position.y - oldY, onGround);
+
+        // MC Entity.move → applyMovementEmissionAndPlaySound, server side
+        // (`!level.isClientSide() || isLocalInstanceAuthoritative()` — a mob
+        // mirror is never authoritative, and its sounds would be dropped by
+        // the client bridge anyway). Passengers already returned above.
+        if (!m_level->IsClientSide() && !IsRemoved() && EmitsMovementSounds()) {
+            ApplyMovementEmissionAndPlaySound(position - startPos);
+        }
 
         // MC Entity.move's tail: velocity *= (blockSpeedFactor, 1,
         // blockSpeedFactor). getBlockSpeedFactor reads the block AT the
@@ -375,15 +621,24 @@ namespace Game {
 
         if (onGroundNow) {
             if (fallDistance > 0.0f) {
-                // MC Block.fallOn's default: causeFallDamage(fd, 1.0F). The
-                // per-block multipliers (hay 0.2, beds 0.5-off bounce, slime 0)
-                // arrive with those blocks' behaviours.
+                // MC Block.fallOn: causeFallDamage(fd * (1 - fallDistance
+                // Reduction), 1.0F) for the block landed on (getOnPosLegacy
+                // = getOnPos(0.2)) — a bed or shelf mushroom halves the
+                // fall. (Hay's 0.2 multiplier and slime's cancel are their
+                // own fallOn overrides, still to come.)
                 //
                 // Riders take the landing too — MC does this inside
                 // causeFallDamage itself; see PropagateFallToPassengers's
                 // header note for why it is called from here instead.
-                PropagateFallToPassengers(fallDistance, 1.0f);
-                CauseFallDamage(fallDistance, 1.0f);
+                float reduction = 0.0f;
+                if (const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr) {
+                    const glm::ivec3 p = BlockPosition();
+                    reduction = FallDistanceReduction(blocks->GetBlock(
+                        p.x, static_cast<int>(std::floor(position.y - 0.2)), p.z));
+                }
+                const float fd = fallDistance * (1.0f - reduction);
+                PropagateFallToPassengers(fd, 1.0f);
+                CauseFallDamage(fd, 1.0f);
             }
             // MC resets unconditionally inside the onGround branch.
             ResetFallDistance();
@@ -400,32 +655,101 @@ namespace Game {
         }
     }
 
-    bool Entity::IsInWater() const {
+    // MC EntityFluidInteraction.update, with the two per-fluid trackers and
+    // current accumulators inlined as FluidContact.
+    bool Entity::UpdateFluidInteraction(bool ignoreCurrent) {
+        m_fluid = FluidContact{};
         if (!m_level) return false;
         const IBlockAccess* blocks = m_level->Blocks();
         if (!blocks) return false;
 
-        // MC tests the fluid the entity's box overlaps. This engine has no
-        // fluid-height model, so the test is "is the block at the entity's eye-
-        // low / feet-high midpoint a fluid" — accurate enough for the two
-        // things that read it (FloatGoal and the water movement branch) and
-        // deliberately coarse rather than pretending to a precision the block
-        // data cannot support.
-        const glm::ivec3 p = BlockPosition();
-        return blocks->IsBlockFluid(p.x, p.y, p.z);
+        // MC getFluidInteractionBox: the bounding box deflated by 0.001 so a
+        // box exactly flush with a fluid cell's face does not count as in it.
+        const AABBd full = GetAABBd();
+        const glm::dvec3 lo = full.min + 0.001;
+        const glm::dvec3 hi = full.max - 0.001;
+        const int x0 = static_cast<int>(std::floor(lo.x));
+        const int y0 = static_cast<int>(std::floor(lo.y));
+        const int z0 = static_cast<int>(std::floor(lo.z));
+        const int x1 = static_cast<int>(std::ceil(hi.x)) - 1;
+        const int y1 = static_cast<int>(std::ceil(hi.y)) - 1;
+        const int z1 = static_cast<int>(std::ceil(hi.z)) - 1;
+
+        // MC hasFluidAndLoaded: skip the cell walk when no section in range
+        // holds a fluid. The engine's section-emptiness test is the same
+        // early-out for the common case — an entity in open air.
+        if (blocks->IsRegionAllAir(glm::ivec3(x0 - 1, y0, z0 - 1),
+                                   glm::ivec3(x1 + 1, y1, z1 + 1))) {
+            return false;
+        }
+
+        const double entityY  = full.min.y;
+        const int    eyeBlockX = static_cast<int>(std::floor(position.x));
+        const double eyeY      = GetEyeY();
+        const int    eyeBlockZ = static_cast<int>(std::floor(position.z));
+        bool any = false;
+
+        for (int x = x0; x <= x1; ++x) {
+            for (int y = y0; y <= y1; ++y) {
+                for (int z = z0; z <= z1; ++z) {
+                    const FluidState fluidState = GetFluidState(*blocks, x, y, z);
+                    if (fluidState.IsEmpty()) continue;
+                    const glm::ivec3 cell(x, y, z);
+                    const double fluidBottom = static_cast<double>(y);
+                    const double fluidTop = fluidBottom + FluidHeight(*blocks, cell, fluidState);
+                    if (fluidTop < lo.y) continue;
+
+                    any = true;
+                    const int t = static_cast<int>(fluidState.type);
+                    if (x == eyeBlockX && z == eyeBlockZ && eyeY >= fluidBottom) {
+                        const double fluidTopForCamera =
+                            fluidBottom + FluidHeightForCamera(*blocks, cell, fluidState);
+                        if (eyeY <= fluidTopForCamera) m_fluid.eyesInside[t] = true;
+                    }
+
+                    m_fluid.height[t] = std::max(fluidTop - entityY, m_fluid.height[t]);
+                    if (!ignoreCurrent) {
+                        glm::dvec3 flow = FluidFlow(*blocks, cell, fluidState);
+                        m_fluid.currentHeight[t] = std::max(m_fluid.height[t], m_fluid.currentHeight[t]);
+                        // A shallow film pushes proportionally less.
+                        if (m_fluid.currentHeight[t] < 0.4) flow *= m_fluid.currentHeight[t];
+                        m_fluid.current[t] += flow;
+                        ++m_fluid.currentCount[t];
+                    }
+                }
+            }
+        }
+        return any;
     }
 
-    bool Entity::IsEyeInWater() const {
-        // MC isEyeInFluid samples the fluid HEIGHT at the eye block; with no
-        // fluid-height model the test is "is the block containing the eye
-        // water", the same coarseness IsInWater documents.
-        if (!m_level) return false;
-        const IBlockAccess* blocks = m_level->Blocks();
-        if (!blocks) return false;
-        const int ex = static_cast<int>(std::floor(position.x));
-        const int ey = static_cast<int>(std::floor(GetEyeY()));
-        const int ez = static_cast<int>(std::floor(position.z));
-        return blocks->ContainsWater(ex, ey, ez);
+    // MC EntityFluidInteraction.CurrentAccumulator.applyTo.
+    void Entity::ApplyFluidCurrent(FluidType type, double scale) {
+        const int t = static_cast<int>(type);
+        if (m_fluid.currentCount[t] == 0) return;
+        const glm::dvec3 acc = m_fluid.current[t];
+        if (glm::dot(acc, acc) < 9.999999747378752E-6) return;
+
+        // A player averages the cells' flows; everything else takes the
+        // unit direction (so a mob in a wide river is pushed at full
+        // strength regardless of how many cells it overlaps).
+        glm::dvec3 impulse = IsPlayer()
+            ? acc * (1.0 / static_cast<double>(m_fluid.currentCount[t]))
+            : glm::normalize(acc);
+        impulse *= scale;
+
+        // The minimum-nudge rule: something sitting still in a current is
+        // always moved at least 0.0045 a tick, or a slow flow could never
+        // overcome the rest.
+        constexpr double kMin = 0.003;
+        if (std::abs(velocity.x) < kMin && std::abs(velocity.z) < kMin &&
+            glm::length(impulse) < 0.0045000000000000005) {
+            impulse = glm::normalize(impulse) * 0.0045000000000000005;
+        }
+        AddDeltaMovement(impulse);
+    }
+
+    void Entity::LavaIgnite() {
+        if (!FireImmune()) IgniteForSeconds(15);
     }
 
     // MC Entity.checkInsideBlocks (Entity.java:1240-1309)
@@ -610,11 +934,24 @@ namespace Game {
             --m_boardingCooldown;
         }
 
+        UpdateInWaterStateAndDoFluidPushing();
+
+        // MC Entity.baseTick: `if (isOnFire() && (isInPowderSnow ||
+        // isInWaterOrRain() || isInFloatableFluid())) clearFire()`. No rain
+        // or powder snow here; water is the whole rule.
+        if (IsOnFire() && IsInWater()) {
+            ClearFire();
+            // MC applyEffectsFromBlocks: `wasOnFire && !isOnFire()` → the hiss.
+            PlayEntityOnFireExtinguishedSound();
+        }
         if (m_remainingFireTicks > 0) {
             --m_remainingFireTicks;
         }
-
-        UpdateInWaterStateAndDoFluidPushing();
+        // MC Entity.baseTick: lava only HALVES the fall each tick (a lava
+        // landing still hurts); water's reset lives in the fluid update.
+        if (IsInLava()) {
+            fallDistance *= 0.5f;
+        }
 
         // MC Entity.checkBelowWorld — anything that falls out of the world is
         // discarded rather than left falling forever. The threshold is the
@@ -625,21 +962,42 @@ namespace Game {
     }
 
     void Entity::UpdateInWaterStateAndDoFluidPushing() {
-        // MC updateInWaterStateAndDoFluidPushing resets fall distance on water
-        // contact; lava only HALVES it per tick (Entity.java lava handling), so
-        // a lava landing still hurts.
-        if (IsInWater()) {
+        // MC Entity.updateFluidInteraction.
+        const bool pushed = IsPushedByFluid();
+        UpdateFluidInteraction(/*ignoreCurrent=*/!pushed);
+        const bool inWater = GetFluidHeight(FluidType::Water) > 0.0;
+        const bool inLava  = GetFluidHeight(FluidType::Lava)  > 0.0;
+        if (inWater) {
             ResetFallDistance();
-        } else if (IsInLava()) {
-            fallDistance *= 0.5f;
+            // MC doWaterSplashEffect on the dry→wet edge (`!wasTouchingWater
+            // && !firstTick`): the splash sound, from the server. The SPLASH
+            // / BUBBLE particles have no client particle type yet.
+            if (!m_wasTouchingWater && m_fluidPrimed && m_level && !m_level->IsClientSide()) {
+                DoWaterSplashEffect();
+            }
+        }
+        m_wasTouchingWater = inWater;
+        m_fluidPrimed = true;
+
+        if (pushed) {
+            if (inWater) ApplyFluidCurrent(FluidType::Water, 0.014);
+            if (inLava) {
+                // Lava runs slower: 0.007 where the dimension is FAST_LAVA
+                // (the nether), 0.0023333… elsewhere.
+                const bool fastLava = m_level && m_level->Dimension() == DimensionId::Nether;
+                ApplyFluidCurrent(FluidType::Lava, fastLava ? 0.007 : 0.0023333333333333335);
+            }
         }
 
-        // NOT IMPLEMENTED — MC's current push. See the header note: it reads
-        // FluidState.getFlow per overlapped cell, averages the vectors,
-        // normalises and scales by 0.014 (water) / 0.007 (lava), and this
-        // engine has no fluid level or flow direction to read. Everything that
-        // should drift downstream — primed TNT, dropped items, boats, the
-        // player — instead sits still in a river.
+        // LavaFluid.entityInside: ignite for 15 s, then hurt (4 damage,
+        // gated by the hurt cooldown as in vanilla — a swim is ~2 hearts a
+        // half-second). WaterFluid.entityInside's EXTINGUISH is the clearFire
+        // in BaseTick. Both are applied from checkInsideBlocks in MC, i.e.
+        // once per tick per overlapped fluid, which is what this is.
+        if (inLava) {
+            LavaIgnite();
+            LavaHurt();
+        }
     }
 
     void Entity::Tick() {

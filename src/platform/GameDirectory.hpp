@@ -50,12 +50,25 @@ namespace Platform {
 
         bool GetFogEnabled() const { return GetBool("fogEnabled", true); }
         void SetFogEnabled(bool enabled) { SetBool("fogEnabled", enabled); }
+        // The underwater/lava look: the fluid fog (MC's WaterFogEnvironment /
+        // LavaFogEnvironment) and the underwater.png screen overlay. OFF sees
+        // through fluids as if from the air. Engine-only; vanilla has no
+        // switch for it.
+        bool GetUnderwaterEffects() const { return GetBool("underwaterEffects", true); }
+        void SetUnderwaterEffects(bool enabled) { SetBool("underwaterEffects", enabled); }
 
         // MC biomeBlendRadius 0..7 — (2r+1)² biome samples per tinted quad at
         // mesh time; 0 is a single lookup. Clamped on read so a hand-edited
         // file cannot make the mesher sample a 1000-wide square.
         int GetBiomeBlendRadius() const { return std::clamp(GetInt("biomeBlendRadius", 2), 0, 7); }
         void SetBiomeBlendRadius(int radius) { SetInt("biomeBlendRadius", std::clamp(radius, 0, 7)); NoteGraphicsOptionChanged(); }
+
+        // MC chunkSectionFadeInTime (options.chunkFade): the seconds a newly
+        // compiled chunk section takes to fade in from the fog colour. 0 =
+        // none, 0.05 steps up to 2; default 0.75. Read every frame by the
+        // chunk renderer and by the level-load tracker's readiness test.
+        float GetChunkFadeInTime() const { return std::clamp(GetFloat("chunkSectionFadeInTime", 0.75f), 0.0f, 2.0f); }
+        void  SetChunkFadeInTime(float seconds) { SetFloat("chunkSectionFadeInTime", std::clamp(seconds, 0.0f, 2.0f)); NoteGraphicsOptionChanged(); }
 
         bool GetVSync() const { return GetBool("enableVsync", true); }
         void SetVSync(bool enabled) { SetBool("enableVsync", enabled); }
@@ -101,7 +114,7 @@ namespace Platform {
         bool GetFullscreen() const { return GetBool("fullscreen", false); }
         void SetFullscreen(bool enabled) { SetBool("fullscreen", enabled); }
 
-        float GetGamma() const { return GetFloat("gamma", 1.0f); }
+        float GetGamma() const { return GetFloat("gamma", 0.5f); }   // MC default 0.5
         void SetGamma(float gamma) { SetFloat("gamma", gamma); }
 
         // ── Graphics preset (MC GraphicsPreset) ─────────────────────────────
@@ -194,6 +207,15 @@ namespace Platform {
         // MC mipmapLevels 0..4; 0 = no mipmapping. Applied to the block atlas
         // at build time and live through Render::AtlasBuilder::SetMipmapLevels.
         int GetMipmapLevels() const { return std::clamp(GetInt("mipmapLevels", 4), 0, 4); }
+        // Anisotropic filtering of the block atlas: 1 (off), 2, 4, 8, 16.
+        // Smooths distant and grazing-angle textures; a Minecraft world
+        // with this on looks like it does with OptiFine's AF.
+        int GetAnisotropicFiltering() const {
+            const int v = std::clamp(GetInt("anisotropicFiltering", 16), 1, 16);
+            // Snap to a power of two.
+            int p = 1; while (p * 2 <= v) p *= 2; return p;
+        }
+        void SetAnisotropicFiltering(int level) { SetInt("anisotropicFiltering", std::clamp(level, 1, 16)); NoteGraphicsOptionChanged(); }
         void SetMipmapLevels(int levels) { SetInt("mipmapLevels", std::clamp(levels, 0, 4)); NoteGraphicsOptionChanged(); }
 
         int GetNarrator() const { return GetInt("narrator", 0); }
@@ -218,13 +240,19 @@ namespace Platform {
         int GetRenderDistance() const { return std::clamp(GetInt("renderDistance", 12), 2, 32); }
         void SetRenderDistance(int distance) { SetInt("renderDistance", std::clamp(distance, 2, 32)); NoteGraphicsOptionChanged(); }
 
-        // MC simulationDistance 5..32 (2..32 on the wire): how far from the
-        // player the server ticks entities, random ticks and fluids. Sent to
-        // the server in ClientConfigC2S alongside the render distance and
-        // applied to the player's PLAYER_SIMULATION ticket level — it is the
-        // CPU-side counterpart of the render distance, and independent of it.
-        int GetSimulationDistance() const { return std::clamp(GetInt("simulationDistance", 12), 2, 32); }
-        void SetSimulationDistance(int distance) { SetInt("simulationDistance", std::clamp(distance, 2, 32)); NoteGraphicsOptionChanged(); }
+        // MC simulationDistance 5..32: how far from the player the server
+        // ticks entities, random ticks and fluids. Sent to the server in
+        // ClientConfigC2S alongside the render distance and applied to the
+        // player's PLAYER_SIMULATION ticket level — it is the CPU-side
+        // counterpart of the render distance, and independent of it. This
+        // engine allows up to kMaxSimulationDistance (the server loads and
+        // ticks the ring beyond the view distance without sending it), which
+        // is what lets a kilometre-long redstone machine run end to end. Every
+        // chunk in the ring costs memory and tick time, so above 32 it is a
+        // deliberate choice, not a preset.
+        static constexpr int kMaxSimulationDistance = 128;
+        int GetSimulationDistance() const { return std::clamp(GetInt("simulationDistance", 12), 2, kMaxSimulationDistance); }
+        void SetSimulationDistance(int distance) { SetInt("simulationDistance", std::clamp(distance, 2, kMaxSimulationDistance)); NoteGraphicsOptionChanged(); }
 
         float GetScreenEffectScale() const { return GetFloat("screenEffectScale", 1.0f); }
         void SetScreenEffectScale(float scale) { SetFloat("screenEffectScale", scale); }
@@ -233,10 +261,10 @@ namespace Platform {
         std::string GetSoundDevice() const { return GetString("soundDevice", ""); }
         void SetSoundDevice(const std::string& device) { SetString("soundDevice", device); }
 
-        float GetMasterVolume() const { return GetFloat("soundCategory_master", 0.20778146f); }
+        float GetMasterVolume() const { return GetFloat("soundCategory_master", 1.0f); }
         void SetMasterVolume(float volume) { SetFloat("soundCategory_master", volume); }
 
-        float GetMusicVolume() const { return GetFloat("soundCategory_music", 0.0f); }
+        float GetMusicVolume() const { return GetFloat("soundCategory_music", 1.0f); }
         void SetMusicVolume(float volume) { SetFloat("soundCategory_music", volume); }
 
         float GetRecordVolume() const { return GetFloat("soundCategory_record", 1.0f); }
@@ -367,7 +395,10 @@ namespace Platform {
         bool GetAdvancedItemTooltips() const { return GetBool("advancedItemTooltips", true); }
         void SetAdvancedItemTooltips(bool enabled) { SetBool("advancedItemTooltips", enabled); }
 
-        bool GetPauseOnLostFocus() const { return GetBool("pauseOnLostFocus", true); }
+        // Off by default here (vanilla: on). The window losing focus — a Tab
+        // to another app, or just clicking away — must not pause the world;
+        // F3+P turns it on for anyone who wants MC's behaviour.
+        bool GetPauseOnLostFocus() const { return GetBool("pauseOnLostFocus", false); }
         void SetPauseOnLostFocus(bool enabled) { SetBool("pauseOnLostFocus", enabled); }
 
         // Screen and Resolution
@@ -535,6 +566,9 @@ namespace Platform {
         // (skyboxes/<name>/panorama_0..5.png), picked up alongside the ones
         // shipped in assets/textures/environment/skyboxes.
         std::string GetSkyboxesDirectory() const { return m_skyboxesDirectory; }
+        // <game dir>/shaderpacks — Minecraft shader packs (folders or zips
+        // with a shaders/ folder), picked on the Shader Packs screen.
+        std::string GetShaderPacksDirectory() const { return m_shaderPacksDirectory; }
 
         // Reveal a folder in the platform's file browser (Finder, Explorer,
         // xdg-open). Returns false if the platform has no way to do it.
@@ -604,6 +638,7 @@ namespace Platform {
         std::string m_logsDirectory;
         std::string m_screenshotsDirectory;
         std::string m_skyboxesDirectory;
+        std::string m_shaderPacksDirectory;
         bool m_initialized = false;
 
         // Create directory structure

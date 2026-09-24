@@ -70,30 +70,18 @@ const ChunkStatus ChunkStatus::BIOMES(
     ChunkType::PROTOCHUNK
 );
 
-const ChunkStatus ChunkStatus::NOISE(
-    "noise",
+// 26.3: noise fill, material rules and carving in one step
+// (ChunkStatus.java:115), and the first status on the final heightmaps.
+const ChunkStatus ChunkStatus::TERRAIN(
+    "terrain",
     &BIOMES,
-    WORLDGEN_HEIGHTMAPS,
-    ChunkType::PROTOCHUNK
-);
-
-const ChunkStatus ChunkStatus::SURFACE(
-    "surface",
-    &NOISE,
-    WORLDGEN_HEIGHTMAPS,
-    ChunkType::PROTOCHUNK
-);
-
-const ChunkStatus ChunkStatus::CARVERS(
-    "carvers",
-    &SURFACE,
-    FINAL_HEIGHTMAPS,  // Switches to final heightmaps here
+    FINAL_HEIGHTMAPS,
     ChunkType::PROTOCHUNK
 );
 
 const ChunkStatus ChunkStatus::FEATURES(
     "features",
-    &CARVERS,
+    &TERRAIN,
     FINAL_HEIGHTMAPS,
     ChunkType::PROTOCHUNK
 );
@@ -132,9 +120,7 @@ static const ChunkStatus* ALL_STATUSES[] = {
     &ChunkStatus::STRUCTURE_STARTS,
     &ChunkStatus::STRUCTURE_REFERENCES,
     &ChunkStatus::BIOMES,
-    &ChunkStatus::NOISE,
-    &ChunkStatus::SURFACE,
-    &ChunkStatus::CARVERS,
+    &ChunkStatus::TERRAIN,
     &ChunkStatus::FEATURES,
     &ChunkStatus::INITIALIZE_LIGHT,
     &ChunkStatus::LIGHT,

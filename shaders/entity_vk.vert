@@ -1,5 +1,9 @@
 // File: shaders/entity_vk.vert (Vulkan version of the mob entity shader)
 // Layout matches GetBlockVertexLayout(): pos3 (loc 0), uv2 (loc 1), color4 ubyte (loc 2)
+//
+// Created through CreateShaderFromFilesPortal (the portal pipeline layout)
+// because the fragment shader reads the frame's fog from the Common UBO; the
+// matrices stay in the push constants (SetShaderIgnoresCommonMatrices).
 #version 450
 
 layout(location = 0) in vec3 aPos;
@@ -16,6 +20,7 @@ layout(push_constant) uniform PushConstants {
     float uAlphaTest;   // 76-79
     vec4 uColor;        // 80-95  — the hurt/swell overlay
     vec4 uUVRange;      // 96-111 — here: the portal clip plane (uEntityClipPlane)
+    vec4 uScalars;      // 112-127 — x: the batch's light (uEntityLight)
 } pc;
 
 // gl_ClipDistance must be advertised explicitly — see block_vk.vert.
@@ -27,16 +32,17 @@ out gl_PerVertex {
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
+layout(location = 2) out vec3 vRenderPos;   // render space, for the fog
 
 void main() {
-    // Vertices are already in world space — ModelPart::Build applies the part
-    // hierarchy and the entity transform on the CPU, so every mob sharing a
-    // texture batches into one draw and only uMVP is needed here.
+    // Vertices are already in render space — ModelPart::Build applies the
+    // part hierarchy and the entity transform on the CPU, so every mob sharing
+    // a texture batches into one draw and only uMVP is needed here.
     vUV = aUV;
     vColor = aColor;
+    vRenderPos = aPos;
     gl_Position = pc.uMVP * vec4(aPos, 1.0);
-    // Portal clip plane in aPos space (camera-relative world; the renderer
-    // folds the camera offset into .w). Zero = no clipping.
+    // Portal clip plane in aPos space (render space). Zero = no clipping.
     gl_ClipDistance[0] = (any(notEqual(pc.uUVRange.xyz, vec3(0.0))))
         ? dot(pc.uUVRange.xyz, aPos) + pc.uUVRange.w
         : 1.0;

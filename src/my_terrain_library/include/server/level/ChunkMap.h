@@ -19,6 +19,7 @@
 #include <unordered_set>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <string>
 
@@ -160,7 +161,10 @@ public:
      */
     size_t size() const { return m_updatingChunkMap.size(); }
     ChunkTaskDispatcher::Stats worldgenDispatcherStats() const { return m_worldgenTaskDispatcher->stats(); }
-    size_t pendingGenerationTaskCount() const { return m_pendingGenerationTasks.size(); }
+    size_t pendingGenerationTaskCount() const {
+        std::lock_guard<std::mutex> lock(m_pendingTasksMutex);
+        return m_pendingGenerationTasks.size();
+    }
     std::string debugHotTasks(size_t n);   // diagnostics
     size_t featureClaimRetries() const { return m_worldGenContext.featureClaims ? m_worldGenContext.featureClaims->retries.load() : 0; }
     size_t featureClaimWaiters() const {
@@ -170,13 +174,50 @@ public:
     }
     size_t pendingUnloadCount() const { std::lock_guard<std::mutex> lock(m_mapMutex); return m_pendingUnloads.size(); }
 
-    // Reference: ChunkMap.java processUnloads (lines 442-460), minus the save:
-    // holders whose ticket level rose above the max are destroyed (the holder
-    // owns its chunk). `canUnload(key)` lets the embedder veto a holder it
-    // still references (a conversion in flight). Budgeted by `haveTime` with
-    // a small floor, like Java. Main thread. Returns holders destroyed.
+    // Reference: ChunkMap.java processUnloads + scheduleUnload: every holder
+    // whose ticket level rose above the max is saved (a proto chunk; FULL
+    // chunks are the embedder's) and destroyed. `canUnload(key)` lets the
+    // embedder veto a holder it still references (a conversion in flight).
+    // Budgeted by `haveTime`, plus Java's minimum: however far the holders
+    // ready to unload are over 2,000. Main thread.
+    // Returns holders destroyed.
+    //
+    // Without storage (a read-only world) nothing can be saved, so a proto
+    // that may carry another chunk's decoration (TERRAIN up to FULL) is kept
+    // instead: see the .cpp.
     size_t processUnloads(const std::function<bool()>& haveTime,
                           const std::function<bool(int64_t)>& canUnload);
+
+    // The embedder took this FULL chunk into its own world (it converts FULL
+    // chunks to its own format, saves them itself and loads them from that
+    // save). Makes it a candidate for releaseHandedOffChunks. Main thread.
+    void markHandedOff(int64_t key);
+
+    // Check up to `maxChecks` candidates, and release the block data
+    // (ProtoChunk::releaseBlockData) of each one nothing will read again:
+    //  - the holder has completed FULL, and no generation task holds it;
+    //  - all 8 neighbours are past SPAWN — SPAWN is the last step that reads
+    //    a neighbour's blocks, and FEATURES, the one that writes them, is
+    //    already done for every neighbour of a FULL chunk (LIGHT needs
+    //    INITIALIZE_LIGHT at radius 1). A neighbour saved and reloaded keeps
+    //    its status, so this stays true;
+    //  - chunks are saved (with no storage the embedder may regenerate a
+    //    chunk it dropped, from this copy);
+    //  - `canRelease(key)`: the embedder is not reading it.
+    // What other chunks still read — status, structure starts and
+    // references — is kept. A candidate not ready yet stays for a later
+    // call; one whose holder is gone is dropped. Main thread. Returns
+    // chunks released.
+    size_t releaseHandedOffChunks(size_t maxChecks, const std::function<bool(int64_t)>& canRelease);
+
+    // Reference: ChunkMap.onChunkReadyToSend, called from prepareTickingChunk
+    // once a chunk and its 3x3 are FULL — MC sends it to every player
+    // tracking it then, whichever ticket made it FULL. The embedder, which
+    // does the sending, is told through this listener. Main thread; the
+    // chunk stays valid for the call (the embedder pins it to keep it).
+    using ChunkReadyListener = std::function<void(int64_t key, ChunkAccess* chunk)>;
+    void setChunkReadyListener(ChunkReadyListener listener);
+    size_t releasedChunkCount() const { return m_releasedChunks; }
 
     // Reference: ChunkMap.java onLevelChange — forwards a holder's new ticket
     // level to both task dispatchers so queued work is re-sorted by it. This
@@ -208,6 +249,42 @@ public:
     const world::chunk::status::WorldGenContext& getWorldGenContext() const {
         return m_worldGenContext;
     }
+
+    /**
+     * Chunk storage handed in by the embedder (its region I/O), replacing
+     * the storage-path IOWorker, and the DataVersion saves are written in
+     * (the embedder's world format). Call before the first chunk is
+     * requested. Null storage turns saving and loading off.
+     */
+    void setChunkStorage(std::shared_ptr<world::level::chunk::storage::ChunkStorageBackend> storage,
+                         int dataVersion);
+
+    world::level::chunk::storage::IOWorker* getChunkIo() const { return m_chunkIo.get(); }
+
+    /** The world clock, for each save's LastUpdate. Any thread. */
+    void setGameTime(int64_t gameTime) { m_gameTime.store(gameTime, std::memory_order_relaxed); }
+
+    /**
+     * Reference: ChunkMap.save(ChunkAccess). Writes a proto chunk that has
+     * changed since it was last saved. FULL chunks are the embedder's and are
+     * never written here. Main thread; the chunk must not be generating.
+     * Returns true when a write was queued.
+     */
+    bool save(ChunkAccess* chunk);
+
+    /**
+     * Reference: ChunkMap.saveAllChunks(boolean). With flush: saves every
+     * proto chunk that is not generating, unloads everything queued for
+     * unloading (saving it), and waits for the writes to reach the storage.
+     * Without flush it does nothing here: MC's periodic save covers only
+     * LevelChunks, which are the embedder's. Main thread.
+     *
+     * `quiesced`: the embedder has stopped every generation task (shutdown),
+     * so a holder a cancelled task still claims is quiet too and is saved —
+     * MC instead blocks until each holder is ready.
+     */
+    void saveAllChunks(bool flush, const std::function<bool(int64_t)>& canUnload,
+                       bool quiesced = false);
 
     // =========================================================================
     // Chunk preparation methods
@@ -274,14 +351,29 @@ private:
     std::unordered_map<int64_t, std::unique_ptr<ChunkHolder>> m_updatingChunkMap;
     std::unordered_map<int64_t, ChunkHolder*> m_visibleChunkMap;
     std::unordered_set<int64_t> m_pendingUnloads;
+    // releaseHandedOffChunks candidates, walked round-robin. Main thread.
+    std::vector<int64_t> m_handedOff;
+    std::unordered_set<int64_t> m_handedOffSet;
+    size_t m_handedOffCursor = 0;
+    size_t m_releasedChunks = 0;   // lifetime count, diagnostics
+    ChunkReadyListener m_chunkReadyListener;
+    void onChunkReadyToSend(int64_t key);
     // Holders created since the last promoteChunkMap. Java clones the whole
-    // updating map on every promotion; with holders never unloaded here
-    // that clone grew to 13k+ entries and ran once per chunk request. Only
-    // additions ever happen, so promotion just appends these.
+    // updating map on every promotion; that clone grew to 13k+ entries and
+    // ran once per chunk request, so promotion appends these instead.
+    // Removals need no list: processUnloads erases from the visible map
+    // (and from this list) as it destroys a holder.
     std::vector<std::pair<int64_t, ChunkHolder*>> m_visibleAdds;
-    std::vector<int64_t> m_visibleRemoves;
 
-    // Generation state
+    // Generation state. Java's pendingGenerationTasks is main-thread-only;
+    // here a task can also be scheduled from the worldgen lane (the loading-
+    // pyramid recovery in ChunkGenerationTask::scheduleChunkInLayer), so the
+    // list has its own lock. Unlocked, a push from the lane landing between
+    // runGenerationTasks' copy and its clear() was dropped: the task never
+    // ran, yet kept its claim on every holder of its pyramid (~529) — the
+    // "task scheduled=none, refs in the hundreds" holders that stopped
+    // holder unloading from being enabled (2026-08-30).
+    mutable std::mutex m_pendingTasksMutex;
     std::vector<std::shared_ptr<ChunkGenerationTask>> m_pendingGenerationTasks;
     world::chunk::status::WorldGenContext m_worldGenContext;
 
@@ -308,6 +400,14 @@ private:
 
     // Storage
     std::unique_ptr<world::level::chunk::storage::IOWorker> m_chunkIo;
+    int m_dataVersion;
+    std::atomic<int64_t> m_gameTime{0};
+    // Reference: ChunkMap.chunkTypeCache - what kind of chunk each position
+    // holds on disk (1 = full, -1 = proto), filled by loads and saves.
+    std::mutex m_chunkTypeCacheMutex;
+    std::unordered_map<int64_t, int8_t> m_chunkTypeCache;
+    void markPosition(const world::ChunkPos& pos, bool full);
+    bool isExistingChunkFull(const world::ChunkPos& pos);
     std::string m_storagePath;
     std::unique_ptr<ServerLevel> m_serverLevel;
 

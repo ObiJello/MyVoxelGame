@@ -139,6 +139,11 @@ class DB:
         if "algo" not in columns:
             self.conn.execute("ALTER TABLE accounts ADD COLUMN algo TEXT "
                               "NOT NULL DEFAULT 'scrypt'")
+        # Migration: "last online", the Unix time the account's last game
+        # connection dropped. 0 = never seen online since this column exists.
+        if "last_online" not in columns:
+            self.conn.execute("ALTER TABLE accounts ADD COLUMN last_online "
+                              "INTEGER NOT NULL DEFAULT 0")
         self.conn.commit()
 
     # ── accounts ────────────────────────────────────────────────────────
@@ -181,6 +186,17 @@ class DB:
             return False
         return secrets.compare_digest(self._hash(password, row["salt"], algo),
                                       row["hash"])
+
+    def set_last_online(self, account_id: int, when: int):
+        self.conn.execute("UPDATE accounts SET last_online=? WHERE id=?",
+                          (when, account_id))
+        self.conn.commit()
+
+    def last_online(self, account_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT last_online FROM accounts WHERE id=?", (account_id,)
+        ).fetchone()
+        return int(row["last_online"]) if row else 0
 
     def rename(self, account_id: int, name: str):
         self.conn.execute("UPDATE accounts SET name=? WHERE id=?",
@@ -302,7 +318,7 @@ class Presence:
     def touch(self, account_id: int, conn):
         entry = self.online.setdefault(account_id, {
             "state": "menu", "world": "", "host": "", "port": 0,
-            "conns": set()})
+            "joinable": True, "conns": set()})
         entry["conns"].add(conn)
         task = self.offline_tasks.pop(account_id, None)
         if task:
@@ -310,11 +326,12 @@ class Presence:
         return entry
 
     def update(self, account_id: int, state: str, world: str,
-               host: str, port: int):
+               host: str, port: int, joinable: bool = True):
         entry = self.online.get(account_id)
         if entry is None:
             return
-        entry.update(state=state, world=world, host=host, port=port)
+        entry.update(state=state, world=world, host=host, port=port,
+                     joinable=joinable)
 
     def drop_conn(self, account_id: int, conn) -> bool:
         """Returns True when this was the account's last connection."""
@@ -331,8 +348,11 @@ class Presence:
     def snapshot(self, account_id: int) -> dict:
         entry = self.online.get(account_id)
         if entry is None:
-            return {"state": "offline", "world": ""}
-        return {"state": entry["state"], "world": entry["world"]}
+            return {"state": "offline", "world": "", "joinable": False}
+        # joinable: the host's World Options "Joinable" switch. Friends still
+        # see the world; the Join button is greyed out while it is off.
+        return {"state": entry["state"], "world": entry["world"],
+                "joinable": bool(entry.get("joinable", True))}
 
     def host_info(self, account_id: int):
         entry = self.online.get(account_id)
@@ -484,9 +504,15 @@ class Service:
     # ── event push ──────────────────────────────────────────────────────
 
     def roster_payload(self, account_id: int) -> dict:
-        friends = [{"id": fid, "name": fname,
-                    "presence": self.presence.snapshot(fid)}
-                   for fid, fname in self.db.friends_of(account_id)]
+        friends = []
+        for fid, fname in self.db.friends_of(account_id):
+            presence = self.presence.snapshot(fid)
+            # An offline friend carries when they were last seen, so the
+            # roster can say "last online 2 hours ago" instead of a bare
+            # "Offline". Unix seconds; 0 = never (or before this was kept).
+            if presence["state"] == "offline":
+                presence["last_online"] = self.db.last_online(fid)
+            friends.append({"id": fid, "name": fname, "presence": presence})
         incoming = [{"id": i, "name": n}
                     for i, n in self.db.requests_incoming(account_id)]
         outgoing = [{"id": i, "name": n}
@@ -696,6 +722,8 @@ class Service:
             return {"ok": False, "error": "bad_state"}
         world = str(body.get("world", ""))[:48]
         port = int(body.get("port", 0)) if state == "hosting" else 0
+        # Absent from older clients → joinable (their hosts always were).
+        joinable = bool(body.get("joinable", True)) if state == "hosting" else False
 
         # Which address should joiners dial? Normally the observed source
         # address. When the host shares a LAN with this service (or sits
@@ -708,7 +736,7 @@ class Service:
             if not host and is_public_ip(reported):
                 host = reported
 
-        self.presence.update(me["id"], state, world, host, port)
+        self.presence.update(me["id"], state, world, host, port, joinable)
         self.broadcast_change(me["id"])
         return {"ok": True}
 
@@ -732,6 +760,10 @@ class Service:
         entry = self.presence.entry(host_id)
         if entry is None or entry["state"] != "hosting":
             return {"ok": False, "error": "not_hosting"}
+        if not entry.get("joinable", True):
+            # The host turned World Options → Joinable off: no address, no
+            # relay ticket — the host's server is refusing connections anyway.
+            return {"ok": False, "error": "not_joinable"}
 
         # A usable address means one we could plausibly hand to an outsider.
         # is_public_ip already rejects the cases that are hopeless from the
@@ -863,6 +895,10 @@ async def serve_ndjson(service: Service, first: bytes,
         pass
     finally:
         if service.presence.drop_conn(account["id"], conn):
+            # The moment the last connection dropped is the "last online"
+            # time friends see; written now, not after the grace period, so
+            # a service restart during the grace still keeps it.
+            service.db.set_last_online(account["id"], int(time.time()))
             # Last connection gone: grace period before the offline broadcast
             # so brief reconnects don't flap friends' rosters.
             async def go_offline(aid=account["id"]):

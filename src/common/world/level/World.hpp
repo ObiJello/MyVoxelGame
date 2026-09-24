@@ -1,5 +1,6 @@
 // File: src/common/world/level/World.hpp
 #pragma once
+#include <chrono>
 
 #include "../chunk/IBlockAccess.hpp"
 #include "../chunk/Heightmap.hpp"
@@ -13,37 +14,96 @@
 #include "common/entity/EntityLevel.hpp"   // Game::Difficulty
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <cstdint>
+#include <deque>
+#include <optional>
 #include <vector>
 #include <unordered_set>
 #include <glm/glm.hpp>
 
+namespace Game::Lighting {
+    class LevelLightManager;
+}
+
 namespace Game {
+
+    class BlockEntity;
+    class CollectingNeighborUpdater;
+    class EntityLevel;
 
     class World : public ILevelWrite {
     public:
-        // Update flags for SetBlock operations (bitfield)
+        // MC Block.UPDATE_* — the flags `Level.setBlock(pos, state, flags)`
+        // takes, with vanilla's numeric values so a port can carry the
+        // literal from the decompile (`setBlock(pos, state, 2)`) unchanged.
+        //
+        // The engine's old flag set (NotifyNeighbors | UpdateShapes |
+        // RecomputeLight | UpdateHeightmap | MarkDirty) predates redstone and
+        // did not distinguish "tell the neighbours" from "tell the clients".
+        // Redstone needs both halves separately: a wire re-evaluating its
+        // power writes with flag 2 (clients only) and fans its neighbour
+        // updates out by hand, and getting that wrong doubles every update.
         enum UpdateFlags : uint32_t {
-            None              = 0,
-            NotifyNeighbors   = 1 << 0,  // Notify neighboring blocks of change
-            UpdateShapes      = 1 << 1,  // Update block shapes (for fences, walls, etc.) - TODO
-            RecomputeLight    = 1 << 2,  // Recalculate lighting - TODO
-            // Vestigial. Heightmaps are now maintained unconditionally by
-            // Chunk::SetBlock, which is the single funnel every write reaches.
-            // That matches MC: LevelChunk.setBlockState updates its heightmaps
-            // regardless of the flags handed to Level.setBlock — those govern
-            // neighbour updates, lighting and client notification, never the
-            // heightmap. The bit is kept so the `All` combination and existing
-            // call sites keep their numeric value.
-            UpdateHeightmap   = 1 << 3,
-            MarkDirty         = 1 << 4,  // Mark section dirty for mesh rebuild
-            NoDrops           = 1 << 6,  // Don't drop items when breaking - TODO
-            
-            // Common flag combinations
-            All = NotifyNeighbors | UpdateShapes | RecomputeLight | UpdateHeightmap | MarkDirty,
-            AllNoDrops = All | NoDrops
+            None                       = 0,
+            // UPDATE_NEIGHBORS — run neighborChanged on the six neighbours
+            // (the writable notification redstone lives on).
+            NotifyNeighbors            = 1,
+            // UPDATE_CLIENTS — send the change to watching clients, and here
+            // also remesh the section. Without it a write is server-private.
+            UpdateClients              = 2,
+            // UPDATE_INVISIBLE — client-side only in vanilla; carried so the
+            // combinations keep their values.
+            Invisible                  = 4,
+            // UPDATE_IMMEDIATE — MC sends the block update in the same tick
+            // rather than batching it. The accumulator here flushes once per
+            // tick regardless, so this is informational.
+            Immediate                  = 8,
+            // UPDATE_KNOWN_SHAPE — SKIP the updateShape walk on the
+            // neighbours. A block that already knows its neighbours' shapes
+            // are unaffected (a door swinging) sets this to save the walk.
+            KnownShape                 = 16,
+            // UPDATE_SUPPRESS_DROPS — a neighbour that updateShape destroys
+            // drops nothing.
+            SuppressDrops              = 32,
+            // UPDATE_MOVE_BY_PISTON — this write is a piston moving the
+            // block; blocks pass it through to onPlace / removal.
+            MoveByPiston               = 64,
+            // UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE — the experimental wire
+            // evaluator's flag; honoured, never set here.
+            SkipShapeUpdateOnWire      = 128,
+            // UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS — remove a block entity
+            // without its removal side effects (dropping contents).
+            SkipBlockEntitySideEffects = 256,
+            // UPDATE_SKIP_ON_PLACE — do not run the new block's onPlace.
+            SkipOnPlace                = 512,
+
+            // MC Block.UPDATE_ALL (3) — what `setBlockAndUpdate` uses, and
+            // what nearly every caller wants.
+            All                        = NotifyNeighbors | UpdateClients,
+            // MC Block.UPDATE_ALL_IMMEDIATE (11) — BlockItem.place.
+            AllImmediate               = All | Immediate,
+            AllNoDrops                 = All | SuppressDrops,
+
+            // ── Legacy names, kept so existing call sites read the same ───
+            //
+            // MarkDirty was "remesh + tell the clients", which IS
+            // UPDATE_CLIENTS. The three below were TODO bits nobody read;
+            // they fold into the same value so `UpdateShapes | RecomputeLight
+            // | UpdateHeightmap | MarkDirty` (the wither ritual's flag 2)
+            // stays flag 2.
+            MarkDirty                  = UpdateClients,
+            UpdateShapes               = UpdateClients,
+            RecomputeLight             = UpdateClients,
+            UpdateHeightmap            = UpdateClients,
+            NoDrops                    = SuppressDrops,
         };
-        
+
+        // MC Block.UPDATE_LIMIT — how deep a chain of shape updates may
+        // recurse before it is cut off. A shape update that writes a block
+        // passes `limit - 1` to that write.
+        static constexpr int kUpdateLimit = 512;
+
         World();
         ~World();
 
@@ -66,6 +126,16 @@ namespace Game {
         // IBlockAccess implementation
         BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
         BlockState GetBlockState(int worldX, int worldY, int worldZ) const override;
+        // The raw sky column, bounded by the WORLD_SURFACE heightmap and read
+        // straight out of the one chunk: the interface's default walks to the
+        // build limit through a chunk lookup per cell, which with every grass
+        // block random-ticking made one server tick take longer than a join.
+        int GetRawBrightness(int worldX, int worldY, int worldZ) const override;
+        // MC Level.getBrightness(LightLayer, pos), from the level light engine.
+        int GetBrightness(Lighting::LightLayer layer, int worldX, int worldY, int worldZ) const override;
+
+        // The level's light engine (server). Null before Initialize.
+        Lighting::LevelLightManager* Light() const { return m_light.get(); }
 
         // Section-aware collision-mask fill. See IBlockAccess for the contract.
         void FillCollisionMask(const glm::ivec3& origin, const glm::ivec3& size,
@@ -106,8 +176,37 @@ namespace Game {
         // back into scope — declaring overloads here would otherwise hide it.
         using ILevelWrite::SetBlock;
 
+        // MC Level.setBlock(pos, state, flags, updateLimit) — the four-argument
+        // form every other overload funnels into. `updateLimit` is the
+        // remaining shape-update depth; callers outside the update machinery
+        // pass kUpdateLimit (which the three-argument forms do for you).
+        bool SetBlock(const glm::ivec3& pos, BlockState state, uint32_t updateFlags,
+                      int updateLimit);
+
+        // MC Level.removeBlock(pos, movedByPiston): the cell becomes the fluid
+        // it held or air, flag 3 (| 64 when a piston is doing it).
+        bool RemoveBlock(const glm::ivec3& pos, bool movedByPiston);
+
+        // MC Level.destroyBlock — loot (optional), then RemoveBlock-style
+        // write carrying `updateLimit`. The ILevelWrite form below passes
+        // the full limit.
+        bool DestroyBlock(const glm::ivec3& pos, bool dropResources, int updateLimit);
+        bool DestroyBlock(const glm::ivec3& pos, bool dropResources) override {
+            return DestroyBlock(pos, dropResources, kUpdateLimit);
+        }
+
         // The server's world is the authority — MC ServerLevel.isClientSide.
         bool IsClientSide() const override { return false; }
+
+        // MC ServerLevel.playSeededSound: to every player in this dimension
+        // within range, minus `except` (common/sound/LevelSound.hpp).
+        void PlaySeededSound(const SoundExcept& except, const glm::dvec3& pos,
+                             std::string_view event, SoundSource source,
+                             float volume, float pitch, int64_t seed) override {
+            if (Sound::ServerSoundSink* sink = Sound::GetServerSink()) {
+                sink->PlaySound(m_dimension, except, pos, event, source, volume, pitch, seed);
+            }
+        }
 
         // Which dimension this world IS. MUST be set before Initialize() —
         // that is where the chunk provider is built, and the provider hands
@@ -173,13 +272,23 @@ namespace Game {
 
         // Performance and debugging
         void LogPerformanceStats();
-        void SaveAllChunks();
+        // wait = false (autosave, pause-save): hand the dirty chunks to the
+        // IO thread and return. wait = true: every one on disk first.
+        void SaveAllChunks(bool wait = true);
+        // MC ChunkMap.saveChunksEagerly — a few dirty chunks a tick, in its
+        // spare time. Returns how many were queued.
+        size_t SaveDirtyChunksEagerly(size_t maxChunks, std::chrono::steady_clock::time_point deadline);
         size_t GetMemoryUsage() const;
         ChunkProviderStats GetChunkProviderStats() const;
 
         // World generation control
         void SetGenerationSeed(int64_t seed);
         int64_t GetGenerationSeed() const;
+        // MC BiomeManager's biomeZoomSeed — obfuscateSeed(generation seed),
+        // the fuzzy zoom's hash and the hashedSeed the client is sent.
+        int64_t GetBiomeZoomSeed() const {
+            return m_biomeZoomSeed.load(std::memory_order_relaxed);
+        }
         // World-creation "Generate Structures" toggle; set alongside the seed
         // (after it — see ChunkProvider::SetGenerateStructures), before
         // generation starts.
@@ -214,6 +323,11 @@ namespace Game {
         // Chunk loading is driven by the session system, NOT by World.
         void WorldLoop(float deltaTime);
 
+        // MC ChunkMap.prepareTickingChunk -> LevelChunk.postProcessGeneration:
+        // the worldgen post-processing (Chunk::postProcessing) of every chunk
+        // that has started ticking with its 3x3 resident. Start of the tick.
+        void PostProcessGeneration();
+
         // Block update processing
         void ProcessBlockUpdates();
 
@@ -239,8 +353,41 @@ namespace Game {
         // advances when the doDaylightCycle gamerule is on (default OFF here,
         // unlike vanilla — worlds are frozen at noon unless enabled).
         int64_t GetGameTime() const { return m_gameTime; }
-        int64_t GetDayTime() const { return m_dayTime; }
-        void SetDayTime(int64_t dayTime) { m_dayTime = dayTime; }
+        // MC DimensionType.fixedTime: a pinned dimension reports its fixed
+        // time whatever the stored clock says (Level.getDayTime reads the
+        // dimension type first).
+        int64_t GetDayTime() const { return m_fixedDayTime ? *m_fixedDayTime : m_dayTime; }
+        // MC Level.getSkyDarken for a day time: 0 in full day, 11 at night,
+        // interpolated across dawn and dusk on Timelines.DAY's SKY_LIGHT_LEVEL
+        // track (four keyframes, 133 -> 1.0, 11867 -> 1.0, 13670 -> 0.2667,
+        // 22330 -> 0.2667; skyDarken = (int)(15 - 15 * mult)). Shared by the
+        // entity bridge's light tests and the grass spread tick.
+        static int SkyDarkenForDayTime(int64_t dayTime) {
+            constexpr float kDayMult   = 1.0f;
+            constexpr float kNightMult = 0.26666668f;
+            const auto t = static_cast<int>(((dayTime % 24000) + 24000) % 24000);
+            float mult;
+            if (t >= 133 && t <= 11867) {
+                mult = kDayMult;
+            } else if (t > 11867 && t < 13670) {
+                const float f = static_cast<float>(t - 11867) / static_cast<float>(13670 - 11867);
+                mult = kDayMult + (kNightMult - kDayMult) * f;
+            } else if (t >= 13670 && t <= 22330) {
+                mult = kNightMult;
+            } else {
+                const int tt = (t < 133) ? t + 24000 : t;   // dawn wraps the period boundary
+                const float f = static_cast<float>(tt - 22330) / static_cast<float>(24133 - 22330);
+                mult = kNightMult + (kDayMult - kNightMult) * f;
+            }
+            return static_cast<int>(15.0f - 15.0f * mult);
+        }
+        int GetSkyDarken() const { return SkyDarkenForDayTime(GetDayTime()); }
+        // A no-op in a fixed-time dimension (MC ServerLevel.setDayTime writes
+        // the clock, but getDayTime never reads it there); callers such as
+        // /time set check HasFixedDayTime() to tell the player.
+        void SetDayTime(int64_t dayTime) { if (!m_fixedDayTime) m_dayTime = dayTime; }
+        bool HasFixedDayTime() const { return m_fixedDayTime.has_value(); }
+        void SetFixedDayTime(int64_t dayTime) { m_fixedDayTime = dayTime; m_dayTime = dayTime; }
         bool GetDoDaylightCycle() const { return m_doDaylightCycle; }
         void SetDoDaylightCycle(bool enabled) { m_doDaylightCycle = enabled; }
 
@@ -310,13 +457,23 @@ namespace Game {
         // players in it. World deliberately does not reach for the ticket
         // manager itself — it is a data container and knows nothing about
         // sessions (see the WorldLoop comment).
-        void SetBlockTickingChunks(std::vector<Math::ChunkPos> chunks) {
+        // `version` identifies the ticket manager's level solve the lists came
+        // from (ChunkTicketManager::LevelsVersion): while it is unchanged the
+        // lists are identical and the set below is not rebuilt — with a wide
+        // simulation ring it holds tens of thousands of keys. `randomTicking`
+        // is the subset that random-ticks (ChunkTicketManager::
+        // GetRandomTickingChunks); scheduled ticks use the whole set.
+        void SetBlockTickingChunks(std::vector<Math::ChunkPos> chunks,
+                                   std::vector<Math::ChunkPos> randomTicking,
+                                   uint64_t version) {
+            if (m_blockTickingVersion == version) return;
+            m_blockTickingVersion = version;
             m_blockTickingChunks = std::move(chunks);
-            // The random-tick walk iterates the vector; the scheduled-tick
-            // drain needs to ASK "is this one chunk simulating?" per active
-            // container, so it gets a set. Rebuilt here rather than lazily
-            // because the vector is replaced wholesale every tick and a stale
-            // set would silently freeze or resurrect block ticks.
+            m_randomTickingChunks = std::move(randomTicking);
+            // The scheduled-tick drain needs to ASK "is this one chunk
+            // simulating?" per active container, so it gets a set. A stale
+            // set would silently freeze or resurrect block ticks, which is why
+            // it is keyed to the same version as the vector.
             m_blockTickingKeys.clear();
             m_blockTickingKeys.reserve(m_blockTickingChunks.size());
             for (const Math::ChunkPos& cp : m_blockTickingChunks) {
@@ -357,14 +514,120 @@ namespace Game {
         // degrades into lag instead of hanging the tick thread.
         static constexpr int kMaxBlockTicksPerTick = 65536;
 
-        // MC Level.updateNeighborsAt. Public because the wither ritual mirrors
-        // CarvedPumpkinBlock.updatePatternBlocks: the pattern cells are
-        // cleared WITHOUT neighbour updates (MC flag 2), the boss is spawned,
-        // and only then does each cleared cell notify its neighbours.
-        void NotifyNeighborBlocks(int worldX, int worldY, int worldZ);
+        // ── Neighbour notification (MC ServerLevel → CollectingNeighborUpdater)
+        //
+        // All of these go through one collecting updater (NeighborUpdater.hpp)
+        // so that a cascade — a wire re-evaluating, which tells its
+        // neighbours, which tell theirs — runs as a flat, ordered queue
+        // rather than as native recursion. The ORDER is part of vanilla
+        // redstone's observable behaviour and is preserved exactly.
+        void UpdateNeighborsAt(const glm::ivec3& pos, BlockID sourceBlock) override;
+        void UpdateNeighborsAtExceptFromFacing(const glm::ivec3& pos, BlockID sourceBlock,
+                                               Direction skipDirection) override;
+        void NeighborChanged(const glm::ivec3& pos, BlockID sourceBlock) override;
+        // MC Level.neighborChanged(state, pos, block, orientation, movedByPiston).
+        void NeighborChanged(BlockState state, const glm::ivec3& pos, BlockID sourceBlock,
+                             bool movedByPiston);
+        void UpdateNeighbourForOutputSignal(const glm::ivec3& pos, BlockID block) override;
+
+        // MC Level.neighborShapeChanged → NeighborUpdater.shapeUpdate: the
+        // block at `pos` is told that its neighbour in `direction` is now
+        // `neighborState`. Public because redstone dust's indirect shape
+        // updates reach diagonal cells through it.
+        void NeighborShapeChanged(Direction direction, const glm::ivec3& pos,
+                                  const glm::ivec3& neighborPos, BlockState neighborState,
+                                  uint32_t updateFlags, int updateLimit);
+
+        // MC BlockState.updateNeighbourShapes(level, pos, flags, limit): the
+        // six-way shape walk in UPDATE_SHAPE_ORDER. `state` is what now sits
+        // at `pos`.
+        void UpdateNeighbourShapes(BlockState state, const glm::ivec3& pos,
+                                   uint32_t updateFlags, int updateLimit);
+
+        // The old name for "tell the six neighbours something changed here".
+        // Its one remaining caller is the wither ritual, which mirrors
+        // CarvedPumpkinBlock.updatePatternBlocks' `blockUpdated(pos, AIR)`.
+        void NotifyNeighborBlocks(int worldX, int worldY, int worldZ) {
+            UpdateNeighborsAt(glm::ivec3(worldX, worldY, worldZ), BlockID::Air);
+        }
+
+        // ── Block events (MC ServerLevel.blockEvents) ───────────────────────
+        void BlockEvent(const glm::ivec3& pos, BlockID block, int b0, int b1) override;
+
+        // ── Block entities ──────────────────────────────────────────────────
+        BlockEntity* GetBlockEntity(const glm::ivec3& pos) override;
+        void SetBlockEntity(const glm::ivec3& pos, std::unique_ptr<BlockEntity> entity) override;
+        void BlockEntityChanged(const glm::ivec3& pos) override;
+        void RemoveBlockEntity(const glm::ivec3& pos) override;
+        bool IsHandlingTick() const override { return m_handlingTick; }
+        // Redstone warm-up (see ServerLevel::redstoneWarmup): scheduled block
+        // ticks and the redstone_plus deferred re-checks wait until the server
+        // says the world's redstone chunks are all resident.
+        void SetRedstoneFrozen(bool frozen) { m_redstoneFrozen = frozen; }
+        bool RedstoneFrozen() const { return m_redstoneFrozen; }
+
+        // ── The rest of the Level surface ───────────────────────────────────
+        int64_t GameTime() const override { return m_gameTime; }
+        JavaRandom* Random() override { return &m_tickRandom; }
+        EntityLevel* Entities() override { return m_entityLevel; }
+        // Installed by ServerLevel once the entity bridge exists. World does
+        // not own it; it is the same object the mobs tick against.
+        void SetEntityLevel(EntityLevel* level) { m_entityLevel = level; }
+
+        // MC ServerLevel.shouldTickBlocksAt — is this cell inside a chunk
+        // that is simulating this tick? Block events in chunks that are not
+        // are held over rather than dropped.
+        bool ShouldTickBlocksAt(const glm::ivec3& pos) const;
 
     private:
+        friend class CollectingNeighborUpdater;
+
+        // NeighborUpdater.executeShapeUpdate / executeUpdate — the two
+        // leaves of the collecting updater. Private: everything reaches
+        // them through the queue so the ordering stays vanilla's.
+        void ExecuteShapeUpdate(Direction direction, const glm::ivec3& pos,
+                                const glm::ivec3& neighborPos, BlockState neighborState,
+                                uint32_t updateFlags, int updateLimit);
+        void ExecuteNeighborUpdate(BlockState state, const glm::ivec3& pos, BlockID sourceBlock,
+                                   bool movedByPiston);
+
+        // MC Block.updateOrDestroy — apply a shape update's answer.
+        void UpdateOrDestroy(BlockState oldState, BlockState newState, const glm::ivec3& pos,
+                             uint32_t updateFlags, int updateLimit);
+
+        // MC BlockState.updateIndirectNeighbourShapes — dispatch to the
+        // block's hook, for the one block (dust) that has one.
+        void UpdateIndirectNeighbourShapes(BlockState state, const glm::ivec3& pos,
+                                           uint32_t updateFlags, int updateLimit);
+
+        // Push one block entity's current state to the watchers.
+        void BroadcastBlockEntity(const glm::ivec3& pos, const BlockEntity& entity);
+
+        std::unique_ptr<CollectingNeighborUpdater> m_neighborUpdater;
+
+        // MC ServerLevel.blockEvents / blockEventsToReschedule. A deque
+        // because vanilla's is an insertion-ordered set drained from the
+        // front; the uniqueness half is not load-bearing (a piston that books
+        // two identical events runs two).
+        struct BlockEventData {
+            glm::ivec3 pos;
+            BlockID    block;
+            int        b0;
+            int        b1;
+        };
+        std::deque<BlockEventData> m_blockEvents;
+        std::vector<BlockEventData> m_blockEventsToReschedule;
+
+        EntityLevel* m_entityLevel = nullptr;
+        // See IsHandlingTick — set for the block-tick through block-event
+        // phases of WorldLoop, exactly ServerLevel.handlingTick's window.
+        bool m_handlingTick = false;
+        bool m_redstoneFrozen = false;
+
         std::unique_ptr<ChunkProvider> m_chunkProvider;
+        // Declared after the provider: destroyed first, while the chunks it
+        // still references are alive in the cache.
+        std::unique_ptr<Lighting::LevelLightManager> m_light;
         std::string m_minecraftWorldPath;
         bool        m_readOnly = false;   // see SetReadOnly
         DimensionId m_dimension = DimensionId::Overworld;
@@ -381,11 +644,18 @@ namespace Game {
         // Stop flag for early termination of long-running loops
         std::atomic<bool> m_stopRequested{false};
 
+        // BiomeZoom::ObfuscateSeed(GetGenerationSeed()), cached: GetBiome
+        // runs per block and the seed itself sits behind the generator.
+        // Refreshed when the seed is set and once the provider is running.
+        std::atomic<int64_t> m_biomeZoomSeed{0};
+        void RefreshBiomeZoomSeed();
+
         // World time. dayTime defaults to 6000 (noon) so frozen worlds match
         // the pre-time-system look (MC new worlds start at 0/sunrise, but our
         // doDaylightCycle default is false so noon is the better freeze point).
         int64_t m_gameTime = 0;
         int64_t m_dayTime = 6000;
+        std::optional<int64_t> m_fixedDayTime;   // DimensionFixedTime — the Hush's midnight
         bool m_doDaylightCycle = false;
         // Vanilla defaults, unlike doDaylightCycle above.
         bool m_doMobSpawning = true;
@@ -412,8 +682,18 @@ namespace Game {
         // moves in, rather than a set World queries, so the tick loop is a
         // straight walk with no hashing.
         std::vector<Math::ChunkPos> m_blockTickingChunks;
+        // The random-ticking subset — see SetBlockTickingChunks.
+        std::vector<Math::ChunkPos> m_randomTickingChunks;
+        uint64_t m_blockTickingVersion = ~uint64_t{0};
         // Lookup form of the above — see SetBlockTickingChunks.
         std::unordered_set<uint64_t> m_blockTickingKeys;
+
+        // Chunks announced with worldgen post-processing pending (see
+        // ChunkProvider::SetChunkPostProcessCallback), keyed like
+        // m_blockTickingKeys. Filled from worker threads, drained by
+        // PostProcessGeneration on the server thread.
+        std::mutex m_postProcessMutex;
+        std::unordered_set<uint64_t> m_pendingPostProcess;
 
         // MC Level.randValue — the state of getBlockRandomPos's own LCG. It is
         // deliberately NOT the world RNG and deliberately not seeded: vanilla

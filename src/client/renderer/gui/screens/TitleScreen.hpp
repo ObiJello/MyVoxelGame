@@ -41,6 +41,11 @@ namespace Render {
         // load the terrain but never write a single byte back. See
         // WorldEntry::readOnly.
         bool        readOnlyWorld = false;
+        // WorldEntry::regenerateOnJoin: run without a save folder.
+        bool        regenerateOnJoin = false;
+        // Created by this launch: MC Minecraft.doWorldLoad gives a new
+        // world's LevelLoadTracker a 500 ms close delay.
+        bool        freshWorld = false;
         std::string worldName;
         int64_t     seed     = 0;
         int         gameMode = 1;   // 0 = Survival, 1 = Creative
@@ -72,7 +77,15 @@ namespace Render {
     public:
         // fadeIn: play the 2-second widget fade (used on boot, like MC's
         // post-loading fade).
-        explicit TitleScreen(bool fadeIn = true);
+        // `fadeIn`: MC's two-second fade — widgets ramp over the second half.
+        // `fadeFromBlack`: the black veil that fade lifts. Off when the
+        // title continues a world's view (the last-world panorama handoff):
+        // the world must not dip to black on the way to its own picture.
+        explicit TitleScreen(bool fadeIn = true, bool fadeFromBlack = true);
+        // No tooltip until the fade-in is over: one over a half-faded
+        // button, or over the world still turning into its panorama, is
+        // noise in the transition.
+        bool ShowsTooltips() const override { return CurrentFadeAlpha() >= 1.0f; }
 
         // MC TitleScreen.isPauseScreen() == false. Academic here (there is no
         // world behind it), kept because the vanilla override exists.
@@ -89,6 +102,7 @@ namespace Render {
         float CurrentFadeAlpha() const;
 
         bool        m_fading;
+        bool        m_fadeFromBlack = true;
         double      m_fadeStartSeconds = -1.0;
         bool        m_easterEggLogo = false;   // "Minceraft" (1-in-10000)
         bool        m_logoResolved  = false;

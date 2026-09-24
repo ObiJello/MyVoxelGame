@@ -5,10 +5,12 @@
 #include "server/world/storage/anvil/WorldFolder.hpp"
 #include "server/world/storage/anvil/WorldSidecar.hpp"
 #include "TitleScreen.hpp"   // TitleAction
+#include "../../environment/SkyRenderer.hpp"   // sky pack prefetch
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/entity/Item.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "server/world/storage/SectionDataUnpacker.hpp"
@@ -69,6 +71,7 @@ namespace Render {
                 e.bonusChest         = w.value("bonusChest", false);
                 e.worldWrap          = w.value("worldWrap", 0);
                 e.dimensionStack     = w.value("dimensionStack", false);
+                e.regenerateOnJoin   = w.value("regenerateOnJoin", false);
                 e.dayTime            = w.value("dayTime", 6000LL);
                 e.doDaylightCycle    = w.value("doDaylightCycle", false);
                 e.skybox             = w.value("skybox", std::string("vanilla"));
@@ -106,6 +109,7 @@ namespace Render {
                     {"bonusChest", e.bonusChest},
                     {"worldWrap", e.worldWrap},
                     {"dimensionStack", e.dimensionStack},
+                    {"regenerateOnJoin", e.regenerateOnJoin},
                     {"dayTime", e.dayTime},
                     {"doDaylightCycle", e.doDaylightCycle},
                     {"skybox", e.skybox},
@@ -223,6 +227,7 @@ namespace Render {
             a.useMinecraftSave = e.isMinecraftSave;
             a.worldPath        = e.savePath;
             a.readOnlyWorld    = e.readOnly;
+            a.regenerateOnJoin = e.regenerateOnJoin;
             a.worldName = e.name;
             a.seed      = e.seed;
             a.gameMode  = e.gameMode;
@@ -237,6 +242,7 @@ namespace Render {
             a.difficulty      = e.difficulty;
             a.worldWrap       = e.worldWrap;
             a.dimensionStack  = e.dimensionStack;
+            a.freshWorld      = e.justCreated;
             a.skybox          = e.skybox;
             a.skyboxMode      = e.skyboxMode;
             a.babyModels      = e.babyModels;
@@ -319,6 +325,18 @@ namespace Render {
         const int rowX = m_x + (m_width - ROW_W) / 2;
         g.EnableScissor(m_x, m_y, m_x + m_width, m_y + m_height);
 
+        // MC WorldSelectionList.LoadingHeader.renderContent: the label
+        // white at the screen's vertical centre, the LoadingDotsText line
+        // ("O o o" cycling every 300 ms) grey a line below.
+        if (m_loading && m_entries.empty()) {
+            static const char* kDots[] = {"O o o", "o O o", "o o O"};
+            const long long millis = static_cast<long long>(glfwGetTime() * 1000.0);
+            const int cx = m_x + m_width / 2;
+            const int cy = m_y + (m_height - FontRenderer::LINE_HEIGHT) / 2;
+            g.DrawCenteredString("Loading worlds...", cx, cy, 0xFFFFFFFF);
+            g.DrawCenteredString(kDots[(millis / 300) % 3], cx, cy + FontRenderer::LINE_HEIGHT, 0xFF808080);
+        }
+
         for (size_t i = 0; i < m_entries.size(); ++i) {
             const int top = m_y + 2 + static_cast<int>(i) * ROW_H - static_cast<int>(m_scroll);
             if (top + ROW_H < m_y || top > m_y + m_height) continue;
@@ -368,9 +386,16 @@ namespace Render {
             } else if (e.isMinecraftSave) {
                 line2 = "Minecraft save (saves/world)";
                 line3 = "Loaded from disk - block changes persist";
-            } else {
+            } else if (e.regenerateOnJoin) {
                 line2 = std::string(GameModeName(e.gameMode)) + ", Seed: " + std::to_string(e.seed);
-                line3 = "Created " + FormatDate(e.created) + " - regenerates on join";
+                line3 = "Regenerates on join - nothing is saved";
+            } else {
+                // A world with a save folder (or one that gets its folder the
+                // first time it is opened): what it is and when it was last
+                // played, as MC's own list reads.
+                line2 = std::string(GameModeName(e.gameMode)) + ", Seed: " + std::to_string(e.seed);
+                line3 = e.lastPlayed > 0 ? "Last played " + FormatDate(e.lastPlayed)
+                                         : "Created " + FormatDate(e.created);
             }
             g.DrawString(Ellipsize(g, line2, ROW_W - 6), rowX + 3,
                          top + 1 + FontRenderer::LINE_HEIGHT + 2, 0xFF808080);
@@ -393,11 +418,8 @@ namespace Render {
 
     // ═══════════════════════════ SelectWorldScreen ══════════════════════════
 
-    void SelectWorldScreen::Init() {
-        // List area: MC SelectWorldScreen — from below the title to above the
-        // two footer button rows.
-        m_list = AddWidget(new WorldListWidget(0, 48, m_width, m_height - 48 - 64));
-
+    std::vector<WorldEntry> SelectWorldScreen::ReadEntries() {
+        PROFILE_ZONE_N("SelectWorld.ReadEntries");
         std::vector<WorldEntry> entries;
 
         // Headings only make sense when there are two sections to tell apart.
@@ -497,8 +519,44 @@ namespace Render {
                       Platform::GameDirectory::GetMinecraftSavesDirectory().c_str());
         }
 
+        return entries;
+    }
+
+    void SelectWorldScreen::InstallEntries(std::vector<WorldEntry> entries) {
+        if (!m_list) return;
+        // The sky the player is most likely to join with — the most recently
+        // played world's — starts decoding while the list is up, and the
+        // selected world's takes over as the selection moves (see
+        // SkyRenderer::PrefetchSkybox). A Minecraft save joins with the
+        // vanilla sky, which its entry carries.
+        {
+            const WorldEntry* recent = nullptr;
+            for (const WorldEntry& e : entries) {
+                if (e.isHeader) continue;
+                if (!recent || e.lastPlayed > recent->lastPlayed) recent = &e;
+            }
+            if (recent) g_skyRenderer.PrefetchSkybox(recent->skybox);
+        }
         m_list->SetEntries(std::move(entries));
-        m_list->onSelectionChanged = [this] { UpdateButtonStates(); };
+        m_list->SetLoading(false);
+        UpdateButtonStates();
+    }
+
+    void SelectWorldScreen::Init() {
+        // A rebuild (CopySelected) while the previous read is still out:
+        // let it land first, it is tens of milliseconds at most.
+        if (m_pendingEntries.valid()) m_pendingEntries.wait();
+        // List area: MC SelectWorldScreen — from below the title to above the
+        // two footer button rows.
+        m_list = AddWidget(new WorldListWidget(0, 48, m_width, m_height - 48 - 64));
+        m_list->SetLoading(true);
+        m_pendingEntries = std::async(std::launch::async, &SelectWorldScreen::ReadEntries);
+        m_list->onSelectionChanged = [this] {
+            UpdateButtonStates();
+            if (const WorldEntry* sel = m_list->Selected(); sel && !sel->isHeader) {
+                g_skyRenderer.PrefetchSkybox(sel->skybox);
+            }
+        };
         m_list->onDoubleClick      = [this] { PlaySelected(); };
 
         const int cx = m_width / 2;
@@ -650,10 +708,14 @@ namespace Render {
     }
 
     void SelectWorldScreen::Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) {
+        if (m_pendingEntries.valid() &&
+            m_pendingEntries.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            InstallEntries(m_pendingEntries.get());
+        }
         Screen::Render(g, mouseX, mouseY, partialTick);
         g.DrawCenteredString(m_title, m_width / 2, 16, 0xFFFFFFFF);
         RenderMenuSeparators(g, m_width, 46, m_height - 64);
-        if (m_list && m_list->Entries().empty()) {
+        if (m_list && !m_list->IsLoading() && m_list->Entries().empty()) {
             g.DrawCenteredString("No worlds yet - create one!", m_width / 2,
                                  m_height / 2 - 4, 0xFF808080);
         }
@@ -2327,6 +2389,18 @@ namespace Render {
         m_commandsButton->SetTooltip({"Commands like /tp are allowed.",
                                       "(Commands are currently always",
                                       "available in this engine.)"});
+        y += 28;
+
+        // Engine-only: whether the world persists at all. Off is the old
+        // behaviour every world had before save folders existed.
+        AddWidget(CycleButton::MakeOnOff(cx - 105, y, 210, 20,
+            "Save World", !m_draft.regenerateOnJoin,
+            [this](bool on) { m_draft.regenerateOnJoin = !on; }))
+            ->SetTooltip({"On: the world is saved to disk and",
+                          "  picks up where you left it.",
+                          "Off: nothing is ever saved - the world",
+                          "  regenerates from its seed every",
+                          "  time you join it."});
 
         ApplyHardcoreCoupling();
     }
@@ -2451,6 +2525,7 @@ namespace Render {
         e.created    = NowEpoch();
         e.lastPlayed = e.created;
         e.isMinecraftSave = false;
+        e.justCreated     = true;
 
         auto worlds = WorldList::Load();
         // MC-style name dedup: "New World (2)", "New World (3)", …
@@ -2467,9 +2542,13 @@ namespace Render {
         while (taken(e.name)) e.name = base + " (" + std::to_string(n++) + ")";
 
         // The DEDUPED name is what names the folder, so create it now rather
-        // than letting the server derive a different one later.
+        // than letting the server derive a different one later. A
+        // regenerate-on-join world gets no folder at all: it lives in
+        // worlds.json only and is rebuilt from its seed every session.
         std::string reason;
-        if (auto root = Game::Anvil::RootForWorldName(e.name, reason)) {
+        if (e.regenerateOnJoin) {
+            e.savePath.clear();
+        } else if (auto root = Game::Anvil::RootForWorldName(e.name, reason)) {
             e.savePath = root->Root().string();
 
             std::string error;

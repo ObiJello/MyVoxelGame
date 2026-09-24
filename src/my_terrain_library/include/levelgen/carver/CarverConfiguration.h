@@ -1,6 +1,6 @@
 #pragma once
 
-#include "levelgen/SurfaceRules.h"
+#include "levelgen/VerticalAnchor.h"
 #include "levelgen/WorldgenRandom.h"
 #include "random/XoroshiroRandomSource.h"
 #include "random/LegacyRandomSource.h"
@@ -286,6 +286,52 @@ public:
 
     int32_t getMinValue() const override { return m_minValue; }
     int32_t getMaxValue() const override { return m_maxValue; }
+};
+
+/**
+ * TrapezoidInt - 26.3 util/valueproviders/TrapezoidInt.java. triangle(range)
+ * = [-range, range] with no plateau: nextInt(range + 1) - nextInt(range + 1),
+ * the offset 26.1's RandomPatchFeature drew per axis (OffsetPlacement
+ * .ofTriangle replaced it).
+ */
+class TrapezoidInt : public IntProvider {
+private:
+    int32_t m_minInclusive;
+    int32_t m_maxInclusive;
+    int32_t m_plateau;
+
+    template <typename Random>
+    int32_t sampleImpl(Random& random) const {
+        if (m_plateau == 0 && m_maxInclusive == -m_minInclusive) {
+            const int32_t a = random.nextInt(m_maxInclusive + 1);
+            const int32_t b = random.nextInt(m_maxInclusive + 1);
+            return a - b;
+        }
+        const int32_t range = m_maxInclusive - m_minInclusive;
+        if (m_plateau == range) {
+            return random.nextInt(m_maxInclusive - m_minInclusive + 1) + m_minInclusive;
+        }
+        const int32_t plateauStart = (range - m_plateau) / 2;
+        const int32_t plateauEnd = range - plateauStart;
+        const int32_t a = random.nextInt(plateauEnd + 1);
+        const int32_t b = random.nextInt(plateauStart + 1);
+        return m_minInclusive + a + b;
+    }
+
+public:
+    TrapezoidInt(int32_t minInclusive, int32_t maxInclusive, int32_t plateau)
+        : m_minInclusive(minInclusive), m_maxInclusive(maxInclusive), m_plateau(plateau) {}
+
+    static TrapezoidInt triangle(int32_t range) {
+        return TrapezoidInt(-range, range, 0);
+    }
+
+    int32_t sample(WorldgenRandom& random) const override { return sampleImpl(random); }
+    int32_t sample(LegacyRandomSource& random) const override { return sampleImpl(random); }
+    int32_t sample(XoroshiroRandomSource& random) const override { return sampleImpl(random); }
+
+    int32_t getMinValue() const override { return m_minInclusive; }
+    int32_t getMaxValue() const override { return m_maxInclusive; }
 };
 
 /**

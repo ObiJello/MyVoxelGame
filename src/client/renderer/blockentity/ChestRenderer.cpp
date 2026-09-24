@@ -2,11 +2,12 @@
 //
 // In-world chest renderer. Mirrors MC `ChestRenderer.java` + `ChestModel.java`:
 // the chest is built from three cuboids — bottom (14×10×14), lid (14×5×14),
-// lock (2×4×1) — with UVs baked from the 64×64 chest entity atlas. Lid open
-// animation is a Stage-4 concern; this renderer draws the static closed chest.
+// lock (2×4×1) — with UVs baked from the 64×64 chest entity atlas. The lid
+// and lock swing open on MC's hinge as the block entity's lid controller says
+// (ChestBlockEntity: server opener count → block event → client lid tick).
 //
-// One static mesh shared across all chest cells; the per-cell model matrix
-// is a uniform updated per-draw. Texture is keyed by variant ("normal",
+// Static meshes shared across all chest cells (body and lid per variant); the
+// per-cell model matrix is a uniform updated per-draw. Texture is keyed by variant ("normal",
 // "trapped", "ender") and loaded on first request from
 // `assets/textures/entity/chest/{variant}.png`.
 #include "client/resource/ResourcePacks.hpp"
@@ -14,6 +15,9 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include <functional>
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
+#include "../entity/EntityLighting.hpp"
+#include "BlockEntityShader.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/ChestBlockEntity.hpp"
 #include "common/world/block/entity/DoubleChest.hpp"
@@ -23,7 +27,9 @@
 
 #include "stb_image.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <vector>
 
@@ -39,44 +45,24 @@ namespace Render {
         };
         static_assert(sizeof(CubeVert) == 24, "match GetBlockVertexLayout");
 
-        // GLSL: world-space MVP, sampler2D, vertex-colour modulation.
-        // The [0,64]→[0,1] UV divide is baked into the mesh at build time
-        // (see Initialize) so this shader — and the shared Vulkan pair
-        // blockentity_vk.* — take normalized UVs.
-        constexpr const char* kVS = R"GLSL(
-#version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec2 aUV;     // in 64-px atlas coords
-layout(location=2) in vec4 aColor;
-uniform mat4 uMVP;
-out vec2 vUV;
-out vec4 vColor;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV;
-    vColor = aColor;
-}
-)GLSL";
-        constexpr const char* kFS = R"GLSL(
-#version 330 core
-in vec2 vUV;
-in vec4 vColor;
-out vec4 FragColor;
-uniform sampler2D uTex;
-void main() {
-    vec4 t = texture(uTex, vUV);
-    if (t.a < 0.05) discard;
-    FragColor = t * vColor;
-}
-)GLSL";
-
         // Build the 6 faces of one cuboid into the running vertex/index buffer.
         // `from`/`to` in MC pixel-space (0..16 per block). `xTexOffs`/`yTexOffs`
         // are the cube's texOffs in the chest 64×64 atlas. `w`/`h`/`d` are the
         // cube extents in MC pixels.
+        //
+        // `lighting` picks the per-face shade: null = the item form's
+        // block-model face table (the chest icon matches every other block
+        // icon); otherwise MC's world-space entity lighting for the chest's
+        // Y rotation `worldRot` (EntityLighting.hpp).
+        struct FaceLighting {
+            glm::mat3 worldRot{1.0f};
+            EntityLighting::LightSet set = EntityLighting::LightSet::Default;
+        };
+
         void AddCube(std::vector<CubeVert>& verts, std::vector<uint32_t>& idx,
                      glm::vec3 from, glm::vec3 to,
-                     float xTexOffs, float yTexOffs, float w, float h, float d) {
+                     float xTexOffs, float yTexOffs, float w, float h, float d,
+                     const FaceLighting* lighting) {
             // Vertex names mirror ModelPart.Cube (MC ModelPart.java:268-275).
             const float minX = from.x, minY = from.y, minZ = from.z;
             const float maxX = to.x,   maxY = to.y,   maxZ = to.z;
@@ -95,15 +81,19 @@ void main() {
             const float v1 = yTexOffs + d;
             const float v2 = yTexOffs + d + h;
 
-            // Per-face directional shading (MC's standard top=1.0, bottom=0.5,
-            // NS=0.8, EW=0.6). Multiplied into vertex colour.
-            auto shade = [](float s) -> uint8_t {
-                return static_cast<uint8_t>(s * 255.0f);
+            // Per-face shade, multiplied into vertex colour. The model is
+            // authored Y-up (no flip), so each face's model normal is its
+            // ModelPart.Polygon direction as-is.
+            auto shade = [&](const glm::vec3& modelNormal, float itemShade) -> uint8_t {
+                if (!lighting) return static_cast<uint8_t>(itemShade * 255.0f);
+                return EntityLighting::ShadeByte(lighting->worldRot * modelNormal, lighting->set);
             };
-            const uint8_t S_UP    = shade(1.00f);
-            const uint8_t S_DOWN  = shade(0.50f);
-            const uint8_t S_NS    = shade(0.80f);
-            const uint8_t S_EW    = shade(0.60f);
+            const uint8_t S_UP    = shade({ 0, 1, 0}, 1.00f);
+            const uint8_t S_DOWN  = shade({ 0,-1, 0}, 0.50f);
+            const uint8_t S_NORTH = shade({ 0, 0,-1}, 0.80f);
+            const uint8_t S_SOUTH = shade({ 0, 0, 1}, 0.80f);
+            const uint8_t S_WEST  = shade({-1, 0, 0}, 0.60f);
+            const uint8_t S_EAST  = shade({ 1, 0, 0}, 0.60f);
 
             // Helper: emit one face = 4 verts + 6 indices (two CCW tris).
             // UV layout is MC ModelPart.Polygon's constructor verbatim:
@@ -140,17 +130,32 @@ void main() {
               emit(q, u2, v1, u22, v0, S_UP); }
             // WEST  — [t0, l0, l3, t3]   uv (u0..u1, v1..v2)
             { const glm::vec3 q[4] = {t0, l0, l3, t3};
-              emit(q, u0, v1, u1,  v2, S_EW); }
+              emit(q, u0, v1, u1,  v2, S_WEST); }
             // NORTH — [t1, t0, t3, t2]   uv (u1..u2, v1..v2)
             { const glm::vec3 q[4] = {t1, t0, t3, t2};
-              emit(q, u1, v1, u2,  v2, S_NS); }
+              emit(q, u1, v1, u2,  v2, S_NORTH); }
             // EAST  — [l1, t1, t2, l2]   uv (u2..u3, v1..v2)
             { const glm::vec3 q[4] = {l1, t1, t2, l2};
-              emit(q, u2, v1, u3,  v2, S_EW); }
+              emit(q, u2, v1, u3,  v2, S_EAST); }
             // SOUTH — [l0, l1, l2, l3]   uv (u3..u4, v1..v2)
             { const glm::vec3 q[4] = {l0, l1, l2, l3};
-              emit(q, u3, v1, u4,  v2, S_NS); }
+              emit(q, u3, v1, u4,  v2, S_SOUTH); }
         }
+        // MC ChestModel's lid/lock PartPose.offset(0, 9, 1): the hinge, in
+        // the model's pixel space.
+        const glm::vec3 kLidPivot(0.0f, 9.0f, 1.0f);
+
+        // The lid part's pose at hinge angle `xRot` (MC ModelPart
+        // translateAndRotate with the offset folded out of the boxes: turn
+        // about the hinge line).
+        glm::mat4 LidPose(float xRot) {
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), kLidPivot);
+            m = glm::rotate(m, xRot, glm::vec3(1, 0, 0));
+            return glm::translate(m, -kLidPivot);
+        }
+
+        // MC ChestModel.setupAnim: lid.xRot = lock.xRot = -(open · π/2).
+        float LidXRot(float open) { return -(open * 1.5707964f); }
     } // namespace
 
     ChestRenderer::ChestRenderer() = default;
@@ -159,13 +164,9 @@ void main() {
     bool ChestRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        m_shader = (g_renderBackend->GetType() == BackendType::Vulkan)
-            // VKBackend cannot compile GLSL source; it loads the shared
-            // shaders/blockentity_vk.*.spv pair (CreateShaderFromFiles
-            // rewrites the .vert/.frag names). GL keeps the inline source.
-            ? g_renderBackend->CreateShaderFromFiles("shaders/blockentity.vert",
-                                                     "shaders/blockentity.frag")
-            : g_renderBackend->CreateShader(kVS, kFS);
+        // The shared block-entity shader (BlockEntityShader.hpp): lit and
+        // fogged like the terrain, on both backends.
+        m_shader = BlockEntityShader::Create();
         if (m_shader == INVALID_SHADER) {
             Log::Error("[ChestRenderer] shader compile failed");
             return false;
@@ -182,46 +183,90 @@ void main() {
         // left x∈[0,15], so once they sit in adjacent cells the seam closes and
         // the pair reads as one 30-wide chest. Building them 14 wide like the
         // single leaves a visible 2px gutter down the middle.
-        auto build = [&](Variant v,
-                         const std::function<void(std::vector<CubeVert>&,
-                                                  std::vector<uint32_t>&)>& emit) {
+        using Emit = std::function<void(std::vector<CubeVert>&, std::vector<uint32_t>&,
+                                        const FaceLighting*)>;
+        auto buildPart = [&](Variant v, Part part, const Emit& emit) {
+            const int copies = kLightingCount[part];
             std::vector<CubeVert> verts;
             std::vector<uint32_t> idx;
-            verts.reserve(72); idx.reserve(108);
-            emit(verts, idx);
+            verts.reserve(48 * copies); idx.reserve(72 * copies);
+            for (int lighting = 0; lighting < copies; ++lighting) {
+                if (lighting == kItemLighting) {
+                    emit(verts, idx, nullptr);
+                    continue;
+                }
+                // Invert BodyLighting / LidLighting: facing (south 0, east
+                // 90°, north 180°, west 270° — the Y turn Render applies),
+                // light set, and for the lid the hinge angle whose shade this
+                // copy carries. The geometry itself is always the closed pose;
+                // Render swings it with the part's matrix.
+                const int world  = lighting - 1;
+                const int angles = (part == kLid) ? kLidAngleSteps + 1 : 1;
+                const int setIdx = world / angles;
+                const int step   = world % angles;
+                const int facing = setIdx / 2;
+                FaceLighting fl;
+                glm::mat4 turn = glm::rotate(glm::mat4(1.0f), 1.5707963f * static_cast<float>(facing),
+                                             glm::vec3(0, 1, 0));
+                if (part == kLid) {
+                    const float open = static_cast<float>(step) / static_cast<float>(kLidAngleSteps);
+                    turn = glm::rotate(turn, LidXRot(open), glm::vec3(1, 0, 0));
+                }
+                fl.worldRot = glm::mat3(turn);
+                fl.set = (setIdx % 2) ? EntityLighting::LightSet::Nether
+                                      : EntityLighting::LightSet::Default;
+                // AddCube indexes from verts.size(), so every copy's indices
+                // already point at its own vertices.
+                emit(verts, idx, &fl);
+            }
             // AddCube works in the chest sheet's 64-px space; normalize here
-            // so the shaders (GL inline and shared VK pair) are divide-free.
+            // so the shaders are divide-free.
             for (auto& vert : verts) { vert.u /= 64.0f; vert.v /= 64.0f; }
-            m_vb[v] = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
+            m_vb[v][part] = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
                 verts.size() * sizeof(CubeVert), verts.data());
-            m_ib[v] = g_renderBackend->CreateBuffer(BufferUsage::Index,
+            m_ib[v][part] = g_renderBackend->CreateBuffer(BufferUsage::Index,
                 idx.size() * sizeof(uint32_t), idx.data());
-            m_mesh[v] = g_renderBackend->CreateMesh(m_vb[v], m_ib[v], GetBlockVertexLayout());
-            m_indexCount[v] = static_cast<uint32_t>(idx.size());
+            m_mesh[v][part] = g_renderBackend->CreateMesh(m_vb[v][part], m_ib[v][part],
+                                                          GetBlockVertexLayout());
+            m_indexCount[v][part] = static_cast<uint32_t>(idx.size() / copies);
+        };
+        auto build = [&](Variant v, const Emit& body, const Emit& lid) {
+            buildPart(v, kBody, body);
+            buildPart(v, kLid, lid);
         };
 
         // createSingleBodyLayer
-        build(kSingle, [](auto& verts, auto& idx) {
-            AddCube(verts, idx, {1, 0, 1},  {15, 10, 15}, 0, 19, 14, 10, 14);
-            AddCube(verts, idx, {1, 9, 1},  {15, 14, 15}, 0,  0, 14,  5, 14);
-            AddCube(verts, idx, {7, 7, 15}, { 9, 11, 16}, 0,  0,  2,  4,  1);
-        });
+        build(kSingle,
+              [](auto& verts, auto& idx, const FaceLighting* fl) {
+                  AddCube(verts, idx, {1, 0, 1},  {15, 10, 15}, 0, 19, 14, 10, 14, fl);
+              },
+              [](auto& verts, auto& idx, const FaceLighting* fl) {
+                  AddCube(verts, idx, {1, 9, 1},  {15, 14, 15}, 0,  0, 14,  5, 14, fl);
+                  AddCube(verts, idx, {7, 7, 15}, { 9, 11, 16}, 0,  0,  2,  4,  1, fl);
+              });
         // createDoubleBodyRightLayer — bottom/lid span x 1..16, lock at x 15..16
-        build(kRight, [](auto& verts, auto& idx) {
-            AddCube(verts, idx, {1, 0, 1},   {16, 10, 15}, 0, 19, 15, 10, 14);
-            AddCube(verts, idx, {1, 9, 1},   {16, 14, 15}, 0,  0, 15,  5, 14);
-            AddCube(verts, idx, {15, 7, 15}, {16, 11, 16}, 0,  0,  1,  4,  1);
-        });
+        build(kRight,
+              [](auto& verts, auto& idx, const FaceLighting* fl) {
+                  AddCube(verts, idx, {1, 0, 1},   {16, 10, 15}, 0, 19, 15, 10, 14, fl);
+              },
+              [](auto& verts, auto& idx, const FaceLighting* fl) {
+                  AddCube(verts, idx, {1, 9, 1},   {16, 14, 15}, 0,  0, 15,  5, 14, fl);
+                  AddCube(verts, idx, {15, 7, 15}, {16, 11, 16}, 0,  0,  1,  4,  1, fl);
+              });
         // createDoubleBodyLeftLayer — bottom/lid span x 0..15, lock at x 0..1
-        build(kLeft, [](auto& verts, auto& idx) {
-            AddCube(verts, idx, {0, 0, 1},  {15, 10, 15}, 0, 19, 15, 10, 14);
-            AddCube(verts, idx, {0, 9, 1},  {15, 14, 15}, 0,  0, 15,  5, 14);
-            AddCube(verts, idx, {0, 7, 15}, { 1, 11, 16}, 0,  0,  1,  4,  1);
-        });
+        build(kLeft,
+              [](auto& verts, auto& idx, const FaceLighting* fl) {
+                  AddCube(verts, idx, {0, 0, 1},  {15, 10, 15}, 0, 19, 15, 10, 14, fl);
+              },
+              [](auto& verts, auto& idx, const FaceLighting* fl) {
+                  AddCube(verts, idx, {0, 9, 1},  {15, 14, 15}, 0,  0, 15,  5, 14, fl);
+                  AddCube(verts, idx, {0, 7, 15}, { 1, 11, 16}, 0,  0,  1,  4,  1, fl);
+              });
 
-        m_geomBuilt = (m_mesh[kSingle] != INVALID_MESH &&
-                       m_mesh[kLeft]   != INVALID_MESH &&
-                       m_mesh[kRight]  != INVALID_MESH);
+        m_geomBuilt = true;
+        for (int v = 0; v < kVariantCount; ++v)
+            for (int part = 0; part < kPartCount; ++part)
+                if (m_mesh[v][part] == INVALID_MESH) m_geomBuilt = false;
         return m_geomBuilt;
     }
 
@@ -232,9 +277,14 @@ void main() {
         }
         m_textureCache.clear();
         for (int v = 0; v < kVariantCount; ++v) {
-            if (m_mesh[v] != INVALID_MESH)   { g_renderBackend->DestroyMesh(m_mesh[v]);   m_mesh[v] = INVALID_MESH; }
-            if (m_vb[v]   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_vb[v]);   m_vb[v]   = INVALID_BUFFER; }
-            if (m_ib[v]   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_ib[v]);   m_ib[v]   = INVALID_BUFFER; }
+            for (int part = 0; part < kPartCount; ++part) {
+                MeshHandle&   mesh = m_mesh[v][part];
+                BufferHandle& vb   = m_vb[v][part];
+                BufferHandle& ib   = m_ib[v][part];
+                if (mesh != INVALID_MESH) { g_renderBackend->DestroyMesh(mesh);   mesh = INVALID_MESH; }
+                if (vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(vb); vb   = INVALID_BUFFER; }
+                if (ib   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(ib); ib   = INVALID_BUFFER; }
+            }
         }
         if (m_shader != INVALID_SHADER)  { g_renderBackend->DestroyShader(m_shader); m_shader = INVALID_SHADER; }
         m_geomBuilt = false;
@@ -282,11 +332,16 @@ void main() {
         }
     }
 
+    void ChestRenderer::DrawPart(Variant variant, Part part, int lighting) {
+        g_renderBackend->DrawIndexed(m_mesh[variant][part], m_indexCount[variant][part],
+                                     m_indexCount[variant][part] * static_cast<uint32_t>(lighting));
+    }
+
     void ChestRenderer::Render(const Game::BlockEntity& be,
-                                float /*partialTick*/,
+                                float partialTick,
                                 const glm::mat4& proj,
                                 const glm::mat4& view,
-                                const glm::vec3& /*cameraPos*/) {
+                                const glm::vec3& cameraPos) {
         PROFILE_ZONE_N("BE.Chest");
         if (!m_geomBuilt || !g_renderBackend) return;
 
@@ -301,6 +356,10 @@ void main() {
         // disagree, because both read the same rule off the same block states.
         Variant variant = kSingle;
         std::string texVariant = VariantForBlock(be.GetBlockId());
+        // MC ChestBlock.opennessCombiner: a pair opens as one — the wider of
+        // the two halves' lids.
+        const auto* chest = dynamic_cast<const Game::ChestBlockEntity*>(&be);
+        float open = chest ? chest->GetOpenNess(partialTick) : 0.0f;
         if (Client::g_clientBlockAccess) {
             if (auto pair = Game::FindChestPartner(*Client::g_clientBlockAccess,
                                                    be.GetWorldPos())) {
@@ -320,8 +379,16 @@ void main() {
                 // the one whose seam must be at maxX: kRight.
                 variant     = pair->selfIsFirst ? kRight : kLeft;
                 texVariant += pair->selfIsFirst ? "_right" : "_left";
+                if (const auto* partner = dynamic_cast<const Game::ChestBlockEntity*>(
+                        Client::g_clientBlockAccess->GetBlockEntity(pair->partnerPos))) {
+                    open = std::max(open, partner->GetOpenNess(partialTick));
+                }
             }
         }
+        // MC ChestRenderer.submit's ease: 1 - (1 - open)³ — quick to lift,
+        // settling as it reaches the top.
+        open = 1.0f - open;
+        open = 1.0f - open * open * open;
 
         TextureHandle tex = LoadVariantTexture(texVariant);
         if (tex == INVALID_TEXTURE) return;
@@ -344,6 +411,7 @@ void main() {
         // rather than caching it on the BE means a chest picks up any state
         // change (placement, /setblock, world load) with no extra sync.
         float yRot = 0.0f;
+        int facingIndex = 0;   // south, east, north, west — WorldLighting's order
         {
             const glm::ivec3 p = be.GetWorldPos();
             Game::BlockState state;
@@ -353,14 +421,17 @@ void main() {
             const std::string_view facing = state.GetValueByName("facing");
             // MC Direction.toYRot() is degrees clockwise from south; our model
             // is authored with its lock on +Z (south), so south is the zero.
-            if      (facing == "east")  yRot =  1.5707963f;
-            else if (facing == "north") yRot =  3.1415927f;
-            else if (facing == "west")  yRot = -1.5707963f;
-            else                        yRot =  0.0f;   // south / unknown
+            if      (facing == "east")  { yRot =  1.5707963f; facingIndex = 1; }
+            else if (facing == "north") { yRot =  3.1415927f; facingIndex = 2; }
+            else if (facing == "west")  { yRot = -1.5707963f; facingIndex = 3; }
+            else                        { yRot =  0.0f;       facingIndex = 0; }   // south / unknown
         }
 
+        // Model translation in RENDER space (camera-relative, see
+        // RenderOrigin.hpp): the block position minus the view's origin,
+        // subtracted before the narrowing to float.
         glm::mat4 model = glm::translate(glm::mat4(1.0f),
-            glm::vec3(be.GetWorldPos()) + glm::vec3(0.5f, 0.0f, 0.5f));
+            Render::ToRender(glm::dvec3(be.GetWorldPos())) + glm::vec3(0.5f, 0.0f, 0.5f));
         model = glm::rotate(model, yRot, glm::vec3(0, 1, 0));
         model = glm::translate(model, glm::vec3(-0.5f, 0.0f, -0.5f));
         model = glm::scale(model, glm::vec3(1.0f / 16.0f));
@@ -376,14 +447,26 @@ void main() {
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(tex, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
-        // VK: the shared shader reads the threshold from a push constant.
-        // GL: the inline FS hardcodes 0.05 and silently ignores this.
         g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
-        g_renderBackend->DrawIndexed(m_mesh[variant], m_indexCount[variant]);
+        // The chest's light (its cell's) and the frame's fog.
+        BlockEntityShader::ApplyWorld(m_shader, model, cameraPos, be.GetWorldPos());
+        // MC lights the chest from fixed world directions; the copies for this
+        // facing and the drawn level's light set carry that shade.
+        const bool nether = EntityLighting::Current() == EntityLighting::LightSet::Nether;
+        DrawPart(variant, kBody, BodyLighting(facingIndex, nether));
+
+        // The lid and lock on the hinge, lit for the nearest baked angle.
+        const glm::mat4 lidModel = model * LidPose(LidXRot(open));
+        g_renderBackend->SetUniformMat4(m_shader, "uMVP", proj * view * lidModel);
+        BlockEntityShader::ApplyWorld(m_shader, lidModel, cameraPos, be.GetWorldPos());
+        const int step = std::clamp(static_cast<int>(std::lround(open * kLidAngleSteps)),
+                                    0, kLidAngleSteps);
+        DrawPart(variant, kLid, LidLighting(facingIndex, nether, step));
         g_renderBackend->UnbindMesh();
     }
 
-    void ChestRenderer::RenderBEWLR(Game::BlockID blockId, const glm::mat4& mvp) {
+    void ChestRenderer::RenderBEWLR(Game::BlockID blockId, const glm::mat4& mvp,
+                                    const BEWLRLight& light) {
         if (!m_geomBuilt || !g_renderBackend) return;
         TextureHandle tex = LoadVariantTexture(VariantForBlock(blockId));
         if (tex == INVALID_TEXTURE) return;
@@ -404,7 +487,10 @@ void main() {
         g_renderBackend->BindTexture(tex, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
         g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.05f);
-        g_renderBackend->DrawIndexed(m_mesh[kSingle], m_indexCount[kSingle]);
+        BlockEntityShader::ApplyItem(m_shader, light);
+        // The item form is always closed: body and lid in their rest pose.
+        DrawPart(kSingle, kBody, kItemLighting);
+        DrawPart(kSingle, kLid,  kItemLighting);
         g_renderBackend->UnbindMesh();
     }
 

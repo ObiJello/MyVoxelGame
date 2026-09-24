@@ -40,6 +40,8 @@ namespace Client {
                     const auto& p = e["presence"];
                     entry.presence.state = ParseState(p.value("state", "offline"));
                     entry.presence.world = p.value("world", "");
+                    entry.presence.joinable = p.value("joinable", true);
+                    entry.presence.lastOnline = p.value("last_online", int64_t{0});
                 }
                 out.push_back(std::move(entry));
             }
@@ -302,6 +304,7 @@ namespace Client {
                 e == "already_friends" ? "Already friends." :
                 e == "already_pending" ? "Request already sent." :
                 e == "not_hosting"     ? "That friend is not hosting a world." :
+                e == "not_joinable"    ? "That world is not open to joining right now." :
                 e == "not_online"      ? "That friend is offline." :
                 e == "no_request"      ? "That request is gone." :
                                          "Error: " + e;
@@ -360,13 +363,14 @@ namespace Client {
 
     void FriendsClient::SetPresence(FriendPresence::State state,
                                     const std::string& world, uint16_t hostPort,
-                                    const std::string& externalIp) {
+                                    const std::string& externalIp, bool joinable) {
         m_uiPresence = static_cast<int>(state);
-        net::post(m_ioContext, [this, state, world, hostPort, externalIp] {
+        net::post(m_ioContext, [this, state, world, hostPort, externalIp, joinable] {
             m_presenceState = state;
             m_presenceWorld = world;
             m_presencePort = hostPort;
             m_presenceExternalIp = externalIp;
+            m_presenceJoinable = joinable;
             if (!m_connected) return;   // re-sent on reconnect
             ResendPresence();
         });
@@ -378,6 +382,7 @@ namespace Client {
                            {"world", m_presenceWorld},
                            {"port", m_presencePort},
                            {"external_ip", m_presenceExternalIp},
+                           {"joinable", m_presenceJoinable},
                            {"id", m_nextRequestId++}};
         SendJson(req.dump());
     }

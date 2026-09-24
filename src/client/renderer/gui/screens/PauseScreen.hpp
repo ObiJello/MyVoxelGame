@@ -24,6 +24,11 @@ namespace Render {
         PauseScreen() : Screen("Game Menu") {}
         void Init() override;
         void Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;
+
+        // "Save and Quit to Title" clears the menu on the click, as MC does:
+        // with the panorama's faces captured under the menu (LeaveCapture),
+        // the world is the title's picture on the very next frame. (It used
+        // to fade out over the click-time capture, which no longer exists.)
     };
 
 } // namespace Render

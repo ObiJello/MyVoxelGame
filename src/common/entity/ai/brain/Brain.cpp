@@ -340,6 +340,22 @@ namespace Game {
         m_activityRequirements.emplace_back(activity, std::move(conditions));
     }
 
+    void Brain::AddActivityWithPriorities(Activity activity,
+                                          std::vector<PrioritizedBehavior> behaviors,
+                                          std::vector<MemoryCondition> conditions) {
+        // MC addActivityAndRemoveMemoriesWhenStopped with the caller's own
+        // priorities: each behaviour lands in its stated bucket, in list order.
+        for (PrioritizedBehavior& pb : behaviors) {
+            m_behaviorsByPriority[pb.first].push_back(Entry{ activity, std::move(pb.second) });
+        }
+        m_activityRequirements.emplace_back(activity, std::move(conditions));
+    }
+
+    void Brain::SetActiveActivityIfPossible(Activity activity) {
+        if (ActivityRequirementsAreMet(activity)) SetActiveActivity(activity);
+        else UseDefaultActivity();
+    }
+
     void Brain::AddActivityAndRemoveMemoryWhenStopped(
             Activity activity, int priorityOfFirstBehavior,
             std::vector<BehaviorPtr> behaviors, MemoryModule memory) {

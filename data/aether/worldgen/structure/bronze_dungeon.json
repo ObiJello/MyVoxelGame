@@ -1,0 +1,63 @@
+{
+  "type": "aether:bronze_dungeon",
+  "aboveBottom": 32,
+  "belowTop": 24,
+  "biomes": "#aether:has_bronze_dungeon",
+  "maxrooms": 8,
+  "processor_settings": {
+    "boss_room_processors": "aether:bronze_boss_room",
+    "generic_room_processors": "aether:bronze_room",
+    "tunnel_processors": "aether:bronze_tunnel"
+  },
+  "spawn_overrides": {
+    "aether:aether_aerwhale": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "aether:aether_darkness_monster": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "aether:aether_sky_monster": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "aether:aether_surface_monster": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "ambient": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "axolotls": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "creature": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "misc": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "monster": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "underground_water_creature": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "water_ambient": {
+      "bounding_box": "piece",
+      "spawns": []
+    },
+    "water_creature": {
+      "bounding_box": "piece",
+      "spawns": []
+    }
+  },
+  "step": "top_layer_modification"
+}

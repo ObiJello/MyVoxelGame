@@ -45,6 +45,10 @@ namespace Render {
     namespace {
         struct MenuTextures {
             TextureHandle background = INVALID_TEXTURE;
+            // MC Screen.INWORLD_MENU_BACKGROUND: the 16×16 tile drawn over a
+            // live world (black at 25 % alpha), where the title flow's
+            // menu_background.png is opaque dirt-grey.
+            TextureHandle inworldBackground = INVALID_TEXTURE;
             TextureHandle headerSep  = INVALID_TEXTURE;
             TextureHandle footerSep  = INVALID_TEXTURE;
             bool loaded = false;
@@ -54,6 +58,7 @@ namespace Render {
                 loaded = true;
                 int w, h;
                 background = LoadStandaloneGuiTexture("assets/textures/gui/menu_background.png", w, h);
+                inworldBackground = LoadStandaloneGuiTexture("assets/textures/gui/inworld_menu_background.png", w, h);
                 headerSep  = LoadStandaloneGuiTexture("assets/textures/gui/header_separator.png", w, h);
                 footerSep  = LoadStandaloneGuiTexture("assets/textures/gui/footer_separator.png", w, h);
             }
@@ -63,7 +68,7 @@ namespace Render {
 
     void ResetMenuTextures() {
         if (g_renderBackend) {
-            for (TextureHandle* t : {&s_menuTextures.background, &s_menuTextures.headerSep, &s_menuTextures.footerSep}) {
+            for (TextureHandle* t : {&s_menuTextures.background, &s_menuTextures.inworldBackground, &s_menuTextures.headerSep, &s_menuTextures.footerSep}) {
                 if (*t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(*t); *t = INVALID_TEXTURE; }
             }
         }
@@ -154,11 +159,26 @@ namespace Render {
     }
 
     void Screen::RenderBackground(GuiGraphics& g, int, int, float) {
-        // In a live world (pause-menu flow): MC renderTransparentBackground —
-        // a dark gradient over the still-rendering world. Otherwise (title
-        // flow): menu_background.png tiled at 32×32 GUI pixels.
+        // MC Screen.extractMenuBackground: in a live world the tile is
+        // INWORLD_MENU_BACKGROUND (black at 25 % alpha) over the blurred
+        // world; on the title flow it is menu_background.png. Both tiled at
+        // 32×32 GUI pixels. This used to draw MC's transparent GRADIENT
+        // (0xC0101010 → 0xD0101010, 75-82 % black) in-world, which vanilla
+        // reserves for PopupScreen — three times darker than the pause menu.
+        // The blur (menuBackgroundBlurriness, default 5) has no equivalent
+        // here; the world stays sharp under the tint.
         if (m_manager && m_manager->IsInWorld()) {
-            g.FillGradient(0, 0, m_width, m_height, 0xC0101010, 0xD0101010);
+            s_menuTextures.EnsureLoaded();
+            if (s_menuTextures.inworldBackground != INVALID_TEXTURE) {
+                const float tile = 32.0f;
+                g.Blit(s_menuTextures.inworldBackground, 0, 0, m_width, m_height,
+                       0.0f, 0.0f,
+                       static_cast<float>(m_width) / tile,
+                       static_cast<float>(m_height) / tile,
+                       ApplyAlpha(0xFFFFFFFF, m_backgroundAlpha));
+            } else {
+                g.Fill(0, 0, m_width, m_height, ApplyAlpha(0x40000000, m_backgroundAlpha));
+            }
         } else {
             RenderMenuBackgroundTexture(g, 0, 0, m_width, m_height);
         }
@@ -172,6 +192,7 @@ namespace Render {
 
         // Hover tooltip (drawn last, on top). TooltipAt lets containers
         // (OptionsList) delegate to the child under the cursor.
+        if (!ShowsTooltips()) return;
         for (auto& w : m_widgets) {
             const std::vector<std::string>* tip = w->TooltipAt(mouseX, mouseY);
             if (!tip) continue;

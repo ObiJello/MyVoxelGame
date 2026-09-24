@@ -56,6 +56,17 @@ struct GenerationContext {
           seed(worldSeed), chunkX(cx), chunkZ(cz), validBiomes(biomes) {
         random.setLargeFeatureSeed(worldSeed, cx, cz);
     }
+
+    // Reference: 26.3 GenerationContext.couldStructureExistInColumn - whether
+    // any quart of the column [minBlockY, maxBlockY] has a valid biome, the
+    // column sampled as one volume (BiomeSource.createResolverForChunk)
+    // through the context's caching climate sampler.
+    bool couldStructureExistInColumn(int32_t blockX, int32_t blockZ, int32_t minBlockY, int32_t maxBlockY) const;
+    // couldValidBiomeExistInTerrainColumn: the level's whole height, from one
+    // below its floor (heightAccessor.getMinY() - 1 .. getMaxY()).
+    bool couldValidBiomeExistInTerrainColumn(int32_t blockX, int32_t blockZ) const;
+    // couldValidBiomeExistOnTopOfChunkCenter: the chunk's middle column.
+    bool couldValidBiomeExistOnTopOfChunkCenter() const;
 };
 
 namespace Structures {

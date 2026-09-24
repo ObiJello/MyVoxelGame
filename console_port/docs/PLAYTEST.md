@@ -1,0 +1,88 @@
+# Play-test route
+
+The current build supports local creative exploration. It is still an incomplete
+port: scripted tutorial lessons, mobs, survival, crafting, combat, redstone and the
+Nether portal trip are not playable yet.
+
+## Start
+
+From `/Users/obey/Desktop/MyVoxelGame`, run:
+
+```sh
+bash console_port/run.command
+```
+
+Choose **Play Game**, then **Tutorial World**. Create a new Tutorial World for
+terrain, trees, and chest checks; existing saved chunks are deliberately not
+rewritten. Keep an older save for the reload and preservation check.
+
+## Test this build
+
+1. Walk around the starting tutorial area with WASD and mouse look. Jump with Space.
+   Check nearby trees, grass and other natural terrain around the castle. Press F to
+   fly, cross several chunk boundaries in different directions, and return. Note
+   any pause longer than about a second or missing terrain, and confirm the starting
+   structures and your edits remain intact.
+2. Walk on stairs and slabs, climb a ladder, and right-click a wooden door. Confirm
+   the door opens, can be walked through, and closes on the next right-click.
+3. Find a fence gate in the tutorial structures. Confirm a closed gate blocks you,
+   right-click opens it, the center becomes passable, and another right-click closes it.
+4. Press E. Select **Fence Gate** from Building Blocks or **Oak Fence** and
+   **Nether Brick Fence** from Miscellaneous; the choice
+   fills a free hotbar slot, or replaces the selected slot if the bar is full.
+   Place fence lines and corners. Confirm rails join
+   neighboring fences, solid blocks and gates. Confirm a gate faces your viewing direction.
+   Check that Nether Brick Fence is dark red brick, without bright pink faces.
+5. Inspect stair runs and corners in the tutorial structures. Confirm both shape
+   and texture are correct, without bright pink faces. Note the block type and
+   position of any remaining pink stair.
+6. Right-click a chest. Use Enter for a whole stack, H for half, and R for one item.
+   Right-clicking a slot should also move half. Move matching stacks repeatedly and
+   confirm they merge without exceeding 64, 16 or 1 according to the item.
+7. Open an adjacent pair of chests and confirm the screen shows 54 slots. Transfer
+   items through both halves, close it, and reopen either half. The contents and order
+   should match.
+8. Pause and choose **Save Game**, then **Save and Exit**. Load that world again and
+   check your placed fences/gates, gate open state, chest contents and carried inventory.
+9. Continue flying toward the edge of the finite console world. Confirm chunks keep
+   streaming during travel and the game prevents crossing beyond the world boundary.
+10. Open the creative inventory with E. Select sand from Building Blocks, coal
+    from Materials, and a furnace from Miscellaneous. Place the furnace and open it
+    with right-click/L2, move sand into the input and press F/L3 to select the fuel
+    slot for coal. Confirm the front lights, glass appears after about ten seconds,
+    and the cook progress, fuel, and output survive Save Game and reload.
+11. Select a cauldron and water bucket from Miscellaneous, then place the cauldron
+    and use the bucket on it. Select a glass bottle from Brewing and use it
+    once; the water should drop by one level and a water potion should appear in
+    the carried inventory. Save and reload to check that the water level remains.
+12. Select a brewing stand from Miscellaneous and place it. Brewing supplies
+    water potions; Materials supplies nether wart and sugar. Open the stand,
+    insert a potion and nether wart, and confirm an awkward potion appears after
+    twenty seconds. Add sugar to brew a speed potion. The stand model should show
+    a bottle when its slot is occupied, and the brew countdown should survive a
+    save and reload. Check that its background, bubbles, and arrow match the
+    supplied PS3 scene artwork, and that the speed potion has blue contents.
+    Take the brewed speed potion from the stand; it should become the selected
+    quickbar item. Hold right mouse or L2 for about 1.6 seconds to drink it,
+    then walk and confirm the speed increase. Save and reopen the world; the
+    effect should still be active for its remaining duration.
+13. Move a tutorial chest item into one of the first nine inventory slots. Close
+    the chest and confirm that the same item appears in the quickbar and remains
+    there after saving and reopening the world. Select a creative block with E;
+    it should fill a free slot without erasing the chest item. Shift-selecting a
+    creative stack should fill it to the item's source stack limit.
+    In the ninth Inventory category, select a backpack slot and press Enter
+    or Cross to swap it with the active quickbar slot.
+14. Browse all eight source creative tabs with Tab or L1/R1. Use Page Up/Down,
+    [ / ], or the mouse wheel to reach later catalog pages. Check that the
+    source sandstone, wood, slab, potion, skull, dye, and spawn-egg variants
+    are selectable and have distinct names. Note any missing or
+    indistinguishable icons or incorrect names.
+15. Select the creative spawn eggs from Miscellaneous and right-click a clear
+    block. All 21 catalog creatures should appear and survive Save and Exit.
+    Slime and Magma Cube should retain their size; Mooshroom should have its
+    red cow skin and three mushrooms. Species AI and attacks are incomplete.
+
+Please report the step number, what happened, keyboard or controller input, and the
+on-screen position shown at the upper left. A short description is enough; no save
+file is needed unless the failure only appears after reload.

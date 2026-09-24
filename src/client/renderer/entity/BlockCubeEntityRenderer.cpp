@@ -1,11 +1,17 @@
 // File: src/client/renderer/entity/BlockCubeEntityRenderer.cpp
 #include "../mesh/ChunkRenderer.hpp"
 #include "BlockCubeEntityRenderer.hpp"
+#include "client/world/ClientBlockAccess.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "EntityCulling.hpp"
 #include "../core/Frustum.hpp"
+#include "../core/RenderOrigin.hpp"
 
 #include "../backend/RenderBackend.hpp"
 #include "../environment/EnvironmentState.hpp"
+#include "../environment/EntityEnvironment.hpp"
+#include "common/world/lighting/LightCoords.hpp"
+#include <cstddef>
 #include "../texture/AtlasBuilder.hpp"
 #include "../viewmodel/ItemMeshBuilder.hpp"
 #include "client/entity/ClientMobManager.hpp"
@@ -128,7 +134,8 @@ namespace Render {
             if (m_instanceVB != INVALID_BUFFER) {
                 // Location 3: one vec4 per instance — xyz the world
                 // translation, w the uniform scale (see Instance). The
-                // divisor of 1 is what makes it per-instance.
+                // divisor of 1 is what makes it per-instance. Location 4:
+                // the instance's lightmap colour, RGBA8 normalized.
                 VertexLayout instanceLayout;
                 instanceLayout.stride = sizeof(Instance);
                 {
@@ -137,6 +144,16 @@ namespace Render {
                     attr.componentCount  = 4;
                     attr.offset          = 0;
                     attr.type            = AttribType::Float;
+                    attr.instanceDivisor = 1;
+                    instanceLayout.attributes.push_back(attr);
+                }
+                {
+                    VertexAttribute attr;
+                    attr.location        = 4;
+                    attr.componentCount  = 4;
+                    attr.offset          = static_cast<uint32_t>(offsetof(Instance, light));
+                    attr.normalized      = true;
+                    attr.type            = AttribType::UByte;
                     attr.instanceDivisor = 1;
                     instanceLayout.attributes.push_back(attr);
                 }
@@ -207,7 +224,8 @@ namespace Render {
     void BlockCubeEntityRenderer::Render(const glm::mat4& projection,
                                          const glm::mat4& view,
                                          const glm::vec3& cameraPos,
-                                         float partialTick) {
+                                         float partialTick,
+                                         bool movingBlocksOnly) {
         if (!m_initialized || !g_renderBackend || !Client::g_clientMobManager) return;
         PROFILE_ZONE_N("BlockCubeRender");
 
@@ -219,8 +237,10 @@ namespace Render {
         // is what stops a thousand primed TNT behind the camera from each
         // costing a draw, a matrix and a uniform slot. On Vulkan those slots
         // are finite, so this is a correctness contributor as well as a
-        // performance one.
-        const Frustum frustum = Frustum::FromMatrix(viewProj);
+        // performance one. Culling stays in WORLD space: `view` is the
+        // render-space (camera-relative) view, so the frustum is built from
+        // its world twin.
+        const Frustum frustum = Frustum::FromMatrix(projection * Render::WorldViewFromRenderView(view));
 
         // Which streaming set this call writes, and where in it — see
         // EntityFrame.hpp. Decided up front so useInstanced can name the
@@ -273,12 +293,16 @@ namespace Render {
             // night exactly like the terrain it fell from. Packing matches
             // ChunkRenderer's so the two fade at the same rate.
             const auto& env = EnvironmentState::Get().Frame();
-            g_renderBackend->SetUniformFloat(shader, "uSkyBrightness", env.skyBrightness);
+            // The instanced path carries each entity's light per instance
+            // (block_instanced.vert); the per-entity path sets it per draw.
+            EntityEnvironment::SetDrawLight(shader, glm::vec3(1.0f));
             g_renderBackend->SetUniformVec4(shader, "uFogColor",
                 glm::vec4(env.fogColor, 1.0f));
             g_renderBackend->SetUniformVec4(shader, "uFogEnv",
                 glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
-            g_renderBackend->SetUniformVec3(shader, "uCameraPos", cameraPos);
+            // The instance translations are render-space, so the fog's
+            // camera is the render-space eye too.
+            g_renderBackend->SetUniformVec3(shader, "uCameraPos", Render::ToRender(cameraPos));
 
             // The instanced shader multiplies by the per-instance model matrix
             // itself, so it wants the view-projection alone. The per-entity
@@ -405,7 +429,15 @@ namespace Render {
                 if (sectionGate && !EntityCulling::BoxTouchesVisibleSection(bmin, bmax)) return;
             }
 
-            Instance inst{worldPos, 1.0f};
+            // The instance translation is what the GPU sees, so it is the
+            // RENDER-space position: the origin subtracted from the double
+            // `interp`, never from the float `worldPos` the culls used.
+            Instance inst{Render::ToRender(interp), 1.0f};
+            // MC getPackedLightCoords at the eye: FallingBlockEntity's
+            // default 0.85 x 0.98, PrimedTnt's eyeHeight(0.15). Packed now,
+            // a colour after the gather (see Instance).
+            inst.light = static_cast<uint32_t>(EntityEnvironment::PackedLightAt(
+                interp + glm::dvec3(0.0, falling ? 0.833 : 0.15, 0.0)));
             bool whiteFlash = false;
 
             if (falling) {
@@ -451,7 +483,7 @@ namespace Render {
 
         std::vector<DrawItem>& items = m_items;
         items.clear();
-        {
+        if (!movingBlocksOnly) {
             PROFILE_ZONE_N("BlockCube.Gather");
             // Two proxy lists: the mob manager's (primed TNT, and any falling
             // block that is a Mob there) and the compact falling-block store's.
@@ -503,6 +535,61 @@ namespace Render {
 
         PROFILE_PLOT("BlockCube/Entities",
                      static_cast<int64_t>(Client::g_clientMobManager->All().size()));
+        // Moving blocks submitted by the block-entity renderers this pass
+        // (see SubmitMovingBlock). No culling beyond the frustum: there are
+        // at most a handful, and each lives a few ticks.
+        if (movingBlocksOnly) {
+            m_customMeshes.clear();
+            for (const MovingBlock& mb : m_movingBlocks) {
+                const glm::vec3 bmin(mb.worldMin);
+                const glm::vec3 bmax = bmin + glm::vec3(1.0f);
+                if (frustum.TestAABB(bmin, bmax) == FrustumResult::Outside) continue;
+                Instance inst{Render::ToRender(mb.worldMin), 1.0f};
+                // A moving block is drawn by its block entity (MC
+                // PistonHeadRenderer): the block light of the cell it is in.
+                inst.light = static_cast<uint32_t>(EntityEnvironment::LevelLightCoordsAt(
+                    glm::ivec3(glm::floor(mb.worldMin + glm::dvec3(0.5)))));
+                DrawItem item{mb.state, inst, false};
+                // Its own mesh, with the ambient occlusion the block had in
+                // the cell it is leaving — MC tesselates a moving block with
+                // the level's AO exactly as it does a placed one.
+                CustomMesh mesh;
+                BuildStateMesh(mb.state, mesh.verts, mesh.idx);
+                if (!mesh.verts.empty()) {
+                    ApplyAmbientOcclusion(mb.state, mb.aoCell, mesh.verts, mesh.idx);
+                    item.customMesh = static_cast<int>(m_customMeshes.size());
+                    item.meshKey    = 0x80000000u | static_cast<uint32_t>(m_customMeshes.size());
+                    m_customMeshes.push_back(std::move(mesh));
+                } else {
+                    item.meshKey = mb.state.RawId();
+                }
+                items.push_back(item);
+            }
+            m_movingBlocks.clear();
+        }
+        {
+            // Packed light → the lightmap colour, through a table of the 256
+            // (block, sky) texels built once per pass (the colour lookup
+            // touches the Lightmap, main thread only).
+            namespace LC = Game::Lighting::LightCoords;
+            uint32_t lightLut[256];
+            bool lutBuilt = false;
+            for (DrawItem& item : items) {
+                if (item.customMesh < 0 && item.meshKey == 0) item.meshKey = item.state.RawId();
+                if (!lutBuilt) {
+                    for (int sky = 0; sky < 16; ++sky) {
+                        for (int block = 0; block < 16; ++block) {
+                            lightLut[sky * 16 + block] = EntityEnvironment::ToRGBA8(
+                                EntityEnvironment::LightColor(LC::Pack(block, sky)));
+                        }
+                    }
+                    lutBuilt = true;
+                }
+                const int packed = static_cast<int>(item.instance.light);
+                item.instance.light = lightLut[LC::Sky(packed) * 16 + LC::Block(packed)];
+            }
+        }
+
         PROFILE_PLOT("BlockCube/Draws", static_cast<int64_t>(items.size()));
         if (items.empty()) return;
 
@@ -521,10 +608,15 @@ namespace Render {
         {
             PROFILE_ZONE_N("BlockCube.BuildBatch");
             for (const DrawItem& item : items) {
-                const uint32_t key = item.state.RawId();
+                const uint32_t key = item.meshKey;
                 if (ranges.find(key) != ranges.end()) continue;
 
-                BuildStateMesh(item.state, stateVerts, stateIdx);
+                if (item.customMesh >= 0) {
+                    stateVerts = m_customMeshes[static_cast<size_t>(item.customMesh)].verts;
+                    stateIdx   = m_customMeshes[static_cast<size_t>(item.customMesh)].idx;
+                } else {
+                    BuildStateMesh(item.state, stateVerts, stateIdx);
+                }
                 if (stateVerts.empty() || stateIdx.empty()) {
                     ranges.emplace(key, MeshRange{0, 0});
                     continue;
@@ -596,9 +688,9 @@ namespace Render {
                 std::unordered_map<uint64_t, std::vector<Instance>> groups;
                 groups.reserve(8);
                 for (const DrawItem& item : items) {
-                    const auto it = ranges.find(item.state.RawId());
+                    const auto it = ranges.find(item.meshKey);
                     if (it == ranges.end() || it->second.indexCount == 0) continue;
-                    const uint64_t key = (static_cast<uint64_t>(item.state.RawId()) << 1) |
+                    const uint64_t key = (static_cast<uint64_t>(item.meshKey) << 1) |
                                          (item.whiteFlash ? 1u : 0u);
                     groups[key].push_back(item.instance);
                 }
@@ -635,7 +727,7 @@ namespace Render {
                 }
             } else {
                 for (const DrawItem& item : items) {
-                    const auto it = ranges.find(item.state.RawId());
+                    const auto it = ranges.find(item.meshKey);
                     if (it == ranges.end() || it->second.indexCount == 0) continue;
 
                     // The same transform the instanced shader applies:
@@ -645,11 +737,19 @@ namespace Render {
                                    glm::vec3(item.instance.scale));
                     g_renderBackend->SetUniformVec4(shader, "uOverlayColor",
                                                     overlayOf(item.whiteFlash));
+                    {
+                        const uint32_t c = item.instance.light;
+                        EntityEnvironment::SetDrawLight(shader, glm::vec3(
+                            static_cast<float>(c & 0xFFu), static_cast<float>((c >> 8) & 0xFFu),
+                            static_cast<float>((c >> 16) & 0xFFu)) / 255.0f);
+                    }
                     g_renderBackend->SetUniformMat4(shader, "uMVP", viewProj * model);
-                    g_renderBackend->SetUniformMat4(shader, "uModel", model);   // fog from the WORLD position
+                    g_renderBackend->SetUniformMat4(shader, "uModel", model);   // fog from the RENDER-space position
                     // block.vert clips in aPos space, which is model space on
                     // this path — give it the plane in model space (Mᵀ p). See
-                    // ItemEntityRenderer for the full note.
+                    // ItemEntityRenderer for the full note. `model` is render-
+                    // space (the instance translate is) and the plane is the
+                    // render-space one, so the transpose is consistent.
                     {
                         const glm::vec4 plane = ::Render::ChunkRenderer::PortalEntityClipPlane();
                         if (plane.x != 0.0f || plane.y != 0.0f || plane.z != 0.0f) {
@@ -670,6 +770,87 @@ namespace Render {
             // next, and the terrain would strobe white in time with the TNT.
             g_renderBackend->SetUniformVec4(shader, "uOverlayColor", glm::vec4(0.0f));
             g_renderBackend->UnbindMesh();
+        }
+    }
+
+    void BlockCubeEntityRenderer::SubmitMovingBlock(Game::BlockState state, const glm::dvec3& worldMin,
+                                                    const glm::ivec3& aoCell) {
+        if (m_movingBlocks.size() < 4096) m_movingBlocks.push_back(MovingBlock{state, worldMin, aoCell});
+    }
+
+    // The terrain mesher's ambient occlusion (Mesher::CalculateVertexAO +
+    // ComputeFaceAO), applied to a block-model mesh: each face's four cell
+    // corners get (edge1 + edge2 + corner + 1) / 4 with a term of 0.2 for an
+    // occluding neighbour, and every vertex takes the bilinear blend of the
+    // four by where it sits on the face. Sampling the same "occludes" answer
+    // the mesher uses keeps a block's shading identical before, during and
+    // after its move.
+    void BlockCubeEntityRenderer::ApplyAmbientOcclusion(Game::BlockState state, const glm::ivec3& aoCell,
+                                                        std::vector<ItemCubeVert>& verts,
+                                                        const std::vector<uint32_t>& idx) {
+        if (!Client::g_clientBlockAccess) return;
+        if (!Game::BlockRegistry::GetBlockModel(state).ambientOcclusion) return;
+
+        const auto occludes = [](const glm::ivec3& p) {
+            const Game::BlockState s = Client::g_clientBlockAccess->GetBlockState(p.x, p.y, p.z);
+            const Game::BlockID id = s.Block();
+            if (id == Game::BlockID::Air) return false;
+            return Game::BlockRegistry::Get(id).opaque &&
+                   !Game::BlockEntityTypes::HasBlockEntity(id) &&
+                   Game::BlockRegistry::IsOcclusionFullCube(s);
+        };
+        const auto cornerAo = [&](const glm::ivec3& n, const glm::ivec3& e1, const glm::ivec3& e2) {
+            const bool edge1 = occludes(aoCell + n + e1);
+            const bool edge2 = occludes(aoCell + n + e2);
+            const float s1 = edge1 ? 0.2f : 1.0f;
+            const float s2 = edge2 ? 0.2f : 1.0f;
+            const float sc = (edge1 && edge2) ? 0.2f : (occludes(aoCell + n + e1 + e2) ? 0.2f : 1.0f);
+            return (s1 + s2 + sc + 1.0f) * 0.25f;
+        };
+
+        // Every six indices are one quad (two triangles over four vertices).
+        for (size_t i = 0; i + 5 < idx.size(); i += 6) {
+            uint32_t quad[4];
+            int count = 0;
+            for (size_t k = i; k < i + 6 && count < 4; ++k) {
+                bool seen = false;
+                for (int q = 0; q < count; ++q) if (quad[q] == idx[k]) { seen = true; break; }
+                if (!seen) quad[count++] = idx[k];
+            }
+            if (count < 3) continue;
+            const ItemCubeVert& a = verts[idx[i]];
+            const ItemCubeVert& b = verts[idx[i + 1]];
+            const ItemCubeVert& c = verts[idx[i + 2]];
+            const glm::vec3 normal = glm::cross(glm::vec3(b.x - a.x, b.y - a.y, b.z - a.z),
+                                                glm::vec3(c.x - a.x, c.y - a.y, c.z - a.z));
+            const glm::vec3 an = glm::abs(normal);
+            const int nAxis = (an.x >= an.y && an.x >= an.z) ? 0 : (an.y >= an.z ? 1 : 2);
+            if (an[nAxis] < 1e-6f) continue;
+            const int sign = normal[nAxis] > 0.0f ? 1 : -1;
+            const int a1 = (nAxis + 1) % 3, a2 = (nAxis + 2) % 3;
+            glm::ivec3 n(0); n[nAxis] = sign;
+
+            // AO at the face's four cell corners: (s, t) in {0,1}^2 along a1, a2.
+            float corner[2][2];
+            for (int s = 0; s < 2; ++s) {
+                for (int t = 0; t < 2; ++t) {
+                    glm::ivec3 e1(0), e2(0);
+                    e1[a1] = s ? 1 : -1;
+                    e2[a2] = t ? 1 : -1;
+                    corner[s][t] = cornerAo(n, e1, e2);
+                }
+            }
+            for (int q = 0; q < count; ++q) {
+                ItemCubeVert& v = verts[quad[q]];
+                const glm::vec3 p(v.x, v.y, v.z);
+                const float s = std::clamp(p[a1], 0.0f, 1.0f);
+                const float t = std::clamp(p[a2], 0.0f, 1.0f);
+                const float ao = corner[0][0] * (1 - s) * (1 - t) + corner[1][0] * s * (1 - t) +
+                                 corner[0][1] * (1 - s) * t       + corner[1][1] * s * t;
+                v.r = static_cast<uint8_t>(std::clamp(v.r * ao, 0.0f, 255.0f));
+                v.g = static_cast<uint8_t>(std::clamp(v.g * ao, 0.0f, 255.0f));
+                v.b = static_cast<uint8_t>(std::clamp(v.b * ao, 0.0f, 255.0f));
+            }
         }
     }
 

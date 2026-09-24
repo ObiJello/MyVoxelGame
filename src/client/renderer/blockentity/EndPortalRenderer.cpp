@@ -5,6 +5,7 @@
 #include "EndPortalRenderer.hpp"
 
 #include "../backend/RenderBackend.hpp"
+#include "../core/RenderOrigin.hpp"
 #include "../environment/EnvironmentState.hpp"
 #include "../../world/ClientChunkManager.hpp"
 #include "../mesh/ChunkRenderer.hpp"
@@ -323,12 +324,17 @@ void main() {
                                                 (block.y - Config::MinY) >> 4)) {
                     continue;
                 }
-                const glm::vec3 base(block);
                 // Distance cull against the block's centre, MC's cheap
                 // horizontal test (BlockEntityRenderDispatcher does the same).
-                const float dx = base.x + 0.5f - cameraPos.x;
-                const float dz = base.z + 0.5f - cameraPos.z;
+                // World space, like every cull.
+                const float dx = static_cast<float>(block.x) + 0.5f - cameraPos.x;
+                const float dz = static_cast<float>(block.z) + 0.5f - cameraPos.z;
                 if (dx * dx + dz * dz > maxDistSq) continue;
+                // The quads below go to the GPU as they are, so the block's
+                // corner is taken in RENDER space (camera-relative, see
+                // RenderOrigin.hpp): integer block minus integer origin,
+                // exact.
+                const glm::vec3 base = Render::ToRender(glm::dvec3(block));
 
                 // AbstractEndPortalRenderer.renderCube lines 46-47 through
                 // renderFace lines 52-55. renderFace emits, in order,
@@ -370,10 +376,10 @@ void main() {
                                                 (block.y - Config::MinY) >> 4)) {
                     continue;
                 }
-                const glm::vec3 base(block);
-                const float dx = base.x + 0.5f - cameraPos.x;
-                const float dz = base.z + 0.5f - cameraPos.z;
+                const float dx = static_cast<float>(block.x) + 0.5f - cameraPos.x;
+                const float dz = static_cast<float>(block.z) + 0.5f - cameraPos.z;
                 if (dx * dx + dz * dz > maxDistSq) continue;
+                const glm::vec3 base = Render::ToRender(glm::dvec3(block));   // render space
 
                 constexpr float e0 = 0.001f;
                 constexpr float e1 = 1.0f - 0.001f;
@@ -471,7 +477,9 @@ void main() {
         // shaders get (ChunkRenderer::SetEnvironmentUniforms) so the portal
         // fades with the terrain it sits in.
         const EnvironmentFrame& env = envState.Frame();
-        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", cameraPos);
+        // vWorldPos in the shader is the render-space vertex, so the fog's
+        // camera is the render-space eye.
+        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", Render::ToRender(cameraPos));
         g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
         g_renderBackend->SetUniformVec4(m_shader, "uFogEnv",
             glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));

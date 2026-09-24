@@ -11,6 +11,7 @@
 #include <array>
 #include <string>
 #include <cstdint>
+#include <thread>
 
 namespace Render {
 
@@ -27,6 +28,7 @@ namespace Render {
         void Shutdown() override;
         BackendType GetType() const override { return BackendType::Vulkan; }
         const char* GetName() const override { return "Vulkan 1.0 (MoltenVK)"; }
+        GpuDeviceInfo GetDeviceInfo() const override;
         GLFWwindow* GetWindow() const override { return m_window; }
         void SetVSync(bool enabled) override;
 
@@ -38,6 +40,15 @@ namespace Render {
         void SetViewport(int x, int y, int width, int height) override;
         void SetScissorRect(int x, int y, int w, int h) override;
         void ClearScissorRect() override;
+
+        // Backbuffer read-back — see RenderBackend.hpp. The frame's render
+        // pass is ended, the colour image copied to a host buffer, and the
+        // frame resumed in m_renderPassLoad; Take waits on that frame's fence.
+        bool RequestBackbufferReadback(int x, int y, int w, int h) override;
+        bool TakeBackbufferReadback(std::vector<uint8_t>& outRgba, int& outW, int& outH) override;
+        void SetTextureAnisotropy(TextureHandle handle, float maxAnisotropy) override;
+        void UploadTextureRegionNow(TextureHandle handle, int level, int x, int y,
+                                    int width, int height, const void* data) override;
 
         // Buffers
         BufferHandle CreateBuffer(BufferUsage usage, size_t size,
@@ -59,6 +70,8 @@ namespace Render {
         bool DebugGetMultiDrawIndirect() const override { return m_multiDrawIndirect; }
 
         // Textures
+        TextureHandle CreateEmptyTexture2D(int width, int height, TextureFormat format,
+                                           int maxLevel) override;
         TextureHandle CreateTexture2D(int width, int height, TextureFormat format,
                                      const void* data) override;
         void UpdateTexture2D(TextureHandle handle, int x, int y,
@@ -76,6 +89,14 @@ namespace Render {
         void BindTexture(TextureHandle handle, uint32_t slot) override;
         TextureHandle CreateBufferTexture(BufferHandle buffer, TextureFormat format) override;
         uintptr_t GetNativeTextureID(TextureHandle handle) const override;
+
+        // Render targets — see RenderBackend.hpp and the long note at
+        // m_renderTargets below for how they sit inside the one-pass frame.
+        RenderTargetHandle CreateRenderTarget(const RenderTargetDesc& desc) override;
+        void DestroyRenderTarget(RenderTargetHandle rt) override;
+        void BindRenderTarget(RenderTargetHandle rt) override;
+        TextureHandle GetRenderTargetColorTexture(RenderTargetHandle rt) const override;
+        void ResizeRenderTarget(RenderTargetHandle rt, int w, int h) override;
 
         // Shaders
         ShaderHandle CreateShader(const std::string& vertexSource,
@@ -99,6 +120,7 @@ namespace Render {
         void SetUniformVec2(ShaderHandle handle, const std::string& name, const glm::vec2& value) override;
         void SetUniformFloat(ShaderHandle handle, const std::string& name, float value) override;
         void SetUniformInt(ShaderHandle handle, const std::string& name, int value) override;
+        void SetUniformIVec3(ShaderHandle handle, const std::string& name, const glm::ivec3& value) override;
 
         // Meshes
         MeshHandle CreateMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
@@ -195,7 +217,28 @@ namespace Render {
         // RENDER PASS & FRAMEBUFFERS
         // ====================================================================
         VkRenderPass m_renderPass = VK_NULL_HANDLE;
+        // The same pass with LOAD in place of CLEAR: what a frame resumes
+        // into after RequestBackbufferReadback interrupted it to copy the
+        // colour image out. Identical attachments, so every pipeline built
+        // against m_renderPass is compatible with it (VK render pass
+        // compatibility ignores load/store ops and initial layouts).
+        VkRenderPass m_renderPassLoad = VK_NULL_HANDLE;
+        bool CreateRenderPassVariant(bool loadContents, VkRenderPass& out);
         std::vector<VkFramebuffer> m_framebuffers;
+        // Whether the swapchain images were created with TRANSFER_SRC (the
+        // surface has to allow it); without it the read-back is refused.
+        bool m_swapchainTransferSrc = false;
+        bool m_anisotropySupported = false;   // samplerAnisotropy feature enabled on the device
+
+        struct BackbufferReadback {
+            VkBuffer       buffer = VK_NULL_HANDLE;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            int            width = 0, height = 0;
+            uint32_t       frameSlot = 0;   // whose fence proves the copy is done
+            uint64_t       frameNumber = 0; // the frame that recorded the copy
+            bool           pending = false;
+        } m_readback;
+        void DestroyReadback(bool waitForGpu);
 
         // ====================================================================
         // COMMAND BUFFERS
@@ -248,6 +291,9 @@ namespace Render {
             TextureHandle texture = INVALID_TEXTURE;   // buffer-texture views, freed before their buffer
         };
         std::array<std::vector<DeferredDeletion>, MAX_FRAMES_IN_FLIGHT> m_deletionQueues;
+        // The slot whose fence guards the last frame that can still read a
+        // resource being retired now (see the definition).
+        uint32_t DeletionSlot() const;
 
         // ====================================================================
         // BATCHED TEXTURE UPDATES
@@ -264,6 +310,24 @@ namespace Render {
             size_t byteSize = 0;
         };
         std::vector<PendingTextureUpdate> m_pendingTextureUpdates;
+
+        // A single-time submit that is NOT waited for: texture creation and
+        // the immediate uploads. In-order queue execution puts the copy
+        // before any later frame that samples the image, so the wait was
+        // only ever the GPU backlog (the previous frame's render, up to a
+        // frame long — the per-tile jitter in the leave capture). The fence
+        // says when the staging buffer and command buffer can go; reclaimed
+        // at BeginFrame. DestroyTexture / Reserve / Shutdown all wait for
+        // the device to idle, which covers a submit still in flight.
+        struct DetachedSubmit {
+            VkFence         fence   = VK_NULL_HANDLE;
+            VkCommandBuffer cmd     = VK_NULL_HANDLE;
+            VkBuffer        staging = VK_NULL_HANDLE;
+            VkDeviceMemory  memory  = VK_NULL_HANDLE;
+        };
+        std::vector<DetachedSubmit> m_detachedSubmits;
+        void EndSingleTimeCommandsDetached(VkCommandBuffer cmd, VkBuffer staging, VkDeviceMemory memory);
+        void ReclaimDetachedSubmits(bool waitAll);
 
         // Staging ring: MAX_FRAMES_IN_FLIGHT + 1 slots, indexed by the number
         // of the frame that will flush them. Frame N's BeginFrame flushes slot
@@ -340,14 +404,23 @@ namespace Render {
         // is covered from then on.
         std::string m_pipelineManifestFile;
         bool        m_pipelinesWarmed = false;
-        void SavePipelineManifest();
+        // The manifest lines this session's pipelines make (main thread:
+        // reads m_pipelines / m_shaders); the writer thread unions them
+        // with the file's.
+        std::vector<std::string> PipelineManifestLines() const;
     public:
         void WarmPipelines() override;
     private:
         uint32_t m_pipelinesSinceSave = 0;      // new pipelines not yet on disk
         uint64_t m_lastPipelineFrame  = 0;      // frame of the most recent creation
         std::vector<char> LoadPipelineCacheBlob() const;
-        void SavePipelineCache();
+        // Fetches the cache blob and the manifest lines (main thread, a
+        // millisecond) and writes both files. `synchronous` writes inline
+        // (Shutdown); otherwise the writes go to m_pipelineCacheWriter —
+        // the save that fires mid-session, ~5 s after a pipeline burst,
+        // was a 6 ms hitch on the frame it landed on.
+        void SavePipelineCache(bool synchronous);
+        std::thread m_pipelineCacheWriter;
         // Every pipeline is remembered with the (state, shader) it was built
         // from so RecreateSwapchain can rebuild the set EAGERLY (one hitch at
         // resize) instead of dropping it and re-hitching lazily per draw.
@@ -412,6 +485,7 @@ namespace Render {
             VkFilter             minFilter = VK_FILTER_NEAREST;
             VkSamplerAddressMode addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
             VkSamplerAddressMode addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            float                maxAnisotropy = 1.0f;   // 1 = off; already clamped to the device
             // Selected by the *_MIPMAP_* filter modes. Inert while mipLevels
             // is 1, because the sampler's maxLod is then 0.
             VkSamplerMipmapMode  mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -422,8 +496,17 @@ namespace Render {
             // VkBuffer (image/sampler/memory stay null); descriptorSet is
             // then a m_texelBufferLayout set (portal pipeline layout set 4).
             VkBufferView         bufferView = VK_NULL_HANDLE;
+            // The frame number (m_frameNumber) of the last bind or upload.
+            // A deferred destroy whose flush finds this older than the
+            // frame still executing skips the device-wide wait: the fence
+            // just passed proves the GPU is done with it.
+            uint64_t             lastUsedFrame = 0;
         };
         std::unordered_map<uint32_t, VKTextureInfo> m_textures;
+        // The shared body of DestroyTexture: `forceWait` = the immediate
+        // form, which always drains; the deferred flush passes false and
+        // waits only when the texture was used by the frame in flight.
+        void DestroyTextureImpl(TextureHandle handle, bool forceWait);
 
         struct VKShaderInfo {
             VkShaderModule vertModule = VK_NULL_HANDLE;
@@ -444,6 +527,12 @@ namespace Render {
             // sessions, which is how the pipeline manifest names it.
             std::string vertPath;
             std::string fragPath;
+            // Portal-layout shaders that take their matrices from the push
+            // constants and read only the environment block of the Common
+            // UBO (entity, block entity, particles, stick figures): a new
+            // uMVP / uModel alone does not give them a fresh UBO slot.
+            // See SetShaderIgnoresCommonMatrices.
+            bool ignoresCommonMatrices = false;
         };
         std::unordered_map<uint32_t, VKShaderInfo> m_shaders;
 
@@ -456,6 +545,13 @@ namespace Render {
         // arrays in CreateGraphicsPipeline.
         void RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout);
         void RegisterShaderInstanceLayout(ShaderHandle shader, const VertexLayout& layout);
+        // A portal-layout shader that reads the Common UBO's environment
+        // fields (fog, camera, sky brightness) but never its uMVP / uModel.
+        // Such shaders are drawn once per entity or block entity with a new
+        // MVP each time; without this every one of those draws would copy a
+        // fresh 384-byte UBO slot for matrices the shader never reads, and a
+        // storage room of chests could run the 8192-slot ring dry.
+        void SetShaderIgnoresCommonMatrices(ShaderHandle shader);
     private:
 
         // ====================================================================
@@ -496,7 +592,12 @@ namespace Render {
             // Appended for the same reason the fog block was: a _vk shader may
             // declare a smaller layout than the buffer it is bound to.
             glm::vec4 uOverlayColor= {0, 0, 0, 0};      // 352 — rgb=colour, w=strength
-        };                                              // 368 bytes
+            // The view's render origin (RenderOrigin.hpp): the integer block
+            // position every float the GPU sees is measured from. The
+            // terrain vertex shader subtracts it from the section-origin
+            // table in INTEGER arithmetic. Appended, as the fog block was.
+            glm::ivec4 uRenderOrigin= {0, 0, 0, 0};     // 368 — xyz = origin, w unused
+        };                                              // 384 bytes
         // 96-mat4 bone palette UBO for the viewmodel skinning shader.
         // 6144 bytes — well within the typical UBO size limit (16 KB).
         static constexpr int kMaxBones = 96;
@@ -574,6 +675,12 @@ namespace Render {
         // the last upload, so we only memcpy when needed.
         bool m_commonUBODirty = true;
         bool m_bonesUBODirty  = true;
+        // uMVP / uModel changed since the last slot. Kept apart from
+        // m_commonUBODirty so a shader that ignores the UBO's matrices
+        // (VKShaderInfo::ignoresCommonMatrices) can keep rebinding the
+        // previous slot; any slot written copies the current matrices, so
+        // a later matrix-reading draw still sees the right ones.
+        bool m_commonMatricesDirty = true;
 
         struct VKMeshInfo {
             BufferHandle vertexBuffer = INVALID_BUFFER;
@@ -683,6 +790,55 @@ namespace Render {
 
         // Clear color
         VkClearColorValue m_clearColor = {{0.5f, 0.7f, 1.0f, 1.0f}};
+
+        // ====================================================================
+        // OFFSCREEN RENDER TARGETS
+        // ====================================================================
+        // The whole frame is ONE render pass on the swapchain image. A render
+        // target interrupts it: BindRenderTarget(rt) ends the pass in progress
+        // (the frame's or another target's) and begins the target's own;
+        // BindRenderTarget(INVALID) ends that and resumes the frame in
+        // m_renderPassLoad (colour LOADed — what the frame drew survives).
+        //
+        // The frame pass stores neither depth nor stencil (DONT_CARE: on a
+        // tile GPU that is a full-screen write saved every frame), so an
+        // interruption DISCARDS the frame's depth and stencil. The resumed
+        // pass clears both, so what follows sees a defined, empty depth
+        // buffer. Interrupt only once the world's depth is no longer needed
+        // — the entity outline composites after the hand, as MC's does.
+        //
+        // A target's attachments use the swapchain's colour format and the
+        // frame's depth format, and its pass has the frame pass's single
+        // subpass and dependency: the passes are COMPATIBLE, so every
+        // pipeline built against m_renderPass draws into a target unchanged
+        // (compatibility ignores load/store ops and layouts). The colour
+        // image rests in SHADER_READ_ONLY_OPTIMAL between uses and is
+        // sampled through an ordinary texture handle; the barriers into and
+        // out of the pass are explicit, not subpass dependencies, to keep
+        // the pass otherwise identical to the frame's.
+        struct VKRenderTargetInfo {
+            int            width = 0, height = 0;
+            VkImage        colorImage  = VK_NULL_HANDLE;
+            VkDeviceMemory colorMemory = VK_NULL_HANDLE;
+            VkImageView    colorView   = VK_NULL_HANDLE;
+            VkImage        depthImage  = VK_NULL_HANDLE;
+            VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+            VkImageView    depthView   = VK_NULL_HANDLE;
+            VkFramebuffer  framebuffer = VK_NULL_HANDLE;
+            TextureHandle  colorTexture = INVALID_TEXTURE;   // registered in m_textures
+        };
+        std::unordered_map<uint32_t, VKRenderTargetInfo> m_renderTargets;
+        VkRenderPass       m_targetRenderPass = VK_NULL_HANDLE;
+        RenderTargetHandle m_activeTarget = INVALID_RENDER_TARGET;
+        // The extent of whatever pass is recording: the swapchain's, or the
+        // bound target's. Clear / SetViewport / the scissor clamp use it.
+        VkExtent2D ActiveExtent() const;
+        bool CreateTargetRenderPass();
+        bool CreateTargetImages(VKRenderTargetInfo& rt);
+        void DestroyTargetImages(VKRenderTargetInfo& rt);
+        // Ends the pass recording now, leaving its colour image ready to be
+        // sampled (a target) or re-entered (the frame).
+        void SuspendActivePass(VkCommandBuffer cmd);
 
         // Memory tracking
         GPUMemoryStats m_memStats;
@@ -800,6 +956,10 @@ namespace Render {
         // (one GPU drain) for a whole texture upload instead of three.
         void RecordImageLayoutTransition(VkCommandBuffer cmd, VkImage image, VkFormat format,
                                          VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels);
+        // Both CreateTexture2D forms: the image carries `mipLevels` levels,
+        // `data` (optional) fills level 0.
+        TextureHandle CreateTexture2DImpl(int width, int height, TextureFormat format,
+                                          const void* data, uint32_t mipLevels);
         void RecordCopyBufferToImage(VkCommandBuffer cmd, VkBuffer buffer, VkImage image,
                                      uint32_t width, uint32_t height);
         void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);

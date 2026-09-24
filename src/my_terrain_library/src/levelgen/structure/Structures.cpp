@@ -1,7 +1,11 @@
 #include "levelgen/structure/Structures.h"
+#include "core/QuartPos.h"
 
 #include "levelgen/structure/StructureLayouts.h"
 #include "levelgen/structure/PieceBehaviors.h"
+#include "levelgen/structure/AetherStructures.h"
+#include "levelgen/structure/TwilightStructures.h"
+#include "levelgen/structure/AurelithOutskirts.h"
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/Heightmap.h"
 
@@ -129,11 +133,17 @@ StructurePieceData makeScatteredPiece(GenerationContext& ctx, const char* typeId
     return piece;
 }
 
-// Shared flow for onTopOfChunkCenter structures: stub at the chunk middle on
-// the given heightmap, biome check there, THEN build pieces (lazy consumer).
+// Shared flow for onTopOfChunkCenter structures (Structure.onTopOfChunkCenter):
+// the column pre-check (skipped by SinglePieceStructure, which runs its own
+// before its sea-level gate - onTopOfChunkCenterWithoutBiomeCheck), the stub
+// at the chunk middle on the given heightmap, findValidGenerationPoint's biome
+// check there, THEN the pieces (lazy consumer).
 bool generateOnTopOfChunkCenter(GenerationContext& ctx, Heightmap::Types heightmap,
                                 const std::function<void(std::vector<StructurePieceData>&)>& buildPieces,
-                                StructureStartData& out) {
+                                StructureStartData& out, bool columnCheck = true) {
+    if (columnCheck && !ctx.couldValidBiomeExistOnTopOfChunkCenter()) {
+        return false;
+    }
     int32_t blockX = ctx.chunkX * 16 + 8;  // ChunkPos.getMiddleBlockX
     int32_t blockZ = ctx.chunkZ * 16 + 8;
     int32_t blockY = getFirstOccupiedHeight(ctx, blockX, blockZ, heightmap);
@@ -145,6 +155,33 @@ bool generateOnTopOfChunkCenter(GenerationContext& ctx, Heightmap::Types heightm
 }
 
 } // namespace
+
+bool GenerationContext::couldStructureExistInColumn(int32_t blockX, int32_t blockZ, int32_t minBlockY,
+                                                    int32_t maxBlockY) const {
+    const int32_t quartX = core::QuartPos::fromBlock(blockX);
+    const int32_t quartZ = core::QuartPos::fromBlock(blockZ);
+    const int32_t minQuartY = core::QuartPos::fromBlock(minBlockY);
+    const int32_t maxQuartY = core::QuartPos::fromBlock(maxBlockY);
+    const world::biome::BiomeSource::BiomeResolver columnResolver = biomeSource->createResolverForChunk(
+        *sampler, quartX, minQuartY, quartZ, 1, maxQuartY - minQuartY + 1, 1);
+    for (int32_t quartY = minQuartY; quartY <= maxQuartY; ++quartY) {
+        if (validBiomes->find(columnResolver(quartX, quartY, quartZ)) != validBiomes->end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GenerationContext::couldValidBiomeExistInTerrainColumn(int32_t blockX, int32_t blockZ) const {
+    // The context's height accessor is the level (Java: the centre chunk).
+    const int32_t minY = generator->getLevelMinY();
+    const int32_t maxY = minY + generator->getLevelHeight() - 1;
+    return couldStructureExistInColumn(blockX, blockZ, minY - 1, maxY);
+}
+
+bool GenerationContext::couldValidBiomeExistOnTopOfChunkCenter() const {
+    return couldValidBiomeExistInTerrainColumn(chunkX * 16 + 8, chunkZ * 16 + 8);
+}
 
 namespace Structures {
 
@@ -164,7 +201,13 @@ bool isImplemented(const StructureInfo& info) {
         || info.type == "minecraft:ocean_ruin"
         || info.type == "minecraft:ruined_portal"
         || info.type == "minecraft:woodland_mansion"
-        || info.type == "minecraft:jigsaw";
+        || info.type == "minecraft:jigsaw"
+        // Twilight Forest structures (TwilightStructures.cpp dispatches).
+        || TwilightStructures::isImplemented(info)
+        // The Aether's structures (AetherStructures.cpp dispatches).
+        || AetherStructures::isImplemented(info)
+        // The engine's companion structures (AurelithOutskirts.cpp).
+        || AurelithOutskirts::isOutskirtsType(info.type);
 }
 
 bool generate(const StructureInfo& info, GenerationContext& ctx,
@@ -203,26 +246,29 @@ bool generate(const StructureInfo& info, GenerationContext& ctx,
         }
     } else if (info.type == "minecraft:desert_pyramid") {
         // Reference: SinglePieceStructure(DesertPyramidPiece::new, 21, 21) -
-        // reject when the 4-corner lowest WORLD_SURFACE_WG height is below sea level.
+        // the column pre-check, then reject when the 4-corner lowest
+        // WORLD_SURFACE_WG height is below sea level.
+        if (!ctx.couldValidBiomeExistOnTopOfChunkCenter()) return false;
         if (getLowestY(ctx, 21, 21) < ctx.generator->getSeaLevel()) return false;
         int orientation = -1;
         built = generateOnTopOfChunkCenter(ctx, Heightmap::Types::WORLD_SURFACE_WG,
             [&](std::vector<StructurePieceData>& pieces) {
                 pieces.push_back(
                     makeScatteredPiece(ctx, "minecraft:tedp", 21, 15, 21, &orientation));
-            }, out);
+            }, out, /*columnCheck=*/false);
         if (built) {
             out.behaviors = {PieceBehaviors::desertPyramid(orientation, out.afterPlace)};
         }
     } else if (info.type == "minecraft:jungle_temple") {
         // Reference: SinglePieceStructure(JungleTemplePiece::new, 12, 15).
+        if (!ctx.couldValidBiomeExistOnTopOfChunkCenter()) return false;
         if (getLowestY(ctx, 12, 15) < ctx.generator->getSeaLevel()) return false;
         int orientation = -1;
         built = generateOnTopOfChunkCenter(ctx, Heightmap::Types::WORLD_SURFACE_WG,
             [&](std::vector<StructurePieceData>& pieces) {
                 pieces.push_back(
                     makeScatteredPiece(ctx, "minecraft:tejp", 12, 10, 15, &orientation));
-            }, out);
+            }, out, /*columnCheck=*/false);
         if (built) {
             out.behaviors = {PieceBehaviors::jungleTemple(orientation)};
         }
@@ -256,6 +302,7 @@ bool generate(const StructureInfo& info, GenerationContext& ctx,
             [&](int x, int y, int z) { return isValidBiome(ctx, x, y, z); });
     } else if (info.type == "minecraft:woodland_mansion") {
         // Reference: WoodlandMansionStructure.findGenerationPoint.
+        if (!ctx.couldValidBiomeExistInTerrainColumn(ctx.chunkX * 16 + 7, ctx.chunkZ * 16 + 7)) return false;
         int rotation = ctx.random.nextInt(4);  // Rotation.getRandom
         // getLowestYIn5by5BoxOffset7Blocks: offsets flip by rotation
         // (CLOCKWISE_90: x -5; CLOCKWISE_180: both -5; CCW_90: z -5).
@@ -277,6 +324,7 @@ bool generate(const StructureInfo& info, GenerationContext& ctx,
     } else if (info.type == "minecraft:end_city") {
         // Reference: EndCityStructure.findGenerationPoint - same
         // getLowestYIn5by5BoxOffset7Blocks flow as the mansion.
+        if (!ctx.couldValidBiomeExistInTerrainColumn(ctx.chunkX * 16 + 7, ctx.chunkZ * 16 + 7)) return false;
         int rotation = ctx.random.nextInt(4);  // Rotation.getRandom
         int offsetX = 5, offsetZ = 5;
         if (rotation == 1) offsetX = -5;
@@ -350,6 +398,17 @@ bool generate(const StructureInfo& info, GenerationContext& ctx,
         if (built) {
             out.behaviors = {monumentBehavior};
         }
+    } else if (TwilightStructures::isTwilightType(info.type)) {
+        // Twilight Forest: LandmarkStructure flow / per-type builders.
+        built = TwilightStructures::generate(info, ctx, out);
+    } else if (AurelithOutskirts::isOutskirtsType(info.type)) {
+        // Engine extension: the outskirts of an Aurelith city — its own
+        // anchor check (the city must generate) and piece layout.
+        built = AurelithOutskirts::generate(info, ctx, out);
+    } else if (info.type.rfind("aether:", 0) == 0) {
+        // The Aether: each type runs its own findGenerationPoint and biome check.
+        built = AetherStructures::generate(info, ctx, out,
+            [&](int x, int y, int z) { return isValidBiome(ctx, x, y, z); });
     } else {
         return false;  // not yet implemented (see isImplemented)
     }

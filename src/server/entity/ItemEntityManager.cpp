@@ -1,4 +1,6 @@
 // File: src/server/entity/ItemEntityManager.cpp
+#include "common/world/block/BlockRegistry.hpp"
+#include <cmath>
 #include "ItemEntityManager.hpp"
 
 #include "common/world/level/World.hpp"
@@ -10,6 +12,8 @@
 #if ENABLE_IMMERSIVE_PORTALS
 #include "server/portal/EntityPortalTravel.hpp"
 #endif
+#include "server/portal/TwilightTeleporter.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -55,6 +59,7 @@ namespace Server {
         if (it == m_entities.end()) return std::nullopt;
         Game::ItemEntity e = std::move(it->second);
         m_entities.erase(it);
+        m_playerThrown.erase(id);
         return e;
     }
 
@@ -201,7 +206,10 @@ namespace Server {
             fwd.z * 0.3 + std::sin(spreadDir) * spreadMag
         };
 
-        return Spawn(pos, vel, stack, Game::ItemEntity::kThrowPickupDelay);
+        const int32_t id = Spawn(pos, vel, stack, Game::ItemEntity::kThrowPickupDelay);
+        // MC ItemEntity.setThrower(player) — both callers are players.
+        if (id != 0) m_playerThrown.insert(id);
+        return id;
     }
 
     int32_t ItemEntityManager::DropScattered(const glm::dvec3& pos,
@@ -317,6 +325,41 @@ namespace Server {
 
             if (!e.Tick(ctx, m_random)) {
                 e.stack.Clear();          // marks it for the sweep below
+                continue;
+            }
+
+            // MC Entity.checkInsideBlocks for an item: a wooden pressure
+            // plate or a tripwire feels a dropped item. Items are not
+            // Game::Entities, so they cannot go through Entity's own walk;
+            // the cells the item's box spans are asked through the
+            // occupancy-only hook instead.
+            {
+                // One cell below as well: a hopper's intake box reaches a
+                // full block above its own cell, so an item resting on the
+                // block over a hopper is inside the hopper's funnel.
+                const int y0 = static_cast<int>(std::floor(e.pos.y)) - 1;
+                const int y1 = static_cast<int>(std::floor(e.pos.y + Game::ItemEntity::kHeight));
+                const int x  = static_cast<int>(std::floor(e.pos.x));
+                const int z  = static_cast<int>(std::floor(e.pos.z));
+                for (int y = y0; y <= y1; ++y) {
+                    const Game::BlockID id = world->GetBlock(x, y, z);
+                    if (id == Game::BlockID::Air) continue;
+                    const Game::Block& def = Game::BlockRegistry::Get(id);
+                    if (!def.anyInside) continue;
+                    def.anyInside(*world, glm::ivec3(x, y, z), world->GetBlockState(x, y, z));
+                }
+            }
+
+            // Twilight Forest: a diamond a player threw into a valid pool
+            // lights it (ProgressionEvents.checkForPortalCreation →
+            // TFPortalBlock.tryToCreatePortal). Gated on the item id first —
+            // the overwhelmingly common answer — then on the cadence.
+            if (e.stack.itemId == Game::Items::Diamond &&
+                e.tickCount % TwilightTeleporter::kCatalystCheckInterval == 0) {
+                const bool thrown = m_playerThrown.count(id) != 0;
+                if (TwilightTeleporter::TryCreatePortalFromCatalyst(*world, sessions, e, thrown)) {
+                    e.needsSync = true;
+                }
             }
         }
 
@@ -402,6 +445,7 @@ namespace Server {
                 if (!it->second.pickedUp) {
                     outRemoved.push_back(it->first);
                 }
+                m_playerThrown.erase(it->first);
                 it = m_entities.erase(it);
             } else {
                 ++it;
@@ -414,6 +458,7 @@ namespace Server {
         for (auto it = m_entities.begin(); it != m_entities.end(); ) {
             if (ChunkOf(it->second.pos) == chunk) {
                 outRemoved.push_back(it->first);
+                m_playerThrown.erase(it->first);
                 it = m_entities.erase(it);
             } else {
                 ++it;
@@ -423,6 +468,7 @@ namespace Server {
 
     void ItemEntityManager::Clear() {
         m_entities.clear();
+        m_playerThrown.clear();
     }
 
     void ItemEntityManager::CollectSyncSets(int64_t serverTick,

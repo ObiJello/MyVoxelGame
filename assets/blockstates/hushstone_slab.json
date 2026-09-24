@@ -1,0 +1,13 @@
+{
+  "variants": {
+    "type=bottom": {
+      "model": "minecraft:block/hushstone_slab"
+    },
+    "type=double": {
+      "model": "minecraft:block/hushstone"
+    },
+    "type=top": {
+      "model": "minecraft:block/hushstone_slab_top"
+    }
+  }
+}

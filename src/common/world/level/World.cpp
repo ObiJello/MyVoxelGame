@@ -1,6 +1,9 @@
 // File: src/common/world/level/World.cpp
 #include "World.hpp"
+#include "common/world/lighting/LevelLightManager.hpp"
+#include "common/world/lighting/BlockLightProperties.hpp"
 #include "common/world/biome/Biomes.hpp"
+#include "common/world/biome/BiomeZoom.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Profiling_Tracy.hpp"
 #include "../block/BlockRegistry.hpp"
@@ -9,23 +12,46 @@
 #include "../block/entity/BlockEntityType.hpp"
 #include "../block/entity/BlockEntityTypes.hpp"
 #include "../chunk/Chunk.hpp"
+#include "../math/WorldCoordinates.hpp"
 #include "../../physics/RayCast.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/network/NetworkServer.hpp"
 #include "server/world/tracking/SectionChangeAccumulator.hpp"
-#include "server/level/ServerLevel.hpp"   // per-dimension nether-portal index
+#include "server/level/ServerLevel.hpp"   // per-dimension portal indexes
+#include "common/world/portal/PortalFamily.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "common/network/packets/game/BlockEntityDataS2CPacket.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/world/loot/LootTables.hpp"
 #include "WorldDrops.hpp"
+#include "../fluid/FlowingFluid.hpp"
+#include "../block/piston/PistonBaseBlock.hpp"   // UpdateFromNeighbourShapes
+#include "NeighborUpdater.hpp"
+#include "../block/RedstoneComponents.hpp"
+#include "../block/RedstoneStateUtil.hpp"
+#include <unordered_set>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
+#include "../block/RedstonePlus.hpp"
+#include "../block/RedstoneSignal.hpp"
+#include "../block/RedstoneFamilies.hpp"
+#include "common/network/packets/game/BlockEntityDataS2CPacket.hpp"
 #include <algorithm>
 #include <cmath>
 
 
 namespace Game {
 
-    World::World() {
+    // ILevelWrite's default: a level that keeps no block entities drops the
+    // one it was handed. Defined here, where BlockEntity is complete.
+    void ILevelWrite::SetBlockEntity(const glm::ivec3& /*pos*/, std::unique_ptr<BlockEntity> entity) {
+        entity.reset();
+    }
+
+    World::World()
+        : m_neighborUpdater(std::make_unique<CollectingNeighborUpdater>(
+              *this, CollectingNeighborUpdater::kDefaultMaxChainedNeighborUpdates)) {
         Log::Info("World created");
     }
 
@@ -98,6 +124,24 @@ namespace Game {
             return;
         }
 
+        // The level light engine (MC LevelLightEngine, server thread). Its
+        // registry is fed by IntegratedServer as chunks become resident and
+        // looks the cache up (never loads) for the rest. A cache eviction on
+        // any thread is queued to it, so an evicted chunk's layers stop
+        // taking writes.
+        m_light = std::make_unique<Lighting::LevelLightManager>(
+            DimensionHasSkyLight(m_dimension),
+            [this](Math::ChunkPos pos) -> std::shared_ptr<Chunk> {
+                return m_chunkProvider ? m_chunkProvider->GetLoadedChunk(pos) : nullptr;
+            });
+        {
+            Lighting::LevelLightManager* light = m_light.get();
+            m_chunkProvider->SetLightEvictionHook(
+                [light](Math::ChunkPos pos, const std::shared_ptr<Chunk>& chunk) {
+                    light->NoteEvicted(pos, chunk);
+                });
+        }
+
         // NOTE: ChunkProvider::Initialize() is deferred to the server thread
         // via World::InitializeChunkProvider(). This ensures ServerChunkCache
         // captures the correct thread ID (matching Minecraft's architecture).
@@ -113,6 +157,13 @@ namespace Game {
         m_chunkProvider->SetChunkTicksLoadedCallback([this](Math::ChunkPos cp) {
             m_blockTicks.NoteChunkWithTicks(cp.x, cp.z);
         });
+        // Likewise a chunk with worldgen post-processing still to apply.
+        m_chunkProvider->SetChunkPostProcessCallback([this](Math::ChunkPos cp) {
+            const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(cp.x)) << 32) |
+                                  static_cast<uint64_t>(static_cast<uint32_t>(cp.z));
+            std::lock_guard<std::mutex> lock(m_postProcessMutex);
+            m_pendingPostProcess.insert(key);
+        });
         // Same gate PerformRandomBlockTick uses: only chunks the server has
         // marked as simulating this tick. Appointments in a chunk that has
         // fallen out of range are kept, not dropped — they fire when a player
@@ -122,7 +173,20 @@ namespace Game {
             const uint64_t key =
                 (static_cast<uint64_t>(static_cast<uint32_t>(chunkX)) << 32) |
                  static_cast<uint64_t>(static_cast<uint32_t>(chunkZ));
-            return m_blockTickingKeys.count(key) != 0;
+            if (m_blockTickingKeys.count(key) == 0) return false;
+            // MC's guarantee, made explicit: a chunk block-ticks only once
+            // the chunks around it are resident (in vanilla the status
+            // pyramid delivers a ticking chunk's neighbours as FULL first).
+            // Here the ticket says "ticking" the moment it is placed, before
+            // the loader has delivered the neighbours — and a component
+            // ticking next to a hole reads air across the border: measured
+            // 2026-09-11, a zero-delay gate flipped during load and the
+            // counter behind it stepped before the machine was even started.
+            // Cheap: asked only for chunks that have a tick due.
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dx = -1; dx <= 1; ++dx)
+                    if ((dx || dz) && !IsChunkLoaded(chunkX + dx, chunkZ + dz)) return false;
+            return true;
         });
 
         Log::Info("✓ World created successfully");
@@ -151,15 +215,31 @@ namespace Game {
         // and on a host process PlatformMain overwrites it with the CLIENT's
         // block access anyway, which is what the raycast consumers actually
         // want.
+        // The generator now reports the seed it actually runs on (a world
+        // that was never given one keeps the generator default).
+        RefreshBiomeZoomSeed();
         Log::Info("ChunkProvider initialized successfully on server thread");
         return true;
     }
 
     void World::Shutdown() {
+        // Idempotent and quiet the second time: ~ServerLevel shuts its world
+        // down explicitly and ~World then calls this again.
+        if (!m_light && !m_chunkProvider) return;
+
+        // The light manager and the provider point at each other: the
+        // provider's eviction hook holds the manager as a raw pointer
+        // (NoteEvicted, callable from any thread that evicts), and the
+        // manager's cache lookup reads m_chunkProvider. So: stop the provider
+        // first (cache, saver and generator gone — nothing can evict any
+        // more), then drop the manager, then the provider object. Resetting
+        // the manager first left the hook naming a dead mutex for as long as
+        // the provider could still evict.
         if (m_chunkProvider) {
             m_chunkProvider->Shutdown();
-            m_chunkProvider.reset();
         }
+        m_light.reset();
+        m_chunkProvider.reset();
 
         // The global block access is NOT cleared here — see
         // InitializeChunkProvider. A non-overworld level shutting down must
@@ -190,6 +270,20 @@ namespace Game {
         return m_chunkProvider->GetBlockState(worldX, worldY, worldZ);
     }
 
+    int World::GetRawBrightness(int worldX, int worldY, int worldZ) const {
+        // MC LevelReader.getRawBrightness(pos, 0).
+        return std::max(GetBrightness(Lighting::LightLayer::Block, worldX, worldY, worldZ),
+                        GetBrightness(Lighting::LightLayer::Sky, worldX, worldY, worldZ));
+    }
+
+    int World::GetBrightness(Lighting::LightLayer layer, int worldX, int worldY, int worldZ) const {
+        // MC Level.getBrightness(layer, pos) — the level light engine's value.
+        // Without one (a World that never initialised) the interface's
+        // sky-column stand-in answers.
+        if (!m_light) return IBlockAccess::GetBrightness(layer, worldX, worldY, worldZ);
+        return m_light->GetBrightness(layer, worldX, worldY, worldZ);
+    }
+
     // Clamp to the dimension's build range, then hand whole (column, section)
     // tiles to the chunk provider. Cells outside the range, and cells in
     // columns that are not resident, keep the caller's zero — which is exactly
@@ -218,10 +312,21 @@ namespace Game {
     }
 
     uint16_t World::GetBiome(int worldX, int worldY, int worldZ) const {
-        if (!IsValidPosition(worldX, worldY, worldZ) || !m_chunkProvider) {
+        // MC LevelReader.getBiome -> BiomeManager.getBiome: the fuzzy zoom
+        // picks which neighbouring quart this block shows, then the noise
+        // biome is read there. Any Y is fine — the quart is clamped into the
+        // column, as MC clamps it.
+        if (!m_chunkProvider) {
             return kFallbackBiomeId;
         }
-        return m_chunkProvider->GetBiome(worldX, worldY, worldZ);
+        const glm::ivec3 quart = BiomeZoom::NoiseQuartAt(
+            m_biomeZoomSeed.load(std::memory_order_relaxed), worldX, worldY, worldZ);
+        return m_chunkProvider->GetNoiseBiome(quart.x, quart.y, quart.z);
+    }
+
+    void World::RefreshBiomeZoomSeed() {
+        m_biomeZoomSeed.store(BiomeZoom::ObfuscateSeed(GetGenerationSeed()),
+                              std::memory_order_relaxed);
     }
 
     bool World::IsChunkLoaded(int chunkX, int chunkZ) const {
@@ -322,6 +427,78 @@ namespace Game {
 
     bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags,
                          BlockStateIndex stateIndex) {
+        return SetBlock(glm::ivec3(worldX, worldY, worldZ),
+                        BlockStates::FromIndex(blockId, stateIndex), updateFlags, kUpdateLimit);
+    }
+
+    // Port of MC Level.setBlock(pos, state, flags, updateLimit) layered over
+    // LevelChunk.setBlockState(pos, state, flags). The two are one function
+    // here because the chunk half's side effects (block-entity teardown,
+    // affectNeighborsAfterRemoval, onPlace) and the level half's (client
+    // notification, neighbour updates, shape updates) have to interleave in
+    // vanilla's exact order, and that order is what redstone timing is built
+    // on:
+    //
+    //   1. write the cell
+    //   2. old block entity goes (side effects unless flag 256)
+    //   3. oldState.affectNeighborsAfterRemoval   (flag 1 or 64, block change)
+    //   4. bail if step 3 replaced the cell again
+    //   5. state.onPlace                          (unless flag 512)
+    //   6. new block entity is created
+    //   7. bail if step 5 changed the cell
+    //   8. sendBlockUpdated                        (flag 2)
+    //   9. updateNeighborsAt + updateNeighbourForOutputSignal   (flag 1)
+    //  10. the three shape walks                   (unless flag 16, limit > 0)
+    // Dev trace: OBEY_RS_TRACE="x,y,z;x,y,z;..." lists cells whose every
+    // SetBlock is appended to OBEY_RS_TRACE_OUT as "gameTime x y z slug on"
+    // (on = wire power > 0 / lit / powered). For lining the engine's redstone
+    // event order up against the tick simulator's recorder (play2 --rec).
+    namespace {
+        struct RedstoneTrace {
+            bool enabled = false;
+            std::unordered_set<uint64_t> cells;
+            FILE* out = nullptr;
+            static uint64_t Key(int x, int y, int z) {
+                return (static_cast<uint64_t>(static_cast<uint32_t>(x) & 0x3FFFFFFu) << 38) ^
+                       (static_cast<uint64_t>(static_cast<uint32_t>(y) & 0xFFFu) << 26) ^
+                       static_cast<uint64_t>(static_cast<uint32_t>(z) & 0x3FFFFFFu);
+            }
+            RedstoneTrace() {
+                const char* spec = std::getenv("OBEY_RS_TRACE");
+                const char* outPath = std::getenv("OBEY_RS_TRACE_OUT");
+                if (!spec || !outPath) return;
+                int x = 0, y = 0, z = 0;
+                const char* p = spec;
+                while (*p) {
+                    if (std::sscanf(p, "%d,%d,%d", &x, &y, &z) == 3) cells.insert(Key(x, y, z));
+                    const char* semi = std::strchr(p, ';');
+                    if (!semi) break;
+                    p = semi + 1;
+                }
+                out = std::fopen(outPath, "w");
+                enabled = out && !cells.empty();
+            }
+        };
+        RedstoneTrace& Trace() { static RedstoneTrace t; return t; }
+    }
+
+    bool World::SetBlock(const glm::ivec3& pos, BlockState state, uint32_t updateFlags,
+                         int updateLimit) {
+        const int worldX = pos.x, worldY = pos.y, worldZ = pos.z;
+        if (Trace().enabled && Trace().cells.count(RedstoneTrace::Key(worldX, worldY, worldZ))) {
+            const BlockID id = state.Block();
+            int on = 0;
+            if (id == BlockID::RedstoneWire) on = PowerOf(state) > 0;
+            else if (state.HasProperty(PropertyId::LIT)) on = LitOf(state);
+            else if (state.HasProperty(PropertyId::POWERED)) on = PoweredOf(state);
+            if (id == BlockID::DisplayBlock) {          // colour bits: red 1, green 2, blue 4 (+8 when powered)
+                on = (BoolOf(state, PropertyId::RED) ? 1 : 0) | (BoolOf(state, PropertyId::GREEN) ? 2 : 0) |
+                     (BoolOf(state, PropertyId::BLUE) ? 4 : 0) | (PoweredOf(state) ? 8 : 0);
+            }
+            std::fprintf(Trace().out, "%lld %d %d %d %s %d\n", static_cast<long long>(m_gameTime), worldX, worldY, worldZ,
+                         BlockRegistry::Get(id).registrySlug.c_str(), on);
+            std::fflush(Trace().out);
+        }
         if (!IsValidPosition(worldX, worldY, worldZ)) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d)",
                         worldX, worldY, worldZ);
@@ -333,19 +510,14 @@ namespace Game {
             return false;
         }
 
-        // Every accepted write bumps this, so anything holding a cached view
-        // of the block field can tell that its snapshot went stale. Bumped
-        // before the early-out below only would be wrong the other way — a
-        // no-op write must NOT invalidate a valid snapshot — so it is bumped
-        // after the change is known to be real, further down.
-        //
-        // Get the old block for comparison
-        BlockID oldBlockId = GetBlock(worldX, worldY, worldZ);
-        const BlockState oldState = GetBlockState(worldX, worldY, worldZ);
+        const BlockID    blockId    = state.Block();
+        const BlockState oldState   = GetBlockState(worldX, worldY, worldZ);
+        const BlockID    oldBlockId = oldState.Block();
 
-        // No change needed. The state comparison matters: re-orienting a block
-        // in place (same id, new facing) must not be swallowed here.
-        if (oldBlockId == blockId && oldState.Index() == stateIndex) {
+        // No change needed. MC's LevelChunk.setBlockState answers null here
+        // and Level.setBlock returns false; this engine has always answered
+        // true and callers treat false as a failure to report, so it stays.
+        if (oldState == state) {
             return true;
         }
 
@@ -354,148 +526,155 @@ namespace Game {
         m_blockWriteEpoch.fetch_add(1, std::memory_order_release);
 
         // Set the block using the chunk provider
-        m_chunkProvider->SetBlock(worldX, worldY, worldZ, blockId, stateIndex);
+        m_chunkProvider->SetBlock(worldX, worldY, worldZ, blockId, state.Index());
 
-        // ── BlockEntity lifecycle hook (mirrors MC Level.setBlock's
-        //    setBlockEntity call). If the OLD block had a BE, destroy it.
-        //    If the NEW block needs a BE, create one and broadcast it.
+        // LevelChunk.setBlockState's light half: when the two states light
+        // differently, the column's sky sources move and the cell is queued
+        // for the light engine (drained once per tick, IntegratedServer).
+        if (m_light && Lighting::BlockLightProperties::HasDifferentLightProperties(oldState, state)) {
+            const auto cp = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+            if (const auto lightChunk = m_chunkProvider->GetLoadedChunk(cp)) {
+                m_light->OnBlockChanged(*lightChunk, worldX, worldY, worldZ, oldState, state);
+            }
+        }
+
+        const bool blockChanged  = (oldBlockId != blockId);
+        const bool movedByPiston = (updateFlags & UpdateFlags::MoveByPiston) != 0;
+        const bool sideEffects   = (updateFlags & UpdateFlags::SkipBlockEntitySideEffects) == 0;
+        const auto chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+        const int  localX = worldX - chunkPos.x * 16;
+        const int  localZ = worldZ - chunkPos.z * 16;
+
+        // ── Old block entity (LevelChunk.setBlockState step 2) ───────────
         //
-        //    The chunk lookup is best-effort: a freshly-loaded chunk should
-        //    always be available immediately after SetBlock since we just
-        //    wrote into it via m_chunkProvider->SetBlock. If it's somehow
-        //    not, we silently skip — the BE will be missing but the block
-        //    update still goes out.
-        {
-            // The two predicates below need NO chunk — HasBlockEntity is a flat
-            // array lookup — so they are computed first and the whole block is
-            // skipped when neither fires. That is every cell in a stone or dirt
-            // crater, and it deletes one full chunk resolve per destroyed block
-            // (the chunk is used for nothing else in this scope).
-            const bool blockChanged = (oldBlockId != blockId);
-            const bool oldHadBE = blockChanged && BlockEntityTypes::HasBlockEntity(oldBlockId);
-            const bool newHasBE = blockChanged && BlockEntityTypes::HasBlockEntity(blockId);
-
-            const auto chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-            auto chunk = (oldHadBE || newHasBE) ? m_chunkProvider->GetChunk(chunkPos) : nullptr;
-            if (chunk) {
-                const int localX = worldX - chunkPos.x * 16;
-                const int localZ = worldZ - chunkPos.z * 16;
-
-                // ONLY when the BLOCK changes. A state-only edit (same block,
-                // new facing or chest `type`) must keep its block entity: MC's
-                // setBlock only swaps the BE when the new state's block differs.
-                //
-                // Without this guard, re-typing a chest as it pairs or unpairs
-                // destroys and recreates its block entity — silently emptying
-                // the chest next to the one you just placed, and churning a
-                // BlockEntityRemove + BlockEntityData pair at the client for a
-                // block that never went away.
-                if (oldHadBE) {
-                    chunk->RemoveBlockEntity(localX, worldY, localZ);
-                    // Tell every watcher to drop their copy. The block change
-                    // is already queued via the accumulator above, but a
-                    // separate teardown packet keeps client-side lifecycle
-                    // symmetric with the server (mirrors MC's implicit
-                    // remove-via-new-blockstate by being explicit).
-                    //
-                    // Watcher-scoped, and scoped to THIS world's dimension: the
-                    // packet is a bare x/y/z, so a broadcast would tell a
-                    // player in another dimension to delete the block entity at
-                    // those coordinates in the world they are actually in.
-                    if (Server::g_integratedServer) {
-                        Network::BlockEntityRemoveS2CPacket pkt{worldX, worldY, worldZ};
-                        auto data = Network::Serialization::Serialize(pkt);
-                        Server::g_integratedServer->SendToChunkWatchersAt(
-                            GetDimension(), chunkPos,
-                            Network::PacketId::BlockEntityRemoveS2C, data);
+        // ONLY when the BLOCK changes. A state-only edit (same block, new
+        // facing or chest `type`) must keep its block entity: MC's setBlock
+        // only swaps the BE when the new state's block differs.
+        //
+        // Without this guard, re-typing a chest as it pairs or unpairs
+        // destroys and recreates its block entity — silently emptying the
+        // chest next to the one you just placed, and churning a
+        // BlockEntityRemove + BlockEntityData pair at the client for a
+        // block that never went away.
+        if (blockChanged && BlockEntityTypes::HasBlockEntity(oldBlockId)) {
+            if (auto chunk = m_chunkProvider->GetChunk(chunkPos)) {
+                // MC BlockEntity.preRemoveSideEffects, gated on flag 256. A
+                // container's contents are dropped by whoever is breaking it
+                // in this engine (PlayerSession / explosions); the piston's
+                // moving-block entity finishes its move here, which may
+                // re-write this very cell.
+                if (sideEffects) {
+                    if (BlockEntity* be = chunk->GetBlockEntity(localX, worldY, localZ)) {
+                        be->PreRemoveSideEffects(*this, pos, oldState);
                     }
                 }
-                if (newHasBE) {
-                    const auto* type = BlockEntityTypes::ForBlock(blockId);
-                    if (type) {
-                        auto be = type->Create(glm::ivec3(worldX, worldY, worldZ), blockId);
-                        // Snapshot the freshly-created state for the broadcast
-                        // BEFORE handing the BE to the chunk (the chunk owns
-                        // it after SetBlockEntity).
-                        Network::BlockEntityDataS2CPacket pkt(worldX, worldY, worldZ,
-                                                              type->TypeId());
-                        Network::PacketBuffer scratch;
-                        be->Save(scratch);
-                        pkt.dataBlob = scratch.GetData();
-
-                        chunk->SetBlockEntity(localX, worldY, localZ, std::move(be));
-
-                        // Same scoping as the removal above — the payload is
-                        // positional and carries no dimension of its own.
-                        if (Server::g_integratedServer) {
-                            auto data = Network::Serialization::Serialize(pkt);
-                            Server::g_integratedServer->SendToChunkWatchersAt(
-                                GetDimension(), chunkPos,
-                                Network::PacketId::BlockEntityDataS2C, data);
-                        }
-                    }
+                if (!chunk->GetBlockEntity(localX, worldY, localZ)) {
+                    // Already gone (the side effect removed it).
+                } else if (oldBlockId == BlockID::MovingPiston) {
+                    // Never sent to clients — see SetBlockEntity.
+                    chunk->RemoveBlockEntity(localX, worldY, localZ);
+                } else {
+                chunk->RemoveBlockEntity(localX, worldY, localZ);
+                // Tell every watcher to drop their copy. Watcher-scoped, and
+                // scoped to THIS world's dimension: the packet is a bare
+                // x/y/z, so a broadcast would tell a player in another
+                // dimension to delete the block entity at those coordinates
+                // in the world they are actually in.
+                if (Server::g_integratedServer) {
+                    Network::BlockEntityRemoveS2CPacket pkt{worldX, worldY, worldZ};
+                    auto data = Network::Serialization::Serialize(pkt);
+                    Server::g_integratedServer->SendToChunkWatchersAt(
+                        GetDimension(), chunkPos,
+                        Network::PacketId::BlockEntityRemoveS2C, data);
+                }
                 }
             }
         }
 
-        // ── onPlace (MC BlockBehaviour.onPlace, reached from Level.setBlock)
-        //    Runs after the chunk write so the callback sees the world as it
-        //    now is, and BEFORE neighbour notification so a block that
-        //    replaces itself here (fire becoming a nether portal) never gets
-        //    a neighbour update for the state it is about to abandon.
+        // ── affectNeighborsAfterRemoval (step 3) ────────────────────────
         //
-        //    Only on a real block change, matching the
-        //    `!oldState.is(state.getBlock())` guard every MC implementation
-        //    opens with. The callback may write to the world — including this
-        //    very cell — so it is reached through the same recursion budget
-        //    NotifyNeighborBlocks uses; see kMaxSetBlockDepth.
-        if (oldBlockId != blockId) {
+        // `blockChanged || newBlock instanceof BaseRailBlock` — a rail
+        // re-shaping counts as a removal for its neighbours, which is what
+        // lets a detector rail's power follow a track edit.
+        if (blockChanged || IsRailBlock(blockId)) {
+            if ((updateFlags & UpdateFlags::NotifyNeighbors) || movedByPiston) {
+                const Block& oldDef = BlockRegistry::Get(oldBlockId);
+                if (oldDef.affectNeighborsAfterRemoval && s_setBlockDepth < kMaxSetBlockDepth) {
+                    ++s_setBlockDepth;
+                    oldDef.affectNeighborsAfterRemoval(*this, pos, oldState, movedByPiston);
+                    --s_setBlockDepth;
+                }
+            }
+        }
+
+        // Step 4: `if (!section.getBlockState(...).is(newBlock)) return null`.
+        if (GetBlock(worldX, worldY, worldZ) != blockId) {
+            return false;
+        }
+
+        // ── onPlace (step 5) ─────────────────────────────────────────────
+        //
+        // Runs after the chunk write so the callback sees the world as it
+        // now is, and BEFORE neighbour notification so a block that
+        // replaces itself here (fire becoming a nether portal) never gets a
+        // neighbour update for the state it is about to abandon.
+        //
+        // Every write reaches it, state-only edits included — see the note
+        // on BlockOnPlaceFn. The callback may write to the world, including
+        // this very cell, so it runs under the recursion budget.
+        if ((updateFlags & UpdateFlags::SkipOnPlace) == 0) {
             const Block& newDef = BlockRegistry::Get(blockId);
             if (newDef.onPlace && s_setBlockDepth < kMaxSetBlockDepth) {
                 ++s_setBlockDepth;
-                newDef.onPlace(*this, glm::ivec3(worldX, worldY, worldZ),
-                               BlockStates::FromIndex(blockId, stateIndex), oldState);
+                newDef.onPlace(*this, pos, state, oldState, movedByPiston);
                 --s_setBlockDepth;
+            }
+        }
 
-                // MC Level.setBlock re-reads the cell after the chunk write
-                // and only runs markAndNotifyBlock when what is there is still
-                // what it wrote. That guard exists for exactly one case, and
-                // it is the one that matters here: fire's onPlace turns the
-                // whole frame into portal blocks INCLUDING this cell, so
-                // carrying on would broadcast "fire" over the portal block
-                // that just replaced it and would run neighbour updates for a
-                // state that no longer exists. The callback's own writes have
-                // already done both jobs.
-                if (GetBlock(worldX, worldY, worldZ) != blockId) {
-                    return true;
+        // ── New block entity (step 6) ────────────────────────────────────
+        //
+        // Created AFTER onPlace, as LevelChunk does, and only if the cell
+        // still holds the block and nothing has installed one already (a
+        // piston hands the moving-block cell a pre-built entity through
+        // SetBlockEntity from inside its own write).
+        // MC MovingPistonBlock.newBlockEntity returns null: the piston hands
+        // the cell its carried state through SetBlockEntity itself, and an
+        // empty default here would be broadcast and then replaced.
+        if (blockChanged && BlockEntityTypes::HasBlockEntity(blockId) &&
+            blockId != BlockID::MovingPiston &&
+            GetBlock(worldX, worldY, worldZ) == blockId) {
+            if (auto chunk = m_chunkProvider->GetChunk(chunkPos)) {
+                if (!chunk->GetBlockEntity(localX, worldY, localZ)) {
+                    if (const auto* type = BlockEntityTypes::ForBlock(blockId)) {
+                        auto be = type->Create(pos, blockId);
+                        be->SetLevel(this);
+                        // Snapshot the freshly-created state for the broadcast
+                        // BEFORE handing the BE to the chunk (the chunk owns
+                        // it after SetBlockEntity).
+                        BroadcastBlockEntity(pos, *be);
+                        chunk->SetBlockEntity(localX, worldY, localZ, std::move(be));
+                    }
                 }
             }
         }
 
-        // Process update flags
-        if (updateFlags & UpdateFlags::NotifyNeighbors) {
-            // Notify all 6 neighboring blocks
-            NotifyNeighborBlocks(worldX, worldY, worldZ);
+        // Step 7: MC Level.setBlock re-reads the cell after the chunk write
+        // and only runs the notifications when what is there is still what
+        // it wrote. That guard exists for exactly one case, and it is the
+        // one that matters here: fire's onPlace turns the whole frame into
+        // portal blocks INCLUDING this cell, so carrying on would broadcast
+        // "fire" over the portal block that just replaced it and would run
+        // neighbour updates for a state that no longer exists. The
+        // callback's own writes have already done both jobs.
+        if (GetBlockState(worldX, worldY, worldZ) != state) {
+            return true;
         }
-        
-        if (updateFlags & UpdateFlags::UpdateShapes) {
-            // TODO: Update connected block shapes (fences, walls, etc.)
-        }
-        
-        if (updateFlags & UpdateFlags::RecomputeLight) {
-            // TODO: Trigger light recalculation
-        }
-        
-        if (updateFlags & UpdateFlags::UpdateHeightmap) {
-            // TODO: Update chunk heightmap
-        }
-        
-        if (updateFlags & UpdateFlags::MarkDirty) {
+
+        // ── sendBlockUpdated (step 8, flag 2) ────────────────────────────
+        if (updateFlags & UpdateFlags::UpdateClients) {
             // Mark section for remeshing
             OnBlockChanged(worldX, worldY, worldZ);
-        }
-        
-        if (updateFlags) {
+
             // Queue block change for centralized broadcast
             // This happens on server thread during world simulation
             if (Server::g_integratedServer) {
@@ -509,54 +688,108 @@ namespace Game {
                 if (accumulator) {
                     // Calculate section position
                     Game::Math::SectionPos sp = Game::Math::SectionPos::fromWorldPos(worldX, worldY, worldZ);
-                    
+
                     // Calculate local coordinates within section
-                    uint8_t localX = worldX & 0xF;
-                    uint8_t localY = (worldY + 64) & 0xF;  // Adjust for min Y of -64
-                    uint8_t localZ = worldZ & 0xF;
-                    
+                    uint8_t lx = worldX & 0xF;
+                    uint8_t ly = (worldY + 64) & 0xF;  // Adjust for min Y of -64
+                    uint8_t lz = worldZ & 0xF;
+
                     // Accumulate the change (will be broadcast at end of tick).
                     // Block and state travel together — a re-orientation is a
                     // real change that watchers must be told about.
-                    accumulator->accumulate(sp, localX, localY, localZ,
-                                            Game::BlockStates::FromIndex(blockId, stateIndex));
+                    accumulator->accumulate(sp, lx, ly, lz, state);
                 }
             }
         }
 
-        // Keep this dimension's nether-portal index in step.
+        // ── updateNeighborsAt (step 9, flag 1) ───────────────────────────
+        if (updateFlags & UpdateFlags::NotifyNeighbors) {
+            UpdateNeighborsAt(pos, oldBlockId);
+            if (BlockRegistry::Get(blockId).hasAnalogOutputSignal) {
+                UpdateNeighbourForOutputSignal(pos, blockId);
+            }
+        }
+
+        // ── The shape walks (step 10, unless flag 16) ────────────────────
+        //
+        // `updateFlags & -34` — the neighbours' writes carry every flag but
+        // UPDATE_NEIGHBORS and UPDATE_SUPPRESS_DROPS.
+        if ((updateFlags & UpdateFlags::KnownShape) == 0 && updateLimit > 0) {
+            const uint32_t neighbourFlags =
+                updateFlags & ~(UpdateFlags::NotifyNeighbors | UpdateFlags::SuppressDrops);
+            UpdateIndirectNeighbourShapes(oldState, pos, neighbourFlags, updateLimit - 1);
+            UpdateNeighbourShapes(state, pos, neighbourFlags, updateLimit - 1);
+            UpdateIndirectNeighbourShapes(state, pos, neighbourFlags, updateLimit - 1);
+        }
+
+        // Keep this dimension's per-family portal indexes in step.
         //
         // Here rather than at the individual call sites because EVERY route a
         // portal block can appear or vanish by funnels through SetBlock —
         // lighting one, PortalForcer building an exit, a player mining the
         // frame, and the updateShape cascade that collapse triggers. Missing
         // any one of them leaves an index entry pointing at a portal that is
-        // not there, or loses one that is.
-        if (oldBlockId != blockId &&
-            (oldBlockId == BlockID::NetherPortal || blockId == BlockID::NetherPortal) &&
-            Server::g_integratedServer) {
+        // not there, or loses one that is. Each family (nether_portal,
+        // hush_portal) keeps its own index.
+        if (blockChanged && Server::g_integratedServer) {
+            const PortalFamily* wasFamily = FamilyOfPortalBlock(oldBlockId);
+            const PortalFamily* nowFamily = FamilyOfPortalBlock(blockId);
+            if (wasFamily || nowFamily) {
+                if (auto* level = Server::g_integratedServer->GetLevel(m_dimension);
+                    level && level->World() == this) {
+                    if (wasFamily && wasFamily != nowFamily) level->Portals(wasFamily->id).Remove(pos);
+                    if (nowFamily)                           level->Portals(nowFamily->id).Add(pos);
+                }
+            }
+        }
+
+        // MC ServerLevel.onBlockStateChange → PoiManager: a bed, job site or
+        // bell appearing or vanishing. Same funnel, same reason, as the
+        // portal indexes above; the cheap block test keeps the lookup off
+        // every ordinary edit.
+        if (oldState != state && Server::g_integratedServer &&
+            (BlockMayHavePoi(oldBlockId) || BlockMayHavePoi(blockId))) {
             if (auto* level = Server::g_integratedServer->GetLevel(m_dimension);
                 level && level->World() == this) {
-                const glm::ivec3 pos(worldX, worldY, worldZ);
-                if (blockId == BlockID::NetherPortal) level->Portals().Add(pos);
-                else                                  level->Portals().Remove(pos);
+                level->Poi().OnBlockStateChange(pos, oldState, state);
             }
         }
 
 #if ENABLE_IMMERSIVE_PORTALS
-        // An obsidian block removed may have been a nether portal's frame.
-        // Cheap gate (obsidian only) here; the periodic sweep in
-        // NetherPortalGeneration catches everything else.
-        if (oldBlockId != blockId &&
-            (oldBlockId == BlockID::Obsidian || oldBlockId == BlockID::CryingObsidian) &&
-            Server::g_integratedServer) {
-            Server::g_integratedServer->OnObsidianRemoved(m_dimension, glm::ivec3(worldX, worldY, worldZ));
+        // A frame block removed (obsidian, reinforced deepslate) may have
+        // been an immersive portal's frame. Cheap gate (frame blocks only)
+        // here; the periodic sweep in NetherPortalGeneration catches
+        // everything else.
+        if (blockChanged && FamilyOfFrameBlock(oldBlockId) && Server::g_integratedServer) {
+            Server::g_integratedServer->OnFrameBlockRemoved(m_dimension, pos, oldBlockId);
         }
 #endif
 
         return true;
     }
-    
+
+    bool World::RemoveBlock(const glm::ivec3& pos, bool movedByPiston) {
+        // MC: setBlock(pos, fluidState.createLegacyBlock(), 3 | (movedByPiston ? 64 : 0)).
+        const BlockState old = GetBlockState(pos.x, pos.y, pos.z);
+        const BlockState next = BlockRegistry::ContainsWater(old)
+            ? BlockStates::Default(BlockID::Water) : BlockState{};
+        return SetBlock(pos, next,
+                        UpdateFlags::All | (movedByPiston ? UpdateFlags::MoveByPiston : 0u),
+                        kUpdateLimit);
+    }
+
+    bool World::DestroyBlock(const glm::ivec3& pos, bool dropResources, int updateLimit) {
+        const BlockState state = GetBlockState(pos.x, pos.y, pos.z);
+        if (state.Block() == BlockID::Air) return false;
+        // MC: spawnDestroyParticles — no level-event channel yet.
+        if (dropResources) {
+            DropBlockLoot(*this, pos, state);
+        }
+        const BlockState next = BlockRegistry::ContainsWater(state)
+            ? BlockStates::Default(BlockID::Water) : BlockState{};
+        return SetBlock(pos, next, UpdateFlags::All, updateLimit);
+    }
+
     bool World::CanBlockSurviveAt(int worldX, int worldY, int worldZ) const {
         const BlockID id = GetBlock(worldX, worldY, worldZ);
         if (id == BlockID::Air) return true;
@@ -593,89 +826,224 @@ namespace Game {
         return BlockRegistry::HasCollision(below);
     }
 
-    void World::NotifyNeighborBlocks(int worldX, int worldY, int worldZ) {
-        // Port of MC BlockState.updateNeighbourShapes → Block.updateOrDestroy
-        // (Block.java): after a block changes, every neighbour re-checks
-        // whether it can still exist, and one that cannot is DESTROYED WITH
-        // DROPS rather than left floating.
-        //
-        // Recursion is real and wanted — breaking the dirt under a stack of
-        // sugar cane has to collapse the whole column — so this re-enters
-        // through SetBlock. MC bounds it with a recursionLeft counter starting
-        // at 512; the same budget is kept here, as a thread_local because
-        // SetBlock can be driven from either the server thread or a worker.
-        static thread_local int s_updateDepth = 0;
-        constexpr int kMaxUpdateDepth = 512;
-        if (s_updateDepth >= kMaxUpdateDepth) return;
+    // ── Neighbour notification ──────────────────────────────────────────────
 
-        // All six, not just the one above: each neighbour evaluates its OWN
-        // rule, and blocks with no rule fall out in the first line of
-        // CanBlockSurviveAt. Keeping the walk general means a side-attached
-        // rule can be added later without revisiting this loop.
-        // Paired with kOffsets: the direction pointing from the NEIGHBOUR back
-        // at the block that changed, which is what an updateShape rule asks
-        // about ("is the thing I'm attached to still there?").
-        static constexpr glm::ivec3 kOffsets[6] = {
-            {1, 0, 0}, {-1, 0, 0},
-            {0, 1, 0}, {0, -1, 0},
-            {0, 0, 1}, {0, 0, -1}
-        };
-        static constexpr Direction kFromNeighbour[6] = {
-            Direction::West,  Direction::East,
-            Direction::Down,  Direction::Up,
-            Direction::North, Direction::South
-        };
+    void World::UpdateNeighborsAt(const glm::ivec3& pos, BlockID sourceBlock) {
+        m_neighborUpdater->UpdateNeighborsAtExceptFromFacing(pos, sourceBlock, std::nullopt);
+    }
 
-        const glm::ivec3 origin(worldX, worldY, worldZ);
-        const BlockID originId = GetBlock(worldX, worldY, worldZ);
+    void World::UpdateNeighborsAtExceptFromFacing(const glm::ivec3& pos, BlockID sourceBlock,
+                                                  Direction skipDirection) {
+        m_neighborUpdater->UpdateNeighborsAtExceptFromFacing(pos, sourceBlock, skipDirection);
+    }
 
-        // MC destroyBlock(pos, true) — drops, then clears. Shared by the
-        // support rule and by an updateShape that answers AIR, because MC's
-        // updateShape returning AIR is a destroy too, not a silent erase.
-        // Moved to WorldDrops.hpp as DestroyBlockWithDrops — scaffolding and
-        // dripstone need the identical "roll loot, pop it, clear the cell"
-        // sequence, and three copies of a loot roll is three chances for them
-        // to drift.
-        auto destroyWithDrops = [&](const glm::ivec3& p, BlockID /*id*/) {
-            DestroyBlockWithDrops(*this, p);
-        };
+    void World::NeighborChanged(const glm::ivec3& pos, BlockID sourceBlock) {
+        m_neighborUpdater->NeighborChanged(pos, sourceBlock);
+    }
 
-        ++s_updateDepth;
-        for (int oi = 0; oi < 6; ++oi) {
-            const glm::ivec3 n = origin + kOffsets[oi];
-            if (!IsValidPosition(n.x, n.y, n.z)) continue;
+    void World::NeighborChanged(BlockState state, const glm::ivec3& pos, BlockID sourceBlock,
+                                bool movedByPiston) {
+        m_neighborUpdater->NeighborChanged(state, pos, sourceBlock, movedByPiston);
+    }
 
-            const BlockID id = GetBlock(n.x, n.y, n.z);
-            if (id == BlockID::Air) continue;
-            const Block& neighbourDef = BlockRegistry::Get(id);
-
-            // MC BlockState.updateShape — a neighbour may TRANSFORM rather than
-            // just survive-or-die. Runs before the support rule below because
-            // the two are alternatives: a block that transformed has already
-            // answered for this change.
-            if (neighbourDef.neighborChanged) {
-                BlockState outState;
-                if (neighbourDef.neighborChanged(*this, n,
-                                                 GetBlockState(n.x, n.y, n.z),
-                                                 kFromNeighbour[oi], originId,
-                                                 outState, &m_blockTicks)) {
-                    const BlockID outBlock = outState.Block();
-                    // AIR from updateShape means "I cannot exist any more" —
-                    // MC's RedStoneWireBlock and the face-attached family both
-                    // return it when their support goes, and MC destroys with
-                    // drops rather than erasing.
-                    if (outBlock == BlockID::Air) destroyWithDrops(n, id);
-                    else SetBlock(n.x, n.y, n.z, outState, UpdateFlags::All);
-                    continue;
+    // MC Level.updateNeighbourForOutputSignal, verbatim: comparators beside
+    // the block, or one CONDUCTOR away from it, get a neighborChanged.
+    void World::UpdateNeighbourForOutputSignal(const glm::ivec3& pos, BlockID changedBlock) {
+        for (Direction direction : {Direction::North, Direction::South,
+                                    Direction::West,  Direction::East}) {
+            glm::ivec3 relativePos(pos.x + StepX(direction), pos.y, pos.z + StepZ(direction));
+            if (!IsPositionLoaded(relativePos.x, relativePos.y, relativePos.z)) continue;
+            BlockState state = GetBlockState(relativePos.x, relativePos.y, relativePos.z);
+            if (state.Is(BlockID::Comparator)) {
+                NeighborChanged(state, relativePos, changedBlock, false);
+            } else if (IsRedstoneConductor(*this, relativePos, state)) {
+                relativePos += glm::ivec3(StepX(direction), 0, StepZ(direction));
+                state = GetBlockState(relativePos.x, relativePos.y, relativePos.z);
+                if (state.Is(BlockID::Comparator)) {
+                    NeighborChanged(state, relativePos, changedBlock, false);
                 }
             }
-
-            if (!neighbourDef.needsSupportBelow) continue;   // cheap reject
-            if (CanBlockSurviveAt(n.x, n.y, n.z)) continue;
-
-            destroyWithDrops(n, id);
         }
-        --s_updateDepth;
+    }
+
+    void World::NeighborShapeChanged(Direction direction, const glm::ivec3& pos,
+                                     const glm::ivec3& neighborPos, BlockState neighborState,
+                                     uint32_t updateFlags, int updateLimit) {
+        m_neighborUpdater->ShapeUpdate(direction, neighborState, pos, neighborPos,
+                                       updateFlags, updateLimit);
+    }
+
+    void World::UpdateNeighbourShapes(BlockState state, const glm::ivec3& pos,
+                                      uint32_t updateFlags, int updateLimit) {
+        for (Direction direction : CollectingNeighborUpdater::kUpdateShapeOrder) {
+            const glm::ivec3 neighbour(pos.x + StepX(direction), pos.y + StepY(direction),
+                                       pos.z + StepZ(direction));
+            NeighborShapeChanged(Opposite(direction), neighbour, pos, state,
+                                 updateFlags, updateLimit);
+        }
+    }
+
+    void World::UpdateIndirectNeighbourShapes(BlockState state, const glm::ivec3& pos,
+                                              uint32_t updateFlags, int updateLimit) {
+        const Block& def = BlockRegistry::Get(state.Block());
+        if (def.updateIndirectNeighbourShapes) {
+            def.updateIndirectNeighbourShapes(*this, pos, state, updateFlags, updateLimit);
+        }
+    }
+
+    // MC NeighborUpdater.executeShapeUpdate + the engine's support rule.
+    void World::ExecuteShapeUpdate(Direction direction, const glm::ivec3& pos,
+                                   const glm::ivec3& neighborPos, BlockState neighborState,
+                                   uint32_t updateFlags, int updateLimit) {
+        if (!IsValidPosition(pos.x, pos.y, pos.z)) return;
+        const BlockState currentState = GetBlockState(pos.x, pos.y, pos.z);
+        const BlockID    id           = currentState.Block();
+        if (id == BlockID::Air) return;   // air's updateShape is the identity
+
+        // UPDATE_SKIP_SHAPE_UPDATE_ON_WIRE: the experimental evaluator writes
+        // every wire itself and does not want the shape walk touching them.
+        if ((updateFlags & UpdateFlags::SkipShapeUpdateOnWire) && id == BlockID::RedstoneWire) {
+            return;
+        }
+
+        const Block& def = BlockRegistry::Get(id);
+        BlockState newState = currentState;
+
+        // MC BlockState.updateShape — a neighbour may TRANSFORM rather than
+        // just survive-or-die.
+        bool transformed = false;
+        if (def.updateShape) {
+            BlockState outState;
+            if (def.updateShape(*this, pos, currentState, direction, neighborState.Block(),
+                                outState, &m_blockTicks)) {
+                newState    = outState;
+                transformed = true;
+            }
+        }
+
+        // MC SimpleWaterloggedBlock.updateShape's shared first line —
+        //     if (WATERLOGGED) ticks.scheduleTick(pos, Fluids.WATER, delay);
+        // — which every one of the 386 waterloggable blocks (and kelp,
+        // seagrass, the bubble column) repeats verbatim. Done here, once,
+        // rather than in each family's hook: the water a fence holds has to
+        // start flowing the moment the block beside it is broken, and a
+        // block that never got its own updateShape ported would otherwise
+        // hold its water forever. Plain water/lava cells book their own
+        // tick through LiquidBlock's updateShape above.
+        if (id != BlockID::Water && id != BlockID::Lava && BlockRegistry::ContainsWater(currentState)) {
+            Fluids::ScheduleTick(*this, pos, FluidType::Water);
+        }
+
+        // The engine's generic support rule, for blocks flagged
+        // needsSupportBelow that have no updateShape of their own. MC's
+        // VegetationBlock.updateShape is `direction == DOWN && !canSurvive
+        // → AIR`, so only the change from below is consulted.
+        if (!transformed && def.needsSupportBelow && direction == Direction::Down &&
+            !CanBlockSurviveAt(pos.x, pos.y, pos.z)) {
+            newState = BlockState{};
+        }
+
+        UpdateOrDestroy(currentState, newState, pos, updateFlags, updateLimit);
+    }
+
+    // MC Block.updateOrDestroy, verbatim: AIR from updateShape is a DESTROY
+    // (with drops unless flag 32), anything else a write that clears the
+    // suppress-drops bit.
+    void World::UpdateOrDestroy(BlockState oldState, BlockState newState, const glm::ivec3& pos,
+                                uint32_t updateFlags, int updateLimit) {
+        if (newState == oldState) return;
+        if (newState.Block() == BlockID::Air) {
+            DestroyBlock(pos, (updateFlags & UpdateFlags::SuppressDrops) == 0, updateLimit);
+        } else {
+            SetBlock(pos, newState, updateFlags & ~UpdateFlags::SuppressDrops, updateLimit);
+        }
+    }
+
+    // MC NeighborUpdater.executeUpdate → BlockState.handleNeighborChanged.
+    void World::ExecuteNeighborUpdate(BlockState state, const glm::ivec3& pos, BlockID sourceBlock,
+                                      bool movedByPiston) {
+        if (!IsValidPosition(pos.x, pos.y, pos.z)) return;
+        const Block& def = BlockRegistry::Get(state.Block());
+        if (!def.neighborChanged) return;
+        def.neighborChanged(*this, pos, state, sourceBlock, movedByPiston);
+    }
+
+    // ── Block events ────────────────────────────────────────────────────────
+
+    void World::BlockEvent(const glm::ivec3& pos, BlockID block, int b0, int b1) {
+        m_blockEvents.push_back(BlockEventData{pos, block, b0, b1});
+    }
+
+    bool World::ShouldTickBlocksAt(const glm::ivec3& pos) const {
+        const auto cp = Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+        const uint64_t key =
+            (static_cast<uint64_t>(static_cast<uint32_t>(cp.x)) << 32) |
+             static_cast<uint64_t>(static_cast<uint32_t>(cp.z));
+        return m_blockTickingKeys.count(key) != 0;
+    }
+
+    // ── Block entities ──────────────────────────────────────────────────────
+
+    BlockEntity* World::GetBlockEntity(const glm::ivec3& pos) {
+        if (!m_chunkProvider || !IsValidPosition(pos.x, pos.y, pos.z)) return nullptr;
+        const auto cp = Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+        auto chunk = m_chunkProvider->GetLoadedChunk(cp);
+        if (!chunk) return nullptr;
+        return chunk->GetBlockEntity(pos.x - cp.x * 16, pos.y, pos.z - cp.z * 16);
+    }
+
+    void World::SetBlockEntity(const glm::ivec3& pos, std::unique_ptr<BlockEntity> entity) {
+        if (!m_chunkProvider || !entity || !IsValidPosition(pos.x, pos.y, pos.z)) return;
+        const auto cp = Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+        auto chunk = m_chunkProvider->GetLoadedChunk(cp);
+        if (!chunk) return;
+        entity->SetLevel(this);
+        // MC BlockEntity.getUpdatePacket is null for PistonMovingBlockEntity:
+        // the client builds its own from the block event, so the server's is
+        // never sent (a chunk send still carries it, as vanilla's does).
+        if (entity->GetBlockId() != BlockID::MovingPiston) BroadcastBlockEntity(pos, *entity);
+        chunk->SetBlockEntity(pos.x - cp.x * 16, pos.y, pos.z - cp.z * 16, std::move(entity));
+        m_chunkProvider->MarkChunkForSave(cp);
+    }
+
+    void World::RemoveBlockEntity(const glm::ivec3& pos) {
+        if (!m_chunkProvider || !IsValidPosition(pos.x, pos.y, pos.z)) return;
+        const auto cp = Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+        auto chunk = m_chunkProvider->GetLoadedChunk(cp);
+        if (!chunk) return;
+        BlockEntity* existing = chunk->GetBlockEntity(pos.x - cp.x * 16, pos.y, pos.z - cp.z * 16);
+        if (!existing) return;
+        const bool movingPiston = existing->GetBlockId() == BlockID::MovingPiston;
+        chunk->RemoveBlockEntity(pos.x - cp.x * 16, pos.y, pos.z - cp.z * 16);
+        // A moving-piston cell's entity was never sent; the client retires
+        // its own copy when the final block arrives.
+        if (Server::g_integratedServer && !movingPiston) {
+            Network::BlockEntityRemoveS2CPacket pkt{pos.x, pos.y, pos.z};
+            auto data = Network::Serialization::Serialize(pkt);
+            Server::g_integratedServer->SendToChunkWatchersAt(
+                GetDimension(), cp, Network::PacketId::BlockEntityRemoveS2C, data);
+        }
+    }
+
+    void World::BlockEntityChanged(const glm::ivec3& pos) {
+        BlockEntity* be = GetBlockEntity(pos);
+        if (!be) return;
+        be->MarkDirty();
+        BroadcastBlockEntity(pos, *be);
+    }
+
+    void World::BroadcastBlockEntity(const glm::ivec3& pos, const BlockEntity& entity) {
+        if (!Server::g_integratedServer || !entity.GetType()) return;
+        Network::BlockEntityDataS2CPacket pkt(pos.x, pos.y, pos.z, entity.GetType()->TypeId());
+        Network::PacketBuffer scratch;
+        entity.Save(scratch);
+        pkt.dataBlob = scratch.GetData();
+        auto data = Network::Serialization::Serialize(pkt);
+        // Same scoping as the removal — the payload is positional and
+        // carries no dimension of its own.
+        Server::g_integratedServer->SendToChunkWatchersAt(
+            GetDimension(), Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z),
+            Network::PacketId::BlockEntityDataS2C, data);
     }
 
     void World::MarkSectionDirty(int worldX, int worldY, int worldZ) {
@@ -791,13 +1159,17 @@ namespace Game {
         m_chunkProvider->LogPerformanceStats();
     }
 
-    void World::SaveAllChunks() {
+    void World::SaveAllChunks(bool wait) {
         if (!m_chunkProvider) {
             return;
         }
 
         Log::Info("Saving all loaded chunks...");
-        m_chunkProvider->SaveAllDirtyChunks();
+        m_chunkProvider->SaveAllDirtyChunks(wait);
+    }
+
+    size_t World::SaveDirtyChunksEagerly(size_t maxChunks, std::chrono::steady_clock::time_point deadline) {
+        return m_chunkProvider ? m_chunkProvider->SaveDirtyChunksEagerly(maxChunks, deadline) : 0;
     }
 
     void World::SetGenerationSeed(int64_t seed) {
@@ -806,6 +1178,7 @@ namespace Game {
         }
 
         m_chunkProvider->SetGenerationSeed(seed);
+        RefreshBiomeZoomSeed();
         Log::Info("Set world generation seed to: %d", seed);
     }
 
@@ -881,15 +1254,31 @@ namespace Game {
         // load this tick.
         if (m_chunkProvider) m_chunkProvider->SetGameTime(m_gameTime);
 
+        // MC runs a chunk's post-processing as it becomes a ticking chunk,
+        // in the chunk source's part of the tick — before the level's.
+        PostProcessGeneration();
+
+        // MC ServerLevel.handlingTick spans tickPending through blockEvents.
+        m_handlingTick = true;
+
         // 1. Process any pending block updates (MC ServerLevel's tickPending
         //    phase — scheduled block ticks, which run BEFORE random ticks).
-        ProcessBlockUpdates();
+        //    redstone_plus: the delayed components' re-checks deferred by
+        //    everything since the last tick (player interactions) go first,
+        //    then the ones this tick's cascades produce.
+        if (!m_redstoneFrozen) {
+            if (RedstonePlus::Enabled()) RedstoneFlushDeferredChecks(*this);
+            ProcessBlockUpdates();
+            if (RedstonePlus::Enabled()) RedstoneFlushDeferredChecks(*this);
+        }
 
         // 2. Perform random block ticks (growth, decay, etc.)
         PerformRandomBlockTick();
 
         // 3. Process scheduled block events
         ProcessBlockEvents();
+
+        m_handlingTick = false;
 
         // 4. Update tile entities
         TileEntityTick();
@@ -899,6 +1288,84 @@ namespace Game {
 
         // 6. Update world time and weather
         WorldTimeWeatherTick();
+    }
+
+    // MC ChunkMap.prepareTickingChunk waits for the chunk's 3x3 at FULL, then
+    // LevelChunk.postProcessGeneration visits every marked cell:
+    //
+    //     FluidState fluidState = blockState.getFluidState();
+    //     if (!fluidState.isEmpty()) fluidState.tick(level, pos, blockState);
+    //     if (!(blockState.getBlock() instanceof LiquidBlock)) {
+    //         BlockState newState = Block.updateFromNeighbourShapes(blockState, level, pos);
+    //         if (newState != blockState) level.setBlock(pos, newState, 276);
+    //     }
+    //
+    // What worldgen marks: fluids at aquifer and cave edges (they start
+    // flowing), soul sand and magma under water (their bubble columns),
+    // mushrooms (their footing), sculk veins. A chunk not ticking yet stays
+    // pending; one that left the cache keeps its list in its save and is
+    // announced again when it comes back.
+    void World::PostProcessGeneration() {
+        std::vector<uint64_t> pending;
+        {
+            std::lock_guard<std::mutex> lock(m_postProcessMutex);
+            if (m_pendingPostProcess.empty()) return;
+            pending.assign(m_pendingPostProcess.begin(), m_pendingPostProcess.end());
+        }
+        PROFILE_ZONE_N("PostProcessGeneration");
+        for (const uint64_t key : pending) {
+            if (m_blockTickingKeys.count(key) == 0) continue;
+            const int chunkX = static_cast<int32_t>(static_cast<uint32_t>(key >> 32));
+            const int chunkZ = static_cast<int32_t>(static_cast<uint32_t>(key));
+            std::shared_ptr<Chunk> chunk = GetLoadedChunk(chunkX, chunkZ);
+            if (!chunk) {
+                std::lock_guard<std::mutex> lock(m_postProcessMutex);
+                m_pendingPostProcess.erase(key);
+                continue;
+            }
+            bool surrounded = true;
+            for (int dz = -1; dz <= 1 && surrounded; ++dz) {
+                for (int dx = -1; dx <= 1 && surrounded; ++dx) {
+                    if ((dx != 0 || dz != 0) && !GetLoadedChunk(chunkX + dx, chunkZ + dz)) surrounded = false;
+                }
+            }
+            if (!surrounded) continue;
+            {
+                std::lock_guard<std::mutex> lock(m_postProcessMutex);
+                m_pendingPostProcess.erase(key);
+            }
+
+            std::vector<std::vector<int16_t>> sections;
+            {
+                const auto guard = chunk->LockExclusive();
+                sections.swap(chunk->postProcessing);
+            }
+            if (sections.empty()) continue;
+            // The drained list must not come back from the save.
+            m_chunkProvider->MarkChunkForSave(Math::ChunkPos{chunkX, chunkZ});
+
+            for (size_t si = 0; si < sections.size(); ++si) {
+                const int baseY = Math::WorldCoordinates::MIN_WORLD_Y + static_cast<int>(si) * 16;
+                for (const int16_t packed : sections[si]) {
+                    const glm::ivec3 pos(chunkX * 16 + (packed & 15),
+                                         baseY + ((packed >> 4) & 15),
+                                         chunkZ * 16 + ((packed >> 8) & 15));
+                    const BlockState blockState = GetBlockState(pos.x, pos.y, pos.z);
+                    const FluidState fluidState = FluidStateOf(blockState);
+                    if (!fluidState.IsEmpty()) {
+                        Fluids::Tick(*this, pos, blockState, fluidState);
+                    }
+                    if (!blockState.Is(BlockID::Water) && !blockState.Is(BlockID::Lava)) {
+                        const BlockState newState = UpdateFromNeighbourShapes(*this, blockState, pos);
+                        if (newState.RawId() != blockState.RawId()) {
+                            SetBlock(pos.x, pos.y, pos.z, newState,
+                                     UpdateFlags::Invisible | UpdateFlags::KnownShape |
+                                     UpdateFlags::SkipBlockEntitySideEffects);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MC ServerLevel.tick's "tickPending" phase:
@@ -930,6 +1397,19 @@ namespace Game {
             // in the two ticks since — and FallingBlockTick would happily spawn
             // a falling stone.
             const BlockState state = GetBlockState(pos.x, pos.y, pos.z);
+
+            // Fluid ticks share this queue (see FlowingFluid.hpp). MC's
+            // ServerLevel.tickFluid guard is on the cell's FLUID, not its
+            // block: a `water` appointment on a waterlogged fence must fire
+            // on the fence's water, and one on a cell that has since dried
+            // up must not.
+            if (type == BlockID::Water || type == BlockID::Lava) {
+                const FluidState fluid = FluidStateOf(state);
+                if (!fluid.IsSame(type == BlockID::Water ? FluidType::Water : FluidType::Lava)) return;
+                Fluids::Tick(*this, pos, state, fluid);
+                return;
+            }
+
             if (!state.Is(type)) return;
 
             const Block& def = BlockRegistry::Get(type);
@@ -968,11 +1448,17 @@ namespace Game {
     void World::PerformRandomBlockTick() {
         PROFILE_ZONE_N("RandomTick");
 
-        const int tickSpeed = m_randomTickSpeed;
+        // Per section per tick, as MC — but no more samples than a section
+        // has blocks. MC itself has no ceiling, and a rule set to millions
+        // parks the server thread in this loop for good: no chunk goes out,
+        // no command comes in to lower it again. At 4096 a section's every
+        // block ticks about once, which is all a bigger number could mean.
+        constexpr int kMaxSamplesPerSection = Math::CHUNK_SIZE_X * Math::SECTION_HEIGHT * Math::CHUNK_SIZE_Z;
+        const int tickSpeed = std::min(m_randomTickSpeed, kMaxSamplesPerSection);
         if (tickSpeed <= 0 || !m_chunkProvider) return;
 
-        for (const Math::ChunkPos& cp : m_blockTickingChunks) {
-            // Cache-only, and it MUST stay that way. m_blockTickingChunks comes
+        for (const Math::ChunkPos& cp : m_randomTickingChunks) {
+            // Cache-only, and it MUST stay that way. The list comes
             // from the ticket manager's level cache, which lists every chunk
             // inside simulation distance whether or not it has ever been
             // loaded — 289 of them at the default distance of 8. Calling the
@@ -1036,15 +1522,49 @@ namespace Game {
         }
     }
 
+    // MC ServerLevel.runBlockEvents, verbatim in shape. Events in a chunk
+    // that is not simulating this tick are held over, not dropped — a piston
+    // armed at the edge of the loaded area fires when someone comes back.
     void World::ProcessBlockEvents() {
-        // Process scheduled block events
-        // This handles time-delayed block actions like:
-        // - Piston extensions/retractions
-        // - Door animations
-        // - Note block sounds
-        // - Dispenser/dropper actions
-        
-        // TODO: Implement block event queue and processing
+        PROFILE_ZONE_N("BlockEvents");
+        m_blockEventsToReschedule.clear();
+
+        while (!m_blockEvents.empty()) {
+            const BlockEventData eventData = m_blockEvents.front();
+            m_blockEvents.pop_front();
+            if (ShouldTickBlocksAt(eventData.pos)) {
+                // doBlockEvent: only if the block is still the one that booked it.
+                const BlockState state = GetBlockState(eventData.pos.x, eventData.pos.y, eventData.pos.z);
+                if (!state.Is(eventData.block)) continue;
+                const Block& def = BlockRegistry::Get(eventData.block);
+                if (!def.triggerEvent) continue;
+                const bool handled = def.triggerEvent(*this, eventData.pos, state,
+                                                      eventData.b0, eventData.b1);
+                if (handled && Server::g_integratedServer) {
+                    // MC broadcasts a ClientboundBlockEventPacket to players
+                    // within 64 blocks so the client can mirror the event
+                    // (piston animation, note-block sound). The engine's
+                    // clients render pistons from the block-entity stream
+                    // instead, but the packet is sent for the ones that will
+                    // want it.
+                    Network::BlockEntityActionS2CPacket pkt;
+                    pkt.worldX      = eventData.pos.x;
+                    pkt.worldY      = eventData.pos.y;
+                    pkt.worldZ      = eventData.pos.z;
+                    pkt.actionType  = static_cast<uint8_t>(eventData.b0);
+                    pkt.actionParam = static_cast<uint8_t>(eventData.b1);
+                    pkt.blockId     = static_cast<uint16_t>(eventData.block);
+                    auto data = Network::Serialization::Serialize(pkt);
+                    Server::g_integratedServer->SendToChunkWatchers(
+                        GetDimension(), glm::dvec3(eventData.pos) + glm::dvec3(0.5),
+                        Network::PacketId::BlockEntityActionS2C, data);
+                }
+            } else {
+                m_blockEventsToReschedule.push_back(eventData);
+            }
+        }
+
+        for (const BlockEventData& e : m_blockEventsToReschedule) m_blockEvents.push_back(e);
     }
 
     void World::TileEntityTick() {
@@ -1062,10 +1582,14 @@ namespace Game {
         if (!m_chunkProvider) return;
         constexpr float kTickDt = 1.0f / 20.0f;
 
-        const auto positions = m_chunkProvider->GetLoadedChunkPositions();
-        for (const auto& pos : positions) {
-            auto chunk = m_chunkProvider->GetChunk(pos);
-            if (!chunk) continue;
+        // Only chunks that hold a block entity, gathered in one pass under the
+        // cache lock — walking every loaded chunk through GetChunk cost a lock
+        // per chunk (~7,000 per level with a few dozen players) to find the
+        // few with anything to tick. A chunk that gains its first block entity
+        // during this walk is ticked from the next tick on, as MC's
+        // pendingBlockEntityTickers are.
+        const auto chunks = m_chunkProvider->GetChunksWithBlockEntities();
+        for (const auto& [pos, chunk] : chunks) {
 
             // The dirty bit is drained HERE, in the loop that already visits
             // every block entity, so it costs nothing extra.
@@ -1077,9 +1601,21 @@ namespace Game {
             // chest's contents were never written. Placing a block anywhere in
             // the same chunk would incidentally save them; that is the bug,
             // not the feature.
-            bool anyDirty = false;
+            // Snapshot first: a ticking entity may write blocks — a piston's
+            // moving cell lands its block and removes itself — and that
+            // mutates the very map being walked. Each entry is re-resolved
+            // before it is ticked so a removed one is skipped.
+            struct Entry { glm::ivec3 local; BlockEntity* be; };
+            std::vector<Entry> entries;
             for (auto& [localPos, be] : chunk->MutableBlockEntities()) {
-                if (!be) continue;
+                if (be) entries.push_back(Entry{localPos, be.get()});
+            }
+            bool anyDirty = false;
+            for (const Entry& e : entries) {
+                BlockEntity* be = chunk->GetBlockEntity(e.local.x, e.local.y, e.local.z);
+                if (be != e.be) continue;
+                // An entity that arrived with its chunk has no level yet.
+                if (!be->GetLevel()) be->SetLevel(this);
                 if (be->IsDirty()) {
                     be->ClearDirty();
                     anyDirty = true;
@@ -1108,7 +1644,7 @@ namespace Game {
         // Port of ServerLevel.tickTime: gameTime always advances, dayTime only
         // while the doDaylightCycle gamerule is enabled.
         m_gameTime++;
-        if (m_doDaylightCycle) {
+        if (m_doDaylightCycle && !m_fixedDayTime) {
             m_dayTime++;
         }
 
