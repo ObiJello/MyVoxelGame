@@ -122,7 +122,8 @@ std::vector<RichSpan> parseConsoleRichText(const std::wstring& source,bool south
     std::vector<std::uint32_t> colours{defaultColour};
     std::wstring run;
     auto flush=[&]{if(!run.empty()){spans.push_back({utf8(run),colours.back()});run.clear();}};
-    auto glyph=[&](PadGlyph g){flush();RichSpan s;s.glyph=g;s.colour=colours.back();spans.push_back(s);};
+    std::wstring currentToken;
+    auto glyph=[&](PadGlyph g){flush();RichSpan s;s.glyph=g;s.colour=colours.back();s.token=utf8(currentToken);spans.push_back(s);};
     for(std::size_t i=0;i<text.size();){
         if(text.compare(i,2,L"{*")!=0){
             if(text[i]==L'\n' || text[i]==L'\r'){
@@ -134,6 +135,7 @@ std::vector<RichSpan> parseConsoleRichText(const std::wstring& source,bool south
         const auto end=text.find(L"*}",i+2);
         if(end==std::wstring::npos){run+=text.substr(i);break;}
         const std::wstring token=text.substr(i+2,end-i-2);
+        currentToken=token;
         i=end+2;
         if(token==L"B"){flush();RichSpan s;s.lineBreak=true;spans.push_back(s);continue;}
         if(token==L"T1" || token==L"T2" || token==L"T3"){flush();colours.push_back(kTitle);continue;}
@@ -176,7 +178,8 @@ std::vector<RichSpan> parseConsoleRichText(const std::wstring& source,bool south
     return spans;
 }
 
-std::vector<RichLine> layoutRichText(const std::vector<RichSpan>& spans,float maxWidth,float glyphWidth,
+std::vector<RichLine> layoutRichText(const std::vector<RichSpan>& spans,float maxWidth,
+                                     const std::function<float(const RichSpan&)>& glyphWidth,
                                      const std::function<float(const std::string&)>& measure){
     std::vector<RichLine> lines(1);
     float spaceWidth=measure(" ");
@@ -188,8 +191,9 @@ std::vector<RichLine> layoutRichText(const std::vector<RichSpan>& spans,float ma
     for(const auto& span:spans){
         if(span.lineBreak){lines.emplace_back();continue;}
         if(span.glyph!=PadGlyph::None){
-            if(lines.back().width>0 && lines.back().width+glyphWidth>maxWidth)lines.emplace_back();
-            place(span,glyphWidth);continue;
+            const float width=glyphWidth(span);
+            if(lines.back().width>0 && lines.back().width+width>maxWidth)lines.emplace_back();
+            place(span,width);continue;
         }
         // Words (keeping leading/trailing spaces as gaps).
         std::size_t at=0;

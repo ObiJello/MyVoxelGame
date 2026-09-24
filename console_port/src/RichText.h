@@ -17,6 +17,7 @@ struct RichSpan {
     std::uint32_t colour=0xffffff;
     PadGlyph glyph=PadGlyph::None;
     bool lineBreak=false;
+    std::string token; // the {*...*} name a glyph came from
 };
 
 // UIComponent_TutorialPopup::ParseDescription + CMinecraftApp::FormatHTMLString
@@ -38,9 +39,10 @@ bool consoleRichTextIcon(const std::wstring& text,int& id,int& aux);
 PadGlyph consoleActionGlyph(int action);
 
 // Word-wrapped layout of parsed spans. `measure` returns the width of UTF-8
-// text at the layout scale; glyphs are `glyphWidth` wide.
+// text at the layout scale and `glyphWidth` the width of a glyph span.
 struct RichPiece { float x=0; RichSpan span; };
 struct RichLine { std::vector<RichPiece> pieces; float width=0; };
-std::vector<RichLine> layoutRichText(const std::vector<RichSpan>& spans,float maxWidth,float glyphWidth,
+std::vector<RichLine> layoutRichText(const std::vector<RichSpan>& spans,float maxWidth,
+                                     const std::function<float(const RichSpan&)>& glyphWidth,
                                      const std::function<float(const std::string&)>& measure);
 }

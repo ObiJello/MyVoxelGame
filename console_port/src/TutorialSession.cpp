@@ -7,6 +7,18 @@
 
 namespace console {
 unsigned consoleJoypadButtons(int action){return InputManager.GetGameJoypadMaps(0,action);}
+int consoleEntityInstanceType(const std::wstring& id){
+    static const std::pair<const wchar_t*,eINSTANCEOF> types[]{
+        {L"Squid",eTYPE_SQUID},{L"Cow",eTYPE_COW},{L"Sheep",eTYPE_SHEEP},{L"Chicken",eTYPE_CHICKEN},
+        {L"Pig",eTYPE_PIG},{L"Wolf",eTYPE_WOLF},{L"Creeper",eTYPE_CREEPER},{L"Skeleton",eTYPE_SKELETON},
+        {L"Spider",eTYPE_SPIDER},{L"Zombie",eTYPE_ZOMBIE},{L"PigZombie",eTYPE_PIGZOMBIE},{L"Ghast",eTYPE_GHAST},
+        {L"Slime",eTYPE_SLIME},{L"Enderman",eTYPE_ENDERMAN},{L"Silverfish",eTYPE_SILVERFISH},
+        {L"CaveSpider",eTYPE_CAVESPIDER},{L"MushroomCow",eTYPE_MUSHROOMCOW},{L"SnowMan",eTYPE_SNOWMAN},
+        {L"VillagerGolem",eTYPE_VILLAGERGOLEM},{L"EnderDragon",eTYPE_ENDERDRAGON},{L"Blaze",eTYPE_BLAZE},
+        {L"LavaSlime",eTYPE_LAVASLIME},{L"Ozelot",eTYPE_OZELOT},{L"Villager",eTYPE_VILLAGER}};
+    for(const auto& [name,type]:types)if(id==name)return type;
+    return eTYPE_NOTSET;
+}
 namespace {
 shared_ptr<ItemInstance> stack(int id,int aux,int count=1){
     return id>0?make_shared<ItemInstance>(id,count,aux):nullptr;
@@ -50,6 +62,7 @@ void TutorialSession::tick(){
 bool TutorialSession::isTutorial()const{return !tutorial_->m_fullTutorialComplete;}
 bool TutorialSession::allTutorialsComplete()const{return tutorial_->m_allTutorialsComplete;}
 int TutorialSession::currentState()const{return tutorial_->getCurrentState();}
+bool TutorialSession::isStateCompleted(int state)const{return tutorial_->isStateCompleted(static_cast<eTutorial_State>(state));}
 
 std::array<std::uint8_t,TutorialSession::ProfileBytes> TutorialSession::profile()const{
     std::array<std::uint8_t,ProfileBytes> bytes{};
@@ -192,5 +205,10 @@ void TutorialSession::closeMenu(){
 void TutorialSession::showTutorialPopup(bool show){
     TutorialHost::setEngine(&engine_);
     tutorial_->showTutorialPopup(show);
+}
+
+void TutorialSession::setMessage(const std::wstring& message,int icon,int aux){
+    TutorialHost::setEngine(&engine_);
+    tutorial_->setMessage(message,icon,aux);
 }
 }

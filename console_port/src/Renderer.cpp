@@ -473,6 +473,81 @@ void Renderer::prompt(char symbol,const std::string& label,float x,float y) {
     else {segment(4,0,8,7);segment(8,7,0,7);segment(0,7,4,0);}
     draw(vertices,white_);text(label,x+13,y);
 }
+float Renderer::padGlyph(PadGlyph glyph,float x,float y,float size) {
+    if(glyph==PadGlyph::None)return 0;
+    if(glyph==PadGlyph::Shank){
+        // Gui food icon (icons.png 52,27).
+        sprite("icons",x,y,size,size,{52/256.f,27/256.f,61/256.f,36/256.f});
+        return size;
+    }
+    std::vector<Vertex> vertices;
+    const float r=size/2,cx=x+r,cy=y+r;
+    auto triangle=[&](glm::vec2 a,glm::vec2 b,glm::vec2 c,glm::vec4 colour){
+        for(auto p:{a,b,c})vertices.push_back({p.x,p.y,0,0,0,colour.r,colour.g,colour.b,colour.a});
+    };
+    auto disc=[&](float radius,glm::vec4 colour){
+        for(int i=0;i<24;++i){
+            const double a=i*PI/12,b=(i+1)*PI/12;
+            triangle({cx,cy},{cx+radius*float(std::cos(a)),cy+radius*float(std::sin(a))},
+                     {cx+radius*float(std::cos(b)),cy+radius*float(std::sin(b))},colour);
+        }
+    };
+    auto segment=[&](float ax,float ay,float bx,float by,float width,glm::vec4 colour){
+        glm::vec2 direction=glm::normalize(glm::vec2(bx-ax,by-ay));glm::vec2 side(-direction.y*width,direction.x*width);
+        glm::vec2 a(ax,ay),b(bx,by);
+        triangle(a+side,b+side,b-side,colour);triangle(a+side,b-side,a-side,colour);
+    };
+    const glm::vec4 body(.12f,.12f,.14f,.95f),rim(.75f,.75f,.78f,1);
+    const float stroke=std::max(.6f,size*.07f);
+    switch(glyph){
+    case PadGlyph::Cross:case PadGlyph::Circle:case PadGlyph::Square:case PadGlyph::Triangle:{
+        disc(r,rim);disc(r*.86f,body);
+        const float s=r*.45f;
+        if(glyph==PadGlyph::Cross){const glm::vec4 c(.49f,.7f,.97f,1);segment(cx-s,cy-s,cx+s,cy+s,stroke,c);segment(cx+s,cy-s,cx-s,cy+s,stroke,c);}
+        else if(glyph==PadGlyph::Circle){const glm::vec4 c(1,.42f,.42f,1);
+            for(int i=0;i<20;++i){const double a=i*PI/10,b=(i+1)*PI/10;
+                segment(cx+s*float(std::cos(a)),cy+s*float(std::sin(a)),cx+s*float(std::cos(b)),cy+s*float(std::sin(b)),stroke,c);}}
+        else if(glyph==PadGlyph::Square){const glm::vec4 c(.95f,.55f,.85f,1);
+            segment(cx-s,cy-s,cx+s,cy-s,stroke,c);segment(cx+s,cy-s,cx+s,cy+s,stroke,c);
+            segment(cx+s,cy+s,cx-s,cy+s,stroke,c);segment(cx-s,cy+s,cx-s,cy-s,stroke,c);}
+        else {const glm::vec4 c(.35f,.9f,.72f,1);
+            segment(cx,cy-s,cx+s,cy+s*.8f,stroke,c);segment(cx+s,cy+s*.8f,cx-s,cy+s*.8f,stroke,c);segment(cx-s,cy+s*.8f,cx,cy-s,stroke,c);}
+        draw(vertices,white_);
+        return size;
+    }
+    case PadGlyph::LeftStick:case PadGlyph::RightStick:case PadGlyph::L3:case PadGlyph::R3:{
+        disc(r,rim);disc(r*.86f,body);disc(r*.55f,glm::vec4(.3f,.3f,.33f,1));
+        draw(vertices,white_);
+        const bool left=glyph==PadGlyph::LeftStick || glyph==PadGlyph::L3;
+        const std::string label=glyph==PadGlyph::L3?"L3":glyph==PadGlyph::R3?"R3":left?"L":"R";
+        const float scale=size/16*.8f;
+        text(label,cx-textWidth(label,scale)/2,cy-4*scale,scale,{1,1,1,1},false);
+        return size;
+    }
+    case PadGlyph::DpadUp:case PadGlyph::DpadDown:case PadGlyph::DpadLeft:case PadGlyph::DpadRight:{
+        disc(r,rim);disc(r*.86f,body);
+        const float s=r*.45f;const glm::vec4 c(.9f,.9f,.9f,1);
+        if(glyph==PadGlyph::DpadUp)triangle({cx,cy-s},{cx+s,cy+s*.6f},{cx-s,cy+s*.6f},c);
+        else if(glyph==PadGlyph::DpadDown)triangle({cx,cy+s},{cx-s,cy-s*.6f},{cx+s,cy-s*.6f},c);
+        else if(glyph==PadGlyph::DpadLeft)triangle({cx-s,cy},{cx+s*.6f,cy-s},{cx+s*.6f,cy+s},c);
+        else triangle({cx+s,cy},{cx-s*.6f,cy+s},{cx-s*.6f,cy-s},c);
+        draw(vertices,white_);
+        return size;
+    }
+    default:break;
+    }
+    const std::string label=glyph==PadGlyph::L1?"L1":glyph==PadGlyph::R1?"R1":glyph==PadGlyph::L2?"L2":
+                            glyph==PadGlyph::R2?"R2":glyph==PadGlyph::Start?"START":"SELECT";
+    return keyCap(label,x,y,size);
+}
+float Renderer::keyCap(const std::string& label,float x,float y,float height) {
+    const float scale=height/16*.8f;
+    const float width=textWidth(label,scale)+height*.5f;
+    rect(x,y,width,height,{.75f,.75f,.78f,1});
+    rect(x+.8f,y+.8f,width-1.6f,height-1.6f,{.12f,.12f,.14f,.95f});
+    text(label,x+(width-textWidth(label,scale))/2,y+height/2-4*scale,scale,{1,1,1,1},false);
+    return width;
+}
 void Renderer::screenshot(const std::filesystem::path& path) {
     if(!path.parent_path().empty())std::filesystem::create_directories(path.parent_path());
     std::vector<unsigned char> pixels(width_*height_*4);glReadPixels(0,0,width_,height_,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());

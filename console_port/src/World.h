@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -59,6 +60,7 @@ struct DroppedItem {
     std::shared_ptr<class CompoundTag> stack;
 };
 struct CraftingRecipe;
+struct TutorialLevelRules;
 
 // Bounded resident window over the original finite console world.
 // Generation uses the original biome, density, surface, cave and canyon stages.
@@ -111,6 +113,14 @@ public:
     void generateTutorial(const std::filesystem::path& tutorialAssets);
     void generateArchivedTutorial(const std::filesystem::path& tutorialAssets);
     bool isTutorial()const;
+    // The supplied tutorial's LevelRules and languages.loc strings (null for
+    // other worlds, including the archived tutorial).
+    const TutorialLevelRules* tutorialRules()const;
+    const std::map<std::wstring,std::wstring>* tutorialStrings()const;
+    // MinecraftServer::setSpawnSettings(... && !Minecraft::isTutorial()):
+    // natural spawning stays off in a tutorial world until the player leaves
+    // the tutorial.
+    void setTutorialSpawning(bool enabled);
     bool isFlat()const;
     int originX()const;
     int originZ()const;
@@ -213,6 +223,8 @@ public:
     void playerJumped(bool sprinting);
     void playerAttacked(int slot);
     bool playerInWater()const;
+    // Entity::isUnderLiquid(Material::water): the eye is in water.
+    bool playerUnderWater()const{return playerEyeInWater();}
     int playerAir()const;
     // Gui heart blink inputs: Mob::invulnerableTime and Mob::lastHealth.
     int playerInvulnerableTicks()const;

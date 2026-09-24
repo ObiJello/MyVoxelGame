@@ -373,7 +373,7 @@ void World::tickEntities(){
     }
     // ServerLevel permits natural friendlies once per 40 ticks. Animal's
     // grass/daytime-brightness test and the same two 24-block exclusions apply.
-    if(!isTutorial() && time()%40==0 && state->entities.size()<60){
+    if((!isTutorial() || state->tutorialSpawning) && time()%40==0 && state->entities.size()<60){
         int animals=0,chickens=0;
         for(const auto& entity:state->entities){
             if(entity.id==L"Cow" || entity.id==L"Pig" || entity.id==L"Sheep")++animals;

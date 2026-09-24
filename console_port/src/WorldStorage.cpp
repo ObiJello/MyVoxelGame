@@ -219,6 +219,9 @@ void World::generateArchivedTutorial(const std::filesystem::path& assets){
     activateFluidChunks();
 }
 bool World::isTutorial()const{return bool(state->tutorial || state->archivedTutorial);}
+const TutorialLevelRules* World::tutorialRules()const{return state->tutorial?&state->tutorial->levelRules():nullptr;}
+const std::map<std::wstring,std::wstring>* World::tutorialStrings()const{return state->tutorial?&state->tutorial->strings():nullptr;}
+void World::setTutorialSpawning(bool enabled){state->tutorialSpawning=enabled;}
 bool World::isFlat()const{return state->metadata->getGenerator()==LevelType::lvl_flat;}
 Block World::get(int x,int y,int z)const{
     if(!inside(x,y,z))return Air;

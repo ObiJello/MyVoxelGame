@@ -11,6 +11,12 @@
 #include "SpawnEggColors.h"
 #include "SurvivalRules.h"
 #include "CraftingRecipes.h"
+#include "TutorialSession.h"
+#include "TutorialContainers.h"
+#include "RichText.h"
+#include "GameSettings.h"
+#include "ConsoleStrings.h"
+#include "ItemDescriptions.h"
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -24,6 +30,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <cwchar>
+#include <set>
 
 using namespace console;
 namespace {
@@ -85,6 +93,50 @@ void drawSlotFrame(Renderer& r,float x,float y,float size,bool selected,bool hol
   r.rect(x+1,y+1,size-2,size-2,{.48f,.72f,.48f,.52f});
  }
 }
+// AddItemRuleDefinition::addItemToContainer: a fixed slot or the first space.
+void addRuleItem(World& world,const TutorialItem& item){
+    if(item.slot>=0 && item.slot<36)world.setCarriedItem(item.slot,item.id,item.count,item.aux,item.dataTag);
+    else world.addCarriedItem(item.id,item.count,item.aux);
+}
+// UpdatePlayerRuleDefinition::postProcessPlayer (health, food, items); the
+// position and rotation are applied when the player is placed.
+void applyUpdatePlayer(World& world){
+    const auto* rules=world.tutorialRules();
+    if(!rules || !rules->updatePlayer)return;
+    const auto& update=*rules->updatePlayer;
+    if(update.hasHealth)world.setPlayerHealth(update.health);
+    if(update.hasFood)world.setPlayerFood(update.food);
+    for(const auto& item:update.items)addRuleItem(world,item);
+}
+// PlayerList::placeNewPlayer: every new player is given a map in slot 9
+// (Item::map_Id), then the level rules post-process the player.
+void setUpNewPlayer(World& world){
+    world.setCarriedItem(9,358,1,0);
+    applyUpdatePlayer(world);
+}
+std::wstring widen(const std::string& text){
+    std::wstring out;
+    for(std::size_t i=0;i<text.size();){
+        unsigned c=static_cast<unsigned char>(text[i++]);
+        const int extra=c>=0xF0?3:c>=0xE0?2:c>=0xC0?1:0;
+        if(extra)c&=0x3F>>extra;
+        for(int k=0;k<extra && i<text.size();++k)c=(c<<6)|(static_cast<unsigned char>(text[i++])&0x3F);
+        out.push_back(static_cast<wchar_t>(c));
+    }
+    return out;
+}
+std::string narrow(const std::wstring& text){
+    std::string out;
+    for(wchar_t w:text){
+        const auto c=static_cast<std::uint32_t>(w);
+        if(c<0x80)out+=char(c);
+        else if(c<0x800){out+=char(0xC0|(c>>6));out+=char(0x80|(c&0x3F));}
+        else {out+=char(0xE0|(c>>12));out+=char(0x80|((c>>6)&0x3F));out+=char(0x80|(c&0x3F));}
+    }
+    return out;
+}
+// app.GetString with the IDS_* name.
+std::string consoleText(const char* name){return consoleString(consoleStringId(name));}
 enum class Screen { Main, Worlds, CreateWorld, FindingSeed, Loading, Playing, Pause, Inventory, Chest, Furnace, Brewing, Crafting, Dead, Options, Controls, Notice };
 struct App {
     enum class LoadKind { Create, Tutorial, ArchivedTutorial, Existing };
@@ -94,6 +146,7 @@ struct App {
         std::filesystem::path path,previousPath;
         bool previousLoaded=false;
         std::string error;
+        LoadKind kind=LoadKind::Existing;
     };
     GLFWwindow* window=nullptr;
     std::unique_ptr<Renderer> renderer;
@@ -142,6 +195,96 @@ struct App {
     std::filesystem::path dataDir;
     GLFWgamepadstate previousPad{};
     bool leftMouse=false,rightMouse=false,usedBlockHeld=false;
+    // ---- Console tutorial (FullTutorialMode) and the player's profile ----
+    GameSettings settings;
+    std::unique_ptr<TutorialSession> tutorial;
+    // UIComponent_TutorialPopup: the description, fade timer and visibility.
+    TutorialPopup tutorialPopup;
+    bool tutorialPopupVisible=false,tutorialPopupHidden=false,tutorialModeActive=false;
+    double tutorialPopupTime=0;
+    // InputManager.GetValue for the current frame (EControllerActions).
+    std::array<int,TutorialSession::ActionCount> actionValues{};
+    double lookDX=0,lookDY=0;
+    int scrollSteps=0;
+    bool padInputLast=false;
+    // Engine state compared each tick to raise tutorial events.
+    std::vector<ContainerItem> tutorialCarried;
+    std::vector<PotionEffect> tutorialEffects;
+    int tutorialSlot=-1,tutorialFood=-1;
+    std::set<int> collectedGoals;
+    std::filesystem::path settingsPath()const{return dataDir/"settings.dat";}
+    void saveSettings(){try{settings.save(settingsPath());}catch(const std::exception& e){message(e.what());}}
+    bool inputAllowed(int action)const{return !tutorial || tutorial->isInputAllowed(action);}
+    struct TutorialBridge final:TutorialEngine{
+        App& app;
+        explicit TutorialBridge(App& owner):app(owner){}
+        // Level coordinates: the client world is offset by half its size.
+        void playerPosition(double& x,double& y,double& z)override{
+            x=app.position.x-World::width/2;y=app.position.y+1.62;z=app.position.z-World::depth/2;
+        }
+        bool playerUnderWater()override{return app.world.playerUnderWater();}
+        bool playerCreative()override{return !app.world.survival();}
+        void setPlayerCreative(bool creative)override{app.world.setSurvival(!creative);}
+        int tile(int x,int y,int z)override{return app.world.get(x+World::width/2,y,z+World::depth/2);}
+        std::int64_t levelTime()override{return app.world.time();}
+        void setLevelTime(std::int64_t time)override{app.world.setTime(time);}
+        void setOverrideTimeOfDay(std::int64_t time)override{app.world.setOverrideTimeOfDay(time);}
+        int inputValue(int action)override{return action>=0 && action<TutorialSession::ActionCount?app.actionValues[action]:0;}
+        bool menuDisplayed()override{return app.screen!=Screen::Playing;}
+        bool pauseMenuDisplayed()override{return app.screen==Screen::Pause || app.screen==Screen::Options || app.screen==Screen::Controls;}
+        std::uint32_t tickCount()override{return static_cast<std::uint32_t>(glfwGetTime()*1000);}
+        unsigned char gameSetting(int setting)override{return app.settings.get(static_cast<GameSetting>(setting));}
+        const TutorialArea* namedArea(const std::wstring& name)override{
+            const auto* rules=app.world.tutorialRules();if(!rules)return nullptr;
+            auto it=rules->namedAreas.find(name);return it==rules->namedAreas.end()?nullptr:&it->second;
+        }
+        void setTutorialVisible(bool visible)override{
+            app.tutorialPopupHidden=!visible;
+            if(visible)app.tutorialPopupTime=glfwGetTime();
+        }
+        void setTutorialDescription(const TutorialPopup& popup)override{
+            app.tutorialPopup=popup;app.tutorialPopupVisible=!popup.description.empty();app.tutorialPopupTime=glfwGetTime();
+        }
+        void playerLeftTutorial()override{app.tutorialModeActive=false;app.world.setTutorialSpawning(true);}
+        int craftingGroup()override{return app.craftingGroup;}
+        bool craftingItemSelected(int itemId)override{
+            const auto list=app.craftingList();
+            return app.selection>=0 && app.selection<int(list.size()) && list[app.selection]->id==itemId;
+        }
+    };
+    std::unique_ptr<TutorialBridge> tutorialBridge;
+    // UIComponent_TutorialPopup visibility: SetVisible plus the fade timer.
+    bool tutorialPopupShown()const{
+        if(!tutorial || !tutorialPopupVisible || tutorialPopupHidden)return false;
+        return !tutorialPopup.allowFade || glfwGetTime()-tutorialPopupTime<7.0; // TUTORIAL_DISPLAY_MESSAGE_TIME
+    }
+    void startTutorialSession(){
+        tutorialBridge=std::make_unique<TutorialBridge>(*this);
+        tutorialPopupVisible=tutorialPopupHidden=false;
+        tutorialCarried=world.carriedItems();tutorialEffects=world.activePotionEffects();
+        tutorialSlot=slot;tutorialFood=world.playerFoodLevel();collectedGoals.clear();
+        world.setTutorialSpawning(false);
+        tutorial=std::make_unique<TutorialSession>(*tutorialBridge,settings.tutorialCompletion());
+        tutorialModeActive=true;
+    }
+    void endTutorialSession(){
+        if(tutorial){
+            if(tutorial->profileChanged()){settings.tutorialCompletion()=tutorial->profile();saveSettings();}
+            tutorial.reset();
+        }
+        tutorialBridge.reset();tutorialPopupVisible=false;tutorialModeActive=false;
+    }
+    // The tutorial menu states of the UIScene_*Menu constructors.
+    static int tutorialMenuState(Screen s,bool creative,bool table){
+        switch(s){
+        case Screen::Inventory:return creative?TutorialSession::CreativeInventoryMenu:TutorialSession::InventoryMenu;
+        case Screen::Crafting:return table?TutorialSession::Crafting3x3Menu:TutorialSession::Crafting2x2Menu;
+        case Screen::Furnace:return TutorialSession::FurnaceMenu;
+        case Screen::Brewing:return TutorialSession::BrewingMenu;
+        case Screen::Chest:return TutorialSession::ContainerMenu;
+        default:return -1;
+        }
+    }
     ContainerItem selectedItem()const{return world.carriedItems()[slot];}
     int inventoryCount()const{
         if(inventoryCategory==creativeTabCount())return 36;
@@ -175,7 +318,22 @@ struct App {
     }
     std::filesystem::path savePath()const{return activeSave.empty()?dataDir/"world.inner":activeSave;}
     void message(const std::string& s){toast=s;toastUntil=glfwGetTime()+5;}
-    void change(Screen s){screen=s;selection=0;seedEditing=false;nameEditing=false;
+    void change(Screen s){
+        if(tutorial && s!=screen){
+            // UIScene_PauseMenu hides the popup; the container menus switch
+            // the tutorial state with their scene and restore it on close.
+            const bool pauseBefore=screen==Screen::Pause || screen==Screen::Options || screen==Screen::Controls;
+            const bool pauseAfter=s==Screen::Pause || s==Screen::Options || s==Screen::Controls;
+            const int before=tutorialMenuState(screen,!world.survival(),craftingTable);
+            const Screen previous=screen;screen=s;
+            if(before>=0)tutorial->closeMenu();
+            const int after=tutorialMenuState(s,!world.survival(),craftingTable);
+            if(after>=0)tutorial->openMenu(after,s==Screen::Crafting);
+            if(pauseAfter && !pauseBefore)tutorial->showTutorialPopup(false);
+            if(pauseBefore && !pauseAfter)tutorial->showTutorialPopup(true);
+            screen=previous;
+        }
+        screen=s;selection=0;seedEditing=false;nameEditing=false;
         if(s!=Screen::FindingSeed)seedSearch.reset();
         if(s==Screen::Worlds){try{savedWorlds=listSavedWorlds(dataDir);}catch(const std::exception& e){message(e.what());savedWorlds.clear();}worldPage=0;}mouseReady=false;leftMouse=rightMouse=usedBlockHeld=false;potionUseTicks=0;potionUseSlot=-1;ignoreMouseUntil=glfwGetTime()+.15;
         glfwSetInputMode(window,GLFW_CURSOR,s==Screen::Playing?GLFW_CURSOR_DISABLED:GLFW_CURSOR_NORMAL);}
@@ -188,13 +346,14 @@ struct App {
         const bool flat=flatWorld,survivalMode=survivalWorld;
         std::shared_ptr<World> previous;
         if(previousLoaded){previous=std::make_shared<World>();previous->swapWith(world);}
+        endTutorialSession();
         loaded=false;loadReturnScreen=screen==Screen::FindingSeed?Screen::CreateWorld:screen;
         change(Screen::Loading);
         loadPhase=std::make_shared<std::atomic<int>>(previousLoaded?0:1);
         auto phase=loadPhase;
         try{loadJob=std::async(std::launch::async,[kind,selected,value,destinationDir,name,flat,survivalMode,previousPath,previousLoaded,
                                                    previous,phase]() mutable -> LoadResult {
-            LoadResult result;result.previous=previous;result.previousLoaded=previousLoaded;result.previousPath=previousPath;
+            LoadResult result;result.previous=previous;result.previousLoaded=previousLoaded;result.previousPath=previousPath;result.kind=kind;
             try{
                 if(result.previous){phase->store(0);result.previous->save(previousPath);}
                 phase->store(1);
@@ -204,9 +363,14 @@ struct App {
                     result.path=selected.extension()==".mcp"?destinationDir/"world.inner":selected;
                 }else{
                     result.path=allocateWorldSave(destinationDir);
-                    if(kind==LoadKind::Tutorial)result.next->generateTutorial(std::filesystem::path(CONSOLE_ASSET_DIR)/"tutorial");
+                    if(kind==LoadKind::Tutorial){
+                        result.next->generateTutorial(std::filesystem::path(CONSOLE_ASSET_DIR)/"tutorial");
+                        // eGameHostOption_Tutorial: survival (game type bits 0).
+                        result.next->setSurvival(true);
+                    }
                     else if(kind==LoadKind::ArchivedTutorial)result.next->generateArchivedTutorial(std::filesystem::path(CONSOLE_ASSET_DIR)/"tutorial");
                     else {result.next->generate(value,flat);result.next->setName(name);result.next->setSurvival(survivalMode);}
+                    if(kind==LoadKind::Tutorial || kind==LoadKind::Create)setUpNewPlayer(*result.next);
                 }
                 phase->store(2);
                 phase->store(3);
@@ -242,9 +406,18 @@ struct App {
             position=saved?*saved:world.spawn();verticalSpeed=0;grounded=false;flying=false;worldTickSeconds=0;
             fallDistance=0;mineProgress=0;mineY=-1;eatUseTicks=0;
             world.setPlayerPosition(position);
-            if(world.isTutorial()){yaw=(81.59-180)*3.14159265358979323846/180;pitch=0;}
+            if(world.isTutorial()){
+                // UpdatePlayerRuleDefinition yRot (the archived tutorial uses the same value).
+                const auto* rules=world.tutorialRules();
+                const double yRot=rules && rules->updatePlayer && rules->updatePlayer->hasYRot?rules->updatePlayer->yRot:81.59;
+                yaw=(yRot-180)*3.14159265358979323846/180;pitch=0;
+            }
+            endTutorialSession();
+            // UIScene_LoadOrJoinMenu::LoadLevelGen sets tutorial mode only for a
+            // fresh tutorial; a saved tutorial world plays normally.
+            if(loadReady->kind==LoadKind::Tutorial)startTutorialSession();
             lastSave=glfwGetTime();change(Screen::Playing);
-            message(world.isTutorial()?"Tutorial world - creative exploration":
+            if(!tutorial)message(world.isTutorial()?"Classic tutorial world - creative exploration":
                     world.survival()?"Survival mode - E inventory, C crafting, Q drop":"Creative mode - press E for blocks, F to fly");
             loadReady.reset();loadPhase.reset();
         }catch(const std::exception& error){
@@ -315,7 +488,15 @@ struct App {
     void moveFurnaceSelection(int amount=-1){
         try{
             bool moved=false;
-            if(selection<3)moved=world.transferFurnaceItem(chestX,chestY,chestZ,selection,true,0,amount);
+            if(selection<3){
+                const auto before=world.furnaceItems(chestX,chestY,chestZ);
+                moved=world.transferFurnaceItem(chestX,chestY,chestZ,selection,true,0,amount);
+                if(moved && selection==2 && tutorial && before.size()>2 && before[2].id){
+                    const auto after=world.furnaceItems(chestX,chestY,chestZ);
+                    const int left=after.size()>2 && after[2].id==before[2].id?after[2].count:0;
+                    if(before[2].count>left)tutorial->onCrafted(before[2].id,before[2].damage,before[2].count-left);
+                }
+            }
             else{
                 int source=selection-3;auto carried=world.carriedItems();
                 int target=furnaceFuelTarget?1:0;
@@ -331,7 +512,10 @@ struct App {
             const auto bottle=selection<3?world.brewingItems(chestX,chestY,chestZ)[selection]:ContainerItem{};
             const auto before=selection<3?world.carriedItems():std::vector<ContainerItem>{};
             bool moved=false;
-            if(selection<4)moved=world.transferBrewingItem(chestX,chestY,chestZ,selection,true,0,amount);
+            if(selection<4){
+                moved=world.transferBrewingItem(chestX,chestY,chestZ,selection,true,0,amount);
+                if(moved && selection<3 && tutorial && bottle.id)tutorial->onCrafted(bottle.id,bottle.damage,1);
+            }
             else{
                 int source=selection-4;auto carried=world.carriedItems();
                 if(isBrewingIngredient(carried[source].id))moved=world.transferBrewingItem(chestX,chestY,chestZ,source,false,3,amount);
@@ -386,14 +570,23 @@ struct App {
             else if(selection==2)flatWorld=!flatWorld;else if(selection==3)survivalWorld=!survivalWorld;
             else if(selection==4)start(true);else change(Screen::Worlds);break;
         case Screen::Dead:
-            if(selection==0){world.respawnPlayer();position=world.spawn();verticalSpeed=0;fallDistance=0;world.setPlayerPosition(position);change(Screen::Playing);}
-            else try{save();loaded=false;change(Screen::Main);}catch(const std::exception& e){message(e.what());}
+            if(selection==0){world.respawnPlayer();position=world.spawn();verticalSpeed=0;fallDistance=0;world.setPlayerPosition(position);
+                // PlayerList::respawn: in the tutorial, until the food bar lesson
+                // is done, the player gets their health, hunger and steak back.
+                if(tutorialModeActive && tutorial && !tutorial->isStateCompleted(TutorialSession::FoodBar))applyUpdatePlayer(world);
+                change(Screen::Playing);}
+            else try{save();endTutorialSession();loaded=false;change(Screen::Main);}catch(const std::exception& e){message(e.what());}
             break;
         case Screen::Crafting:{
             const auto list=craftingList();
             if(selection>=0 && selection<int(list.size())){
-                if(world.craft(*list[selection]))message("Crafted "+itemDisplayName(list[selection]->id,list[selection]->damage));
-                else message("Missing ingredients");
+                const auto& recipe=*list[selection];
+                if(tutorial)tutorial->createItemSelected(recipe.id,recipe.damage,world.canCraft(recipe));
+                if(world.craft(recipe)){
+                    if(tutorial)tutorial->onCrafted(recipe.id,recipe.damage,recipe.count);
+                    message("Crafted "+itemDisplayName(recipe.id,recipe.damage));
+                }
+                else if(!tutorial)message("Missing ingredients");
             }
             break;
         }
@@ -401,7 +594,7 @@ struct App {
         case Screen::Pause:
             if(selection==0)change(Screen::Playing);
             else if(selection==1){returnScreen=Screen::Pause;change(Screen::Options);}
-            else try{save();if(selection==3){loaded=false;change(Screen::Main);}message("World saved");}catch(const std::exception& e){message(e.what());}
+            else try{save();if(selection==3){endTutorialSession();loaded=false;change(Screen::Main);}message("World saved");}catch(const std::exception& e){message(e.what());}
             break;
         case Screen::Options:
             if(selection==0)change(Screen::Controls);
@@ -425,23 +618,48 @@ struct App {
         default:break;
         }
     }
+    // The EControllerActions a key stands for inside a container menu.
+    static int menuAction(int key){
+        using S=TutorialSession;
+        switch(key){
+        case GLFW_KEY_ENTER:case GLFW_KEY_KP_ENTER:case GLFW_KEY_SPACE:return S::MenuA;
+        case GLFW_KEY_ESCAPE:case GLFW_KEY_E:case GLFW_KEY_C:return S::MenuB;
+        case GLFW_KEY_X:case GLFW_KEY_H:return S::MenuX;
+        case GLFW_KEY_Y:case GLFW_KEY_R:return S::MenuY;
+        case GLFW_KEY_UP:return S::MenuUp;case GLFW_KEY_DOWN:return S::MenuDown;
+        case GLFW_KEY_LEFT:return S::MenuLeft;case GLFW_KEY_RIGHT:return S::MenuRight;
+        case GLFW_KEY_TAB:case GLFW_KEY_PAGE_DOWN:case GLFW_KEY_RIGHT_BRACKET:return S::MenuRightScroll;
+        case GLFW_KEY_PAGE_UP:case GLFW_KEY_LEFT_BRACKET:return S::MenuLeftScroll;
+        default:return -1;
+        }
+    }
     void key(int key,int action){
         if(action!=GLFW_PRESS && action!=GLFW_REPEAT)return;
         if(key==GLFW_KEY_F2){screenshotRequested=true;return;}
+        if(action==GLFW_PRESS && key!=GLFW_KEY_ESCAPE)padInputLast=false;
+        // IUIScene_AbstractContainerMenu/CraftingMenu::handleKeyDown: the
+        // tutorial sees every menu key and may hold it back.
+        if(tutorial && tutorialMenuState(screen,!world.survival(),craftingTable)>=0 && action==GLFW_PRESS){
+            const int menu=menuAction(key);
+            if(menu>=0 && !tutorial->menuInput(menu,tutorialPopupShown()))return;
+        }
         if(action==GLFW_REPEAT && (key==GLFW_KEY_E || key==GLFW_KEY_F || key==GLFW_KEY_ESCAPE ||
                                    key==GLFW_KEY_TAB))return;
         if(key==GLFW_KEY_ESCAPE){if(seedEditing || nameEditing){seedEditing=nameEditing=false;return;}back();return;}
         if(screen==Screen::Playing){
             if(key>=GLFW_KEY_1 && key<=GLFW_KEY_9)slot=key-GLFW_KEY_1;
-            if(key==GLFW_KEY_E){change(Screen::Inventory);if(world.survival())inventoryCategory=creativeTabCount();}
-            if(key==GLFW_KEY_C && world.survival()){craftingTable=false;craftScroll=0;change(Screen::Crafting);}
+            if(key==GLFW_KEY_E && inputAllowed(TutorialSession::InventoryAction)){
+                if(world.survival())inventoryCategory=creativeTabCount();
+                change(Screen::Inventory);
+            }
+            if(key==GLFW_KEY_C && world.survival() && inputAllowed(TutorialSession::CraftingAction)){craftingTable=false;craftScroll=0;change(Screen::Crafting);}
             // Abilities::mayfly is creative-only.
             if(key==GLFW_KEY_F && !world.survival()){flying=!flying;verticalSpeed=0;message(flying?"Flying enabled":"Flying disabled");}
-            if(key==GLFW_KEY_Q){
+            if(key==GLFW_KEY_Q && inputAllowed(TutorialSession::Drop)){
                 const bool stack=glfwGetKey(window,GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS;
                 try{world.dropCarried(slot,stack,eye(),yaw,pitch);}catch(const std::exception& e){message(e.what());}
             }
-            if(key==GLFW_KEY_SPACE && grounded && !world.playerInWater()){
+            if(key==GLFW_KEY_SPACE && grounded && !world.playerInWater() && inputAllowed(TutorialSession::Jump)){
                 verticalSpeed=8.4;grounded=false;
                 world.playerJumped(glfwGetKey(window,GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS);
             }
@@ -515,7 +733,12 @@ struct App {
     }
     void look(double x,double y){
         if(screen!=Screen::Playing || scripted || glfwGetTime()<ignoreMouseUntil){lastX=x;lastY=y;mouseReady=false;return;}
-        if(mouseReady){yaw+=(x-lastX)*sensitivity;pitch+=(y-lastY)*sensitivity*(invert?1:-1);pitch=std::clamp(pitch,-1.55,1.55);}
+        if(mouseReady){
+            lookDX+=x-lastX;lookDY+=y-lastY;padInputLast=false;
+            if(inputAllowed(TutorialSession::LookLeft) || inputAllowed(TutorialSession::LookRight))yaw+=(x-lastX)*sensitivity;
+            if(inputAllowed(TutorialSession::LookUp) || inputAllowed(TutorialSession::LookDown))pitch+=(y-lastY)*sensitivity*(invert?1:-1);
+            pitch=std::clamp(pitch,-1.55,1.55);
+        }
         lastX=x;lastY=y;mouseReady=true;
     }
     Vec3 eye()const{return {position.x,position.y+1.62,position.z};}
@@ -527,9 +750,11 @@ struct App {
     void edit(bool place){
         if(glfwGetTime()-lastEdit<.16)return;lastEdit=glfwGetTime();
         const auto heldItem=selectedItem();
-        if(!place && world.attackEntity(eye(),direction(),heldItem.id,entityReach())){world.playerAttacked(slot);return;}
+        if(!place && world.attackEntity(eye(),direction(),heldItem.id,entityReach())){
+            world.playerAttacked(slot);if(tutorial)tutorial->attack(heldItem.id,heldItem.damage,true);return;}
         auto h=world.raycast(eye(),direction(),blockReach());if(!h.hit)return;
         bool changed=false;
+        if(place && tutorial)tutorial->useItemOnBefore(heldItem.id,heldItem.damage,heldItem.count,h.x-World::width/2,h.y,h.z-World::depth/2);
         if(place && world.get(h.x,h.y,h.z)==58){
             // WorkbenchTile::use opens the 3x3 crafting menu.
             craftingTable=true;craftScroll=0;change(Screen::Crafting);return;
@@ -586,6 +811,10 @@ struct App {
                                          heldItem.id<256?heldItem.damage:0,position,yaw);
             // TileItem/TilePlanterItem::useOn uses one item in survival.
             if(changed)world.consumeCarried(slot);
+            if(tutorial){
+                const auto after=selectedItem();
+                tutorial->useItemOnAfter(heldItem.id,heldItem.damage,heldItem.count,after.id==heldItem.id?after.count:0,changed);
+            }
         }else if(world.get(h.x,h.y,h.z)!=Bedrock)changed=world.destroyBlock(h.x,h.y,h.z,slot);
         if(changed){
             world.updateLiquidNeighbors(place?h.px:h.x,place?h.py:h.y,place?h.pz:h.z);
@@ -599,12 +828,20 @@ struct App {
     void mine(int ticks){
         const auto heldItem=selectedItem();
         if(glfwGetTime()-lastEdit>=.16 && world.attackEntity(eye(),direction(),heldItem.id,entityReach())){
-            lastEdit=glfwGetTime();world.playerAttacked(slot);mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;
+            lastEdit=glfwGetTime();world.playerAttacked(slot);if(tutorial)tutorial->attack(heldItem.id,heldItem.damage,true);
+            mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;
         }
         const auto h=world.raycast(eye(),direction(),blockReach());
         if(!h.hit){mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;}
         const auto destroy=[&]{
-            if(world.destroyBlock(h.x,h.y,h.z,slot)){
+            const int tileId=world.get(h.x,h.y,h.z);
+            const auto before=selectedItem();
+            const bool destroyed=world.destroyBlock(h.x,h.y,h.z,slot);
+            if(tutorial){
+                const auto after=selectedItem();
+                tutorial->destroyBlock(tileId,before.id,before.damage,after.id==before.id?after.damage:before.damage);
+            }
+            if(destroyed){
                 world.updateLiquidNeighbors(h.x,h.y,h.z);
                 if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
             }
@@ -612,6 +849,7 @@ struct App {
         for(int tick=0;tick<ticks;++tick){
             if(mineDelay>0){--mineDelay;continue;}
             if(mineY<0 || h.x!=mineX || h.y!=mineY || h.z!=mineZ){
+                if(tutorial)tutorial->startDestroyBlock(heldItem.id,heldItem.damage,heldItem.count,world.get(h.x,h.y,h.z));
                 if(world.destroyProgress(h.x,h.y,h.z,slot)>=1){destroy();mineY=-1;break;}
                 mineX=h.x;mineY=h.y;mineZ=h.z;mineProgress=0;continue;
             }
@@ -626,12 +864,125 @@ struct App {
             if(!world.collides(next))position=next;
             else {if(axis==1){if(amount<0)grounded=true;verticalSpeed=0;}else horizontalCollision=true;break;}}
     }
+    // InputManager.GetValue: the EControllerActions values for this frame from
+    // the keyboard/mouse and the PS3 layout of the gamepad (DefineActions).
+    void sampleActions(const GLFWgamepadstate& pad,bool hasPad){
+        using S=TutorialSession;
+        auto key=[&](int k){return glfwGetKey(window,k)==GLFW_PRESS;};
+        auto mouse=[&](int b){return glfwGetMouseButton(window,b)==GLFW_PRESS;};
+        auto button=[&](int b){return hasPad && pad.buttons[b]==GLFW_PRESS;};
+        auto stick=[&](int a,float sign){return hasPad && pad.axes[a]*sign>.5f;};
+        auto trigger=[&](int a){return hasPad && pad.axes[a]>.1f;};
+        auto& v=actionValues;v.fill(0);
+        v[S::MenuA]=key(GLFW_KEY_ENTER)||key(GLFW_KEY_KP_ENTER)||key(GLFW_KEY_SPACE)||button(GLFW_GAMEPAD_BUTTON_A);
+        v[S::MenuB]=key(GLFW_KEY_BACKSPACE)||button(GLFW_GAMEPAD_BUTTON_B)||(screen!=Screen::Playing && key(GLFW_KEY_ESCAPE));
+        v[S::MenuX]=key(GLFW_KEY_X)||button(GLFW_GAMEPAD_BUTTON_X);
+        v[S::MenuY]=key(GLFW_KEY_Y)||button(GLFW_GAMEPAD_BUTTON_Y);
+        v[S::MenuUp]=key(GLFW_KEY_UP)||button(GLFW_GAMEPAD_BUTTON_DPAD_UP)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,-1);
+        v[S::MenuDown]=key(GLFW_KEY_DOWN)||button(GLFW_GAMEPAD_BUTTON_DPAD_DOWN)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,1);
+        v[S::MenuLeft]=key(GLFW_KEY_LEFT)||button(GLFW_GAMEPAD_BUTTON_DPAD_LEFT)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,-1);
+        v[S::MenuRight]=key(GLFW_KEY_RIGHT)||button(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,1);
+        v[S::MenuPageUp]=trigger(GLFW_GAMEPAD_AXIS_LEFT_TRIGGER);v[S::MenuPageDown]=trigger(GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER);
+        v[S::MenuLeftScroll]=button(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER);v[S::MenuRightScroll]=button(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER);
+        v[S::MenuPauseMenu]=key(GLFW_KEY_ESCAPE)||button(GLFW_GAMEPAD_BUTTON_START);
+        v[S::MenuOk]=v[S::MenuA];v[S::MenuCancel]=v[S::MenuB];
+        v[S::Jump]=key(GLFW_KEY_SPACE)||button(GLFW_GAMEPAD_BUTTON_A);
+        v[S::Forward]=key(GLFW_KEY_W)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,-1);
+        v[S::Backward]=key(GLFW_KEY_S)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,1);
+        v[S::Left]=key(GLFW_KEY_A)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,-1);
+        v[S::Right]=key(GLFW_KEY_D)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,1);
+        v[S::LookLeft]=lookDX<-1||stick(GLFW_GAMEPAD_AXIS_RIGHT_X,-1);
+        v[S::LookRight]=lookDX>1||stick(GLFW_GAMEPAD_AXIS_RIGHT_X,1);
+        v[S::LookUp]=lookDY<-1||stick(GLFW_GAMEPAD_AXIS_RIGHT_Y,-1);
+        v[S::LookDown]=lookDY>1||stick(GLFW_GAMEPAD_AXIS_RIGHT_Y,1);
+        v[S::Use]=mouse(GLFW_MOUSE_BUTTON_RIGHT)||trigger(GLFW_GAMEPAD_AXIS_LEFT_TRIGGER);
+        v[S::ActionButton]=mouse(GLFW_MOUSE_BUTTON_LEFT)||trigger(GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER);
+        v[S::LeftScroll]=scrollSteps<0||button(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER);
+        v[S::RightScroll]=scrollSteps>0||button(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER);
+        v[S::InventoryAction]=key(GLFW_KEY_E)||button(GLFW_GAMEPAD_BUTTON_Y);
+        v[S::CraftingAction]=key(GLFW_KEY_C)||button(GLFW_GAMEPAD_BUTTON_X);
+        v[S::Drop]=key(GLFW_KEY_Q)||button(GLFW_GAMEPAD_BUTTON_B);
+        v[S::PauseMenu]=v[S::MenuPauseMenu];
+        v[S::SneakToggle]=key(GLFW_KEY_LEFT_SHIFT)||button(GLFW_GAMEPAD_BUTTON_RIGHT_THUMB);
+        v[S::RenderThirdPerson]=key(GLFW_KEY_F5)||button(GLFW_GAMEPAD_BUTTON_LEFT_THUMB);
+        v[S::GameInfo]=key(GLFW_KEY_TAB)||button(GLFW_GAMEPAD_BUTTON_BACK);
+        v[S::DpadLeft]=button(GLFW_GAMEPAD_BUTTON_DPAD_LEFT);v[S::DpadRight]=button(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT);
+        v[S::DpadUp]=button(GLFW_GAMEPAD_BUTTON_DPAD_UP);v[S::DpadDown]=button(GLFW_GAMEPAD_BUTTON_DPAD_DOWN);
+        if(hasPad){
+            for(int b=0;b<=GLFW_GAMEPAD_BUTTON_LAST;++b)if(pad.buttons[b]==GLFW_PRESS)padInputLast=true;
+            for(int a=0;a<4;++a)if(std::abs(pad.axes[a])>.5f)padInputLast=true;
+        }
+    }
+    // The engine events the console tutorial listens to, checked once per game
+    // tick: look-at (Minecraft::tick tooltips), collected items
+    // (LocalPlayer::handleCollectItem), effects (MultiplayerLocalPlayer),
+    // hunger (ClientConnection::handleSetHealth), hotbar changes and the
+    // CompleteAll music disc goal (ClientConnection progress packets).
+    void tutorialEvents(){
+        if(screen==Screen::Playing){
+            if(auto entity=world.pickEntity(eye(),direction(),entityReach()))
+                tutorial->onLookAtEntity(consoleEntityInstanceType(*entity));
+            else if(auto h=world.raycast(eye(),direction(),blockReach());h.hit)
+                tutorial->onLookAt(world.get(h.x,h.y,h.z),world.getData(h.x,h.y,h.z));
+        }
+        const auto carried=world.carriedItems();
+        for(int i=0;i<int(carried.size()) && i<int(tutorialCarried.size());++i){
+            const auto& now=carried[i];const auto& was=tutorialCarried[i];
+            if(!now.id || (now.id==was.id && now.count==was.count && now.damage==was.damage))continue;
+            unsigned anyAux=0,thisAux=0;
+            for(const auto& item:carried)if(item.id==now.id){anyAux+=item.count;if(item.damage==now.damage)thisAux+=item.count;}
+            tutorial->onTake(now.id,now.damage,now.count,anyAux,thisAux);
+            collectGoal(now);
+        }
+        tutorialCarried=carried;
+        const auto& effects=world.activePotionEffects();
+        for(const auto& effect:effects){
+            const bool had=std::any_of(tutorialEffects.begin(),tutorialEffects.end(),[&](const PotionEffect& e){return e.id==effect.id;});
+            if(!had)tutorial->onEffectChanged(effect.id,false);
+        }
+        for(const auto& effect:tutorialEffects)
+            if(std::none_of(effects.begin(),effects.end(),[&](const PotionEffect& e){return e.id==effect.id;}))
+                tutorial->onEffectChanged(effect.id,true);
+        tutorialEffects=effects;
+        const int food=world.playerFoodLevel();
+        // FoodConstants::HEAL_LEVEL - 1
+        if(food!=tutorialFood && food<17 && world.survival())tutorial->hungry();
+        tutorialFood=food;
+        if(slot!=tutorialSlot){
+            tutorialSlot=slot;
+            tutorial->onSelectedItemChanged(carried[slot].id,carried[slot].damage);
+        }
+    }
+    // CollectItemRuleDefinition::onCollectItem inside the CompleteAll goal:
+    // the progress message and the profile's special completion flag.
+    void collectGoal(const ContainerItem& item){
+        const auto* rules=world.tutorialRules();
+        if(!rules || !item.marker)return;
+        for(const auto& goal:rules->collectGoals){
+            if(goal.itemId!=item.id || goal.aux!=item.damage || goal.dataTag!=item.marker || item.count<goal.quantity)continue;
+            if(!collectedGoals.insert(goal.dataTag).second)return;
+            if(goal.dataTag>0 && goal.dataTag<=32){settings.setSpecialTutorialCompletion(goal.dataTag-1);saveSettings();}
+            const auto* strings=world.tutorialStrings();
+            if(!strings)return;
+            auto description=strings->find(rules->completeAllDescription);
+            if(description==strings->end())return;
+            std::wstring text=description->second;
+            auto replace=[&](const std::wstring& token,int value){
+                for(std::size_t at;(at=text.find(token))!=std::wstring::npos;)text.replace(at,token.size(),std::to_wstring(value));
+            };
+            replace(L"{*progress*}",int(collectedGoals.size()));replace(L"{*goal*}",int(rules->collectGoals.size()));
+            tutorial->setMessage(text,item.id,item.damage);
+            return;
+        }
+    }
     void update(double dt){
         GLFWgamepadstate pad{};bool hasPad=false;
         for(int i=GLFW_JOYSTICK_1;i<=GLFW_JOYSTICK_LAST;++i)if(glfwGetGamepadState(i,&pad)){hasPad=true;break;}
         if(hasPad){
             auto pressed=[&](int b){return pad.buttons[b] && !previousPad.buttons[b];};
-            if(pressed(GLFW_GAMEPAD_BUTTON_START) || pressed(GLFW_GAMEPAD_BUTTON_B))back();
+            // START pauses; B is MINECRAFT_ACTION_DROP in game and back in menus.
+            if(pressed(GLFW_GAMEPAD_BUTTON_START))key(GLFW_KEY_ESCAPE,GLFW_PRESS);
+            else if(pressed(GLFW_GAMEPAD_BUTTON_B))key(screen==Screen::Playing?GLFW_KEY_Q:GLFW_KEY_ESCAPE,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_DPAD_UP))key(GLFW_KEY_UP,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_DPAD_DOWN))key(GLFW_KEY_DOWN,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_DPAD_LEFT))key(GLFW_KEY_LEFT,GLFW_PRESS);
@@ -650,12 +1001,13 @@ struct App {
             if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Furnace)key(GLFW_KEY_F,GLFW_PRESS);
             if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Brewing)key(GLFW_KEY_F,GLFW_PRESS);
             if((pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER) || pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER)) && (screen==Screen::Inventory || screen==Screen::Crafting))key(GLFW_KEY_TAB,GLFW_PRESS);
-            else{
-                if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER))slot=(slot+8)%9;
-                if(pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER))slot=(slot+1)%9;
+            else if(screen==Screen::Playing){
+                if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER) && inputAllowed(TutorialSession::LeftScroll))slot=(slot+8)%9;
+                if(pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER) && inputAllowed(TutorialSession::RightScroll))slot=(slot+1)%9;
             }
         }
         previousPad=pad;
+        sampleActions(pad,hasPad);
         if(screen==Screen::Loading){finishLoad();return;}
         if(screen==Screen::FindingSeed){
             try{auto seed=seedSearch->step();++seedAttempts;if(seed)start(true,{},seed);}
@@ -673,6 +1025,12 @@ struct App {
         const auto beforeWorldTick=world.revision;
         int elapsedWorldTicks=0;
         while(worldTickSeconds>=.05){world.tickTime();worldTickSeconds-=.05;++elapsedWorldTicks;}
+        if(tutorial && elapsedWorldTicks>0){
+            // TutorialMode::tick, once per game tick.
+            for(int i=0;i<elapsedWorldTicks;++i){tutorialEvents();tutorial->tick();}
+            lookDX=lookDY=0;scrollSteps=0;
+            if(tutorial->profileChanged()){settings.tutorialCompletion()=tutorial->profile();saveSettings();}
+        }
         if(world.revision!=beforeWorldTick && !world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
         if(world.playerDead() && screen!=Screen::Dead){change(Screen::Dead);return;}
         if(screen!=Screen::Playing){potionUseTicks=0;eatUseTicks=0;mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;}
@@ -682,8 +1040,14 @@ struct App {
         double forward=held(GLFW_KEY_W)-held(GLFW_KEY_S),right=held(GLFW_KEY_D)-held(GLFW_KEY_A);
         auto dead=[](float x){return std::abs(x)<.18f?0.f:(x-std::copysign(.18f,x))/.82f;};
         if(hasPad){forward-=dead(pad.axes[GLFW_GAMEPAD_AXIS_LEFT_Y]);right+=dead(pad.axes[GLFW_GAMEPAD_AXIS_LEFT_X]);
-            yaw+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_X])*dt*sensitivity*1100;
-            pitch+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y])*dt*sensitivity*900*(invert?1:-1);pitch=std::clamp(pitch,-1.55,1.55);}
+            if(inputAllowed(TutorialSession::LookLeft) || inputAllowed(TutorialSession::LookRight))
+                yaw+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_X])*dt*sensitivity*1100;
+            if(inputAllowed(TutorialSession::LookUp) || inputAllowed(TutorialSession::LookDown))
+                pitch+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y])*dt*sensitivity*900*(invert?1:-1);
+            pitch=std::clamp(pitch,-1.55,1.55);}
+        // Input::tick: an axis moves only if one of its directions is allowed.
+        if(!inputAllowed(TutorialSession::Forward) && !inputAllowed(TutorialSession::Backward))forward=0;
+        if(!inputAllowed(TutorialSession::Left) && !inputAllowed(TutorialSession::Right))right=0;
         double length=std::sqrt(forward*forward+right*right);if(length>1){forward/=length;right/=length;}
         // Player::canSprint: survival players need more than six food.
         const bool sprinting=held(GLFW_KEY_LEFT_CONTROL) && forward>0 && (!survival || world.playerFoodLevel()>6);
@@ -697,7 +1061,7 @@ struct App {
         const Vec3 before=position;
         moveAxis(0,velocity.x*dt);moveAxis(2,velocity.z*dt);
         if(climbing)verticalSpeed=horizontalCollision?4:velocity.y;
-        const bool up=held(GLFW_KEY_SPACE)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_A]);
+        const bool up=(held(GLFW_KEY_SPACE)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_A])) && inputAllowed(TutorialSession::Jump);
         if(flying){verticalSpeed=0;moveAxis(1,(up-(held(GLFW_KEY_LEFT_SHIFT)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_X])))*speed*dt);}
         else if(inLiquid && !climbing){
             // Mob::travel in liquids: slow sinking, jump swims upward.
@@ -706,16 +1070,22 @@ struct App {
             moveAxis(1,verticalSpeed*dt);
         }
         else {grounded=false;if(!climbing)verticalSpeed=std::max(verticalSpeed-24*dt,-35.0);moveAxis(1,verticalSpeed*dt);}
+        // MultiplayerLocalPlayer::tick: a tutorial area constraint puts the
+        // player back where they were horizontally.
+        if(tutorial && !tutorial->canMoveToPosition(before.x-World::width/2,before.y+1.62,before.z-World::depth/2,
+                                                    position.x-World::width/2,position.y+1.62,position.z-World::depth/2)){
+            position.x=before.x;position.z=before.z;
+        }
         // Entity::move fall distance; water, ladders and flight reset it.
         if(position.y<before.y)fallDistance+=before.y-position.y;
         if(flying || climbing || inLiquid)fallDistance=0;
         if(grounded){if(fallDistance>0)world.playerLanded(fallDistance);fallDistance=0;}
         world.playerWalked(std::hypot(position.x-before.x,position.z-before.z),sprinting,inWater);
-        const bool mining=leftMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]>.1);
+        const bool mining=(leftMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]>.1)) && inputAllowed(TutorialSession::ActionButton);
         if(!survival){if(mining)edit(false);renderer->setDestroyStage(-1);}
         else if(mining)mine(elapsedWorldTicks);
         else{mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);}
-        const bool usingRight=rightMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]>.1);
+        const bool usingRight=(rightMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]>.1)) && inputAllowed(TutorialSession::Use);
         const auto selected=selectedItem();
         const bool drinkable=selected.id==373 && !(selected.damage&0x4000);
         const bool edible=world.canEatCarried(slot);
@@ -733,7 +1103,10 @@ struct App {
             potionUseTicks+=elapsedWorldTicks;
             if(potionUseTicks>=32){
                 potionUseTicks=0;
-                if(world.drinkPotion(selected.damage))message("Potion used");
+                if(world.drinkPotion(selected.damage)){
+                    if(tutorial)tutorial->completeUsingItem(selected.id,selected.damage);
+                    message("Potion used");
+                }
             }
         }else if(usingRight && edible && !blockUse){
             // FoodItem::use -> startUsingItem for EAT_DURATION ticks.
@@ -742,7 +1115,10 @@ struct App {
             if(eatUseTicks>=consoleEatDuration){
                 eatUseTicks=0;
                 const auto name=itemDisplayName(selected.id,selected.damage);
-                if(world.eatCarried(slot))message("Ate "+name);
+                if(world.eatCarried(slot)){
+                    if(tutorial)tutorial->completeUsingItem(selected.id,selected.damage);
+                    if(!tutorial)message("Ate "+name);
+                }
             }
         }else{
             potionUseTicks=0;potionUseSlot=-1;eatUseTicks=0;
@@ -802,6 +1178,74 @@ struct App {
         }
         auto entries=buttons();float left=renderer->uiWidth()/2-buttonWidth()/2;
         for(int i=0;i<int(entries.size());++i)if(x>=left && x<left+buttonWidth() && y>=buttonY()+i*25 && y<buttonY()+i*25+20){selection=i;activate();break;}
+    }
+    // The keyboard key for a button image when playing with keyboard and mouse.
+    std::string keyboardLabel(const RichSpan& span)const{
+        const std::string& t=span.token;
+        const bool menu=screen!=Screen::Playing;
+        if(t=="CONTROLLER_ACTION_MOVE" || t=="CONTROLLER_VK_LS")return "W A S D";
+        if(t=="CONTROLLER_ACTION_LOOK" || t=="CONTROLLER_VK_RS")return "Mouse";
+        if(t=="CONTROLLER_MENU_NAVIGATE")return "Arrow Keys";
+        if(t=="CONTROLLER_ACTION_JUMP")return "Space";
+        if(t=="CONTROLLER_ACTION_SNEAK")return "Shift";
+        if(t=="CONTROLLER_ACTION_USE" || t=="CONTROLLER_VK_LT")return "Right Click";
+        if(t=="CONTROLLER_ACTION_ACTION" || t=="CONTROLLER_VK_RT")return "Left Click";
+        if(t=="CONTROLLER_ACTION_LEFT_SCROLL" || t=="CONTROLLER_ACTION_RIGHT_SCROLL")return "Mouse Wheel";
+        if(t=="CONTROLLER_VK_LB" || t=="CONTROLLER_VK_RB")return menu?"Tab":"Mouse Wheel";
+        if(t=="CONTROLLER_ACTION_INVENTORY")return "E";
+        if(t=="CONTROLLER_ACTION_CRAFTING")return "C";
+        if(t=="CONTROLLER_ACTION_DROP")return "Q";
+        if(t=="CONTROLLER_ACTION_CAMERA")return "F5";
+        if(t=="CONTROLLER_VK_A")return "Enter";
+        if(t=="CONTROLLER_VK_B")return menu?"Esc":"Backspace";
+        if(t=="CONTROLLER_VK_X")return "X";
+        if(t=="CONTROLLER_VK_Y")return "Y";
+        if(t.rfind("CONTROLLER_ACTION_DPAD_",0)==0)return t.substr(23);
+        return {};
+    }
+    // UIComponent_TutorialPopup: title, item icon and the formatted text.
+    void drawTutorialPopup(Renderer& r){
+        const float cw=r.uiWidth();
+        const float width=std::min(250.f,cw*.4f),left=10,top=10,pad=6,scale=.8f,lineHeight=11,glyph=10;
+        int iconId=0,iconAux=0;
+        bool icon=false;
+        if(tutorialPopup.icon>=0){iconId=tutorialPopup.icon;iconAux=tutorialPopup.iconAux;icon=true;}
+        else icon=consoleRichTextIcon(tutorialPopup.description,iconId,iconAux) && iconId>0;
+        std::wstring description=tutorialPopup.description;
+        // _SetDescription: a reminder is prefixed with IDS_TUTORIAL_REMINDER.
+        if(tutorialPopup.isReminder)description=widen(consoleText("IDS_TUTORIAL_REMINDER"))+description;
+        const auto spans=parseConsoleRichText(description,settings.get(GameSetting::ControlSouthPaw)!=0);
+        const float textLeft=left+pad+(icon?24.f:0.f);
+        const float textWidth=width-(textLeft-left)-pad;
+        auto measure=[&](const std::string& s){return r.textWidth(s,scale);};
+        // Button images, or the key's cap when playing with keyboard and mouse.
+        auto useKey=[&](const RichSpan& span){return !padInputLast && span.glyph!=PadGlyph::Shank && !keyboardLabel(span).empty();};
+        auto glyphWidth=[&](const RichSpan& span){
+            return (useKey(span)?r.textWidth(keyboardLabel(span),glyph/16*.8f)+glyph*.5f:glyph)+1;
+        };
+        const auto lines=layoutRichText(spans,textWidth,glyphWidth,measure);
+        const std::string title=narrow(tutorialPopup.title);
+        const float titleHeight=title.empty()?0.f:13.f;
+        float height=pad*2+titleHeight+lines.size()*lineHeight;
+        if(icon)height=std::max(height,pad*2+titleHeight+22);
+        r.rect(left,top,width,height,{0,0,0,.72f});
+        r.rect(left,top,width,1,{1,1,1,.35f});
+        float y=top+pad;
+        if(!title.empty()){r.text(title,left+pad,y,.9f,{1,1,.4f,1});y+=titleHeight;}
+        if(icon && iconId>0)drawItemIcon(r,iconId,iconAux,left+pad,y,18);
+        for(const auto& line:lines){
+            for(const auto& piece:line.pieces){
+                const float x=textLeft+piece.x;
+                if(piece.span.glyph!=PadGlyph::None){
+                    if(useKey(piece.span))r.keyCap(keyboardLabel(piece.span),x,y-1,glyph);
+                    else r.padGlyph(piece.span.glyph,x,y-1,glyph);
+                }else{
+                    const glm::vec4 colour(((piece.span.colour>>16)&255)/255.f,((piece.span.colour>>8)&255)/255.f,(piece.span.colour&255)/255.f,1);
+                    r.text(piece.span.text,x,y,scale,colour);
+                }
+            }
+            y+=lineHeight;
+        }
     }
     void draw(){
         int w,h;glfwGetFramebufferSize(window,&w,&h);renderer->resize(w,h);auto& r=*renderer;float cw=r.uiWidth();
@@ -1080,6 +1524,7 @@ struct App {
                 r.text(entries[i],(cw-r.textWidth(entries[i],scale))/2,y+6,scale,color);}
             if(screen!=Screen::Loading){r.prompt('X',"Select",20,329);if(screen!=Screen::Main)r.prompt('O',"Back",95,329);}
         }
+        if(inWorld && tutorialPopupShown())drawTutorialPopup(r);
         if(glfwGetTime()<toastUntil){float tw=r.textWidth(toast,.8f);r.rect((cw-tw)/2-6,292,tw+12,15,{0,0,0,.8f});r.centered(toast,296,.8f);}
     }
 };
@@ -1110,11 +1555,16 @@ int main(int argc,char** argv){
     try{
         App app;app.window=window;app.scripted=!smokeDir.empty();app.dataDir=smokeDir.empty()?data:smokeDir/"test-data";
         app.renderer=std::make_unique<Renderer>(assets);glfwSetWindowUserPointer(window,&app);
+        // The profile's GAME_SETTINGS (options and tutorial progress).
+        try{app.settings.load(app.settingsPath());}catch(const std::exception& e){app.message(e.what());}
         glfwSetKeyCallback(window,[](GLFWwindow* w,int key,int,int action,int){static_cast<App*>(glfwGetWindowUserPointer(w))->key(key,action);});
         glfwSetCharCallback(window,[](GLFWwindow* w,unsigned c){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));if(a->seedEditing && a->seedText.size()<60 && c>=32 && c<127)a->seedText+=char(c);if(a->nameEditing && a->worldName.size()<25 && c>=32 && c<127)a->worldName+=char(c);});
         glfwSetCursorPosCallback(window,[](GLFWwindow* w,double x,double y){static_cast<App*>(glfwGetWindowUserPointer(w))->look(x,y);});
         glfwSetScrollCallback(window,[](GLFWwindow* w,double,double y){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
-            if(a->screen==Screen::Playing && y!=0)a->slot=(a->slot+(y>0?8:1))%9;
+            if(a->screen==Screen::Playing && y!=0){
+                a->scrollSteps+=y>0?-1:1;a->padInputLast=false;
+                if(a->inputAllowed(y>0?TutorialSession::LeftScroll:TutorialSession::RightScroll))a->slot=(a->slot+(y>0?8:1))%9;
+            }
             else if(a->screen==Screen::Inventory && y!=0)a->turnCreativePage(y>0?-1:1);
             else if(a->screen==Screen::Crafting && y!=0){const int count=int(a->craftingList().size());
                 if(count)a->selection=std::clamp(a->selection+(y>0?-1:1),0,count-1);}
@@ -1169,9 +1619,11 @@ int main(int argc,char** argv){
                     app.inventoryCategory=0;app.selection=0;app.activate();
                     if(app.selectedItem().id!=Stone || app.world.carriedItems()[8].id!=Bricks)
                         throw std::runtime_error("Smoke creative quickbar failed");
-                    app.world.swapCarriedSlots(0,9);
-                    app.change(Screen::Inventory);app.inventoryCategory=creativeTabCount();app.selection=9;app.activate();
-                    if(app.selectedItem().id!=Stone || app.world.carriedItems()[9].id)
+                    // Slot 9 holds the map PlayerList gives every new player.
+                    if(app.world.carriedItems()[9].id!=358)throw std::runtime_error("Smoke new player map missing");
+                    app.world.swapCarriedSlots(0,18);
+                    app.change(Screen::Inventory);app.inventoryCategory=creativeTabCount();app.selection=18;app.activate();
+                    if(app.selectedItem().id!=Stone || app.world.carriedItems()[18].id)
                         throw std::runtime_error("Smoke backpack equip failed");
                     app.save();World equipped;
                     if(!equipped.load(app.savePath()) || equipped.carriedItems()[0].id!=Stone ||
@@ -1191,8 +1643,24 @@ int main(int argc,char** argv){
                 if(frame==16){app.renderer->setDestroyStage(-1);app.craftingTable=true;app.change(Screen::Crafting);
                     if(app.craftingList().empty())throw std::runtime_error("Smoke crafting list empty");}
                 if(frame==17)app.change(Screen::Dead);
-                if(frame==18){glFinish();auto error=glGetError();if(error!=GL_NO_ERROR)throw std::runtime_error("OpenGL error: "+std::to_string(error));
-                    std::cout<<"Smoke test passed: menu, world, inventory, furnace, brewing, chest, survival HUD/crafting/death, edit/save/reload; "<<app.renderer->triangleCount()<<" world triangles\n";break;}
+                if(frame==18){
+                    // Tutorial World: FullTutorialMode with the pack's LevelRules.
+                    app.world.respawnPlayer();app.change(Screen::Worlds);app.startTutorial();
+                    if(!app.loaded || !app.tutorial || !app.world.survival())throw std::runtime_error("Smoke tutorial failed to start");
+                    const auto carried=app.world.carriedItems();
+                    if(app.world.playerHealth()!=12 || app.world.playerFoodLevel()!=12 || carried[10].id!=364 || carried[9].id!=358)
+                        throw std::runtime_error("Smoke tutorial UpdatePlayer rule not applied");
+                }
+                if(frame==19){
+                    // Past the 1.5 s start delay the overview lesson is shown.
+                    for(int i=0;i<3;++i){glfwSetTime(glfwGetTime()+1);app.tutorial->tick();}
+                    if(!app.tutorialPopupShown() || app.tutorialPopup.description.rfind(widen(consoleText("IDS_TUTORIAL_TASK_OVERVIEW")),0)!=0)
+                        throw std::runtime_error("Smoke tutorial overview not shown");
+                    if(app.world.dayTime()!=8000)throw std::runtime_error("Smoke tutorial time of day not frozen");
+                }
+                if(frame==20)app.renderer->screenshot(smokeDir/"tutorial.png");
+                if(frame==21){glFinish();auto error=glGetError();if(error!=GL_NO_ERROR)throw std::runtime_error("OpenGL error: "+std::to_string(error));
+                    std::cout<<"Smoke test passed: menu, world, inventory, furnace, brewing, chest, survival HUD/crafting/death, edit/save/reload, tutorial; "<<app.renderer->triangleCount()<<" world triangles\n";break;}
             }
             glfwSwapBuffers(window);++frame;
         }

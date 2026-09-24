@@ -5,6 +5,7 @@
 #include "BookMesh.h"
 #include "Random.h"
 #include "TextureAnimation.h"
+#include "RichText.h"
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <array>
@@ -41,6 +42,11 @@ public:
     void centered(const std::string& value,float y,float scale=1,glm::vec4 color={1,1,1,1});
     void blockIcon(Block block,float x,float y,float size,int data=0);
     void prompt(char symbol,const std::string& label,float x,float y);
+    // The PS3 button images of the console strings (GetVKReplacement /
+    // GetActionReplacement) at `size`; returns the width drawn.
+    float padGlyph(PadGlyph glyph,float x,float y,float size);
+    // A keyboard key label in a small cap; returns the width drawn.
+    float keyCap(const std::string& label,float x,float y,float height);
     void screenshot(const std::filesystem::path& path);
     float uiWidth() const { return float(width_)*360/height_; }
     std::size_t triangleCount()const;

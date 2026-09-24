@@ -764,7 +764,7 @@ if(CONSOLE_BUILD_CLIENT)
   target_include_directories(console_glad PUBLIC ../ext/glad/include)
   add_executable(minecraft_console src/main.cpp src/Renderer.cpp)
   target_include_directories(minecraft_console PRIVATE ../ext/glm ../ext/stb_image)
-  target_link_libraries(minecraft_console PRIVATE console_terrain_mesh console_texture_animation glfw console_glad)
+  target_link_libraries(minecraft_console PRIVATE console_terrain_mesh console_texture_animation console_tutorial glfw console_glad)
   target_compile_definitions(minecraft_console PRIVATE CONSOLE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 endif()
 

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 class FullTutorial;
 
@@ -10,6 +11,8 @@ namespace console {
 // InputManager.GetGameJoypadMaps: the PS3 (_360_JOY_BUTTON_*) buttons bound to
 // an EControllerActions value by DefineActions (circle/cross not swapped).
 unsigned consoleJoypadButtons(int action);
+// Entity::GetType (eINSTANCEOF) for an EntityIO id, 0 (eTYPE_NOTSET) if unknown.
+int consoleEntityInstanceType(const std::wstring& id);
 
 // The console tutorial game mode: FullTutorialMode/TutorialMode
 // (Common/Tutorial) and the engine call sites that feed the tutorial
@@ -54,6 +57,8 @@ public:
     bool isTutorial()const;
     bool allTutorialsComplete()const;
     int currentState()const;
+    // Tutorial::isStateCompleted (FullTutorial: completed in this session).
+    bool isStateCompleted(int state)const;
     std::array<std::uint8_t,ProfileBytes> profile()const;
     bool profileChanged();
 
@@ -97,6 +102,8 @@ public:
     void openMenu(int menuState,bool craftingScene=false);
     void closeMenu();
     void showTutorialPopup(bool show);
+    // Tutorial::setMessage(string, icon, aux): game rule progress messages.
+    void setMessage(const std::wstring& message,int icon,int aux);
 private:
     struct Scenes;
     TutorialEngine& engine_;

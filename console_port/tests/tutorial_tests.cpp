@@ -129,7 +129,8 @@ int main(int argc,char** argv){try{
         int id=0,aux=0;
         require(consoleRichTextIcon(L"Make a {*SticksIcon*}stick",id,aux) && id==280,"Fixed icon token");
         require(consoleRichTextIcon(L"x{*ICON*}35:14{*/ICON*}",id,aux) && id==35 && aux==14,"ICON tag");
-        const auto lines=layoutRichText(parseConsoleRichText(L"aa bb cc"),5,2,[](const std::string& s){return float(s.size());});
+        const auto lines=layoutRichText(parseConsoleRichText(L"aa bb cc"),5,[](const RichSpan&){return 2.f;},
+                                         [](const std::string& s){return float(s.size());});
         require(lines.size()==2 && lines[0].pieces.size()==2 && lines[1].pieces[0].span.text=="cc","Word wrap");
     }
 
