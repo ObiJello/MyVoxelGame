@@ -334,6 +334,7 @@ Tutorial::Tutorial(int iPad, bool isFullTutorial /*= false*/) : m_iPad( iPad )
 	m_fullTutorialComplete = false;
 	m_allTutorialsComplete = false;
 	hasRequestedUI = false;
+	m_bSceneIsSplitscreen = false; // port fix: read before it is set outside _XBOX
 	uiTempDisabled = false;
 	m_hintDisplayed = false;
 	m_freezeTime = false;

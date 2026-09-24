@@ -1490,10 +1490,12 @@ reconstruct is now taken from the source:
   `ClientConnection` raise on the console, applies input and area constraints,
   freezes the time of day at 8000, restores health/hunger/steak on respawn until
   the food lesson is done, and saves the completion bits and music disc flags in
-  the profile. The one change to the imported code: `TutorialHint` gets the
-  virtual destructor it lacks (hints are deleted through the base class), and the
-  two derived destructors the source declares but never defines are supplied by
-  the host. Allocations the source never frees are listed in
+  the profile. Two changes to the imported code, both undefined behaviour that
+  sanitizers caught: `TutorialHint` gets the virtual destructor it lacks (hints
+  are deleted through the base class; the two derived destructors the source
+  declares but never defines are supplied by the host), and
+  `m_bSceneIsSplitscreen`, which `Tutorial::tick` reads but only the Xbox build
+  sets, starts false. Allocations the source never frees are listed in
   `tests/lsan_tutorial.supp` for sanitizer runs.
 - **Menus:** `src/ConsoleMenus` is the `UIScene_*` front end as data — controls,
   focus rules (disabled options skipped, Controls previews the focused layout),

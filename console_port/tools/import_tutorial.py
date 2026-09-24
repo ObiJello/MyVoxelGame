@@ -115,12 +115,19 @@ def expected():
             files[path.name] = rewrite(path.read_text(encoding='utf-8-sig', errors='strict'))
     # Tutorial::setHintCompleted deletes hints through TutorialHint*, which
     # has no virtual destructor in the source (undefined behaviour; the
-    # derived hints' members leak). The one fix applied to the import.
+    # derived hints' members leak).
     ctor = '\tTutorialHint(eTutorial_Hint id, Tutorial *tutorial, int descriptionId, eHintType type, bool allowFade = true);\n'
     if ctor not in files['TutorialHint.h']:
         raise SystemExit('TutorialHint.h: constructor not found')
     files['TutorialHint.h'] = files['TutorialHint.h'].replace(
         ctor, ctor + '\tvirtual ~TutorialHint() {} // port fix: deleted through the base class\n')
+    # Tutorial::tick compares m_bSceneIsSplitscreen, which only the Xbox
+    # branch ever assigns: initialise it with hasRequestedUI.
+    init = '\thasRequestedUI = false;\n'
+    if files['Tutorial.cpp'].count(init) != 1:
+        raise SystemExit('Tutorial.cpp: hasRequestedUI initialisation not found')
+    files['Tutorial.cpp'] = files['Tutorial.cpp'].replace(
+        init, init + '\tm_bSceneIsSplitscreen = false; // port fix: read before it is set outside _XBOX\n')
     files.update(generated())
     return files
 
