@@ -235,7 +235,7 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
     glUniform1f(glGetUniformLocation(program_,"fogDistance"),0);
     glBlendFunc(GL_SRC_ALPHA,GL_ONE);
     glUniform1i(glGetUniformLocation(program_,"skyPass"),1);
-    auto celestial=buildCelestialMesh(source.time(),source.rainLevel());
+    auto celestial=buildCelestialMesh(source.dayTime(),source.rainLevel());
     for(auto* mesh:{&celestial.sun,&celestial.moon})for(auto& vertex:*mesh){vertex.x+=e.x;vertex.y+=e.y;vertex.z+=e.z;}
     draw(celestial.sun,textures_.at("sun").id);draw(celestial.moon,textures_.at("moon_phases").id);
     glUniform1i(glGetUniformLocation(program_,"skyPass"),0);
@@ -390,7 +390,7 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
     }
     glDepthMask(GL_TRUE);
     glUniform1i(glGetUniformLocation(program_,"useLighting"),0);
-    auto clouds=buildCloudMesh(eye,cloudTicks_,consoleCloudColour(source.time(),source.rainLevel(),source.thunderLevel()));
+    auto clouds=buildCloudMesh(eye,cloudTicks_,consoleCloudColour(source.dayTime(),source.rainLevel(),source.thunderLevel()));
     glBindTexture(GL_TEXTURE_2D,textures_.at("clouds").id);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
     draw(clouds,textures_.at("clouds").id);

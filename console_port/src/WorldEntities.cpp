@@ -123,6 +123,26 @@ bool World::spawnCreativeEgg(int entityId,Vec3 position){
     ++revision;
     return true;
 }
+std::optional<std::wstring> World::pickEntity(Vec3 eye,Vec3 direction,double reach)const{
+    if(state->pending || !std::isfinite(reach) || reach<=0 || reach>64)return std::nullopt;
+    const double length=std::hypot(direction.x,direction.y,direction.z);
+    if(!std::isfinite(length) || length<1e-12)return std::nullopt;
+    direction={direction.x/length,direction.y/length,direction.z/length};
+    const auto block=raycast(eye,direction,reach);
+    double best=block.hit?block.distance:reach;
+    const SimulatedEntity* target=nullptr;
+    for(const auto& entity:state->entities){
+        if(entity.health<=0)continue;
+        const auto [width,height]=entitySize(entity.id,entity.slimeSize);
+        const double radius=width*.5;
+        const double hit=rayBox(eye,direction,
+            {entity.position.x-radius,entity.position.y,entity.position.z-radius},
+            {entity.position.x+radius,entity.position.y+height,entity.position.z+radius},reach);
+        if(hit<=best){best=hit;target=&entity;}
+    }
+    if(!target)return std::nullopt;
+    return target->id;
+}
 bool World::attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach){
     if(state->pending || !std::isfinite(reach) || reach<=0 || reach>64 ||
        !std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z))return false;

@@ -76,4 +76,78 @@ std::vector<TutorialSpawner> readTutorialSpawners(const std::vector<ConsoleGameR
  }
  return result;
 }
+TutorialLevelRules readTutorialLevelRules(const std::vector<ConsoleGameRuleNode>& rules){
+ TutorialLevelRules result;
+ auto real=[](const ConsoleGameRuleNode& n,const wchar_t* key){
+  std::size_t used=0;double value=std::stod(n.attributes.at(key),&used);
+  if(used!=n.attributes.at(key).size() || !(value>-30000000 && value<30000000))throw IoError("Invalid tutorial rule attribute");
+  return value;
+ };
+ auto has=[](const ConsoleGameRuleNode& n,const wchar_t* key){return n.attributes.contains(key);};
+ auto item=[&](const ConsoleGameRuleNode& n){
+  TutorialItem i{number(n,L"itemId"),number(n,L"quantity",1),number(n,L"auxValue"),number(n,L"dataTag"),number(n,L"slot",-1)};
+  if(i.id<=0 || i.id>32767 || i.count<1 || i.count>64)throw IoError("Invalid tutorial item");
+  return i;
+ };
+ for(const auto& root:rules)if(root.name==L"LevelRules")for(const auto& rule:root.children){
+  if(rule.name==L"NamedArea"){
+   // NamedAreaRuleDefinition stores integer attributes in an AABB.
+   TutorialArea area{double(number(rule,L"x0")),double(number(rule,L"y0")),double(number(rule,L"z0")),
+                     double(number(rule,L"x1")),double(number(rule,L"y1")),double(number(rule,L"z1"))};
+   result.namedAreas[rule.attributes.at(L"name")]=area;
+  }else if(rule.name==L"UpdatePlayer"){
+   TutorialUpdatePlayer update;
+   if(has(rule,L"spawnX") || has(rule,L"spawnY") || has(rule,L"spawnZ")){
+    update.hasSpawn=true;update.spawnX=number(rule,L"spawnX");update.spawnY=number(rule,L"spawnY");update.spawnZ=number(rule,L"spawnZ");
+   }
+   if(has(rule,L"yRot")){update.hasYRot=true;update.yRot=float(real(rule,L"yRot"));}
+   if(has(rule,L"health")){update.hasHealth=true;update.health=number(rule,L"health");}
+   if(has(rule,L"food")){update.hasFood=true;update.food=number(rule,L"food");}
+   for(const auto& child:rule.children)if(child.name==L"AddItem")update.items.push_back(item(child));
+   result.updatePlayer=std::move(update);
+  }else if(rule.name==L"CompleteAll"){
+   auto name=rule.attributes.find(L"descriptionName");
+   if(name!=rule.attributes.end())result.completeAllDescription=name->second;
+   for(const auto& child:rule.children)if(child.name==L"CollectItem")
+    result.collectGoals.push_back({number(child,L"itemId"),number(child,L"auxValue"),number(child,L"quantity",1),number(child,L"dataTag")});
+  }
+ }
+ return result;
+}
+std::map<std::wstring,std::wstring> readTutorialStrings(std::span<const unsigned char> bytes,const std::wstring& locale){
+ std::size_t at=0;
+ auto need=[&](std::size_t n){if(bytes.size()-at<n || at>bytes.size())throw IoError("Truncated tutorial string table");};
+ auto u16=[&]{need(2);unsigned v=(bytes[at]<<8)|bytes[at+1];at+=2;return v;};
+ auto s32=[&]{need(4);std::uint32_t v=(std::uint32_t(bytes[at])<<24)|(bytes[at+1]<<16)|(bytes[at+2]<<8)|bytes[at+3];at+=4;return std::int32_t(v);};
+ // DataInputStream::readUTF: modified UTF-8.
+ auto utf=[&]{
+  const unsigned length=u16();need(length);std::wstring out;const std::size_t end=at+length;
+  while(at<end){
+   unsigned c=bytes[at++];
+   if(c>=0xE0 && at+1<end){c=((c&0x0F)<<12)|((bytes[at]&0x3F)<<6)|(bytes[at+1]&0x3F);at+=2;}
+   else if(c>=0xC0 && at<end){c=((c&0x1F)<<6)|(bytes[at]&0x3F);at+=1;}
+   out.push_back(wchar_t(c));
+  }
+  return out;
+ };
+ s32();const int languages=s32();
+ if(languages<0 || languages>256)throw IoError("Invalid tutorial string table");
+ std::vector<std::pair<std::wstring,int>> sizes;
+ for(int i=0;i<languages;++i){auto id=utf();sizes.emplace_back(std::move(id),s32());}
+ std::map<std::wstring,std::wstring> result;
+ for(const auto& [id,size]:sizes){
+  if(size<0)throw IoError("Invalid tutorial string table");
+  if(id!=locale){need(std::size_t(size));at+=std::size_t(size);continue;}
+  const std::size_t end=at+std::size_t(size);need(std::size_t(size));
+  const int version=s32();
+  bool isStatic=false;
+  if(version>0){need(1);isStatic=bytes[at++]!=0;}
+  utf();const int count=s32();
+  if(isStatic || count<0)throw IoError("Unsupported tutorial string table");
+  for(int i=0;i<count;++i){auto key=utf();result[key]=utf();}
+  if(at>end)throw IoError("Truncated tutorial string table");
+  break;
+ }
+ return result;
+}
 }

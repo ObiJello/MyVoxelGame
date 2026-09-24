@@ -14,6 +14,7 @@ std::vector<unsigned char> readPackage(const std::filesystem::path& root){
 TutorialSchematics::TutorialSchematics(const std::filesystem::path& root):TutorialSchematics(readPackage(root)){}
 TutorialSchematics::TutorialSchematics(std::span<const unsigned char> bytes){
  auto pack=ConsoleDlcPack::read(bytes);bool found=false;
+ for(const auto& entry:pack.entries)if(entry.name==u"languages.loc")strings_=readTutorialStrings(entry.bytes);
  for(const auto& entry:pack.entries)if(entry.type==7){
   if(found)throw IoError("Ambiguous tutorial rule files");found=true;
   auto content=ConsoleGameRuleFile::read(entry.bytes);rules_=std::move(content.rules);
@@ -34,6 +35,7 @@ TutorialSchematics::TutorialSchematics(std::span<const unsigned char> bytes){
  }
  containers_=readTutorialContainers(rules_);
  spawners_=readTutorialSpawners(rules_);
+ levelRules_=readTutorialLevelRules(rules_);
  if(!found || placements_.empty())throw IoError("Tutorial package has no structure layout");
 }
 std::unique_ptr<CompoundTag> TutorialSchematics::tagsForChunk(int cx,int cz)const{

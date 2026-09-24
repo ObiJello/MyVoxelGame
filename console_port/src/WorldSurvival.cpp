@@ -17,6 +17,7 @@
 #include "LevelSettings.h"
 #include "FoodAccess.h"
 #include "BlockShape.h"
+#include "ContainerItems.h"
 #include <algorithm>
 #include <cmath>
 
@@ -472,5 +473,36 @@ bool World::craft(const CraftingRecipe& recipe){
         spawnDroppedItem({p.x,p.y+1.32,p.z},{0,.1,0},stackTag(recipe.id,left,recipe.damage),40);
     }
     return true;
+}
+}
+namespace console {
+void World::setPlayerHealth(int health){
+    health=std::clamp(health,0,20);
+    state->playerHurt.lastHealth=health;
+    state->playerHurt.health=health;
+    ++revision;
+}
+void World::setPlayerFood(int food){
+    state->playerFood.setFoodLevel(std::clamp(food,0,20));
+    ++revision;
+}
+bool World::setCarriedItem(int slot,int id,int count,int damage,int dataTag){
+    if(slot<0 || slot>=36 || id<1 || id>32767 || damage<0 || damage>32767 ||
+       count<1 || count>std::min(64,consoleItemStackLimit(id)))return false;
+    containerItems(*state->inventory,36);
+    auto replacement=std::make_unique<TagList>();
+    if(auto* previous=dynamic_cast<TagList*>(state->inventory->get(L"Items")))
+        for(int i=0;i<previous->size();++i){
+            auto* item=dynamic_cast<CompoundTag*>(previous->get(i));
+            if(static_cast<unsigned char>(item->getByte(L"Slot"))==slot)continue;
+            std::unique_ptr<Tag> copy(item->copy());replacement->add(copy.get());copy.release();
+        }
+    auto item=std::make_unique<CompoundTag>();
+    item->putByte(L"Slot",slot);item->putShort(L"id",id);
+    item->putByte(L"Count",count);item->putShort(L"Damage",damage);
+    if(dataTag){auto tag=std::make_unique<CompoundTag>();tag->putInt(L"4jdata",dataTag);item->put(L"tag",tag.get());tag.release();}
+    replacement->add(item.get());item.release();
+    state->inventory->put(L"Items",replacement.get());replacement.release();
+    ++revision;return true;
 }
 }

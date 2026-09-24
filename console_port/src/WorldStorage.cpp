@@ -253,6 +253,9 @@ void World::setName(const std::string& name){
     state->metadata->setLevelName(std::wstring(name.begin(),name.end()));
 }
 std::int64_t World::time()const{return state->metadata->getTime();}
+std::int64_t World::dayTime()const{return state->timeOfDayOverride>=0?state->timeOfDayOverride:time();}
+void World::setOverrideTimeOfDay(std::int64_t timeOfDay){state->timeOfDayOverride=timeOfDay<0?-1:timeOfDay;}
+void World::setTime(std::int64_t value){state->metadata->setTime(value);}
 float World::rainLevel()const{return state->metadata->isRaining()?1.f:0.f;}
 float World::thunderLevel()const{return state->metadata->isThundering()?rainLevel():0;}
 void World::tickTime(){
@@ -268,7 +271,7 @@ void World::tickTime(){
 std::array<float,3> World::skyColour(int x,int z)const{
     if(x<originX() || x>=originX()+width || z<originZ() || z>=originZ()+depth)throw std::out_of_range("Sky sample outside client world");
     int biome=state->chunk(x,z).biomes[(z&15)*16+(x&15)];
-    return consoleSkyColour(biome,time(),rainLevel(),state->metadata->isThundering()?rainLevel():0);
+    return consoleSkyColour(biome,dayTime(),rainLevel(),state->metadata->isThundering()?rainLevel():0);
 }
 std::array<int,9> World::neighboringBiomes(int x,int z)const{
     if(x<originX() || x>=originX()+width || z<originZ() || z>=originZ()+depth)throw std::out_of_range("Biome sample outside client world");
@@ -282,7 +285,7 @@ std::array<int,9> World::neighboringBiomes(int x,int z)const{
     return result;
 }
 float World::skyDarken()const {
-    return consoleSkyDarken(state->metadata->getTime(),state->metadata->isRaining()?1.f:0.f,
+    return consoleSkyDarken(dayTime(),state->metadata->isRaining()?1.f:0.f,
         state->metadata->isThundering() && state->metadata->isRaining()?1.f:0.f);
 }
 int World::renderLight(int x,int y,int z,bool liquid)const {

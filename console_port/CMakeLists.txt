@@ -893,3 +893,24 @@ if(NOT MSVC)
     ${CMAKE_CURRENT_SOURCE_DIR}/src/CraftingRecipes.cpp --cxx ${CMAKE_CXX_COMPILER} --check)
   set_tests_properties(console_recipe_extraction PROPERTIES TIMEOUT 120)
 endif()
+
+# Console strings (strings.resx by PS3 IDS_* number) and item descriptions.
+add_library(console_strings STATIC ported/ConsoleStrings.cpp ported/ItemDescriptions.cpp)
+target_include_directories(console_strings PUBLIC src)
+# The original console tutorial (ported/tutorial, imported by
+# tools/import_tutorial.py) and its game-mode glue.
+file(GLOB CONSOLE_TUTORIAL_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ported/tutorial/*.cpp)
+add_library(console_tutorial STATIC ${CONSOLE_TUTORIAL_SOURCES} src/TutorialSession.cpp src/RichText.cpp src/GameSettings.cpp)
+target_include_directories(console_tutorial PUBLIC src PRIVATE ported/tutorial ported)
+target_link_libraries(console_tutorial PUBLIC console_strings console_geometry console_world)
+add_executable(console_tutorial_tests tests/tutorial_tests.cpp)
+target_link_libraries(console_tutorial_tests PRIVATE console_tutorial console_schematic)
+add_test(NAME console_tutorial_core COMMAND console_tutorial_tests ${CMAKE_CURRENT_SOURCE_DIR}/assets/tutorial)
+set_tests_properties(console_tutorial_core PROPERTIES TIMEOUT 60 ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+if(NOT MSVC)
+  # The committed string/description tables and tutorial import must match the source.
+  add_test(NAME console_string_extraction COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_strings.py --check)
+  add_test(NAME console_description_extraction COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_descriptions.py --check)
+  add_test(NAME console_tutorial_import COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/import_tutorial.py --check)
+  set_tests_properties(console_string_extraction console_description_extraction console_tutorial_import PROPERTIES TIMEOUT 60)
+endif()

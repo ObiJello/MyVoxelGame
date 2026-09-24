@@ -61,6 +61,7 @@ struct World::State {
     PlayerExperience playerExperience;
     std::vector<DroppedItem> droppedItems;
     int playerAir=300,playerFire=0,playerPickupDelay=0;
+    std::int64_t timeOfDayOverride=-1;
     bool playerDeathHandled=false;
     std::optional<Vec3> savedPlayerPosition;
     Random survivalRandom{0x5eed5eed};

@@ -167,6 +167,11 @@ public:
     int renderLight(int x,int y,int z,bool liquid=false)const;
     float skyDarken()const;
     std::int64_t time()const;
+    // Level::setOverrideTimeOfDay (-1 clears): the tutorial freezes the time
+    // of day. dayTime() is what sky colour, darkness and the sun read.
+    void setOverrideTimeOfDay(std::int64_t timeOfDay);
+    std::int64_t dayTime()const;
+    void setTime(std::int64_t value);
     float rainLevel()const;
     float thunderLevel()const;
     std::array<float,3> skyColour(int x,int z)const;
@@ -175,6 +180,9 @@ public:
     void setPlayerPosition(Vec3 position);
     bool spawnCreativeEgg(int entityId,Vec3 position);
     bool attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach=6);
+    // GameRenderer::pick: the living entity under the crosshair (nearer than
+    // any block), by entity id.
+    std::optional<std::wstring> pickEntity(Vec3 eye,Vec3 direction,double reach)const;
     const std::vector<SimulatedEntity>& entities()const;
     const std::vector<ExperienceOrbState>& experienceOrbs()const;
     const std::vector<HangingDecoration>& hangingDecorations()const;
@@ -219,6 +227,12 @@ public:
     bool craft(const CraftingRecipe& recipe);
     // Feet position saved with the player, if the save had one.
     std::optional<Vec3> savedPlayerPosition()const;
+    // UpdatePlayerRuleDefinition::postProcessPlayer: lastHealth/setHealth and
+    // FoodData::setFoodLevel.
+    void setPlayerHealth(int health);
+    void setPlayerFood(int food);
+    // Inventory::setItem for slots 0-35 (dataTag is the 4jdata marker).
+    bool setCarriedItem(int slot,int id,int count,int damage,int dataTag=0);
     int surface(int x,int z) const;
     Vec3 spawn() const;
     bool collides(Vec3 feet) const;

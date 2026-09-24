@@ -18,6 +18,8 @@ class TutorialSchematics {
     std::vector<ConsoleGameRuleNode> rules_;
     std::vector<TutorialContainer> containers_;
     std::vector<TutorialSpawner> spawners_;
+    TutorialLevelRules levelRules_;
+    std::map<std::wstring,std::wstring> strings_;
 public:
     explicit TutorialSchematics(const std::filesystem::path& tutorialAssets);
     explicit TutorialSchematics(std::span<const unsigned char> package);
@@ -27,6 +29,9 @@ public:
     const std::vector<TutorialSpawner>& spawners()const{return spawners_;}
     const std::vector<TutorialPlacement>& placements()const{return placements_;}
     const std::vector<ConsoleGameRuleNode>& rules()const{return rules_;}
+    const TutorialLevelRules& levelRules()const{return levelRules_;}
+    // languages.loc (en-EN): app.GetGameRulesString for the rule descriptions.
+    const std::map<std::wstring,std::wstring>& strings()const{return strings_;}
     const ConsoleSchematic& schematic(const std::string& name)const{return files_.at(name);}
 };
 }
