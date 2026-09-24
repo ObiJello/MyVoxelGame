@@ -1350,3 +1350,59 @@ Squid movement and tentacles use a water pulse; Slime and Magma Cube use source
 jump-delay ranges and different jump strengths. These remain bounded
 approximations: projectile attacks, many goals, and exact renderer transforms
 are pending. Mooshroom mushroom transforms still need precise source parity.
+
+### Review fixes and survival mode (September 24)
+
+A full review pass (three independent reviewers plus Linux builds under Clang,
+GCC, AddressSanitizer and UBSan) found and fixed:
+
+- **Liquids:** turning still water/lava back into flowing liquid reset its depth
+  to 0, so every flowing cell became a new source and water flooded without
+  limit. The depth is now kept, as `LiquidTileStatic::setDynamic` does.
+- **Furnaces** lost their facing every time they lit or went out (`FurnaceTile::setLit`
+  keeps the data).
+- **Entity persistence:** mobs spawned during play were deleted, unsaved, when the
+  streaming window moved away; killed or collected entities loaded from a save
+  came back after a window move; saving dropped unloaded simulated entities in
+  halo chunks; a restarted eviction pass (or a save during eviction) lost the
+  orbs and fluid ticks the first pass had archived. Entities now stay frozen in
+  resident halo chunks, activated save entries are flagged, and re-captures
+  start from the archived record.
+- **Crashes:** the villager librarian texture was never loaded; paintings, item
+  frames and enchanting tables outside the window threw from `renderLight`; any
+  per-frame exception closed the game without saving.
+- **Assets:** six item icons (brick, clay, reeds, brewing stand, flower pot,
+  quartz) were read from the terrain atlas; the extractor now reads only the
+  item atlas. The item-frame rim uses birch planks (console `Tile::wood`).
+- **Compatibility:** stale bytes after the `level.dat` NBT root and
+  `originalVersion` 0 are accepted, as the original loader accepts them.
+- **Portability/tests:** a missing `<cstdint>` broke the Linux build, and the
+  experience-orb test kept a pointer into a destroyed temporary.
+
+Sanitizer notes: on Linux, AddressSanitizer runs. Remaining ASan/UBSan reports
+are in the untouched *original* reference builds used for parity comparison
+(for example `BufferedOutputStream`'s mismatched delete and leaks in the
+original NBT/LevelData code), which the port already documents fixing.
+
+**Survival mode** is now playable (Create New World → Game Mode):
+
+| Boundary | Source and verification |
+|---|---|
+| Tile destroy times/materials | `tools/extract_survival_tiles.py` extracts all 147 registrations from `Tile::staticCtor`, including stair/wall inheritance and `setIndestructible`. 30 tiles whose class source is absent from the subset use a flagged material fallback. |
+| Mining | `Tile::getDestroyProgress`, `Player::getDestroySpeed/canDestroy`, `Inventory::canDestroy`, `Item::Tier`, `DiggerItem`, `PickaxeItem`, `ShovelItem`, `HatchetItem`, `WeaponItem`, `ShearsItem`; the console's removal of the airborne penalty is kept. Client progress follows `MultiPlayerGameMode` start/continue/destroyDelay with the destroy-stage crack. |
+| Drops and tool wear | `Tile::playerDestroy/spawnResources`, the present subclasses' `getResource/getResourceCount/getSpawnResourcesAuxValue`, shears/leaf/crop/stem/door/slab rules, `ChestTile::onRemove` container drops and `mineBlock`/`hurtEnemy` durability. Stone, ore, gravel, clay, glowstone, glass, ice, bookshelf, web, snow, huge mushroom, mycelium, sign and wood-slab drops are reconstructed (sources absent). |
+| Dropped items | ItemEntity pop/throw velocities, bob, pickup box, lifetime and NBT schema; physics constants follow Java (`ItemEntity.cpp` absent). Saved with chunks. |
+| Damage and death | `Mob::hurt` window, `causeFallDamage`, air supply/drowning, suffocation, void, `Player::die` inventory/XP drops; lava/fire ticks follow Java `Entity` (absent). Death screen and respawn. |
+| Food | All `FoodItem`/`BowlFoodItem`/`GoldenAppleItem` registrations, eat duration, effects and probabilities; walk/sprint/swim/jump/attack/mine exhaustion. |
+| Crafting | **Reconstructed**: `Recipes.cpp` and its sub-tables are not in the supplied archive. `src/CraftingRecipes.cpp` holds ~110 same-era recipes in the console's ingredient-list UI (2×2 from the inventory, 3×3 at a crafting table) and must be replaced by an extraction when the sources are imported. |
+| Persistence | Game type (survival/creative; adventure still rejected), player position, air and fire now save and restore. |
+
+`tests/survival_tests.cpp` covers destroy rates for every tier/material path,
+harvest rules, drops, tool wear, food, meshes, and a full world flow (mine,
+drop, pick up, place, fall, drown, eat, craft, die, respawn, save/reload).
+`tests/world_regression_tests.cpp` reproduces the liquid, furnace and entity
+bugs (it fails on the previous code). The hidden-window smoke test also renders
+the survival HUD, dropped items, crack overlay, crafting and death screens with
+no GL errors. Armour, enchantment effects on mining, sleeping, hunger-bar
+shaking, item-stack merging on the ground and the survival tutorial lessons
+remain unported.

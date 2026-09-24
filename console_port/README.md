@@ -1,8 +1,9 @@
 # Minecraft console desktop port
 
 An independent C++ desktop port **in progress**, using the user-provided archive at
-`/Users/obey/Downloads/minecraft console`. The current executable is a playable
-creative prototype and platform bring-up, **not a complete port of the console game**.
+`/Users/obey/Downloads/minecraft console`. The current executable plays local
+**survival and creative** worlds, but it is **not yet a complete port of the
+console game** (see `docs/PORT_STATUS.md`).
 The archive itself is already C++; the main job is replacing its platform services
 and incrementally bringing the original game systems across.
 
@@ -67,7 +68,7 @@ not a verified pixel-identical PS3 title screen.
 ## Play
 
 Choose **Play Game → Create New World**, enter a world name and a numeric or text
-seed (up to 60 characters), choose Default or Superflat, then choose **Create New World** on that screen. Enter finishes a
+seed (up to 60 characters), choose Default or Superflat and Survival or Creative, then choose **Create New World** on that screen. Enter finishes a
 text field; Escape leaves it. Leave the seed blank for the original biome-balanced random search; the search
 screen can be cancelled. The console hashes text seeds and numeric zero, so `0`
 resolves to seed 48. Numeric overflow is rejected. The Play Game list shows named saves, four per page.
@@ -78,12 +79,15 @@ The old root `world.inner` (or legacy `world.mcp`) is also listed automatically.
 | Action | Keyboard / mouse | Mapped gamepad |
 |---|---|---|
 | Move / look | WASD / mouse | Left / right stick |
-| Jump / fly up | Space | Cross |
-| Fly down | Left Shift | Square |
-| Toggle flight | F | L3 |
-| Mine / place | Left / right mouse | R2 / L2 |
+| Jump / swim / fly up | Space | Cross |
+| Sprint | Left Ctrl | — |
+| Fly down (creative) | Left Shift | Square |
+| Toggle flight (creative) | F | L3 |
+| Mine / place, use, eat | Left / right mouse (hold) | R2 / L2 |
 | Select hotbar slot | 1–9 / wheel | L1 / R1 |
-| Building blocks | E | Triangle |
+| Inventory / building blocks | E | Triangle |
+| Crafting (survival) | C, or use a crafting table | Square |
+| Drop item / stack | Q / Ctrl+Q | — |
 | Pause / back | Esc | Start / Circle |
 | Navigate / select menus | Arrows / Enter, or click | D-pad / Cross |
 | Screenshot | F2 | — |
@@ -98,11 +102,16 @@ complete PS3 save importing, Sony packaging and simulation remain unfinished.
 Unknown archive data, unloaded chunks and other dimensions survive edits.
 
 Older 96/128-high `world.mcp` prototype saves migrate on load into 256-high columns;
-the old file remains untouched and the next save writes `world.inner`. Player
-position is not yet restored by the client; loading finds a new safe spawn. Direct executable launches without `--data-dir` use
+the old file remains untouched and the next save writes `world.inner`. The player's
+position, health, food, air and experience are saved and restored. Direct executable launches without `--data-dir` use
 `~/Library/Application Support/MinecraftConsolePort`.
 
 ## Verification
+
+Linux (tested in a cloud container with Clang 18 / GCC 13) needs the X11 and GL
+development headers for GLFW (`libxrandr-dev libxinerama-dev libxcursor-dev
+libxi-dev libgl-dev`) and `-DGLFW_BUILD_WAYLAND=OFF` unless `wayland-scanner` is
+installed. The hidden-window smoke test runs under `xvfb-run`.
 
 ```sh
 python3 console_port/tools/verify_import.py

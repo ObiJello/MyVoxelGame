@@ -1,8 +1,9 @@
 # Play-test route
 
-The current build supports local creative exploration. It is still an incomplete
-port: scripted tutorial lessons, mobs, survival, crafting, combat, redstone and the
-Nether portal trip are not playable yet.
+The current build supports local survival and creative play. It is still an
+incomplete port: scripted tutorial lessons, full mob AI, armour, redstone and the
+Nether portal trip are not playable yet. Crafting uses a reconstructed recipe
+table because the original Recipes.cpp is not in the supplied archive.
 
 ## Start
 
@@ -86,3 +87,20 @@ rewritten. Keep an older save for the reload and preservation check.
 Please report the step number, what happened, keyboard or controller input, and the
 on-screen position shown at the upper left. A short description is enough; no save
 file is needed unless the failure only appears after reload.
+
+## Survival route
+
+1. **Play Game → Create New World**, leave **Game Mode: Survival**, create it.
+   Confirm hearts, food and the XP bar sit above the hotbar and F does not fly.
+2. Punch a tree: the crack overlay should grow over about 3 seconds, then an oak
+   log pops out and is collected when you walk over it. Grass/dirt drop dirt;
+   stone takes about 7.5 s by hand and drops nothing.
+3. Press **C**: craft planks, sticks and a crafting table. Place the table and
+   right-click it to see the 3×3 recipes; make a wooden pickaxe. Stone should now
+   break in about a second and drop cobblestone; the pickaxe wears down.
+4. Jump off a 6+ block drop (damage), stand under water until the bubbles run out
+   (drowning), and step next to lava (burning). Eat by holding right mouse with
+   food selected.
+5. Press **Q** to throw one item, **Ctrl+Q** for the stack. Die, confirm the
+   death screen, respawn, and walk back to collect your dropped items.
+6. Save and Exit, reload: you should resume where you stood, still in survival.
