@@ -1,4 +1,6 @@
 #include "TutorialHost.h"
+#include "LookAtEntityHint.h"
+#include "LookAtTileHint.h"
 #include "ConsoleStrings.h"
 #include "ItemDescriptions.h"
 #include "SurvivalRules.h"
@@ -110,6 +112,13 @@ MobEffect *MobEffect::fireResistance = MobEffect::effects[12] = new MobEffect(12
 GameType *GameType::SURVIVAL = new GameType(0);
 GameType *GameType::CREATIVE = new GameType(1);
 
+// Hints --------------------------------------------------------------------
+
+// Declared by the source but never defined (the hints were deleted through a
+// TutorialHint* without a virtual destructor, so these never ran).
+LookAtTileHint::~LookAtTileHint() { delete[] m_iTiles; }
+LookAtEntityHint::~LookAtEntityHint() {}
+
 // Player -------------------------------------------------------------------
 
 void Player::setPlayerGamePrivilege(unsigned int &uiGamePrivileges, EPlayerGamePrivileges privilege, unsigned int value)
@@ -212,15 +221,17 @@ bool UIController::GetMenuDisplayed(int) { return TutorialHost::engine().menuDis
 
 int C4JInput::GetValue(int, int action, bool) { return TutorialHost::engine().inputValue(action); }
 
-unsigned int C4JInput::GetGameJoypadMaps(unsigned char, int action)
+unsigned char C4JInput::GetJoypadMapVal(int)
 {
-    switch (action)
-    {
-#define JOYPAD_MAP(action, buttons) case action: return buttons;
+    return TutorialHost::engine().gameSetting(eGameSetting_ControlScheme);
+}
+
+unsigned int C4JInput::GetGameJoypadMaps(unsigned char layout, int action)
+{
+#define JOYPAD_MAP(style, mapped, buttons) if (layout == style && action == mapped) return buttons;
 #include "generated/JoypadMap.inc"
 #undef JOYPAD_MAP
-    default: return 0;
-    }
+    return 0;
 }
 
 void *C4JStorage::GetGameDefinedProfileData(int) { return &g_profile; }

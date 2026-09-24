@@ -45,7 +45,9 @@ typedef unsigned short WORD;
 typedef unsigned char BYTE;
 typedef const wchar_t *LPCWSTR;
 using __int64 = std::int64_t; // as platform/stdafx.h
+#ifndef AUTO_VAR
 #define AUTO_VAR(_var, _val) auto _var = _val
+#endif
 #define ZeroMemory(p, n) memset((p), 0, (n))
 
 #define Tile TutorialHost_Tile
@@ -384,7 +386,7 @@ class C4JInput
 {
 public:
     int GetValue(int iPad, int action, bool bRepeat = false);
-    unsigned char GetJoypadMapVal(int iPad) { return 0; }
+    unsigned char GetJoypadMapVal(int iPad);
     unsigned int GetGameJoypadMaps(unsigned char layout, int action);
 };
 extern C4JInput InputManager;

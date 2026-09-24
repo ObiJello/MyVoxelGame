@@ -17,6 +17,8 @@
 #include "GameSettings.h"
 #include "ConsoleStrings.h"
 #include "ItemDescriptions.h"
+#include "ConsoleMenus.h"
+#include "ConsoleCredits.h"
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -31,6 +33,7 @@
 #include <optional>
 #include <string>
 #include <cwchar>
+#include <cstdio>
 #include <set>
 
 using namespace console;
@@ -137,7 +140,29 @@ std::string narrow(const std::wstring& text){
 }
 // app.GetString with the IDS_* name.
 std::string consoleText(const char* name){return consoleString(consoleStringId(name));}
-enum class Screen { Main, Worlds, CreateWorld, FindingSeed, Loading, Playing, Pause, Inventory, Chest, Furnace, Brewing, Crafting, Dead, Options, Controls, Notice };
+// The PS3 buttons (_360_JOY_BUTTON_*) held on a GLFW gamepad, sticks as
+// directions; southpaw swaps the sticks (C4JInput with eGameSetting_ControlSouthPaw).
+unsigned padButtons(const GLFWgamepadstate& pad,bool southpaw){
+    unsigned bits=0;
+    auto button=[&](int b,unsigned bit){if(pad.buttons[b]==GLFW_PRESS)bits|=bit;};
+    button(GLFW_GAMEPAD_BUTTON_A,0x1);button(GLFW_GAMEPAD_BUTTON_B,0x2);button(GLFW_GAMEPAD_BUTTON_X,0x4);
+    button(GLFW_GAMEPAD_BUTTON_Y,0x8);button(GLFW_GAMEPAD_BUTTON_START,0x10);button(GLFW_GAMEPAD_BUTTON_BACK,0x20);
+    button(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER,0x40);button(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER,0x80);
+    button(GLFW_GAMEPAD_BUTTON_RIGHT_THUMB,0x100);button(GLFW_GAMEPAD_BUTTON_LEFT_THUMB,0x200);
+    button(GLFW_GAMEPAD_BUTTON_DPAD_UP,0x400);button(GLFW_GAMEPAD_BUTTON_DPAD_DOWN,0x800);
+    button(GLFW_GAMEPAD_BUTTON_DPAD_LEFT,0x1000);button(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT,0x2000);
+    const int lx=southpaw?GLFW_GAMEPAD_AXIS_RIGHT_X:GLFW_GAMEPAD_AXIS_LEFT_X,ly=southpaw?GLFW_GAMEPAD_AXIS_RIGHT_Y:GLFW_GAMEPAD_AXIS_LEFT_Y;
+    const int rx=southpaw?GLFW_GAMEPAD_AXIS_LEFT_X:GLFW_GAMEPAD_AXIS_RIGHT_X,ry=southpaw?GLFW_GAMEPAD_AXIS_LEFT_Y:GLFW_GAMEPAD_AXIS_RIGHT_Y;
+    if(pad.axes[lx]>.5f)bits|=0x4000;if(pad.axes[lx]<-.5f)bits|=0x8000;
+    if(pad.axes[ly]>.5f)bits|=0x100000;if(pad.axes[ly]<-.5f)bits|=0x200000;
+    if(pad.axes[rx]>.5f)bits|=0x40000;if(pad.axes[rx]<-.5f)bits|=0x80000;
+    if(pad.axes[ry]>.5f)bits|=0x10000;if(pad.axes[ry]<-.5f)bits|=0x20000;
+    if(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]>.1f)bits|=0x400000;
+    if(pad.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]>.1f)bits|=0x800000;
+    return bits;
+}
+struct Box { float x=0,y=0,w=0,h=0; bool contains(double px,double py)const{return w>0 && px>=x && px<x+w && py>=y && py<y+h;} };
+enum class Screen { Menu, FindingSeed, Loading, Playing, Inventory, Chest, Furnace, Brewing, Crafting };
 struct App {
     enum class LoadKind { Create, Tutorial, ArchivedTutorial, Existing };
     struct LoadResult {
@@ -151,14 +176,18 @@ struct App {
     GLFWwindow* window=nullptr;
     std::unique_ptr<Renderer> renderer;
     World world;
-    Screen screen=Screen::Main,returnScreen=Screen::Main;
+    Screen screen=Screen::Menu;
     Vec3 position{};
-    double yaw=.65,pitch=-.12,verticalSpeed=0,sensitivity=.0022,viewDistance=120;
+    double yaw=.65,pitch=-.12,verticalSpeed=0,viewDistance=120;
     double worldTickSeconds=0;
     int potionUseTicks=0,potionUseSlot=-1;
-    bool horizontalCollision=false,grounded=false,flying=false,invert=false,loaded=false,seedEditing=false,enderChestOpen=false,furnaceFuelTarget=false;
+    bool horizontalCollision=false,grounded=false,flying=false,loaded=false,enderChestOpen=false,furnaceFuelTarget=false;
     int selection=0,slot=0,chestX=0,chestY=0,chestZ=0,chestSlots=27;
-    bool nameEditing=false;
+    // The Create World text field being typed into (0 name, 1 seed).
+    int editingField=-1;
+    // The key that opened a text field also sends its character; skip it.
+    bool editCharGuard=false;
+    double lastJumpPress=-1;
     int inventoryCategory=0,brewingBottleTarget=0;
     std::array<int,8> creativePage{};
     bool flatWorld=false;
@@ -181,22 +210,26 @@ struct App {
     std::string worldName="New World";
     std::filesystem::path activeSave;
     std::vector<SavedWorld> savedWorlds;
-    std::size_t worldPage=0;
     double lastX=0,lastY=0,toastUntil=0,lastSave=0,lastEdit=0,ignoreMouseUntil=0;
     bool scripted=false,screenshotRequested=false;
     bool mouseReady=false;
-    std::string seedText,toast,notice;
+    std::string seedText,toast;
     std::unique_ptr<ConsoleSeedSearch> seedSearch;
     std::future<LoadResult> loadJob;
     std::optional<LoadResult> loadReady;
     std::shared_ptr<std::atomic<int>> loadPhase;
-    Screen loadReturnScreen=Screen::Worlds;
     std::uint64_t seedAttempts=0;
     std::filesystem::path dataDir;
     GLFWgamepadstate previousPad{};
+    unsigned padBits=0,previousPadBits=0;
     bool leftMouse=false,rightMouse=false,usedBlockHeld=false;
     // ---- Console tutorial (FullTutorialMode) and the player's profile ----
     GameSettings settings;
+    // The front-end and pause menus (UIScene_*).
+    ConsoleMenus menus{settings};
+    float howToPlayScroll=0;
+    int howToPlayShown=-1;
+    bool tutorialPaused=false;
     std::unique_ptr<TutorialSession> tutorial;
     // UIComponent_TutorialPopup: the description, fade timer and visibility.
     TutorialPopup tutorialPopup;
@@ -215,6 +248,17 @@ struct App {
     std::filesystem::path settingsPath()const{return dataDir/"settings.dat";}
     void saveSettings(){try{settings.save(settingsPath());}catch(const std::exception& e){message(e.what());}}
     bool inputAllowed(int action)const{return !tutorial || tutorial->isInputAllowed(action);}
+    // eGameSetting_Sensitivity_InGame (0-200%) and eGameSetting_ControlInvertLook.
+    double lookSensitivity()const{return .0022*settings.get(GameSetting::SensitivityInGame)/100.0;}
+    bool invertLook()const{return settings.get(GameSetting::ControlInvertLook)!=0;}
+    int controlScheme()const{return settings.get(GameSetting::ControlScheme);}
+    bool padAction(int action)const{return (padBits&consoleJoypadButtons(action,controlScheme()))!=0;}
+    bool padActionPressed(int action)const{
+        const unsigned bits=consoleJoypadButtons(action,controlScheme());
+        return (padBits&bits) && !(previousPadBits&bits);
+    }
+    bool pauseMenuShown()const{return screen==Screen::Menu && loaded && menus.active() && menus.root()==MenuScene::Pause;}
+    bool deathMenuShown()const{return screen==Screen::Menu && loaded && menus.active() && menus.root()==MenuScene::Death;}
     struct TutorialBridge final:TutorialEngine{
         App& app;
         explicit TutorialBridge(App& owner):app(owner){}
@@ -231,7 +275,7 @@ struct App {
         void setOverrideTimeOfDay(std::int64_t time)override{app.world.setOverrideTimeOfDay(time);}
         int inputValue(int action)override{return action>=0 && action<TutorialSession::ActionCount?app.actionValues[action]:0;}
         bool menuDisplayed()override{return app.screen!=Screen::Playing;}
-        bool pauseMenuDisplayed()override{return app.screen==Screen::Pause || app.screen==Screen::Options || app.screen==Screen::Controls;}
+        bool pauseMenuDisplayed()override{return app.pauseMenuShown();}
         std::uint32_t tickCount()override{return static_cast<std::uint32_t>(glfwGetTime()*1000);}
         unsigned char gameSetting(int setting)override{return app.settings.get(static_cast<GameSetting>(setting));}
         const TutorialArea* namedArea(const std::wstring& name)override{
@@ -262,7 +306,7 @@ struct App {
         tutorialBridge=std::make_unique<TutorialBridge>(*this);
         tutorialPopupVisible=tutorialPopupHidden=false;
         tutorialCarried=world.carriedItems();tutorialEffects=world.activePotionEffects();
-        tutorialSlot=slot;tutorialFood=world.playerFoodLevel();collectedGoals.clear();
+        tutorialSlot=slot;tutorialFood=world.playerFoodLevel();collectedGoals.clear();tutorialPaused=false;
         world.setTutorialSpawning(false);
         tutorial=std::make_unique<TutorialSession>(*tutorialBridge,settings.tutorialCompletion());
         tutorialModeActive=true;
@@ -320,23 +364,68 @@ struct App {
     void message(const std::string& s){toast=s;toastUntil=glfwGetTime()+5;}
     void change(Screen s){
         if(tutorial && s!=screen){
-            // UIScene_PauseMenu hides the popup; the container menus switch
-            // the tutorial state with their scene and restore it on close.
-            const bool pauseBefore=screen==Screen::Pause || screen==Screen::Options || screen==Screen::Controls;
-            const bool pauseAfter=s==Screen::Pause || s==Screen::Options || s==Screen::Controls;
+            // The container menus switch the tutorial state with their scene
+            // and restore it on close.
             const int before=tutorialMenuState(screen,!world.survival(),craftingTable);
             const Screen previous=screen;screen=s;
             if(before>=0)tutorial->closeMenu();
             const int after=tutorialMenuState(s,!world.survival(),craftingTable);
             if(after>=0)tutorial->openMenu(after,s==Screen::Crafting);
-            if(pauseAfter && !pauseBefore)tutorial->showTutorialPopup(false);
-            if(pauseBefore && !pauseAfter)tutorial->showTutorialPopup(true);
             screen=previous;
         }
-        screen=s;selection=0;seedEditing=false;nameEditing=false;
+        screen=s;selection=0;editingField=-1;
+        // UIScene_PauseMenu hides the tutorial popup while it is open.
+        if(tutorial && pauseMenuShown()!=tutorialPaused){tutorialPaused=pauseMenuShown();tutorial->showTutorialPopup(!tutorialPaused);}
         if(s!=Screen::FindingSeed)seedSearch.reset();
-        if(s==Screen::Worlds){try{savedWorlds=listSavedWorlds(dataDir);}catch(const std::exception& e){message(e.what());savedWorlds.clear();}worldPage=0;}mouseReady=false;leftMouse=rightMouse=usedBlockHeld=false;potionUseTicks=0;potionUseSlot=-1;ignoreMouseUntil=glfwGetTime()+.15;
+        mouseReady=false;leftMouse=rightMouse=usedBlockHeld=false;potionUseTicks=0;potionUseSlot=-1;ignoreMouseUntil=glfwGetTime()+.15;
         glfwSetInputMode(window,GLFW_CURSOR,s==Screen::Playing?GLFW_CURSOR_DISABLED:GLFW_CURSOR_NORMAL);}
+    // Open a menu stack: the main menu, the pause menu or the death menu.
+    void openMenu(MenuScene root){
+        MenuContext context;
+        context.inGame=loaded;context.creative=loaded && !world.survival();
+        if(root==MenuScene::MainMenu){
+            try{savedWorlds=listSavedWorlds(dataDir);}catch(const std::exception& e){message(e.what());savedWorlds.clear();}
+            for(const auto& saved:savedWorlds)context.saves.push_back(saved.name.substr(0,25));
+        }
+        menus.show(root,context);howToPlayShown=-1;
+        change(Screen::Menu);
+    }
+    void toTitle(){endTutorialSession();loaded=false;openMenu(MenuScene::MainMenu);}
+    void respawn(){
+        world.respawnPlayer();position=world.spawn();verticalSpeed=0;fallDistance=0;world.setPlayerPosition(position);
+        // PlayerList::respawn: in the tutorial, until the food bar lesson is
+        // done, the player gets their health, hunger and steak back.
+        if(tutorialModeActive && tutorial && !tutorial->isStateCompleted(TutorialSession::FoodBar))applyUpdatePlayer(world);
+        change(Screen::Playing);
+    }
+    void handleMenuEvent(const MenuEvent& event){
+        switch(event.action){
+        case MenuAction::None:break;
+        case MenuAction::StartTutorial:startTutorial();break;
+        case MenuAction::StartClassicTutorial:startTutorial(true);break;
+        case MenuAction::CreateWorld:{
+            const auto& options=menus.newWorld();
+            worldName=options.name;seedText=options.seed;survivalWorld=options.survival;flatWorld=options.superflat;
+            start(true);break;
+        }
+        case MenuAction::LoadSave:
+            if(event.index>=0 && event.index<int(savedWorlds.size())){
+                const auto& entry=savedWorlds[event.index];
+                if(entry.readable)start(false,entry.path);else message("This saved world could not be read.");
+            }
+            break;
+        case MenuAction::ResumeGame:menus.close();change(Screen::Playing);break;
+        case MenuAction::SaveGame:try{save();}catch(const std::exception& e){message(e.what());}break;
+        case MenuAction::ExitAndSave:
+            try{save();}catch(const std::exception& e){message(e.what());break;}
+            toTitle();break;
+        case MenuAction::ExitWithoutSaving:toTitle();break;
+        case MenuAction::Respawn:menus.close();respawn();break;
+        case MenuAction::EditWorldName:editingField=0;editCharGuard=true;break;
+        case MenuAction::EditSeed:editingField=1;editCharGuard=true;break;
+        case MenuAction::SettingsChanged:saveSettings();break;
+        }
+    }
     void save(){if(loaded){world.save(savePath());lastSave=glfwGetTime();}}
     void beginLoad(LoadKind kind,const std::filesystem::path& selected={},std::int64_t value=0){
         if(loadJob.valid() || loadReady)return;
@@ -347,7 +436,7 @@ struct App {
         std::shared_ptr<World> previous;
         if(previousLoaded){previous=std::make_shared<World>();previous->swapWith(world);}
         endTutorialSession();
-        loaded=false;loadReturnScreen=screen==Screen::FindingSeed?Screen::CreateWorld:screen;
+        loaded=false;
         change(Screen::Loading);
         loadPhase=std::make_shared<std::atomic<int>>(previousLoaded?0:1);
         auto phase=loadPhase;
@@ -380,17 +469,24 @@ struct App {
             return result;
         });}catch(...){
             if(previous)world.swapWith(*previous);
-            loaded=previousLoaded;change(loadReturnScreen);loadPhase.reset();throw;
+            loaded=previousLoaded;returnFromLoad();loadPhase.reset();throw;
         }
+    }
+    // A failed load goes back to the menu it was started from (or to the
+    // previous world's pause menu).
+    void returnFromLoad(){
+        if(loaded)openMenu(MenuScene::Pause);
+        else if(menus.active())change(Screen::Menu);
+        else openMenu(MenuScene::MainMenu);
     }
     void finishLoad(bool wait=false){
         if(!loadReady){
             if(!loadJob.valid() || (!wait && loadJob.wait_for(std::chrono::seconds(0))!=std::future_status::ready))return;
             try{loadReady.emplace(loadJob.get());}
-            catch(const std::exception& error){loaded=false;change(loadReturnScreen);message(error.what());loadPhase.reset();return;}
+            catch(const std::exception& error){loaded=false;returnFromLoad();message(error.what());loadPhase.reset();return;}
             if(!loadReady->error.empty()){
                 if(loadReady->previous){world.swapWith(*loadReady->previous);activeSave=loadReady->previousPath;}
-                loaded=loadReady->previousLoaded;change(loaded?Screen::Pause:loadReturnScreen);
+                loaded=loadReady->previousLoaded;returnFromLoad();
                 message(loadReady->error);loadReady.reset();loadPhase.reset();return;
             }
             world.swapWith(*loadReady->next);
@@ -416,14 +512,14 @@ struct App {
             // UIScene_LoadOrJoinMenu::LoadLevelGen sets tutorial mode only for a
             // fresh tutorial; a saved tutorial world plays normally.
             if(loadReady->kind==LoadKind::Tutorial)startTutorialSession();
-            lastSave=glfwGetTime();change(Screen::Playing);
+            lastSave=glfwGetTime();menus.close();change(Screen::Playing);
             if(!tutorial)message(world.isTutorial()?"Classic tutorial world - creative exploration":
                     world.survival()?"Survival mode - E inventory, C crafting, Q drop":"Creative mode - press E for blocks, F to fly");
             loadReady.reset();loadPhase.reset();
         }catch(const std::exception& error){
             if(loadReady && loadReady->previous){world.swapWith(*loadReady->previous);activeSave=loadReady->previousPath;}
             loaded=loadReady && loadReady->previousLoaded;
-            change(loaded?Screen::Pause:loadReturnScreen);message(error.what());
+            returnFromLoad();message(error.what());
             loadReady.reset();loadPhase.reset();
         }
     }
@@ -441,41 +537,18 @@ struct App {
                 beginLoad(LoadKind::Existing,selected);
             }
             if(scripted)finishLoad(true);
-        }catch(const std::exception& e){if(screen==Screen::FindingSeed)change(Screen::CreateWorld);message(e.what());}
+        }catch(const std::exception& e){if(screen==Screen::FindingSeed)change(Screen::Menu);message(e.what());}
     }
     void startTutorial(bool archived=false){
         try{beginLoad(archived?LoadKind::ArchivedTutorial:LoadKind::Tutorial);if(scripted)finishLoad(true);
         }catch(const std::exception& error){message(error.what());}
     }
-    std::vector<std::string> buttons()const {
-        switch(screen){
-        case Screen::Main:return {"Play Game","Leaderboards","Help & Options","Downloadable Content","Exit Game"};
-        case Screen::Worlds:{
-            std::vector<std::string> entries{"Create New World","Tutorial World","Classic Tutorial World"};
-            for(std::size_t i=worldPage*4;i<std::min(savedWorlds.size(),worldPage*4+4);++i)
-                entries.push_back(savedWorlds[i].name.substr(0,25));
-            entries.push_back("Previous Page");entries.push_back("Next Page");entries.push_back("Back");return entries;
-        }
-        case Screen::CreateWorld:return {"World Name: "+worldName+(nameEditing?"_":""),"Seed: "+(seedText.empty() && !seedEditing?std::string("Random"):seedText)+(seedEditing?"_":""),"World Type: "+std::string(flatWorld?"Superflat":"Default"),"Game Mode: "+std::string(survivalWorld?"Survival":"Creative"),"Create New World","Back"};
-        case Screen::Dead:return {"Respawn","Exit to Title"};
-        case Screen::FindingSeed:return {"Cancel"};
-        case Screen::Loading:return {};
-        case Screen::Pause:return {"Resume Game","Help & Options","Save Game","Save and Exit"};
-        case Screen::Options:return {"Controls","Sensitivity: "+std::to_string(int(sensitivity*10000)),"Invert Look: "+std::string(invert?"On":"Off"),"View Distance: "+std::to_string(int(viewDistance)),"Back"};
-        case Screen::Controls:case Screen::Notice:return {"Back"};
-        default:return {};
-        }
-    }
     void back(){
-        if(screen==Screen::Loading || screen==Screen::Dead)return;
-        if(screen==Screen::Playing)change(Screen::Pause);
-        else if(screen==Screen::Crafting)change(Screen::Playing);
-        else if(screen==Screen::Pause || screen==Screen::Inventory || screen==Screen::Chest || screen==Screen::Furnace || screen==Screen::Brewing)change(Screen::Playing);
-        else if(screen==Screen::Options)change(returnScreen);
-        else if(screen==Screen::Controls)change(Screen::Options);
-        else if(screen==Screen::CreateWorld)change(Screen::Worlds);
-        else if(screen==Screen::FindingSeed)change(Screen::CreateWorld);
-        else change(Screen::Main);
+        if(screen==Screen::Loading)return;
+        if(screen==Screen::Playing)openMenu(MenuScene::Pause);
+        else if(screen==Screen::Menu)handleMenuEvent(menus.input(MenuInput::Back));
+        else if(screen==Screen::FindingSeed)change(Screen::Menu);
+        else change(Screen::Playing);
     }
     void moveChestSelection(int amount=-1){
         try{const int itemSlot=selection<chestSlots?selection:selection-chestSlots;
@@ -546,37 +619,6 @@ struct App {
     }
     void activate(){
         switch(screen){
-        case Screen::Main:
-            if(selection==0)change(Screen::Worlds);
-            else if(selection==2){returnScreen=Screen::Main;change(Screen::Options);}
-            else if(selection==4)glfwSetWindowShouldClose(window,1);
-            else {notice=selection==1?"PlayStation Network leaderboards are not ported.":"The console content store is not ported.";change(Screen::Notice);}
-            break;
-        case Screen::Worlds:
-            {
-            auto count=std::min<std::size_t>(4,savedWorlds.size()-worldPage*4);
-            if(selection==0)change(Screen::CreateWorld);
-            else if(selection==1)startTutorial();
-            else if(selection==2)startTutorial(true);
-            else if(selection<=int(count)+2){
-                const auto& entry=savedWorlds[worldPage*4+selection-3];
-                if(entry.readable)start(false,entry.path);else message("This saved world could not be read.");
-            }else if(selection==int(count)+3){if(worldPage>0){--worldPage;selection=0;}}
-            else if(selection==int(count)+4){if((worldPage+1)*4<savedWorlds.size()){++worldPage;selection=0;}}
-            else change(Screen::Main);break;
-        }
-        case Screen::CreateWorld:
-            if(selection==0){nameEditing=true;seedEditing=false;}else if(selection==1){seedEditing=true;nameEditing=false;}
-            else if(selection==2)flatWorld=!flatWorld;else if(selection==3)survivalWorld=!survivalWorld;
-            else if(selection==4)start(true);else change(Screen::Worlds);break;
-        case Screen::Dead:
-            if(selection==0){world.respawnPlayer();position=world.spawn();verticalSpeed=0;fallDistance=0;world.setPlayerPosition(position);
-                // PlayerList::respawn: in the tutorial, until the food bar lesson
-                // is done, the player gets their health, hunger and steak back.
-                if(tutorialModeActive && tutorial && !tutorial->isStateCompleted(TutorialSession::FoodBar))applyUpdatePlayer(world);
-                change(Screen::Playing);}
-            else try{save();endTutorialSession();loaded=false;change(Screen::Main);}catch(const std::exception& e){message(e.what());}
-            break;
         case Screen::Crafting:{
             const auto list=craftingList();
             if(selection>=0 && selection<int(list.size())){
@@ -590,21 +632,7 @@ struct App {
             }
             break;
         }
-        case Screen::FindingSeed:change(Screen::CreateWorld);break;
-        case Screen::Pause:
-            if(selection==0)change(Screen::Playing);
-            else if(selection==1){returnScreen=Screen::Pause;change(Screen::Options);}
-            else try{save();if(selection==3){endTutorialSession();loaded=false;change(Screen::Main);}message("World saved");}catch(const std::exception& e){message(e.what());}
-            break;
-        case Screen::Options:
-            if(selection==0)change(Screen::Controls);
-            else if(selection==1)sensitivity=sensitivity>=.004? .001:sensitivity+.0005;
-            else if(selection==2)invert=!invert;
-            else if(selection==3)viewDistance=viewDistance>=160?80:viewDistance+40;
-            else change(returnScreen);
-            break;
-        case Screen::Controls:change(Screen::Options);break;
-        case Screen::Notice:change(Screen::Main);break;
+        case Screen::FindingSeed:change(Screen::Menu);break;
         case Screen::Chest:moveChestSelection();break;
         case Screen::Furnace:moveFurnaceSelection();break;
         case Screen::Brewing:moveBrewingSelection();break;
@@ -645,7 +673,8 @@ struct App {
         }
         if(action==GLFW_REPEAT && (key==GLFW_KEY_E || key==GLFW_KEY_F || key==GLFW_KEY_ESCAPE ||
                                    key==GLFW_KEY_TAB))return;
-        if(key==GLFW_KEY_ESCAPE){if(seedEditing || nameEditing){seedEditing=nameEditing=false;return;}back();return;}
+        if(screen==Screen::Menu){menuKey(key,action);return;}
+        if(key==GLFW_KEY_ESCAPE){back();return;}
         if(screen==Screen::Playing){
             if(key>=GLFW_KEY_1 && key<=GLFW_KEY_9)slot=key-GLFW_KEY_1;
             if(key==GLFW_KEY_E && inputAllowed(TutorialSession::InventoryAction)){
@@ -659,7 +688,13 @@ struct App {
                 const bool stack=glfwGetKey(window,GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS;
                 try{world.dropCarried(slot,stack,eye(),yaw,pitch);}catch(const std::exception& e){message(e.what());}
             }
-            if(key==GLFW_KEY_SPACE && grounded && !world.playerInWater() && inputAllowed(TutorialSession::Jump)){
+            // LocalPlayer::aiStep: a double jump toggles creative flight.
+            if(key==GLFW_KEY_SPACE && action==GLFW_PRESS && !world.survival()){
+                const double now=glfwGetTime();
+                if(now-lastJumpPress<.35){flying=!flying;verticalSpeed=0;lastJumpPress=-1;return;}
+                lastJumpPress=now;
+            }
+            if(key==GLFW_KEY_SPACE && grounded && !flying && !world.playerInWater() && inputAllowed(TutorialSession::Jump)){
                 verticalSpeed=8.4;grounded=false;
                 world.playerJumped(glfwGetKey(window,GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS);
             }
@@ -678,7 +713,6 @@ struct App {
             if(key==GLFW_KEY_ENTER || key==GLFW_KEY_SPACE)activate();
             return;
         }
-        if(seedEditing || nameEditing){auto& value=seedEditing?seedText:worldName;if(key==GLFW_KEY_BACKSPACE && !value.empty())value.pop_back();if(key==GLFW_KEY_ENTER)seedEditing=nameEditing=false;return;}
         if(screen==Screen::Chest){
             if(key==GLFW_KEY_H){moveChestSelection(0);return;}
             if(key==GLFW_KEY_R){moveChestSelection(1);return;}
@@ -725,18 +759,57 @@ struct App {
             if(key==GLFW_KEY_ENTER || key==GLFW_KEY_SPACE)activate();
             return;
         }
-        const int count=static_cast<int>(buttons().size());
-        if(count==0)return;
-        if(key==GLFW_KEY_UP || key==GLFW_KEY_LEFT)selection=(selection+count-1)%count;
-        if(key==GLFW_KEY_DOWN || key==GLFW_KEY_RIGHT)selection=(selection+1)%count;
         if(key==GLFW_KEY_ENTER || key==GLFW_KEY_SPACE)activate();
     }
+    // Menu navigation (ACTION_MENU_*) from the keyboard, and typing into the
+    // Create World text fields (the console's virtual keyboard).
+    void menuKey(int key,int action){
+        if(editingField>=0){
+            auto& value=editingField==0?menus.newWorld().name:menus.newWorld().seed;
+            if(key==GLFW_KEY_BACKSPACE && !value.empty()){
+                while(!value.empty() && (static_cast<unsigned char>(value.back())&0xC0)==0x80)value.pop_back();
+                if(!value.empty())value.pop_back();
+            }
+            if(key==GLFW_KEY_ENTER || key==GLFW_KEY_KP_ENTER || key==GLFW_KEY_ESCAPE || key==GLFW_KEY_TAB)editingField=-1;
+            menus.refresh();return;
+        }
+        if(action==GLFW_REPEAT && key!=GLFW_KEY_UP && key!=GLFW_KEY_DOWN && key!=GLFW_KEY_LEFT && key!=GLFW_KEY_RIGHT)return;
+        if(menus.active() && menus.scene()==MenuScene::HowToPlay && (key==GLFW_KEY_UP || key==GLFW_KEY_DOWN)){
+            howToPlayScroll=std::max(0.f,howToPlayScroll+(key==GLFW_KEY_UP?-12.f:12.f));return;
+        }
+        std::optional<MenuInput> input;
+        switch(key){
+        case GLFW_KEY_UP:input=MenuInput::Up;break;
+        case GLFW_KEY_DOWN:input=MenuInput::Down;break;
+        case GLFW_KEY_LEFT:input=MenuInput::Left;break;
+        case GLFW_KEY_RIGHT:input=MenuInput::Right;break;
+        case GLFW_KEY_ENTER:case GLFW_KEY_KP_ENTER:case GLFW_KEY_SPACE:input=MenuInput::Accept;break;
+        case GLFW_KEY_ESCAPE:case GLFW_KEY_BACKSPACE:input=MenuInput::Back;break;
+        case GLFW_KEY_X:input=MenuInput::X;break;
+        case GLFW_KEY_Y:input=MenuInput::Y;break;
+        default:break;
+        }
+        if(input)menuInput(*input);
+    }
+    void menuInput(MenuInput input){
+        if(!menus.active())return;
+        // The pause menu's Back resumes; the death menu has none.
+        handleMenuEvent(menus.input(input));
+        if(screen==Screen::Menu && !menus.active() && loaded)change(Screen::Playing);
+    }
     void look(double x,double y){
+        if(screen==Screen::Menu && menus.active() && (std::abs(x-lastX)>1 || std::abs(y-lastY)>1)){
+            // Pointing at a control focuses it.
+            int w,h;glfwGetWindowSize(window,&w,&h);
+            const double ux=x*renderer->uiWidth()/std::max(1,w),uy=y*360/std::max(1,h);
+            const auto boxes=menuLayout();
+            for(int i=0;i<int(boxes.size());++i)if(boxes[i].contains(ux,uy) && i!=menus.focus()){menus.setFocus(i);break;}
+        }
         if(screen!=Screen::Playing || scripted || glfwGetTime()<ignoreMouseUntil){lastX=x;lastY=y;mouseReady=false;return;}
         if(mouseReady){
             lookDX+=x-lastX;lookDY+=y-lastY;padInputLast=false;
-            if(inputAllowed(TutorialSession::LookLeft) || inputAllowed(TutorialSession::LookRight))yaw+=(x-lastX)*sensitivity;
-            if(inputAllowed(TutorialSession::LookUp) || inputAllowed(TutorialSession::LookDown))pitch+=(y-lastY)*sensitivity*(invert?1:-1);
+            if(inputAllowed(TutorialSession::LookLeft) || inputAllowed(TutorialSession::LookRight))yaw+=(x-lastX)*lookSensitivity();
+            if(inputAllowed(TutorialSession::LookUp) || inputAllowed(TutorialSession::LookDown))pitch+=(y-lastY)*lookSensitivity()*(invertLook()?1:-1);
             pitch=std::clamp(pitch,-1.55,1.55);
         }
         lastX=x;lastY=y;mouseReady=true;
@@ -866,52 +939,38 @@ struct App {
     }
     // InputManager.GetValue: the EControllerActions values for this frame from
     // the keyboard/mouse and the PS3 layout of the gamepad (DefineActions).
-    void sampleActions(const GLFWgamepadstate& pad,bool hasPad){
+    void sampleActions(bool hasPad){
         using S=TutorialSession;
         auto key=[&](int k){return glfwGetKey(window,k)==GLFW_PRESS;};
         auto mouse=[&](int b){return glfwGetMouseButton(window,b)==GLFW_PRESS;};
-        auto button=[&](int b){return hasPad && pad.buttons[b]==GLFW_PRESS;};
-        auto stick=[&](int a,float sign){return hasPad && pad.axes[a]*sign>.5f;};
-        auto trigger=[&](int a){return hasPad && pad.axes[a]>.1f;};
+        // The buttons the selected controller layout binds to each action.
+        auto pad=[&](int action){return hasPad && padAction(action);};
         auto& v=actionValues;v.fill(0);
-        v[S::MenuA]=key(GLFW_KEY_ENTER)||key(GLFW_KEY_KP_ENTER)||key(GLFW_KEY_SPACE)||button(GLFW_GAMEPAD_BUTTON_A);
-        v[S::MenuB]=key(GLFW_KEY_BACKSPACE)||button(GLFW_GAMEPAD_BUTTON_B)||(screen!=Screen::Playing && key(GLFW_KEY_ESCAPE));
-        v[S::MenuX]=key(GLFW_KEY_X)||button(GLFW_GAMEPAD_BUTTON_X);
-        v[S::MenuY]=key(GLFW_KEY_Y)||button(GLFW_GAMEPAD_BUTTON_Y);
-        v[S::MenuUp]=key(GLFW_KEY_UP)||button(GLFW_GAMEPAD_BUTTON_DPAD_UP)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,-1);
-        v[S::MenuDown]=key(GLFW_KEY_DOWN)||button(GLFW_GAMEPAD_BUTTON_DPAD_DOWN)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,1);
-        v[S::MenuLeft]=key(GLFW_KEY_LEFT)||button(GLFW_GAMEPAD_BUTTON_DPAD_LEFT)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,-1);
-        v[S::MenuRight]=key(GLFW_KEY_RIGHT)||button(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,1);
-        v[S::MenuPageUp]=trigger(GLFW_GAMEPAD_AXIS_LEFT_TRIGGER);v[S::MenuPageDown]=trigger(GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER);
-        v[S::MenuLeftScroll]=button(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER);v[S::MenuRightScroll]=button(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER);
-        v[S::MenuPauseMenu]=key(GLFW_KEY_ESCAPE)||button(GLFW_GAMEPAD_BUTTON_START);
-        v[S::MenuOk]=v[S::MenuA];v[S::MenuCancel]=v[S::MenuB];
-        v[S::Jump]=key(GLFW_KEY_SPACE)||button(GLFW_GAMEPAD_BUTTON_A);
-        v[S::Forward]=key(GLFW_KEY_W)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,-1);
-        v[S::Backward]=key(GLFW_KEY_S)||stick(GLFW_GAMEPAD_AXIS_LEFT_Y,1);
-        v[S::Left]=key(GLFW_KEY_A)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,-1);
-        v[S::Right]=key(GLFW_KEY_D)||stick(GLFW_GAMEPAD_AXIS_LEFT_X,1);
-        v[S::LookLeft]=lookDX<-1||stick(GLFW_GAMEPAD_AXIS_RIGHT_X,-1);
-        v[S::LookRight]=lookDX>1||stick(GLFW_GAMEPAD_AXIS_RIGHT_X,1);
-        v[S::LookUp]=lookDY<-1||stick(GLFW_GAMEPAD_AXIS_RIGHT_Y,-1);
-        v[S::LookDown]=lookDY>1||stick(GLFW_GAMEPAD_AXIS_RIGHT_Y,1);
-        v[S::Use]=mouse(GLFW_MOUSE_BUTTON_RIGHT)||trigger(GLFW_GAMEPAD_AXIS_LEFT_TRIGGER);
-        v[S::ActionButton]=mouse(GLFW_MOUSE_BUTTON_LEFT)||trigger(GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER);
-        v[S::LeftScroll]=scrollSteps<0||button(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER);
-        v[S::RightScroll]=scrollSteps>0||button(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER);
-        v[S::InventoryAction]=key(GLFW_KEY_E)||button(GLFW_GAMEPAD_BUTTON_Y);
-        v[S::CraftingAction]=key(GLFW_KEY_C)||button(GLFW_GAMEPAD_BUTTON_X);
-        v[S::Drop]=key(GLFW_KEY_Q)||button(GLFW_GAMEPAD_BUTTON_B);
-        v[S::PauseMenu]=v[S::MenuPauseMenu];
-        v[S::SneakToggle]=key(GLFW_KEY_LEFT_SHIFT)||button(GLFW_GAMEPAD_BUTTON_RIGHT_THUMB);
-        v[S::RenderThirdPerson]=key(GLFW_KEY_F5)||button(GLFW_GAMEPAD_BUTTON_LEFT_THUMB);
-        v[S::GameInfo]=key(GLFW_KEY_TAB)||button(GLFW_GAMEPAD_BUTTON_BACK);
-        v[S::DpadLeft]=button(GLFW_GAMEPAD_BUTTON_DPAD_LEFT);v[S::DpadRight]=button(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT);
-        v[S::DpadUp]=button(GLFW_GAMEPAD_BUTTON_DPAD_UP);v[S::DpadDown]=button(GLFW_GAMEPAD_BUTTON_DPAD_DOWN);
-        if(hasPad){
-            for(int b=0;b<=GLFW_GAMEPAD_BUTTON_LAST;++b)if(pad.buttons[b]==GLFW_PRESS)padInputLast=true;
-            for(int a=0;a<4;++a)if(std::abs(pad.axes[a])>.5f)padInputLast=true;
-        }
+        for(int action=0;action<S::ActionCount;++action)v[action]=pad(action);
+        const bool menu=screen!=Screen::Playing;
+        v[S::MenuA]|=key(GLFW_KEY_ENTER)||key(GLFW_KEY_KP_ENTER)||key(GLFW_KEY_SPACE);
+        v[S::MenuB]|=key(GLFW_KEY_BACKSPACE)||(menu && key(GLFW_KEY_ESCAPE));
+        v[S::MenuX]|=key(GLFW_KEY_X);v[S::MenuY]|=key(GLFW_KEY_Y);
+        v[S::MenuUp]|=key(GLFW_KEY_UP);v[S::MenuDown]|=key(GLFW_KEY_DOWN);
+        v[S::MenuLeft]|=key(GLFW_KEY_LEFT);v[S::MenuRight]|=key(GLFW_KEY_RIGHT);
+        v[S::MenuPauseMenu]|=key(GLFW_KEY_ESCAPE);
+        v[S::MenuOk]|=v[S::MenuA];v[S::MenuCancel]|=v[S::MenuB];
+        v[S::Jump]|=key(GLFW_KEY_SPACE);
+        v[S::Forward]|=key(GLFW_KEY_W);v[S::Backward]|=key(GLFW_KEY_S);
+        v[S::Left]|=key(GLFW_KEY_A);v[S::Right]|=key(GLFW_KEY_D);
+        v[S::LookLeft]|=lookDX<-1;v[S::LookRight]|=lookDX>1;
+        v[S::LookUp]|=lookDY<-1;v[S::LookDown]|=lookDY>1;
+        v[S::Use]|=mouse(GLFW_MOUSE_BUTTON_RIGHT);
+        v[S::ActionButton]|=mouse(GLFW_MOUSE_BUTTON_LEFT);
+        v[S::LeftScroll]|=scrollSteps<0;v[S::RightScroll]|=scrollSteps>0;
+        v[S::InventoryAction]|=key(GLFW_KEY_E);
+        v[S::CraftingAction]|=key(GLFW_KEY_C);
+        v[S::Drop]|=key(GLFW_KEY_Q);
+        v[S::PauseMenu]|=key(GLFW_KEY_ESCAPE);
+        v[S::SneakToggle]|=key(GLFW_KEY_LEFT_SHIFT);
+        v[S::RenderThirdPerson]|=key(GLFW_KEY_F5);
+        v[S::GameInfo]|=key(GLFW_KEY_TAB);
+        if(padBits)padInputLast=true;
     }
     // The engine events the console tutorial listens to, checked once per game
     // tick: look-at (Minecraft::tick tooltips), collected items
@@ -978,47 +1037,72 @@ struct App {
     void update(double dt){
         GLFWgamepadstate pad{};bool hasPad=false;
         for(int i=GLFW_JOYSTICK_1;i<=GLFW_JOYSTICK_LAST;++i)if(glfwGetGamepadState(i,&pad)){hasPad=true;break;}
+        const bool southpaw=settings.get(GameSetting::ControlSouthPaw)!=0;
+        padBits=hasPad?padButtons(pad,southpaw):0;
         if(hasPad){
+            using S=TutorialSession;
             auto pressed=[&](int b){return pad.buttons[b] && !previousPad.buttons[b];};
-            // START pauses; B is MINECRAFT_ACTION_DROP in game and back in menus.
-            if(pressed(GLFW_GAMEPAD_BUTTON_START))key(GLFW_KEY_ESCAPE,GLFW_PRESS);
-            else if(pressed(GLFW_GAMEPAD_BUTTON_B))key(screen==Screen::Playing?GLFW_KEY_Q:GLFW_KEY_ESCAPE,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_DPAD_UP))key(GLFW_KEY_UP,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_DPAD_DOWN))key(GLFW_KEY_DOWN,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_DPAD_LEFT))key(GLFW_KEY_LEFT,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT))key(GLFW_KEY_RIGHT,GLFW_PRESS);
-            if(screen==Screen::Chest && pressed(GLFW_GAMEPAD_BUTTON_X))moveChestSelection(0);
-            if(screen==Screen::Chest && pressed(GLFW_GAMEPAD_BUTTON_Y))moveChestSelection(1);
-            if(screen==Screen::Furnace && pressed(GLFW_GAMEPAD_BUTTON_X))moveFurnaceSelection(0);
-            if(screen==Screen::Furnace && pressed(GLFW_GAMEPAD_BUTTON_Y))moveFurnaceSelection(1);
-            if(screen==Screen::Brewing && pressed(GLFW_GAMEPAD_BUTTON_X))moveBrewingSelection(0);
-            if(screen==Screen::Brewing && pressed(GLFW_GAMEPAD_BUTTON_Y))moveBrewingSelection(1);
-            if(pressed(GLFW_GAMEPAD_BUTTON_A))key(screen==Screen::Playing?GLFW_KEY_SPACE:GLFW_KEY_ENTER,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_X) && loaded && world.survival() && (screen==Screen::Playing || screen==Screen::Crafting))
-                key(GLFW_KEY_C,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_Y) && (screen==Screen::Playing || screen==Screen::Inventory))key(GLFW_KEY_E,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Playing)key(GLFW_KEY_F,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Furnace)key(GLFW_KEY_F,GLFW_PRESS);
-            if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && screen==Screen::Brewing)key(GLFW_KEY_F,GLFW_PRESS);
-            if((pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER) || pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER)) && (screen==Screen::Inventory || screen==Screen::Crafting))key(GLFW_KEY_TAB,GLFW_PRESS);
-            else if(screen==Screen::Playing){
-                if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER) && inputAllowed(TutorialSession::LeftScroll))slot=(slot+8)%9;
-                if(pressed(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER) && inputAllowed(TutorialSession::RightScroll))slot=(slot+1)%9;
+            if(screen==Screen::Menu){
+                if(editingField>=0){
+                    if(padActionPressed(S::MenuA) || padActionPressed(S::MenuB)){editingField=-1;menus.refresh();}
+                }else{
+                    if(padActionPressed(S::MenuUp))menuKey(GLFW_KEY_UP,GLFW_PRESS);
+                    if(padActionPressed(S::MenuDown))menuKey(GLFW_KEY_DOWN,GLFW_PRESS);
+                    if(padActionPressed(S::MenuLeft))menuInput(MenuInput::Left);
+                    if(padActionPressed(S::MenuRight))menuInput(MenuInput::Right);
+                    if(padActionPressed(S::MenuA))menuInput(MenuInput::Accept);
+                    else if(padActionPressed(S::MenuB))menuInput(MenuInput::Back);
+                    else if(padActionPressed(S::MenuX))menuInput(MenuInput::X);
+                    else if(padActionPressed(S::MenuY))menuInput(MenuInput::Y);
+                    // UIScene_PauseMenu: START also resumes.
+                    else if(padActionPressed(S::MenuPauseMenu) && menus.active() && menus.scene()==MenuScene::Pause)menuInput(MenuInput::Back);
+                }
+            }else if(screen==Screen::Playing){
+                // The in-game actions of the selected controller layout.
+                if(padActionPressed(S::PauseMenu))key(GLFW_KEY_ESCAPE,GLFW_PRESS);
+                else{
+                    if(padActionPressed(S::Jump))key(GLFW_KEY_SPACE,GLFW_PRESS);
+                    if(padActionPressed(S::Drop))key(GLFW_KEY_Q,GLFW_PRESS);
+                    if(padActionPressed(S::InventoryAction))key(GLFW_KEY_E,GLFW_PRESS);
+                    if(padActionPressed(S::CraftingAction))key(GLFW_KEY_C,GLFW_PRESS);
+                    if(padActionPressed(S::LeftScroll) && inputAllowed(S::LeftScroll))slot=(slot+8)%9;
+                    if(padActionPressed(S::RightScroll) && inputAllowed(S::RightScroll))slot=(slot+1)%9;
+                }
+            }else{
+                // Container menus: the ACTION_MENU_* buttons.
+                if(padActionPressed(S::MenuB) || padActionPressed(S::MenuPauseMenu))key(GLFW_KEY_ESCAPE,GLFW_PRESS);
+                if(padActionPressed(S::MenuUp))key(GLFW_KEY_UP,GLFW_PRESS);
+                if(padActionPressed(S::MenuDown))key(GLFW_KEY_DOWN,GLFW_PRESS);
+                if(padActionPressed(S::MenuLeft))key(GLFW_KEY_LEFT,GLFW_PRESS);
+                if(padActionPressed(S::MenuRight))key(GLFW_KEY_RIGHT,GLFW_PRESS);
+                if(screen==Screen::Chest && padActionPressed(S::MenuX))moveChestSelection(0);
+                if(screen==Screen::Chest && padActionPressed(S::MenuY))moveChestSelection(1);
+                if(screen==Screen::Furnace && padActionPressed(S::MenuX))moveFurnaceSelection(0);
+                if(screen==Screen::Furnace && padActionPressed(S::MenuY))moveFurnaceSelection(1);
+                if(screen==Screen::Brewing && padActionPressed(S::MenuX))moveBrewingSelection(0);
+                if(screen==Screen::Brewing && padActionPressed(S::MenuY))moveBrewingSelection(1);
+                if(padActionPressed(S::MenuA))key(GLFW_KEY_ENTER,GLFW_PRESS);
+                if(screen==Screen::Crafting && padActionPressed(S::MenuX))key(GLFW_KEY_C,GLFW_PRESS);
+                if(screen==Screen::Inventory && padActionPressed(S::MenuY))key(GLFW_KEY_E,GLFW_PRESS);
+                if(pressed(GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && (screen==Screen::Furnace || screen==Screen::Brewing))key(GLFW_KEY_F,GLFW_PRESS);
+                if((padActionPressed(S::MenuLeftScroll) || padActionPressed(S::MenuRightScroll)) &&
+                   (screen==Screen::Inventory || screen==Screen::Crafting))key(GLFW_KEY_TAB,GLFW_PRESS);
             }
         }
-        previousPad=pad;
-        sampleActions(pad,hasPad);
+        previousPad=pad;previousPadBits=padBits;
+        sampleActions(hasPad);
+        if(screen==Screen::Menu && menus.active() && menus.scene()==MenuScene::Credits)menus.creditsScroll+=float(dt)*20;
         if(screen==Screen::Loading){finishLoad();return;}
         if(screen==Screen::FindingSeed){
             try{auto seed=seedSearch->step();++seedAttempts;if(seed)start(true,{},seed);}
-            catch(const std::exception& error){change(Screen::CreateWorld);message(error.what());}
+            catch(const std::exception& error){change(Screen::Menu);message(error.what());}
             return;
         }
         if(screen!=Screen::Playing && screen!=Screen::Furnace && screen!=Screen::Brewing && screen!=Screen::Chest &&
-           screen!=Screen::Inventory && screen!=Screen::Crafting && screen!=Screen::Dead)return;
+           screen!=Screen::Inventory && screen!=Screen::Crafting && !deathMenuShown())return;
         try{if(world.streamAround(position))renderer->beginRebuild(world);
             if(!world.streaming())renderer->stepRebuild(world);}
-        catch(const std::exception& error){change(Screen::Pause);message(error.what());return;}
+        catch(const std::exception& error){openMenu(MenuScene::Pause);message(error.what());return;}
         renderer->tickLighting(dt);
         world.setPlayerPosition(position);
         worldTickSeconds+=dt;
@@ -1032,18 +1116,22 @@ struct App {
             if(tutorial->profileChanged()){settings.tutorialCompletion()=tutorial->profile();saveSettings();}
         }
         if(world.revision!=beforeWorldTick && !world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
-        if(world.playerDead() && screen!=Screen::Dead){change(Screen::Dead);return;}
+        if(world.playerDead() && !deathMenuShown()){openMenu(MenuScene::Death);return;}
         if(screen!=Screen::Playing){potionUseTicks=0;eatUseTicks=0;mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);return;}
         const bool survival=world.survival();
         if(survival)flying=false;
         auto held=[&](int k){return glfwGetKey(window,k)==GLFW_PRESS;};
         double forward=held(GLFW_KEY_W)-held(GLFW_KEY_S),right=held(GLFW_KEY_D)-held(GLFW_KEY_A);
         auto dead=[](float x){return std::abs(x)<.18f?0.f:(x-std::copysign(.18f,x))/.82f;};
-        if(hasPad){forward-=dead(pad.axes[GLFW_GAMEPAD_AXIS_LEFT_Y]);right+=dead(pad.axes[GLFW_GAMEPAD_AXIS_LEFT_X]);
+        if(hasPad){
+            // Southpaw moves with the right stick and looks with the left.
+            const int moveX=southpaw?GLFW_GAMEPAD_AXIS_RIGHT_X:GLFW_GAMEPAD_AXIS_LEFT_X,moveY=southpaw?GLFW_GAMEPAD_AXIS_RIGHT_Y:GLFW_GAMEPAD_AXIS_LEFT_Y;
+            const int lookX=southpaw?GLFW_GAMEPAD_AXIS_LEFT_X:GLFW_GAMEPAD_AXIS_RIGHT_X,lookY=southpaw?GLFW_GAMEPAD_AXIS_LEFT_Y:GLFW_GAMEPAD_AXIS_RIGHT_Y;
+            forward-=dead(pad.axes[moveY]);right+=dead(pad.axes[moveX]);
             if(inputAllowed(TutorialSession::LookLeft) || inputAllowed(TutorialSession::LookRight))
-                yaw+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_X])*dt*sensitivity*1100;
+                yaw+=dead(pad.axes[lookX])*dt*lookSensitivity()*1100;
             if(inputAllowed(TutorialSession::LookUp) || inputAllowed(TutorialSession::LookDown))
-                pitch+=dead(pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y])*dt*sensitivity*900*(invert?1:-1);
+                pitch+=dead(pad.axes[lookY])*dt*lookSensitivity()*900*(invertLook()?1:-1);
             pitch=std::clamp(pitch,-1.55,1.55);}
         // Input::tick: an axis moves only if one of its directions is allowed.
         if(!inputAllowed(TutorialSession::Forward) && !inputAllowed(TutorialSession::Backward))forward=0;
@@ -1061,8 +1149,8 @@ struct App {
         const Vec3 before=position;
         moveAxis(0,velocity.x*dt);moveAxis(2,velocity.z*dt);
         if(climbing)verticalSpeed=horizontalCollision?4:velocity.y;
-        const bool up=(held(GLFW_KEY_SPACE)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_A])) && inputAllowed(TutorialSession::Jump);
-        if(flying){verticalSpeed=0;moveAxis(1,(up-(held(GLFW_KEY_LEFT_SHIFT)||(hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_X])))*speed*dt);}
+        const bool up=(held(GLFW_KEY_SPACE)||padAction(TutorialSession::Jump)) && inputAllowed(TutorialSession::Jump);
+        if(flying){verticalSpeed=0;moveAxis(1,(up-(held(GLFW_KEY_LEFT_SHIFT)||padAction(TutorialSession::SneakToggle)))*speed*dt);}
         else if(inLiquid && !climbing){
             // Mob::travel in liquids: slow sinking, jump swims upward.
             grounded=false;
@@ -1081,11 +1169,11 @@ struct App {
         if(flying || climbing || inLiquid)fallDistance=0;
         if(grounded){if(fallDistance>0)world.playerLanded(fallDistance);fallDistance=0;}
         world.playerWalked(std::hypot(position.x-before.x,position.z-before.z),sprinting,inWater);
-        const bool mining=(leftMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]>.1)) && inputAllowed(TutorialSession::ActionButton);
+        const bool mining=(leftMouse || padAction(TutorialSession::ActionButton)) && inputAllowed(TutorialSession::ActionButton);
         if(!survival){if(mining)edit(false);renderer->setDestroyStage(-1);}
         else if(mining)mine(elapsedWorldTicks);
         else{mineProgress=0;mineY=-1;renderer->setDestroyStage(-1);}
-        const bool usingRight=(rightMouse || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]>.1)) && inputAllowed(TutorialSession::Use);
+        const bool usingRight=(rightMouse || padAction(TutorialSession::Use)) && inputAllowed(TutorialSession::Use);
         const auto selected=selectedItem();
         const bool drinkable=selected.id==373 && !(selected.damage&0x4000);
         const bool edible=world.canEatCarried(slot);
@@ -1124,10 +1212,104 @@ struct App {
             potionUseTicks=0;potionUseSlot=-1;eatUseTicks=0;
             if(usingRight)edit(true);else usedBlockHeld=false;
         }
-        if(!world.streaming() && glfwGetTime()-lastSave>30)try{save();}catch(const std::exception& e){message(e.what());lastSave=glfwGetTime();}
+        // eGameSetting_Autosave: every 15 minutes times the setting (0 off).
+        const int autosave=settings.get(GameSetting::Autosave);
+        if(autosave>0 && !world.streaming() && glfwGetTime()-lastSave>autosave*15.0*60.0)
+            try{save();}catch(const std::exception& e){message(e.what());lastSave=glfwGetTime();}
     }
-    float buttonY()const{return screen==Screen::Dead?160:screen==Screen::Main?125:screen==Screen::Worlds?100:screen==Screen::Controls || screen==Screen::Notice?286:screen==Screen::Pause?135:139;}
-    float buttonWidth()const{return screen==Screen::Main?225.f:200.f;}
+    // Word-wrapped console rich text at `scale`, with button images (or key
+    // caps when playing with keyboard and mouse) `glyph` units high.
+    std::vector<RichLine> richLines(const std::wstring& text,float width,float scale,float glyph,std::uint32_t colour=0xffffff)const{
+        const auto spans=parseConsoleRichText(text,settings.get(GameSetting::ControlSouthPaw)!=0,colour,controlScheme());
+        auto measure=[&](const std::string& t){return renderer->textWidth(t,scale);};
+        auto glyphWidth=[&](const RichSpan& span){
+            return (useKeyCap(span)?renderer->textWidth(keyboardLabel(span),glyph/16*.8f)+glyph*.5f:glyph)+1;
+        };
+        return layoutRichText(spans,width,glyphWidth,measure);
+    }
+    bool useKeyCap(const RichSpan& span)const{return !padInputLast && span.glyph!=PadGlyph::Shank && !keyboardLabel(span).empty();}
+    void drawRichLines(Renderer& r,const std::vector<RichLine>& lines,float left,float y,float scale,float lineHeight,float glyph,bool shadow=true){
+        for(const auto& line:lines){
+            for(const auto& piece:line.pieces){
+                const float x=left+piece.x;
+                if(piece.span.glyph!=PadGlyph::None){
+                    if(useKeyCap(piece.span))r.keyCap(keyboardLabel(piece.span),x,y-1,glyph);
+                    else r.padGlyph(piece.span.glyph,x,y-1,glyph);
+                }else{
+                    const glm::vec4 colour(((piece.span.colour>>16)&255)/255.f,((piece.span.colour>>8)&255)/255.f,(piece.span.colour&255)/255.f,1);
+                    r.text(piece.span.text,x,y,scale,colour,shadow);
+                }
+            }
+            y+=lineHeight;
+        }
+    }
+    std::wstring messageText()const{
+        const auto* message=menus.message();
+        if(!message)return {};
+        return widen(message->note.empty()?consoleString(message->text):message->note);
+    }
+    // Control rectangles of the current menu scene in UI units (half the
+    // PS3's 1280x720 canvas), shared by drawing and the mouse. `panel` is
+    // the scene's backing panel (zero width when it has none).
+    std::vector<Box> menuLayout(Box* panelOut=nullptr)const{
+        std::vector<Box> boxes;Box panel;
+        if(!menus.active() || !renderer){if(panelOut)*panelOut=panel;return boxes;}
+        const float cw=renderer->uiWidth(),cx=cw/2;
+        const auto& controls=menus.controls();
+        const int n=int(controls.size());
+        auto column=[&](float top){for(int i=0;i<n;++i)boxes.push_back({cx-112.5f,top+i*25,225,20});};
+        auto rowHeight=[&](const MenuControl& c){return c.kind==MenuControlKind::Checkbox?17.f:c.kind==MenuControlKind::TextField?36.f:25.f;};
+        switch(menus.scene()){
+        case MenuScene::MainMenu:column(150);break;
+        case MenuScene::Pause:case MenuScene::Death:case MenuScene::HelpAndOptions:case MenuScene::Settings:
+            column(std::max(95.f,205-n*12.5f));break;
+        case MenuScene::LoadOrJoin:case MenuScene::HowToPlayMenu:{
+            const int visible=std::min(n,10);const float step=22;
+            panel={cx-150,72,300,visible*step+14};
+            const int first=std::clamp(menus.focus()-visible/2,0,std::max(0,n-visible));
+            for(int i=0;i<n;++i){
+                if(i<first || i>=first+visible)boxes.push_back({});
+                else boxes.push_back({panel.x+8,panel.y+8+(i-first)*step,panel.w-16,20});
+            }
+            break;
+        }
+        case MenuScene::CreateWorld:case MenuScene::MoreOptions:case MenuScene::SettingsOptions:case MenuScene::SettingsAudio:
+        case MenuScene::SettingsControl:case MenuScene::SettingsGraphics:case MenuScene::SettingsUI:{
+            float total=16;
+            for(const auto& c:controls)total+=rowHeight(c);
+            const float top=menus.scene()==MenuScene::CreateWorld || menus.scene()==MenuScene::MoreOptions?62.f:std::max(62.f,170-total/2);
+            panel={cx-150,top,300,total};
+            float y=panel.y+8;
+            for(const auto& c:controls){
+                if(c.kind==MenuControlKind::TextField)boxes.push_back({panel.x+12,y+11,panel.w-24,18});
+                else boxes.push_back({panel.x+12,y,panel.w-24,c.kind==MenuControlKind::Checkbox?14.f:20.f});
+                y+=rowHeight(c);
+            }
+            break;
+        }
+        case MenuScene::Controls:{
+            const float top=270;
+            for(int i=0;i<3;++i)boxes.push_back({cx-105+i*72.f,top,66,20});
+            boxes.push_back({cx-110,top+27,220,14});
+            boxes.push_back({cx-110,top+44,220,14});
+            break;
+        }
+        case MenuScene::MessageBox:{
+            const auto* message=menus.message();
+            const float width=320;
+            const float textHeight=richLines(messageText(),width-24,.8f,10).size()*11.f;
+            const float titleHeight=message && message->title>=0?18.f:0.f;
+            const float height=16+titleHeight+textHeight+8+n*25;
+            panel={cx-width/2,std::max(20.f,185-height/2),width,height};
+            const float y=panel.y+8+titleHeight+textHeight+8;
+            for(int i=0;i<n;++i)boxes.push_back({cx-110,y+i*25,220,20});
+            break;
+        }
+        default:break;
+        }
+        if(panelOut)*panelOut=panel;
+        return boxes;
+    }
     void click(int amount=-1){
         int w,h;glfwGetWindowSize(window,&w,&h);double x,y;glfwGetCursorPos(window,&x,&y);x=x*renderer->uiWidth()/w;y=y*360/h;
         if(screen==Screen::Chest){
@@ -1176,8 +1358,27 @@ struct App {
                 candidate<inventoryCount()){selection=candidate;activate();}
             return;
         }
-        auto entries=buttons();float left=renderer->uiWidth()/2-buttonWidth()/2;
-        for(int i=0;i<int(entries.size());++i)if(x>=left && x<left+buttonWidth() && y>=buttonY()+i*25 && y<buttonY()+i*25+20){selection=i;activate();break;}
+        if(screen!=Screen::Menu || !menus.active())return;
+        if(editingField>=0){editingField=-1;menus.refresh();}
+        if(amount==0){menuInput(MenuInput::Back);return;} // right click
+        const auto scene=menus.scene();
+        if(scene==MenuScene::HowToPlay){menuInput(MenuInput::Accept);return;}
+        const auto boxes=menuLayout();
+        for(int i=0;i<int(boxes.size());++i){
+            if(!boxes[i].contains(x,y))continue;
+            const auto& control=menus.controls()[i];
+            if(control.kind==MenuControlKind::Slider){
+                // Clicking a slider moves it towards the pointer.
+                menus.setFocus(i);
+                const float at=float(control.value-control.min)/std::max(1,control.max-control.min);
+                const double thumb=boxes[i].x+4+at*(boxes[i].w-8);
+                menuInput(x<thumb?MenuInput::Left:MenuInput::Right);
+            }else{
+                handleMenuEvent(menus.click(i));
+                if(screen==Screen::Menu && !menus.active() && loaded)change(Screen::Playing);
+            }
+            return;
+        }
     }
     // The keyboard key for a button image when playing with keyboard and mouse.
     std::string keyboardLabel(const RichSpan& span)const{
@@ -1214,42 +1415,233 @@ struct App {
         std::wstring description=tutorialPopup.description;
         // _SetDescription: a reminder is prefixed with IDS_TUTORIAL_REMINDER.
         if(tutorialPopup.isReminder)description=widen(consoleText("IDS_TUTORIAL_REMINDER"))+description;
-        const auto spans=parseConsoleRichText(description,settings.get(GameSetting::ControlSouthPaw)!=0);
         const float textLeft=left+pad+(icon?24.f:0.f);
         const float textWidth=width-(textLeft-left)-pad;
-        auto measure=[&](const std::string& s){return r.textWidth(s,scale);};
-        // Button images, or the key's cap when playing with keyboard and mouse.
-        auto useKey=[&](const RichSpan& span){return !padInputLast && span.glyph!=PadGlyph::Shank && !keyboardLabel(span).empty();};
-        auto glyphWidth=[&](const RichSpan& span){
-            return (useKey(span)?r.textWidth(keyboardLabel(span),glyph/16*.8f)+glyph*.5f:glyph)+1;
-        };
-        const auto lines=layoutRichText(spans,textWidth,glyphWidth,measure);
+        const auto lines=richLines(description,textWidth,scale,glyph);
         const std::string title=narrow(tutorialPopup.title);
         const float titleHeight=title.empty()?0.f:13.f;
         float height=pad*2+titleHeight+lines.size()*lineHeight;
         if(icon)height=std::max(height,pad*2+titleHeight+22);
-        r.rect(left,top,width,height,{0,0,0,.72f});
+        // eGameSetting_InterfaceOpacity fades the popup's backing.
+        r.rect(left,top,width,height,{0,0,0,.9f*settings.get(GameSetting::InterfaceOpacity)/100.f});
         r.rect(left,top,width,1,{1,1,1,.35f});
         float y=top+pad;
         if(!title.empty()){r.text(title,left+pad,y,.9f,{1,1,.4f,1});y+=titleHeight;}
         if(icon && iconId>0)drawItemIcon(r,iconId,iconAux,left+pad,y,18);
-        for(const auto& line:lines){
-            for(const auto& piece:line.pieces){
-                const float x=textLeft+piece.x;
-                if(piece.span.glyph!=PadGlyph::None){
-                    if(useKey(piece.span))r.keyCap(keyboardLabel(piece.span),x,y-1,glyph);
-                    else r.padGlyph(piece.span.glyph,x,y-1,glyph);
-                }else{
-                    const glm::vec4 colour(((piece.span.colour>>16)&255)/255.f,((piece.span.colour>>8)&255)/255.f,(piece.span.colour&255)/255.f,1);
-                    r.text(piece.span.text,x,y,scale,colour);
-                }
-            }
-            y+=lineHeight;
+        drawRichLines(r,lines,textLeft,y,scale,lineHeight,glyph);
+    }
+    // A button image (or the key when playing with keyboard and mouse) and
+    // its label; returns the x after it.
+    float drawTooltip(Renderer& r,float x,float y,PadGlyph glyph,const std::string& keyLabel,const std::string& label){
+        x+=padInputLast || keyLabel.empty()?r.padGlyph(glyph,x,y-2,11):r.keyCap(keyLabel,x,y-2,11);
+        x+=4;r.text(label,x,y,.85f);
+        return x+r.textWidth(label,.85f)+14;
+    }
+    std::string actionKey(const char* token)const{RichSpan span;span.token=token;return keyboardLabel(span);}
+    // Minecraft::tick's in-game tooltips: Jump (swim up), crafting or the
+    // creative menu, inventory, and what Use and Action do to the target.
+    void drawGameTooltips(Renderer& r){
+        using S=TutorialSession;
+        const int scheme=controlScheme();
+        const bool survival=world.survival();
+        const auto held=selectedItem();
+        int jump=-1,use=-1,act=-1;
+        if(world.playerUnderWater())jump=consoleStringId("IDS_TOOLTIPS_SWIMUP");
+        if(held.id==373)use=consoleStringId(held.damage&0x4000?"IDS_TOOLTIPS_THROW":"IDS_TOOLTIPS_DRINK");
+        else if(survival && world.canEatCarried(slot))use=consoleStringId("IDS_TOOLTIPS_EAT");
+        if(world.pickEntity(eye(),direction(),entityReach()))act=consoleStringId("IDS_TOOLTIPS_HIT");
+        else if(const auto h=world.raycast(eye(),direction(),blockReach());h.hit){
+            act=consoleStringId("IDS_TOOLTIPS_MINE");
+            const int block=world.get(h.x,h.y,h.z);
+            if(block==54 || block==58 || block==130 || block==64 || block==71 || block==96 || block==107 ||
+               world.canOpenFurnace(h.x,h.y,h.z) || world.canOpenBrewingStand(h.x,h.y,h.z))use=consoleStringId("IDS_TOOLTIPS_OPEN");
+            else if(use<0 && held.id && (held.id<256 || placedTileForItem(held.id)>0))use=consoleStringId("IDS_TOOLTIPS_PLACE");
         }
+        float x=16;const float y=338;
+        if(jump>=0)x=drawTooltip(r,x,y,consoleActionGlyph(S::Jump,scheme),actionKey("CONTROLLER_ACTION_JUMP"),consoleString(jump));
+        if(survival)x=drawTooltip(r,x,y,consoleActionGlyph(S::CraftingAction,scheme),actionKey("CONTROLLER_ACTION_CRAFTING"),consoleText("IDS_CONTROLS_CRAFTING"));
+        x=drawTooltip(r,x,y,consoleActionGlyph(S::InventoryAction,scheme),actionKey("CONTROLLER_ACTION_INVENTORY"),consoleText("IDS_CONTROLS_INVENTORY"));
+        if(use>=0)x=drawTooltip(r,x,y,consoleActionGlyph(S::Use,scheme),actionKey("CONTROLLER_ACTION_USE"),consoleString(use));
+        if(act>=0)x=drawTooltip(r,x,y,consoleActionGlyph(S::ActionButton,scheme),actionKey("CONTROLLER_ACTION_ACTION"),consoleString(act));
+    }
+    static std::string creditText(const ConsoleCredit& credit){
+        std::string text=credit.format;
+        for(int id:{credit.first,credit.second}){
+            if(id<0)continue;
+            const auto at=text.find("%ls");
+            if(at!=std::string::npos)text.replace(at,3,consoleString(id));
+        }
+        return text;
+    }
+    // The controller picture's labels (UIScene_ControlsMenu::PositionAllText):
+    // every button an action is bound to in the shown layout gets its text.
+    void drawControlsDiagram(Renderer& r){
+        using S=TutorialSession;
+        const float cw=r.uiWidth(),cx=cw/2;
+        const int layout=menus.controlsLayout();
+        const bool creative=menus.context().creative,southpaw=settings.get(GameSetting::ControlSouthPaw)!=0;
+        r.centered(consoleText(("IDS_CONTROLS_SCHEME"+std::to_string(layout)).c_str()),44,1.2f);
+        std::vector<std::pair<const char*,int>> lines{
+            {creative?"IDS_CONTROLS_JUMPFLY":"IDS_CONTROLS_JUMP",S::Jump},{"IDS_CONTROLS_INVENTORY",S::InventoryAction},
+            {"IDS_CONTROLS_PAUSE",S::PauseMenu},{creative?"IDS_CONTROLS_SNEAKFLY":"IDS_CONTROLS_SNEAK",S::SneakToggle},
+            {"IDS_CONTROLS_USE",S::Use},{"IDS_CONTROLS_ACTION",S::ActionButton},{"IDS_CONTROLS_HELDITEM",S::RightScroll},
+            {"IDS_CONTROLS_HELDITEM",S::LeftScroll},{"IDS_CONTROLS_DROP",S::Drop},{"IDS_CONTROLS_CRAFTING",S::CraftingAction},
+            {"IDS_CONTROLS_THIRDPERSON",S::RenderThirdPerson},{"IDS_CONTROLS_PLAYERS",S::GameInfo},
+            {southpaw?"IDS_CONTROLS_LOOK":"IDS_CONTROLS_MOVE",S::Right},{southpaw?"IDS_CONTROLS_MOVE":"IDS_CONTROLS_LOOK",S::LookRight}};
+        if(creative && layout==0)lines.push_back({"IDS_CONTROLS_DPAD",S::DpadLeft});
+        struct Pad { unsigned bits; PadGlyph glyph; bool left; };
+        static constexpr Pad pads[]{
+            {0x800000,PadGlyph::L2,true},{0x80,PadGlyph::L1,true},{0x400,PadGlyph::DpadUp,true},{0x800,PadGlyph::DpadDown,true},
+            {0x1000,PadGlyph::DpadLeft,true},{0x2000,PadGlyph::DpadRight,true},{0x4000,PadGlyph::LeftStick,true},
+            {0x200,PadGlyph::L3,true},{0x20,PadGlyph::Select,true},
+            {0x400000,PadGlyph::R2,false},{0x40,PadGlyph::R1,false},{0x8,PadGlyph::Triangle,false},{0x2,PadGlyph::Circle,false},
+            {0x4,PadGlyph::Square,false},{0x1,PadGlyph::Cross,false},{0x40000,PadGlyph::RightStick,false},
+            {0x100,PadGlyph::R3,false},{0x10,PadGlyph::Start,false}};
+        std::array<std::string,std::size(pads)> labels;
+        for(const auto& [text,action]:lines){
+            const unsigned bits=consoleJoypadButtons(action,layout);
+            for(std::size_t i=0;i<std::size(pads);++i)if(bits&pads[i].bits)labels[i]=consoleText(text);
+        }
+        r.rect(cx-230,60,460,200,{0,0,0,.55f});
+        float left=70,right=70;
+        for(std::size_t i=0;i<std::size(pads);++i){
+            if(labels[i].empty())continue;
+            float& y=pads[i].left?left:right;
+            if(pads[i].left){
+                r.padGlyph(pads[i].glyph,cx-34,y-2,12);
+                r.text(labels[i],cx-40-r.textWidth(labels[i],.85f),y,.85f);
+            }else{
+                r.padGlyph(pads[i].glyph,cx+22,y-2,12);
+                r.text(labels[i],cx+40,y,.85f);
+            }
+            y+=17;
+        }
+    }
+    // The UIScene_* menus: the scene's panel and controls, its description,
+    // and the button tooltips.
+    void drawMenu(Renderer& r,bool inWorld){
+        const float cw=r.uiWidth(),cx=cw/2;
+        const MenuScene scene=menus.scene(),root=menus.root();
+        const glm::vec4 ink{.25f,.25f,.25f,1},white{1,1,1,1},focusText{1,1,.63f,1},disabled{.55f,.55f,.55f,1};
+        if(root==MenuScene::Death)r.rect(0,0,cw,360,{.45f,.05f,.05f,.55f});
+        else if(inWorld)r.rect(0,0,cw,360,{0,0,0,.55f});
+        const bool overMain=scene==MenuScene::MainMenu || (scene==MenuScene::MessageBox && menus.below()==MenuScene::MainMenu);
+        if(overMain || scene==MenuScene::HelpAndOptions || scene==MenuScene::Settings){
+            // The loose PS3 title image includes an Xbox subtitle; use only its common wordmark.
+            r.sprite("logo",cx-142.75f,38,285.5f,40,{0,0,1,80/138.f});
+            if(overMain)r.centered("PLAYSTATION 3 EDITION",88,1.35f,{.82,.82,.82,1});
+        }
+        const int titleId=menus.title();
+        if(scene==MenuScene::Death)r.centered(consoleString(titleId),90,2);
+        else if(titleId>=0 && scene!=MenuScene::MessageBox)r.centered(consoleString(titleId),44,1.4f);
+        Box panel;
+        const auto boxes=menuLayout(&panel);
+        if(scene==MenuScene::MessageBox)r.rect(0,0,cw,360,{0,0,0,.45f});
+        if(panel.w>0)r.panel(panel.x,panel.y,panel.w,panel.h);
+        if(const auto* message=menus.message()){
+            float y=panel.y+8;
+            if(message->title>=0){const std::string title=consoleString(message->title);r.text(title,cx-r.textWidth(title)/2,y,1,ink,false);y+=18;}
+            drawRichLines(r,richLines(messageText(),panel.w-24,.8f,10,0x383838),panel.x+12,y,.8f,11,10,false);
+        }
+        if(scene==MenuScene::Controls)drawControlsDiagram(r);
+        if(scene==MenuScene::HowToPlay){
+            const int page=menus.howToPlayPage();
+            if(page!=howToPlayShown){howToPlayShown=page;howToPlayScroll=0;}
+            const Box view{cx-230,40,460,280};
+            r.rect(view.x-6,view.y-6,view.w+12,view.h+12,{0,0,0,.8f});
+            const auto lines=richLines(widen(consoleString(menus.howToPlayText())),view.w-10,.8f,10);
+            const float content=lines.size()*11.f;
+            howToPlayScroll=std::clamp(howToPlayScroll,0.f,std::max(0.f,content-view.h));
+            int fbw,fbh;glfwGetFramebufferSize(window,&fbw,&fbh);
+            const float k=fbh/360.f;
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(int(view.x*k),int(fbh-(view.y+view.h)*k),int(view.w*k),int(view.h*k));
+            drawRichLines(r,lines,view.x+2,view.y+2-howToPlayScroll,.8f,11,10);
+            glDisable(GL_SCISSOR_TEST);
+            if(content>view.h){
+                const float bar=view.h*view.h/content;
+                r.rect(view.x+view.w+1,view.y+(view.h-bar)*howToPlayScroll/(content-view.h),3,bar,{1,1,1,.5f});
+            }
+        }
+        if(scene==MenuScene::Credits){
+            r.rect(0,0,cw,360,{0,0,0,.8f});
+            std::size_t count=0;
+            const auto* credits=consoleCredits(count);
+            float y=360-menus.creditsScroll;
+            constexpr float scales[]{.8f,1.f,1.3f,2.f},heights[]{11,13,17,26};
+            for(std::size_t i=0;i<count;++i){
+                const auto& credit=credits[i];
+                const int size=std::clamp(credit.size,0,3);
+                if(credit.first==-2){y+=30;continue;} // CREDIT_ICON: the middleware logos are not supplied
+                if(y>-30 && y<370){
+                    const std::string text=creditText(credit);
+                    r.centered(text,y,scales[size],size==2?glm::vec4(1,1,.4f,1):white);
+                }
+                y+=heights[size];
+            }
+            if(y<-30)menus.creditsScroll=0;
+        }
+        const auto& controls=menus.controls();
+        for(int i=0;i<int(controls.size()) && i<int(boxes.size());++i){
+            const auto& c=controls[i];const Box& b=boxes[i];
+            if(b.w<=0)continue;
+            const bool focused=i==menus.focus();
+            switch(c.kind){
+            case MenuControlKind::Button:{
+                const bool chosen=scene==MenuScene::Controls && c.id==settings.get(GameSetting::ControlScheme);
+                r.sprite(focused?"button_focus":"button",b.x,b.y,b.w,b.h,{0,0,1,1},c.enabled?glm::vec4(1):glm::vec4(.6f,.6f,.6f,1));
+                const float scale=std::min(1.f,(b.w-10)/std::max(1.f,r.textWidth(c.label)));
+                r.text(c.label,b.x+(b.w-r.textWidth(c.label,scale))/2,b.y+6,scale,!c.enabled?disabled:focused || chosen?focusText:white);
+                break;
+            }
+            case MenuControlKind::ListItem:
+                r.rect(b.x,b.y,b.w,b.h,focused?glm::vec4(1,1,1,.6f):glm::vec4(0,0,0,.1f));
+                r.text(c.label,b.x+6,b.y+6,1,ink,false);
+                break;
+            case MenuControlKind::TextField:{
+                const bool editing=editingField==c.id;
+                r.text(c.label,b.x,b.y-10,.8f,ink,false);
+                r.rect(b.x-1,b.y-1,b.w+2,b.h+2,focused?glm::vec4(1,1,.63f,1):glm::vec4(.35f,.35f,.35f,1));
+                r.rect(b.x,b.y,b.w,b.h,{0,0,0,1});
+                if(c.text.empty() && !editing)r.text(c.placeholder,b.x+4,b.y+5,.8f,{.6f,.6f,.6f,1});
+                else r.text(c.text+(editing && std::fmod(glfwGetTime(),1.0)<.5?"_":""),b.x+4,b.y+5,1,white);
+                break;
+            }
+            case MenuControlKind::Checkbox:
+                if(focused)r.rect(b.x-3,b.y-2,b.w+6,b.h+4,{1,1,1,.5f});
+                r.rect(b.x,b.y+1,12,12,{.2f,.2f,.2f,1});
+                r.rect(b.x+1,b.y+2,10,10,c.enabled?glm::vec4(.92f,.92f,.92f,1):glm::vec4(.6f,.6f,.6f,1));
+                if(c.checked)r.rect(b.x+3,b.y+4,6,6,c.enabled?glm::vec4(.15f,.55f,.15f,1):glm::vec4(.35f,.35f,.35f,1));
+                r.text(c.label,b.x+18,b.y+3,.85f,c.enabled?ink:disabled,false);
+                break;
+            case MenuControlKind::Slider:{
+                const float at=float(c.value-c.min)/std::max(1,c.max-c.min);
+                r.sprite(focused?"button_focus":"button",b.x,b.y,b.w,b.h);
+                r.rect(b.x+3,b.y+b.h-5,(b.w-6)*at,2,{.5f,.85f,.4f,1});
+                r.rect(b.x+2+(b.w-12)*at,b.y+1,8,b.h-2,{0,0,0,.45f});
+                r.rect(b.x+3+(b.w-12)*at,b.y+2,6,b.h-4,{.85f,.85f,.85f,1});
+                const float scale=std::min(1.f,(b.w-10)/std::max(1.f,r.textWidth(c.label)));
+                r.text(c.label,b.x+(b.w-r.textWidth(c.label,scale))/2,b.y+6,scale,focused?focusText:white);
+                break;
+            }
+            }
+        }
+        if(const int description=menus.focusedDescription();description>=0 && scene!=MenuScene::MessageBox && panel.w>0){
+            const auto lines=richLines(widen(consoleString(description)),panel.w-16,.75f,9);
+            const float y=panel.y+panel.h+6;
+            r.rect(panel.x,y,panel.w,lines.size()*10+10,{0,0,0,.75f});
+            drawRichLines(r,lines,panel.x+8,y+5,.75f,10,9);
+        }
+        // ui.SetTooltips: A, B and X.
+        const auto tips=menus.tooltips();
+        constexpr PadGlyph glyphs[3]{PadGlyph::Cross,PadGlyph::Circle,PadGlyph::Square};
+        const char* keys[3]{"Enter","Esc","X"};
+        float x=16;
+        for(int i=0;i<3;++i)if(tips[i]>=0)x=drawTooltip(r,x,338,glyphs[i],keys[i],consoleString(tips[i]));
     }
     void draw(){
         int w,h;glfwGetFramebufferSize(window,&w,&h);renderer->resize(w,h);auto& r=*renderer;float cw=r.uiWidth();
-        bool inWorld=loaded && screen!=Screen::Loading && screen!=Screen::Main && screen!=Screen::Worlds && screen!=Screen::CreateWorld && screen!=Screen::FindingSeed && screen!=Screen::Notice;
+        const bool inWorld=loaded && screen!=Screen::Loading && screen!=Screen::FindingSeed;
         if(inWorld)r.world(world,eye(),yaw,pitch,viewDistance,screen==Screen::Playing?world.raycast(eye(),direction(),blockReach()):Hit{});
         else {glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);}
         r.beginUI();
@@ -1259,6 +1651,8 @@ struct App {
             r.rect(0,0,cw,360,{0,0,0,.12});
         }
         if(screen==Screen::Playing){
+          // eGameSetting_DisplayHUD
+          if(settings.get(GameSetting::DisplayHUD)){
             const auto carried=world.carriedItems();
             r.rect(cw/2-4,179.5,9,1,{1,1,1,.85});r.rect(cw/2-.5,176,1,9,{1,1,1,.85});
             r.sprite("gui",cw/2-91,328,182,22,{0,0,182/256.f,22/256.f});
@@ -1322,13 +1716,12 @@ struct App {
                 r.text(text,x,y,1,{.5f,1,.125f,1},false); // 0x80ff20
             }
             if(carried[slot].id)r.centered(itemDisplayName(carried[slot].id,carried[slot].damage),survival?290:312,1);
-            r.text("Position: "+std::to_string(int(position.x))+", "+std::to_string(int(position.y))+", "+std::to_string(int(position.z)),16,16);
-            r.text(carried[slot].id==373 && !(carried[slot].damage&0x4000)?"L2  Drink":
-                   consoleFood(carried[slot].id) && survival?"L2  Eat":"L2  Place",16,325);r.text("R2  Mine / Attack",16,338);
-            r.prompt('T',"Inventory",cw-96,325);r.prompt('X',"Jump",cw-96,338);
-            if(survival)r.prompt('S',"Crafting",cw-96,312);
-            if(flying)r.text("Flying",16,29);
-            if(world.streaming() || r.rebuilding())r.text("Loading terrain...",16,flying?42:29);
+            if(settings.get(GameSetting::Tooltips))drawGameTooltips(r);
+            if(world.streaming() || r.rebuilding()){
+                const std::string loading=consoleText("IDS_PROGRESS_BUILDING_TERRAIN");
+                r.text(loading,cw-r.textWidth(loading,.8f)-10,10,.8f);
+            }
+          }
         }else if(screen==Screen::Chest){
             const float cx=cw/2;
             r.rect(0,0,cw,360,{0,0,0,.55});
@@ -1449,14 +1842,6 @@ struct App {
             }
             r.centered(std::to_string(list.empty()?0:selection+1)+" / "+std::to_string(list.size()),308,.7f,{.2,.2,.2,1});
             r.centered("Enter/Cross: Craft   Tab / L1 R1: Group   Esc / Circle: Close",336,.7f);
-        }else if(screen==Screen::Dead){
-            // DeathScreen: red wash, title and the two source buttons.
-            r.rect(0,0,cw,360,{.45f,.05f,.05f,.55f});
-            r.centered("You died!",90,2);
-            r.centered("Score: "+std::to_string(world.playerTotalExperience()),125,1);
-            auto entries=buttons();
-            for(int i=0;i<int(entries.size());++i){float y=160+i*25.f,width=200;r.sprite(i==selection?"button_focus":"button",cw/2-width/2,y,width,20);
-                r.text(entries[i],(cw-r.textWidth(entries[i]))/2,y+6,1,i==selection?glm::vec4(1,1,.65,1):glm::vec4(1));}
         }else if(screen==Screen::Inventory){
             const bool playerInventory=inventoryCategory==creativeTabCount();
             r.rect(0,0,cw,360,{0,0,0,.55});
@@ -1493,36 +1878,22 @@ struct App {
                 const int pages=std::max(1,int((tab.items.size()+49)/50));
                 r.centered("Page "+std::to_string(creativePage[inventoryCategory]+1)+" / "+std::to_string(pages)+"  [ / ]",281,.75f,{.2,.2,.2,1});
             }
-        }else{
+        }else if(screen==Screen::Menu && menus.active()){
+            drawMenu(r,inWorld);
+        }else if(screen==Screen::FindingSeed || screen==Screen::Loading){
+            // The console's progress screen: a message over the panorama.
             if(inWorld)r.rect(0,0,cw,360,{0,0,0,.65});
-            if(screen==Screen::Main){
-                // The loose PS3 title image includes an Xbox subtitle; use only its common wordmark.
-                r.sprite("logo",cw/2-142.75f,38,285.5f,40,{0,0,1,80/138.f});
-                r.centered("PLAYSTATION 3 EDITION",88,1.35f,{.82,.82,.82,1});
-            }else r.centered(screen==Screen::Worlds?"Play Game":screen==Screen::CreateWorld?"Create New World":screen==Screen::FindingSeed?"Finding World Seed":screen==Screen::Loading?"Loading World":screen==Screen::Pause?"Game Paused":screen==Screen::Options?"Help & Options":screen==Screen::Controls?"Controls":"Console Services",65,2);
-            if(screen==Screen::Worlds){
-                r.centered("Load / Create",91);
-                if(savedWorlds.empty())r.centered("No saved worlds",315,.8f);
-                else r.centered("Page "+std::to_string(worldPage+1)+" / "+std::to_string((savedWorlds.size()+3)/4),335,.8f);
-            }
-            if(screen==Screen::FindingSeed)r.centered("Searching... "+std::to_string(seedAttempts),108,1);
-            if(screen==Screen::Loading){
-                constexpr const char* stages[]={"Saving previous world...","Preparing chunks...","Preparing world...","Saving world...","Building the world view..."};
+            std::string status;float progress=0;
+            if(screen==Screen::FindingSeed){status=consoleText("IDS_PROGRESS_NEW_WORLD_SEED");progress=std::fmod(float(seedAttempts)/64.f,1.f);}
+            else{
                 const int stage=loadPhase?std::clamp(loadPhase->load(),0,4):0;
-                r.centered(stages[stage],146,1);
+                const char* stages[]{"IDS_PROGRESS_SAVING_LEVEL","IDS_PROGRESS_INITIALISING_SERVER","IDS_PROGRESS_SAVING_CHUNKS",
+                                     "IDS_PROGRESS_SAVING_TO_DISC","IDS_PROGRESS_BUILDING_TERRAIN"};
+                status=consoleText(stages[stage]);progress=(stage+1)/5.f;
             }
-            if(screen==Screen::CreateWorld)r.centered("Offline Game",108,.85f);
-            if(screen==Screen::Controls){
-                const char* lines[]={"W A S D / Left Stick - Move   Ctrl - Sprint","Mouse / Right Stick - Look","Space / Cross - Jump / Swim / Fly Up","Shift / Square - Fly Down (creative)","F / L3 - Toggle Flight (creative)","Left Mouse / R2 - Mine / Attack","Right Mouse / L2 - Place / Use / Eat","1-9 / Wheel / L1 R1 - Select Item","E / Triangle - Inventory   C / Square - Crafting","Q - Drop Item (Ctrl+Q: Stack)","Esc / Start - Pause   F2 - Screenshot"};
-                for(int i=0;i<11;++i)r.centered(lines[i],104+i*14,.85f);
-            }
-            if(screen==Screen::Notice){r.centered(notice,158,.9f);r.centered("This build supports local survival and creative play.",180,.9f);}
-            auto entries=buttons();
-            for(int i=0;i<int(entries.size());++i){float y=buttonY()+i*25,width=buttonWidth();r.sprite(i==selection?"button_focus":"button",cw/2-width/2,y,width,20);
-                auto color=i==selection?glm::vec4(1,1,.65,1):glm::vec4(1);
-                float scale=std::min(1.f,(width-10)/std::max(1.f,r.textWidth(entries[i])));
-                r.text(entries[i],(cw-r.textWidth(entries[i],scale))/2,y+6,scale,color);}
-            if(screen!=Screen::Loading){r.prompt('X',"Select",20,329);if(screen!=Screen::Main)r.prompt('O',"Back",95,329);}
+            r.centered(status,160,1);
+            r.rect(cw/2-100,180,200,6,{.2f,.2f,.2f,1});
+            r.rect(cw/2-100,180,200*progress,6,{.5f,.85f,.4f,1});
         }
         if(inWorld && tutorialPopupShown())drawTutorialPopup(r);
         if(glfwGetTime()<toastUntil){float tw=r.textWidth(toast,.8f);r.rect((cw-tw)/2-6,292,tw+12,15,{0,0,0,.8f});r.centered(toast,296,.8f);}
@@ -1557,8 +1928,18 @@ int main(int argc,char** argv){
         app.renderer=std::make_unique<Renderer>(assets);glfwSetWindowUserPointer(window,&app);
         // The profile's GAME_SETTINGS (options and tutorial progress).
         try{app.settings.load(app.settingsPath());}catch(const std::exception& e){app.message(e.what());}
+        app.openMenu(MenuScene::MainMenu);
         glfwSetKeyCallback(window,[](GLFWwindow* w,int key,int,int action,int){static_cast<App*>(glfwGetWindowUserPointer(w))->key(key,action);});
-        glfwSetCharCallback(window,[](GLFWwindow* w,unsigned c){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));if(a->seedEditing && a->seedText.size()<60 && c>=32 && c<127)a->seedText+=char(c);if(a->nameEditing && a->worldName.size()<25 && c>=32 && c<127)a->worldName+=char(c);});
+        glfwSetCharCallback(window,[](GLFWwindow* w,unsigned c){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
+            if(a->editCharGuard){a->editCharGuard=false;return;}
+            if(a->screen!=Screen::Menu || a->editingField<0 || c<32 || c==127 || c>=0x800)return;
+            // The seed is read as ASCII; world names take Latin letters too.
+            auto& value=a->editingField==0?a->menus.newWorld().name:a->menus.newWorld().seed;
+            std::size_t length=0;for(unsigned char ch:value)if((ch&0xC0)!=0x80)++length;
+            if(a->editingField==1 && (c>=127 || length>=60))return;
+            if(a->editingField==0 && length>=25)return;
+            if(c<0x80)value+=char(c);else{value+=char(0xC0|(c>>6));value+=char(0x80|(c&0x3F));}
+            a->menus.refresh();});
         glfwSetCursorPosCallback(window,[](GLFWwindow* w,double x,double y){static_cast<App*>(glfwGetWindowUserPointer(w))->look(x,y);});
         glfwSetScrollCallback(window,[](GLFWwindow* w,double,double y){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
             if(a->screen==Screen::Playing && y!=0){
@@ -1566,34 +1947,57 @@ int main(int argc,char** argv){
                 if(a->inputAllowed(y>0?TutorialSession::LeftScroll:TutorialSession::RightScroll))a->slot=(a->slot+(y>0?8:1))%9;
             }
             else if(a->screen==Screen::Inventory && y!=0)a->turnCreativePage(y>0?-1:1);
+            else if(a->screen==Screen::Menu && y!=0)a->menuKey(y>0?GLFW_KEY_UP:GLFW_KEY_DOWN,GLFW_PRESS);
             else if(a->screen==Screen::Crafting && y!=0){const int count=int(a->craftingList().size());
                 if(count)a->selection=std::clamp(a->selection+(y>0?-1:1),0,count-1);}
         });
         glfwSetMouseButtonCallback(window,[](GLFWwindow* w,int button,int action,int){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));
             if(button==GLFW_MOUSE_BUTTON_LEFT)a->leftMouse=action==GLFW_PRESS;
             if(button==GLFW_MOUSE_BUTTON_RIGHT)a->rightMouse=action==GLFW_PRESS;
-            if((a->screen==Screen::Chest || a->screen==Screen::Furnace || a->screen==Screen::Brewing) && button==GLFW_MOUSE_BUTTON_RIGHT && action==GLFW_PRESS)a->click(0);
+            if((a->screen==Screen::Chest || a->screen==Screen::Furnace || a->screen==Screen::Brewing || a->screen==Screen::Menu) && button==GLFW_MOUSE_BUTTON_RIGHT && action==GLFW_PRESS)a->click(0);
             if(a->screen!=Screen::Playing && button==GLFW_MOUSE_BUTTON_LEFT && action==GLFW_PRESS)a->click();});
-        glfwSetWindowFocusCallback(window,[](GLFWwindow* w,int focused){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));if(!focused && a->screen==Screen::Playing){a->leftMouse=a->rightMouse=false;a->change(Screen::Pause);}});
+        glfwSetWindowFocusCallback(window,[](GLFWwindow* w,int focused){auto a=static_cast<App*>(glfwGetWindowUserPointer(w));if(!focused && a->screen==Screen::Playing){a->leftMouse=a->rightMouse=false;a->openMenu(MenuScene::Pause);}});
         double previous=glfwGetTime();int frame=0;
         while(true){
-            glfwPollEvents();double now=glfwGetTime(),dt=std::clamp(now-previous,0.0,.05);previous=now;
+            glfwPollEvents();app.editCharGuard=false;double now=glfwGetTime(),dt=std::clamp(now-previous,0.0,.05);previous=now;
             if(glfwWindowShouldClose(window)){
-                try{app.save();break;}catch(const std::exception& e){app.message(e.what());glfwSetWindowShouldClose(window,0);app.change(Screen::Pause);}
+                try{app.save();break;}catch(const std::exception& e){app.message(e.what());glfwSetWindowShouldClose(window,0);if(app.loaded)app.openMenu(MenuScene::Pause);}
             }
             try{app.update(dt);app.draw();}
             catch(const std::exception& e){
                 if(!smokeDir.empty())throw;
                 std::cerr<<"Console port frame error: "<<e.what()<<'\n';
-                if(app.screen==Screen::Playing)app.change(Screen::Pause);
+                if(app.screen==Screen::Playing)app.openMenu(MenuScene::Pause);
                 app.message(e.what());
             }
             if(app.screenshotRequested){app.screenshotRequested=false;
                 try{app.renderer->screenshot(app.dataDir/"screenshots"/("capture-"+std::to_string(std::chrono::system_clock::now().time_since_epoch().count())+".png"));app.message("Screenshot saved");}
                 catch(const std::exception& e){app.message(e.what());}}
             if(!smokeDir.empty()){
-                if(frame==3)app.renderer->screenshot(smokeDir/"menu.png");
-                if(frame==4){app.seedText="1";app.survivalWorld=false;app.change(Screen::Worlds);app.selection=0;app.activate();app.selection=4;app.activate();if(!app.loaded)throw std::runtime_error("Smoke world failed to start");app.flying=true;app.position.y+=9;app.pitch=-.35;}
+                if(frame==2)app.renderer->screenshot(smokeDir/"menu.png");
+                if(frame==3){
+                    // Every menu scene draws: Help & Options, How To Play, Controls,
+                    // each Settings page, Credits and the message boxes.
+                    auto press=[&](int index){app.menus.setFocus(index);app.menuInput(MenuInput::Accept);app.draw();};
+                    auto back=[&]{app.menuInput(MenuInput::Back);app.draw();};
+                    press(2);press(1);press(7);press(1);back();back();press(2);back();press(3);
+                    for(int i=0;i<5;++i){press(i);back();}
+                    press(5);back();back();press(4);back();press(0);back();back();press(3);app.menuInput(MenuInput::Accept);
+                    if(app.menus.scene()!=MenuScene::MainMenu || glGetError()!=GL_NO_ERROR)throw std::runtime_error("Smoke menus failed");
+                }
+                if(frame==4){
+                    // Play Game -> Create New World (creative, seed 1).
+                    app.menus.setFocus(0);app.menuInput(MenuInput::Accept);app.menus.setFocus(0);app.menuInput(MenuInput::Accept);
+                    if(app.menus.scene()!=MenuScene::CreateWorld)throw std::runtime_error("Smoke create world menu missing");
+                    app.menus.setFocus(1);app.menuInput(MenuInput::Accept);
+                    if(app.editingField!=1)throw std::runtime_error("Smoke seed field not editable");
+                    app.menus.newWorld().seed="1";app.menuKey(GLFW_KEY_ENTER,GLFW_PRESS);
+                    app.menus.setFocus(2);app.menuInput(MenuInput::Accept);app.draw();
+                    app.menus.setFocus(5);app.menuInput(MenuInput::Accept);app.draw();
+                    app.menuInput(MenuInput::Accept); // IDS_CONFIRM_START_CREATIVE: OK
+                    if(!app.loaded)throw std::runtime_error("Smoke world failed to start");
+                    app.flying=true;app.position.y+=9;app.pitch=-.35;
+                }
                 if(frame==9){app.change(Screen::Playing);app.renderer->screenshot(smokeDir/"world.png");
                     auto h=app.world.raycast({64.5,95,64.5},{0,-1,0},96);if(!h.hit)throw std::runtime_error("Smoke raycast missed world");
                     auto camera=app.position;double cameraPitch=app.pitch;
@@ -1642,10 +2046,22 @@ int main(int argc,char** argv){
                 }
                 if(frame==16){app.renderer->setDestroyStage(-1);app.craftingTable=true;app.change(Screen::Crafting);
                     if(app.craftingList().empty())throw std::runtime_error("Smoke crafting list empty");}
-                if(frame==17)app.change(Screen::Dead);
+                if(frame==17){
+                    app.openMenu(MenuScene::Death);
+                    app.menus.setFocus(1);app.menuInput(MenuInput::Accept);app.draw();
+                    if(!app.menus.message())throw std::runtime_error("Smoke death exit prompt missing");
+                    app.menuInput(MenuInput::Back);app.openMenu(MenuScene::Pause);app.draw();
+                    if(!app.pauseMenuShown())throw std::runtime_error("Smoke pause menu missing");
+                    app.menuInput(MenuInput::Back);
+                    if(app.screen!=Screen::Playing)throw std::runtime_error("Smoke pause did not resume");
+                    app.openMenu(MenuScene::Death);
+                }
                 if(frame==18){
                     // Tutorial World: FullTutorialMode with the pack's LevelRules.
-                    app.world.respawnPlayer();app.change(Screen::Worlds);app.startTutorial();
+                    // Death menu -> Exit Game -> Exit without saving -> Play Game -> Play Tutorial.
+                    app.menus.setFocus(1);app.menuInput(MenuInput::Accept);app.menus.setFocus(2);app.menuInput(MenuInput::Accept);
+                    if(app.loaded || app.menus.scene()!=MenuScene::MainMenu)throw std::runtime_error("Smoke exit to title failed");
+                    app.menus.setFocus(0);app.menuInput(MenuInput::Accept);app.menus.setFocus(1);app.menuInput(MenuInput::Accept);
                     if(!app.loaded || !app.tutorial || !app.world.survival())throw std::runtime_error("Smoke tutorial failed to start");
                     const auto carried=app.world.carriedItems();
                     if(app.world.playerHealth()!=12 || app.world.playerFoodLevel()!=12 || carried[10].id!=364 || carried[9].id!=358)

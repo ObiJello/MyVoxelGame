@@ -6,7 +6,7 @@
 #include <cstring>
 
 namespace console {
-unsigned consoleJoypadButtons(int action){return InputManager.GetGameJoypadMaps(0,action);}
+unsigned consoleJoypadButtons(int action,int layout){return InputManager.GetGameJoypadMaps(static_cast<unsigned char>(layout),action);}
 int consoleEntityInstanceType(const std::wstring& id){
     static const std::pair<const wchar_t*,eINSTANCEOF> types[]{
         {L"Squid",eTYPE_SQUID},{L"Cow",eTYPE_COW},{L"Sheep",eTYPE_SHEEP},{L"Chicken",eTYPE_CHICKEN},
@@ -35,9 +35,9 @@ struct TutorialSession::Scenes {
 TutorialSession::TutorialSession(TutorialEngine& engine,const std::array<std::uint8_t,ProfileBytes>& profile)
     :engine_(engine),scenes_(std::make_unique<Scenes>()){
     static_assert(ProfileBytes==TUTORIAL_PROFILE_STORAGE_BYTES);
-    static_assert(ActionCount==MINECRAFT_ACTION_MAX && InventoryAction==MINECRAFT_ACTION_INVENTORY &&
-                  MenuCancel==ACTION_MENU_CANCEL && Jump==MINECRAFT_ACTION_JUMP);
-    static_assert(Enderchests==e_Tutorial_State_Enderchests && FoodBar==e_Tutorial_State_Food_Bar);
+    static_assert(int(ActionCount)==int(MINECRAFT_ACTION_MAX) && int(InventoryAction)==int(MINECRAFT_ACTION_INVENTORY) &&
+                  int(MenuCancel)==int(ACTION_MENU_CANCEL) && int(Jump)==int(MINECRAFT_ACTION_JUMP));
+    static_assert(int(Enderchests)==int(e_Tutorial_State_Enderchests) && int(FoodBar)==int(e_Tutorial_State_Food_Bar));
     TutorialHost::setEngine(&engine_);
     GAME_SETTINGS& settings=TutorialHost::profile();
     std::memcpy(settings.ucTutorialCompletion,profile.data(),ProfileBytes);

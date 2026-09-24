@@ -1,0 +1,7 @@
+# Allocations the original console tutorial (ported/tutorial, imported
+# verbatim) never frees: task input constraints, DiggerItemHint's item list
+# and a look-at popup message. A few hundred bytes per tutorial session.
+leak:InfoTask::InfoTask
+leak:ChoiceTask::ChoiceTask
+leak:DiggerItemHint::DiggerItemHint
+leak:LookAtTileHint::onLookAt

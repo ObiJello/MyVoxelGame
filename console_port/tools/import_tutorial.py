@@ -92,8 +92,9 @@ def generated():
                                     for name in ('eGameSetting', 'EControllerActions'))
     recipy = re.search(r'enum _eGroupType\s*\{.*?\}', world('Recipy.h'), re.S)
     files['RecipyGroups.inc'] = recipy[0] + ';\n'
-    # PS3 4J_Input.h button bits and DefineActions() MAP_STYLE_0 (circle/cross
-    # not swapped), which InputConstraint compares through GetGameJoypadMaps.
+    # PS3 4J_Input.h button bits and the DefineActions() layouts MAP_STYLE_0-2
+    # (circle/cross not swapped), which InputConstraint compares through
+    # GetGameJoypadMaps and the Controls menu selects.
     client = ROOT / 'source_full/Minecraft.Client/PS3'
     buttons = re.findall(r'#define\s+(_360_JOY_BUTTON_\w+)\s+(0x[0-9A-Fa-f]+)',
                          (client / '4JLibs/inc/4J_Input.h').read_text(errors='replace'))
@@ -102,8 +103,8 @@ def generated():
     actions = actions[actions.index('void DefineActions(void)'):]
     actions = actions[:actions.index('\n}\n')]
     actions = re.sub(r'if\(InputManager\.IsCircleCrossSwapped\(\)\)\s*\{.*?\}\s*else', '', actions, flags=re.S)
-    maps = re.findall(r'SetGameJoypadMaps\(MAP_STYLE_0,\s*(\w+),\s*([^)]*)\)', actions)
-    files['JoypadMap.inc'] = ''.join(f'JOYPAD_MAP({a}, {" ".join(b.split())})\n' for a, b in maps)
+    maps = re.findall(r'SetGameJoypadMaps\(MAP_STYLE_(\d),\s*(\w+),\s*([^)]*)\)', actions)
+    files['JoypadMap.inc'] = ''.join(f'JOYPAD_MAP({s}, {a}, {" ".join(b.split())})\n' for s, a, b in maps)
     return {'generated/' + k: v for k, v in files.items()}
 
 
@@ -112,6 +113,14 @@ def expected():
     for path in sorted(SOURCE.iterdir()):
         if path.suffix in ('.cpp', '.h') and path.name not in SKIP:
             files[path.name] = rewrite(path.read_text(encoding='utf-8-sig', errors='strict'))
+    # Tutorial::setHintCompleted deletes hints through TutorialHint*, which
+    # has no virtual destructor in the source (undefined behaviour; the
+    # derived hints' members leak). The one fix applied to the import.
+    ctor = '\tTutorialHint(eTutorial_Hint id, Tutorial *tutorial, int descriptionId, eHintType type, bool allowFade = true);\n'
+    if ctor not in files['TutorialHint.h']:
+        raise SystemExit('TutorialHint.h: constructor not found')
+    files['TutorialHint.h'] = files['TutorialHint.h'].replace(
+        ctor, ctor + '\tvirtual ~TutorialHint() {} // port fix: deleted through the base class\n')
     files.update(generated())
     return files
 

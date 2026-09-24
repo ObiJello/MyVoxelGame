@@ -9,8 +9,9 @@ class FullTutorial;
 
 namespace console {
 // InputManager.GetGameJoypadMaps: the PS3 (_360_JOY_BUTTON_*) buttons bound to
-// an EControllerActions value by DefineActions (circle/cross not swapped).
-unsigned consoleJoypadButtons(int action);
+// an EControllerActions value by DefineActions in controller layout 0-2
+// (eGameSetting_ControlScheme; circle/cross not swapped).
+unsigned consoleJoypadButtons(int action,int layout=0);
 // Entity::GetType (eINSTANCEOF) for an EntityIO id, 0 (eTYPE_NOTSET) if unknown.
 int consoleEntityInstanceType(const std::wstring& id);
 

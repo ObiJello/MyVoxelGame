@@ -58,21 +58,33 @@ AppleClang and OpenGL 3.2 is the tested platform; other hosts are unverified.
 * `assets/`: textures, font, button art, and panorama copied from the console archive.
 * `docs/source_manifest.json`: original paths and SHA-256 hashes of every import.
 
-The menu uses the PS3 main-menu action order from
-`Minecraft.Client/Common/UI/UIScene_MainMenu.cpp`. Its layout and controls are a new
-desktop implementation, not the original Iggy movie. The PS3 loose `MenuTitle.png`
+The front end is the PS3 `Common/UI/UIScene_*` menus, ported as data in
+`src/ConsoleMenus.cpp` (the PS3, single-player, full-version and offline branches of
+each scene's constructor and input handler): the main menu (Play Game, Leaderboards,
+Help & Options, Minecraft Store), the Start Game list, Create New World and More
+Options, Help & Options (Change Skin, How To Play, Controls, Settings, Credits), the
+five Settings pages and Reset to Defaults, the pause menu and the death menu. Every
+label, description, tooltip and message box is the original text from `strings.resx`
+(`ported/ConsoleStrings.cpp`), How To Play shows the 22 original pages with their
+button images, and Credits rolls `UIScene_Credits`' PS3 list. There is no PlayStation
+Network, so the store says it has no offers and Leaderboards and Change Skin explain
+that they are unavailable. The Iggy SWF movies that drew these screens are not in the
+supplied files, so panels, positions and fonts are an approximation built from the
+supplied button, panel, logo and panorama art. The PS3 loose `MenuTitle.png`
 contains an Xbox subtitle; the renderer samples only its common Minecraft wordmark
-and draws a PlayStation subtitle with the supplied font. This is approximate artwork,
-not a verified pixel-identical PS3 title screen.
+and draws a PlayStation subtitle with the supplied font.
 
 ## Play
 
-Choose **Play Game → Create New World**, enter a world name and a numeric or text
-seed (up to 60 characters), choose Default or Superflat and Survival or Creative, then choose **Create New World** on that screen. Enter finishes a
-text field; Escape leaves it. Leave the seed blank for the original biome-balanced random search; the search
-screen can be cancelled. The console hashes text seeds and numeric zero, so `0`
-resolves to seed 48. Numeric overflow is rejected. The Play Game list shows named saves, four per page.
-Select a saved world to load it. Each new world gets its own
+Choose **Play Game** for the Start Game list: **Create New World**, **Play Tutorial**,
+the port's **Classic Tutorial World** (the archived tutorial save for free
+exploration) and your saves. **Create New World** has World Name and Seed fields
+(select one and type; Enter finishes), the Survival/Creative toggle, Difficulty and
+**More Options** (Superflat World and the other host options; the online options are
+disabled offline). Creative asks for confirmation first, as on the console. Leave the
+seed blank for the original biome-balanced random search; the search screen can be
+cancelled. The console hashes text seeds and numeric zero, so `0` resolves to seed 48.
+Numeric overflow is rejected. Select a saved world to load it. Each new world gets its own
 `worlds/world-<unique-id>/world.inner`; creating a world preserves earlier worlds.
 The old root `world.inner` (or legacy `world.mcp`) is also listed automatically.
 
@@ -81,21 +93,30 @@ The old root `world.inner` (or legacy `world.mcp`) is also listed automatically.
 | Move / look | WASD / mouse | Left / right stick |
 | Jump / swim / fly up | Space | Cross |
 | Sprint | Left Ctrl | — |
-| Fly down (creative) | Left Shift | Square |
-| Toggle flight (creative) | F | L3 |
+| Toggle flight (creative) | Double-tap Space, or F | Double-tap Cross |
+| Sneak / fly down | Left Shift | R3 |
 | Mine / place, use, eat | Left / right mouse (hold) | R2 / L2 |
 | Select hotbar slot | 1–9 / wheel | L1 / R1 |
 | Inventory / building blocks | E | Triangle |
 | Crafting (survival) | C, or use a crafting table | Square |
-| Drop item / stack | Q / Ctrl+Q | — |
-| Pause / back | Esc | Start / Circle |
-| Navigate / select menus | Arrows / Enter, or click | D-pad / Cross |
+| Drop item / stack | Q / Ctrl+Q | Circle |
+| Pause | Esc | Start |
+| Menus: move / select / back | Arrows / Enter / Esc, or point and click (right click: back) | D-pad or left stick / Cross / Circle |
 | Screenshot | F2 | — |
 
-Gamepad mappings are implemented through GLFW; physical controller testing is still
-needed. Help & Options changes sensitivity, inverted look, and view distance for
-the current session. Focus loss pauses play. Worlds autosave every 30 seconds while
-playing and on clean exit. Saves use the PS3 inner archive, region and chunk formats
+The gamepad column is controller layout 1. Help & Options → Controls chooses between
+the three PS3 layouts (`DefineActions`' `MAP_STYLE_0`–`2`), shows the controller
+labels for the highlighted layout, and sets Invert Look and Southpaw; the game reads
+buttons through that layout, as the console's `InputManager` does. Gamepads go through
+GLFW; physical controller testing is still needed.
+
+Help & Options → Settings writes the profile (`GAME_SETTINGS`, saved to
+`settings.dat` with the tutorial progress). In use: in-game sensitivity, Autosave
+(off, or every 15–120 minutes; the world is also saved on exit and from the pause
+menu), Hints (tutorial popups), In-Game Tooltips, Display HUD and Interface Opacity.
+Music and sound volume, gamma, clouds, bedrock fog, difficulty, hand, death messages,
+gamertags, splitscreen and UI size are stored but have no effect yet. Focus loss
+pauses play. Saves use the PS3 inner archive, region and chunk formats
 in `world.inner`, with validated reads and synced atomic replacement on macOS.
 The loader accepts supported creative worlds with all central chunks present;
 complete PS3 save importing, Sony packaging and simulation remain unfinished.
@@ -192,8 +213,13 @@ its expected signed wrapping semantics. The actual port uses defined arithmetic.
 
 The core test covers deterministic world creation, collision and spawn, ray reach
 and adjacent placement cells, edits, save replacement, and corruption/truncation
-rejection. The window smoke test captures menu, world, and inventory images, performs
-an edit/save/reload round trip, and checks for OpenGL errors. The smoke test uses its
+rejection. The window smoke test walks every front-end menu scene (How To Play,
+Controls, each Settings page, Credits, message boxes), creates a world through Create
+New World, captures menu, world, inventory and tutorial images, performs an
+edit/save/reload round trip, exits through the death menu, starts the tutorial from
+the Start Game list, and checks for OpenGL errors. `console_menu_core` checks the menu
+scenes against the source (buttons, focus, settings written, message boxes) and
+`console_tutorial_core` drives the tutorial's lessons, hints and constraints. The smoke test uses its
 own data directory and does not touch normal saves.
 
 ```sh
@@ -280,6 +306,20 @@ scripted lessons, entities and survival progression still need their original
 runtime systems. PS3 content uses EdgeZLib raw DEFLATE/RLE; the LZX decoder still
 reads earlier generic tutorial saves. The general LZX dependency is documented in
 third_party/libmspack/README.md with its source and license.
+
+### The console tutorial (September 24)
+
+**Play Game → Play Tutorial** creates a new Tutorial World and runs the original
+`FullTutorial` (`Common/Tutorial/*`, imported unchanged into `ported/tutorial/` by
+`tools/import_tutorial.py`): survival mode with the level rules' health, hunger and
+steak, the map in slot 9, every lesson, hint and reminder popup with its PS3 button
+images (or the keyboard key when you last used the keyboard), the input and area
+constraints that hold you in place during a lesson, the frozen time of day, the
+crafting, furnace, brewing, inventory and creative menus' own lessons, and the music
+disc collection goal. Completed lessons are remembered in the profile, so a second
+tutorial skips them; turning Hints off in Settings hides the hint popups. Leaving the
+tutorial area ends it and turns mob spawning on. A saved tutorial world loads as an
+ordinary world, as on the console.
 
 ### Tutorial exploration (September 13)
 

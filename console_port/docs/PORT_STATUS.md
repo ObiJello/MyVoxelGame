@@ -1473,3 +1473,39 @@ reconstruct is now taken from the source:
   hotbar), heart shake at low health, Regeneration ripple, damage blink with
   `lastHealth`, food shake without saturation, and the outlined level number,
   which also shows in creative.
+
+### Console tutorial, strings and front-end menus (September 24)
+
+- **Strings:** `tools/extract_strings.py` turns the PS3 `strings.resx` into
+  `ported/ConsoleStrings.cpp` (every `IDS_*` in `strings.h` order);
+  `tools/extract_descriptions.py` adds the `Tile`/`Item` description and use
+  strings. The renderer maps their UTF-8 onto the code page 437 font.
+- **Tutorial:** all of `Common/Tutorial` except `TutorialMode`/`FullTutorialMode`
+  is imported by `tools/import_tutorial.py` and compiled unchanged against
+  `ported/tutorial/TutorialHost.h`, which stands in for the engine classes it
+  touches (renamed so they do not clash with the port's own `Level`, `Entity`,
+  …) and forwards to `src/TutorialSession` / `TutorialEngine`. `FullTutorialMode`
+  itself is `src/TutorialSession.cpp`. The game raises the events
+  `Minecraft::tick`, `LocalPlayer`, `MultiPlayerGameMode`, the container menus and
+  `ClientConnection` raise on the console, applies input and area constraints,
+  freezes the time of day at 8000, restores health/hunger/steak on respawn until
+  the food lesson is done, and saves the completion bits and music disc flags in
+  the profile. The one change to the imported code: `TutorialHint` gets the
+  virtual destructor it lacks (hints are deleted through the base class), and the
+  two derived destructors the source declares but never defines are supplied by
+  the host. Allocations the source never frees are listed in
+  `tests/lsan_tutorial.supp` for sanitizer runs.
+- **Menus:** `src/ConsoleMenus` is the `UIScene_*` front end as data — controls,
+  focus rules (disabled options skipped, Controls previews the focused layout),
+  checkboxes committed on Back as `handleInput(ACTION_MENU_CANCEL)` does, sliders
+  written as they move, the Reset to Defaults and exit/save message boxes with the
+  source's button order, How To Play paging, the PS3 credits list
+  (`tools/extract_credits.py`) and tooltips. `console_menu_core` tests it.
+- **Controller layouts:** `DefineActions`' three PS3 layouts are generated into
+  `ported/tutorial/generated/JoypadMap.inc`; the game reads the pad through the
+  selected layout and southpaw, the tutorial and the Controls menu show that
+  layout's button images, and the in-game tooltips follow `Minecraft::tick`
+  (swim up, crafting, inventory, and what Use and Action do to the target).
+- **Not exact:** the Iggy movies (`MediaPS3.arc`) are not supplied, so menu
+  geometry, fonts and the controller picture are approximations; audio,
+  difficulty, gamma, clouds and bedrock fog settings are stored but unused.

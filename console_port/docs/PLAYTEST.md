@@ -1,7 +1,7 @@
 # Play-test route
 
-The current build supports local survival and creative play. It is still an
-incomplete port: scripted tutorial lessons, full mob AI, armour, redstone and the
+The current build supports local survival and creative play and the console
+tutorial. It is still an incomplete port: full mob AI, armour, redstone and the
 Nether portal trip are not playable yet. Crafting has all 222 original recipes.
 
 ## Start
@@ -12,9 +12,10 @@ From `/Users/obey/Desktop/MyVoxelGame`, run:
 bash console_port/run.command
 ```
 
-Choose **Play Game**, then **Tutorial World**. Create a new Tutorial World for
-terrain, trees, and chest checks; existing saved chunks are deliberately not
-rewritten. Keep an older save for the reload and preservation check.
+Choose **Play Game**, then **Classic Tutorial World** for the free-exploration
+checks below (terrain, trees, chests); existing saved chunks are deliberately not
+rewritten. Keep an older save for the reload and preservation check. The tutorial
+itself is **Play Tutorial** — see the tutorial route at the end.
 
 ## Test this build
 
@@ -104,3 +105,28 @@ file is needed unless the failure only appears after reload.
 5. Press **Q** to throw one item, **Ctrl+Q** for the stack. Die, confirm the
    death screen, respawn, and walk back to collect your dropped items.
 6. Save and Exit, reload: you should resume where you stood, still in survival.
+
+## Menus
+
+1. On the title screen move through the four buttons with the arrow keys and with the
+   mouse. Minecraft Store should say there are no offers; Leaderboards explains PSN is
+   unavailable.
+2. Help & Options → How To Play: open several topics, page with Enter / X, scroll long
+   pages with Up/Down. Controls: move between the three layouts and check the button
+   labels change; toggle Invert Look and Southpaw.
+3. Settings: change Autosave, sensitivity, Display HUD and In-Game Tooltips, leave with
+   Esc, quit, restart and confirm they stuck (`settings.dat` in the data folder).
+   Reset to Defaults: Cancel keeps them, OK resets them.
+4. Credits should roll and return with Esc.
+5. In a world, Esc opens the pause menu: Save Game asks to overwrite, Exit Game offers
+   Exit and save / Exit without saving.
+
+## Tutorial route
+
+Choose **Play Game → Play Tutorial**. Follow the popups from the overview through
+moving, looking, jumping, mining wood, crafting planks, sticks and a crafting table,
+tools, the furnace, the food bar, the night shelter, and the areas beyond (boats,
+farming, redstone, brewing, enchanting, the Nether portal and the music discs). Note
+any lesson that does not advance, any popup whose button images are wrong for the
+chosen controller layout, and any place the area constraint lets you leave early.
+Start a second tutorial afterwards: lessons you completed should be skipped.

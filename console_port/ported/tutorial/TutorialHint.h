@@ -37,6 +37,7 @@ protected:
 
 public:
 	TutorialHint(eTutorial_Hint id, Tutorial *tutorial, int descriptionId, eHintType type, bool allowFade = true);
+	virtual ~TutorialHint() {} // port fix: deleted through the base class
 
 	eTutorial_Hint getId() { return m_id; }
 

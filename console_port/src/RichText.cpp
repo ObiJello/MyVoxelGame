@@ -72,7 +72,7 @@ constexpr const wchar_t* kIconTokens[]{
     L"{*StructuresIcon*}",L"{*ToolsIcon*}",L"{*StoneIcon*}"};
 }
 
-PadGlyph consoleActionGlyph(int action){return glyphForButtons(consoleJoypadButtons(action));}
+PadGlyph consoleActionGlyph(int action,int layout){return glyphForButtons(consoleJoypadButtons(action,layout));}
 
 bool consoleRichTextIcon(const std::wstring& text,int& id,int& aux){
     const std::wstring open=L"{*ICON*}",close=L"{*/ICON*}";
@@ -103,7 +103,7 @@ bool consoleRichTextIcon(const std::wstring& text,int& id,int& aux){
     return false;
 }
 
-std::vector<RichSpan> parseConsoleRichText(const std::wstring& source,bool southpaw,std::uint32_t defaultColour){
+std::vector<RichSpan> parseConsoleRichText(const std::wstring& source,bool southpaw,std::uint32_t defaultColour,int layout){
     std::wstring text=source;
     // _SetIcon strips the {*ICON*}..{*/ICON*} tag it consumed.
     if(const auto start=text.find(L"{*ICON*}");start!=std::wstring::npos && start>0){
@@ -147,8 +147,8 @@ std::vector<RichSpan> parseConsoleRichText(const std::wstring& source,bool south
         if(token.size()==2 && token[0]==L'C' && std::iswxdigit(token[1])){
             flush();colours.push_back(kPalette[std::stoi(token.substr(1),nullptr,16)]);continue;
         }
-        if(token==L"CONTROLLER_ACTION_MOVE"){glyph(consoleActionGlyph(southpaw?MinecraftLookRight:MinecraftRight));continue;}
-        if(token==L"CONTROLLER_ACTION_LOOK"){glyph(consoleActionGlyph(southpaw?MinecraftRight:MinecraftLookRight));continue;}
+        if(token==L"CONTROLLER_ACTION_MOVE"){glyph(consoleActionGlyph(southpaw?MinecraftLookRight:MinecraftRight,layout));continue;}
+        if(token==L"CONTROLLER_ACTION_LOOK"){glyph(consoleActionGlyph(southpaw?MinecraftRight:MinecraftLookRight,layout));continue;}
         if(token==L"CONTROLLER_MENU_NAVIGATE"){glyph(southpaw?PadGlyph::RightStick:PadGlyph::LeftStick);continue;}
         static const std::pair<const wchar_t*,int> actions[]{
             {L"CONTROLLER_ACTION_JUMP",MinecraftJump},{L"CONTROLLER_ACTION_SNEAK",MinecraftSneakToggle},
@@ -159,7 +159,7 @@ std::vector<RichSpan> parseConsoleRichText(const std::wstring& source,bool south
             {L"CONTROLLER_ACTION_DPAD_UP",MinecraftDpadUp},{L"CONTROLLER_ACTION_DPAD_DOWN",MinecraftDpadDown},
             {L"CONTROLLER_ACTION_DPAD_RIGHT",MinecraftDpadRight},{L"CONTROLLER_ACTION_DPAD_LEFT",MinecraftDpadLeft}};
         bool matched=false;
-        for(const auto& [name,action]:actions)if(token==name){glyph(consoleActionGlyph(action));matched=true;break;}
+        for(const auto& [name,action]:actions)if(token==name){glyph(consoleActionGlyph(action,layout));matched=true;break;}
         if(matched)continue;
         // GetVKReplacement (circle/cross not swapped).
         static const std::pair<const wchar_t*,PadGlyph> keys[]{

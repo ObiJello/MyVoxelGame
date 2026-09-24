@@ -27,7 +27,7 @@ struct RichSpan {
 // The icon tokens ({*...Icon*}, {*ICON*}id{*/ICON*}) are removed; read them
 // first with consoleRichTextIcon.
 std::vector<RichSpan> parseConsoleRichText(const std::wstring& text,bool southpaw=false,
-                                           std::uint32_t defaultColour=0xffffff);
+                                           std::uint32_t defaultColour=0xffffff,int layout=0);
 
 // UIComponent_TutorialPopup::_SetIcon: the item a description names with
 // {*ICON*}id[:aux]{*/ICON*} or one of the fixed {*...Icon*} tokens.
@@ -35,8 +35,9 @@ std::vector<RichSpan> parseConsoleRichText(const std::wstring& text,bool southpa
 // group icons: id -1 / -2.
 bool consoleRichTextIcon(const std::wstring& text,int& id,int& aux);
 
-// GetActionReplacement: the PS3 button bound to an EControllerActions value.
-PadGlyph consoleActionGlyph(int action);
+// GetActionReplacement: the PS3 button bound to an EControllerActions value
+// in controller layout 0-2.
+PadGlyph consoleActionGlyph(int action,int layout=0);
 
 // Word-wrapped layout of parsed spans. `measure` returns the width of UTF-8
 // text at the layout scale and `glyphWidth` the width of a glyph span.
