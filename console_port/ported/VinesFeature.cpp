@@ -29,8 +29,8 @@ bool VinesFeature::place(Level *level, Random *random, int x, int y, int z)
 		}
 		else
 		{
-			x = ox + random->nextInt(4) - random->nextInt(4);
-			z = oz + random->nextInt(4) - random->nextInt(4);
+			x = ox + random->nextInt(4); x -= random->nextInt(4);
+			z = oz + random->nextInt(4); z -= random->nextInt(4);
 		}
 		y++;
 	}

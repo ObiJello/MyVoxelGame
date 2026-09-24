@@ -4,6 +4,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(CONSOLE_BUILD_CLIENT "Build the desktop client" ON)
+# The generation code comes from Java, which never fuses a*b+c. Clang fuses by
+# default on FMA hardware (Apple Silicon), changing noise bits so one seed
+# would build different worlds on arm64 and x86. Keep plain IEEE operations.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  add_compile_options(-ffp-contract=off)
+endif()
 option(CONSOLE_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 set(CONSOLE_SANITIZER_SET "address,undefined" CACHE STRING "Compiler sanitizer list")
 if(CONSOLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -870,3 +876,13 @@ add_executable(console_survival_tests tests/survival_tests.cpp)
 target_link_libraries(console_survival_tests PRIVATE console_terrain_mesh)
 add_test(NAME console_survival_core COMMAND console_survival_tests)
 set_tests_properties(console_survival_core PROPERTIES TIMEOUT 120)
+
+# Same seed, same world on every compiler (see tests/compare_golden.cmake).
+add_test(NAME console_chunk_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_chunk_samples> -DEXPECTED=a2d7ff3caa8f8a54a1375de793223980d0924aedafbdcd69284ccc58d4d332cb -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
+add_test(NAME console_feature_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_feature_samples> -DEXPECTED=a2d9550dd3f7f6590832ca1b325576c24a905097f90f5c02d2862f68ce0cd0e0 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
+add_test(NAME console_plant_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_plant_samples> -DEXPECTED=13644ebec404587029fcef3ba47391b2d854531ef3d62f7c1bc3e77e5293f692 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
+add_test(NAME console_lake_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_lake_samples> -DEXPECTED=39f3ba6907cbb1578f0331bfa452ae08f1ccae5d00f2bd5dcadf82bb069bd83f -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
+add_test(NAME console_dimension_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_dimension_samples> -DEXPECTED=5c32728a6144e9345cac1ac5af781f4d020d5a75acab7b77042cf6de44d3fafe -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
+add_test(NAME console_biome_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_biome_samples> -DEXPECTED=4b79e6c3f1b9f79827a5b3328954d245bbbfec2638bd77377feb97285dc1b32b -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
+add_test(NAME console_noise_golden COMMAND ${CMAKE_COMMAND} -DPORTED=$<TARGET_FILE:console_noise_samples> -DEXPECTED=8624ffeccc98812fdf48d0112023084329baab10b16b7e2322e59f5401794f4b -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_golden.cmake)
+set_tests_properties(console_chunk_golden console_feature_golden console_plant_golden console_lake_golden console_dimension_golden console_biome_golden console_noise_golden PROPERTIES TIMEOUT 60)

@@ -22,4 +22,12 @@ out.write_text('#include "stdafx.h"\n#include "RandomLevelSource.h"\n#include "M
 for name in ['LargeCaveFeature','CanyonFeature']:
     original=(root/'original/Minecraft.World'/(name+'.cpp')).read_text()
     # Original LevelType imports std; disambiguate its pre-C++17 byte alias.
-    (out.parent/(name+'.cpp')).write_text(original.replace('(byte)', '(::byte)'))
+    original=original.replace('(byte)', '(::byte)')
+    # addTunnel(random.nextLong(), ..., random.nextFloat()...) depends on the
+    # unspecified C++ argument order (Clang draws the seed first, GCC/MSVC the
+    # float). Sequence it in Java's left-to-right order, exactly as the port
+    # does, so the comparison is compiler independent.
+    original=re.sub(r'^(\s*)addTunnel\(random\.nextLong\(\), (.*random\.nextFloat\(\).*)$',
+                    r'\1{ const __int64 tunnelSeed = random.nextLong();\n\1  addTunnel(tunnelSeed, \2 }',
+                    original,flags=re.MULTILINE)
+    (out.parent/(name+'.cpp')).write_text(original)

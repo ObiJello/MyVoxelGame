@@ -1406,3 +1406,28 @@ the survival HUD, dropped items, crack overlay, crafting and death screens with
 no GL errors. Armour, enchantment effects on mining, sleeping, hunger-bar
 shaking, item-stack merging on the ground and the survival tutorial lessons
 remain unported.
+
+### Same seed, same world on every platform
+
+Building with GCC showed that caves differed from the Clang build for the same
+seed. The original `LargeCaveFeature` passes `random.nextLong()` and
+`random.nextFloat()` in one argument list; C++ leaves their order unspecified
+(Clang draws the seed first, GCC/MSVC the float), so macOS and Windows builds
+carved different caves. The source-parity test could not see it because the
+reference is built by the same compiler. All generation code that draws two
+random values in one argument list or arithmetic expression (carvers and the
+plant/cactus/reed/vine scatter features) is now sequenced in Java's
+left-to-right order, and the reference extraction applies the same sequencing.
+Clang output is byte-for-byte unchanged, so existing macOS worlds keep their
+terrain.
+
+Clang also fuses `a*b+c` into FMA instructions on Apple Silicon, which changed
+noise results relative to x86 (verified on x86 with `-mfma`). The build now uses
+`-ffp-contract=off`, matching Java's unfused arithmetic. On Apple Silicon this
+can change the least significant bits of noise; any resulting block differences
+at the border between old and newly generated chunks of an existing Apple
+Silicon world are expected to be rare.
+
+`console_*_golden` tests pin SHA-256 hashes of the noise, biome, terrain,
+feature, plant, lake and dimension samples, so any compiler or platform that
+would build a different world for the same seed fails the suite.

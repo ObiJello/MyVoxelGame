@@ -61,8 +61,8 @@ void CanyonFeature::addTunnel(__int64 seed, int xOffs, int zOffs, byteArray bloc
 
         xRota *= 0.80f;
         yRota *= 0.50f;
-        xRota += (random->nextFloat() - random->nextFloat()) * random->nextFloat() * 2;
-        yRota += (random->nextFloat() - random->nextFloat()) * random->nextFloat() * 4;
+        { const float first = random->nextFloat(); const float second = random->nextFloat(); xRota += (first - second) * random->nextFloat() * 2; }
+        { const float first = random->nextFloat(); const float second = random->nextFloat(); yRota += (first - second) * random->nextFloat() * 4; }
 
         if (!singleStep && random->nextInt(4) == 0) continue;
 
@@ -174,7 +174,7 @@ void CanyonFeature::addFeature(Level *level, int x, int z, int xOffs, int zOffs,
 	{
 		float yRot = random->nextFloat() * PI * 2;
 		float xRot = ((random->nextFloat() - 0.5f) * 2) / 8;
-		float thickness = (random->nextFloat() * 2 + random->nextFloat()) * 2;
+		float thickness = random->nextFloat() * 2; thickness = (thickness + random->nextFloat()) * 2;
 
 		addTunnel(random->nextLong(), xOffs, zOffs, blocks, xCave, yCave, zCave, thickness, yRot, xRot, 0, 0, 3.0);
 

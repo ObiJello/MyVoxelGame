@@ -7,9 +7,9 @@ bool ReedsFeature::place(Level *level, Random *random, int x, int y, int z)
 {
     for (int i = 0; i < 20; i++)
 	{
-        int x2 = x + random->nextInt(4) - random->nextInt(4);
+        int x2 = x + random->nextInt(4); x2 -= random->nextInt(4);
         int y2 = y;
-        int z2 = z + random->nextInt(4) - random->nextInt(4);
+        int z2 = z + random->nextInt(4); z2 -= random->nextInt(4);
 
 		// 4J Stu Added to stop reed features generating areas previously place by game rule generation
 		if(app.getLevelGenerationOptions() != NULL)

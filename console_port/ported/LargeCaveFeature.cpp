@@ -59,14 +59,16 @@ void LargeCaveFeature::addTunnel(__int64 seed, int xOffs, int zOffs, byteArray b
 
         xRota *= 0.90f;
         yRota *= 0.75f;
-        xRota += (random.nextFloat() - random.nextFloat()) * random.nextFloat() * 2;
-        yRota += (random.nextFloat() - random.nextFloat()) * random.nextFloat() * 4;
+        { const float first = random.nextFloat(); const float second = random.nextFloat(); xRota += (first - second) * random.nextFloat() * 2; }
+        { const float first = random.nextFloat(); const float second = random.nextFloat(); yRota += (first - second) * random.nextFloat() * 4; }
 
 
         if (!singleStep && step == splitPoint && thickness > 1 && dist > 0)
 		{
-            addTunnel(random.nextLong(), xOffs, zOffs, blocks, xCave, yCave, zCave, random.nextFloat() * 0.5f + 0.5f, yRot - PI / 2, xRot / 3, step, dist, 1.0);
-            addTunnel(random.nextLong(), xOffs, zOffs, blocks, xCave, yCave, zCave, random.nextFloat() * 0.5f + 0.5f, yRot + PI / 2, xRot / 3, step, dist, 1.0);
+            { const __int64 tunnelSeed = random.nextLong(); // Java evaluates arguments left to right.
+              addTunnel(tunnelSeed, xOffs, zOffs, blocks, xCave, yCave, zCave, random.nextFloat() * 0.5f + 0.5f, yRot - PI / 2, xRot / 3, step, dist, 1.0); }
+            { const __int64 tunnelSeed = random.nextLong(); // Java evaluates arguments left to right.
+              addTunnel(tunnelSeed, xOffs, zOffs, blocks, xCave, yCave, zCave, random.nextFloat() * 0.5f + 0.5f, yRot + PI / 2, xRot / 3, step, dist, 1.0); }
             return;
         }
         if (!singleStep && random.nextInt(4) == 0) continue;
@@ -186,7 +188,7 @@ void LargeCaveFeature::addFeature(Level *level, int x, int z, int xOffs, int zOf
 
             float yRot = random->nextFloat() * PI * 2;
             float xRot = ((random->nextFloat() - 0.5f) * 2) / 8;
-            float thickness = random->nextFloat() * 2 + random->nextFloat();
+            float thickness = random->nextFloat() * 2; thickness += random->nextFloat();
 			if (random->nextInt(10) == 0) thickness *= random->nextFloat() * random->nextFloat() * 3 + 1;
 
             addTunnel(random->nextLong(), xOffs, zOffs, blocks, xCave, yCave, zCave, thickness, yRot, xRot, 0, 0, 1.0);

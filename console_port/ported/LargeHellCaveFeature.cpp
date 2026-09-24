@@ -58,8 +58,8 @@ void LargeHellCaveFeature::addTunnel(int xOffs, int zOffs, byteArray blocks, dou
 
         xRota *= 0.90f;
         yRota *= 0.75f;
-        xRota += (random->nextFloat() - random->nextFloat()) * random->nextFloat() * 2;
-        yRota += (random->nextFloat() - random->nextFloat()) * random->nextFloat() * 4;
+        { const float first = random->nextFloat(); const float second = random->nextFloat(); xRota += (first - second) * random->nextFloat() * 2; }
+        { const float first = random->nextFloat(); const float second = random->nextFloat(); yRota += (first - second) * random->nextFloat() * 4; }
 
 
         if (!singleStep && step == splitPoint && thickness > 1)
@@ -174,7 +174,7 @@ void LargeHellCaveFeature::addFeature(Level *level, int x, int z, int xOffs, int
 
             float yRot = random->nextFloat() * PI * 2;
             float xRot = ((random->nextFloat() - 0.5f) * 2) / 8;
-            float thickness = random->nextFloat() * 2 + random->nextFloat();
+            float thickness = random->nextFloat() * 2; thickness += random->nextFloat();
 
             addTunnel(xOffs, zOffs, blocks, xCave, yCave, zCave, thickness*2, yRot, xRot, 0, 0, 0.5);
         }
