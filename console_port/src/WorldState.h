@@ -9,6 +9,7 @@
 #include "CombatRules.h"
 #include "FoodData.h"
 #include "PlayerExperience.h"
+#include "ScheduledTickQueue.h"
 #include <set>
 namespace console {
 struct World::State {
@@ -46,9 +47,22 @@ struct World::State {
     std::unique_ptr<ChunkGenerator> generator;
     std::unique_ptr<TutorialSchematics> tutorial;
     std::unique_ptr<TutorialWorldSource> archivedTutorial;
-    Random fluidRandom;
     Random entityRandom;
-    std::map<std::tuple<int,int,int>,std::int64_t> fluidTicks;
+    // ServerLevel's pending tile ticks, in level coordinates, over the
+    // resident region; WorldTiles.cpp.
+    struct TileTickHost final:ScheduledTickHost {
+        World* world=nullptr;
+        State& state;
+        explicit TileTickHost(State& owner):state(owner){}
+        std::int64_t getTime()const override;
+        void setTime(std::int64_t time)noexcept override;
+        bool getInstaTick()const override{return false;}
+        bool hasChunksAt(int x0,int y0,int z0,int x1,int y1,int z1)override;
+        int getTile(int x,int y,int z)override;
+        void tickTile(int id,int x,int y,int z)override;
+    } tileTickHost{*this};
+    ScheduledTickQueue tileTicks{tileTickHost};
+    std::vector<FallingBlock> fallingBlocks;
     std::vector<SimulatedEntity> entities;
     std::vector<ExperienceOrbState> experienceOrbs;
     int playerXpPickupDelay=0;

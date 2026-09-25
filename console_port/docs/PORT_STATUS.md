@@ -1547,3 +1547,49 @@ reconstruct is now taken from the source:
 - `console_tile_tick_core` drives each rule on a map-backed level and runs 1,200
   world ticks on a generated world (about 0.9 ms a tick; almost all block changes are
   the existing lava settling).
+
+### Tile updates (September 25)
+
+- The tick `Level` is now in level coordinates and has the source's update
+  semantics: the host stores (`setTileAndDataNoUpdate`, running the old tile's
+  `onRemove` and the new tile's `onPlace` as `LevelChunk::setTileAndData` does), and
+  `Level::setTile`/`setTileAndData`/`setData`, `tileUpdated`, `updateNeighborsAt` and
+  `neighborChanged` (with `noNeighborUpdate`) are the source's. `World::set`/`setData`
+  stay raw storage; `World::setTileAndUpdate`/`setDataAndUpdate` are the update-aware
+  edits, used for breaking, placing (after the collision check), doors, fence gates
+  and melting ice. `World::updateLiquidNeighbors` is gone.
+- Scheduled ticks: `World` keeps one `ScheduledTickQueue` for every tile (level
+  coordinates, the source's 1,000-a-tick limit), replacing the fluid-only map. A tick
+  runs only for tiles whose class the port has (`sim::tickPorted`); a chunk's saved
+  `TileTicks` for other tiles (redstone, pistons) stay in the record untouched and
+  are written back. Ticks in the streaming halo wait (re-queued 20 ticks on) until
+  the window reaches them. Flowing liquids with no saved tick are still scheduled when
+  their chunk becomes visible.
+- Liquids are now the source: `LiquidTile`, `LiquidTileDynamic` and `LiquidTileStatic`
+  (flow, slope search, spread, the lava/water reaction, still/flowing switching, the
+  `chunkSourceXZSize` edge check) are extracted with the other tile methods;
+  `src/FlowingFluidTick.*` (the port's own step) is removed. A generated world's
+  flowing water settles in the first few hundred ticks and then stays still.
+- Newly extracted: `HeavyTile` (with a `FallingTile` entity: `FallingTile::tick`,
+  vertical clipping as `Entity::move`, landing, dropping, `MAX_FALLING_TILE` 20),
+  `FireTile` (init/flammability, tick, spread, burn-out, placement), lava's fire
+  spread (`LiquidTileStatic::tick`), `TorchTile`, `DoorTile::neighborChanged`,
+  `LadderTile`, `SignTile`, `WoolCarpetTile`, `CakeTile`, `FlowerPotTile`,
+  `TopSnowTile`, and the `neighborChanged` of `Bush`, `CactusTile`, `ReedTile`,
+  `FarmTile`, `CocoaTile` and `VineTile`; `FlintAndSteelItem::useOn`. A broken door's
+  upper half drops nothing; the lower half drops the door when its neighbour update
+  removes it (`DoorTile::getResource`).
+- Fire renders with `TileRenderer::tesselateFireInWorld`, extracted unchanged into
+  `ported/FireRender.cpp` (`tools/extract_fire_render.py`). The console's terrain atlas
+  holds only a placeholder in fire's slot (15,1); the animated `fire_0`/`fire_1` strips
+  (from `res/TitleUpdate/res/textures/blocks`, like the liquids') are loaded from
+  `assets/animations` when present and are not in the repository yet. Falling blocks
+  draw as their tile's cube (`FallingTileRenderer`).
+- Not yet: redstone, pistons, TNT explosions, nether portals, the Fire Spreads host
+  option (always on) and saving a block mid-fall.
+- `console_tile_tick_core` covers falling sand, torches, doors, fire placement and
+  netherrack, still water waking, and through `World`: sand landing, a door's single
+  drop, a torch falling with its block, flint and steel, and a pending tick surviving
+  save and load. `console_block_texture_core` covers the fire shapes and the falling
+  block cube; `console_fire_render_extraction` checks the extraction. 1,200 world ticks
+  take about 0.7 ms a tick.

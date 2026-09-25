@@ -16,6 +16,7 @@ ControllerTask::ControllerTask(Tutorial *tutorial, int descriptionId, bool enabl
 		constraints.push_back( new InputConstraint( mappings[i] ) );
 		completedMappings[mappings[i]] = false;
 	}
+	m_bHasSouthpaw = false; // port fix: read before it is set without southpaw mappings
 	if(uiSouthpawMappingsCount > 0 ) m_bHasSouthpaw = true;
 	for(unsigned int i = 0; i < uiSouthpawMappingsCount; ++i)
 	{

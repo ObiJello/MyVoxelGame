@@ -128,6 +128,13 @@ def expected():
         raise SystemExit('Tutorial.cpp: hasRequestedUI initialisation not found')
     files['Tutorial.cpp'] = files['Tutorial.cpp'].replace(
         init, init + '\tm_bSceneIsSplitscreen = false; // port fix: read before it is set outside _XBOX\n')
+    # ControllerTask sets m_bHasSouthpaw only when it has southpaw mappings;
+    # isCompleted reads it for every controller task.
+    southpaw = '\tif(uiSouthpawMappingsCount > 0 ) m_bHasSouthpaw = true;\n'
+    if files['ControllerTask.cpp'].count(southpaw) != 1:
+        raise SystemExit('ControllerTask.cpp: southpaw flag not found')
+    files['ControllerTask.cpp'] = files['ControllerTask.cpp'].replace(
+        southpaw, '\tm_bHasSouthpaw = false; // port fix: read before it is set without southpaw mappings\n' + southpaw)
     files.update(generated())
     return files
 

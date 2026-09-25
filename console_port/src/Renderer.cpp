@@ -68,6 +68,23 @@ Renderer::Renderer(const std::filesystem::path& assets) {
         liquidAnimations_.push_back({spec,TextureAnimation(spec.frames,spec.schedule),std::move(frames)});
         uploadAnimation(liquidAnimations_.size()-1,0);
     }
+    // PreStitchedTextureMap animates fire_0 and then fire_1 into the same
+    // atlas slot (15,1), so fire_1 is what shows. The strips come from
+    // textures/blocks like the liquids' and are optional: the slot in the
+    // atlas itself only holds a placeholder.
+    for(auto name:{"fire_0","fire_1"}){
+        int width,height,channels;
+        auto path=assets/"animations"/(std::string(name)+".png");
+        if(!std::filesystem::exists(path))continue;
+        unsigned char* pixels=stbi_load(path.string().c_str(),&width,&height,&channels,4);
+        if(!pixels)continue;
+        if(width!=16 || height<16 || height%16 || height/16>4096){stbi_image_free(pixels);continue;}
+        std::vector<unsigned char> frames(pixels,pixels+width*height*4);
+        stbi_image_free(pixels);
+        LiquidAnimationSpec spec{name,240,16,16,height/16,{}};
+        liquidAnimations_.push_back({spec,TextureAnimation(spec.frames,{}),std::move(frames)});
+        uploadAnimation(liquidAnimations_.size()-1,0);
+    }
 }
 Renderer::~Renderer() {
     if(pendingMesh_)releaseChunkBuffers(pendingMesh_->chunks);
@@ -362,6 +379,12 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
         const auto mesh=buildDroppedItemMesh(item,yaw,pitch,source.inside(x,y,z)?source.renderLight(x,y,z,false):0);
         if(!mesh.terrain.empty())draw(mesh.terrain,textures_.at("terrain").id);
         if(!mesh.items.empty())draw(mesh.items,textures_.at("items").id);
+    }
+    for(const auto& block:source.fallingBlocks()){
+        const double dx=block.position.x-eye.x,dy=block.position.y-eye.y,dz=block.position.z-eye.z;
+        if(dx*dx+dy*dy+dz*dz>distance*distance)continue;
+        const int x=int(std::floor(block.position.x)),y=int(std::floor(block.position.y)),z=int(std::floor(block.position.z));
+        draw(buildFallingBlockMesh(block,source.inside(x,y,z)?source.renderLight(x,y,z,false):0),textures_.at("terrain").id);
     }
     for(const auto& decoration:source.hangingDecorations()){
         const double dx=decoration.tileX+.5-eye.x,dy=decoration.tileY+.5-eye.y,dz=decoration.tileZ+.5-eye.z;

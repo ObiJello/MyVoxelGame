@@ -32,17 +32,24 @@ struct MapLevel final:sim::Level {
     MapLevel(){sim::initializeTiles();random=&rng;static sim::Dimension overworld;dimension=&overworld;}
     int getTile(int x,int y,int z)override{auto it=blocks.find({x,y,z});return it==blocks.end()?0:it->second.first;}
     int getData(int x,int y,int z)override{auto it=blocks.find({x,y,z});return it==blocks.end()?0:it->second.second;}
-    bool setTileAndData(int x,int y,int z,int tile,int data)override{
+    // LevelChunk::setTileAndData: store, onRemove of the old tile, onPlace of the new.
+    bool setTileAndDataNoUpdate(int x,int y,int z,int tile,int data)override{
         const int old=getTile(x,y,z),oldData=getData(x,y,z);
+        if(old==tile && oldData==data)return false;
         if(tile==0)blocks.erase({x,y,z});else blocks[{x,y,z}]={tile,data};
-        if(old && old!=tile && Tile::tiles[old])Tile::tiles[old]->onRemove(this,x,y,z,old,oldData);
+        if(old && Tile::tiles[old])Tile::tiles[old]->onRemove(this,x,y,z,old,oldData);
+        if(tile && Tile::tiles[tile])Tile::tiles[tile]->onPlace(this,x,y,z);
         return true;
     }
-    bool setTile(int x,int y,int z,int tile)override{return setTileAndData(x,y,z,tile,0);}
-    bool setData(int x,int y,int z,int data)override{if(getTile(x,y,z))blocks[{x,y,z}].second=data;return true;}
-    bool setTileNoUpdate(int x,int y,int z,int tile)override{return setTile(x,y,z,tile);}
-    bool setTileAndDataNoUpdate(int x,int y,int z,int tile,int data)override{return setTileAndData(x,y,z,tile,data);}
-    bool setDataNoUpdate(int x,int y,int z,int data)override{return setData(x,y,z,data);}
+    bool setDataNoUpdate(int x,int y,int z,int data)override{
+        if(!getTile(x,y,z) || getData(x,y,z)==data)return false;
+        blocks[{x,y,z}].second=data;return true;
+    }
+    bool hasChunk(int,int)override{return true;}
+    std::vector<std::tuple<int,int,int,int,int>> scheduled;
+    void addToTickNextTick(int x,int y,int z,int tile,int delay)override{scheduled.push_back({x,y,z,tile,delay});}
+    std::vector<std::tuple<double,double,double,int,int>> falling;
+    void addEntity(std::shared_ptr<sim::FallingTile> e)override{falling.push_back({e->x,e->y,e->z,e->tile,e->data});}
     int top(int x,int z){int h=-1;for(auto& [k,v]:blocks)if(std::get<0>(k)==x && std::get<2>(k)==z && Tile::lightBlock[v.first]>0)h=std::max(h,std::get<1>(k));return h+1;}
     int skyAt(int x,int y,int z){return y>=top(x,z)?sky:0;}
     int getRawBrightness(int x,int y,int z)override{return std::max(skyAt(x,y,z)-skyDarken,lamp);}
@@ -145,9 +152,9 @@ static void rules(){
     }
     {   // IceTile melts to still water in block light above 8; TopSnowTile above 11.
         MapLevel level;
-        level.put(0,0,0,Tile::ice_Id);level.put(1,0,0,Tile::topSnow_Id);level.lamp=12;
-        level.tick(0,0,0);level.tick(1,0,0);
-        require(level.getTile(0,0,0)==Tile::calmWater_Id && level.getTile(1,0,0)==0,"ice and snow melt by a light");
+        level.put(0,0,0,Tile::ice_Id);level.put(5,-1,0,Tile::dirt_Id);level.put(5,0,0,Tile::topSnow_Id);level.lamp=12;
+        level.tick(0,0,0);level.tick(5,0,0);
+        require(level.getTile(0,0,0)==Tile::calmWater_Id && level.getTile(5,0,0)==0,"ice and snow melt by a light");
     }
     {   // RedStoneOreTile: lit ore goes dark.
         MapLevel level;level.put(0,0,0,Tile::redStoneOre_lit_Id);level.tick(0,0,0);
@@ -205,6 +212,81 @@ static void items(){
     require(plants>10,"bone meal grows plants ("+std::to_string(plants)+")");
 }
 
+// Tile updates: the chunk hooks, neighbour notifications and scheduled ticks.
+static void updates(){
+    {   // HeavyTile::onPlace schedules; the tick over air hands a FallingTile to the level.
+        MapLevel level;
+        level.setTile(0,5,0,Tile::sand_Id);
+        require(level.scheduled.size()==1 && std::get<4>(level.scheduled[0])==5,"sand schedules its fall");
+        level.tick(0,5,0);
+        require(level.falling.size()==1 && std::get<3>(level.falling[0])==Tile::sand_Id,"sand starts falling");
+    }
+    {   // TorchTile::neighborChanged: a torch loses its support and drops.
+        MapLevel level;
+        level.put(0,0,0,Tile::rock_Id);level.put(0,1,0,Tile::torch_Id,5);
+        level.setTile(0,0,0,0);
+        require(level.getTile(0,1,0)==0 && level.drops.size()==1 && std::get<3>(level.drops[0])==Tile::torch_Id,"torch pops off");
+    }
+    {   // DoorTile::neighborChanged: removing the upper half removes and drops the lower.
+        MapLevel level;
+        level.put(0,-1,0,Tile::rock_Id);level.put(0,0,0,Tile::door_wood_Id,0);level.put(0,1,0,Tile::door_wood_Id,8);
+        level.setTile(0,1,0,0);
+        require(level.getTile(0,0,0)==0 && level.drops.size()==1,"door halves go together");
+    }
+    {   // FireTile::onPlace: fire with nothing to burn and nothing under it goes
+        // out; on netherrack it stays and schedules its tick.
+        MapLevel level;
+        level.setTile(0,1,0,Tile::fire_Id);
+        require(level.getTile(0,1,0)==0,"unsupported fire goes out");
+        level.put(5,0,0,Tile::hellRock_Id);
+        level.setTile(5,1,0,Tile::fire_Id);
+        require(level.getTile(5,1,0)==Tile::fire_Id && !level.scheduled.empty(),"fire on netherrack stays");
+        // FireTile::tick on netherrack never burns out.
+        for(int i=0;i<50;++i)level.tick(5,1,0);
+        require(level.getTile(5,1,0)==Tile::fire_Id,"netherrack burns forever");
+    }
+    {   // LiquidTileStatic::neighborChanged turns still water flowing and schedules it.
+        MapLevel level;
+        level.put(0,0,0,Tile::calmWater_Id,0);
+        level.setTile(1,0,0,Tile::rock_Id);
+        require(level.getTile(0,0,0)==Tile::water_Id && !level.scheduled.empty(),"still water wakes");
+    }
+}
+
+// The same through the World: falling sand, doors, torches, flint and steel
+// and a pending tick that survives a save.
+static void worldUpdates(const std::filesystem::path& scratch){
+    World world;world.generate(41,true);
+    for(int x=24;x<=40;++x)for(int z=24;z<=40;++z)world.set(x,179,z,Stone);
+    require(world.setTileAndUpdate(32,190,32,Sand),"place sand in the air");
+    for(int i=0;i<60 && (world.get(32,180,32)!=Sand || !world.fallingBlocks().empty());++i)world.tickTime();
+    require(world.get(32,180,32)==Sand && world.get(32,190,32)==Air && world.fallingBlocks().empty(),"sand falls and lands");
+
+    world.set(30,180,30,static_cast<Block>(64));world.setData(30,180,30,0);
+    world.set(30,181,30,static_cast<Block>(64));world.setData(30,181,30,8);
+    world.setSurvival(true);
+    world.setCarriedItem(0,0,0,0);
+    const auto dropsBefore=world.droppedItems().size();
+    require(world.destroyBlock(30,181,30,0),"break the upper door half");
+    int doors=0;for(std::size_t i=dropsBefore;i<world.droppedItems().size();++i)if(world.droppedItems()[i].id==324)doors+=world.droppedItems()[i].count;
+    require(world.get(30,180,30)==Air && doors==1,"a broken door drops once");
+    world.setSurvival(false);
+
+    world.set(34,180,34,Stone);world.set(34,181,34,static_cast<Block>(50));world.setData(34,181,34,5);
+    require(world.breakBlock(34,180,34) && world.get(34,181,34)==Air,"a torch falls with its block");
+
+    require(world.setCarriedItem(0,259,1,0) && world.useItemOn(36,179,36,1,0) && int(world.get(36,180,36))==51,"flint and steel lights fire");
+
+    require(world.setTileAndUpdate(26,180,26,static_cast<Block>(8)),"place flowing water");
+    const auto path=scratch/"tile_updates_world.inner";
+    world.save(path);
+    World loaded;require(loaded.load(path),"reload with pending ticks");
+    std::filesystem::remove(path);
+    for(int i=0;i<5;++i)loaded.tickTime();
+    // LiquidTileDynamic::getSpread: toward the pad's nearer edge.
+    require(loaded.get(25,180,26)==static_cast<Block>(8) && loaded.getData(25,180,26)==1,"a saved pending tick runs after loading");
+}
+
 static void worldPass(const std::filesystem::path& scratch){
     // A generated world: random ticks run without errors, and report their cost.
     World world;
@@ -239,6 +321,8 @@ static void worldPass(const std::filesystem::path& scratch){
 int main(int argc,char** argv){try{
     rules();
     items();
+    updates();
+    worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     worldPass(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     std::cout<<"tile tick tests passed\n";
     return 0;

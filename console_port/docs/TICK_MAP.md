@@ -19,15 +19,15 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | `runTileEvents` (pistons, note blocks, chest lids) | missing | |
 | incremental save every `saveInterval` | own | the Autosave setting |
 | `setTime(time + 1)` | ported | `World::tickTime` |
-| `tickPendingTicks` (scheduled tile ticks) | partial | water and lava only; other saved ticks are kept |
+| `tickPendingTicks` (scheduled tile ticks) | ported | `ScheduledTickQueue` for every tile whose class the port has; ticks in the streaming halo wait for the window; saved ticks of other tiles (redstone, pistons) stay in the chunk untouched |
 | `tickTiles`: random tile ticks (80 per polled chunk, grass/lava limits, the update thread's one-tick lag) | ported | `WorldTiles.cpp`; chunks inside the visible window, in ring order |
-| `tickTiles`: lightning in thunderstorms | partial | the strike roll and flash timer; no `LightningBolt` (fire, damage) |
+| `tickTiles`: lightning in thunderstorms | partial | the strike roll and flash timer (`isRaining`/`isThundering` from the rain and thunder levels); no `LightningBolt` (fire, damage) |
 | `tickTiles`: freezing water, snow in rain, `Tile::handleRain` | ported | cauldrons fill in rain |
 | `tickTiles`: `checkLight` | own | lighting is recomputed on edits |
 | `tickClientSideTiles`: cave ambience | partial | the timing and draws; no audio |
 | `chunkMap->tick`, `villages->tick`, `villageSiege->tick` | missing | |
 | `Level::updateLights` | own | light propagation on edit |
-| `Level::tickEntities` | partial | dropped items, XP orbs, mob spawners, mobs with simple movement and attacks; no `Goal` AI, projectiles, riding, minecarts, boats |
+| `Level::tickEntities` | partial | dropped items, XP orbs, falling sand and gravel (`FallingTile::tick`, at most 20), mob spawners, mobs with simple movement and attacks; no `Goal` AI, projectiles, riding, minecarts, boats |
 | tile entities (`TileEntity::tick`) | partial | furnaces and brewing stands; the rest are not ticked |
 | player (`ServerPlayer`/`Player::tick`): food, effects, air, fall, experience | ported | `WorldSurvival` |
 
@@ -41,7 +41,7 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | `GameRenderer`/`LevelRenderer` | own | `Renderer` |
 | `ParticleEngine::tick` | missing | |
 | `SoundEngine`/music | missing | |
-| texture animation | partial | water and lava (`TextureAnimation`); no fire, portal, clock or compass |
+| texture animation | partial | water and lava (`TextureAnimation`); fire when `assets/animations/fire_0.png`/`fire_1.png` are supplied (the atlas slot is a placeholder); no portal, clock or compass |
 | UI scenes | ported | `ConsoleMenus` (layout approximated) |
 
 ## Random tile ticks
@@ -52,26 +52,46 @@ The ticking tiles' rules are the original methods, extracted unchanged into
 potatoes), pumpkin and melon stems, sugar cane, cactus, saplings (the original tree
 features), flowers, tall grass, dead bushes, lily pads, mushrooms, nether wart, cocoa,
 vines, leaf decay (with the trunk/leaf `onRemove` flags), ice, snow, top snow, lit
-redstone ore and cauldrons in rain. Flowing water and lava use the port's
-`LiquidTileDynamic` step. Every tile's class, material, light and ticking flag comes
-from `ported/TileProperties.cpp` (`tools/extract_tile_properties.py`).
+redstone ore, cauldrons in rain, fire and lava's fire spread. Every tile's class,
+material, light and ticking flag comes from `ported/TileProperties.cpp`
+(`tools/extract_tile_properties.py`).
 
 Farming items use the same extraction: `HoeItem`, `SeedItem` (wheat, pumpkin, melon,
 nether wart), `SeedFoodItem` (carrots, potatoes) and `DyePowderItem` (bone meal on
-saplings, mushrooms, stems, crops, cocoa and grass; cocoa beans on jungle wood), called
-from right click through `World::useItemOn`. Farmland, crops, carrots, potatoes,
-stems and nether wart render with `TileRenderer`'s row and stem shapes and the
-original atlas slots.
+saplings, mushrooms, stems, crops, cocoa and grass; cocoa beans on jungle wood), and
+`FlintAndSteelItem`, called from right click through `World::useItemOn`. Farmland,
+crops, carrots, potatoes, stems and nether wart render with `TileRenderer`'s row and
+stem shapes and the original atlas slots.
 
-Still no-ops when picked: fire and lava's fire spread (they need scheduled ticks and
-neighbour updates), torches, buttons, pressure plates, redstone torches, tripwires,
-pumpkins, cake and portals.
+## Tile updates
+
+The tick Level (`WorldTickLevel`, in level coordinates) stores a change the way
+`LevelChunk::setTileAndData` does, running the replaced tile's `onRemove` and the new
+tile's `onPlace`; `Level::setTile`/`setTileAndData`/`setData` then notify the six
+neighbours (`Level::updateNeighborsAt`, `neighborChanged`, with `noNeighborUpdate`).
+Player breaking, placing, doors, fence gates, melting ice and every tile rule go
+through it (`World::setTileAndUpdate`, `setDataAndUpdate`); `World::set`/`setData`
+stay raw storage for generation, import and streaming.
+
+Neighbour reactions from the source: liquids (`LiquidTile`, `LiquidTileDynamic`,
+`LiquidTileStatic`, all extracted: flow, the lava/water reaction, the still/flowing
+switch; replacing the port's own flow step), sand, gravel and anvils (`HeavyTile`, and
+the `FallingTile` entity), fire (placement, burning, spreading, burning out, lava
+setting things alight), torches, doors (the halves go together and drop once), ladders,
+signs, carpet, cake, flower pots, top snow, cactus, sugar cane, farmland, cocoa, vines
+and every `Bush`. Fire is drawn by `TileRenderer::tesselateFireInWorld`, extracted into
+`ported/FireRender.cpp` by `tools/extract_fire_render.py`.
+
+Not yet: redstone (dust, torches, repeaters, levers, buttons, pressure plates and the
+doors, trapdoors and gates they power), pistons and `runTileEvents`, TNT (burnt TNT
+simply goes; explosions are unported), nether portals (fire on obsidian lights
+normally), the Fire Spreads host option (always on), and saving a block that is
+mid-fall.
 
 ## Order of work
 
-1. **Tile updates**: scheduled ticks for every tile, neighbour notifications
-   (`neighborChanged`, `onPlace`), fire, redstone, pistons and `runTileEvents`,
-   buttons, pressure plates, falling sand and gravel, torches.
+1. **Tile updates**: redstone (dust, torches, repeaters, levers, buttons, pressure
+   plates, powered doors, trapdoors and gates), then pistons and `runTileEvents`.
 2. **Mobs**: the `Goal` AI, `MobCategory` spawning, combat, armour, difficulty.
 3. **More tiles**: rails and minecarts, beds and sleeping, TNT and explosions,
    dispensers, boats.

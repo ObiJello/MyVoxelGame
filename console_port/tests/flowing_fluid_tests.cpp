@@ -8,7 +8,7 @@ int main(){try{
  using namespace console;
  World water;water.generate(41,true);
  for(int x=29;x<=35;++x)for(int z=29;z<=35;++z)water.set(x,179,z,Stone);
- water.set(32,180,32,Water);water.updateLiquidNeighbors(32,180,32);
+ water.setTileAndUpdate(32,180,32,static_cast<Block>(8));
  for(int i=0;i<4;++i)water.tickTime();
  require(water.get(31,180,32)==Air,"Water spread before its five-tick delay");
  water.tickTime();
@@ -16,13 +16,13 @@ int main(){try{
          water.get(31,180,32)==static_cast<Block>(8) &&
          water.getData(31,180,32)==1,"Source water spreads one depth level across supported ground");
  World falling;falling.generate(42,true);
- falling.set(32,181,32,Water);falling.updateLiquidNeighbors(32,181,32);
+ falling.setTileAndUpdate(32,181,32,static_cast<Block>(8));
  for(int i=0;i<5;++i)falling.tickTime();
  require(falling.get(32,180,32)==static_cast<Block>(8) && falling.getData(32,180,32)==8,
          "Water falls with source falling-depth metadata");
  World lava;lava.generate(43,true);
  for(int x=29;x<=35;++x)for(int z=29;z<=35;++z)lava.set(x,179,z,Stone);
- lava.set(32,180,32,Lava);lava.updateLiquidNeighbors(32,180,32);
+ lava.setTileAndUpdate(32,180,32,static_cast<Block>(10));
  for(int i=0;i<29;++i)lava.tickTime();
  require(lava.get(31,180,32)==Air,"Lava spread before its thirty-tick delay");
  lava.tickTime();
@@ -30,7 +30,7 @@ int main(){try{
          "Overworld lava spreads two depth levels after thirty ticks");
  World persistent;persistent.generate(44,true);
  for(int x=29;x<=35;++x)for(int z=29;z<=35;++z)persistent.set(x,179,z,Stone);
- persistent.set(32,180,32,Water);persistent.updateLiquidNeighbors(32,180,32);
+ persistent.setTileAndUpdate(32,180,32,static_cast<Block>(8));
  persistent.tickTime();persistent.tickTime();
  const auto path=std::filesystem::temp_directory_path()/
      ("console-flow-"+std::to_string(getpid())+".inner");
@@ -48,7 +48,7 @@ int main(){try{
  };
  travel(150,40);
  for(int x=146;x<=154;++x)for(int z=36;z<=44;++z)streamed.set(x,179,z,Stone);
- streamed.set(150,180,40,Water);streamed.updateLiquidNeighbors(150,180,40);
+ streamed.setTileAndUpdate(150,180,40,static_cast<Block>(8));
  streamed.tickTime();streamed.tickTime();
  travel(400,400);travel(150,40);
  streamed.tickTime();streamed.tickTime();

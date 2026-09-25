@@ -8,6 +8,8 @@ struct DroppedItemMesh {
     std::vector<Vertex> terrain,items;
 };
 DroppedItemMesh buildDroppedItemMesh(const DroppedItem& item,double yaw,double pitch,int packedLight);
+// FallingTileRenderer: the tile's full cube centred on the entity.
+std::vector<Vertex> buildFallingBlockMesh(const FallingBlock& block,int packedLight);
 // LevelRenderer destroy-stage overlay: the cube at (x,y,z) textured with
 // terrain destroy_<stage> (atlas tiles 240-249).
 std::vector<Vertex> buildDestroyStageMesh(int x,int y,int z,int stage,int packedLight);

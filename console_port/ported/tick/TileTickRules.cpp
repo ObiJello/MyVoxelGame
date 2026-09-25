@@ -1240,4 +1240,1506 @@ mainloop: continue;
 	return false;
 }
 
+// FlintAndSteelItem.cpp
+bool FlintAndSteelItem::useOn(shared_ptr<ItemInstance> instance, shared_ptr<Player> player, Level *level, int x, int y, int z, int face, float clickX, float clickY, float clickZ, bool bTestUseOnOnly) 
+{
+	// 4J-PB - Adding a test only version to allow tooltips to be displayed
+	if (face == 0) y--;
+	if (face == 1) y++;
+	if (face == 2) z--;
+	if (face == 3) z++;
+	if (face == 4) x--;
+	if (face == 5) x++;
+	
+	if (!player->mayBuild(x, y, z)) return false;
+
+	int targetType = level->getTile(x, y, z);
+
+	if(!bTestUseOnOnly)
+	{	
+		if (targetType == 0) 
+		{
+			if( level->getTile(x, y-1, z) == Tile::obsidian_Id )
+			{
+				if( Tile::portalTile->trySpawnPortal(level, x, y, z, false) )
+				{
+					player->awardStat(
+						GenericStats::portalsCreated(),
+						GenericStats::param_noArgs()
+						);
+
+					// 4J : WESTY : Added for achievement.
+					player->awardStat(GenericStats::InToTheNether(),GenericStats::param_InToTheNether());
+				}
+			}
+
+			level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_FIRE_IGNITE, 1, random->nextFloat() * 0.4f + 0.8f);
+			level->setTile(x, y, z, Tile::fire_Id);
+		}
+
+		instance->hurt(1, player);
+	}
+	else
+	{
+		if(targetType == 0)
+		{
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	// 4J-PB - this function shouldn't really return true all the time, but I've added a special case for my test use for the tooltips display
+	// and will leave it as is for the game use
+
+	return true;
+}
+
+// Level.cpp
+void Level::updateNeighborsAt(int x, int y, int z, int tile)
+{
+	neighborChanged(x - 1, y, z, tile);
+	neighborChanged(x + 1, y, z, tile);
+	neighborChanged(x, y - 1, z, tile);
+	neighborChanged(x, y + 1, z, tile);
+	neighborChanged(x, y, z - 1, tile);
+	neighborChanged(x, y, z + 1, tile);
+}
+
+// Level.cpp
+void Level::neighborChanged(int x, int y, int z, int type)
+{
+	if (noNeighborUpdate || isClientSide) return;
+	Tile *tile = Tile::tiles[getTile(x, y, z)];
+	if (tile != NULL) tile->neighborChanged(this, x, y, z, type);
+}
+
+// Level.cpp
+bool Level::getDirectSignal(int x, int y, int z, int dir)
+{
+	int t = getTile(x, y, z);
+	if (t == 0) return false;
+	return Tile::tiles[t]->getDirectSignal(this, x, y, z, dir);
+}
+
+// Level.cpp
+bool Level::hasDirectSignal(int x, int y, int z)
+{
+	if (getDirectSignal(x, y - 1, z, 0)) return true;
+	if (getDirectSignal(x, y + 1, z, 1)) return true;
+	if (getDirectSignal(x, y, z - 1, 2)) return true;
+	if (getDirectSignal(x, y, z + 1, 3)) return true;
+	if (getDirectSignal(x - 1, y, z, 4)) return true;
+	if (getDirectSignal(x + 1, y, z, 5)) return true;
+	return false;
+}
+
+// Level.cpp
+bool Level::getSignal(int x, int y, int z, int dir)
+{
+	if (isSolidBlockingTile(x, y, z))
+	{
+		return hasDirectSignal(x, y, z);
+	}
+	int t = getTile(x, y, z);
+	if (t == 0) return false;
+	return Tile::tiles[t]->getSignal(this, x, y, z, dir);
+}
+
+// Level.cpp
+bool Level::hasNeighborSignal(int x, int y, int z)
+{
+	if (getSignal(x, y - 1, z, 0)) return true;
+	if (getSignal(x, y + 1, z, 1)) return true;
+	if (getSignal(x, y, z - 1, 2)) return true;
+	if (getSignal(x, y, z + 1, 3)) return true;
+	if (getSignal(x - 1, y, z, 4)) return true;
+	if (getSignal(x + 1, y, z, 5)) return true;
+	return false;
+}
+
+// Level.cpp
+bool Level::isTopSolidBlocking(int x, int y, int z)
+{
+    // Temporary workaround until tahgs per-face solidity is finished
+    Tile *tile = Tile::tiles[getTile(x, y, z)];
+    if (tile == NULL) return false;
+
+    if (tile->material->isSolidBlocking() && tile->isCubeShaped()) return true;
+	if (dynamic_cast<StairTile *>(tile) != NULL) 
+	{
+		return (getData(x, y, z) & StairTile::UPSIDEDOWN_BIT) == StairTile::UPSIDEDOWN_BIT;
+	}
+    if (dynamic_cast<HalfSlabTile *>(tile) != NULL)
+	{
+		return (getData(x, y, z) & HalfSlabTile::TOP_SLOT_BIT) == HalfSlabTile::TOP_SLOT_BIT;
+	}
+	if (dynamic_cast<TopSnowTile *>(tile) != NULL) return (getData(x, y, z) & TopSnowTile::HEIGHT_MASK) == TopSnowTile::MAX_HEIGHT + 1;
+    return false;
+}
+
+// Level.cpp
+bool Level::isSolidBlockingTileInLoadedChunk(int x, int y, int z, bool valueIfNotLoaded)
+{
+    if (x < -MAX_LEVEL_SIZE || z < -MAX_LEVEL_SIZE || x >= MAX_LEVEL_SIZE || z >= MAX_LEVEL_SIZE)
+	{
+        return valueIfNotLoaded;
+    }
+    LevelChunk *chunk = chunkSource->getChunk(x >> 4, z >> 4);
+    if (chunk == NULL || chunk->isEmpty())
+	{
+        return valueIfNotLoaded;
+    }
+
+    Tile *tile = Tile::tiles[getTile(x, y, z)];
+    if (tile == NULL) return false;
+    return tile->material->isSolidBlocking() && tile->isCubeShaped();
+}
+
+// Level.cpp
+bool Level::mayPlace(int tileId, int x, int y, int z, bool ignoreEntities, int face, shared_ptr<Entity> ignoreEntity)
+{
+	int targetType = getTile(x, y, z);
+	Tile *targetTile = Tile::tiles[targetType];
+
+	Tile *tile = Tile::tiles[tileId];
+
+	AABB *aabb = tile->getAABB(this, x, y, z);
+	if (ignoreEntities) aabb = NULL;
+	if (aabb != NULL && !isUnobstructed(aabb, ignoreEntity)) return false;
+	if (targetTile != NULL &&
+		(targetTile == Tile::water || targetTile == Tile::calmWater || targetTile == Tile::lava ||
+		targetTile == Tile::calmLava || targetTile == Tile::fire || targetTile->material->isReplaceable())) targetTile = NULL;
+	if (targetTile != NULL && targetTile->material == Material::decoration && tile == Tile::anvil) return true;
+	if (tileId > 0 && targetTile == NULL)
+	{
+		if (tile->mayPlace(this, x, y, z, face))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Bush.cpp
+void Bush::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	Tile::neighborChanged(level, x, y, z, type);
+	checkAlive(level, x, y, z);
+}
+
+// CactusTile.cpp
+void CactusTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    if (!canSurvive(level, x, y, z))
+	{
+        this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+        level->setTile(x, y, z, 0);
+	}
+}
+
+// CocoaTile.cpp
+void CocoaTile::neighborChanged(Level *level, int x, int y, int z, int type) 
+{
+	if (!canSurvive(level, x, y, z))
+	{
+		this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+		level->setTile(x, y, z, 0);
+	}
+}
+
+// ReedTile.cpp
+void ReedTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	checkAlive(level, x, y, z);
+}
+
+// ReedTile.cpp
+const void ReedTile::checkAlive(Level *level, int x, int y, int z)
+{
+	if (!canSurvive(level, x, y, z)) 
+	{
+		this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+		level->setTile(x, y, z, 0);
+	}
+}
+
+// FarmTile.cpp
+void FarmTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    Tile::neighborChanged(level, x, y, z, type);
+    Material *above = level->getMaterial(x, y + 1, z);
+    if (above->isSolid())
+	{
+        level->setTile(x, y, z, Tile::dirt_Id);
+    }
+}
+
+// VineTile.cpp
+void VineTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    if (!level->isClientSide && !updateSurvival(level, x, y, z))
+	{
+        spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+        level->setTile(x, y, z, 0);
+    }
+}
+
+// VineTile.cpp
+bool VineTile::updateSurvival(Level *level, int x, int y, int z)
+{
+    int facings = level->getData(x, y, z);
+    int newFacings = facings;
+
+    if (newFacings > 0)
+	{
+        for (int d = 0; d <= 3; d++)
+		{
+            int facing = 1 << d;
+            if ((facings & facing) != 0)
+			{
+                if (!isAcceptableNeighbor(level->getTile(x + Direction::STEP_X[d], y, z + Direction::STEP_Z[d])))
+				{
+                    // no attachment in this direction,
+                    // verify that there is vines hanging above
+                    if (level->getTile(x, y + 1, z) != id || (level->getData(x, y + 1, z) & facing) == 0)
+					{
+                        newFacings &= ~facing;
+                    }
+                }
+            }
+        }
+    }
+
+    if (newFacings == 0)
+	{
+        // the block will die unless it has a roof
+        if (!isAcceptableNeighbor(level->getTile(x, y + 1, z)))
+		{
+            return false;
+        }
+    }
+    if (newFacings != facings)
+	{
+        level->setData(x, y, z, newFacings);
+    }
+    return true;
+
+}
+
+// TopSnowTile.cpp
+bool TopSnowTile::mayPlace(Level *level, int x, int y, int z)
+{
+	int t = level->getTile(x, y - 1, z);
+	// 4J Stu - Assume when placing that this is the server level and we don't care how it's going to be rendered
+	// Fix for #9407 - Gameplay: Destroying a block of snow on top of trees, removes any adjacent snow.
+	if (t == 0 || (t != Tile::leaves_Id && !Tile::tiles[t]->isSolidRender(true))) return false;
+	return level->getMaterial(x, y - 1, z)->blocksMotion();
+}
+
+// TopSnowTile.cpp
+void TopSnowTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	checkCanSurvive(level, x, y, z);
+}
+
+// TopSnowTile.cpp
+bool TopSnowTile::checkCanSurvive(Level *level, int x, int y, int z)
+{
+	if (!mayPlace(level, x, y, z))
+	{
+		this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+		level->setTile(x, y, z, 0);
+		return false;
+	}
+	return true;
+}
+
+// WoolCarpetTile.cpp
+void WoolCarpetTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	checkCanSurvive(level, x, y, z);
+}
+
+// WoolCarpetTile.cpp
+bool WoolCarpetTile::checkCanSurvive(Level *level, int x, int y, int z)
+{
+	if (!canSurvive(level, x, y, z))
+	{
+		spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+		level->setTile(x, y, z, 0);
+		return false;
+	}
+	return true;
+}
+
+// WoolCarpetTile.cpp
+bool WoolCarpetTile::canSurvive(Level *level, int x, int y, int z)
+{
+	return !level->isEmptyTile(x, y - 1, z);
+}
+
+// WoolCarpetTile.cpp
+bool WoolCarpetTile::mayPlace(Level *level, int x, int y, int z)
+{
+	return Tile::mayPlace(level, x, y, z) && canSurvive(level, x, y, z);
+}
+
+// CakeTile.cpp
+void CakeTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    if (!canSurvive(level, x, y, z))
+	{
+        this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+        level->setTile(x, y, z, 0);
+	}
+}
+
+// CakeTile.cpp
+bool CakeTile::canSurvive(Level *level, int x, int y, int z)
+{
+	return level->getMaterial(x, y - 1, z)->isSolid();
+}
+
+// CakeTile.cpp
+bool CakeTile::mayPlace(Level *level, int x, int y, int z)
+{
+    if (!Tile::mayPlace(level, x, y, z)) return false;
+
+    return canSurvive(level, x, y, z);
+}
+
+// FlowerPotTile.cpp
+void FlowerPotTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (!level->isTopSolidBlocking(x, y - 1, z))
+	{
+		spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+
+		level->setTile(x, y, z, 0);
+	}
+}
+
+// SignTile.cpp
+void SignTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	bool remove = false;
+
+	if (onGround)
+	{
+		if (!level->getMaterial(x, y - 1, z)->isSolid()) remove = true;
+	}
+	else
+	{
+		int face = level->getData(x, y, z);
+		remove = true;
+		if (face == 2 && level->getMaterial(x, y, z + 1)->isSolid()) remove = false;
+		if (face == 3 && level->getMaterial(x, y, z - 1)->isSolid()) remove = false;
+		if (face == 4 && level->getMaterial(x + 1, y, z)->isSolid()) remove = false;
+		if (face == 5 && level->getMaterial(x - 1, y, z)->isSolid()) remove = false;
+	}
+	if (remove)
+	{
+		spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+		level->setTile(x, y, z, 0);
+	}
+
+	EntityTile::neighborChanged(level, x, y, z, type);
+}
+
+// LadderTile.cpp
+bool LadderTile::mayPlace(Level *level, int x, int y, int z)
+{
+    if (level->isSolidBlockingTile(x - 1, y, z))
+	{
+        return true;
+    }
+	else if (level->isSolidBlockingTile(x + 1, y, z))
+	{
+        return true;
+	}
+	else if (level->isSolidBlockingTile(x, y, z - 1))
+	{
+        return true;
+    }
+	else if (level->isSolidBlockingTile(x, y, z + 1))
+	{
+        return true;
+    }
+    return false;
+}
+
+// LadderTile.cpp
+int LadderTile::getPlacedOnFaceDataValue(Level *level, int x, int y, int z, int face, float clickX, float clickY, float clickZ, int itemValue)
+{
+    int dir = level->getData(x, y, z);
+
+    if ((dir == 0 || face == 2) && level->isSolidBlockingTile(x, y, z + 1)) dir = 2;
+    if ((dir == 0 || face == 3) && level->isSolidBlockingTile(x, y, z - 1)) dir = 3;
+    if ((dir == 0 || face == 4) && level->isSolidBlockingTile(x + 1, y, z)) dir = 4;
+    if ((dir == 0 || face == 5) && level->isSolidBlockingTile(x - 1, y, z)) dir = 5;
+
+    return dir;
+}
+
+// LadderTile.cpp
+void LadderTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    int face = level->getData(x, y, z);
+    bool ok = false;
+
+    if (face == 2 && level->isSolidBlockingTile(x, y, z + 1)) ok = true;
+    if (face == 3 && level->isSolidBlockingTile(x, y, z - 1)) ok = true;
+    if (face == 4 && level->isSolidBlockingTile(x + 1, y, z)) ok = true;
+    if (face == 5 && level->isSolidBlockingTile(x - 1, y, z)) ok = true;
+    if (!ok)
+	{
+        spawnResources(level, x, y, z, face, 0);
+        level->setTile(x, y, z, 0);
+    }
+
+    Tile::neighborChanged(level, x, y, z, type);
+}
+
+// TorchTile.cpp
+bool TorchTile::isConnection(Level *level, int x, int y, int z)
+{
+	if (level->isTopSolidBlocking(x, y, z))
+	{
+		return true;
+	}
+	int tile = level->getTile(x, y, z);
+	if  (tile == Tile::fence_Id || tile == Tile::netherFence_Id 
+		|| tile == Tile::glass_Id || tile == Tile::cobbleWall_Id)
+	{
+		return true;
+	}
+	return false;
+}
+
+// TorchTile.cpp
+bool TorchTile::mayPlace(Level *level, int x, int y, int z)
+{
+	if (level->isSolidBlockingTileInLoadedChunk(x - 1, y, z, true))
+	{
+		return true;
+	}
+	else if (level->isSolidBlockingTileInLoadedChunk(x + 1, y, z, true))
+	{
+		return true;
+	}
+	else if (level->isSolidBlockingTileInLoadedChunk(x, y, z - 1, true))
+	{
+		return true;
+	}
+	else if (level->isSolidBlockingTileInLoadedChunk(x, y, z + 1, true))
+	{
+		return true;
+	}
+	else if (isConnection(level, x, y - 1, z))
+	{
+		return true;
+	}
+	return false;
+}
+
+// TorchTile.cpp
+int TorchTile::getPlacedOnFaceDataValue(Level *level, int x, int y, int z, int face, float clickX, float clickY, float clickZ, int itemValue)
+{
+	int dir = itemValue;
+
+	if (face == 1 && isConnection(level, x, y - 1, z)) dir = 5;
+	if (face == 2 && level->isSolidBlockingTileInLoadedChunk(x, y, z + 1, true)) dir = 4;
+	if (face == 3 && level->isSolidBlockingTileInLoadedChunk(x, y, z - 1, true)) dir = 3;
+	if (face == 4 && level->isSolidBlockingTileInLoadedChunk(x + 1, y, z, true)) dir = 2;
+	if (face == 5 && level->isSolidBlockingTileInLoadedChunk(x - 1, y, z, true)) dir = 1;
+
+	return dir;
+}
+
+// TorchTile.cpp
+void TorchTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+	Tile::tick(level, x, y, z, random);
+	if (level->getData(x, y, z) == 0) onPlace(level, x, y, z);
+}
+
+// TorchTile.cpp
+void TorchTile::onPlace(Level *level, int x, int y, int z)
+{
+	if(level->getData(x,y,z) == 0)
+	{
+		if (level->isSolidBlockingTileInLoadedChunk(x - 1, y, z, true))
+		{
+			level->setData(x, y, z, 1);
+		}
+		else if (level->isSolidBlockingTileInLoadedChunk(x + 1, y, z, true))
+		{
+			level->setData(x, y, z, 2);
+		}
+		else if (level->isSolidBlockingTileInLoadedChunk(x, y, z - 1, true))
+		{
+			level->setData(x, y, z, 3);
+		}
+		else if (level->isSolidBlockingTileInLoadedChunk(x, y, z + 1, true))
+		{
+			level->setData(x, y, z, 4);
+		}
+		else if (isConnection(level, x, y - 1, z))
+		{
+			level->setData(x, y, z, 5);
+		}
+	}
+	checkCanSurvive(level, x, y, z);
+}
+
+// TorchTile.cpp
+void TorchTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (checkCanSurvive(level, x, y, z))
+	{
+		int dir = level->getData(x, y, z);
+		bool replace = false;
+
+		if (!level->isSolidBlockingTileInLoadedChunk(x - 1, y, z, true) && dir == 1) replace = true;
+		if (!level->isSolidBlockingTileInLoadedChunk(x + 1, y, z, true) && dir == 2) replace = true;
+		if (!level->isSolidBlockingTileInLoadedChunk(x, y, z - 1, true) && dir == 3) replace = true;
+		if (!level->isSolidBlockingTileInLoadedChunk(x, y, z + 1, true) && dir == 4) replace = true;
+		if (!isConnection(level, x, y - 1, z) && dir == 5) replace = true;
+
+		if (replace)
+		{
+			this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+			level->setTile(x, y, z, 0);
+		}
+	}
+}
+
+// TorchTile.cpp
+bool TorchTile::checkCanSurvive(Level *level, int x, int y, int z)
+{
+	if (!mayPlace(level, x, y, z))
+	{
+		if (level->getTile(x, y, z) == id)
+		{
+			this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+			level->setTile(x, y, z, 0);
+		}
+		return false;
+	}
+	return true;
+}
+
+// TorchTile.cpp
+bool TorchTile::shouldTileTick(Level *level, int x,int y,int z)
+{
+	return level->getData(x, y, z) == 0;
+}
+
+// DoorTile.cpp
+void DoorTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	int data = level->getData(x, y, z);
+	if ((data & UPPER_BIT) == 0)
+	{
+		bool spawn = false;
+		if (level->getTile(x, y + 1, z) != id)
+		{
+			level->setTile(x, y, z, 0);
+			spawn = true;
+		}
+		if (!level->isSolidBlockingTile(x, y - 1, z))
+		{
+			level->setTile(x, y, z, 0);
+			spawn = true;
+			if (level->getTile(x, y + 1, z) == id)
+			{
+				level->setTile(x, y + 1, z, 0);
+			}
+		}
+		if (spawn)
+		{
+			if (!level->isClientSide)
+			{
+				spawnResources(level, x, y, z, data, 0);
+			}
+		}
+		else
+		{
+			bool signal = level->hasNeighborSignal(x, y, z) || level->hasNeighborSignal(x, y + 1, z);
+			if ((signal || (type > 0 && Tile::tiles[type]->isSignalSource())) && type != id)
+			{
+				setOpen(level, x, y, z, signal);
+			}
+		}
+	}
+	else
+	{
+		if (level->getTile(x, y - 1, z) != id)
+		{
+			level->setTile(x, y, z, 0);
+		}
+		if (type > 0 && type != id)
+		{
+			neighborChanged(level, x, y - 1, z, type);
+		}
+	}
+}
+
+// DoorTile.cpp
+void DoorTile::setOpen(Level *level, int x, int y, int z, bool shouldOpen)
+{
+	int compositeData = getCompositeData(level, x, y, z);
+	bool isOpen = (compositeData & C_OPEN_MASK) != 0;
+	if (isOpen == shouldOpen) return;
+
+	int lowerData = compositeData & C_LOWER_DATA_MASK;
+	lowerData ^= 4;
+	if ((compositeData & C_IS_UPPER_MASK) == 0)
+	{
+		level->setData(x, y, z, lowerData);//, Tile.UPDATE_CLIENTS);
+		level->setTilesDirty(x, y, z, x, y, z);
+	}
+	else
+	{
+		level->setData(x, y - 1, z, lowerData);//, Tile.UPDATE_CLIENTS);
+		level->setTilesDirty(x, y - 1, z, x, y, z);
+	}
+
+	level->levelEvent(nullptr, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+}
+
+// DoorTile.cpp
+int DoorTile::getCompositeData(LevelSource *level, int x, int y, int z)
+{
+	int data = level->getData(x, y, z);
+	bool isUpper = (data & UPPER_BIT) != 0;
+	int lowerData;
+	int upperData;
+	if (isUpper)
+	{
+		lowerData = level->getData(x, y - 1, z);
+		upperData = data;
+	}
+	else
+	{
+		lowerData = data;
+		upperData = level->getData(x, y + 1, z);
+	}
+
+	// bits: dir, dir, open/closed, isUpper, isRightHinge
+	bool isRightHinge = (upperData & 1) != 0;
+	return (lowerData & C_LOWER_DATA_MASK) | (isUpper ? 8 : 0) | (isRightHinge ? 16 : 0);
+}
+
+// HeavyTile.cpp
+void HeavyTile::onPlace(Level *level, int x, int y, int z)
+{
+	level->addToTickNextTick(x, y, z, id, getTickDelay());
+}
+
+// HeavyTile.cpp
+void HeavyTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	level->addToTickNextTick(x, y, z, id, getTickDelay());
+}
+
+// HeavyTile.cpp
+void HeavyTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+	if(!level->isClientSide)
+	{
+		checkSlide(level, x, y, z);
+	}
+}
+
+// HeavyTile.cpp
+void HeavyTile::checkSlide(Level *level, int x, int y, int z)
+{
+    int x2 = x;
+    int y2 = y;
+    int z2 = z;
+    if (isFree(level, x2, y2 - 1, z2) && y2 >= 0)
+	{
+        int r = 32;
+
+		if (instaFall || !level->hasChunksAt(x - r, y - r, z - r, x + r, y + r, z + r)  )
+		{
+            level->setTile(x, y, z, 0);
+            while (isFree(level, x, y - 1, z) && y > 0)
+                y--;
+            if (y > 0) {
+                level->setTile(x, y, z, id);
+            }
+        }
+		else if (!level->isClientSide)
+		{
+			// 4J added - don't do anything just now if we can't create any new falling tiles
+			if( !level->newFallingTileAllowed() )
+			{
+				level->addToTickNextTick(x, y, z, id, getTickDelay());
+				return;
+			}
+
+            shared_ptr<FallingTile> e = shared_ptr<FallingTile>( new FallingTile(level, x + 0.5f, y + 0.5f, z + 0.5f, id, level->getData(x, y, z)) );
+			falling(e);
+            level->addEntity(e);
+        }
+    }
+}
+
+// HeavyTile.cpp
+void HeavyTile::falling(shared_ptr<FallingTile> entity)
+{
+}
+
+// HeavyTile.cpp
+int HeavyTile::getTickDelay()
+{
+	return 5;
+}
+
+// HeavyTile.cpp
+bool HeavyTile::isFree(Level *level, int x, int y, int z)
+{
+    int t = level->getTile(x, y, z);
+    if (t == 0) return true;
+    if (t == Tile::fire_Id) return true;
+    Material *material = Tile::tiles[t]->material;
+    if (material == Material::water) return true;
+    if (material == Material::lava) return true;
+    return false;
+}
+
+// HeavyTile.cpp
+void HeavyTile::onLand(Level *level, int xt, int yt, int zt, int data)
+{
+}
+
+// FireTile.cpp
+void FireTile::init()
+{
+	setFlammable(Tile::wood_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::woodSlab_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::woodSlabHalf_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::fence_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::stairs_wood_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::stairs_birchwood_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::stairs_sprucewood_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::stairs_junglewood_Id, FLAME_HARD, BURN_MEDIUM);
+	setFlammable(Tile::treeTrunk_Id, FLAME_HARD, BURN_HARD);
+	setFlammable(Tile::leaves_Id, FLAME_EASY, BURN_EASY);
+	setFlammable(Tile::bookshelf_Id, FLAME_EASY, BURN_MEDIUM);
+	setFlammable(Tile::tnt_Id, FLAME_MEDIUM, BURN_INSTANT);
+	setFlammable(Tile::tallgrass_Id, FLAME_INSTANT, BURN_INSTANT);
+	setFlammable(Tile::cloth_Id, FLAME_EASY, BURN_EASY);
+	setFlammable(Tile::vine_Id, FLAME_MEDIUM, BURN_INSTANT);
+}
+
+// FireTile.cpp
+void FireTile::setFlammable(int id, int flame, int burn)
+{
+	flameOdds[id] = flame;
+	burnOdds[id] = burn;
+}
+
+// FireTile.cpp
+int FireTile::getTickDelay()
+{
+	return 30;
+}
+
+// FireTile.cpp
+void FireTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+	// 4J added - we don't want fire to do anything that might create new fire, or destroy this fire, if we aren't actually tracking (for network) the chunk this is in in the player
+	// chunk map. If we did change something in that case, then the change wouldn't get sent to any player that had already received that full chunk, and so we'd just become desynchronised.
+	// Seems safest just to do an addToTickNextTick here instead with a decent delay, to make sure that we will get ticked again in the future, when we might again be in a chunk
+	// that is being tracked.
+	if( !level->isClientSide )		// Note - should only be being ticked on the server
+	{
+		if( !MinecraftServer::getInstance()->getPlayers()->isTrackingTile(x, y, z, level->dimension->id) )
+		{
+			level->addToTickNextTick(x, y, z, id, getTickDelay() * 5);
+			return;
+		}
+	}
+
+
+	bool infiniBurn = level->getTile(x, y - 1, z) == Tile::hellRock_Id;
+	if (level->dimension->id == 1)		// 4J - was == instanceof TheEndDimension
+	{
+		if (level->getTile(x, y - 1, z) == Tile::unbreakable_Id) infiniBurn = true;
+	}
+
+	if (!mayPlace(level, x, y, z))
+	{
+		level->setTile(x, y, z, 0);
+	}
+
+	if (!infiniBurn && level->isRaining())
+	{
+		if (level->isRainingAt(x, y, z) || level->isRainingAt(x - 1, y, z) || level->isRainingAt(x + 1, y, z) || level->isRainingAt(x, y, z - 1) || level->isRainingAt(x, y, z + 1)) {
+
+			level->setTile(x, y, z, 0);
+			return;
+		}
+	}
+
+	int age = level->getData(x, y, z);
+	if (age < 15)
+	{
+		level->setDataNoUpdate(x, y, z, age + random->nextInt(3) / 2);
+	}
+	level->addToTickNextTick(x, y, z, id, getTickDelay() + random->nextInt(10));
+
+	if (!infiniBurn && !isValidFireLocation(level, x, y, z))
+	{
+		if (!level->isTopSolidBlocking(x, y - 1, z) || age > 3) level->setTile(x, y, z, 0);
+		return;
+	}
+
+	if (!infiniBurn && !canBurn(level, x, y - 1, z))
+	{
+		if (age == 15 && random->nextInt(4) == 0)
+		{
+			level->setTile(x, y, z, 0);
+			return;
+		}
+	}
+
+	bool isHumid = level->isHumidAt(x, y, z);
+	int extra = 0;
+	if (isHumid)
+	{
+		extra = -50;
+	}
+	checkBurnOut(level, x + 1, y, z, 300 + extra, random, age);
+	checkBurnOut(level, x - 1, y, z, 300 + extra, random, age);
+	checkBurnOut(level, x, y - 1, z, 250 + extra, random, age);
+	checkBurnOut(level, x, y + 1, z, 250 + extra, random, age);
+	checkBurnOut(level, x, y, z - 1, 300 + extra, random, age);
+	checkBurnOut(level, x, y, z + 1, 300 + extra, random, age);
+	if( app.GetGameHostOption(eGameHostOption_FireSpreads) )
+	{
+		for (int xx = x - 1; xx <= x + 1; xx++)
+		{
+			for (int zz = z - 1; zz <= z + 1; zz++)
+			{
+				for (int yy = y - 1; yy <= y + 4; yy++)
+				{
+					if (xx == x && yy == y && zz == z) continue;
+
+					int rate = 100;
+					if (yy > y + 1)
+					{
+						rate += ((yy - (y + 1)) * 100);
+					}
+
+					int fodds = getFireOdds(level, xx, yy, zz);
+					if (fodds > 0) {
+						int odds = (fodds + 40) / (age + 30);
+						if (isHumid)
+						{
+							odds /= 2;
+						}
+						if (odds > 0 && random->nextInt(rate) <= odds)
+						{
+							if ((level->isRaining() && level->isRainingAt(xx, yy, zz)) || level->isRainingAt(xx - 1, yy, z) || level->isRainingAt(xx + 1, yy, zz) || level->isRainingAt(xx, yy, zz - 1)
+								|| level->isRainingAt(xx, yy, zz + 1))
+							{
+								// DO NOTHING, rain!
+
+							} else {
+								int tAge = age + random->nextInt(5) / 4;
+								if (tAge > 15) tAge = 15;
+								level->setTileAndData(xx, yy, zz, this->id, tAge);
+
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// FireTile.cpp
+void FireTile::checkBurnOut(Level *level, int x, int y, int z, int chance, Random *random, int age)
+{
+	int odds = burnOdds[level->getTile(x, y, z)];
+	if (random->nextInt(chance) < odds)
+	{
+		bool wasTnt = level->getTile(x, y, z) == Tile::tnt_Id;
+		if (random->nextInt(age + 10) < 5 && !level->isRainingAt(x, y, z) && app.GetGameHostOption(eGameHostOption_FireSpreads))
+		{
+			int tAge = age + random->nextInt(5) / 4;
+			if (tAge > 15) tAge = 15;
+			level->setTileAndData(x, y, z, this->id, tAge);
+		} else
+		{
+			level->setTile(x, y, z, 0);
+		}
+		if (wasTnt)
+		{
+			Tile::tnt->destroy(level, x, y, z, TntTile::EXPLODE_BIT);
+		}
+	}
+}
+
+// FireTile.cpp
+bool FireTile::isValidFireLocation(Level *level, int x, int y, int z)
+{
+	if (canBurn(level, x + 1, y, z)) return true;
+	if (canBurn(level, x - 1, y, z)) return true;
+	if (canBurn(level, x, y - 1, z)) return true;
+	if (canBurn(level, x, y + 1, z)) return true;
+	if (canBurn(level, x, y, z - 1)) return true;
+	if (canBurn(level, x, y, z + 1)) return true;
+
+	return false;
+}
+
+// FireTile.cpp
+int FireTile::getFireOdds(Level *level, int x, int y, int z)
+{
+	int odds = 0;
+	if (!level->isEmptyTile(x, y, z)) return 0;
+
+	odds = getFlammability(level, x + 1, y, z, odds);
+	odds = getFlammability(level, x - 1, y, z, odds);
+	odds = getFlammability(level, x, y - 1, z, odds);
+	odds = getFlammability(level, x, y + 1, z, odds);
+	odds = getFlammability(level, x, y, z - 1, odds);
+	odds = getFlammability(level, x, y, z + 1, odds);
+
+	return odds;
+}
+
+// FireTile.cpp
+bool FireTile::canBurn(LevelSource *level, int x, int y, int z)
+{
+	return flameOdds[level->getTile(x, y, z)] > 0;
+}
+
+// FireTile.cpp
+int FireTile::getFlammability(Level *level, int x, int y, int z, int odds)
+{
+	int f = flameOdds[level->getTile(x, y, z)];
+	if (f > odds) return f;
+	return odds;
+}
+
+// FireTile.cpp
+bool FireTile::mayPlace(Level *level, int x, int y, int z)
+{
+	return level->isTopSolidBlocking(x, y - 1, z) || isValidFireLocation(level, x, y, z);
+}
+
+// FireTile.cpp
+void FireTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (!level->isTopSolidBlocking(x, y - 1, z) && !isValidFireLocation(level, x, y, z))
+	{
+		level->setTile(x, y, z, 0);
+		return;
+	}
+}
+
+// FireTile.cpp
+void FireTile::onPlace(Level *level, int x, int y, int z)
+{
+	if (level->dimension->id <= 0 && level->getTile(x, y - 1, z) == Tile::obsidian_Id)
+	{
+		if (Tile::portalTile->trySpawnPortal(level, x, y, z, true))
+		{
+			return;
+		}
+	}
+	if (!level->isTopSolidBlocking(x, y - 1, z) && !isValidFireLocation(level, x, y, z))
+	{
+		level->setTile(x, y, z, 0);
+		return;
+	}
+	level->addToTickNextTick(x, y, z, id, getTickDelay() + level->random->nextInt(10));
+}
+
+// FireTile.cpp
+bool FireTile::isFlammable(int tile)
+{
+	return flameOdds[tile] > 0;
+}
+
+// LiquidTileStatic.cpp
+void LiquidTileStatic::tick(Level *level, int x, int y, int z, Random *random)
+{
+    if (material == Material::lava)
+	{
+        int h = random->nextInt(3);
+        for (int i = 0; i < h; i++)
+		{
+            x += random->nextInt(3) - 1;
+            y++;
+            z += random->nextInt(3) - 1;
+            int t = level->getTile(x, y, z);
+            if (t == 0)
+			{
+                if (isFlammable(level, x - 1, y, z) ||
+					isFlammable(level, x + 1, y, z) ||
+					isFlammable(level, x, y, z - 1) ||
+					isFlammable(level, x, y, z + 1) ||
+					isFlammable(level, x, y - 1, z) ||
+					isFlammable(level, x, y + 1, z))
+				{
+                    level->setTile(x, y, z, Tile::fire_Id);
+                    return;
+                }
+            }
+			else if (Tile::tiles[t]->material->blocksMotion())
+			{
+                return;
+            }
+
+        }
+		if (h == 0)
+		{
+			int ox = x;
+			int oz = z;
+			for (int i = 0; i<  3; i++)
+			{
+				x = ox + random->nextInt(3) - 1;
+				z = oz + random->nextInt(3) - 1;
+				if (level->isEmptyTile(x, y + 1, z) && isFlammable(level, x, y, z)) {
+					level->setTile(x, y + 1, z, Tile::fire_Id);
+				}
+			}
+		}
+    }
+}
+
+// LiquidTileStatic.cpp
+bool LiquidTileStatic::isFlammable(Level *level, int x, int y, int z)
+{
+	return level->getMaterial(x, y, z)->isFlammable();
+}
+
+// LiquidTile.cpp
+int LiquidTile::getDepth(Level *level, int x, int y, int z)
+{
+    if (level->getMaterial(x, y, z) == material) return level->getData(x, y, z);
+	else return -1;
+}
+
+// LiquidTile.cpp
+int LiquidTile::getTickDelay()
+{
+    if (material == Material::water) return 5;
+    if (material == Material::lava) return 30;
+    return 0;
+}
+
+// LiquidTile.cpp
+void LiquidTile::onPlace(Level *level, int x, int y, int z)
+{
+	updateLiquid(level, x, y, z);
+}
+
+// LiquidTile.cpp
+void LiquidTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	updateLiquid(level, x, y, z);
+}
+
+// LiquidTile.cpp
+void LiquidTile::updateLiquid(Level *level, int x, int y, int z)
+{
+    if (level->getTile(x, y, z) != id) return;
+    if (material == Material::lava)
+	{
+        bool water = false;
+        if (water || level->getMaterial(x, y, z - 1) == Material::water) water = true;
+        if (water || level->getMaterial(x, y, z + 1) == Material::water) water = true;
+        if (water || level->getMaterial(x - 1, y, z) == Material::water) water = true;
+        if (water || level->getMaterial(x + 1, y, z) == Material::water) water = true;
+        if (water || level->getMaterial(x, y + 1, z) == Material::water) water = true;
+        if (water)
+		{
+            int data = level->getData(x, y, z);
+            if (data == 0)
+			{
+                level->setTile(x, y, z, Tile::obsidian_Id);
+            }
+			else if (data <= 4)
+			{
+                level->setTile(x, y, z, Tile::stoneBrick_Id);
+            }
+            fizz(level, x, y, z);
+        }
+    }
+
+}
+
+// LiquidTile.cpp
+void LiquidTile::fizz(Level *level, int x, int y, int z)
+{
+	MemSect(31);
+    level->playSound(x + 0.5f, y + 0.5f, z + 0.5f, eSoundType_RANDOM_FIZZ, 0.5f, 2.6f + (level->random->nextFloat() - level->random->nextFloat()) * 0.8f);
+	MemSect(0);
+    for (int i = 0; i < 8; i++)
+	{
+        level->addParticle(eParticleType_largesmoke, x +Math::random(), y + 1.2, z + Math::random(), 0, 0, 0);
+    }
+}
+
+// LiquidTileStatic.cpp
+void LiquidTileStatic::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    LiquidTile::neighborChanged(level, x, y, z, type);
+    if (level->getTile(x, y, z) == id)
+	{
+        setDynamic(level, x, y, z);
+    }
+}
+
+// LiquidTileStatic.cpp
+void LiquidTileStatic::setDynamic(Level *level, int x, int y, int z)
+{
+    int d = level->getData(x, y, z);
+    level->noNeighborUpdate = true;
+    level->setTileAndDataNoUpdate(x, y, z, id - 1, d);
+    level->setTilesDirty(x, y, z, x, y, z);
+    level->addToTickNextTick(x, y, z, id - 1, getTickDelay());
+    level->noNeighborUpdate = false;
+}
+
+// LiquidTileDynamic.cpp
+void LiquidTileDynamic::setStatic(Level *level, int x, int y, int z)
+{
+    int d = level->getData(x, y, z);
+    level->setTileAndDataNoUpdate(x, y, z, id + 1, d);
+    level->setTilesDirty(x, y, z, x, y, z);
+}
+
+// LiquidTileDynamic.cpp
+void LiquidTileDynamic::iterativeTick(Level *level, int x, int y, int z, Random *random)
+{
+	m_tilesToTick.push_back(LiquidTickData(level, x,y,z,random));
+
+	while(m_tilesToTick.size() > 0)
+	{
+		LiquidTickData tickData = m_tilesToTick.front();
+		m_tilesToTick.pop_front();
+		mainTick(tickData.level, tickData.x, tickData.y, tickData.z, tickData.random);
+	}
+}
+
+// LiquidTileDynamic.cpp
+void LiquidTileDynamic::tick(Level *level, int x, int y, int z, Random *random)
+{
+	if(!m_iterativeInstatick && level->getInstaTick() )
+	{
+		m_iterativeInstatick = true;
+		iterativeTick(level, x, y, z, random);
+		m_iterativeInstatick = false;
+	}
+	else if(m_iterativeInstatick && level->getInstaTick())
+	{
+		m_tilesToTick.push_back(LiquidTickData(level, x,y,z,random));
+	}
+	else
+	{
+		mainTick(level, x, y, z, random);
+	}
+}
+
+// LiquidTileDynamic.cpp
+void LiquidTileDynamic::mainTick(Level *level, int x, int y, int z, Random *random)
+{
+    int depth = getDepth(level, x, y, z);
+
+    int dropOff = 1;
+    if (material == Material::lava && !level->dimension->ultraWarm) dropOff = 2;
+
+    bool becomeStatic = true;
+    if (depth > 0)
+	{
+        int highest = -100;
+        maxCount = 0;
+        highest = getHighest(level, x - 1, y, z, highest);
+        highest = getHighest(level, x + 1, y, z, highest);
+        highest = getHighest(level, x, y, z - 1, highest);
+        highest = getHighest(level, x, y, z + 1, highest);
+
+        int newDepth = highest + dropOff;
+        if (newDepth >= 8 || highest < 0)
+		{
+            newDepth = -1;
+        }
+        if (getDepth(level, x, y + 1, z) >= 0)
+		{
+            int above = getDepth(level, x, y + 1, z);
+            if (above >= 8) newDepth = above;
+            else newDepth = above + 8;
+        }
+        if (maxCount >= 2 && material == Material::water)
+		{
+            // Only spread spring if it's on top of an existing spring, or
+			// on top of solid ground.
+            if (level->getMaterial(x, y - 1, z)->isSolid())
+			{
+                newDepth = 0;
+            }
+			else if (level->getMaterial(x, y - 1, z) == material && level->getData(x, y - 1, z) == 0)
+			{
+                newDepth = 0;
+            }
+        }
+        if (material == Material::lava)
+		{
+            if (depth < 8 && newDepth < 8)
+			{
+                if (newDepth > depth)
+				{
+                    if (random->nextInt(4) != 0)
+					{
+                        newDepth = depth;
+                        becomeStatic = false;
+                    }
+                }
+            }
+        }
+        if (newDepth == depth)
+		{
+            if (becomeStatic)
+			{
+				setStatic(level, x, y, z);
+			}
+        }
+		else
+		{
+            depth = newDepth;
+            if (depth < 0)
+			{
+                level->setTile(x, y, z, 0);
+            } else
+			{
+                level->setData(x, y, z, depth);
+                level->addToTickNextTick(x, y, z, id, getTickDelay());
+                level->updateNeighborsAt(x, y, z, id);
+            }
+        }
+    } else
+	{
+        setStatic(level, x, y, z);
+    }
+    if (canSpreadTo(level, x, y - 1, z))
+	{
+        if (material == Material::lava)
+		{
+            if (level->getMaterial(x, y - 1, z) == Material::water)
+			{
+                level->setTile(x, y - 1, z, Tile::rock_Id);
+                fizz(level, x, y - 1, z);
+                return;
+            }
+        }
+
+        if (depth >= 8) trySpreadTo(level, x, y - 1, z, depth);
+        else trySpreadTo(level, x, y - 1, z, depth + 8);
+    }
+	else if (depth >= 0 && (depth == 0 || isWaterBlocking(level, x, y - 1, z)))
+	{
+        bool *spreads = getSpread(level, x, y, z);
+        int neighbor = depth + dropOff;
+        if (depth >= 8)
+		{
+            neighbor = 1;
+        }
+        if (neighbor >= 8) return;
+        if (spreads[0]) trySpreadTo(level, x - 1, y, z, neighbor);
+        if (spreads[1]) trySpreadTo(level, x + 1, y, z, neighbor);
+        if (spreads[2]) trySpreadTo(level, x, y, z - 1, neighbor);
+        if (spreads[3]) trySpreadTo(level, x, y, z + 1, neighbor);
+    }
+}
+
+// LiquidTileDynamic.cpp
+void LiquidTileDynamic::trySpreadTo(Level *level, int x, int y, int z, int neighbor)
+{
+    if (canSpreadTo(level, x, y, z))
+	{
+		{
+			int old = level->getTile(x, y, z);
+			if (old > 0)
+			{
+				if (material == Material::lava)
+				{
+					fizz(level, x, y, z);
+				}
+				else
+				{
+					Tile::tiles[old]->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+				}
+			}
+		}
+        level->setTileAndData(x, y, z, id, neighbor);
+    }
+}
+
+// LiquidTileDynamic.cpp
+int LiquidTileDynamic::getSlopeDistance(Level *level, int x, int y, int z, int pass, int from)
+{
+    int lowest = 1000;
+    for (int d = 0; d < 4; d++)
+	{
+        if (d == 0 && from == 1) continue;
+        if (d == 1 && from == 0) continue;
+        if (d == 2 && from == 3) continue;
+        if (d == 3 && from == 2) continue;
+
+        int xx = x;
+        int yy = y;
+        int zz = z;
+
+        if (d == 0) xx--;
+        if (d == 1) xx++;
+        if (d == 2) zz--;
+        if (d == 3) zz++;
+
+        if (isWaterBlocking(level, xx, yy, zz))
+		{
+            continue;
+        } else if (level->getMaterial(xx, yy, zz) == material && level->getData(xx, yy, zz) == 0)
+		{
+            continue;
+        }
+		else
+		{
+            if (isWaterBlocking(level, xx, yy - 1, zz))
+			{
+                if (pass < 4)
+				{
+                    int v = getSlopeDistance(level, xx, yy, zz, pass + 1, d);
+                    if (v < lowest) lowest = v;
+                }
+            }
+			else
+			{
+                return pass;
+            }
+        }
+    }
+    return lowest;
+
+}
+
+// LiquidTileDynamic.cpp
+bool *LiquidTileDynamic::getSpread(Level *level, int x, int y, int z)
+{
+    for (int d = 0; d < 4; d++)
+	{
+        dist[d] = 1000;
+        int xx = x;
+        int yy = y;
+        int zz = z;
+
+        if (d == 0) xx--;
+        if (d == 1) xx++;
+        if (d == 2) zz--;
+        if (d == 3) zz++;
+        if (isWaterBlocking(level, xx, yy, zz))
+		{
+            continue;
+        }
+		else if (level->getMaterial(xx, yy, zz) == material && level->getData(xx, yy, zz) == 0)
+		{
+            continue;
+        } 
+
+		{
+            if (isWaterBlocking(level, xx, yy - 1, zz))
+			{
+                dist[d] = getSlopeDistance(level, xx, yy, zz, 1, d);
+            }
+			else
+			{
+                dist[d] = 0;
+            }
+        }
+    }
+
+    int lowest = dist[0];
+    for (int d = 1; d < 4; d++)
+	{
+        if (dist[d] < lowest) lowest = dist[d];
+    }
+
+
+    for (int d = 0; d < 4; d++)
+	{
+        result[d] = (dist[d] == lowest);
+    }
+    return result;
+
+}
+
+// LiquidTileDynamic.cpp
+bool LiquidTileDynamic::isWaterBlocking(Level *level, int x, int y, int z)
+{
+    int t = level->getTile(x, y, z);
+    if (t == Tile::door_wood_Id || t == Tile::door_iron_Id || t == Tile::sign_Id || t == Tile::ladder_Id || t == Tile::reeds_Id)
+	{
+        return true;
+    }
+    if (t == 0) return false;
+    Material *m = Tile::tiles[t]->material;
+    if (m == Material::portal) return true;
+    if (m->blocksMotion()) return true;
+    return false;
+}
+
+// LiquidTileDynamic.cpp
+int LiquidTileDynamic::getHighest(Level *level, int x, int y, int z, int current)
+{
+    int d = getDepth(level, x, y, z);
+    if (d < 0) return current;
+    if (d == 0) maxCount++;
+    if (d >= 8)
+	{
+        d = 0;
+    }
+    return current < 0 || d < current ? d : current;
+}
+
+// LiquidTileDynamic.cpp
+bool LiquidTileDynamic::canSpreadTo(Level *level, int x, int y, int z)
+{
+	// 4J added - don't try and spread out of our restricted map. If we don't do this check then tiles at the edge of the world will try and spread outside as the outside tiles report that they contain
+	// only air. The fact that this successfully spreads then updates the neighbours of the tile outside of the map, one of which is the original tile just inside the map, which gets set back to being
+	// dynamic, and added to the pending ticks array.
+	int xc = x >> 4;
+	int zc = z >> 4;
+	int ix = xc + (level->chunkSourceXZSize/2);
+	int iz = zc + (level->chunkSourceXZSize/2);
+	if( ( ix < 0 ) || ( ix >= level->chunkSourceXZSize ) ) return false;
+	if( ( iz < 0 ) || ( iz >= level->chunkSourceXZSize ) ) return false;
+
+    Material *target = level->getMaterial(x, y, z);
+    if (target == material) return false;
+    if (target == Material::lava) return false;
+    return !isWaterBlocking(level, x, y, z);
+}
+
+// LiquidTileDynamic.cpp
+void LiquidTileDynamic::onPlace(Level *level, int x, int y, int z)
+{
+    LiquidTile::onPlace(level, x, y, z);
+    if (level->getTile(x, y, z) == id)
+	{
+        level->addToTickNextTick(x, y, z, id, getTickDelay());
+    }
+}
+
 }

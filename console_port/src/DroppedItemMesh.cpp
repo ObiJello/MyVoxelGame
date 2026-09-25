@@ -74,6 +74,15 @@ DroppedItemMesh buildDroppedItemMesh(const DroppedItem& item,double yaw,double p
     out.insert(out.end(),{quad[0],quad[1],quad[2],quad[0],quad[2],quad[3]});
     return mesh;
 }
+std::vector<Vertex> buildFallingBlockMesh(const FallingBlock& block,int packedLight){
+    std::vector<Vertex> mesh;
+    if(block.tile<=0 || block.tile>255)return mesh;
+    const Light l=light(packedLight);
+    const std::array<float,3> center{float(block.position.x),float(block.position.y),float(block.position.z)};
+    for(int face=0;face<6;++face)
+        cubeFace(mesh,face,center,.5f,0,tileUV(textureTile(static_cast<Block>(block.tile),face,block.data)),shades[face],l);
+    return mesh;
+}
 std::vector<Vertex> buildDestroyStageMesh(int x,int y,int z,int stage,int packedLight){
     if(stage<0 || stage>9)throw std::invalid_argument("Invalid destroy stage");
     std::vector<Vertex> mesh;

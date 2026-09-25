@@ -10,27 +10,27 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 |---|---:|---:|---:|---:|
 | Main loop and levels | 53 | 7 | 19 | 27 |
 | Player and game modes | 12 | 3 | 4 | 5 |
-| Entities | 67 | 0 | 40 | 27 |
+| Entities | 67 | 0 | 41 | 26 |
 | Mob AI | 58 | 0 | 1 | 57 |
 | Blocks | 110 | 0 | 105 | 5 |
 | Block entities | 13 | 0 | 5 | 8 |
-| Items | 63 | 0 | 25 | 38 |
+| Items | 63 | 0 | 26 | 37 |
 | Crafting | 14 | 0 | 11 | 3 |
 | Menus and containers | 55 | 1 | 15 | 39 |
 | Enchanting | 24 | 0 | 1 | 23 |
 | Effects | 5 | 0 | 2 | 3 |
 | World generation | 118 | 57 | 11 | 50 |
-| Dimensions | 4 | 0 | 1 | 3 |
+| Dimensions | 4 | 0 | 2 | 2 |
 | Saves, NBT and IO | 47 | 12 | 6 | 29 |
-| Rendering | 156 | 0 | 27 | 129 |
+| Rendering | 156 | 0 | 28 | 128 |
 | Audio | 3 | 0 | 0 | 3 |
 | Screens and UI | 195 | 0 | 17 | 178 |
 | Tutorial | 29 | 26 | 2 | 1 |
-| Stats and achievements | 14 | 2 | 1 | 11 |
+| Stats and achievements | 14 | 2 | 2 | 10 |
 | Commands | 9 | 0 | 0 | 9 |
 | Networking | 96 | 0 | 4 | 92 |
 | Other | 102 | 11 | 25 | 66 |
-| **All** | **1247** | **119** | **322** | **806** |
+| **All** | **1247** | **119** | **327** | **801** |
 
 ## Main loop and levels
 
@@ -50,9 +50,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Entities
 
-**Partial (40):** Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, EnderDragon, Fireball, Ghast, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LightningBolt, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, Sheep, Silverfish, Skeleton, Slime, SnowMan, Snowball, Spider, Squid, Villager, VillagerGolem, Wolf, Zombie
+**Partial (41):** Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, EnderDragon, FallingTile, Fireball, Ghast, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LightningBolt, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, Sheep, Silverfish, Skeleton, Slime, SnowMan, Snowball, Spider, Squid, Villager, VillagerGolem, Wolf, Zombie
 
-**Missing (27):** AgableMob, BossMob, BossMobPart, DelayedRelease, DragonFireball, EnderCrystal, EnderMan, ExperienceOrb, EyeOfEnderSignal, FallingTile, FishingHook, FlyingMob, Giant, GlobalEntity, NetherSphere, Particle, PrimedTnt, RemotePlayer, ServerPlayer, SmallFireball, TamableAnimal, Throwable, ThrownEgg, ThrownEnderpearl, ThrownExpBottle, ThrownPotion, WaterAnimal
+**Missing (26):** AgableMob, BossMob, BossMobPart, DelayedRelease, DragonFireball, EnderCrystal, EnderMan, ExperienceOrb, EyeOfEnderSignal, FishingHook, FlyingMob, Giant, GlobalEntity, NetherSphere, Particle, PrimedTnt, RemotePlayer, ServerPlayer, SmallFireball, TamableAnimal, Throwable, ThrownEgg, ThrownEnderpearl, ThrownExpBottle, ThrownPotion, WaterAnimal
 
 ## Mob AI
 
@@ -74,9 +74,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Items
 
-**Partial (25):** AnvilTileItem, BowlFoodItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
+**Partial (26):** AnvilTileItem, BowlFoodItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
 
-**Missing (38):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, BucketItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, FlintAndSteelItem, HangingEntityItem, LeafTileItem, MilkBucketItem, MinecartItem, PistonTileItem, RedStoneItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
+**Missing (37):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, BucketItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, MinecartItem, PistonTileItem, RedStoneItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
 
 ## Crafting
 
@@ -114,9 +114,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Dimensions
 
-**Partial (1):** Dimension
+**Partial (2):** Dimension, TheEndDimension
 
-**Missing (3):** HellDimension, SkyIslandDimension, TheEndDimension
+**Missing (2):** HellDimension, SkyIslandDimension
 
 ## Saves, NBT and IO
 
@@ -128,9 +128,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Rendering
 
-**Partial (27):** Camera, ChestModel, ChestRenderer, Chunk, EnchantTableRenderer, EndermanModel, GhastModel, GhastRenderer, ItemFrameRenderer, ItemRenderer, Lighting, MobRenderer, MushroomCowRenderer, OzelotModel, PaintingRenderer, PreStitchedTextureMap, SilverfishModel, SimpleIcon, SkeletonHeadModel, SkullTileRenderer, SlimeModel, StitchedTexture, Tesselator, Texture, TileRenderer, VillagerModel, WolfModel
+**Partial (28):** Camera, ChestModel, ChestRenderer, Chunk, EnchantTableRenderer, EndermanModel, FallingTileRenderer, GhastModel, GhastRenderer, ItemFrameRenderer, ItemRenderer, Lighting, MobRenderer, MushroomCowRenderer, OzelotModel, PaintingRenderer, PreStitchedTextureMap, SilverfishModel, SimpleIcon, SkeletonHeadModel, SkullTileRenderer, SlimeModel, StitchedTexture, Tesselator, Texture, TileRenderer, VillagerModel, WolfModel
 
-**Missing (129):** AbstractTexturePack, AllowAllCuller, ArrowRenderer, BlazeModel, BlazeRenderer, BoatModel, BoatRenderer, BookModel, BreakingItemParticle, BubbleParticle, ChickenModel, ChickenRenderer, ClockTexture, CompassTexture, CowModel, CowRenderer, CreeperModel, CreeperRenderer, CritParticle, CritParticle2, DLCTextureFile, DLCTexturePack, DefaultRenderer, DefaultTexturePack, DirtyChunkSorter, DragonBreathParticle, DragonModel, DripParticle, EchantmentTableParticle, EnderChestRenderer, EnderCrystalModel, EnderCrystalRenderer, EnderDragonRenderer, EnderParticle, EndermanRenderer, EntityRenderer, EntityTileRenderer, ExperienceOrbRenderer, ExplodeParticle, FallingTileRenderer, FileTexturePack, FireballRenderer, FishingHookRenderer, FlameParticle, FolderTexturePack, Font, FootstepParticle, Frustum, FrustumCuller, FrustumData, GiantMobRenderer, GuiParticle, GuiParticles, HeartParticle, HttpTexture, HugeExplosionParticle, HugeExplosionSeedParticle, HumanoidMobRenderer, HumanoidModel, ItemInHandRenderer, ItemSpriteRenderer, LargeChestModel, LavaParticle, LavaSlimeModel, LavaSlimeRenderer, LightningBoltRenderer, MemTexture, MemoryTracker, MinecartModel, MinecartRenderer, MobSkinMemTextureProcessor, MobSkinTextureProcessor, MobSpawnerRenderer, NetherPortalParticle, NoteParticle, OzelotRenderer, ParticleEngine, PigModel, PigRenderer, PistonPieceRenderer, PlayerCloudParticle, PlayerRenderer, ProgressRenderer, QuadrupedModel, RedDustParticle, SheepFurModel, SheepModel, SheepRenderer, SignModel, SignRenderer, SilverfishRenderer, SkeletonModel, SlimeRenderer, SmokeParticle, SnowManModel, SnowManRenderer, SnowShovelParticle, SpellParticle, SpiderModel, SpiderRenderer, SplashParticle, SquidModel, SquidRenderer, SuspendedParticle, SuspendedTownParticle, TakeAnimationParticle, TerrainParticle, TextureHolder, TextureManager, TextureMap, TexturePack, TexturePackRepository, Textures, TheEndPortalRenderer, TileEntityRenderer, TntRenderer, UIBitmapFont, UIFontData, UITTFFont, ViewportCuller, VillagerGolemModel, VillagerGolemRenderer, VillagerRenderer, VillagerZombieModel, WaterDropParticle, WolfRenderer, XUI_DebugSetCamera, ZombieModel, ZombieRenderer
+**Missing (128):** AbstractTexturePack, AllowAllCuller, ArrowRenderer, BlazeModel, BlazeRenderer, BoatModel, BoatRenderer, BookModel, BreakingItemParticle, BubbleParticle, ChickenModel, ChickenRenderer, ClockTexture, CompassTexture, CowModel, CowRenderer, CreeperModel, CreeperRenderer, CritParticle, CritParticle2, DLCTextureFile, DLCTexturePack, DefaultRenderer, DefaultTexturePack, DirtyChunkSorter, DragonBreathParticle, DragonModel, DripParticle, EchantmentTableParticle, EnderChestRenderer, EnderCrystalModel, EnderCrystalRenderer, EnderDragonRenderer, EnderParticle, EndermanRenderer, EntityRenderer, EntityTileRenderer, ExperienceOrbRenderer, ExplodeParticle, FileTexturePack, FireballRenderer, FishingHookRenderer, FlameParticle, FolderTexturePack, Font, FootstepParticle, Frustum, FrustumCuller, FrustumData, GiantMobRenderer, GuiParticle, GuiParticles, HeartParticle, HttpTexture, HugeExplosionParticle, HugeExplosionSeedParticle, HumanoidMobRenderer, HumanoidModel, ItemInHandRenderer, ItemSpriteRenderer, LargeChestModel, LavaParticle, LavaSlimeModel, LavaSlimeRenderer, LightningBoltRenderer, MemTexture, MemoryTracker, MinecartModel, MinecartRenderer, MobSkinMemTextureProcessor, MobSkinTextureProcessor, MobSpawnerRenderer, NetherPortalParticle, NoteParticle, OzelotRenderer, ParticleEngine, PigModel, PigRenderer, PistonPieceRenderer, PlayerCloudParticle, PlayerRenderer, ProgressRenderer, QuadrupedModel, RedDustParticle, SheepFurModel, SheepModel, SheepRenderer, SignModel, SignRenderer, SilverfishRenderer, SkeletonModel, SlimeRenderer, SmokeParticle, SnowManModel, SnowManRenderer, SnowShovelParticle, SpellParticle, SpiderModel, SpiderRenderer, SplashParticle, SquidModel, SquidRenderer, SuspendedParticle, SuspendedTownParticle, TakeAnimationParticle, TerrainParticle, TextureHolder, TextureManager, TextureMap, TexturePack, TexturePackRepository, Textures, TheEndPortalRenderer, TileEntityRenderer, TntRenderer, UIBitmapFont, UIFontData, UITTFFont, ViewportCuller, VillagerGolemModel, VillagerGolemRenderer, VillagerRenderer, VillagerZombieModel, WaterDropParticle, WolfRenderer, XUI_DebugSetCamera, ZombieModel, ZombieRenderer
 
 ## Audio
 
@@ -154,9 +154,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 **Ported (2):** ChangeStateConstraint, StatTask
 
-**Partial (1):** Achievements
+**Partial (2):** Achievements, GenericStats
 
-**Missing (11):** Achievement, AchievementPopup, CommonStats, DurangoStats, GeneralStat, GenericStats, ItemStat, Stat, Stats, StatsCounter, StatsSyncher
+**Missing (10):** Achievement, AchievementPopup, CommonStats, DurangoStats, GeneralStat, ItemStat, Stat, Stats, StatsCounter, StatsSyncher
 
 ## Commands
 

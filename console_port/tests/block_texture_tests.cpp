@@ -1,4 +1,5 @@
 #include "TerrainMesh.h"
+#include "DroppedItemMesh.h"
 #include "BlockFaceUV.h"
 #include <cmath>
 #include <iostream>
@@ -74,6 +75,27 @@ int main(){try{
  auto vineMesh=buildTerrainMeshRegion(plants,plants.blockSnapshot(),14,10,1,1);
  require(vineMesh.opaque.size()==12,"One vine attachment uses a double-sided wall plane");
  for(const auto& v:vineMesh.opaque)require(std::abs(v.z-10.975f)<.0001f,"Vine metadata chooses its wall");
+ // TileRenderer::tesselateFireInWorld: on a solid top, eight 1.4-high planes
+ // from the fire slot (15,1); beside a log with nothing under it, one
+ // double-sided slanted plane toward the log.
+ require(plants.set(20,179,20,Stone) && plants.set(20,180,20,static_cast<Block>(51)),"Fire is a supported block");
+ auto fireMesh=buildTerrainMeshRegion(plants,plants.blockSnapshot(),20,20,1,1);
+ int fireFaces=0;
+ for(const auto& v:fireMesh.opaque)if(v.y>180){
+  require(int(std::floor(v.u*16))+16*int(std::floor(v.v*16))==31,"Fire uses its atlas slot");
+  require(v.y<=181.4001f,"Fire planes rise 1.4 blocks");++fireFaces;
+ }
+ require(fireFaces==8*3,"Fire on a solid block is eight planes");
+ require(plants.set(24,190,20,static_cast<Block>(51)) && plants.set(23,190,20,Log),"Fire beside a log");
+ auto hangingFire=buildTerrainMeshRegion(plants,plants.blockSnapshot(),24,20,1,1);
+ require(hangingFire.opaque.size()==2*6,"Fire leans toward what it burns");
+ FallingBlock sand;sand.position={30.5,185.49,30.5};sand.tile=12;
+ const auto falling=buildFallingBlockMesh(sand,0);
+ require(falling.size()==36,"A falling block is a full cube");
+ const int sandTile=textureTile(Sand,0);
+ for(const auto& v:falling)require(v.u*16>=sandTile%16-.001f && v.u*16<=sandTile%16+1.001f &&
+     v.v*16>=sandTile/16-.001f && v.v*16<=sandTile/16+1.001f &&
+     std::abs(std::abs(v.y-185.49f)-.5f)<.001f,"A falling block keeps its tile's texture and size");
  require(plants.set(16,180,10,static_cast<Block>(81)),"Cactus is a supported natural block");
  auto cactusMesh=buildTerrainMeshRegion(plants,plants.blockSnapshot(),16,10,1,1);
  require(cactusMesh.opaque.size()==36,"Cactus renders six inset faces");

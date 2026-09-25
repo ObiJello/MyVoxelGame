@@ -140,8 +140,9 @@ bool World::destroyBlock(int x,int y,int z,int slot){
     }
     if(!harvest)return true;
     state->playerFood.addExhaustion(consoleMineExhaustion());
-    // A door's upper half removes the lower half, which drops the item.
-    const int dropData=(id==64 || id==71) && (data&8)?0:data;
+    // DoorTile::getResource: the upper half drops nothing; the lower half
+    // drops the door when its neighbour update removes it.
+    const int dropData=data;
     auto& random=state->survivalRandom;
     int experience=0;
     for(const auto& drop:consoleTileDrops(id,dropData,selected,random,&experience)){
@@ -154,7 +155,7 @@ bool World::destroyBlock(int x,int y,int z,int slot){
     if(id==79 && y>0){
         const int below=get(x,y-1,z);
         if(solid(static_cast<Block>(below)) || below==8 || below==9 || below==10 || below==11){
-            set(x,y,z,static_cast<Block>(8));updateLiquidNeighbors(x,y,z);
+            setTileAndUpdate(x,y,z,static_cast<Block>(8));
         }
     }
     return true;

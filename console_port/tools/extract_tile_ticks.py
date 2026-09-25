@@ -48,7 +48,44 @@ METHODS = [
     ('CropTile', 'growCropsToMax'), ('StemTile', 'growCropsToMax'),
     ('CocoaTile', 'getPlacedOnFaceDataValue'),
     ('HoeItem', 'useOn'), ('SeedItem', 'useOn'), ('SeedFoodItem', 'useOn'), ('DyePowderItem', 'useOn'),
+    ('FlintAndSteelItem', 'useOn'),
+    # Tile updates: Level's neighbour and signal queries, then the tiles that
+    # react to their neighbours, schedule ticks or burn.
+    ('Level', 'updateNeighborsAt'), ('Level', 'neighborChanged'),
+    ('Level', 'getDirectSignal'), ('Level', 'hasDirectSignal'), ('Level', 'getSignal'), ('Level', 'hasNeighborSignal'),
+    ('Level', 'isTopSolidBlocking'), ('Level', 'isSolidBlockingTileInLoadedChunk'), ('Level', 'mayPlace'),
+    ('Bush', 'neighborChanged'), ('CactusTile', 'neighborChanged'), ('CocoaTile', 'neighborChanged'),
+    ('ReedTile', 'neighborChanged'), ('ReedTile', 'checkAlive'), ('FarmTile', 'neighborChanged'),
+    ('VineTile', 'neighborChanged'), ('VineTile', 'updateSurvival'),
+    ('TopSnowTile', 'mayPlace'), ('TopSnowTile', 'neighborChanged'), ('TopSnowTile', 'checkCanSurvive'),
+    ('WoolCarpetTile', 'neighborChanged'), ('WoolCarpetTile', 'checkCanSurvive'),
+    ('WoolCarpetTile', 'canSurvive'), ('WoolCarpetTile', 'mayPlace'),
+    ('CakeTile', 'neighborChanged'), ('CakeTile', 'canSurvive'), ('CakeTile', 'mayPlace'),
+    ('FlowerPotTile', 'neighborChanged'), ('SignTile', 'neighborChanged'),
+    ('LadderTile', 'mayPlace'), ('LadderTile', 'getPlacedOnFaceDataValue'), ('LadderTile', 'neighborChanged'),
+    ('TorchTile', 'isConnection'), ('TorchTile', 'mayPlace'), ('TorchTile', 'getPlacedOnFaceDataValue'),
+    ('TorchTile', 'tick'), ('TorchTile', 'onPlace'), ('TorchTile', 'neighborChanged'),
+    ('TorchTile', 'checkCanSurvive'), ('TorchTile', 'shouldTileTick'),
+    ('DoorTile', 'neighborChanged'), ('DoorTile', 'setOpen'), ('DoorTile', 'getCompositeData'),
+    ('HeavyTile', 'onPlace'), ('HeavyTile', 'neighborChanged'), ('HeavyTile', 'tick'), ('HeavyTile', 'checkSlide'),
+    ('HeavyTile', 'falling'), ('HeavyTile', 'getTickDelay'), ('HeavyTile', 'isFree'), ('HeavyTile', 'onLand'),
+    ('FireTile', 'init'), ('FireTile', 'setFlammable'), ('FireTile', 'getTickDelay'), ('FireTile', 'tick'),
+    ('FireTile', 'checkBurnOut'), ('FireTile', 'isValidFireLocation'), ('FireTile', 'getFireOdds'),
+    ('FireTile', 'canBurn'), ('FireTile', 'getFlammability'), ('FireTile', 'mayPlace'),
+    ('FireTile', 'neighborChanged'), ('FireTile', 'onPlace'), ('FireTile', 'isFlammable'),
+    ('LiquidTileStatic', 'tick'), ('LiquidTileStatic', 'isFlammable'),
+    # Liquids: the flow itself, the lava/water reaction and the static/dynamic switch.
+    ('LiquidTile', 'getDepth'), ('LiquidTile', 'getTickDelay'), ('LiquidTile', 'onPlace'),
+    ('LiquidTile', 'neighborChanged'), ('LiquidTile', 'updateLiquid'), ('LiquidTile', 'fizz'),
+    ('LiquidTileStatic', 'neighborChanged'), ('LiquidTileStatic', 'setDynamic'),
+    ('LiquidTileDynamic', 'setStatic'), ('LiquidTileDynamic', 'iterativeTick'), ('LiquidTileDynamic', 'tick'),
+    ('LiquidTileDynamic', 'mainTick'), ('LiquidTileDynamic', 'trySpreadTo'), ('LiquidTileDynamic', 'getSlopeDistance'),
+    ('LiquidTileDynamic', 'getSpread'), ('LiquidTileDynamic', 'isWaterBlocking'), ('LiquidTileDynamic', 'getHighest'),
+    ('LiquidTileDynamic', 'canSpreadTo'), ('LiquidTileDynamic', 'onPlace'),
 ]
+# Classes whose header constants (static const int / static bool) are written
+# to TileConstants.inc as TILE_CONSTANTS_<Class> for the stand-in classes.
+CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile']
 # The class's source file where it differs from the class name.
 SOURCE_FILE = {'WaterlilyTile': 'WaterLilyTile.cpp'}
 
@@ -87,7 +124,21 @@ def expected():
     tile_h = re.sub(r'//[^\n]*', '', FILES['tile.h'].read_text(encoding='utf-8-sig'))
     ids = ''.join(f'static const int {m[1]}_Id = {m[2]};\n'
                   for m in re.finditer(r'static const int (\w+)_Id\s*=\s*(\d+)', tile_h))
-    return {'TileTickRules.cpp': rules, 'TileIds.inc': ids}
+    constants = []
+    for cls in CONSTANT_CLASSES:
+        header = re.sub(r'//[^\n]*', '', FILES[(cls + '.h').lower()].read_text(encoding='utf-8-sig'))
+        body = re.sub(r'//[^\n]*', '', source(cls))
+        lines = []
+        for m in re.finditer(r'static const int (\w+)(\s*=\s*([^;]+))?;', header):
+            value = m[3]
+            if value is None:
+                d = re.search(r'const int ' + cls + r'::' + m[1] + r'\s*=\s*([^;]+);', body)
+                if not d:
+                    raise SystemExit(f'{cls}::{m[1]} has no value')
+                value = d[1]
+            lines.append(f'static const int {m[1]} = {value.strip()};')
+        constants.append(f'#define TILE_CONSTANTS_{cls} \\\n    ' + ' \\\n    '.join(lines) + '\n')
+    return {'TileTickRules.cpp': rules, 'TileIds.inc': ids, 'TileConstants.inc': ''.join(constants)}
 
 
 def main():

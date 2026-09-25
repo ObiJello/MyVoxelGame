@@ -141,3 +141,14 @@ bone meal) for a tree. Cut a tree's trunk and watch its leaves decay. Also check
 farmland dries out and turns back to dirt away from water, and that pumpkin and melon
 stems bend toward the fruit they grow. Note anything that grows far faster or slower
 than you remember.
+
+## Blocks reacting to each other
+
+Pour water (a water bucket) on a slope and watch it run downhill and settle; pour
+lava next to water and check that obsidian or cobblestone forms. Stack sand or gravel
+in the air and watch it fall and land. Put a torch on a block and break the block
+under it. Break the top half of a door (in survival it should drop one door). Light
+fire on netherrack or wood with flint and steel and watch it spread and burn wood,
+leaves and wool, and burn out on stone. (Fire shows a red placeholder texture until
+the `fire_0.png`/`fire_1.png` strips are added to `assets/animations`.) Note anything
+that flows, falls or burns differently from how you remember it.

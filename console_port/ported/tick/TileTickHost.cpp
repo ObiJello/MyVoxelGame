@@ -2,6 +2,7 @@
 #include "TileProperties.h"
 
 #include <cstring>
+#include <typeinfo>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -11,7 +12,12 @@ Tile* Tile::tiles[256];
 bool Tile::solid[256];
 int Tile::lightBlock[256];
 int Tile::lightEmission[256];
-Tile *Tile::farmland,*Tile::sapling,*Tile::crops,*Tile::tallgrass,*Tile::flower,*Tile::rose;
+Tile *Tile::farmland,*Tile::sapling,*Tile::crops,*Tile::tallgrass,*Tile::flower,*Tile::rose,
+    *Tile::water,*Tile::calmWater,*Tile::lava,*Tile::calmLava,*Tile::anvil;
+FireTile* Tile::fire;
+TntTile* Tile::tnt;
+PortalTile* Tile::portalTile;
+bool HeavyTile::instaFall=false;
 Random* Item::random=new Random();
 
 namespace {
@@ -65,6 +71,21 @@ std::unique_ptr<Tile> make(std::string_view cls){
     if(cls=="SnowTile")return std::make_unique<SnowTile>();
     if(cls=="RedStoneOreTile")return std::make_unique<RedStoneOreTile>();
     if(cls=="CauldronTile")return std::make_unique<CauldronTile>();
+    if(cls=="WoolCarpetTile")return std::make_unique<WoolCarpetTile>();
+    if(cls=="CakeTile")return std::make_unique<CakeTile>();
+    if(cls=="FlowerPotTile")return std::make_unique<FlowerPotTile>();
+    if(cls=="SignTile")return std::make_unique<SignTile>();
+    if(cls=="LadderTile")return std::make_unique<LadderTile>();
+    if(cls=="TorchTile")return std::make_unique<TorchTile>();
+    if(cls=="DoorTile")return std::make_unique<DoorTile>();
+    if(cls=="HeavyTile" || cls=="GravelTile" || cls=="AnvilTile")return std::make_unique<HeavyTile>();
+    if(cls=="FireTile")return std::make_unique<FireTile>();
+    if(cls=="TntTile")return std::make_unique<TntTile>();
+    if(cls=="PortalTile")return std::make_unique<PortalTile>();
+    if(cls=="LiquidTileDynamic")return std::make_unique<LiquidTileDynamic>();
+    if(cls=="LiquidTileStatic")return std::make_unique<LiquidTileStatic>();
+    if(cls=="StairTile")return std::make_unique<StairTile>();
+    if(cls=="StoneSlabTile" || cls=="WoodSlabTile")return std::make_unique<HalfSlabTile>();
     return std::make_unique<Tile>();
 }
 }
@@ -78,10 +99,12 @@ void initializeTiles(){
             if(!properties)continue;
             owned[id]=make(properties->className);
             Tile& tile=*owned[id];
+            tile.ported=typeid(tile)!=typeid(Tile);
             tile.id=id;
             tile.material=materialOf(properties->material);
             tile.ticking=properties->ticking;
             tile.cubeShaped=properties->cubeShaped;
+            tile.solidRender=properties->solid;
             Tile::tiles[id]=&tile;
             Tile::solid[id]=properties->solid;
             Tile::lightBlock[id]=properties->lightBlock;
@@ -90,10 +113,59 @@ void initializeTiles(){
         Tile::farmland=Tile::tiles[Tile::farmland_Id];Tile::sapling=Tile::tiles[Tile::sapling_Id];
         Tile::crops=Tile::tiles[Tile::crops_Id];Tile::tallgrass=Tile::tiles[Tile::tallgrass_Id];
         Tile::flower=Tile::tiles[Tile::flower_Id];Tile::rose=Tile::tiles[Tile::rose_Id];
+        Tile::water=Tile::tiles[Tile::water_Id];Tile::calmWater=Tile::tiles[Tile::calmWater_Id];
+        Tile::lava=Tile::tiles[Tile::lava_Id];Tile::calmLava=Tile::tiles[Tile::calmLava_Id];
+        Tile::anvil=Tile::tiles[Tile::anvil_Id];
+        Tile::fire=static_cast<FireTile*>(Tile::tiles[Tile::fire_Id]);
+        Tile::tnt=static_cast<TntTile*>(Tile::tiles[Tile::tnt_Id]);
+        Tile::portalTile=static_cast<PortalTile*>(Tile::tiles[Tile::portalTile_Id]);
+        // SignTile(id, clas, onGround): the wall sign is not on the ground.
+        static_cast<SignTile*>(Tile::tiles[Tile::wallSign_Id])->onGround=false;
         // StemTile(id, fruit): Tile::pumpkinStem and Tile::melonStem.
         static_cast<StemTile*>(Tile::tiles[Tile::pumpkinStem_Id])->fruit=Tile::tiles[Tile::pumpkin_Id];
         static_cast<StemTile*>(Tile::tiles[Tile::melonStem_Id])->fruit=Tile::tiles[Tile::melon_Id];
+        // Tile::staticCtor's closing loop runs every tile's init (FireTile's flammability).
+        for(auto* tile:Tile::tiles)if(tile)tile->init();
     });
+}
+
+bool tickPorted(int id){
+    initializeTiles();
+    return id>0 && id<256 && Tile::tiles[id] && Tile::tiles[id]->ported;
+}
+
+namespace {
+// A level holding one tile at every position.
+struct CellLevel final:Level {
+    int tile=0,data=0;
+    int getTile(int,int,int)override{return tile;}
+    int getData(int,int,int)override{return data;}
+    bool setTileAndDataNoUpdate(int,int,int,int,int)override{return false;}
+    bool setDataNoUpdate(int,int,int,int)override{return false;}
+    bool hasChunk(int,int)override{return true;}
+    int getRawBrightness(int,int,int)override{return 0;}
+    int getDaytimeRawBrightness(int,int,int)override{return 0;}
+    int getBrightness(LightLayer::variety,int,int,int)override{return 0;}
+    bool canSeeSky(int,int,int)override{return false;}
+    bool isRainingAt(int,int,int)override{return false;}
+    bool hasChunksAt(int,int,int,int,int,int)override{return true;}
+    void spawnResources(int,int,int,int,int)override{}
+    bool placeTree(TreeKind,int,Random&,int,int,int)override{return false;}
+};
+}
+bool isTopSolidBlocking(int tile,int data){
+    initializeTiles();
+    CellLevel level;level.tile=tile&255;level.data=data;
+    return level.isTopSolidBlocking(0,0,0);
+}
+bool fireCanBurn(int tile){
+    initializeTiles();
+    CellLevel level;level.tile=tile&255;
+    return Tile::fire->canBurn(&level,0,0,0);
+}
+
+LevelChunk* ChunkSource::getChunk(int chunkX,int chunkZ){
+    return level->hasChunk(chunkX,chunkZ)?&loaded:&missing;
 }
 
 Material* Level::getMaterial(int x,int y,int z){
@@ -145,6 +217,7 @@ bool useItemOn(Level& level,ItemInstance& item,int x,int y,int z,int face){
     static SeedFoodItem carrot=[]{SeedFoodItem i;i.id=391;i.resultId=Tile::carrots_Id;i.targetLand=Tile::farmland_Id;return i;}();
     static SeedFoodItem potato=[]{SeedFoodItem i;i.id=392;i.resultId=Tile::potatoes_Id;i.targetLand=Tile::farmland_Id;return i;}();
     static DyePowderItem dye;
+    static FlintAndSteelItem flintAndSteel;
     auto instance=std::make_shared<ItemInstance>(item);
     auto player=std::make_shared<Player>();
     bool used=false;
@@ -157,6 +230,7 @@ bool useItemOn(Level& level,ItemInstance& item,int x,int y,int z,int face){
     case 391:used=carrot.useOn(instance,player,&level,x,y,z,face,0,0,0);break;
     case 392:used=potato.useOn(instance,player,&level,x,y,z,face,0,0,0);break;
     case 351:used=dye.useOn(instance,player,&level,x,y,z,face,0,0,0);break;
+    case 259:used=flintAndSteel.useOn(instance,player,&level,x,y,z,face,0,0,0);break;
     default:return false;
     }
     item=*instance;

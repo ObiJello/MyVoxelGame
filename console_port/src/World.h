@@ -59,6 +59,12 @@ struct DroppedItem {
     float bobOffset=0;
     std::shared_ptr<class CompoundTag> stack;
 };
+// FallingTile: a sand, gravel or anvil tile falling (HeavyTile::checkSlide).
+// The position is the entity's (the block's centre) in client coordinates.
+struct FallingBlock {
+    Vec3 position,velocity;
+    int tile=0,data=0,time=0;
+};
 struct CraftingRecipe;
 struct TutorialLevelRules;
 
@@ -77,18 +83,23 @@ class World {
     void scheduleFluid(int x,int y,int z,int delay);
     void activateFluidChunks();
     void activateFluidChunk(int chunkX,int chunkZ);
-    void tickFluids();
-    void putFluid(int x,int y,int z,int id,int data);
-    void flowFluid(int x,int y,int z);
+    // ServerLevel::tickPendingTicks over the window.
+    void tickPendingTicks();
+    class ScheduledTickQueue& tileTicks();
     // ServerLevel::tickTiles (random tile ticks, freezing, snow, rain) and
     // Level::tickWeather; WorldTiles.cpp.
     void tickTiles();
     void tickWeather();
-    // Tile::onRemove for a replaced tile (trunks and leaves flag decay).
-    void tileRemoved(int x,int y,int z,int tile,int data);
+    // FallingTile::tick for every falling block.
+    void tickFallingBlocks();
+    // The chunk hooks and neighbour notifications of a change already made
+    // with set/setData (placement keeps its collision check first).
+    void tileStored(int x,int y,int z,int oldTile,int oldData);
     friend class WorldTickLevel;
-    void saveFluidTicks(class ChunkRecord& record,bool remove,bool keepSavedFluids=false);
-    void loadFluidTicks(const class ChunkRecord& record);
+    // OldChunkStorage TileTicks: the queue's ticks for the chunk join the
+    // ones the port does not run, which stay as saved.
+    void saveTileTicks(class ChunkRecord& record,bool remove);
+    void loadTileTicks(class ChunkRecord& record);
     void tickEntities();
     void tickExperienceOrbs();
     void spawnExperienceOrbs(Vec3 position,int reward);
@@ -178,9 +189,14 @@ public:
     bool placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw);
     int getData(int x,int y,int z)const;
     bool setData(int x,int y,int z,int data);
-    // Call after an accepted edit. Returns fizz locations for the future effects system.
-    // Raw set/setData deliberately remain no-update storage operations.
-    std::vector<Vec3> updateLiquidNeighbors(int x,int y,int z);
+    // set/setData are raw storage. These are Level::setTileAndData and
+    // setData: the replaced tile's onRemove and the new tile's onPlace
+    // (LevelChunk::setTileAndData), then neighborChanged on the six
+    // neighbours, which is how liquids, sand, torches, doors, fire and plants
+    // react to an edit.
+    bool setTileAndUpdate(int x,int y,int z,Block tile,int data=0);
+    bool setDataAndUpdate(int x,int y,int z,int data);
+    const std::vector<FallingBlock>& fallingBlocks()const;
     int skyLight(int x,int y,int z)const;
     int blockLight(int x,int y,int z)const;
     int renderLight(int x,int y,int z,bool liquid=false)const;

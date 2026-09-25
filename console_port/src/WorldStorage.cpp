@@ -73,7 +73,7 @@ void appendDungeonTiles(ChunkRecord& record,const std::vector<DungeonTile>& tile
     }
 }
 }
-World::State::State(std::int64_t seed):archive(std::make_unique<PS3WorldStorage>()),fluidRandom(seed),entityRandom(seed^0x5deece66){
+World::State::State(std::int64_t seed):archive(std::make_unique<PS3WorldStorage>()),entityRandom(seed^0x5deece66){
     GameType::staticCtor();LevelType::staticCtor();
     LevelSettings settings(seed,GameType::CREATIVE,true,false,true,LevelType::lvl_normal,54,3);
     metadata=std::make_unique<LevelData>(&settings,L"Console World");
@@ -187,7 +187,7 @@ void World::generateTutorial(const std::filesystem::path& assets){
         for(int z=next->originZ/16-depth/32;z<next->originZ/16+depth/32;++z)
             next->decorateNatural(x,z);
     next->ensureLighting(tutorialSeed);state.swap(next);seed=tutorialSeed;++revision;
-    for(const auto& [key,record]:state->records)loadEntities(*record);
+    for(const auto& [key,record]:state->records){loadTileTicks(*record);loadEntities(*record);}
     activateFluidChunks();
 }
 void World::generateArchivedTutorial(const std::filesystem::path& assets){
@@ -215,7 +215,7 @@ void World::generateArchivedTutorial(const std::filesystem::path& assets){
     next->configureLight(originalSeed);
     next->ensureLighting(originalSeed);
     state.swap(next);seed=originalSeed;++revision;
-    for(const auto& [key,record]:state->records)loadEntities(*record);
+    for(const auto& [key,record]:state->records){loadTileTicks(*record);loadEntities(*record);}
     activateFluidChunks();
 }
 bool World::isTutorial()const{return bool(state->tutorial || state->archivedTutorial);}
@@ -230,7 +230,6 @@ Block World::get(int x,int y,int z)const{
 int World::getData(int x,int y,int z)const{return inside(x,y,z)?state->chunk(x,z).metadata.get(x&15,y,z&15):0;}
 bool World::set(int x,int y,int z,Block tile){
     if(!inside(x,y,z) || !validBlock(tile) || get(x,y,z)==tile)return false;
-    const int oldTile=get(x,y,z),oldData=getData(x,y,z);
     const bool lighting=state->pending && state->pending->phase==State::Pending::Phase::Lighting && !state->region.hasPreparedLight();
     if(!lighting)state->ensureLighting(seed);
     state->lightDirty=true;
@@ -238,7 +237,6 @@ bool World::set(int x,int y,int z,Block tile){
     if(lighting){if(changed)state->pending->restartLighting=true;}
     else state->lightDirty=false;
     if(changed){state->undecorated.erase({Mth::intFloorDiv(x-width/2,16),Mth::intFloorDiv(z-depth/2,16)});++revision;}
-    if(changed && !lighting)tileRemoved(x,y,z,oldTile,oldData);
     return changed;
 }
 bool World::setData(int x,int y,int z,int data){
@@ -276,13 +274,14 @@ void World::tickTime(){
     // console wrap explicitly), then tickPendingTicks and tickTiles.
     tickWeather();
     state->metadata->setTime(std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(time())+1));
-    tickFluids();
+    tickPendingTicks();
     tickTiles();
     tickFurnaces();
     tickBrewingStands();
     tickPlayerEffects();
     tickPlayerSurvival();
     tickEntities();
+    tickFallingBlocks();
 }
 std::array<float,3> World::skyColour(int x,int z)const{
     if(x<originX() || x>=originX()+width || z<originZ() || z>=originZ()+depth)throw std::out_of_range("Sky sample outside client world");
@@ -477,7 +476,7 @@ bool World::streamAround(Vec3 player,int chunkBudget){
                 const int clientX=cx*16+width/2,clientZ=cz*16+depth/2;
                 if(clientX>=previousX && clientX<previousX+width &&
                    clientZ>=previousZ && clientZ<previousZ+depth)continue;
-                if(auto it=state->records.find({cx,cz});it!=state->records.end())loadFluidTicks(*it->second);
+                if(auto it=state->records.find({cx,cz});it!=state->records.end())loadTileTicks(*it->second);
                 activateFluidChunk(cx,cz);
             }
         // A record can have been resident in the old lighting halo while its
@@ -559,7 +558,7 @@ std::unique_ptr<ChunkRecord> World::captureChunk(std::pair<int,int> key,bool rem
     auto it=state->records.find(key);
     const ChunkRecord& context=previous?*previous:it==state->records.end()?fresh:*it->second;
     auto record=ChunkStorageCodec::capture(chunk,context);
-    saveFluidTicks(*record,remove,bool(previous));
+    saveTileTicks(*record,remove);
     saveEntities(*record,remove);
     markDecoration(*record,state->undecorated.contains(key));
     record->lastUpdate=time();
@@ -665,9 +664,8 @@ bool World::load(const std::filesystem::path& path){
         next->lightDirty=repair;
     }
     next->configureLight(loadedSeed);state.swap(next);seed=loadedSeed;++revision;
-    state->fluidRandom.setSeed(loadedSeed);
     state->entityRandom.setSeed(loadedSeed^0x5deece66);
-    for(const auto& [key,record]:state->records){loadFluidTicks(*record);loadEntities(*record);}
+    for(const auto& [key,record]:state->records){loadTileTicks(*record);loadEntities(*record);}
     activateFluidChunks();
     return true;
 }

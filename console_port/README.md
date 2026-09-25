@@ -244,8 +244,8 @@ retained in the native save archive and restored on return. Newly generated visi
 chunks receive a deterministic source-derived pass for lakes, ores, shore deposits,
 trees, biome foliage, cold-biome snow/ice and biome-specific wells and emerald ore.
 Tutorial schematics run after biome decoration and before the shifted snow/ice pass.
-Full worlds are **not reproduced yet**: the larger structure generator, dungeons,
-live liquid spread and the remaining postprocessing order are pending. The client now uses the 256-high chunk store with metadata and original
+Full worlds are **not reproduced yet**: the larger structure generator, dungeons
+and the remaining postprocessing order are pending. The client now uses the 256-high chunk store with metadata and original
 light propagation, including a two-chunk halo around the visible region. The renderer
 now uses those light values; complete block metadata and ambient occlusion remain
 pending.
@@ -258,8 +258,12 @@ integration remain pending; these libraries have only been tested nonvisually.
 
 Crops, saplings, grass, leaves, cactus, sugar cane, vines and the rest of the randomly
 ticking tiles now grow and decay with the original rules, the weather cycles, and
-hoes, seeds, carrots, potatoes, nether wart and bone meal work (`docs/TICK_MAP.md`). Other unfinished systems include per-chunk mesh uploads, ambient
-occlusion, scheduled ticks for tiles other than liquids, redstone, survival, mobs/entities, inventories and recipes, audio/music,
+hoes, seeds, carrots, potatoes, nether wart and bone meal work (`docs/TICK_MAP.md`).
+Blocks react to their neighbours as in the source: liquids flow with the original
+`LiquidTile` code, sand and gravel fall, fire burns and spreads, torches, doors,
+ladders, signs and plants drop when their support goes, and scheduled ticks are kept
+for every tile. Other unfinished systems include per-chunk mesh uploads, ambient
+occlusion, redstone, pistons, survival, mobs/entities, inventories and recipes, audio/music,
 animation, first-person hand, split screen, networking, PSN/store services, and legacy
 saves. `docs/COVERAGE.md` lists every source class and whether the port has it;
 `docs/TICK_MAP.md` follows the game tick and gives the order of the remaining work. Existing 96/128-high

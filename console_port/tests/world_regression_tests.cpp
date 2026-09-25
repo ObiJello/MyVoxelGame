@@ -12,8 +12,7 @@ int main(){try{
   // LiquidTileStatic::setDynamic keeps depth: one source must not become many.
   World world;world.generate(41,true);
   for(int x=4;x<=60;++x)for(int z=4;z<=60;++z)world.set(x,179,z,Stone);
-  require(world.set(32,180,32,Water),"Place a water source");
-  world.updateLiquidNeighbors(32,180,32);
+  require(world.setTileAndUpdate(32,180,32,static_cast<Block>(8)),"Place a water source");
   for(int i=0;i<600;++i)world.tickTime();
   int sources=0,wet=0;
   for(int x=4;x<=60;++x)for(int z=4;z<=60;++z){

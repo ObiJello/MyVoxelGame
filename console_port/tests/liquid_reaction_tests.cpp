@@ -30,17 +30,18 @@ int main(int argc,char** argv){try{
     rejected=false;try{consoleLiquidReaction(access,INT_MAX,0,0);}catch(const std::out_of_range&){rejected=true;}
     require(rejected,"Reject overflowing neighbor coordinates");
     World world;
-    world.set(15,180,16,Lava);world.set(16,180,16,Water);
+    world.set(15,180,16,Lava);
     require(world.get(15,180,16)==Lava && world.blockLight(15,180,16)==15,"Raw storage remains no-update");
-    auto effects=world.updateLiquidNeighbors(16,180,16);
-    require(effects.size()==1 && world.get(15,180,16)==Obsidian,"Water edit cools lava across chunk boundary");
+    // LiquidTile::neighborChanged -> updateLiquid when water is placed beside it.
+    require(world.setTileAndUpdate(16,180,16,Water) && world.get(15,180,16)==Obsidian,"Water edit cools lava across chunk boundary");
     require(world.blockLight(15,180,16)==0 && world.getData(15,180,16)==0,"Solidification clears emission and metadata");
     require(solid(Obsidian) && validBlock(Obsidian) && textureTile(Obsidian,0)==37,"Obsidian collision, storage and original atlas tile");
-    world.set(30,180,30,Water);world.set(30,179,30,Lava);world.setData(30,179,30,4);
-    world.updateLiquidNeighbors(30,179,30);require(world.get(30,179,30)==Cobble,"Placed shallow lava cools under water");
-    world.set(40,179,40,Water);world.set(40,180,40,Lava);
-    require(world.updateLiquidNeighbors(40,180,40).empty() && world.get(40,180,40)==Lava,"Water below cannot solidify lava");
-    require(world.updateLiquidNeighbors(-1,0,0).empty(),"Outside edits cannot notify the world");
+    // LiquidTile::onPlace -> updateLiquid for placed lava.
+    world.set(30,180,30,Water);
+    world.setTileAndUpdate(30,179,30,Lava,4);require(world.get(30,179,30)==Cobble,"Placed shallow lava cools under water");
+    world.set(40,179,40,Water);
+    require(world.setTileAndUpdate(40,180,40,Lava) && world.get(40,180,40)==Lava,"Water below cannot solidify lava");
+    require(!world.setTileAndUpdate(-1,0,0,Water),"Outside edits cannot notify the world");
     require(argc==2,"Scratch path required");std::filesystem::create_directories(argv[1]);
     auto name=(std::filesystem::path(argv[1])/"liquid-save-XXXXXX").string();std::vector<char> temp(name.begin(),name.end());temp.push_back(0);
     require(mkdtemp(temp.data())!=nullptr,"Temporary save directory");

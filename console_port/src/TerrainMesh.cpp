@@ -1,4 +1,6 @@
 #include "TerrainMesh.h"
+#include "FireRender.h"
+#include "TileTickHost.h"
 #include "BlockFaceUV.h"
 #include "DoorShape.h"
 #include "LadderShape.h"
@@ -95,6 +97,20 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
         }
         const int data=world.getData(x,y,z);
         if(b==116)mesh.enchantTables.push_back({x,y,z});
+        if(b==51){
+            // TileRenderer::tesselateFireInWorld (ported/FireRender.cpp).
+            fire_render::LevelSource level{
+                [&](int fx,int fy,int fz){return sim::isTopSolidBlocking(blockAt(fx,fy,fz),world.getData(fx,fy,fz));},
+                [&](int fx,int fy,int fz){return sim::fireCanBurn(blockAt(fx,fy,fz));},
+                [&](int fx,int fy,int fz){return world.renderLight(fx,fy,fz);}};
+            const auto quads=fire_render::tesselateFire(level,x,y,z);
+            for(std::size_t q=0;q+3<quads.size();q+=4)for(int k:indices){
+                const auto& v=quads[q+k];
+                mesh.opaque.push_back({v.x,v.y,v.z,v.u,v.v,1,1,1,1,
+                                       (((v.light>>4)&15)+.5f)/16,(((v.light>>20)&15)+.5f)/16});
+            }
+            continue;
+        }
         // TileRenderer draws these alpha-cutout blocks as crossed or wall
         // planes. A cube here turns an entire biome's undergrowth into boxes.
         const int id=static_cast<int>(b);

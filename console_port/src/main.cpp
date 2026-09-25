@@ -904,7 +904,6 @@ struct App {
             }
         }else if(world.get(h.x,h.y,h.z)!=Bedrock)changed=world.destroyBlock(h.x,h.y,h.z,slot);
         if(changed){
-            world.updateLiquidNeighbors(place?h.px:h.x,place?h.py:h.y,place?h.pz:h.z);
             if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
         }
     }
@@ -929,7 +928,6 @@ struct App {
                 tutorial->destroyBlock(tileId,before.id,before.damage,after.id==before.id?after.damage:before.damage);
             }
             if(destroyed){
-                world.updateLiquidNeighbors(h.x,h.y,h.z);
                 if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
             }
         };

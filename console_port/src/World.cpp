@@ -4,7 +4,6 @@
 #include "BlockShape.h"
 #include "TutorialSchematics.h"
 #include "ChunkGenerator.h"
-#include "LiquidReaction.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -151,64 +150,32 @@ bool validBlock(std::uint8_t b) {
     case 8:case 11:case 61:case 62:case 116:case 117:case 118:case 130:return true;
     // Farming (hoes, seeds, stems) and random ticks.
     case 59:case 60:case 74:case 103:case 104:case 105:case 115:case 141:case 142:return true;
+    // Fire (flint and steel, lava, spreading).
+    case 51:return true;
     default:break;
     }
     return consoleIsStair(b) || b==43 || b==44 || b==64 || b==71 || b==65 || b==85 || b==107 || b==113 || b==98 || b==52 || b==54 || b==Air || b==Stone || b==Grass || b==Dirt || b==Cobble || b==Planks ||
         b==Bedrock || b==Water || b==Lava || b==Sand || b==Log || b==Leaves || b==Glass || b==Wool || b==Bricks ||
         b==Sandstone || b==Obsidian || b==Ice || b==Mycelium;
 }
-std::vector<Vec3> World::updateLiquidNeighbors(int x,int y,int z) {
-    if(!inside(x,y,z))return {};
-    struct Access final:LiquidReactionAccess {
-        const World& world;
-        explicit Access(const World& value):world(value){}
-        bool lava(int x,int y,int z)const override{return world.get(x,y,z)==Lava || world.get(x,y,z)==11;}
-        bool water(int x,int y,int z)const override{return world.get(x,y,z)==Water || world.get(x,y,z)==8;}
-        int data(int x,int y,int z)const override{return world.getData(x,y,z);}
-    } access(*this);
-    std::vector<Vec3> effects;
-    // Placement first, then the original Level neighbor notification order.
-    const int offsets[][3]={{0,0,0},{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
-    for(const auto& offset:offsets){
-        int xx=x+offset[0],yy=y+offset[1],zz=z+offset[2];
-        auto reaction=consoleLiquidReaction(access,xx,yy,zz);
-        if(reaction.replacement)set(xx,yy,zz,static_cast<Block>(reaction.replacement));
-        if(reaction.fizz)effects.push_back({xx+.5,yy+.5,zz+.5});
-    }
-    for(const auto& offset:offsets){
-        const int xx=x+offset[0],yy=y+offset[1],zz=z+offset[2];
-        if(!inside(xx,yy,zz))continue;
-        const int id=get(xx,yy,zz);
-        if(id==9 || id==11){
-            // LiquidTileStatic::setDynamic keeps the depth metadata.
-            const int depthData=getData(xx,yy,zz);
-            set(xx,yy,zz,static_cast<Block>(id-1));setData(xx,yy,zz,depthData);
-            scheduleFluid(xx,yy,zz,id==9?5:30);
-        }else if(id==8 || id==10)scheduleFluid(xx,yy,zz,id==8?5:30);
-    }
-    return effects;
-}
+// ServerPlayerGameMode::destroyBlock: Level::setTile(x, y, z, 0), so the
+// neighbours react (a door's other half, a torch or plant on it, liquids).
 bool World::breakBlock(int x,int y,int z){
-    const int id=get(x,y,z),data=getData(x,y,z);
-    if(id==Bedrock || !set(x,y,z,Air))return false;
+    const int id=get(x,y,z);
+    if(id==Bedrock || id==Air || !setTileAndUpdate(x,y,z,Air))return false;
     if(id==54 || id==130 || id==61 || id==62 || id==117)
         discardContainerData(x,y,z,id==54?L"Chest":id==130?L"EnderChest":id==117?L"Cauldron":L"Furnace");
-    // DoorTile::neighborChanged removes a door whose matching half is gone.
-    // The creative bridge has no item drops; survival drops remain unported.
-    if(id==64 || id==71){const int otherY=y+((data&8)?-1:1);
-        if(get(x,otherY,z)==id)set(x,otherY,z,Air);
-    }
     return true;
 }
 bool World::useBlock(int x,int y,int z){
     const int id=get(x,y,z);
-    if(id==FenceGate){setData(x,y,z,getData(x,y,z)^4);return true;}
+    if(id==FenceGate){setDataAndUpdate(x,y,z,getData(x,y,z)^4);return true;}
     if(id!=64 && id!=71)return false;
     // DoorTile::use consumes iron-door interaction without opening it.
     if(id==71)return true;
     if(getData(x,y,z)&8)--y;
     if(get(x,y,z)!=64 || (getData(x,y,z)&8))return true;
-    setData(x,y,z,(getData(x,y,z)&7)^4);
+    setDataAndUpdate(x,y,z,(getData(x,y,z)&7)^4);
     return true;
 }
 bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw) {
@@ -239,6 +206,9 @@ bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double y
         set(x,y,z,old);setData(x,y,z,oldData);
         return false;
     }
+    // TileItem::useOn places with Level::setTileAndData.
+    tileStored(x,y,z,old,oldData);
+    if(get(x,y,z)!=block)return true;
     if(block==static_cast<Block>(130))ensureEnderChestData(x,y,z);
     if(block==static_cast<Block>(61))ensureFurnaceData(x,y,z);
     if(block==static_cast<Block>(117))ensureBrewingData(x,y,z);
