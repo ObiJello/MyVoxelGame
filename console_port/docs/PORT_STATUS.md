@@ -1684,3 +1684,25 @@ reconstruct is now taken from the source:
 - Tests: flint and steel and a lever light TNT, the fuse, the crater, obsidian
   surviving, a chain reaction's short fuse, the player hurt and knocked back; the
   primed mesh's textures, swelling and flash.
+
+### Dispensers (September 25)
+
+- Extracted: `DispenserTile` (`recalcLockDir`, `setPlacedBy`, `use`, the rising-edge
+  `neighborChanged`/`tick` four ticks later, `fireArrow`, `dispenseItem`, `throwItem`,
+  `onRemove` dropping the contents), `DispenserTileEntity`'s items (`getRandomSlot`,
+  `removeItem`, `addItem`), `BucketItem::emptyBucket`, `PotionItem::isThrowable` and
+  `RailTile::isRail`. Items are thrown out of the front; water and lava buckets empty
+  in front and empty buckets take a source back; spawn eggs spawn their mob.
+- Not ported, so the dispenser keeps them with a failed click (the host counts
+  projectiles at the 4J limit, which `dispenseItem` checks first): arrows, eggs,
+  snowballs, potions of either kind, bottles o' enchanting and fire charges;
+  minecarts and boats are thrown as items.
+- The World keeps the items in the chunk's `Trap` tile entity (the source's save
+  format), loads them into the extracted `DispenserTileEntity` for the tick and saves
+  them back (item tags included). The entity outlives its tile until
+  `removeTileEntity`, as `LevelChunk`'s map does, so `onRemove` still finds it.
+- The dispenser menu: nine slots in a 3×3 grid over the inventory; textures after
+  `DispenserTile::getTexture` (front, vertical front, furnace top and side).
+- Tests: placement facing, texture faces, a lever firing one item per rising edge,
+  buckets both ways, arrows kept with a failed click, a spawn egg's pig, contents
+  dropping when broken.

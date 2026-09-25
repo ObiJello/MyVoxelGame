@@ -177,3 +177,12 @@ flashes white, swells at the end and explodes after four seconds, leaving a crat
 (obsidian and bedrock stay). Try TNT beside TNT (the second goes off soon after),
 TNT on a lever or button, and standing a few blocks away (you should be hurt and
 thrown). Note how far you are thrown, the size of the crater and anything that drops.
+
+## Dispensers
+
+Place a dispenser (it faces you), open it and put in some blocks, a water bucket, a
+lava bucket, an empty bucket and a spawn egg. Power it with a lever or button: each
+new signal should throw one random item out of the front (it picks a random filled
+slot), empty a bucket into the space in front, pick a source back up with an empty
+bucket, or spawn the egg's mob. Arrows, snowballs, eggs and potions stay inside for now
+(their projectiles are not ported). Break it and check its contents drop.

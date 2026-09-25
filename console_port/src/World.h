@@ -88,6 +88,7 @@ class World {
     void ensureFurnaceData(int x,int y,int z);
     void tickFurnaces();
     void ensureBrewingData(int x,int y,int z);
+    void ensureTrapData(int x,int y,int z);
     void tickBrewingStands();
     void scheduleFluid(int x,int y,int z,int delay);
     void activateFluidChunks();
@@ -184,6 +185,9 @@ public:
     bool canOpenEnderChest(int x,int y,int z)const;
     bool canOpenFurnace(int x,int y,int z)const;
     bool canOpenBrewingStand(int x,int y,int z)const;
+    // DispenserTile::use opens its nine slots (DispenserTileEntity).
+    bool canOpenDispenser(int x,int y,int z)const;
+    std::vector<ContainerItem> dispenserItems(int x,int y,int z)const;
     std::vector<ContainerItem> chestItems(int x,int y,int z)const;
     std::vector<ContainerItem> enderChestItems()const;
     std::vector<ContainerItem> furnaceItems(int x,int y,int z)const;
@@ -209,6 +213,7 @@ public:
     bool transferEnderChestItem(int x,int y,int z,int slot,bool take,int amount=-1);
     bool transferFurnaceItem(int x,int y,int z,int slot,bool take,int targetSlot=0,int amount=-1);
     bool transferBrewingItem(int x,int y,int z,int slot,bool take,int targetSlot=0,int amount=-1);
+    bool transferDispenserItem(int x,int y,int z,int slot,bool take,int amount=-1);
     bool breakBlock(int x,int y,int z);
     // Tile::use (ServerPlayerGameMode::useItemOn) for the tiles that have one
     // (doors, gates, trapdoors, levers, buttons, repeaters); `yaw` is the
@@ -238,6 +243,9 @@ public:
     // Explosion knockback on the player since the last call (a velocity, in
     // blocks per tick; the client owns the player's motion).
     Vec3 takePlayerKnockback();
+    // The Level::levelEvent calls since the last take: {type, x, y, z}
+    // (LevelEvent: 1000 click, 1001 click fail, 1002 launch, 2000 smoke).
+    std::vector<std::array<int,4>> takeLevelEvents();
     int skyLight(int x,int y,int z)const;
     int blockLight(int x,int y,int z)const;
     int renderLight(int x,int y,int z,bool liquid=false)const;
@@ -255,6 +263,8 @@ public:
     void tickTime();
     void setPlayerPosition(Vec3 position);
     bool spawnCreativeEgg(int entityId,Vec3 position);
+    // Whether an egg of this entity id may spawn now (a modeled mob under the cap).
+    bool eggSpawnable(int entityId)const;
     bool attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach=6);
     // GameRenderer::pick: the living entity under the crosshair (nearer than
     // any block), by entity id.

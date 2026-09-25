@@ -102,6 +102,16 @@ int textureTile(Block b,int face,int data) {
     case 66:return data>=6?112:128; // RailTile: rail_turn / rail
     case 103:return face<2?137:136; // MelonTile: melon_top / melon_side
     case 145:return 215; // AnvilTile base; shaped upper parts need the anvil renderer
+    case 23:{
+        // DispenserTile::getTexture: the front on the facing side (the
+        // vertical front when it faces up or down), furnace_top on the top and
+        // bottom, furnace_side elsewhere.
+        constexpr int originalFace[]{1,0,4,5,2,3};
+        const int f=originalFace[face],dir=data&7;
+        if(f==dir)return dir==1 || dir==0?40:46;
+        if(dir==1 || dir==0 || f==1 || f==0)return 62;
+        return 45;
+    }
     case 61:case 62:{
         if(face<2)return 62; // FurnaceTile top on both vertical faces.
         constexpr int originalFace[]{1,0,4,5,2,3};
@@ -190,6 +200,8 @@ bool validBlock(std::uint8_t b) {
     case 29:case 33:case 34:case 36:return true;
     // TNT (flint and steel, redstone, explosions).
     case 46:return true;
+    // Dispensers.
+    case 23:return true;
     default:break;
     }
     return consoleIsStair(b) || b==43 || b==44 || b==64 || b==71 || b==65 || b==85 || b==107 || b==113 || b==98 || b==52 || b==54 || b==Air || b==Stone || b==Grass || b==Dirt || b==Cobble || b==Planks ||
@@ -204,6 +216,7 @@ bool World::breakBlock(int x,int y,int z){
     tileDestroyed(x,y,z,id,data);
     if(id==54 || id==130 || id==61 || id==62 || id==117)
         discardContainerData(x,y,z,id==54?L"Chest":id==130?L"EnderChest":id==117?L"Cauldron":L"Furnace");
+    // A dispenser's items drop and its tile entity goes in DispenserTile::onRemove.
     return true;
 }
 bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw,int face) {
@@ -248,7 +261,8 @@ bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double y
     // TileItem::useOn places with Level::setTileAndData, then Tile::setPlacedBy.
     tileStored(x,y,z,old,oldData);
     if(get(x,y,z)!=block)return true;
-    if(block==static_cast<Block>(93) || block==static_cast<Block>(29) || block==static_cast<Block>(33))tilePlacedBy(x,y,z,yaw,feet);
+    if(block==static_cast<Block>(93) || block==static_cast<Block>(29) || block==static_cast<Block>(33) ||
+       block==static_cast<Block>(23))tilePlacedBy(x,y,z,yaw,feet);
     if(block==static_cast<Block>(130))ensureEnderChestData(x,y,z);
     if(block==static_cast<Block>(61))ensureFurnaceData(x,y,z);
     if(block==static_cast<Block>(117))ensureBrewingData(x,y,z);

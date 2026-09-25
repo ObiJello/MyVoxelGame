@@ -101,6 +101,10 @@ void World::setPlayerPosition(Vec3 position){
     if(!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))return;
     state->playerPosition=position;state->hasPlayerPosition=true;
 }
+bool World::eggSpawnable(int entityId)const{
+    const auto egg=consoleSourceEggColors(entityId);
+    return egg.valid && egg.entityName && modeled(egg.entityName) && !state->pending && state->entities.size()<60;
+}
 bool World::spawnCreativeEgg(int entityId,Vec3 position){
     const auto egg=consoleSourceEggColors(entityId);
     const int slimeSize=egg.entityName && (std::wstring(egg.entityName)==L"Slime" ||

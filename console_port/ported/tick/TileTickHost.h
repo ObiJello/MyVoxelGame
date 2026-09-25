@@ -73,8 +73,39 @@ public:
 };
 // Mob (a player's or a mob's facing, in the source's degrees) and Arrow: the
 // classes pressure plates and wooden buttons look for.
-class Mob:public Entity { public: float yRot=0; };
-class Arrow:public Entity {};
+class Mob:public Entity {
+public:
+    float yRot=0,xRot=0;
+    void moveTo(double x,double y,double z,float yRot,float xRot){this->x=x;this->y=y;this->z=z;this->yRot=yRot;this->xRot=xRot;}
+    virtual void finalizeMobSpawn(){}
+};
+// Projectile::shoot's aim for the thrown entities the dispenser makes (they
+// are not ported: the host never lets one be made).
+class Projectile:public Entity {
+public:
+    Projectile()=default;
+    Projectile(double x,double y,double z){this->x=x;this->y=y;this->z=z;}
+    void shoot(double xd,double yd,double zd,float,float){this->xd=xd;this->yd=yd;this->zd=zd;}
+};
+class Arrow:public Projectile {
+public:
+    static const int PICKUP_ALLOWED=1;
+    int pickup=0;
+    Arrow()=default;
+    Arrow(class Level*,double x,double y,double z):Projectile(x,y,z){}
+};
+class ThrownEgg:public Projectile { public: ThrownEgg(class Level*,double x,double y,double z):Projectile(x,y,z){} };
+class Snowball:public Projectile { public: Snowball(class Level*,double x,double y,double z):Projectile(x,y,z){} };
+class ThrownExpBottle:public Projectile { public: ThrownExpBottle(class Level*,double x,double y,double z):Projectile(x,y,z){} };
+class ThrownPotion:public Projectile { public: ThrownPotion(class Level*,double x,double y,double z,int):Projectile(x,y,z){} };
+class SmallFireball:public Projectile {
+public:
+    SmallFireball(class Level*,double x,double y,double z,double xa,double ya,double za):Projectile(x,y,z){xd=xa;yd=ya;zd=za;}
+};
+class Minecart:public Entity { public: Minecart(class Level*,double x,double y,double z,int){this->x=x;this->y=y;this->z=z;} };
+class Boat:public Entity { public: Boat(class Level*,double x,double y,double z){this->x=x;this->y=y;this->z=z;} };
+// The entity kinds Level::countInstanceOf is asked about.
+enum eINSTANCEOF { eTYPE_PROJECTILE,eTYPE_SMALL_FIREBALL,eTYPE_MINECART,eTYPE_BOAT };
 class Level;
 // TileEntity: the fields and removal flag the piston pieces use.
 class TileEntity {
@@ -103,6 +134,7 @@ struct GenericStats {
     static int param_InToTheNether(){return 0;}
 };
 class ItemInstance;
+class DispenserTileEntity;
 class Player:public Mob {
 public:
     Player(){heightOffset=1.62f;}
@@ -112,11 +144,39 @@ public:
     Abilities abilities;
     bool mayBuild(int,int,int){return true;}
     void awardStat(int,int){}
+    // Player::openTrap: the dispenser the player opened (the client shows its menu).
+    shared_ptr<DispenserTileEntity> openedTrap;
+    bool openTrap(shared_ptr<DispenserTileEntity> container){openedTrap=container;return true;}
 };
+// CompoundTag: an item's tag, carried whole (the host keeps the saved tag).
+class CompoundTag {
+public:
+    std::shared_ptr<const void> saved;
+    CompoundTag* copy()const{return new CompoundTag(*this);}
+};
+class Item;
 class ItemInstance {
 public:
     int id=0,count=0,auxValue=0,damage=0;
+    ItemInstance()=default;
+    ItemInstance(int id,int count,int auxValue):id(id),count(count),auxValue(auxValue){}
+    explicit ItemInstance(Item* item);
     int getAuxValue()const{return auxValue;}
+    Item* getItem();
+    // ItemInstance::remove: a stack of count split off (with a copy of the tag).
+    shared_ptr<ItemInstance> remove(int n){
+        auto result=std::make_shared<ItemInstance>(id,n,auxValue);
+        if(tag)result->tag.reset(tag->copy());
+        count-=n;
+        return result;
+    }
+    shared_ptr<CompoundTag> tag;
+    bool hasTag(){return tag!=nullptr;}
+    CompoundTag* getTag(){return tag.get();}
+    void setTag(CompoundTag* t){tag.reset(t);}
+    int data4J=0;
+    void set4JData(int data){data4J=data;}
+    int get4JData(){return data4J;}
     // ItemInstance::hurt: the host wears the tool (and breaks it) afterwards.
     void hurt(int amount,shared_ptr<Player>){damage+=amount;}
 };
@@ -150,7 +210,10 @@ public:
 };
 struct TilePosKeyHash { int operator()(const TilePos& k)const{return TilePos::hash_fnct(k);} };
 struct TilePosKeyEq { bool operator()(const TilePos& a,const TilePos& b)const{return TilePos::eq_test(a,b);} };
-struct LevelEvent { static const int SOUND_OPEN_DOOR=1003; };
+struct LevelEvent {
+    static const int SOUND_CLICK=1000,SOUND_CLICK_FAIL=1001,SOUND_LAUNCH=1002,SOUND_OPEN_DOOR=1003,
+        SOUND_BLAZE_FIREBALL=1009,PARTICLES_SHOOT=2000;
+};
 // Sounds and particles are client effects; the ids are what the calls name.
 enum eSOUND_TYPE { eSoundType_RANDOM_FIZZ,eSoundType_FIRE_IGNITE,eSoundType_RANDOM_CLICK,
     eSoundType_TILE_PISTON_OUT,eSoundType_TILE_PISTON_IN,eSoundType_RANDOM_FUSE,eSoundType_RANDOM_EXPLODE };
@@ -185,6 +248,19 @@ struct ChunkSource {
     LevelChunk loaded{false},missing{true};
     LevelChunk* getChunk(int chunkX,int chunkZ);
 };
+// ItemEntity(level, x, y, z, item): ItemEntity::_init's random throw.
+class ItemEntity:public Entity {
+public:
+    shared_ptr<ItemInstance> item;
+    int throwTime=0;
+    ItemEntity(Level*,double x,double y,double z,shared_ptr<ItemInstance> item):item(item){
+        this->x=x;this->y=y;this->z=z;
+        xd=(float)(Math::random()*0.2f-0.1f);
+        yd=+0.2f;
+        zd=(float)(Math::random()*0.2f-0.1f);
+    }
+    shared_ptr<ItemInstance> getItem(){return item;}
+};
 // FallingTile: the entity HeavyTile::checkSlide hands to Level::addEntity.
 class FallingTile:public Entity {
 public:
@@ -204,6 +280,9 @@ public:
     // object (the host makes a Level for each call).
     const void* identity=this;
     static const int MAX_LEVEL_SIZE=30000000;
+    // Level.h's 4J entity limits.
+    static const int MAX_XBOX_BOATS=40,MAX_CONSOLE_MINECARTS=40,MAX_DISPENSABLE_FIREBALLS=200,
+        MAX_DISPENSABLE_PROJECTILES=300;
     bool isClientSide=false;
     bool noNeighborUpdate=false;
     // The world's width in chunks (LevelData::getXZSize), centred on 0.
@@ -275,6 +354,16 @@ public:
     virtual void addEntity(shared_ptr<FallingTile>){}
     void setTilesDirty(int,int,int,int,int,int){}
     void levelEvent(shared_ptr<Player>,int,int,int,int,int){}
+    // Level::levelEvent: sounds and particles (client effects), which the
+    // host may record.
+    virtual void levelEvent(int,int,int,int,int){}
+    // Level::countInstanceOf and addEntity for the entities the dispenser
+    // makes: items and mobs (spawn eggs) are the host's; thrown entities,
+    // minecarts and boats are not ported, so the host counts them at the limit.
+    virtual int countInstanceOf(eINSTANCEOF,bool){return 1<<30;}
+    virtual void addEntity(shared_ptr<Entity>){}
+    // EntityIO::newById and Level::canCreateMore for MonsterPlacerItem::canSpawn.
+    virtual bool canSpawnEgg(int){return false;}
     void playSound(double,double,double,int,float,float){}
     // Level::getTime (the game time) and the entities in a box.
     virtual std::int64_t getTime(){return 0;}
@@ -951,9 +1040,64 @@ public:
     void neighborChanged(Level* level,int x,int y,int z,int type)override;
     static bool isOpen(int data);
 };
-// Only their push reactions: beds and rails are otherwise not ported yet.
+// Only their push reactions (and isRail): beds and rails are otherwise not ported yet.
 class BedTile:public DirectionalTile { public: int getPistonPushReaction()override; };
-class RailTile:public Tile { public: int getPistonPushReaction()override; };
+class RailTile:public Tile {
+public:
+    int getPistonPushReaction()override;
+    static bool isRail(Level* level,int x,int y,int z);
+    static bool isRail(int id);
+};
+// Container and DispenserTileEntity (the items; the host saves them back).
+class Container {
+public:
+    static const int LARGE_MAX_STACK_SIZE=64;
+    virtual ~Container()=default;
+    virtual unsigned int getContainerSize()=0;
+    virtual shared_ptr<ItemInstance> getItem(unsigned int slot)=0;
+    virtual void setItem(unsigned int slot,shared_ptr<ItemInstance> item)=0;
+};
+struct ItemInstanceArray {
+    shared_ptr<ItemInstance>* data;
+    int length;
+    explicit ItemInstanceArray(int n):data(new shared_ptr<ItemInstance>[n]),length(n){}
+    shared_ptr<ItemInstance>& operator[](int i){return data[i];}
+};
+class DispenserTileEntity:public TileEntity,public Container {
+public:
+    ItemInstanceArray* items;
+    Random* random;
+    DispenserTileEntity();
+    ~DispenserTileEntity()override;
+    unsigned int getContainerSize()override;
+    shared_ptr<ItemInstance> getItem(unsigned int slot)override;
+    shared_ptr<ItemInstance> removeItem(unsigned int slot,int count);
+    int getRandomSlot();
+    void setItem(unsigned int slot,shared_ptr<ItemInstance> item)override;
+    int addItem(shared_ptr<ItemInstance> item);
+    int getMaxStackSize();
+    void setChanged(){}
+};
+class DispenserTile:public EntityTile {
+public:
+    TILE_CONSTANTS_DispenserTile
+    // DispenserTile::DispenserTile: random = new Random() (freed with the
+    // registry, which the source never tears down).
+    Random* random=new Random();
+    ~DispenserTile()override{delete random;}
+    int getTickDelay()override;
+    void onPlace(Level* level,int x,int y,int z)override;
+    void recalcLockDir(Level* level,int x,int y,int z);
+    bool TestUse()override;
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    void fireArrow(Level* level,int x,int y,int z,Random* random);
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    void tick(Level* level,int x,int y,int z,Random* random)override;
+    void setPlacedBy(Level* level,int x,int y,int z,shared_ptr<Mob> by)override;
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    void throwItem(Level* level,shared_ptr<ItemInstance> item,Random* random,int accuracy,int xd,int zd,double xp,double yp,double zp);
+    int dispenseItem(shared_ptr<DispenserTileEntity> trap,Level* level,shared_ptr<ItemInstance> item,Random* random,int x,int y,int z,int xd,int zd,double xp,double yp,double zp);
+};
 class PistonPieceEntity;
 class PistonBaseTile:public Tile {
 public:
@@ -1040,6 +1184,40 @@ public:
 #include "ItemIds.inc"
     static Random* random;
     int id=0;
+    Item()=default;
+    explicit Item(int id):id(id){}
+    virtual ~Item()=default;
+    static Item *bucket_empty,*bucket_water,*bucket_lava;
+    // Item::items[id] for the classes the dispenser casts to.
+    static Item* byId(int id);
+};
+inline ItemInstance::ItemInstance(Item* item):id(item->id),count(1),auxValue(0){}
+inline Item* ItemInstance::getItem(){return Item::byId(id);}
+class BucketItem:public Item {
+public:
+    int content=0;
+    BucketItem(int id,int content):Item(id),content(content){}
+    bool emptyBucket(Level* level,double x,double y,double z,int xt,int yt,int zt);
+};
+class MinecartItem:public Item {
+public:
+    int type=0;
+    MinecartItem(int id,int type):Item(id),type(type){}
+};
+// PotionBrewing.h's throwable bit.
+struct PotionBrewing { static const int THROWABLE_BIT=14,THROWABLE_MASK=(1<<THROWABLE_BIT); };
+class PotionItem:public Item { public: static bool isThrowable(int auxValue); };
+// MonsterPlacerItem::canSpawn: EntityIO::newById and the per-type
+// Level::canCreateMore limits are the host's (Level::canSpawnEgg); the mob
+// carries its egg's id to Level::addEntity.
+class EggMob:public Mob { public: int entityId=0; };
+class MonsterPlacerItem:public Item {
+public:
+    static shared_ptr<Entity> canSpawn(int iAuxVal,Level* level,int*){
+        if(!level->canSpawnEgg(iAuxVal))return nullptr;
+        auto mob=std::make_shared<EggMob>();mob->entityId=iAuxVal;
+        return mob;
+    }
 };
 class HoeItem:public Item {
 public:

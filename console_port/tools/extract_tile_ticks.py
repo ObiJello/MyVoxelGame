@@ -155,19 +155,36 @@ METHODS = [
     ('PistonPieceEntity', 'getFacing'), ('PistonPieceEntity', 'isSourcePiston'), ('PistonPieceEntity', 'getProgress'),
     ('PistonPieceEntity', 'getXOff'), ('PistonPieceEntity', 'getYOff'), ('PistonPieceEntity', 'getZOff'),
     ('PistonPieceEntity', 'moveCollidedEntities'), ('PistonPieceEntity', 'finalTick'), ('PistonPieceEntity', 'tick'),
+    # Dispensers: the tile, its tile entity's items, and what it fires.
+    ('DispenserTile', 'getTickDelay'), ('DispenserTile', 'onPlace'), ('DispenserTile', 'recalcLockDir'),
+    ('DispenserTile', 'TestUse'), ('DispenserTile', 'use'), ('DispenserTile', 'fireArrow'),
+    ('DispenserTile', 'neighborChanged'), ('DispenserTile', 'tick'), ('DispenserTile', 'setPlacedBy'),
+    ('DispenserTile', 'onRemove'), ('DispenserTile', 'throwItem'), ('DispenserTile', 'dispenseItem'),
+    ('DispenserTileEntity', 'DispenserTileEntity()'), ('DispenserTileEntity', '~DispenserTileEntity'),
+    ('DispenserTileEntity', 'getContainerSize'), ('DispenserTileEntity', 'getItem'),
+    ('DispenserTileEntity', 'removeItem'), ('DispenserTileEntity', 'getRandomSlot'),
+    ('DispenserTileEntity', 'setItem'), ('DispenserTileEntity', 'addItem'), ('DispenserTileEntity', 'getMaxStackSize'),
+    ('BucketItem', 'emptyBucket'), ('PotionItem', 'isThrowable'),
+    ('RailTile', 'isRail(Level *level, int x, int y, int z)'), ('RailTile', 'isRail(int id)'),
 ]
 # Classes whose header constants (static const int / static bool) are written
 # to TileConstants.inc as TILE_CONSTANTS_<Class> for the stand-in classes.
 CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile',
                     'NotGateTile', 'DiodeTile', 'TrapDoorTile', 'FenceGateTile', 'PistonBaseTile',
-                    'PistonExtensionTile']
+                    'PistonExtensionTile', 'DispenserTile']
 # The class's source file where it differs from the class name.
 SOURCE_FILE = {'WaterlilyTile': 'WaterLilyTile.cpp'}
 
 
 def source(cls):
     path = FILES[SOURCE_FILE.get(cls, cls + '.cpp').lower()]
-    return path.read_text(encoding='utf-8-sig', errors='strict').replace('\r\n', '\n')
+    data = path.read_bytes()
+    try:
+        text = data.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        # A few files carry Windows-1252 text in comments (PotionItem's section sign).
+        text = data.decode('cp1252')
+    return text.replace('\r\n', '\n')
 
 
 def method(cls, name):

@@ -23,6 +23,26 @@ PistonMovingPiece* Tile::pistonMovingPiece;
 DWORD PistonBaseTile::tlsIdx = TlsAlloc();
 bool HeavyTile::instaFall=false;
 Random* Item::random=new Random();
+// Item::staticCtor's buckets (BucketItem(id, content)) and minecarts (MinecartItem(id, type)).
+Item* Item::bucket_empty=new BucketItem(Item::bucket_empty_Id,0);
+Item* Item::bucket_water=new BucketItem(Item::bucket_water_Id,Tile::water_Id);
+Item* Item::bucket_lava=new BucketItem(Item::bucket_lava_Id,Tile::lava_Id);
+Item* Item::byId(int id){
+    static MinecartItem minecart(minecart_Id,0),chestMinecart(minecart_chest_Id,1),furnaceMinecart(minecart_furnace_Id,2);
+    static std::unordered_map<int,std::unique_ptr<Item>> others;
+    switch(id){
+    case bucket_empty_Id:return bucket_empty;
+    case bucket_water_Id:return bucket_water;
+    case bucket_lava_Id:return bucket_lava;
+    case minecart_Id:return &minecart;
+    case minecart_chest_Id:return &chestMinecart;
+    case minecart_furnace_Id:return &furnaceMinecart;
+    default:break;
+    }
+    auto& item=others[id];
+    if(!item)item=std::make_unique<Item>(id);
+    return item.get();
+}
 
 namespace {
 Material* materialOf(SurvivalMaterial m){
@@ -85,6 +105,7 @@ std::unique_ptr<Tile> make(std::string_view cls){
     if(cls=="HeavyTile" || cls=="GravelTile" || cls=="AnvilTile")return std::make_unique<HeavyTile>();
     if(cls=="FireTile")return std::make_unique<FireTile>();
     if(cls=="TntTile")return std::make_unique<TntTile>();
+    if(cls=="DispenserTile")return std::make_unique<DispenserTile>();
     if(cls=="PortalTile")return std::make_unique<PortalTile>();
     if(cls=="LiquidTileDynamic")return std::make_unique<LiquidTileDynamic>();
     if(cls=="LiquidTileStatic")return std::make_unique<LiquidTileStatic>();

@@ -10,11 +10,11 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 |---|---:|---:|---:|---:|
 | Main loop and levels | 53 | 7 | 22 | 24 |
 | Player and game modes | 12 | 3 | 4 | 5 |
-| Entities | 67 | 0 | 44 | 23 |
+| Entities | 67 | 0 | 48 | 19 |
 | Mob AI | 58 | 0 | 1 | 57 |
 | Blocks | 110 | 0 | 105 | 5 |
-| Block entities | 13 | 0 | 6 | 7 |
-| Items | 63 | 0 | 27 | 36 |
+| Block entities | 13 | 0 | 7 | 6 |
+| Items | 63 | 0 | 29 | 34 |
 | Crafting | 14 | 0 | 11 | 3 |
 | Menus and containers | 55 | 1 | 15 | 39 |
 | Enchanting | 24 | 0 | 1 | 23 |
@@ -30,7 +30,7 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 | Commands | 9 | 0 | 0 | 9 |
 | Networking | 96 | 0 | 4 | 92 |
 | Other | 102 | 11 | 26 | 65 |
-| **All** | **1247** | **119** | **338** | **790** |
+| **All** | **1247** | **119** | **345** | **783** |
 
 ## Main loop and levels
 
@@ -50,9 +50,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Entities
 
-**Partial (44):** Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, EnderCrystal, EnderDragon, ExperienceOrb, FallingTile, Fireball, Ghast, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LightningBolt, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, PrimedTnt, Sheep, Silverfish, Skeleton, Slime, SnowMan, Snowball, Spider, Squid, Villager, VillagerGolem, Wolf, Zombie
+**Partial (48):** Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, EnderCrystal, EnderDragon, ExperienceOrb, FallingTile, Fireball, Ghast, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LightningBolt, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, PrimedTnt, Sheep, Silverfish, Skeleton, Slime, SmallFireball, SnowMan, Snowball, Spider, Squid, ThrownEgg, ThrownExpBottle, ThrownPotion, Villager, VillagerGolem, Wolf, Zombie
 
-**Missing (23):** AgableMob, BossMob, BossMobPart, DelayedRelease, DragonFireball, EnderMan, EyeOfEnderSignal, FishingHook, FlyingMob, Giant, GlobalEntity, NetherSphere, Particle, RemotePlayer, ServerPlayer, SmallFireball, TamableAnimal, Throwable, ThrownEgg, ThrownEnderpearl, ThrownExpBottle, ThrownPotion, WaterAnimal
+**Missing (19):** AgableMob, BossMob, BossMobPart, DelayedRelease, DragonFireball, EnderMan, EyeOfEnderSignal, FishingHook, FlyingMob, Giant, GlobalEntity, NetherSphere, Particle, RemotePlayer, ServerPlayer, TamableAnimal, Throwable, ThrownEnderpearl, WaterAnimal
 
 ## Mob AI
 
@@ -68,15 +68,15 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Block entities
 
-**Partial (6):** BrewingStandTileEntity, Entity, FurnaceTileEntity, MobSpawnerTileEntity, PistonPieceEntity, SkullTileEntity
+**Partial (7):** BrewingStandTileEntity, DispenserTileEntity, Entity, FurnaceTileEntity, MobSpawnerTileEntity, PistonPieceEntity, SkullTileEntity
 
-**Missing (7):** ChestTileEntity, DispenserTileEntity, EnchantmentTableEntity, EnderChestTileEntity, MusicTileEntity, SignTileEntity, TheEndPortalTileEntity
+**Missing (6):** ChestTileEntity, EnchantmentTableEntity, EnderChestTileEntity, MusicTileEntity, SignTileEntity, TheEndPortalTileEntity
 
 ## Items
 
-**Partial (27):** AnvilTileItem, BowlFoodItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, RedStoneItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
+**Partial (29):** AnvilTileItem, BowlFoodItem, BucketItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MinecartItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, RedStoneItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
 
-**Missing (36):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, BucketItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, MinecartItem, PistonTileItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
+**Missing (34):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, PistonTileItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
 
 ## Crafting
 

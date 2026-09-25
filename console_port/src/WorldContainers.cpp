@@ -31,6 +31,43 @@ CompoundTag* World::State::brewingStand(int x,int y,int z)const{
      t->getInt(L"y")==y && t->getInt(L"z")==z-depth/2)return t;
  return nullptr;
 }
+// DispenserTileEntity is saved as "Trap" (TileEntity::staticCtor).
+CompoundTag* World::State::trap(int x,int y,int z)const{
+ auto it=records.find({Mth::intFloorDiv(x-width/2,16),Mth::intFloorDiv(z-depth/2,16)});
+ if(it==records.end() || !it->second->extra)return nullptr;
+ auto* list=dynamic_cast<TagList*>(it->second->extra->get(L"TileEntities"));if(!list)return nullptr;
+ for(int i=0;i<list->size();++i)if(auto* t=dynamic_cast<CompoundTag*>(list->get(i)))
+  if(t->getString(L"id")==L"Trap" && t->getInt(L"x")==x-width/2 &&
+     t->getInt(L"y")==y && t->getInt(L"z")==z-depth/2)return t;
+ return nullptr;
+}
+void World::ensureTrapData(int x,int y,int z){
+ if(state->trap(x,y,z))return;
+ const int nativeX=x-width/2,nativeZ=z-depth/2;
+ const auto key=std::pair{Mth::intFloorDiv(nativeX,16),Mth::intFloorDiv(nativeZ,16)};
+ auto& record=state->records[key];
+ if(!record){record=std::make_unique<ChunkRecord>();record->x=key.first;record->z=key.second;}
+ if(!record->extra)record->extra=std::make_unique<CompoundTag>();
+ auto* list=dynamic_cast<TagList*>(record->extra->get(L"TileEntities"));
+ if(!list){record->extra->put(L"TileEntities",new TagList());list=record->extra->getList(L"TileEntities");}
+ auto tag=std::make_unique<CompoundTag>();tag->putString(L"id",L"Trap");
+ tag->putInt(L"x",nativeX);tag->putInt(L"y",y);tag->putInt(L"z",nativeZ);
+ tag->put(L"Items",new TagList());
+ list->add(tag.get());tag.release();state->chunk(x,z).unsaved=true;
+}
+bool World::canOpenDispenser(int x,int y,int z)const{return inside(x,y,z) && get(x,y,z)==static_cast<Block>(23);}
+std::vector<ContainerItem> World::dispenserItems(int x,int y,int z)const{
+ if(!canOpenDispenser(x,y,z))return {};
+ auto* tile=state->trap(x,y,z);return tile?containerItems(*tile,9):std::vector<ContainerItem>(9);
+}
+bool World::transferDispenserItem(int x,int y,int z,int slot,bool take,int amount){
+ if(!canOpenDispenser(x,y,z))return false;
+ ensureTrapData(x,y,z);auto* tile=state->trap(x,y,z);if(!tile)return false;
+ bool moved=take?moveContainerStack(*tile,9,slot,*state->inventory,36,amount):
+     moveContainerStack(*state->inventory,36,slot,*tile,9,amount);
+ if(moved){state->chunk(x,z).unsaved=true;++revision;}
+ return moved;
+}
 void World::ensureBrewingData(int x,int y,int z){
  if(state->brewingStand(x,y,z))return;
  const int nativeX=x-width/2,nativeZ=z-depth/2;

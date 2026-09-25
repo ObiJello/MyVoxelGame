@@ -78,6 +78,8 @@ struct World::State {
     // How far pistons pushed the player, and the explosion knockback, since
     // the client last asked.
     Vec3 playerPush,playerKnockback;
+    // Level::levelEvent calls (type, position), the latest kept for tests.
+    std::vector<std::array<int,4>> levelEvents;
     // PrimedTnt entities: centre, motion and fuse.
     struct Primed { Vec3 position,velocity;int life=80; };
     std::vector<Primed> primedTnt;
@@ -116,6 +118,7 @@ struct World::State {
     CompoundTag* chest(int x,int y,int z)const;
     CompoundTag* furnace(int x,int y,int z)const;
     CompoundTag* brewingStand(int x,int y,int z)const;
+    CompoundTag* trap(int x,int y,int z)const;
     bool terrain=false;
     bool lightDirty=true;
     explicit State(std::int64_t seed);

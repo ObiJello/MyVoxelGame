@@ -51,3 +51,8 @@
     static const int TRIGGER_CONTRACT = 1;
 #define TILE_CONSTANTS_PistonExtensionTile \
     static const int STICKY_BIT = 8;
+#define TILE_CONSTANTS_DispenserTile \
+    static const int DISPENSE_ITEM = 0; \
+    static const int REMOVE_ITEM = 1; \
+    static const int LEAVE_ITEM = 2; \
+    static const int FACING_MASK = 0x7;

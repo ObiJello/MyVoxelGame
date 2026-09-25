@@ -1,5 +1,6 @@
 // Properties transcribed from original Tile::staticCtor and the listed tile constructors.
 // Geometry, interaction and entity behavior are separate from these storage/light properties.
+CONSOLE_TUTORIAL_TILE(23,stone,true,255,0) // DispenserTile
 CONSOLE_TUTORIAL_TILE(26,cloth,false,0,0) // BedTile
 CONSOLE_TUTORIAL_TILE(27,decoration,false,0,0) // RailTile
 CONSOLE_TUTORIAL_TILE(29,piston,false,0,0) // PistonBaseTile

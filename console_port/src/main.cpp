@@ -184,7 +184,7 @@ struct App {
     Vec3 knockback{};
     double worldTickSeconds=0;
     int potionUseTicks=0,potionUseSlot=-1;
-    bool horizontalCollision=false,grounded=false,flying=false,loaded=false,enderChestOpen=false,furnaceFuelTarget=false;
+    bool horizontalCollision=false,grounded=false,flying=false,loaded=false,enderChestOpen=false,dispenserOpen=false,furnaceFuelTarget=false;
     int selection=0,slot=0,chestX=0,chestY=0,chestZ=0,chestSlots=27;
     // The Create World text field being typed into (0 name, 1 seed).
     int editingField=-1;
@@ -556,7 +556,8 @@ struct App {
     void moveChestSelection(int amount=-1){
         try{const int itemSlot=selection<chestSlots?selection:selection-chestSlots;
             const bool take=selection<chestSlots;
-            bool moved=enderChestOpen?world.transferEnderChestItem(chestX,chestY,chestZ,itemSlot,take,amount):
+            bool moved=dispenserOpen?world.transferDispenserItem(chestX,chestY,chestZ,itemSlot,take,amount):
+                enderChestOpen?world.transferEnderChestItem(chestX,chestY,chestZ,itemSlot,take,amount):
                 world.transferChestItem(chestX,chestY,chestZ,itemSlot,take,amount);
             if(!moved)message("No items moved");}
         catch(const std::exception& error){message(error.what());}
@@ -719,8 +720,22 @@ struct App {
         if(screen==Screen::Chest){
             if(key==GLFW_KEY_H){moveChestSelection(0);return;}
             if(key==GLFW_KEY_R){moveChestSelection(1);return;}
+            if(dispenserOpen && (key==GLFW_KEY_UP || key==GLFW_KEY_DOWN)){
+                // The 3x3 grid sits over the middle three inventory columns.
+                const bool up=key==GLFW_KEY_UP;
+                if(selection<9){
+                    const int row=selection/3,col=selection%3;
+                    if(up)selection=row>0?selection-3:9+27+3+col;
+                    else selection=row<2?selection+3:9+3+col;
+                }else{
+                    const int slot=selection-9,col=std::clamp(slot%9-3,0,2);
+                    if(up)selection=slot<9?6+col:selection-9;
+                    else selection=slot>=27?col:selection+9;
+                }
+            }else{
             if(key==GLFW_KEY_UP)selection=(selection+chestSlots+36-9)%(chestSlots+36);
             if(key==GLFW_KEY_DOWN)selection=(selection+9)%(chestSlots+36);
+            }
             if(key==GLFW_KEY_LEFT)selection=(selection+chestSlots+35)%(chestSlots+36);
             if(key==GLFW_KEY_RIGHT)selection=(selection+1)%(chestSlots+36);
             if(key==GLFW_KEY_ENTER || key==GLFW_KEY_SPACE)activate();
@@ -839,13 +854,20 @@ struct App {
             if(!world.canOpenChest(h.x,h.y,h.z)){message("The chest lid is blocked");return;}
             try{chestSlots=int(world.chestItems(h.x,h.y,h.z).size());world.carriedItems();}
             catch(const std::exception& error){message(error.what());return;}
-            chestX=h.x;chestY=h.y;chestZ=h.z;enderChestOpen=false;change(Screen::Chest);return;
+            chestX=h.x;chestY=h.y;chestZ=h.z;enderChestOpen=false;dispenserOpen=false;change(Screen::Chest);return;
+        }
+        if(place && world.canOpenDispenser(h.x,h.y,h.z)){
+            // DispenserTile::use -> Player::openTrap: the nine-slot menu.
+            try{world.dispenserItems(h.x,h.y,h.z);world.carriedItems();}
+            catch(const std::exception& error){message(error.what());return;}
+            chestX=h.x;chestY=h.y;chestZ=h.z;chestSlots=9;enderChestOpen=false;dispenserOpen=true;
+            change(Screen::Chest);return;
         }
         if(place && world.get(h.x,h.y,h.z)==static_cast<Block>(130)){
             if(!world.canOpenEnderChest(h.x,h.y,h.z)){message("The ender chest lid is blocked");return;}
             try{world.enderChestItems();world.carriedItems();}
             catch(const std::exception& error){message(error.what());return;}
-            chestX=h.x;chestY=h.y;chestZ=h.z;chestSlots=27;enderChestOpen=true;
+            chestX=h.x;chestY=h.y;chestZ=h.z;chestSlots=27;enderChestOpen=true;dispenserOpen=false;
             change(Screen::Chest);return;
         }
         if(place && world.canOpenFurnace(h.x,h.y,h.z)){
@@ -1353,7 +1375,11 @@ struct App {
         int w,h;glfwGetWindowSize(window,&w,&h);double x,y;glfwGetCursorPos(window,&x,&y);x=x*renderer->uiWidth()/w;y=y*360/h;
         if(screen==Screen::Chest){
             const float cx=renderer->uiWidth()/2;
-            if(chestSlots==27){
+            if(dispenserOpen){
+                const int col=int(std::floor((x-(cx-31.5f))/21));
+                if(col>=0 && col<3 && y>=94 && y<157){selection=int((y-94)/21)*3+col;moveChestSelection(amount);}
+                else if(int carried=carriedClickSlot(x,y,cx,175,245);carried>=0){selection=9+carried;moveChestSelection(amount);}
+            }else if(chestSlots==27){
                 int col=int(std::floor((x-(cx-95))/21));
                 if(col>=0 && col<9 && y>=94 && y<157){selection=int((y-94)/21)*9+col;moveChestSelection(amount);}
                 else if(int carried=carriedClickSlot(x,y,cx,175,245);carried>=0){selection=27+carried;moveChestSelection(amount);}
@@ -1773,24 +1799,28 @@ struct App {
         }else if(screen==Screen::Chest){
             const float cx=cw/2;
             r.rect(0,0,cw,360,{0,0,0,.55});
-            if(chestSlots==27){
+            const bool small=chestSlots==27 || dispenserOpen;
+            if(small){
                 r.panel(cx-107.5f,69,215,207.5f);
-                r.text(enderChestOpen?"Ender Chest":"Chest",cx-94.5f,77,1,{.275f,.275f,.275f,1});
+                r.text(dispenserOpen?"Dispenser":enderChestOpen?"Ender Chest":"Chest",cx-94.5f,77,1,{.275f,.275f,.275f,1});
                 r.text("Inventory",cx-94.5f,160,1,{.275f,.275f,.275f,1});
             }else{
                 r.panel(cx-102,38,204,254);
                 r.centered("Large Chest",46,1,{.2,.2,.2,1});r.centered("Inventory",189,1,{.2,.2,.2,1});
             }
-            auto contents=enderChestOpen?world.enderChestItems():world.chestItems(chestX,chestY,chestZ);contents.resize(chestSlots);
+            auto contents=dispenserOpen?world.dispenserItems(chestX,chestY,chestZ):
+                enderChestOpen?world.enderChestItems():world.chestItems(chestX,chestY,chestZ);contents.resize(chestSlots);
             auto carried=world.carriedItems();contents.insert(contents.end(),carried.begin(),carried.end());
             for(int i=0;i<chestSlots+36;++i){const auto& item=contents[i];
-                const auto point=chestSlots==27
+                const auto point=dispenserOpen
+                    ?(i<9?std::array<float,2>{cx-31.5f+(i%3)*21.f,94+(i/3)*21.f}:carriedSlotPosition(cx,i-9,175,245))
+                    :chestSlots==27
                     ?(i<27?std::array<float,2>{cx-95+(i%9)*21.f,94+(i/9)*21.f}:carriedSlotPosition(cx,i-27,175,245))
                     :std::array<float,2>{cx-90+(i%9)*20.f,float(i<chestSlots?64+(i/9)*20:202+((i-chestSlots)/9)*20)};
-                float x=point[0],y=point[1];const float size=chestSlots==27?21.f:18.f;
+                float x=point[0],y=point[1];const float size=small?21.f:18.f;
                 drawSlotFrame(r,x,y,size,i==selection);
                 if(!item.id)continue;
-                const float iconSize=chestSlots==27?19.f:16.f;
+                const float iconSize=small?19.f:16.f;
                 drawItemIcon(r,item.id,item.damage,x+(size-iconSize)/2,y+(size-iconSize)/2,iconSize);
                 r.text(std::to_string(item.count),x+10,y+10,.7f);
             }

@@ -10,6 +10,8 @@
 #include "GenerationDecorator.h"
 #include "CompoundTag.h"
 #include <algorithm>
+#include <array>
+#include <map>
 #include <functional>
 #include <cmath>
 #include <memory>
@@ -277,6 +279,10 @@ public:
     // entities the port keeps here (piston pieces), with LevelChunk's rule
     // that only an EntityTile holds one.
     std::shared_ptr<sim::TileEntity> getTileEntity(int x,int y,int z)override{
+        // A dispenser's entity outlives its tile until removeTileEntity (as
+        // LevelChunk's map does), so DispenserTile::onRemove still finds it.
+        if(world_.inside(x+half,y,z+half) && (traps_.contains({x,y,z}) ||
+           getTile(x,y,z)==sim::Tile::dispenser_Id || s_.trap(x+half,y,z+half)))return trap(x,y,z);
         auto it=s_.tileEntities.find({x,y,z});
         return it==s_.tileEntities.end() || it->second->isRemoved()?nullptr:it->second;
     }
@@ -294,6 +300,71 @@ public:
         if(auto it=s_.tileEntities.find({x,y,z});it!=s_.tileEntities.end()){
             it->second->setRemoved();s_.tileEntities.erase(it);
         }
+        if(auto it=traps_.find({x,y,z});it!=traps_.end()){it->second->setRemoved();traps_.erase(it);}
+        if(world_.inside(x+half,y,z+half))world_.discardContainerData(x+half,y,z+half,L"Trap");
+    }
+    // DispenserTileEntity for the extracted DispenserTile: loaded from the
+    // chunk's "Trap" tag when first asked for, saved back (as
+    // DispenserTileEntity::save) when this Level goes. Item tags are carried
+    // whole.
+    std::map<std::array<int,3>,std::shared_ptr<sim::DispenserTileEntity>> traps_;
+    std::shared_ptr<sim::DispenserTileEntity> trap(int x,int y,int z){
+        const std::array<int,3> key{x,y,z};
+        if(auto it=traps_.find(key);it!=traps_.end())return it->second;
+        auto te=std::make_shared<sim::DispenserTileEntity>();
+        te->level=this;te->x=x;te->y=y;te->z=z;
+        if(auto* tag=s_.trap(x+half,y,z+half))
+            if(auto* list=dynamic_cast<TagList*>(tag->get(L"Items")))
+                for(int i=0;i<list->size();++i)if(auto* stack=dynamic_cast<CompoundTag*>(list->get(i))){
+                    const int slot=static_cast<unsigned char>(stack->getByte(L"Slot"));
+                    const int id=stack->getShort(L"id"),count=static_cast<unsigned char>(stack->getByte(L"Count"));
+                    if(slot>=9 || id<=0 || count<=0)continue;
+                    auto item=std::make_shared<sim::ItemInstance>(id,count,stack->getShort(L"Damage"));
+                    if(auto* extra=dynamic_cast<CompoundTag*>(stack->get(L"tag"))){
+                        item->tag=std::make_shared<sim::CompoundTag>();
+                        item->tag->saved=std::shared_ptr<CompoundTag>(static_cast<CompoundTag*>(extra->copy()));
+                    }
+                    (*te->items)[slot]=item;
+                }
+        traps_[key]=te;
+        return te;
+    }
+    static std::unique_ptr<CompoundTag> stackOf(const sim::ItemInstance& item){
+        auto stack=dropStack(item.id,item.count,item.auxValue);
+        if(item.tag && item.tag->saved)
+            stack->put(L"tag",const_cast<CompoundTag*>(static_cast<const CompoundTag*>(item.tag->saved.get()))->copy());
+        return stack;
+    }
+    void saveTrap(const std::array<int,3>& at,sim::DispenserTileEntity& te){
+        const int x=at[0]+half,y=at[1],z=at[2]+half;
+        if(!world_.inside(x,y,z))return;
+        world_.ensureTrapData(x,y,z);
+        auto* tag=s_.trap(x,y,z);if(!tag)return;
+        auto list=std::make_unique<TagList>();
+        for(int i=0;i<te.items->length;++i){
+            const auto& item=(*te.items)[i];
+            if(!item || item->id<=0 || item->count<=0)continue;
+            auto stack=stackOf(*item);stack->putByte(L"Slot",i);
+            list->add(stack.get());stack.release();
+        }
+        tag->put(L"Items",list.get());list.release();
+        s_.chunk(x,z).unsaved=true;
+    }
+    // Level::addEntity for what a dispenser makes: an item entity (thrown
+    // items, dropped contents) or a spawn egg's mob.
+    void addEntity(std::shared_ptr<sim::Entity> e)override{
+        if(auto item=std::dynamic_pointer_cast<sim::ItemEntity>(e)){
+            if(item->item && item->item->count>0)
+                world_.spawnDroppedItem({e->x+half,e->y,e->z+half},{e->xd,e->yd,e->zd},stackOf(*item->item),item->throwTime);
+        }else if(auto mob=std::dynamic_pointer_cast<sim::EggMob>(e))
+            world_.spawnCreativeEgg(mob->entityId,{e->x+half,e->y,e->z+half});
+    }
+    bool canSpawnEgg(int entityId)override{return world_.eggSpawnable(entityId);}
+    // Level::levelEvent: the dispenser's clicks, launches and smoke (sound and
+    // particles are not ported), kept for the tests.
+    void levelEvent(int type,int x,int y,int z,int)override{
+        if(s_.levelEvents.size()>=64)s_.levelEvents.erase(s_.levelEvents.begin());
+        s_.levelEvents.push_back({type,x+half,y,z+half});
     }
     // ServerLevel::tileEvent: queued once per identical event, run by
     // World::runTileEvents.
@@ -303,6 +374,9 @@ public:
         if(std::find(list.begin(),list.end(),event)==list.end())list.push_back(event);
     }
     ~WorldTickLevel()override{
+        for(auto& [at,te]:traps_)
+            // Items change in place too (the buckets), so every one goes back.
+            if(!te->isRemoved() && getTile(at[0],at[1],at[2])==sim::Tile::dispenser_Id)saveTrap(at,*te);
         // The tile entities hold their level: hand them back to the level
         // that was current when this one was made.
         for(auto& te:s_.tickingTileEntities)if(te->level==this)te->level=previous_;
@@ -584,6 +658,11 @@ std::vector<PrimedTntState> World::primedTnt()const{
     std::vector<PrimedTntState> result;
     for(const auto& tnt:state->primedTnt)result.push_back({tnt.position,tnt.life});
     return result;
+}
+std::vector<std::array<int,4>> World::takeLevelEvents(){
+    auto events=std::move(state->levelEvents);
+    state->levelEvents.clear();
+    return events;
 }
 Vec3 World::takePlayerKnockback(){
     const Vec3 knockback=state->playerKnockback;

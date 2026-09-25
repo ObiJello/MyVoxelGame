@@ -461,6 +461,88 @@ static void tnt(){
     require(world.takePlayerKnockback().x>0,"and pushes them away");
 }
 
+static void dispensers(){
+    World world;world.generate(59,true);
+    for(int x=16;x<=48;++x)for(int z=16;z<=48;++z){
+        world.set(x,179,z,Stone);
+        for(int y=180;y<186;++y)world.set(x,y,z,Air);
+    }
+    auto B=[](int id){return static_cast<Block>(id);};
+    auto run=[&](int ticks){for(int i=0;i<ticks;++i)world.tickTime();};
+    world.setPlayerPosition({40.5,180,40.5});
+    world.setSurvival(true);
+    auto carriedSlot=[&](int id){
+        const auto items=world.carriedItems();
+        for(int i=0;i<36;++i)if(items[i].id==id)return i;
+        return -1;
+    };
+    auto load=[&](int x,int y,int z,int id,int count,int damage=0){
+        world.addCarriedItem(id,count,damage);
+        require(world.transferDispenserItem(x,y,z,carriedSlot(id),false),"fill the dispenser");
+    };
+    auto countIn=[&](int x,int y,int z,int id){
+        int n=0;for(const auto& item:world.dispenserItems(x,y,z))if(item.id==id)n+=item.count;
+        return n;
+    };
+    // Placing faces it from the player (DispenserTile::setPlacedBy); the
+    // texture's front is on that side.
+    require(world.placeBlock(24,180,24,B(23),0,{24.5,180,30.5},0,1),"place a dispenser");
+    require(world.getData(24,180,24)>=2 && world.getData(24,180,24)<=5,"a placed dispenser faces a side");
+    world.setData(24,180,24,5);
+    require(textureTile(B(23),3,5)==46 && textureTile(B(23),2,5)==45 && textureTile(B(23),0,5)==62,
+            "the dispenser's front faces east");
+    require(world.canOpenDispenser(24,180,24) && world.dispenserItems(24,180,24).size()==9,"a dispenser has nine slots");
+    // Cobblestone is thrown out in front when the dispenser is powered.
+    load(24,180,24,4,3);
+    require(countIn(24,180,24,4)==3,"the dispenser holds the stack");
+    const auto dropsBefore=world.droppedItems().size();
+    require(world.placeBlock(23,180,24,B(69),0,{30.5,180,30.5},0,1),"a lever behind it");
+    world.useBlock(23,180,24);
+    run(5);
+    require(countIn(24,180,24,4)==2,"a signal dispenses one item");
+    require(world.droppedItems().size()==dropsBefore+1,"the item is thrown out");
+    const auto& thrown=world.droppedItems().back();
+    require(thrown.id==4 && thrown.position.x>24.5 && thrown.velocity.x>0,"it flies out of the front");
+    // It fires on the rising edge only.
+    run(10);
+    require(countIn(24,180,24,4)==2,"a steady signal fires once");
+    world.useBlock(23,180,24);run(2);world.useBlock(23,180,24);run(5);
+    require(countIn(24,180,24,4)==1,"a new signal fires again");
+    // A water bucket empties in front; the empty bucket takes the source back.
+    require(world.set(30,180,30,B(23)),"a second dispenser");world.setData(30,180,30,5);
+    load(30,180,30,326,1);
+    require(world.placeBlock(29,180,30,B(69),0,{30.5,180,36.5},0,1),"its lever");
+    world.useBlock(29,180,30);run(5);
+    require(world.get(31,180,30)==B(8) && world.getData(31,180,30)==0 && countIn(30,180,30,325)==1,
+            "the water bucket empties a source in front");
+    world.useBlock(29,180,30);run(2);world.useBlock(29,180,30);run(5);
+    require(countIn(30,180,30,326)==1 && !(world.get(31,180,30)==B(8) && world.getData(31,180,30)==0),
+            "the empty bucket picks the source up");
+    // Arrows need projectiles, which are not ported: the dispenser clicks and keeps them.
+    require(world.set(36,180,30,B(23)),"a third dispenser");world.setData(36,180,30,5);
+    load(36,180,30,262,4);
+    world.takeLevelEvents();
+    require(world.placeBlock(35,180,30,B(69),0,{30.5,180,36.5},0,1),"its lever");
+    world.useBlock(35,180,30);run(5);
+    bool failed=false;for(const auto& e:world.takeLevelEvents())failed|=e[0]==1001;
+    require(countIn(36,180,30,262)==4 && failed,"arrows stay in the dispenser with a failed click");
+    // A spawn egg spawns its mob in front.
+    require(world.set(42,180,24,B(23)),"a fourth dispenser");world.setData(42,180,24,5);
+    load(42,180,24,383,1,90);
+    const auto mobs=world.entities().size();
+    require(world.placeBlock(41,180,24,B(69),0,{30.5,180,36.5},0,1),"its lever");
+    world.useBlock(41,180,24);run(5);
+    require(world.entities().size()==mobs+1 && world.entities().back().id==L"Pig" && countIn(42,180,24,383)==0,
+            "a spawn egg spawns a pig in front");
+    // Breaking a dispenser drops what it holds (DispenserTile::onRemove).
+    const auto before=world.droppedItems().size();
+    require(world.breakBlock(24,180,24),"break the first dispenser");
+    int cobble=0;for(std::size_t i=before;i<world.droppedItems().size();++i)
+        if(world.droppedItems()[i].id==4)cobble+=world.droppedItems()[i].count;
+    require(cobble==1,"its cobblestone drops");
+    require(world.set(24,180,24,B(23)) && countIn(24,180,24,4)==0,"a new dispenser there is empty");
+}
+
 static void worldPass(const std::filesystem::path& scratch){
     // A generated world: random ticks run without errors, and report their cost.
     World world;
@@ -499,6 +581,7 @@ int main(int argc,char** argv){try{
     redstone();
     pistons();
     tnt();
+    dispensers();
     worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     worldPass(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     std::cout<<"tile tick tests passed\n";
