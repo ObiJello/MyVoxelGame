@@ -1,5 +1,5 @@
 #include "TerrainMesh.h"
-#include "FireRender.h"
+#include "TileRender.h"
 #include "TileTickHost.h"
 #include "BlockFaceUV.h"
 #include "DoorShape.h"
@@ -97,13 +97,17 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
         }
         const int data=world.getData(x,y,z);
         if(b==116)mesh.enchantTables.push_back({x,y,z});
-        if(b==51){
-            // TileRenderer::tesselateFireInWorld (ported/FireRender.cpp).
-            fire_render::LevelSource level{
+        if(b==51 || b==50 || b==75 || b==76){
+            // TileRenderer::tesselateFireInWorld and tesselateTorchInWorld
+            // (ported/TileRender.cpp).
+            tile_render::LevelSource level{
+                [&](int fx,int fy,int fz){return int(blockAt(fx,fy,fz));},
+                [&](int fx,int fy,int fz){return world.getData(fx,fy,fz);},
                 [&](int fx,int fy,int fz){return sim::isTopSolidBlocking(blockAt(fx,fy,fz),world.getData(fx,fy,fz));},
                 [&](int fx,int fy,int fz){return sim::fireCanBurn(blockAt(fx,fy,fz));},
-                [&](int fx,int fy,int fz){return world.renderLight(fx,fy,fz);}};
-            const auto quads=fire_render::tesselateFire(level,x,y,z);
+                [&](int fx,int fy,int fz){return world.renderLight(fx,fy,fz);},
+                [&](int tile,int face,int tileData){return textureTile(static_cast<Block>(tile),face,tileData);}};
+            const auto quads=tile_render::tesselate(level,static_cast<int>(b),x,y,z);
             for(std::size_t q=0;q+3<quads.size();q+=4)for(int k:indices){
                 const auto& v=quads[q+k];
                 mesh.opaque.push_back({v.x,v.y,v.z,v.u,v.v,1,1,1,1,

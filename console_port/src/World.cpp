@@ -126,6 +126,10 @@ int textureTile(Block b,int face,int data) {
     case 115:return data>=3?228:data>0?227:226;       // netherStalk_0..2
     case 104:case 105:return 111;                     // stem_straight
     case 74:return 51;                                // lit redstone ore
+    // PreStitchedTextureMap: torch (0,5), redtorch (3,7), redtorch_lit (3,6).
+    case 50:return 80;
+    case 75:return 115;
+    case 76:return 99;
     default:return 1;
     }
 }
@@ -150,8 +154,8 @@ bool validBlock(std::uint8_t b) {
     case 8:case 11:case 61:case 62:case 116:case 117:case 118:case 130:return true;
     // Farming (hoes, seeds, stems) and random ticks.
     case 59:case 60:case 74:case 103:case 104:case 105:case 115:case 141:case 142:return true;
-    // Fire (flint and steel, lava, spreading).
-    case 51:return true;
+    // Fire (flint and steel, lava, spreading) and torches.
+    case 50:case 51:return true;
     default:break;
     }
     return consoleIsStair(b) || b==43 || b==44 || b==64 || b==71 || b==65 || b==85 || b==107 || b==113 || b==98 || b==52 || b==54 || b==Air || b==Stone || b==Grass || b==Dirt || b==Cobble || b==Planks ||
@@ -178,7 +182,7 @@ bool World::useBlock(int x,int y,int z){
     setDataAndUpdate(x,y,z,(getData(x,y,z)&7)^4);
     return true;
 }
-bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw) {
+bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw,int face) {
     if(!inside(x,y,z) || !validBlock(block) || block==Air || data<0 || data>15)return false;
     const auto old=get(x,y,z);
     if(old!=Air && old!=Water)return false;
@@ -198,6 +202,10 @@ bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double y
         const int direction=static_cast<int>(std::floor(degrees*4/360+.5))&3;
         constexpr int horizontal[]{2,5,3,4};
         placedData=horizontal[direction];
+    }
+    if(face>=0 && face<=5 && (block==static_cast<Block>(50) || block==static_cast<Block>(65))){
+        placedData=placementData(x,y,z,block,face,placedData);
+        if(placedData<0)return false;
     }
     const int oldData=getData(x,y,z);
     if(!set(x,y,z,block))return false;

@@ -95,6 +95,9 @@ class World {
     // The chunk hooks and neighbour notifications of a change already made
     // with set/setData (placement keeps its collision check first).
     void tileStored(int x,int y,int z,int oldTile,int oldData);
+    // Level::mayPlace and getPlacedOnFaceDataValue for tile against `face`;
+    // -1 when it may not go there.
+    int placementData(int x,int y,int z,int tile,int face,int data);
     friend class WorldTickLevel;
     // OldChunkStorage TileTicks: the queue's ticks for the chunk join the
     // ones the port does not run, which stay as saved.
@@ -186,7 +189,10 @@ public:
     bool breakBlock(int x,int y,int z);
     bool useBlock(int x,int y,int z);
     bool useCauldron(int x,int y,int z,int heldItemId);
-    bool placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw);
+    // `face` is the clicked face of the block the new one goes against
+    // (Facing); torches and ladders use it (TileItem::useOn: Level::mayPlace
+    // and Tile::getPlacedOnFaceDataValue).
+    bool placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw,int face=-1);
     int getData(int x,int y,int z)const;
     bool setData(int x,int y,int z,int data);
     // set/setData are raw storage. These are Level::setTileAndData and

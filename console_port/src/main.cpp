@@ -893,9 +893,11 @@ struct App {
         }
         if(place){
             const int tileId=heldItem.id<256?heldItem.id:placedTileForItem(heldItem.id);
+            // The clicked face of the target block (Facing), as for useItemOn.
+            const int face=h.py<h.y?0:h.py>h.y?1:h.pz<h.z?2:h.pz>h.z?3:h.px<h.x?4:5;
             if(tileId>0 && tileId<256)
                 changed=world.placeBlock(h.px,h.py,h.pz,static_cast<Block>(tileId),
-                                         heldItem.id<256?heldItem.damage:0,position,yaw);
+                                         heldItem.id<256?heldItem.damage:0,position,yaw,face);
             // TileItem/TilePlanterItem::useOn uses one item in survival.
             if(changed)world.consumeCarried(slot);
             if(tutorial){

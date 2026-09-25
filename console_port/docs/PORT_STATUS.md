@@ -1580,7 +1580,7 @@ reconstruct is now taken from the source:
   upper half drops nothing; the lower half drops the door when its neighbour update
   removes it (`DoorTile::getResource`).
 - Fire renders with `TileRenderer::tesselateFireInWorld`, extracted unchanged into
-  `ported/FireRender.cpp` (`tools/extract_fire_render.py`). The console's terrain atlas
+  `ported/TileRender.cpp` (`tools/extract_tile_render.py`). The console's terrain atlas
   holds only a placeholder in fire's slot (15,1); the animated `fire_0`/`fire_1` strips
   and their frame timing files are imported from `res/TitleUpdate/res/textures/blocks`
   into `assets/animations`, like the liquids', and animate into that slot in
@@ -1592,5 +1592,10 @@ reconstruct is now taken from the source:
   netherrack, still water waking, and through `World`: sand landing, a door's single
   drop, a torch falling with its block, flint and steel, and a pending tick surviving
   save and load. `console_block_texture_core` covers the fire shapes and the falling
-  block cube; `console_fire_render_extraction` checks the extraction. 1,200 world ticks
+  block cube; `console_tile_render_extraction` checks the extraction. 1,200 world ticks
   take about 0.7 ms a tick.
+- Torches: `TileRenderer::tesselateTorchInWorld`/`tesselateTorch` join fire in
+  `ported/TileRender.cpp` (the extractor is now `tools/extract_tile_render.py`), with
+  the torch and redstone torch atlas slots; torches are allowed in generated worlds.
+  Placing a torch or ladder uses the clicked face (`Level::mayPlace`,
+  `getPlacedOnFaceDataValue`), so it goes on the wall you click and not in mid-air.

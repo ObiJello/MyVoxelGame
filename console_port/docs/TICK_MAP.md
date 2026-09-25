@@ -80,7 +80,8 @@ the `FallingTile` entity), fire (placement, burning, spreading, burning out, lav
 setting things alight), torches, doors (the halves go together and drop once), ladders,
 signs, carpet, cake, flower pots, top snow, cactus, sugar cane, farmland, cocoa, vines
 and every `Bush`. Fire is drawn by `TileRenderer::tesselateFireInWorld`, extracted into
-`ported/FireRender.cpp` by `tools/extract_fire_render.py`.
+`ported/TileRender.cpp` by `tools/extract_tile_render.py`, as are torches
+(`tesselateTorchInWorld`).
 
 Not yet: redstone (dust, torches, repeaters, levers, buttons, pressure plates and the
 doors, trapdoors and gates they power), pistons and `runTileEvents`, TNT (burnt TNT

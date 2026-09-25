@@ -272,9 +272,19 @@ static void worldUpdates(const std::filesystem::path& scratch){
     require(world.get(30,180,30)==Air && doors==1,"a broken door drops once");
     world.setSurvival(false);
 
-    world.set(34,180,34,Stone);world.set(34,181,34,static_cast<Block>(50));world.setData(34,181,34,5);
-    require(world.breakBlock(34,180,34) && world.get(34,181,34)==Air,"a torch falls with its block");
+    require(world.set(34,180,34,Stone) && world.set(34,181,34,static_cast<Block>(50)),"place a torch");
+    world.setData(34,181,34,5);
+    const auto torchDrops=world.droppedItems().size();
+    require(world.breakBlock(34,180,34) && world.get(34,181,34)==Air && world.droppedItems().size()==torchDrops+1 &&
+            world.droppedItems().back().id==50,"a torch falls with its block");
 
+    // TileItem::useOn for torches: the wall from the clicked face, and no torch
+    // where nothing holds it.
+    world.set(39,180,30,Stone);
+    require(world.placeBlock(38,180,30,static_cast<Block>(50),0,{30.5,180,30.5},0,4) &&
+            world.get(38,180,30)==static_cast<Block>(50) && world.getData(38,180,30)==2,"a torch on a wall");
+    require(world.placeBlock(38,180,32,static_cast<Block>(50),0,{30.5,180,30.5},0,1) && world.getData(38,180,32)==5,"a torch on the floor");
+    require(!world.placeBlock(38,185,30,static_cast<Block>(50),0,{30.5,180,30.5},0,1),"no torch in the air");
     require(world.setCarriedItem(0,259,1,0) && world.useItemOn(36,179,36,1,0) && int(world.get(36,180,36))==51,"flint and steel lights fire");
 
     require(world.setTileAndUpdate(26,180,26,static_cast<Block>(8)),"place flowing water");

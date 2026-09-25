@@ -89,6 +89,17 @@ int main(){try{
  require(plants.set(24,190,20,static_cast<Block>(51)) && plants.set(23,190,20,Log),"Fire beside a log");
  auto hangingFire=buildTerrainMeshRegion(plants,plants.blockSnapshot(),24,20,1,1);
  require(hangingFire.opaque.size()==2*6,"Fire leans toward what it burns");
+ // TileRenderer::tesselateTorchInWorld: a standing torch is six quads from
+ // the torch slot (0,5); a wall torch (data 1) leans away from the wall.
+ require(plants.set(28,180,20,static_cast<Block>(50)),"Torches are supported");
+ auto torchMesh=buildTerrainMeshRegion(plants,plants.blockSnapshot(),28,20,1,1);
+ require(torchMesh.opaque.size()==6*6,"A torch is six quads");
+ for(const auto& v:torchMesh.opaque)require(v.u*16>=-.001f && v.u*16<=1.001f && v.v*16>=4.999f && v.v*16<=6.001f &&
+     v.x>=28 && v.x<=29 && v.y>=180 && v.y<=181,"A standing torch stays in its cell");
+ plants.setData(28,180,20,1);
+ auto wallTorch=buildTerrainMeshRegion(plants,plants.blockSnapshot(),28,20,1,1);
+ float lowest=1e9f;for(const auto& v:wallTorch.opaque)if(v.y<=180.2001f)lowest=std::min(lowest,v.x);
+ require(lowest<28.2f,"A wall torch's foot sits against the wall");
  FallingBlock sand;sand.position={30.5,185.49,30.5};sand.tile=12;
  const auto falling=buildFallingBlockMesh(sand,0);
  require(falling.size()==36,"A falling block is a full cube");

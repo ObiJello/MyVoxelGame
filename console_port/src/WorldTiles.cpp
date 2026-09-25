@@ -411,6 +411,14 @@ void World::tileStored(int x,int y,int z,int oldTile,int oldData){
     level.tileUpdated(x-width/2,y,z-depth/2,tile);
 }
 
+int World::placementData(int x,int y,int z,int tile,int face,int data){
+    if(!inside(x,y,z))return -1;
+    WorldTickLevel level(*this,*state);
+    const int lx=x-width/2,lz=z-depth/2;
+    if(!sim::Tile::tiles[tile] || !level.mayPlace(tile,lx,y,lz,false,face,nullptr))return -1;
+    return sim::Tile::tiles[tile]->getPlacedOnFaceDataValue(&level,lx,y,lz,face,0,0,0,data);
+}
+
 ScheduledTickQueue& World::tileTicks(){
     state->tileTickHost.world=this;
     return state->tileTicks;
