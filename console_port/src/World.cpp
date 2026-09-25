@@ -92,6 +92,7 @@ int textureTile(Block b,int face,int data) {
     case 40:return 28; // red mushroom
     case 48:return 36; // mossy cobblestone in dungeon floors
     case 56:return 50; // diamond ore
+    case 46:return face==0?9:face==1?10:8; // TntTile: iconTop, iconBottom, icon
     case 73:return 51; // redstone ore
     case 129:return 171; // emerald ore
     case 81:return face==0?69:face==1?71:70; // cactus
@@ -187,6 +188,8 @@ bool validBlock(std::uint8_t b) {
     case 93:case 94:case 96:case 123:case 124:case 143:return true;
     // Pistons, their heads and moving pieces.
     case 29:case 33:case 34:case 36:return true;
+    // TNT (flint and steel, redstone, explosions).
+    case 46:return true;
     default:break;
     }
     return consoleIsStair(b) || b==43 || b==44 || b==64 || b==71 || b==65 || b==85 || b==107 || b==113 || b==98 || b==52 || b==54 || b==Air || b==Stone || b==Grass || b==Dirt || b==Cobble || b==Planks ||

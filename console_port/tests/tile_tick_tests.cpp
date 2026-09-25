@@ -2,6 +2,7 @@
 // the World's random tick pass on a generated world.
 #include "TileTickHost.h"
 #include "TileProperties.h"
+#include "TileSurvival.h"
 #include "World.h"
 #include "WorldLibrary.h"
 
@@ -58,7 +59,7 @@ struct MapLevel final:sim::Level {
     bool canSeeSky(int x,int y,int z)override{return y>=top(x,z);}
     bool isRainingAt(int x,int y,int z)override{return raining && canSeeSky(x,y,z);}
     bool hasChunksAt(int,int,int,int,int,int)override{return true;}
-    void spawnResources(int x,int y,int z,int tile,int data)override{drops.push_back({x,y,z,tile});(void)data;}
+    void spawnResources(int x,int y,int z,int tile,int data,float)override{drops.push_back({x,y,z,tile});(void)data;}
     bool placeTree(TreeKind kind,int height,Random&,int x,int y,int z)override{
         trees.push_back({int(kind),height,x,z});(void)y;
         if(treeResult)setTile(x,y,z,Tile::treeTrunk_Id);
@@ -73,6 +74,10 @@ static void rules(){
     for(int id:{2,6,18,59,60,81,83,104,105,106,110,115,127,141,142,79,78,80,74})
         require(consoleTileProperties(id) && consoleTileProperties(id)->ticking,"tile "+std::to_string(id)+" should tick");
     require(!consoleTileProperties(1)->ticking && consoleTileProperties(1)->solid,"stone");
+    // Destroy times from the registration chains agree with the survival table.
+    for(int id=1;id<256;++id)if(const auto* p=consoleTileProperties(id))if(const auto* s=consoleSurvivalTile(id))
+        require(std::abs(p->destroyTime-s->destroyTime)<1e-6f,"destroy time of tile "+std::to_string(id));
+    require(consoleTileProperties(49)->explosionResistance==6000 && consoleTileProperties(1)->explosionResistance==30,"explosion resistance");
     require(consoleTileProperties(89)->lightEmission==15 && consoleTileProperties(18)->lightBlock==1,"light properties");
 
     {   // CropTile: wet farmland under the crop, full light: grows to 7.
@@ -302,7 +307,7 @@ static void worldUpdates(const std::filesystem::path& scratch){
 static void redstone(){
     World world;world.generate(46,true);
     for(int x=20;x<=44;++x)for(int z=20;z<=44;++z)world.set(x,179,z,Stone);
-    const Vec3 feet{22.5,180,22.5};
+    const console::Vec3 feet{22.5,180,22.5};
     auto B=[](int id){return static_cast<Block>(id);};
     // A lever on the floor, three dust and a lamp.
     require(world.placeBlock(26,180,30,B(69),0,feet,0,1) && world.get(26,180,30)==B(69),"place a lever");
@@ -364,7 +369,7 @@ static void pistons(){
     World world;world.generate(47,true);
     for(int x=20;x<=44;++x)for(int z=20;z<=44;++z)world.set(x,179,z,Stone);
     auto B=[](int id){return static_cast<Block>(id);};
-    const Vec3 feet{22.5,180,40.5};
+    const console::Vec3 feet{22.5,180,40.5};
     auto run=[&](int ticks){for(int i=0;i<ticks;++i)world.tickTime();};
     // A piston facing east (Facing 5) with a lever behind it and stone in front.
     require(world.set(30,180,30,B(33)),"place a piston");world.setData(30,180,30,5);
@@ -404,11 +409,63 @@ static void pistons(){
     require(world.getData(40,180,26)<6,"a placed piston faces a direction");
 }
 
+static void tnt(){
+    World world;world.generate(53,true);
+    for(int x=16;x<=48;++x)for(int z=16;z<=48;++z){
+        world.set(x,179,z,Stone);
+        for(int y=180;y<186;++y)world.set(x,y,z,Air);
+    }
+    auto B=[](int id){return static_cast<Block>(id);};
+    auto run=[&](int ticks){for(int i=0;i<ticks;++i)world.tickTime();};
+    const console::Vec3 feet{40.5,180,40.5};
+    world.setPlayerPosition(feet);
+    // Flint and steel lights TNT (TntTile::use): the tile becomes a primed
+    // entity that falls, flashes and explodes after 80 ticks.
+    world.setSurvival(true);
+    world.addCarriedItem(259,1);
+    int flint=-1;
+    for(int i=0;i<36;++i)if(world.carriedItems()[i].id==259)flint=i;
+    require(flint>=0,"flint and steel is carried");
+    require(world.set(24,180,24,B(46)),"place TNT");
+    world.set(24,180,26,Obsidian);
+    require(world.useItemOn(24,180,24,1,flint),"flint and steel lights TNT");
+    require(world.get(24,180,24)==Air && world.primedTnt().size()==1,"lit TNT becomes a primed entity");
+    require(world.carriedItems()[flint].damage==0,"lighting TNT does not wear the flint and steel");
+    require(std::abs(world.primedTnt()[0].position.y-180.5)<.3,"the entity starts at the block centre");
+    run(40);
+    require(world.primedTnt().size()==1 && world.primedTnt()[0].life<45,"the fuse burns down");
+    run(45);
+    require(world.primedTnt().empty(),"the TNT explodes after its fuse");
+    require(world.get(24,179,24)==Air && world.get(23,180,24)==Air,"the explosion breaks the floor around it");
+    require(world.get(24,180,26)==Obsidian,"obsidian survives an explosion");
+    // Redstone lights TNT too (TntTile::neighborChanged), and an explosion
+    // lights the TNT next to it with a short fuse (TntTile::wasExploded).
+    require(world.set(36,180,20,B(46)) && world.set(36,180,22,B(46)),"two TNT blocks");
+    require(world.placeBlock(35,180,20,B(69),0,{30.5,180,20.5},0,1),"a lever by the TNT");
+    world.useBlock(35,180,20);
+    run(1);
+    require(world.get(36,180,20)==Air && world.primedTnt().size()==1,"a powered lever lights TNT");
+    run(81);
+    require(world.get(36,180,22)==Air && world.primedTnt().size()==1 && world.primedTnt()[0].life<31,
+            "an explosion lights the TNT beside it with a short fuse");
+    run(40);
+    require(world.primedTnt().empty(),"the chained TNT explodes");
+    // A player beside an explosion is hurt and thrown back.
+    const int before=world.playerHealth();
+    world.setPlayerPosition({42.5,180,40.5});
+    world.takePlayerKnockback();
+    require(world.set(40,180,40,B(46)),"TNT by the player");
+    require(world.useItemOn(40,180,40,1,flint),"light it");
+    run(81);
+    require(world.playerHealth()<before,"the explosion hurts the player");
+    require(world.takePlayerKnockback().x>0,"and pushes them away");
+}
+
 static void worldPass(const std::filesystem::path& scratch){
     // A generated world: random ticks run without errors, and report their cost.
     World world;
     world.generate(12345);
-    Vec3 spawn=world.spawn();
+    console::Vec3 spawn=world.spawn();
     world.setPlayerPosition(spawn);
     const auto before=world.revision;
     const auto start=std::chrono::steady_clock::now();
@@ -421,7 +478,7 @@ static void worldPass(const std::filesystem::path& scratch){
     // A save round trip keeps the weather timers.
     // Farming through the World: till, plant and ripen at the spawn.
     world.setSurvival(true);
-    Vec3 at=world.spawn();
+    console::Vec3 at=world.spawn();
     int x=int(std::floor(at.x)),z=int(std::floor(at.z)),y=int(std::floor(at.y))-1;
     while(y>0 && world.get(x,y,z)==Air)--y;
     world.set(x,y,z,Grass);world.set(x,y+1,z,Air);
@@ -441,6 +498,7 @@ int main(int argc,char** argv){try{
     updates();
     redstone();
     pistons();
+    tnt();
     worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     worldPass(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     std::cout<<"tile tick tests passed\n";

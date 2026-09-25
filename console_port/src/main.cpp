@@ -179,6 +179,9 @@ struct App {
     Screen screen=Screen::Menu;
     Vec3 position{};
     double yaw=.65,pitch=-.12,verticalSpeed=0,viewDistance=120;
+    // Explosion::explode adds to the player's xd/zd; the port keeps it in
+    // blocks per second and lets Mob::travel's friction wear it off.
+    Vec3 knockback{};
     double worldTickSeconds=0;
     int potionUseTicks=0,potionUseSlot=-1;
     bool horizontalCollision=false,grounded=false,flying=false,loaded=false,enderChestOpen=false,furnaceFuelTarget=false;
@@ -392,7 +395,7 @@ struct App {
     }
     void toTitle(){endTutorialSession();loaded=false;openMenu(MenuScene::MainMenu);}
     void respawn(){
-        world.respawnPlayer();position=world.spawn();verticalSpeed=0;fallDistance=0;world.setPlayerPosition(position);
+        world.respawnPlayer();position=world.spawn();verticalSpeed=0;knockback={};fallDistance=0;world.setPlayerPosition(position);
         // PlayerList::respawn: in the tutorial, until the food bar lesson is
         // done, the player gets their health, hunger and steak back.
         if(tutorialModeActive && tutorial && !tutorial->isStateCompleted(TutorialSession::FoodBar))applyUpdatePlayer(world);
@@ -499,7 +502,7 @@ struct App {
             else if(!renderer->stepRebuild(world))return;
             // Resume at the saved player position when the save has one.
             const auto saved=world.savedPlayerPosition();
-            position=saved?*saved:world.spawn();verticalSpeed=0;grounded=false;flying=false;worldTickSeconds=0;
+            position=saved?*saved:world.spawn();verticalSpeed=0;knockback={};grounded=false;flying=false;worldTickSeconds=0;
             fallDistance=0;mineProgress=0;mineY=-1;eatUseTicks=0;
             world.setPlayerPosition(position);
             if(world.isTutorial()){
@@ -1134,6 +1137,9 @@ struct App {
             }
             world.setPlayerPosition(position);
         }
+        if(const auto kb=world.takePlayerKnockback();kb.x!=0 || kb.y!=0 || kb.z!=0){
+            if(!flying){knockback.x+=kb.x*20;knockback.z+=kb.z*20;verticalSpeed+=kb.y*20;grounded=false;}
+        }
         if(tutorial && elapsedWorldTicks>0){
             // TutorialMode::tick, once per game tick.
             for(int i=0;i<elapsedWorldTicks;++i){tutorialEvents();tutorial->tick();}
@@ -1172,6 +1178,14 @@ struct App {
         Vec3 velocity{(std::sin(yaw)*forward+std::cos(yaw)*right)*speed,climbing?verticalSpeed-24*dt:verticalSpeed,(-std::cos(yaw)*forward+std::sin(yaw)*right)*speed};
         if(climbing)velocity=consoleLadderVelocity(velocity,held(GLFW_KEY_LEFT_SHIFT));
         const Vec3 before=position;
+        if(knockback.x!=0 || knockback.z!=0){
+            // Mob::travel: xd/zd *= 0.91 each tick, times the tile's 0.6
+            // friction on the ground.
+            velocity.x+=knockback.x;velocity.z+=knockback.z;
+            const double decay=std::pow(grounded?.546:.91,dt*20);
+            knockback.x*=decay;knockback.z*=decay;
+            if(std::abs(knockback.x)<.01 && std::abs(knockback.z)<.01)knockback={};
+        }
         moveAxis(0,velocity.x*dt);moveAxis(2,velocity.z*dt);
         if(climbing)verticalSpeed=horizontalCollision?4:velocity.y;
         const bool up=(held(GLFW_KEY_SPACE)||padAction(TutorialSession::Jump)) && inputAllowed(TutorialSession::Jump);

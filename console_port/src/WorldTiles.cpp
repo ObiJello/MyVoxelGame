@@ -5,6 +5,7 @@
 #include "TileTickHost.h"
 #include "ConsoleLightmap.h"
 #include "SurvivalRules.h"
+#include "CombatRules.h"
 #include "Biome.h"
 #include "GenerationDecorator.h"
 #include "CompoundTag.h"
@@ -162,46 +163,115 @@ public:
     // whose move() moves the real one; the player's is handed to the client
     // (World::takePlayerPush).
     std::vector<std::shared_ptr<sim::Entity>> entitiesIn(const sim::AABB& box,EntityClass kind)override{
-        struct Moved final:sim::Player {
-            std::function<void(double,double,double)> apply;
-            void move(double dx,double dy,double dz)override{apply(dx,dy,dz);}
+        // Entity position (feet, or the player's eye line: Player's y is its
+        // feet plus heightOffset), box, head height, and what moving, hurting
+        // and pushing it does to the real one. The push (explosion knockback)
+        // is applied when the stand-in goes.
+        struct Proxy final:sim::Player {
+            std::function<void(double,double,double)> moveFn,pushFn;
+            std::function<bool(int)> hurtFn;
+            float head=0;
+            sim::AABB box;
+            void move(double dx,double dy,double dz)override{moveFn(dx,dy,dz);}
+            bool hurt(sim::DamageSource*,int damage)override{return hurtFn && hurtFn(damage);}
+            float getHeadHeight()override{return head;}
+            ~Proxy()override{if(pushFn && (xd!=0 || yd!=0 || zd!=0))pushFn(xd,yd,zd);}
         };
         std::vector<std::shared_ptr<sim::Entity>> found;
-        auto add=[&](std::function<void(double,double,double)> apply){
-            auto entity=std::make_shared<Moved>();entity->apply=std::move(apply);found.push_back(entity);
+        auto add=[&](const Vec3& feet,double width,double height,float yOffset,float head,
+                     std::function<void(double,double,double)> moveFn,std::function<bool(int)> hurtFn,
+                     std::function<void(double,double,double)> pushFn){
+            auto entity=std::make_shared<Proxy>();
+            entity->x=feet.x-half;entity->y=feet.y+yOffset;entity->z=feet.z-half;entity->heightOffset=yOffset;
+            entity->box={entity->x-width/2,feet.y,entity->z-width/2,entity->x+width/2,feet.y+height,entity->z+width/2};
+            entity->bb=&entity->box;entity->head=head;
+            entity->moveFn=std::move(moveFn);entity->hurtFn=std::move(hurtFn);entity->pushFn=std::move(pushFn);
+            found.push_back(entity);
         };
-        const auto overlaps=[&](double x,double y,double z,double width,double height){
-            x-=half;z-=half;
-            return x+width/2>box.x0 && x-width/2<box.x1 && y+height>box.y0 && y<box.y1 &&
+        const auto overlaps=[&](const Vec3& feet,double width,double height){
+            const double x=feet.x-half,z=feet.z-half;
+            return x+width/2>box.x0 && x-width/2<box.x1 && feet.y+height>box.y0 && feet.y<box.y1 &&
                    z+width/2>box.z0 && z-width/2<box.z1;
         };
+        const auto shift=[](Vec3& v,double dx,double dy,double dz){v.x+=dx;v.y+=dy;v.z+=dz;};
         if(kind==EntityClass::Arrow)return found;
-        if(s_.hasPlayerPosition && s_.playerHurt.health>0 &&
-           overlaps(s_.playerPosition.x,s_.playerPosition.y,s_.playerPosition.z,.6,1.8))
-            add([this](double dx,double dy,double dz){
-                s_.playerPush.x+=dx;s_.playerPush.y+=dy;s_.playerPush.z+=dz;
-                s_.playerPosition.x+=dx;s_.playerPosition.y+=dy;s_.playerPosition.z+=dz;
-            });
+        if(s_.hasPlayerPosition && s_.playerHurt.health>0 && overlaps(s_.playerPosition,.6,1.8))
+            add(s_.playerPosition,.6,1.8,1.62f,.12f,
+                [this,shift](double dx,double dy,double dz){shift(s_.playerPush,dx,dy,dz);shift(s_.playerPosition,dx,dy,dz);},
+                // DamageSource::explosion scales with the difficulty (Normal here).
+                [this](int damage){return applySourcePlayerHurt(s_.playerHurt,damage,2,!world_.survival());},
+                [this,shift](double dx,double dy,double dz){shift(s_.playerKnockback,dx,dy,dz);});
         if(kind==EntityClass::Player)return found;
         for(std::size_t i=0;i<s_.entities.size();++i){
             const auto& entity=s_.entities[i];
             if(entity.health<=0)continue;
             const auto [width,height]=entitySizeOf(entity.id,entity.slimeSize);
-            if(overlaps(entity.position.x,entity.position.y,entity.position.z,width,height))
-                add([this,i](double dx,double dy,double dz){auto& p=s_.entities[i].position;p.x+=dx;p.y+=dy;p.z+=dz;});
+            if(overlaps(entity.position,width,height))
+                add(entity.position,width,height,0,float(height)*.85f,
+                    [this,i,shift](double dx,double dy,double dz){shift(s_.entities[i].position,dx,dy,dz);},
+                    [this,i](int damage){
+                        // Mob::hurt: the invulnerability window keeps only a larger hit's excess.
+                        auto& target=s_.entities[i];
+                        if(damage<=0 || target.health<=0)return false;
+                        if(target.invulnerableTicks>10){
+                            if(damage<=target.lastHurt)return false;
+                            target.health-=damage-target.lastHurt;
+                        }else{target.health-=damage;target.invulnerableTicks=20;target.hurtTicks=10;}
+                        target.lastHurt=damage;
+                        return true;
+                    },
+                    [this,i,shift](double dx,double dy,double dz){shift(s_.entities[i].velocity,dx,dy,dz);});
         }
         if(kind==EntityClass::Mob)return found;
-        for(std::size_t i=0;i<s_.droppedItems.size();++i){
-            const auto& p=s_.droppedItems[i].position;
-            if(overlaps(p.x,p.y,p.z,.25,.25))
-                add([this,i](double dx,double dy,double dz){auto& q=s_.droppedItems[i].position;q.x+=dx;q.y+=dy;q.z+=dz;});
-        }
-        for(std::size_t i=0;i<s_.experienceOrbs.size();++i){
-            const auto& p=s_.experienceOrbs[i].position;
-            if(overlaps(p.x,p.y,p.z,.5,.5))
-                add([this,i](double dx,double dy,double dz){auto& q=s_.experienceOrbs[i].position;q.x+=dx;q.y+=dy;q.z+=dz;});
-        }
+        for(std::size_t i=0;i<s_.droppedItems.size();++i)
+            if(overlaps(s_.droppedItems[i].position,.25,.25))
+                add(s_.droppedItems[i].position,.25,.25,.125f,0,
+                    [this,i,shift](double dx,double dy,double dz){shift(s_.droppedItems[i].position,dx,dy,dz);},
+                    // ItemEntity::hurt
+                    [this,i](int damage){s_.droppedItems[i].health-=damage;return true;},
+                    [this,i,shift](double dx,double dy,double dz){shift(s_.droppedItems[i].velocity,dx,dy,dz);});
+        for(std::size_t i=0;i<s_.experienceOrbs.size();++i)
+            if(overlaps(s_.experienceOrbs[i].position,.5,.5))
+                add(s_.experienceOrbs[i].position,.5,.5,.25f,0,
+                    [this,i,shift](double dx,double dy,double dz){shift(s_.experienceOrbs[i].position,dx,dy,dz);},
+                    // ExperienceOrb::hurt
+                    [this,i](int damage){s_.experienceOrbs[i].health-=damage;return true;},
+                    [this,i,shift](double dx,double dy,double dz){shift(s_.experienceOrbs[i].velocity,dx,dy,dz);});
         return found;
+    }
+    // Level::clip between two points (level coordinates): the port's raycast.
+    sim::HitResult* clip(::Vec3* a,::Vec3* b)override{
+        const Vec3 from{a->x+half,a->y,a->z+half},dir{b->x-a->x,b->y-a->y,b->z-a->z};
+        const double length=std::sqrt(dir.x*dir.x+dir.y*dir.y+dir.z*dir.z);
+        if(length<1e-9)return nullptr;
+        const auto hit=world_.raycast(from,dir,length);
+        return hit.hit?new sim::HitResult():nullptr;
+    }
+    // ServerLevel::newPrimedTntAllowed (MAX_PRIMED_TNT 20) and addEntity.
+    bool newPrimedTntAllowed()override{return s_.primedTnt.size()<20;}
+    void addEntity(std::shared_ptr<sim::PrimedTnt> e)override{
+        s_.primedTnt.push_back({{e->x+half,e->y,e->z+half},{e->xd,e->yd,e->zd},e->life});
+    }
+    // ServerLevel::explode: the explosion without particles, block
+    // destruction included.
+    void explode(double x,double y,double z,float r){
+        sim::Explosion explosion(this,nullptr,x,y,z,r);
+        explosion.explode();
+        explosion.finalizeExplosion(false);
+        found.clear();
+    }
+    // Entity::move for a box: each axis (y, then x, then z) as far as it goes
+    // before touching a block the box does not already overlap.
+    double clipMove(Vec3& feet,int axis,double delta,double width,double height)const{
+        const auto at=[&](double d){
+            Vec3 p=feet;(axis==0?p.x:axis==1?p.y:p.z)+=d;
+            return world_.collides(p,width,height);
+        };
+        if(delta==0 || at(0) || !at(delta)){(axis==0?feet.x:axis==1?feet.y:feet.z)+=delta;return delta;}
+        double free=0,blocked=delta;
+        for(int i=0;i<40;++i){const double mid=(free+blocked)/2;(at(mid)?blocked:free)=mid;}
+        (axis==0?feet.x:axis==1?feet.y:feet.z)+=free;
+        return free;
     }
     // Level::getTileEntity / setTileEntity / removeTileEntity for the tile
     // entities the port keeps here (piston pieces), with LevelChunk's rule
@@ -259,13 +329,18 @@ public:
     // PlayerList::isTrackingTile: the chunk is in the player's view.
     bool isTrackingTile(int x,int y,int z)override{return world_.inside(x+half,y,z+half);}
     // Tile::spawnResources -> popResource: each drop at a random point inside
-    // the tile.
-    void spawnResources(int x,int y,int z,int tile,int data)override{
+    // the tile. Below odds 1 (an explosion) every item is its own roll
+    // (level->random->nextFloat() > odds skips it) and pops alone.
+    void spawnResources(int x,int y,int z,int tile,int data,float odds)override{
         if(!world_.inside(x+half,y,z+half))return;
-        for(const auto& drop:consoleTileDrops(tile,data,0,*random)){
+        const auto pop=[&](int id,int count,int damage){
             const double xo=random->nextFloat()*.7+.15,yo=random->nextFloat()*.7+.15,zo=random->nextFloat()*.7+.15;
             world_.spawnDroppedItem({x+half+xo,y+yo,z+half+zo},{random->nextFloat()*.2-.1,.2,random->nextFloat()*.2-.1},
-                                    dropStack(drop.id,drop.count,drop.damage),10);
+                                    dropStack(id,count,damage),10);
+        };
+        for(const auto& drop:consoleTileDrops(tile,data,0,*random)){
+            if(odds>=1){pop(drop.id,drop.count,drop.damage);continue;}
+            for(int i=0;i<drop.count;++i)if(!(random->nextFloat()>odds))pop(drop.id,1,drop.damage);
         }
     }
     bool placeTree(TreeKind kind,int height,Random& treeRandom,int x,int y,int z)override{
@@ -278,6 +353,8 @@ public:
     }
     // FallingTile::tick; false once the entity is removed.
     bool tickFalling(FallingBlock& block);
+    // PrimedTnt::tick; false once it has exploded.
+    bool tickPrimed(World::State::Primed& tnt);
     // ServerLevel::tickTiles and the update thread.
     void tickTiles();
     // Level::tickClientSideTiles without the cave sound itself.
@@ -319,6 +396,29 @@ bool WorldTickLevel::tickFalling(FallingBlock& block){
         }
     }else if((block.time>20*5 && (yt<1 || yt>maxBuildHeight)) || block.time>20*30){
         world_.spawnDroppedItem(p,{random->nextFloat()*.2-.1,.2,random->nextFloat()*.2-.1},dropStack(block.tile,1,0),10);
+        return false;
+    }
+    return true;
+}
+
+bool WorldTickLevel::tickPrimed(World::State::Primed& tnt){
+    // The entity position is the box centre (heightOffset bbHeight / 2).
+    Vec3 feet{tnt.position.x,tnt.position.y-.49,tnt.position.z};
+    tnt.velocity.y-=0.04f;
+    const double wanted=tnt.velocity.y;
+    const double dy=clipMove(feet,1,tnt.velocity.y,.98,.98);
+    const double dx=clipMove(feet,0,tnt.velocity.x,.98,.98);
+    const double dz=clipMove(feet,2,tnt.velocity.z,.98,.98);
+    const bool onGround=dy!=wanted && wanted<0;
+    if(dy!=wanted)tnt.velocity.y=0;
+    if(dx!=tnt.velocity.x)tnt.velocity.x=0;
+    if(dz!=tnt.velocity.z)tnt.velocity.z=0;
+    tnt.position={feet.x,feet.y+.49,feet.z};
+    tnt.velocity.x*=0.98f;tnt.velocity.y*=0.98f;tnt.velocity.z*=0.98f;
+    if(onGround){tnt.velocity.x*=0.7f;tnt.velocity.z*=0.7f;tnt.velocity.y*=-0.5f;}
+    if(tnt.life--<=0){
+        // PrimedTnt::explode: radius 4.
+        explode(tnt.position.x-half,tnt.position.y,tnt.position.z-half,4.0f);
         return false;
     }
     return true;
@@ -470,6 +570,27 @@ void World::tickFallingBlocks(){
 }
 const std::vector<FallingBlock>& World::fallingBlocks()const{return state->fallingBlocks;}
 
+void World::tickPrimedTnt(){
+    if(state->pending || state->primedTnt.empty())return;
+    WorldTickLevel level(*this,*state);
+    auto& all=state->primedTnt;
+    for(std::size_t i=0;i<all.size();){
+        auto tnt=all[i];
+        if(level.tickPrimed(tnt)){all[i++]=tnt;}
+        else all.erase(all.begin()+std::ptrdiff_t(i));
+    }
+}
+std::vector<PrimedTntState> World::primedTnt()const{
+    std::vector<PrimedTntState> result;
+    for(const auto& tnt:state->primedTnt)result.push_back({tnt.position,tnt.life});
+    return result;
+}
+Vec3 World::takePlayerKnockback(){
+    const Vec3 knockback=state->playerKnockback;
+    state->playerKnockback={};
+    return knockback;
+}
+
 bool World::useItemOn(int x,int y,int z,int face,int slot){
     if(state->pending || slot<0 || slot>=36 || !inside(x,y,z))return false;
     const auto item=carriedItems()[slot];
@@ -477,6 +598,13 @@ bool World::useItemOn(int x,int y,int z,int face,int slot){
     sim::ItemInstance instance;
     instance.id=item.id;instance.count=item.count;instance.auxValue=item.damage;
     WorldTickLevel level(*this,*state);
+    // ServerPlayerGameMode::useItemOn: the tile's own use first (TNT and
+    // flint and steel, which is not worn by it), then the item's.
+    if(auto* tile=sim::Tile::tiles[get(x,y,z)]){
+        auto player=std::make_shared<sim::Player>();
+        player->selected=std::make_shared<sim::ItemInstance>(instance);
+        if(tile->use(&level,x-width/2,y,z-depth/2,player,face,0,0,0))return true;
+    }
     if(!sim::useItemOn(level,instance,x-width/2,y,z-depth/2,face))return false;
     // ServerPlayerGameMode::useItemOn: creative keeps the stack.
     if(instance.count<item.count)consumeCarried(slot,item.count-instance.count);

@@ -138,6 +138,11 @@ METHODS = [
     ('PistonExtensionTile', 'mayPlace(Level *level, int x, int y, int z, int face)'), ('PistonExtensionTile', 'updateShape'),
     ('PistonExtensionTile', 'neighborChanged'), ('PistonExtensionTile', 'getFacing'),
     ('PistonExtensionTile', 'addAABBs'),
+    # TNT and explosions.
+    ('Tile', 'getExplosionResistance'), ('Level', 'getSeenPercent'),
+    ('TntTile', 'onPlace'), ('TntTile', 'neighborChanged'), ('TntTile', 'wasExploded'), ('TntTile', 'destroy'),
+    ('TntTile', 'use'),
+    ('Explosion', 'Explosion'), ('Explosion', '~Explosion'), ('Explosion', 'explode'), ('Explosion', 'finalizeExplosion'),
     ('PistonMovingPiece', 'onPlace'), ('PistonMovingPiece', 'onRemove'),
     ('PistonMovingPiece', 'mayPlace(Level *level, int x, int y, int z)'),
     ('PistonMovingPiece', 'mayPlace(Level *level, int x, int y, int z, int face)'), ('PistonMovingPiece', 'use'),
@@ -195,6 +200,9 @@ def expected():
     tile_h = re.sub(r'//[^\n]*', '', FILES['tile.h'].read_text(encoding='utf-8-sig'))
     ids = ''.join(f'static const int {m[1]}_Id = {m[2]};\n'
                   for m in re.finditer(r'static const int (\w+)_Id\s*=\s*(\d+)', tile_h))
+    item_h = re.sub(r'//[^\n]*', '', FILES['item.h'].read_text(encoding='utf-8-sig'))
+    item_ids = ''.join(f'static const int {m[1]}_Id = {m[2]};\n'
+                       for m in re.finditer(r'static const int (\w+)_Id\s*=\s*(\d+)', item_h))
     constants = []
     for cls in CONSTANT_CLASSES:
         header = re.sub(r'//[^\n]*', '', FILES[(cls + '.h').lower()].read_text(encoding='utf-8-sig'))
@@ -209,7 +217,8 @@ def expected():
                 value = d[1]
             lines.append(f'static const int {m[1]} = {value.strip()};')
         constants.append(f'#define TILE_CONSTANTS_{cls} \\\n    ' + ' \\\n    '.join(lines) + '\n')
-    return {'TileTickRules.cpp': rules, 'TileIds.inc': ids, 'TileConstants.inc': ''.join(constants)}
+    return {'TileTickRules.cpp': rules, 'TileIds.inc': ids, 'ItemIds.inc': item_ids,
+            'TileConstants.inc': ''.join(constants)}
 
 
 def main():

@@ -67,9 +67,9 @@ def class_info(cls):
             elif base is None and ctor[2] not in ('Tile',):
                 base = ctor[2]
             ctor_body = source[ctor.end():source.find('\n}', ctor.end())]
-            t = re.search(r'setDestroyTime\(\s*([-\d.]+)f?\s*\)', ctor_body)
+            t = re.search(r'setDestroyTime\(\s*([-\d.]+|INDESTRUCTIBLE_DESTROY_TIME)f?\s*\)', ctor_body)
             if t and own_time is None:
-                own_time = float(t[1])
+                own_time = -1.0 if t[1] == 'INDESTRUCTIBLE_DESTROY_TIME' else float(t[1])
         reconstructed = False
         if material is None and base is not None:
             material, base_time, reconstructed = class_info(base)
@@ -98,7 +98,8 @@ for statement in body.split(';'):
         tile_id = ids[name]
     else:
         raise SystemExit(f'Unresolved tile id for {name}')
-    times = re.findall(r'setDestroyTime\(\s*([-\d.]+)f?\s*\)', statement)
+    times = [('-1' if v == 'INDESTRUCTIBLE_DESTROY_TIME' else v)
+             for v in re.findall(r'setDestroyTime\(\s*([-\d.]+|INDESTRUCTIBLE_DESTROY_TIME)f?\s*\)', statement)]
     material_arg = re.search(r'Material::(\w+)', args)
     material, own_time, reconstructed = class_info(cls)
     if material_arg:

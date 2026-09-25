@@ -169,3 +169,11 @@ Flip the levers: the pistons should push the blocks out one cell and the sticky 
 should pull its block back when switched off. Try pushing a row of blocks, standing in
 front of a piston (it should shove you), and pushing obsidian or a chest (neither
 moves). Note anything that moves too far, too fast, or looks wrong while moving.
+
+## TNT
+
+Light TNT with flint and steel and step back: it should drop out as a block that
+flashes white, swells at the end and explodes after four seconds, leaving a crater
+(obsidian and bedrock stay). Try TNT beside TNT (the second goes off soon after),
+TNT on a lever or button, and standing a few blocks away (you should be hurt and
+thrown). Note how far you are thrown, the size of the crater and anything that drops.

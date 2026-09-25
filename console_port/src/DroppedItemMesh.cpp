@@ -1,6 +1,7 @@
 #include "DroppedItemMesh.h"
 #include "BlockShape.h"
 #include "ItemIcons.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <stdexcept>
@@ -16,6 +17,9 @@ std::array<float,4> tileUV(int tile){
 }
 // Axis-aligned cube faces in TileRenderer order: down, up, north, south, west, east.
 constexpr float shades[6]{.5f,1.f,.8f,.8f,.6f,.6f};
+// textureTile's face for each cube face (it numbers top 0, bottom 1, west,
+// east, north, south).
+constexpr int textureFace[6]{1,0,4,5,2,3};
 void cubeFace(std::vector<Vertex>& out,int face,const std::array<float,3>& center,float half,float spin,
               const std::array<float,4>& uv,float shade,Light l,float alpha=1){
     static constexpr float corners[6][4][3]{
@@ -48,7 +52,7 @@ DroppedItemMesh buildDroppedItemMesh(const DroppedItem& item,double yaw,double p
         const int data=item.damage>=0 && item.damage<=15?item.damage:0;
         for(int face=0;face<6;++face)
             cubeFace(mesh.terrain,face,{center[0],center[1]+.125f,center[2]},.125f,spin,
-                     tileUV(textureTile(static_cast<Block>(item.id),face,data)),shades[face],l);
+                     tileUV(textureTile(static_cast<Block>(item.id),textureFace[face],data)),shades[face],l);
         return mesh;
     }
     int tile;bool terrain=false;
@@ -80,7 +84,30 @@ std::vector<Vertex> buildFallingBlockMesh(const FallingBlock& block,int packedLi
     const Light l=light(packedLight);
     const std::array<float,3> center{float(block.position.x),float(block.position.y),float(block.position.z)};
     for(int face=0;face<6;++face)
-        cubeFace(mesh,face,center,.5f,0,tileUV(textureTile(static_cast<Block>(block.tile),face,block.data)),shades[face],l);
+        cubeFace(mesh,face,center,.5f,0,tileUV(textureTile(static_cast<Block>(block.tile),textureFace[face],block.data)),shades[face],l);
+    return mesh;
+}
+PrimedTntMesh buildPrimedTntMesh(const PrimedTntState& tnt,int packedLight){
+    PrimedTntMesh mesh;
+    const float life=float(tnt.life+1);
+    // TntRenderer::render: swell by up to 30% over the last ten ticks.
+    float scale=1;
+    if(life<10){
+        float g=std::clamp(1-life/10.f,0.f,1.f);
+        g=g*g;g=g*g;
+        scale=1+g*.3f;
+    }
+    const std::array<float,3> center{float(tnt.position.x),float(tnt.position.y),float(tnt.position.z)};
+    const Light l=light(packedLight);
+    for(int face=0;face<6;++face)
+        cubeFace(mesh.tile,face,center,.5f*scale,0,tileUV(textureTile(static_cast<Block>(46),textureFace[face],0)),shades[face],l);
+    // Every other five ticks the same cube again, untextured white at
+    // alpha (1 - life/100) * .8, full bright and unshaded.
+    if(tnt.life/5%2==0){
+        const float br=(1-life/100.f)*.8f;
+        const Light full=light(0xf000f0);
+        for(int face=0;face<6;++face)cubeFace(mesh.flash,face,center,.5f*scale,0,{0,0,1,1},1,full,br);
+    }
     return mesh;
 }
 std::vector<Vertex> buildDestroyStageMesh(int x,int y,int z,int stage,int packedLight){

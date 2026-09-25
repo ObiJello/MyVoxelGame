@@ -6,7 +6,7 @@ namespace console {
 // tools/extract_tile_properties.py). solid is Tile::solid (the constructor's
 // isSolidRender), lightBlock/lightEmission are Tile::lightBlock and
 // Tile::lightEmission, ticking is Tile::isTicking and cubeShaped is
-// Tile::isCubeShaped.
+// Tile::isCubeShaped; then the destroy time and explosion resistance.
 struct TileProperties {
     int id;
     const char* className;
@@ -14,6 +14,9 @@ struct TileProperties {
     bool solid;
     int lightBlock,lightEmission;
     bool ticking,cubeShaped;
+    // Tile::destroySpeed (-1 indestructible) and Tile::explosionResistance
+    // (getExplosionResistance divides it by 5).
+    float destroyTime,explosionResistance;
 };
 // nullptr for an unregistered id.
 const TileProperties* consoleTileProperties(int id);

@@ -87,19 +87,19 @@ Redstone is the source's: dust, redstone torches, levers, buttons, pressure plat
 repeaters and lamps, and the doors, trapdoors and gates they open (see
 `docs/PORT_STATUS.md`, Redstone).
 
-Pistons are the source's too (tile events, moving pieces, sticky pistons).
+Pistons are the source's too (tile events, moving pieces, sticky pistons), and so are
+TNT and explosions (`TntTile`, `PrimedTnt::tick`, `Explosion`).
 
-Not yet: note blocks and chest lids (tile events that only make sound and animation), TNT (burnt TNT simply goes; explosions are
-unported), nether portals (fire on obsidian lights
+Not yet: note blocks and chest lids (tile events that only make sound and animation),
+creeper explosions, nether portals (fire on obsidian lights
 normally), the Fire Spreads host option (always on), and saving a block that is
 mid-fall.
 
 ## Order of work
 
-1. **Tile updates**: dispensers, TNT with explosions, note blocks (with sound).
+1. **Tile updates**: dispensers, note blocks (with sound).
 2. **Mobs**: the `Goal` AI, `MobCategory` spawning, combat, armour, difficulty.
-3. **More tiles**: rails and minecarts, beds and sleeping, TNT and explosions,
-   dispensers, boats.
+3. **More tiles**: rails and minecarts, beds and sleeping, dispensers, boats.
 4. **Menus**: armour, enchanting, anvil, dispenser, villager trading.
 5. **Dimensions**: portals, the Nether and the End in play.
 6. **Client**: sound and music, particles, the first-person hand, smooth lighting.

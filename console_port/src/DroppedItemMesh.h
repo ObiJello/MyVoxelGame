@@ -10,6 +10,12 @@ struct DroppedItemMesh {
 DroppedItemMesh buildDroppedItemMesh(const DroppedItem& item,double yaw,double pitch,int packedLight);
 // FallingTileRenderer: the tile's full cube centred on the entity.
 std::vector<Vertex> buildFallingBlockMesh(const FallingBlock& block,int packedLight);
+// TntRenderer: the TNT cube swelling over its last ten ticks, and the white
+// flash drawn over it (additively) every other five ticks.
+struct PrimedTntMesh {
+    std::vector<Vertex> tile,flash;
+};
+PrimedTntMesh buildPrimedTntMesh(const PrimedTntState& tnt,int packedLight);
 // LevelRenderer destroy-stage overlay: the cube at (x,y,z) textured with
 // terrain destroy_<stage> (atlas tiles 240-249).
 std::vector<Vertex> buildDestroyStageMesh(int x,int y,int z,int stage,int packedLight);

@@ -75,8 +75,12 @@ struct World::State {
     };
     std::vector<TileEvent> tileEvents[2];
     int activeTileEvents=0;
-    // How far pistons pushed the player since the client last asked.
-    Vec3 playerPush;
+    // How far pistons pushed the player, and the explosion knockback, since
+    // the client last asked.
+    Vec3 playerPush,playerKnockback;
+    // PrimedTnt entities: centre, motion and fuse.
+    struct Primed { Vec3 position,velocity;int life=80; };
+    std::vector<Primed> primedTnt;
     std::vector<SimulatedEntity> entities;
     std::vector<ExperienceOrbState> experienceOrbs;
     int playerXpPickupDelay=0;

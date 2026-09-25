@@ -129,6 +129,8 @@ void initializeTiles(){
             tile.ticking=properties->ticking;
             tile.cubeShaped=properties->cubeShaped;
             tile.solidRender=properties->solid;
+            tile.destroyTime=properties->destroyTime;
+            tile.explosionResistance=properties->explosionResistance;
             Tile::tiles[id]=&tile;
             Tile::solid[id]=properties->solid;
             Tile::lightBlock[id]=properties->lightBlock;
@@ -147,9 +149,6 @@ void initializeTiles(){
         Tile::rock=Tile::tiles[Tile::rock_Id];Tile::stoneSlab=Tile::tiles[Tile::stoneSlabHalf_Id];
         Tile::redStoneDust=Tile::tiles[Tile::redStoneDust_Id];
         Tile::notGate_on=Tile::tiles[Tile::notGate_on_Id];Tile::notGate_off=Tile::tiles[Tile::notGate_off_Id];
-        // Tile::staticCtor: bedrock is setIndestructible, the portal setDestroyTime(-1).
-        Tile::tiles[Tile::unbreakable_Id]->destroyTime=Tile::INDESTRUCTIBLE_DESTROY_TIME;
-        Tile::tiles[Tile::portalTile_Id]->destroyTime=Tile::INDESTRUCTIBLE_DESTROY_TIME;
         static_cast<PistonBaseTile*>(Tile::tiles[Tile::pistonStickyBase_Id])->isSticky=true;
         Tile::pistonMovingPiece=static_cast<PistonMovingPiece*>(Tile::tiles[Tile::pistonMovingPiece_Id]);
         // The constructor arguments of Tile::staticCtor's redstone tiles.
@@ -189,7 +188,7 @@ struct CellLevel final:Level {
     bool canSeeSky(int,int,int)override{return false;}
     bool isRainingAt(int,int,int)override{return false;}
     bool hasChunksAt(int,int,int,int,int,int)override{return true;}
-    void spawnResources(int,int,int,int,int)override{}
+    void spawnResources(int,int,int,int,int,float)override{}
     bool placeTree(TreeKind,int,Random&,int,int,int)override{return false;}
 };
 }
@@ -209,7 +208,7 @@ struct ReadLevel final:Level {
     bool canSeeSky(int,int,int)override{return false;}
     bool isRainingAt(int,int,int)override{return false;}
     bool hasChunksAt(int,int,int,int,int,int)override{return true;}
-    void spawnResources(int,int,int,int,int)override{}
+    void spawnResources(int,int,int,int,int,float)override{}
     bool placeTree(TreeKind,int,Random&,int,int,int)override{return false;}
 };
 bool isSolidBlockingTile(int tile){

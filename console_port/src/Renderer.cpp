@@ -404,6 +404,18 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
         const int x=int(std::floor(block.position.x)),y=int(std::floor(block.position.y)),z=int(std::floor(block.position.z));
         draw(buildFallingBlockMesh(block,source.inside(x,y,z)?source.renderLight(x,y,z,false):0),textures_.at("terrain").id);
     }
+    for(const auto& tnt:source.primedTnt()){
+        const double dx=tnt.position.x-eye.x,dy=tnt.position.y-eye.y,dz=tnt.position.z-eye.z;
+        if(dx*dx+dy*dy+dz*dz>distance*distance)continue;
+        const int x=int(std::floor(tnt.position.x)),y=int(std::floor(tnt.position.y)),z=int(std::floor(tnt.position.z));
+        const auto mesh=buildPrimedTntMesh(tnt,source.inside(x,y,z)?source.renderLight(x,y,z,false):0);
+        draw(mesh.tile,textures_.at("terrain").id);
+        if(!mesh.flash.empty()){
+            glDepthFunc(GL_LEQUAL);glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+            draw(mesh.flash,white_);
+            glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthFunc(GL_LESS);
+        }
+    }
     for(const auto& decoration:source.hangingDecorations()){
         const double dx=decoration.tileX+.5-eye.x,dy=decoration.tileY+.5-eye.y,dz=decoration.tileZ+.5-eye.z;
         if(dx*dx+dy*dy+dz*dz>(distance+4)*(distance+4))continue;

@@ -11,6 +11,9 @@
 #include "Material.h"
 #include "Mth.h"
 #include "Random.h"
+#include "Vec3.h"
+#include <map>
+#include <cmath>
 #include <cstdint>
 #include <array>
 #include <deque>
@@ -35,6 +38,7 @@ using ::Facing;
 using ::LightLayer;
 using ::Material;
 using ::Random;
+using ::Vec3;
 using std::shared_ptr;
 
 #include "TileConstants.inc"
@@ -46,8 +50,27 @@ struct SoundType {
     float getPitch()const{return 1;}
 };
 struct Abilities { bool instabuild=false; };
-// Entity::move: the host moves the real entity (pistons push them).
-class Entity { public: virtual ~Entity()=default; virtual void move(double,double,double){} };
+struct AABB;
+class DamageSource {
+public:
+    static inline DamageSource* explosion=nullptr;
+};
+// Entity: position, motion, box and the calls pistons and explosions make;
+// the host's stand-ins pass move() and hurt() on to the real entity.
+class Entity {
+public:
+    double x=0,y=0,z=0,xd=0,yd=0,zd=0;
+    float heightOffset=0;
+    AABB* bb=nullptr;
+    virtual ~Entity()=default;
+    virtual void move(double,double,double){}
+    virtual bool hurt(DamageSource*,int){return false;}
+    virtual float getHeadHeight(){return 0;}
+    double distanceTo(double xp,double yp,double zp){
+        const double dx=x-xp,dy=y-yp,dz=z-zp;
+        return std::sqrt(dx*dx+dy*dy+dz*dz);
+    }
+};
 // Mob (a player's or a mob's facing, in the source's degrees) and Arrow: the
 // classes pressure plates and wooden buttons look for.
 class Mob:public Entity { public: float yRot=0; };
@@ -79,11 +102,13 @@ struct GenericStats {
     static int param_noArgs(){return 0;}
     static int param_InToTheNether(){return 0;}
 };
+class ItemInstance;
 class Player:public Mob {
 public:
-    // Entity position and heightOffset (PistonBaseTile::getNewFacing).
-    double x=0,y=0,z=0;
-    float heightOffset=1.62f;
+    Player(){heightOffset=1.62f;}
+    // The carried item (TntTile::use looks for flint and steel).
+    shared_ptr<ItemInstance> selected;
+    shared_ptr<ItemInstance> getSelectedItem(){return selected;}
     Abilities abilities;
     bool mayBuild(int,int,int){return true;}
     void awardStat(int,int){}
@@ -98,6 +123,12 @@ public:
 // AABB::newTemp: a box from a small per-thread pool, as the source's.
 struct AABB {
     double x0=0,y0=0,z0=0,x1=0,y1=0,z1=0;
+    bool intersects(double x02,double y02,double z02,double x12,double y12,double z12)const{
+        if(x12<=x0 || x02>=x1)return false;
+        if(y12<=y0 || y02>=y1)return false;
+        if(z12<=z0 || z02>=z1)return false;
+        return true;
+    }
     static AABB* newTemp(double x0,double y0,double z0,double x1,double y1,double z1){
         static thread_local AABB pool[64];
         static thread_local unsigned next=0;
@@ -122,8 +153,10 @@ struct TilePosKeyEq { bool operator()(const TilePos& a,const TilePos& b)const{re
 struct LevelEvent { static const int SOUND_OPEN_DOOR=1003; };
 // Sounds and particles are client effects; the ids are what the calls name.
 enum eSOUND_TYPE { eSoundType_RANDOM_FIZZ,eSoundType_FIRE_IGNITE,eSoundType_RANDOM_CLICK,
-    eSoundType_TILE_PISTON_OUT,eSoundType_TILE_PISTON_IN };
-enum ePARTICLE_TYPE { eParticleType_largesmoke,eParticleType_smoke };
+    eSoundType_TILE_PISTON_OUT,eSoundType_TILE_PISTON_IN,eSoundType_RANDOM_FUSE,eSoundType_RANDOM_EXPLODE };
+enum ePARTICLE_TYPE { eParticleType_largesmoke,eParticleType_smoke,eParticleType_hugeexplosion,eParticleType_explode };
+// HitResult: only whether Level::clip hit something.
+class HitResult {};
 inline void MemSect(int){}
 // PIX profiler markers.
 inline void PIXBeginNamedEvent(int,const char*,...){}
@@ -260,6 +293,15 @@ public:
     }
     std::vector<shared_ptr<Entity>> found;
     void addParticle(int,double,double,double,double,double,double){}
+    void playSound(shared_ptr<Entity>,int,float,float){}
+    // Level::clip between two points: a result when a block is in the way
+    // (the caller deletes it).
+    virtual HitResult* clip(Vec3*,Vec3*){return nullptr;}
+    float getSeenPercent(Vec3* center,AABB* bb);
+    // ServerLevel's primed TNT limit and Level::addEntity(PrimedTnt).
+    virtual bool newPrimedTntAllowed(){return true;}
+    virtual void addEntity(shared_ptr<class PrimedTnt>){}
+    virtual bool tntExplodes(){return true;}
     // Level::getInstaTick: only world generation ticks instantly.
     bool getInstaTick(){return false;}
     // PlayerList::isTrackingTile and the Fire Spreads host option.
@@ -267,7 +309,8 @@ public:
     virtual bool fireSpreads(){return true;}
 
     // Tile::spawnResources (drops for tile and data at the position).
-    virtual void spawnResources(int x,int y,int z,int tile,int data)=0;
+    // With odds below 1 (explosions) each item is kept with that chance.
+    virtual void spawnResources(int x,int y,int z,int tile,int data,float odds=1)=0;
     // Sapling::growTree's feature placement: the host runs the original tree
     // feature and returns Feature::place. The mushroom kinds are
     // HugeMushroomFeature(0) and (1) for Mushroom::growTree.
@@ -298,9 +341,12 @@ public:
 private:
     PlayerList players;
 };
-enum eGameHostOption { eGameHostOption_FireSpreads };
+enum eGameHostOption { eGameHostOption_FireSpreads,eGameHostOption_TNT };
 struct App {
-    bool GetGameHostOption(eGameHostOption){return Level::current?Level::current->fireSpreads():true;}
+    bool GetGameHostOption(eGameHostOption option){
+        if(!Level::current)return true;
+        return option==eGameHostOption_TNT?Level::current->tntExplodes():Level::current->fireSpreads();
+    }
     void DebugPrintf(const char*,...){}
 };
 inline App app;
@@ -364,6 +410,10 @@ public:
     bool isEntityTile()const{return entityTile;}
     virtual int getPistonPushReaction();
     virtual void triggerEvent(Level*,int,int,int,int,int){}
+    // Explosions: Tile::explosionResistance and wasExploded.
+    float explosionResistance=0;
+    float getExplosionResistance(shared_ptr<Entity> source);
+    virtual void wasExploded(Level*,int,int,int){}
     // Tile::addAABBs: the current shape's box when it meets `box` (the host
     // passes none to collect them all).
     virtual void addAABBs(Level*,int x,int y,int z,AABB* box,std::vector<AABB*>* boxes,shared_ptr<Entity>){
@@ -402,7 +452,7 @@ public:
     virtual bool getDirectSignal(Level*,int,int,int,int){return false;}
     // spawnResources(level, x, y, z, data, playerBonusLevel): the item drops
     // (ported SurvivalRules, including the leaf and cocoa overrides).
-    virtual void spawnResources(Level* level,int x,int y,int z,int data,float,int){level->spawnResources(x,y,z,id,data);}
+    virtual void spawnResources(Level* level,int x,int y,int z,int data,float odds,int){level->spawnResources(x,y,z,id,data,odds);}
     void spawnResources(Level* level,int x,int y,int z,int data,int bonus){spawnResources(level,x,y,z,data,1.0f,bonus);}
 };
 
@@ -650,9 +700,41 @@ public:
 class TntTile:public Tile {
 public:
     TILE_CONSTANTS_TntTile
-    // TntTile::destroy with the explode bit primes TNT; explosions are not
-    // ported yet, so the burnt TNT is simply gone.
-    void destroy(Level*,int,int,int,int)override{}
+    void onPlace(Level* level,int x,int y,int z)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    void wasExploded(Level* level,int x,int y,int z)override;
+    void destroy(Level* level,int x,int y,int z,int data)override;
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+};
+// PrimedTnt(level, x, y, z): the lit block's start (PrimedTnt.cpp; the rest
+// of the entity is the host's).
+class PrimedTnt:public Entity {
+public:
+    int life=80;
+    PrimedTnt(Level*,double x,double y,double z){
+        this->x=x;this->y=y;this->z=z;
+        float rot=(float)(Math::random()*3.141592654f*2);
+        xd=-std::sin(rot)*0.02f;
+        yd=+0.2f;
+        zd=-std::cos(rot)*0.02f;
+    }
+};
+class Explosion {
+public:
+    bool fire=false,destroyBlocks=true;
+    int size=16;
+    Random* random=nullptr;
+    Level* level=nullptr;
+    double x=0,y=0,z=0;
+    shared_ptr<Entity> source;
+    float r=0;
+    std::unordered_set<TilePos,TilePosKeyHash,TilePosKeyEq> toBlow;
+    typedef std::map<shared_ptr<Player>,Vec3*> playerVec3Map;
+    playerVec3Map hitPlayers;
+    Explosion(Level* level,shared_ptr<Entity> source,double x,double y,double z,float r);
+    ~Explosion();
+    void explode();
+    void finalizeExplosion(bool generateParticles,vector<TilePos>* toBlowDirect=nullptr);
 };
 class PortalTile:public Tile {
 public:
@@ -955,6 +1037,7 @@ class HalfSlabTile:public Tile { public: TILE_CONSTANTS_HalfSlabTile };
 // cocoa beans and flint and steel).
 class Item {
 public:
+#include "ItemIds.inc"
     static Random* random;
     int id=0;
 };

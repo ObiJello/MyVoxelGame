@@ -287,6 +287,7 @@ void World::tickTime(){
     tickEntities();
     tickTileEntities();
     tickFallingBlocks();
+    tickPrimedTnt();
     tickInsideTiles();
 }
 std::array<float,3> World::skyColour(int x,int z)const{

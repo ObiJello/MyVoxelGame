@@ -163,6 +163,20 @@ require(dust.size()==12,"Lone dust is the cross and its overlay");
  for(const auto& v:falling)require(v.u*16>=sandTile%16-.001f && v.u*16<=sandTile%16+1.001f &&
      v.v*16>=sandTile/16-.001f && v.v*16<=sandTile/16+1.001f &&
      std::abs(std::abs(v.y-185.49f)-.5f)<.001f,"A falling block keeps its tile's texture and size");
+ // TntRenderer: the top face carries tnt_top, the cube swells over the last
+ // ten ticks and flashes white every other five.
+ require(validBlock(46) && textureTile(static_cast<Block>(46),0)==9 && textureTile(static_cast<Block>(46),1)==10 &&
+         textureTile(static_cast<Block>(46),2)==8,"TNT has its top, bottom and side textures");
+ PrimedTntState primed;primed.position={30.5,182.5,30.5};primed.life=37;
+ const auto primedMesh=buildPrimedTntMesh(primed,0);
+ require(primedMesh.tile.size()==36 && primedMesh.flash.empty(),"Primed TNT is a cube without its flash at life 37");
+ for(int i=6;i<12;++i)if(const auto& v=primedMesh.tile[i];std::abs(v.y-183.f)<.001f)
+     require(v.u*16>=9-.001f && v.u*16<=10.001f && v.v*16<=1.001f,"The primed cube's top is tnt_top");
+ primed.life=4;
+ const auto swelling=buildPrimedTntMesh(primed,0);
+ require(swelling.flash.size()==36,"Primed TNT flashes white");
+ for(const auto& v:swelling.tile)require(std::abs(std::abs(v.x-30.5f)-.5f*(1+.25f*.25f*.3f))<.001f,
+     "Primed TNT swells in its last ten ticks");
  require(plants.set(16,180,10,static_cast<Block>(81)),"Cactus is a supported natural block");
  auto cactusMesh=buildTerrainMeshRegion(plants,plants.blockSnapshot(),16,10,1,1);
  require(cactusMesh.opaque.size()==36,"Cactus renders six inset faces");

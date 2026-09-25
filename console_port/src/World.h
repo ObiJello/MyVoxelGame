@@ -66,6 +66,8 @@ struct MovingPiece {
     bool extending=false,sourcePiston=false;
     float progress=0,xOff=0,yOff=0,zOff=0;
 };
+// PrimedTnt: a lit TNT block (its centre) and the ticks left on its fuse.
+struct PrimedTntState { Vec3 position;int life=0; };
 // FallingTile: a sand, gravel or anvil tile falling (HeavyTile::checkSlide).
 // The position is the entity's (the block's centre) in client coordinates.
 struct FallingBlock {
@@ -97,8 +99,9 @@ class World {
     // Level::tickWeather; WorldTiles.cpp.
     void tickTiles();
     void tickWeather();
-    // FallingTile::tick for every falling block.
+    // FallingTile::tick for every falling block, PrimedTnt::tick for lit TNT.
     void tickFallingBlocks();
+    void tickPrimedTnt();
     // The chunk hooks and neighbour notifications of a change already made
     // with set/setData (placement keeps its collision check first).
     void tileStored(int x,int y,int z,int oldTile,int oldData);
@@ -231,6 +234,10 @@ public:
     // the player's position and applies it).
     Vec3 takePlayerPush();
     std::vector<MovingPiece> movingPieces()const;
+    std::vector<PrimedTntState> primedTnt()const;
+    // Explosion knockback on the player since the last call (a velocity, in
+    // blocks per tick; the client owns the player's motion).
+    Vec3 takePlayerKnockback();
     int skyLight(int x,int y,int z)const;
     int blockLight(int x,int y,int z)const;
     int renderLight(int x,int y,int z,bool liquid=false)const;

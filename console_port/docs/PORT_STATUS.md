@@ -1658,3 +1658,29 @@ reconstruct is now taken from the source:
 - Tests: pistons extend and retract through a lever, a sticky piston pulls its block
   back, obsidian stops a piston, the head pushes the player, and placement faces a
   direction; the meshes, the head's collision and the side texture's orientation.
+
+### TNT and explosions (September 25)
+
+- Extracted: `TntTile` (`onPlace`/`neighborChanged` under a signal, `wasExploded`
+  with its short random fuse, `destroy` with the explode bit, `use` with flint and
+  steel), `Explosion` (the constructor, `explode` with its 16×16×16 rays and entity
+  damage and knockback, `finalizeExplosion` without particles or sound),
+  `Level::getSeenPercent` and `Tile::getExplosionResistance`. `ServerLevel::explode`,
+  `newPrimedTntAllowed` (20 at once) and the host's TNT option (on) are stand-ins.
+- The tile table now carries `destroyTime` and `explosionResistance` from the
+  generator (`setDestroyTime` raises resistance to five times, `setExplodeable` and
+  `setIndestructible` as in `Tile`), checked against the survival table; that fixed
+  the indestructible moving piece and portals there.
+- `PrimedTnt::tick` runs in the World (gravity, drag, bouncing on the ground, the
+  fuse, radius 4); explosions drop blocks at 1/r odds (`Tile::spawnResources`), light
+  neighbouring TNT, hurt and push mobs, items, orbs and the player. The player's
+  knockback goes to the client (`World::takePlayerKnockback`), which adds it to the
+  jump speed and a horizontal push that wears off with `Mob::travel`'s friction.
+  Lighting TNT does not wear the flint and steel, as in `ServerPlayerGameMode`.
+- Drawing: TNT's top, bottom and side textures; primed TNT after `TntRenderer`
+  (swelling over its last ten ticks, the additive white flash every other five
+  ticks). Dropped and falling cubes now take the right texture per face (the top was
+  drawn underneath).
+- Tests: flint and steel and a lever light TNT, the fuse, the crater, obsidian
+  surviving, a chain reaction's short fuse, the player hurt and knocked back; the
+  primed mesh's textures, swelling and flash.
