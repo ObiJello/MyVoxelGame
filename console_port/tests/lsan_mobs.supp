@@ -1,0 +1,5 @@
+# Allocations the original mob code (ported/tick/EntityRules.cpp, extracted
+# verbatim) never frees: Sheep::Sheep's EatTileGoal, which it adds to its
+# goal selector with canDeletePointer false and has no destructor to delete.
+# One small goal per sheep.
+leak:console::sim::Sheep::Sheep
