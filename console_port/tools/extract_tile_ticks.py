@@ -82,10 +82,51 @@ METHODS = [
     ('LiquidTileDynamic', 'mainTick'), ('LiquidTileDynamic', 'trySpreadTo'), ('LiquidTileDynamic', 'getSlopeDistance'),
     ('LiquidTileDynamic', 'getSpread'), ('LiquidTileDynamic', 'isWaterBlocking'), ('LiquidTileDynamic', 'getHighest'),
     ('LiquidTileDynamic', 'canSpreadTo'), ('LiquidTileDynamic', 'onPlace'),
+    # Redstone: dust, torches, levers, buttons, pressure plates, repeaters,
+    # lamps, and the doors, trapdoors and gates they open.
+    ('Tile', 'setShape'), ('FenceTile', 'isFence'),
+    ('RedStoneDustTile', 'mayPlace'), ('RedStoneDustTile', 'updatePowerStrength(Level *level, int x, int y, int z)'),
+    ('RedStoneDustTile', 'updatePowerStrength(Level *level, int x, int y, int z, int xFrom'),
+    ('RedStoneDustTile', 'checkCornerChangeAt'), ('RedStoneDustTile', 'onPlace'), ('RedStoneDustTile', 'onRemove'),
+    ('RedStoneDustTile', 'checkTarget'), ('RedStoneDustTile', 'neighborChanged'), ('RedStoneDustTile', 'getDirectSignal'),
+    ('RedStoneDustTile', 'getSignal'), ('RedStoneDustTile', 'isSignalSource'), ('RedStoneDustTile', 'shouldConnectTo'),
+    ('RedStoneDustTile', 'shouldReceivePowerFrom'),
+    ('NotGateTile', 'removeLevelReferences'), ('NotGateTile', 'isToggledTooFrequently'), ('NotGateTile', 'getTickDelay'),
+    ('NotGateTile', 'onPlace'), ('NotGateTile', 'onRemove'), ('NotGateTile', 'getSignal'), ('NotGateTile', 'hasNeighborSignal'),
+    ('NotGateTile', 'tick'), ('NotGateTile', 'neighborChanged'), ('NotGateTile', 'getDirectSignal'), ('NotGateTile', 'isSignalSource'),
+    ('LeverTile', 'mayPlace(Level *level, int x, int y, int z, int face)'), ('LeverTile', 'mayPlace(Level *level, int x, int y, int z)'),
+    ('LeverTile', 'getPlacedOnFaceDataValue'), ('LeverTile', 'getLeverFacing'), ('LeverTile', 'neighborChanged'),
+    ('LeverTile', 'checkCanSurvive'), ('LeverTile', 'updateShape'), ('LeverTile', 'attack'), ('LeverTile', 'TestUse'),
+    ('LeverTile', 'use'), ('LeverTile', 'onRemove'), ('LeverTile', 'getSignal'), ('LeverTile', 'getDirectSignal'),
+    ('LeverTile', 'isSignalSource'),
+    ('ButtonTile', 'getTickDelay'), ('ButtonTile', 'mayPlace(Level *level, int x, int y, int z, int face)'),
+    ('ButtonTile', 'mayPlace(Level *level, int x, int y, int z)'), ('ButtonTile', 'getPlacedOnFaceDataValue'),
+    ('ButtonTile', 'findFace'), ('ButtonTile', 'neighborChanged'), ('ButtonTile', 'checkCanSurvive'),
+    ('ButtonTile', 'updateShape(LevelSource'), ('ButtonTile', 'updateShape(int data)'), ('ButtonTile', 'attack'),
+    ('ButtonTile', 'TestUse'), ('ButtonTile', 'use'), ('ButtonTile', 'onRemove'), ('ButtonTile', 'getSignal'),
+    ('ButtonTile', 'getDirectSignal'), ('ButtonTile', 'isSignalSource'), ('ButtonTile', 'tick'), ('ButtonTile', 'entityInside'),
+    ('ButtonTile', 'checkPressed'), ('ButtonTile', 'updateNeighbours'), ('ButtonTile', 'shouldTileTick'),
+    ('PressurePlateTile', 'getTickDelay'), ('PressurePlateTile', 'mayPlace'), ('PressurePlateTile', 'neighborChanged'),
+    ('PressurePlateTile', 'tick'), ('PressurePlateTile', 'entityInside'), ('PressurePlateTile', 'checkPressed'),
+    ('PressurePlateTile', 'onRemove'), ('PressurePlateTile', 'updateShape'), ('PressurePlateTile', 'getSignal'),
+    ('PressurePlateTile', 'getDirectSignal'), ('PressurePlateTile', 'isSignalSource'), ('PressurePlateTile', 'shouldTileTick'),
+    ('DiodeTile', 'mayPlace'), ('DiodeTile', 'canSurvive'), ('DiodeTile', 'tick'), ('DiodeTile', 'getDirectSignal'),
+    ('DiodeTile', 'getSignal'), ('DiodeTile', 'neighborChanged'), ('DiodeTile', 'getSourceSignal'), ('DiodeTile', 'TestUse'),
+    ('DiodeTile', 'use'), ('DiodeTile', 'isSignalSource'), ('DiodeTile', 'setPlacedBy'), ('DiodeTile', 'onPlace'),
+    ('DiodeTile', 'destroy'),
+    ('RedlightTile', 'onPlace'), ('RedlightTile', 'neighborChanged'), ('RedlightTile', 'tick'),
+    ('TrapDoorTile', 'updateShape'), ('TrapDoorTile', 'setShape'), ('TrapDoorTile', 'attack'), ('TrapDoorTile', 'TestUse'),
+    ('TrapDoorTile', 'use'), ('TrapDoorTile', 'setOpen'), ('TrapDoorTile', 'neighborChanged'), ('TrapDoorTile', 'getDir'),
+    ('TrapDoorTile', 'getPlacedOnFaceDataValue'), ('TrapDoorTile', 'mayPlace'), ('TrapDoorTile', 'isOpen'),
+    ('TrapDoorTile', 'attachesTo'),
+    ('FenceGateTile', 'mayPlace'), ('FenceGateTile', 'setPlacedBy'), ('FenceGateTile', 'use'),
+    ('FenceGateTile', 'neighborChanged'), ('FenceGateTile', 'isOpen'),
+    ('DoorTile', 'TestUse'), ('DoorTile', 'use'),
 ]
 # Classes whose header constants (static const int / static bool) are written
 # to TileConstants.inc as TILE_CONSTANTS_<Class> for the stand-in classes.
-CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile']
+CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile',
+                    'NotGateTile', 'DiodeTile', 'TrapDoorTile', 'FenceGateTile']
 # The class's source file where it differs from the class name.
 SOURCE_FILE = {'WaterlilyTile': 'WaterLilyTile.cpp'}
 
@@ -97,8 +138,9 @@ def source(cls):
 
 def method(cls, name):
     text = source(cls)
-    pattern = re.escape(f'{cls}::{name}') + ('' if '(' in name else r'\s*\(')
-    matches = [m for m in re.finditer(pattern, text)]
+    # Definitions start a line; qualified calls inside bodies are indented.
+    pattern = r'^\S[^\n]*?\b' + re.escape(f'{cls}::{name}') + ('' if '(' in name else r'\s*\(')
+    matches = [m for m in re.finditer(pattern, text, re.M)]
     if len(matches) != 1:
         raise SystemExit(f'{cls}::{name}: {len(matches)} definitions')
     start = text.rindex('\n', 0, matches[0].start()) + 1

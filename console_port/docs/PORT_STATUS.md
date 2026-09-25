@@ -1599,3 +1599,31 @@ reconstruct is now taken from the source:
   the torch and redstone torch atlas slots; torches are allowed in generated worlds.
   Placing a torch or ladder uses the clicked face (`Level::mayPlace`,
   `getPlacedOnFaceDataValue`), so it goes on the wall you click and not in mid-air.
+
+### Redstone (September 25)
+
+- Extracted with the tile methods: `RedStoneDustTile` (power strength, corners,
+  connections), `NotGateTile` (redstone torches, with the burnout history kept per
+  world rather than per `Level*`, since the port makes a `Level` per call),
+  `LeverTile`, `ButtonTile` (stone, and wood pressed by arrows), `PressurePlateTile`
+  (wood: any entity; stone: mobs and players), `DiodeTile` (repeaters: delay, facing
+  from the player, right click cycles the delay), `RedlightTile` (lamps),
+  `TrapDoorTile`, `FenceGateTile` and `DoorTile::use`, plus `Tile::setShape` and
+  `FenceTile::isFence`. `TilePos` keeps the source's hash in unsigned arithmetic (the
+  source's signed multiply overflows).
+- Right click runs the tile's own `use` (`World::useBlock`/`usable`, for `TestUse`
+  tiles), replacing the port's door and gate code: a gate now opens away from the
+  player as in `FenceGateTile::use`. Placement checks `Level::mayPlace` against the
+  clicked face and takes `getPlacedOnFaceDataValue` for torches, ladders, dust, levers,
+  buttons, plates, repeaters and trapdoors, and repeaters run `setPlacedBy`. Breaking
+  calls `Tile::destroy`. Each tick, the player, mobs, dropped items and XP orbs run
+  `Tile::entityInside` for the tiles they stand in (`Entity::checkInsideTiles`), so
+  plates are pressed. Redstone items place dust (`RedStoneItem`).
+- The in-game Use tooltip follows `Minecraft::tick`: chests Open; workbenches,
+  furnaces, brewing stands, enchanting tables, anvils, wooden doors, levers, buttons,
+  trapdoors and gates Use (the port showed Open for all of them).
+- Lamps use their atlas slots; dust, levers, buttons, plates, repeaters and
+  trapdoors still draw as cubes until their `TileRenderer` shapes are ported.
+- `console_tile_tick_core` drives a lever through dust to a lamp (signal strength
+  falling by one per dust, the lamp's four-tick delay), a redstone torch inverting,
+  a repeater's delay and delay cycling, a pressure plate under the player, and doors.

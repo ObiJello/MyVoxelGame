@@ -297,6 +297,68 @@ static void worldUpdates(const std::filesystem::path& scratch){
     require(loaded.get(25,180,26)==static_cast<Block>(8) && loaded.getData(25,180,26)==1,"a saved pending tick runs after loading");
 }
 
+// Redstone through the World: levers, dust, lamps, torches, repeaters,
+// pressure plates and doors, with the World's own scheduled ticks.
+static void redstone(){
+    World world;world.generate(46,true);
+    for(int x=20;x<=44;++x)for(int z=20;z<=44;++z)world.set(x,179,z,Stone);
+    const Vec3 feet{22.5,180,22.5};
+    auto B=[](int id){return static_cast<Block>(id);};
+    // A lever on the floor, three dust and a lamp.
+    require(world.placeBlock(26,180,30,B(69),0,feet,0,1) && world.get(26,180,30)==B(69),"place a lever");
+    for(int x=27;x<=29;++x)require(world.placeBlock(x,180,30,B(55),0,feet,0,1),"place dust");
+    require(!world.placeBlock(27,185,30,B(55),0,feet,0,1),"no dust in the air");
+    require(world.placeBlock(30,180,30,B(123),0,feet,0),"place a lamp");
+    require(world.usable(26,180,30) && world.useBlock(26,180,30),"pull the lever");
+    require(world.getData(27,180,30)==15 && world.getData(29,180,30)==13,"dust carries the signal, one less each step");
+    require(world.get(30,180,30)==B(124),"the lamp lights");
+    world.useBlock(26,180,30);
+    require(world.getData(28,180,30)==0,"dust goes dark");
+    for(int i=0;i<3;++i)world.tickTime();
+    require(world.get(30,180,30)==B(124),"a lamp stays lit for four ticks");
+    for(int i=0;i<2;++i)world.tickTime();
+    require(world.get(30,180,30)==B(123),"then goes out");
+
+    // A redstone torch on the side of a block turns off when the block is powered.
+    world.set(32,180,34,Stone);
+    require(world.placeBlock(33,180,34,B(76),0,feet,0,5) && world.getData(33,180,34)==1,"a redstone torch on a wall");
+    require(world.placeBlock(32,181,34,B(69),0,feet,0,1),"a lever on the block");
+    world.useBlock(32,181,34);
+    world.tickTime();
+    require(world.get(33,180,34)==B(76),"the torch waits two ticks");
+    world.tickTime();world.tickTime();
+    require(world.get(33,180,34)==B(75),"the powered block turns the torch off");
+    world.useBlock(32,181,34);
+    for(int i=0;i<3;++i)world.tickTime();
+    require(world.get(33,180,34)==B(76),"and back on");
+
+    // A repeater facing south (data 0) takes its input from the south side and
+    // powers the north side after its delay.
+    require(world.set(36,180,32,B(93)),"place a repeater");world.setData(36,180,32,0);
+    require(world.placeBlock(36,180,33,B(69),0,feet,0,1) && world.placeBlock(36,180,31,B(123),0,feet,0),"lever and lamp");
+    world.useBlock(36,180,33);
+    world.tickTime();
+    require(world.get(36,180,31)==B(123),"the repeater waits");
+    world.tickTime();world.tickTime();
+    require(world.get(36,180,32)==B(94) && world.get(36,180,31)==B(124),"the repeater passes the signal on");
+    require(world.usable(36,180,32) && world.useBlock(36,180,32) && (world.getData(36,180,32)>>2)==1,"right click sets a longer delay");
+
+    // A wooden pressure plate under the player.
+    require(world.placeBlock(40,180,36,B(72),0,feet,0,1),"place a pressure plate");
+    world.setPlayerPosition({40.5,180,36.5});
+    world.tickTime();
+    require(world.getData(40,180,36)==1,"the player presses the plate");
+    world.setPlayerPosition({30.5,180,40.5});
+    for(int i=0;i<25;++i)world.tickTime();
+    require(world.getData(40,180,36)==0,"the plate lifts when the player steps off");
+
+    // DoorTile::use opens both halves' composite state from either half.
+    world.set(24,180,40,B(64));world.setData(24,180,40,0);
+    world.set(24,181,40,B(64));world.setData(24,181,40,8);
+    require(world.useBlock(24,181,40) && (world.getData(24,180,40)&4),"use a door's top half");
+    require(world.useBlock(24,180,40) && !(world.getData(24,180,40)&4),"and close it from below");
+}
+
 static void worldPass(const std::filesystem::path& scratch){
     // A generated world: random ticks run without errors, and report their cost.
     World world;
@@ -332,6 +394,7 @@ int main(int argc,char** argv){try{
     rules();
     items();
     updates();
+    redstone();
     worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     worldPass(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     std::cout<<"tile tick tests passed\n";

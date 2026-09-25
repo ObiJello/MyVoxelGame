@@ -98,6 +98,13 @@ class World {
     // Level::mayPlace and getPlacedOnFaceDataValue for tile against `face`;
     // -1 when it may not go there.
     int placementData(int x,int y,int z,int tile,int face,int data);
+    // Tile::setPlacedBy with the player's heading, and Tile::destroy after the
+    // player removed a tile.
+    void tilePlacedBy(int x,int y,int z,double yaw);
+    void tileDestroyed(int x,int y,int z,int tile,int data);
+    // Entity::checkInsideTiles: Tile::entityInside for the tiles each entity's
+    // box is in (pressure plates, wooden buttons).
+    void tickInsideTiles();
     friend class WorldTickLevel;
     // OldChunkStorage TileTicks: the queue's ticks for the chunk join the
     // ones the port does not run, which stay as saved.
@@ -187,7 +194,11 @@ public:
     bool transferFurnaceItem(int x,int y,int z,int slot,bool take,int targetSlot=0,int amount=-1);
     bool transferBrewingItem(int x,int y,int z,int slot,bool take,int targetSlot=0,int amount=-1);
     bool breakBlock(int x,int y,int z);
-    bool useBlock(int x,int y,int z);
+    // Tile::use (ServerPlayerGameMode::useItemOn) for the tiles that have one
+    // (doors, gates, trapdoors, levers, buttons, repeaters); `yaw` is the
+    // player's heading. usable is Tile::TestUse, what the Use tooltip shows.
+    bool useBlock(int x,int y,int z,double yaw=0);
+    bool usable(int x,int y,int z)const;
     bool useCauldron(int x,int y,int z,int heldItemId);
     // `face` is the clicked face of the block the new one goes against
     // (Facing); torches and ladders use it (TileItem::useOn: Level::mayPlace

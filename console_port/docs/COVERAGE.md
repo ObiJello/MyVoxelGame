@@ -8,13 +8,13 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 | Subsystem | Classes | Ported | Partial | Missing |
 |---|---:|---:|---:|---:|
-| Main loop and levels | 53 | 7 | 19 | 27 |
+| Main loop and levels | 53 | 7 | 20 | 26 |
 | Player and game modes | 12 | 3 | 4 | 5 |
 | Entities | 67 | 0 | 41 | 26 |
 | Mob AI | 58 | 0 | 1 | 57 |
 | Blocks | 110 | 0 | 105 | 5 |
 | Block entities | 13 | 0 | 5 | 8 |
-| Items | 63 | 0 | 26 | 37 |
+| Items | 63 | 0 | 27 | 36 |
 | Crafting | 14 | 0 | 11 | 3 |
 | Menus and containers | 55 | 1 | 15 | 39 |
 | Enchanting | 24 | 0 | 1 | 23 |
@@ -30,15 +30,15 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 | Commands | 9 | 0 | 0 | 9 |
 | Networking | 96 | 0 | 4 | 92 |
 | Other | 102 | 11 | 25 | 66 |
-| **All** | **1247** | **119** | **327** | **801** |
+| **All** | **1247** | **119** | **329** | **799** |
 
 ## Main loop and levels
 
 **Ported (7):** HellRandomLevelSource, LevelData, LevelSettings, LevelType, RandomLevelSource, TheEndLevelRandomLevelSource, TickNextTickData
 
-**Partial (19):** ChunkPos, DerivedLevelData, EmptyLevelChunk, FlatLevelSource, GameRenderer, Level, LevelChunk, LevelGenerationOptions, LevelRenderer, LevelRules, LevelRuleset, LevelStorage, McRegionLevelStorage, Minecraft, MinecraftServer, MobSpawner, MultiPlayerChunkCache, Options, ServerLevel
+**Partial (20):** ChunkPos, DerivedLevelData, EmptyLevelChunk, FlatLevelSource, GameRenderer, Level, LevelChunk, LevelGenerationOptions, LevelRenderer, LevelRules, LevelRuleset, LevelStorage, McRegionLevelStorage, Minecraft, MinecraftServer, MobSpawner, MultiPlayerChunkCache, Options, ServerLevel, TilePos
 
-**Missing (27):** CustomLevelSource, DemoLevel, DerivedServerLevel, DirectoryLevelStorage, DirectoryLevelStorageSource, DistanceChunkSorter, Explosion, HellFlatLevelSource, LevelConflictException, LevelGenerators, LevelStorageProfilerDecorator, LevelSummary, McRegionLevelStorageSource, MemoryLevelStorage, MemoryLevelStorageSource, MobCategory, MockedLevelStorage, MultiPlayerLevel, PlayerChunkMap, PortalForcer, ReadOnlyChunkCache, ServerChunkCache, ServerLevelListener, TileEventData, TilePos, Timer, WaterLevelChunk
+**Missing (26):** CustomLevelSource, DemoLevel, DerivedServerLevel, DirectoryLevelStorage, DirectoryLevelStorageSource, DistanceChunkSorter, Explosion, HellFlatLevelSource, LevelConflictException, LevelGenerators, LevelStorageProfilerDecorator, LevelSummary, McRegionLevelStorageSource, MemoryLevelStorage, MemoryLevelStorageSource, MobCategory, MockedLevelStorage, MultiPlayerLevel, PlayerChunkMap, PortalForcer, ReadOnlyChunkCache, ServerChunkCache, ServerLevelListener, TileEventData, Timer, WaterLevelChunk
 
 ## Player and game modes
 
@@ -74,9 +74,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Items
 
-**Partial (26):** AnvilTileItem, BowlFoodItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
+**Partial (27):** AnvilTileItem, BowlFoodItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, RedStoneItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
 
-**Missing (37):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, BucketItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, MinecartItem, PistonTileItem, RedStoneItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
+**Missing (36):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, BucketItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, MinecartItem, PistonTileItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
 
 ## Crafting
 

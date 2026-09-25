@@ -130,6 +130,8 @@ int textureTile(Block b,int face,int data) {
     case 50:return 80;
     case 75:return 115;
     case 76:return 99;
+    case 123:return 211; // redstoneLight
+    case 124:return 212; // redstoneLight_lit
     default:return 1;
     }
 }
@@ -154,8 +156,9 @@ bool validBlock(std::uint8_t b) {
     case 8:case 11:case 61:case 62:case 116:case 117:case 118:case 130:return true;
     // Farming (hoes, seeds, stems) and random ticks.
     case 59:case 60:case 74:case 103:case 104:case 105:case 115:case 141:case 142:return true;
-    // Fire (flint and steel, lava, spreading) and torches.
-    case 50:case 51:return true;
+    // Fire (flint and steel, lava, spreading), torches and redstone.
+    case 50:case 51:case 55:case 69:case 70:case 72:case 75:case 76:case 77:
+    case 93:case 94:case 96:case 123:case 124:case 143:return true;
     default:break;
     }
     return consoleIsStair(b) || b==43 || b==44 || b==64 || b==71 || b==65 || b==85 || b==107 || b==113 || b==98 || b==52 || b==54 || b==Air || b==Stone || b==Grass || b==Dirt || b==Cobble || b==Planks ||
@@ -165,21 +168,11 @@ bool validBlock(std::uint8_t b) {
 // ServerPlayerGameMode::destroyBlock: Level::setTile(x, y, z, 0), so the
 // neighbours react (a door's other half, a torch or plant on it, liquids).
 bool World::breakBlock(int x,int y,int z){
-    const int id=get(x,y,z);
+    const int id=get(x,y,z),data=getData(x,y,z);
     if(id==Bedrock || id==Air || !setTileAndUpdate(x,y,z,Air))return false;
+    tileDestroyed(x,y,z,id,data);
     if(id==54 || id==130 || id==61 || id==62 || id==117)
         discardContainerData(x,y,z,id==54?L"Chest":id==130?L"EnderChest":id==117?L"Cauldron":L"Furnace");
-    return true;
-}
-bool World::useBlock(int x,int y,int z){
-    const int id=get(x,y,z);
-    if(id==FenceGate){setDataAndUpdate(x,y,z,getData(x,y,z)^4);return true;}
-    if(id!=64 && id!=71)return false;
-    // DoorTile::use consumes iron-door interaction without opening it.
-    if(id==71)return true;
-    if(getData(x,y,z)&8)--y;
-    if(get(x,y,z)!=64 || (getData(x,y,z)&8))return true;
-    setDataAndUpdate(x,y,z,(getData(x,y,z)&7)^4);
     return true;
 }
 bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double yaw,int face) {
@@ -203,9 +196,16 @@ bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double y
         constexpr int horizontal[]{2,5,3,4};
         placedData=horizontal[direction];
     }
-    if(face>=0 && face<=5 && (block==static_cast<Block>(50) || block==static_cast<Block>(65))){
-        placedData=placementData(x,y,z,block,face,placedData);
-        if(placedData<0)return false;
+    // TileItem::useOn: Level::mayPlace against the clicked face and
+    // Tile::getPlacedOnFaceDataValue for the tiles whose placement is ported.
+    switch(static_cast<int>(block)){
+    case 50:case 55:case 65:case 69:case 70:case 72:case 75:case 76:case 77:case 93:case 96:case 143:
+        if(face>=0 && face<=5){
+            placedData=placementData(x,y,z,block,face,placedData);
+            if(placedData<0)return false;
+        }
+        break;
+    default:break;
     }
     const int oldData=getData(x,y,z);
     if(!set(x,y,z,block))return false;
@@ -214,9 +214,10 @@ bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double y
         set(x,y,z,old);setData(x,y,z,oldData);
         return false;
     }
-    // TileItem::useOn places with Level::setTileAndData.
+    // TileItem::useOn places with Level::setTileAndData, then Tile::setPlacedBy.
     tileStored(x,y,z,old,oldData);
     if(get(x,y,z)!=block)return true;
+    if(block==static_cast<Block>(93))tilePlacedBy(x,y,z,yaw);
     if(block==static_cast<Block>(130))ensureEnderChestData(x,y,z);
     if(block==static_cast<Block>(61))ensureFurnaceData(x,y,z);
     if(block==static_cast<Block>(117))ensureBrewingData(x,y,z);

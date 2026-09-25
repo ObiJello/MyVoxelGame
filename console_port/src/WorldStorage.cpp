@@ -282,6 +282,7 @@ void World::tickTime(){
     tickPlayerSurvival();
     tickEntities();
     tickFallingBlocks();
+    tickInsideTiles();
 }
 std::array<float,3> World::skyColour(int x,int z)const{
     if(x<originX() || x>=originX()+width || z<originZ() || z>=originZ()+depth)throw std::out_of_range("Sky sample outside client world");

@@ -17,6 +17,8 @@ Tile *Tile::farmland,*Tile::sapling,*Tile::crops,*Tile::tallgrass,*Tile::flower,
 FireTile* Tile::fire;
 TntTile* Tile::tnt;
 PortalTile* Tile::portalTile;
+Tile *Tile::lightGem,*Tile::wood,*Tile::rock,*Tile::stoneSlab,*Tile::redStoneDust,*Tile::notGate_on,*Tile::notGate_off;
+NotGateTile::ToggleMap NotGateTile::recentToggles;
 bool HeavyTile::instaFall=false;
 Random* Item::random=new Random();
 
@@ -85,6 +87,16 @@ std::unique_ptr<Tile> make(std::string_view cls){
     if(cls=="LiquidTileDynamic")return std::make_unique<LiquidTileDynamic>();
     if(cls=="LiquidTileStatic")return std::make_unique<LiquidTileStatic>();
     if(cls=="StairTile")return std::make_unique<StairTile>();
+    if(cls=="FenceTile")return std::make_unique<FenceTile>();
+    if(cls=="RedStoneDustTile")return std::make_unique<RedStoneDustTile>();
+    if(cls=="NotGateTile")return std::make_unique<NotGateTile>();
+    if(cls=="LeverTile")return std::make_unique<LeverTile>();
+    if(cls=="ButtonTile")return std::make_unique<ButtonTile>();
+    if(cls=="PressurePlateTile")return std::make_unique<PressurePlateTile>();
+    if(cls=="DiodeTile")return std::make_unique<DiodeTile>();
+    if(cls=="RedlightTile")return std::make_unique<RedlightTile>();
+    if(cls=="TrapDoorTile")return std::make_unique<TrapDoorTile>();
+    if(cls=="FenceGateTile")return std::make_unique<FenceGateTile>();
     if(cls=="StoneSlabTile" || cls=="WoodSlabTile")return std::make_unique<HalfSlabTile>();
     return std::make_unique<Tile>();
 }
@@ -119,6 +131,17 @@ void initializeTiles(){
         Tile::fire=static_cast<FireTile*>(Tile::tiles[Tile::fire_Id]);
         Tile::tnt=static_cast<TntTile*>(Tile::tiles[Tile::tnt_Id]);
         Tile::portalTile=static_cast<PortalTile*>(Tile::tiles[Tile::portalTile_Id]);
+        Tile::lightGem=Tile::tiles[Tile::lightGem_Id];Tile::wood=Tile::tiles[Tile::wood_Id];
+        Tile::rock=Tile::tiles[Tile::rock_Id];Tile::stoneSlab=Tile::tiles[Tile::stoneSlabHalf_Id];
+        Tile::redStoneDust=Tile::tiles[Tile::redStoneDust_Id];
+        Tile::notGate_on=Tile::tiles[Tile::notGate_on_Id];Tile::notGate_off=Tile::tiles[Tile::notGate_off_Id];
+        // The constructor arguments of Tile::staticCtor's redstone tiles.
+        static_cast<NotGateTile*>(Tile::notGate_on)->on=true;
+        static_cast<DiodeTile*>(Tile::tiles[Tile::diode_on_Id])->on=true;
+        static_cast<RedlightTile*>(Tile::tiles[Tile::redstoneLight_lit_Id])->isLit=true;
+        static_cast<ButtonTile*>(Tile::tiles[Tile::button_wood_Id])->sensitive=true;
+        static_cast<PressurePlateTile*>(Tile::tiles[Tile::pressurePlate_stone_Id])->sensitivity=PressurePlateTile::mobs;
+        static_cast<PressurePlateTile*>(Tile::tiles[Tile::pressurePlate_wood_Id])->sensitivity=PressurePlateTile::everything;
         // SignTile(id, clas, onGround): the wall sign is not on the ground.
         static_cast<SignTile*>(Tile::tiles[Tile::wallSign_Id])->onGround=false;
         // StemTile(id, fruit): Tile::pumpkinStem and Tile::melonStem.

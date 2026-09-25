@@ -9,11 +9,25 @@
 #include "Facing.h"
 #include "LightLayer.h"
 #include "Material.h"
+#include "Mth.h"
 #include "Random.h"
+#include <cstdint>
 #include <deque>
+#include <typeinfo>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <memory>
 
+// The source's iterator shorthand (stdafx.h).
+#ifndef AUTO_VAR
+#define AUTO_VAR(_var, _val) auto _var = _val
+#endif
+
 namespace console::sim {
+using ::Mth;
+using std::deque;
+using std::vector;
 using ::Direction;
 using ::Facing;
 using ::LightLayer;
@@ -31,6 +45,11 @@ struct SoundType {
 };
 struct Abilities { bool instabuild=false; };
 class Entity { public: virtual ~Entity()=default; };
+// Mob (a player's or a mob's facing, in the source's degrees) and Arrow: the
+// classes pressure plates and wooden buttons look for.
+class Mob:public Entity { public: float yRot=0; };
+class Arrow:public Entity {};
+class TileEntity {};
 // Statistics and achievements are not ported.
 struct GenericStats {
     static int portalsCreated(){return 0;}
@@ -38,7 +57,7 @@ struct GenericStats {
     static int param_noArgs(){return 0;}
     static int param_InToTheNether(){return 0;}
 };
-class Player:public Entity {
+class Player:public Mob {
 public:
     Abilities abilities;
     bool mayBuild(int,int,int){return true;}
@@ -51,11 +70,34 @@ public:
     // ItemInstance::hurt: the host wears the tool (and breaks it) afterwards.
     void hurt(int amount,shared_ptr<Player>){damage+=amount;}
 };
-struct AABB {};
+// AABB::newTemp: a box from a small per-thread pool, as the source's.
+struct AABB {
+    double x0=0,y0=0,z0=0,x1=0,y1=0,z1=0;
+    static AABB* newTemp(double x0,double y0,double z0,double x1,double y1,double z1){
+        static thread_local AABB pool[64];
+        static thread_local unsigned next=0;
+        AABB& box=pool[next++%64];
+        box={x0,y0,z0,x1,y1,z1};
+        return &box;
+    }
+};
+// TilePos with the source's hash (in unsigned arithmetic: the source's signed
+// multiply overflows).
+class TilePos {
+public:
+    int x,y,z;
+    TilePos(int x,int y,int z):x(x),y(y),z(z){}
+    static int hash_fnct(const TilePos& k){
+        return static_cast<int>(static_cast<unsigned>(k.x)*8976890u+static_cast<unsigned>(k.y)*981131u+static_cast<unsigned>(k.z));
+    }
+    static bool eq_test(const TilePos& a,const TilePos& b){return a.x==b.x && a.y==b.y && a.z==b.z;}
+};
+struct TilePosKeyHash { int operator()(const TilePos& k)const{return TilePos::hash_fnct(k);} };
+struct TilePosKeyEq { bool operator()(const TilePos& a,const TilePos& b)const{return TilePos::eq_test(a,b);} };
 struct LevelEvent { static const int SOUND_OPEN_DOOR=1003; };
 // Sounds and particles are client effects; the ids are what the calls name.
-enum eSOUND_TYPE { eSoundType_RANDOM_FIZZ,eSoundType_FIRE_IGNITE };
-enum ePARTICLE_TYPE { eParticleType_largesmoke };
+enum eSOUND_TYPE { eSoundType_RANDOM_FIZZ,eSoundType_FIRE_IGNITE,eSoundType_RANDOM_CLICK };
+enum ePARTICLE_TYPE { eParticleType_largesmoke,eParticleType_smoke };
 inline void MemSect(int){}
 // Math::random: java.lang.Math's shared generator.
 struct Math { static double random(){static Random generator;return generator.nextDouble();} };
@@ -93,6 +135,9 @@ public:
 class Level {
 public:
     static constexpr int MAX_BRIGHTNESS=15,maxBuildHeight=256,genDepth=128,genDepthMinusOne=127;
+    // What NotGateTile's toggle history is kept under: the world, not this
+    // object (the host makes a Level for each call).
+    const void* identity=this;
     static const int MAX_LEVEL_SIZE=30000000;
     bool isClientSide=false;
     bool noNeighborUpdate=false;
@@ -158,7 +203,25 @@ public:
     virtual void addEntity(shared_ptr<FallingTile>){}
     void setTilesDirty(int,int,int,int,int,int){}
     void levelEvent(shared_ptr<Player>,int,int,int,int,int){}
-    void playSound(float,float,float,int,float,float){}
+    void playSound(double,double,double,int,float,float){}
+    // Level::getTime (the game time) and the entities in a box.
+    virtual std::int64_t getTime(){return 0;}
+    enum class EntityClass { Any,Mob,Player,Arrow };
+    virtual bool hasEntitiesIn(const AABB&,EntityClass){return false;}
+    // Level::getEntities (the level's own list) and getEntitiesOfClass (a new
+    // list the caller deletes); only whether they are empty matters here.
+    std::vector<shared_ptr<Entity>>* getEntities(shared_ptr<Entity>,AABB* box){
+        found.clear();
+        if(box && hasEntitiesIn(*box,EntityClass::Any))found.push_back(std::make_shared<Entity>());
+        return &found;
+    }
+    std::vector<shared_ptr<Entity>>* getEntitiesOfClass(const std::type_info& type,AABB* box){
+        auto* list=new std::vector<shared_ptr<Entity>>();
+        const auto kind=type==typeid(Player)?EntityClass::Player:type==typeid(Arrow)?EntityClass::Arrow:EntityClass::Mob;
+        if(box && hasEntitiesIn(*box,kind))list->push_back(std::make_shared<Entity>());
+        return list;
+    }
+    std::vector<shared_ptr<Entity>> found;
     void addParticle(int,double,double,double,double,double,double){}
     // Level::getInstaTick: only world generation ticks instantly.
     bool getInstaTick(){return false;}
@@ -201,6 +264,7 @@ private:
 enum eGameHostOption { eGameHostOption_FireSpreads };
 struct App {
     bool GetGameHostOption(eGameHostOption){return Level::current?Level::current->fireSpreads():true;}
+    void DebugPrintf(const char*,...){}
 };
 inline App app;
 
@@ -223,6 +287,17 @@ public:
     static FireTile* fire;
     static TntTile* tnt;
     static PortalTile* portalTile;
+    static Tile *lightGem,*wood,*rock,*stoneSlab,*redStoneDust,*notGate_on,*notGate_off;
+    // Tile::setShape writes the shape to thread storage (TlsGetValue).
+    class ThreadStorage {
+    public:
+        double xx0=0,yy0=0,zz0=0,xx1=1,yy1=1,zz1=1;
+        int tileId=0;
+    };
+    static inline int tlsIdxShape=0;
+    static ThreadStorage* shapeStorage(){static thread_local ThreadStorage storage;return &storage;}
+    void setShape(float x0,float y0,float z0,float x1,float y1,float z1);
+    virtual void updateShape(LevelSource*,int,int,int,int=-1,shared_ptr<TileEntity> =nullptr){}
 
     int id=0;
     // The class has its original methods here (not the plain Tile stand-in).
@@ -250,6 +325,13 @@ public:
     virtual void neighborChanged(Level*,int,int,int,int){}
     virtual void handleRain(Level*,int,int,int){}
     virtual int getPlacedOnFaceDataValue(Level*,int,int,int,int,float,float,float,int itemValue){return itemValue;}
+    // Player interaction and placement (ServerPlayerGameMode, TileItem).
+    virtual bool TestUse(){return false;}
+    virtual bool use(Level*,int,int,int,shared_ptr<Player>,int,float,float,float,bool=false){return false;}
+    virtual void attack(Level*,int,int,int,shared_ptr<Player>){}
+    virtual void setPlacedBy(Level*,int,int,int,shared_ptr<Mob>){}
+    virtual void destroy(Level*,int,int,int,int){}
+    virtual void entityInside(Level*,int,int,int,shared_ptr<Entity>){}
     // Redstone (answered by the signal sources in a later batch).
     virtual bool isSignalSource(){return false;}
     virtual bool getSignal(LevelSource*,int,int,int,int){return false;}
@@ -258,6 +340,9 @@ public:
     // (ported SurvivalRules, including the leaf and cocoa overrides).
     void spawnResources(Level* level,int x,int y,int z,int data,int){level->spawnResources(x,y,z,id,data);}
 };
+
+// TlsGetValue(Tile::tlsIdxShape): this thread's shape storage.
+inline void* TlsGetValue(int){return Tile::shapeStorage();}
 
 class EntityTile:public Tile {};
 
@@ -459,6 +544,8 @@ public:
     void neighborChanged(Level* level,int x,int y,int z,int type)override;
     void setOpen(Level* level,int x,int y,int z,bool shouldOpen);
     int getCompositeData(LevelSource* level,int x,int y,int z);
+    bool TestUse()override;
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
 };
 class HeavyTile:public Tile {
 public:
@@ -495,7 +582,7 @@ public:
     TILE_CONSTANTS_TntTile
     // TntTile::destroy with the explode bit primes TNT; explosions are not
     // ported yet, so the burnt TNT is simply gone.
-    void destroy(Level*,int,int,int,int){}
+    void destroy(Level*,int,int,int,int)override{}
 };
 class PortalTile:public Tile {
 public:
@@ -540,6 +627,176 @@ public:
     void setDynamic(Level* level,int x,int y,int z);
     void tick(Level* level,int x,int y,int z,Random* random)override;
     bool isFlammable(Level* level,int x,int y,int z);
+};
+class FenceTile:public Tile {
+public:
+    static bool isFence(int tile);
+};
+class RedStoneDustTile:public Tile {
+public:
+    bool shouldSignal=true;
+    std::unordered_set<TilePos,TilePosKeyHash,TilePosKeyEq> toUpdate;
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    void updatePowerStrength(Level* level,int x,int y,int z);
+    void updatePowerStrength(Level* level,int x,int y,int z,int xFrom,int yFrom,int zFrom);
+    void checkCornerChangeAt(Level* level,int x,int y,int z);
+    void onPlace(Level* level,int x,int y,int z)override;
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    int checkTarget(Level* level,int x,int y,int z,int target);
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    bool getDirectSignal(Level* level,int x,int y,int z,int dir)override;
+    bool getSignal(LevelSource* level,int x,int y,int z,int dir)override;
+    bool isSignalSource()override;
+    static bool shouldConnectTo(LevelSource* level,int x,int y,int z,int direction);
+    static bool shouldReceivePowerFrom(LevelSource* level,int x,int y,int z,int direction);
+};
+class NotGateTile:public TorchTile {
+public:
+    TILE_CONSTANTS_NotGateTile
+    class Toggle {
+    public:
+        int x,y,z;
+        std::int64_t when;
+        Toggle(int x,int y,int z,std::int64_t when):x(x),y(y),z(z),when(when){}
+    };
+    // recentToggles, keyed by Level::identity (see Level::identity).
+    struct LevelKey {
+        const void* id;
+        LevelKey(Level* level):id(level?level->identity:nullptr){}
+        LevelKey(const void* value):id(value){}
+        bool operator==(const LevelKey&)const=default;
+    };
+    struct LevelKeyHash { std::size_t operator()(const LevelKey& k)const{return std::hash<const void*>()(k.id);} };
+    struct ToggleMap:std::unordered_map<LevelKey,std::deque<Toggle>*,LevelKeyHash> {
+        ~ToggleMap(){for(auto& entry:*this)delete entry.second;}
+    };
+    static ToggleMap recentToggles;
+    bool on=false;
+    static void removeLevelReferences(Level* level);
+    bool isToggledTooFrequently(Level* level,int x,int y,int z,bool add);
+    int getTickDelay()override;
+    void onPlace(Level* level,int x,int y,int z)override;
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    bool getSignal(LevelSource* level,int x,int y,int z,int face)override;
+    bool hasNeighborSignal(Level* level,int x,int y,int z);
+    void tick(Level* level,int x,int y,int z,Random* random)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    bool getDirectSignal(Level* level,int x,int y,int z,int face)override;
+    bool isSignalSource()override;
+};
+class LeverTile:public Tile {
+public:
+    bool mayPlace(Level* level,int x,int y,int z,int face)override;
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    int getPlacedOnFaceDataValue(Level* level,int x,int y,int z,int face,float clickX,float clickY,float clickZ,int itemValue)override;
+    static int getLeverFacing(int facing);
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    bool checkCanSurvive(Level* level,int x,int y,int z);
+    void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
+    void attack(Level* level,int x,int y,int z,shared_ptr<Player> player)override;
+    bool TestUse()override;
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    bool getSignal(LevelSource* level,int x,int y,int z,int dir)override;
+    bool getDirectSignal(Level* level,int x,int y,int z,int dir)override;
+    bool isSignalSource()override;
+};
+class ButtonTile:public Tile {
+public:
+    bool sensitive=false;
+    int getTickDelay()override;
+    bool mayPlace(Level* level,int x,int y,int z,int face)override;
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    int getPlacedOnFaceDataValue(Level* level,int x,int y,int z,int face,float clickX,float clickY,float clickZ,int itemValue)override;
+    int findFace(Level* level,int x,int y,int z);
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    bool checkCanSurvive(Level* level,int x,int y,int z);
+    void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
+    void updateShape(int data);
+    void attack(Level* level,int x,int y,int z,shared_ptr<Player> player)override;
+    bool TestUse()override;
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    bool getSignal(LevelSource* level,int x,int y,int z,int dir)override;
+    bool getDirectSignal(Level* level,int x,int y,int z,int dir)override;
+    bool isSignalSource()override;
+    void tick(Level* level,int x,int y,int z,Random* random)override;
+    void entityInside(Level* level,int x,int y,int z,shared_ptr<Entity> entity)override;
+    void checkPressed(Level* level,int x,int y,int z);
+    void updateNeighbours(Level* level,int x,int y,int z,int dir);
+    bool shouldTileTick(Level* level,int x,int y,int z)override;
+};
+class PressurePlateTile:public Tile {
+public:
+    enum Sensitivity { everything,mobs,players };
+    Sensitivity sensitivity=everything;
+    int getTickDelay()override;
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    void tick(Level* level,int x,int y,int z,Random* random)override;
+    void entityInside(Level* level,int x,int y,int z,shared_ptr<Entity> entity)override;
+    void checkPressed(Level* level,int x,int y,int z);
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
+    bool getSignal(LevelSource* level,int x,int y,int z,int dir)override;
+    bool getDirectSignal(Level* level,int x,int y,int z,int dir)override;
+    bool isSignalSource()override;
+    bool shouldTileTick(Level* level,int x,int y,int z)override;
+};
+class DiodeTile:public DirectionalTile {
+public:
+    TILE_CONSTANTS_DiodeTile
+    // DiodeTile.cpp: const int DiodeTile::DELAYS[4] = { 1, 2, 3, 4 };
+    static constexpr int DELAYS[4]={1,2,3,4};
+    bool on=false;
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    bool canSurvive(Level* level,int x,int y,int z)override;
+    void tick(Level* level,int x,int y,int z,Random* random)override;
+    bool getDirectSignal(Level* level,int x,int y,int z,int dir)override;
+    bool getSignal(LevelSource* level,int x,int y,int z,int facing)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    bool getSourceSignal(Level* level,int x,int y,int z,int data);
+    bool TestUse()override;
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    bool isSignalSource()override;
+    void setPlacedBy(Level* level,int x,int y,int z,shared_ptr<Mob> by)override;
+    void onPlace(Level* level,int x,int y,int z)override;
+    void destroy(Level* level,int x,int y,int z,int data)override;
+};
+class RedlightTile:public Tile {
+public:
+    bool isLit=false;
+    void onPlace(Level* level,int x,int y,int z)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    void tick(Level* level,int x,int y,int z,Random* random)override;
+};
+class TrapDoorTile:public Tile {
+public:
+    TILE_CONSTANTS_TrapDoorTile
+    void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
+    void setShape(int data);
+    using Tile::setShape;
+    void attack(Level* level,int x,int y,int z,shared_ptr<Player> player)override;
+    bool TestUse()override;
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    void setOpen(Level* level,int x,int y,int z,bool shouldOpen);
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    static int getDir(int dir);
+    int getPlacedOnFaceDataValue(Level* level,int x,int y,int z,int face,float clickX,float clickY,float clickZ,int itemValue)override;
+    bool mayPlace(Level* level,int x,int y,int z,int face)override;
+    using Tile::mayPlace;
+    static bool isOpen(int data);
+    static bool attachesTo(int id);
+};
+class FenceGateTile:public DirectionalTile {
+public:
+    TILE_CONSTANTS_FenceGateTile
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    void setPlacedBy(Level* level,int x,int y,int z,shared_ptr<Mob> by)override;
+    bool TestUse()override{return true;}
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    static bool isOpen(int data);
 };
 class StairTile:public Tile { public: TILE_CONSTANTS_StairTile };
 class HalfSlabTile:public Tile { public: TILE_CONSTANTS_HalfSlabTile };

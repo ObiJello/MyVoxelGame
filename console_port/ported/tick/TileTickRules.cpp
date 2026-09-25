@@ -2742,4 +2742,1758 @@ void LiquidTileDynamic::onPlace(Level *level, int x, int y, int z)
     }
 }
 
+// Tile.cpp
+void Tile::setShape(float x0, float y0, float z0, float x1, float y1, float z1)
+{
+	ThreadStorage *tls = (ThreadStorage *)TlsGetValue(Tile::tlsIdxShape);
+	tls->xx0 = x0;
+	tls->yy0 = y0;
+	tls->zz0 = z0;
+	tls->xx1 = x1;
+	tls->yy1 = y1;
+	tls->zz1 = z1;
+	tls->tileId = this->id;
+	
+	//this->xx0 = x0;
+	//this->yy0 = y0;
+	//this->zz0 = z0;
+	//this->xx1 = x1;
+	//this->yy1 = y1;
+	//this->zz1 = z1;
+}
+
+// FenceTile.cpp
+bool FenceTile::isFence(int tile)
+{
+	return tile == Tile::fence_Id || tile == Tile::netherFence_Id;
+}
+
+// RedStoneDustTile.cpp
+bool RedStoneDustTile::mayPlace(Level *level, int x, int y, int z)
+{
+	return level->isTopSolidBlocking(x, y - 1, z) || level->getTile(x, y - 1, z) == Tile::lightGem_Id;
+}
+
+// RedStoneDustTile.cpp
+void RedStoneDustTile::updatePowerStrength(Level *level, int x, int y, int z)
+{
+	updatePowerStrength(level, x, y, z, x, y, z);
+	
+	vector<TilePos> updates = vector<TilePos>(toUpdate.begin(), toUpdate.end());
+	toUpdate.clear();
+
+	AUTO_VAR(itEnd, updates.end());
+	for(AUTO_VAR(it, updates.begin()); it != itEnd; it++)
+	{
+		TilePos tp = *it;
+		level->updateNeighborsAt(tp.x, tp.y, tp.z, id);
+	}
+}
+
+// RedStoneDustTile.cpp
+void RedStoneDustTile::updatePowerStrength(Level *level, int x, int y, int z, int xFrom, int yFrom, int zFrom)
+{
+	int old = level->getData(x, y, z);
+	int target = 0;
+
+	this->shouldSignal = false;
+	bool neighborSignal = level->hasNeighborSignal(x, y, z);
+	this->shouldSignal = true;
+
+	if (neighborSignal)
+	{
+		target = 15;
+	}
+	else
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			int xt = x;
+			int zt = z;
+			if (i == 0) xt--;
+			if (i == 1) xt++;
+			if (i == 2) zt--;
+			if (i == 3) zt++;
+
+			if (xt != xFrom || y != yFrom || zt != zFrom) target = checkTarget(level, xt, y, zt, target);
+			if (level->isSolidBlockingTile(xt, y, zt) && !level->isSolidBlockingTile(x, y + 1, z))
+			{
+				if (xt != xFrom || y + 1 != yFrom || zt != zFrom) target = checkTarget(level, xt, y + 1, zt, target);
+			}
+			else if (!level->isSolidBlockingTile(xt, y, zt))
+			{
+				if (xt != xFrom || y - 1 != yFrom || zt != zFrom) target = checkTarget(level, xt, y - 1, zt, target);
+			}
+		}
+		if (target > 0) target--;
+		else target = 0;
+	}
+
+	if (old != target)
+	{
+		level->noNeighborUpdate = true;
+		level->setData(x, y, z, target);
+		level->setTilesDirty(x, y, z, x, y, z);
+		level->noNeighborUpdate = false;
+
+		for (int i = 0; i < 4; i++)
+		{
+			int xt = x;
+			int zt = z;
+			int yt = y - 1;
+			if (i == 0) xt--;
+			if (i == 1) xt++;
+			if (i == 2) zt--;
+			if (i == 3) zt++;
+
+			if (level->isSolidBlockingTile(xt, y, zt)) yt += 2;
+
+			int current = 0;
+			current = checkTarget(level, xt, y, zt, -1);
+			target = level->getData(x, y, z);
+			if (target > 0) target--;
+			if (current >= 0 && current != target)
+			{
+				updatePowerStrength(level, xt, y, zt, x, y, z);
+			}
+			current = checkTarget(level, xt, yt, zt, -1);
+			target = level->getData(x, y, z);
+			if (target > 0) target--;
+			if (current >= 0 && current != target)
+			{
+				updatePowerStrength(level, xt, yt, zt, x, y, z);
+			}
+		}
+
+		if (old < target || target == 0)
+		{
+			toUpdate.insert(TilePos(x, y, z));
+			toUpdate.insert(TilePos(x - 1, y, z));
+			toUpdate.insert(TilePos(x + 1, y, z));
+			toUpdate.insert(TilePos(x, y - 1, z));
+			toUpdate.insert(TilePos(x, y + 1, z));
+			toUpdate.insert(TilePos(x, y, z - 1));
+			toUpdate.insert(TilePos(x, y, z + 1));
+		}
+	}
+}
+
+// RedStoneDustTile.cpp
+void RedStoneDustTile::checkCornerChangeAt(Level *level, int x, int y, int z)
+{
+	if (level->getTile(x, y, z) != id) return;
+
+	level->updateNeighborsAt(x, y, z, id);
+	level->updateNeighborsAt(x - 1, y, z, id);
+	level->updateNeighborsAt(x + 1, y, z, id);
+	level->updateNeighborsAt(x, y, z - 1, id);
+	level->updateNeighborsAt(x, y, z + 1, id);
+		 
+	level->updateNeighborsAt(x, y - 1, z, id);
+	level->updateNeighborsAt(x, y + 1, z, id);
+}
+
+// RedStoneDustTile.cpp
+void RedStoneDustTile::onPlace(Level *level, int x, int y, int z)
+{
+	Tile::onPlace(level, x, y, z);
+	if (level->isClientSide) return;
+
+	updatePowerStrength(level, x, y, z);
+	level->updateNeighborsAt(x, y + 1, z, id);
+	level->updateNeighborsAt(x, y - 1, z, id);
+
+	checkCornerChangeAt(level, x - 1, y, z);
+	checkCornerChangeAt(level, x + 1, y, z);
+	checkCornerChangeAt(level, x, y, z - 1);
+	checkCornerChangeAt(level, x, y, z + 1);
+
+	if (level->isSolidBlockingTile(x - 1, y, z)) checkCornerChangeAt(level, x - 1, y + 1, z);
+	else checkCornerChangeAt(level, x - 1, y - 1, z);
+	if (level->isSolidBlockingTile(x + 1, y, z)) checkCornerChangeAt(level, x + 1, y + 1, z);
+	else checkCornerChangeAt(level, x + 1, y - 1, z);
+	if (level->isSolidBlockingTile(x, y, z - 1)) checkCornerChangeAt(level, x, y + 1, z - 1);
+	else checkCornerChangeAt(level, x, y - 1, z - 1);
+	if (level->isSolidBlockingTile(x, y, z + 1)) checkCornerChangeAt(level, x, y + 1, z + 1);
+	else checkCornerChangeAt(level, x, y - 1, z + 1);
+
+}
+
+// RedStoneDustTile.cpp
+void RedStoneDustTile::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+	Tile::onRemove(level, x, y, z, id, data);
+	if (level->isClientSide) return;
+
+	level->updateNeighborsAt(x, y + 1, z, this->id);
+	level->updateNeighborsAt(x, y - 1, z, this->id);
+	level->updateNeighborsAt(x + 1, y, z, this->id);
+	level->updateNeighborsAt(x - 1, y, z, this->id);
+	level->updateNeighborsAt(x, y, z + 1, this->id);
+	level->updateNeighborsAt(x, y, z - 1, this->id);
+	updatePowerStrength(level, x, y, z);
+
+	checkCornerChangeAt(level, x - 1, y, z);
+	checkCornerChangeAt(level, x + 1, y, z);
+	checkCornerChangeAt(level, x, y, z - 1);
+	checkCornerChangeAt(level, x, y, z + 1);
+
+	if (level->isSolidBlockingTile(x - 1, y, z)) checkCornerChangeAt(level, x - 1, y + 1, z);
+	else checkCornerChangeAt(level, x - 1, y - 1, z);
+	if (level->isSolidBlockingTile(x + 1, y, z)) checkCornerChangeAt(level, x + 1, y + 1, z);
+	else checkCornerChangeAt(level, x + 1, y - 1, z);
+	if (level->isSolidBlockingTile(x, y, z - 1)) checkCornerChangeAt(level, x, y + 1, z - 1);
+	else checkCornerChangeAt(level, x, y - 1, z - 1);
+	if (level->isSolidBlockingTile(x, y, z + 1)) checkCornerChangeAt(level, x, y + 1, z + 1);
+	else checkCornerChangeAt(level, x, y - 1, z + 1);
+}
+
+// RedStoneDustTile.cpp
+int RedStoneDustTile::checkTarget(Level *level, int x, int y, int z, int target)
+{
+	if (level->getTile(x, y, z) != id) return target;
+	int d = level->getData(x, y, z);
+	if (d > target) return d;
+	return target;
+}
+
+// RedStoneDustTile.cpp
+void RedStoneDustTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (level->isClientSide) return;
+	int face = level->getData(x, y, z);
+
+	bool ok = mayPlace(level, x, y, z);
+
+	if (ok)
+	{
+		updatePowerStrength(level, x, y, z);
+	}
+	else
+	{
+		spawnResources(level, x, y, z, face, 0);
+		level->setTile(x, y, z, 0);
+	}
+
+	Tile::neighborChanged(level, x, y, z, type);
+}
+
+// RedStoneDustTile.cpp
+bool RedStoneDustTile::getDirectSignal(Level *level, int x, int y, int z, int dir)
+{
+	if (!shouldSignal) return false;
+	return getSignal(level, x, y, z, dir);
+}
+
+// RedStoneDustTile.cpp
+bool RedStoneDustTile::getSignal(LevelSource *level, int x, int y, int z, int dir)
+{
+	if (!shouldSignal) return false;
+	if (level->getData(x, y, z) == 0) return false;
+
+	if (dir == 1) return true;
+
+    bool w = RedStoneDustTile::shouldReceivePowerFrom(level, x - 1, y, z, Direction::WEST)
+            || (!level->isSolidBlockingTile(x - 1, y, z) && RedStoneDustTile::shouldReceivePowerFrom(level, x - 1, y - 1, z, Direction::UNDEFINED));
+    bool e = RedStoneDustTile::shouldReceivePowerFrom(level, x + 1, y, z, Direction::EAST)
+            || (!level->isSolidBlockingTile(x + 1, y, z) && RedStoneDustTile::shouldReceivePowerFrom(level, x + 1, y - 1, z, Direction::UNDEFINED));
+    bool n = RedStoneDustTile::shouldReceivePowerFrom(level, x, y, z - 1, Direction::NORTH)
+            || (!level->isSolidBlockingTile(x, y, z - 1) && RedStoneDustTile::shouldReceivePowerFrom(level, x, y - 1, z - 1, Direction::UNDEFINED));
+    bool s = RedStoneDustTile::shouldReceivePowerFrom(level, x, y, z + 1, Direction::SOUTH)
+            || (!level->isSolidBlockingTile(x, y, z + 1) && RedStoneDustTile::shouldReceivePowerFrom(level, x, y - 1, z + 1, Direction::UNDEFINED));
+
+	if (!level->isSolidBlockingTile(x, y + 1, z))
+	{
+        if (level->isSolidBlockingTile(x - 1, y, z) && RedStoneDustTile::shouldReceivePowerFrom(level, x - 1, y + 1, z, Direction::UNDEFINED)) w = true;
+        if (level->isSolidBlockingTile(x + 1, y, z) && RedStoneDustTile::shouldReceivePowerFrom(level, x + 1, y + 1, z, Direction::UNDEFINED)) e = true;
+        if (level->isSolidBlockingTile(x, y, z - 1) && RedStoneDustTile::shouldReceivePowerFrom(level, x, y + 1, z - 1, Direction::UNDEFINED)) n = true;
+        if (level->isSolidBlockingTile(x, y, z + 1) && RedStoneDustTile::shouldReceivePowerFrom(level, x, y + 1, z + 1, Direction::UNDEFINED)) s = true;
+	}
+
+	if (!n && !e && !w && !s && (dir >= 2 && dir <= 5)) return true;
+
+	if (dir == 2 && n && (!w && !e)) return true;
+	if (dir == 3 && s && (!w && !e)) return true;
+	if (dir == 4 && w && (!n && !s)) return true;
+	if (dir == 5 && e && (!n && !s)) return true;
+
+	return false;
+
+}
+
+// RedStoneDustTile.cpp
+bool RedStoneDustTile::isSignalSource()
+{
+	return shouldSignal;
+}
+
+// RedStoneDustTile.cpp
+bool RedStoneDustTile::shouldConnectTo(LevelSource *level, int x, int y, int z, int direction)
+{
+	int t = level->getTile(x, y, z);
+	if (t == Tile::redStoneDust_Id) return true;
+	if (t == 0) return false;
+    if (t == Tile::diode_off_Id || t == Tile::diode_on_Id)
+	{
+        int data = level->getData(x, y, z);
+        return direction == (data & DiodeTile::DIRECTION_MASK) || direction == Direction::DIRECTION_OPPOSITE[data & DiodeTile::DIRECTION_MASK];
+    }
+	else if (Tile::tiles[t]->isSignalSource() && direction != Direction::UNDEFINED) return true;
+
+	return false;
+}
+
+// RedStoneDustTile.cpp
+bool RedStoneDustTile::shouldReceivePowerFrom(LevelSource *level, int x, int y, int z, int direction)
+{
+    if (shouldConnectTo(level, x, y, z, direction))
+	{
+        return true;
+    }
+
+    int t = level->getTile(x, y, z);
+    if (t == Tile::diode_on_Id)
+	{
+        int data = level->getData(x, y, z);
+        return direction == (data & DiodeTile::DIRECTION_MASK);
+    }
+    return false;
+}
+
+// NotGateTile.cpp
+void NotGateTile::removeLevelReferences(Level *level)
+{
+	if( recentToggles.find(level) != recentToggles.end() )
+	{
+		delete recentToggles[level];
+		recentToggles.erase(level);
+	}
+}
+
+// NotGateTile.cpp
+bool NotGateTile::isToggledTooFrequently(Level *level, int x, int y, int z, bool add)
+{
+	// 4J - brought forward changes to associate toggles with a level from 1.3.2
+	if( recentToggles.find(level) == recentToggles.end() )
+	{
+		recentToggles[level] = new deque<Toggle>;
+	}
+    if (add) recentToggles[level]->push_back(Toggle(x, y, z, level->getTime()));
+    int count = 0;
+
+	AUTO_VAR(itEnd, recentToggles[level]->end());
+	for (AUTO_VAR(it, recentToggles[level]->begin()); it != itEnd; it++)
+	{
+        if (it->x == x && it->y == y && it->z == z)
+		{
+            count++;
+            if (count >= MAX_RECENT_TOGGLES)
+			{
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// NotGateTile.cpp
+int NotGateTile::getTickDelay()
+{
+	return 2;
+}
+
+// NotGateTile.cpp
+void NotGateTile::onPlace(Level *level, int x, int y, int z)
+{
+    if (level->getData(x, y, z) == 0) TorchTile::onPlace(level, x, y, z);
+    if (on)
+	{
+        level->updateNeighborsAt(x, y - 1, z, id);
+        level->updateNeighborsAt(x, y + 1, z, id);
+        level->updateNeighborsAt(x - 1, y, z, id);
+        level->updateNeighborsAt(x + 1, y, z, id);
+        level->updateNeighborsAt(x, y, z - 1, id);
+        level->updateNeighborsAt(x, y, z + 1, id);
+    }
+}
+
+// NotGateTile.cpp
+void NotGateTile::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+    if (on)
+	{
+        level->updateNeighborsAt(x, y - 1, z, this->id);
+        level->updateNeighborsAt(x, y + 1, z, this->id);
+        level->updateNeighborsAt(x - 1, y, z, this->id);
+        level->updateNeighborsAt(x + 1, y, z, this->id);
+        level->updateNeighborsAt(x, y, z - 1, this->id);
+        level->updateNeighborsAt(x, y, z + 1, this->id);
+    }
+}
+
+// NotGateTile.cpp
+bool NotGateTile::getSignal(LevelSource *level, int x, int y, int z, int face)
+{
+    if (!on) return false;
+
+    int dir = level->getData(x, y, z);
+
+    if (dir == 5 && face == 1) return false;
+    if (dir == 3 && face == 3) return false;
+    if (dir == 4 && face == 2) return false;
+    if (dir == 1 && face == 5) return false;
+    if (dir == 2 && face == 4) return false;
+
+    return true;
+}
+
+// NotGateTile.cpp
+bool NotGateTile::hasNeighborSignal(Level *level, int x, int y, int z)
+{
+    int dir = level->getData(x, y, z);
+
+    if (dir == 5 && level->getSignal(x, y - 1, z, 0)) return true;
+    if (dir == 3 && level->getSignal(x, y, z - 1, 2)) return true;
+    if (dir == 4 && level->getSignal(x, y, z + 1, 3)) return true;
+    if (dir == 1 && level->getSignal(x - 1, y, z, 4)) return true;
+    if (dir == 2 && level->getSignal(x + 1, y, z, 5)) return true;
+    return false;
+}
+
+// NotGateTile.cpp
+void NotGateTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+    bool neighborSignal = hasNeighborSignal(level, x, y, z);
+
+	// 4J - brought forward changes from 1.3.2 to associate toggles with level
+	if( recentToggles.find(level) != recentToggles.end() )
+	{
+		deque<Toggle> *toggles = recentToggles[level];
+		while (!toggles->empty() && level->getTime() - toggles->front().when > RECENT_TOGGLE_TIMER)
+		{
+			toggles->pop_front();
+		}
+	}
+
+    if (on) 
+	{
+        if (neighborSignal)
+		{
+            level->setTileAndData(x, y, z, Tile::notGate_off_Id, level->getData(x, y, z));
+
+            if (isToggledTooFrequently(level, x, y, z, true))
+			{
+				app.DebugPrintf("Torch at (%d,%d,%d) has toggled too many times\n",x,y,z);
+
+                level->playSound(x + 0.5f, y + 0.5f, z + 0.5f, eSoundType_RANDOM_FIZZ, 0.5f, 2.6f + (level->random->nextFloat() - level->random->nextFloat()) * 0.8f);
+                for (int i = 0; i < 5; i++)
+				{
+                    double xx = x + random->nextDouble() * 0.6 + 0.2;
+                    double yy = y + random->nextDouble() * 0.6 + 0.2;
+                    double zz = z + random->nextDouble() * 0.6 + 0.2;
+
+                    level->addParticle(eParticleType_smoke, xx, yy, zz, 0, 0, 0);
+                }
+            }
+        }
+    }
+	else
+	{
+        if (!neighborSignal)
+		{
+            if (!isToggledTooFrequently(level, x, y, z, false))
+			{
+                level->setTileAndData(x, y, z, Tile::notGate_on_Id, level->getData(x, y, z));
+            }
+			else
+			{				
+				app.DebugPrintf("Torch at (%d,%d,%d) has toggled too many times\n",x,y,z);
+			}
+        }
+    }
+}
+
+// NotGateTile.cpp
+void NotGateTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    TorchTile::neighborChanged(level, x, y, z, type);
+    level->addToTickNextTick(x, y, z, id, getTickDelay());
+}
+
+// NotGateTile.cpp
+bool NotGateTile::getDirectSignal(Level *level, int x, int y, int z, int face)
+{
+    if (face == 0)
+	{
+        return getSignal(level, x, y, z, face);
+    }
+    return false;
+}
+
+// NotGateTile.cpp
+bool NotGateTile::isSignalSource()
+{
+	 return true;
+}
+
+// LeverTile.cpp
+bool LeverTile::mayPlace(Level *level, int x, int y, int z, int face)
+{
+	if (face == 0 && level->isSolidBlockingTile(x, y + 1, z)) return true;
+    if (face == 1 && level->isTopSolidBlocking(x, y - 1, z)) return true;
+    if (face == 2 && level->isSolidBlockingTile(x, y, z + 1)) return true;
+    if (face == 3 && level->isSolidBlockingTile(x, y, z - 1)) return true;
+    if (face == 4 && level->isSolidBlockingTile(x + 1, y, z)) return true;
+    if (face == 5 && level->isSolidBlockingTile(x - 1, y, z)) return true;
+    return false;
+}
+
+// LeverTile.cpp
+bool LeverTile::mayPlace(Level *level, int x, int y, int z)
+{
+    if (level->isSolidBlockingTile(x - 1, y, z))
+	{
+        return true;
+    } else if (level->isSolidBlockingTile(x + 1, y, z))
+	{
+        return true;
+    } else if (level->isSolidBlockingTile(x, y, z - 1))
+	{
+        return true;
+    } else if (level->isSolidBlockingTile(x, y, z + 1))
+	{
+        return true;
+    } else if (level->isTopSolidBlocking(x, y - 1, z))
+	{
+        return true;
+    }
+	else if (level->isSolidBlockingTile(x, y + 1, z))
+	{
+		return true;
+	}
+    return false;
+}
+
+// LeverTile.cpp
+int LeverTile::getPlacedOnFaceDataValue(Level *level, int x, int y, int z, int face, float clickX, float clickY, float clickZ, int itemValue)
+{
+	int dir = itemValue;
+
+	int oldFlip = dir & 8;
+	dir &= 7;
+
+	dir = -1;
+
+	if (face == Facing::DOWN && level->isSolidBlockingTile(x, y + 1, z)) dir = 0;
+	if (face == Facing::UP && level->isTopSolidBlocking(x, y - 1, z)) dir = 5;
+	if (face == Facing::NORTH && level->isSolidBlockingTile(x, y, z + 1)) dir = 4;
+	if (face == Facing::SOUTH && level->isSolidBlockingTile(x, y, z - 1)) dir = 3;
+	if (face == Facing::WEST && level->isSolidBlockingTile(x + 1, y, z)) dir = 2;
+	if (face == Facing::EAST && level->isSolidBlockingTile(x - 1, y, z)) dir = 1;
+
+	return dir + oldFlip;
+}
+
+// LeverTile.cpp
+int LeverTile::getLeverFacing(int facing)
+{
+	switch (facing)
+	{
+	case Facing::DOWN:
+		return 0;
+	case Facing::UP:
+		return 5;
+	case Facing::NORTH:
+		return 4;
+	case Facing::SOUTH:
+		return 3;
+	case Facing::WEST:
+		return 2;
+	case Facing::EAST:
+		return 1;
+	}
+	return -1;
+}
+
+// LeverTile.cpp
+void LeverTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    if (checkCanSurvive(level, x, y, z))
+	{
+        int dir = level->getData(x, y, z) & 7;
+        bool replace = false;
+
+        if (!level->isSolidBlockingTile(x - 1, y, z) && dir == 1) replace = true;
+        if (!level->isSolidBlockingTile(x + 1, y, z) && dir == 2) replace = true;
+        if (!level->isSolidBlockingTile(x, y, z - 1) && dir == 3) replace = true;
+		if (!level->isSolidBlockingTile(x, y, z + 1) && dir == 4) replace = true;
+		if (!level->isTopSolidBlocking(x, y - 1, z) && dir == 5) replace = true;
+		if (!level->isTopSolidBlocking(x, y - 1, z) && dir == 6) replace = true;
+		if (!level->isSolidBlockingTile(x, y + 1, z) && dir == 0) replace = true;
+		if (!level->isSolidBlockingTile(x, y + 1, z) && dir == 7) replace = true;
+
+        if (replace)
+		{
+            this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+            level->setTile(x, y, z, 0);
+        }
+    }
+
+}
+
+// LeverTile.cpp
+bool LeverTile::checkCanSurvive(Level *level, int x, int y, int z)
+{
+    if (!mayPlace(level, x, y, z))
+	{
+        this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+        level->setTile(x, y, z, 0);
+        return false;
+    }
+    return true;
+}
+
+// LeverTile.cpp
+void LeverTile::updateShape(LevelSource *level, int x, int y, int z, int forceData, shared_ptr<TileEntity> forceEntity) // 4J added forceData, forceEntity param
+{
+    int dir = level->getData(x, y, z) & 7;
+    float r = 3 / 16.0f;
+    if (dir == 1)
+	{
+        setShape(0, 0.2f, 0.5f - r, r * 2, 0.8f, 0.5f + r);
+    }
+	else if (dir == 2)
+	{
+        setShape(1 - r * 2, 0.2f, 0.5f - r, 1, 0.8f, 0.5f + r);
+    }
+	else if (dir == 3)
+	{
+        setShape(0.5f - r, 0.2f, 0, 0.5f + r, 0.8f, r * 2);
+    }
+	else if (dir == 4)
+	{
+        setShape(0.5f - r, 0.2f, 1 - r * 2, 0.5f + r, 0.8f, 1);
+    }
+	else if (dir == 5 || dir == 6)
+	{
+        r = 4 / 16.0f;
+        setShape(0.5f - r, 0.0f, 0.5f - r, 0.5f + r, 0.6f, 0.5f + r);
+    }
+	else if (dir == 0 || dir == 7)
+	{
+		r = 4 / 16.0f;
+		setShape(0.5f - r, 0.4f, 0.5f - r, 0.5f + r, 1.0f, 0.5f + r);
+	}
+}
+
+// LeverTile.cpp
+void LeverTile::attack(Level *level, int x, int y, int z, shared_ptr<Player> player)
+{
+	use(level, x, y, z, player, 0, 0, 0, 0);
+}
+
+// LeverTile.cpp
+bool LeverTile::TestUse()
+{
+	return true;
+}
+
+// LeverTile.cpp
+bool LeverTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	if( soundOnly )
+	{
+		// 4J - added - just do enough to play the sound
+		int data = level->getData(x, y, z);
+		int dir = data & 7;
+		int open = 8 - (data & 8);
+		level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, open > 0 ? 0.6f : 0.5f);
+		return false;
+	}
+    if (level->isClientSide)
+	{
+		// 4J - added stuff to play sound in this case too
+		int data = level->getData(x, y, z);
+		int dir = data & 7;
+		int open = 8 - (data & 8);
+		level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, open > 0 ? 0.6f : 0.5f);
+
+		return true;
+	}
+    int data = level->getData(x, y, z);
+    int dir = data & 7;
+    int open = 8 - (data & 8);
+
+    level->setData(x, y, z, dir + open);
+    level->setTilesDirty(x, y, z, x, y, z);
+
+    level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, open > 0 ? 0.6f : 0.5f);
+
+    level->updateNeighborsAt(x, y, z, id);
+    if (dir == 1)
+	{
+        level->updateNeighborsAt(x - 1, y, z, id);
+    }
+	else if (dir == 2)
+	{
+        level->updateNeighborsAt(x + 1, y, z, id);
+    }
+	else if (dir == 3)
+	{
+        level->updateNeighborsAt(x, y, z - 1, id);
+    }
+	else if (dir == 4)
+	{
+        level->updateNeighborsAt(x, y, z + 1, id);
+    }
+	else if (dir == 5 || dir == 6)
+	{
+        level->updateNeighborsAt(x, y - 1, z, id);
+    }
+	else if (dir == 0 || dir == 7)
+	{
+		level->updateNeighborsAt(x, y + 1, z, id);
+	}
+
+    return true;
+}
+
+// LeverTile.cpp
+void LeverTile::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+    if ((data & 8) > 0)
+	{
+        level->updateNeighborsAt(x, y, z, this->id);
+        int dir = data & 7;
+        if (dir == 1)
+		{
+            level->updateNeighborsAt(x - 1, y, z, this->id);
+        }
+		else if (dir == 2)
+		{
+            level->updateNeighborsAt(x + 1, y, z, this->id);
+        }
+		else if (dir == 3)
+		{
+            level->updateNeighborsAt(x, y, z - 1, this->id);
+        }
+		else if (dir == 4)
+		{
+            level->updateNeighborsAt(x, y, z + 1, this->id);
+        }
+		else if (dir == 5 || dir == 6)
+		{
+            level->updateNeighborsAt(x, y - 1, z, this->id);
+		}
+		else if (dir == 0 || dir == 7)
+		{
+			level->updateNeighborsAt(x, y + 1, z, this->id);
+		}
+    }
+    Tile::onRemove(level, x, y, z, id, data);
+}
+
+// LeverTile.cpp
+bool LeverTile::getSignal(LevelSource *level, int x, int y, int z, int dir)
+{
+	return (level->getData(x, y, z) & 8) > 0;
+}
+
+// LeverTile.cpp
+bool LeverTile::getDirectSignal(Level *level, int x, int y, int z, int dir)
+{
+    int data = level->getData(x, y, z);
+    if ((data & 8) == 0) return false;
+    int myDir = data & 7;
+	
+	if (myDir == 0 && dir == 0) return true;
+	if (myDir == 7 && dir == 0) return true;
+    if (myDir == 6 && dir == 1) return true;
+    if (myDir == 5 && dir == 1) return true;
+    if (myDir == 4 && dir == 2) return true;
+    if (myDir == 3 && dir == 3) return true;
+    if (myDir == 2 && dir == 4) return true;
+    if (myDir == 1 && dir == 5) return true;
+
+    return false;
+}
+
+// LeverTile.cpp
+bool LeverTile::isSignalSource()
+{
+	return true;
+}
+
+// ButtonTile.cpp
+int ButtonTile::getTickDelay()
+{
+	return sensitive ? 30 : 20;
+}
+
+// ButtonTile.cpp
+bool ButtonTile::mayPlace(Level *level, int x, int y, int z, int face)
+{
+    if (face == 2 && level->isSolidBlockingTile(x, y, z + 1)) return true;
+    if (face == 3 && level->isSolidBlockingTile(x, y, z - 1)) return true;
+    if (face == 4 && level->isSolidBlockingTile(x + 1, y, z)) return true;
+    if (face == 5 && level->isSolidBlockingTile(x - 1, y, z)) return true;
+    return false;
+}
+
+// ButtonTile.cpp
+bool ButtonTile::mayPlace(Level *level, int x, int y, int z)
+{
+    if (level->isSolidBlockingTile(x - 1, y, z))
+	{
+        return true;
+    }
+	else if (level->isSolidBlockingTile(x + 1, y, z))
+	{
+        return true;
+    }
+	else if (level->isSolidBlockingTile(x, y, z - 1))
+	{
+        return true;
+    }
+	else if (level->isSolidBlockingTile(x, y, z + 1))
+	{
+        return true;
+    }
+    return false;
+}
+
+// ButtonTile.cpp
+int ButtonTile::getPlacedOnFaceDataValue(Level *level, int x, int y, int z, int face, float clickX, float clickY, float clickZ, int itemValue)
+{
+    int dir = level->getData(x, y, z);
+
+    int oldFlip = dir & 8;
+    dir &= 7;
+
+    if (face == 2 && level->isSolidBlockingTile(x, y, z + 1)) dir = 4;
+    else if (face == 3 && level->isSolidBlockingTile(x, y, z - 1)) dir = 3;
+    else if (face == 4 && level->isSolidBlockingTile(x + 1, y, z)) dir = 2;
+    else if (face == 5 && level->isSolidBlockingTile(x - 1, y, z)) dir = 1;
+    else dir = findFace(level, x, y, z);
+
+    return dir + oldFlip;
+}
+
+// ButtonTile.cpp
+int ButtonTile::findFace(Level *level, int x, int y, int z)
+{
+    if (level->isSolidBlockingTile(x - 1, y, z))
+	{
+        return 1;
+    }
+	else if (level->isSolidBlockingTile(x + 1, y, z))
+	{
+        return 2;
+    }
+	else if (level->isSolidBlockingTile(x, y, z - 1))
+	{
+        return 3;
+    }
+	else if (level->isSolidBlockingTile(x, y, z + 1))
+	{
+        return 4;
+    }
+    return 1;
+}
+
+// ButtonTile.cpp
+void ButtonTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    if (checkCanSurvive(level, x, y, z))
+	{
+        int dir = level->getData(x, y, z) & 7;
+        bool replace = false;
+
+        if (!level->isSolidBlockingTile(x - 1, y, z) && dir == 1) replace = true;
+        if (!level->isSolidBlockingTile(x + 1, y, z) && dir == 2) replace = true;
+        if (!level->isSolidBlockingTile(x, y, z - 1) && dir == 3) replace = true;
+        if (!level->isSolidBlockingTile(x, y, z + 1) && dir == 4) replace = true;
+
+        if (replace)
+		{
+            this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+            level->setTile(x, y, z, 0);
+        }
+    }
+}
+
+// ButtonTile.cpp
+bool ButtonTile::checkCanSurvive(Level *level, int x, int y, int z)
+{
+    if (!mayPlace(level, x, y, z))
+	{
+        this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+        level->setTile(x, y, z, 0);
+        return false;
+    }
+    return true;
+}
+
+// ButtonTile.cpp
+void ButtonTile::updateShape(LevelSource *level, int x, int y, int z, int forceData, shared_ptr<TileEntity> forceEntity) // 4J added forceData, forceEntity param
+{
+	int data = level->getData(x, y, z);
+	updateShape(data);
+}
+
+// ButtonTile.cpp
+void ButtonTile::updateShape(int data)
+{
+    int dir = data & 7;
+    bool pressed = (data & 8) > 0;
+
+    float h0 = 6 / 16.0f;
+    float h1 = 10 / 16.0f;
+    float r = 3 / 16.0f;
+    float d = 2 / 16.0f;
+    if (pressed) d = 1 / 16.0f;
+
+    if (dir == 1)
+	{
+        setShape(0, h0, 0.5f - r, d, h1, 0.5f + r);
+    }
+	else if (dir == 2)
+	{
+        setShape(1 - d, h0, 0.5f - r, 1, h1, 0.5f + r);
+    }
+	else if (dir == 3)
+	{
+        setShape(0.5f - r, h0, 0, 0.5f + r, h1, d);
+    }
+	else if (dir == 4)
+	{
+        setShape(0.5f - r, h0, 1 - d, 0.5f + r, h1, 1);
+    }
+}
+
+// ButtonTile.cpp
+void ButtonTile::attack(Level *level, int x, int y, int z, shared_ptr<Player> player)
+{
+	//use(level, x, y, z, player, 0, 0, 0, 0);
+}
+
+// ButtonTile.cpp
+bool ButtonTile::TestUse()
+{
+	return true;
+}
+
+// ButtonTile.cpp
+bool ButtonTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	if( soundOnly)
+	{
+		// 4J - added - just do enough to play the sound
+		level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, 0.6f);
+		return false;
+	}
+    int data = level->getData(x, y, z);
+    int dir = data & 7;
+    int open = 8 - (data & 8);
+    if (open == 0) return true;
+
+    level->setData(x, y, z, dir + open);
+    level->setTilesDirty(x, y, z, x, y, z);
+
+    level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, 0.6f);
+
+    updateNeighbours(level, x, y, z, dir);
+
+    level->addToTickNextTick(x, y, z, id, getTickDelay());
+
+    return true;
+}
+
+// ButtonTile.cpp
+void ButtonTile::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+    if ((data & 8) > 0)
+	{
+        int dir = data & 7;
+        updateNeighbours(level, x, y, z, dir);
+    }
+    Tile::onRemove(level, x, y, z, id, data);
+}
+
+// ButtonTile.cpp
+bool ButtonTile::getSignal(LevelSource *level, int x, int y, int z, int dir)
+{
+	return (level->getData(x, y, z) & 8) > 0;
+}
+
+// ButtonTile.cpp
+bool ButtonTile::getDirectSignal(Level *level, int x, int y, int z, int dir)
+{
+    int data = level->getData(x, y, z);
+    if ((data & 8) == 0) return false;
+    int myDir = data & 7;
+
+    if (myDir == 5 && dir == 1) return true;
+    if (myDir == 4 && dir == 2) return true;
+    if (myDir == 3 && dir == 3) return true;
+    if (myDir == 2 && dir == 4) return true;
+    if (myDir == 1 && dir == 5) return true;
+
+    return false;
+}
+
+// ButtonTile.cpp
+bool ButtonTile::isSignalSource()
+{
+	return true;
+}
+
+// ButtonTile.cpp
+void ButtonTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+	if (level->isClientSide) return;
+	int data = level->getData(x, y, z);
+	if ((data & 8) == 0)
+	{
+		return;
+	}
+	if(sensitive)
+	{
+		checkPressed(level, x, y, z);
+	}
+	else
+	{
+		level->setData(x, y, z, data & 7);
+
+		int dir = data & 7;
+		updateNeighbours(level, x, y, z, dir);
+
+		level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, 0.5f);
+		level->setTilesDirty(x, y, z, x, y, z);
+	}
+}
+
+// ButtonTile.cpp
+void ButtonTile::entityInside(Level *level, int x, int y, int z, shared_ptr<Entity> entity)
+{
+	if (level->isClientSide) return;
+	if (!sensitive) return;
+
+	if ((level->getData(x, y, z) & 8) != 0)
+	{
+		return;
+	}
+
+	checkPressed(level, x, y, z);
+}
+
+// ButtonTile.cpp
+void ButtonTile::checkPressed(Level *level, int x, int y, int z)
+{
+	int data = level->getData(x, y, z);
+	int dir = data & 7;
+	bool wasPressed = (data & 8) != 0;
+	bool shouldBePressed;
+
+	updateShape(data);
+	Tile::ThreadStorage *tls = (Tile::ThreadStorage *)TlsGetValue(Tile::tlsIdxShape);
+	vector<shared_ptr<Entity> > *entities = level->getEntitiesOfClass(typeid(Arrow), AABB::newTemp(x + tls->xx0, y + tls->yy0, z + tls->zz0, x + tls->xx1, y + tls->yy1, z + tls->zz1));
+	shouldBePressed = !entities->empty();
+	delete entities;
+
+	if (shouldBePressed && !wasPressed)
+	{
+		level->setData(x, y, z, dir | 8);
+		updateNeighbours(level, x, y, z, dir);
+		level->setTilesDirty(x, y, z, x, y, z);
+
+		level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, 0.6f);
+	}
+	if (!shouldBePressed && wasPressed)
+	{
+		level->setData(x, y, z, dir);
+		updateNeighbours(level, x, y, z, dir);
+		level->setTilesDirty(x, y, z, x, y, z);
+
+		level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, 0.5f);
+	}
+
+	if (shouldBePressed)
+	{
+		level->addToTickNextTick(x, y, z, id, getTickDelay());
+	}
+}
+
+// ButtonTile.cpp
+void ButtonTile::updateNeighbours(Level *level, int x, int y, int z, int dir)
+{
+	level->updateNeighborsAt(x, y, z, id);
+
+	if (dir == 1)
+	{
+		level->updateNeighborsAt(x - 1, y, z, id);
+	}
+	else if (dir == 2)
+	{
+		level->updateNeighborsAt(x + 1, y, z, id);
+	}
+	else if (dir == 3)
+	{
+		level->updateNeighborsAt(x, y, z - 1, id);
+	}
+	else if (dir == 4)
+	{
+		level->updateNeighborsAt(x, y, z + 1, id);
+	}
+	else
+	{
+		level->updateNeighborsAt(x, y - 1, z, id);
+	}
+}
+
+// ButtonTile.cpp
+bool ButtonTile::shouldTileTick(Level *level, int x,int y,int z)
+{
+	int currentData = level->getData(x, y, z);
+    return (currentData & 8) != 0;
+}
+
+// PressurePlateTile.cpp
+int PressurePlateTile::getTickDelay()
+{
+	return 20;
+}
+
+// PressurePlateTile.cpp
+bool PressurePlateTile::mayPlace(Level *level, int x, int y, int z)
+{
+	return level->isTopSolidBlocking(x, y - 1, z) || FenceTile::isFence(level->getTile(x, y - 1, z));
+}
+
+// PressurePlateTile.cpp
+void PressurePlateTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    bool replace = false;
+
+   if (!level->isTopSolidBlocking(x, y - 1, z) && !FenceTile::isFence(level->getTile(x, y - 1, z))) replace = true;
+
+    if (replace)
+	{
+        this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+        level->setTile(x, y, z, 0);
+    }
+}
+
+// PressurePlateTile.cpp
+void PressurePlateTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+    if (level->isClientSide) return;
+    if (level->getData(x, y, z) == 0)
+	{
+        return;
+    }
+
+    checkPressed(level, x, y, z);
+}
+
+// PressurePlateTile.cpp
+void PressurePlateTile::entityInside(Level *level, int x, int y, int z, shared_ptr<Entity> entity)
+{
+    if (level->isClientSide) return;
+
+    if (level->getData(x, y, z) == 1)
+	{
+        return;
+    }
+
+    checkPressed(level, x, y, z);
+}
+
+// PressurePlateTile.cpp
+void PressurePlateTile::checkPressed(Level *level, int x, int y, int z)
+{
+    bool wasPressed = level->getData(x, y, z) == 1;
+    bool shouldBePressed = false;
+
+    float b = 2 / 16.0f;
+    vector<shared_ptr<Entity> > *entities = NULL;
+
+	bool entitiesToBeFreed = false;
+    if (sensitivity == PressurePlateTile::everything) entities = level->getEntities(nullptr, AABB::newTemp(x + b, y, z + b, x + 1 - b, y + 0.25, z + 1 - b));
+
+    if (sensitivity == PressurePlateTile::mobs)
+	{
+		entities = level->getEntitiesOfClass(typeid(Mob), AABB::newTemp(x + b, y, z + b, x + 1 - b, y + 0.25, z + 1 - b));
+		entitiesToBeFreed = true;
+	}
+    if (sensitivity == PressurePlateTile::players)
+	{
+		entities = level->getEntitiesOfClass(typeid(Player), AABB::newTemp(x + b, y, z + b, x + 1 - b, y + 0.25, z + 1 - b));
+		entitiesToBeFreed = true;
+	}
+
+    if (!entities->empty())
+	{
+        shouldBePressed = true;
+    }
+
+    if (shouldBePressed && !wasPressed)
+	{
+        level->setData(x, y, z, 1);
+        level->updateNeighborsAt(x, y, z, id);
+        level->updateNeighborsAt(x, y - 1, z, id);
+        level->setTilesDirty(x, y, z, x, y, z);
+
+        level->playSound(x + 0.5, y + 0.1, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, 0.6f);
+    }
+    if (!shouldBePressed && wasPressed)
+	{
+        level->setData(x, y, z, 0);
+        level->updateNeighborsAt(x, y, z, id);
+        level->updateNeighborsAt(x, y - 1, z, id);
+        level->setTilesDirty(x, y, z, x, y, z);
+
+        level->playSound(x + 0.5, y + 0.1, z + 0.5, eSoundType_RANDOM_CLICK, 0.3f, 0.5f);
+    }
+
+    if (shouldBePressed)
+	{
+        level->addToTickNextTick(x, y, z, id, getTickDelay());
+    }
+
+	if( entitiesToBeFreed )
+	{
+		delete entities;
+	}
+}
+
+// PressurePlateTile.cpp
+void PressurePlateTile::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+    if (data > 0)
+	{
+        level->updateNeighborsAt(x, y, z, this->id);
+        level->updateNeighborsAt(x, y - 1, z, this->id);
+    }
+    Tile::onRemove(level, x, y, z, id, data);
+}
+
+// PressurePlateTile.cpp
+void PressurePlateTile::updateShape(LevelSource *level, int x, int y, int z, int forceData, shared_ptr<TileEntity> forceEntity) // 4J added forceData, forceEntity param
+{
+    bool pressed = level->getData(x, y, z) == 1;
+
+    float o = 1 / 16.0f;
+    if (pressed)
+	{
+        this->setShape(o, 0, o, 1 - o, 0.5f / 16.0f, 1 - o);
+    }
+	else
+	{
+        setShape(o, 0, o, 1 - o, 1 / 16.0f, 1 - o);
+    }
+}
+
+// PressurePlateTile.cpp
+bool PressurePlateTile::getSignal(LevelSource *level, int x, int y, int z, int dir)
+{
+	return (level->getData(x, y, z)) > 0;
+}
+
+// PressurePlateTile.cpp
+bool PressurePlateTile::getDirectSignal(Level *level, int x, int y, int z, int dir)
+{
+    if (level->getData(x, y, z) == 0) return false;
+    return (dir == 1);
+}
+
+// PressurePlateTile.cpp
+bool PressurePlateTile::isSignalSource()
+{
+	return true;
+}
+
+// PressurePlateTile.cpp
+bool PressurePlateTile::shouldTileTick(Level *level, int x,int y,int z)
+{
+    return level->getData(x, y, z) != 0;
+}
+
+// DiodeTile.cpp
+bool DiodeTile::mayPlace(Level *level, int x, int y, int z)
+{
+	if (!level->isTopSolidBlocking(x, y - 1, z))
+	{
+		return false;
+	}
+	return Tile::mayPlace(level, x, y, z);
+}
+
+// DiodeTile.cpp
+bool DiodeTile::canSurvive(Level *level, int x, int y, int z)
+{
+	if (!level->isTopSolidBlocking(x, y - 1, z))
+	{
+		return false;
+	}
+	return Tile::canSurvive(level, x, y, z);
+}
+
+// DiodeTile.cpp
+void DiodeTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+	int data = level->getData(x, y, z);
+	bool sourceOn = getSourceSignal(level, x, y, z, data);
+	if (on && !sourceOn)
+	{
+		level->setTileAndData(x, y, z, Tile::diode_off_Id, data);
+	}
+	else if (!on)
+	{
+		// when off-diodes are ticked, they always turn on for one tick and
+		// then off again if necessary
+		level->setTileAndData(x, y, z, Tile::diode_on_Id, data);
+		if (!sourceOn)
+		{
+			int delay = (data & DELAY_MASK) >> DELAY_SHIFT;
+			level->addToTickNextTick(x, y, z, Tile::diode_on_Id, DELAYS[delay] * 2);
+		}
+	}
+}
+
+// DiodeTile.cpp
+bool DiodeTile::getDirectSignal(Level *level, int x, int y, int z, int dir)
+{
+	return getSignal(level, x, y, z, dir);
+}
+
+// DiodeTile.cpp
+bool DiodeTile::getSignal(LevelSource *level, int x, int y, int z, int facing)
+{
+	if (!on)
+	{
+		return false;
+	}
+
+	int dir = getDirection(level->getData(x, y, z));
+
+	if (dir == Direction::SOUTH && facing == Facing::SOUTH) return true;
+	if (dir == Direction::WEST && facing == Facing::WEST) return true;
+	if (dir == Direction::NORTH && facing == Facing::NORTH) return true;
+	if (dir == Direction::EAST && facing == Facing::EAST) return true;
+
+	return false;
+}
+
+// DiodeTile.cpp
+void DiodeTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (!canSurvive(level, x, y, z))
+	{
+		this->spawnResources(level, x, y, z, level->getData(x, y, z), 0);
+		level->setTile(x, y, z, 0);
+		level->updateNeighborsAt(x + 1, y, z, id);
+		level->updateNeighborsAt(x - 1, y, z, id);
+		level->updateNeighborsAt(x, y, z + 1, id);
+		level->updateNeighborsAt(x, y, z - 1, id);
+		level->updateNeighborsAt(x, y - 1, z, id);
+		level->updateNeighborsAt(x, y + 1, z, id);
+		return;
+	}
+
+	int data = level->getData(x, y, z);
+
+	bool sourceOn = getSourceSignal(level, x, y, z, data);
+	int delay = (data & DELAY_MASK) >> DELAY_SHIFT;
+	if ( (on && !sourceOn) || (!on && sourceOn))
+	{
+		level->addToTickNextTick(x, y, z, id, DELAYS[delay] * 2);
+	}
+}
+
+// DiodeTile.cpp
+bool DiodeTile::getSourceSignal(Level *level, int x, int y, int z, int data)
+{
+	int dir = getDirection(data);
+	switch (dir)
+	{
+		case Direction::SOUTH:
+            return level->getSignal(x, y, z + 1, Facing::SOUTH) || (level->getTile(x, y, z + 1) == Tile::redStoneDust_Id && level->getData(x, y, z + 1) > 0);
+        case Direction::NORTH:
+            return level->getSignal(x, y, z - 1, Facing::NORTH) || (level->getTile(x, y, z - 1) == Tile::redStoneDust_Id && level->getData(x, y, z - 1) > 0);
+        case Direction::EAST:
+            return level->getSignal(x + 1, y, z, Facing::EAST) || (level->getTile(x + 1, y, z) == Tile::redStoneDust_Id && level->getData(x + 1, y, z) > 0);
+        case Direction::WEST:
+            return level->getSignal(x - 1, y, z, Facing::WEST) || (level->getTile(x - 1, y, z) == Tile::redStoneDust_Id && level->getData(x - 1, y, z) > 0);   
+	}
+	return false;
+}
+
+// DiodeTile.cpp
+bool DiodeTile::TestUse()
+{
+	return true;
+}
+
+// DiodeTile.cpp
+bool DiodeTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	if( soundOnly) return false;
+
+	int data = level->getData(x, y, z);
+	int delay = (data & DELAY_MASK) >> DELAY_SHIFT;
+	delay = ((delay + 1) << DELAY_SHIFT) & DELAY_MASK;
+
+	level->setData(x, y, z, delay | (data & DIRECTION_MASK));
+	return true;
+}
+
+// DiodeTile.cpp
+bool DiodeTile::isSignalSource()
+{
+	return true;
+}
+
+// DiodeTile.cpp
+void DiodeTile::setPlacedBy(Level *level, int x, int y, int z, shared_ptr<Mob> by)
+{
+	int dir = (((Mth::floor(by->yRot * 4 / (360) + 0.5)) & 3) + 2) % 4;
+	level->setData(x, y, z, dir);
+
+	bool sourceOn = getSourceSignal(level, x, y, z, dir);
+	if (sourceOn)
+	{
+		level->addToTickNextTick(x, y, z, id, 1);
+	}
+}
+
+// DiodeTile.cpp
+void DiodeTile::onPlace(Level *level, int x, int y, int z)
+{
+	level->updateNeighborsAt(x + 1, y, z, id);
+	level->updateNeighborsAt(x - 1, y, z, id);
+	level->updateNeighborsAt(x, y, z + 1, id);
+	level->updateNeighborsAt(x, y, z - 1, id);
+	level->updateNeighborsAt(x, y - 1, z, id);
+	level->updateNeighborsAt(x, y + 1, z, id);
+}
+
+// DiodeTile.cpp
+void DiodeTile::destroy(Level *level, int x, int y, int z, int data)
+{
+    if (on)
+	{
+		level->updateNeighborsAt(x + 1, y, z, id);
+		level->updateNeighborsAt(x - 1, y, z, id);
+		level->updateNeighborsAt(x, y, z + 1, id);
+		level->updateNeighborsAt(x, y, z - 1, id);
+		level->updateNeighborsAt(x, y - 1, z, id);
+		level->updateNeighborsAt(x, y + 1, z, id);
+	}
+    Tile::destroy(level, x, y, z, data);
+}
+
+// RedlightTile.cpp
+void RedlightTile::onPlace(Level *level, int x, int y, int z)
+{
+	if (!level->isClientSide)
+	{
+		if (isLit && !level->hasNeighborSignal(x, y, z))
+		{
+			level->addToTickNextTick(x, y, z, id, 4);
+		}
+		else if (!isLit && level->hasNeighborSignal(x, y, z))
+		{
+			level->setTile(x, y, z, Tile::redstoneLight_lit_Id);
+		}
+	}
+}
+
+// RedlightTile.cpp
+void RedlightTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (!level->isClientSide)
+	{
+		if (isLit && !level->hasNeighborSignal(x, y, z))
+		{
+			level->addToTickNextTick(x, y, z, id, 4);
+		}
+		else if (!isLit && level->hasNeighborSignal(x, y, z))
+		{
+			level->setTile(x, y, z, Tile::redstoneLight_lit_Id);
+		}
+	}
+}
+
+// RedlightTile.cpp
+void RedlightTile::tick(Level *level, int x, int y, int z, Random *random)
+{
+	if (!level->isClientSide)
+	{
+		if (isLit && !level->hasNeighborSignal(x, y, z))
+		{
+			level->setTile(x, y, z, Tile::redstoneLight_Id);
+		}
+	}
+}
+
+// TrapDoorTile.cpp
+void TrapDoorTile::updateShape(LevelSource *level, int x, int y, int z, int forceData, shared_ptr<TileEntity> forceEntity) // 4J added forceData, forceEntity param
+{
+	setShape(level->getData(x, y, z));
+}
+
+// TrapDoorTile.cpp
+void TrapDoorTile::setShape(int data)
+{
+
+	float r = 3 / 16.0f;
+	Tile::setShape(0, 0, 0, 1, r, 1);
+	if (isOpen(data))
+	{
+		if ((data & 3) == 0) setShape(0, 0, 1 - r, 1, 1, 1);
+		if ((data & 3) == 1) setShape(0, 0, 0, 1, 1, r);
+		if ((data & 3) == 2) setShape(1 - r, 0, 0, 1, 1, 1);
+		if ((data & 3) == 3) setShape(0, 0, 0, r, 1, 1);
+	}
+}
+
+// TrapDoorTile.cpp
+void TrapDoorTile::attack(Level *level, int x, int y, int z, shared_ptr<Player> player)
+{
+	use(level, x, y, z, player, 0, 0, 0, 0);
+}
+
+// TrapDoorTile.cpp
+bool TrapDoorTile::TestUse()
+{
+	return true;
+}
+
+// TrapDoorTile.cpp
+bool TrapDoorTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	if (material == Material::metal) return true;
+
+	if (soundOnly)
+	{
+		// 4J - added - just do enough to play the sound
+		level->levelEvent(player, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+		return false;
+	}
+
+	int dir = level->getData(x, y, z);
+	level->setData(x, y, z, dir ^ 4);
+
+	level->levelEvent(player, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+	return true;
+}
+
+// TrapDoorTile.cpp
+void TrapDoorTile::setOpen(Level *level, int x, int y, int z, bool shouldOpen)
+{
+	int dir = level->getData(x, y, z);
+
+	bool wasOpen = (dir & 4) > 0;
+	if (wasOpen == shouldOpen) return;
+
+	level->setData(x, y, z, dir ^ 4);
+
+	level->levelEvent(nullptr, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+}
+
+// TrapDoorTile.cpp
+void TrapDoorTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (level->isClientSide) return;
+
+	int data = level->getData(x, y, z);
+	int xt = x;
+	int zt = z;
+	if ((data & 3) == 0) zt++;
+	if ((data & 3) == 1) zt--;
+	if ((data & 3) == 2) xt++;
+	if ((data & 3) == 3) xt--;
+
+
+	if (!attachesTo(level->getTile(xt, y, zt)))
+	{
+		level->setTile(x, y, z, 0);
+		spawnResources(level, x, y, z, data, 0);
+	}
+
+	bool signal = level->hasNeighborSignal(x, y, z);
+	if( signal || ((type > 0 && Tile::tiles[type]->isSignalSource())) )
+	{
+		setOpen(level, x, y, z, signal);
+	}
+}
+
+// TrapDoorTile.cpp
+int TrapDoorTile::getDir(int dir)
+{
+	if ((dir & 4) == 0)
+	{
+		return ((dir - 1) & 3);
+	}
+	else
+	{
+		return (dir & 3);
+	}
+}
+
+// TrapDoorTile.cpp
+int TrapDoorTile::getPlacedOnFaceDataValue(Level *level, int x, int y, int z, int face, float clickX, float clickY, float clickZ, int itemValue)
+{
+	int dir = 0;
+	if (face == 2) dir = 0;
+	if (face == 3) dir = 1;
+	if (face == 4) dir = 2;
+	if (face == 5) dir = 3;
+	if (face != Facing::UP && face != Facing::DOWN && clickY > 0.5f) dir |= TOP_MASK;
+	return dir;
+}
+
+// TrapDoorTile.cpp
+bool TrapDoorTile::mayPlace(Level *level, int x, int y, int z, int face)
+{
+	if (face == 0) return false;
+	if (face == 1) return false;
+	if (face == 2) z++;
+	if (face == 3) z--;
+	if (face == 4) x++;
+	if (face == 5) x--;
+
+	return attachesTo(level->getTile(x, y, z));
+}
+
+// TrapDoorTile.cpp
+bool TrapDoorTile::isOpen(int data)
+{
+	return (data & 4) != 0;
+}
+
+// TrapDoorTile.cpp
+bool TrapDoorTile::attachesTo(int id)
+{
+	if (id <= 0)
+	{
+		return false;
+	}
+	Tile *tile = Tile::tiles[id];
+
+	return tile != NULL && (tile->material->isSolidBlocking() && tile->isCubeShaped()) || tile == Tile::lightGem || (dynamic_cast<HalfSlabTile *>(tile) != NULL) || (dynamic_cast<StairTile *>(tile) != NULL);
+}
+
+// FenceGateTile.cpp
+bool FenceGateTile::mayPlace(Level *level, int x, int y, int z)
+{
+    if (!level->getMaterial(x, y - 1, z)->isSolid()) return false;
+    return Tile::mayPlace(level, x, y, z);
+}
+
+// FenceGateTile.cpp
+void FenceGateTile::setPlacedBy(Level *level, int x, int y, int z, shared_ptr<Mob> by)
+{
+    int dir = (((Mth::floor(by->yRot * 4 / (360) + 0.5)) & 3)) % 4;
+    level->setData(x, y, z, dir);
+}
+
+// FenceGateTile.cpp
+bool FenceGateTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	if( soundOnly )
+	{
+		// 4J - added - just do enough to play the sound
+		level->levelEvent(player, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);	// 4J - changed event to pass player rather than NULL as the source of the event so we can filter the broadcast properly
+		return false;
+	}
+
+    int data = level->getData(x, y, z);
+    if (isOpen(data))
+	{
+        level->setData(x, y, z, data & ~OPEN_BIT);
+    }
+	else
+	{
+        // open the door from the player
+        int dir = (((Mth::floor(player->yRot * 4 / (360) + 0.5)) & 3)) % 4;
+        int current = getDirection(data);
+        if (current == ((dir + 2) % 4)) {
+            data = dir;
+        }
+        level->setData(x, y, z, data | OPEN_BIT);
+    }
+    level->levelEvent(player, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+    return true;
+}
+
+// FenceGateTile.cpp
+void FenceGateTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+	if (level->isClientSide) return;
+
+	int data = level->getData(x, y, z);
+
+	bool signal = level->hasNeighborSignal(x, y, z);
+	if (signal || ((type > 0 && Tile::tiles[type]->isSignalSource()) || type == 0))
+	{
+		if (signal && !isOpen(data))
+		{
+			level->setData(x, y, z, data | OPEN_BIT);
+			level->levelEvent(nullptr, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+		}
+		else if (!signal && isOpen(data))
+		{
+			level->setData(x, y, z, data & ~OPEN_BIT);
+			level->levelEvent(nullptr, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+		}
+	}
+}
+
+// FenceGateTile.cpp
+bool FenceGateTile::isOpen(int data)
+{
+	return (data & OPEN_BIT) != 0;
+}
+
+// DoorTile.cpp
+bool DoorTile::TestUse()
+{
+	return true;
+}
+
+// DoorTile.cpp
+bool DoorTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	if(soundOnly)
+	{
+		// 4J - added - just do enough to play the sound
+		if (material != Material::metal)
+		{
+			level->levelEvent(player, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+		}
+		return false;
+	}
+
+	if (material == Material::metal) return true;
+
+	int compositeData = getCompositeData(level, x, y, z);
+	int lowerData = compositeData & C_LOWER_DATA_MASK;
+	lowerData ^= 4;
+	if ((compositeData & C_IS_UPPER_MASK) == 0)
+	{
+		level->setData(x, y, z, lowerData);//, Tile.UPDATE_CLIENTS);
+		level->setTilesDirty(x, y, z, x, y, z);
+	}
+	else
+	{
+		level->setData(x, y - 1, z, lowerData);//, Tile.UPDATE_CLIENTS);
+		level->setTilesDirty(x, y - 1, z, x, y, z);
+	}
+
+	level->levelEvent(player, LevelEvent::SOUND_OPEN_DOOR, x, y, z, 0);
+	return true;
+}
+
 }

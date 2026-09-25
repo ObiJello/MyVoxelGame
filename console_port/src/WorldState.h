@@ -101,6 +101,7 @@ struct World::State {
     bool terrain=false;
     bool lightDirty=true;
     explicit State(std::int64_t seed);
+    ~State();
     ChunkStorage& chunk(int x,int z)const{return *region.chunks.at({Mth::intFloorDiv(x-width/2,16),Mth::intFloorDiv(z-depth/2,16)});}
     void ensureLighting(std::int64_t seed);
     void configureLight(std::int64_t seed);

@@ -70,6 +70,7 @@ double rayBox(Vec3 eye,Vec3 direction,Vec3 low,Vec3 high,double reach){
     }
     return near;
 }
+std::pair<double,double> entitySizeOf(const std::wstring& id,int slimeSize);
 std::pair<double,double> entitySize(const std::wstring& id,int slimeSize=1){
     // Entity's default is 0.6 x 1.8. These overrides are the setSize calls
     // in the source creature constructors, not the visible model dimensions.
@@ -899,4 +900,5 @@ void World::loadEntities(ChunkRecord& record){
         }
     }
 }
+std::pair<double,double> entitySizeOf(const std::wstring& id,int slimeSize){return entitySize(id,slimeSize);}
 }

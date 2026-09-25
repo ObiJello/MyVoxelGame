@@ -13,6 +13,8 @@
 #include <memory>
 
 namespace console {
+// Entity::setSize widths and heights (WorldEntities.cpp).
+std::pair<double,double> entitySizeOf(const std::wstring& id,int slimeSize);
 namespace {
 constexpr int TICKS_PER_DAY=24000;
 // ServerLevel::MAX_UPDATES, Level::MAX_GRASS_TICKS / MAX_LAVA_TICKS.
@@ -89,6 +91,7 @@ public:
         random=&s_.tickRandom;
         dimension=&overworld_;
         chunkSourceXZSize=s_.metadata->getXZSize();
+        identity=&s_;
         skyDarken_=consoleOldSkyDarken(world.dayTime(),world.rainLevel(),world.thunderLevel());
     }
     int getTile(int x,int y,int z)override{
@@ -147,6 +150,32 @@ public:
         const int id=biome(x,z);
         if(biomeHasSnow(id))return false;
         return biomeHasRain(id);
+    }
+    std::int64_t getTime()override{return world_.time();}
+    // Level::getEntities / getEntitiesOfClass over a box: the player (a Mob
+    // and a Player), the mobs, and for any entity also dropped items and
+    // experience orbs. Arrows are not ported.
+    bool hasEntitiesIn(const sim::AABB& box,EntityClass kind)override{
+        const auto overlaps=[&](double x,double y,double z,double width,double height){
+            x-=half;z-=half;
+            return x+width/2>box.x0 && x-width/2<box.x1 && y+height>box.y0 && y<box.y1 &&
+                   z+width/2>box.z0 && z-width/2<box.z1;
+        };
+        if(kind==EntityClass::Arrow)return false;
+        if(s_.hasPlayerPosition && s_.playerHurt.health>0 &&
+           overlaps(s_.playerPosition.x,s_.playerPosition.y,s_.playerPosition.z,.6,1.8))return true;
+        if(kind==EntityClass::Player)return false;
+        for(const auto& entity:s_.entities){
+            if(entity.health<=0)continue;
+            const auto [width,height]=entitySizeOf(entity.id,entity.slimeSize);
+            if(overlaps(entity.position.x,entity.position.y,entity.position.z,width,height))return true;
+        }
+        if(kind==EntityClass::Mob)return false;
+        for(const auto& item:s_.droppedItems)
+            if(overlaps(item.position.x,item.position.y,item.position.z,.25,.25))return true;
+        for(const auto& orb:s_.experienceOrbs)
+            if(overlaps(orb.position.x,orb.position.y,orb.position.z,.5,.5))return true;
+        return false;
     }
     // Biome::isHumid: downfall above 0.85.
     bool isHumidAt(int x,int,int z)override{
@@ -357,6 +386,14 @@ void World::tickTiles(){
     level.tickTiles();
 }
 
+World::State::~State(){
+    // NotGateTile::removeLevelReferences for this world's torch history.
+    auto& toggles=sim::NotGateTile::recentToggles;
+    if(auto it=toggles.find(sim::NotGateTile::LevelKey(static_cast<const void*>(this)));it!=toggles.end()){
+        delete it->second;toggles.erase(it);
+    }
+}
+
 void World::tickFallingBlocks(){
     if(state->pending || state->fallingBlocks.empty())return;
     WorldTickLevel level(*this,*state);
@@ -417,6 +454,70 @@ int World::placementData(int x,int y,int z,int tile,int face,int data){
     const int lx=x-width/2,lz=z-depth/2;
     if(!sim::Tile::tiles[tile] || !level.mayPlace(tile,lx,y,lz,false,face,nullptr))return -1;
     return sim::Tile::tiles[tile]->getPlacedOnFaceDataValue(&level,lx,y,lz,face,0,0,0,data);
+}
+
+namespace {
+// Mob::yRot in the source's degrees from the port's heading (as the furnace
+// and ender chest placement read it).
+float sourceYRot(double yaw){
+    constexpr double pi=3.14159265358979323846;
+    return static_cast<float>(std::remainder(yaw,2*pi)*180/pi+180);
+}
+}
+
+bool World::usable(int x,int y,int z)const{
+    if(!inside(x,y,z))return false;
+    sim::initializeTiles();
+    auto* tile=sim::Tile::tiles[get(x,y,z)];
+    return tile && tile->TestUse();
+}
+
+bool World::useBlock(int x,int y,int z,double yaw){
+    if(!usable(x,y,z))return false;
+    WorldTickLevel level(*this,*state);
+    auto player=std::make_shared<sim::Player>();
+    player->yRot=sourceYRot(yaw);
+    sim::Tile::tiles[get(x,y,z)]->use(&level,x-width/2,y,z-depth/2,player,0,0,0,0);
+    return true;
+}
+
+void World::tilePlacedBy(int x,int y,int z,double yaw){
+    if(!inside(x,y,z))return;
+    WorldTickLevel level(*this,*state);
+    auto by=std::make_shared<sim::Mob>();
+    by->yRot=sourceYRot(yaw);
+    if(auto* tile=sim::Tile::tiles[get(x,y,z)])tile->setPlacedBy(&level,x-width/2,y,z-depth/2,by);
+}
+
+void World::tileDestroyed(int x,int y,int z,int tile,int data){
+    if(!inside(x,y,z))return;
+    WorldTickLevel level(*this,*state);
+    if(auto* t=sim::Tile::tiles[tile])t->destroy(&level,x-width/2,y,z-depth/2,data);
+}
+
+void World::tickInsideTiles(){
+    if(state->pending)return;
+    WorldTickLevel level(*this,*state);
+    // Entity::checkInsideTiles: the tiles in the entity's box shrunk by 0.001.
+    const auto checkInside=[&](const Vec3& feet,double boxWidth,double boxHeight){
+        const int ax=Mth::floor(feet.x-boxWidth/2+.001),bx=Mth::floor(feet.x+boxWidth/2-.001);
+        const int ay=Mth::floor(feet.y+.001),by=Mth::floor(feet.y+boxHeight-.001);
+        const int az=Mth::floor(feet.z-boxWidth/2+.001),bz=Mth::floor(feet.z+boxWidth/2-.001);
+        for(int x=ax;x<=bx;++x)for(int y=ay;y<=by;++y)for(int z=az;z<=bz;++z){
+            if(!inside(x,y,z))continue;
+            if(auto* tile=sim::Tile::tiles[get(x,y,z)])
+                tile->entityInside(&level,x-World::width/2,y,z-World::depth/2,std::make_shared<sim::Entity>());
+        }
+    };
+    if(state->hasPlayerPosition && state->playerHurt.health>0)checkInside(state->playerPosition,.6,1.8);
+    for(std::size_t i=0;i<state->entities.size();++i){
+        const auto entity=state->entities[i];
+        if(entity.health<=0)continue;
+        const auto [boxWidth,boxHeight]=entitySizeOf(entity.id,entity.slimeSize);
+        checkInside(entity.position,boxWidth,boxHeight);
+    }
+    for(std::size_t i=0;i<state->droppedItems.size();++i)checkInside(state->droppedItems[i].position,.25,.25);
+    for(std::size_t i=0;i<state->experienceOrbs.size();++i)checkInside(state->experienceOrbs[i].position,.5,.5);
 }
 
 ScheduledTickQueue& World::tileTicks(){

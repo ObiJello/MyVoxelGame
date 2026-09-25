@@ -33,3 +33,13 @@
 #define TILE_CONSTANTS_HalfSlabTile \
     static const int TYPE_MASK = 7; \
     static const int TOP_SLOT_BIT = 8;
+#define TILE_CONSTANTS_NotGateTile \
+    static const int RECENT_TOGGLE_TIMER = 20 * 3; \
+    static const int MAX_RECENT_TOGGLES = 8;
+#define TILE_CONSTANTS_DiodeTile \
+    static const int DELAY_MASK = DIRECTION_INV_MASK; \
+    static const int DELAY_SHIFT = 2;
+#define TILE_CONSTANTS_TrapDoorTile \
+    static const int TOP_MASK = 0x8;
+#define TILE_CONSTANTS_FenceGateTile \
+    static const int OPEN_BIT = 4;

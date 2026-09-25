@@ -51,7 +51,12 @@ int main(){try{
     world.set(24,180,20,static_cast<Block>(107));world.setData(24,180,20,0);
     require(world.collides({24.5,180.75,20.5}),"Closed gate blocks passage");
     require(world.raycast({22,180.75,20.5},{1,0,0},4).hit,"Closed gate panel is pickable");
-    require(world.useBlock(24,180,20) && world.getData(24,180,20)==4,"Using a gate opens it");
+    // FenceGateTile::use opens it away from the player: facing it from the
+    // north (heading 0) swings it to the north side; from the south it keeps
+    // its direction.
+    {World other;other.set(24,180,20,static_cast<Block>(107));other.setData(24,180,20,0);
+     require(other.useBlock(24,180,20,0) && other.getData(24,180,20)==6,"A gate opens away from the player");}
+    require(world.useBlock(24,180,20,3.14159265358979323846) && world.getData(24,180,20)==4,"Using a gate opens it");
     require(!world.collides({24.5,180.75,20.5}),"Open gate clears collision");
     require(!world.raycast({22,180.75,20.5},{1,0,0},4).hit,"Ray passes through open gate center");
     require(world.useBlock(24,180,20) && world.getData(24,180,20)==0,"Using an open gate closes it");

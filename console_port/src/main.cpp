@@ -865,8 +865,9 @@ struct App {
                 usedBlockHeld=true;}
             return;
         }
-        if(place && (world.get(h.x,h.y,h.z)==64 || world.get(h.x,h.y,h.z)==71 || world.get(h.x,h.y,h.z)==107)){
-            if(!usedBlockHeld){world.useBlock(h.x,h.y,h.z);if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);usedBlockHeld=true;}
+        // Tile::use: doors, gates, trapdoors, levers, buttons, repeaters.
+        if(place && world.usable(h.x,h.y,h.z)){
+            if(!usedBlockHeld){world.useBlock(h.x,h.y,h.z,yaw);if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);usedBlockHeld=true;}
             return;
         }
         if(place){
@@ -1467,8 +1468,11 @@ struct App {
         else if(const auto h=world.raycast(eye(),direction(),blockReach());h.hit){
             act=consoleStringId("IDS_TOOLTIPS_MINE");
             const int block=world.get(h.x,h.y,h.z);
-            if(block==54 || block==58 || block==130 || block==64 || block==71 || block==96 || block==107 ||
-               world.canOpenFurnace(h.x,h.y,h.z) || world.canOpenBrewingStand(h.x,h.y,h.z))use=consoleStringId("IDS_TOOLTIPS_OPEN");
+            // Chests open; workbenches, furnaces, brewing stands, wooden doors,
+            // levers, buttons, trapdoors and gates are used.
+            if(block==54 || block==130)use=consoleStringId("IDS_TOOLTIPS_OPEN");
+            else if(block==58 || block==61 || block==62 || block==117 || block==116 || block==145 || block==64 ||
+                    block==69 || block==77 || block==143 || block==96 || block==107)use=consoleStringId("IDS_TOOLTIPS_USE");
             else if(use<0 && held.id && (held.id<256 || placedTileForItem(held.id)>0))use=consoleStringId("IDS_TOOLTIPS_PLACE");
             else if(held.id>=290 && held.id<=294)use=consoleStringId("IDS_TOOLTIPS_TILL");
             else if(held.id==295 || held.id==372)use=consoleStringId("IDS_TOOLTIPS_PLANT");
