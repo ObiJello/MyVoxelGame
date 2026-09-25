@@ -1582,8 +1582,9 @@ reconstruct is now taken from the source:
 - Fire renders with `TileRenderer::tesselateFireInWorld`, extracted unchanged into
   `ported/FireRender.cpp` (`tools/extract_fire_render.py`). The console's terrain atlas
   holds only a placeholder in fire's slot (15,1); the animated `fire_0`/`fire_1` strips
-  (from `res/TitleUpdate/res/textures/blocks`, like the liquids') are loaded from
-  `assets/animations` when present and are not in the repository yet. Falling blocks
+  and their frame timing files are imported from `res/TitleUpdate/res/textures/blocks`
+  into `assets/animations`, like the liquids', and animate into that slot in
+  `PreStitchedTextureMap` order (fire_1 last, so it shows). Falling blocks
   draw as their tile's cube (`FallingTileRenderer`).
 - Not yet: redstone, pistons, TNT explosions, nether portals, the Fire Spreads host
   option (always on) and saving a block mid-fall.

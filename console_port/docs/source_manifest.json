@@ -3595,6 +3595,26 @@
       "source": "Minecraft.Client/Common/Tutorial/Tutorial",
       "destination": "assets/tutorial/Tutorial",
       "sha256": "f160aa2807f39ae10832442ef48de88da017845b8ea2519c150571958375a972"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/fire_0.png",
+      "destination": "assets/animations/fire_0.png",
+      "sha256": "aa2fa0e734b355ba748b2238c0f15946c9099260464aba25f422c258f4ed8609"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/fire_0.txt",
+      "destination": "assets/animations/fire_0.txt",
+      "sha256": "6e5ac889a43c2236b07d4572b6ccb01509e3e7ce438abdea65742781f2ccf46b"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/fire_1.png",
+      "destination": "assets/animations/fire_1.png",
+      "sha256": "82e4aaef1b84aa25bf4330101059e1419e094f71839b353b1016e6c5dfec5f9f"
+    },
+    {
+      "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/fire_1.txt",
+      "destination": "assets/animations/fire_1.txt",
+      "sha256": "36a9e7f1c95b82ffb99743e0c5c4ce95d83c9a430aac59f84ef3cbfab6145068"
     }
   ]
 }

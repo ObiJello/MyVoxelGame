@@ -149,6 +149,5 @@ lava next to water and check that obsidian or cobblestone forms. Stack sand or g
 in the air and watch it fall and land. Put a torch on a block and break the block
 under it. Break the top half of a door (in survival it should drop one door). Light
 fire on netherrack or wood with flint and steel and watch it spread and burn wood,
-leaves and wool, and burn out on stone. (Fire shows a red placeholder texture until
-the `fire_0.png`/`fire_1.png` strips are added to `assets/animations`.) Note anything
+leaves and wool, and burn out on stone. The flames should flicker. Note anything
 that flows, falls or burns differently from how you remember it.

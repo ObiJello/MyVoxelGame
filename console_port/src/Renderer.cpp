@@ -15,6 +15,8 @@
 #include <stb_image_write.h>
 #include <algorithm>
 #include <array>
+#include <fstream>
+#include <sstream>
 #include <iterator>
 #include <stdexcept>
 
@@ -69,20 +71,34 @@ Renderer::Renderer(const std::filesystem::path& assets) {
         uploadAnimation(liquidAnimations_.size()-1,0);
     }
     // PreStitchedTextureMap animates fire_0 and then fire_1 into the same
-    // atlas slot (15,1), so fire_1 is what shows. The strips come from
-    // textures/blocks like the liquids' and are optional: the slot in the
-    // atlas itself only holds a placeholder.
+    // atlas slot (15,1), so fire_1 is what shows (the slot in the atlas
+    // itself only holds a placeholder). The strips and their frame timing
+    // files come from textures/blocks like the liquids'.
     for(auto name:{"fire_0","fire_1"}){
         int width,height,channels;
         auto path=assets/"animations"/(std::string(name)+".png");
-        if(!std::filesystem::exists(path))continue;
         unsigned char* pixels=stbi_load(path.string().c_str(),&width,&height,&channels,4);
-        if(!pixels)continue;
-        if(width!=16 || height<16 || height%16 || height/16>4096){stbi_image_free(pixels);continue;}
+        if(!pixels)throw std::runtime_error("Cannot read fire animation: "+path.string());
+        if(width!=16 || height<16 || height%16 || height/16>4096){
+            stbi_image_free(pixels);
+            throw std::runtime_error("Invalid fire animation strip: "+path.string());
+        }
         std::vector<unsigned char> frames(pixels,pixels+width*height*4);
         stbi_image_free(pixels);
-        LiquidAnimationSpec spec{name,240,16,16,height/16,{}};
-        liquidAnimations_.push_back({spec,TextureAnimation(spec.frames,{}),std::move(frames)});
+        // StitchedTexture::loadAnimationFrames: "frame" or "frame*time",
+        // separated by commas or whitespace.
+        std::vector<std::pair<int,int>> schedule;
+        std::ifstream timing(assets/"animations"/(std::string(name)+".txt"));
+        std::string token;
+        while(std::getline(timing,token,',')){
+            std::istringstream words(token);
+            for(std::string word;words>>word;){
+                const auto star=word.find('*');
+                schedule.push_back({std::stoi(word.substr(0,star)),star==std::string::npos?1:std::stoi(word.substr(star+1))});
+            }
+        }
+        LiquidAnimationSpec spec{name,240,16,16,height/16,schedule};
+        liquidAnimations_.push_back({spec,TextureAnimation(spec.frames,schedule),std::move(frames)});
         uploadAnimation(liquidAnimations_.size()-1,0);
     }
 }

@@ -41,7 +41,7 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | `GameRenderer`/`LevelRenderer` | own | `Renderer` |
 | `ParticleEngine::tick` | missing | |
 | `SoundEngine`/music | missing | |
-| texture animation | partial | water and lava (`TextureAnimation`); fire when `assets/animations/fire_0.png`/`fire_1.png` are supplied (the atlas slot is a placeholder); no portal, clock or compass |
+| texture animation | partial | water, lava and fire (`TextureAnimation`, with the original frame timing files); no portal, clock or compass |
 | UI scenes | ported | `ConsoleMenus` (layout approximated) |
 
 ## Random tile ticks
