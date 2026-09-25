@@ -581,6 +581,11 @@ public:
     ItemInstanceArray items{36};
     ItemInstanceArray armor{4};
     int selected=0;
+    // arrayWithLength never frees its data; its owner does.
+    Inventory()=default;
+    Inventory(const Inventory&)=delete;
+    Inventory& operator=(const Inventory&)=delete;
+    ~Inventory(){delete[] items.data;delete[] armor.data;}
     shared_ptr<ItemInstance> getSelected(){return items[selected];}
     void setItem(unsigned int slot,shared_ptr<ItemInstance> item){if(slot<items.length)items[slot]=item;}
     // Inventory::add: into a free slot (the host merges stacks afterwards).

@@ -511,7 +511,10 @@ public:
     bool attackSourceMob(SimulatedEntity& entity,int damage){
         if(!entity.ai)adopt(entity);
         if(!entity.ai)return false;
-        const bool hurt=entity.ai->hurt(sim::DamageSource::playerAttack(s_.simPlayer),damage);
+        // Player::attack: the damage source is the caller's to delete.
+        sim::DamageSource* source=sim::DamageSource::playerAttack(s_.simPlayer);
+        const bool hurt=entity.ai->hurt(source,damage);
+        delete source;
         mirrorMob(entity);
         // The record keeps Mob::lastHurtByPlayerTime (PLAYER_HURT_EXPERIENCE_TIME),
         // which the source does not save, so a death across a save still gives XP.

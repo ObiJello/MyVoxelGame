@@ -466,6 +466,12 @@ static void entities(){
     require(e->isInWall(),"inside the floor is in a wall");
 }
 
+// Mob::hurt with a made damage source, which the caller deletes (Player::attack).
+static bool hurtBy(const std::shared_ptr<sim::Entity>& target,sim::DamageSource* source,int damage){
+    const bool hurt=target->hurt(source,damage);
+    delete source;
+    return hurt;
+}
 // A PathfinderMob with the new AI (navigation, move and look controls).
 struct Walker final:sim::PathfinderMob {
     explicit Walker(sim::Level* level):PathfinderMob(level){health=getMaxHealth();}
@@ -485,9 +491,9 @@ static void mobs(){
     // invulnerability window absorbs a weaker second hit (Mob::hurt).
     auto attacker=std::make_shared<Walker>(&level);
     attacker->moveTo(-1.5,1,0.5,0,0);
-    require(mob->hurt(sim::DamageSource::mobAttack(attacker),3),"a mob can be hurt");
+    require(hurtBy(mob,sim::DamageSource::mobAttack(attacker),3),"a mob can be hurt");
     require(mob->getHealthNow()==7 && mob->xd>0 && mob->yd>0,"the hit costs health and knocks it away");
-    require(!mob->hurt(sim::DamageSource::mobAttack(attacker),2) && mob->getHealthNow()==7,"a weaker hit in the window does nothing");
+    require(!hurtBy(mob,sim::DamageSource::mobAttack(attacker),2) && mob->getHealthNow()==7,"a weaker hit in the window does nothing");
     require(mob->getLastHurtByMob()==attacker,"it remembers who hurt it");
     // Path finding around a wall (PathNavigation, PathFinder, MoveControl).
     for(int z=-4;z<=4;++z){map.put(4,1,z,Tile::rock_Id);map.put(4,2,z,Tile::rock_Id);}
@@ -540,7 +546,7 @@ static void animals(){
     // long as it remembers the hit (Mob::lastHurtByMobTime, 60 ticks).
     player->moveTo(pig->x-1,1,pig->z,0,0);
     const double hitX=pig->x,hitZ=pig->z;
-    require(pig->hurt(sim::DamageSource::playerAttack(player),1),"the pig is hit");
+    require(hurtBy(pig,sim::DamageSource::playerAttack(player),1),"the pig is hit");
     double furthest=0;
     for(int i=0;i<60;++i){tickAll(level,1);furthest=std::max(furthest,std::hypot(pig->x-hitX,pig->z-hitZ));}
     require(furthest>2.5,"it panics and runs");
