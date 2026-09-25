@@ -115,6 +115,18 @@ int textureTile(Block b,int face,int data) {
     case 106:return 143; // vine
     case 111:return 76; // waterlily
     case 127:return (data>>2)==0?170:(data>>2)==1?169:168;
+    // FarmTile, CropTile, CarrotTile, PotatoTile, NetherStalkTile, StemTile
+    // getTexture over PreStitchedTextureMap's slots (face 0 is the top here).
+    case 60:return face==0?(data>0?86:87):2;          // farmland_wet / farmland_dry / dirt
+    case 59:return 88+(data>7?7:data);                // crops_0..7
+    case 141:case 142:{
+        const int stage=data<7?((data==6?5:data)>>1):3;
+        static const int carrots[]{200,201,202,203},potatoes[]{200,201,202,204};
+        return b==141?carrots[stage]:potatoes[stage];
+    }
+    case 115:return data>=3?228:data>0?227:226;       // netherStalk_0..2
+    case 104:case 105:return 111;                     // stem_straight
+    case 74:return 51;                                // lit redstone ore
     default:return 1;
     }
 }
@@ -137,6 +149,8 @@ bool validBlock(std::uint8_t b) {
     case 37:case 38:case 39:case 40:case 48:case 56:case 73:case 81:case 82:
     case 78:case 83:case 86:case 99:case 100:case 106:case 111:case 127:case 129:
     case 8:case 11:case 61:case 62:case 116:case 117:case 118:case 130:return true;
+    // Farming (hoes, seeds, stems) and random ticks.
+    case 59:case 60:case 74:case 103:case 104:case 105:case 115:case 141:case 142:return true;
     default:break;
     }
     return consoleIsStair(b) || b==43 || b==44 || b==64 || b==71 || b==65 || b==85 || b==107 || b==113 || b==98 || b==52 || b==54 || b==Air || b==Stone || b==Grass || b==Dirt || b==Cobble || b==Planks ||

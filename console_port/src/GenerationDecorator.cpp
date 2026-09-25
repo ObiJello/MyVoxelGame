@@ -300,4 +300,21 @@ bool decorateGeneratedChunk(Level& level,int chunkX,int chunkZ,DecorationStats* 
     if(output)*output=stats;
     return true;
 }
+bool placeSaplingTree(Level& level,int kind,int height,Random& random,int x,int y,int z){
+    std::unique_ptr<Feature> feature;
+    switch(kind){
+    case 0:feature=std::make_unique<TreeFeature>(false);break;
+    case 1:feature=std::make_unique<BasicTree>(false);break;
+    case 2:feature=std::make_unique<SpruceFeature>(false);break;
+    case 3:feature=std::make_unique<BirchFeature>(false);break;
+    // TreeTile::JUNGLE_TRUNK, LeafTile::JUNGLE_LEAF
+    case 4:feature=std::make_unique<TreeFeature>(false,height,3,3,false);break;
+    case 5:feature=std::make_unique<MegaTreeFeature>(false,height,3,3);break;
+    // Mushroom::growTree
+    case 6:feature=std::make_unique<HugeMushroomFeature>(0);break;
+    case 7:feature=std::make_unique<HugeMushroomFeature>(1);break;
+    default:throw std::invalid_argument("Unknown sapling tree");
+    }
+    return feature->place(&level,&random,x,y,z);
+}
 }

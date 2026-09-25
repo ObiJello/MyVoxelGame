@@ -1511,3 +1511,39 @@ reconstruct is now taken from the source:
 - **Not exact:** the Iggy movies (`MediaPS3.arc`) are not supplied, so menu
   geometry, fonts and the controller picture are approximations; audio,
   difficulty, gamma, clouds and bedrock fog settings are stored but unused.
+
+### Random tile ticks and weather (September 25)
+
+- `tools/extract_tile_properties.py` writes `ported/TileProperties.cpp`: every tile
+  `Tile::staticCtor` registers, with its class, material, solid render, light block,
+  light emission, ticking flag and cube shape, worked out from the registration chain
+  and the constructor chain (conditions on constructor arguments evaluated). It
+  agrees with every hand-transcribed light and solid table the port had. LeafTile's
+  constructor reads `allowSame` before setting it (uninitialised in the source); the
+  table keeps leaves non-solid, as the port always has.
+- `tools/extract_tile_ticks.py` copies the tick, survival and growth methods of the
+  ticking tiles unchanged into `ported/tick/TileTickRules.cpp`; they compile against
+  `ported/tick/TileTickHost.h`, whose `Level` is the live world (`src/WorldTiles.cpp`).
+  `Sapling::growTree` is transcribed because it constructs the tree features; the host
+  runs the original features (without the update flag; the level relights as it
+  writes).
+- `World::tickTiles` follows `ServerLevel::tickTiles`: the tiles chosen on the
+  previous tick, the chunk rings out to 9 around the player, the mood-sound, lightning,
+  freeze/snow/rain and `checkLight` draws, then the update thread's selection (80
+  samples per chunk from a copy of `randValue`, edge clipping, 100 grass and 100 lava
+  at most, 256 in all). The source iterates an unordered set of chunks; the port uses
+  the insertion order.
+- `World::tickWeather` is `Level::tickWeather` with `prepareWeather` on the first tick;
+  `rainLevel()`/`thunderLevel()` now ease in and out.
+- Farming: `HoeItem`, `SeedItem`, `SeedFoodItem` and `DyePowderItem::useOn` are
+  extracted the same way (with `ItemInstance`/`Player` stand-ins) and run from right
+  click (`World::useItemOn`, after containers and doors, as `ServerPlayerGameMode::
+  useItemOn` does). Farmland (15/16 high, wet/dry top), crops, carrots, potatoes and
+  nether wart (`tesselateRowTexture`, four planes a sixteenth low) and pumpkin/melon
+  stems (`tesselateStemTexture`/`tesselateStemDirTexture`, coloured by
+  `StemTile::getColor`, whose `a&0xFF - b&0xFF` precedence is kept) now render in
+  normal worlds, and these tiles are allowed by `World::set`. The in-game tooltips
+  show Till, Plant and Grow.
+- `console_tile_tick_core` drives each rule on a map-backed level and runs 1,200
+  world ticks on a generated world (about 0.9 ms a tick; almost all block changes are
+  the existing lava settling).

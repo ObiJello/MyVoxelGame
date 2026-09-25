@@ -78,6 +78,15 @@ class World {
     void activateFluidChunks();
     void activateFluidChunk(int chunkX,int chunkZ);
     void tickFluids();
+    void putFluid(int x,int y,int z,int id,int data);
+    void flowFluid(int x,int y,int z);
+    // ServerLevel::tickTiles (random tile ticks, freezing, snow, rain) and
+    // Level::tickWeather; WorldTiles.cpp.
+    void tickTiles();
+    void tickWeather();
+    // Tile::onRemove for a replaced tile (trunks and leaves flag decay).
+    void tileRemoved(int x,int y,int z,int tile,int data);
+    friend class WorldTickLevel;
     void saveFluidTicks(class ChunkRecord& record,bool remove,bool keepSavedFluids=false);
     void loadFluidTicks(const class ChunkRecord& record);
     void tickEntities();
@@ -208,6 +217,13 @@ public:
     bool destroyBlock(int x,int y,int z,int slot);
     // Survival placement and eating use up the carried item.
     bool consumeCarried(int slot,int amount=1);
+    // ItemInstance::hurt on a carried tool in survival (removed when it breaks).
+    void wearCarried(int slot,int amount);
+    // Item::useOn for the farming items (hoes, seeds, carrots, potatoes,
+    // nether wart, bone meal, cocoa beans) at tile x,y,z clicked on `face`
+    // (Facing: 0 down, 1 up, 2 north, 3 south, 4 west, 5 east). True when
+    // the item was used; the stack and blocks are updated.
+    bool useItemOn(int x,int y,int z,int face,int slot);
     // Inventory::add; returns how many items did not fit.
     int addCarriedItem(int id,int count,int damage=0);
     // Player::drop(item,false) from the carried slot (one item or the stack).

@@ -1,6 +1,7 @@
 #include "WorldState.h"
 #include "FlowingFluidTick.h"
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <tuple>
 
@@ -30,24 +31,33 @@ void World::activateFluidChunk(int chunkX,int chunkZ){
                 scheduleFluid(x,y,z,column[y]==8?5:30);
         }
 }
+namespace {
+struct FluidAccess final:FlowingFluidAccess {
+    World& world;
+    std::function<void(int,int,int,int,int)> store;
+    FluidAccess(World& value,std::function<void(int,int,int,int,int)> put):world(value),store(std::move(put)){}
+    bool inside(int x,int y,int z)const override{return world.inside(x,y,z);}
+    int tile(int x,int y,int z)const override{return world.get(x,y,z);}
+    int data(int x,int y,int z)const override{return world.getData(x,y,z);}
+    bool blocksMotion(int x,int y,int z)const override{return solid(world.get(x,y,z));}
+    void put(int x,int y,int z,int id,int data)override{store(x,y,z,id,data);}
+};
+}
+void World::putFluid(int x,int y,int z,int id,int data){
+    if(!inside(x,y,z))return;
+    const int old=get(x,y,z);
+    if(old!=id)set(x,y,z,static_cast<Block>(id));
+    if(id && getData(x,y,z)!=data)setData(x,y,z,data);
+    if(id==8 || id==10)scheduleFluid(x,y,z,id==8?5:30);
+    if(old!=id && id!=9 && id!=11)updateLiquidNeighbors(x,y,z);
+}
+// LiquidTileDynamic::tick, from a scheduled tick or a random tile tick.
+void World::flowFluid(int x,int y,int z){
+    FluidAccess access(*this,[this](int px,int py,int pz,int id,int data){putFluid(px,py,pz,id,data);});
+    if(inside(x,y,z))tickFlowingFluid(access,state->fluidRandom,x,y,z);
+}
 void World::tickFluids(){
     if(state->pending)return;
-    struct Access final:FlowingFluidAccess {
-        World& world;
-        explicit Access(World& value):world(value){}
-        bool inside(int x,int y,int z)const override{return world.inside(x,y,z);}
-        int tile(int x,int y,int z)const override{return world.get(x,y,z);}
-        int data(int x,int y,int z)const override{return world.getData(x,y,z);}
-        bool blocksMotion(int x,int y,int z)const override{return solid(world.get(x,y,z));}
-        void put(int x,int y,int z,int id,int data)override{
-            if(!world.inside(x,y,z))return;
-            const int old=world.get(x,y,z);
-            if(old!=id)world.set(x,y,z,static_cast<Block>(id));
-            if(id && world.getData(x,y,z)!=data)world.setData(x,y,z,data);
-            if(id==8 || id==10)world.scheduleFluid(x,y,z,id==8?5:30);
-            if(old!=id && id!=9 && id!=11)world.updateLiquidNeighbors(x,y,z);
-        }
-    } access(*this);
     // Source ServerLevel permits 1000 tile callbacks per tick. The desktop
     // adapter keeps a smaller budget while lighting and mesh updates run in
     // the same frame; due entries remain queued for later ticks.
@@ -60,7 +70,7 @@ void World::tickFluids(){
         }
         if(due==state->fluidTicks.end())break;
         auto [x,y,z]=due->first;state->fluidTicks.erase(due);
-        if(inside(x,y,z))tickFlowingFluid(access,state->fluidRandom,x,y,z);
+        flowFluid(x,y,z);
     }
 }
 void World::saveFluidTicks(ChunkRecord& record,bool remove,bool keepSavedFluids){

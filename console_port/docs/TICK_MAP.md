@@ -11,7 +11,7 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | Step (source) | Status | Port |
 |---|---|---|
 | `SetTimePacket` every 20 ticks | n/a | one process |
-| `ServerLevel::tick` → `Level::tick` → `tickWeather` (rain/thunder timers, rain and thunder levels) | missing | save keeps the flags; they never change |
+| `ServerLevel::tick` → `Level::tick` → `tickWeather` (rain/thunder timers, rain and thunder levels) | ported | `World::tickWeather`; rain and snow are not drawn yet (no rain/snow textures supplied) |
 | sleeping players skip the night (`allPlayersAreSleeping`, `awakenAllPlayers`) | missing | no beds yet |
 | `MobSpawner::tick` | partial | four hostile and four passive types in the visible region; no `MobCategory` caps, pack spawning or biome spawn lists |
 | `chunkSource->tick` (unload/save) | own | chunk streaming, `WorldStorage` |
@@ -20,11 +20,11 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | incremental save every `saveInterval` | own | the Autosave setting |
 | `setTime(time + 1)` | ported | `World::tickTime` |
 | `tickPendingTicks` (scheduled tile ticks) | partial | water and lava only; other saved ticks are kept |
-| `tickTiles`: random tile ticks (80 per polled chunk, grass/lava limits, the update thread's one-tick lag) | missing | |
-| `tickTiles`: lightning in thunderstorms | missing | |
-| `tickTiles`: freezing water, snow in rain, `Tile::handleRain` | missing | new chunks get the generator's initial snow/ice |
+| `tickTiles`: random tile ticks (80 per polled chunk, grass/lava limits, the update thread's one-tick lag) | ported | `WorldTiles.cpp`; chunks inside the visible window, in ring order |
+| `tickTiles`: lightning in thunderstorms | partial | the strike roll and flash timer; no `LightningBolt` (fire, damage) |
+| `tickTiles`: freezing water, snow in rain, `Tile::handleRain` | ported | cauldrons fill in rain |
 | `tickTiles`: `checkLight` | own | lighting is recomputed on edits |
-| `tickClientSideTiles`: cave ambience | missing | no audio |
+| `tickClientSideTiles`: cave ambience | partial | the timing and draws; no audio |
 | `chunkMap->tick`, `villages->tick`, `villageSiege->tick` | missing | |
 | `Level::updateLights` | own | light propagation on edit |
 | `Level::tickEntities` | partial | dropped items, XP orbs, mob spawners, mobs with simple movement and attacks; no `Goal` AI, projectiles, riding, minecarts, boats |
@@ -44,15 +44,37 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | texture animation | partial | water and lava (`TextureAnimation`); no fire, portal, clock or compass |
 | UI scenes | ported | `ConsoleMenus` (layout approximated) |
 
+## Random tile ticks
+
+The ticking tiles' rules are the original methods, extracted unchanged into
+`ported/tick/TileTickRules.cpp` by `tools/extract_tile_ticks.py` and compiled against
+`ported/tick/TileTickHost.h`: grass, mycelium, farmland, crops (wheat, carrots,
+potatoes), pumpkin and melon stems, sugar cane, cactus, saplings (the original tree
+features), flowers, tall grass, dead bushes, lily pads, mushrooms, nether wart, cocoa,
+vines, leaf decay (with the trunk/leaf `onRemove` flags), ice, snow, top snow, lit
+redstone ore and cauldrons in rain. Flowing water and lava use the port's
+`LiquidTileDynamic` step. Every tile's class, material, light and ticking flag comes
+from `ported/TileProperties.cpp` (`tools/extract_tile_properties.py`).
+
+Farming items use the same extraction: `HoeItem`, `SeedItem` (wheat, pumpkin, melon,
+nether wart), `SeedFoodItem` (carrots, potatoes) and `DyePowderItem` (bone meal on
+saplings, mushrooms, stems, crops, cocoa and grass; cocoa beans on jungle wood), called
+from right click through `World::useItemOn`. Farmland, crops, carrots, potatoes,
+stems and nether wart render with `TileRenderer`'s row and stem shapes and the
+original atlas slots.
+
+Still no-ops when picked: fire and lava's fire spread (they need scheduled ticks and
+neighbour updates), torches, buttons, pressure plates, redstone torches, tripwires,
+pumpkins, cake and portals.
+
 ## Order of work
 
-1. **World tick** (this is next): `tickWeather`, the random tile ticks and the ticking
-   tiles they call (grass, mycelium, leaves, farmland, crops, stems, sugar cane,
-   cactus, saplings, mushrooms, vines, cocoa, nether wart, ice, snow, fire, lava,
-   redstone ore), freezing/snow/`handleRain`, and lightning.
+1. **Tile updates**: scheduled ticks for every tile, neighbour notifications
+   (`neighborChanged`, `onPlace`), fire, redstone, pistons and `runTileEvents`,
+   buttons, pressure plates, falling sand and gravel, torches.
 2. **Mobs**: the `Goal` AI, `MobCategory` spawning, combat, armour, difficulty.
-3. **Tile behaviour**: redstone, pistons and `runTileEvents`, rails and minecarts,
-   beds and sleeping, TNT and explosions, dispensers, boats.
+3. **More tiles**: rails and minecarts, beds and sleeping, TNT and explosions,
+   dispensers, boats.
 4. **Menus**: armour, enchanting, anvil, dispenser, villager trading.
 5. **Dimensions**: portals, the Nether and the End in play.
 6. **Client**: sound and music, particles, the first-person hand, smooth lighting.

@@ -10,16 +10,16 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 |---|---:|---:|---:|---:|
 | Main loop and levels | 53 | 7 | 19 | 27 |
 | Player and game modes | 12 | 3 | 4 | 5 |
-| Entities | 67 | 0 | 39 | 28 |
+| Entities | 67 | 0 | 40 | 27 |
 | Mob AI | 58 | 0 | 1 | 57 |
-| Blocks | 110 | 0 | 103 | 7 |
+| Blocks | 110 | 0 | 105 | 5 |
 | Block entities | 13 | 0 | 5 | 8 |
-| Items | 63 | 0 | 24 | 39 |
+| Items | 63 | 0 | 25 | 38 |
 | Crafting | 14 | 0 | 11 | 3 |
 | Menus and containers | 55 | 1 | 15 | 39 |
 | Enchanting | 24 | 0 | 1 | 23 |
 | Effects | 5 | 0 | 2 | 3 |
-| World generation | 118 | 57 | 10 | 51 |
+| World generation | 118 | 57 | 11 | 50 |
 | Dimensions | 4 | 0 | 1 | 3 |
 | Saves, NBT and IO | 47 | 12 | 6 | 29 |
 | Rendering | 156 | 0 | 27 | 129 |
@@ -30,7 +30,7 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 | Commands | 9 | 0 | 0 | 9 |
 | Networking | 96 | 0 | 4 | 92 |
 | Other | 102 | 11 | 25 | 66 |
-| **All** | **1247** | **119** | **317** | **811** |
+| **All** | **1247** | **119** | **322** | **806** |
 
 ## Main loop and levels
 
@@ -50,9 +50,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Entities
 
-**Partial (39):** Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, EnderDragon, Fireball, Ghast, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, Sheep, Silverfish, Skeleton, Slime, SnowMan, Snowball, Spider, Squid, Villager, VillagerGolem, Wolf, Zombie
+**Partial (40):** Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, EnderDragon, Fireball, Ghast, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LightningBolt, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, Sheep, Silverfish, Skeleton, Slime, SnowMan, Snowball, Spider, Squid, Villager, VillagerGolem, Wolf, Zombie
 
-**Missing (28):** AgableMob, BossMob, BossMobPart, DelayedRelease, DragonFireball, EnderCrystal, EnderMan, ExperienceOrb, EyeOfEnderSignal, FallingTile, FishingHook, FlyingMob, Giant, GlobalEntity, LightningBolt, NetherSphere, Particle, PrimedTnt, RemotePlayer, ServerPlayer, SmallFireball, TamableAnimal, Throwable, ThrownEgg, ThrownEnderpearl, ThrownExpBottle, ThrownPotion, WaterAnimal
+**Missing (27):** AgableMob, BossMob, BossMobPart, DelayedRelease, DragonFireball, EnderCrystal, EnderMan, ExperienceOrb, EyeOfEnderSignal, FallingTile, FishingHook, FlyingMob, Giant, GlobalEntity, NetherSphere, Particle, PrimedTnt, RemotePlayer, ServerPlayer, SmallFireball, TamableAnimal, Throwable, ThrownEgg, ThrownEnderpearl, ThrownExpBottle, ThrownPotion, WaterAnimal
 
 ## Mob AI
 
@@ -62,9 +62,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Blocks
 
-**Partial (103):** AnvilTile, BedTile, BookshelfTile, BrewingStandTile, Bush, ButtonTile, CactusTile, CakeTile, CarrotTile, CauldronTile, ChestTile, ClayTile, ClothTile, CocoaTile, CropTile, DeadBushTile, DetectorRailTile, DiodeTile, DirectionalTile, DirtTile, DispenserTile, DoorTile, EggTile, EnchantmentTableTile, EnderChestTile, FarmTile, FenceGateTile, FenceTile, FireTile, FlowerPotTile, FurnaceTile, GlassTile, GrassTile, GravelTile, HalfSlabTile, HeavyTile, HellSandTile, HellStoneTile, HugeMushroomTile, IceTile, LadderTile, LeafTile, LeverTile, LightGemTile, LiquidTile, LiquidTileDynamic, LiquidTileStatic, LockedChestTile, MelonTile, MetalTile, MobSpawnerTile, Mushroom, MusicTile, MycelTile, NetherStalkTile, NotGateTile, ObsidianTile, OreTile, PistonBaseTile, PistonExtensionTile, PistonMovingPiece, PortalTile, PotatoTile, PressurePlateTile, PumpkinTile, QuartzBlockTile, RailTile, RecordPlayerTile, RedStoneDustTile, RedStoneOreTile, RedlightTile, ReedTile, SandStoneTile, Sapling, SignTile, SkullTile, SmoothStoneBrickTile, SnowTile, Sponge, StairTile, StemTile, StoneMonsterTile, StoneSlabTile, StoneTile, TallGrass, TheEndPortal, TheEndPortalFrameTile, ThinFenceTile, Tile, TntTile, TopSnowTile, TorchTile, TrapDoorTile, TreeTile, TripWireSourceTile, TripWireTile, VineTile, WallTile, WebTile, WoodSlabTile, WoodTile, WoolCarpetTile, WorkbenchTile
+**Partial (105):** AnvilTile, BedTile, BookshelfTile, BrewingStandTile, Bush, ButtonTile, CactusTile, CakeTile, CarrotTile, CauldronTile, ChestTile, ClayTile, ClothTile, CocoaTile, CropTile, DeadBushTile, DetectorRailTile, DiodeTile, DirectionalTile, DirtTile, DispenserTile, DoorTile, EggTile, EnchantmentTableTile, EnderChestTile, EntityTile, FarmTile, FenceGateTile, FenceTile, FireTile, FlowerPotTile, FurnaceTile, GlassTile, GrassTile, GravelTile, HalfSlabTile, HeavyTile, HellSandTile, HellStoneTile, HugeMushroomTile, IceTile, LadderTile, LeafTile, LeverTile, LightGemTile, LiquidTile, LiquidTileDynamic, LiquidTileStatic, LockedChestTile, MelonTile, MetalTile, MobSpawnerTile, Mushroom, MusicTile, MycelTile, NetherStalkTile, NotGateTile, ObsidianTile, OreTile, PistonBaseTile, PistonExtensionTile, PistonMovingPiece, PortalTile, PotatoTile, PressurePlateTile, PumpkinTile, QuartzBlockTile, RailTile, RecordPlayerTile, RedStoneDustTile, RedStoneOreTile, RedlightTile, ReedTile, SandStoneTile, Sapling, SignTile, SkullTile, SmoothStoneBrickTile, SnowTile, Sponge, StairTile, StemTile, StoneMonsterTile, StoneSlabTile, StoneTile, TallGrass, TheEndPortal, TheEndPortalFrameTile, ThinFenceTile, Tile, TntTile, TopSnowTile, TorchTile, TrapDoorTile, TreeTile, TripWireSourceTile, TripWireTile, VineTile, WallTile, WaterLilyTile, WebTile, WoodSlabTile, WoodTile, WoolCarpetTile, WorkbenchTile
 
-**Missing (7):** AirTile, CoralTile, EntityTile, HalfTransparentTile, SpringTile, TransparentTile, WaterLilyTile
+**Missing (5):** AirTile, CoralTile, HalfTransparentTile, SpringTile, TransparentTile
 
 ## Block entities
 
@@ -74,9 +74,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Items
 
-**Partial (24):** AnvilTileItem, BowlFoodItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, SeedFoodItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
+**Partial (25):** AnvilTileItem, BowlFoodItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
 
-**Missing (39):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, BucketItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, FlintAndSteelItem, HangingEntityItem, LeafTileItem, MilkBucketItem, MinecartItem, PistonTileItem, RedStoneItem, SaddleItem, SaplingTileItem, SeedItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
+**Missing (38):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, BucketItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, FlintAndSteelItem, HangingEntityItem, LeafTileItem, MilkBucketItem, MinecartItem, PistonTileItem, RedStoneItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
 
 ## Crafting
 
@@ -108,9 +108,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 **Ported (57):** AddIslandLayer, AddMushroomIslandLayer, AddSnowLayer, BasicTree, Biome, BiomeInitLayer, BiomeOverrideLayer, BirchFeature, CactusFeature, CanyonFeature, ClayFeature, DataLayer, DeadBushFeature, DesertWellFeature, DownfallLayer, DownfallMixerLayer, Feature, FlatLayer, FlowerFeature, FuzzyZoomLayer, GroundBushFeature, GrowMushroomIslandLayer, HugeMushroomFeature, ImprovedNoise, IslandLayer, LakeFeature, LargeCaveFeature, LargeFeature, LargeHellCaveFeature, Layer, MegaTreeFeature, OreFeature, PerlinNoise, PineFeature, PumpkinFeature, ReedsFeature, RegionHillsLayer, RiverInitLayer, RiverLayer, RiverMixerLayer, SandFeature, ShoreLayer, SmoothLayer, SmoothZoomLayer, SpringFeature, SpruceFeature, SwampRiversLayer, SwampTreeFeature, Synth, TallGrassFeature, TemperatureLayer, TemperatureMixerLayer, TreeFeature, VinesFeature, VoronoiZoom, WaterlilyFeature, ZoomLayer
 
-**Partial (10):** BiomeDecorator, BiomeSource, DesertBiome, ExtremeHillsBiome, JungleBiome, MonsterRoomFeature, PlainsBiome, Rotate, Scale, Villages
+**Partial (11):** BiomeDecorator, BiomeSource, DesertBiome, ExtremeHillsBiome, HellBiome, JungleBiome, MonsterRoomFeature, PlainsBiome, Rotate, Scale, Villages
 
-**Missing (51):** BeachBiome, BiomeCache, BiomeOverride, BonusChestFeature, CaveFeature, ChunkStorageProfileDecorator, ConsoleGenerateStructure, Distort, DungeonFeature, Emboss, EndPodiumFeature, FastNoise, FixedBiomeSource, ForestBiome, HellBiome, HellFireFeature, HellPortalFeature, HellSpringFeature, HouseFeature, IceBiome, LightGemFeature, MineShaftFeature, MineShaftPieces, MineShaftStart, MushroomIslandBiome, NetherBridgeFeature, NetherBridgePieces, PerlinSimplexNoise, RainforestBiome, RandomScatteredLargeFeature, ScatteredFeaturePieces, SimplexNoise, SpikeFeature, StartFeature, StrongholdFeature, StrongholdPieces, StructureFeature, StructurePiece, StructureStart, SwampBiome, TaigaBiome, TheEndBiome, TheEndBiomeDecorator, UILayer, Village, VillageFeature, VillagePieces, VillageSiege, XboxStructureActionGenerateBox, XboxStructureActionPlaceBlock, XboxStructureActionPlaceSpawner
+**Missing (50):** BeachBiome, BiomeCache, BiomeOverride, BonusChestFeature, CaveFeature, ChunkStorageProfileDecorator, ConsoleGenerateStructure, Distort, DungeonFeature, Emboss, EndPodiumFeature, FastNoise, FixedBiomeSource, ForestBiome, HellFireFeature, HellPortalFeature, HellSpringFeature, HouseFeature, IceBiome, LightGemFeature, MineShaftFeature, MineShaftPieces, MineShaftStart, MushroomIslandBiome, NetherBridgeFeature, NetherBridgePieces, PerlinSimplexNoise, RainforestBiome, RandomScatteredLargeFeature, ScatteredFeaturePieces, SimplexNoise, SpikeFeature, StartFeature, StrongholdFeature, StrongholdPieces, StructureFeature, StructurePiece, StructureStart, SwampBiome, TaigaBiome, TheEndBiome, TheEndBiomeDecorator, UILayer, Village, VillageFeature, VillagePieces, VillageSiege, XboxStructureActionGenerateBox, XboxStructureActionPlaceBlock, XboxStructureActionPlaceSpawner
 
 ## Dimensions
 

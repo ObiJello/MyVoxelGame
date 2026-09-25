@@ -17,6 +17,8 @@ using Lightmap=std::array<LightPixel,256>;
 Lightmap buildConsoleLightmap(const LightmapInput& input);
 float consoleTimeOfDay(std::int64_t time,float partialTick=1,int dimension=0);
 float consoleSkyDarken(std::int64_t time,float rain=0,float thunder=0,float partialTick=1,int dimension=0);
+// Level::getOldSkyDarken: the 0-11 sky dampening the server's raw brightness uses.
+int consoleOldSkyDarken(std::int64_t time,float rain=0,float thunder=0,float partialTick=1,int dimension=0);
 float consoleNightVisionScale(int duration,float partialTick);
 class LightFlicker {
     float blr=0,blg=0,blrt=0,blgt=0;

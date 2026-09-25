@@ -256,8 +256,10 @@ surface stages now compile through `DimensionChunkGenerator`. Their outputs matc
 falloff. Dimension decoration, fortresses, portals/transitions and live client
 integration remain pending; these libraries have only been tested nonvisually.
 
-Other unfinished systems include per-chunk mesh uploads, ambient occlusion, complete tile properties
-and behaviors, survival, mobs/entities, inventories and recipes, audio/music,
+Crops, saplings, grass, leaves, cactus, sugar cane, vines and the rest of the randomly
+ticking tiles now grow and decay with the original rules, the weather cycles, and
+hoes, seeds, carrots, potatoes, nether wart and bone meal work (`docs/TICK_MAP.md`). Other unfinished systems include per-chunk mesh uploads, ambient
+occlusion, scheduled ticks for tiles other than liquids, redstone, survival, mobs/entities, inventories and recipes, audio/music,
 animation, first-person hand, split screen, networking, PSN/store services, and legacy
 saves. `docs/COVERAGE.md` lists every source class and whether the port has it;
 `docs/TICK_MAP.md` follows the game tick and gives the order of the remaining work. Existing 96/128-high

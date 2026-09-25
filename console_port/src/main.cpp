@@ -869,6 +869,20 @@ struct App {
             if(!usedBlockHeld){world.useBlock(h.x,h.y,h.z);if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);usedBlockHeld=true;}
             return;
         }
+        if(place){
+            // Item::useOn for hoes, seeds, bone meal and cocoa beans; the face
+            // is the side of the target the adjacent cell lies on (Facing).
+            const int face=h.py<h.y?0:h.py>h.y?1:h.pz<h.z?2:h.pz>h.z?3:h.px<h.x?4:5;
+            if(!usedBlockHeld && world.useItemOn(h.x,h.y,h.z,face,slot)){
+                usedBlockHeld=true;
+                if(tutorial){
+                    const auto after=selectedItem();
+                    tutorial->useItemOnAfter(heldItem.id,heldItem.damage,heldItem.count,after.id==heldItem.id?after.count:0,true);
+                }
+                if(!world.streaming() && !renderer->rebuilding())renderer->beginRebuild(world);
+                return;
+            }
+        }
         if(place && heldItem.id==383){
             const Block support=world.get(h.x,h.y,h.z);
             const double fenceOffset=h.py==h.y+1 && (support==Fence || support==NetherFence)?0.5:0.0;
@@ -1456,6 +1470,12 @@ struct App {
             if(block==54 || block==58 || block==130 || block==64 || block==71 || block==96 || block==107 ||
                world.canOpenFurnace(h.x,h.y,h.z) || world.canOpenBrewingStand(h.x,h.y,h.z))use=consoleStringId("IDS_TOOLTIPS_OPEN");
             else if(use<0 && held.id && (held.id<256 || placedTileForItem(held.id)>0))use=consoleStringId("IDS_TOOLTIPS_PLACE");
+            else if(held.id>=290 && held.id<=294)use=consoleStringId("IDS_TOOLTIPS_TILL");
+            else if(held.id==295 || held.id==372)use=consoleStringId("IDS_TOOLTIPS_PLANT");
+            else if(held.id==351 && held.damage==15){
+                // Bone meal grows these.
+                for(int grows:{6,59,2,39,40,105,104,141,142})if(block==grows)use=consoleStringId("IDS_TOOLTIPS_GROW");
+            }
         }
         float x=16;const float y=338;
         if(jump>=0)x=drawTooltip(r,x,y,consoleActionGlyph(S::Jump,scheme),actionKey("CONTROLLER_ACTION_JUMP"),consoleString(jump));

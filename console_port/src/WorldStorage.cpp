@@ -230,13 +230,16 @@ Block World::get(int x,int y,int z)const{
 int World::getData(int x,int y,int z)const{return inside(x,y,z)?state->chunk(x,z).metadata.get(x&15,y,z&15):0;}
 bool World::set(int x,int y,int z,Block tile){
     if(!inside(x,y,z) || !validBlock(tile) || get(x,y,z)==tile)return false;
+    const int oldTile=get(x,y,z),oldData=getData(x,y,z);
     const bool lighting=state->pending && state->pending->phase==State::Pending::Phase::Lighting && !state->region.hasPreparedLight();
     if(!lighting)state->ensureLighting(seed);
     state->lightDirty=true;
     bool changed=state->lightLevel->setTileAndDataNoUpdate(x-width/2,y,z-depth/2,tile,0);
     if(lighting){if(changed)state->pending->restartLighting=true;}
     else state->lightDirty=false;
-    if(changed){state->undecorated.erase({Mth::intFloorDiv(x-width/2,16),Mth::intFloorDiv(z-depth/2,16)});++revision;}return changed;
+    if(changed){state->undecorated.erase({Mth::intFloorDiv(x-width/2,16),Mth::intFloorDiv(z-depth/2,16)});++revision;}
+    if(changed && !lighting)tileRemoved(x,y,z,oldTile,oldData);
+    return changed;
 }
 bool World::setData(int x,int y,int z,int data){
     if(!inside(x,y,z) || data<0 || data>15 || getData(x,y,z)==data)return false;
@@ -259,12 +262,22 @@ std::int64_t World::time()const{return state->metadata->getTime();}
 std::int64_t World::dayTime()const{return state->timeOfDayOverride>=0?state->timeOfDayOverride:time();}
 void World::setOverrideTimeOfDay(std::int64_t timeOfDay){state->timeOfDayOverride=timeOfDay<0?-1:timeOfDay;}
 void World::setTime(std::int64_t value){state->metadata->setTime(value);}
-float World::rainLevel()const{return state->metadata->isRaining()?1.f:0.f;}
-float World::thunderLevel()const{return state->metadata->isThundering()?rainLevel():0;}
+// Level::getRainLevel / getThunderLevel at the end of the tick (a = 1).
+float World::rainLevel()const{
+    if(!state->weatherPrepared)return state->metadata->isRaining()?1.f:0.f;
+    return state->rainLevel;
+}
+float World::thunderLevel()const{
+    if(!state->weatherPrepared)return state->metadata->isThundering()?rainLevel():0;
+    return state->thunderLevel*rainLevel();
+}
 void World::tickTime(){
-    // ServerLevel advances one stored world tick; define its console wrap explicitly.
+    // ServerLevel::tick: Level::tick (weather), the time step (define its
+    // console wrap explicitly), then tickPendingTicks and tickTiles.
+    tickWeather();
     state->metadata->setTime(std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(time())+1));
     tickFluids();
+    tickTiles();
     tickFurnaces();
     tickBrewingStands();
     tickPlayerEffects();

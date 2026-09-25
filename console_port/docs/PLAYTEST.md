@@ -130,3 +130,14 @@ farming, redstone, brewing, enchanting, the Nether portal and the music discs). 
 any lesson that does not advance, any popup whose button images are wrong for the
 chosen controller layout, and any place the area constraint lets you leave early.
 Start a second tutorial afterwards: lessons you completed should be skipped.
+
+## Farming and growth
+
+In a survival world: break tall grass for seeds, till grass or dirt next to water with
+a hoe (right click), plant seeds on the farmland, and wait. Wheat should grow through
+its eight stages over a few in-game days (faster on wet farmland and in rows), and
+bone meal (right click) should ripen it at once. Plant a sapling and wait (or use
+bone meal) for a tree. Cut a tree's trunk and watch its leaves decay. Also check that
+farmland dries out and turns back to dirt away from water, and that pumpkin and melon
+stems bend toward the fruit they grow. Note anything that grows far faster or slower
+than you remember.

@@ -159,6 +159,16 @@ bool World::destroyBlock(int x,int y,int z,int slot){
     }
     return true;
 }
+void World::wearCarried(int slot,int amount){
+    if(!survival() || amount<1)return;
+    auto* tool=carriedAt(*state->inventory,slot);
+    if(!tool)return;
+    const int maximum=consoleItemMaxDamage(tool->getShort(L"id"));
+    if(maximum<=0)return;
+    const int damage=tool->getShort(L"Damage")+amount;
+    if(damage>maximum)removeCarried(*state->inventory,slot);
+    else tool->putShort(L"Damage",damage);
+}
 bool World::consumeCarried(int slot,int amount){
     if(slot<0 || slot>=36 || amount<1)return false;
     if(!survival())return true; // Creative placement keeps the stack.

@@ -3,6 +3,7 @@
 #include <functional>
 
 class Level;
+class Random;
 
 namespace console {
 // A bounded first pass through RandomLevelSource::postProcess and
@@ -34,4 +35,9 @@ struct DecorationStats {
 bool decorateGeneratedChunk(Level& level,int chunkX,int chunkZ,DecorationStats* stats=nullptr,
                             const std::function<void(int,int)>& afterBiome={},
                             std::vector<DungeonTile>* generatedTiles=nullptr);
+// Sapling::growTree's features on a live level (doUpdate false; the level
+// relights as it writes): 0 TreeFeature, 1 BasicTree, 2 SpruceFeature,
+// 3 BirchFeature, 4 jungle TreeFeature(height), 5 MegaTreeFeature(height),
+// 6 and 7 HugeMushroomFeature(0) and (1).
+bool placeSaplingTree(Level& level,int kind,int height,Random& random,int x,int y,int z);
 }

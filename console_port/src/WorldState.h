@@ -66,6 +66,18 @@ struct World::State {
     bool playerDeathHandled=false;
     std::optional<Vec3> savedPlayerPosition;
     Random survivalRandom{0x5eed5eed};
+    // ServerLevel's random tile ticks: the level Random, the randValue/addend
+    // generator (Level constructor), the tiles the update thread chose last
+    // tick and the chunks polled this tick; tickClientSideTiles' mood delay.
+    Random tickRandom;
+    int randValue=Random().nextInt();
+    static constexpr int addend=1013904223;
+    int delayUntilNextMoodSound=-1;
+    std::vector<std::array<int,3>> updateTiles;
+    // Level::tickWeather's rain and thunder levels (prepareWeather on load).
+    bool weatherPrepared=false;
+    float rainLevel=0,oRainLevel=0,thunderLevel=0,oThunderLevel=0;
+    int lightningTime=0;
     void decorateNatural(int x,int z,std::map<std::pair<int,int>,std::unique_ptr<ChunkStorage>>* incoming=nullptr);
     std::unique_ptr<CompoundTag> inventory=std::make_unique<CompoundTag>();
     std::unique_ptr<CompoundTag> enderInventory=std::make_unique<CompoundTag>();

@@ -7,13 +7,25 @@
 #include "LiquidSurface.h"
 #include "LiquidFlow.h"
 #include "BiomeTint.h"
+#include <array>
 #include <cmath>
+#include <utility>
 #include <stdexcept>
 namespace console {
 namespace {
 bool waterBlock(Block b){return b==8 || b==9;}
 bool lavaBlock(Block b){return b==10 || b==11;}
 bool sameLiquid(Block a,Block b){return (waterBlock(a) && waterBlock(b)) || (lavaBlock(a) && lavaBlock(b));}
+// StemTile::getColor with the colours.xml Tile_StemMin/Max. The source
+// expression is kept as written: `(max>>16)&0xFF - (min>>16)&0xFF` parses as
+// `(max>>16) & (0xFF - (min>>16)) & 0xFF`.
+int stemColour(int data){
+    const unsigned int minColour=0x00ff00,maxColour=0xe0c71c;
+    const unsigned char red=((minColour>>16)&0xFF) + (( (maxColour>>16)&0xFF - (minColour>>16)&0xFF)*( data/7.0f));
+    const unsigned char green=((minColour>>8)&0xFF) + (( (maxColour>>8)&0xFF - (minColour>>8)&0xFF)*( data/7.0f));
+    const unsigned char blue=((minColour)&0xFF) + (( (maxColour)&0xFF - (minColour)&0xFF)*( data/7.0f));
+    return red<<16 | green<<8 | blue;
+}
 }
 TerrainMesh buildTerrainMesh(const World& world) {
     auto blocks=world.blockSnapshot();
@@ -118,6 +130,64 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
             }
             continue;
         }
+        // TileRenderer::tesselateRowInWorld (crops, carrots, potatoes, nether
+        // wart) and tesselateStemInWorld, drawn a sixteenth low.
+        if(id==59 || id==115 || id==141 || id==142 || id==104 || id==105){
+            const int light=world.renderLight(x,y,z);
+            const float lu=(((light>>4)&15)+.5f)/16,lv=(((light>>20)&15)+.5f)/16;
+            const float fy=y-1.f/16;
+            // One face with the tile's u0..u1, v0..v1 from the top of the icon.
+            auto face=[&](int tile,const std::array<std::array<float,3>,4>& p,float r,float g,float bl,
+                          float u0,float u1,float vHeight){
+                const float us[]{u0,u0,u1,u1},vs[]{0,vHeight,vHeight,0};
+                for(int k:{0,1,2,0,2,3})
+                    mesh.opaque.push_back({x+p[k][0],fy+p[k][1],z+p[k][2],(tile%16+us[k]*.998f+.001f)/16,
+                                           (tile/16+vs[k]*.998f+.001f)/16,r,g,bl,1,lu,lv});
+            };
+            if(id==104 || id==105){
+                const int colour=stemColour(data);
+                const float r=((colour>>16)&255)/255.f,g=((colour>>8)&255)/255.f,bl=(colour&255)/255.f;
+                // StemTile::getConnectDir: a ripe stem bends toward its fruit.
+                const int fruit=id==104?86:103;
+                int dir=-1;
+                if(data>=7){
+                    if(blockAt(x-1,y,z)==fruit)dir=0;else if(blockAt(x+1,y,z)==fruit)dir=1;
+                    else if(blockAt(x,y,z-1)==fruit)dir=2;else if(blockAt(x,y,z+1)==fruit)dir=3;
+                }
+                const float shapeY1=(data*2+2)/16.f,h=dir<0?shapeY1:.5f;
+                // tesselateStemTexture: two crossed planes, both sides, cut at h.
+                const float a=.05f,c=.95f;
+                face(111,{{{a,h,a},{a,0,a},{c,0,c},{c,h,c}}},r,g,bl,0,1,h);
+                face(111,{{{c,h,c},{c,0,c},{a,0,a},{a,h,a}}},r,g,bl,0,1,h);
+                face(111,{{{a,h,c},{a,0,c},{c,0,a},{c,h,a}}},r,g,bl,0,1,h);
+                face(111,{{{c,h,a},{c,0,a},{a,0,c},{a,h,c}}},r,g,bl,0,1,h);
+                if(dir>=0){
+                    // tesselateStemDirTexture: the bent icon toward the fruit.
+                    float u0=0,u1=1;
+                    if((dir+1)/2%2==1)std::swap(u0,u1);
+                    const float hh=shapeY1;
+                    if(dir<2){
+                        face(127,{{{0,hh,.5f},{0,0,.5f},{1,0,.5f},{1,hh,.5f}}},r,g,bl,u0,u1,1);
+                        face(127,{{{1,hh,.5f},{1,0,.5f},{0,0,.5f},{0,hh,.5f}}},r,g,bl,u1,u0,1);
+                    }else{
+                        face(127,{{{.5f,hh,1},{.5f,0,1},{.5f,0,0},{.5f,hh,0}}},r,g,bl,u0,u1,1);
+                        face(127,{{{.5f,hh,0},{.5f,0,0},{.5f,0,1},{.5f,hh,1}}},r,g,bl,u1,u0,1);
+                    }
+                }
+            }else{
+                // tesselateRowTexture: four planes a quarter in from each side, both faces.
+                const int tile=textureTile(b,0,data);
+                for(float px:{.25f,.75f}){
+                    face(tile,{{{px,1,0},{px,0,0},{px,0,1},{px,1,1}}},1,1,1,0,1,1);
+                    face(tile,{{{px,1,1},{px,0,1},{px,0,0},{px,1,0}}},1,1,1,0,1,1);
+                }
+                for(float pz:{.25f,.75f}){
+                    face(tile,{{{0,1,pz},{0,0,pz},{1,0,pz},{1,1,pz}}},1,1,1,0,1,1);
+                    face(tile,{{{1,1,pz},{1,0,pz},{0,0,pz},{0,1,pz}}},1,1,1,0,1,1);
+                }
+            }
+            continue;
+        }
         if(b==65 && data>=2 && data<=5){
             const auto quad=consoleLadderQuad(data);const int light=world.renderLight(x,y,z);
             const float lu=(((light>>4)&15)+.5f)/16,lv=(((light>>20)&15)+.5f)/16;
@@ -148,6 +218,7 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
             shape.boxes[3]={2.f/16,0,9.f/16,8.f/16,2.f/16,15.f/16};
         }
         if(id==78)shape.boxes[0]={0,0,0,1,2.f*(1+(data&7))/16.f,1};
+        if(id==60)shape.boxes[0]={0,0,0,1,15.f/16,1}; // FarmTile::updateDefaultShape
         if(id==81)shape.boxes[0]={.0625f,0,.0625f,.9375f,1,.9375f};
         if(id==127){
             const float width=(4+2*(data>>2))/16.f,height=(5+2*(data>>2))/16.f;
@@ -159,7 +230,7 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
             case 3:shape.boxes[0]={1.f-width-1.f/16,.75f-height,lo,1.f-1.f/16,.75f,hi};break;
             }
         }
-        const bool partial=consoleIsPartialBlock(b) || id==78 || id==117;
+        const bool partial=consoleIsPartialBlock(b) || id==78 || id==117 || id==60;
         if(partial && id!=78 && id!=117 && id!=118)shape=consoleRenderShape(shapeAccess,x,y,z);
         for(int piece=0;piece<shape.count;++piece){
         const auto& box=shape.boxes[piece];
@@ -168,7 +239,7 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
             auto n=blockAt(x+normals[f][0],y+normals[f][1],z+normals[f][2]);
             if(liquid){
                 if(sameLiquid(n,b) || (f!=0 && (n==Ice || (solid(n) && !consoleIsPartialBlock(n) && n!=Leaves && n!=Glass))))continue;
-            }else if(boundary && solid(n) && !consoleIsPartialBlock(n) && n!=Leaves && n!=Glass)continue;
+            }else if(boundary && solid(n) && !consoleIsPartialBlock(n) && n!=Leaves && n!=Glass && n!=60)continue;
             if((b==Leaves || b==Glass) && n==b)continue;
             const auto faceUV=partial?consoleBoxFaceUV(b,f,data,box):consoleBlockFaceUV(b,f,data);
             int tile=textureTile(b,f,data);

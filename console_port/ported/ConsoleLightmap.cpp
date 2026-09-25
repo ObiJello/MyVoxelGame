@@ -38,6 +38,22 @@ fraction(rain);fraction(thunder);
 
     return br * 0.8f + 0.2f;
 }
+int consoleOldSkyDarken(std::int64_t time,float rain,float thunder,float a,int dimension) {
+fraction(rain);fraction(thunder);
+
+	float td = consoleTimeOfDay(time,a,dimension);
+
+	float br = 1 - (Mth::cos(td * PI * 2) * 2 + 0.5f);
+	if (br < 0.0f) br = 0.0f;
+	if (br > 1.0f) br = 1.0f;
+
+	br = 1 - br;
+
+	br *= 1 - (rain * 5 / 16.0f);
+	br *= 1 - (thunder * 5 / 16.0f);
+	br = 1 - br;
+	return ((int) (br * 11));
+}
 float consoleNightVisionScale(int duration,float a) {
 fraction(a);if(duration < 0)throw std::invalid_argument("Negative night vision duration");
 
