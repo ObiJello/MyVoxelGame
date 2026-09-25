@@ -212,13 +212,36 @@ ENTITY_METHODS = [
     ('Entity', 'getAirSupply'), ('Entity', 'setAirSupply'), ('Entity', 'killed'), ('Entity', 'checkInTile'),
     ('Entity', 'makeStuckInWeb'), ('Entity', 'is'), ('Entity', 'getYHeadRot'), ('Entity', 'setYHeadRot'),
     ('Entity', 'isAttackable'), ('Entity', 'isInvulnerable'), ('Entity', 'copyPosition'),
+    # Mob, its controls, sensing, goals and path finding.
+    ('Level', 'getNearestPlayer(shared_ptr'), ('Level', 'getNearestPlayer(double x, double y'),
+    ('Level', 'getNearestPlayer(double x, double z'), ('Level', 'getNearestAttackablePlayer(shared_ptr'),
+    ('Level', 'getNearestAttackablePlayer(double'), ('Level', 'findPath(shared_ptr<Entity> from, shared_ptr'),
+    ('Level', 'findPath(shared_ptr<Entity> from, int'), ('Level', 'isUnobstructed(AABB *aabb)'),
+    ('Level', 'isUnobstructed(AABB *aabb, shared_ptr'), ('Level', 'containsAnyLiquid_NoLoad'),
+    ('ExperienceOrb', 'getExperienceValue'), ('Entity', 'rideTick'), ('Entity', 'positionRider'), ('Entity', 'getRidingHeight'), ('Entity', 'getRideHeight'),
+    ('Tile', 'isPathfindable'), ('FenceGateTile', 'isPathfindable'), ('FenceTile', 'isPathfindable'),
+    ('LiquidTile', 'isPathfindable'), ('LiquidTileDynamic', 'isPathfindable'), ('LiquidTileStatic', 'isPathfindable'),
+    ('PressurePlateTile', 'isPathfindable'), ('SignTile', 'isPathfindable'), ('TrapDoorTile', 'isPathfindable'),
+    ('WallTile', 'isPathfindable'),
+    ('Pos', '*'), ('Node', '*', ('toString',)), ('BinaryHeap', '*'), ('Path', '*'), ('PathFinder', '*'),
+    ('PathNavigation', '*'), ('LookControl', '*'), ('MoveControl', '*'), ('JumpControl', '*'),
+    ('BodyControl', '*'), ('Sensing', '*'), ('Goal', '*'), ('GoalSelector', '*'),
+    # Mob: not its client lighting, picking and item icons, nor the effect
+    # bookkeeping (no effects reach mobs here; the host's stand-ins).
+    ('Mob', '*', ('getLightColor', 'pick', 'getItemInHandIcon', 'shouldRender', 'tickEffects', 'removeAllEffects',
+                  'getActiveEffects', 'addEffect', 'addEffectNoUpdate', 'canBeAffected', 'isInvertedHealAndHarm',
+                  'removeEffectNoUpdate', 'removeEffect', 'onEffectAdded', 'onEffectUpdated', 'onEffectRemoved')),
+    ('PathfinderMob', '*'), ('RandomPos', '*'),
 ]
 # Static member definitions (one statement each), written before the methods
 # of the same output: (class, member, output).
 STATICS = [(
     'DamageSource', name, 'EntityRules.cpp') for name in (
     'inFire', 'onFire', 'lava', 'inWall', 'drown', 'starve', 'cactus', 'fall', 'outOfWorld', 'genericSource',
-    'explosion', 'controlledExplosion', 'magic', 'dragonbreath', 'wither', 'anvil', 'fallingBlock')]
+    'explosion', 'controlledExplosion', 'magic', 'dragonbreath', 'wither', 'anvil', 'fallingBlock')] + [
+    ('MoveControl', 'MIN_SPEED', 'EntityRules.cpp'), ('MoveControl', 'MIN_SPEED_SQR', 'EntityRules.cpp'),
+    ('BodyControl', 'maxClampAngle', 'EntityRules.cpp'), ('Mob', 'MIN_MOVEMENT_DISTANCE', 'EntityRules.cpp'),
+    ('RandomPos', 'tempDir', 'EntityRules.cpp')]
 # Enums copied whole from their headers into .inc files the host includes:
 # (header, enum name or None for the whole header, output).
 ENUMS = [
@@ -226,7 +249,16 @@ ENUMS = [
     ('SoundTypes.h', 'eSOUND_TYPE', 'SoundTypes.inc'),
     ('ParticleTypes.h', None, 'ParticleTypes.inc'),
     ('ChatPacket.h', 'EChatPacketMessage', 'ChatMessages.inc'),
+    ('../Minecraft.Client/Textures.h', '_TEXTURE_NAME', 'TextureNames.inc'),
 ]
+# Headers whose class declarations the host includes as they are
+# (SourceClasses.inc), in dependency order.
+HEADERS = ['ArrayWithLength', 'EntityEvent', 'MobType', 'Control', 'LookControl', 'MoveControl', 'JumpControl',
+           'BodyControl', 'Sensing', 'Goal', 'GoalSelector', 'Pos', 'Node', 'BinaryHeap', 'Path', 'PathFinder',
+           'PathNavigation', 'Mob', 'PathfinderMob', 'RandomPos']
+# Forward declarations the copies drop (the host has these as aliases).
+HEADER_SKIP_FORWARD = {'LevelSource', 'CompoundTag', 'Vec3', 'AABB', 'Material', 'Random', 'LightLayer', 'Facing',
+                       'Direction', 'Mth', 'HitResult'}
 # Classes whose header constants (static const int / static bool) are written
 # to TileConstants.inc as TILE_CONSTANTS_<Class> for the stand-in classes.
 CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile',
@@ -264,6 +296,58 @@ def method(cls, name):
             return text[start:end]
 
 
+def comment_spans(text):
+    spans = [(m.start(), m.end()) for m in re.finditer(r'/\*.*?\*/', text, re.S)]
+    return lambda pos: any(a <= pos < b for a, b in spans)
+
+
+def all_methods(cls, exclude=()):
+    """Every method Class.cpp defines, in file order, except `exclude`."""
+    text = source(cls)
+    in_comment = comment_spans(text)
+    out = []
+    for m in re.finditer(r'^(?:\S[^\n]*?\b)?' + re.escape(cls) + r'::(?:\w+::)?(~?\w+)\s*\(', text, re.M):
+        line_start = text.rfind('\n', 0, m.start()) + 1
+        name_at = text.index(cls + '::', m.start())
+        if text[line_start:m.start() + 2].lstrip().startswith('//') or in_comment(name_at):
+            continue
+        if m[1] in exclude:
+            continue
+        opening = text.index('{', m.end())
+        if ';' in text[m.end():opening] and ':' not in text[m.end():opening]:
+            continue
+        depth, end = 0, opening
+        while True:
+            depth += (text[end] == '{') - (text[end] == '}')
+            end += 1
+            if depth == 0:
+                break
+        out.append(text[line_start:end])
+    if not out:
+        raise SystemExit(f'{cls}: no methods')
+    return out
+
+
+def header_classes(names):
+    """The listed headers' declarations, without includes, pragmas and forward
+    declarations, for the host to include inside console::sim."""
+    out = ['// Generated by tools/extract_tile_ticks.py: class declarations copied from',
+           '// source_full/Minecraft.World headers. Do not edit by hand.']
+    for name in names:
+        text = FILES[(name + '.h').lower()].read_text(encoding='utf-8-sig').replace('\r\n', '\n')
+        lines = []
+        for line in text.split('\n'):
+            bare = line.strip()
+            if bare.startswith('#pragma') or bare.startswith('#include') or bare == 'using namespace std;':
+                continue
+            if re.fullmatch(r'class (\w+);', bare) and bare[6:-1] in HEADER_SKIP_FORWARD:
+                continue
+            lines.append(line)
+        out.append(f'// {name}.h')
+        out.append('\n'.join(lines).strip() + '\n')
+    return '\n'.join(out)
+
+
 def static(cls, member):
     text = source(cls)
     matches = list(re.finditer(r'^[^\n]*\b' + re.escape(f'{cls}::{member}') + r'\s*=[^;]*;', text, re.M))
@@ -273,9 +357,14 @@ def static(cls, member):
 
 
 def header_enum(header, name):
-    text = FILES[header.lower()].read_text(encoding='utf-8-sig').replace('\r\n', '\n')
+    path = (SRC / header) if '/' in header else FILES[header.lower()]
+    text = path.read_text(encoding='utf-8-sig').replace('\r\n', '\n')
     if name is None:
         return text.replace('#pragma once\n', '')
+    typedef = re.search(r'typedef enum ' + re.escape(name) + r'\b', text)
+    if typedef:
+        end = re.search(r'\}\s*\w+;', text[typedef.start():])
+        return text[typedef.start():typedef.start() + end.end()] + '\n'
     start = re.search(r'enum ' + re.escape(name) + r'\b', text)
     if not start:
         raise SystemExit(f'{header}: no enum {name}')
@@ -319,9 +408,13 @@ def rules_file(methods, output):
             out.append(static(cls, member))
     if any(target == output for _, _, target in STATICS):
         out.append('')
-    for cls, name in methods:
+    for entry in methods:
+        cls, name = entry[0], entry[1]
         out.append(f'// {SOURCE_FILE.get(cls, cls + ".cpp")}')
-        out.append(method(cls, name))
+        if name == '*':
+            out.append('\n\n'.join(all_methods(cls, entry[2] if len(entry) > 2 else ())))
+        else:
+            out.append(method(cls, name))
         out.append('')
     out.append('}')
     return '\n'.join(out) + '\n'
@@ -353,6 +446,7 @@ def expected():
         constants.append(f'#define TILE_CONSTANTS_{cls} \\\n    ' + ' \\\n    '.join(lines) + '\n')
     files = {'RenderShapes.inc': render_shapes(), 'TileTickRules.cpp': rules, 'EntityRules.cpp': rules_file(ENTITY_METHODS, 'EntityRules.cpp'),
              'TileIds.inc': ids, 'ItemIds.inc': item_ids, 'TileConstants.inc': ''.join(constants)}
+    files['SourceClasses.inc'] = header_classes(HEADERS)
     for header, name, output in ENUMS:
         files[output] = f'// Generated by tools/extract_tile_ticks.py from {header}.\n' + header_enum(header, name)
     return files

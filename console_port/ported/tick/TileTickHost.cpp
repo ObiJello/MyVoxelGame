@@ -111,6 +111,7 @@ std::unique_ptr<Tile> make(std::string_view cls){
     if(cls=="LiquidTileStatic")return std::make_unique<LiquidTileStatic>();
     if(cls=="StairTile")return std::make_unique<StairTile>();
     if(cls=="FenceTile")return std::make_unique<FenceTile>();
+    if(cls=="WallTile")return std::make_unique<WallTile>();
     if(cls=="RedStoneDustTile")return std::make_unique<RedStoneDustTile>();
     if(cls=="NotGateTile")return std::make_unique<NotGateTile>();
     if(cls=="LeverTile")return std::make_unique<LeverTile>();
@@ -152,6 +153,8 @@ void initializeTiles(){
 #include "RenderShapes.inc"
 #undef CONSOLE_RENDER_SHAPE
             tile.material=materialOf(properties->material);
+            // IceTile::IceTile: friction = 0.98f.
+            if(properties->className==std::string_view("IceTile"))tile.friction=0.98f;
             tile.ticking=properties->ticking;
             tile.cubeShaped=properties->cubeShaped;
             tile.solidRender=properties->solid;
@@ -443,4 +446,20 @@ void Sapling::growTree(Level* level,int x,int y,int z,Random* random){
         }
     }
 }
+}
+
+namespace console::sim {
+// The Mob methods EntityRules.cpp leaves out. Lighting, picking, icons and
+// culling are the client renderer's (the port draws mobs its own way); mob
+// effects never reach a mob here (no splash potions or effect sources), so
+// the effect bookkeeping has nothing to do.
+int Mob::getLightColor(float){return 0;}
+Icon* Mob::getItemInHandIcon(shared_ptr<ItemInstance>,int){return nullptr;}
+bool Mob::shouldRender(Vec3*){return true;}
+void Mob::tickEffects(){}
+bool Mob::canBeAffected(MobEffectInstance*){return true;}
+bool Mob::isInvertedHealAndHarm(){return false;}
+void Mob::onEffectAdded(MobEffectInstance*){}
+void Mob::onEffectUpdated(MobEffectInstance*){}
+void Mob::onEffectRemoved(MobEffectInstance*){}
 }

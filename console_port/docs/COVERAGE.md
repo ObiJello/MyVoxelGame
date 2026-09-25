@@ -8,37 +8,37 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 | Subsystem | Classes | Ported | Partial | Missing |
 |---|---:|---:|---:|---:|
-| Main loop and levels | 53 | 7 | 23 | 23 |
+| Main loop and levels | 53 | 7 | 25 | 21 |
 | Player and game modes | 12 | 3 | 4 | 5 |
 | Entities | 67 | 0 | 48 | 19 |
-| Mob AI | 58 | 0 | 1 | 57 |
+| Mob AI | 58 | 0 | 11 | 47 |
 | Blocks | 110 | 0 | 105 | 5 |
 | Block entities | 13 | 0 | 7 | 6 |
-| Items | 63 | 0 | 29 | 34 |
+| Items | 63 | 0 | 30 | 33 |
 | Crafting | 14 | 0 | 11 | 3 |
 | Menus and containers | 55 | 1 | 15 | 39 |
-| Enchanting | 24 | 0 | 2 | 22 |
-| Effects | 5 | 0 | 2 | 3 |
+| Enchanting | 24 | 0 | 3 | 21 |
+| Effects | 5 | 0 | 3 | 2 |
 | World generation | 118 | 57 | 11 | 50 |
 | Dimensions | 4 | 0 | 2 | 2 |
 | Saves, NBT and IO | 47 | 12 | 7 | 28 |
-| Rendering | 156 | 0 | 30 | 126 |
+| Rendering | 156 | 0 | 31 | 125 |
 | Audio | 3 | 0 | 0 | 3 |
 | Screens and UI | 195 | 0 | 17 | 178 |
 | Tutorial | 29 | 26 | 2 | 1 |
-| Stats and achievements | 14 | 2 | 2 | 10 |
+| Stats and achievements | 14 | 2 | 3 | 9 |
 | Commands | 9 | 0 | 0 | 9 |
 | Networking | 96 | 0 | 5 | 91 |
-| Other | 102 | 11 | 29 | 62 |
-| **All** | **1247** | **119** | **352** | **776** |
+| Other | 102 | 11 | 31 | 60 |
+| **All** | **1247** | **119** | **371** | **757** |
 
 ## Main loop and levels
 
 **Ported (7):** HellRandomLevelSource, LevelData, LevelSettings, LevelType, RandomLevelSource, TheEndLevelRandomLevelSource, TickNextTickData
 
-**Partial (23):** ChunkPos, DerivedLevelData, EmptyLevelChunk, Explosion, FlatLevelSource, GameRenderer, Level, LevelChunk, LevelGenerationOptions, LevelRenderer, LevelRules, LevelRuleset, LevelStorage, McRegionLevelStorage, Minecraft, MinecraftServer, MobSpawner, MultiPlayerChunkCache, Options, ServerLevel, TileEventData, TilePos, Timer
+**Partial (25):** ChunkPos, DerivedLevelData, EmptyLevelChunk, Explosion, FlatLevelSource, GameRenderer, Level, LevelChunk, LevelGenerationOptions, LevelRenderer, LevelRules, LevelRuleset, LevelStorage, McRegionLevelStorage, Minecraft, MinecraftServer, MobCategory, MobSpawner, MultiPlayerChunkCache, MultiPlayerLevel, Options, ServerLevel, TileEventData, TilePos, Timer
 
-**Missing (23):** CustomLevelSource, DemoLevel, DerivedServerLevel, DirectoryLevelStorage, DirectoryLevelStorageSource, DistanceChunkSorter, HellFlatLevelSource, LevelConflictException, LevelGenerators, LevelStorageProfilerDecorator, LevelSummary, McRegionLevelStorageSource, MemoryLevelStorage, MemoryLevelStorageSource, MobCategory, MockedLevelStorage, MultiPlayerLevel, PlayerChunkMap, PortalForcer, ReadOnlyChunkCache, ServerChunkCache, ServerLevelListener, WaterLevelChunk
+**Missing (21):** CustomLevelSource, DemoLevel, DerivedServerLevel, DirectoryLevelStorage, DirectoryLevelStorageSource, DistanceChunkSorter, HellFlatLevelSource, LevelConflictException, LevelGenerators, LevelStorageProfilerDecorator, LevelSummary, McRegionLevelStorageSource, MemoryLevelStorage, MemoryLevelStorageSource, MockedLevelStorage, PlayerChunkMap, PortalForcer, ReadOnlyChunkCache, ServerChunkCache, ServerLevelListener, WaterLevelChunk
 
 ## Player and game modes
 
@@ -56,9 +56,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Mob AI
 
-**Partial (1):** Path
+**Partial (11):** BodyControl, Goal, GoalSelector, JumpControl, LookControl, MoveControl, Path, PathFinder, PathNavigation, RandomPos, Sensing
 
-**Missing (57):** ArrowAttackGoal, AvoidPlayerGoal, BegGoal, BodyControl, BreakDoorGoal, BreedGoal, ControlledByPlayerGoal, DefendVillageTargetGoal, DoorInteractGoal, EatTileGoal, FleeSunGoal, FloatGoal, FollowOwnerGoal, FollowParentGoal, Goal, GoalSelector, HurtByTargetGoal, InteractGoal, JumpControl, LeapAtTargetGoal, LookAtPlayerGoal, LookAtTradingPlayerGoal, LookControl, MakeLoveGoal, MeleeAttackGoal, MoveControl, MoveIndoorsGoal, MoveThroughVillageGoal, MoveTowardsRestrictionGoal, MoveTowardsTargetGoal, NearestAttackableTargetGoal, NonTameRandomTargetGoal, OcelotSitOnTileGoal, OfferFlowerGoal, OpenDoorGoal, OwnerHurtByTargetGoal, OwnerHurtTargetGoal, OzelotAttackGoal, PanicGoal, PathFinder, PathNavigation, PlayGoal, RandomLookAroundGoal, RandomPos, RandomStrollGoal, RestrictOpenDoorGoal, RestrictSunGoal, Sensing, SitGoal, SlotProgressControl, SwellGoal, TakeFlowerGoal, TargetGoal, TemptGoal, TradeWithPlayerGoal, UIControl, XUI_SettingsControl
+**Missing (47):** ArrowAttackGoal, AvoidPlayerGoal, BegGoal, BreakDoorGoal, BreedGoal, ControlledByPlayerGoal, DefendVillageTargetGoal, DoorInteractGoal, EatTileGoal, FleeSunGoal, FloatGoal, FollowOwnerGoal, FollowParentGoal, HurtByTargetGoal, InteractGoal, LeapAtTargetGoal, LookAtPlayerGoal, LookAtTradingPlayerGoal, MakeLoveGoal, MeleeAttackGoal, MoveIndoorsGoal, MoveThroughVillageGoal, MoveTowardsRestrictionGoal, MoveTowardsTargetGoal, NearestAttackableTargetGoal, NonTameRandomTargetGoal, OcelotSitOnTileGoal, OfferFlowerGoal, OpenDoorGoal, OwnerHurtByTargetGoal, OwnerHurtTargetGoal, OzelotAttackGoal, PanicGoal, PlayGoal, RandomLookAroundGoal, RandomStrollGoal, RestrictOpenDoorGoal, RestrictSunGoal, SitGoal, SlotProgressControl, SwellGoal, TakeFlowerGoal, TargetGoal, TemptGoal, TradeWithPlayerGoal, UIControl, XUI_SettingsControl
 
 ## Blocks
 
@@ -74,9 +74,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Items
 
-**Partial (29):** AnvilTileItem, BowlFoodItem, BucketItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MinecartItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, RedStoneItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem
+**Partial (30):** AnvilTileItem, BowlFoodItem, BucketItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MinecartItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, RedStoneItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem, WeighedTreasure
 
-**Missing (34):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, PistonTileItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem, WeighedTreasure
+**Missing (33):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, PistonTileItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem
 
 ## Crafting
 
@@ -94,15 +94,15 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Enchanting
 
-**Partial (2):** Enchantment, ProtectionEnchantment
+**Partial (3):** Enchantment, EnchantmentHelper, ProtectionEnchantment
 
-**Missing (22):** AddEnchantmentRuleDefinition, ArrowDamageEnchantment, ArrowFireEnchantment, ArrowInfiniteEnchantment, ArrowKnockbackEnchantment, DamageEnchantment, DigDurabilityEnchantment, DiggingEnchantment, EnchantmentCategory, EnchantmentHelper, EnchantmentInstance, FireAspectEnchantment, KnockbackEnchantment, LootBonusEnchantment, OxygenEnchantment, ThornsEnchantment, UntouchingEnchantment, WaterWorkerEnchantment, XUI_Ctrl_EnchantButton, XUI_Ctrl_EnchantmentBook, XUI_Ctrl_EnchantmentButtonText, XUI_Scene_Enchant
+**Missing (21):** AddEnchantmentRuleDefinition, ArrowDamageEnchantment, ArrowFireEnchantment, ArrowInfiniteEnchantment, ArrowKnockbackEnchantment, DamageEnchantment, DigDurabilityEnchantment, DiggingEnchantment, EnchantmentCategory, EnchantmentInstance, FireAspectEnchantment, KnockbackEnchantment, LootBonusEnchantment, OxygenEnchantment, ThornsEnchantment, UntouchingEnchantment, WaterWorkerEnchantment, XUI_Ctrl_EnchantButton, XUI_Ctrl_EnchantmentBook, XUI_Ctrl_EnchantmentButtonText, XUI_Scene_Enchant
 
 ## Effects
 
-**Partial (2):** MobEffect, PotionBrewing
+**Partial (3):** MobEffect, MobEffectInstance, PotionBrewing
 
-**Missing (3):** InstantenousMobEffect, MobEffectInstance, XUI_Ctrl_MobEffect
+**Missing (2):** InstantenousMobEffect, XUI_Ctrl_MobEffect
 
 ## World generation
 
@@ -128,9 +128,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Rendering
 
-**Partial (30):** Camera, ChestModel, ChestRenderer, Chunk, EnchantTableRenderer, EndermanModel, FallingTileRenderer, GhastModel, GhastRenderer, ItemFrameRenderer, ItemRenderer, Lighting, MobRenderer, MushroomCowRenderer, OzelotModel, PaintingRenderer, PistonPieceRenderer, PreStitchedTextureMap, SilverfishModel, SimpleIcon, SkeletonHeadModel, SkullTileRenderer, SlimeModel, StitchedTexture, Tesselator, Texture, TileRenderer, TntRenderer, VillagerModel, WolfModel
+**Partial (31):** Camera, ChestModel, ChestRenderer, Chunk, EnchantTableRenderer, EndermanModel, FallingTileRenderer, GhastModel, GhastRenderer, ItemFrameRenderer, ItemRenderer, Lighting, MobRenderer, MushroomCowRenderer, OzelotModel, PaintingRenderer, PistonPieceRenderer, PreStitchedTextureMap, SilverfishModel, SimpleIcon, SkeletonHeadModel, SkullTileRenderer, SlimeModel, StitchedTexture, Tesselator, Texture, Textures, TileRenderer, TntRenderer, VillagerModel, WolfModel
 
-**Missing (126):** AbstractTexturePack, AllowAllCuller, ArrowRenderer, BlazeModel, BlazeRenderer, BoatModel, BoatRenderer, BookModel, BreakingItemParticle, BubbleParticle, ChickenModel, ChickenRenderer, ClockTexture, CompassTexture, CowModel, CowRenderer, CreeperModel, CreeperRenderer, CritParticle, CritParticle2, DLCTextureFile, DLCTexturePack, DefaultRenderer, DefaultTexturePack, DirtyChunkSorter, DragonBreathParticle, DragonModel, DripParticle, EchantmentTableParticle, EnderChestRenderer, EnderCrystalModel, EnderCrystalRenderer, EnderDragonRenderer, EnderParticle, EndermanRenderer, EntityRenderer, EntityTileRenderer, ExperienceOrbRenderer, ExplodeParticle, FileTexturePack, FireballRenderer, FishingHookRenderer, FlameParticle, FolderTexturePack, Font, FootstepParticle, Frustum, FrustumCuller, FrustumData, GiantMobRenderer, GuiParticle, GuiParticles, HeartParticle, HttpTexture, HugeExplosionParticle, HugeExplosionSeedParticle, HumanoidMobRenderer, HumanoidModel, ItemInHandRenderer, ItemSpriteRenderer, LargeChestModel, LavaParticle, LavaSlimeModel, LavaSlimeRenderer, LightningBoltRenderer, MemTexture, MemoryTracker, MinecartModel, MinecartRenderer, MobSkinMemTextureProcessor, MobSkinTextureProcessor, MobSpawnerRenderer, NetherPortalParticle, NoteParticle, OzelotRenderer, ParticleEngine, PigModel, PigRenderer, PlayerCloudParticle, PlayerRenderer, ProgressRenderer, QuadrupedModel, RedDustParticle, SheepFurModel, SheepModel, SheepRenderer, SignModel, SignRenderer, SilverfishRenderer, SkeletonModel, SlimeRenderer, SmokeParticle, SnowManModel, SnowManRenderer, SnowShovelParticle, SpellParticle, SpiderModel, SpiderRenderer, SplashParticle, SquidModel, SquidRenderer, SuspendedParticle, SuspendedTownParticle, TakeAnimationParticle, TerrainParticle, TextureHolder, TextureManager, TextureMap, TexturePack, TexturePackRepository, Textures, TheEndPortalRenderer, TileEntityRenderer, UIBitmapFont, UIFontData, UITTFFont, ViewportCuller, VillagerGolemModel, VillagerGolemRenderer, VillagerRenderer, VillagerZombieModel, WaterDropParticle, WolfRenderer, XUI_DebugSetCamera, ZombieModel, ZombieRenderer
+**Missing (125):** AbstractTexturePack, AllowAllCuller, ArrowRenderer, BlazeModel, BlazeRenderer, BoatModel, BoatRenderer, BookModel, BreakingItemParticle, BubbleParticle, ChickenModel, ChickenRenderer, ClockTexture, CompassTexture, CowModel, CowRenderer, CreeperModel, CreeperRenderer, CritParticle, CritParticle2, DLCTextureFile, DLCTexturePack, DefaultRenderer, DefaultTexturePack, DirtyChunkSorter, DragonBreathParticle, DragonModel, DripParticle, EchantmentTableParticle, EnderChestRenderer, EnderCrystalModel, EnderCrystalRenderer, EnderDragonRenderer, EnderParticle, EndermanRenderer, EntityRenderer, EntityTileRenderer, ExperienceOrbRenderer, ExplodeParticle, FileTexturePack, FireballRenderer, FishingHookRenderer, FlameParticle, FolderTexturePack, Font, FootstepParticle, Frustum, FrustumCuller, FrustumData, GiantMobRenderer, GuiParticle, GuiParticles, HeartParticle, HttpTexture, HugeExplosionParticle, HugeExplosionSeedParticle, HumanoidMobRenderer, HumanoidModel, ItemInHandRenderer, ItemSpriteRenderer, LargeChestModel, LavaParticle, LavaSlimeModel, LavaSlimeRenderer, LightningBoltRenderer, MemTexture, MemoryTracker, MinecartModel, MinecartRenderer, MobSkinMemTextureProcessor, MobSkinTextureProcessor, MobSpawnerRenderer, NetherPortalParticle, NoteParticle, OzelotRenderer, ParticleEngine, PigModel, PigRenderer, PlayerCloudParticle, PlayerRenderer, ProgressRenderer, QuadrupedModel, RedDustParticle, SheepFurModel, SheepModel, SheepRenderer, SignModel, SignRenderer, SilverfishRenderer, SkeletonModel, SlimeRenderer, SmokeParticle, SnowManModel, SnowManRenderer, SnowShovelParticle, SpellParticle, SpiderModel, SpiderRenderer, SplashParticle, SquidModel, SquidRenderer, SuspendedParticle, SuspendedTownParticle, TakeAnimationParticle, TerrainParticle, TextureHolder, TextureManager, TextureMap, TexturePack, TexturePackRepository, TheEndPortalRenderer, TileEntityRenderer, UIBitmapFont, UIFontData, UITTFFont, ViewportCuller, VillagerGolemModel, VillagerGolemRenderer, VillagerRenderer, VillagerZombieModel, WaterDropParticle, WolfRenderer, XUI_DebugSetCamera, ZombieModel, ZombieRenderer
 
 ## Audio
 
@@ -154,9 +154,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 **Ported (2):** ChangeStateConstraint, StatTask
 
-**Partial (2):** Achievements, GenericStats
+**Partial (3):** Achievements, GenericStats, Stat
 
-**Missing (10):** Achievement, AchievementPopup, CommonStats, DurangoStats, GeneralStat, ItemStat, Stat, Stats, StatsCounter, StatsSyncher
+**Missing (9):** Achievement, AchievementPopup, CommonStats, DurangoStats, GeneralStat, ItemStat, Stats, StatsCounter, StatsSyncher
 
 ## Commands
 
@@ -172,6 +172,6 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 **Ported (11):** AABB, Direction, Facing, HitResult, IntCache, JavaMath, Material, MaterialColor, Mth, Random, Vec3
 
-**Partial (29):** AddItemRuleDefinition, ApplySchematicRuleDefinition, Buffer, Class, CollectItemRuleDefinition, Color, ColourTable, Command, Cube, DLCManager, DamageSource, EntityDamageSource, EntityIO, EntityRenderDispatcher, IndirectEntityDamageSource, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, SynchedEntityData, TileEntity, User, Vertex
+**Partial (31):** AddItemRuleDefinition, ApplySchematicRuleDefinition, BinaryHeap, Buffer, Class, CollectItemRuleDefinition, Color, ColourTable, Command, Cube, DLCManager, DamageSource, EntityDamageSource, EntityIO, EntityRenderDispatcher, IndirectEntityDamageSource, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Node, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, SynchedEntityData, TileEntity, User, Vertex
 
-**Missing (62):** BinaryHeap, BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, Creature, DLCPack, DemoUser, DoorInfo, Enemy, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Node, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs
+**Missing (60):** BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, Creature, DLCPack, DemoUser, DoorInfo, Enemy, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs

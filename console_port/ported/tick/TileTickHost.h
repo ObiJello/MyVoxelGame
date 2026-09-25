@@ -15,6 +15,9 @@
 #include "AABB.h"
 #include "CompoundTag.h"
 #include "FoodConstants.h"
+#include "BasicTypeContainers.h"
+#include <cassert>
+#include <cstring>
 #include <map>
 #include <cmath>
 #include <cstdint>
@@ -62,7 +65,7 @@ using LPVOID=void*;
 inline DWORD TlsAlloc(){static DWORD next=1;return next++;}
 inline void*& tlsSlot(DWORD index){static thread_local void* slots[16]{};return slots[index%16];}
 inline void TlsSetValue(DWORD index,void* value){tlsSlot(index)=value;}
-struct Abilities { bool instabuild=false; };
+struct Abilities { bool instabuild=false,invulnerable=false,flying=false; };
 using AABBList=std::vector<AABB*>;
 typedef unsigned char byte;
 #define PI (3.141592654f)
@@ -257,6 +260,14 @@ protected:
     int getSmallId(){return entityCounter++;}
     void freeSmallId(int){}
 public:
+    // 4J's extra wandering for protected mobs runs only for the server
+    // thread's small ids, which the port does not use.
+    virtual bool isDespawnProtected(){return false;}
+    void considerForExtraWandering(bool){}
+    bool isExtraWanderingEnabled(){return false;}
+    int getWanderingQuadrant(){return 0;}
+protected:
+public:
     shared_ptr<SynchedEntityData> getEntityData();
 protected:
     virtual void resetPos();
@@ -354,6 +365,10 @@ protected:
     bool checkInTile(double x,double y,double z);
 public:
     virtual void makeStuckInWeb();
+    virtual void rideTick();
+    virtual void positionRider();
+    virtual double getRidingHeight();
+    virtual double getRideHeight();
     virtual bool canCreateParticles(){return true;}
     virtual bool is(shared_ptr<Entity> other);
     virtual float getYHeadRot();
@@ -363,14 +378,85 @@ public:
     virtual void copyPosition(shared_ptr<Entity> target);
     unsigned int getAnimOverrideBitmask(){return m_uiAnimOverrideBitmask;}
 };
-// Mob: the facing (Entity::yRot) pressure plates and buttons look for;
-// the rest of the Mob port comes with the mob AI.
-class Mob:public Entity {
+// What Mob.h names beyond the entity: mob effects (only their ids and the
+// map entries here; no effect reaches a mob in the port), icons and textures
+// (client only), the player's inventory (for the looting bonus).
+typedef unsigned char BYTE;
+using ::Short;
+#include "TextureNames.inc"
+class Icon;
+class HitResult;
+class Inventory;
+class MobEffect {
 public:
-    using Entity::Entity;
-    eINSTANCEOF GetType()override{return eTYPE_MOB;}
-    virtual void finalizeMobSpawn(){}
+    int id;
+    explicit MobEffect(int id):id(id){}
+    int getId(){return id;}
+    // MobEffect.h's effects (by id).
+    static MobEffect *movementSpeed,*movementSlowdown,*digSpeed,*digSlowdown,*damageBoost,*heal,*harm,*jump,*confusion,*regeneration,*damageResistance,*fireResistance,*waterBreathing,*invisibility,*blindness,*nightVision,*hunger,*weakness,*poison,*wither;
 };
+inline MobEffect* MobEffect::movementSpeed=new MobEffect(1);
+inline MobEffect* MobEffect::movementSlowdown=new MobEffect(2);
+inline MobEffect* MobEffect::digSpeed=new MobEffect(3);
+inline MobEffect* MobEffect::digSlowdown=new MobEffect(4);
+inline MobEffect* MobEffect::damageBoost=new MobEffect(5);
+inline MobEffect* MobEffect::heal=new MobEffect(6);
+inline MobEffect* MobEffect::harm=new MobEffect(7);
+inline MobEffect* MobEffect::jump=new MobEffect(8);
+inline MobEffect* MobEffect::confusion=new MobEffect(9);
+inline MobEffect* MobEffect::regeneration=new MobEffect(10);
+inline MobEffect* MobEffect::damageResistance=new MobEffect(11);
+inline MobEffect* MobEffect::fireResistance=new MobEffect(12);
+inline MobEffect* MobEffect::waterBreathing=new MobEffect(13);
+inline MobEffect* MobEffect::invisibility=new MobEffect(14);
+inline MobEffect* MobEffect::blindness=new MobEffect(15);
+inline MobEffect* MobEffect::nightVision=new MobEffect(16);
+inline MobEffect* MobEffect::hunger=new MobEffect(17);
+inline MobEffect* MobEffect::weakness=new MobEffect(18);
+inline MobEffect* MobEffect::poison=new MobEffect(19);
+inline MobEffect* MobEffect::wither=new MobEffect(20);
+class MobEffectInstance {
+    int id,duration,amplifier;
+public:
+    MobEffectInstance(int id,int duration,int amplifier):id(id),duration(duration),amplifier(amplifier){}
+    int getId(){return id;}
+    int getDuration(){return duration;}
+    int getAmplifier(){return amplifier;}
+};
+class Level;
+using LevelSource=Level;
+// JavaIntHash.h's IntKeyHash (Java's supplemental hash; unsigned here, where
+// the source's signed int arithmetic overflows) and IntKeyEq.
+struct IntKeyHash {
+    int operator()(const int& k)const{
+        unsigned h=static_cast<unsigned>(k);
+        h+=~(h<<9);
+        h^=h>>14;
+        h+=h<<4;
+        h^=h>>10;
+        return static_cast<int>(h);
+    }
+};
+struct IntKeyEq { bool operator()(const int& x,const int& y)const{return x==y;} };
+// System::arraycopy (java.lang.System's, which copies as if through a temporary).
+template<class T> class arrayWithLength;
+struct System {
+    template<class T>static void arraycopy(arrayWithLength<T> src,unsigned int srcPos,arrayWithLength<T>* dst,unsigned int dstPos,unsigned int length){
+        std::vector<T> copy(src.data+srcPos,src.data+srcPos+length);
+        std::copy(copy.begin(),copy.end(),dst->data+dstPos);
+    }
+};
+#include "SourceClasses.inc"
+// Wolf: only whether it is tame, for Mob::hurt (wolves are not ported yet).
+class Wolf:public Mob {
+public:
+    using Mob::Mob;
+    int getMaxHealth()override{return 8;}
+    bool isTame(){return false;}
+};
+// EnchantmentHelper::getKillingLootBonus: the looting level of the held
+// weapon (enchantments are not applied to kills yet).
+struct EnchantmentHelper { static int getKillingLootBonus(Inventory*){return 0;} };
 // Projectile::shoot's aim for the thrown entities the dispenser makes (they
 // are not ported: the host never lets one be made).
 class Projectile:public Entity {
@@ -415,13 +501,26 @@ struct GenericStats {
     static int InToTheNether(){return 0;}
     static int param_noArgs(){return 0;}
     static int param_InToTheNether(){return 0;}
+    static int killMob(){return 0;}
+    template<class... T>static int param_mobKill(T...){return 0;}
+    static int stayinFrosty(){return 0;}
+    static int param_stayinFrosty(){return 0;}
 };
 class ItemInstance;
 class DispenserTileEntity;
 class Player:public Mob {
 public:
-    Player(){heightOffset=1.62f;}
+    Player():Mob(nullptr){heightOffset=1.62f;}
     eINSTANCEOF GetType()override{return eTYPE_PLAYER;}
+    int getMaxHealth()override{return 20;}
+    Inventory* inventory=nullptr;
+    // Player::getArmorCoverPercentage (the worn armour pieces, which the
+    // host sets) and hasInvisiblePrivilege (a host privilege, off).
+    float armorCover=0;
+    float getArmorCoverPercentage(){return armorCover;}
+    bool hasInvisiblePrivilege(){return false;}
+    // Player::isLocalPlayer: the server's players are not.
+    virtual bool isLocalPlayer(){return false;}
     // The carried item (TntTile::use looks for flint and steel).
     shared_ptr<ItemInstance> selected;
     shared_ptr<ItemInstance> getSelectedItem(){return selected;}
@@ -522,6 +621,14 @@ public:
     }
     shared_ptr<ItemInstance> getItem(){return item;}
 };
+// ExperienceOrb(level, x, y, z, count): the orb a dying mob drops (the rest of
+// the orb is the World's), and its value split.
+class ExperienceOrb:public Entity {
+public:
+    int value;
+    ExperienceOrb(Level*,double x,double y,double z,int count):value(count){this->x=x;this->y=y;this->z=z;}
+    static int getExperienceValue(int maxValue);
+};
 // FallingTile: the entity HeavyTile::checkSlide hands to Level::addEntity.
 class FallingTile:public Entity {
 public:
@@ -608,7 +715,9 @@ public:
     bool isSolidBlockingTileInLoadedChunk(int x,int y,int z,bool valueIfNotLoaded);
     bool isTopSolidBlocking(int x,int y,int z);
     bool mayPlace(int tileId,int x,int y,int z,bool ignoreEntities,int face,shared_ptr<Entity> ignoreEntity);
-    bool isUnobstructed(AABB*,shared_ptr<Entity>){return true;}
+    bool isUnobstructed(AABB* aabb);
+    bool isUnobstructed(AABB* aabb,shared_ptr<Entity> ignore);
+    bool containsAnyLiquid_NoLoad(AABB* box);
     bool getDirectSignal(int x,int y,int z,int dir);
     bool hasDirectSignal(int x,int y,int z);
     bool getSignal(int x,int y,int z,int dir);
@@ -645,6 +754,18 @@ public:
     void playSound(double,double,double,int,float,float){}
     // Level::getTime (the game time) and the entities in a box.
     virtual std::int64_t getTime(){return 0;}
+    // Level::players and the nearest-player queries (the source's).
+    std::vector<shared_ptr<Player>> players;
+    shared_ptr<Player> getNearestPlayer(shared_ptr<Entity> source,double maxDist,double maxYDist=-1);
+    shared_ptr<Player> getNearestPlayer(double x,double y,double z,double maxDist,double maxYDist=-1);
+    shared_ptr<Player> getNearestPlayer(double x,double z,double maxDist);
+    shared_ptr<Player> getNearestAttackablePlayer(shared_ptr<Entity> source,double maxDist);
+    shared_ptr<Player> getNearestAttackablePlayer(double x,double y,double z,double maxDist);
+    // Level::findPath over a Region of the level.
+    Path* findPath(shared_ptr<Entity> from,shared_ptr<Entity> to,float maxDist,bool canPassDoors,bool canOpenDoors,bool avoidWater,bool canFloat);
+    Path* findPath(shared_ptr<Entity> from,int xBest,int yBest,int zBest,float maxDist,bool canPassDoors,bool canOpenDoors,bool avoidWater,bool canFloat);
+    // Level::broadcastEntityEvent: client animations (hurt, death), not ported.
+    void broadcastEntityEvent(shared_ptr<Entity>,byte){}
     enum class EntityClass { Any,Mob,Player,Arrow };
     // The entities in a box, as stand-ins whose move() moves the real one.
     virtual std::vector<shared_ptr<Entity>> entitiesIn(const AABB&,EntityClass){return {};}
@@ -688,7 +809,6 @@ public:
     // MinecraftServer and app stand-ins); set by the host while it runs them.
     static inline thread_local Level* current=nullptr;
 };
-using LevelSource=Level;
 // Minecraft::GetInstance()->levelRenderer->destroyedTileManager: the client's
 // removed-but-still-drawn tiles, which getCubes also blocks (none here).
 struct DestroyedTileManager { void addAABBs(Level*,AABB*,AABBList*){} };
@@ -696,6 +816,28 @@ struct LevelRenderer { DestroyedTileManager ownManager;DestroyedTileManager* des
 struct Minecraft {
     LevelRenderer ownRenderer;LevelRenderer* levelRenderer=&ownRenderer;
     static Minecraft* GetInstance(){static Minecraft instance;return &instance;}
+};
+// Region: a LevelSource over part of a level. The source copies the chunks;
+// the path finder only reads, so this reads the level itself.
+class Region final:public Level {
+    Level* level_;
+public:
+    Region(Level* level,int,int,int,int,int,int):level_(level){
+        random=level->random;dimension=level->dimension;chunkSourceXZSize=level->chunkSourceXZSize;
+    }
+    int getTile(int x,int y,int z)override{return level_->getTile(x,y,z);}
+    int getData(int x,int y,int z)override{return level_->getData(x,y,z);}
+    bool setTileAndDataNoUpdate(int,int,int,int,int)override{return false;}
+    bool setDataNoUpdate(int,int,int,int)override{return false;}
+    bool hasChunk(int x,int z)override{return level_->hasChunk(x,z);}
+    int getRawBrightness(int x,int y,int z)override{return level_->getRawBrightness(x,y,z);}
+    int getDaytimeRawBrightness(int x,int y,int z)override{return level_->getDaytimeRawBrightness(x,y,z);}
+    int getBrightness(LightLayer::variety layer,int x,int y,int z)override{return level_->getBrightness(layer,x,y,z);}
+    bool canSeeSky(int x,int y,int z)override{return level_->canSeeSky(x,y,z);}
+    bool isRainingAt(int x,int y,int z)override{return level_->isRainingAt(x,y,z);}
+    bool hasChunksAt(int x0,int y0,int z0,int x1,int y1,int z1)override{return level_->hasChunksAt(x0,y0,z0,x1,y1,z1);}
+    void spawnResources(int,int,int,int,int,float)override{}
+    bool placeTree(TreeKind,int,Random&,int,int,int)override{return false;}
 };
 // Sets Level::current for a scope.
 struct CurrentLevel {
@@ -809,12 +951,16 @@ public:
     virtual int getTickDelay(){return 10;}
     // Tile::getRenderShape (the class's own, from RenderShapes.inc).
     int renderShape=SHAPE_BLOCK;
+    // Tile::friction (0.6; IceTile sets 0.98).
+    float friction=0.6f;
+    typedef ::console::sim::SoundType SoundType;
     virtual int getRenderShape(){return renderShape;}
     // Entities on and in tiles.
     virtual void stepOn(Level*,int,int,int,shared_ptr<Entity>){}
     virtual void fallOn(Level*,int,int,int,shared_ptr<Entity>,float){}
     virtual void handleEntityInside(Level*,int,int,int,shared_ptr<Entity>,Vec3*){}
     virtual bool isSolidFace(LevelSource* level,int x,int y,int z,int face);
+    virtual bool isPathfindable(LevelSource* level,int x,int y,int z);
     virtual void tick(Level*,int,int,int,Random*){}
     virtual bool shouldTileTick(Level*,int,int,int){return true;}
     virtual bool canSurvive(Level*,int,int,int){return true;}
@@ -1029,6 +1175,7 @@ public:
 };
 class SignTile:public EntityTile {
 public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     bool onGround=true;
     void neighborChanged(Level* level,int x,int y,int z,int type)override;
 };
@@ -1137,6 +1284,7 @@ class LiquidTile:public Tile {
 public:
     int getDepth(Level* level,int x,int y,int z);
     static float getHeight(int d);
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     int getRenderedDepth(LevelSource* level,int x,int y,int z);
     bool isSolidFace(LevelSource* level,int x,int y,int z,int face)override;
     Vec3* getFlow(LevelSource* level,int x,int y,int z);
@@ -1153,6 +1301,7 @@ struct LiquidTickData {
 };
 class LiquidTileDynamic:public LiquidTile {
 public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     int maxCount=0;
     bool result[4]{};
     int dist[4]{};
@@ -1172,13 +1321,19 @@ public:
 };
 class LiquidTileStatic:public LiquidTile {
 public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     void neighborChanged(Level* level,int x,int y,int z,int type)override;
     void setDynamic(Level* level,int x,int y,int z);
     void tick(Level* level,int x,int y,int z,Random* random)override;
     bool isFlammable(Level* level,int x,int y,int z);
 };
+class WallTile:public Tile {
+public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
+};
 class FenceTile:public Tile {
 public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     static bool isFence(int tile);
 };
 class RedStoneDustTile:public Tile {
@@ -1277,6 +1432,7 @@ public:
 };
 class PressurePlateTile:public Tile {
 public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     enum Sensitivity { everything,mobs,players };
     Sensitivity sensitivity=everything;
     int getTickDelay()override;
@@ -1322,6 +1478,7 @@ public:
 };
 class TrapDoorTile:public Tile {
 public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     TILE_CONSTANTS_TrapDoorTile
     void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
     void setShape(int data);
@@ -1340,6 +1497,7 @@ public:
 };
 class FenceGateTile:public DirectionalTile {
 public:
+    bool isPathfindable(LevelSource* level,int x,int y,int z)override;
     TILE_CONSTANTS_FenceGateTile
     bool mayPlace(Level* level,int x,int y,int z)override;
     void setPlacedBy(Level* level,int x,int y,int z,shared_ptr<Mob> by)override;
@@ -1364,12 +1522,6 @@ public:
     virtual unsigned int getContainerSize()=0;
     virtual shared_ptr<ItemInstance> getItem(unsigned int slot)=0;
     virtual void setItem(unsigned int slot,shared_ptr<ItemInstance> item)=0;
-};
-struct ItemInstanceArray {
-    shared_ptr<ItemInstance>* data;
-    int length;
-    explicit ItemInstanceArray(int n):data(new shared_ptr<ItemInstance>[n]),length(n){}
-    shared_ptr<ItemInstance>& operator[](int i){return data[i];}
 };
 class DispenserTileEntity:public TileEntity,public Container {
 public:
@@ -1517,7 +1669,12 @@ class PotionItem:public Item { public: static bool isThrowable(int auxValue); };
 // MonsterPlacerItem::canSpawn: EntityIO::newById and the per-type
 // Level::canCreateMore limits are the host's (Level::canSpawnEgg); the mob
 // carries its egg's id to Level::addEntity.
-class EggMob:public Mob { public: int entityId=0; };
+class EggMob:public Mob {
+public:
+    int entityId=0;
+    EggMob():Mob(nullptr){}
+    int getMaxHealth()override{return 20;}
+};
 class MonsterPlacerItem:public Item {
 public:
     static shared_ptr<Entity> canSpawn(int iAuxVal,Level* level,int*){

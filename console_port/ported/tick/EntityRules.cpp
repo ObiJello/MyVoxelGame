@@ -38,6 +38,16 @@ DamageSource *DamageSource::wither = (new DamageSource(ChatPacket::e_ChatDeathWi
 DamageSource *DamageSource::anvil = (new DamageSource(ChatPacket::e_ChatDeathAnvil));
 // DamageSource.cpp
 DamageSource *DamageSource::fallingBlock = (new DamageSource(ChatPacket::e_ChatDeathFallingBlock));
+// MoveControl.cpp
+const float MoveControl::MIN_SPEED = 0.0005f;
+// MoveControl.cpp
+const float MoveControl::MIN_SPEED_SQR = MIN_SPEED * MIN_SPEED;
+// BodyControl.cpp
+const float BodyControl::maxClampAngle = 75.0f;
+// Mob.cpp
+const double Mob::MIN_MOVEMENT_DISTANCE = 0.005;
+// RandomPos.cpp
+Vec3 *RandomPos::tempDir = Vec3::newPermanent(0, 0, 0);
 
 // DamageSource.cpp
 DamageSource *DamageSource::mobAttack(shared_ptr<Mob> mob)
@@ -1858,6 +1868,4045 @@ bool Entity::isInvulnerable()
 void Entity::copyPosition(shared_ptr<Entity> target)
 {
 	moveTo(target->x, target->y, target->z, target->yRot, target->xRot);
+}
+
+// Level.cpp
+shared_ptr<Player> Level::getNearestPlayer(shared_ptr<Entity> source, double maxDist, double maxYDist /*= -1*/)
+{
+	return getNearestPlayer(source->x, source->y, source->z, maxDist, maxYDist);
+}
+
+// Level.cpp
+shared_ptr<Player> Level::getNearestPlayer(double x, double y, double z, double maxDist, double maxYDist /*= -1*/)
+{
+	MemSect(21);
+	double best = -1;
+	shared_ptr<Player> result = nullptr;
+	AUTO_VAR(itEnd, players.end());
+	for (AUTO_VAR(it, players.begin()); it != itEnd; it++)
+	{
+		shared_ptr<Player> p = *it;//players.at(i);
+		double dist = p->distanceToSqr(x, y, z);
+
+		// Allow specifying shorter distances in the vertical
+		if(maxYDist > 0 && abs(p->y - y) > maxYDist) continue;
+
+		// 4J Stu - Added check that this player is still alive
+		if ((maxDist < 0 || dist < maxDist * maxDist) && (best == -1 || dist < best) && p->isAlive() )
+		{
+			best = dist;
+			result = p;
+		}
+	}
+	MemSect(0);
+	return result;
+}
+
+// Level.cpp
+shared_ptr<Player> Level::getNearestPlayer(double x, double z, double maxDist)
+{
+	double best = -1;
+	shared_ptr<Player> result = nullptr;
+	AUTO_VAR(itEnd, players.end());
+	for (AUTO_VAR(it, players.begin()); it != itEnd; it++)
+	{
+		shared_ptr<Player> p = *it;
+		double dist = p->distanceToSqr(x, p->y, z);
+		if ((maxDist < 0 || dist < maxDist * maxDist) && (best == -1 || dist < best))
+		{
+			best = dist;
+			result = p;
+		}
+	}
+	return result;
+}
+
+// Level.cpp
+shared_ptr<Player> Level::getNearestAttackablePlayer(shared_ptr<Entity> source, double maxDist)
+{
+	return getNearestAttackablePlayer(source->x, source->y, source->z, maxDist);
+}
+
+// Level.cpp
+shared_ptr<Player> Level::getNearestAttackablePlayer(double x, double y, double z, double maxDist)
+{
+    double best = -1;
+	
+    shared_ptr<Player> result = nullptr;
+	AUTO_VAR(itEnd, players.end());
+	for (AUTO_VAR(it, players.begin()); it != itEnd; it++)
+	{
+		shared_ptr<Player> p = *it;
+
+		if (p->abilities.invulnerable)
+		{
+			continue;
+		}
+
+		double dist = p->distanceToSqr(x, y, z);
+		double visibleDist = maxDist;
+
+		// decrease the max attackable distance if the target player
+		// is sneaking or invisible
+        if (p->isSneaking())
+		{
+            visibleDist *= .8f;
+        }
+		if (p->isInvisible())
+		{
+            float coverPercentage = p->getArmorCoverPercentage();
+            if (coverPercentage < .1f)
+			{
+                coverPercentage = .1f;
+            }
+            visibleDist *= (.7f * coverPercentage);
+        }
+        
+		// 4J Stu - Added check that this player is still alive and privilege check
+        if ((visibleDist < 0 || dist < visibleDist * visibleDist) && (best == -1 || dist < best) && p->isAlive() && !p->hasInvisiblePrivilege())
+		{
+            best = dist;
+            result = p;
+        }
+    }
+    return result;
+}
+
+// Level.cpp
+Path *Level::findPath(shared_ptr<Entity> from, shared_ptr<Entity> to, float maxDist, bool canPassDoors, bool canOpenDoors, bool avoidWater, bool canFloat)
+{
+	int x = Mth::floor(from->x);
+	int y = Mth::floor(from->y + 1);
+	int z = Mth::floor(from->z);
+
+	int r = (int) (maxDist + 16);
+	int x1 = x - r;
+	int y1 = y - r;
+	int z1 = z - r;
+	int x2 = x + r;
+	int y2 = y + r;
+	int z2 = z + r;
+	Region region = Region(this, x1, y1, z1, x2, y2, z2);
+	Path *path = (PathFinder(&region, canPassDoors, canOpenDoors, avoidWater, canFloat)).findPath(from.get(), to.get(), maxDist);
+	return path;
+}
+
+// Level.cpp
+Path *Level::findPath(shared_ptr<Entity> from, int xBest, int yBest, int zBest, float maxDist, bool canPassDoors, bool canOpenDoors, bool avoidWater, bool canFloat)
+{
+	int x = Mth::floor(from->x);
+	int y = Mth::floor(from->y);
+	int z = Mth::floor(from->z);
+
+	int r = (int) (maxDist + 8);
+	int x1 = x - r;
+	int y1 = y - r;
+	int z1 = z - r;
+	int x2 = x + r;
+	int y2 = y + r;
+	int z2 = z + r;
+	Region region = Region(this, x1, y1, z1, x2, y2, z2);
+	Path *path = (PathFinder(&region, canPassDoors, canOpenDoors, avoidWater, canFloat)).findPath(from.get(), xBest, yBest, zBest, maxDist);
+	return path;
+}
+
+// Level.cpp
+bool Level::isUnobstructed(AABB *aabb)
+{
+	return isUnobstructed(aabb, nullptr);
+}
+
+// Level.cpp
+bool Level::isUnobstructed(AABB *aabb, shared_ptr<Entity> ignore)
+{
+	vector<shared_ptr<Entity> > *ents = getEntities(nullptr, aabb);
+	AUTO_VAR(itEnd, ents->end());
+	for (AUTO_VAR(it, ents->begin()); it != itEnd; it++)
+	{
+		shared_ptr<Entity> e = *it;
+		if (!e->removed && e->blocksBuilding && e != ignore) return false;
+	}
+	return true;
+}
+
+// Level.cpp
+bool Level::containsAnyLiquid_NoLoad(AABB *box)
+{
+	int x0 = Mth::floor(box->x0);
+	int x1 = Mth::floor(box->x1 + 1);
+	int y0 = Mth::floor(box->y0);
+	int y1 = Mth::floor(box->y1 + 1);
+	int z0 = Mth::floor(box->z0);
+	int z1 = Mth::floor(box->z1 + 1);
+
+	if (box->x0 < 0) x0--;
+	if (box->y0 < 0) y0--;
+	if (box->z0 < 0) z0--;
+
+	for (int x = x0; x < x1; x++)
+		for (int y = y0; y < y1; y++)
+			for (int z = z0; z < z1; z++)
+			{
+				if( !hasChunkAt(x,y,z) ) return true;				// If we don't have it, it might be liquid...
+				Tile *tile = Tile::tiles[getTile(x, y, z)];
+				if (tile != NULL && tile->material->isLiquid())
+				{
+					return true;
+				}
+			}
+			return false;
+}
+
+// ExperienceOrb.cpp
+int ExperienceOrb::getExperienceValue(int maxValue)
+{
+
+	if (maxValue >= 2477)
+	{
+		return 2477;
+	}
+	else if (maxValue >= 1237)
+	{
+		return 1237;
+	}
+	else if (maxValue >= 617)
+	{
+		return 617;
+	}
+	else if (maxValue >= 307)
+	{
+		return 307;
+	}
+	else if (maxValue >= 149)
+	{
+		return 149;
+	}
+	else if (maxValue >= 73)
+	{
+		return 73;
+	}
+	else if (maxValue >= 37)
+	{
+		return 37;
+	}
+	else if (maxValue >= 17)
+	{
+		return 17;
+	}
+	else if (maxValue >= 7)
+	{
+		return 7;
+	}
+	else if (maxValue >= 3)
+	{
+		return 3;
+	}
+
+	return 1;
+}
+
+// Entity.cpp
+void Entity::rideTick()
+{
+	if (riding->removed)
+	{
+		riding = nullptr;
+		return;
+	}
+	xd = yd = zd = 0;
+	tick();
+
+	if (riding == NULL) return;
+
+	// Sets riders old&new position to it's mount's old&new position (plus the ride y-seperatation).
+	riding->positionRider();
+
+	yRideRotA += (riding->yRot - riding->yRotO);
+	xRideRotA += (riding->xRot - riding->xRotO);
+
+	// Wrap rotation angles.
+	while (yRideRotA >= 180) yRideRotA -= 360;
+	while (yRideRotA < -180) yRideRotA += 360;
+	while (xRideRotA >= 180) xRideRotA -= 360;
+	while (xRideRotA < -180) xRideRotA += 360;
+
+	double yra = yRideRotA * 0.5;
+	double xra = xRideRotA * 0.5;
+
+	// Cap rotation speed.
+	float max = 10;
+	if (yra > max)	yra = max;
+	if (yra < -max)	yra = -max;
+	if (xra > max)	xra = max;
+	if (xra < -max)	xra = -max;
+
+	yRideRotA -= yra;
+	xRideRotA -= xra;
+
+	yRot += (float) yra;
+	xRot += (float) xra;
+}
+
+// Entity.cpp
+void Entity::positionRider()
+{
+	shared_ptr<Entity> lockedRider = rider.lock();
+	if( lockedRider )
+	{
+		shared_ptr<Player> player = dynamic_pointer_cast<Player>(lockedRider);
+		if (!(player && player->isLocalPlayer()))
+		{
+			lockedRider->xOld = xOld;
+			lockedRider->yOld = yOld + getRideHeight() + lockedRider->getRidingHeight();
+			lockedRider->zOld = zOld;
+		}
+		lockedRider->setPos(x, y + getRideHeight() + lockedRider->getRidingHeight(), z);
+	}
+}
+
+// Entity.cpp
+double Entity::getRidingHeight()
+{
+	return heightOffset;
+}
+
+// Entity.cpp
+double Entity::getRideHeight()
+{
+	return bbHeight * .75;
+}
+
+// Tile.cpp
+bool Tile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return !material->blocksMotion();
+}
+
+// FenceGateTile.cpp
+bool FenceGateTile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return isOpen(level->getData(x, y, z));
+}
+
+// FenceTile.cpp
+bool FenceTile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return false;
+}
+
+// LiquidTile.cpp
+bool LiquidTile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return material != Material::lava;
+}
+
+// LiquidTileDynamic.cpp
+bool LiquidTileDynamic::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return material != Material::lava;
+}
+
+// LiquidTileStatic.cpp
+bool LiquidTileStatic::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return material != Material::lava;
+}
+
+// PressurePlateTile.cpp
+bool PressurePlateTile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return true;
+}
+
+// SignTile.cpp
+bool SignTile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return true;
+}
+
+// TrapDoorTile.cpp
+bool TrapDoorTile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return !isOpen(level->getData(x, y, z));
+}
+
+// WallTile.cpp
+bool WallTile::isPathfindable(LevelSource *level, int x, int y, int z)
+{
+	return false;
+}
+
+// Pos.cpp
+Pos::Pos()
+{
+	x = y = z = 0;
+}
+
+Pos::Pos(int x, int y, int z)
+{
+	this->x = x;
+	this->y = y;
+	this->z = z;
+}
+
+Pos::Pos(Pos *position)
+{
+	this->x = position->x;
+	this->y = position->y;
+	this->z = position->z;
+}
+
+bool Pos::equals(void *other)
+{
+	// TODO 4J Stu I cannot do a dynamic_cast from a void pointer
+	// If I cast it to a Pos then do a dynamic_cast will it still return NULL if it wasn't originally a Pos?
+	if (!( dynamic_cast<Pos *>( (Pos *)other ) != NULL ))
+	{
+		return false;
+	}
+
+	Pos *p = (Pos *) other;
+	return x == p->x && y == p->y && z == p->z;
+}
+
+int Pos::hashCode()
+{
+	return x + (z << 8) + (y << 16);
+}
+
+int Pos::compareTo(Pos *pos)
+{
+	if (y == pos->y)
+	{
+		if (z == pos->z)
+		{
+			return x - pos->x;
+		}
+		return z - pos->z;
+	}
+	return y - pos->y;
+}
+
+Pos *Pos::offset(int x, int y, int z)
+{
+	return new Pos(this->x + x, this->y + y, this->z + z);
+}
+
+void Pos::set(int x, int y, int z)
+{
+	this->x = x;
+	this->y = y;
+	this->z = z;
+}
+
+void Pos::set(Pos *pos)
+{
+	this->x = pos->x;
+	this->y = pos->y;
+	this->z = pos->z;
+}
+
+Pos *Pos::above()
+{
+	return new Pos(x, y + 1, z);
+}
+
+Pos *Pos::above(int steps)
+{
+	return new Pos(x, y + steps, z);
+}
+
+Pos *Pos::below()
+{
+	return new Pos(x, y - 1, z);
+}
+
+Pos *Pos::below(int steps)
+{
+	return new Pos(x, y - steps, z);
+}
+
+Pos *Pos::north()
+{
+	return new Pos(x, y, z - 1);
+}
+
+Pos *Pos::north(int steps)
+{
+	return new Pos(x, y, z - steps);
+}
+
+Pos *Pos::south()
+{
+	return new Pos(x, y, z + 1);
+}
+
+Pos *Pos::south(int steps)
+{
+	return new Pos(x, y, z + steps);
+}
+
+Pos *Pos::west()
+{
+	return new Pos(x - 1, y, z);
+}
+
+Pos *Pos::west(int steps)
+{
+	return new Pos(x - 1, y, z);
+}
+
+Pos *Pos::east()
+{
+	return new Pos(x + 1, y, z);
+}
+
+Pos *Pos::east(int steps)
+{
+	return new Pos(x + steps, y, z);
+}
+
+void Pos::move(int x, int y, int z)
+{
+	this->x += x;
+	this->y += y;
+	this->z += z;
+}
+
+void Pos::move(Pos pos)
+{
+	this->x += pos.x;
+	this->y += pos.y;
+	this->z += pos.z;
+}
+
+void Pos::moveX(int steps) 
+{
+	this->x += steps;
+}
+
+void Pos::moveY(int steps)
+{
+	this->y += steps;
+}
+
+void Pos::moveZ(int steps)
+{
+	this->z += steps;
+}
+
+void Pos::moveUp(int steps)
+{
+	this->y += steps;
+}
+
+void Pos::moveUp()
+{
+	this->y++;
+}
+
+void Pos::moveDown(int steps)
+{
+	this->y -= steps;
+}
+
+void Pos::moveDown()
+{
+	this->y--;
+}
+
+void Pos::moveEast(int steps)
+{
+	this->x += steps;
+}
+
+void Pos::moveEast()
+{
+	this->x++;
+}
+
+void Pos::moveWest(int steps)
+{
+	this->x -= steps;
+}
+
+void Pos::moveWest()
+{
+	this->x--;
+}
+
+void Pos::moveNorth(int steps)
+{
+	this->z -= steps;
+}
+
+void Pos::moveNorth()
+{
+	this->z--;
+}
+
+void Pos::moveSouth(int steps)
+{
+	this->z += steps;
+}
+
+void Pos::moveSouth()
+{
+	this->z++;
+}
+
+double Pos::dist(int x, int y, int z)
+{
+	int dx = this->x - x;
+	int dy = this->y - y;
+	int dz = this->z - z;
+
+	return sqrt( (double) dx * dx + dy * dy + dz * dz);
+}
+
+double Pos::dist(Pos *pos)
+{
+	return dist(pos->x, pos->y, pos->z);
+}
+
+float Pos::distSqr(int x, int y, int z)
+{
+	int dx = this->x - x;
+	int dy = this->y - y;
+	int dz = this->z - z;
+	return dx * dx + dy * dy + dz * dz;
+}
+
+// Node.cpp
+void Node::_init()
+{
+	heapIdx = -1;
+
+	closed = false;
+
+	cameFrom = NULL;
+}
+
+Node::Node(const int x, const int y, const int z) :
+x(x),
+y(y),
+z(z),
+hash(createHash(x, y, z))
+{
+	_init();
+
+	//this->x = x;
+	//this->y = y;
+	//this->z = z;
+
+	//hash = createHash(x, y, z);
+}
+
+int Node::createHash(const int x, const int y, const int z) 
+{
+	return (y & 0xff) | ((x & 0x7fff) << 8) | ((z & 0x7fff) << 24) | ((x < 0) ? 0x0080000000 : 0) | ((z < 0) ? 0x0000008000 : 0);
+}
+
+float Node::distanceTo(Node *to) 
+{
+	float xd = (float) ( to->x - x );
+	float yd = (float) ( to->y - y );
+	float zd = (float) ( to->z - z );
+	return Mth::sqrt(xd * xd + yd * yd + zd * zd);
+}
+
+float Node::distanceToSqr(Node *to)
+{
+	float xd = to->x - x;
+	float yd = to->y - y;
+	float zd = to->z - z;
+	return xd * xd + yd * yd + zd * zd;
+}
+
+bool Node::equals(Node *o) 
+{
+	//4J Jev, never used anything other than a node.
+	//if (dynamic_cast<Node *>((Node *) o) != NULL) 
+	//{
+		return hash == o->hash && x == o->x && y == o->y && z == o->z;
+	//}
+	//return false;
+}
+
+int Node::hashCode() 
+{
+	return hash;
+}
+
+bool Node::inOpenSet() 
+{
+	return heapIdx >= 0;
+}
+
+// BinaryHeap.cpp
+void BinaryHeap::_init()
+{
+	heap = NodeArray(1024);
+	sizeVar = 0;
+}
+
+BinaryHeap::BinaryHeap()
+{
+	_init();
+}
+
+BinaryHeap::~BinaryHeap()
+{
+	delete[] heap.data;
+}
+
+Node *BinaryHeap::insert(Node *node)
+{
+    /* if (node->heapIdx >=0) throw new IllegalStateException("OW KNOWS!"); 4J Jev, removed try/catch */
+
+    // Expand if necessary.
+	if (sizeVar == heap.length)
+    {
+        NodeArray newHeap = NodeArray(sizeVar << 1);
+
+        System::arraycopy(heap, 0, &newHeap, 0, sizeVar);
+
+		delete[] heap.data;
+        heap = newHeap;
+    }
+
+    // Insert at end and bubble up.
+    heap[sizeVar] = node;
+    node->heapIdx = sizeVar;
+    upHeap(sizeVar++);
+
+    return node;
+}
+
+void BinaryHeap::clear()
+{
+    sizeVar = 0;
+}
+
+Node *BinaryHeap::peek()
+{
+    return heap[0];
+}
+
+Node *BinaryHeap::pop()
+{
+    Node *popped = heap[0];
+    heap[0] = heap[--sizeVar];
+    heap[sizeVar] = NULL;
+    if (sizeVar > 0) downHeap(0);
+    popped->heapIdx=-1;
+    return popped;
+}
+
+void BinaryHeap::remove(Node *node)
+{
+    // This is what node.heapIdx is for.
+    heap[node->heapIdx] = heap[--sizeVar];
+    heap[sizeVar] = NULL;
+    if (sizeVar > node->heapIdx)
+    {
+        if (heap[node->heapIdx]->f < node->f)
+        {
+            upHeap(node->heapIdx);
+        }
+        else
+        {
+            downHeap(node->heapIdx);
+        }
+    }
+    // Just as a precaution: should make stuff blow up if the node is abused.
+    node->heapIdx = -1;
+}
+
+void BinaryHeap::changeCost(Node *node, float newCost)
+{
+    float oldCost = node->f;
+    node->f = newCost;
+    if (newCost < oldCost)
+    {
+        upHeap(node->heapIdx);
+    }
+    else
+    {
+        downHeap(node->heapIdx);
+    }
+}
+
+int BinaryHeap::size()
+{
+    return sizeVar;
+}
+
+void BinaryHeap::upHeap(int idx)
+{
+    Node *node = heap[idx];
+    float cost = node->f;
+    while (idx > 0)
+    {
+        int parentIdx = (idx - 1) >> 1;
+        Node *parent = heap[parentIdx];
+        if (cost < parent->f)
+        {
+            heap[idx] = parent;
+            parent->heapIdx = idx;
+            idx = parentIdx;
+        }
+        else break;
+    }
+    heap[idx] = node;
+    node->heapIdx = idx;
+}
+
+void BinaryHeap::downHeap(int idx)
+{
+    Node *node = heap[idx];
+    float cost = node->f;
+
+    while (true)
+    {
+        int leftIdx = 1 + (idx << 1);
+        int rightIdx = leftIdx + 1;
+
+        if (leftIdx >= sizeVar) break;
+
+        // We definitely have a left child.
+        Node *leftNode = heap[leftIdx];
+        float leftCost = leftNode->f;
+        // We may have a right child.
+        Node *rightNode;
+        float rightCost;
+
+        if (rightIdx >= sizeVar)
+        {
+            // Only need to compare with left.
+            rightNode = NULL;
+            rightCost = Float::POSITIVE_INFINITY;
+        }
+        else
+        {
+            rightNode = heap[rightIdx];
+            rightCost = rightNode->f;
+        }
+
+        // Find the smallest of the three costs: the corresponding node
+        // should be the parent.
+        if (leftCost < rightCost)
+        {
+            if (leftCost < cost)
+            {
+                heap[idx] = leftNode;
+                leftNode->heapIdx = idx;
+                idx = leftIdx;
+            }
+            else break;
+        }
+        else
+        {
+            if (rightCost < cost)
+            {
+                heap[idx] = rightNode;
+                rightNode->heapIdx = idx;
+                idx = rightIdx;
+            }
+            else break;
+        }
+    }
+
+    heap[idx] = node;
+    node->heapIdx = idx;
+}
+
+bool BinaryHeap::isEmpty()
+{
+    return sizeVar==0;
+}
+
+// Path.cpp
+Path::~Path()
+{
+	if( nodes.data )
+	{
+		for( int i = 0; i < nodes.length; i++ )
+			delete nodes.data[i];
+		delete[] nodes.data;
+	}
+}
+
+Path::Path(NodeArray nodes) 
+{
+	index = 0;
+
+	length = nodes.length;
+	// 4J - copying these nodes over from a NodeArray (which is an array of Node * references) to just a straight array of Nodes,
+	// so that this Path is no longer dependent of Nodes allocated elsewhere and can handle its own destruction
+	// Note: cameFrom pointer will be useless now but that isn't used once this is just a path
+	this->nodes = NodeArray(length);
+
+	for( int i = 0; i < length; i++ )
+	{
+		this->nodes.data[i] = new Node();
+		memcpy(this->nodes.data[i],nodes[i],sizeof(Node));
+	}
+}
+
+void Path::next() 
+{
+	index++;
+}
+
+bool Path::isDone() 
+{
+	return index >= length;
+}
+
+Node *Path::last() 
+{
+	if (length > 0) 
+	{
+		return nodes[length - 1];
+	}
+	return NULL;
+}
+
+Node *Path::get(int i) 
+{
+	return nodes[i];
+}
+
+int Path::getSize()
+{
+	return length;
+}
+
+void Path::setSize(int length)
+{
+	this->length = length;
+}
+
+int Path::getIndex()
+{
+	return index;
+}
+
+void Path::setIndex(int index)
+{
+	this->index = index;
+}
+
+Vec3 *Path::getPos(shared_ptr<Entity> e, int index) 
+{
+	double x = nodes[index]->x + (int) (e->bbWidth + 1) * 0.5;
+	double y = nodes[index]->y;
+	double z = nodes[index]->z + (int) (e->bbWidth + 1) * 0.5;
+	return Vec3::newTemp(x, y, z);
+}
+
+Vec3 *Path::currentPos(shared_ptr<Entity> e)
+{
+	return getPos(e, index);
+}
+
+Vec3 *Path::currentPos()
+{
+	return Vec3::newTemp( nodes[index]->x, nodes[index]->y, nodes[index]->z );
+}
+
+bool Path::sameAs(Path *path)
+{
+	if (path == NULL) return false;
+	if (path->nodes.length != nodes.length) return false;
+	for (int i = 0; i < nodes.length; ++i)
+		if (nodes[i]->x != path->nodes[i]->x || nodes[i]->y != path->nodes[i]->y || nodes[i]->z != path->nodes[i]->z) return false;
+	return true;
+}
+
+bool Path::endsIn(Vec3 *pos)
+{
+	Node *lastNode = last();
+	if (lastNode == NULL) return false;
+	return lastNode->x == (int) pos->x && lastNode->y == (int) pos->y && lastNode->z == (int) pos->z;
+}
+
+bool Path::endsInXZ(Vec3 *pos)
+{
+	Node *lastNode = last();
+	if (lastNode == NULL) return false;
+	return lastNode->x == (int) pos->x && lastNode->z == (int) pos->z;
+}
+
+// PathFinder.cpp
+PathFinder::PathFinder(LevelSource *level, bool canPassDoors, bool canOpenDoors, bool avoidWater, bool canFloat)
+{
+	neighbors = new NodeArray(32);
+
+	this->canPassDoors = canPassDoors;
+	this->canOpenDoors = canOpenDoors;
+	this->avoidWater = avoidWater;
+	this->canFloat = canFloat;
+    this->level = level;
+}
+
+PathFinder::~PathFinder()
+{
+	// All the nodes should be uniquely referenced in the nodes map, and everything else should just be duplicate
+	// references to the same things, so just need to destroy their containers
+	delete [] neighbors->data;
+	delete neighbors;
+	AUTO_VAR(itEnd, nodes.end());
+	for( AUTO_VAR(it, nodes.begin()); it != itEnd; it++ )
+	{
+		delete it->second;
+	}
+}
+
+Path *PathFinder::findPath(Entity *from, Entity *to, float maxDist) 
+{
+    return findPath(from, to->x, to->bb->y0, to->z, maxDist);
+}
+
+Path *PathFinder::findPath(Entity *from, int x, int y, int z, float maxDist)
+{
+    return findPath(from, x + 0.5f, y + 0.5f, z + 0.5f, maxDist);
+}
+
+Path *PathFinder::findPath(Entity *e, double xt, double yt, double zt, float maxDist)
+{
+    openSet.clear();
+	nodes.clear();
+
+	bool resetAvoidWater = avoidWater;
+	int startY = Mth::floor(e->bb->y0 + 0.5f);
+	if (canFloat && e->isInWater())
+	{
+		startY = (int) (e->bb->y0);
+		int tileId = level->getTile((int) Mth::floor(e->x), startY, (int) Mth::floor(e->z));
+		while (tileId == Tile::water_Id || tileId == Tile::calmWater_Id)
+		{
+			++startY;
+			tileId = level->getTile((int) Mth::floor(e->x), startY, (int) Mth::floor(e->z));
+		}
+		resetAvoidWater = avoidWater;
+		avoidWater = false;
+	} else startY = Mth::floor(e->bb->y0 + 0.5f);
+
+    Node *from = getNode((int) floor(e->bb->x0), startY, (int) floor(e->bb->z0));
+    Node *to = getNode((int) floor(xt - e->bbWidth / 2), (int) floor(yt), (int) floor(zt - e->bbWidth / 2));
+
+    Node *size = new Node((int) floor(e->bbWidth + 1), (int) floor(e->bbHeight + 1), (int) floor(e->bbWidth + 1));
+    Path *path = findPath(e, from, to, size, maxDist);
+	delete size;
+
+	avoidWater = resetAvoidWater;
+    return path;
+}
+
+Path *PathFinder::findPath(Entity *e, Node *from, Node *to, Node *size, float maxDist)
+{
+    from->g = 0;
+    from->h = from->distanceToSqr(to);
+    from->f = from->h;
+
+    openSet.clear();
+    openSet.insert(from);
+
+    Node *closest = from;
+
+    while (!openSet.isEmpty())
+	{
+        Node *x = openSet.pop();
+
+		if (x->equals(to))
+		{
+            return reconstruct_path(from, to);
+        }
+
+        if (x->distanceToSqr(to) < closest->distanceToSqr(to))
+		{
+            closest = x;
+        }
+        x->closed = true;
+
+        int neighborCount = getNeighbors(e, x, size, to, maxDist);
+        for (int i = 0; i < neighborCount; i++)
+		{
+            Node *y = neighbors->data[i];
+
+            float tentative_g_score = x->g + x->distanceToSqr(y);
+            if (!y->inOpenSet() || tentative_g_score < y->g)
+			{
+                y->cameFrom = x;
+                y->g = tentative_g_score;
+                y->h = y->distanceToSqr(to);
+                if (y->inOpenSet())
+				{
+                    openSet.changeCost(y, y->g + y->h);
+                }
+				else
+				{
+                    y->f = y->g + y->h;
+                    openSet.insert(y);
+                }
+            }
+        }
+    }
+
+    if (closest == from) return NULL;
+    return reconstruct_path(from, closest);
+}
+
+int PathFinder::getNeighbors(Entity *entity, Node *pos, Node *size, Node *target, float maxDist)
+{
+    int p = 0;
+
+    int jumpSize = 0;
+    if (isFree(entity, pos->x, pos->y + 1, pos->z, size) == TYPE_OPEN) jumpSize = 1;
+
+    Node *n = getNode(entity, pos->x, pos->y, pos->z + 1, size, jumpSize);
+    Node *w = getNode(entity, pos->x - 1, pos->y, pos->z, size, jumpSize);
+    Node *e = getNode(entity, pos->x + 1, pos->y, pos->z, size, jumpSize);
+    Node *s = getNode(entity, pos->x, pos->y, pos->z - 1, size, jumpSize);
+
+    if (n != NULL && !n->closed && n->distanceTo(target) < maxDist) neighbors->data[p++] = n;
+    if (w != NULL && !w->closed && w->distanceTo(target) < maxDist) neighbors->data[p++] = w;
+    if (e != NULL && !e->closed && e->distanceTo(target) < maxDist) neighbors->data[p++] = e;
+    if (s != NULL && !s->closed && s->distanceTo(target) < maxDist) neighbors->data[p++] = s;
+
+    return p;
+}
+
+Node *PathFinder::getNode(Entity *entity, int x, int y, int z, Node *size, int jumpSize)
+{
+    Node *best = NULL;
+	int pathType = isFree(entity, x, y, z, size);
+	if (pathType == TYPE_WALKABLE) return getNode(x, y, z);
+    if (pathType == TYPE_OPEN) best = getNode(x, y, z);
+    if (best == NULL && jumpSize > 0 && pathType != TYPE_FENCE && pathType != TYPE_TRAP && isFree(entity, x, y + jumpSize, z, size) == TYPE_OPEN)
+	{
+        best = getNode(x, y + jumpSize, z);
+        y += jumpSize;
+    }
+
+    if (best != NULL)
+	{
+        int drop = 0;
+        int cost = 0;
+        while (y > 0)
+		{
+			cost = isFree(entity, x, y - 1, z, size);
+			if (avoidWater && cost == TYPE_WATER) return NULL;
+			if (cost != TYPE_OPEN) break;
+            // fell too far?
+            if (++drop >= 4) return NULL;
+            y--;
+
+            if (y > 0) best = getNode(x, y, z);
+        }
+        // fell into lava?
+        if (cost == TYPE_LAVA) return NULL;
+    }
+
+    return best;
+}
+
+/*final*/ Node *PathFinder::getNode(int x, int y, int z)
+{
+    int i = Node::createHash(x, y, z);
+    Node *node;
+	AUTO_VAR(it, nodes.find(i));
+    if ( it == nodes.end() )
+	{
+		MemSect(54);
+        node = new Node(x, y, z);
+		MemSect(0);
+        nodes.insert( unordered_map<int, Node *>::value_type(i, node) );
+    }
+	else
+	{
+		node = (*it).second;
+	}
+    return node;
+}
+
+int PathFinder::isFree(Entity *entity, int x, int y, int z, Node *size)
+{
+	return isFree(entity, x, y, z, size, avoidWater, canOpenDoors, canPassDoors);
+}
+
+int PathFinder::isFree(Entity *entity, int x, int y, int z, Node *size, bool avoidWater, bool canOpenDoors, bool canPassDoors)
+{
+	bool walkable = false;
+	for (int xx = x; xx < x + size->x; xx++)
+		for (int yy = y; yy < y + size->y; yy++)
+			for (int zz = z; zz < z + size->z; zz++)
+			{
+				int tileId = entity->level->getTile(xx, yy, zz);
+				if(tileId <= 0) continue;
+				if (tileId == Tile::trapdoor_Id) walkable = true;
+				else if (tileId == Tile::water_Id || tileId == Tile::calmWater_Id)
+				{
+					if (avoidWater) return TYPE_WATER;
+					else walkable = true;
+				}
+				else if (!canPassDoors && tileId == Tile::door_wood_Id)
+				{
+					return TYPE_BLOCKED;
+				}
+
+				Tile *tile = Tile::tiles[tileId];
+				if (tile->isPathfindable(entity->level, xx, yy, zz)) continue;
+				if (canOpenDoors && tileId == Tile::door_wood_Id) continue;
+
+				int renderShape = tile->getRenderShape();
+				if (renderShape == Tile::SHAPE_FENCE || tileId == Tile::fenceGate_Id || renderShape == Tile::SHAPE_WALL) return TYPE_FENCE;
+				if (tileId == Tile::trapdoor_Id) return TYPE_TRAP;
+				Material *m = tile->material;
+				if (m == Material::lava)
+				{
+					if (entity->isInLava()) continue;
+					return TYPE_LAVA;
+				}
+				return TYPE_BLOCKED;
+			}
+
+    return walkable ? TYPE_WALKABLE : TYPE_OPEN;
+}
+
+Path *PathFinder::reconstruct_path(Node *from, Node *to)
+{
+    int count = 1;
+    Node *n = to;
+    while (n->cameFrom != NULL)
+	{
+        count++;
+        n = n->cameFrom;
+    }
+
+    NodeArray nodes = NodeArray(count);
+    n = to;
+    nodes.data[--count] = n;
+    while (n->cameFrom != NULL) 
+	{
+        n = n->cameFrom;
+        nodes.data[--count] = n;
+    }
+	Path *ret = new Path(nodes);
+	delete [] nodes.data;
+    return ret;
+}
+
+// PathNavigation.cpp
+PathNavigation::PathNavigation(Mob *mob, Level *level, float maxDist)
+{
+	this->mob = mob;
+	this->level = level;
+	this->maxDist = maxDist;
+
+	path = NULL;
+	speed = 0.0f;
+	avoidSun = false;
+	_tick = 0;
+	lastStuckCheck = 0;
+	lastStuckCheckPos = Vec3::newPermanent(0, 0, 0);
+	_canPassDoors = true;
+	_canOpenDoors = false;
+	avoidWater = false;
+	canFloat = false;
+}
+
+PathNavigation::~PathNavigation()
+{
+	if(path != NULL) delete path;
+	delete lastStuckCheckPos;
+}
+
+void PathNavigation::setAvoidWater(bool avoidWater)
+{
+	this->avoidWater = avoidWater;
+}
+
+bool PathNavigation::getAvoidWater()
+{
+	return avoidWater;
+}
+
+void PathNavigation::setCanOpenDoors(bool canOpenDoors)
+{
+	this->_canOpenDoors = canOpenDoors;
+}
+
+bool PathNavigation::canPassDoors()
+{
+	return _canPassDoors;
+}
+
+void PathNavigation::setCanPassDoors(bool canPass)
+{
+	_canPassDoors = canPass;
+}
+
+bool PathNavigation::canOpenDoors()
+{
+	return _canOpenDoors;
+}
+
+void PathNavigation::setAvoidSun(bool avoidSun)
+{
+	this->avoidSun = avoidSun;
+}
+
+void PathNavigation::setSpeed(float speed)
+{
+	this->speed = speed;
+}
+
+void PathNavigation::setCanFloat(bool canFloat)
+{
+	this->canFloat = canFloat;
+}
+
+Path *PathNavigation::createPath(double x, double y, double z)
+{
+	if (!canUpdatePath()) return NULL;
+	return level->findPath(mob->shared_from_this(), Mth::floor(x), (int) y, Mth::floor(z), maxDist, _canPassDoors, _canOpenDoors, avoidWater, canFloat);
+}
+
+bool PathNavigation::moveTo(double x, double y, double z, float speed)
+{
+	MemSect(52);
+	Path *newPath = createPath(Mth::floor(x), (int) y, Mth::floor(z));
+	MemSect(0);
+	// No need to delete newPath here as this will be copied into the member variable path and the class can assume responsibility for it
+	return moveTo(newPath, speed);
+}
+
+Path *PathNavigation::createPath(shared_ptr<Mob> target)
+{
+	if (!canUpdatePath()) return NULL;
+	return level->findPath(mob->shared_from_this(), target, maxDist, _canPassDoors, _canOpenDoors, avoidWater, canFloat);
+}
+
+bool PathNavigation::moveTo(shared_ptr<Mob> target, float speed)
+{
+	MemSect(53);
+	Path *newPath = createPath(target);
+	MemSect(0);
+	// No need to delete newPath here as this will be copied into the member variable path and the class can assume responsibility for it
+	if (newPath != NULL) return moveTo(newPath, speed);
+	else return false;
+}
+
+bool PathNavigation::moveTo(Path *newPath, float speed)
+{
+	if(newPath == NULL)
+	{
+		if(path != NULL) delete path;
+		path = NULL;
+		return false;
+	}
+	if(!newPath->sameAs(path))
+	{
+		if(path != NULL) delete path;
+		path = newPath;
+	}
+	else
+	{
+		delete newPath;
+	}
+	if (avoidSun) trimPathFromSun();
+	if (path->getSize() == 0) return false;
+
+	this->speed = speed;
+	Vec3 *mobPos = getTempMobPos();
+	lastStuckCheck = _tick;
+	lastStuckCheckPos->x = mobPos->x;
+	lastStuckCheckPos->y = mobPos->y;
+	lastStuckCheckPos->z = mobPos->z;
+	return true;
+}
+
+Path *PathNavigation::getPath()
+{
+	return path;
+}
+
+void PathNavigation::tick()
+{
+	++_tick;
+	if (isDone()) return;
+
+	if (canUpdatePath()) updatePath();
+
+	if (isDone()) return;
+	Vec3 *target = path->currentPos(mob->shared_from_this());
+	if (target == NULL) return;
+
+	mob->getMoveControl()->setWantedPosition(target->x, target->y, target->z, speed);
+}
+
+void PathNavigation::updatePath()
+{
+	Vec3 *mobPos = getTempMobPos();
+
+	// find first elevations in path
+	int firstElevation = path->getSize();
+	for (int i = path->getIndex(); path != NULL && i < path->getSize(); ++i)
+	{
+		if ((int) path->get(i)->y != (int) mobPos->y)
+		{
+			firstElevation = i;
+			break;
+		}
+	}
+
+	// remove those within way point radius (this is not optimal, should
+	// check canWalkDirectly also) possibly only check next as well
+	float waypointRadiusSqr = mob->bbWidth * mob->bbWidth;
+	for (int i = path->getIndex(); i < firstElevation; ++i)
+	{
+		Vec3 *pathPos = path->getPos(mob->shared_from_this(), i);
+		if (mobPos->distanceToSqr(pathPos) < waypointRadiusSqr)
+		{
+			path->setIndex(i + 1);
+		}
+	}
+
+	// smooth remaining on same elevation
+	int sx = (int) ceil(mob->bbWidth);
+	int sy = (int) mob->bbHeight + 1;
+	int sz = sx;
+	for (int i = firstElevation - 1; i >= path->getIndex(); --i)
+	{
+		if (canMoveDirectly(mobPos, path->getPos(mob->shared_from_this(), i), sx, sy, sz))
+		{
+			path->setIndex(i);
+			break;
+		}
+	}
+
+	// stuck detection (probably pushed off path)
+	if (_tick - lastStuckCheck > 100)
+	{
+		if (mobPos->distanceToSqr(lastStuckCheckPos) < 1.5 * 1.5) stop();
+		lastStuckCheck = _tick;
+		lastStuckCheckPos->x = mobPos->x;
+		lastStuckCheckPos->y = mobPos->y;
+		lastStuckCheckPos->z = mobPos->z;
+	}
+}
+
+bool PathNavigation::isDone()
+{
+	return path == NULL || path->isDone();
+}
+
+void PathNavigation::stop()
+{
+	if(path != NULL) delete path;
+	path = NULL;
+}
+
+Vec3 *PathNavigation::getTempMobPos()
+{
+	return Vec3::newTemp(mob->x, getSurfaceY(), mob->z);
+}
+
+int PathNavigation::getSurfaceY()
+{
+	if (!mob->isInWater() || !canFloat) return (int) (mob->bb->y0 + 0.5);
+
+	int surface = (int) (mob->bb->y0);
+	int tileId = level->getTile(Mth::floor(mob->x), surface, Mth::floor(mob->z));
+	int steps = 0;
+	while (tileId == Tile::water_Id || tileId == Tile::calmWater_Id)
+	{
+		++surface;
+		tileId = level->getTile(Mth::floor(mob->x), surface, Mth::floor(mob->z));
+		if (++steps > 16) return (int) (mob->bb->y0);
+	}
+	return surface;
+}
+
+bool PathNavigation::canUpdatePath()
+{
+	return mob->onGround || (canFloat && isInLiquid());
+}
+
+bool PathNavigation::isInLiquid()
+{
+	return mob->isInWater() || mob->isInLava();
+}
+
+void PathNavigation::trimPathFromSun()
+{
+	if (level->canSeeSky(Mth::floor(mob->x), (int) (mob->bb->y0 + 0.5), Mth::floor(mob->z))) return;
+
+	for (int i = 0; i < path->getSize(); ++i)
+	{
+		Node *n = path->get(i);
+		if (level->canSeeSky((int) n->x, (int) n->y, (int) n->z))
+		{
+			path->setSize(i - 1);
+			return;
+		}
+	}
+}
+
+bool PathNavigation::canMoveDirectly(Vec3 *startPos, Vec3 *stopPos, int sx, int sy, int sz)
+{
+
+	int gridPosX = Mth::floor(startPos->x);
+	int gridPosZ = Mth::floor(startPos->z);
+
+	double dirX = stopPos->x - startPos->x;
+	double dirZ = stopPos->z - startPos->z;
+	double distSqr = dirX * dirX + dirZ * dirZ;
+	if (distSqr < 0.00000001) return false;
+
+	double nf = 1 / sqrt(distSqr);
+	dirX *= nf;
+	dirZ *= nf;
+
+	sx += 2;
+	sz += 2;
+	if (!canWalkOn(gridPosX, (int) startPos->y, gridPosZ, sx, sy, sz, startPos, dirX, dirZ)) return false;
+	sx -= 2;
+	sz -= 2;
+
+	double deltaX = 1 / abs(dirX);
+	double deltaZ = 1 / abs(dirZ);
+
+	double maxX = gridPosX * 1 - startPos->x;
+	double maxZ = gridPosZ * 1 - startPos->z;
+	if (dirX >= 0) maxX += 1;
+	if (dirZ >= 0) maxZ += 1;
+	maxX /= dirX;
+	maxZ /= dirZ;
+
+	int stepX = dirX < 0 ? -1 : 1;
+	int stepZ = dirZ < 0 ? -1 : 1;
+	int gridGoalX = Mth::floor(stopPos->x);
+	int gridGoalZ = Mth::floor(stopPos->z);
+	int currentDirX = gridGoalX - gridPosX;
+	int currentDirZ = gridGoalZ - gridPosZ;
+	while (currentDirX * stepX > 0 || currentDirZ * stepZ > 0)
+	{
+		if (maxX < maxZ)
+		{
+			maxX += deltaX;
+			gridPosX += stepX;
+			currentDirX = gridGoalX - gridPosX;
+		}
+		else
+		{
+			maxZ += deltaZ;
+			gridPosZ += stepZ;
+			currentDirZ = gridGoalZ - gridPosZ;
+		}
+
+		if (!canWalkOn(gridPosX, (int) startPos->y, gridPosZ, sx, sy, sz, startPos, dirX, dirZ)) return false;
+	}
+	return true;
+}
+
+bool PathNavigation::canWalkOn(int x, int y, int z, int sx, int sy, int sz, Vec3 *startPos, double goalDirX, double goalDirZ)
+{
+
+	int startX = x - sx / 2;
+	int startZ = z - sz / 2;
+
+	if (!canWalkAbove(startX, y, startZ, sx, sy, sz, startPos, goalDirX, goalDirZ)) return false;
+
+	// lava or water or air under
+	for (int xx = startX; xx < startX + sx; xx++)
+	{
+		for (int zz = startZ; zz < startZ + sz; zz++)
+		{
+			double dirX = xx + 0.5 - startPos->x;
+			double dirZ = zz + 0.5 - startPos->z;
+			if (dirX * goalDirX + dirZ * goalDirZ < 0) continue;
+			int tile = level->getTile(xx, y - 1, zz);
+			if (tile <= 0) return false;
+			Material *m = Tile::tiles[tile]->material;
+			if (m == Material::water && !mob->isInWater()) return false;
+			if (m == Material::lava) return false;
+		}
+	}
+
+	return true;
+}
+
+bool PathNavigation::canWalkAbove(int startX, int startY, int startZ, int sx, int sy, int sz, Vec3 *startPos, double goalDirX, double goalDirZ)
+{
+
+	for (int xx = startX; xx < startX + sx; xx++)
+	{
+		for (int yy = startY; yy < startY + sy; yy++)
+		{
+			for (int zz = startZ; zz < startZ + sz; zz++)
+			{
+
+				double dirX = xx + 0.5 - startPos->x;
+				double dirZ = zz + 0.5 - startPos->z;
+				if (dirX * goalDirX + dirZ * goalDirZ < 0) continue;
+				int tile = level->getTile(xx, yy, zz);
+				if (tile <= 0) continue;
+				if (!Tile::tiles[tile]->isPathfindable(level, xx, yy, zz)) return false;
+			}
+		}
+	}
+	return true;
+}
+
+void PathNavigation::setLevel(Level *level)
+{
+	this->level = level;
+}
+
+// LookControl.cpp
+LookControl::LookControl(Mob *mob)
+{
+	yMax = xMax = 0.0f;
+	hasWanted = false;
+	wantedX = wantedY = wantedZ = 0.0;
+
+	this->mob = mob;
+}
+
+void LookControl::setLookAt(shared_ptr<Entity> target, float yMax, float xMax)
+{
+	this->wantedX = target->x;
+	shared_ptr<Mob> targetMob = dynamic_pointer_cast<Mob>(target);
+	if (targetMob != NULL) this->wantedY = target->y + targetMob->getHeadHeight();
+	else this->wantedY = (target->bb->y0 + target->bb->y1) / 2;
+	this->wantedZ = target->z;
+	this->yMax = yMax;
+	this->xMax = xMax;
+	hasWanted = true;
+}
+
+void LookControl::setLookAt(double x, double y, double z, float yMax, float xMax)
+{
+	this->wantedX = x;
+	this->wantedY = y;
+	this->wantedZ = z;
+	this->yMax = yMax;
+	this->xMax = xMax;
+	hasWanted = true;
+}
+
+void LookControl::tick()
+{
+	mob->xRot = 0;
+
+	if (hasWanted)
+	{
+		hasWanted = false;
+
+		double xd = wantedX - mob->x;
+		double yd = wantedY - (mob->y + mob->getHeadHeight());
+		double zd = wantedZ - mob->z;
+		double sd = sqrt(xd * xd + zd * zd);
+
+		float yRotD = (float) (atan2(zd, xd) * 180 / PI) - 90;
+		float xRotD = (float) -(atan2(yd, sd) * 180 / PI);
+		mob->xRot = rotlerp(mob->xRot, xRotD, xMax);
+		mob->yHeadRot = rotlerp(mob->yHeadRot, yRotD, yMax);
+	}
+	else
+	{		
+		mob->yHeadRot = rotlerp(mob->yHeadRot, mob->yBodyRot, 10);
+	}
+
+	float headDiffBody = Mth::wrapDegrees(mob->yHeadRot - mob->yBodyRot);
+
+	if (!mob->getNavigation()->isDone())
+	{
+		// head clamped to body
+		if (headDiffBody < -75) mob->yHeadRot = mob->yBodyRot - 75;
+		if (headDiffBody > 75) mob->yHeadRot = mob->yBodyRot + 75;
+	}
+}
+
+float LookControl::rotlerp(float a, float b, float max)
+{
+	float diff = b - a;
+	while (diff < -180)
+		diff += 360;
+	while (diff >= 180)
+		diff -= 360;
+	if (diff > max)
+	{
+		diff = max;
+	}
+	if (diff < -max)
+	{
+		diff = -max;
+	}
+	return a + diff;
+}
+
+bool LookControl::isHasWanted()
+{
+	return hasWanted;
+}
+
+float LookControl::getYMax()
+{
+	return yMax;
+}
+
+float LookControl::getXMax()
+{
+	return xMax;
+}
+
+double LookControl::getWantedX()
+{
+	return wantedX;
+}
+
+double LookControl::getWantedY()
+{
+	return wantedY;
+}
+
+double LookControl::getWantedZ()
+{
+	return wantedZ;
+}
+
+// MoveControl.cpp
+MoveControl::MoveControl(Mob *mob)
+{
+	this->mob = mob;
+	wantedX = mob->x;
+	wantedY = mob->y;
+	wantedZ = mob->z;
+
+	speed = 0.0f;
+
+	_hasWanted = false;
+}
+
+bool MoveControl::hasWanted()
+{
+	return _hasWanted;
+}
+
+float MoveControl::getSpeed()
+{
+	return speed;
+}
+
+void MoveControl::setWantedPosition(double x, double y, double z, float speed)
+{
+	wantedX = x;
+	wantedY = y;
+	wantedZ = z;
+	this->speed = speed;
+	_hasWanted = true;
+}
+
+void MoveControl::tick()
+{
+	mob->setYya(0);
+	if (!_hasWanted) return;
+	_hasWanted = false;
+
+	int yFloor = floor(mob->bb->y0 + .5f);
+
+	double xd = wantedX - mob->x;
+	double zd = wantedZ - mob->z;
+	double yd = wantedY - yFloor;
+	double dd = xd * xd + yd * yd + zd * zd;
+	if (dd < MIN_SPEED_SQR) return;
+
+	float yRotD = (float) (atan2(zd, xd) * 180 / PI) - 90;
+
+	mob->yRot = rotlerp(mob->yRot, yRotD, MAX_TURN);
+	mob->setSpeed(speed * mob->getWalkingSpeedModifier());
+
+	if (yd > 0 && xd * xd + zd * zd < 1) mob->getJumpControl()->jump();
+}
+
+float MoveControl::rotlerp(float a, float b, float max)
+{
+	float diff = Mth::wrapDegrees(b - a);
+	if (diff > max)
+	{
+		diff = max;
+	}
+	if (diff < -max)
+	{
+		diff = -max;
+	}
+	return a + diff;
+}
+
+// JumpControl.cpp
+JumpControl::JumpControl(Mob *mob)
+{
+	_jump = false;
+
+	this->mob = mob;
+}
+
+void JumpControl::jump()
+{
+	_jump = true;
+}
+
+void JumpControl::tick()
+{
+	mob->setJumping(_jump);
+	_jump = false;
+}
+
+// BodyControl.cpp
+BodyControl::BodyControl(Mob *mob)
+{
+	this->mob = mob;
+
+	timeStill = 0;
+	lastHeadY = 0.0f;
+}
+
+void BodyControl::clientTick()
+{
+	double xd = mob->x - mob->xo;
+	double zd = mob->z - mob->zo;
+
+	if (xd * xd + zd * zd > MoveControl::MIN_SPEED_SQR)
+	{
+		// we are moving.
+		mob->yBodyRot = mob->yRot;
+		mob->yHeadRot = clamp(mob->yBodyRot, mob->yHeadRot, maxClampAngle);
+		lastHeadY = mob->yHeadRot;
+		timeStill = 0;
+		return;
+	}
+
+	// Body will align to head after looking long enough in a direction
+	float clampAngle = maxClampAngle;
+	if (abs(mob->yHeadRot - lastHeadY) > 15)
+	{
+		timeStill = 0;
+		lastHeadY = mob->yHeadRot;
+	}
+	else
+	{
+		++timeStill;
+		static const int timeStillBeforeTurn = 10;
+		if (timeStill > timeStillBeforeTurn) clampAngle = max(1 - (timeStill - timeStillBeforeTurn) / 10.f, 0.0f) * maxClampAngle;
+	}
+
+	mob->yBodyRot = clamp(mob->yHeadRot, mob->yBodyRot, clampAngle);
+}
+
+float BodyControl::clamp(float clampTo, float clampFrom, float clampAngle)
+{
+	float headDiffBody = Mth::wrapDegrees(clampTo - clampFrom);
+	if (headDiffBody < -clampAngle) headDiffBody = -clampAngle;
+	if (headDiffBody >= clampAngle) headDiffBody = +clampAngle;
+	return clampTo - headDiffBody;
+}
+
+// Sensing.cpp
+Sensing::Sensing(Mob *mob)
+{
+	this->mob = mob;
+}
+
+void Sensing::tick()
+{
+	seen.clear();
+	unseen.clear();
+}
+
+bool Sensing::canSee(shared_ptr<Entity> target)
+{
+	//if ( find(seen.begin(), seen.end(), target) != seen.end() ) return true;
+	//if ( find(unseen.begin(), unseen.end(), target) != unseen.end()) return false;
+	for(AUTO_VAR(it, seen.begin()); it != seen.end(); ++it)
+	{
+		if(target == (*it).lock()) return true;
+	}
+	for(AUTO_VAR(it, unseen.begin()); it != unseen.end(); ++it)
+	{
+		if(target == (*it).lock()) return false;
+	}
+
+	//util.Timer.push("canSee");
+	bool canSee = mob->canSee(target);
+	//util.Timer.pop();
+	if (canSee) seen.push_back(weak_ptr<Entity>(target));
+	else unseen.push_back(weak_ptr<Entity>(target));
+	return canSee;
+}
+
+// Goal.cpp
+Goal::Goal()
+{
+	_requiredControlFlags = 0;
+}
+
+bool Goal::canContinueToUse()
+{
+	return canUse();
+}
+
+bool Goal::canInterrupt()
+{
+	return true;
+}
+
+void Goal::start()
+{
+}
+
+void Goal::stop()
+{
+}
+
+void Goal::tick()
+{
+}
+
+void Goal::setRequiredControlFlags(int requiredControlFlags)
+{
+	_requiredControlFlags = requiredControlFlags;
+}
+
+int Goal::getRequiredControlFlags()
+{
+	return _requiredControlFlags;
+}
+
+// GoalSelector.cpp
+GoalSelector::InternalGoal::InternalGoal(int prio, Goal *goal, bool canDeletePointer)
+{
+	this->prio = prio;
+	this->goal = goal;
+	this->canDeletePointer = canDeletePointer;
+}
+
+GoalSelector::GoalSelector()
+{
+	tickCount = 0;
+	newGoalRate = 3;
+}
+
+GoalSelector::~GoalSelector()
+{
+	for(AUTO_VAR(it, goals.begin()); it != goals.end(); ++it)
+	{
+		if((*it)->canDeletePointer) delete (*it)->goal;
+		delete (*it);
+	}
+}
+
+void GoalSelector::addGoal(int prio, Goal *goal, bool canDeletePointer /*= true*/) // 4J Added canDelete param
+{
+	goals.push_back(new InternalGoal(prio, goal, canDeletePointer));
+}
+
+void GoalSelector::tick()
+{
+	vector<InternalGoal *> toStart;
+
+	if(tickCount++ % newGoalRate == 0)
+	{
+		//for (InternalGoal ig : goals)
+		for(AUTO_VAR(it, goals.begin()); it != goals.end(); ++it)
+		{
+			InternalGoal *ig = *it;
+			//bool isUsing = usingGoals.contains(ig);
+			AUTO_VAR(usingIt, find(usingGoals.begin(), usingGoals.end(), ig));
+
+			//if (isUsing)
+			if(usingIt != usingGoals.end())
+			{
+				if (!canUseInSystem(ig) || !canContinueToUse(ig))
+				{
+					ig->goal->stop();
+					//usingGoals.remove(ig);
+					usingGoals.erase(usingIt);
+				}
+				else continue;
+			}
+
+			if (!canUseInSystem(ig) || !ig->goal->canUse()) continue;
+
+			toStart.push_back(ig);
+			usingGoals.push_back(ig);
+		}
+	}
+	else
+	{
+		for(AUTO_VAR(it, usingGoals.begin() ); it != usingGoals.end(); )
+		{
+			InternalGoal *ig = *it;
+			if (!ig->goal->canContinueToUse())
+			{
+				ig->goal->stop();
+				it = usingGoals.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+	}
+
+
+	//bool debug = false;
+	//if (debug && toStart.size() > 0) System.out.println("Starting: ");
+	//for (InternalGoal ig : toStart)
+	for(AUTO_VAR(it, toStart.begin()); it != toStart.end(); ++it)
+	{
+		//if (debug) System.out.println(ig.goal.toString() + ", ");
+		(*it)->goal->start();
+	}
+
+	//if (debug && usingGoals.size() > 0) System.out.println("Running: ");
+	//for (InternalGoal ig : usingGoals)
+	for(AUTO_VAR(it, usingGoals.begin()); it != usingGoals.end(); ++it)
+	{
+		//if (debug) System.out.println(ig.goal.toString());
+		(*it)->goal->tick();
+	}
+}
+
+vector<GoalSelector::InternalGoal *> *GoalSelector::getRunningGoals()
+{
+	return &usingGoals;
+}
+
+bool GoalSelector::canContinueToUse(InternalGoal *ig)
+{
+	return ig->goal->canContinueToUse();
+}
+
+bool GoalSelector::canUseInSystem(GoalSelector::InternalGoal *goal)
+{
+	//for (InternalGoal ig : goals)
+	for(AUTO_VAR(it, goals.begin()); it != goals.end(); ++it)
+	{
+		InternalGoal *ig = *it;
+		if (ig == goal) continue;
+
+		AUTO_VAR(usingIt, find(usingGoals.begin(), usingGoals.end(), ig));
+
+		if (goal->prio >= ig->prio)
+		{
+			if (usingIt != usingGoals.end() && !canCoExist(goal, ig)) return false;
+		}
+		else if (usingIt != usingGoals.end() && !ig->goal->canInterrupt()) return false;
+	}
+
+	return true;
+}
+
+bool GoalSelector::canCoExist(GoalSelector::InternalGoal *goalA, GoalSelector::InternalGoal *goalB)
+{
+	return (goalA->goal->getRequiredControlFlags() & goalB->goal->getRequiredControlFlags()) == 0;
+}
+
+void GoalSelector::setNewGoalRate(int newGoalRate)
+{
+	this->newGoalRate = newGoalRate;
+}
+
+void GoalSelector::setLevel(Level *level)
+{
+	for(AUTO_VAR(it, goals.begin()); it != goals.end(); ++it)
+	{
+		InternalGoal *ig = *it;
+		ig->goal->setLevel(level);
+	}
+}
+
+// Mob.cpp
+void Mob::_init()
+{
+	invulnerableDuration = 20;
+	timeOffs = 0.0f;
+
+	yBodyRot = 0;
+	yBodyRotO = 0;
+	yHeadRot = 0;
+	yHeadRotO = 0;
+
+	oRun = 0.0f;
+	run = 0.0f;
+
+	animStep = 0.0f;
+	animStepO = 0.0f;
+
+	MemSect(31);
+	hasHair = true;
+	textureIdx = TN_MOB_CHAR;	// 4J was L"/mob/char.png";
+	allowAlpha = true;
+	rotOffs = 0;
+	modelName = L"";
+	bobStrength = 1;
+	deathScore = 0;
+	renderOffset = 0;
+	MemSect(0);
+
+	walkingSpeed = 0.1f;
+	flyingSpeed = 0.02f;
+
+	oAttackAnim = 0.0f;
+	attackAnim = 0.0f;
+
+	lastHealth = 0;
+	dmgSpill = 0;
+
+	ambientSoundTime = 0;
+
+	hurtTime = 0;
+	hurtDuration = 0;
+	hurtDir = 0;
+	deathTime = 0;
+	attackTime = 0;
+	oTilt = 0;
+	tilt = 0;
+
+	dead = false;
+	xpReward = 0;
+
+	modelNum = -1;
+	animSpeed = (float) (Math::random() * 0.9f + 0.1f);
+
+	walkAnimSpeedO = 0.0f;
+	walkAnimSpeed = 0.0f;
+	walkAnimPos = 0.0f;
+
+	lastHurtByPlayer = nullptr;
+	lastHurtByPlayerTime = 0;
+	lastHurtByMob = nullptr;
+	lastHurtByMobTime = 0;
+	lastHurtMob = nullptr;
+
+	arrowCount = 0;
+	removeArrowTime = 0;
+
+	lSteps = 0;
+	lx = ly = lz = lyr = lxr = 0.0;
+
+	fallTime = 0.0f;
+
+	lastHurt = 0;
+
+	noActionTime = 0;
+	xxa = yya = yRotA = 0.0f;
+	jumping = false;
+	defaultLookAngle = 0.0f;
+	runSpeed = 0.7f;
+	noJumpDelay = 0;
+
+	lookingAt = nullptr;
+	lookTime = 0;
+
+	effectsDirty = true;
+	effectColor = 0;
+
+	target = nullptr;
+	sensing = NULL;
+	speed = 0.0f;
+
+	restrictCenter = new Pos(0, 0, 0);
+	restrictRadius = -1.0f;
+}
+
+Mob::Mob( Level* level) : Entity(level)
+{
+	_init();
+
+	// 4J Stu - This will not call the correct derived function, so moving to each derived class
+	//health = getMaxHealth();
+	health = 0;
+
+	blocksBuilding = true;
+
+	lookControl = new LookControl(this);
+	moveControl = new MoveControl(this);
+	jumpControl = new JumpControl(this);
+	bodyControl = new BodyControl(this);
+	navigation = new PathNavigation(this, level, 16);
+	sensing = new Sensing(this);
+
+	rotA = (float) (Math::random() + 1) * 0.01f;
+	setPos(x, y, z);
+	timeOffs = (float) Math::random() * 12398;
+	yRot = (float) (Math::random() * PI * 2);
+	yHeadRot = yRot;
+
+	this->footSize = 0.5f;
+}
+
+Mob::~Mob()
+{
+	for(AUTO_VAR(it, activeEffects.begin()); it != activeEffects.end(); ++it)
+	{
+		delete it->second;
+	}
+
+	if(lookControl != NULL) delete lookControl;
+	if(moveControl != NULL) delete moveControl;
+	if(jumpControl != NULL) delete jumpControl;
+	if(bodyControl != NULL) delete bodyControl;
+	if(navigation != NULL) delete navigation;
+	if(sensing != NULL) delete sensing;
+
+	delete restrictCenter;
+}
+
+LookControl *Mob::getLookControl()
+{
+	return lookControl;
+}
+
+MoveControl *Mob::getMoveControl()
+{
+	return moveControl;
+}
+
+JumpControl *Mob::getJumpControl()
+{
+	return jumpControl;
+}
+
+PathNavigation *Mob::getNavigation()
+{
+	return navigation;
+}
+
+Sensing *Mob::getSensing()
+{
+	return sensing;
+}
+
+Random *Mob::getRandom()
+{
+	return random;
+}
+
+shared_ptr<Mob> Mob::getLastHurtByMob()
+{
+	return lastHurtByMob;
+}
+
+shared_ptr<Mob> Mob::getLastHurtMob()
+{
+	return lastHurtMob;
+}
+
+void Mob::setLastHurtMob(shared_ptr<Entity> target)
+{
+	shared_ptr<Mob> mob = dynamic_pointer_cast<Mob>(target);
+	if (mob != NULL) lastHurtMob = mob;
+}
+
+int Mob::getNoActionTime()
+{
+	return noActionTime;
+}
+
+float Mob::getYHeadRot()
+{
+	return yHeadRot;
+}
+
+void Mob::setYHeadRot(float yHeadRot)
+{
+	this->yHeadRot = yHeadRot;
+}
+
+float Mob::getSpeed()
+{
+	return speed;
+}
+
+void Mob::setSpeed(float speed)
+{
+	this->speed = speed;
+	setYya(speed);
+}
+
+bool Mob::doHurtTarget(shared_ptr<Entity> target)
+{
+	setLastHurtMob(target);
+	return false;
+}
+
+shared_ptr<Mob> Mob::getTarget()
+{
+	return target;
+}
+
+void Mob::setTarget(shared_ptr<Mob> target)
+{
+	this->target = target;
+}
+
+bool Mob::canAttackType(eINSTANCEOF targetType)
+{
+	return !(targetType == eTYPE_CREEPER || targetType == eTYPE_GHAST);
+}
+
+void Mob::ate()
+{
+}
+
+bool Mob::isWithinRestriction()
+{
+	return isWithinRestriction(Mth::floor(x), Mth::floor(y), Mth::floor(z));
+}
+
+bool Mob::isWithinRestriction(int x, int y, int z)
+{
+	if (restrictRadius == -1) return true;
+	return restrictCenter->distSqr(x, y, z) < restrictRadius * restrictRadius;
+}
+
+void Mob::restrictTo(int x, int y, int z, int radius)
+{
+	restrictCenter->set(x, y, z);
+	restrictRadius = radius;
+}
+
+Pos *Mob::getRestrictCenter()
+{
+	return restrictCenter;
+}
+
+float Mob::getRestrictRadius()
+{
+	return restrictRadius;
+}
+
+void Mob::clearRestriction()
+{
+	restrictRadius = -1;
+}
+
+bool Mob::hasRestriction()
+{
+	return restrictRadius != -1;
+}
+
+void Mob::setLastHurtByMob(shared_ptr<Mob> hurtBy)
+{
+	lastHurtByMob = hurtBy;
+	lastHurtByMobTime = lastHurtByMob != NULL ? PLAYER_HURT_EXPERIENCE_TIME : 0;
+}
+
+void Mob::defineSynchedData() 
+{
+	entityData->define(DATA_EFFECT_COLOR_ID, effectColor);
+}
+
+bool Mob::canSee(shared_ptr<Entity> target) 
+{
+	HitResult *hres = level->clip(Vec3::newTemp(x, y + getHeadHeight(), z), Vec3::newTemp(target->x, target->y + target->getHeadHeight(), target->z));
+	bool retVal = (hres == NULL);
+	delete hres;
+	return retVal;
+}
+
+int Mob::getTexture() 
+{
+	return textureIdx;
+}
+
+bool Mob::isPickable() 
+{
+	return !removed;
+}
+
+bool Mob::isPushable() 
+{
+	return !removed;
+}
+
+float Mob::getHeadHeight() 
+{
+	return bbHeight * 0.85f;
+}
+
+int Mob::getAmbientSoundInterval() 
+{
+	return 20 * 4;
+}
+
+void Mob::playAmbientSound() 
+{
+	MemSect(31);
+	int ambient = getAmbientSound();
+	if (ambient != -1) 
+	{
+		level->playSound(shared_from_this(), ambient, getSoundVolume(), getVoicePitch());
+	}
+	MemSect(0);
+}
+
+void Mob::baseTick() 
+{
+	oAttackAnim = attackAnim;
+	Entity::baseTick();
+
+	if (isAlive() && random->nextInt(1000) < ambientSoundTime++) 
+	{
+		ambientSoundTime = -getAmbientSoundInterval();
+
+		playAmbientSound();		
+	}
+
+	if (isAlive() && isInWall()) 
+	{
+		hurt(DamageSource::inWall, 1);
+	}
+
+	if (isFireImmune() || level->isClientSide) clearFire();
+
+	if (isAlive() && isUnderLiquid(Material::water) && !isWaterMob() && activeEffects.find(MobEffect::waterBreathing->id) == activeEffects.end()) 
+	{
+		setAirSupply(decreaseAirSupply(getAirSupply()));
+		if (getAirSupply() == -20)
+		{
+			setAirSupply(0);
+			if(canCreateParticles())
+			{
+				for (int i = 0; i < 8; i++)
+				{
+					float xo = random->nextFloat() - random->nextFloat();
+					float yo = random->nextFloat() - random->nextFloat();
+					float zo = random->nextFloat() - random->nextFloat();
+					level->addParticle(eParticleType_bubble, x + xo, y + yo, z + zo, xd, yd, zd);
+				}
+			}
+			hurt(DamageSource::drown, 2);
+		}
+
+		clearFire();
+	} 
+	else 
+	{
+		setAirSupply(TOTAL_AIR_SUPPLY);
+	}
+
+	oTilt = tilt;
+
+	if (attackTime > 0) attackTime--;
+	if (hurtTime > 0) hurtTime--;
+	if (invulnerableTime > 0) invulnerableTime--;
+	if (health <= 0) 
+	{
+		tickDeath();
+	}
+
+	if (lastHurtByPlayerTime > 0) lastHurtByPlayerTime--;
+	else
+	{
+		// Note - this used to just set to nullptr, but that has to create a new shared_ptr and free an old one, when generally this won't be doing anything at all. This
+		// is the lightweight but ugly alternative
+		if( lastHurtByPlayer )
+		{
+			lastHurtByPlayer.reset();
+		}
+	}
+	if (lastHurtMob != NULL && !lastHurtMob->isAlive()) lastHurtMob = nullptr;
+
+	if (lastHurtByMob != NULL)
+	{
+		if (!lastHurtByMob->isAlive()) setLastHurtByMob(nullptr);
+		else if (lastHurtByMobTime > 0) lastHurtByMobTime--;
+		else setLastHurtByMob(nullptr);
+	}
+
+	// update effects
+	tickEffects();
+
+	animStepO = animStep;
+
+	yBodyRotO = yBodyRot;
+	yHeadRotO = yHeadRot;
+	yRotO = yRot;
+	xRotO = xRot;
+}
+
+void Mob::tickDeath()
+{	
+	deathTime++;
+	if (deathTime == 20) 
+	{
+		// 4J Stu - Added level->isClientSide check from 1.2 to fix XP orbs being created client side
+		if(!level->isClientSide && (lastHurtByPlayerTime > 0 || isAlwaysExperienceDropper()) )
+		{
+			if (!isBaby())
+			{
+				int xpCount = this->getExperienceReward(lastHurtByPlayer);
+				while (xpCount > 0)
+				{
+					int newCount = ExperienceOrb::getExperienceValue(xpCount);
+					xpCount -= newCount;
+					level->addEntity(shared_ptr<ExperienceOrb>( new ExperienceOrb(level, x, y, z, newCount) ) );
+				}
+			}
+		}
+
+		remove();
+		for (int i = 0; i < 20; i++) 
+		{
+			double xa = random->nextGaussian() * 0.02;
+			double ya = random->nextGaussian() * 0.02;
+			double za = random->nextGaussian() * 0.02;
+			level->addParticle(eParticleType_explode, x + random->nextFloat() * bbWidth * 2 - bbWidth, y + random->nextFloat() * bbHeight, z + random->nextFloat() * bbWidth * 2 - bbWidth, xa, ya, za);
+		}
+	}
+}
+
+int Mob::decreaseAirSupply(int currentSupply)
+{
+	return currentSupply - 1;
+}
+
+int Mob::getExperienceReward(shared_ptr<Player> killedBy)
+{
+	return xpReward;
+}
+
+bool Mob::isAlwaysExperienceDropper()
+{
+	return false;
+}
+
+void Mob::spawnAnim() 
+{
+	for (int i = 0; i < 20; i++) 
+	{
+		double xa = random->nextGaussian() * 0.02;
+		double ya = random->nextGaussian() * 0.02;
+		double za = random->nextGaussian() * 0.02;
+		double dd = 10;
+		level->addParticle(eParticleType_explode, x + random->nextFloat() * bbWidth * 2 - bbWidth - xa * dd, y + random->nextFloat() * bbHeight - ya * dd, z + random->nextFloat() * bbWidth * 2 - bbWidth - za
+			* dd, xa, ya, za);
+	}
+}
+
+void Mob::rideTick() 
+{
+	Entity::rideTick();
+	oRun = run;
+	run = 0;
+	fallDistance = 0;
+}
+
+void Mob::lerpTo(double x, double y, double z, float yRot, float xRot, int steps) 
+{
+	heightOffset = 0;
+	lx = x;
+	ly = y;
+	lz = z;
+	lyr = yRot;
+	lxr = xRot;
+
+	lSteps = steps;
+}
+
+void Mob::superTick() 
+{
+	Entity::tick();
+}
+
+void Mob::tick() 
+{
+	Entity::tick();
+
+	if (arrowCount > 0)
+	{
+		if (removeArrowTime <= 0)
+		{
+			removeArrowTime = 20 * 3;
+		}
+		removeArrowTime--;
+		if (removeArrowTime <= 0)
+		{
+			arrowCount--;
+		}
+	}
+
+	aiStep();
+
+	double xd = x - xo;
+	double zd = z - zo;
+
+	float sideDist = xd * xd + zd * zd;
+
+	float yBodyRotT = yBodyRot;
+
+	float walkSpeed = 0;
+	oRun = run;
+	float tRun = 0;
+	if (sideDist <= 0.05f * 0.05f) 
+	{
+		// animStep = 0;
+	} 
+	else 
+	{
+		tRun = 1;
+		walkSpeed = sqrt(sideDist) * 3;
+		yBodyRotT = ((float) atan2(zd, xd) * 180 / (float) PI - 90);
+	}
+	if (attackAnim > 0) 
+	{
+		yBodyRotT = yRot;
+	}
+	if (!onGround) 
+	{
+		tRun = 0;
+	}
+	run = run + (tRun - run) * 0.3f;
+
+	/*
+	* float yBodyRotD = yRot-yBodyRot; while (yBodyRotD < -180) yBodyRotD
+	* += 360; while (yBodyRotD >= 180) yBodyRotD -= 360; yBodyRot +=
+	* yBodyRotD * 0.1f;
+	*/
+
+	if (useNewAi())
+	{
+		bodyControl->clientTick();
+	}
+	else
+	{
+		float yBodyRotD = Mth::wrapDegrees(yBodyRotT - yBodyRot);
+		yBodyRot += yBodyRotD * 0.3f;
+
+		float headDiff = Mth::wrapDegrees(yRot - yBodyRot);
+		bool behind = headDiff < -90 || headDiff >= 90;
+		if (headDiff < -75) headDiff = -75;
+		if (headDiff >= 75) headDiff = +75;
+		yBodyRot = yRot - headDiff;
+		if (headDiff * headDiff > 50 * 50) 
+		{
+			yBodyRot += headDiff * 0.2f;
+		}
+
+		if (behind) 
+		{
+			walkSpeed *= -1;
+		}
+	}
+	while (yRot - yRotO < -180)
+		yRotO -= 360;
+	while (yRot - yRotO >= 180)
+		yRotO += 360;
+
+	while (yBodyRot - yBodyRotO < -180)
+		yBodyRotO -= 360;
+	while (yBodyRot - yBodyRotO >= 180)
+		yBodyRotO += 360;
+
+	while (xRot - xRotO < -180)
+		xRotO -= 360;
+	while (xRot - xRotO >= 180)
+		xRotO += 360;
+
+	while (yHeadRot - yHeadRotO < -180)
+		yHeadRotO -= 360;
+	while (yHeadRot - yHeadRotO >= 180)
+		yHeadRotO += 360;
+
+	animStep += walkSpeed;
+}
+
+void Mob::heal(int heal) 
+{
+	if (health <= 0) return;
+	health += heal;
+	if (health > getMaxHealth()) health = getMaxHealth();
+	invulnerableTime = invulnerableDuration / 2;
+}
+
+int Mob::getHealth()
+{
+	return health;
+}
+
+void Mob::setHealth(int health)
+{
+	this->health = health;
+	if (health > getMaxHealth())
+	{
+		health = getMaxHealth();
+	}
+}
+
+bool Mob::hurt(DamageSource *source, int dmg) 
+{
+	// 4J Stu - Reworked this function a bit to show hurt damage on the client before the server responds.
+	// Fix for #8823 - Gameplay: Confirmation that a monster or animal has taken damage from an attack is highly delayed
+	// 4J Stu - Change to the fix to only show damage when attacked, rather than collision damage
+	// Fix for #10299 - When in corners, passive mobs may show that they are taking damage.
+	// 4J Stu - Change to the fix for TU6, as source is never NULL due to changes in 1.8.2 to what source actually is
+	if (level->isClientSide && dynamic_cast<EntityDamageSource *>(source) == NULL) return false;
+	noActionTime = 0;
+	if (health <= 0) return false;
+
+	if ( source->isFire() && hasEffect(MobEffect::fireResistance) )
+	{
+		// 4J-JEV, for new achievement Stayin'Frosty, TODO merge with Java version.
+		shared_ptr<Player> plr = dynamic_pointer_cast<Player>(shared_from_this());
+		if ( plr != NULL && source == DamageSource::lava ) // Only award when in lava (not any fire).
+		{
+			plr->awardStat(GenericStats::stayinFrosty(),GenericStats::param_stayinFrosty());
+		}
+		return false;
+	}
+
+	this->walkAnimSpeed = 1.5f;
+
+	bool sound = true;
+	if (invulnerableTime > invulnerableDuration / 2.0f) 
+	{
+		if (dmg <= lastHurt) return false;
+		if(!level->isClientSide) actuallyHurt(source, dmg - lastHurt);
+		lastHurt = dmg;
+		sound = false;
+	} 
+	else 
+	{
+		lastHurt = dmg;
+		lastHealth = health;
+		invulnerableTime = invulnerableDuration;
+		if (!level->isClientSide) actuallyHurt(source, dmg);
+		hurtTime = hurtDuration = 10;
+	}
+
+	hurtDir = 0;
+
+	shared_ptr<Entity> sourceEntity = source->getEntity();
+	if (sourceEntity != NULL)
+	{
+		if (dynamic_pointer_cast<Mob>(sourceEntity) != NULL) {
+			setLastHurtByMob(dynamic_pointer_cast<Mob>(sourceEntity));
+
+		}
+		if (dynamic_pointer_cast<Player>(sourceEntity) != NULL)
+		{
+			lastHurtByPlayerTime = PLAYER_HURT_EXPERIENCE_TIME;
+			lastHurtByPlayer = dynamic_pointer_cast<Player>(sourceEntity);
+		}
+		else if (dynamic_pointer_cast<Wolf>(sourceEntity))
+		{
+			shared_ptr<Wolf> w = dynamic_pointer_cast<Wolf>(sourceEntity);
+			if (w->isTame())
+			{
+				lastHurtByPlayerTime = PLAYER_HURT_EXPERIENCE_TIME;
+				lastHurtByPlayer = nullptr;
+			}
+		}
+	}
+
+	if (sound && level->isClientSide)
+	{
+		return false;
+	}
+
+	if (sound)
+	{
+		level->broadcastEntityEvent(shared_from_this(), EntityEvent::HURT);
+		if (source != DamageSource::drown && source != DamageSource::controlledExplosion) markHurt();
+		if (sourceEntity != NULL) 
+		{
+			double xd = sourceEntity->x - x;
+			double zd = sourceEntity->z - z;
+			while (xd * xd + zd * zd < 0.0001) 
+			{
+				xd = (Math::random() - Math::random()) * 0.01;
+				zd = (Math::random() - Math::random()) * 0.01;
+			}
+			hurtDir = (float) (atan2(zd, xd) * 180 / PI) - yRot;
+			knockback(sourceEntity, dmg, xd, zd);
+		} 
+		else 
+		{
+			hurtDir = (float) (int) ((Math::random() * 2) * 180); // 4J This cast is the same as Java
+		}
+	}
+
+	MemSect(31);
+	if (health <= 0) 
+	{
+		if (sound) level->playSound(shared_from_this(), getDeathSound(), getSoundVolume(), getVoicePitch());
+		die(source);
+	} 
+	else 
+	{
+		if (sound) level->playSound(shared_from_this(), getHurtSound(), getSoundVolume(), getVoicePitch());
+	}
+	MemSect(0);
+
+	return true;
+}
+
+float Mob::getVoicePitch()
+{
+	if (isBaby())
+	{
+		return (random->nextFloat() - random->nextFloat()) * 0.2f + 1.5f;
+
+	}
+	return (random->nextFloat() - random->nextFloat()) * 0.2f + 1.0f;
+}
+
+void Mob::animateHurt() 
+{
+	hurtTime = hurtDuration = 10;
+	hurtDir = 0;
+}
+
+int Mob::getArmorValue()
+{
+	return 0;
+}
+
+void Mob::hurtArmor(int damage)
+{
+}
+
+int Mob::getDamageAfterArmorAbsorb(DamageSource *damageSource, int damage)
+{
+	if (!damageSource->isBypassArmor())
+	{
+		int absorb = 25 - getArmorValue();
+		int v = (damage) * absorb + dmgSpill;
+		hurtArmor(damage);
+		damage = v / 25;
+		dmgSpill = v % 25;
+	}
+	return damage;
+}
+
+int Mob::getDamageAfterMagicAbsorb(DamageSource *damageSource, int damage)
+{
+	if (hasEffect(MobEffect::damageResistance))
+	{
+		int absorbValue = (getEffect(MobEffect::damageResistance)->getAmplifier() + 1) * 5;
+		int absorb = 25 - absorbValue;
+		int v = (damage) * absorb + dmgSpill;
+		damage = v / 25;
+		dmgSpill = v % 25;
+	}
+	return damage;
+}
+
+void Mob::actuallyHurt(DamageSource *source, int dmg) 
+{
+	dmg = getDamageAfterArmorAbsorb(source, dmg);
+	dmg = getDamageAfterMagicAbsorb(source, dmg);
+	health -= dmg;
+}
+
+float Mob::getSoundVolume() 
+{
+	return 1;
+}
+
+int Mob::getAmbientSound() 
+{
+	return -1;
+}
+
+int Mob::getHurtSound() 
+{
+	return eSoundType_DAMAGE_HURT;
+}
+
+int Mob::getDeathSound() 
+{
+	return eSoundType_DAMAGE_HURT;
+}
+
+void Mob::knockback(shared_ptr<Entity> source, int dmg, double xd, double zd) 
+{
+	hasImpulse = true;
+	float dd = (float) sqrt(xd * xd + zd * zd);
+	float pow = 0.4f;
+
+	this->xd /= 2;
+	this->yd /= 2;
+	this->zd /= 2;
+
+	this->xd -= xd / dd * pow;
+	this->yd += pow;
+	this->zd -= zd / dd * pow;
+
+	if (this->yd > 0.4f) this->yd = 0.4f;
+}
+
+void Mob::die(DamageSource *source) 
+{
+	shared_ptr<Entity> sourceEntity = source->getEntity();
+	if (deathScore >= 0 && sourceEntity != NULL) sourceEntity->awardKillScore(shared_from_this(), deathScore);
+
+	if (sourceEntity != NULL) sourceEntity->killed( dynamic_pointer_cast<Mob>( shared_from_this() ) );
+
+	dead = true;
+
+	if (!level->isClientSide) 
+	{
+		int playerBonus = 0;
+		shared_ptr<Player> player = dynamic_pointer_cast<Player>(sourceEntity);
+		if (player != NULL)
+		{
+			playerBonus = EnchantmentHelper::getKillingLootBonus(player->inventory);
+		}
+		if (!isBaby())
+		{
+			dropDeathLoot(lastHurtByPlayerTime > 0, playerBonus);
+			if (lastHurtByPlayerTime > 0)
+			{
+				int rareLoot = random->nextInt(200) - playerBonus;
+				if (rareLoot < 5)
+				{
+					dropRareDeathLoot((rareLoot <= 0) ? 1 : 0);
+				}
+			}
+		}
+
+		// 4J-JEV, hook for Durango mobKill event.
+		if (player != NULL)
+		{
+			player->awardStat(GenericStats::killMob(),GenericStats::param_mobKill(player, dynamic_pointer_cast<Mob>(shared_from_this()), source));
+		}
+	}
+
+	level->broadcastEntityEvent(shared_from_this(), EntityEvent::DEATH);
+}
+
+void Mob::dropRareDeathLoot(int rareLootLevel)
+{
+
+}
+
+void Mob::dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel) 
+{
+	int loot = getDeathLoot();
+	if (loot > 0) 
+	{
+		int count = random->nextInt(3);
+		if (playerBonusLevel > 0)
+		{
+			count += random->nextInt(playerBonusLevel + 1);
+		}
+		for (int i = 0; i < count; i++)
+			spawnAtLocation(loot, 1);
+	}
+}
+
+int Mob::getDeathLoot() 
+{
+	return 0;
+}
+
+void Mob::causeFallDamage(float distance) 
+{
+	Entity::causeFallDamage(distance);
+	int dmg = (int) ceil(distance - 3);
+	if (dmg > 0) 
+	{
+		// 4J - new sounds here brought forward from 1.2.3
+		if (dmg > 4)
+		{
+			level->playSound(shared_from_this(), eSoundType_DAMAGE_FALL_BIG, 1, 1);
+		}
+		else
+		{
+			level->playSound(shared_from_this(), eSoundType_DAMAGE_FALL_SMALL, 1, 1);
+		}
+		hurt(DamageSource::fall, dmg);
+
+		int t = level->getTile( Mth::floor(x), Mth::floor(y - 0.2f - this->heightOffset), Mth::floor(z));
+		if (t > 0) 
+		{
+			const Tile::SoundType *soundType = Tile::tiles[t]->soundType;
+			MemSect(31);
+			level->playSound(shared_from_this(), soundType->getStepSound(), soundType->getVolume() * 0.5f, soundType->getPitch() * 0.75f);
+			MemSect(0);
+		}
+	}
+}
+
+void Mob::travel(float xa, float ya) 
+{
+#ifdef __PSVITA__
+	// AP - dynamic_pointer_cast is a non-trivial call
+	Player *thisPlayer = NULL;
+	if( (GetType() & eTYPE_PLAYER) == eTYPE_PLAYER )
+	{
+		thisPlayer = (Player*) this;
+	}
+#else
+	shared_ptr<Player> thisPlayer = dynamic_pointer_cast<Player>(shared_from_this());
+#endif
+	if (isInWater() && !(thisPlayer && thisPlayer->abilities.flying) ) 
+	{
+		double yo = y;
+		moveRelative(xa, ya, useNewAi() ? 0.04f : 0.02f);
+		move(xd, yd, zd);
+
+		xd *= 0.80f;
+		yd *= 0.80f;
+		zd *= 0.80f;
+		yd -= 0.02;
+
+		if (horizontalCollision && isFree(xd, yd + 0.6f - y + yo, zd)) 
+		{
+			yd = 0.3f;
+		}
+	} 
+	else if (isInLava() && !(thisPlayer && thisPlayer->abilities.flying) ) 
+	{
+		double yo = y;
+		moveRelative(xa, ya, 0.02f);
+		move(xd, yd, zd);
+		xd *= 0.50f;
+		yd *= 0.50f;
+		zd *= 0.50f;
+		yd -= 0.02;
+
+		if (horizontalCollision && isFree(xd, yd + 0.6f - y + yo, zd)) 
+		{
+			yd = 0.3f;
+		}
+	} 
+	else 
+	{
+		float friction = 0.91f;
+		if (onGround) 
+		{
+			friction = 0.6f * 0.91f;
+			int t = level->getTile(Mth::floor(x), Mth::floor(bb->y0) - 1, Mth::floor(z));
+			if (t > 0) 
+			{
+				friction = Tile::tiles[t]->friction * 0.91f;
+			}
+		}
+
+		float friction2 = (0.6f * 0.6f * 0.91f * 0.91f * 0.6f * 0.91f) / (friction * friction * friction);
+
+		float speed;
+		if (onGround)
+		{
+			if (useNewAi()) speed = getSpeed();
+			else speed = walkingSpeed;
+			speed *= friction2;
+		}
+		else speed = flyingSpeed;
+
+		moveRelative(xa, ya, speed);
+
+		friction = 0.91f;
+		if (onGround) 
+		{
+			friction = 0.6f * 0.91f;
+			int t = level->getTile( Mth::floor(x), Mth::floor(bb->y0) - 1, Mth::floor(z));
+			if (t > 0) 
+			{
+				friction = Tile::tiles[t]->friction * 0.91f;
+			}
+		}
+		if (onLadder()) 
+		{
+			float max = 0.15f;
+			if (xd < -max) xd = -max;
+			if (xd > max) xd = max;
+			if (zd < -max) zd = -max;
+			if (zd > max) zd = max;
+			this->fallDistance = 0;
+			if (yd < -0.15) yd = -0.15;
+			bool playerSneaking = isSneaking() && dynamic_pointer_cast<Player>(shared_from_this()) != NULL;
+			if (playerSneaking && yd < 0) yd = 0;
+		}
+
+		move(xd, yd, zd);
+
+		if (horizontalCollision && onLadder()) 
+		{
+			yd = 0.2;
+		}
+
+		yd -= 0.08;
+		yd *= 0.98f;
+		xd *= friction;
+		zd *= friction;
+	}
+
+	walkAnimSpeedO = walkAnimSpeed;
+	double xxd = x - xo;
+	double zzd = z - zo;
+	float wst = Mth::sqrt(xxd * xxd + zzd * zzd) * 4;
+	if (wst > 1) wst = 1;
+	walkAnimSpeed += (wst - walkAnimSpeed) * 0.4f;
+	walkAnimPos += walkAnimSpeed;
+}
+
+bool Mob::onLadder() 
+{
+	int xt = Mth::floor(x);
+	int yt = Mth::floor(bb->y0);
+	int zt = Mth::floor(z);
+
+	// 4J-PB - TU9 - add climbable vines
+	int iTile = level->getTile(xt, yt, zt);
+	return  (iTile== Tile::ladder_Id) || (iTile== Tile::vine_Id);
+}
+
+bool Mob::isShootable() 
+{
+	return true;
+}
+
+void Mob::addAdditonalSaveData(CompoundTag *entityTag) 
+{
+	entityTag->putShort(L"Health", (short) health);
+	entityTag->putShort(L"HurtTime", (short) hurtTime);
+	entityTag->putShort(L"DeathTime", (short) deathTime);
+	entityTag->putShort(L"AttackTime", (short) attackTime);
+
+	if (!activeEffects.empty())
+	{
+		ListTag<CompoundTag> *listTag = new ListTag<CompoundTag>();
+
+		for(AUTO_VAR(it, activeEffects.begin()); it != activeEffects.end(); ++it)
+		{
+			MobEffectInstance *effect = it->second;
+
+			CompoundTag *tag = new CompoundTag();
+			tag->putByte(L"Id", (BYTE) effect->getId());
+			tag->putByte(L"Amplifier", (char) effect->getAmplifier());
+			tag->putInt(L"Duration", effect->getDuration());
+			listTag->add(tag);
+		}
+		entityTag->put(L"ActiveEffects", listTag);
+	}
+}
+
+void Mob::readAdditionalSaveData(CompoundTag *tag) 
+{
+	if (health < Short::MIN_VALUE) health = Short::MIN_VALUE;
+	health = tag->getShort(L"Health");
+	if (!tag->contains(L"Health")) health = getMaxHealth();
+	hurtTime = tag->getShort(L"HurtTime");
+	deathTime = tag->getShort(L"DeathTime");
+	attackTime = tag->getShort(L"AttackTime");
+
+	if (tag->contains(L"ActiveEffects"))
+	{
+		ListTag<CompoundTag> *effects = (ListTag<CompoundTag> *) tag->getList(L"ActiveEffects");
+		for (int i = 0; i < effects->size(); i++)
+		{
+			CompoundTag *effectTag = effects->get(i);
+			int id = effectTag->getByte(L"Id");
+			int amplifier = effectTag->getByte(L"Amplifier");
+			int duration = effectTag->getInt(L"Duration");
+
+			activeEffects.insert( unordered_map<int, MobEffectInstance *>::value_type( id, new MobEffectInstance(id, duration, amplifier) ) );
+		}
+	}
+}
+
+bool Mob::isAlive() 
+{
+	return !removed && health > 0;
+}
+
+bool Mob::isWaterMob() 
+{
+	return false;
+}
+
+void Mob::setYya(float yya)
+{
+	this->yya = yya;
+}
+
+void Mob::setJumping(bool jump)
+{
+	jumping = jump;
+}
+
+void Mob::aiStep() 
+{
+	if (noJumpDelay > 0) noJumpDelay--;
+	if (lSteps > 0) 
+	{
+		double xt = x + (lx - x) / lSteps;
+		double yt = y + (ly - y) / lSteps;
+		double zt = z + (lz - z) / lSteps;
+
+		double yrd = Mth::wrapDegrees(lyr - yRot);
+		double xrd = Mth::wrapDegrees(lxr - xRot);
+
+		yRot += (float) ( (yrd) / lSteps );
+		xRot += (float) ( (xrd) / lSteps );
+
+		lSteps--;
+		this->setPos(xt, yt, zt);
+		this->setRot(yRot, xRot);
+
+		// 4J - this collision is carried out to try and stop the lerping push the mob through the floor,
+		// in which case gravity can then carry on moving the mob because the collision just won't work anymore.
+		// BB for collision used to be calculated as: bb->shrink(1 / 32.0, 0, 1 / 32.0)
+		// now using a reduced BB to try and get rid of some issues where mobs pop up the sides of walls, undersides of
+		// trees etc.
+		AABB *shrinkbb = bb->shrink(0.1, 0, 0.1);
+		shrinkbb->y1 = shrinkbb->y0 + 0.1;
+		AABBList *collisions = level->getCubes(shared_from_this(), shrinkbb);
+		if (collisions->size() > 0)
+		{
+			double yTop = 0;
+			AUTO_VAR(itEnd, collisions->end());
+			for (AUTO_VAR(it, collisions->begin()); it != itEnd; it++)
+			{
+				AABB *ab = *it; //collisions->at(i);
+				if (ab->y1 > yTop) yTop = ab->y1;
+			}
+
+			yt += yTop - bb->y0;
+			setPos(xt, yt, zt);
+		}
+		if (abs(xd) < MIN_MOVEMENT_DISTANCE) xd = 0;
+		if (abs(yd) < MIN_MOVEMENT_DISTANCE) yd = 0;
+		if (abs(zd) < MIN_MOVEMENT_DISTANCE) zd = 0;
+	}
+
+	if (isImmobile()) 
+	{
+		jumping = false;
+		xxa = 0;
+		yya = 0;
+		yRotA = 0;
+	} 
+	else 
+	{
+		MemSect(25);
+		if (isEffectiveAI())
+		{
+			if (useNewAi())
+			{
+				newServerAiStep();
+			}
+			else
+			{
+				serverAiStep();
+				yHeadRot = yRot;
+			}
+		}
+		MemSect(0);
+	}
+
+	if (jumping) 
+	{
+		if (isInWater() || isInLava() ) 
+		{
+			yd += 0.04f;
+		}
+		else if (onGround) 
+		{
+			if (noJumpDelay == 0)
+			{
+				jumpFromGround();
+				noJumpDelay = 10;
+			}
+		}
+	}
+	else
+	{
+		noJumpDelay = 0;
+	}
+
+
+	xxa *= 0.98f;
+	yya *= 0.98f;
+	yRotA *= 0.9f;
+
+	float normalSpeed = walkingSpeed;
+	walkingSpeed *= getWalkingSpeedModifier();
+	travel(xxa, yya);
+	walkingSpeed = normalSpeed;
+
+	if(!level->isClientSide)
+	{
+		vector<shared_ptr<Entity> > *entities = level->getEntities(shared_from_this(), this->bb->grow(0.2f, 0, 0.2f));
+		if (entities != NULL && !entities->empty()) 
+		{
+			AUTO_VAR(itEnd, entities->end());
+			for (AUTO_VAR(it, entities->begin()); it != itEnd; it++)
+			{
+				shared_ptr<Entity> e = *it; //entities->at(i);
+				if (e->isPushable()) e->push(shared_from_this());
+			}
+		}
+	}
+}
+
+bool Mob::useNewAi()
+{
+	return false;
+}
+
+bool Mob::isEffectiveAI()
+{
+	return !level->isClientSide;
+}
+
+bool Mob::isImmobile() 
+{
+	return health <= 0;
+}
+
+bool Mob::isBlocking()
+{
+	return false;
+}
+
+void Mob::jumpFromGround() 
+{
+	yd = 0.42f;
+	if (hasEffect(MobEffect::jump))
+	{
+		yd += (getEffect(MobEffect::jump)->getAmplifier() + 1) * .1f;
+	}
+	if (isSprinting())
+	{
+		float rr = yRot * Mth::RAD_TO_GRAD;
+
+		xd -= Mth::sin(rr) * 0.2f;
+		zd += Mth::cos(rr) * 0.2f;
+	}
+	this->hasImpulse = true;
+}
+
+bool Mob::removeWhenFarAway() 
+{
+	return true;
+}
+
+void Mob::checkDespawn() 
+{
+	shared_ptr<Entity> player = level->getNearestPlayer(shared_from_this(), -1);
+	if (player != NULL) 
+	{
+		double xd = player->x - x;
+		double yd = player->y - y;
+		double zd = player->z - z;
+		double sd = xd * xd + yd * yd + zd * zd;
+
+		if (removeWhenFarAway() && sd > 128 * 128) 
+		{
+			remove();
+		}
+
+		if (noActionTime > 20 * 30 && random->nextInt(800) == 0 && sd > 32 * 32 && removeWhenFarAway()) 
+		{
+			remove();
+		}
+		else if (sd < 32 * 32) 
+		{
+			noActionTime = 0;
+		}
+	}
+}
+
+void Mob::newServerAiStep()
+{
+	MemSect(51);
+	noActionTime++;
+	checkDespawn();
+	sensing->tick();
+	targetSelector.tick();
+	goalSelector.tick();
+	navigation->tick();
+	serverAiMobStep();
+	moveControl->tick();
+	lookControl->tick();
+	jumpControl->tick();
+	// Consider this for extra strolling if it is protected against despawning. We aren't interested in ones that aren't protected as the whole point of this
+	// extra wandering is to potentially transition from protected to not protected.
+	considerForExtraWandering( isDespawnProtected() );
+	MemSect(0);
+}
+
+void Mob::serverAiMobStep()
+{
+}
+
+void Mob::serverAiStep() 
+{
+	noActionTime++;
+
+	checkDespawn();
+
+	xxa = 0;
+	yya = 0;
+
+	float lookDistance = 8;
+	if (random->nextFloat() < 0.02f) 
+	{
+		shared_ptr<Player> player = level->getNearestPlayer(shared_from_this(), lookDistance);
+		if (player != NULL) 
+		{
+			lookingAt = player;
+			lookTime = 10 + random->nextInt(20);
+		} 
+		else 
+		{
+			yRotA = (random->nextFloat() - 0.5f) * 20;
+		}
+	}
+
+	if (lookingAt != NULL)
+	{
+		lookAt(lookingAt, 10.0f, (float) getMaxHeadXRot());
+		if (lookTime-- <= 0 || lookingAt->removed || lookingAt->distanceToSqr(shared_from_this()) > lookDistance * lookDistance) 
+		{
+			lookingAt = nullptr;
+		}
+	} 
+	else 
+	{
+		if (random->nextFloat() < 0.05f) 
+		{
+			yRotA = (random->nextFloat() - 0.5f) * 20;
+		}
+		yRot += yRotA;
+		xRot = defaultLookAngle;
+	}
+
+	bool inWater = isInWater();
+	bool inLava = isInLava();
+	if (inWater || inLava) jumping = random->nextFloat() < 0.8f;
+}
+
+int Mob::getMaxHeadXRot() 
+{
+	return 40;
+}
+
+void Mob::lookAt(shared_ptr<Entity> e, float yMax, float xMax) 
+{
+	double xd = e->x - x;
+	double yd;
+	double zd = e->z - z;
+	
+	shared_ptr<Mob> mob = dynamic_pointer_cast<Mob>(e);
+	if(mob != NULL)
+	{
+		yd = (y + getHeadHeight()) - (mob->y + mob->getHeadHeight());
+	} 
+	else 
+	{
+		yd = (e->bb->y0 + e->bb->y1) / 2 - (y + getHeadHeight());
+	}
+
+	double sd = Mth::sqrt(xd * xd + zd * zd);
+
+	float yRotD = (float) (atan2(zd, xd) * 180 / PI) - 90;
+	float xRotD = (float) -(atan2(yd, sd) * 180 / PI);
+	xRot = -rotlerp(xRot, xRotD, xMax);
+	yRot = rotlerp(yRot, yRotD, yMax);
+}
+
+bool Mob::isLookingAtAnEntity() 
+{
+	return lookingAt != NULL;
+}
+
+shared_ptr<Entity> Mob::getLookingAt() 
+{
+	return lookingAt;
+}
+
+float Mob::rotlerp(float a, float b, float max) 
+{
+	float diff = Mth::wrapDegrees(b - a);
+	if (diff > max) 
+	{
+		diff = max;
+	}
+	if (diff < -max) 
+	{
+		diff = -max;
+	}
+	return a + diff;
+}
+
+bool Mob::canSpawn() 
+{
+	// 4J - altered to use special containsAnyLiquid variant
+	return level->isUnobstructed(bb) && level->getCubes(shared_from_this(), bb)->empty() && !level->containsAnyLiquid_NoLoad(bb);
+}
+
+void Mob::outOfWorld() 
+{
+	hurt(DamageSource::outOfWorld, 4);
+}
+
+float Mob::getAttackAnim(float a) 
+{
+	float diff = attackAnim - oAttackAnim;
+	if (diff < 0) diff += 1;
+	return oAttackAnim + diff * a;
+}
+
+Vec3 *Mob::getPos(float a) 
+{
+	if (a == 1) 
+	{
+		return Vec3::newTemp(x, y, z);
+	}
+	double x = xo + (this->x - xo) * a;
+	double y = yo + (this->y - yo) * a;
+	double z = zo + (this->z - zo) * a;
+
+	return Vec3::newTemp(x, y, z);
+}
+
+Vec3 *Mob::getLookAngle() 
+{
+	return getViewVector(1);
+}
+
+Vec3 *Mob::getViewVector(float a) 
+{
+	if (a == 1) 
+	{
+		float yCos = Mth::cos(-yRot * Mth::RAD_TO_GRAD - PI);
+		float ySin = Mth::sin(-yRot * Mth::RAD_TO_GRAD - PI);
+		float xCos = -Mth::cos(-xRot * Mth::RAD_TO_GRAD);
+		float xSin = Mth::sin(-xRot * Mth::RAD_TO_GRAD);
+
+		return Vec3::newTemp(ySin * xCos, xSin, yCos * xCos);
+	}
+	float xRot = xRotO + (this->xRot - xRotO) * a;
+	float yRot = yRotO + (this->yRot - yRotO) * a;
+
+	float yCos = Mth::cos(-yRot * Mth::RAD_TO_GRAD - PI);
+	float ySin = Mth::sin(-yRot * Mth::RAD_TO_GRAD - PI);
+	float xCos = -Mth::cos(-xRot * Mth::RAD_TO_GRAD);
+	float xSin = Mth::sin(-xRot * Mth::RAD_TO_GRAD);
+
+	return Vec3::newTemp(ySin * xCos, xSin, yCos * xCos);
+}
+
+float Mob::getSizeScale()
+{
+	return 1.0f;
+}
+
+float Mob::getHeadSizeScale()
+{
+	return 1.0f;
+}
+
+int Mob::getMaxSpawnClusterSize() 
+{
+	return 4;
+}
+
+shared_ptr<ItemInstance> Mob::getCarriedItem() 
+{
+	return nullptr;
+}
+
+shared_ptr<ItemInstance> Mob::getArmor(int pos)
+{
+	// 4J Stu - Not implemented yet
+	return nullptr;
+	//return equipment[pos + 1];
+}
+
+void Mob::handleEntityEvent(byte id) 
+{
+	if (id == EntityEvent::HURT) 
+	{
+		this->walkAnimSpeed = 1.5f;
+
+		invulnerableTime = invulnerableDuration;
+		hurtTime = hurtDuration = 10;
+		hurtDir = 0;
+
+		MemSect(31);
+		// 4J-PB -added because villagers have no sounds
+		int iHurtSound=getHurtSound();
+		if(iHurtSound!=-1)
+		{		
+			level->playSound(shared_from_this(), iHurtSound, getSoundVolume(), (random->nextFloat() - random->nextFloat()) * 0.2f + 1.0f);
+		}
+		MemSect(0);
+		hurt(DamageSource::genericSource, 0);
+	} 
+	else if (id == EntityEvent::DEATH) 
+	{
+		MemSect(31);
+		// 4J-PB -added because villagers have no sounds
+		int iDeathSound=getDeathSound();
+		if(iDeathSound!=-1)
+		{		
+			level->playSound(shared_from_this(), iDeathSound, getSoundVolume(), (random->nextFloat() - random->nextFloat()) * 0.2f + 1.0f);
+		}
+		MemSect(0);
+		health = 0;
+		die(DamageSource::genericSource);
+	} 
+	else 
+	{
+		Entity::handleEntityEvent(id);
+	}
+}
+
+bool Mob::isSleeping() 
+{
+	return false;
+}
+
+bool Mob::hasEffect(int id)
+{
+	return activeEffects.find(id) != activeEffects.end();;
+}
+
+bool Mob::hasEffect(MobEffect *effect)
+{
+	return activeEffects.find(effect->id) != activeEffects.end();
+}
+
+MobEffectInstance *Mob::getEffect(MobEffect *effect)
+{
+	MobEffectInstance *effectInst = NULL;
+
+	AUTO_VAR(it, activeEffects.find(effect->id));
+	if(it != activeEffects.end() ) effectInst = it->second;
+
+	return effectInst;
+}
+
+float Mob::getWalkingSpeedModifier()
+{
+	float speed = 1.0f;
+	if (hasEffect(MobEffect::movementSpeed))
+	{
+		speed *= 1.0f + .2f * (getEffect(MobEffect::movementSpeed)->getAmplifier() + 1);
+	}
+	if (hasEffect(MobEffect::movementSlowdown))
+	{
+		speed *= 1.0f - .15f * (getEffect(MobEffect::movementSlowdown)->getAmplifier() + 1);
+	}
+	return speed;
+}
+
+void Mob::teleportTo(double x, double y, double z) 
+{
+	moveTo(x, y, z, yRot, xRot);
+}
+
+bool Mob::isBaby()
+{
+	return false;
+}
+
+MobType Mob::getMobType()
+{
+	return UNDEFINED;
+}
+
+void Mob::breakItem(shared_ptr<ItemInstance> itemInstance)
+{
+	level->playSound(shared_from_this(), eSoundType_RANDOM_BREAK, 0.8f, 0.8f + level->random->nextFloat() * 0.4f);
+
+	for (int i = 0; i < 5; i++)
+	{
+		Vec3 *d = Vec3::newTemp((random->nextFloat() - 0.5) * 0.1, Math::random() * 0.1 + 0.1, 0);
+		d->xRot(-xRot * PI / 180);
+		d->yRot(-yRot * PI / 180);
+
+		Vec3 *p = Vec3::newTemp((random->nextFloat() - 0.5) * 0.3, -random->nextFloat() * 0.6 - 0.3, 0.6);
+		p->xRot(-xRot * PI / 180);
+		p->yRot(-yRot * PI / 180);
+		p = p->add(x, y + getHeadHeight(), z);
+		level->addParticle(PARTICLE_ICONCRACK(itemInstance->getItem()->id,0), p->x, p->y, p->z, d->x, d->y + 0.05, d->z);
+	}
+}
+
+bool Mob::isInvulnerable()
+{
+	// 4J-JEV: I have no idea what was going on here (it gets changed in a later java version).
+	return invulnerableTime > 0; // invulnerableTime <= invulnerableTime / 2;
+}
+
+void Mob::setLevel(Level *level)
+{
+	Entity::setLevel(level);
+	navigation->setLevel(level);
+	goalSelector.setLevel(level);
+	targetSelector.setLevel(level);
+}
+
+void Mob::finalizeMobSpawn()
+{
+
+}
+
+bool Mob::canBeControlledByRider()
+{
+	return false;
+}
+
+// PathfinderMob.cpp
+PathfinderMob::PathfinderMob(Level *level) : Mob( level )
+{
+	path = NULL;
+	attackTarget = nullptr;
+	holdGround = false;
+	fleeTime = 0;
+}
+
+bool PathfinderMob::shouldHoldGround()
+{
+	return false;
+}
+
+PathfinderMob::~PathfinderMob()
+{
+	delete path;
+}
+
+void PathfinderMob::serverAiStep()
+{
+	if (fleeTime > 0) fleeTime--;
+	holdGround = shouldHoldGround();
+	float maxDist = 16;
+
+	if (attackTarget == NULL)
+	{
+		attackTarget = findAttackTarget();
+		if (attackTarget != NULL)
+		{
+			setPath(level->findPath(shared_from_this(), attackTarget, maxDist, true, false, false, true)); // 4J - changed to setPath from path =
+		}
+	}
+	else
+	{
+		if (attackTarget->isAlive())
+		{
+			float d = attackTarget->distanceTo(shared_from_this());
+			if (canSee(attackTarget))
+			{
+				checkHurtTarget(attackTarget, d);
+			}
+		}
+		else
+		{
+			attackTarget = nullptr;
+		}
+	}
+
+	/*
+	* if (holdGround) { xxa = 0; yya = 0; jumping = false; return; }
+	*/
+
+	// 4J - a few changes here so that we can call findRandomStrollLocation for a sub-set of things that it normally wouldn't be in the java game.
+	// This is so that we can have entities wander around a little, in order that we can measure how far they wander and then determine (if they wander too far) that
+	// they aren't enclosed. We don't want the extra network overhead of just having Everything wandering round all the time, so have put a management system in place
+	// that selects a subset of entities which have had their flag set through the considerForExtraWandering method so that these can keep doing random strolling.
+
+	if (!holdGround && (attackTarget != NULL && (path == NULL || random->nextInt(20) == 0)))
+	{
+		setPath(level->findPath(shared_from_this(), attackTarget, maxDist, true, false, false, true));// 4J - changed to setPath from path =
+	}
+	else if (!holdGround && ((path == NULL && (random->nextInt(180) == 0) || fleeTime > 0) || (random->nextInt(120) == 0 || fleeTime > 0)))
+	{
+		if(noActionTime < SharedConstants::TICKS_PER_SECOND * 5) 
+		{
+			findRandomStrollLocation();
+		}
+	}
+	else if (!holdGround && (path == NULL ) )
+	{
+		if( ( noActionTime >= SharedConstants::TICKS_PER_SECOND * 5 ) && isExtraWanderingEnabled() )
+		{
+			// This entity wouldn't normally be randomly strolling. However, if our management system says that it should do, then do. Don't
+			// bother waiting for random conditions to be met before picking a direction though as the point here is to see if it is possible to
+			// stroll out of a given area and so waiting around is just wasting time
+			findRandomStrollLocation(getWanderingQuadrant());
+		}
+	}
+
+	// Consider this for extra strolling if it is protected against despawning. We aren't interested in ones that aren't protected as the whole point of this
+	// extra wandering is to potentially transition from protected to not protected.
+	considerForExtraWandering( isDespawnProtected() );
+
+	int yFloor = Mth::floor(bb->y0 + 0.5f);
+
+	bool inWater = isInWater();
+	bool inLava = isInLava();
+	xRot = 0;
+	if (path == NULL || random->nextInt(100) == 0)
+	{
+		this->Mob::serverAiStep();
+		setPath(NULL);// 4J - changed to setPath from path =
+		return;
+	}
+
+	Vec3 *target = path->currentPos(shared_from_this());
+	double r = bbWidth * 2;
+	while (target != NULL && target->distanceToSqr(x, target->y, z) < r * r)
+	{
+		path->next();
+		if (path->isDone())
+		{
+			target = NULL;
+			setPath(NULL); // 4J - changed to setPath from path =
+		}
+		else target = path->currentPos(shared_from_this());
+	}
+
+	jumping = false;
+	if (target != NULL)
+	{
+		double xd = target->x - x;
+		double zd = target->z - z;
+		double yd = target->y - yFloor;
+		float yRotD = (float) (atan2(zd, xd) * 180 / PI) - 90;
+		float rotDiff = Mth::wrapDegrees(yRotD - yRot);
+		yya = runSpeed;
+		if (rotDiff > MAX_TURN)
+		{
+			rotDiff = MAX_TURN;
+		}
+		if (rotDiff < -MAX_TURN)
+		{
+			rotDiff = -MAX_TURN;
+		}
+		yRot += rotDiff;
+
+		if (holdGround)
+		{
+			if (attackTarget != NULL)
+			{
+				double xd2 = attackTarget->x - x;
+				double zd2 = attackTarget->z - z;
+
+				float oldyRot = yRot;
+				yRot = (float) (atan2(zd2, xd2) * 180 / PI) - 90;
+
+				rotDiff = ((oldyRot - yRot) + 90) * PI / 180;
+				xxa = -Mth::sin(rotDiff) * yya * 1.0f;
+				yya = Mth::cos(rotDiff) * yya * 1.0f;
+			}
+		}
+		if (yd > 0)
+		{
+			jumping = true;
+		}
+	}
+
+	if (attackTarget != NULL)
+	{
+		lookAt(attackTarget, 30, 30);
+	}
+
+	if (this->horizontalCollision && !isPathFinding()) jumping = true;
+	if (random->nextFloat() < 0.8f && (inWater || inLava)) jumping = true;
+}
+
+void PathfinderMob::findRandomStrollLocation(int quadrant/*=-1*/)	// 4J - added quadrant
+{
+	bool hasBest = false;
+	int xBest = -1;
+	int yBest = -1;
+	int zBest = -1;
+	float best = -99999;
+	for (int i = 0; i < 10; i++)
+	{
+		// 4J - added quadrant parameter to this method so that the caller can request that only stroll locations in one quadrant be found. If -1 is passed then
+		// behaviour is the same as the java game
+		int xt, zt;
+		int yt = Mth::floor(y + random->nextInt(7) - 3);
+		if( quadrant == -1 )
+		{
+			xt = Mth::floor(x + random->nextInt(13) - 6);
+			zt = Mth::floor(z + random->nextInt(13) - 6);
+		}
+		else
+		{
+			int sx = ( ( quadrant & 1 ) ? -1 : 1 );
+			int sz = ( ( quadrant & 2 ) ? -1 : 1 );
+			xt = Mth::floor(x + random->nextInt(7) * sx);
+			zt = Mth::floor(z + random->nextInt(7) * sz);
+		}
+		float value = getWalkTargetValue(xt, yt, zt);
+		if (value > best)
+		{
+			best = value;
+			xBest = xt;
+			yBest = yt;
+			zBest = zt;
+			hasBest = true;
+		}
+	}
+	if (hasBest)
+	{
+		setPath(level->findPath(shared_from_this(), xBest, yBest, zBest, 10, true, false, false, true)); // 4J - changed to setPath from path =
+	}
+}
+
+void PathfinderMob::checkHurtTarget(shared_ptr<Entity> target, float d)
+{
+}
+
+float PathfinderMob::getWalkTargetValue(int x, int y, int z)
+{
+	return 0;
+}
+
+shared_ptr<Entity> PathfinderMob::findAttackTarget()
+{
+	return shared_ptr<Entity>();
+}
+
+bool PathfinderMob::canSpawn()
+{
+	int xt = Mth::floor(x);
+	int yt = Mth::floor(bb->y0);
+	int zt = Mth::floor(z);
+	return this->Mob::canSpawn() && getWalkTargetValue(xt, yt, zt) >= 0;
+}
+
+bool PathfinderMob::isPathFinding()
+{
+	return path != NULL;
+}
+
+void PathfinderMob::setPath(Path *path)
+{
+	delete this->path;
+	this->path = path;
+}
+
+shared_ptr<Entity> PathfinderMob::getAttackTarget()
+{
+	return attackTarget;
+}
+
+void PathfinderMob::setAttackTarget(shared_ptr<Entity> attacker)
+{
+	attackTarget = attacker;
+}
+
+float PathfinderMob::getWalkingSpeedModifier()
+{
+	if (useNewAi()) return 1.0f;
+	float speed = Mob::getWalkingSpeedModifier();
+	if (fleeTime > 0) speed *= 2;
+	return speed;
+}
+
+bool PathfinderMob::couldWander()
+{
+	return (noActionTime < SharedConstants::TICKS_PER_SECOND * 5) || ( isExtraWanderingEnabled() );
+}
+
+// RandomPos.cpp
+Vec3 *RandomPos::getPos(shared_ptr<PathfinderMob> mob, int xzDist, int yDist, int quadrant/*=-1*/)		// 4J - added quadrant
+{
+	return generateRandomPos(mob, xzDist, yDist, NULL, quadrant);
+}
+
+Vec3 *RandomPos::getPosTowards(shared_ptr<PathfinderMob> mob, int xzDist, int yDist, Vec3 *towardsPos)
+{
+	tempDir->x = towardsPos->x - mob->x;
+	tempDir->y = towardsPos->y - mob->y;
+	tempDir->z = towardsPos->z - mob->z;
+	return generateRandomPos(mob, xzDist, yDist, tempDir);
+}
+
+Vec3 *RandomPos::getPosAvoid(shared_ptr<PathfinderMob> mob, int xzDist, int yDist, Vec3 *avoidPos)
+{
+	tempDir->x = mob->x - avoidPos->x;
+	tempDir->y = mob->y - avoidPos->y;
+	tempDir->z = mob->z - avoidPos->z;
+	return generateRandomPos(mob, xzDist, yDist, tempDir);
+}
+
+Vec3 *RandomPos::generateRandomPos(shared_ptr<PathfinderMob> mob, int xzDist, int yDist, Vec3 *dir, int quadrant/*=-1*/)		// 4J - added quadrant
+{
+	Random *random = mob->getRandom();
+	bool hasBest = false;
+	int xBest = 0, yBest = 0, zBest = 0;
+	float best = -99999;
+
+	// 4J Stu - restrict is a reserved keyword
+	bool bRestrict;
+	if (mob->hasRestriction())
+	{
+		double restDist = mob->getRestrictCenter()->distSqr(Mth::floor(mob->x), Mth::floor(mob->y), Mth::floor(mob->z)) + 4;
+		double radius = mob->getRestrictRadius() + xzDist;
+		bRestrict = restDist < radius * radius;
+	}
+	else bRestrict = false;
+
+	for (int i = 0; i < 10; i++)
+	{
+		int xt, yt, zt;
+		// 4J - added quadrant here so that we can choose to select positions only within the one quadrant. Passing a parameter of -1 will
+		// lead to normal java behaviour
+		if( quadrant == -1 )
+		{
+			xt = random->nextInt(2 * xzDist) - xzDist;
+			zt = random->nextInt(2 * xzDist) - xzDist;
+		}
+		else
+		{
+			int sx = ( ( quadrant & 1 ) ? -1 : 1 );
+			int sz = ( ( quadrant & 2 ) ? -1 : 1 );
+			xt = random->nextInt(xzDist) * sx;
+			zt = random->nextInt(xzDist) * sz;
+		}
+		yt = random->nextInt(2 * yDist) - yDist;
+
+		if (dir != NULL && xt * dir->x + zt * dir->z < 0) continue;
+
+		xt += Mth::floor(mob->x);
+		yt += Mth::floor(mob->y);
+		zt += Mth::floor(mob->z);
+
+		if (bRestrict && !mob->isWithinRestriction(xt, yt, zt)) continue;
+		float value = mob->getWalkTargetValue(xt, yt, zt);
+		if (value > best)
+		{
+			best = value;
+			xBest = xt;
+			yBest = yt;
+			zBest = zt;
+			hasBest = true;
+		}
+	}
+	if (hasBest)
+	{
+		return Vec3::newTemp(xBest, yBest, zBest);
+	}
+
+	return NULL;
 }
 
 }

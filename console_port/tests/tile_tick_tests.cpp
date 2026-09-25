@@ -466,6 +466,45 @@ static void entities(){
     require(e->isInWall(),"inside the floor is in a wall");
 }
 
+// A PathfinderMob with the new AI (navigation, move and look controls).
+struct Walker final:sim::PathfinderMob {
+    explicit Walker(sim::Level* level):PathfinderMob(level){health=getMaxHealth();}
+    int getMaxHealth()override{return 10;}
+    bool useNewAi()override{return true;}
+    int getHealthNow(){return health;}
+};
+
+static void mobs(){
+    MapLevel map;BoxLevel level(map);
+    for(int x=-6;x<=12;++x)for(int z=-8;z<=8;++z)map.put(x,0,z,Tile::rock_Id);
+    auto mob=std::make_shared<Walker>(&level);
+    mob->moveTo(0.5,3,0.5,0,0);
+    for(int i=0;i<40;++i)mob->tick();
+    require(mob->onGround && std::abs(mob->y-1)<1e-6,"a mob falls onto the floor (Mob::travel)");
+    // A hit knocks it back and away from the attacker, then the
+    // invulnerability window absorbs a weaker second hit (Mob::hurt).
+    auto attacker=std::make_shared<Walker>(&level);
+    attacker->moveTo(-1.5,1,0.5,0,0);
+    require(mob->hurt(sim::DamageSource::mobAttack(attacker),3),"a mob can be hurt");
+    require(mob->getHealthNow()==7 && mob->xd>0 && mob->yd>0,"the hit costs health and knocks it away");
+    require(!mob->hurt(sim::DamageSource::mobAttack(attacker),2) && mob->getHealthNow()==7,"a weaker hit in the window does nothing");
+    require(mob->getLastHurtByMob()==attacker,"it remembers who hurt it");
+    // Path finding around a wall (PathNavigation, PathFinder, MoveControl).
+    for(int z=-4;z<=4;++z){map.put(4,1,z,Tile::rock_Id);map.put(4,2,z,Tile::rock_Id);}
+    auto walker=std::make_shared<Walker>(&level);
+    walker->moveTo(0.5,1,0.5,0,0);
+    for(int i=0;i<3;++i)walker->tick(); // PathNavigation::canUpdatePath: only from the ground
+    require(walker->getNavigation()->moveTo(8.5,1,0.5,0.3f),"a path around the wall");
+    for(int i=0;i<600 && !walker->getNavigation()->isDone();++i)walker->tick();
+    require(walker->distanceTo(8.5,1,0.5)<1.5,"the mob walks round the wall to the target");
+    // Health 0: the death animation, then it is removed (Mob::tickDeath).
+    mob->invulnerableTime=0;
+    mob->hurt(sim::DamageSource::genericSource,20);
+    require(!mob->isAlive(),"a fatal hit kills it");
+    for(int i=0;i<25;++i)mob->tick();
+    require(mob->removed,"a dead mob is removed after its death animation");
+}
+
 static void tnt(){
     World world;world.generate(53,true);
     for(int x=16;x<=48;++x)for(int z=16;z<=48;++z){
@@ -638,6 +677,7 @@ int main(int argc,char** argv){try{
     redstone();
     pistons();
     entities();
+    mobs();
     tnt();
     dispensers();
     worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
